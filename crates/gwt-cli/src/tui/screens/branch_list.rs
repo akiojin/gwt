@@ -621,6 +621,21 @@ impl BranchListState {
         self.ensure_visible();
     }
 
+    fn rebuild_filtered_cache_preserve_selection(&mut self) {
+        let selected_name = self.selected_branch().map(|branch| branch.name.clone());
+        self.rebuild_filtered_cache();
+        if let Some(name) = selected_name {
+            if let Some(index) = self
+                .filtered_indices
+                .iter()
+                .position(|&idx| self.branches[idx].name == name)
+            {
+                self.selected = index;
+                self.ensure_visible();
+            }
+        }
+    }
+
     pub fn filtered_len(&self) -> usize {
         self.filtered_indices.len()
     }
@@ -947,6 +962,25 @@ impl BranchListState {
                 }
             }
         }
+    }
+
+    pub fn apply_worktree_created(&mut self, branch_name: &str, worktree_path: &Path) -> bool {
+        let Some(item) = self.branches.iter_mut().find(|b| b.name == branch_name) else {
+            return false;
+        };
+
+        item.has_worktree = true;
+        item.worktree_path = Some(worktree_path.display().to_string());
+        item.worktree_status = if worktree_path.exists() {
+            WorktreeStatus::Active
+        } else {
+            WorktreeStatus::Inaccessible
+        };
+        item.update_safety_status();
+
+        self.stats.worktree_count = self.branches.iter().filter(|b| b.has_worktree).count();
+        self.rebuild_filtered_cache_preserve_selection();
+        true
     }
 
     pub fn reset_status_progress(&mut self, total: usize) {
@@ -1806,6 +1840,24 @@ fn session_panel_hint() -> Line<'static> {
     .right_aligned()
 }
 
+fn session_scroll_layout(inner: Rect, scrollable: bool) -> (Rect, Option<Rect>) {
+    if !scrollable || inner.width <= 1 {
+        return (inner, None);
+    }
+
+    let content = Rect {
+        width: inner.width.saturating_sub(1),
+        ..inner
+    };
+    let scrollbar = Rect {
+        x: inner.x + inner.width.saturating_sub(1),
+        y: inner.y,
+        width: 1,
+        height: inner.height,
+    };
+    (content, Some(scrollbar))
+}
+
 fn build_summary_links(repo_web_url: Option<&String>, branch: Option<&BranchItem>) -> SummaryLinks {
     let Some(branch) = branch else {
         return SummaryLinks::default();
@@ -2076,13 +2128,30 @@ fn render_session_panel(
         )));
     }
 
-    let wrapped_lines = wrap_lines_by_char(lines, inner.width as usize);
-    let total_lines = wrapped_lines.len();
-    let max_scroll = total_lines.saturating_sub(inner.height as usize);
-    state.update_session_scroll_bounds(max_scroll, inner.height as usize);
+    let mut wrapped_lines = wrap_lines_by_char(lines.clone(), inner.width as usize);
+    let mut total_lines = wrapped_lines.len();
+    let scrollable = total_lines > inner.height as usize;
+    let (content_area, scrollbar_area) = session_scroll_layout(inner, scrollable);
+    if content_area.width != inner.width {
+        wrapped_lines = wrap_lines_by_char(lines, content_area.width as usize);
+        total_lines = wrapped_lines.len();
+    }
+
+    let max_scroll = total_lines.saturating_sub(content_area.height as usize);
+    state.update_session_scroll_bounds(max_scroll, content_area.height as usize);
 
     let paragraph = Paragraph::new(wrapped_lines).scroll((state.session_scroll_offset as u16, 0));
-    frame.render_widget(paragraph, inner);
+    frame.render_widget(paragraph, content_area);
+
+    if let Some(scrollbar_area) = scrollbar_area {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("^"))
+            .end_symbol(Some("v"));
+        let mut scrollbar_state = ScrollbarState::new(total_lines)
+            .position(state.session_scroll_offset)
+            .viewport_content_length(content_area.height as usize);
+        frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+    }
 }
 
 fn render_markdown_lines(markdown: &str) -> Vec<Line<'static>> {
@@ -2332,6 +2401,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::path::Path;
+    use tempfile::tempdir;
 
     fn line_text(line: &Line<'_>) -> String {
         let mut text = String::new();
@@ -2395,6 +2465,52 @@ mod tests {
     }
 
     #[test]
+    fn test_session_scroll_layout_no_scrollbar_when_not_scrollable() {
+        let inner = Rect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 5,
+        };
+        let (content, scrollbar) = session_scroll_layout(inner, false);
+        assert_eq!(content, inner);
+        assert!(scrollbar.is_none());
+    }
+
+    #[test]
+    fn test_session_scroll_layout_scrollbar_when_scrollable() {
+        let inner = Rect {
+            x: 2,
+            y: 3,
+            width: 10,
+            height: 5,
+        };
+        let (content, scrollbar) = session_scroll_layout(inner, true);
+        assert_eq!(content.width, 9);
+        assert_eq!(content.x, inner.x);
+        assert_eq!(content.y, inner.y);
+        assert_eq!(content.height, inner.height);
+        let scrollbar = scrollbar.expect("scrollbar");
+        assert_eq!(scrollbar.x, inner.x + inner.width - 1);
+        assert_eq!(scrollbar.y, inner.y);
+        assert_eq!(scrollbar.width, 1);
+        assert_eq!(scrollbar.height, inner.height);
+    }
+
+    #[test]
+    fn test_session_scroll_layout_no_scrollbar_when_narrow() {
+        let inner = Rect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 5,
+        };
+        let (content, scrollbar) = session_scroll_layout(inner, true);
+        assert_eq!(content, inner);
+        assert!(scrollbar.is_none());
+    }
+
+    #[test]
     fn test_branch_name_color_by_worktree_status() {
         let mut branch = sample_branch("feature/color");
 
@@ -2411,6 +2527,46 @@ mod tests {
         branch.is_gone = true;
         branch.worktree_status = WorktreeStatus::None;
         assert_eq!(branch.branch_name_color(), Color::Red);
+    }
+
+    #[test]
+    fn test_apply_worktree_created_updates_branch_and_preserves_selection() {
+        let temp = tempdir().expect("tempdir");
+        let expected_path = temp.path().display().to_string();
+
+        let mut branch_a = sample_branch("feature/a");
+        branch_a.has_worktree = false;
+        branch_a.worktree_path = None;
+        branch_a.worktree_status = WorktreeStatus::None;
+
+        let mut branch_b = sample_branch("feature/b");
+        branch_b.worktree_path = Some("/path".to_string());
+
+        let mut state = BranchListState::new().with_branches(vec![branch_a, branch_b]);
+        assert_eq!(
+            state.selected_branch().map(|branch| branch.name.as_str()),
+            Some("feature/b")
+        );
+
+        let updated = state.apply_worktree_created("feature/a", temp.path());
+        assert!(updated);
+
+        let updated_branch = state
+            .branches
+            .iter()
+            .find(|branch| branch.name == "feature/a")
+            .expect("branch exists");
+        assert!(updated_branch.has_worktree);
+        assert_eq!(updated_branch.worktree_status, WorktreeStatus::Active);
+        assert_eq!(
+            updated_branch.worktree_path.as_deref(),
+            Some(expected_path.as_str())
+        );
+        assert_eq!(state.stats.worktree_count, 2);
+        assert_eq!(
+            state.selected_branch().map(|branch| branch.name.as_str()),
+            Some("feature/b")
+        );
     }
 
     #[test]
