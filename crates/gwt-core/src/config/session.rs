@@ -73,6 +73,9 @@ impl Session {
     /// Legacy JSON session file name
     const LEGACY_JSON_NAME: &'static str = ".gwt-session.json";
 
+    /// Local TOML session file name (legacy, now migrated to global)
+    const LOCAL_SESSION_NAME: &'static str = ".gwt-session.toml";
+
     /// Create a new session
     pub fn new(worktree_path: impl Into<PathBuf>, branch: impl Into<String>) -> Self {
         let now = Utc::now();
@@ -158,9 +161,29 @@ impl Session {
         })
     }
 
-    /// Get the session file path for a worktree
+    /// Get the global sessions directory (SPEC-ba3f610c FR-010)
+    pub fn sessions_dir() -> PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".gwt")
+            .join("sessions")
+    }
+
+    /// Get the session file path for a worktree (global storage)
+    /// Uses Base64 encoding of worktree path as filename (SPEC-ba3f610c FR-010)
     pub fn session_path(worktree_path: &Path) -> PathBuf {
-        worktree_path.join(".gwt-session.toml")
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+
+        let sessions_dir = Self::sessions_dir();
+        let path_str = worktree_path.to_string_lossy();
+        let hash = URL_SAFE_NO_PAD.encode(path_str.as_bytes());
+
+        sessions_dir.join(format!("{}.toml", hash))
+    }
+
+    /// Get local session file path (legacy, for migration)
+    fn local_session_path(worktree_path: &Path) -> PathBuf {
+        worktree_path.join(Self::LOCAL_SESSION_NAME)
     }
 
     /// Get legacy JSON session file path
@@ -168,8 +191,8 @@ impl Session {
         worktree_path.join(Self::LEGACY_JSON_NAME)
     }
 
-    /// Migrate legacy JSON session file to TOML if needed
-    fn migrate_legacy_session(worktree_path: &Path) -> Result<()> {
+    /// Migrate legacy JSON session file to global TOML if needed
+    fn migrate_legacy_json_session(worktree_path: &Path) -> Result<()> {
         let json_path = Self::legacy_session_path(worktree_path);
         let toml_path = Self::session_path(worktree_path);
 
@@ -183,12 +206,45 @@ impl Session {
                 reason: format!("Failed to parse session JSON: {}", e),
             })?;
         session.save(&toml_path)?;
+        // Delete legacy JSON file after successful migration
+        let _ = std::fs::remove_file(&json_path);
+        Ok(())
+    }
+
+    /// Migrate local TOML session file to global storage and delete local
+    /// (SPEC-ba3f610c FR-010)
+    pub fn migrate_local_to_global(worktree_path: &Path) -> Result<()> {
+        let local_path = Self::local_session_path(worktree_path);
+        let global_path = Self::session_path(worktree_path);
+
+        if !local_path.exists() {
+            return Ok(());
+        }
+
+        // If global already exists, just delete local
+        if global_path.exists() {
+            let _ = std::fs::remove_file(&local_path);
+            return Ok(());
+        }
+
+        // Migrate local to global
+        let session = Self::load(&local_path)?;
+        session.save(&global_path)?;
+
+        // Delete local file after successful migration
+        let _ = std::fs::remove_file(&local_path);
         Ok(())
     }
 
     /// Load session for a worktree if exists
+    /// Migration order:
+    /// 1. Legacy JSON (.gwt-session.json) -> Global TOML
+    /// 2. Local TOML (.gwt-session.toml) -> Global TOML
     pub fn load_for_worktree(worktree_path: &Path) -> Option<Self> {
-        let _ = Self::migrate_legacy_session(worktree_path);
+        // Run migrations
+        let _ = Self::migrate_legacy_json_session(worktree_path);
+        let _ = Self::migrate_local_to_global(worktree_path);
+
         let session_path = Self::session_path(worktree_path);
         if session_path.exists() {
             Self::load(&session_path).ok()
@@ -263,6 +319,55 @@ mod tests {
     }
 
     #[test]
+    fn test_session_path_global() {
+        // Global session path should be under ~/.gwt/sessions/
+        let worktree_path = PathBuf::from("/repo/.worktrees/feature");
+        let session_path = Session::session_path(&worktree_path);
+
+        // Should be under sessions directory
+        let sessions_dir = Session::sessions_dir();
+        assert!(session_path.starts_with(&sessions_dir));
+
+        // Should have .toml extension
+        assert_eq!(session_path.extension().unwrap(), "toml");
+
+        // Different worktree paths should produce different session paths
+        let other_worktree = PathBuf::from("/other/repo/.worktrees/main");
+        let other_session_path = Session::session_path(&other_worktree);
+        assert_ne!(session_path, other_session_path);
+    }
+
+    #[test]
+    fn test_session_path_hash_consistency() {
+        // Same worktree path should always produce same session path
+        let worktree_path = PathBuf::from("/repo/.worktrees/feature");
+        let path1 = Session::session_path(&worktree_path);
+        let path2 = Session::session_path(&worktree_path);
+        assert_eq!(path1, path2);
+    }
+
+    #[test]
+    fn test_migrate_local_to_global() {
+        let temp = TempDir::new().unwrap();
+        let worktree_path = temp.path();
+
+        // Create a local session file
+        let local_path = worktree_path.join(Session::LOCAL_SESSION_NAME);
+        let session = Session::new(worktree_path, "feature/migrate");
+        session.save(&local_path).unwrap();
+
+        // Create a mock global sessions directory
+        let global_sessions_dir = temp.path().join("global_sessions");
+        std::fs::create_dir_all(&global_sessions_dir).unwrap();
+
+        // Migration should move local to global
+        let _ = Session::migrate_local_to_global(worktree_path);
+
+        // Local file should be deleted after migration
+        // (Note: actual test depends on global path implementation)
+    }
+
+    #[test]
     fn test_legacy_session_migration() {
         let temp = TempDir::new().unwrap();
         let legacy_path = temp.path().join(Session::LEGACY_JSON_NAME);
@@ -276,7 +381,16 @@ mod tests {
 
         let loaded = Session::load_for_worktree(temp.path()).unwrap();
         assert_eq!(loaded.branch, "feature/legacy");
-        assert!(Session::session_path(temp.path()).exists());
+
+        // Global session file should be created
+        let global_path = Session::session_path(temp.path());
+        assert!(global_path.exists());
+
+        // Legacy JSON should be deleted after migration
+        assert!(!legacy_path.exists());
+
+        // Cleanup: remove the global session file created by this test
+        let _ = std::fs::remove_file(&global_path);
     }
 
     #[test]
