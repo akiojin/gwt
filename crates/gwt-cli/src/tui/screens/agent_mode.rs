@@ -1,6 +1,6 @@
 //! Agent Mode screen
 
-use ratatui::{prelude::*, widgets::*};
+use ratatui::{prelude::*, style::Modifier, widgets::*};
 use unicode_width::UnicodeWidthChar;
 
 #[allow(dead_code)]
@@ -58,20 +58,17 @@ impl AgentModeState {
         self.is_waiting = waiting;
     }
 
-    #[allow(dead_code)]
     pub fn clear_input(&mut self) {
         self.input.clear();
         self.input_cursor = 0;
     }
 
-    #[allow(dead_code)]
     pub fn insert_char(&mut self, c: char) {
         let byte_idx = char_to_byte_index(&self.input, self.input_cursor);
         self.input.insert(byte_idx, c);
         self.input_cursor += 1;
     }
 
-    #[allow(dead_code)]
     pub fn backspace(&mut self) {
         if self.input_cursor == 0 {
             return;
@@ -82,12 +79,10 @@ impl AgentModeState {
         self.input_cursor -= 1;
     }
 
-    #[allow(dead_code)]
     pub fn cursor_left(&mut self) {
         self.input_cursor = self.input_cursor.saturating_sub(1);
     }
 
-    #[allow(dead_code)]
     pub fn cursor_right(&mut self) {
         let len = self.input.chars().count();
         if self.input_cursor < len {
@@ -128,8 +123,14 @@ fn render_chat_panel(
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(" Chat ");
+        .border_style(Style::default().fg(Color::White))
+        .title(" Chat ")
+        .title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .padding(Padding::new(1, 1, 0, 0));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -200,8 +201,14 @@ fn render_chat_panel(
 fn render_task_panel(state: &AgentModeState, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(" Tasks ");
+        .border_style(Style::default().fg(Color::White))
+        .title(" Tasks ")
+        .title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .padding(Padding::new(1, 1, 0, 0));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -229,10 +236,21 @@ fn render_task_panel(state: &AgentModeState, frame: &mut Frame, area: Rect) {
 }
 
 fn render_input_panel(state: &AgentModeState, frame: &mut Frame, area: Rect) {
+    let border_color = if state.ai_ready {
+        Color::Yellow
+    } else {
+        Color::DarkGray
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(" Input ");
+        .border_style(Style::default().fg(border_color))
+        .title(" Input ")
+        .title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .padding(Padding::new(1, 1, 0, 0));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -382,7 +400,6 @@ fn cursor_position(text: &str, cursor: usize, width: u16) -> (usize, usize, usiz
     (cursor_line, cursor_col, total_lines)
 }
 
-#[allow(dead_code)]
 fn char_to_byte_index(text: &str, cursor: usize) -> usize {
     if cursor == 0 {
         return 0;

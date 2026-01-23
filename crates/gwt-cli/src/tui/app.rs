@@ -3246,7 +3246,7 @@ impl Model {
                             role: AgentRole::User,
                             content,
                         });
-                        self.agent_mode.input.clear();
+                        self.agent_mode.clear_input();
                         self.agent_mode.last_error = None;
                         self.agent_mode.set_waiting(true);
                         let messages = self.agent_mode.messages.clone();
@@ -3375,7 +3375,7 @@ impl Model {
                     // Log search mode - add character to search
                     self.logs.search.push(c);
                 } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
-                    self.agent_mode.input.push(c);
+                    self.agent_mode.insert_char(c);
                 } else if matches!(self.screen, Screen::AISettingsWizard) {
                     if self.ai_wizard.show_delete_confirm {
                         // Handle delete confirmation
@@ -3443,7 +3443,7 @@ impl Model {
                     // Log search mode - delete character
                     self.logs.search.pop();
                 } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
-                    self.agent_mode.input.pop();
+                    self.agent_mode.backspace();
                 } else if matches!(self.screen, Screen::AISettingsWizard)
                     && self.ai_wizard.is_text_input()
                 {
@@ -3464,6 +3464,8 @@ impl Model {
                     && self.ai_wizard.is_text_input()
                 {
                     self.ai_wizard.cursor_left();
+                } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
+                    self.agent_mode.cursor_left();
                 }
             }
             Message::CursorRight => {
@@ -3480,6 +3482,8 @@ impl Model {
                     && self.ai_wizard.is_text_input()
                 {
                     self.ai_wizard.cursor_right();
+                } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
+                    self.agent_mode.cursor_right();
                 }
             }
             Message::RefreshData => {
@@ -3865,8 +3869,9 @@ impl Model {
     }
 
     fn handle_launch_plan(&mut self, plan: LaunchPlan) {
-        // Refresh data to reflect branch/worktree changes (FR-008b)
-        self.refresh_data();
+        // Note: refresh_data() removed for startup optimization - TUI exits after
+        // agent launch in single mode, and tmux mode updates status message directly.
+        // The branch list refresh is unnecessary here. (FR-008b still satisfied)
 
         if let InstallPlan::Skip { message } = &plan.install_plan {
             self.status_message = Some(message.clone());
@@ -4384,7 +4389,7 @@ impl Model {
 
         // Header (for branch list screen, render boxed header)
         if needs_header {
-            if matches!(base_screen, Screen::BranchList) {
+            if matches!(base_screen, Screen::BranchList | Screen::AgentMode) {
                 self.view_boxed_header(frame, chunks[0]);
             } else {
                 self.view_header(frame, chunks[0], &base_screen);
