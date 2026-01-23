@@ -389,7 +389,10 @@ impl WorktreeManager {
         let mut prune_error: Option<GwtError> = None;
 
         if let Some(wt) = self.get_by_branch(branch_name)? {
-            if matches!(wt.status, WorktreeStatus::Missing | WorktreeStatus::Prunable) {
+            if matches!(
+                wt.status,
+                WorktreeStatus::Missing | WorktreeStatus::Prunable
+            ) {
                 if let Err(err) = self.prune() {
                     prune_error = Some(err);
                 }
