@@ -4273,7 +4273,7 @@ impl Model {
                 .iter()
                 .find(|b| &b.name == branch_name);
 
-            let force_remove = branch_item.map_or(false, |item| {
+            let force_remove = branch_item.is_some_and(|item| {
                 item.worktree_status == WorktreeStatus::Inaccessible
                     || item.has_changes
                     || WorktreeManager::is_protected(&item.name)
