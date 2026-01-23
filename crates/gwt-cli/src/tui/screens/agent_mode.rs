@@ -58,20 +58,17 @@ impl AgentModeState {
         self.is_waiting = waiting;
     }
 
-    #[allow(dead_code)]
     pub fn clear_input(&mut self) {
         self.input.clear();
         self.input_cursor = 0;
     }
 
-    #[allow(dead_code)]
     pub fn insert_char(&mut self, c: char) {
         let byte_idx = char_to_byte_index(&self.input, self.input_cursor);
         self.input.insert(byte_idx, c);
         self.input_cursor += 1;
     }
 
-    #[allow(dead_code)]
     pub fn backspace(&mut self) {
         if self.input_cursor == 0 {
             return;
@@ -82,12 +79,10 @@ impl AgentModeState {
         self.input_cursor -= 1;
     }
 
-    #[allow(dead_code)]
     pub fn cursor_left(&mut self) {
         self.input_cursor = self.input_cursor.saturating_sub(1);
     }
 
-    #[allow(dead_code)]
     pub fn cursor_right(&mut self) {
         let len = self.input.chars().count();
         if self.input_cursor < len {
@@ -405,7 +400,6 @@ fn cursor_position(text: &str, cursor: usize, width: u16) -> (usize, usize, usiz
     (cursor_line, cursor_col, total_lines)
 }
 
-#[allow(dead_code)]
 fn char_to_byte_index(text: &str, cursor: usize) -> usize {
     if cursor == 0 {
         return 0;
