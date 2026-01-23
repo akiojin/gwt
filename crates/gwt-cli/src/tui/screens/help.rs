@@ -125,6 +125,11 @@ pub fn render_help(state: &HelpState, frame: &mut Frame, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
         .title(" Help ")
+        .title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .title_alignment(Alignment::Center);
 
     let inner_area = block.inner(popup_area);

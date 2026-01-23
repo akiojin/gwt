@@ -1,6 +1,6 @@
 //! Agent Mode screen
 
-use ratatui::{prelude::*, widgets::*};
+use ratatui::{prelude::*, style::Modifier, widgets::*};
 use unicode_width::UnicodeWidthChar;
 
 #[allow(dead_code)]
@@ -128,8 +128,14 @@ fn render_chat_panel(
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(" Chat ");
+        .border_style(Style::default().fg(Color::White))
+        .title(" Chat ")
+        .title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .padding(Padding::new(1, 1, 0, 0));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -200,8 +206,14 @@ fn render_chat_panel(
 fn render_task_panel(state: &AgentModeState, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(" Tasks ");
+        .border_style(Style::default().fg(Color::White))
+        .title(" Tasks ")
+        .title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .padding(Padding::new(1, 1, 0, 0));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -229,10 +241,21 @@ fn render_task_panel(state: &AgentModeState, frame: &mut Frame, area: Rect) {
 }
 
 fn render_input_panel(state: &AgentModeState, frame: &mut Frame, area: Rect) {
+    let border_color = if state.ai_ready {
+        Color::Yellow
+    } else {
+        Color::DarkGray
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(" Input ");
+        .border_style(Style::default().fg(border_color))
+        .title(" Input ")
+        .title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .padding(Padding::new(1, 1, 0, 0));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

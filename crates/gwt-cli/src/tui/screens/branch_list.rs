@@ -1513,6 +1513,11 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect, has_f
         .borders(Borders::ALL)
         .border_style(border_style)
         .title(" Branches ")
+        .title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .padding(Padding::new(
             BRANCH_LIST_PADDING_X,
             BRANCH_LIST_PADDING_X,
@@ -1879,7 +1884,7 @@ fn render_details_panel(
         let title = panel_title_line(&summary.branch_name, "Details");
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
+            .border_style(Style::default().fg(Color::White))
             .title(title)
             .padding(Padding::new(PANEL_PADDING_X, PANEL_PADDING_X, 0, 0));
         let inner = block.inner(area);
@@ -1899,7 +1904,7 @@ fn render_details_panel(
         let title = panel_title_line(&summary.branch_name, "Details");
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
+            .border_style(Style::default().fg(Color::White))
             .title(title)
             .padding(Padding::new(PANEL_PADDING_X, PANEL_PADDING_X, 0, 0));
         let inner = block.inner(area);
