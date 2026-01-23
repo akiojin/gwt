@@ -79,8 +79,8 @@ fn get_branch_name_type(name: &str) -> BranchNameType {
 /// View mode for branch list
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewMode {
-    #[default]
     All,
+    #[default]
     Local,
     Remote,
 }
@@ -2729,11 +2729,12 @@ mod tests {
 
         let mut state = BranchListState::new().with_branches(branches);
 
-        assert_eq!(state.filtered_branches().len(), 2);
-
-        state.set_view_mode(ViewMode::Local);
+        // Default is Local, so only local branches are shown
         assert_eq!(state.filtered_branches().len(), 1);
         assert_eq!(state.filtered_branches()[0].name, "main");
+
+        state.set_view_mode(ViewMode::All);
+        assert_eq!(state.filtered_branches().len(), 2);
 
         state.set_view_mode(ViewMode::Remote);
         assert_eq!(state.filtered_branches().len(), 1);
