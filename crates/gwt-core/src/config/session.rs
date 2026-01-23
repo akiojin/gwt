@@ -349,6 +349,12 @@ mod tests {
 
     #[test]
     fn test_session_path_hash_consistency() {
+        // Lock mutex to prevent concurrent env var access
+        let _guard = ENV_MUTEX.lock().unwrap();
+
+        // Clear any previously set env var
+        std::env::remove_var("GWT_SESSIONS_DIR");
+
         // Same worktree path should always produce same session path
         let worktree_path = PathBuf::from("/repo/.worktrees/feature");
         let path1 = Session::session_path(&worktree_path);
