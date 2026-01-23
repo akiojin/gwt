@@ -18,8 +18,9 @@ use gwt_core::ai::{
 };
 use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{
-    get_claude_settings_path, is_gwt_hooks_registered, register_gwt_hooks, reregister_gwt_hooks,
-    save_session_entry, AISettings, Profile, ProfilesConfig, ResolvedAISettings, ToolSessionEntry,
+    get_claude_settings_path, is_gwt_hooks_registered, is_temporary_execution, register_gwt_hooks,
+    reregister_gwt_hooks, save_session_entry, AISettings, Profile, ProfilesConfig,
+    ResolvedAISettings, ToolSessionEntry,
 };
 use gwt_core::error::GwtError;
 use gwt_core::git::{Branch, PrCache, Remote, Repository};
@@ -566,7 +567,12 @@ impl Model {
             // SPEC-861d8cdf T-104: Check if hook setup is needed on first startup
             if model.tmux_mode.is_multi() && !is_gwt_hooks_registered(&settings_path) {
                 model.pending_hook_setup = true;
-                model.confirm = ConfirmState::hook_setup();
+                // FR-102i: Show warning if running from temporary execution environment
+                if let Some(exe_path) = is_temporary_execution() {
+                    model.confirm = ConfirmState::hook_setup_with_warning(&exe_path);
+                } else {
+                    model.confirm = ConfirmState::hook_setup();
+                }
                 model.screen_stack.push(model.screen.clone());
                 model.screen = Screen::Confirm;
             }
@@ -3539,7 +3545,14 @@ impl Model {
             }
             Message::ReregisterHooks => {
                 // FR-102g: Manually re-register Claude Code hooks
-                if let Some(settings_path) = get_claude_settings_path() {
+                // FR-102i: Show confirmation dialog if running from temporary execution
+                if let Some(exe_path) = is_temporary_execution() {
+                    // Show confirmation dialog before registering
+                    self.pending_hook_setup = true;
+                    self.confirm = ConfirmState::hook_setup_with_warning(&exe_path);
+                    self.screen_stack.push(self.screen.clone());
+                    self.screen = Screen::Confirm;
+                } else if let Some(settings_path) = get_claude_settings_path() {
                     match register_gwt_hooks(&settings_path) {
                         Ok(()) => {
                             self.status_message = Some("Claude Code hooks registered.".to_string());

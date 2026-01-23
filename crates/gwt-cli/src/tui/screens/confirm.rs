@@ -193,6 +193,26 @@ impl ConfirmState {
         }
     }
 
+    /// Create Claude Code hook setup warning dialog for temporary execution (FR-102i)
+    ///
+    /// Shows when running from bunx/npx cache - hooks may break after cleanup
+    pub fn hook_setup_with_warning(exe_path: &str) -> Self {
+        Self {
+            title: "Warning: Temporary Execution".to_string(),
+            message: "Hook setup may not work correctly.".to_string(),
+            details: vec![
+                format!("Running from: {}", exe_path),
+                "Hooks will break after cache cleanup.".to_string(),
+                "Install globally: npm install -g @akiojin/gwt".to_string(),
+            ],
+            confirm_label: "Setup Anyway".to_string(),
+            cancel_label: "Skip".to_string(),
+            selected_confirm: false, // Default to Skip for safety
+            is_dangerous: true,
+            ..Default::default()
+        }
+    }
+
     // Mouse click support methods
 
     /// Check if point is within popup area
@@ -516,5 +536,26 @@ mod tests {
         assert!(!state.is_dangerous); // Not dangerous, just a warning
         assert!(state.message.contains("claude"));
         assert!(state.message.contains("main"));
+    }
+
+    #[test]
+    fn test_hook_setup() {
+        let state = ConfirmState::hook_setup();
+        assert!(!state.is_dangerous);
+        assert!(state.selected_confirm); // Default to Setup
+        assert_eq!(state.confirm_label, "Setup");
+        assert_eq!(state.cancel_label, "Skip");
+    }
+
+    #[test]
+    fn test_hook_setup_with_warning() {
+        let exe_path = "/home/user/.bun/install/cache/@akiojin/gwt/v1.0.0/bin/gwt";
+        let state = ConfirmState::hook_setup_with_warning(exe_path);
+        assert!(state.is_dangerous);
+        assert!(!state.selected_confirm); // Default to Skip for safety
+        assert_eq!(state.confirm_label, "Setup Anyway");
+        assert_eq!(state.cancel_label, "Skip");
+        assert!(state.details.iter().any(|d| d.contains(exe_path)));
+        assert!(state.details.iter().any(|d| d.contains("npm install -g")));
     }
 }

@@ -63,6 +63,42 @@ pub fn get_claude_settings_path() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".claude").join("settings.json"))
 }
 
+/// Patterns that indicate temporary/cache execution environments (FR-102i)
+const TEMP_EXECUTION_PATTERNS: &[&str] = &[
+    ".bun/install/cache/",
+    "/tmp/bunx-",
+    "/.npm/_npx/",
+    "node_modules/.cache/",
+];
+
+/// Check if the current executable is running from a temporary execution environment (FR-102i)
+///
+/// Returns Some(exe_path) if running from bunx/npx cache, None otherwise.
+pub fn is_temporary_execution() -> Option<String> {
+    let exe_path = get_gwt_executable_path();
+    if is_temp_execution_path(&exe_path) {
+        Some(exe_path)
+    } else {
+        None
+    }
+}
+
+/// Check if a path matches temporary execution patterns
+fn is_temp_execution_path(path: &str) -> bool {
+    TEMP_EXECUTION_PATTERNS
+        .iter()
+        .any(|pattern| path.contains(pattern))
+}
+
+/// Check if a command string is a gwt hook command (FR-102j)
+///
+/// Matches:
+/// - Standard format: "gwt hook EventName"
+/// - Build binary format: "/path/to/gwt-HASH hook EventName" (contains "/gwt" and " hook ")
+fn is_gwt_hook_command(command: &str) -> bool {
+    command.contains("gwt hook") || (command.contains("/gwt") && command.contains(" hook "))
+}
+
 /// Check if gwt hooks are already registered in settings.json
 pub fn is_gwt_hooks_registered(settings_path: &Path) -> bool {
     if !settings_path.exists() {
@@ -94,20 +130,17 @@ fn value_has_gwt_hook(value: &serde_json::Value) -> bool {
                 hooks.iter().any(|hook| {
                     hook.get("command")
                         .and_then(|c| c.as_str())
-                        .map(|s| s.contains("gwt hook"))
+                        .map(is_gwt_hook_command)
                         .unwrap_or(false)
                 })
             } else {
                 // Legacy: array of strings
-                entry
-                    .as_str()
-                    .map(|s| s.contains("gwt hook"))
-                    .unwrap_or(false)
+                entry.as_str().map(is_gwt_hook_command).unwrap_or(false)
             }
         })
     } else if let Some(cmd) = value.as_str() {
         // Legacy: single string
-        cmd.contains("gwt hook")
+        is_gwt_hook_command(cmd)
     } else {
         false
     }
@@ -257,7 +290,7 @@ fn is_gwt_hook_entry(entry: &serde_json::Value) -> bool {
         hooks.iter().any(|hook| {
             hook.get("command")
                 .and_then(|c| c.as_str())
-                .map(|s| s.contains("gwt hook"))
+                .map(is_gwt_hook_command)
                 .unwrap_or(false)
         })
     } else {
@@ -615,5 +648,130 @@ mod tests {
         // Verify the new path overwrites the old one
         assert!(!content.contains("/path/to/old-gwt"));
         assert!(content.contains("/path/to/new-gwt"));
+    }
+
+    // T-102-05: Temporary execution detection tests (FR-102i)
+
+    #[test]
+    fn test_detect_temporary_execution_bunx() {
+        let exe_path = "/home/user/.bun/install/cache/@akiojin/gwt/v1.0.0/bin/gwt";
+        assert!(is_temp_execution_path(exe_path));
+    }
+
+    #[test]
+    fn test_detect_temporary_execution_npx() {
+        let exe_path = "/home/user/.npm/_npx/abc123/node_modules/.bin/gwt";
+        assert!(is_temp_execution_path(exe_path));
+    }
+
+    #[test]
+    fn test_detect_temporary_execution_tmp_bunx() {
+        let exe_path = "/tmp/bunx-12345/gwt";
+        assert!(is_temp_execution_path(exe_path));
+    }
+
+    #[test]
+    fn test_detect_temporary_execution_node_modules_cache() {
+        let exe_path = "/project/node_modules/.cache/gwt/bin/gwt";
+        assert!(is_temp_execution_path(exe_path));
+    }
+
+    #[test]
+    fn test_detect_normal_execution_usr_local() {
+        let exe_path = "/usr/local/bin/gwt";
+        assert!(!is_temp_execution_path(exe_path));
+    }
+
+    #[test]
+    fn test_detect_normal_execution_home_bin() {
+        let exe_path = "/home/user/.local/bin/gwt";
+        assert!(!is_temp_execution_path(exe_path));
+    }
+
+    // T-102-06: gwt hook detection pattern tests (FR-102j)
+
+    #[test]
+    fn test_is_gwt_hook_command_standard() {
+        assert!(is_gwt_hook_command("gwt hook PreToolUse"));
+        assert!(is_gwt_hook_command("/usr/bin/gwt hook UserPromptSubmit"));
+    }
+
+    #[test]
+    fn test_is_gwt_hook_command_build_binary() {
+        // Build binary format: gwt-HASH
+        assert!(is_gwt_hook_command(
+            "/gwt/target/release/deps/gwt-614ba193345891eb hook PreToolUse"
+        ));
+        assert!(is_gwt_hook_command(
+            "/home/user/gwt/target/debug/gwt-abc123 hook Stop"
+        ));
+    }
+
+    #[test]
+    fn test_is_gwt_hook_command_not_gwt() {
+        assert!(!is_gwt_hook_command("echo hello"));
+        assert!(!is_gwt_hook_command("other-tool hook PreToolUse"));
+        // "hook" without "/gwt" path
+        assert!(!is_gwt_hook_command("/some/path hook something"));
+    }
+
+    #[test]
+    fn test_is_gwt_hook_entry_standard_format() {
+        let entry = serde_json::json!({
+            "hooks": [{"type": "command", "command": "gwt hook PreToolUse"}]
+        });
+        assert!(is_gwt_hook_entry(&entry));
+    }
+
+    #[test]
+    fn test_is_gwt_hook_entry_build_binary_format() {
+        let entry = serde_json::json!({
+            "hooks": [{"type": "command", "command": "/gwt/target/release/deps/gwt-614ba193345891eb hook PreToolUse"}]
+        });
+        assert!(is_gwt_hook_entry(&entry));
+    }
+
+    #[test]
+    fn test_is_gwt_hook_entry_non_gwt() {
+        let entry = serde_json::json!({
+            "hooks": [{"type": "command", "command": "echo hello"}]
+        });
+        assert!(!is_gwt_hook_entry(&entry));
+    }
+
+    #[test]
+    fn test_no_duplicate_when_registering_build_binary_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let settings_path = temp_dir.path().join(".claude").join("settings.json");
+
+        // Register with build binary path (gwt-HASH format)
+        register_gwt_hooks_with_exe_path(
+            &settings_path,
+            "/gwt/target/release/deps/gwt-614ba193345891eb",
+        )
+        .unwrap();
+
+        // Register again with different hash - should overwrite, not duplicate
+        register_gwt_hooks_with_exe_path(
+            &settings_path,
+            "/gwt/target/release/deps/gwt-abc123def456",
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&settings_path).unwrap();
+        let settings: ClaudeSettings = serde_json::from_str(&content).unwrap();
+
+        // Check that there's only one entry per event
+        let pre_tool_hook = settings.hooks.get("PreToolUse").unwrap();
+        let arr = pre_tool_hook.as_array().expect("Expected array format");
+        assert_eq!(
+            arr.len(),
+            1,
+            "Should have exactly one entry, not duplicated"
+        );
+
+        // Verify the new hash is present, not the old one
+        assert!(!content.contains("gwt-614ba193345891eb"));
+        assert!(content.contains("gwt-abc123def456"));
     }
 }

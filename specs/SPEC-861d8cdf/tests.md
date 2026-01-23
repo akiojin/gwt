@@ -299,6 +299,62 @@ fn test_reregister_hooks_failure_shows_error_message() {
 }
 ```
 
+#### T-102-05: 一時実行環境検出 (FR-102i)
+
+```rust
+#[test]
+fn test_detect_temporary_execution_bunx() {
+    // bunxキャッシュパスからの実行を検出
+    let exe_path = "/home/user/.bun/install/cache/@akiojin/gwt/v1.0.0/bin/gwt";
+    assert!(is_temp_execution_path(exe_path));
+}
+
+#[test]
+fn test_detect_temporary_execution_npx() {
+    // npxキャッシュパスからの実行を検出
+    let exe_path = "/home/user/.npm/_npx/abc123/node_modules/.bin/gwt";
+    assert!(is_temp_execution_path(exe_path));
+}
+
+#[test]
+fn test_detect_normal_execution() {
+    // 通常インストールパスは一時実行ではない
+    let exe_path = "/usr/local/bin/gwt";
+    assert!(!is_temp_execution_path(exe_path));
+}
+```
+
+#### T-102-06: gwt hook検出パターン改善 (FR-102j)
+
+```rust
+#[test]
+fn test_detect_gwt_hook_standard_format() {
+    // 標準形式: "gwt hook EventName"
+    let entry = json!({
+        "hooks": [{"type": "command", "command": "gwt hook PreToolUse"}]
+    });
+    assert!(is_gwt_hook_entry(&entry));
+}
+
+#[test]
+fn test_detect_gwt_hook_build_binary_format() {
+    // ビルドバイナリ形式: "/path/to/gwt-HASH hook EventName"
+    let entry = json!({
+        "hooks": [{"type": "command", "command": "/gwt/target/release/deps/gwt-614ba193345891eb hook PreToolUse"}]
+    });
+    assert!(is_gwt_hook_entry(&entry));
+}
+
+#[test]
+fn test_not_detect_non_gwt_hook() {
+    // gwt以外のhookはマッチしない
+    let entry = json!({
+        "hooks": [{"type": "command", "command": "echo hello"}]
+    });
+    assert!(!is_gwt_hook_entry(&entry));
+}
+```
+
 ---
 
 ### T-103: 状態表示UIの実装
