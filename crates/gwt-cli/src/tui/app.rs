@@ -85,6 +85,10 @@ fn format_ai_error(err: AIError) -> String {
     err.to_string()
 }
 
+fn background_window_name(branch_name: &str) -> String {
+    branch_name.to_string()
+}
+
 fn session_poll_due(last_poll: Option<Instant>, now: Instant) -> bool {
     last_poll
         .map(|last| now.duration_since(last) >= SESSION_POLL_INTERVAL)
@@ -262,6 +266,7 @@ struct LaunchRequest {
 
 enum LaunchUpdate {
     Progress(LaunchProgress),
+    WorktreeReady { branch: String, path: PathBuf },
     Ready(Box<LaunchPlan>),
     Failed(String),
 }
@@ -1673,51 +1678,68 @@ impl Model {
     }
 
     fn apply_launch_updates(&mut self) {
-        let Some(rx) = &self.launch_rx else {
-            return;
-        };
+        let refresh_after = {
+            let Some(rx) = &self.launch_rx else {
+                return;
+            };
 
-        loop {
-            match rx.try_recv() {
-                Ok(update) => match update {
-                    LaunchUpdate::Progress(progress) => {
-                        self.launch_status = Some(progress.message());
-                    }
-                    LaunchUpdate::Ready(plan) => {
-                        self.launch_in_progress = false;
-                        self.launch_rx = None;
-                        let next_status = match &plan.install_plan {
-                            InstallPlan::Install { manager } => {
-                                LaunchProgress::InstallingDependencies {
-                                    manager: manager.clone(),
-                                }
-                                .message()
+            let mut refresh_after = false;
+
+            loop {
+                match rx.try_recv() {
+                    Ok(update) => match update {
+                        LaunchUpdate::Progress(progress) => {
+                            self.launch_status = Some(progress.message());
+                        }
+                        LaunchUpdate::WorktreeReady { branch, path } => {
+                            if self.branch_list.apply_worktree_created(&branch, &path) {
+                                self.active_count = self.branch_list.stats.worktree_count;
+                            } else {
+                                refresh_after = true;
                             }
-                            _ => "Launching agent...".to_string(),
-                        };
-                        self.launch_status = Some(next_status);
-                        self.handle_launch_plan(*plan);
-                        break;
-                    }
-                    LaunchUpdate::Failed(message) => {
-                        self.launch_in_progress = false;
+                        }
+                        LaunchUpdate::Ready(plan) => {
+                            self.launch_in_progress = false;
+                            self.launch_rx = None;
+                            let next_status = match &plan.install_plan {
+                                InstallPlan::Install { manager } => {
+                                    LaunchProgress::InstallingDependencies {
+                                        manager: manager.clone(),
+                                    }
+                                    .message()
+                                }
+                                _ => "Launching agent...".to_string(),
+                            };
+                            self.launch_status = Some(next_status);
+                            self.handle_launch_plan(*plan);
+                            break;
+                        }
+                        LaunchUpdate::Failed(message) => {
+                            self.launch_in_progress = false;
+                            self.launch_rx = None;
+                            self.launch_status = None;
+                            gwt_core::logging::log_error_message("E4001", "agent", &message, None);
+                            self.worktree_create.error_message = Some(message.clone());
+                            self.status_message = Some(format!("Error: {}", message));
+                            self.status_message_time = Some(Instant::now());
+                            break;
+                        }
+                    },
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
                         self.launch_rx = None;
+                        self.launch_in_progress = false;
                         self.launch_status = None;
-                        gwt_core::logging::log_error_message("E4001", "agent", &message, None);
-                        self.worktree_create.error_message = Some(message.clone());
-                        self.status_message = Some(format!("Error: {}", message));
-                        self.status_message_time = Some(Instant::now());
                         break;
                     }
-                },
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    self.launch_rx = None;
-                    self.launch_in_progress = false;
-                    self.launch_status = None;
-                    break;
                 }
             }
+
+            refresh_after
+        };
+
+        if refresh_after {
+            self.refresh_data();
         }
     }
 
@@ -1918,10 +1940,7 @@ impl Model {
         };
 
         // Hide the pane (break to background window)
-        let window_name = format!(
-            "gwt-agent-{}",
-            pane.branch_name.replace('/', "-").replace(' ', "_")
-        );
+        let window_name = background_window_name(&pane.branch_name);
 
         match gwt_core::tmux::hide_pane(&pane.pane_id, &window_name) {
             Ok(background_window) => {
@@ -3839,6 +3858,15 @@ impl Model {
                 }
             };
 
+            let branch_name = worktree
+                .branch
+                .clone()
+                .unwrap_or_else(|| request.branch_name.clone());
+            send(LaunchUpdate::WorktreeReady {
+                branch: branch_name,
+                path: worktree.path.clone(),
+            });
+
             let config = AgentLaunchConfig {
                 worktree_path: worktree.path.clone(),
                 branch_name: request.branch_name.clone(),
@@ -5428,6 +5456,12 @@ mod tests {
             tool_version: None,
             timestamp: 0,
         }
+    }
+
+    #[test]
+    fn test_background_window_name_uses_branch_name_only() {
+        let branch = "feature/clean-name";
+        assert_eq!(background_window_name(branch), branch);
     }
 
     fn sample_branch_with_session(name: &str) -> BranchItem {

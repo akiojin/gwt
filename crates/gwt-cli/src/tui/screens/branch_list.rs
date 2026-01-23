@@ -621,6 +621,21 @@ impl BranchListState {
         self.ensure_visible();
     }
 
+    fn rebuild_filtered_cache_preserve_selection(&mut self) {
+        let selected_name = self.selected_branch().map(|branch| branch.name.clone());
+        self.rebuild_filtered_cache();
+        if let Some(name) = selected_name {
+            if let Some(index) = self
+                .filtered_indices
+                .iter()
+                .position(|&idx| self.branches[idx].name == name)
+            {
+                self.selected = index;
+                self.ensure_visible();
+            }
+        }
+    }
+
     pub fn filtered_len(&self) -> usize {
         self.filtered_indices.len()
     }
@@ -947,6 +962,25 @@ impl BranchListState {
                 }
             }
         }
+    }
+
+    pub fn apply_worktree_created(&mut self, branch_name: &str, worktree_path: &Path) -> bool {
+        let Some(item) = self.branches.iter_mut().find(|b| b.name == branch_name) else {
+            return false;
+        };
+
+        item.has_worktree = true;
+        item.worktree_path = Some(worktree_path.display().to_string());
+        item.worktree_status = if worktree_path.exists() {
+            WorktreeStatus::Active
+        } else {
+            WorktreeStatus::Inaccessible
+        };
+        item.update_safety_status();
+
+        self.stats.worktree_count = self.branches.iter().filter(|b| b.has_worktree).count();
+        self.rebuild_filtered_cache_preserve_selection();
+        true
     }
 
     pub fn reset_status_progress(&mut self, total: usize) {
@@ -2367,6 +2401,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::path::Path;
+    use tempfile::tempdir;
 
     fn line_text(line: &Line<'_>) -> String {
         let mut text = String::new();
@@ -2492,6 +2527,46 @@ mod tests {
         branch.is_gone = true;
         branch.worktree_status = WorktreeStatus::None;
         assert_eq!(branch.branch_name_color(), Color::Red);
+    }
+
+    #[test]
+    fn test_apply_worktree_created_updates_branch_and_preserves_selection() {
+        let temp = tempdir().expect("tempdir");
+        let expected_path = temp.path().display().to_string();
+
+        let mut branch_a = sample_branch("feature/a");
+        branch_a.has_worktree = false;
+        branch_a.worktree_path = None;
+        branch_a.worktree_status = WorktreeStatus::None;
+
+        let mut branch_b = sample_branch("feature/b");
+        branch_b.worktree_path = Some("/path".to_string());
+
+        let mut state = BranchListState::new().with_branches(vec![branch_a, branch_b]);
+        assert_eq!(
+            state.selected_branch().map(|branch| branch.name.as_str()),
+            Some("feature/b")
+        );
+
+        let updated = state.apply_worktree_created("feature/a", temp.path());
+        assert!(updated);
+
+        let updated_branch = state
+            .branches
+            .iter()
+            .find(|branch| branch.name == "feature/a")
+            .expect("branch exists");
+        assert!(updated_branch.has_worktree);
+        assert_eq!(updated_branch.worktree_status, WorktreeStatus::Active);
+        assert_eq!(
+            updated_branch.worktree_path.as_deref(),
+            Some(expected_path.as_str())
+        );
+        assert_eq!(state.stats.worktree_count, 2);
+        assert_eq!(
+            state.selected_branch().map(|branch| branch.name.as_str()),
+            Some("feature/b")
+        );
     }
 
     #[test]
