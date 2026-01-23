@@ -372,6 +372,10 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let legacy_path = temp.path().join(Session::LEGACY_JSON_NAME);
 
+        // Ensure sessions directory exists (may not exist in CI environment)
+        let sessions_dir = Session::sessions_dir();
+        std::fs::create_dir_all(&sessions_dir).expect("Failed to create sessions directory");
+
         let session = Session::new(temp.path(), "feature/legacy");
         std::fs::write(
             &legacy_path,
@@ -379,11 +383,12 @@ mod tests {
         )
         .unwrap();
 
+        let global_path = Session::session_path(temp.path());
+
         let loaded = Session::load_for_worktree(temp.path()).unwrap();
         assert_eq!(loaded.branch, "feature/legacy");
 
         // Global session file should be created
-        let global_path = Session::session_path(temp.path());
         assert!(global_path.exists());
 
         // Legacy JSON should be deleted after migration
