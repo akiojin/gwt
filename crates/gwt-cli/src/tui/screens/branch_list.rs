@@ -79,8 +79,8 @@ fn get_branch_name_type(name: &str) -> BranchNameType {
 /// View mode for branch list
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewMode {
-    #[default]
     All,
+    #[default]
     Local,
     Remote,
 }
@@ -1513,6 +1513,11 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect, has_f
         .borders(Borders::ALL)
         .border_style(border_style)
         .title(" Branches ")
+        .title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .padding(Padding::new(
             BRANCH_LIST_PADDING_X,
             BRANCH_LIST_PADDING_X,
@@ -1620,9 +1625,10 @@ fn render_branch_row(
     // FR-082/FR-083/FR-084/FR-085: Get branch name color based on worktree/gone status
     let branch_name_color = branch.branch_name_color();
 
-    // Branch name
+    // Branch name (strip "remotes/" prefix for cleaner display)
     let display_name = if branch.branch_type == BranchType::Remote {
-        branch.remote_name.as_deref().unwrap_or(&branch.name)
+        let name = branch.remote_name.as_deref().unwrap_or(&branch.name);
+        name.strip_prefix("remotes/").unwrap_or(name)
     } else {
         &branch.name
     };
@@ -1878,7 +1884,7 @@ fn render_details_panel(
         let title = panel_title_line(&summary.branch_name, "Details");
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
+            .border_style(Style::default().fg(Color::White))
             .title(title)
             .padding(Padding::new(PANEL_PADDING_X, PANEL_PADDING_X, 0, 0));
         let inner = block.inner(area);
@@ -1898,7 +1904,7 @@ fn render_details_panel(
         let title = panel_title_line(&summary.branch_name, "Details");
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
+            .border_style(Style::default().fg(Color::White))
             .title(title)
             .padding(Padding::new(PANEL_PADDING_X, PANEL_PADDING_X, 0, 0));
         let inner = block.inner(area);
@@ -2728,11 +2734,12 @@ mod tests {
 
         let mut state = BranchListState::new().with_branches(branches);
 
-        assert_eq!(state.filtered_branches().len(), 2);
-
-        state.set_view_mode(ViewMode::Local);
+        // Default is Local, so only local branches are shown
         assert_eq!(state.filtered_branches().len(), 1);
         assert_eq!(state.filtered_branches()[0].name, "main");
+
+        state.set_view_mode(ViewMode::All);
+        assert_eq!(state.filtered_branches().len(), 2);
 
         state.set_view_mode(ViewMode::Remote);
         assert_eq!(state.filtered_branches().len(), 1);

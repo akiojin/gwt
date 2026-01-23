@@ -4,6 +4,15 @@
 
 use ratatui::{prelude::*, widgets::*};
 
+/// Truncate a path for display, keeping the end portion
+fn truncate_path(path: &str, max_len: usize) -> String {
+    if path.len() <= max_len {
+        path.to_string()
+    } else {
+        format!("...{}", &path[path.len() - max_len + 3..])
+    }
+}
+
 /// Confirmation dialog state
 #[derive(Debug, Default)]
 pub struct ConfirmState {
@@ -189,6 +198,27 @@ impl ConfirmState {
             cancel_label: "Skip".to_string(),
             selected_confirm: true, // Default to setup for better UX
             is_dangerous: false,
+            ..Default::default()
+        }
+    }
+
+    /// Create hook setup warning dialog for temporary execution (FR-102i)
+    ///
+    /// When gwt is running from bunx/npx cache, hooks may not work correctly
+    /// because the executable path will change after cache cleanup.
+    pub fn hook_setup_with_warning(exe_path: &str) -> Self {
+        Self {
+            title: "Warning: Temporary Execution".to_string(),
+            message: "Hook setup may not work correctly.".to_string(),
+            details: vec![
+                format!("Running from: {}", truncate_path(exe_path, 50)),
+                "Hooks will break after cache cleanup.".to_string(),
+                "Install globally: npm install -g @akiojin/gwt".to_string(),
+            ],
+            confirm_label: "Setup Anyway".to_string(),
+            cancel_label: "Skip".to_string(),
+            selected_confirm: false, // Default to Skip for safety
+            is_dangerous: true,
             ..Default::default()
         }
     }
@@ -516,5 +546,41 @@ mod tests {
         assert!(!state.is_dangerous); // Not dangerous, just a warning
         assert!(state.message.contains("claude"));
         assert!(state.message.contains("main"));
+    }
+
+    #[test]
+    fn test_hook_setup_with_warning() {
+        let exe_path = "/home/user/.bun/install/cache/@akiojin/gwt@1.0.0/gwt";
+        let state = ConfirmState::hook_setup_with_warning(exe_path);
+
+        assert!(state.is_dangerous);
+        assert!(!state.selected_confirm); // Default to Skip for safety
+        assert_eq!(state.confirm_label, "Setup Anyway");
+        assert_eq!(state.cancel_label, "Skip");
+        assert!(state.title.contains("Warning"));
+        assert!(state.details.iter().any(|d| d.contains("npm install -g")));
+    }
+
+    #[test]
+    fn test_hook_setup_normal() {
+        let state = ConfirmState::hook_setup();
+
+        assert!(!state.is_dangerous);
+        assert!(state.selected_confirm); // Default to Setup for better UX
+        assert_eq!(state.confirm_label, "Setup");
+    }
+
+    #[test]
+    fn test_truncate_path_short() {
+        let short_path = "/usr/local/bin/gwt";
+        assert_eq!(truncate_path(short_path, 50), short_path);
+    }
+
+    #[test]
+    fn test_truncate_path_long() {
+        let long_path = "/home/user/.bun/install/cache/@akiojin/gwt@1.0.0/gwt";
+        let truncated = truncate_path(long_path, 30);
+        assert!(truncated.starts_with("..."));
+        assert!(truncated.len() <= 30);
     }
 }
