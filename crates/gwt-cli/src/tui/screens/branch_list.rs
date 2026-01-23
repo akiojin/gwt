@@ -1620,9 +1620,10 @@ fn render_branch_row(
     // FR-082/FR-083/FR-084/FR-085: Get branch name color based on worktree/gone status
     let branch_name_color = branch.branch_name_color();
 
-    // Branch name
+    // Branch name (strip "remotes/" prefix for cleaner display)
     let display_name = if branch.branch_type == BranchType::Remote {
-        branch.remote_name.as_deref().unwrap_or(&branch.name)
+        let name = branch.remote_name.as_deref().unwrap_or(&branch.name);
+        name.strip_prefix("remotes/").unwrap_or(name)
     } else {
         &branch.name
     };
