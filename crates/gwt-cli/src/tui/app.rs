@@ -4273,29 +4273,26 @@ impl Model {
                 .iter()
                 .find(|b| &b.name == branch_name);
 
-            if let (Some(manager), Some(item)) = (manager.as_ref(), branch_item) {
-                if let Some(path) = item.worktree_path.as_deref() {
-                    let force_remove = item.worktree_status == WorktreeStatus::Inaccessible
-                        || item.has_changes
-                        || WorktreeManager::is_protected(&item.name);
-                    let path_buf = PathBuf::from(path);
-                    if let Err(e) = manager.remove(&path_buf, force_remove) {
-                        errors.push(format!("{}: {}", branch_name, e));
-                        continue;
-                    }
-                }
-            }
+            let force_remove = branch_item.map_or(false, |item| {
+                item.worktree_status == WorktreeStatus::Inaccessible
+                    || item.has_changes
+                    || WorktreeManager::is_protected(&item.name)
+            });
 
-            // Try to delete the branch
-            match Branch::delete(&self.repo_root, branch_name, true) {
+            let result = if let Some(manager) = manager.as_ref() {
+                manager.cleanup_branch(branch_name, force_remove, true)
+            } else {
+                Branch::delete(&self.repo_root, branch_name, true)
+            };
+
+            match result {
                 Ok(_) => {
                     debug!(
                         category = "tui",
                         branch = %branch_name,
-                        "Branch deleted successfully"
+                        "Branch cleanup succeeded"
                     );
                     deleted += 1;
-                    // Remove from selection
                     self.branch_list.selected_branches.remove(branch_name);
                 }
                 Err(e) => {
@@ -4303,7 +4300,7 @@ impl Model {
                         category = "tui",
                         branch = %branch_name,
                         error = %e,
-                        "Failed to delete branch"
+                        "Branch cleanup failed"
                     );
                     errors.push(format!("{}: {}", branch_name, e));
                 }
