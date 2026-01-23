@@ -128,7 +128,7 @@ fn render_chat_panel(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let mut lines: Vec<Line> = Vec::new();
+    let mut lines: Vec<Line<'static>> = Vec::new();
 
     if let Some(status) = status_message {
         lines.push(Line::from(Span::styled(
@@ -200,7 +200,7 @@ fn render_task_panel(state: &AgentModeState, frame: &mut Frame, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let mut lines: Vec<Line> = Vec::new();
+    let mut lines: Vec<Line<'static>> = Vec::new();
     if state.tasks.is_empty() {
         lines.push(Line::from(Span::styled(
             "No tasks yet.",
@@ -265,7 +265,7 @@ fn render_input_panel(state: &AgentModeState, frame: &mut Frame, area: Rect) {
     }
 }
 
-fn wrap_lines(lines: &[Line], width: u16) -> Vec<Line> {
+fn wrap_lines(lines: &[Line<'static>], width: u16) -> Vec<Line<'static>> {
     if width == 0 {
         return Vec::new();
     }
@@ -280,7 +280,7 @@ fn wrap_lines(lines: &[Line], width: u16) -> Vec<Line> {
     wrapped
 }
 
-fn wrap_text_lines(text: &str, width: u16, style: Style) -> Vec<Line> {
+fn wrap_text_lines(text: &str, width: u16, style: Style) -> Vec<Line<'static>> {
     if width == 0 {
         return Vec::new();
     }
@@ -288,7 +288,7 @@ fn wrap_text_lines(text: &str, width: u16, style: Style) -> Vec<Line> {
     wrap_spans_to_lines(&spans, width)
 }
 
-fn wrap_spans_to_lines(spans: &[Span], width: u16) -> Vec<Line> {
+fn wrap_spans_to_lines(spans: &[Span<'static>], width: u16) -> Vec<Line<'static>> {
     let width = width as usize;
     let mut lines: Vec<Line> = Vec::new();
     let mut segments: Vec<(Style, String)> = Vec::new();
