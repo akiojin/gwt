@@ -13,6 +13,7 @@ PLANS.md
 
 # npm wrapper (for bunx distribution)
 node_modules/
+bun.lock
 
 # Downloaded native binaries (postinstall downloads these)
 bin/gwt

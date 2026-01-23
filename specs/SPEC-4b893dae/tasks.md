@@ -4,6 +4,13 @@
 **入力**: `specs/SPEC-4b893dae/` からの設計ドキュメント
 **前提条件**: plan.md、spec.md、data-model.md、contracts/openai-api.md、research.md、quickstart.md
 
+## 追加作業: セッション要約スクロールバー (2026-01-23)
+
+- [x] **T8940** [P] [共通] `specs/SPEC-4b893dae/spec.md` / `specs/SPEC-4b893dae/plan.md` にセッション要約スクロールバー要件を追記
+- [x] **T8941** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` にスクロール可能な場合のみスクロールバーを表示する処理を追加
+- [x] **T8942** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にセッション要約スクロールバーのレイアウト計算テストを追加
+- [x] **T8943** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
 ## 追加作業: セッション要約タイムアウト延長 (2026-01-22)
 
 - [x] **T8930** [P] [共通] `specs/SPEC-4b893dae/spec.md` / `specs/SPEC-4b893dae/plan.md` / `specs/SPEC-4b893dae/contracts/openai-api.md` にセッション要約のタイムアウト要件を追記

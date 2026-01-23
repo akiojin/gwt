@@ -309,7 +309,11 @@ pub fn get_session_for_branch<'a>(sessions: &'a [Session], branch: &str) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    // Mutex to serialize tests that use GWT_SESSIONS_DIR environment variable
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_session_save_load() {
@@ -345,6 +349,12 @@ mod tests {
 
     #[test]
     fn test_session_path_hash_consistency() {
+        // Lock mutex to prevent concurrent env var access
+        let _guard = ENV_MUTEX.lock().unwrap();
+
+        // Clear any previously set env var
+        std::env::remove_var("GWT_SESSIONS_DIR");
+
         // Same worktree path should always produce same session path
         let worktree_path = PathBuf::from("/repo/.worktrees/feature");
         let path1 = Session::session_path(&worktree_path);
@@ -354,6 +364,9 @@ mod tests {
 
     #[test]
     fn test_migrate_local_to_global() {
+        // Lock mutex to prevent concurrent env var access
+        let _guard = ENV_MUTEX.lock().unwrap();
+
         let temp = TempDir::new().unwrap();
         let worktree_path = temp.path();
 
@@ -384,6 +397,9 @@ mod tests {
 
     #[test]
     fn test_legacy_session_migration() {
+        // Lock mutex to prevent concurrent env var access
+        let _guard = ENV_MUTEX.lock().unwrap();
+
         let temp = TempDir::new().unwrap();
         let legacy_path = temp.path().join(Session::LEGACY_JSON_NAME);
 

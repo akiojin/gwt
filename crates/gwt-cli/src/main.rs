@@ -7,6 +7,7 @@ use gwt_core::agent::get_command_version;
 use gwt_core::ai::AgentHistoryStore;
 use gwt_core::config::{save_session_entry, AgentStatus, Session, Settings, ToolSessionEntry};
 use gwt_core::error::GwtError;
+use gwt_core::git::Branch;
 use gwt_core::worktree::WorktreeManager;
 use gwt_core::TmuxMode;
 use std::fs;
@@ -254,25 +255,39 @@ fn cmd_remove(
     let manager = WorktreeManager::new(repo_root)?;
 
     // Find worktree by branch name or path
-    let wt = manager
-        .get_by_branch(target)?
-        .or_else(|| {
-            let path = PathBuf::from(target);
-            manager.get_by_path(&path).ok().flatten()
-        })
-        .ok_or_else(|| GwtError::WorktreeNotFound {
-            path: PathBuf::from(target),
-        })?;
-
-    let path = wt.path.clone();
+    let wt = manager.get_by_branch(target)?.or_else(|| {
+        let path = PathBuf::from(target);
+        manager.get_by_path(&path).ok().flatten()
+    });
 
     if delete_branch {
-        manager.remove_with_branch(&path, force)?;
-        println!("Removed worktree and branch: {}", target);
-    } else {
-        manager.remove(&path, force)?;
-        println!("Removed worktree: {}", path.display());
+        if let Some(wt) = wt {
+            if let Some(branch) = wt.branch.as_deref() {
+                manager.cleanup_branch(branch, force, force)?;
+                println!("Removed worktree and branch: {}", branch);
+            } else {
+                manager.remove(&wt.path, force)?;
+                println!("Removed worktree: {}", wt.path.display());
+            }
+            return Ok(());
+        }
+
+        if Branch::exists(repo_root, target)? {
+            manager.cleanup_branch(target, force, force)?;
+            println!("Removed branch: {}", target);
+            return Ok(());
+        }
+
+        return Err(GwtError::BranchNotFound {
+            name: target.to_string(),
+        });
     }
+
+    let wt = wt.ok_or_else(|| GwtError::WorktreeNotFound {
+        path: PathBuf::from(target),
+    })?;
+    manager.remove(&wt.path, force)?;
+    println!("Removed worktree: {}", wt.path.display());
 
     Ok(())
 }
