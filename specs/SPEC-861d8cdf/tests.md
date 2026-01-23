@@ -282,7 +282,6 @@ fn test_is_temporary_execution_local_dev() {
 }
 ```
 
-
 ```rust
 #[test]
 fn test_u_key_triggers_hook_reregistration() {
