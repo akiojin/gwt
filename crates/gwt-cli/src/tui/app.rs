@@ -12,14 +12,15 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use gwt_core::ai::{
-    summarize_session, AIClient, AIError, AgentHistoryStore, AgentType, ClaudeSessionParser,
-    CodexSessionParser, GeminiSessionParser, OpenCodeSessionParser, SessionParseError,
-    SessionParser,
+    summarize_session, AIClient, AIError, AgentHistoryStore, AgentType, ChatMessage,
+    ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, OpenCodeSessionParser,
+    SessionParseError, SessionParser,
 };
 use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{
-    get_claude_settings_path, is_gwt_hooks_registered, register_gwt_hooks, reregister_gwt_hooks,
-    save_session_entry, AISettings, Profile, ProfilesConfig, ResolvedAISettings, ToolSessionEntry,
+    get_claude_settings_path, is_gwt_hooks_registered, is_temporary_execution, register_gwt_hooks,
+    reregister_gwt_hooks, save_session_entry, AISettings, Profile, ProfilesConfig,
+    ResolvedAISettings, ToolSessionEntry,
 };
 use gwt_core::error::GwtError;
 use gwt_core::git::{Branch, PrCache, Remote, Repository};
@@ -31,7 +32,7 @@ use gwt_core::tmux::{
 use gwt_core::worktree::WorktreeManager;
 use gwt_core::TmuxMode;
 use ratatui::{prelude::*, widgets::*};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -43,6 +44,7 @@ const BRANCH_LIST_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(500);
 const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const SESSION_SUMMARY_QUIET_PERIOD: Duration = Duration::from_secs(5);
 const FAST_EXIT_THRESHOLD_SECS: u64 = 2;
+const AGENT_SYSTEM_PROMPT: &str = "You are the master agent. Analyze tasks and propose a plan.";
 
 use super::screens::branch_list::{
     BranchSummaryRequest, BranchSummaryUpdate, PrInfo, WorktreeStatus,
@@ -51,13 +53,15 @@ use super::screens::environment::EditField;
 use super::screens::pane_list::PaneListState;
 use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
 use super::screens::{
-    collect_os_env, render_ai_wizard, render_branch_list, render_confirm, render_environment,
-    render_error, render_help, render_logs, render_profiles, render_settings, render_wizard,
-    render_worktree_create, AIWizardState, BranchItem, BranchListState, BranchType, CodingAgent,
-    ConfirmState, DetailPanelTab, EnvironmentState, ErrorState, ExecutionMode, HelpState,
-    LogsState, ProfilesState, QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult,
-    WizardState, WorktreeCreateState,
+    collect_os_env, render_agent_mode, render_ai_wizard, render_branch_list, render_confirm,
+    render_environment, render_error_with_queue, render_help, render_logs, render_profiles,
+    render_settings, render_wizard, render_worktree_create, AIWizardState, AgentMessage,
+    AgentModeState, AgentRole, BranchItem, BranchListState, BranchType, CodingAgent, ConfirmState,
+    EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, HelpState, LogsState, ProfilesState,
+    QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult, WizardState,
+    WorktreeCreateState,
 };
+// log_gwt_error is available for use when GwtError types are available
 
 fn resolve_orphaned_agent_name(
     fallback_name: &str,
@@ -223,6 +227,11 @@ struct SessionSummaryUpdate {
     missing: bool,
 }
 
+struct AgentModeUpdate {
+    response: Option<String>,
+    error: Option<String>,
+}
+
 struct BranchListUpdate {
     branches: Vec<BranchItem>,
     branch_names: Vec<String>,
@@ -283,12 +292,12 @@ pub struct Model {
     logs: LogsState,
     /// Help state
     help: HelpState,
-    /// Detail panel tab state (FR-074)
-    detail_panel_tab: DetailPanelTab,
+    /// Agent mode state
+    agent_mode: AgentModeState,
     /// Confirm dialog state
     confirm: ConfirmState,
-    /// Error display state
-    error: ErrorState,
+    /// Error queue for managing multiple errors
+    error_queue: ErrorQueue,
     /// Profiles state
     profiles: ProfilesState,
     /// Profiles configuration
@@ -339,6 +348,10 @@ pub struct Model {
     session_summary_tx: Option<Sender<SessionSummaryUpdate>>,
     /// Session summary update receiver
     session_summary_rx: Option<Receiver<SessionSummaryUpdate>>,
+    /// Agent mode update sender
+    agent_mode_tx: Option<Sender<AgentModeUpdate>>,
+    /// Agent mode update receiver
+    agent_mode_rx: Option<Receiver<AgentModeUpdate>>,
     /// Tmux mode (Single or Multi)
     tmux_mode: TmuxMode,
     /// Tmux session name (when in multi mode)
@@ -367,6 +380,7 @@ pub struct Model {
 #[derive(Clone, Debug)]
 pub enum Screen {
     BranchList,
+    AgentMode,
     WorktreeCreate,
     Settings,
     Logs,
@@ -432,6 +446,8 @@ pub enum Message {
     ConfirmAgentTermination,
     /// Execute agent termination after confirmation
     ExecuteAgentTermination,
+    /// FR-102g: Manually re-register Claude Code hooks (u key)
+    ReregisterHooks,
 }
 
 impl Model {
@@ -449,6 +465,8 @@ impl Model {
             "Initializing TUI model"
         );
 
+        let (agent_mode_tx, agent_mode_rx) = mpsc::channel();
+
         let mut model = Self {
             should_quit: false,
             ctrl_c_count: 0,
@@ -462,9 +480,9 @@ impl Model {
             settings: SettingsState::new(),
             logs: LogsState::new(),
             help: HelpState::new(),
-            detail_panel_tab: DetailPanelTab::Details,
+            agent_mode: AgentModeState::new(),
             confirm: ConfirmState::new(),
-            error: ErrorState::new(),
+            error_queue: ErrorQueue::new(),
             profiles: ProfilesState::new(),
             profiles_config: ProfilesConfig::default(),
             environment: EnvironmentState::new(),
@@ -490,6 +508,8 @@ impl Model {
             worktree_status_rx: None,
             session_summary_tx: None,
             session_summary_rx: None,
+            agent_mode_tx: Some(agent_mode_tx),
+            agent_mode_rx: Some(agent_mode_rx),
             tmux_mode: TmuxMode::detect(),
             tmux_session: None,
             gwt_pane_id: None,
@@ -545,9 +565,14 @@ impl Model {
             }
 
             // SPEC-861d8cdf T-104: Check if hook setup is needed on first startup
+            // FR-102i: Show warning if running from temporary execution environment
             if model.tmux_mode.is_multi() && !is_gwt_hooks_registered(&settings_path) {
                 model.pending_hook_setup = true;
-                model.confirm = ConfirmState::hook_setup();
+                model.confirm = if let Some(exe_path) = is_temporary_execution() {
+                    ConfirmState::hook_setup_with_warning(&exe_path)
+                } else {
+                    ConfirmState::hook_setup()
+                };
                 model.screen_stack.push(model.screen.clone());
                 model.screen = Screen::Confirm;
             }
@@ -611,7 +636,6 @@ impl Model {
         self.total_count = 0;
         self.active_count = 0;
 
-        // FR-074: タブ状態はModelレベルで保持されるため、BranchListStateの再生成時に引き継ぎ不要
         let mut branch_list = BranchListState::new();
         branch_list.active_profile = self.profiles_config.active.clone();
         branch_list.ai_enabled = self.active_ai_enabled();
@@ -633,6 +657,22 @@ impl Model {
                 .and_then(|manager| manager.list_basic().ok())
                 .unwrap_or_default();
             let branches = Branch::list_basic(&repo_root).unwrap_or_default();
+            let remote_branches = Branch::list_remote(&repo_root).unwrap_or_default();
+            let local_branch_names: HashSet<String> =
+                branches.iter().map(|b| b.name.clone()).collect();
+            let mut remote_only_branches = Vec::new();
+            for mut branch in remote_branches {
+                let short_name = branch
+                    .name
+                    .split_once('/')
+                    .map(|(_, name)| name)
+                    .unwrap_or(branch.name.as_str());
+                if local_branch_names.contains(short_name) {
+                    continue;
+                }
+                branch.name = format!("remotes/{}", branch.name);
+                remote_only_branches.push(branch);
+            }
             let worktree_targets: Vec<WorktreeStatusTarget> = worktrees
                 .iter()
                 .filter_map(|wt| {
@@ -688,6 +728,11 @@ impl Model {
                     item
                 })
                 .collect();
+            branch_items.extend(
+                remote_only_branches
+                    .iter()
+                    .map(|b| BranchItem::from_branch_minimal(b, &worktrees)),
+            );
 
             // Sort branches by timestamp for those with sessions
             branch_items.iter_mut().for_each(|item| {
@@ -699,12 +744,8 @@ impl Model {
 
             let total_count = branch_items.len();
             let active_count = branch_items.iter().filter(|b| b.has_worktree).count();
-            let base_branches: Vec<String> = branches
-                .iter()
-                .filter(|b| !b.name.starts_with("remotes/"))
-                .map(|b| b.name.clone())
-                .collect();
-            let branch_names: Vec<String> = branches.iter().map(|b| b.name.clone()).collect();
+            let base_branches: Vec<String> = branches.iter().map(|b| b.name.clone()).collect();
+            let branch_names: Vec<String> = branch_items.iter().map(|b| b.name.clone()).collect();
 
             let _ = tx.send(BranchListUpdate {
                 branches: branch_items,
@@ -734,9 +775,20 @@ impl Model {
             let mut cache = PrCache::new();
             cache.populate(&repo_root);
 
+            let normalize_branch_name = |name: &str| {
+                if let Some(stripped) = name.strip_prefix("remotes/") {
+                    if let Some((_, branch)) = stripped.split_once('/') {
+                        return branch.to_string();
+                    }
+                    return stripped.to_string();
+                }
+                name.to_string()
+            };
+
             let mut info = HashMap::new();
             for name in branch_names {
-                if let Some(pr) = cache.get(&name) {
+                let lookup = normalize_branch_name(&name);
+                if let Some(pr) = cache.get(&lookup) {
                     info.insert(
                         name,
                         PrInfo {
@@ -902,9 +954,99 @@ impl Model {
         if let Some(request) = self.branch_list.prepare_branch_summary(&self.repo_root) {
             self.spawn_branch_summary_fetch(request);
         }
-        if self.detail_panel_tab == DetailPanelTab::Session {
-            self.maybe_request_session_summary_for_selected(false);
+        self.maybe_request_session_summary_for_selected(false);
+    }
+
+    fn enter_agent_mode(&mut self) {
+        self.update_agent_mode_ai_status();
+        self.agent_mode.last_error = None;
+        self.screen = Screen::AgentMode;
+    }
+
+    fn update_agent_mode_ai_status(&mut self) {
+        if !self.active_ai_enabled() {
+            self.agent_mode
+                .set_ai_status(false, Some("AI settings are required.".to_string()));
+            return;
         }
+
+        let (ready, error) = match self.active_ai_settings() {
+            Some(settings) => {
+                if settings.endpoint.trim().is_empty() || settings.model.trim().is_empty() {
+                    (false, Some("AI settings are required.".to_string()))
+                } else {
+                    match AIClient::new(settings) {
+                        Ok(_) => (true, None),
+                        Err(err) => (false, Some(format_ai_error(err))),
+                    }
+                }
+            }
+            None => (false, Some("AI settings are required.".to_string())),
+        };
+        self.agent_mode.set_ai_status(ready, error);
+    }
+
+    fn spawn_agent_mode_request(&mut self, messages: Vec<AgentMessage>) {
+        let Some(settings) = self.active_ai_settings() else {
+            self.agent_mode.last_error = Some("AI settings are required.".to_string());
+            self.agent_mode.set_waiting(false);
+            return;
+        };
+
+        let Some(tx) = &self.agent_mode_tx else {
+            self.agent_mode.last_error = Some("Agent channel unavailable.".to_string());
+            self.agent_mode.set_waiting(false);
+            return;
+        };
+
+        let tx = tx.clone();
+        thread::spawn(move || {
+            let client = match AIClient::new(settings) {
+                Ok(client) => client,
+                Err(err) => {
+                    let _ = tx.send(AgentModeUpdate {
+                        response: None,
+                        error: Some(format_ai_error(err)),
+                    });
+                    return;
+                }
+            };
+
+            let mut chat_messages = Vec::new();
+            if !AGENT_SYSTEM_PROMPT.trim().is_empty() {
+                chat_messages.push(ChatMessage {
+                    role: "system".to_string(),
+                    content: AGENT_SYSTEM_PROMPT.to_string(),
+                });
+            }
+
+            for msg in messages {
+                let role = match msg.role {
+                    AgentRole::User => "user",
+                    AgentRole::Assistant => "assistant",
+                    AgentRole::System => "system",
+                };
+                chat_messages.push(ChatMessage {
+                    role: role.to_string(),
+                    content: msg.content,
+                });
+            }
+
+            match client.create_response(chat_messages) {
+                Ok(response) => {
+                    let _ = tx.send(AgentModeUpdate {
+                        response: Some(response),
+                        error: None,
+                    });
+                }
+                Err(err) => {
+                    let _ = tx.send(AgentModeUpdate {
+                        response: None,
+                        error: Some(format_ai_error(err)),
+                    });
+                }
+            }
+        });
     }
 
     fn maybe_request_session_summary_for_selected(&mut self, force: bool) {
@@ -977,10 +1119,31 @@ impl Model {
         self.spawn_session_summaries(vec![task], settings);
     }
 
+    fn extract_tool_version_from_usage(branch: &BranchItem, tool_id: &str) -> Option<String> {
+        let usage = branch.last_tool_usage.as_ref()?;
+        let (label, version) = usage.rsplit_once('@')?;
+        let version = version.trim();
+        if version.is_empty() {
+            return None;
+        }
+        if let Some(last_id) = branch.last_tool_id.as_deref() {
+            if last_id != tool_id {
+                return None;
+            }
+        } else {
+            let normalized = crate::tui::normalize_agent_label(tool_id);
+            if !label.trim().eq_ignore_ascii_case(&normalized) {
+                return None;
+            }
+        }
+        Some(version.to_string())
+    }
+
     fn persist_detected_session(&self, branch: &BranchItem, tool_id: &str, session_id: &str) {
         if branch.worktree_path.is_none() {
             return;
         }
+        let tool_version = Self::extract_tool_version_from_usage(branch, tool_id);
         let entry = ToolSessionEntry {
             branch: branch.name.clone(),
             worktree_path: branch.worktree_path.clone(),
@@ -991,7 +1154,7 @@ impl Model {
             model: None,
             reasoning_level: None,
             skip_permissions: None,
-            tool_version: None,
+            tool_version,
             timestamp: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
@@ -1210,13 +1373,37 @@ impl Model {
         }
     }
 
-    fn poll_session_summary_if_needed(&mut self) {
-        if self.detail_panel_tab != DetailPanelTab::Session {
-            self.last_session_poll = None;
-            self.session_poll_deferred = false;
+    fn apply_agent_mode_updates(&mut self) {
+        let Some(rx) = &self.agent_mode_rx else {
             return;
-        }
+        };
 
+        loop {
+            match rx.try_recv() {
+                Ok(update) => {
+                    self.agent_mode.set_waiting(false);
+                    if let Some(error) = update.error {
+                        self.agent_mode.last_error = Some(error);
+                        continue;
+                    }
+                    if let Some(response) = update.response {
+                        self.agent_mode.last_error = None;
+                        self.agent_mode.messages.push(AgentMessage {
+                            role: AgentRole::Assistant,
+                            content: response,
+                        });
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.agent_mode_rx = None;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn poll_session_summary_if_needed(&mut self) {
         if !self.branch_list.ai_enabled {
             return;
         }
@@ -1378,7 +1565,10 @@ impl Model {
                 self.status_message_time = Some(Instant::now());
             }
             if let Some(message) = context.error_message {
-                self.error = ErrorState::from_error(&message);
+                // Log the error
+                gwt_core::logging::log_error_message("E9001", "cli", &message, None);
+                let error_state = ErrorState::from_error(&message);
+                self.error_queue.push(error_state);
                 self.screen_stack.push(self.screen.clone());
                 self.screen = Screen::Error;
             }
@@ -1402,7 +1592,6 @@ impl Model {
                 let session_inflight = self.branch_list.clone_session_inflight();
                 let session_missing = self.branch_list.clone_session_missing();
                 let session_warnings = self.branch_list.clone_session_warnings();
-                // FR-074: タブ状態はModelレベルで保持されるため、BranchListStateの再生成時に引き継ぎ不要
                 let mut branch_list = BranchListState::new().with_branches(update.branches);
                 branch_list.active_profile = self.profiles_config.active.clone();
                 branch_list.ai_enabled = self.active_ai_enabled();
@@ -1514,6 +1703,7 @@ impl Model {
                         self.launch_in_progress = false;
                         self.launch_rx = None;
                         self.launch_status = None;
+                        gwt_core::logging::log_error_message("E4001", "agent", &message, None);
                         self.worktree_create.error_message = Some(message.clone());
                         self.status_message = Some(format!("Error: {}", message));
                         self.status_message_time = Some(Instant::now());
@@ -1954,6 +2144,322 @@ impl Model {
         }
     }
 
+    fn handle_wizard_mouse(&mut self, mouse: MouseEvent) {
+        if !self.wizard.visible {
+            return;
+        }
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+
+        // Check if clicking outside popup area - close wizard
+        if !self.wizard.is_point_in_popup(mouse.column, mouse.row) {
+            self.wizard.close();
+            self.last_mouse_click = None;
+            return;
+        }
+
+        // Check if clicking on a list item
+        let Some(index) = self
+            .wizard
+            .selection_index_from_point(mouse.column, mouse.row)
+        else {
+            self.last_mouse_click = None;
+            return;
+        };
+
+        let now = Instant::now();
+        let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
+            last.index == index && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
+        });
+
+        if is_double_click {
+            self.last_mouse_click = None;
+            // Double click: confirm selection (equivalent to Enter)
+            self.update(Message::WizardConfirm);
+        } else {
+            // Single click: select item and record for potential double click
+            if self.wizard.set_selection_index(index) {
+                // Selection changed
+            }
+            self.last_mouse_click = Some(MouseClick { index, at: now });
+        }
+    }
+
+    fn handle_confirm_mouse(&mut self, mouse: MouseEvent) {
+        if !matches!(self.screen, Screen::Confirm) {
+            return;
+        }
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+
+        // Check if clicking outside popup area - close confirm dialog
+        if !self.confirm.is_point_in_popup(mouse.column, mouse.row) {
+            // Pop screen stack to return to previous screen
+            if let Some(prev_screen) = self.screen_stack.pop() {
+                self.screen = prev_screen;
+            }
+            self.last_mouse_click = None;
+            return;
+        }
+
+        // Check if clicking on cancel button
+        if self.confirm.is_cancel_button_at(mouse.column, mouse.row) {
+            let now = Instant::now();
+            let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
+                last.index == 0 && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
+            });
+
+            if is_double_click {
+                self.last_mouse_click = None;
+                // Double click on cancel: close dialog
+                if let Some(prev_screen) = self.screen_stack.pop() {
+                    self.screen = prev_screen;
+                }
+            } else {
+                self.confirm.select_cancel();
+                self.last_mouse_click = Some(MouseClick { index: 0, at: now });
+            }
+            return;
+        }
+
+        // Check if clicking on confirm button
+        if self.confirm.is_confirm_button_at(mouse.column, mouse.row) {
+            let now = Instant::now();
+            let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
+                last.index == 1 && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
+            });
+
+            if is_double_click {
+                self.last_mouse_click = None;
+                // Double click on confirm: execute confirm action
+                self.handle_confirm_action();
+            } else {
+                self.confirm.select_confirm();
+                self.last_mouse_click = Some(MouseClick { index: 1, at: now });
+            }
+        }
+    }
+
+    fn handle_confirm_action(&mut self) {
+        if self.confirm.is_confirmed() {
+            // FR-029d: Handle unsafe branch selection confirmation
+            if let Some(branch_name) = self.pending_unsafe_selection.take() {
+                // User confirmed - add branch to selection (FR-030)
+                self.branch_list.selected_branches.insert(branch_name);
+            }
+            // FR-010: Handle cleanup confirmation
+            if !self.pending_cleanup_branches.is_empty() {
+                let branches = std::mem::take(&mut self.pending_cleanup_branches);
+                self.execute_cleanup(&branches);
+            }
+            // FR-040: Handle agent termination confirmation
+            if self.pending_agent_termination.is_some() {
+                self.update(Message::ExecuteAgentTermination);
+            }
+            // SPEC-861d8cdf T-104: Handle hook setup confirmation
+            if self.pending_hook_setup {
+                if let Some(settings_path) = get_claude_settings_path() {
+                    if let Err(e) = register_gwt_hooks(&settings_path) {
+                        debug!(category = "tui", error = %e, "Failed to register gwt hooks");
+                    }
+                }
+            }
+        }
+        // Clear pending state and return to previous screen
+        self.pending_unsafe_selection = None;
+        self.pending_agent_termination = None;
+        self.pending_cleanup_branches.clear();
+        self.pending_hook_setup = false;
+        if let Some(prev_screen) = self.screen_stack.pop() {
+            self.screen = prev_screen;
+        }
+    }
+
+    fn handle_ai_wizard_mouse(&mut self, mouse: MouseEvent) {
+        if !self.ai_wizard.visible {
+            return;
+        }
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+
+        // Check if clicking outside popup area - close wizard
+        if !self.ai_wizard.is_point_in_popup(mouse.column, mouse.row) {
+            self.ai_wizard.close();
+            self.last_mouse_click = None;
+            return;
+        }
+
+        // Only handle model selection step mouse clicks
+        if !matches!(
+            self.ai_wizard.step,
+            crate::tui::screens::ai_wizard::AIWizardStep::ModelSelect
+        ) {
+            return;
+        }
+
+        // Check if clicking on model list
+        if let Some(index) = self
+            .ai_wizard
+            .selection_index_from_point(mouse.column, mouse.row)
+        {
+            let now = Instant::now();
+            let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
+                last.index == index
+                    && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
+            });
+
+            if is_double_click {
+                self.last_mouse_click = None;
+                // Double click: select model and proceed (same as Enter)
+                if self.ai_wizard.select_model_index(index) {
+                    self.handle_ai_wizard_enter();
+                }
+            } else {
+                // Single click: just select the model
+                self.ai_wizard.select_model_index(index);
+                self.last_mouse_click = Some(MouseClick { index, at: now });
+            }
+        }
+    }
+
+    fn handle_profiles_mouse(&mut self, mouse: MouseEvent) {
+        if !matches!(self.screen, Screen::Profiles) {
+            return;
+        }
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+        // Don't handle mouse clicks in create mode
+        if self.profiles.create_mode {
+            return;
+        }
+
+        if let Some(index) = self
+            .profiles
+            .selection_index_from_point(mouse.column, mouse.row)
+        {
+            let now = Instant::now();
+            let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
+                last.index == index
+                    && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
+            });
+
+            if is_double_click {
+                self.last_mouse_click = None;
+                // Double click: open environment screen for selected profile (same as Enter)
+                if self.profiles.select_index(index) {
+                    self.update(Message::Enter);
+                }
+            } else {
+                // Single click: just select the profile
+                self.profiles.select_index(index);
+                self.last_mouse_click = Some(MouseClick { index, at: now });
+            }
+        }
+    }
+
+    fn handle_environment_mouse(&mut self, mouse: MouseEvent) {
+        if !matches!(self.screen, Screen::Environment) {
+            return;
+        }
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+        // Don't handle mouse clicks in edit mode
+        if self.environment.edit_mode {
+            return;
+        }
+
+        if let Some(index) = self
+            .environment
+            .selection_index_from_point(mouse.column, mouse.row)
+        {
+            let now = Instant::now();
+            let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
+                last.index == index
+                    && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
+            });
+
+            if is_double_click {
+                self.last_mouse_click = None;
+                // Double click: enter edit mode for selected item (same as Enter)
+                if self.environment.select_index(index) {
+                    self.update(Message::Enter);
+                }
+            } else {
+                // Single click: just select the item
+                self.environment.select_index(index);
+                self.last_mouse_click = Some(MouseClick { index, at: now });
+            }
+        }
+    }
+
+    fn handle_logs_mouse(&mut self, mouse: MouseEvent) {
+        if !matches!(self.screen, Screen::Logs) {
+            return;
+        }
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+        // Don't handle mouse clicks during search or detail view
+        if self.logs.is_searching || self.logs.is_detail_shown() {
+            return;
+        }
+
+        if let Some(index) = self
+            .logs
+            .selection_index_from_point(mouse.column, mouse.row)
+        {
+            let now = Instant::now();
+            let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
+                last.index == index
+                    && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
+            });
+
+            if is_double_click {
+                self.last_mouse_click = None;
+                // Double click: show detail view for selected log entry (same as Enter)
+                if self.logs.select_index(index) {
+                    self.update(Message::Enter);
+                }
+            } else {
+                // Single click: just select the log entry
+                self.logs.select_index(index);
+                self.last_mouse_click = Some(MouseClick { index, at: now });
+            }
+        }
+    }
+
+    /// Handle mouse events for the error popup
+    fn handle_error_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                // Click outside the popup area closes it (simplified: any click dismisses)
+                // In a more sophisticated implementation, we'd track popup bounds
+                self.error_queue.dismiss_current();
+                if self.error_queue.is_empty() {
+                    self.update(Message::NavigateBack);
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                // Scroll up in details
+                if let Some(error) = self.error_queue.current_mut() {
+                    error.scroll_up();
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                // Scroll down in details
+                if let Some(error) = self.error_queue.current_mut() {
+                    error.scroll_down();
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn open_url(&mut self, url: &str) {
         if url.trim().is_empty() {
             self.status_message = Some("Failed to open URL: empty URL".to_string());
@@ -2291,6 +2797,16 @@ impl Model {
         }
     }
 
+    fn open_ai_settings_for_agent_mode(&mut self) {
+        if let Some(profile_name) = self.profiles_config.active.clone() {
+            if self.profiles_config.profiles.contains_key(&profile_name) {
+                self.open_profile_ai_editor(&profile_name);
+                return;
+            }
+        }
+        self.open_default_ai_editor();
+    }
+
     /// Handle Enter key in AI settings wizard
     fn handle_ai_wizard_enter(&mut self) {
         use super::screens::ai_wizard::AIWizardStep;
@@ -2586,11 +3102,17 @@ impl Model {
                             // Wizard was closed
                             if let Some(prev_screen) = self.screen_stack.pop() {
                                 self.screen = prev_screen;
+                                if matches!(self.screen, Screen::AgentMode) {
+                                    self.update_agent_mode_ai_status();
+                                }
                             }
                         }
                     }
                 } else if let Some(prev_screen) = self.screen_stack.pop() {
                     self.screen = prev_screen;
+                    if matches!(self.screen, Screen::AgentMode) {
+                        self.update_agent_mode_ai_status();
+                    }
                 }
                 self.status_message = None;
             }
@@ -2617,6 +3139,7 @@ impl Model {
                 self.apply_worktree_updates();
                 self.apply_launch_updates();
                 self.apply_session_summary_updates();
+                self.apply_agent_mode_updates();
                 self.poll_session_summary_if_needed();
                 // FR-033: Update pane list every 1 second in tmux multi mode
                 self.update_pane_list();
@@ -2625,14 +3148,18 @@ impl Model {
                 Screen::BranchList => {
                     self.branch_list.select_next();
                     // SPEC-4b893dae: Update branch summary on selection change
-                    // FR-074d: グローバルタブ状態はブランチ切り替え時も維持
                     self.refresh_branch_summary();
                 }
+                Screen::AgentMode => {}
                 Screen::WorktreeCreate => self.worktree_create.select_next_base(),
                 Screen::Settings => self.settings.select_next(),
                 Screen::Logs => self.logs.select_next(),
                 Screen::Help => self.help.scroll_down(),
-                Screen::Error => self.error.scroll_down(),
+                Screen::Error => {
+                    if let Some(error) = self.error_queue.current_mut() {
+                        error.scroll_down();
+                    }
+                }
                 Screen::Profiles => self.profiles.select_next(),
                 Screen::Environment => self.environment.select_next(),
                 Screen::AISettingsWizard => self.ai_wizard.select_next_model(),
@@ -2642,14 +3169,18 @@ impl Model {
                 Screen::BranchList => {
                     self.branch_list.select_prev();
                     // SPEC-4b893dae: Update branch summary on selection change
-                    // FR-074d: グローバルタブ状態はブランチ切り替え時も維持
                     self.refresh_branch_summary();
                 }
+                Screen::AgentMode => {}
                 Screen::WorktreeCreate => self.worktree_create.select_prev_base(),
                 Screen::Settings => self.settings.select_prev(),
                 Screen::Logs => self.logs.select_prev(),
                 Screen::Help => self.help.scroll_up(),
-                Screen::Error => self.error.scroll_up(),
+                Screen::Error => {
+                    if let Some(error) = self.error_queue.current_mut() {
+                        error.scroll_up();
+                    }
+                }
                 Screen::Profiles => self.profiles.select_prev(),
                 Screen::Environment => self.environment.select_prev(),
                 Screen::AISettingsWizard => self.ai_wizard.select_prev_model(),
@@ -2657,14 +3188,7 @@ impl Model {
             },
             Message::PageUp => match self.screen {
                 Screen::BranchList => {
-                    if self.detail_panel_tab == DetailPanelTab::Session {
-                        self.branch_list.scroll_session_page_up();
-                    } else {
-                        self.branch_list.page_up(10);
-                        // SPEC-4b893dae: Update branch summary on selection change
-                        // FR-074d: グローバルタブ状態はブランチ切り替え時も維持
-                        self.refresh_branch_summary();
-                    }
+                    self.branch_list.scroll_session_page_up();
                 }
                 Screen::Logs => self.logs.page_up(10),
                 Screen::Help => self.help.page_up(),
@@ -2673,14 +3197,7 @@ impl Model {
             },
             Message::PageDown => match self.screen {
                 Screen::BranchList => {
-                    if self.detail_panel_tab == DetailPanelTab::Session {
-                        self.branch_list.scroll_session_page_down();
-                    } else {
-                        self.branch_list.page_down(10);
-                        // SPEC-4b893dae: Update branch summary on selection change
-                        // FR-074d: グローバルタブ状態はブランチ切り替え時も維持
-                        self.refresh_branch_summary();
-                    }
+                    self.branch_list.scroll_session_page_down();
                 }
                 Screen::Logs => self.logs.page_down(10),
                 Screen::Help => self.help.page_down(),
@@ -2691,7 +3208,6 @@ impl Model {
                 Screen::BranchList => {
                     self.branch_list.go_home();
                     // SPEC-4b893dae: Update branch summary on selection change
-                    // FR-074d: グローバルタブ状態はブランチ切り替え時も維持
                     self.refresh_branch_summary();
                 }
                 Screen::Logs => self.logs.go_home(),
@@ -2702,7 +3218,6 @@ impl Model {
                 Screen::BranchList => {
                     self.branch_list.go_end();
                     // SPEC-4b893dae: Update branch summary on selection change
-                    // FR-074d: グローバルタブ状態はブランチ切り替え時も維持
                     self.refresh_branch_summary();
                 }
                 Screen::Logs => self.logs.go_end(),
@@ -2720,6 +3235,24 @@ impl Model {
                         self.handle_branch_enter();
                     }
                 }
+                Screen::AgentMode => {
+                    if !self.agent_mode.ai_ready {
+                        self.open_ai_settings_for_agent_mode();
+                    } else if self.agent_mode.is_waiting {
+                        // Ignore input while waiting for response
+                    } else if !self.agent_mode.input.trim().is_empty() {
+                        let content = self.agent_mode.input.trim().to_string();
+                        self.agent_mode.messages.push(AgentMessage {
+                            role: AgentRole::User,
+                            content,
+                        });
+                        self.agent_mode.clear_input();
+                        self.agent_mode.last_error = None;
+                        self.agent_mode.set_waiting(true);
+                        let messages = self.agent_mode.messages.clone();
+                        self.spawn_agent_mode_request(messages);
+                    }
+                }
                 Screen::WorktreeCreate => {
                     if self.worktree_create.is_confirm_step() {
                         // Create the worktree
@@ -2729,38 +3262,7 @@ impl Model {
                     }
                 }
                 Screen::Confirm => {
-                    if self.confirm.is_confirmed() {
-                        // FR-029d: Handle unsafe branch selection confirmation
-                        if let Some(branch_name) = self.pending_unsafe_selection.take() {
-                            // User confirmed - add branch to selection (FR-030)
-                            self.branch_list.selected_branches.insert(branch_name);
-                        }
-                        // FR-010: Handle cleanup confirmation
-                        if !self.pending_cleanup_branches.is_empty() {
-                            let branches = std::mem::take(&mut self.pending_cleanup_branches);
-                            self.execute_cleanup(&branches);
-                        }
-                        // FR-040: Handle agent termination confirmation
-                        if self.pending_agent_termination.is_some() {
-                            self.update(Message::ExecuteAgentTermination);
-                        }
-                        // SPEC-861d8cdf T-104: Handle hook setup confirmation
-                        if self.pending_hook_setup {
-                            if let Some(settings_path) = get_claude_settings_path() {
-                                if let Err(e) = register_gwt_hooks(&settings_path) {
-                                    debug!(category = "tui", error = %e, "Failed to register gwt hooks");
-                                }
-                            }
-                        }
-                    }
-                    // Clear pending state and return to previous screen
-                    self.pending_unsafe_selection = None;
-                    self.pending_agent_termination = None;
-                    self.pending_cleanup_branches.clear();
-                    self.pending_hook_setup = false;
-                    if let Some(prev_screen) = self.screen_stack.pop() {
-                        self.screen = prev_screen;
-                    }
+                    self.handle_confirm_action();
                 }
                 Screen::Profiles => {
                     if self.profiles.create_mode {
@@ -2842,7 +3344,11 @@ impl Model {
                     self.update(Message::NavigateBack);
                 }
                 Screen::Error => {
-                    self.update(Message::NavigateBack);
+                    // Dismiss current error and show next, or close if no more errors
+                    self.error_queue.dismiss_current();
+                    if self.error_queue.is_empty() {
+                        self.update(Message::NavigateBack);
+                    }
                 }
                 Screen::Logs => {
                     self.logs.toggle_detail();
@@ -2868,6 +3374,8 @@ impl Model {
                 } else if matches!(self.screen, Screen::Logs) && self.logs.is_searching {
                     // Log search mode - add character to search
                     self.logs.search.push(c);
+                } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
+                    self.agent_mode.insert_char(c);
                 } else if matches!(self.screen, Screen::AISettingsWizard) {
                     if self.ai_wizard.show_delete_confirm {
                         // Handle delete confirmation
@@ -2885,6 +3393,39 @@ impl Model {
                             self.ai_wizard.show_delete();
                         }
                     }
+                } else if matches!(self.screen, Screen::Error) {
+                    // Error screen shortcuts
+                    match c {
+                        'l' | 'L' => {
+                            // Navigate to Logs screen
+                            self.screen_stack.push(self.screen.clone());
+                            self.screen = Screen::Logs;
+                        }
+                        'c' | 'C' => {
+                            // Copy error to clipboard as JSON
+                            if let Some(error) = self.error_queue.current() {
+                                let json = error.to_json();
+                                match arboard::Clipboard::new() {
+                                    Ok(mut clipboard) => match clipboard.set_text(&json) {
+                                        Ok(()) => {
+                                            self.status_message =
+                                                Some("Error copied to clipboard".to_string());
+                                        }
+                                        Err(e) => {
+                                            self.status_message =
+                                                Some(format!("Failed to copy: {}", e));
+                                        }
+                                    },
+                                    Err(e) => {
+                                        self.status_message =
+                                            Some(format!("Clipboard unavailable: {}", e));
+                                    }
+                                }
+                                self.status_message_time = Some(Instant::now());
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
             Message::Backspace => {
@@ -2901,6 +3442,8 @@ impl Model {
                 } else if matches!(self.screen, Screen::Logs) && self.logs.is_searching {
                     // Log search mode - delete character
                     self.logs.search.pop();
+                } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
+                    self.agent_mode.backspace();
                 } else if matches!(self.screen, Screen::AISettingsWizard)
                     && self.ai_wizard.is_text_input()
                 {
@@ -2921,6 +3464,8 @@ impl Model {
                     && self.ai_wizard.is_text_input()
                 {
                     self.ai_wizard.cursor_left();
+                } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
+                    self.agent_mode.cursor_left();
                 }
             }
             Message::CursorRight => {
@@ -2937,6 +3482,8 @@ impl Model {
                     && self.ai_wizard.is_text_input()
                 {
                     self.ai_wizard.cursor_right();
+                } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
+                    self.agent_mode.cursor_right();
                 }
             }
             Message::RefreshData => {
@@ -2983,6 +3530,7 @@ impl Model {
                             cancel_label: "Cancel".to_string(),
                             selected_confirm: true, // Default to Terminate
                             is_dangerous: true,
+                            ..Default::default()
                         };
                         self.screen_stack.push(self.screen.clone());
                         self.screen = Screen::Confirm;
@@ -2995,20 +3543,49 @@ impl Model {
                     self.terminate_agent_pane(&branch_name);
                 }
             }
+            Message::ReregisterHooks => {
+                // FR-102g: Manually re-register Claude Code hooks
+                // FR-102i: Show warning if running from temporary execution environment
+                if let Some(exe_path) = is_temporary_execution() {
+                    // Show confirmation dialog for temporary execution
+                    self.pending_hook_setup = true;
+                    self.confirm = ConfirmState::hook_setup_with_warning(&exe_path);
+                    self.screen_stack.push(self.screen.clone());
+                    self.screen = Screen::Confirm;
+                } else if let Some(settings_path) = get_claude_settings_path() {
+                    match register_gwt_hooks(&settings_path) {
+                        Ok(()) => {
+                            self.status_message = Some("Claude Code hooks registered.".to_string());
+                            self.status_message_time = Some(Instant::now());
+                            debug!(
+                                category = "hooks",
+                                "Manually re-registered Claude Code hooks"
+                            );
+                        }
+                        Err(e) => {
+                            self.status_message = Some(format!("Failed to register hooks: {}", e));
+                            self.status_message_time = Some(Instant::now());
+                            warn!(
+                                category = "hooks",
+                                error = %e,
+                                "Failed to manually re-register Claude Code hooks"
+                            );
+                        }
+                    }
+                } else {
+                    self.status_message = Some("Could not find Claude settings path.".to_string());
+                    self.status_message_time = Some(Instant::now());
+                }
+            }
             Message::Tab => match self.screen {
                 Screen::Settings => self.settings.next_category(),
                 Screen::BranchList => {
                     if !self.branch_list.filter_mode {
-                        // FR-074a: Tab切り替え時にModelレベルでタブ状態を更新
-                        self.detail_panel_tab.toggle();
-                        self.refresh_branch_summary();
-                        if self.detail_panel_tab == DetailPanelTab::Session {
-                            self.maybe_request_session_summary_for_selected(false);
-                        } else {
-                            self.last_session_poll = None;
-                            self.session_poll_deferred = false;
-                        }
+                        self.enter_agent_mode();
                     }
+                }
+                Screen::AgentMode => {
+                    self.screen = Screen::BranchList;
                 }
                 _ => {}
             },
@@ -3292,8 +3869,9 @@ impl Model {
     }
 
     fn handle_launch_plan(&mut self, plan: LaunchPlan) {
-        // Refresh data to reflect branch/worktree changes (FR-008b)
-        self.refresh_data();
+        // Note: refresh_data() removed for startup optimization - TUI exits after
+        // agent launch in single mode, and tmux mode updates status message directly.
+        // The branch list refresh is unnecessary here. (FR-008b still satisfied)
 
         if let InstallPlan::Skip { message } = &plan.install_plan {
             self.status_message = Some(message.clone());
@@ -3333,6 +3911,12 @@ impl Model {
                 }
                 Err(e) => {
                     self.launch_status = None;
+                    gwt_core::logging::log_error_message(
+                        "E4002",
+                        "agent",
+                        &format!("Failed to launch: {}", e),
+                        None,
+                    );
                     self.status_message = Some(format!("Failed to launch: {}", e));
                     self.status_message_time = Some(Instant::now());
                 }
@@ -3805,10 +4389,10 @@ impl Model {
 
         // Header (for branch list screen, render boxed header)
         if needs_header {
-            if matches!(base_screen, Screen::BranchList) {
+            if matches!(base_screen, Screen::BranchList | Screen::AgentMode) {
                 self.view_boxed_header(frame, chunks[0]);
             } else {
-                self.view_header(frame, chunks[0]);
+                self.view_header(frame, chunks[0], &base_screen);
             }
         }
 
@@ -3849,9 +4433,6 @@ impl Model {
                     .active_status_message()
                     .map(|message| message.to_string());
 
-                // FR-074: Sync tab state from Model to BranchListState for rendering
-                self.branch_list.detail_panel_tab = self.detail_panel_tab;
-
                 // Render branch list (always has focus now)
                 render_branch_list(
                     &mut self.branch_list,
@@ -3864,18 +4445,29 @@ impl Model {
             Screen::WorktreeCreate => {
                 render_worktree_create(&self.worktree_create, frame, chunks[1])
             }
+            Screen::AgentMode => {
+                let status_message = self
+                    .active_status_message()
+                    .map(|message| message.to_string());
+                render_agent_mode(
+                    &self.agent_mode,
+                    frame,
+                    chunks[1],
+                    status_message.as_deref(),
+                );
+            }
             Screen::Settings => render_settings(&self.settings, frame, chunks[1]),
-            Screen::Logs => render_logs(&self.logs, frame, chunks[1]),
+            Screen::Logs => render_logs(&mut self.logs, frame, chunks[1]),
             Screen::Help => render_help(&self.help, frame, chunks[1]),
-            Screen::Error => render_error(&self.error, frame, chunks[1]),
-            Screen::Profiles => render_profiles(&self.profiles, frame, chunks[1]),
+            Screen::Error => render_error_with_queue(&self.error_queue, frame, chunks[1]),
+            Screen::Profiles => render_profiles(&mut self.profiles, frame, chunks[1]),
             Screen::Environment => render_environment(&mut self.environment, frame, chunks[1]),
-            Screen::AISettingsWizard => render_ai_wizard(&self.ai_wizard, frame, chunks[1]),
+            Screen::AISettingsWizard => render_ai_wizard(&mut self.ai_wizard, frame, chunks[1]),
             Screen::Confirm => {}
         }
 
         if matches!(self.screen, Screen::Confirm) {
-            render_confirm(&self.confirm, frame, chunks[1]);
+            render_confirm(&mut self.confirm, frame, chunks[1]);
         }
 
         // Footer (not for BranchList screen)
@@ -3885,7 +4477,7 @@ impl Model {
 
         // Wizard overlay (FR-044: popup on top of branch list)
         if self.wizard.visible {
-            render_wizard(&self.wizard, frame, frame.area());
+            render_wizard(&mut self.wizard, frame, frame.area());
         }
     }
 
@@ -3995,7 +4587,7 @@ impl Model {
         frame.render_widget(Paragraph::new(Line::from(mode_spans)), inner_chunks[3]);
     }
 
-    fn view_header(&self, frame: &mut Frame, area: Rect) {
+    fn view_header(&self, frame: &mut Frame, area: Rect, screen: &Screen) {
         let version = env!("CARGO_PKG_VERSION");
         let offline_indicator = if self.is_offline { " [OFFLINE]" } else { "" };
 
@@ -4006,10 +4598,16 @@ impl Model {
             .unwrap_or("default");
 
         // Match TypeScript format: gwt - Branch Selection v{version} | Profile(p): {name}
-        let title = format!(
-            " gwt - Branch Selection v{} | Profile(p): {} {}",
-            version, profile, offline_indicator
-        );
+        let title = match screen {
+            Screen::AgentMode => format!(
+                " gwt - Agent Mode v{} | Profile(p): {} {}",
+                version, profile, offline_indicator
+            ),
+            _ => format!(
+                " gwt - Branch Selection v{} | Profile(p): {} {}",
+                version, profile, offline_indicator
+            ),
+        };
         let header = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
@@ -4024,6 +4622,13 @@ impl Model {
                     "[Esc] Exit filter | Type to search"
                 } else {
                     "[r] Refresh | [c] Cleanup | [l] Logs"
+                }
+            }
+            Screen::AgentMode => {
+                if self.agent_mode.ai_ready {
+                    "[Enter] Send | [Tab] Back"
+                } else {
+                    "[Enter] Configure AI | [Tab] Back"
                 }
             }
             Screen::WorktreeCreate => "[Enter] Next | [Esc] Back",
@@ -4141,6 +4746,303 @@ impl Model {
             _ => None,
         }
     }
+
+    fn handle_key_event(&mut self, key: KeyEvent) -> Option<Message> {
+        let is_key_press = key.kind == KeyEventKind::Press;
+        // Wizard has priority when visible
+        if self.wizard.visible {
+            match key.code {
+                KeyCode::Esc => Some(Message::WizardBack),
+                KeyCode::Enter if is_key_press => Some(Message::WizardConfirm),
+                KeyCode::Up if is_key_press => Some(Message::WizardPrev),
+                KeyCode::Down if is_key_press => Some(Message::WizardNext),
+                KeyCode::Backspace => {
+                    self.wizard.delete_char();
+                    None
+                }
+                KeyCode::Left => {
+                    self.wizard.cursor_left();
+                    None
+                }
+                KeyCode::Right => {
+                    self.wizard.cursor_right();
+                    None
+                }
+                KeyCode::Char(c)
+                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    self.wizard.insert_char(c);
+                    None
+                }
+                _ => None,
+            }
+        } else if self.text_input_active() {
+            self.handle_text_input_key(key, is_key_press)
+        } else {
+            // Normal key handling
+            match (key.code, key.modifiers) {
+                (KeyCode::Char('c'), KeyModifiers::CONTROL) if is_key_press => Some(Message::CtrlC),
+                (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT)
+                    if is_key_press
+                        && matches!(self.screen, Screen::BranchList)
+                        && self.branch_list.filter_mode =>
+                {
+                    Some(Message::Char(c))
+                }
+                (KeyCode::Char('q'), KeyModifiers::NONE) => {
+                    // 'q' does not quit in BranchList (matches TypeScript behavior)
+                    Some(Message::Char('q'))
+                }
+                (KeyCode::Esc, _) => {
+                    // FR-095: ESC key behavior:
+                    // - In filter mode: exit filter mode (handled by NavigateBack)
+                    // - In BranchList with filter query: clear query
+                    // - In BranchList with active agent pane: hide the pane
+                    // - Otherwise: navigate back (but NOT quit from main screen)
+                    if matches!(self.screen, Screen::BranchList) {
+                        if self.branch_list.filter_mode {
+                            // Exit filter mode (clear query if any, then exit mode)
+                            Some(Message::NavigateBack)
+                        } else if !self.branch_list.filter.is_empty() {
+                            // Clear filter query
+                            self.branch_list.clear_filter();
+                            self.refresh_branch_summary();
+                            None
+                        } else if self.has_active_agent_pane() {
+                            // FR-095: Hide active agent pane
+                            Some(Message::HideActiveAgentPane)
+                        } else {
+                            // On main screen without filter and no active pane - do nothing
+                            None
+                        }
+                    } else {
+                        Some(Message::NavigateBack)
+                    }
+                }
+                (KeyCode::Char('?') | KeyCode::Char('h'), KeyModifiers::NONE) => {
+                    if matches!(self.screen, Screen::BranchList | Screen::Help) {
+                        Some(Message::NavigateTo(Screen::Help))
+                    } else {
+                        Some(Message::Char(if key.code == KeyCode::Char('?') {
+                            '?'
+                        } else {
+                            'h'
+                        }))
+                    }
+                }
+                (KeyCode::Char('n'), KeyModifiers::NONE) => {
+                    if matches!(self.screen, Screen::BranchList) {
+                        if self.branch_list.filter_mode {
+                            Some(Message::Char('n'))
+                        } else {
+                            None
+                        }
+                    } else if matches!(self.screen, Screen::Profiles) {
+                        // Create new profile
+                        self.profiles.enter_create_mode();
+                        None
+                    } else if matches!(self.screen, Screen::Environment) {
+                        if self.environment.edit_mode {
+                            Some(Message::Char('n'))
+                        } else if self.environment.is_ai_only() {
+                            self.status_message =
+                                Some("AI settings only. Use Enter to edit.".to_string());
+                            self.status_message_time = Some(Instant::now());
+                            None
+                        } else {
+                            self.environment.start_new();
+                            None
+                        }
+                    } else {
+                        Some(Message::Char('n'))
+                    }
+                }
+                (KeyCode::Char('s'), KeyModifiers::NONE) => {
+                    // In filter mode, 's' goes to filter input
+                    if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
+                        Some(Message::NavigateTo(Screen::Settings))
+                    } else {
+                        Some(Message::Char('s'))
+                    }
+                }
+                (KeyCode::Char('r'), KeyModifiers::NONE) => {
+                    // In filter mode, 'r' goes to filter input
+                    if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
+                        Some(Message::RefreshData)
+                    } else if matches!(self.screen, Screen::Environment) {
+                        if self.environment.edit_mode {
+                            Some(Message::Char('r'))
+                        } else if self.environment.is_ai_only() {
+                            self.status_message =
+                                Some("AI settings only. Use Enter to edit.".to_string());
+                            self.status_message_time = Some(Instant::now());
+                            None
+                        } else {
+                            self.reset_selected_env();
+                            None
+                        }
+                    } else {
+                        Some(Message::Char('r'))
+                    }
+                }
+                (KeyCode::Char('c'), KeyModifiers::NONE) => {
+                    // Copy to clipboard on Logs screen
+                    if matches!(self.screen, Screen::Logs) && !self.logs.is_searching {
+                        Some(Message::CopyLogToClipboard)
+                    } else if matches!(self.screen, Screen::BranchList)
+                        && !self.branch_list.filter_mode
+                    {
+                        // FR-010: Cleanup command
+                        // In filter mode, 'c' goes to filter input
+                        // FR-028: Check if branches are selected
+                        if self.branch_list.selected_branches.is_empty() {
+                            self.status_message = Some("No branches selected.".to_string());
+                            self.status_message_time = Some(Instant::now());
+                            None
+                        } else {
+                            // FR-028a-b: Filter out remote branches and current branch
+                            let cleanup_branches: Vec<String> = self
+                                .branch_list
+                                .selected_branches
+                                .iter()
+                                .filter(|name| {
+                                    // Find the branch in the list
+                                    self.branch_list
+                                        .branches
+                                        .iter()
+                                        .find(|b| &b.name == *name)
+                                        .map(|b| {
+                                            // Exclude remote branches, current branch, and no-worktree
+                                            b.branch_type == BranchType::Local
+                                                && !b.is_current
+                                                && b.has_worktree
+                                        })
+                                        .unwrap_or(false)
+                                })
+                                .cloned()
+                                .collect();
+
+                            if cleanup_branches.is_empty() {
+                                let excluded = self.branch_list.selected_branches.len();
+                                self.status_message = Some(format!(
+                                    "{} branch(es) excluded (remote, current, or no worktree).",
+                                    excluded
+                                ));
+                                self.status_message_time = Some(Instant::now());
+                                None
+                            } else {
+                                // Show cleanup confirmation dialog
+                                self.confirm = ConfirmState::cleanup(&cleanup_branches);
+                                self.pending_cleanup_branches = cleanup_branches;
+                                self.screen_stack.push(self.screen.clone());
+                                self.screen = Screen::Confirm;
+                                None
+                            }
+                        }
+                    } else {
+                        Some(Message::Char('c'))
+                    }
+                }
+                (KeyCode::Char('d'), KeyModifiers::NONE) => {
+                    if matches!(self.screen, Screen::Profiles) {
+                        self.delete_selected_profile();
+                        None
+                    } else if matches!(self.screen, Screen::Environment) {
+                        if self.environment.edit_mode {
+                            Some(Message::Char('d'))
+                        } else if self.environment.is_ai_only() {
+                            self.status_message =
+                                Some("AI settings only. Use Enter to edit.".to_string());
+                            self.status_message_time = Some(Instant::now());
+                            None
+                        } else {
+                            self.delete_selected_env();
+                            None
+                        }
+                    } else if matches!(self.screen, Screen::BranchList)
+                        && !self.branch_list.filter_mode
+                        && self.selected_branch_has_agent()
+                    {
+                        // FR-040: d key to delete agent pane with confirmation
+                        Some(Message::ConfirmAgentTermination)
+                    } else {
+                        Some(Message::Char('d'))
+                    }
+                }
+                (KeyCode::Char('p'), KeyModifiers::NONE) => {
+                    // In filter mode, 'p' goes to filter input
+                    if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
+                        Some(Message::NavigateTo(Screen::Profiles))
+                    } else {
+                        Some(Message::Char('p'))
+                    }
+                }
+                (KeyCode::Char('l'), KeyModifiers::NONE) => {
+                    // In filter mode, 'l' goes to filter input
+                    if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
+                        Some(Message::NavigateTo(Screen::Logs))
+                    } else {
+                        Some(Message::Char('l'))
+                    }
+                }
+                (KeyCode::Char('u'), KeyModifiers::NONE) => {
+                    // FR-102g: In filter mode, 'u' goes to filter input
+                    if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
+                        Some(Message::ReregisterHooks)
+                    } else {
+                        Some(Message::Char('u'))
+                    }
+                }
+                (KeyCode::Char('f'), KeyModifiers::NONE) if is_key_press => {
+                    if matches!(self.screen, Screen::Logs) {
+                        Some(Message::CycleFilter)
+                    } else if matches!(self.screen, Screen::BranchList) {
+                        Some(Message::ToggleFilterMode)
+                    } else {
+                        Some(Message::Char('f'))
+                    }
+                }
+                (KeyCode::Char('/'), KeyModifiers::NONE) if is_key_press => {
+                    if matches!(self.screen, Screen::Logs) {
+                        Some(Message::ToggleSearch)
+                    } else if matches!(self.screen, Screen::BranchList) {
+                        Some(Message::ToggleFilterMode)
+                    } else {
+                        Some(Message::Char('/'))
+                    }
+                }
+                (KeyCode::Char(' '), _) => {
+                    if matches!(self.screen, Screen::BranchList | Screen::Profiles) {
+                        Some(Message::Space)
+                    } else {
+                        Some(Message::Char(' '))
+                    }
+                }
+                (KeyCode::Tab, _) => Some(Message::Tab),
+                (KeyCode::Char('m'), KeyModifiers::NONE) => {
+                    if matches!(self.screen, Screen::BranchList) {
+                        Some(Message::CycleViewMode)
+                    } else {
+                        None
+                    }
+                }
+                (KeyCode::Up, _) if is_key_press => Some(Message::SelectPrev),
+                (KeyCode::Down, _) if is_key_press => Some(Message::SelectNext),
+                (KeyCode::PageUp, _) if is_key_press => Some(Message::PageUp),
+                (KeyCode::PageDown, _) if is_key_press => Some(Message::PageDown),
+                (KeyCode::Home, _) if is_key_press => Some(Message::GoHome),
+                (KeyCode::End, _) if is_key_press => Some(Message::GoEnd),
+                (KeyCode::Enter, _) if is_key_press => Some(Message::Enter),
+                (KeyCode::Backspace, _) if is_key_press => Some(Message::Backspace),
+                (KeyCode::Left, _) if is_key_press => Some(Message::CursorLeft),
+                (KeyCode::Right, _) if is_key_press => Some(Message::CursorRight),
+                (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) if is_key_press => {
+                    Some(Message::Char(c))
+                }
+                _ => None,
+            }
+        }
+    }
 }
 
 /// Run the TUI application
@@ -4178,314 +5080,31 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
         if event::poll(timeout)? {
             match event::read()? {
                 Event::Key(key) => {
-                    let is_key_press = key.kind == KeyEventKind::Press;
-                    // Wizard has priority when visible
-                    let msg = if model.wizard.visible {
-                        match key.code {
-                            KeyCode::Esc => Some(Message::WizardBack),
-                            KeyCode::Enter if is_key_press => Some(Message::WizardConfirm),
-                            KeyCode::Up if is_key_press => Some(Message::WizardPrev),
-                            KeyCode::Down if is_key_press => Some(Message::WizardNext),
-                            KeyCode::Backspace => {
-                                model.wizard.delete_char();
-                                None
-                            }
-                            KeyCode::Left => {
-                                model.wizard.cursor_left();
-                                None
-                            }
-                            KeyCode::Right => {
-                                model.wizard.cursor_right();
-                                None
-                            }
-                            KeyCode::Char(c)
-                                if key.modifiers.is_empty()
-                                    || key.modifiers == KeyModifiers::SHIFT =>
-                            {
-                                model.wizard.insert_char(c);
-                                None
-                            }
-                            _ => None,
-                        }
-                    } else if model.text_input_active() {
-                        model.handle_text_input_key(key, is_key_press)
-                    } else {
-                        // Normal key handling
-                        match (key.code, key.modifiers) {
-                            (KeyCode::Char('c'), KeyModifiers::CONTROL) if is_key_press => {
-                                Some(Message::CtrlC)
-                            }
-                            (KeyCode::Char('q'), KeyModifiers::NONE) => {
-                                // 'q' does not quit in BranchList (matches TypeScript behavior)
-                                Some(Message::Char('q'))
-                            }
-                            (KeyCode::Esc, _) => {
-                                // FR-095: ESC key behavior:
-                                // - In filter mode: exit filter mode (handled by NavigateBack)
-                                // - In BranchList with filter query: clear query
-                                // - In BranchList with active agent pane: hide the pane
-                                // - Otherwise: navigate back (but NOT quit from main screen)
-                                if matches!(model.screen, Screen::BranchList) {
-                                    if model.branch_list.filter_mode {
-                                        // Exit filter mode (clear query if any, then exit mode)
-                                        Some(Message::NavigateBack)
-                                    } else if !model.branch_list.filter.is_empty() {
-                                        // Clear filter query
-                                        model.branch_list.clear_filter();
-                                        model.refresh_branch_summary();
-                                        None
-                                    } else if model.has_active_agent_pane() {
-                                        // FR-095: Hide active agent pane
-                                        Some(Message::HideActiveAgentPane)
-                                    } else {
-                                        // On main screen without filter and no active pane - do nothing
-                                        None
-                                    }
-                                } else {
-                                    Some(Message::NavigateBack)
-                                }
-                            }
-                            (KeyCode::Char('?') | KeyCode::Char('h'), KeyModifiers::NONE) => {
-                                if matches!(model.screen, Screen::BranchList | Screen::Help) {
-                                    Some(Message::NavigateTo(Screen::Help))
-                                } else {
-                                    Some(Message::Char(if key.code == KeyCode::Char('?') {
-                                        '?'
-                                    } else {
-                                        'h'
-                                    }))
-                                }
-                            }
-                            (KeyCode::Char('n'), KeyModifiers::NONE) => {
-                                if matches!(model.screen, Screen::BranchList) {
-                                    if model.branch_list.filter_mode {
-                                        Some(Message::Char('n'))
-                                    } else {
-                                        None
-                                    }
-                                } else if matches!(model.screen, Screen::Profiles) {
-                                    // Create new profile
-                                    model.profiles.enter_create_mode();
-                                    None
-                                } else if matches!(model.screen, Screen::Environment) {
-                                    if model.environment.edit_mode {
-                                        Some(Message::Char('n'))
-                                    } else if model.environment.is_ai_only() {
-                                        model.status_message = Some(
-                                            "AI settings only. Use Enter to edit.".to_string(),
-                                        );
-                                        model.status_message_time = Some(Instant::now());
-                                        None
-                                    } else {
-                                        model.environment.start_new();
-                                        None
-                                    }
-                                } else {
-                                    Some(Message::Char('n'))
-                                }
-                            }
-                            (KeyCode::Char('s'), KeyModifiers::NONE) => {
-                                // In filter mode, 's' goes to filter input
-                                if matches!(model.screen, Screen::BranchList)
-                                    && !model.branch_list.filter_mode
-                                {
-                                    Some(Message::NavigateTo(Screen::Settings))
-                                } else {
-                                    Some(Message::Char('s'))
-                                }
-                            }
-                            (KeyCode::Char('r'), KeyModifiers::NONE) => {
-                                // In filter mode, 'r' goes to filter input
-                                if matches!(model.screen, Screen::BranchList)
-                                    && !model.branch_list.filter_mode
-                                {
-                                    Some(Message::RefreshData)
-                                } else if matches!(model.screen, Screen::Environment) {
-                                    if model.environment.edit_mode {
-                                        Some(Message::Char('r'))
-                                    } else if model.environment.is_ai_only() {
-                                        model.status_message = Some(
-                                            "AI settings only. Use Enter to edit.".to_string(),
-                                        );
-                                        model.status_message_time = Some(Instant::now());
-                                        None
-                                    } else {
-                                        model.reset_selected_env();
-                                        None
-                                    }
-                                } else {
-                                    Some(Message::Char('r'))
-                                }
-                            }
-                            (KeyCode::Char('c'), KeyModifiers::NONE) => {
-                                // Copy to clipboard on Logs screen
-                                if matches!(model.screen, Screen::Logs) && !model.logs.is_searching
-                                {
-                                    Some(Message::CopyLogToClipboard)
-                                } else if matches!(model.screen, Screen::BranchList)
-                                    && !model.branch_list.filter_mode
-                                {
-                                    // FR-010: Cleanup command
-                                    // In filter mode, 'c' goes to filter input
-                                    // FR-028: Check if branches are selected
-                                    if model.branch_list.selected_branches.is_empty() {
-                                        model.status_message =
-                                            Some("No branches selected.".to_string());
-                                        model.status_message_time = Some(Instant::now());
-                                        None
-                                    } else {
-                                        // FR-028a-b: Filter out remote branches and current branch
-                                        let cleanup_branches: Vec<String> = model
-                                            .branch_list
-                                            .selected_branches
-                                            .iter()
-                                            .filter(|name| {
-                                                // Find the branch in the list
-                                                model
-                                                    .branch_list
-                                                    .branches
-                                                    .iter()
-                                                    .find(|b| &b.name == *name)
-                                                    .map(|b| {
-                                                        // Exclude remote branches, current branch, and no-worktree
-                                                        b.branch_type == BranchType::Local
-                                                            && !b.is_current
-                                                            && b.has_worktree
-                                                    })
-                                                    .unwrap_or(false)
-                                            })
-                                            .cloned()
-                                            .collect();
-
-                                        if cleanup_branches.is_empty() {
-                                            let excluded =
-                                                model.branch_list.selected_branches.len();
-                                            model.status_message = Some(format!(
-                                            "{} branch(es) excluded (remote, current, or no worktree).",
-                                            excluded
-                                        ));
-                                            model.status_message_time = Some(Instant::now());
-                                            None
-                                        } else {
-                                            // Show cleanup confirmation dialog
-                                            model.confirm =
-                                                ConfirmState::cleanup(&cleanup_branches);
-                                            model.pending_cleanup_branches = cleanup_branches;
-                                            model.screen_stack.push(model.screen.clone());
-                                            model.screen = Screen::Confirm;
-                                            None
-                                        }
-                                    }
-                                } else {
-                                    Some(Message::Char('c'))
-                                }
-                            }
-                            (KeyCode::Char('d'), KeyModifiers::NONE) => {
-                                if matches!(model.screen, Screen::Profiles) {
-                                    model.delete_selected_profile();
-                                    None
-                                } else if matches!(model.screen, Screen::Environment) {
-                                    if model.environment.edit_mode {
-                                        Some(Message::Char('d'))
-                                    } else if model.environment.is_ai_only() {
-                                        model.status_message = Some(
-                                            "AI settings only. Use Enter to edit.".to_string(),
-                                        );
-                                        model.status_message_time = Some(Instant::now());
-                                        None
-                                    } else {
-                                        model.delete_selected_env();
-                                        None
-                                    }
-                                } else if matches!(model.screen, Screen::BranchList)
-                                    && !model.branch_list.filter_mode
-                                    && model.selected_branch_has_agent()
-                                {
-                                    // FR-040: d key to delete agent pane with confirmation
-                                    Some(Message::ConfirmAgentTermination)
-                                } else {
-                                    Some(Message::Char('d'))
-                                }
-                            }
-                            (KeyCode::Char('p'), KeyModifiers::NONE) => {
-                                // In filter mode, 'p' goes to filter input
-                                if matches!(model.screen, Screen::BranchList)
-                                    && !model.branch_list.filter_mode
-                                {
-                                    Some(Message::NavigateTo(Screen::Profiles))
-                                } else {
-                                    Some(Message::Char('p'))
-                                }
-                            }
-                            (KeyCode::Char('l'), KeyModifiers::NONE) => {
-                                // In filter mode, 'l' goes to filter input
-                                if matches!(model.screen, Screen::BranchList)
-                                    && !model.branch_list.filter_mode
-                                {
-                                    Some(Message::NavigateTo(Screen::Logs))
-                                } else {
-                                    Some(Message::Char('l'))
-                                }
-                            }
-                            (KeyCode::Char('f'), KeyModifiers::NONE) => {
-                                if matches!(model.screen, Screen::Logs) {
-                                    Some(Message::CycleFilter)
-                                } else if matches!(model.screen, Screen::BranchList) {
-                                    Some(Message::ToggleFilterMode)
-                                } else {
-                                    Some(Message::Char('f'))
-                                }
-                            }
-                            (KeyCode::Char('/'), KeyModifiers::NONE) => {
-                                if matches!(model.screen, Screen::Logs) {
-                                    Some(Message::ToggleSearch)
-                                } else if matches!(model.screen, Screen::BranchList) {
-                                    Some(Message::ToggleFilterMode)
-                                } else {
-                                    Some(Message::Char('/'))
-                                }
-                            }
-                            (KeyCode::Char(' '), _) => {
-                                if matches!(model.screen, Screen::BranchList | Screen::Profiles) {
-                                    Some(Message::Space)
-                                } else {
-                                    Some(Message::Char(' '))
-                                }
-                            }
-                            (KeyCode::Tab, _) => Some(Message::Tab),
-                            (KeyCode::Char('m'), KeyModifiers::NONE) => {
-                                if matches!(model.screen, Screen::BranchList) {
-                                    Some(Message::CycleViewMode)
-                                } else {
-                                    None
-                                }
-                            }
-                            (KeyCode::Up, _) if is_key_press => Some(Message::SelectPrev),
-                            (KeyCode::Down, _) if is_key_press => Some(Message::SelectNext),
-                            (KeyCode::PageUp, _) if is_key_press => Some(Message::PageUp),
-                            (KeyCode::PageDown, _) if is_key_press => Some(Message::PageDown),
-                            (KeyCode::Home, _) if is_key_press => Some(Message::GoHome),
-                            (KeyCode::End, _) if is_key_press => Some(Message::GoEnd),
-                            (KeyCode::Enter, _) if is_key_press => Some(Message::Enter),
-                            (KeyCode::Backspace, _) if is_key_press => Some(Message::Backspace),
-                            (KeyCode::Left, _) if is_key_press => Some(Message::CursorLeft),
-                            (KeyCode::Right, _) if is_key_press => Some(Message::CursorRight),
-                            (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT)
-                                if is_key_press =>
-                            {
-                                Some(Message::Char(c))
-                            }
-                            _ => None,
-                        }
-                    };
-
-                    if let Some(msg) = msg {
+                    if let Some(msg) = model.handle_key_event(key) {
                         model.update(msg);
                     }
                 }
                 Event::Mouse(mouse) => {
-                    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                        model.handle_branch_list_mouse(mouse);
+                    // Error screen handles all mouse events (click, scroll)
+                    if matches!(model.screen, Screen::Error) {
+                        model.handle_error_mouse(mouse);
+                    } else if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                        // Overlay priority: wizard > ai_wizard > confirm > screen-specific
+                        if model.wizard.visible {
+                            model.handle_wizard_mouse(mouse);
+                        } else if model.ai_wizard.visible {
+                            model.handle_ai_wizard_mouse(mouse);
+                        } else if matches!(model.screen, Screen::Confirm) {
+                            model.handle_confirm_mouse(mouse);
+                        } else {
+                            match model.screen {
+                                Screen::BranchList => model.handle_branch_list_mouse(mouse),
+                                Screen::Profiles => model.handle_profiles_mouse(mouse),
+                                Screen::Environment => model.handle_environment_mouse(mouse),
+                                Screen::Logs => model.handle_logs_mouse(mouse),
+                                _ => {}
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -4719,7 +5338,7 @@ fn build_shell_command(command: &str, args: &[String]) -> String {
 
 fn wrap_tmux_command_for_fast_exit(command: &str) -> String {
     format!(
-        "start=$(date +%s); {} ; status=$?; end=$(date +%s); if [ $status -ne 0 ] || [ $((end-start)) -lt {} ]; then echo; echo \"[gwt] Agent exited immediately (status=$status).\"; echo \"[gwt] Press Enter to close this pane.\"; read -r _; fi; exit $status",
+        "start=$(date +%s); {} ; exit_status=$?; end=$(date +%s); if [ $exit_status -ne 0 ] || [ $((end-start)) -lt {} ]; then echo; echo \"[gwt] Agent exited immediately (status=$exit_status).\"; echo \"[gwt] Press Enter to close this pane.\"; read -r _; fi; exit $exit_status",
         command, FAST_EXIT_THRESHOLD_SECS
     )
 }
@@ -4842,6 +5461,13 @@ mod tests {
         }
     }
 
+    fn sample_branch_with_usage(name: &str, usage: &str, tool_id: Option<&str>) -> BranchItem {
+        let mut branch = sample_branch_with_session(name);
+        branch.last_tool_usage = Some(usage.to_string());
+        branch.last_tool_id = tool_id.map(|id| id.to_string());
+        branch
+    }
+
     #[test]
     fn test_resolve_orphaned_agent_name_prefers_session_entry() {
         let entry = sample_tool_entry("codex-cli");
@@ -4850,11 +5476,51 @@ mod tests {
     }
 
     #[test]
+    fn test_wrap_tmux_command_for_fast_exit_uses_exit_status_variable() {
+        let wrapped = wrap_tmux_command_for_fast_exit("echo ok");
+        assert!(wrapped.contains("exit_status=$?"));
+        assert!(wrapped.contains("status=$exit_status"));
+        assert!(wrapped.contains("exit $exit_status"));
+        assert!(!wrapped.contains("; status=$?;"));
+    }
+
+    #[test]
     fn test_resolve_orphaned_agent_name_fallbacks() {
         let resolved = resolve_orphaned_agent_name("bash", None);
         assert_eq!(resolved, "bash");
         let resolved = resolve_orphaned_agent_name("  ", None);
         assert_eq!(resolved, "unknown");
+    }
+
+    #[test]
+    fn test_extract_tool_version_from_usage_matches_tool_id() {
+        let branch = sample_branch_with_usage("feature/version", "Codex@2.1.0", Some("codex-cli"));
+        let version = Model::extract_tool_version_from_usage(&branch, "codex-cli");
+        assert_eq!(version.as_deref(), Some("2.1.0"));
+    }
+
+    #[test]
+    fn test_extract_tool_version_from_usage_matches_label_when_id_missing() {
+        let branch = sample_branch_with_usage("feature/version", "Codex@2.1.0", None);
+        let version = Model::extract_tool_version_from_usage(&branch, "codex-cli");
+        assert_eq!(version.as_deref(), Some("2.1.0"));
+    }
+
+    #[test]
+    fn test_extract_tool_version_from_usage_rejects_mismatch() {
+        let branch = sample_branch_with_usage("feature/version", "Codex@2.1.0", Some("codex-cli"));
+        let version = Model::extract_tool_version_from_usage(&branch, "gemini-cli");
+        assert!(version.is_none());
+    }
+
+    #[test]
+    fn test_extract_tool_version_from_usage_requires_version_suffix() {
+        let branch = sample_branch_with_usage("feature/version", "Codex", Some("codex-cli"));
+        let version = Model::extract_tool_version_from_usage(&branch, "codex-cli");
+        assert!(version.is_none());
+        let branch = sample_branch_with_usage("feature/version", "Codex@", Some("codex-cli"));
+        let version = Model::extract_tool_version_from_usage(&branch, "codex-cli");
+        assert!(version.is_none());
     }
 
     #[test]
@@ -4911,6 +5577,31 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
         let msg = model.handle_text_input_key(key, true);
         assert!(matches!(msg, Some(Message::Char('n'))));
+    }
+
+    #[test]
+    fn test_filter_mode_char_overrides_shortcuts() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+        model.branch_list.enter_filter_mode();
+
+        let key = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);
+        let msg = model.handle_key_event(key);
+        assert!(matches!(msg, Some(Message::Char('r'))));
+
+        let key = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
+        let msg = model.handle_key_event(key);
+        assert!(matches!(msg, Some(Message::Char('f'))));
+    }
+
+    #[test]
+    fn test_filter_toggle_works_when_not_in_filter_mode() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let key = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
+        let msg = model.handle_key_event(key);
+        assert!(matches!(msg, Some(Message::ToggleFilterMode)));
     }
 
     #[test]
@@ -5045,7 +5736,6 @@ mod tests {
 
         let item = sample_branch_with_session("feature/poll");
         model.branch_list = BranchListState::new().with_branches(vec![item]);
-        model.detail_panel_tab = DetailPanelTab::Session;
         model.branch_list.ai_enabled = true;
 
         let branch_name = model
@@ -5064,6 +5754,52 @@ mod tests {
 
         assert!(model.session_poll_deferred);
         assert_eq!(model.last_session_poll, Some(previous));
+    }
+
+    #[test]
+    fn test_tab_switches_between_branch_and_agent_mode() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        model.update(Message::Tab);
+        assert!(matches!(model.screen, Screen::AgentMode));
+
+        model.update(Message::Tab);
+        assert!(matches!(model.screen, Screen::BranchList));
+    }
+
+    #[test]
+    fn test_tab_ignored_when_filter_mode() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+        model.branch_list.enter_filter_mode();
+
+        model.update(Message::Tab);
+        assert!(matches!(model.screen, Screen::BranchList));
+    }
+
+    #[test]
+    fn test_agent_mode_input_accepts_char_and_backspace() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::AgentMode;
+        model.agent_mode.ai_ready = true;
+
+        model.update(Message::Char('h'));
+        model.update(Message::Char('i'));
+        assert_eq!(model.agent_mode.input, "hi");
+
+        model.update(Message::Backspace);
+        assert_eq!(model.agent_mode.input, "h");
+    }
+
+    #[test]
+    fn test_agent_mode_enter_opens_ai_wizard_when_disabled() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::AgentMode;
+        model.agent_mode.ai_ready = false;
+
+        model.update(Message::Enter);
+        assert!(matches!(model.screen, Screen::AISettingsWizard));
     }
 
     #[test]

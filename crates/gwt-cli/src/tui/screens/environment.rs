@@ -112,6 +112,10 @@ pub struct EnvironmentState {
     editing_ai_field: Option<AiField>,
     /// AI-only mode (no environment variables)
     ai_only: bool,
+
+    // Mouse click support
+    /// List inner area for click detection
+    pub list_inner_area: Option<Rect>,
 }
 
 impl EnvironmentState {
@@ -687,6 +691,37 @@ impl EnvironmentState {
     fn clamp_selection(&mut self) {
         self.ensure_visible();
     }
+
+    // Mouse click support methods
+
+    /// Get selection index from screen coordinates
+    pub fn selection_index_from_point(&self, x: u16, y: u16) -> Option<usize> {
+        let area = self.list_inner_area?;
+        if x < area.x || x >= area.x.saturating_add(area.width) {
+            return None;
+        }
+        if y < area.y || y >= area.y.saturating_add(area.height) {
+            return None;
+        }
+        let relative_y = y.saturating_sub(area.y) as usize;
+        let index = self.scroll_offset + relative_y;
+        if index < self.display_len() {
+            Some(index)
+        } else {
+            None
+        }
+    }
+
+    /// Select item by index
+    pub fn select_index(&mut self, index: usize) -> bool {
+        if index < self.display_len() {
+            self.selected = index;
+            self.ensure_visible();
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Collect OS environment variables as a sorted list.
@@ -743,7 +778,10 @@ pub fn render_environment(state: &mut EnvironmentState, frame: &mut Frame, area:
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center);
         frame.render_widget(empty, chunks[1]);
+        state.list_inner_area = None;
     } else {
+        // Record list area for mouse click detection
+        state.list_inner_area = Some(chunks[1]);
         let (start, end) = state.visible_range(total);
         let items: Vec<ListItem> = display_items[start..end]
             .iter()

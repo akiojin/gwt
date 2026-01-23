@@ -1,8 +1,23 @@
 # タスク: ブランチサマリーパネル（セッション要約対応）
 
-**仕様ID**: `SPEC-4b893dae` | **日付**: 2026-01-19 | **更新日**: 2026-01-21
+**仕様ID**: `SPEC-4b893dae` | **日付**: 2026-01-19 | **更新日**: 2026-01-22
 **入力**: `specs/SPEC-4b893dae/` からの設計ドキュメント
 **前提条件**: plan.md、spec.md、data-model.md、contracts/openai-api.md、research.md、quickstart.md
+
+## 追加作業: セッション要約タイムアウト延長 (2026-01-22)
+
+- [x] **T8930** [P] [共通] `specs/SPEC-4b893dae/spec.md` / `specs/SPEC-4b893dae/plan.md` / `specs/SPEC-4b893dae/contracts/openai-api.md` にセッション要約のタイムアウト要件を追記
+- [x] **T8931** [Test] `crates/gwt-core/src/ai/client.rs` にセッション要約タイムアウトのユニットテストを追加
+- [x] **T8932** [Impl] `crates/gwt-core/src/ai/client.rs` のセッション要約タイムアウトを10分に延長
+- [x] **T8933** `cargo test -p gwt-core` を実行し、失敗がないことを確認する
+
+## 追加作業: 文字単位の折り返し (2026-01-22)
+
+- [x] **T8920** [P] [共通] `specs/SPEC-4b893dae/spec.md` / `specs/SPEC-4b893dae/plan.md` に文字単位折り返し要件を追記
+- [x] **T8921** [Impl] `crates/gwt-cli/src/tui/components.rs` のブランチ詳細パネルで文字単位折り返しを行う
+- [x] **T8922** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` のセッション要約で文字単位折り返しを行う
+- [x] **T8923** [Test] 折り返し処理のユニットテストを追加する
+- [ ] **T8924** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
 
 ## 追加作業: サマリーパネルの内側余白 (2026-01-20)
 

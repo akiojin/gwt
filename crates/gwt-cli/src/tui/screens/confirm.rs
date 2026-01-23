@@ -4,6 +4,15 @@
 
 use ratatui::{prelude::*, widgets::*};
 
+/// Truncate a path for display, keeping the end portion
+fn truncate_path(path: &str, max_len: usize) -> String {
+    if path.len() <= max_len {
+        path.to_string()
+    } else {
+        format!("...{}", &path[path.len() - max_len + 3..])
+    }
+}
+
 /// Confirmation dialog state
 #[derive(Debug, Default)]
 pub struct ConfirmState {
@@ -21,6 +30,13 @@ pub struct ConfirmState {
     pub selected_confirm: bool,
     /// Is this a dangerous action (shows in red)
     pub is_dangerous: bool,
+    // Mouse click support
+    /// Cached popup area
+    pub popup_area: Option<Rect>,
+    /// Cached cancel button area
+    pub cancel_button_area: Option<Rect>,
+    /// Cached confirm button area
+    pub confirm_button_area: Option<Rect>,
 }
 
 impl ConfirmState {
@@ -33,6 +49,7 @@ impl ConfirmState {
             cancel_label: "Cancel".to_string(),
             selected_confirm: false, // Default to cancel for safety
             is_dangerous: false,
+            ..Default::default()
         }
     }
 
@@ -46,6 +63,7 @@ impl ConfirmState {
             cancel_label: "Cancel".to_string(),
             selected_confirm: false,
             is_dangerous: true,
+            ..Default::default()
         }
     }
 
@@ -59,6 +77,7 @@ impl ConfirmState {
             cancel_label: "Cancel".to_string(),
             selected_confirm: false,
             is_dangerous: true,
+            ..Default::default()
         }
     }
 
@@ -88,6 +107,7 @@ impl ConfirmState {
             cancel_label: "Cancel".to_string(),
             selected_confirm: false,
             is_dangerous: true,
+            ..Default::default()
         }
     }
 
@@ -107,6 +127,7 @@ impl ConfirmState {
             cancel_label: "Cancel".to_string(),
             selected_confirm: false,
             is_dangerous: true,
+            ..Default::default()
         }
     }
 
@@ -123,6 +144,7 @@ impl ConfirmState {
             cancel_label: "Cancel".to_string(),
             selected_confirm: false,
             is_dangerous: true,
+            ..Default::default()
         }
     }
 
@@ -142,6 +164,7 @@ impl ConfirmState {
             cancel_label: "Cancel".to_string(),
             selected_confirm: false,
             is_dangerous: true,
+            ..Default::default()
         }
     }
 
@@ -158,6 +181,7 @@ impl ConfirmState {
             cancel_label: "Cancel".to_string(),
             selected_confirm: false,
             is_dangerous: false,
+            ..Default::default()
         }
     }
 
@@ -174,7 +198,61 @@ impl ConfirmState {
             cancel_label: "Skip".to_string(),
             selected_confirm: true, // Default to setup for better UX
             is_dangerous: false,
+            ..Default::default()
         }
+    }
+
+    /// Create hook setup warning dialog for temporary execution (FR-102i)
+    ///
+    /// When gwt is running from bunx/npx cache, hooks may not work correctly
+    /// because the executable path will change after cache cleanup.
+    pub fn hook_setup_with_warning(exe_path: &str) -> Self {
+        Self {
+            title: "Warning: Temporary Execution".to_string(),
+            message: "Hook setup may not work correctly.".to_string(),
+            details: vec![
+                format!("Running from: {}", truncate_path(exe_path, 50)),
+                "Hooks will break after cache cleanup.".to_string(),
+                "Install globally: npm install -g @akiojin/gwt".to_string(),
+            ],
+            confirm_label: "Setup Anyway".to_string(),
+            cancel_label: "Skip".to_string(),
+            selected_confirm: false, // Default to Skip for safety
+            is_dangerous: true,
+            ..Default::default()
+        }
+    }
+
+    // Mouse click support methods
+
+    /// Check if point is within popup area
+    pub fn is_point_in_popup(&self, x: u16, y: u16) -> bool {
+        self.popup_area.is_some_and(|area| {
+            x >= area.x
+                && x < area.x.saturating_add(area.width)
+                && y >= area.y
+                && y < area.y.saturating_add(area.height)
+        })
+    }
+
+    /// Check if point is on cancel button
+    pub fn is_cancel_button_at(&self, x: u16, y: u16) -> bool {
+        self.cancel_button_area.is_some_and(|area| {
+            x >= area.x
+                && x < area.x.saturating_add(area.width)
+                && y >= area.y
+                && y < area.y.saturating_add(area.height)
+        })
+    }
+
+    /// Check if point is on confirm button
+    pub fn is_confirm_button_at(&self, x: u16, y: u16) -> bool {
+        self.confirm_button_area.is_some_and(|area| {
+            x >= area.x
+                && x < area.x.saturating_add(area.width)
+                && y >= area.y
+                && y < area.y.saturating_add(area.height)
+        })
     }
 
     /// Toggle selection
@@ -199,7 +277,7 @@ impl ConfirmState {
 }
 
 /// Render confirmation dialog
-pub fn render_confirm(state: &ConfirmState, frame: &mut Frame, area: Rect) {
+pub fn render_confirm(state: &mut ConfirmState, frame: &mut Frame, area: Rect) {
     const H_PADDING: usize = 2;
     let message_lines: Vec<String> = state
         .message
@@ -284,6 +362,9 @@ pub fn render_confirm(state: &ConfirmState, frame: &mut Frame, area: Rect) {
     // Center the dialog
     let dialog_area = centered_rect(dialog_width, dialog_height, area);
 
+    // Store popup area for mouse click detection
+    state.popup_area = Some(dialog_area);
+
     // Clear the background
     frame.render_widget(Clear, dialog_area);
 
@@ -355,6 +436,7 @@ pub fn render_confirm(state: &ConfirmState, frame: &mut Frame, area: Rect) {
         Style::default().fg(Color::DarkGray)
     };
     let cancel_text = format!("[ {} ]", state.cancel_label);
+    let cancel_width = cancel_text.chars().count() as u16;
 
     // Confirm button
     let confirm_style = if state.selected_confirm {
@@ -369,6 +451,7 @@ pub fn render_confirm(state: &ConfirmState, frame: &mut Frame, area: Rect) {
         Style::default().fg(Color::Green)
     };
     let confirm_text = format!("[ {} ]", state.confirm_label);
+    let confirm_width = confirm_text.chars().count() as u16;
 
     let button_line = Line::from(vec![
         Span::styled(cancel_text, cancel_style),
@@ -377,6 +460,20 @@ pub fn render_confirm(state: &ConfirmState, frame: &mut Frame, area: Rect) {
     ]);
     let buttons = Paragraph::new(button_line).alignment(Alignment::Center);
     frame.render_widget(buttons, chunks[3]);
+
+    // Calculate and store button areas for mouse click detection
+    // Button line: "[ Cancel ]  [ Confirm ]" centered in chunks[3]
+    let gap_width: u16 = 2; // Two spaces between buttons
+    let total_button_width = cancel_width + gap_width + confirm_width;
+    let buttons_start_x = chunks[3].x + (chunks[3].width.saturating_sub(total_button_width)) / 2;
+
+    state.cancel_button_area = Some(Rect::new(buttons_start_x, chunks[3].y, cancel_width, 1));
+    state.confirm_button_area = Some(Rect::new(
+        buttons_start_x + cancel_width + gap_width,
+        chunks[3].y,
+        confirm_width,
+        1,
+    ));
 }
 
 /// Helper function to create a centered rect
@@ -449,5 +546,41 @@ mod tests {
         assert!(!state.is_dangerous); // Not dangerous, just a warning
         assert!(state.message.contains("claude"));
         assert!(state.message.contains("main"));
+    }
+
+    #[test]
+    fn test_hook_setup_with_warning() {
+        let exe_path = "/home/user/.bun/install/cache/@akiojin/gwt@1.0.0/gwt";
+        let state = ConfirmState::hook_setup_with_warning(exe_path);
+
+        assert!(state.is_dangerous);
+        assert!(!state.selected_confirm); // Default to Skip for safety
+        assert_eq!(state.confirm_label, "Setup Anyway");
+        assert_eq!(state.cancel_label, "Skip");
+        assert!(state.title.contains("Warning"));
+        assert!(state.details.iter().any(|d| d.contains("npm install -g")));
+    }
+
+    #[test]
+    fn test_hook_setup_normal() {
+        let state = ConfirmState::hook_setup();
+
+        assert!(!state.is_dangerous);
+        assert!(state.selected_confirm); // Default to Setup for better UX
+        assert_eq!(state.confirm_label, "Setup");
+    }
+
+    #[test]
+    fn test_truncate_path_short() {
+        let short_path = "/usr/local/bin/gwt";
+        assert_eq!(truncate_path(short_path, 50), short_path);
+    }
+
+    #[test]
+    fn test_truncate_path_long() {
+        let long_path = "/home/user/.bun/install/cache/@akiojin/gwt@1.0.0/gwt";
+        let truncated = truncate_path(long_path, 30);
+        assert!(truncated.starts_with("..."));
+        assert!(truncated.len() <= 30);
     }
 }

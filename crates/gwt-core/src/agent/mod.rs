@@ -5,13 +5,27 @@
 
 pub mod claude;
 pub mod codex;
+pub mod conversation;
 pub mod gemini;
+pub mod master;
+pub mod session;
+pub mod sub_agent;
+pub mod task;
 pub mod trait_agent;
+pub mod types;
+pub mod worktree;
 
 use crate::error::{GwtError, Result};
 use std::path::Path;
 
+pub use conversation::{Conversation, Message, MessageRole};
+pub use master::MasterAgent;
+pub use session::{AgentSession, SessionStatus};
+pub use sub_agent::{CompletionSource, SubAgent, SubAgentStatus, SubAgentType};
+pub use task::{PullRequestRef, Task, TaskResult as AgentTaskResult, TaskStatus, WorktreeStrategy};
 pub use trait_agent::{AgentCapabilities, AgentInfo, AgentTrait, TaskResult};
+pub use types::{SessionId, SubAgentId, TaskId};
+pub use worktree::WorktreeRef;
 
 /// Agent type enumeration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

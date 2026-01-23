@@ -84,24 +84,29 @@ fn run() -> Result<(), GwtError> {
                 match selection {
                     Some(launch_plan) => {
                         // FR-088: Record agent usage to history (single mode)
-                        let agent_id = launch_plan.config.agent.id();
-                        let agent_label = format!(
+                        // Run in background thread to avoid blocking agent startup
+                        let history_repo_root = repo_root.clone();
+                        let history_branch_name = launch_plan.config.branch_name.clone();
+                        let history_agent_id = launch_plan.config.agent.id().to_string();
+                        let history_agent_label = format!(
                             "{}@{}",
                             launch_plan.config.agent.label(),
                             launch_plan.selected_version
                         );
-                        let mut agent_history = AgentHistoryStore::load().unwrap_or_default();
-                        if let Err(e) = agent_history.record(
-                            &repo_root,
-                            &launch_plan.config.branch_name,
-                            agent_id,
-                            &agent_label,
-                        ) {
-                            warn!(category = "main", "Failed to record agent history: {}", e);
-                        }
-                        if let Err(e) = agent_history.save() {
-                            warn!(category = "main", "Failed to save agent history: {}", e);
-                        }
+                        thread::spawn(move || {
+                            let mut agent_history = AgentHistoryStore::load().unwrap_or_default();
+                            if let Err(e) = agent_history.record(
+                                &history_repo_root,
+                                &history_branch_name,
+                                &history_agent_id,
+                                &history_agent_label,
+                            ) {
+                                warn!(category = "main", "Failed to record agent history: {}", e);
+                            }
+                            if let Err(e) = agent_history.save() {
+                                warn!(category = "main", "Failed to save agent history: {}", e);
+                            }
+                        });
                         match execute_launch_plan(launch_plan) {
                             Ok(AgentExitKind::Success) => {
                                 entry = Some(TuiEntryContext::success(
@@ -1708,7 +1713,6 @@ fn apply_pty_wrapper(executable: &str, args: &[String]) -> (String, Vec<String>)
     {
         let mut wrapped_args = Vec::new();
         wrapped_args.push("-q".to_string());
-        wrapped_args.push("--".to_string());
         wrapped_args.push("/dev/null".to_string());
         wrapped_args.push(executable.to_string());
         wrapped_args.extend(args.iter().cloned());
@@ -2083,10 +2087,9 @@ mod tests {
         {
             assert_eq!(exe, "script");
             assert_eq!(wrapped.get(0).map(String::as_str), Some("-q"));
-            assert_eq!(wrapped.get(1).map(String::as_str), Some("--"));
-            assert_eq!(wrapped.get(2).map(String::as_str), Some("/dev/null"));
-            assert_eq!(wrapped.get(3).map(String::as_str), Some("codex"));
-            assert_eq!(wrapped[4..], args[..]);
+            assert_eq!(wrapped.get(1).map(String::as_str), Some("/dev/null"));
+            assert_eq!(wrapped.get(2).map(String::as_str), Some("codex"));
+            assert_eq!(wrapped[3..], args[..]);
         }
 
         #[cfg(not(target_os = "macos"))]

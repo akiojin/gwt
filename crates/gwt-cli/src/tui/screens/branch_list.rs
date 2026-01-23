@@ -13,7 +13,7 @@ use ratatui::{prelude::*, widgets::*};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Get terminal color for coding agent (SPEC-3b0ed29b FR-024~FR-027)
 fn get_agent_color(tool_id: Option<&str>) -> Color {
@@ -79,27 +79,10 @@ fn get_branch_name_type(name: &str) -> BranchNameType {
 /// View mode for branch list
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewMode {
-    #[default]
     All,
+    #[default]
     Local,
     Remote,
-}
-
-/// Detail panel tab state
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum DetailPanelTab {
-    #[default]
-    Details,
-    Session,
-}
-
-impl DetailPanelTab {
-    pub fn toggle(&mut self) {
-        *self = match self {
-            DetailPanelTab::Details => DetailPanelTab::Session,
-            DetailPanelTab::Session => DetailPanelTab::Details,
-        };
-    }
 }
 
 impl ViewMode {
@@ -253,7 +236,11 @@ impl BranchItem {
             has_changes: worktree.map(|wt| wt.has_changes).unwrap_or(false),
             has_unpushed: worktree.map(|wt| wt.has_unpushed).unwrap_or(false),
             divergence: DivergenceStatus::UpToDate,
-            has_remote_counterpart: branch.has_remote,
+            has_remote_counterpart: if branch_type == BranchType::Local {
+                branch.has_remote
+            } else {
+                false
+            },
             remote_name: if branch.name.starts_with("remotes/") {
                 Some(branch.name.clone())
             } else {
@@ -305,7 +292,11 @@ impl BranchItem {
             has_changes: false,
             has_unpushed: false,
             divergence: DivergenceStatus::UpToDate,
-            has_remote_counterpart: branch.has_remote,
+            has_remote_counterpart: if branch_type == BranchType::Local {
+                branch.has_remote
+            } else {
+                false
+            },
             remote_name: if branch.name.starts_with("remotes/") {
                 Some(branch.name.clone())
             } else {
@@ -444,8 +435,6 @@ pub struct BranchListState {
     pub running_agents: HashMap<String, AgentPane>,
     /// Branch summary data for the selected branch (SPEC-4b893dae)
     pub branch_summary: Option<BranchSummary>,
-    /// Detail panel tab state
-    pub detail_panel_tab: DetailPanelTab,
     /// AI settings enabled for active profile
     pub ai_enabled: bool,
     /// Session summary cache (session)
@@ -496,7 +485,6 @@ impl Default for BranchListState {
             list_inner_area: None,
             running_agents: HashMap::new(),
             branch_summary: None,
-            detail_panel_tab: DetailPanelTab::Details,
             ai_enabled: false,
             session_summary_cache: SessionSummaryCache::default(),
             session_summary_inflight: HashSet::new(),
@@ -525,7 +513,7 @@ impl BranchListState {
                 .count(),
             remote_count: branches
                 .iter()
-                .filter(|b| b.branch_type == BranchType::Remote || b.has_remote_counterpart)
+                .filter(|b| b.branch_type == BranchType::Remote)
                 .count(),
             worktree_count: branches.iter().filter(|b| b.has_worktree).count(),
             changes_count: branches.iter().filter(|b| b.has_changes).count(),
@@ -543,9 +531,7 @@ impl BranchListState {
             match self.view_mode {
                 ViewMode::All => true,
                 ViewMode::Local => branch.branch_type == BranchType::Local,
-                ViewMode::Remote => {
-                    branch.branch_type == BranchType::Remote || branch.has_remote_counterpart
-                }
+                ViewMode::Remote => branch.branch_type == BranchType::Remote,
             }
         });
 
@@ -1205,15 +1191,6 @@ impl BranchListState {
         self.session_summary_cache.clone()
     }
 
-    // ================================================================
-    // グローバルタブ状態 (SPEC-4b893dae FR-074シリーズ)
-    // ================================================================
-
-    /// Toggle the global tab state (FR-074a)
-    pub fn toggle_tab(&mut self) {
-        self.detail_panel_tab.toggle();
-    }
-
     /// Cleanup session summary warnings for deleted branches
     pub fn cleanup_session_warnings(&mut self, remaining_branches: &HashSet<String>) {
         self.session_summary_warnings
@@ -1344,9 +1321,10 @@ pub fn render_branch_list(
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(panel_height), // Branch list (FR-003)
+                Constraint::Length(panel_height), // Branch list
                 Constraint::Length(1),            // Status bar (FR-104a)
-                Constraint::Min(3),               // Summary panel (SPEC-4b893dae)
+                Constraint::Length(panel_height), // Details panel
+                Constraint::Min(6),               // Session panel
             ])
             .split(area)
     } else {
@@ -1354,8 +1332,9 @@ pub fn render_branch_list(
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(panel_height), // Branch list (FR-003)
-                Constraint::Min(3),               // Summary panel (SPEC-4b893dae)
+                Constraint::Length(panel_height), // Branch list
+                Constraint::Length(panel_height), // Details panel
+                Constraint::Min(6),               // Session panel
             ])
             .split(area)
     };
@@ -1367,9 +1346,9 @@ pub fn render_branch_list(
 
     if has_agents {
         render_status_bar(state, frame, chunks[1]);
-        render_summary_panel(state, frame, chunks[2], status_message);
+        render_summary_panels(state, frame, chunks[2], chunks[3], status_message);
     } else {
-        render_summary_panel(state, frame, chunks[1], status_message);
+        render_summary_panels(state, frame, chunks[1], chunks[2], status_message);
     }
 }
 
@@ -1533,6 +1512,12 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect, has_f
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
+        .title(" Branches ")
+        .title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .padding(Padding::new(
             BRANCH_LIST_PADDING_X,
             BRANCH_LIST_PADDING_X,
@@ -1640,9 +1625,10 @@ fn render_branch_row(
     // FR-082/FR-083/FR-084/FR-085: Get branch name color based on worktree/gone status
     let branch_name_color = branch.branch_name_color();
 
-    // Branch name
+    // Branch name (strip "remotes/" prefix for cleaner display)
     let display_name = if branch.branch_type == BranchType::Remote {
-        branch.remote_name.as_deref().unwrap_or(&branch.name)
+        let name = branch.remote_name.as_deref().unwrap_or(&branch.name);
+        name.strip_prefix("remotes/").unwrap_or(name)
     } else {
         &branch.name
     };
@@ -1784,61 +1770,37 @@ fn render_branch_row(
 }
 
 /// Render summary panel (SPEC-4b893dae FR-001~FR-006)
-fn render_summary_panel(
+fn render_summary_panels(
     state: &mut BranchListState,
     frame: &mut Frame,
-    area: Rect,
+    details_area: Rect,
+    session_area: Rect,
     status_message: Option<&str>,
 ) {
-    match state.detail_panel_tab {
-        DetailPanelTab::Details => render_details_panel(state, frame, area, status_message),
-        DetailPanelTab::Session => {
-            state.clear_detail_links();
-            render_session_panel(state, frame, area, status_message);
-        }
-    }
+    render_details_panel(state, frame, details_area, status_message);
+    state.clear_detail_links();
+    render_session_panel(state, frame, session_area, status_message);
 }
 
-fn panel_title_line(branch_name: &str, active: DetailPanelTab) -> Line<'static> {
-    let mut spans = Vec::new();
-    let details_style = if matches!(active, DetailPanelTab::Details) {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let session_style = if matches!(active, DetailPanelTab::Session) {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-
-    spans.push(Span::styled("[Details]", details_style));
-    spans.push(Span::raw(" "));
-    spans.push(Span::styled("[Session]", session_style));
-    spans.push(Span::raw(" "));
-    spans.push(Span::styled(
-        format!(" {}", branch_name),
-        Style::default().fg(Color::DarkGray),
-    ));
-
-    Line::from(spans)
-}
-
-fn panel_switch_hint() -> Line<'static> {
-    Line::from(Span::styled(
-        " Tab: Switch ",
-        Style::default().fg(Color::DarkGray),
-    ))
-    .right_aligned()
+fn panel_title_line(branch_name: &str, label: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            label.to_string(),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            branch_name.to_string(),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ])
 }
 
 fn session_panel_hint() -> Line<'static> {
     Line::from(Span::styled(
-        " Tab: Switch | PgUp/PgDn: Scroll ",
+        " PgUp/PgDn: Scroll ",
         Style::default().fg(Color::DarkGray),
     ))
     .right_aligned()
@@ -1919,12 +1881,11 @@ fn render_details_panel(
     // Handle status messages - show them in the panel area if present
     if let Some(status) = status_message {
         // Draw the panel frame first
-        let title = panel_title_line(&summary.branch_name, DetailPanelTab::Details);
+        let title = panel_title_line(&summary.branch_name, "Details");
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
+            .border_style(Style::default().fg(Color::White))
             .title(title)
-            .title_bottom(panel_switch_hint())
             .padding(Padding::new(PANEL_PADDING_X, PANEL_PADDING_X, 0, 0));
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -1940,12 +1901,11 @@ fn render_details_panel(
 
     // Handle loading state - show spinner in panel
     if state.is_loading {
-        let title = panel_title_line(&summary.branch_name, DetailPanelTab::Details);
+        let title = panel_title_line(&summary.branch_name, "Details");
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
+            .border_style(Style::default().fg(Color::White))
             .title(title)
-            .title_bottom(panel_switch_hint())
             .padding(Padding::new(PANEL_PADDING_X, PANEL_PADDING_X, 0, 0));
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -1973,10 +1933,7 @@ fn render_details_panel(
     // Render the full summary panel with optional status line
     let panel = SummaryPanel::new(&summary)
         .with_tick(state.spinner_frame)
-        .with_title(panel_title_line(
-            &summary.branch_name,
-            DetailPanelTab::Details,
-        ))
+        .with_title(panel_title_line(&summary.branch_name, "Details"))
         .with_links(links)
         .with_status_line(status_line);
 
@@ -1994,21 +1951,21 @@ fn render_session_panel(
         .selected_branch()
         .map(|branch| branch.name.clone())
         .unwrap_or_else(|| "(no branch selected)".to_string());
-    let title = panel_title_line(&branch_name, DetailPanelTab::Session);
+    let title = panel_title_line(&branch_name, "Session");
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(Color::White))
         .title(title)
         .title_bottom(session_panel_hint())
         .padding(Padding::new(PANEL_PADDING_X, PANEL_PADDING_X, 0, 0));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let mut lines: Vec<Line> = Vec::new();
+    let mut lines: Vec<Line<'static>> = Vec::new();
 
     if let Some(status) = status_message {
         lines.push(Line::from(Span::styled(
-            status,
+            status.to_string(),
             Style::default().fg(Color::Yellow),
         )));
     } else if state.is_loading {
@@ -2119,13 +2076,12 @@ fn render_session_panel(
         )));
     }
 
-    let total_lines = count_wrapped_lines(&lines, inner.width as usize);
+    let wrapped_lines = wrap_lines_by_char(lines, inner.width as usize);
+    let total_lines = wrapped_lines.len();
     let max_scroll = total_lines.saturating_sub(inner.height as usize);
     state.update_session_scroll_bounds(max_scroll, inner.height as usize);
 
-    let paragraph = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .scroll((state.session_scroll_offset as u16, 0));
+    let paragraph = Paragraph::new(wrapped_lines).scroll((state.session_scroll_offset as u16, 0));
     frame.render_widget(paragraph, inner);
 }
 
@@ -2191,6 +2147,108 @@ fn render_markdown_lines(markdown: &str) -> Vec<Line<'static>> {
     lines
 }
 
+fn wrap_lines_by_char(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut wrapped = Vec::new();
+    for line in lines {
+        wrapped.extend(wrap_line_chars(&line, width));
+    }
+    wrapped
+}
+
+fn wrap_line_chars(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    if line.spans.is_empty() {
+        return vec![Line {
+            spans: Vec::new(),
+            style: line.style,
+            alignment: line.alignment,
+        }];
+    }
+
+    let mut wrapped = Vec::new();
+    let mut current_spans: Vec<Span<'static>> = Vec::new();
+    let mut current_width = 0usize;
+    let mut buffer = String::new();
+    let mut buffer_style = Style::default();
+    let mut buffer_active = false;
+
+    let flush_buffer = |spans: &mut Vec<Span<'static>>,
+                        buffer: &mut String,
+                        buffer_style: &Style,
+                        buffer_active: &mut bool| {
+        if *buffer_active && !buffer.is_empty() {
+            spans.push(Span::styled(std::mem::take(buffer), *buffer_style));
+        } else {
+            buffer.clear();
+        }
+        *buffer_active = false;
+    };
+
+    let push_line =
+        |wrapped: &mut Vec<Line<'static>>, spans: &mut Vec<Span<'static>>, line: &Line<'static>| {
+            wrapped.push(Line {
+                spans: std::mem::take(spans),
+                style: line.style,
+                alignment: line.alignment,
+            });
+        };
+
+    for span in &line.spans {
+        let span_style = span.style;
+        for ch in span.content.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if current_width > 0 && current_width + ch_width > width {
+                flush_buffer(
+                    &mut current_spans,
+                    &mut buffer,
+                    &buffer_style,
+                    &mut buffer_active,
+                );
+                push_line(&mut wrapped, &mut current_spans, line);
+                current_width = 0;
+            }
+
+            if !buffer_active || buffer_style != span_style {
+                flush_buffer(
+                    &mut current_spans,
+                    &mut buffer,
+                    &buffer_style,
+                    &mut buffer_active,
+                );
+                buffer_style = span_style;
+                buffer_active = true;
+            }
+
+            buffer.push(ch);
+            current_width += ch_width;
+
+            if current_width >= width {
+                flush_buffer(
+                    &mut current_spans,
+                    &mut buffer,
+                    &buffer_style,
+                    &mut buffer_active,
+                );
+                push_line(&mut wrapped, &mut current_spans, line);
+                current_width = 0;
+            }
+        }
+    }
+
+    flush_buffer(
+        &mut current_spans,
+        &mut buffer,
+        &buffer_style,
+        &mut buffer_active,
+    );
+    if !current_spans.is_empty() || wrapped.is_empty() {
+        push_line(&mut wrapped, &mut current_spans, line);
+    }
+
+    wrapped
+}
+
 fn flush_paragraph_lines(lines: &mut Vec<Line<'static>>, buffer: &mut String, in_item: bool) {
     let text = buffer.trim();
     if text.is_empty() {
@@ -2238,24 +2296,6 @@ fn push_bullet_lines(lines: &mut Vec<Line<'static>>, text: &str) {
     }
 }
 
-fn count_wrapped_lines(lines: &[Line], width: usize) -> usize {
-    if width == 0 {
-        return 0;
-    }
-    lines
-        .iter()
-        .map(|line| {
-            let line_width: usize = line
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref().width())
-                .sum();
-            let line_width = line_width.max(1);
-            line_width.div_ceil(width)
-        })
-        .sum()
-}
-
 /// Render footer line with keybindings (FR-004)
 fn render_footer(frame: &mut Frame, area: Rect) {
     let keybinds = [
@@ -2292,6 +2332,14 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::path::Path;
+
+    fn line_text(line: &Line<'_>) -> String {
+        let mut text = String::new();
+        for span in &line.spans {
+            text.push_str(span.content.as_ref());
+        }
+        text
+    }
 
     fn sample_branch(name: &str) -> BranchItem {
         BranchItem {
@@ -2335,6 +2383,15 @@ mod tests {
         assert_eq!(state.spinner_char(), '/');
         state.spinner_frame = SPINNER_FRAMES.len() * 5;
         assert_eq!(state.spinner_char(), '|');
+    }
+
+    #[test]
+    fn test_wrap_lines_by_char_splits_long_line() {
+        let lines = vec![Line::from("abcdef")];
+        let wrapped = wrap_lines_by_char(lines, 3);
+        assert_eq!(wrapped.len(), 2);
+        assert_eq!(line_text(&wrapped[0]), "abc");
+        assert_eq!(line_text(&wrapped[1]), "def");
     }
 
     #[test]
@@ -2677,14 +2734,16 @@ mod tests {
 
         let mut state = BranchListState::new().with_branches(branches);
 
-        assert_eq!(state.filtered_branches().len(), 2);
-
-        state.set_view_mode(ViewMode::Local);
+        // Default is Local, so only local branches are shown
         assert_eq!(state.filtered_branches().len(), 1);
         assert_eq!(state.filtered_branches()[0].name, "main");
 
+        state.set_view_mode(ViewMode::All);
+        assert_eq!(state.filtered_branches().len(), 2);
+
         state.set_view_mode(ViewMode::Remote);
-        assert_eq!(state.filtered_branches().len(), 2); // main has remote counterpart
+        assert_eq!(state.filtered_branches().len(), 1);
+        assert_eq!(state.filtered_branches()[0].name, "remotes/origin/main");
     }
 
     #[test]
@@ -3048,89 +3107,5 @@ mod tests {
         assert_eq!(visible.len(), 2);
         assert_eq!(state.branches[visible[0]].name, "feature/one");
         assert_eq!(state.branches[visible[1]].name, "feature/two");
-    }
-
-    // ==========================================================
-    // グローバルタブ状態のTDDテスト (SPEC-4b893dae FR-074シリーズ)
-    // ==========================================================
-
-    #[test]
-    fn test_global_tab_default_is_details() {
-        // FR-075: アプリ起動時のデフォルトタブはDetails
-        let state = BranchListState::new();
-        assert_eq!(state.detail_panel_tab, DetailPanelTab::Details);
-    }
-
-    #[test]
-    fn test_global_tab_toggle() {
-        // FR-074a: Tab切り替え時に即座にグローバルタブ状態を更新
-        let mut state = BranchListState::new();
-        assert_eq!(state.detail_panel_tab, DetailPanelTab::Details);
-
-        state.toggle_tab();
-        assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
-
-        state.toggle_tab();
-        assert_eq!(state.detail_panel_tab, DetailPanelTab::Details);
-    }
-
-    #[test]
-    fn test_global_tab_preserved_on_branch_change() {
-        // FR-074d: ブランチ切り替え時に現在のグローバルタブ状態を維持
-        let branches = vec![sample_branch("branch-a"), sample_branch("branch-b")];
-        let mut state = BranchListState::new().with_branches(branches);
-
-        // タブをSessionに切り替え
-        state.toggle_tab();
-        assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
-
-        // ブランチを切り替えてもタブ状態は維持される
-        // (select_next/select_prev などでブランチが変わっても detail_panel_tab は変わらない)
-        state.selected = 1; // branch-b を選択
-        assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
-
-        state.selected = 0; // branch-a に戻る
-        assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
-    }
-
-    #[test]
-    fn test_global_tab_preserved_after_refresh() {
-        // FR-074b: rキーリフレッシュでグローバルタブ状態を維持
-        let branches = vec![sample_branch("main"), sample_branch("develop")];
-        let mut state = BranchListState::new().with_branches(branches);
-
-        // タブをSessionに切り替え
-        state.toggle_tab();
-        assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
-
-        // リフレッシュをシミュレート（ブランチリストを再設定）
-        // 重要: detail_panel_tab を保存して復元する
-        let saved_tab = state.detail_panel_tab;
-        let refreshed_branches = vec![sample_branch("main"), sample_branch("develop")];
-        state = BranchListState::new().with_branches(refreshed_branches);
-        state.detail_panel_tab = saved_tab;
-
-        // タブ状態が維持されていることを確認
-        assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
-    }
-
-    #[test]
-    fn test_global_tab_preserved_after_new_branch_creation() {
-        // FR-074c: 新規ブランチ作成後の自動更新でグローバルタブ状態を維持
-        let branches = vec![sample_branch("main")];
-        let mut state = BranchListState::new().with_branches(branches);
-
-        // タブをSessionに切り替え
-        state.toggle_tab();
-        assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
-
-        // 新規ブランチ作成後の自動更新をシミュレート
-        let saved_tab = state.detail_panel_tab;
-        let updated_branches = vec![sample_branch("main"), sample_branch("feature/new-branch")];
-        state = BranchListState::new().with_branches(updated_branches);
-        state.detail_panel_tab = saved_tab;
-
-        // タブ状態が維持されていることを確認
-        assert_eq!(state.detail_panel_tab, DetailPanelTab::Session);
     }
 }
