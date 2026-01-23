@@ -1,6 +1,7 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
 ## [6.13.0] - 2026-01-23
 
 ### Bug Fixes

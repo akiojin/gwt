@@ -162,9 +162,15 @@ impl Session {
     }
 
     /// Get the global sessions directory (SPEC-ba3f610c FR-010)
+    /// Falls back to config_dir or temp_dir if home_dir is unavailable
+    /// Can be overridden via GWT_SESSIONS_DIR environment variable (for testing)
     pub fn sessions_dir() -> PathBuf {
+        if let Ok(dir) = std::env::var("GWT_SESSIONS_DIR") {
+            return PathBuf::from(dir);
+        }
         dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
+            .or_else(dirs::config_dir)
+            .unwrap_or_else(std::env::temp_dir)
             .join(".gwt")
             .join("sessions")
     }
@@ -351,20 +357,29 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let worktree_path = temp.path();
 
+        // Use temp directory as sessions dir to avoid writing to real home
+        let sessions_dir = temp.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::env::set_var("GWT_SESSIONS_DIR", sessions_dir.to_str().unwrap());
+
         // Create a local session file
         let local_path = worktree_path.join(Session::LOCAL_SESSION_NAME);
         let session = Session::new(worktree_path, "feature/migrate");
         session.save(&local_path).unwrap();
 
-        // Create a mock global sessions directory
-        let global_sessions_dir = temp.path().join("global_sessions");
-        std::fs::create_dir_all(&global_sessions_dir).unwrap();
-
         // Migration should move local to global
-        let _ = Session::migrate_local_to_global(worktree_path);
+        let result = Session::migrate_local_to_global(worktree_path);
+        assert!(result.is_ok());
 
         // Local file should be deleted after migration
-        // (Note: actual test depends on global path implementation)
+        assert!(!local_path.exists());
+
+        // Global file should exist
+        let global_path = Session::session_path(worktree_path);
+        assert!(global_path.exists());
+
+        // Cleanup
+        std::env::remove_var("GWT_SESSIONS_DIR");
     }
 
     #[test]
@@ -372,9 +387,10 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let legacy_path = temp.path().join(Session::LEGACY_JSON_NAME);
 
-        // Ensure sessions directory exists (may not exist in CI environment)
-        let sessions_dir = Session::sessions_dir();
-        std::fs::create_dir_all(&sessions_dir).expect("Failed to create sessions directory");
+        // Use temp directory as sessions dir to avoid writing to real home
+        let sessions_dir = temp.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::env::set_var("GWT_SESSIONS_DIR", sessions_dir.to_str().unwrap());
 
         let session = Session::new(temp.path(), "feature/legacy");
         std::fs::write(
@@ -394,8 +410,8 @@ mod tests {
         // Legacy JSON should be deleted after migration
         assert!(!legacy_path.exists());
 
-        // Cleanup: remove the global session file created by this test
-        let _ = std::fs::remove_file(&global_path);
+        // Cleanup
+        std::env::remove_var("GWT_SESSIONS_DIR");
     }
 
     #[test]
