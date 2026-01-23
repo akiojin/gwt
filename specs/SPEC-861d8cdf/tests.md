@@ -246,6 +246,59 @@ fn test_register_all_five_hooks() {
 }
 ```
 
+#### T-102-04: 手動再登録（uキー）
+
+```rust
+#[test]
+fn test_u_key_triggers_hook_reregistration() {
+    // ブランチリスト画面で 'u' キーを押すと再登録が実行される
+    let mut app = App::new();
+    app.screen = Screen::BranchList;
+
+    let message = app.handle_key_event(KeyEvent::from(KeyCode::Char('u')));
+
+    assert_eq!(message, Some(Message::ReregisterHooks));
+}
+
+#[test]
+fn test_u_key_in_filter_mode_is_input() {
+    // フィルターモード中は 'u' はフィルター入力として扱う
+    let mut app = App::new();
+    app.screen = Screen::BranchList;
+    app.branch_list.filter_mode = true;
+
+    let message = app.handle_key_event(KeyEvent::from(KeyCode::Char('u')));
+
+    assert_eq!(message, Some(Message::Char('u')));
+}
+
+#[test]
+fn test_reregister_hooks_success_shows_status_message() {
+    // 再登録成功時にステータスメッセージを表示
+    let mut app = App::new();
+    let temp_dir = tempdir().unwrap();
+    let settings_path = temp_dir.path().join(".claude/settings.json");
+
+    app.handle_message(Message::ReregisterHooks);
+
+    assert!(app.status_message.is_some());
+    assert!(app.status_message.unwrap().contains("registered") ||
+            app.status_message.unwrap().contains("success"));
+}
+
+#[test]
+fn test_reregister_hooks_failure_shows_error_message() {
+    // 再登録失敗時にエラーメッセージを表示
+    // settings.jsonへのアクセス権がない場合など
+    let mut app = App::new();
+    // ホームディレクトリが見つからない環境をシミュレート
+
+    app.handle_message(Message::ReregisterHooks);
+
+    assert!(app.status_message.is_some());
+}
+```
+
 ---
 
 ### T-103: 状態表示UIの実装
