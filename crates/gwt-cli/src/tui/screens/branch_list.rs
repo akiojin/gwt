@@ -1840,6 +1840,24 @@ fn session_panel_hint() -> Line<'static> {
     .right_aligned()
 }
 
+fn session_scroll_layout(inner: Rect, scrollable: bool) -> (Rect, Option<Rect>) {
+    if !scrollable || inner.width <= 1 {
+        return (inner, None);
+    }
+
+    let content = Rect {
+        width: inner.width.saturating_sub(1),
+        ..inner
+    };
+    let scrollbar = Rect {
+        x: inner.x + inner.width.saturating_sub(1),
+        y: inner.y,
+        width: 1,
+        height: inner.height,
+    };
+    (content, Some(scrollbar))
+}
+
 fn build_summary_links(repo_web_url: Option<&String>, branch: Option<&BranchItem>) -> SummaryLinks {
     let Some(branch) = branch else {
         return SummaryLinks::default();
@@ -2110,13 +2128,30 @@ fn render_session_panel(
         )));
     }
 
-    let wrapped_lines = wrap_lines_by_char(lines, inner.width as usize);
-    let total_lines = wrapped_lines.len();
-    let max_scroll = total_lines.saturating_sub(inner.height as usize);
-    state.update_session_scroll_bounds(max_scroll, inner.height as usize);
+    let mut wrapped_lines = wrap_lines_by_char(lines.clone(), inner.width as usize);
+    let mut total_lines = wrapped_lines.len();
+    let scrollable = total_lines > inner.height as usize;
+    let (content_area, scrollbar_area) = session_scroll_layout(inner, scrollable);
+    if content_area.width != inner.width {
+        wrapped_lines = wrap_lines_by_char(lines, content_area.width as usize);
+        total_lines = wrapped_lines.len();
+    }
+
+    let max_scroll = total_lines.saturating_sub(content_area.height as usize);
+    state.update_session_scroll_bounds(max_scroll, content_area.height as usize);
 
     let paragraph = Paragraph::new(wrapped_lines).scroll((state.session_scroll_offset as u16, 0));
-    frame.render_widget(paragraph, inner);
+    frame.render_widget(paragraph, content_area);
+
+    if let Some(scrollbar_area) = scrollbar_area {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("^"))
+            .end_symbol(Some("v"));
+        let mut scrollbar_state = ScrollbarState::new(total_lines)
+            .position(state.session_scroll_offset)
+            .viewport_content_length(content_area.height as usize);
+        frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+    }
 }
 
 fn render_markdown_lines(markdown: &str) -> Vec<Line<'static>> {
@@ -2427,6 +2462,52 @@ mod tests {
         assert_eq!(wrapped.len(), 2);
         assert_eq!(line_text(&wrapped[0]), "abc");
         assert_eq!(line_text(&wrapped[1]), "def");
+    }
+
+    #[test]
+    fn test_session_scroll_layout_no_scrollbar_when_not_scrollable() {
+        let inner = Rect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 5,
+        };
+        let (content, scrollbar) = session_scroll_layout(inner, false);
+        assert_eq!(content, inner);
+        assert!(scrollbar.is_none());
+    }
+
+    #[test]
+    fn test_session_scroll_layout_scrollbar_when_scrollable() {
+        let inner = Rect {
+            x: 2,
+            y: 3,
+            width: 10,
+            height: 5,
+        };
+        let (content, scrollbar) = session_scroll_layout(inner, true);
+        assert_eq!(content.width, 9);
+        assert_eq!(content.x, inner.x);
+        assert_eq!(content.y, inner.y);
+        assert_eq!(content.height, inner.height);
+        let scrollbar = scrollbar.expect("scrollbar");
+        assert_eq!(scrollbar.x, inner.x + inner.width - 1);
+        assert_eq!(scrollbar.y, inner.y);
+        assert_eq!(scrollbar.width, 1);
+        assert_eq!(scrollbar.height, inner.height);
+    }
+
+    #[test]
+    fn test_session_scroll_layout_no_scrollbar_when_narrow() {
+        let inner = Rect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 5,
+        };
+        let (content, scrollbar) = session_scroll_layout(inner, true);
+        assert_eq!(content, inner);
+        assert!(scrollbar.is_none());
     }
 
     #[test]

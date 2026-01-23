@@ -371,9 +371,82 @@ impl WorktreeManager {
         Ok(())
     }
 
+    /// Remove a branch and its worktree if present (FR-011/FR-012)
+    pub fn cleanup_branch(
+        &self,
+        branch_name: &str,
+        force_worktree: bool,
+        force_branch: bool,
+    ) -> Result<()> {
+        debug!(
+            category = "worktree",
+            branch = branch_name,
+            force_worktree,
+            force_branch,
+            "Cleaning up branch"
+        );
+
+        let mut prune_error: Option<GwtError> = None;
+
+        if let Some(wt) = self.get_by_branch(branch_name)? {
+            if matches!(
+                wt.status,
+                WorktreeStatus::Missing | WorktreeStatus::Prunable
+            ) {
+                if let Err(err) = self.prune() {
+                    prune_error = Some(err);
+                }
+            } else {
+                match self.remove(&wt.path, force_worktree) {
+                    Ok(_) => {}
+                    Err(err) if Self::is_missing_worktree_error(&err) => {
+                        if let Err(err) = self.prune() {
+                            prune_error = Some(err);
+                        }
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+        }
+
+        if Branch::exists(&self.repo_root, branch_name)? {
+            Branch::delete(&self.repo_root, branch_name, force_branch)?;
+            info!(
+                category = "worktree",
+                operation = "cleanup_branch",
+                branch = branch_name,
+                "Branch deleted during cleanup"
+            );
+        }
+
+        if let Some(err) = prune_error {
+            return Err(err);
+        }
+
+        Ok(())
+    }
+
     /// Check if a branch is protected
     pub fn is_protected(branch_name: &str) -> bool {
         PROTECTED_BRANCHES.contains(&branch_name)
+    }
+
+    fn is_missing_worktree_error(err: &GwtError) -> bool {
+        match err {
+            GwtError::WorktreeNotFound { .. } => true,
+            GwtError::WorktreeRemoveFailed { .. } => true,
+            GwtError::GitOperationFailed { operation, details } => {
+                if operation != "worktree remove" {
+                    return false;
+                }
+                let message = details.to_lowercase();
+                message.contains("not a working tree")
+                    || message.contains("not a worktree")
+                    || message.contains("not a work tree")
+                    || message.contains("no such file or directory")
+            }
+            _ => false,
+        }
     }
 
     /// Detect orphaned worktrees
@@ -613,6 +686,45 @@ mod tests {
 
         manager.remove(&path, false).unwrap();
 
+        let worktrees = manager.list().unwrap();
+        assert_eq!(worktrees.len(), 1);
+    }
+
+    #[test]
+    fn test_cleanup_branch_without_worktree_deletes_branch() {
+        let temp = create_test_repo();
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+
+        Branch::create(temp.path(), "feature/no-worktree", "HEAD").unwrap();
+        assert!(Branch::exists(temp.path(), "feature/no-worktree").unwrap());
+
+        manager
+            .cleanup_branch("feature/no-worktree", false, true)
+            .unwrap();
+
+        assert!(!Branch::exists(temp.path(), "feature/no-worktree").unwrap());
+        let worktrees = manager.list().unwrap();
+        assert_eq!(worktrees.len(), 1);
+    }
+
+    #[test]
+    fn test_cleanup_branch_with_missing_worktree_path() {
+        let temp = create_test_repo();
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+
+        let wt = manager
+            .create_new_branch("feature/missing-worktree", None)
+            .unwrap();
+        let wt_path = wt.path.clone();
+
+        std::fs::remove_dir_all(&wt_path).unwrap();
+        assert!(Branch::exists(temp.path(), "feature/missing-worktree").unwrap());
+
+        manager
+            .cleanup_branch("feature/missing-worktree", false, true)
+            .unwrap();
+
+        assert!(!Branch::exists(temp.path(), "feature/missing-worktree").unwrap());
         let worktrees = manager.list().unwrap();
         assert_eq!(worktrees.len(), 1);
     }
