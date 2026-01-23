@@ -150,7 +150,7 @@ Summarize the following git commits for branch '{branch_name}':
 | 操作       | タイムアウト |
 | ---------- | ------------ |
 | 接続       | 5秒          |
-| 読み取り   | 30秒         |
+| 読み取り   | 600秒        |
 
 ### リトライ
 
