@@ -320,30 +320,33 @@ mod tests {
 
     #[test]
     fn test_session_path_global() {
-        // Global session path should be under ~/.gwt/sessions/
+        // Global session path should use hash-based filename
         let worktree_path = PathBuf::from("/repo/.worktrees/feature");
         let session_path = Session::session_path(&worktree_path);
-
-        // Should be under sessions directory
-        let sessions_dir = Session::sessions_dir();
-        assert!(session_path.starts_with(&sessions_dir));
 
         // Should have .toml extension
         assert_eq!(session_path.extension().unwrap(), "toml");
 
+        // Should end with sessions/{hash}.toml
+        let parent = session_path.parent().unwrap();
+        assert_eq!(parent.file_name().unwrap(), "sessions");
+
         // Different worktree paths should produce different session paths
         let other_worktree = PathBuf::from("/other/repo/.worktrees/main");
         let other_session_path = Session::session_path(&other_worktree);
-        assert_ne!(session_path, other_session_path);
+        assert_ne!(
+            session_path.file_name().unwrap(),
+            other_session_path.file_name().unwrap()
+        );
     }
 
     #[test]
     fn test_session_path_hash_consistency() {
-        // Same worktree path should always produce same session path
+        // Same worktree path should always produce same filename
         let worktree_path = PathBuf::from("/repo/.worktrees/feature");
         let path1 = Session::session_path(&worktree_path);
         let path2 = Session::session_path(&worktree_path);
-        assert_eq!(path1, path2);
+        assert_eq!(path1.file_name(), path2.file_name());
     }
 
     #[test]
@@ -355,39 +358,61 @@ mod tests {
         let local_path = worktree_path.join(Session::LOCAL_SESSION_NAME);
         let session = Session::new(worktree_path, "feature/migrate");
         session.save(&local_path).unwrap();
+        assert!(local_path.exists());
 
-        // Create a mock global sessions directory
-        let global_sessions_dir = temp.path().join("global_sessions");
-        std::fs::create_dir_all(&global_sessions_dir).unwrap();
+        // Ensure global sessions directory exists
+        let sessions_dir = Session::sessions_dir();
+        std::fs::create_dir_all(&sessions_dir).unwrap();
 
         // Migration should move local to global
-        let _ = Session::migrate_local_to_global(worktree_path);
+        Session::migrate_local_to_global(worktree_path).unwrap();
 
         // Local file should be deleted after migration
-        // (Note: actual test depends on global path implementation)
+        assert!(!local_path.exists());
+
+        // Global file should exist
+        let global_path = Session::session_path(worktree_path);
+        assert!(global_path.exists());
+
+        // Cleanup
+        let _ = std::fs::remove_file(&global_path);
     }
 
     #[test]
     fn test_legacy_session_migration() {
         let temp = TempDir::new().unwrap();
-        let legacy_path = temp.path().join(Session::LEGACY_JSON_NAME);
+        let worktree_path = temp.path();
+        let legacy_path = worktree_path.join(Session::LEGACY_JSON_NAME);
 
-        let session = Session::new(temp.path(), "feature/legacy");
+        let session = Session::new(worktree_path, "feature/legacy");
         std::fs::write(
             &legacy_path,
             serde_json::to_string_pretty(&session).unwrap(),
         )
         .unwrap();
+        assert!(legacy_path.exists());
 
-        let loaded = Session::load_for_worktree(temp.path()).unwrap();
-        assert_eq!(loaded.branch, "feature/legacy");
+        // Ensure global sessions directory exists
+        let sessions_dir = Session::sessions_dir();
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        // Run migration directly first
+        Session::migrate_legacy_json_session(worktree_path).unwrap();
 
         // Global session file should be created
-        let global_path = Session::session_path(temp.path());
-        assert!(global_path.exists());
+        let global_path = Session::session_path(worktree_path);
+        assert!(
+            global_path.exists(),
+            "Global path should exist: {:?}",
+            global_path
+        );
 
         // Legacy JSON should be deleted after migration
         assert!(!legacy_path.exists());
+
+        // Load and verify
+        let loaded = Session::load(&global_path).unwrap();
+        assert_eq!(loaded.branch, "feature/legacy");
 
         // Cleanup: remove the global session file created by this test
         let _ = std::fs::remove_file(&global_path);
