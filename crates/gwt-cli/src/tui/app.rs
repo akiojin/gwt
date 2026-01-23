@@ -445,6 +445,8 @@ pub enum Message {
     ConfirmAgentTermination,
     /// Execute agent termination after confirmation
     ExecuteAgentTermination,
+    /// FR-102g: Manually re-register Claude Code hooks (u key)
+    ReregisterHooks,
 }
 
 impl Model {
@@ -3535,6 +3537,33 @@ impl Model {
                     self.terminate_agent_pane(&branch_name);
                 }
             }
+            Message::ReregisterHooks => {
+                // FR-102g: Manually re-register Claude Code hooks
+                if let Some(settings_path) = get_claude_settings_path() {
+                    match register_gwt_hooks(&settings_path) {
+                        Ok(()) => {
+                            self.status_message = Some("Claude Code hooks registered.".to_string());
+                            self.status_message_time = Some(Instant::now());
+                            debug!(
+                                category = "hooks",
+                                "Manually re-registered Claude Code hooks"
+                            );
+                        }
+                        Err(e) => {
+                            self.status_message = Some(format!("Failed to register hooks: {}", e));
+                            self.status_message_time = Some(Instant::now());
+                            warn!(
+                                category = "hooks",
+                                error = %e,
+                                "Failed to manually re-register Claude Code hooks"
+                            );
+                        }
+                    }
+                } else {
+                    self.status_message = Some("Could not find Claude settings path.".to_string());
+                    self.status_message_time = Some(Instant::now());
+                }
+            }
             Message::Tab => match self.screen {
                 Screen::Settings => self.settings.next_category(),
                 Screen::BranchList => {
@@ -4940,6 +4969,14 @@ impl Model {
                         Some(Message::NavigateTo(Screen::Logs))
                     } else {
                         Some(Message::Char('l'))
+                    }
+                }
+                (KeyCode::Char('u'), KeyModifiers::NONE) => {
+                    // FR-102g: In filter mode, 'u' goes to filter input
+                    if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
+                        Some(Message::ReregisterHooks)
+                    } else {
+                        Some(Message::Char('u'))
                     }
                 }
                 (KeyCode::Char('f'), KeyModifiers::NONE) if is_key_press => {
