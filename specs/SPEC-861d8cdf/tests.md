@@ -246,6 +246,93 @@ fn test_register_all_five_hooks() {
 }
 ```
 
+#### T-102-04: 手動再登録（uキー）
+
+※ `Message::ReregisterHooks` 等は非公開のためユニットテスト不可。統合テストで検証。
+
+#### T-102-05: 一時実行検出（FR-102i）
+
+```rust
+#[test]
+fn test_is_temporary_execution_bunx() {
+    // bunxキャッシュパスを検出
+    let exe_path = "/home/user/.bun/install/cache/@akiojin/gwt@1.0.0/gwt";
+    assert!(is_temporary_execution_path(exe_path).is_some());
+}
+
+#[test]
+fn test_is_temporary_execution_npx() {
+    // npxキャッシュパスを検出
+    let exe_path = "/home/user/.npm/_npx/12345/node_modules/@akiojin/gwt/gwt";
+    assert!(is_temporary_execution_path(exe_path).is_some());
+}
+
+#[test]
+fn test_is_temporary_execution_global_install() {
+    // グローバルインストールは一時実行ではない
+    let exe_path = "/usr/local/bin/gwt";
+    assert!(is_temporary_execution_path(exe_path).is_none());
+}
+
+#[test]
+fn test_is_temporary_execution_local_dev() {
+    // ローカル開発ビルドは一時実行ではない
+    let exe_path = "/home/user/projects/gwt/target/release/gwt";
+    assert!(is_temporary_execution_path(exe_path).is_none());
+}
+```
+
+```rust
+#[test]
+fn test_u_key_triggers_hook_reregistration() {
+    // ブランチリスト画面で 'u' キーを押すと再登録が実行される
+    let mut app = App::new();
+    app.screen = Screen::BranchList;
+
+    let message = app.handle_key_event(KeyEvent::from(KeyCode::Char('u')));
+
+    assert_eq!(message, Some(Message::ReregisterHooks));
+}
+
+#[test]
+fn test_u_key_in_filter_mode_is_input() {
+    // フィルターモード中は 'u' はフィルター入力として扱う
+    let mut app = App::new();
+    app.screen = Screen::BranchList;
+    app.branch_list.filter_mode = true;
+
+    let message = app.handle_key_event(KeyEvent::from(KeyCode::Char('u')));
+
+    assert_eq!(message, Some(Message::Char('u')));
+}
+
+#[test]
+fn test_reregister_hooks_success_shows_status_message() {
+    // 再登録成功時にステータスメッセージを表示
+    let mut app = App::new();
+    let temp_dir = tempdir().unwrap();
+    let settings_path = temp_dir.path().join(".claude/settings.json");
+
+    app.handle_message(Message::ReregisterHooks);
+
+    assert!(app.status_message.is_some());
+    assert!(app.status_message.unwrap().contains("registered") ||
+            app.status_message.unwrap().contains("success"));
+}
+
+#[test]
+fn test_reregister_hooks_failure_shows_error_message() {
+    // 再登録失敗時にエラーメッセージを表示
+    // settings.jsonへのアクセス権がない場合など
+    let mut app = App::new();
+    // ホームディレクトリが見つからない環境をシミュレート
+
+    app.handle_message(Message::ReregisterHooks);
+
+    assert!(app.status_message.is_some());
+}
+```
+
 ---
 
 ### T-103: 状態表示UIの実装

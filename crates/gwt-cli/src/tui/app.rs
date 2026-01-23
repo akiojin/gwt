@@ -18,8 +18,9 @@ use gwt_core::ai::{
 };
 use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{
-    get_claude_settings_path, is_gwt_hooks_registered, register_gwt_hooks, reregister_gwt_hooks,
-    save_session_entry, AISettings, Profile, ProfilesConfig, ResolvedAISettings, ToolSessionEntry,
+    get_claude_settings_path, is_gwt_hooks_registered, is_temporary_execution, register_gwt_hooks,
+    reregister_gwt_hooks, save_session_entry, AISettings, Profile, ProfilesConfig,
+    ResolvedAISettings, ToolSessionEntry,
 };
 use gwt_core::error::GwtError;
 use gwt_core::git::{Branch, PrCache, Remote, Repository};
@@ -445,6 +446,8 @@ pub enum Message {
     ConfirmAgentTermination,
     /// Execute agent termination after confirmation
     ExecuteAgentTermination,
+    /// FR-102g: Manually re-register Claude Code hooks (u key)
+    ReregisterHooks,
 }
 
 impl Model {
@@ -562,9 +565,14 @@ impl Model {
             }
 
             // SPEC-861d8cdf T-104: Check if hook setup is needed on first startup
+            // FR-102i: Show warning if running from temporary execution environment
             if model.tmux_mode.is_multi() && !is_gwt_hooks_registered(&settings_path) {
                 model.pending_hook_setup = true;
-                model.confirm = ConfirmState::hook_setup();
+                model.confirm = if let Some(exe_path) = is_temporary_execution() {
+                    ConfirmState::hook_setup_with_warning(&exe_path)
+                } else {
+                    ConfirmState::hook_setup()
+                };
                 model.screen_stack.push(model.screen.clone());
                 model.screen = Screen::Confirm;
             }
@@ -3238,7 +3246,7 @@ impl Model {
                             role: AgentRole::User,
                             content,
                         });
-                        self.agent_mode.clear_input();
+                        self.agent_mode.input.clear();
                         self.agent_mode.last_error = None;
                         self.agent_mode.set_waiting(true);
                         let messages = self.agent_mode.messages.clone();
@@ -3367,7 +3375,7 @@ impl Model {
                     // Log search mode - add character to search
                     self.logs.search.push(c);
                 } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
-                    self.agent_mode.insert_char(c);
+                    self.agent_mode.input.push(c);
                 } else if matches!(self.screen, Screen::AISettingsWizard) {
                     if self.ai_wizard.show_delete_confirm {
                         // Handle delete confirmation
@@ -3435,7 +3443,7 @@ impl Model {
                     // Log search mode - delete character
                     self.logs.search.pop();
                 } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
-                    self.agent_mode.backspace();
+                    self.agent_mode.input.pop();
                 } else if matches!(self.screen, Screen::AISettingsWizard)
                     && self.ai_wizard.is_text_input()
                 {
@@ -3456,8 +3464,6 @@ impl Model {
                     && self.ai_wizard.is_text_input()
                 {
                     self.ai_wizard.cursor_left();
-                } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
-                    self.agent_mode.cursor_left();
                 }
             }
             Message::CursorRight => {
@@ -3474,8 +3480,6 @@ impl Model {
                     && self.ai_wizard.is_text_input()
                 {
                     self.ai_wizard.cursor_right();
-                } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
-                    self.agent_mode.cursor_right();
                 }
             }
             Message::RefreshData => {
@@ -3533,6 +3537,40 @@ impl Model {
                 // FR-042: Execute tmux kill-pane
                 if let Some(branch_name) = self.pending_agent_termination.take() {
                     self.terminate_agent_pane(&branch_name);
+                }
+            }
+            Message::ReregisterHooks => {
+                // FR-102g: Manually re-register Claude Code hooks
+                // FR-102i: Show warning if running from temporary execution environment
+                if let Some(exe_path) = is_temporary_execution() {
+                    // Show confirmation dialog for temporary execution
+                    self.pending_hook_setup = true;
+                    self.confirm = ConfirmState::hook_setup_with_warning(&exe_path);
+                    self.screen_stack.push(self.screen.clone());
+                    self.screen = Screen::Confirm;
+                } else if let Some(settings_path) = get_claude_settings_path() {
+                    match register_gwt_hooks(&settings_path) {
+                        Ok(()) => {
+                            self.status_message = Some("Claude Code hooks registered.".to_string());
+                            self.status_message_time = Some(Instant::now());
+                            debug!(
+                                category = "hooks",
+                                "Manually re-registered Claude Code hooks"
+                            );
+                        }
+                        Err(e) => {
+                            self.status_message = Some(format!("Failed to register hooks: {}", e));
+                            self.status_message_time = Some(Instant::now());
+                            warn!(
+                                category = "hooks",
+                                error = %e,
+                                "Failed to manually re-register Claude Code hooks"
+                            );
+                        }
+                    }
+                } else {
+                    self.status_message = Some("Could not find Claude settings path.".to_string());
+                    self.status_message_time = Some(Instant::now());
                 }
             }
             Message::Tab => match self.screen {
@@ -4346,7 +4384,7 @@ impl Model {
 
         // Header (for branch list screen, render boxed header)
         if needs_header {
-            if matches!(base_screen, Screen::BranchList | Screen::AgentMode) {
+            if matches!(base_screen, Screen::BranchList) {
                 self.view_boxed_header(frame, chunks[0]);
             } else {
                 self.view_header(frame, chunks[0], &base_screen);
@@ -4940,6 +4978,14 @@ impl Model {
                         Some(Message::NavigateTo(Screen::Logs))
                     } else {
                         Some(Message::Char('l'))
+                    }
+                }
+                (KeyCode::Char('u'), KeyModifiers::NONE) => {
+                    // FR-102g: In filter mode, 'u' goes to filter input
+                    if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
+                        Some(Message::ReregisterHooks)
+                    } else {
+                        Some(Message::Char('u'))
                     }
                 }
                 (KeyCode::Char('f'), KeyModifiers::NONE) if is_key_press => {

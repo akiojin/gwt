@@ -33,6 +33,36 @@ fn get_gwt_executable_path() -> String {
         .unwrap_or_else(|| "gwt".to_string())
 }
 
+/// Patterns indicating temporary execution environments (bunx, npx, etc.)
+/// FR-102i: Detect when gwt is running from a cache directory
+const TEMP_EXECUTION_PATTERNS: &[&str] = &[
+    ".bun/install/cache/",
+    "/tmp/bunx-",
+    "/.npm/_npx/",
+    "node_modules/.cache/",
+];
+
+/// Check if gwt is running from a temporary execution environment (bunx, npx, etc.)
+///
+/// Returns Some(exe_path) if running from a temporary location, None otherwise.
+/// FR-102i: Used to warn users that hooks may not work correctly.
+pub fn is_temporary_execution() -> Option<String> {
+    let exe_path = get_gwt_executable_path();
+    is_temporary_execution_path(&exe_path)
+}
+
+/// Check if the given path indicates a temporary execution environment
+///
+/// This is a separate function for testability.
+pub fn is_temporary_execution_path(exe_path: &str) -> Option<String> {
+    for pattern in TEMP_EXECUTION_PATTERNS {
+        if exe_path.contains(pattern) {
+            return Some(exe_path.to_string());
+        }
+    }
+    None
+}
+
 /// Claude Code settings.json structure (partial)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ClaudeSettings {
@@ -615,5 +645,57 @@ mod tests {
         // Verify the new path overwrites the old one
         assert!(!content.contains("/path/to/old-gwt"));
         assert!(content.contains("/path/to/new-gwt"));
+    }
+
+    // T-102-05: Temporary execution detection tests (FR-102i)
+
+    #[test]
+    fn test_is_temporary_execution_bunx() {
+        // bunx cache path should be detected
+        let exe_path = "/home/user/.bun/install/cache/@akiojin/gwt@1.0.0/gwt";
+        assert!(is_temporary_execution_path(exe_path).is_some());
+    }
+
+    #[test]
+    fn test_is_temporary_execution_npx() {
+        // npx cache path should be detected
+        let exe_path = "/home/user/.npm/_npx/12345/node_modules/@akiojin/gwt/gwt";
+        assert!(is_temporary_execution_path(exe_path).is_some());
+    }
+
+    #[test]
+    fn test_is_temporary_execution_tmp_bunx() {
+        // /tmp/bunx- path should be detected
+        let exe_path = "/tmp/bunx-abc123/gwt";
+        assert!(is_temporary_execution_path(exe_path).is_some());
+    }
+
+    #[test]
+    fn test_is_temporary_execution_node_modules_cache() {
+        // node_modules/.cache path should be detected
+        let exe_path = "/project/node_modules/.cache/gwt/gwt";
+        assert!(is_temporary_execution_path(exe_path).is_some());
+    }
+
+    #[test]
+    fn test_is_temporary_execution_global_install() {
+        // Global install should NOT be detected as temporary
+        let exe_path = "/usr/local/bin/gwt";
+        assert!(is_temporary_execution_path(exe_path).is_none());
+    }
+
+    #[test]
+    fn test_is_temporary_execution_local_dev() {
+        // Local development build should NOT be detected as temporary
+        let exe_path = "/home/user/projects/gwt/target/release/gwt";
+        assert!(is_temporary_execution_path(exe_path).is_none());
+    }
+
+    #[test]
+    fn test_is_temporary_execution_returns_path() {
+        // Should return the executable path when detected
+        let exe_path = "/home/user/.bun/install/cache/@akiojin/gwt@1.0.0/gwt";
+        let result = is_temporary_execution_path(exe_path);
+        assert_eq!(result, Some(exe_path.to_string()));
     }
 }
