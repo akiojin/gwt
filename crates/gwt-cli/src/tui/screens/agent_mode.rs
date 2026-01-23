@@ -132,7 +132,7 @@ fn render_chat_panel(
 
     if let Some(status) = status_message {
         lines.push(Line::from(Span::styled(
-            status,
+            status.to_string(),
             Style::default().fg(Color::Yellow),
         )));
         lines.push(Line::from(""));
@@ -140,7 +140,7 @@ fn render_chat_panel(
 
     if let Some(error) = state.last_error.as_deref() {
         lines.push(Line::from(Span::styled(
-            error,
+            error.to_string(),
             Style::default().fg(Color::Yellow),
         )));
         lines.push(Line::from(""));
@@ -152,16 +152,16 @@ fn render_chat_panel(
             .as_deref()
             .unwrap_or("AI settings are required.");
         lines.push(Line::from(Span::styled(
-            message,
+            message.to_string(),
             Style::default().fg(Color::Yellow),
         )));
         lines.push(Line::from(Span::styled(
-            "Press Enter to configure AI settings.",
+            "Press Enter to configure AI settings.".to_string(),
             Style::default().fg(Color::DarkGray),
         )));
     } else if state.messages.is_empty() {
         lines.push(Line::from(Span::styled(
-            "Start by describing your task.",
+            "Start by describing your task.".to_string(),
             Style::default().fg(Color::DarkGray),
         )));
     } else {
@@ -173,14 +173,14 @@ fn render_chat_panel(
             };
             lines.push(Line::from(vec![
                 Span::styled(format!("{}:", label), Style::default().fg(color)),
-                Span::raw(" "),
+                Span::raw(" ".to_string()),
                 Span::raw(msg.content.clone()),
             ]));
             lines.push(Line::from(""));
         }
         if state.is_waiting {
             lines.push(Line::from(Span::styled(
-                "Thinking...",
+                "Thinking...".to_string(),
                 Style::default().fg(Color::DarkGray),
             )));
         }
@@ -203,14 +203,14 @@ fn render_task_panel(state: &AgentModeState, frame: &mut Frame, area: Rect) {
     let mut lines: Vec<Line<'static>> = Vec::new();
     if state.tasks.is_empty() {
         lines.push(Line::from(Span::styled(
-            "No tasks yet.",
+            "No tasks yet.".to_string(),
             Style::default().fg(Color::DarkGray),
         )));
     } else {
         for task in &state.tasks {
             lines.push(Line::from(vec![
                 Span::styled(task.title.clone(), Style::default().fg(Color::White)),
-                Span::raw(" "),
+                Span::raw(" ".to_string()),
                 Span::styled(
                     format!("[{}]", task.status),
                     Style::default().fg(Color::DarkGray),
@@ -294,11 +294,11 @@ fn wrap_spans_to_lines(spans: &[Span<'static>], width: u16) -> Vec<Line<'static>
     let mut segments: Vec<(Style, String)> = Vec::new();
     let mut current_width = 0usize;
 
-    let mut flush_line = |segments: &mut Vec<(Style, String)>, lines: &mut Vec<Line>| {
+    let flush_line = |segments: &mut Vec<(Style, String)>, lines: &mut Vec<Line>| {
         if segments.is_empty() {
             lines.push(Line::from(""));
         } else {
-            let spans = segments
+            let spans: Vec<Span<'static>> = segments
                 .drain(..)
                 .map(|(style, text)| Span::styled(text, style))
                 .collect();
