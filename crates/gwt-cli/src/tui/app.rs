@@ -85,6 +85,10 @@ fn format_ai_error(err: AIError) -> String {
     err.to_string()
 }
 
+fn background_window_name(branch_name: &str) -> String {
+    branch_name.to_string()
+}
+
 fn session_poll_due(last_poll: Option<Instant>, now: Instant) -> bool {
     last_poll
         .map(|last| now.duration_since(last) >= SESSION_POLL_INTERVAL)
@@ -1918,10 +1922,7 @@ impl Model {
         };
 
         // Hide the pane (break to background window)
-        let window_name = format!(
-            "gwt-agent-{}",
-            pane.branch_name.replace('/', "-").replace(' ', "_")
-        );
+        let window_name = background_window_name(&pane.branch_name);
 
         match gwt_core::tmux::hide_pane(&pane.pane_id, &window_name) {
             Ok(background_window) => {
@@ -5431,6 +5432,12 @@ mod tests {
             tool_version: None,
             timestamp: 0,
         }
+    }
+
+    #[test]
+    fn test_background_window_name_uses_branch_name_only() {
+        let branch = "feature/clean-name";
+        assert_eq!(background_window_name(branch), branch);
     }
 
     fn sample_branch_with_session(name: &str) -> BranchItem {
