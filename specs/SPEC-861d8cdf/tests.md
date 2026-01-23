@@ -248,6 +248,40 @@ fn test_register_all_five_hooks() {
 
 #### T-102-04: 手動再登録（uキー）
 
+※ `Message::ReregisterHooks` 等は非公開のためユニットテスト不可。統合テストで検証。
+
+#### T-102-05: 一時実行検出（FR-102i）
+
+```rust
+#[test]
+fn test_is_temporary_execution_bunx() {
+    // bunxキャッシュパスを検出
+    let exe_path = "/home/user/.bun/install/cache/@akiojin/gwt@1.0.0/gwt";
+    assert!(is_temporary_execution_path(exe_path).is_some());
+}
+
+#[test]
+fn test_is_temporary_execution_npx() {
+    // npxキャッシュパスを検出
+    let exe_path = "/home/user/.npm/_npx/12345/node_modules/@akiojin/gwt/gwt";
+    assert!(is_temporary_execution_path(exe_path).is_some());
+}
+
+#[test]
+fn test_is_temporary_execution_global_install() {
+    // グローバルインストールは一時実行ではない
+    let exe_path = "/usr/local/bin/gwt";
+    assert!(is_temporary_execution_path(exe_path).is_none());
+}
+
+#[test]
+fn test_is_temporary_execution_local_dev() {
+    // ローカル開発ビルドは一時実行ではない
+    let exe_path = "/home/user/projects/gwt/target/release/gwt";
+    assert!(is_temporary_execution_path(exe_path).is_none());
+}
+```
+
 ```rust
 #[test]
 fn test_u_key_triggers_hook_reregistration() {
