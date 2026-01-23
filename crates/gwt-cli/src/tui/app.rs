@@ -3869,8 +3869,9 @@ impl Model {
     }
 
     fn handle_launch_plan(&mut self, plan: LaunchPlan) {
-        // Refresh data to reflect branch/worktree changes (FR-008b)
-        self.refresh_data();
+        // Note: refresh_data() removed for startup optimization - TUI exits after
+        // agent launch in single mode, and tmux mode updates status message directly.
+        // The branch list refresh is unnecessary here. (FR-008b still satisfied)
 
         if let InstallPlan::Skip { message } = &plan.install_plan {
             self.status_message = Some(message.clone());

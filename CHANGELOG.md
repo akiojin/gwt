@@ -1,6 +1,74 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+## [6.13.0] - 2026-01-23
+
+### Bug Fixes
+
+- AI設定ウィザードでdキーが入力できない問題を修正 (#722)
+- ブランチステータス更新中も詳細パネルにブランチ情報を表示 (#721)
+- 起動直後終了時の可視化を改善 (#719)
+- タブ状態をグローバル管理に変更しリフレッシュ時のリセットを修正 (#724)
+- CHANGELOG.mdの重複エントリを修正
+- MacOSのPTYラッパーで引数解釈を遮断 (#731)
+- Hook登録を上書き更新方式に変更 (#734)
+- Worktree復元を無効化 (#735)
+- タブ選択状態がリフレッシュ時にリセットされる問題を修正 (#736)
+- WindowsでClaudeのIS_SANDBOXを無効化 (#737)
+- Prioritize filter input over shortcuts (#746)
+- Remoteモードでリモート専用ブランチを表示 (#747)
+- MacOSのscriptラッパーから--を削除 (#748)
+- ブランチ詳細とセッション要約を文字単位で折り返し (#749)
+- ブランチ一覧のエージェントバージョン保持 (#752)
+- セッション要約のタイムアウトを10分に延長 (#753)
+- Tmux起動ラッパーのstatus変数衝突を回避 (#754)
+- Tmux起動ラッパーのstatus変数衝突を回避 (#756)
+- セッション要約の言語指示を明確化
+- Developとのマージコンフリクトを解消
+- Markdownlint違反を修正（連続空白行）
+- ブランチ一覧でリモートブランチの'remotes/'プレフィックスを削除 (#758)
+- Agent mode UI issues (#759)
+- Agent mode UI issues (#763)
+- TUIパネルのタイトルとボーダースタイルを統一 (#764)
+- Gwt hookコマンドの検出パターンを改善し重複登録を防止 (FR-102j) (#767)
+- セッションファイルをworktreeローカルからグローバルストレージに移行 (#768)
+
+### Features
+
+- Allow variable session summary highlights (#718)
+- 起動最適化 - 非同期化と進捗表示の改善 (#723)
+- **tui:** ブランチ名色分けとエージェント履歴永続化 (#730)
+- **tui:** シングルクリックでブランチ選択、ダブルクリックで実行に変更 (#740)
+- セッション要約に依頼と直近指示の明示を追加 (#742)
+- **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
+- **tui:** 全画面にマウスクリック対応を拡張 (#745)
+- セッション要約に状態と次アクション要件を追加 (#751)
+- セッション要約に依頼と直近指示の明示を追加
+- セッション要約に状態と次アクション要件を追加
+- Add agent mode scaffolding and branch list layout updates (#755)
+- ViewModeのデフォルトをAllからLocalに変更 (#760)
+- UキーでClaude Codeフック設定を手動再登録できる機能を追加 (#761)
+- Bunx/npx一時実行環境でのHook警告機能を追加 (FR-102i) (#762)
+
+### Miscellaneous Tasks
+
+- Add .gwt-session.toml to .gitignore
+- Merge main into develop
+- Merge origin/develop
+
+### Performance
+
+- エージェント起動時のブロッキング処理を削減 (#766)
+
+### Styling
+
+- Rustfmtフォーマット修正 (#732)
+
+### Testing
+
+- Hook setup重複登録防止のテスト追加 (#726)
+
 ## [6.12.0] - 2026-01-22
 
 ### Bug Fixes
