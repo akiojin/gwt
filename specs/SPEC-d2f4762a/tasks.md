@@ -220,7 +220,7 @@
 
 ## フェーズ4: ユーザーストーリー6 - Worktree復元の無効化
 
-**ストーリー**: Worktree作成時や起動時の自動復元・修復を行わず、手動解決のみ許可する。
+**ストーリー**: Worktree作成時や起動時の自動復元を行わず、repair操作はCLI/TUIから提供しない。
 
 **価値**: 予期しない削除や修復の自動実行を防ぎ、運用の透明性を高める。
 
@@ -228,11 +228,15 @@
 
 - [x] **T301** [US6] `crates/gwt-core/src/worktree/manager.rs` の既存パス時エラー/自動クリーンアップ無効化テストを更新
 - [x] **T302** [US6] `crates/gwt-cli/src/main.rs` にrepair無効化のテストを追加
+- [x] **T305** [US6] `crates/gwt-cli/src/cli.rs` に`gwt repair`が未定義サブコマンドとして扱われるテストを追加
 
 ### 実装
 
 - [x] **T303** [US6] `crates/gwt-core/src/worktree/manager.rs` で自動復元を無効化し、既存パスはエラーにする
 - [x] **T304** [US6] `crates/gwt-cli/src/main.rs` / `crates/gwt-cli/src/tui/app.rs` / `crates/gwt-cli/src/tui/screens/branch_list.rs` で自動クリーンアップとrepair操作を無効化し、キーバインド表示を更新
+- [x] **T306** [US6] `crates/gwt-cli/src/cli.rs` から`repair`サブコマンドを削除し、`crates/gwt-cli/src/main.rs` のrepairハンドラ/テストを削除
+- [x] **T307** [US6] `crates/gwt-cli/src/tui/app.rs` のRepairWorktreesメッセージを削除
+- [x] **T308** [US6] `crates/gwt-core/src/worktree/manager.rs` と `crates/gwt-core/src/git/repository.rs` のrepair APIを削除
 
 ## フェーズ5: ユーザーストーリー8 - ブランチ選択後のウィザードポップアップ (優先度: P0)
 

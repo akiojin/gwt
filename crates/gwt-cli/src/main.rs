@@ -152,7 +152,6 @@ fn handle_command(cmd: Commands, repo_root: &PathBuf, settings: &Settings) -> Re
         Commands::Init { force } => cmd_init(repo_root, force),
         Commands::Lock { target, reason } => cmd_lock(repo_root, &target, reason.as_deref()),
         Commands::Unlock { target } => cmd_unlock(repo_root, &target),
-        Commands::Repair { target } => cmd_repair(repo_root, target.as_deref()),
         Commands::Hook { action } => cmd_hook(action),
     }
 }
@@ -468,12 +467,6 @@ fn cmd_unlock(repo_root: &PathBuf, target: &str) -> Result<(), GwtError> {
     println!("Unlocked worktree: {}", wt.path.display());
 
     Ok(())
-}
-
-fn cmd_repair(_repo_root: &PathBuf, _target: Option<&str>) -> Result<(), GwtError> {
-    Err(GwtError::Internal(
-        "Worktree repair is disabled.".to_string(),
-    ))
 }
 
 /// Handle Claude Code hook subcommands (SPEC-861d8cdf FR-101/T-101/T-102)
@@ -2072,13 +2065,6 @@ mod tests {
             classify_exit(Some(1), None),
             ExitClassification::Failure { .. }
         ));
-    }
-
-    #[test]
-    fn test_cmd_repair_disabled() {
-        let err = cmd_repair(&PathBuf::from("/tmp"), None).unwrap_err();
-        assert!(matches!(err, GwtError::Internal(_)));
-        assert!(err.to_string().contains("Worktree repair is disabled."));
     }
 
     #[test]
