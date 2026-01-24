@@ -550,7 +550,6 @@ impl Repository {
             })
         }
     }
-
 }
 
 /// Information about a worktree from git worktree list
