@@ -125,12 +125,6 @@ pub enum Commands {
         target: String,
     },
 
-    /// Repair worktree metadata (disabled)
-    Repair {
-        /// Specific worktree to repair (repairs all if not specified)
-        target: Option<String>,
-    },
-
     /// Manage Claude Code hooks for agent status tracking (SPEC-861d8cdf)
     Hook {
         #[command(subcommand)]
@@ -213,5 +207,11 @@ mod tests {
             }) => {}
             other => panic!("unexpected parse result: {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_repair_subcommand_is_removed() {
+        let err = Cli::try_parse_from(["gwt", "repair"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
     }
 }

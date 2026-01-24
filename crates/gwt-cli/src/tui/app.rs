@@ -441,8 +441,6 @@ pub enum Message {
     WizardConfirm,
     /// Wizard: go back or close
     WizardBack,
-    /// Repair worktrees (disabled)
-    RepairWorktrees,
     /// Copy selected log to clipboard
     CopyLogToClipboard,
     /// FR-095: Hide active agent pane (ESC key in branch list)
@@ -3507,10 +3505,6 @@ impl Model {
             }
             Message::RefreshData => {
                 self.refresh_data();
-            }
-            Message::RepairWorktrees => {
-                self.status_message = Some("Worktree repair is disabled.".to_string());
-                self.status_message_time = Some(Instant::now());
             }
             Message::CopyLogToClipboard => {
                 if matches!(self.screen, Screen::Logs) {
