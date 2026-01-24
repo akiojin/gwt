@@ -1,8 +1,15 @@
 # タスク: ブランチサマリーパネル（セッション要約対応）
 
-**仕様ID**: `SPEC-4b893dae` | **日付**: 2026-01-19 | **更新日**: 2026-01-22
+**仕様ID**: `SPEC-4b893dae` | **日付**: 2026-01-19 | **更新日**: 2026-01-24
 **入力**: `specs/SPEC-4b893dae/` からの設計ドキュメント
 **前提条件**: plan.md、spec.md、data-model.md、contracts/openai-api.md、research.md、quickstart.md
+
+## 追加作業: AI設定モデル一覧スクロール (2026-01-24)
+
+- [x] **T8950** [P] [共通] `specs/SPEC-4b893dae/spec.md` / `specs/SPEC-4b893dae/plan.md` にモデル一覧スクロール要件を追記
+- [x] **T8951** [Impl] `crates/gwt-cli/src/tui/screens/ai_wizard.rs` にモデル一覧スクロールとスクロールバー表示を追加
+- [x] **T8952** [Test] `crates/gwt-cli/src/tui/screens/ai_wizard.rs` にモデル一覧スクロールのユニットテストを追加
+- [ ] **T8953** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
 
 ## 追加作業: セッション要約スクロールバー (2026-01-23)
 
