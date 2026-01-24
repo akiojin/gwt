@@ -2489,7 +2489,9 @@ impl Model {
         {
             match std::process::Command::new("open").arg(url).spawn() {
                 Ok(_) => return,
-                Err(err) => last_error = Some(err),
+                Err(err) => {
+                    last_error.replace(err);
+                }
             }
         }
 
@@ -2503,7 +2505,9 @@ impl Model {
             for (cmd, args) in candidates {
                 match std::process::Command::new(cmd).args(args).spawn() {
                     Ok(_) => return,
-                    Err(err) => last_error = Some(err),
+                    Err(err) => {
+                        last_error.replace(err);
+                    }
                 }
             }
         }
@@ -2515,7 +2519,9 @@ impl Model {
                 .spawn()
             {
                 Ok(_) => return,
-                Err(err) => last_error = Some(err),
+                Err(err) => {
+                    last_error.replace(err);
+                }
             }
 
             match std::process::Command::new("powershell")
@@ -2523,7 +2529,9 @@ impl Model {
                 .spawn()
             {
                 Ok(_) => return,
-                Err(err) => last_error = Some(err),
+                Err(err) => {
+                    last_error.replace(err);
+                }
             }
         }
 
