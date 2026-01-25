@@ -626,7 +626,7 @@
 - [x] **T1521** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に終了時の自動クリーンアップ無効化要件・方針を追記
 - [x] **T1522** [Test] `crates/gwt-cli/src/tui/app.rs` に終了時の自動クリーンアップが実行されないことを検証するテストを追加
 - [x] **T1523** [Impl] `crates/gwt-cli/src/tui/app.rs` の終了処理で `git worktree prune` を実行しないよう修正
-- [ ] **T1524** [検証] `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+- [x] **T1524** [検証] `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
 
 ## タスク凡例（追加分）
 
