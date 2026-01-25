@@ -1339,8 +1339,8 @@ fn get_bunx_command(npm_package: &str, version: &str) -> (String, Vec<String>) {
     // Try bunx first, but avoid project-local node_modules/.bin shims.
     let bunx_path = which::which("bunx").ok();
     let npx_path = which::which("npx").ok();
-    let runner_path = select_runner_executable(bunx_path, npx_path)
-        .unwrap_or_else(|| PathBuf::from("bunx"));
+    let runner_path =
+        select_runner_executable(bunx_path, npx_path).unwrap_or_else(|| PathBuf::from("bunx"));
     let runner_path_str = runner_path.to_string_lossy().to_string();
 
     let package_spec = if version == "latest" {
@@ -1388,7 +1388,12 @@ fn runner_requires_yes(executable: &str) -> bool {
     std::path::Path::new(executable)
         .file_name()
         .and_then(|name| name.to_str())
-        .map(|name| matches!(name.to_ascii_lowercase().as_str(), "npx" | "npx.cmd" | "npx.exe"))
+        .map(|name| {
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "npx" | "npx.cmd" | "npx.exe"
+            )
+        })
         .unwrap_or(false)
 }
 
