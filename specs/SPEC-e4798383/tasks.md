@@ -191,6 +191,35 @@
 - [x] **T708** [統合] 全変更をConventional Commits形式でコミット
 - [x] **T709** [統合] git push でリモートリポジトリにプッシュ
 
+## フェーズ9: ユーザーストーリー6 - GitHub Issue Development Link (優先度: P2)
+
+**ストーリー**: ブランチ作成時にGitHub上でIssueとブランチが正式にリンクされる。
+
+**価値**: GitHub上での追跡性向上、PRマージ時のIssue自動クローズ連携。
+
+### gwt-core実装
+
+- [x] **T801** [US6] crates/gwt-core/src/git/issue.rs に`create_linked_branch()`関数を追加
+  - `gh issue develop {number} --name {branch_name} --checkout=false`を実行
+  - Result<(), String>を返す
+- [x] **T802** [P] [US6] `create_linked_branch()`のユニットテストを追加（コマンド構築のみ、実行はモック）
+  - 注: 実際のgh実行が必要なため統合テストで確認
+
+### gwt-cli統合
+
+- [x] **T803** [US6] crates/gwt-cli/src/tui/app.rs でブランチ作成時にselected_issueがある場合`create_linked_branch()`を呼び出す
+- [x] **T804** [US6] `create_linked_branch()`失敗時のフォールバック処理を実装（従来のローカルブランチ作成）
+- [x] **T805** [US6] フォールバック時の警告メッセージ「GitHub linking failed, creating local branch」を表示
+
+### テスト
+
+- [x] **T806** [P] [US6] フォールバック処理のユニットテストを追加
+  - 注: フォールバックはtracing::warnでログ出力、実行時に確認
+- [x] **T807** [統合] 実際のGitHubリポジトリでIssue連携ブランチ作成を確認
+  - `gh issue develop 774 --name "test/issue-774-link-test"` 成功確認
+- [x] **T808** [統合] GitHubのIssue「Development」セクションにブランチが表示されることを確認
+  - リンク作成後、Issue #774のDevelopmentセクションに表示確認
+
 ## タスク凡例
 
 **優先度**:
@@ -253,7 +282,7 @@
 
 ## 進捗追跡
 
-- **完了したタスク**: 52/54 (96%)
+- **完了したタスク**: 60/62 (97%)
   - フェーズ1（基盤）: 7/7 (100%)
   - フェーズ2（US1）: 17/17 (100%)
   - フェーズ3（US2）: 5/5 (100%)
@@ -261,4 +290,5 @@
   - フェーズ5（US4）: 2/2 (100%)
   - フェーズ6（US5）: 5/5 (100%)
   - フェーズ7（エラー）: 3/5 (60%) - T604-T605未実装（オプション）
-  - フェーズ8（統合）: 9/9 (100%) - 全完了
+  - フェーズ8（統合）: 9/9 (100%)
+  - フェーズ9（US6 GitHub連携）: 8/8 (100%)

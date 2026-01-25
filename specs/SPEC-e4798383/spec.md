@@ -2,7 +2,7 @@
 
 **仕様ID**: `SPEC-e4798383`
 **作成日**: 2025-01-25
-**ステータス**: TDD完了（gwt-core）、実装進行中
+**ステータス**: US1-US6完了（97%）、T604-T605のみオプション
 **入力**: ユーザー説明: "ブランチタイプでbugfixを指定した場合に、GitHubのIssue番号を指定してブランチを作成する機能"
 
 ## ユーザーシナリオとテスト *(必須)*
@@ -82,6 +82,22 @@ feature、bugfix、hotfix、releaseの全ブランチタイプでIssue連携機�
 
 ---
 
+### ユーザーストーリー 6 - GitHub上でIssueとブランチを自動連携できる (優先度: P2)
+
+開発者がブランチ作成時に、GitHub上でIssueとブランチが正式にリンクされ、Issueの「Development」セクションに表示される。
+
+**この優先度の理由**: GitHub上での追跡性が向上し、PRを作成した際の自動クローズ連携も機能する。
+
+**独立したテスト**: `gh issue develop`コマンドでブランチを作成し、GitHub上でIssueの「Development」セクションにブランチが表示されることで完全にテスト可能。
+
+**受け入れシナリオ**:
+
+1. **前提条件** Issue #42を選択してブランチ作成、**操作** ウィザードを完了、**期待結果** GitHub上のIssue #42の「Development」セクションに作成したブランチがリンクされる
+2. **前提条件** リンクされたブランチからPRを作成、**操作** PRをマージ、**期待結果** Issue #42が自動的にクローズされる（PR説明に"Fixes #42"を含む場合）
+3. **前提条件** `gh issue develop`が失敗（権限不足等）、**操作** エラー発生、**期待結果** 従来のローカルブランチ作成にフォールバックし、警告を表示
+
+---
+
 ### エッジケース
 
 - gh CLIがインストールされていない場合、Issue選択ステップは自動的にスキップされる
@@ -115,6 +131,13 @@ feature、bugfix、hotfix、releaseの全ブランチタイプでIssue連携機�
 - **FR-013**: GitHub API呼び出し失敗時（オフライン、認証エラー）はエラーメッセージを表示して中止**しなければならない**
 - **FR-014**: 確認画面にはIssue情報（番号、タイトル）を表示**しなければならない**
 - **FR-015**: 存在しないIssue番号が指定された場合、警告を表示するが続行を許可**しなければならない**
+- **FR-016**: Issueを選択した場合、`gh issue develop`コマンドでGitHubにリンクされたブランチを作成**しなければならない**
+- **FR-016a**: `gh issue develop`コマンドは`--name`オプションでブランチ名を指定する**こと**
+- **FR-016b**: `gh issue develop`コマンドは`--checkout=false`オプションでチェックアウトを抑制する**こと**（worktree作成後にチェックアウトするため）
+- **FR-017**: `gh issue develop`が失敗した場合、従来のローカルブランチ作成にフォールバック**しなければならない**
+- **FR-017a**: フォールバック時は警告メッセージ「GitHub linking failed, creating local branch」を表示する**こと**
+- **FR-018**: Issueをスキップした場合（selected_issue=None）は従来のローカルブランチ作成を使用**しなければならない**
+- **FR-019**: `gh issue develop`の成功時、ログに「Branch linked to issue #N on GitHub」を出力**しなければならない**
 
 ### 非機能要件
 
@@ -160,10 +183,10 @@ feature、bugfix、hotfix、releaseの全ブランチタイプでIssue連携機�
 - closed状態のIssueの選択
 - Issue作成機能
 - Issueへのコメント追加機能
-- Pull RequestとIssueの自動リンク
 - Issueのlabel、assignee、milestoneによるフィルタリング
 - Issue情報のworktreeメタデータへの永続化
 - 複数Issueを1ブランチに紐付ける機能
+- PR作成時の自動クローズキーワード挿入（ユーザーがPR説明に"Fixes #N"を記載する必要あり）
 
 ## セキュリティとプライバシーの考慮事項 *(該当する場合)*
 
@@ -179,4 +202,5 @@ feature、bugfix、hotfix、releaseの全ブランチタイプでIssue連携機�
 ## 参考資料 *(該当する場合)*
 
 - [GitHub CLI Issue List](https://cli.github.com/manual/gh_issue_list)
+- [GitHub CLI Issue Develop](https://cli.github.com/manual/gh_issue_develop) - ブランチをIssueにリンクして作成
 - [既存ウィザード実装](../../crates/gwt-cli/src/tui/screens/wizard.rs)
