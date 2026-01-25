@@ -1107,8 +1107,9 @@ impl WizardState {
                     self.selected_issue = Some(issue);
                 }
             }
-            // If no issue selected (empty list or skip), proceed with no issue (FR-004)
+            // If no issue selected (empty list, error, or skip), proceed with no issue (FR-004, T603)
             // selected_issue remains None, new_branch_name remains empty
+            self.issue_error = None; // Clear error when skipping
             self.next_step();
             return WizardConfirmResult::Advance;
         }
@@ -2026,10 +2027,22 @@ fn render_issue_select_step(state: &WizardState, frame: &mut Frame, area: Rect) 
         return;
     }
 
-    // Show error state
+    // Show error state (T603: Guide user to skip flow)
     if let Some(ref error) = state.issue_error {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // Error message
+                Constraint::Length(1), // Skip hint
+            ])
+            .split(area);
+
         let error_text = Paragraph::new(error.as_str()).style(Style::default().fg(Color::Red));
-        frame.render_widget(error_text, area);
+        frame.render_widget(error_text, chunks[0]);
+
+        let skip_hint =
+            Paragraph::new("(Press Enter to skip)").style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(skip_hint, chunks[1]);
         return;
     }
 
