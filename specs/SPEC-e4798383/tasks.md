@@ -19,14 +19,14 @@
 
 - [x] **T001** [P] [基盤] crates/gwt-core/src/git/issue.rs を新規作成し、GitHubIssue構造体（number: u64, title: String, updated_at: String）を定義
 - [x] **T002** [P] [基盤] crates/gwt-core/src/git.rs にissueモジュールをエクスポート追加
-- [ ] **T003** [P] [基盤] crates/gwt-cli/src/tui/screens/wizard.rs のWizardStepにIssueSelectを追加
+- [x] **T003** [P] [基盤] crates/gwt-cli/src/tui/screens/wizard.rs のWizardStepにIssueSelectを追加
 
 ### WizardStateの拡張
 
-- [ ] **T004** [基盤] crates/gwt-cli/src/tui/screens/wizard.rs のWizardStateにselected_issue: Option<GitHubIssue>フィールドを追加
-- [ ] **T005** [基盤] crates/gwt-cli/src/tui/screens/wizard.rs のWizardStateにissue_list: Vec<GitHubIssue>フィールドを追加
-- [ ] **T006** [基盤] crates/gwt-cli/src/tui/screens/wizard.rs のWizardStateにissue_search_query: Stringフィールドを追加
-- [ ] **T007** [基盤] crates/gwt-cli/src/tui/screens/wizard.rs のWizardStateにissue_selected_index: usizeフィールドを追加
+- [x] **T004** [基盤] crates/gwt-cli/src/tui/screens/wizard.rs のWizardStateにselected_issue: Option<GitHubIssue>フィールドを追加
+- [x] **T005** [基盤] crates/gwt-cli/src/tui/screens/wizard.rs のWizardStateにissue_list: Vec<GitHubIssue>フィールドを追加
+- [x] **T006** [基盤] crates/gwt-cli/src/tui/screens/wizard.rs のWizardStateにissue_search_query: Stringフィールドを追加
+- [x] **T007** [基盤] crates/gwt-cli/src/tui/screens/wizard.rs のWizardStateにissue_selected_index: usizeフィールドを追加
 
 ## フェーズ2: ユーザーストーリー1 - GitHub Issueを選択してブランチを作成できる (優先度: P1)
 
@@ -42,23 +42,23 @@
 
 ### ウィザードフロー
 
-- [ ] **T104** [US1] crates/gwt-cli/src/tui/screens/wizard.rs のnext_step()関数にBranchTypeSelect → IssueSelectの遷移を追加
-- [ ] **T105** [US1] crates/gwt-cli/src/tui/screens/wizard.rs のnext_step()関数にIssueSelect → BranchNameInputの遷移を追加
-- [ ] **T106** [US1] crates/gwt-cli/src/tui/screens/wizard.rs のprev_step()関数にIssueSelect → BranchTypeSelectの遷移を追加
+- [x] **T104** [US1] crates/gwt-cli/src/tui/screens/wizard.rs のnext_step()関数にBranchTypeSelect → IssueSelectの遷移を追加
+- [x] **T105** [US1] crates/gwt-cli/src/tui/screens/wizard.rs のnext_step()関数にIssueSelect → BranchNameInputの遷移を追加
+- [x] **T106** [US1] crates/gwt-cli/src/tui/screens/wizard.rs のprev_step()関数にIssueSelect → BranchTypeSelectの遷移を追加
 
 ### ブランチ名自動生成
 
 - [x] **T107** [US1] crates/gwt-core/src/git/issue.rs にgenerate_branch_name()関数を実装（{type}/issue-{number}形式）
-- [ ] **T108** [US1] crates/gwt-cli/src/tui/screens/wizard.rs のIssue選択確定時にnew_branch_nameを自動設定する処理を追加
+- [x] **T108** [US1] crates/gwt-cli/src/tui/screens/wizard.rs のIssue選択確定時にnew_branch_nameを自動設定する処理を追加
 
 ### UI実装
 
-- [ ] **T109** [US1] crates/gwt-cli/src/tui/screens/wizard.rs にrender_issue_select_step()関数を実装
-- [ ] **T109a** [US1] Issue取得中は「Loading issues...」を表示する処理を実装
-- [ ] **T109b** [US1] Issue0件時は「No open issues」を表示する処理を実装
-- [ ] **T110** [US1] render_issue_select_step()でIssue一覧を「#番号: タイトル」形式で表示
-- [ ] **T111** [US1] crates/gwt-cli/src/tui/screens/wizard.rs のrender_wizard()にWizardStep::IssueSelectのケースを追加
-- [ ] **T112** [US1] crates/gwt-cli/src/tui/screens/wizard.rs のget_step_title()に「GitHub Issue」を追加
+- [x] **T109** [US1] crates/gwt-cli/src/tui/screens/wizard.rs にrender_issue_select_step()関数を実装
+- [x] **T109a** [US1] Issue取得中は「Loading issues...」を表示する処理を実装
+- [x] **T109b** [US1] Issue0件時は「No open issues」を表示する処理を実装
+- [x] **T110** [US1] render_issue_select_step()でIssue一覧を「#番号: タイトル」形式で表示
+- [x] **T111** [US1] crates/gwt-cli/src/tui/screens/wizard.rs のrender_wizard()にWizardStep::IssueSelectのケースを追加
+- [x] **T112** [US1] crates/gwt-cli/src/tui/screens/wizard.rs のget_step_title()に「GitHub Issue」を追加
 
 ### 確認画面
 
@@ -79,13 +79,13 @@
 
 ### スキップ機能
 
-- [ ] **T201** [US2] crates/gwt-cli/src/tui/screens/wizard.rs のhandle_issue_select_input()で空Enterでスキップする処理を実装
-- [ ] **T202** [US2] スキップ時はselected_issueをNoneのまま維持し、new_branch_nameを空のまま次のステップへ遷移
+- [x] **T201** [US2] crates/gwt-cli/src/tui/screens/wizard.rs のhandle_issue_select_input()で空Enterでスキップする処理を実装
+- [x] **T202** [US2] スキップ時はselected_issueをNoneのまま維持し、new_branch_nameを空のまま次のステップへ遷移
 
 ### gh CLI未インストール時の自動スキップ
 
-- [ ] **T203** [US2] crates/gwt-cli/src/tui/screens/wizard.rs のnext_step()でgh CLI未インストール時にIssueSelectをスキップ
-- [ ] **T204** [US2] スキップ時のユーザーへの通知は不要（シームレスに次のステップへ）
+- [x] **T203** [US2] crates/gwt-cli/src/tui/screens/wizard.rs のnext_step()でgh CLI未インストール時にIssueSelectをスキップ
+- [x] **T204** [US2] スキップ時のユーザーへの通知は不要（シームレスに次のステップへ）
 
 ### テスト
 
@@ -102,9 +102,9 @@
 ### 検索機能
 
 - [x] **T301** [US3] crates/gwt-core/src/git/issue.rs にfilter_issues_by_title()関数を実装
-- [ ] **T302** [US3] handle_issue_select_input()でキー入力時にissue_search_queryを更新
-- [ ] **T303** [US3] render_issue_select_step()でフィルタリング済みリストを表示
-- [ ] **T304** [US3] 検索クエリの表示UIを追加（入力欄）
+- [x] **T302** [US3] handle_issue_select_input()でキー入力時にissue_search_queryを更新
+- [x] **T303** [US3] render_issue_select_step()でフィルタリング済みリストを表示
+- [x] **T304** [US3] 検索クエリの表示UIを追加（入力欄）
 
 ### ソート
 
@@ -138,8 +138,8 @@
 ### 重複チェック
 
 - [x] **T501** [US5] crates/gwt-core/src/git/issue.rs にfind_branch_for_issue()関数を実装（issue-{number}を含むブランチを検索）
-- [ ] **T502** [US5] crates/gwt-cli/src/tui/screens/wizard.rs のIssue選択時に重複チェックを追加
-- [ ] **T503** [US5] 重複時のエラーメッセージ表示を実装
+- [x] **T502** [US5] crates/gwt-cli/src/tui/screens/wizard.rs のIssue選択時に重複チェックを追加
+- [x] **T503** [US5] 重複時のエラーメッセージ表示を実装
 
 ### テスト
 
@@ -152,8 +152,8 @@
 
 ### オフライン・認証エラー
 
-- [ ] **T601** [エラー] fetch_open_issues()でgh CLI実行エラー時のResult型を適切に返す
-- [ ] **T602** [エラー] crates/gwt-cli/src/tui/screens/wizard.rs でIssue取得失敗時のエラーメッセージ表示を実装
+- [x] **T601** [エラー] fetch_open_issues()でgh CLI実行エラー時のResult型を適切に返す
+- [x] **T602** [エラー] crates/gwt-cli/src/tui/screens/wizard.rs でIssue取得失敗時のエラーメッセージ表示を実装
 - [ ] **T603** [エラー] エラー発生時は従来フロー（Issue選択スキップ）へ誘導
 
 ### Issue存在確認
@@ -245,12 +245,12 @@
 
 ## 進捗追跡
 
-- **完了したタスク**: 12/54 (22%)
-  - フェーズ1（基盤）: 2/7 (29%)
-  - フェーズ2（US1）: 6/17 (35%)
-  - フェーズ3（US2）: 0/5 (0%)
-  - フェーズ4（US3）: 3/6 (50%)
-  - フェーズ5（US4）: 0/2 (0%)
-  - フェーズ6（US5）: 1/5 (20%)
-  - フェーズ7（エラー）: 0/5 (0%)
+- **完了したタスク**: 36/54 (67%)
+  - フェーズ1（基盤）: 7/7 (100%)
+  - フェーズ2（US1）: 14/17 (82%) - T113確認画面のみ未実装
+  - フェーズ3（US2）: 4/5 (80%) - T205テストのみ未実装
+  - フェーズ4（US3）: 6/6 (100%)
+  - フェーズ5（US4）: 0/2 (0%) - テスト確認のみ
+  - フェーズ6（US5）: 3/5 (60%) - T504-T505テストのみ未実装
+  - フェーズ7（エラー）: 2/5 (40%) - T603-T605未実装
   - フェーズ8（統合）: 0/9 (0%)
