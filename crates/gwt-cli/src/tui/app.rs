@@ -2,7 +2,10 @@
 
 #![allow(dead_code)] // TUI application components for future expansion
 
-use crate::{prepare_launch_plan, InstallPlan, LaunchPlan, LaunchProgress};
+use super::widgets::ProgressModalState;
+use crate::{
+    prepare_launch_plan, InstallPlan, LaunchPlan, LaunchProgress, ProgressStepKind, StepStatus,
+};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -266,7 +269,20 @@ struct LaunchRequest {
 
 enum LaunchUpdate {
     Progress(LaunchProgress),
-    WorktreeReady { branch: String, path: PathBuf },
+    /// Progress step update for modal display (FR-041)
+    ProgressStep {
+        kind: ProgressStepKind,
+        status: StepStatus,
+    },
+    /// Progress step error (FR-052)
+    ProgressStepError {
+        kind: ProgressStepKind,
+        message: String,
+    },
+    WorktreeReady {
+        branch: String,
+        path: PathBuf,
+    },
     Ready(Box<LaunchPlan>),
     Failed(String),
 }
@@ -379,6 +395,8 @@ pub struct Model {
     session_poll_deferred: bool,
     /// Agent history store for persisting agent usage per branch (FR-088)
     agent_history: AgentHistoryStore,
+    /// Progress modal state for worktree preparation (FR-041)
+    progress_modal: Option<ProgressModalState>,
 }
 
 /// Screen types
@@ -524,6 +542,7 @@ impl Model {
             last_session_poll: None,
             session_poll_deferred: false,
             agent_history: AgentHistoryStore::load().unwrap_or_default(),
+            progress_modal: None,
         };
 
         model
@@ -1687,7 +1706,26 @@ impl Model {
                 match rx.try_recv() {
                     Ok(update) => match update {
                         LaunchUpdate::Progress(progress) => {
-                            self.launch_status = Some(progress.message());
+                            // Only update launch_status if modal is not showing (FR-057)
+                            if self.progress_modal.is_none() {
+                                self.launch_status = Some(progress.message());
+                            }
+                        }
+                        LaunchUpdate::ProgressStep { kind, status } => {
+                            // Update progress modal step (FR-041)
+                            if let Some(ref mut modal) = self.progress_modal {
+                                modal.update_step(kind, status);
+                                // Check if all steps are done
+                                if modal.all_done() && !modal.has_failed() {
+                                    modal.mark_completed();
+                                }
+                            }
+                        }
+                        LaunchUpdate::ProgressStepError { kind, message } => {
+                            // Set error on progress modal step (FR-052)
+                            if let Some(ref mut modal) = self.progress_modal {
+                                modal.set_step_error(kind, message);
+                            }
                         }
                         LaunchUpdate::WorktreeReady { branch, path } => {
                             if self.branch_list.apply_worktree_created(&branch, &path) {
@@ -3183,6 +3221,12 @@ impl Model {
                 self.apply_safety_updates();
                 self.apply_worktree_updates();
                 self.apply_launch_updates();
+                // FR-051: Auto-close progress modal after 2-second summary display
+                if let Some(ref modal) = self.progress_modal {
+                    if modal.completed && modal.summary_display_elapsed() && !modal.has_failed() {
+                        self.progress_modal = None;
+                    }
+                }
                 self.apply_session_summary_updates();
                 self.apply_agent_mode_updates();
                 self.poll_session_summary_if_needed();
@@ -3842,7 +3886,10 @@ impl Model {
         }
 
         self.launch_in_progress = true;
-        self.launch_status = Some(LaunchProgress::ResolvingWorktree.message());
+        // FR-041: Show progress modal instead of status bar
+        self.progress_modal = Some(ProgressModalState::new());
+        // Clear launch_status since modal is showing (FR-057)
+        self.launch_status = None;
 
         let repo_root = self.repo_root.clone();
         let (tx, rx) = mpsc::channel();
@@ -4446,8 +4493,8 @@ impl Model {
         // Content
         match base_screen {
             Screen::BranchList => {
-                // Show launch status bar if launching
-                let content_area = if self.launch_in_progress {
+                // Show launch status bar if launching (FR-057: hide when modal is showing)
+                let content_area = if self.launch_in_progress && self.progress_modal.is_none() {
                     if let Some(status) = &self.launch_status {
                         // Split content area: status bar (1 line) + rest
                         let status_chunks = Layout::default()
@@ -4525,6 +4572,13 @@ impl Model {
         // Wizard overlay (FR-044: popup on top of branch list)
         if self.wizard.visible {
             render_wizard(&mut self.wizard, frame, frame.area());
+        }
+
+        // Progress modal overlay (FR-041: highest z-index)
+        if let Some(ref modal) = self.progress_modal {
+            use super::widgets::ProgressModal;
+            let widget = ProgressModal::new(modal);
+            frame.render_widget(widget, frame.area());
         }
     }
 
@@ -4796,6 +4850,29 @@ impl Model {
 
     fn handle_key_event(&mut self, key: KeyEvent) -> Option<Message> {
         let is_key_press = key.kind == KeyEventKind::Press;
+
+        // FR-054: Progress modal has highest priority when visible
+        if let Some(ref mut modal) = self.progress_modal {
+            if is_key_press {
+                if modal.has_failed() && modal.waiting_for_key {
+                    // FR-052: Any key dismisses error modal
+                    self.progress_modal = None;
+                    self.launch_in_progress = false;
+                    return None;
+                } else if key.code == KeyCode::Esc && !modal.completed {
+                    // FR-054: ESC cancels preparation
+                    modal.cancellation_requested = true;
+                    self.progress_modal = None;
+                    self.launch_in_progress = false;
+                    self.launch_rx = None;
+                    // FR-055: Cleanup is handled by the background thread
+                    return None;
+                }
+            }
+            // Block all other input while modal is visible (FR-043)
+            return None;
+        }
+
         // Wizard has priority when visible
         if self.wizard.visible {
             match key.code {

@@ -37,7 +37,7 @@ T002 ─┘                                  ├─> T007 ─> T008 ─> T009 �
 
 ### 型定義タスク
 
-- [ ] **T001** [P] [US15] `ProgressStepKind`列挙型を追加（6段階のステップ種類定義）
+- [x] **T001** [P] [US15] `ProgressStepKind`列挙型を追加（6段階のステップ種類定義）
 
   ```text
   crates/gwt-cli/src/main.rs
@@ -47,7 +47,7 @@ T002 ─┘                                  ├─> T007 ─> T008 ─> T009 �
   - `#[derive(Debug, Clone, Copy, PartialEq, Eq)]`
   - **TDD**: 各バリアント生成テスト
 
-- [ ] **T002** [P] [US15] `StepStatus`列挙型を追加（ステップ状態定義）
+- [x] **T002** [P] [US15] `StepStatus`列挙型を追加（ステップ状態定義）
 
   ```text
   crates/gwt-cli/src/main.rs
@@ -63,7 +63,7 @@ T002 ─┘                                  ├─> T007 ─> T008 ─> T009 �
 
 ### ProgressStep実装タスク
 
-- [ ] **T003** [US15] `ProgressStep`構造体と基本メソッドを追加（T001, T002完了後）
+- [x] **T003** [US15] `ProgressStep`構造体と基本メソッドを追加（T001, T002完了後）
 
   ```text
   crates/gwt-cli/src/main.rs
@@ -73,7 +73,7 @@ T002 ─┘                                  ├─> T007 ─> T008 ─> T009 �
   - メソッド: `new(kind)`, `start()`, `complete()`, `fail(msg)`, `skip()`
   - **TDD**: 状態遷移テスト（Pending→Running→Completed等）
 
-- [ ] **T004** [US15] `ProgressStep::marker()`メソッドを追加（T003完了後）
+- [x] **T004** [US15] `ProgressStep::marker()`メソッドを追加（T003完了後）
 
   ```text
   crates/gwt-cli/src/main.rs
@@ -82,7 +82,7 @@ T002 ─┘                                  ├─> T007 ─> T008 ─> T009 �
   - 返却値: `[x]`, `[>]`, `[ ]`, `[!]`, `[skip]`
   - **TDD**: 各状態に対するマーカー文字列テスト
 
-- [ ] **T005** [US15] `ProgressStep::elapsed_secs()`と`should_show_elapsed()`を追加（T004完了後）
+- [x] **T005** [US15] `ProgressStep::elapsed_secs()`と`should_show_elapsed()`を追加（T004完了後）
 
   ```text
   crates/gwt-cli/src/main.rs
@@ -98,7 +98,7 @@ T002 ─┘                                  ├─> T007 ─> T008 ─> T009 �
 
 ### ウィジェット実装タスク
 
-- [ ] **T006** [US15] `progress_modal.rs`ファイルを作成し、基本構造を実装（T005完了後）
+- [x] **T006** [US15] `progress_modal.rs`ファイルを作成し、基本構造を実装（T005完了後）
 
   ```text
   crates/gwt-cli/src/tui/widgets/progress_modal.rs
@@ -125,7 +125,7 @@ T002 ─┘                                  ├─> T007 ─> T008 ─> T009 �
 
 ### App統合タスク
 
-- [ ] **T007** [US15] `App`構造体に`ProgressModalState`を追加（T006完了後）
+- [x] **T007** [US15] `App`構造体に`ProgressModalState`を追加（T006完了後）
 
   ```text
   crates/gwt-cli/src/tui/app.rs
@@ -141,7 +141,7 @@ T002 ─┘                                  ├─> T007 ─> T008 ─> T009 �
   - `apply_launch_updates()`でProgressStep処理を追加
   - **TDD**: モーダル表示/非表示状態遷移テスト
 
-- [ ] **T008** [US15] ESCキーによるキャンセル実装（T007完了後）
+- [x] **T008** [US15] ESCキーによるキャンセル実装（T007完了後）
 
   ```text
   crates/gwt-cli/src/tui/app.rs
@@ -153,7 +153,7 @@ T002 ─┘                                  ├─> T007 ─> T008 ─> T009 �
   - ブランチ一覧への遷移
   - **TDD**: ESCキー処理テスト、キャンセルフラグ状態テスト
 
-- [ ] **T009** [US15] 冗長表示の排除（T008完了後）
+- [x] **T009** [US15] 冗長表示の排除（T008完了後）
 
   ```text
   crates/gwt-cli/src/tui/app.rs
@@ -169,7 +169,7 @@ T002 ─┘                                  ├─> T007 ─> T008 ─> T009 �
 
 ### UI統合タスク
 
-- [ ] **T010** [US15] `ui()`関数にモーダル描画を統合（T009完了後）
+- [x] **T010** [US15] `ui()`関数にモーダル描画を統合（T009完了後）
 
   ```text
   crates/gwt-cli/src/tui/app.rs
@@ -187,7 +187,7 @@ T002 ─┘                                  ├─> T007 ─> T008 ─> T009 �
 
 ### 統合タスク
 
-- [ ] **T011** [統合] Lint/テスト通過確認
+- [x] **T011** [統合] Lint/テスト通過確認
 
   ```text
   cargo clippy --all-targets --all-features -- -D warnings
@@ -199,7 +199,7 @@ T002 ─┘                                  ├─> T007 ─> T008 ─> T009 �
   - Clippy警告ゼロ
   - フォーマット適合
 
-- [ ] **T012** [統合] PLANS.md更新
+- [x] **T012** [統合] PLANS.md更新
 
   ```text
   PLANS.md
