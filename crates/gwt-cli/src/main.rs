@@ -1212,8 +1212,8 @@ fn get_bunx_command(npm_package: &str, version: &str) -> (String, Vec<String>) {
     let bunx_path = which::which("bunx").ok();
     let npx_path = which::which("npx").ok();
     let runner_path = select_runner_executable(bunx_path, npx_path)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| "bunx".to_string());
+        .unwrap_or_else(|| PathBuf::from("bunx"));
+    let runner_path_str = runner_path.to_string_lossy().to_string();
 
     let package_spec = if version == "latest" {
         format!("{}@latest", npm_package)
@@ -1221,7 +1221,10 @@ fn get_bunx_command(npm_package: &str, version: &str) -> (String, Vec<String>) {
         format!("{}@{}", npm_package, version)
     };
 
-    (runner_path, vec![package_spec])
+    (
+        runner_path_str.clone(),
+        build_runner_args(package_spec, &runner_path_str),
+    )
 }
 
 fn select_runner_executable(
@@ -1242,6 +1245,23 @@ fn select_runner_executable(
 fn is_node_modules_bin(path: &Path) -> bool {
     let normalized = path.to_string_lossy().replace('\\', "/");
     normalized.contains("/node_modules/.bin/")
+}
+
+fn build_runner_args(package_spec: String, runner_executable: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    if runner_requires_yes(runner_executable) {
+        args.push("--yes".to_string());
+    }
+    args.push(package_spec);
+    args
+}
+
+fn runner_requires_yes(executable: &str) -> bool {
+    std::path::Path::new(executable)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| matches!(name.to_ascii_lowercase().as_str(), "npx" | "npx.cmd" | "npx.exe"))
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2041,6 +2061,30 @@ mod tests {
         let bunx = PathBuf::from("/repo/node_modules/.bin/bunx");
         let selected = select_runner_executable(Some(bunx.clone()), None);
         assert_eq!(selected, Some(bunx));
+    }
+
+    #[test]
+    fn test_runner_requires_yes_for_npx_variants() {
+        assert!(runner_requires_yes("npx"));
+        assert!(runner_requires_yes("/usr/local/bin/npx"));
+        assert!(runner_requires_yes("npx.cmd"));
+        assert!(runner_requires_yes("npx.exe"));
+        assert!(!runner_requires_yes("bunx"));
+    }
+
+    #[test]
+    fn test_build_runner_args_adds_yes_for_npx() {
+        let args = build_runner_args("@openai/codex@latest".to_string(), "npx");
+        assert_eq!(
+            args,
+            vec!["--yes".to_string(), "@openai/codex@latest".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_build_runner_args_skips_yes_for_bunx() {
+        let args = build_runner_args("@openai/codex@latest".to_string(), "bunx");
+        assert_eq!(args, vec!["@openai/codex@latest".to_string()]);
     }
 
     #[test]

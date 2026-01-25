@@ -73,3 +73,5 @@
 
 - [x] **T3341** [Test] `crates/gwt-cli/src/main.rs` にbunxが`node_modules/.bin`配下の場合npxへフォールバックする選択ロジックのテストを追加する
 - [x] **T3342** [実装] `crates/gwt-cli/src/main.rs` のbunx解決で`node_modules/.bin`配下のbunxを回避しnpxを優先する
+- [x] **T3343** [Test] `crates/gwt-cli/src/main.rs` にnpx使用時は`--yes`が付与されることを検証するユニットテストを追加する
+- [x] **T3344** [実装] `crates/gwt-cli/src/main.rs` のnpx実行時に`--yes`を付与する
