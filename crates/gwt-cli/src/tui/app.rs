@@ -5185,16 +5185,7 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
     // Get pending agent launch before cleanup
     let pending_launch = model.pending_agent_launch.take();
 
-    // Cleanup on exit - check for orphaned worktrees (only if not launching agent)
-    if pending_launch.is_none() {
-        if let Ok(manager) = WorktreeManager::new(&model.repo_root) {
-            let orphans = manager.detect_orphans();
-            if !orphans.is_empty() {
-                // Attempt to prune automatically
-                let _ = manager.prune();
-            }
-        }
-    }
+    auto_cleanup_orphans_on_exit(&model.repo_root, pending_launch.is_some());
 
     // Cleanup agent panes on exit (tmux multi-mode)
     if model.tmux_mode.is_multi() && !model.agent_panes.is_empty() {
@@ -5225,6 +5216,17 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
     terminal.show_cursor()?;
 
     Ok(pending_launch)
+}
+
+fn auto_cleanup_orphans_on_exit(repo_root: &Path, pending_launch: bool) -> usize {
+    if pending_launch {
+        return 0;
+    }
+
+    match WorktreeManager::new(repo_root) {
+        Ok(manager) => manager.auto_cleanup_orphans().unwrap_or(0),
+        Err(_) => 0,
+    }
 }
 
 fn canonical_tool_id(tool_id: &str) -> String {
@@ -5474,7 +5476,48 @@ mod tests {
     use gwt_core::git::Branch;
     use gwt_core::git::BranchSummary;
     use gwt_core::git::DivergenceStatus;
+    use std::process::Command;
     use std::sync::mpsc;
+    use tempfile::TempDir;
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git execution failed");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn create_test_repo() -> TempDir {
+        let temp = TempDir::new().unwrap();
+        run_git(temp.path(), &["init"]);
+        run_git(temp.path(), &["config", "user.email", "test@test.com"]);
+        run_git(temp.path(), &["config", "user.name", "Test"]);
+        std::fs::write(temp.path().join("test.txt"), "hello").unwrap();
+        run_git(temp.path(), &["add", "."]);
+        run_git(temp.path(), &["commit", "-m", "initial"]);
+        temp
+    }
+
+    fn worktree_list_output(repo_root: &Path) -> String {
+        let output = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(repo_root)
+            .output()
+            .expect("git worktree list execution failed");
+        assert!(
+            output.status.success(),
+            "git worktree list failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).to_string()
+    }
 
     fn sample_tool_entry(tool_id: &str) -> ToolSessionEntry {
         ToolSessionEntry {
@@ -5490,6 +5533,27 @@ mod tests {
             tool_version: None,
             timestamp: 0,
         }
+    }
+
+    #[test]
+    fn test_auto_cleanup_orphans_on_exit_does_not_prune() {
+        let temp = create_test_repo();
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+
+        let wt = manager
+            .create_new_branch("feature/orphan-exit", None)
+            .unwrap();
+        let wt_path = wt.path.clone();
+        std::fs::remove_dir_all(&wt_path).unwrap();
+
+        let before = worktree_list_output(temp.path());
+        assert!(before.contains(wt_path.to_string_lossy().as_ref()));
+
+        let cleaned = auto_cleanup_orphans_on_exit(temp.path(), false);
+        assert_eq!(cleaned, 0);
+
+        let after = worktree_list_output(temp.path());
+        assert!(after.contains(wt_path.to_string_lossy().as_ref()));
     }
 
     #[test]
