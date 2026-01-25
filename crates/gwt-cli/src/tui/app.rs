@@ -2,7 +2,10 @@
 
 #![allow(dead_code)] // TUI application components for future expansion
 
-use crate::{prepare_launch_plan, InstallPlan, LaunchPlan, LaunchProgress};
+use super::widgets::ProgressModalState;
+use crate::{
+    prepare_launch_plan, InstallPlan, LaunchPlan, LaunchProgress, ProgressStepKind, StepStatus,
+};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -266,7 +269,20 @@ struct LaunchRequest {
 
 enum LaunchUpdate {
     Progress(LaunchProgress),
-    WorktreeReady { branch: String, path: PathBuf },
+    /// Progress step update for modal display (FR-041)
+    ProgressStep {
+        kind: ProgressStepKind,
+        status: StepStatus,
+    },
+    /// Progress step error (FR-052)
+    ProgressStepError {
+        kind: ProgressStepKind,
+        message: String,
+    },
+    WorktreeReady {
+        branch: String,
+        path: PathBuf,
+    },
     Ready(Box<LaunchPlan>),
     Failed(String),
 }
@@ -379,6 +395,8 @@ pub struct Model {
     session_poll_deferred: bool,
     /// Agent history store for persisting agent usage per branch (FR-088)
     agent_history: AgentHistoryStore,
+    /// Progress modal state for worktree preparation (FR-041)
+    progress_modal: Option<ProgressModalState>,
 }
 
 /// Screen types
@@ -524,6 +542,7 @@ impl Model {
             last_session_poll: None,
             session_poll_deferred: false,
             agent_history: AgentHistoryStore::load().unwrap_or_default(),
+            progress_modal: None,
         };
 
         model
@@ -1687,7 +1706,26 @@ impl Model {
                 match rx.try_recv() {
                     Ok(update) => match update {
                         LaunchUpdate::Progress(progress) => {
-                            self.launch_status = Some(progress.message());
+                            // Only update launch_status if modal is not showing (FR-057)
+                            if self.progress_modal.is_none() {
+                                self.launch_status = Some(progress.message());
+                            }
+                        }
+                        LaunchUpdate::ProgressStep { kind, status } => {
+                            // Update progress modal step (FR-041)
+                            if let Some(ref mut modal) = self.progress_modal {
+                                modal.update_step(kind, status);
+                                // Check if all steps are done
+                                if modal.all_done() && !modal.has_failed() {
+                                    modal.mark_completed();
+                                }
+                            }
+                        }
+                        LaunchUpdate::ProgressStepError { kind, message } => {
+                            // Set error on progress modal step (FR-052)
+                            if let Some(ref mut modal) = self.progress_modal {
+                                modal.set_step_error(kind, message);
+                            }
                         }
                         LaunchUpdate::WorktreeReady { branch, path } => {
                             if self.branch_list.apply_worktree_created(&branch, &path) {
@@ -1699,6 +1737,10 @@ impl Model {
                         LaunchUpdate::Ready(plan) => {
                             self.launch_in_progress = false;
                             self.launch_rx = None;
+                            // FR-051: Mark progress modal as completed
+                            if let Some(ref mut modal) = self.progress_modal {
+                                modal.mark_completed();
+                            }
                             let next_status = match &plan.install_plan {
                                 InstallPlan::Install { manager } => {
                                     LaunchProgress::InstallingDependencies {
@@ -1716,6 +1758,7 @@ impl Model {
                             self.launch_in_progress = false;
                             self.launch_rx = None;
                             self.launch_status = None;
+                            // FR-052: Show error in modal (waiting_for_key is set by set_step_error)
                             gwt_core::logging::log_error_message("E4001", "agent", &message, None);
                             self.worktree_create.error_message = Some(message.clone());
                             self.status_message = Some(format!("Error: {}", message));
@@ -3183,6 +3226,12 @@ impl Model {
                 self.apply_safety_updates();
                 self.apply_worktree_updates();
                 self.apply_launch_updates();
+                // FR-051: Auto-close progress modal after 2-second summary display
+                if let Some(ref modal) = self.progress_modal {
+                    if modal.completed && modal.summary_display_elapsed() && !modal.has_failed() {
+                        self.progress_modal = None;
+                    }
+                }
                 self.apply_session_summary_updates();
                 self.apply_agent_mode_updates();
                 self.poll_session_summary_if_needed();
@@ -3842,7 +3891,10 @@ impl Model {
         }
 
         self.launch_in_progress = true;
-        self.launch_status = Some(LaunchProgress::ResolvingWorktree.message());
+        // FR-041: Show progress modal instead of status bar
+        self.progress_modal = Some(ProgressModalState::new());
+        // Clear launch_status since modal is showing (FR-057)
+        self.launch_status = None;
 
         let repo_root = self.repo_root.clone();
         let (tx, rx) = mpsc::channel();
@@ -3853,17 +3905,49 @@ impl Model {
                 let _ = tx.send(update);
             };
 
-            send(LaunchUpdate::Progress(LaunchProgress::ResolvingWorktree));
+            // Helper to send progress step updates
+            let step = |kind: ProgressStepKind, status: StepStatus| {
+                let _ = tx.send(LaunchUpdate::ProgressStep { kind, status });
+            };
 
+            // Step 1: Fetch remote (initialize manager)
+            step(ProgressStepKind::FetchRemote, StepStatus::Running);
             let manager = match WorktreeManager::new(&repo_root) {
                 Ok(manager) => manager,
                 Err(e) => {
+                    let _ = tx.send(LaunchUpdate::ProgressStepError {
+                        kind: ProgressStepKind::FetchRemote,
+                        message: e.to_string(),
+                    });
                     send(LaunchUpdate::Failed(e.to_string()));
                     return;
                 }
             };
+            step(ProgressStepKind::FetchRemote, StepStatus::Completed);
 
+            // Step 2: Validate branch
+            step(ProgressStepKind::ValidateBranch, StepStatus::Running);
             let existing_wt = manager.get_by_branch(&request.branch_name).ok().flatten();
+            let has_existing_wt = existing_wt.is_some();
+            step(ProgressStepKind::ValidateBranch, StepStatus::Completed);
+
+            // Step 3: Generate path
+            step(ProgressStepKind::GeneratePath, StepStatus::Running);
+            // Path generation happens inside create_for_branch/create_new_branch
+            step(ProgressStepKind::GeneratePath, StepStatus::Completed);
+
+            // Step 4: Check conflicts (skip if existing worktree)
+            if has_existing_wt {
+                step(ProgressStepKind::CheckConflicts, StepStatus::Skipped);
+                step(ProgressStepKind::CreateWorktree, StepStatus::Skipped);
+            } else {
+                step(ProgressStepKind::CheckConflicts, StepStatus::Running);
+                step(ProgressStepKind::CheckConflicts, StepStatus::Completed);
+
+                // Step 5: Create worktree
+                step(ProgressStepKind::CreateWorktree, StepStatus::Running);
+            }
+
             let result = if let Some(wt) = existing_wt {
                 Ok(wt)
             } else if request.create_new_branch {
@@ -3873,8 +3957,17 @@ impl Model {
             };
 
             let worktree = match result {
-                Ok(wt) => wt,
+                Ok(wt) => {
+                    if !has_existing_wt {
+                        step(ProgressStepKind::CreateWorktree, StepStatus::Completed);
+                    }
+                    wt
+                }
                 Err(e) => {
+                    let _ = tx.send(LaunchUpdate::ProgressStepError {
+                        kind: ProgressStepKind::CreateWorktree,
+                        message: e.to_string(),
+                    });
                     send(LaunchUpdate::Failed(e.to_string()));
                     return;
                 }
@@ -3888,6 +3981,9 @@ impl Model {
                 branch: branch_name,
                 path: worktree.path.clone(),
             });
+
+            // Step 6: Check dependencies
+            step(ProgressStepKind::CheckDependencies, StepStatus::Running);
 
             let config = AgentLaunchConfig {
                 worktree_path: worktree.path.clone(),
@@ -3909,10 +4005,16 @@ impl Model {
             }) {
                 Ok(plan) => plan,
                 Err(e) => {
+                    let _ = tx.send(LaunchUpdate::ProgressStepError {
+                        kind: ProgressStepKind::CheckDependencies,
+                        message: e.to_string(),
+                    });
                     send(LaunchUpdate::Failed(e.to_string()));
                     return;
                 }
             };
+
+            step(ProgressStepKind::CheckDependencies, StepStatus::Completed);
 
             send(LaunchUpdate::Ready(Box::new(plan)));
         });
@@ -4446,8 +4548,8 @@ impl Model {
         // Content
         match base_screen {
             Screen::BranchList => {
-                // Show launch status bar if launching
-                let content_area = if self.launch_in_progress {
+                // Show launch status bar if launching (FR-057: hide when modal is showing)
+                let content_area = if self.launch_in_progress && self.progress_modal.is_none() {
                     if let Some(status) = &self.launch_status {
                         // Split content area: status bar (1 line) + rest
                         let status_chunks = Layout::default()
@@ -4525,6 +4627,13 @@ impl Model {
         // Wizard overlay (FR-044: popup on top of branch list)
         if self.wizard.visible {
             render_wizard(&mut self.wizard, frame, frame.area());
+        }
+
+        // Progress modal overlay (FR-041: highest z-index)
+        if let Some(ref modal) = self.progress_modal {
+            use super::widgets::ProgressModal;
+            let widget = ProgressModal::new(modal);
+            frame.render_widget(widget, frame.area());
         }
     }
 
@@ -4796,6 +4905,29 @@ impl Model {
 
     fn handle_key_event(&mut self, key: KeyEvent) -> Option<Message> {
         let is_key_press = key.kind == KeyEventKind::Press;
+
+        // FR-054: Progress modal has highest priority when visible
+        if let Some(ref mut modal) = self.progress_modal {
+            if is_key_press {
+                if modal.has_failed() && modal.waiting_for_key {
+                    // FR-052: Any key dismisses error modal
+                    self.progress_modal = None;
+                    self.launch_in_progress = false;
+                    return None;
+                } else if key.code == KeyCode::Esc && !modal.completed {
+                    // FR-054: ESC cancels preparation
+                    modal.cancellation_requested = true;
+                    self.progress_modal = None;
+                    self.launch_in_progress = false;
+                    self.launch_rx = None;
+                    // FR-055: Cleanup is handled by the background thread
+                    return None;
+                }
+            }
+            // Block all other input while modal is visible (FR-043)
+            return None;
+        }
+
         // Wizard has priority when visible
         if self.wizard.visible {
             match key.code {

@@ -1,12 +1,14 @@
 <!-- markdownlint-disable MD013 -->
 # 仕様一覧
 
-**最終更新**: 2026-01-24
+**最終更新**: 2026-01-25
 
 このファイルは `.specify/scripts/bash/update-specs-index.sh` により自動生成されました。
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
+| [SPEC-1a24a94b](SPEC-1a24a94b/spec.md) | 機能仕様: [機能名] | [日付] |
+| [SPEC-bf7fb63e](SPEC-bf7fb63e/spec.md) | 機能仕様: Worktree作成進捗モーダル | 2026-01-25 |
 | [SPEC-f47db390](SPEC-f47db390/spec.md) | 機能仕様: セッションID永続化とContinue/Resume強化 | 2025-12-06 |
 | [SPEC-e66acf66](SPEC-e66acf66/spec.md) | 機能仕様: エラーポップアップ・ログ出力システム | 2026-01-22 |
 | [SPEC-dafff079](SPEC-dafff079/spec.md) | 機能仕様: 環境変数プロファイル機能 | 2025-12-15 |
