@@ -5480,34 +5480,28 @@ mod tests {
     use std::sync::mpsc;
     use tempfile::TempDir;
 
+    fn run_git(dir: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git execution failed");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn create_test_repo() -> TempDir {
         let temp = TempDir::new().unwrap();
-        Command::new("git")
-            .args(["init"])
-            .current_dir(temp.path())
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(temp.path())
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(temp.path())
-            .output()
-            .unwrap();
+        run_git(temp.path(), &["init"]);
+        run_git(temp.path(), &["config", "user.email", "test@test.com"]);
+        run_git(temp.path(), &["config", "user.name", "Test"]);
         std::fs::write(temp.path().join("test.txt"), "hello").unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(temp.path())
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "initial"])
-            .current_dir(temp.path())
-            .output()
-            .unwrap();
+        run_git(temp.path(), &["add", "."]);
+        run_git(temp.path(), &["commit", "-m", "initial"]);
         temp
     }
 
@@ -5516,7 +5510,12 @@ mod tests {
             .args(["worktree", "list", "--porcelain"])
             .current_dir(repo_root)
             .output()
-            .unwrap();
+            .expect("git worktree list execution failed");
+        assert!(
+            output.status.success(),
+            "git worktree list failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         String::from_utf8_lossy(&output.stdout).to_string()
     }
 
