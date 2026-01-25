@@ -1,69 +1,251 @@
-# タスク: コーディングエージェント起動の互換性整備（Rust）
+# タスク: 進捗モーダル（ユーザーストーリー15）
 
-**仕様ID**: `SPEC-3b0ed29b`
-**ポリシー**: CLAUDE.md の TDD ルールに基づき、必ず RED→GREEN→リグレッションチェックの順に進める。
-**テスト**: `cargo test`（必要な範囲）
+**入力**: `/specs/SPEC-3b0ed29b/` からの設計ドキュメント
+**前提条件**: plan.md（必須）、spec.md（FR-041〜FR-060, SC-012〜SC-018）
+**スコープ**: このtasks.mdはユーザーストーリー15「起動準備の進捗がセンターモーダルで見える」のみを対象とする
 
-## ユーザーストーリー3 - 権限スキップモードでの起動 (優先度: P2)
+## フォーマット: `[ID] [P?] [ストーリー] 説明`
 
-- [x] **T3101** [P] [US3] `crates/gwt-core/src/agent/codex.rs` にCodexの権限スキップフラグ選択ヘルパーを追加し、v0.79.x/v0.80.0+/不明のユニットテストを追加する
-- [x] **T3102** [US3] T3101の後に `crates/gwt-cli/src/main.rs` のCodex起動引数で新ヘルパーを使用し、skip permissionsに正しいフラグを渡す
+- **[P]**: 並列実行可能（異なるファイル、依存関係なし）
+- **[US15]**: このタスクはユーザーストーリー15に属する
+- 説明に正確なファイルパスを含める
 
-## ユーザーストーリー11 - 起動直後の異常終了を検知して可視化する (優先度: P1)
+## Lint最小要件
 
-- [x] **T3111** [P] [US11] `crates/gwt-cli/src/main.rs` に終了判定（成功/中断/異常）を行うヘルパーを追加し、単体テストを追加する
-- [x] **T3112** [US11] T3111の後に `crates/gwt-cli/src/main.rs` の起動処理で異常終了をエラーとして扱い、終了コード/シグナル/経過時間をログ出力する
-- [x] **T3113** [US11] `crates/gwt-cli/src/tui/app.rs` でエラー画面をEnter/Escで閉じられるようにし、必要なテストを追加する
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo fmt --check`
+- `cargo test`
 
-## ユーザーストーリー13 - セッション完了後にブランチ一覧へ戻る (優先度: P2)
+## 依存関係マップ
 
-- [x] **T3121** [US13] `crates/gwt-cli/src/tui.rs` / `crates/gwt-cli/src/tui/app.rs` に起動結果のコンテキスト注入を追加し、成功/失敗メッセージを表示できるようにする
-- [x] **T3122** [US13] `crates/gwt-cli/src/main.rs` の対話ループを更新し、起動終了後にブランチ一覧へ復帰する
+```text
+T001 ─┐
+      ├─> T003 ─> T004 ─> T005 ─> T006 ─┐
+T002 ─┘                                  ├─> T007 ─> T008 ─> T009 ─> T010
+                                         │
+                                         └─> [完了]
+```
 
-## ユーザーストーリー14 - 起動/終了時のTUI遷移が固まらない (優先度: P1)
+- T001, T002: 並列可能（型定義）
+- T003: T001, T002 に依存（ProgressStepメソッド）
+- T004〜T006: 順次（ProgressModal構築）
+- T007〜T010: 順次（App統合、キャンセル、冗長排除、UI統合）
 
-- [x] **T3201** [P] [US14] `crates/gwt-cli/src/main.rs` に起動開始メッセージの即時出力を検証するテストを追加する
-- [x] **T3202** [P] [US14] `crates/gwt-cli/src/main.rs` にセッション更新停止時の待機遅延が短いことを検証するテストを追加する
-- [x] **T3203** [US14] `crates/gwt-cli/src/main.rs` で起動開始メッセージを依存インストール前に出力する
-- [x] **T3204** [US14] `crates/gwt-cli/src/main.rs` のセッション更新待機を停止シグナルで即時解除できるようにする
+## フェーズ1: 型定義（基盤）
 
-## ユーザーストーリー15 - 起動準備がUIをブロックせず進捗が見える (優先度: P1)
+**目的**: 進捗モーダルで使用する基本型を定義
 
-- [ ] **T3301** [P] [US15] 起動準備パイプラインのステップ順序が固定であることを検証するユニットテストを追加する（`crates/gwt-cli/src/main.rs` または共通ヘルパー）
-- [ ] **T3302** [P] [US15] TUIが進捗イベントを受け取ってステータス表示を更新することを検証するユニットテストを追加する（`crates/gwt-cli/src/tui/app.rs`）
-- [ ] **T3303** [US15] シングル/ tmux 共通の起動準備パイプラインを抽出し、両方から同一関数を呼び出すようにする（`crates/gwt-cli/src/main.rs`, `crates/gwt-cli/src/tui/app.rs`）
-- [ ] **T3304** [US15] 依存インストールを共通パイプライン内へ移動し、tmuxモードでも有効時は実行する
-- [ ] **T3305** [US15] 起動準備をバックグラウンドで実行し、進捗メッセージをTUIステータス表示領域へ反映する
+### 型定義タスク
 
-## ユーザーストーリー16 - macOSのPTYラッパーで引数が失われず起動できる (優先度: P1)
+- [x] **T001** [P] [US15] `ProgressStepKind`列挙型を追加（6段階のステップ種類定義）
 
-- [x] **T3311** [P] [US16] `crates/gwt-cli/src/main.rs` のPTYラッパーが`script -q -- /dev/null`形式になることを検証するユニットテストを追加する
-- [x] **T3312** [US16] T3311の後に `crates/gwt-cli/src/main.rs` のPTYラッパーで`--`を挿入してオプション解釈を遮断する
+  ```text
+  crates/gwt-cli/src/main.rs
+  ```
 
-## ユーザーストーリー1 - デフォルト起動ログの整備 (優先度: P1)
+  - FetchRemote, ValidateBranch, GeneratePath, CheckConflicts, CreateWorktree, CheckDependencies
+  - `#[derive(Debug, Clone, Copy, PartialEq, Eq)]`
+  - **TDD**: 各バリアント生成テスト
 
-- [x] **T3131** [P] [US1] `crates/gwt-cli/src/main.rs` に起動ログの整形ヘルパーを追加し、Working directory/Model/Reasoning/Mode/Skip/Args/Version/実行方法が出力されることをテストする
-- [x] **T3132** [US1] T3131の後に `crates/gwt-cli/src/main.rs` の起動ログをヘルパー経由で統一する
+- [x] **T002** [P] [US15] `StepStatus`列挙型を追加（ステップ状態定義）
 
-## ユーザーストーリー12 - OpenCodeモデル選択が空で止まらない (優先度: P1)
+  ```text
+  crates/gwt-cli/src/main.rs
+  ```
 
-- [x] **T3141** [P] [US12] `crates/gwt-cli/src/tui/screens/wizard.rs` のOpenCodeモデル選択に default/custom の選択肢を含め、空リストにならないことを担保する
-- [x] **T3142** [US12] `crates/gwt-cli/src/tui/screens/wizard.rs` にOpenCodeモデル選択が空にならないことを検証するユニットテストを追加する
+  - Pending, Running, Completed, Failed, Skipped
+  - `#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]` (Default=Pending)
+  - **TDD**: 各バリアント生成テスト、デフォルトテスト
 
-## 統合
+## フェーズ2: ProgressStep構造体
 
-- [x] **T3190** [統合] `cargo build --release` を実行してビルド確認する
-- [x] **T3205** [統合] `cargo test -p gwt-cli` と `cargo build --release` を実行して失敗がないことを確認する
+**目的**: 個別ステップの状態管理
 
-## 追加作業: Codexモデル/スキップ権限の互換修正 (2026-01-14)
+### ProgressStep実装タスク
 
-- [x] **T3150** [Test] `crates/gwt-core/src/agent/codex.rs` のデフォルトモデルとスキップ時引数構成のテストを更新する
-- [x] **T3151** [Test] `crates/gwt-cli/src/main.rs` にCodexのスキップフラグが末尾に来ることを確認するテストを追加する
-- [x] **T3152** [実装] `crates/gwt-core/src/agent/codex.rs` のデフォルトモデルを仕様に合わせて更新し、スキップ時はsandbox設定を抑止する
-- [x] **T3153** [実装] `crates/gwt-cli/src/tui/screens/wizard.rs` のCodexモデル選択肢を仕様に合わせて更新する
-- [x] **T3154** [実装] `crates/gwt-cli/src/main.rs` でClaude Codeのスキップ時に`IS_SANDBOX=1`を必ず付与する
+- [x] **T003** [US15] `ProgressStep`構造体と基本メソッドを追加（T001, T002完了後）
 
-## 追加作業: Claude CodeのWindows起動互換 (2026-01-22)
+  ```text
+  crates/gwt-cli/src/main.rs
+  ```
+
+  - フィールド: kind, status, started_at, error_message
+  - メソッド: `new(kind)`, `start()`, `complete()`, `fail(msg)`, `skip()`
+  - **TDD**: 状態遷移テスト（Pending→Running→Completed等）
+
+- [x] **T004** [US15] `ProgressStep::marker()`メソッドを追加（T003完了後）
+
+  ```text
+  crates/gwt-cli/src/main.rs
+  ```
+
+  - 返却値: `[x]`, `[>]`, `[ ]`, `[!]`, `[skip]`
+  - **TDD**: 各状態に対するマーカー文字列テスト
+
+- [x] **T005** [US15] `ProgressStep::elapsed_secs()`と`should_show_elapsed()`を追加（T004完了後）
+
+  ```text
+  crates/gwt-cli/src/main.rs
+  ```
+
+  - `elapsed_secs()`: started_atからの経過秒数（f64）
+  - `should_show_elapsed()`: 3秒以上でtrue
+  - **TDD**: 経過時間計算テスト、閾値判定テスト
+
+## フェーズ3: ProgressModalウィジェット
+
+**目的**: モーダル描画ウィジェットの実装
+
+### ウィジェット実装タスク
+
+- [x] **T006** [US15] `progress_modal.rs`ファイルを作成し、基本構造を実装（T005完了後）
+
+  ```text
+  crates/gwt-cli/src/tui/widgets/progress_modal.rs
+  crates/gwt-cli/src/tui/widgets/mod.rs
+  ```
+
+  - `ProgressModal<'a>`構造体
+  - `ProgressModalState`構造体（visible, steps, start_time, cancellation_requested）
+  - `impl Widget for ProgressModal`
+  - 描画内容:
+    - 半透明オーバーレイ（暗い背景色で疑似半透明）
+    - 幅80文字以上のセンターモーダル
+    - 動的タイトル
+    - ステップリスト（チェックマーク形式）
+    - 経過時間表示（3秒以上のステップ）
+    - 色分け（緑=完了、黄=進行中、灰=待機、赤=失敗）
+    - サマリ表示（完了時）
+    - エラーメッセージ表示（失敗時）
+  - **TDD**: ステップリスト描画テスト
+
+## フェーズ4: App統合
+
+**目的**: App構造体へのモーダル状態統合
+
+### App統合タスク
+
+- [x] **T007** [US15] `App`構造体に`ProgressModalState`を追加（T006完了後）
+
+  ```text
+  crates/gwt-cli/src/tui/app.rs
+  ```
+
+  - フィールド: `progress_modal: Option<ProgressModalState>`
+  - メソッド:
+    - `show_progress_modal()`: モーダル表示開始
+    - `hide_progress_modal()`: モーダル非表示
+    - `update_progress_step(kind, status)`: ステップ更新
+    - `set_progress_error(kind, message)`: エラー設定
+  - `LaunchUpdate`列挙型に`ProgressStep`バリアント追加
+  - `apply_launch_updates()`でProgressStep処理を追加
+  - **TDD**: モーダル表示/非表示状態遷移テスト
+
+- [x] **T008** [US15] ESCキーによるキャンセル実装（T007完了後）
+
+  ```text
+  crates/gwt-cli/src/tui/app.rs
+  ```
+
+  - モーダル表示中のESCキー検出
+  - `cancellation_requested`フラグ設定
+  - キャンセル時のworktreeクリーンアップ（不完全な場合）
+  - ブランチ一覧への遷移
+  - **TDD**: ESCキー処理テスト、キャンセルフラグ状態テスト
+
+- [x] **T009** [US15] 冗長表示の排除（T008完了後）
+
+  ```text
+  crates/gwt-cli/src/tui/app.rs
+  ```
+
+  - モーダル表示中は`launch_status`を非表示
+  - ステータスバー、ブランチ詳細、セッション要約での「Preparing worktree」を抑制
+  - **TDD**: モーダル表示中の他領域表示状態テスト
+
+## フェーズ5: UI描画統合
+
+**目的**: TUI描画への統合
+
+### UI統合タスク
+
+- [x] **T010** [US15] `ui()`関数にモーダル描画を統合（T009完了後）
+
+  ```text
+  crates/gwt-cli/src/tui/app.rs
+  ```
+
+  - `ui()`の最後（最前面）でProgressModal描画
+  - モーダル表示中の他UI操作の無効化
+  - サマリ表示（2秒）後のモーダル自動クローズ
+  - エラー時はキー入力待ち
+  - **TDD**: 描画呼び出しテスト
+
+## フェーズ6: 統合と検証
+
+**目的**: 全体の統合とLint/テスト通過
+
+### 統合タスク
+
+- [x] **T011** [統合] Lint/テスト通過確認
+
+  ```text
+  cargo clippy --all-targets --all-features -- -D warnings
+  cargo fmt --check
+  cargo test
+  ```
+
+  - 全テスト通過
+  - Clippy警告ゼロ
+  - フォーマット適合
+
+- [x] **T012** [統合] PLANS.md更新
+
+  ```text
+  PLANS.md
+  ```
+
+  - 完了タスクのチェック更新
+  - 必要に応じて次ステップ更新
+
+## タスク凡例
+
+**優先度**:
+
+- **P1**: 必須 - モーダル表示に必要
+
+**依存関係**:
+
+- **[P]**: 並列実行可能
+- 番号順: 前のタスク完了後に実行
+
+**ストーリータグ**:
+
+- **[US15]**: ユーザーストーリー15（進捗モーダル）
+- **[統合]**: 複数タスクにまたがる検証
+
+## 進捗追跡
+
+- **完了したタスク**: `[x]` でマーク
+- **進行中のタスク**: タスクIDの横にメモを追加
+- **ブロックされたタスク**: ブロッカーを文書化
+
+## 独立テスト条件
+
+ユーザーストーリー15は以下の条件で独立してテスト可能:
+
+1. モーダル表示テスト: Skip Permissions確定後1秒以内にモーダルが表示される
+2. ステップ進行テスト: 各ステップが[x]/[>]/[ ]/[!]/[skip]で正しく表示される
+3. 経過時間テスト: 3秒以上のステップで経過時間が表示される
+4. キャンセルテスト: ESCキーでキャンセル可能、ブランチ一覧に戻る
+5. 冗長排除テスト: モーダル表示中に他領域で「Preparing worktree」が表示されない
+6. エラー表示テスト: 失敗ステップに[!]マーク（赤色）とエラーメッセージが表示される
+
+## 推奨MVP範囲
+
+T001〜T010の完了でユーザーストーリー15の全機能が実装される。
+
+## 追加作業: Windows IS_SANDBOX対応 (2026-01-25)
 
 - [x] **T3331** [Test] `crates/gwt-cli/src/main.rs` にClaude Codeの`IS_SANDBOX`付与がWindowsでは無効になることを検証するユニットテストを追加する
 - [x] **T3332** [実装] `crates/gwt-cli/src/main.rs` の環境変数生成でWindowsでは`IS_SANDBOX=1`を付与しないよう修正する
