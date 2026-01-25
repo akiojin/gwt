@@ -451,6 +451,10 @@ pub struct BranchListState {
     session_scroll_max: usize,
     /// Session summary scroll page size
     session_scroll_page: usize,
+    /// Cached session panel area (outer, with border)
+    session_panel_area: Option<Rect>,
+    /// Cached session panel inner area (content rows)
+    session_panel_inner_area: Option<Rect>,
     /// Cached repo web URL for GitHub links
     repo_web_url: Option<String>,
     /// Clickable link regions in details panel
@@ -493,6 +497,8 @@ impl Default for BranchListState {
             session_scroll_offset: 0,
             session_scroll_max: 0,
             session_scroll_page: 0,
+            session_panel_area: None,
+            session_panel_inner_area: None,
             repo_web_url: None,
             detail_links: Vec::new(),
         }
@@ -819,6 +825,25 @@ impl BranchListState {
         };
         self.list_inner_area = Some(inner);
         self.update_visible_height(inner.height as usize);
+    }
+
+    /// Update cached session panel areas based on rendered panel
+    pub fn update_session_panel_area(&mut self, area: Rect, inner: Rect) {
+        self.session_panel_area = Some(area);
+        self.session_panel_inner_area = Some(inner);
+    }
+
+    /// Check if a point is inside the session panel content area
+    pub fn session_panel_contains(&self, x: u16, y: u16) -> bool {
+        let Some(inner) = self.session_panel_inner_area else {
+            return false;
+        };
+        if inner.width == 0 || inner.height == 0 {
+            return false;
+        }
+        let right = inner.x.saturating_add(inner.width);
+        let bottom = inner.y.saturating_add(inner.height);
+        x >= inner.x && x < right && y >= inner.y && y < bottom
     }
 
     /// Resolve selection index from a mouse position within the list area
@@ -1201,6 +1226,14 @@ impl BranchListState {
         let page = self.session_scroll_page.max(1);
         self.session_scroll_offset =
             (self.session_scroll_offset + page).min(self.session_scroll_max);
+    }
+
+    pub fn scroll_session_line_up(&mut self) {
+        self.session_scroll_offset = self.session_scroll_offset.saturating_sub(1);
+    }
+
+    pub fn scroll_session_line_down(&mut self) {
+        self.session_scroll_offset = (self.session_scroll_offset + 1).min(self.session_scroll_max);
     }
 
     pub fn session_summary(&self, branch: &str) -> Option<&gwt_core::ai::SessionSummary> {
@@ -1834,7 +1867,7 @@ fn panel_title_line(branch_name: &str, label: &str) -> Line<'static> {
 
 fn session_panel_hint() -> Line<'static> {
     Line::from(Span::styled(
-        " PgUp/PgDn: Scroll ",
+        " PgUp/PgDn/Wheel: Scroll ",
         Style::default().fg(Color::DarkGray),
     ))
     .right_aligned()
@@ -1856,6 +1889,14 @@ fn session_scroll_layout(inner: Rect, scrollable: bool) -> (Rect, Option<Rect>) 
         height: inner.height,
     };
     (content, Some(scrollbar))
+}
+
+fn session_scrollbar_content_length(total_lines: usize, viewport_len: usize) -> usize {
+    if total_lines == 0 {
+        return 1;
+    }
+    let viewport_len = viewport_len.max(1);
+    total_lines.saturating_sub(viewport_len).saturating_add(1)
 }
 
 fn build_summary_links(repo_web_url: Option<&String>, branch: Option<&BranchItem>) -> SummaryLinks {
@@ -2011,6 +2052,7 @@ fn render_session_panel(
         .title_bottom(session_panel_hint())
         .padding(Padding::new(PANEL_PADDING_X, PANEL_PADDING_X, 0, 0));
     let inner = block.inner(area);
+    state.update_session_panel_area(area, inner);
     frame.render_widget(block, area);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -2137,19 +2179,21 @@ fn render_session_panel(
         total_lines = wrapped_lines.len();
     }
 
-    let max_scroll = total_lines.saturating_sub(content_area.height as usize);
-    state.update_session_scroll_bounds(max_scroll, content_area.height as usize);
+    let viewport_len = content_area.height as usize;
+    let max_scroll = total_lines.saturating_sub(viewport_len);
+    state.update_session_scroll_bounds(max_scroll, viewport_len);
 
     let paragraph = Paragraph::new(wrapped_lines).scroll((state.session_scroll_offset as u16, 0));
     frame.render_widget(paragraph, content_area);
 
     if let Some(scrollbar_area) = scrollbar_area {
+        let scrollbar_length = session_scrollbar_content_length(total_lines, viewport_len);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("^"))
             .end_symbol(Some("v"));
-        let mut scrollbar_state = ScrollbarState::new(total_lines)
+        let mut scrollbar_state = ScrollbarState::new(scrollbar_length)
             .position(state.session_scroll_offset)
-            .viewport_content_length(content_area.height as usize);
+            .viewport_content_length(viewport_len);
         frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
     }
 }
@@ -2508,6 +2552,55 @@ mod tests {
         let (content, scrollbar) = session_scroll_layout(inner, true);
         assert_eq!(content, inner);
         assert!(scrollbar.is_none());
+    }
+
+    #[test]
+    fn test_session_scrollbar_content_length_from_total_and_viewport() {
+        assert_eq!(session_scrollbar_content_length(10, 3), 8);
+        assert_eq!(session_scrollbar_content_length(5, 5), 1);
+        assert_eq!(session_scrollbar_content_length(0, 5), 1);
+    }
+
+    #[test]
+    fn test_session_panel_contains_point() {
+        let mut state = BranchListState::new();
+        let area = Rect::new(0, 0, 20, 5);
+        let inner = Rect::new(2, 1, 16, 3);
+        state.update_session_panel_area(area, inner);
+
+        assert!(state.session_panel_contains(2, 1));
+        assert!(state.session_panel_contains(17, 3));
+        assert!(!state.session_panel_contains(1, 1));
+        assert!(!state.session_panel_contains(18, 1));
+        assert!(!state.session_panel_contains(2, 4));
+    }
+
+    #[test]
+    fn test_session_panel_contains_point_with_empty_inner() {
+        let mut state = BranchListState::new();
+        let area = Rect::new(0, 0, 2, 2);
+        let inner = Rect::new(0, 0, 0, 0);
+        state.update_session_panel_area(area, inner);
+
+        assert!(!state.session_panel_contains(0, 0));
+    }
+
+    #[test]
+    fn test_session_scroll_line_clamps_to_bounds() {
+        let mut state = BranchListState::new();
+        state.update_session_scroll_bounds(3, 5);
+        state.session_scroll_offset = 2;
+
+        state.scroll_session_line_down();
+        assert_eq!(state.session_scroll_offset, 3);
+        state.scroll_session_line_down();
+        assert_eq!(state.session_scroll_offset, 3);
+        state.scroll_session_line_up();
+        assert_eq!(state.session_scroll_offset, 2);
+        state.scroll_session_line_up();
+        state.scroll_session_line_up();
+        state.scroll_session_line_up();
+        assert_eq!(state.session_scroll_offset, 0);
     }
 
     #[test]

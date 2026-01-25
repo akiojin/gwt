@@ -1,6 +1,19 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+## [6.15.0] - 2026-01-25
+
+### Bug Fixes
+
+- テスト間の環境変数競合を修正
+- AI設定モデル一覧のスクロール対応 (#778)
+- Remove repair command (#779)
+
+### Features
+
+- Add mouse wheel scrolling for session summary (#781)
+
 ## [6.14.0] - 2026-01-23
 
 ### Bug Fixes

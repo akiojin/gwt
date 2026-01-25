@@ -550,41 +550,6 @@ impl Repository {
             })
         }
     }
-
-    /// Repair worktree administrative files
-    pub fn repair_worktrees(&self) -> Result<()> {
-        debug!(category = "git", "Repairing worktree administrative files");
-
-        let output = Command::new("git")
-            .args(["worktree", "repair"])
-            .current_dir(&self.root)
-            .output()
-            .map_err(|e| GwtError::GitOperationFailed {
-                operation: "worktree repair".to_string(),
-                details: e.to_string(),
-            })?;
-
-        if output.status.success() {
-            info!(
-                category = "git",
-                operation = "worktree_repair",
-                "Worktree administrative files repaired"
-            );
-            Ok(())
-        } else {
-            let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
-            error!(
-                category = "git",
-                operation = "worktree_repair",
-                error = err_msg.as_str(),
-                "Failed to repair worktree administrative files"
-            );
-            Err(GwtError::GitOperationFailed {
-                operation: "worktree repair".to_string(),
-                details: err_msg,
-            })
-        }
-    }
 }
 
 /// Information about a worktree from git worktree list

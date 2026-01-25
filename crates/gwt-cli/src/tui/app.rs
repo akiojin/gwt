@@ -441,8 +441,6 @@ pub enum Message {
     WizardConfirm,
     /// Wizard: go back or close
     WizardBack,
-    /// Repair worktrees (disabled)
-    RepairWorktrees,
     /// Copy selected log to clipboard
     CopyLogToClipboard,
     /// FR-095: Hide active agent pane (ESC key in branch list)
@@ -2163,6 +2161,26 @@ impl Model {
         }
     }
 
+    fn handle_branch_list_scroll(&mut self, mouse: MouseEvent) {
+        if !matches!(self.screen, Screen::BranchList) {
+            return;
+        }
+        if self.wizard.visible || self.ai_wizard.visible {
+            return;
+        }
+        if !self
+            .branch_list
+            .session_panel_contains(mouse.column, mouse.row)
+        {
+            return;
+        }
+        match mouse.kind {
+            MouseEventKind::ScrollUp => self.branch_list.scroll_session_line_up(),
+            MouseEventKind::ScrollDown => self.branch_list.scroll_session_line_down(),
+            _ => {}
+        }
+    }
+
     fn handle_wizard_mouse(&mut self, mouse: MouseEvent) {
         if !self.wizard.visible {
             return;
@@ -2491,7 +2509,9 @@ impl Model {
         {
             match std::process::Command::new("open").arg(url).spawn() {
                 Ok(_) => return,
-                Err(err) => last_error = Some(err),
+                Err(err) => {
+                    last_error.replace(err);
+                }
             }
         }
 
@@ -2505,7 +2525,9 @@ impl Model {
             for (cmd, args) in candidates {
                 match std::process::Command::new(cmd).args(args).spawn() {
                     Ok(_) => return,
-                    Err(err) => last_error = Some(err),
+                    Err(err) => {
+                        last_error.replace(err);
+                    }
                 }
             }
         }
@@ -2517,7 +2539,9 @@ impl Model {
                 .spawn()
             {
                 Ok(_) => return,
-                Err(err) => last_error = Some(err),
+                Err(err) => {
+                    last_error.replace(err);
+                }
             }
 
             match std::process::Command::new("powershell")
@@ -2525,7 +2549,9 @@ impl Model {
                 .spawn()
             {
                 Ok(_) => return,
-                Err(err) => last_error = Some(err),
+                Err(err) => {
+                    last_error.replace(err);
+                }
             }
         }
 
@@ -3507,10 +3533,6 @@ impl Model {
             }
             Message::RefreshData => {
                 self.refresh_data();
-            }
-            Message::RepairWorktrees => {
-                self.status_message = Some("Worktree repair is disabled.".to_string());
-                self.status_message_time = Some(Instant::now());
             }
             Message::CopyLogToClipboard => {
                 if matches!(self.screen, Screen::Logs) {
@@ -5113,22 +5135,34 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
                     // Error screen handles all mouse events (click, scroll)
                     if matches!(model.screen, Screen::Error) {
                         model.handle_error_mouse(mouse);
-                    } else if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                        // Overlay priority: wizard > ai_wizard > confirm > screen-specific
-                        if model.wizard.visible {
-                            model.handle_wizard_mouse(mouse);
-                        } else if model.ai_wizard.visible {
-                            model.handle_ai_wizard_mouse(mouse);
-                        } else if matches!(model.screen, Screen::Confirm) {
-                            model.handle_confirm_mouse(mouse);
-                        } else {
-                            match model.screen {
-                                Screen::BranchList => model.handle_branch_list_mouse(mouse),
-                                Screen::Profiles => model.handle_profiles_mouse(mouse),
-                                Screen::Environment => model.handle_environment_mouse(mouse),
-                                Screen::Logs => model.handle_logs_mouse(mouse),
-                                _ => {}
+                    } else {
+                        match mouse.kind {
+                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                                if matches!(model.screen, Screen::BranchList) {
+                                    model.handle_branch_list_scroll(mouse);
+                                }
                             }
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                // Overlay priority: wizard > ai_wizard > confirm > screen-specific
+                                if model.wizard.visible {
+                                    model.handle_wizard_mouse(mouse);
+                                } else if model.ai_wizard.visible {
+                                    model.handle_ai_wizard_mouse(mouse);
+                                } else if matches!(model.screen, Screen::Confirm) {
+                                    model.handle_confirm_mouse(mouse);
+                                } else {
+                                    match model.screen {
+                                        Screen::BranchList => model.handle_branch_list_mouse(mouse),
+                                        Screen::Profiles => model.handle_profiles_mouse(mouse),
+                                        Screen::Environment => {
+                                            model.handle_environment_mouse(mouse)
+                                        }
+                                        Screen::Logs => model.handle_logs_mouse(mouse),
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }

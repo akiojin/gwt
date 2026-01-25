@@ -1,8 +1,23 @@
 # タスク: ブランチサマリーパネル（セッション要約対応）
 
-**仕様ID**: `SPEC-4b893dae` | **日付**: 2026-01-19 | **更新日**: 2026-01-22
+**仕様ID**: `SPEC-4b893dae` | **日付**: 2026-01-19 | **更新日**: 2026-01-24
 **入力**: `specs/SPEC-4b893dae/` からの設計ドキュメント
 **前提条件**: plan.md、spec.md、data-model.md、contracts/openai-api.md、research.md、quickstart.md
+
+## 追加作業: セッション要約マウスホイールスクロール (2026-01-25)
+
+- [x] **T8954** [P] [共通] `specs/SPEC-4b893dae/spec.md` / `specs/SPEC-4b893dae/plan.md` / `specs/SPEC-4b893dae/quickstart.md` にマウスホイールスクロール要件と手順を追記
+- [x] **T8955** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` にセッション要約のスクロール領域判定とホイールスクロール処理を追加
+- [x] **T8956** [Impl] `crates/gwt-cli/src/tui/app.rs` にマウスホイールイベントのルーティングを追加
+- [x] **T8957** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にマウスホイールスクロールのユニットテストを追加
+- [x] **T8958** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
+## 追加作業: AI設定モデル一覧スクロール (2026-01-24)
+
+- [x] **T8950** [P] [共通] `specs/SPEC-4b893dae/spec.md` / `specs/SPEC-4b893dae/plan.md` にモデル一覧スクロール要件を追記
+- [x] **T8951** [Impl] `crates/gwt-cli/src/tui/screens/ai_wizard.rs` にモデル一覧スクロールとスクロールバー表示を追加
+- [x] **T8952** [Test] `crates/gwt-cli/src/tui/screens/ai_wizard.rs` にモデル一覧スクロールのユニットテストを追加
+- [x] **T8953** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
 
 ## 追加作業: セッション要約スクロールバー (2026-01-23)
 
@@ -24,14 +39,14 @@
 - [x] **T8921** [Impl] `crates/gwt-cli/src/tui/components.rs` のブランチ詳細パネルで文字単位折り返しを行う
 - [x] **T8922** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` のセッション要約で文字単位折り返しを行う
 - [x] **T8923** [Test] 折り返し処理のユニットテストを追加する
-- [ ] **T8924** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+- [x] **T8924** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
 
 ## 追加作業: サマリーパネルの内側余白 (2026-01-20)
 
 - [x] **T8801** [P] [共通] `specs/SPEC-4b893dae/spec.md` / `specs/SPEC-4b893dae/plan.md` にパネル内左右余白の要件を追記
 - [x] **T8802** [Test] `crates/gwt-cli/src/tui/components.rs` のSummaryPanel描画テストを追加し、枠内余白を検証
 - [x] **T8803** [Impl] SummaryPanelとセッション要約パネルの枠内に左右余白を追加する
-- [ ] **T8804** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+- [x] **T8804** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
 
 ## 追加作業: セッション要約の途中切れ対策 (2026-01-21)
 

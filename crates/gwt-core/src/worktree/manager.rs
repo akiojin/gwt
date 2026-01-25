@@ -469,20 +469,6 @@ impl WorktreeManager {
         self.repo.prune_worktrees()
     }
 
-    /// Repair worktree administrative files (disabled)
-    pub fn repair(&self) -> Result<()> {
-        Err(GwtError::Internal(
-            "Worktree repair is disabled.".to_string(),
-        ))
-    }
-
-    /// Repair a specific worktree path
-    pub fn repair_path(&self, _path: &Path) -> Result<()> {
-        Err(GwtError::Internal(
-            "Worktree repair is disabled.".to_string(),
-        ))
-    }
-
     /// Lock a worktree
     pub fn lock(&self, path: &Path, reason: Option<&str>) -> Result<()> {
         debug!(
