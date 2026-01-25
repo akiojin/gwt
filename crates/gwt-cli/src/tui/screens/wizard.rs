@@ -2100,26 +2100,53 @@ fn render_issue_select_step(state: &WizardState, frame: &mut Frame, area: Rect) 
 }
 
 fn render_branch_name_step(state: &WizardState, frame: &mut Frame, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
+    // FR-014: Show Issue info if selected
+    let has_issue = state.selected_issue.is_some();
+    let constraints: Vec<Constraint> = if has_issue {
+        vec![
+            Constraint::Length(1), // Issue info
+            Constraint::Length(1), // Empty
             Constraint::Length(1), // Label
             Constraint::Length(1), // Empty
             Constraint::Length(1), // Input
-        ])
+        ]
+    } else {
+        vec![
+            Constraint::Length(1), // Label
+            Constraint::Length(1), // Empty
+            Constraint::Length(1), // Input
+        ]
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
         .split(area);
+
+    let (label_idx, input_idx) = if has_issue { (2, 4) } else { (0, 2) };
+
+    // FR-014: Issue info display
+    if let Some(ref issue) = state.selected_issue {
+        let issue_text = truncate_with_ellipsis(&issue.display(), chunks[0].width as usize);
+        let issue_info = Paragraph::new(issue_text).style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        );
+        frame.render_widget(issue_info, chunks[0]);
+    }
 
     // Label
     let label_text = truncate_with_ellipsis(
         &format!("Branch: {}", state.branch_type.prefix()),
-        chunks[0].width as usize,
+        chunks[label_idx].width as usize,
     );
     let label = Paragraph::new(label_text).style(
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
     );
-    frame.render_widget(label, chunks[0]);
+    frame.render_widget(label, chunks[label_idx]);
 
     // Input field
     let input_text = if state.new_branch_name.is_empty() {
@@ -2133,11 +2160,14 @@ fn render_branch_name_step(state: &WizardState, frame: &mut Frame, area: Rect) {
         Style::default()
     };
     let input = Paragraph::new(input_text).style(input_style);
-    frame.render_widget(input, chunks[2]);
+    frame.render_widget(input, chunks[input_idx]);
 
     // Show cursor
     if !state.new_branch_name.is_empty() || state.cursor == 0 {
-        frame.set_cursor_position((chunks[2].x + state.cursor as u16, chunks[2].y));
+        frame.set_cursor_position((
+            chunks[input_idx].x + state.cursor as u16,
+            chunks[input_idx].y,
+        ));
     }
 }
 
