@@ -801,10 +801,13 @@ fn emit_fast_exit_notice(duration_ms: u128, command_display: &str) {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LaunchProgress {
+    #[allow(dead_code)]
     ResolvingWorktree,
     BuildingCommand,
     CheckingDependencies,
-    InstallingDependencies { manager: String },
+    InstallingDependencies {
+        manager: String,
+    },
 }
 
 impl LaunchProgress {

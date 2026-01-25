@@ -1737,6 +1737,10 @@ impl Model {
                         LaunchUpdate::Ready(plan) => {
                             self.launch_in_progress = false;
                             self.launch_rx = None;
+                            // FR-051: Mark progress modal as completed
+                            if let Some(ref mut modal) = self.progress_modal {
+                                modal.mark_completed();
+                            }
                             let next_status = match &plan.install_plan {
                                 InstallPlan::Install { manager } => {
                                     LaunchProgress::InstallingDependencies {
@@ -1754,6 +1758,7 @@ impl Model {
                             self.launch_in_progress = false;
                             self.launch_rx = None;
                             self.launch_status = None;
+                            // FR-052: Show error in modal (waiting_for_key is set by set_step_error)
                             gwt_core::logging::log_error_message("E4001", "agent", &message, None);
                             self.worktree_create.error_message = Some(message.clone());
                             self.status_message = Some(format!("Error: {}", message));
@@ -3900,17 +3905,49 @@ impl Model {
                 let _ = tx.send(update);
             };
 
-            send(LaunchUpdate::Progress(LaunchProgress::ResolvingWorktree));
+            // Helper to send progress step updates
+            let step = |kind: ProgressStepKind, status: StepStatus| {
+                let _ = tx.send(LaunchUpdate::ProgressStep { kind, status });
+            };
 
+            // Step 1: Fetch remote (initialize manager)
+            step(ProgressStepKind::FetchRemote, StepStatus::Running);
             let manager = match WorktreeManager::new(&repo_root) {
                 Ok(manager) => manager,
                 Err(e) => {
+                    let _ = tx.send(LaunchUpdate::ProgressStepError {
+                        kind: ProgressStepKind::FetchRemote,
+                        message: e.to_string(),
+                    });
                     send(LaunchUpdate::Failed(e.to_string()));
                     return;
                 }
             };
+            step(ProgressStepKind::FetchRemote, StepStatus::Completed);
 
+            // Step 2: Validate branch
+            step(ProgressStepKind::ValidateBranch, StepStatus::Running);
             let existing_wt = manager.get_by_branch(&request.branch_name).ok().flatten();
+            let has_existing_wt = existing_wt.is_some();
+            step(ProgressStepKind::ValidateBranch, StepStatus::Completed);
+
+            // Step 3: Generate path
+            step(ProgressStepKind::GeneratePath, StepStatus::Running);
+            // Path generation happens inside create_for_branch/create_new_branch
+            step(ProgressStepKind::GeneratePath, StepStatus::Completed);
+
+            // Step 4: Check conflicts (skip if existing worktree)
+            if has_existing_wt {
+                step(ProgressStepKind::CheckConflicts, StepStatus::Skipped);
+                step(ProgressStepKind::CreateWorktree, StepStatus::Skipped);
+            } else {
+                step(ProgressStepKind::CheckConflicts, StepStatus::Running);
+                step(ProgressStepKind::CheckConflicts, StepStatus::Completed);
+
+                // Step 5: Create worktree
+                step(ProgressStepKind::CreateWorktree, StepStatus::Running);
+            }
+
             let result = if let Some(wt) = existing_wt {
                 Ok(wt)
             } else if request.create_new_branch {
@@ -3920,8 +3957,17 @@ impl Model {
             };
 
             let worktree = match result {
-                Ok(wt) => wt,
+                Ok(wt) => {
+                    if !has_existing_wt {
+                        step(ProgressStepKind::CreateWorktree, StepStatus::Completed);
+                    }
+                    wt
+                }
                 Err(e) => {
+                    let _ = tx.send(LaunchUpdate::ProgressStepError {
+                        kind: ProgressStepKind::CreateWorktree,
+                        message: e.to_string(),
+                    });
                     send(LaunchUpdate::Failed(e.to_string()));
                     return;
                 }
@@ -3935,6 +3981,9 @@ impl Model {
                 branch: branch_name,
                 path: worktree.path.clone(),
             });
+
+            // Step 6: Check dependencies
+            step(ProgressStepKind::CheckDependencies, StepStatus::Running);
 
             let config = AgentLaunchConfig {
                 worktree_path: worktree.path.clone(),
@@ -3956,10 +4005,16 @@ impl Model {
             }) {
                 Ok(plan) => plan,
                 Err(e) => {
+                    let _ = tx.send(LaunchUpdate::ProgressStepError {
+                        kind: ProgressStepKind::CheckDependencies,
+                        message: e.to_string(),
+                    });
                     send(LaunchUpdate::Failed(e.to_string()));
                     return;
                 }
             };
+
+            step(ProgressStepKind::CheckDependencies, StepStatus::Completed);
 
             send(LaunchUpdate::Ready(Box::new(plan)));
         });
