@@ -1891,6 +1891,14 @@ fn session_scroll_layout(inner: Rect, scrollable: bool) -> (Rect, Option<Rect>) 
     (content, Some(scrollbar))
 }
 
+fn session_scrollbar_content_length(total_lines: usize, viewport_len: usize) -> usize {
+    if total_lines == 0 {
+        return 1;
+    }
+    let viewport_len = viewport_len.max(1);
+    total_lines.saturating_sub(viewport_len).saturating_add(1)
+}
+
 fn build_summary_links(repo_web_url: Option<&String>, branch: Option<&BranchItem>) -> SummaryLinks {
     let Some(branch) = branch else {
         return SummaryLinks::default();
@@ -2171,19 +2179,21 @@ fn render_session_panel(
         total_lines = wrapped_lines.len();
     }
 
-    let max_scroll = total_lines.saturating_sub(content_area.height as usize);
-    state.update_session_scroll_bounds(max_scroll, content_area.height as usize);
+    let viewport_len = content_area.height as usize;
+    let max_scroll = total_lines.saturating_sub(viewport_len);
+    state.update_session_scroll_bounds(max_scroll, viewport_len);
 
     let paragraph = Paragraph::new(wrapped_lines).scroll((state.session_scroll_offset as u16, 0));
     frame.render_widget(paragraph, content_area);
 
     if let Some(scrollbar_area) = scrollbar_area {
+        let scrollbar_length = session_scrollbar_content_length(total_lines, viewport_len);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("^"))
             .end_symbol(Some("v"));
-        let mut scrollbar_state = ScrollbarState::new(total_lines)
+        let mut scrollbar_state = ScrollbarState::new(scrollbar_length)
             .position(state.session_scroll_offset)
-            .viewport_content_length(content_area.height as usize);
+            .viewport_content_length(viewport_len);
         frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
     }
 }
@@ -2542,6 +2552,13 @@ mod tests {
         let (content, scrollbar) = session_scroll_layout(inner, true);
         assert_eq!(content, inner);
         assert!(scrollbar.is_none());
+    }
+
+    #[test]
+    fn test_session_scrollbar_content_length_from_total_and_viewport() {
+        assert_eq!(session_scrollbar_content_length(10, 3), 8);
+        assert_eq!(session_scrollbar_content_length(5, 5), 1);
+        assert_eq!(session_scrollbar_content_length(0, 5), 1);
     }
 
     #[test]
