@@ -3977,19 +3977,13 @@ impl Model {
                     ) {
                         Ok(()) => {
                             // FR-019: Log success
-                            tracing::info!(
-                                "Branch linked to issue #{} on GitHub",
-                                issue.number
-                            );
+                            tracing::info!("Branch linked to issue #{} on GitHub", issue.number);
                             // Branch created by gh, now create worktree for it
                             manager.create_for_branch(&request.branch_name)
                         }
                         Err(e) => {
                             // FR-017/FR-017a: Fallback to local branch creation with warning
-                            tracing::warn!(
-                                "GitHub linking failed, creating local branch: {}",
-                                e
-                            );
+                            tracing::warn!("GitHub linking failed, creating local branch: {}", e);
                             manager.create_new_branch(
                                 &request.branch_name,
                                 request.base_branch.as_deref(),
