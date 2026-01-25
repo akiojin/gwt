@@ -2,6 +2,7 @@
 
 **入力**: `/specs/SPEC-e4798383/` からの設計ドキュメント
 **前提条件**: spec.md（ユーザーストーリー用に必須）
+**PR**: [#787](https://github.com/akiojin/gwt/pull/787) (feature/issue-github-import → develop)
 
 **構成**: タスクはユーザーストーリーごとにグループ化され、各ストーリーの独立した実装とテストを可能にします。
 
