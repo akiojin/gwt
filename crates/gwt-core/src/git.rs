@@ -5,6 +5,7 @@
 mod backend;
 mod branch;
 mod commit;
+mod issue;
 mod pullrequest;
 mod remote;
 mod repository;
@@ -13,6 +14,10 @@ pub use backend::GitBackend;
 pub use branch::{Branch, DivergenceStatus};
 pub use commit::{
     BranchMeta, BranchSummary, ChangeStats, CommitEntry, LoadingState, SectionErrors,
+};
+pub use issue::{
+    fetch_open_issues, filter_issues_by_title, find_branch_for_issue, generate_branch_name,
+    is_gh_cli_available, parse_gh_issues_json, GitHubIssue,
 };
 pub use pullrequest::{PrCache, PullRequest};
 pub use remote::Remote;

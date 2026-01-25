@@ -61,7 +61,7 @@ use super::screens::{
     render_settings, render_wizard, render_worktree_create, AIWizardState, AgentMessage,
     AgentModeState, AgentRole, BranchItem, BranchListState, BranchType, CodingAgent, ConfirmState,
     EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, HelpState, LogsState, ProfilesState,
-    QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult, WizardState,
+    QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult, WizardState, WizardStep,
     WorktreeCreateState,
 };
 // log_gwt_error is available for use when GwtError types are available
@@ -3788,6 +3788,12 @@ impl Model {
             }
             Message::WizardConfirm => {
                 if self.wizard.visible {
+                    // SPEC-e4798383: Check for duplicate branch before confirming IssueSelect
+                    if self.wizard.step == WizardStep::IssueSelect {
+                        self.wizard.check_issue_duplicate(&self.repo_root);
+                    }
+
+                    let prev_step = self.wizard.step;
                     match self.wizard.confirm() {
                         WizardConfirmResult::Complete => {
                             // Start worktree creation with wizard settings
@@ -3805,7 +3811,14 @@ impl Model {
                             // Create the worktree directly
                             self.create_worktree();
                         }
-                        WizardConfirmResult::Advance => {}
+                        WizardConfirmResult::Advance => {
+                            // SPEC-e4798383: Load issues when entering IssueSelect step
+                            if self.wizard.step == WizardStep::IssueSelect
+                                && prev_step != WizardStep::IssueSelect
+                            {
+                                self.wizard.load_issues(&self.repo_root);
+                            }
+                        }
                         WizardConfirmResult::FocusPane(pane_idx) => {
                             // Focus on existing agent pane (wizard already closed itself)
                             self.pane_list.selected = pane_idx;
