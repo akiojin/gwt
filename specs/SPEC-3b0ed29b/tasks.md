@@ -244,3 +244,14 @@ T002 ─┘                                  ├─> T007 ─> T008 ─> T009 �
 ## 推奨MVP範囲
 
 T001〜T010の完了でユーザーストーリー15の全機能が実装される。
+
+## 追加作業: Windows IS_SANDBOX対応 (2026-01-25)
+
+- [x] **T3331** [Test] `crates/gwt-cli/src/main.rs` にClaude Codeの`IS_SANDBOX`付与がWindowsでは無効になることを検証するユニットテストを追加する
+- [x] **T3332** [実装] `crates/gwt-cli/src/main.rs` の環境変数生成でWindowsでは`IS_SANDBOX=1`を付与しないよう修正する
+- [x] **T3333** [実装] `crates/gwt-core/src/agent/claude.rs` のClaude Code起動でWindowsでは`IS_SANDBOX=1`を付与しないよう修正する
+
+## 追加作業: bunxランナー選択の安全化 (2026-01-25)
+
+- [x] **T3341** [Test] `crates/gwt-cli/src/main.rs` にbunxが`node_modules/.bin`配下の場合npxへフォールバックする選択ロジックのテストを追加する
+- [x] **T3342** [実装] `crates/gwt-cli/src/main.rs` のbunx解決で`node_modules/.bin`配下のbunxを回避しnpxを優先する
