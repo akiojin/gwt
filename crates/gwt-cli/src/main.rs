@@ -801,10 +801,13 @@ fn emit_fast_exit_notice(duration_ms: u128, command_display: &str) {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LaunchProgress {
+    #[allow(dead_code)]
     ResolvingWorktree,
     BuildingCommand,
     CheckingDependencies,
-    InstallingDependencies { manager: String },
+    InstallingDependencies {
+        manager: String,
+    },
 }
 
 impl LaunchProgress {
@@ -817,6 +820,131 @@ impl LaunchProgress {
                 format!("Installing dependencies with {}...", manager)
             }
         }
+    }
+}
+
+/// Progress step kind for worktree preparation modal (FR-048)
+/// The 6 stages of worktree preparation process
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProgressStepKind {
+    /// 1. Fetching remote...
+    FetchRemote,
+    /// 2. Validating branch...
+    ValidateBranch,
+    /// 3. Generating path...
+    GeneratePath,
+    /// 4. Checking conflicts...
+    CheckConflicts,
+    /// 5. Creating worktree...
+    CreateWorktree,
+    /// 6. Checking dependencies...
+    CheckDependencies,
+}
+
+impl ProgressStepKind {
+    /// Returns the display message for this step kind
+    pub(crate) fn message(&self) -> &'static str {
+        match self {
+            ProgressStepKind::FetchRemote => "Fetching remote...",
+            ProgressStepKind::ValidateBranch => "Validating branch...",
+            ProgressStepKind::GeneratePath => "Generating path...",
+            ProgressStepKind::CheckConflicts => "Checking conflicts...",
+            ProgressStepKind::CreateWorktree => "Creating worktree...",
+            ProgressStepKind::CheckDependencies => "Checking dependencies...",
+        }
+    }
+
+    /// Returns all step kinds in order
+    pub(crate) fn all() -> [ProgressStepKind; 6] {
+        [
+            ProgressStepKind::FetchRemote,
+            ProgressStepKind::ValidateBranch,
+            ProgressStepKind::GeneratePath,
+            ProgressStepKind::CheckConflicts,
+            ProgressStepKind::CreateWorktree,
+            ProgressStepKind::CheckDependencies,
+        ]
+    }
+}
+
+/// Step status for progress modal (FR-047)
+/// [x] Completed, [>] Running, [ ] Pending, [!] Failed, [skip] Skipped
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum StepStatus {
+    /// [ ] - Waiting to start
+    #[default]
+    Pending,
+    /// [>] - Currently executing
+    Running,
+    /// [x] - Successfully completed
+    Completed,
+    /// [!] - Failed with error
+    Failed,
+    /// [skip] - Skipped (e.g., existing worktree reuse)
+    Skipped,
+}
+
+/// Individual progress step with timing and error info (FR-049)
+#[derive(Debug, Clone)]
+pub(crate) struct ProgressStep {
+    pub kind: ProgressStepKind,
+    pub status: StepStatus,
+    pub started_at: Option<Instant>,
+    pub error_message: Option<String>,
+}
+
+impl ProgressStep {
+    /// Create a new pending step
+    pub(crate) fn new(kind: ProgressStepKind) -> Self {
+        Self {
+            kind,
+            status: StepStatus::Pending,
+            started_at: None,
+            error_message: None,
+        }
+    }
+
+    /// Start this step (Pending -> Running)
+    pub(crate) fn start(&mut self) {
+        self.status = StepStatus::Running;
+        self.started_at = Some(Instant::now());
+    }
+
+    /// Complete this step (Running -> Completed)
+    pub(crate) fn complete(&mut self) {
+        self.status = StepStatus::Completed;
+    }
+
+    /// Mark this step as failed with an error message
+    pub(crate) fn fail(&mut self, message: String) {
+        self.status = StepStatus::Failed;
+        self.error_message = Some(message);
+    }
+
+    /// Skip this step (for existing worktree reuse)
+    pub(crate) fn skip(&mut self) {
+        self.status = StepStatus::Skipped;
+    }
+
+    /// Get the marker string for display (FR-047)
+    pub(crate) fn marker(&self) -> &'static str {
+        match self.status {
+            StepStatus::Pending => "[ ]",
+            StepStatus::Running => "[>]",
+            StepStatus::Completed => "[x]",
+            StepStatus::Failed => "[!]",
+            StepStatus::Skipped => "[skip]",
+        }
+    }
+
+    /// Get elapsed seconds since start (if started)
+    pub(crate) fn elapsed_secs(&self) -> Option<f64> {
+        self.started_at.map(|t| t.elapsed().as_secs_f64())
+    }
+
+    /// Check if elapsed time should be shown (>= 3 seconds) (FR-049)
+    pub(crate) fn should_show_elapsed(&self) -> bool {
+        self.elapsed_secs().is_some_and(|secs| secs >= 3.0)
     }
 }
 
@@ -1211,9 +1339,9 @@ fn get_bunx_command(npm_package: &str, version: &str) -> (String, Vec<String>) {
     // Try bunx first, but avoid project-local node_modules/.bin shims.
     let bunx_path = which::which("bunx").ok();
     let npx_path = which::which("npx").ok();
-    let runner_path = select_runner_executable(bunx_path, npx_path)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| "bunx".to_string());
+    let runner_path =
+        select_runner_executable(bunx_path, npx_path).unwrap_or_else(|| PathBuf::from("bunx"));
+    let runner_path_str = runner_path.to_string_lossy().to_string();
 
     let package_spec = if version == "latest" {
         format!("{}@latest", npm_package)
@@ -1221,7 +1349,10 @@ fn get_bunx_command(npm_package: &str, version: &str) -> (String, Vec<String>) {
         format!("{}@{}", npm_package, version)
     };
 
-    (runner_path, vec![package_spec])
+    (
+        runner_path_str.clone(),
+        build_runner_args(package_spec, &runner_path_str),
+    )
 }
 
 fn select_runner_executable(
@@ -1242,6 +1373,28 @@ fn select_runner_executable(
 fn is_node_modules_bin(path: &Path) -> bool {
     let normalized = path.to_string_lossy().replace('\\', "/");
     normalized.contains("/node_modules/.bin/")
+}
+
+fn build_runner_args(package_spec: String, runner_executable: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    if runner_requires_yes(runner_executable) {
+        args.push("--yes".to_string());
+    }
+    args.push(package_spec);
+    args
+}
+
+fn runner_requires_yes(executable: &str) -> bool {
+    std::path::Path::new(executable)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| {
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "npx" | "npx.cmd" | "npx.exe"
+            )
+        })
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2044,6 +2197,30 @@ mod tests {
     }
 
     #[test]
+    fn test_runner_requires_yes_for_npx_variants() {
+        assert!(runner_requires_yes("npx"));
+        assert!(runner_requires_yes("/usr/local/bin/npx"));
+        assert!(runner_requires_yes("npx.cmd"));
+        assert!(runner_requires_yes("npx.exe"));
+        assert!(!runner_requires_yes("bunx"));
+    }
+
+    #[test]
+    fn test_build_runner_args_adds_yes_for_npx() {
+        let args = build_runner_args("@openai/codex@latest".to_string(), "npx");
+        assert_eq!(
+            args,
+            vec!["--yes".to_string(), "@openai/codex@latest".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_build_runner_args_skips_yes_for_bunx() {
+        let args = build_runner_args("@openai/codex@latest".to_string(), "bunx");
+        assert_eq!(args, vec!["@openai/codex@latest".to_string()]);
+    }
+
+    #[test]
     fn test_build_launch_env_claude_skip_permissions_gates_is_sandbox() {
         let config = sample_config(CodingAgent::ClaudeCode);
         let env = build_launch_env(&config);
@@ -2519,5 +2696,136 @@ mod tests {
             hook_event_to_status("SessionStart", &payload),
             AgentStatus::Running
         );
+    }
+
+    // ============================================
+    // Progress Modal Tests (T001-T005)
+    // ============================================
+
+    #[test]
+    fn test_progress_step_kind_all_returns_6_steps() {
+        let all = ProgressStepKind::all();
+        assert_eq!(all.len(), 6);
+        assert_eq!(all[0], ProgressStepKind::FetchRemote);
+        assert_eq!(all[5], ProgressStepKind::CheckDependencies);
+    }
+
+    #[test]
+    fn test_progress_step_kind_messages() {
+        assert_eq!(
+            ProgressStepKind::FetchRemote.message(),
+            "Fetching remote..."
+        );
+        assert_eq!(
+            ProgressStepKind::ValidateBranch.message(),
+            "Validating branch..."
+        );
+        assert_eq!(
+            ProgressStepKind::GeneratePath.message(),
+            "Generating path..."
+        );
+        assert_eq!(
+            ProgressStepKind::CheckConflicts.message(),
+            "Checking conflicts..."
+        );
+        assert_eq!(
+            ProgressStepKind::CreateWorktree.message(),
+            "Creating worktree..."
+        );
+        assert_eq!(
+            ProgressStepKind::CheckDependencies.message(),
+            "Checking dependencies..."
+        );
+    }
+
+    #[test]
+    fn test_step_status_default_is_pending() {
+        let status: StepStatus = Default::default();
+        assert_eq!(status, StepStatus::Pending);
+    }
+
+    #[test]
+    fn test_progress_step_new_is_pending() {
+        let step = ProgressStep::new(ProgressStepKind::FetchRemote);
+        assert_eq!(step.kind, ProgressStepKind::FetchRemote);
+        assert_eq!(step.status, StepStatus::Pending);
+        assert!(step.started_at.is_none());
+        assert!(step.error_message.is_none());
+    }
+
+    #[test]
+    fn test_progress_step_start_sets_running() {
+        let mut step = ProgressStep::new(ProgressStepKind::FetchRemote);
+        step.start();
+        assert_eq!(step.status, StepStatus::Running);
+        assert!(step.started_at.is_some());
+    }
+
+    #[test]
+    fn test_progress_step_complete_sets_completed() {
+        let mut step = ProgressStep::new(ProgressStepKind::FetchRemote);
+        step.start();
+        step.complete();
+        assert_eq!(step.status, StepStatus::Completed);
+    }
+
+    #[test]
+    fn test_progress_step_fail_sets_failed_with_message() {
+        let mut step = ProgressStep::new(ProgressStepKind::FetchRemote);
+        step.start();
+        step.fail("Network error".to_string());
+        assert_eq!(step.status, StepStatus::Failed);
+        assert_eq!(step.error_message, Some("Network error".to_string()));
+    }
+
+    #[test]
+    fn test_progress_step_skip_sets_skipped() {
+        let mut step = ProgressStep::new(ProgressStepKind::FetchRemote);
+        step.skip();
+        assert_eq!(step.status, StepStatus::Skipped);
+    }
+
+    #[test]
+    fn test_progress_step_markers() {
+        let mut step = ProgressStep::new(ProgressStepKind::FetchRemote);
+        assert_eq!(step.marker(), "[ ]"); // Pending
+
+        step.start();
+        assert_eq!(step.marker(), "[>]"); // Running
+
+        step.complete();
+        assert_eq!(step.marker(), "[x]"); // Completed
+
+        let mut step2 = ProgressStep::new(ProgressStepKind::FetchRemote);
+        step2.start();
+        step2.fail("error".to_string());
+        assert_eq!(step2.marker(), "[!]"); // Failed
+
+        let mut step3 = ProgressStep::new(ProgressStepKind::FetchRemote);
+        step3.skip();
+        assert_eq!(step3.marker(), "[skip]"); // Skipped
+    }
+
+    #[test]
+    fn test_progress_step_elapsed_secs_none_if_not_started() {
+        let step = ProgressStep::new(ProgressStepKind::FetchRemote);
+        assert!(step.elapsed_secs().is_none());
+    }
+
+    #[test]
+    fn test_progress_step_elapsed_secs_some_if_started() {
+        let mut step = ProgressStep::new(ProgressStepKind::FetchRemote);
+        step.start();
+        let elapsed = step.elapsed_secs();
+        assert!(elapsed.is_some());
+        assert!(elapsed.unwrap() >= 0.0);
+    }
+
+    #[test]
+    fn test_progress_step_should_show_elapsed_false_under_3_secs() {
+        let mut step = ProgressStep::new(ProgressStepKind::FetchRemote);
+        step.start();
+        // Just started, should be under 3 seconds
+        assert!(!step.should_show_elapsed());
     }
 }
