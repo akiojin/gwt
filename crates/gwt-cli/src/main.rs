@@ -1208,11 +1208,12 @@ fn execute_launch_plan(plan: LaunchPlan) -> Result<AgentExitKind, GwtError> {
 
 /// Get bunx command and base args for npm package execution
 fn get_bunx_command(npm_package: &str, version: &str) -> (String, Vec<String>) {
-    // Try bunx first, then npx as fallback
-    let bunx_path = which::which("bunx")
-        .or_else(|_| which::which("npx"))
+    // Try bunx first, but avoid project-local node_modules/.bin shims.
+    let bunx_path = which::which("bunx").ok();
+    let npx_path = which::which("npx").ok();
+    let runner_path = select_runner_executable(bunx_path, npx_path)
         .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "bunx".to_string());
+        .unwrap_or_else(|| "bunx".to_string());
 
     let package_spec = if version == "latest" {
         format!("{}@latest", npm_package)
@@ -1220,7 +1221,27 @@ fn get_bunx_command(npm_package: &str, version: &str) -> (String, Vec<String>) {
         format!("{}@{}", npm_package, version)
     };
 
-    (bunx_path, vec![package_spec])
+    (runner_path, vec![package_spec])
+}
+
+fn select_runner_executable(
+    bunx_path: Option<PathBuf>,
+    npx_path: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(path) = bunx_path.as_ref() {
+        if !is_node_modules_bin(path) {
+            return bunx_path;
+        }
+    }
+    if npx_path.is_some() {
+        return npx_path;
+    }
+    bunx_path
+}
+
+fn is_node_modules_bin(path: &Path) -> bool {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    normalized.contains("/node_modules/.bin/")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1989,6 +2010,37 @@ mod tests {
     fn test_should_set_claude_sandbox_env_non_windows() {
         assert!(should_set_claude_sandbox_env("linux"));
         assert!(should_set_claude_sandbox_env("macos"));
+    }
+
+    #[test]
+    fn test_is_node_modules_bin_detects_paths() {
+        let unix_path = Path::new("/repo/node_modules/.bin/bunx");
+        let windows_path = Path::new("C:\\repo\\node_modules\\.bin\\bunx");
+        assert!(is_node_modules_bin(unix_path));
+        assert!(is_node_modules_bin(windows_path));
+    }
+
+    #[test]
+    fn test_select_runner_executable_prefers_global_bunx() {
+        let bunx = PathBuf::from("/usr/local/bin/bunx");
+        let npx = PathBuf::from("/usr/bin/npx");
+        let selected = select_runner_executable(Some(bunx.clone()), Some(npx));
+        assert_eq!(selected, Some(bunx));
+    }
+
+    #[test]
+    fn test_select_runner_executable_skips_local_bunx_prefers_npx() {
+        let bunx = PathBuf::from("/repo/node_modules/.bin/bunx");
+        let npx = PathBuf::from("/usr/bin/npx");
+        let selected = select_runner_executable(Some(bunx), Some(npx.clone()));
+        assert_eq!(selected, Some(npx));
+    }
+
+    #[test]
+    fn test_select_runner_executable_falls_back_to_local_bunx() {
+        let bunx = PathBuf::from("/repo/node_modules/.bin/bunx");
+        let selected = select_runner_executable(Some(bunx.clone()), None);
+        assert_eq!(selected, Some(bunx));
     }
 
     #[test]
