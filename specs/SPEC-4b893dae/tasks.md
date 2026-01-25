@@ -4,6 +4,14 @@
 **入力**: `specs/SPEC-4b893dae/` からの設計ドキュメント
 **前提条件**: plan.md、spec.md、data-model.md、contracts/openai-api.md、research.md、quickstart.md
 
+## 追加作業: セッション要約マウスホイールスクロール (2026-01-25)
+
+- [x] **T8954** [P] [共通] `specs/SPEC-4b893dae/spec.md` / `specs/SPEC-4b893dae/plan.md` / `specs/SPEC-4b893dae/quickstart.md` にマウスホイールスクロール要件と手順を追記
+- [x] **T8955** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` にセッション要約のスクロール領域判定とホイールスクロール処理を追加
+- [x] **T8956** [Impl] `crates/gwt-cli/src/tui/app.rs` にマウスホイールイベントのルーティングを追加
+- [x] **T8957** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にマウスホイールスクロールのユニットテストを追加
+- [x] **T8958** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
 ## 追加作業: AI設定モデル一覧スクロール (2026-01-24)
 
 - [x] **T8950** [P] [共通] `specs/SPEC-4b893dae/spec.md` / `specs/SPEC-4b893dae/plan.md` にモデル一覧スクロール要件を追記
