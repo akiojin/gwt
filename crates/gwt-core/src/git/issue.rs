@@ -186,7 +186,7 @@ pub fn create_linked_branch(
     branch_name: &str,
 ) -> Result<(), String> {
     // FR-016a: Use --name to specify branch name
-    // FR-016b: Use --checkout=false since worktree will handle checkout
+    // FR-016b: Omit --checkout flag (default: no checkout) since worktree will handle checkout
     let output = Command::new("gh")
         .args([
             "issue",
@@ -194,7 +194,6 @@ pub fn create_linked_branch(
             &issue_number.to_string(),
             "--name",
             branch_name,
-            "--checkout=false",
         ])
         .current_dir(repo_path)
         .output()
