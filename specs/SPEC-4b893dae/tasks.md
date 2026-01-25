@@ -10,7 +10,7 @@
 - [x] **T8955** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` にセッション要約のスクロール領域判定とホイールスクロール処理を追加
 - [x] **T8956** [Impl] `crates/gwt-cli/src/tui/app.rs` にマウスホイールイベントのルーティングを追加
 - [x] **T8957** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にマウスホイールスクロールのユニットテストを追加
-- [ ] **T8958** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+- [x] **T8958** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
 
 ## 追加作業: AI設定モデル一覧スクロール (2026-01-24)
 
