@@ -265,6 +265,8 @@ struct LaunchRequest {
     env: Vec<(String, String)>,
     env_remove: Vec<String>,
     auto_install_deps: bool,
+    /// SPEC-e4798383 US6: Selected GitHub Issue for branch linking
+    selected_issue: Option<gwt_core::git::GitHubIssue>,
 }
 
 enum LaunchUpdate {
@@ -3889,6 +3891,8 @@ impl Model {
             env: self.active_env_overrides(),
             env_remove: self.active_env_removals(),
             auto_install_deps,
+            // SPEC-e4798383 US6: Pass selected issue for GitHub linking
+            selected_issue: self.wizard.selected_issue.clone(),
         };
 
         self.start_launch_preparation(request);
@@ -3964,7 +3968,38 @@ impl Model {
             let result = if let Some(wt) = existing_wt {
                 Ok(wt)
             } else if request.create_new_branch {
-                manager.create_new_branch(&request.branch_name, request.base_branch.as_deref())
+                // SPEC-e4798383 US6: Try GitHub Issue linking if issue is selected
+                if let Some(ref issue) = request.selected_issue {
+                    match gwt_core::git::create_linked_branch(
+                        &repo_root,
+                        issue.number,
+                        &request.branch_name,
+                    ) {
+                        Ok(()) => {
+                            // FR-019: Log success
+                            tracing::info!(
+                                "Branch linked to issue #{} on GitHub",
+                                issue.number
+                            );
+                            // Branch created by gh, now create worktree for it
+                            manager.create_for_branch(&request.branch_name)
+                        }
+                        Err(e) => {
+                            // FR-017/FR-017a: Fallback to local branch creation with warning
+                            tracing::warn!(
+                                "GitHub linking failed, creating local branch: {}",
+                                e
+                            );
+                            manager.create_new_branch(
+                                &request.branch_name,
+                                request.base_branch.as_deref(),
+                            )
+                        }
+                    }
+                } else {
+                    // FR-018: No issue selected, use regular local branch creation
+                    manager.create_new_branch(&request.branch_name, request.base_branch.as_deref())
+                }
             } else {
                 manager.create_for_branch(&request.branch_name)
             };

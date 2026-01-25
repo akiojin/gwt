@@ -167,6 +167,48 @@ pub fn generate_branch_name(type_prefix: &str, issue_number: u64) -> String {
     format!("{}issue-{}", type_prefix, issue_number)
 }
 
+/// Create a branch linked to a GitHub Issue using `gh issue develop` (FR-016)
+///
+/// This creates a branch on GitHub that is officially linked to the issue,
+/// appearing in the issue's "Development" section.
+///
+/// # Arguments
+/// * `repo_path` - Path to the git repository
+/// * `issue_number` - The GitHub issue number to link
+/// * `branch_name` - Full branch name (e.g., "feature/issue-42")
+///
+/// # Returns
+/// * `Ok(())` - Branch was successfully created and linked on GitHub
+/// * `Err(String)` - Error message if the command failed
+pub fn create_linked_branch(
+    repo_path: &Path,
+    issue_number: u64,
+    branch_name: &str,
+) -> Result<(), String> {
+    // FR-016a: Use --name to specify branch name
+    // FR-016b: Use --checkout=false since worktree will handle checkout
+    let output = Command::new("gh")
+        .args([
+            "issue",
+            "develop",
+            &issue_number.to_string(),
+            "--name",
+            branch_name,
+            "--checkout=false",
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to execute gh issue develop: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh issue develop failed: {}", stderr.trim()));
+    }
+
+    // FR-019: Log success (caller should handle actual logging)
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
