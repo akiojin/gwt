@@ -7,26 +7,25 @@
 
 ## User Scenarios and Tests *(Required)*
 
-### User Story 1 - Enable collaboration_modes for Codex v0.91.0+ (Priority: P1)
+### User Story 1 - Auto-enable collaboration_modes for Codex v0.91.0+ (Priority: P1)
 
-When a developer selects Codex v0.91.0 or later, the TUI displays an option
-to enable collaboration_modes (Plan/Execute mode switching).
+When a developer selects Codex v0.91.0 or later, collaboration_modes is
+automatically enabled without requiring user selection (Plan mode support).
 
-**Reason for priority**: Enables gwt users to leverage a new Codex feature.
+**Reason for priority**: Enables gwt users to leverage a new Codex feature
+with zero friction.
 
-**Independent test**: Select Codex v0.91.0+ -> CollaborationModes step appears
--> Select Enabled -> `--enable collaboration_modes` included in CLI args.
+**Independent test**: Select Codex v0.91.0+ -> CollaborationModes step skipped
+-> `--enable collaboration_modes` automatically included in CLI args.
 
 **Acceptance scenarios**:
 
 1. **Given** Codex v0.91.0+ is selected, **When** VersionSelect completes,
-   **Then** CollaborationModes step is displayed.
-2. **Given** CollaborationModes step with Enabled selected,
+   **Then** CollaborationModes step is skipped and collaboration_modes is
+   automatically set to true.
+2. **Given** Codex v0.91.0+ is selected,
    **When** wizard completes, **Then** Codex launch args include
-   `--enable collaboration_modes`.
-3. **Given** CollaborationModes step with Disabled selected,
-   **When** wizard completes, **Then** Codex launch args do not include
-   `--enable collaboration_modes`.
+   `--enable collaboration_modes` automatically.
 
 ---
 
@@ -94,12 +93,14 @@ is skipped because it is a Codex-specific feature.
 
 ### Functional Requirements
 
-- **FR-001**: gwt shall display CollaborationModes step for Codex v0.91.0+.
-- **FR-002**: gwt shall display CollaborationModes step for version "latest".
+- **FR-001**: gwt shall automatically enable collaboration_modes for Codex
+  v0.91.0+ (step is skipped, no user selection required).
+- **FR-002**: gwt shall automatically enable collaboration_modes for version
+  "latest" (assumed to be v0.91.0+ capable).
 - **FR-003**: gwt shall check installed version for "installed" selection
-  and show CollaborationModes only if v0.91.0+.
+  and auto-enable collaboration_modes only if v0.91.0+.
 - **FR-004**: gwt shall add `--enable collaboration_modes` to Codex args
-  when Enabled is selected.
+  automatically when v0.91.0+ is selected.
 - **FR-005**: gwt shall skip CollaborationModes step for non-Codex agents.
 - **FR-006**: gwt shall persist collaboration_modes in ToolSessionEntry.
 
@@ -113,9 +114,9 @@ is skipped because it is a Codex-specific feature.
 
 ### Measurable Outcomes
 
-- **SC-001**: CollaborationModes step shown 100% for Codex v0.91.0+.
-- **SC-002**: CollaborationModes step skipped 100% for Codex v0.90.x-.
-- **SC-003**: `--enable collaboration_modes` added 100% when Enabled.
+- **SC-001**: collaboration_modes auto-enabled 100% for Codex v0.91.0+.
+- **SC-002**: CollaborationModes step skipped 100% for all versions (auto-enable).
+- **SC-003**: `--enable collaboration_modes` added 100% for Codex v0.91.0+.
 - **SC-004**: Regression tests pass for Claude Code/Gemini workflows.
 
 ## Out of Scope *(Required)*
