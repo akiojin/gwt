@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [6.20.0] - 2026-01-26
+
+### Bug Fixes
+
+- Cleanup spinner + input lock (#802)
+
 ## [6.19.0] - 2026-01-26
 
 ### Bug Fixes

@@ -425,6 +425,10 @@ pub struct BranchListState {
     pub status_progress_total: usize,
     pub status_progress_done: usize,
     pub status_progress_active: bool,
+    pub cleanup_in_progress: bool,
+    pub cleanup_progress_total: usize,
+    pub cleanup_progress_done: usize,
+    pub cleanup_active_branch: Option<String>,
     /// Viewport height for scroll calculations (updated by renderer)
     pub visible_height: usize,
     /// Cached branch list area (outer, with border)
@@ -484,6 +488,10 @@ impl Default for BranchListState {
             status_progress_total: 0,
             status_progress_done: 0,
             status_progress_active: false,
+            cleanup_in_progress: false,
+            cleanup_progress_total: 0,
+            cleanup_progress_done: 0,
+            cleanup_active_branch: None,
             visible_height: 15, // Default fallback (previously hardcoded)
             list_area: None,
             list_inner_area: None,
@@ -1034,6 +1042,58 @@ impl BranchListState {
             "Status: Updating branch status ({}/{})",
             self.status_progress_done, self.status_progress_total
         ))
+    }
+
+    pub fn start_cleanup_progress(&mut self, total: usize) {
+        self.cleanup_in_progress = total > 0;
+        self.cleanup_progress_total = total;
+        self.cleanup_progress_done = 0;
+        self.cleanup_active_branch = None;
+    }
+
+    pub fn increment_cleanup_progress(&mut self) {
+        if !self.cleanup_in_progress {
+            return;
+        }
+        if self.cleanup_progress_done < self.cleanup_progress_total {
+            self.cleanup_progress_done += 1;
+        }
+    }
+
+    pub fn cleanup_progress_line(&self) -> Option<String> {
+        if !self.cleanup_in_progress {
+            return None;
+        }
+        Some(format!(
+            "Cleanup: Running {} ({}/{})",
+            self.spinner_char(),
+            self.cleanup_progress_done,
+            self.cleanup_progress_total
+        ))
+    }
+
+    pub fn active_status_line(&self) -> Option<String> {
+        self.cleanup_progress_line()
+            .or_else(|| self.status_progress_line())
+    }
+
+    pub fn cleanup_in_progress(&self) -> bool {
+        self.cleanup_in_progress
+    }
+
+    pub fn set_cleanup_active_branch(&mut self, branch: Option<String>) {
+        self.cleanup_active_branch = branch;
+    }
+
+    pub fn cleanup_active_branch(&self) -> Option<&str> {
+        self.cleanup_active_branch.as_deref()
+    }
+
+    pub fn finish_cleanup_progress(&mut self) {
+        self.cleanup_in_progress = false;
+        self.cleanup_progress_total = 0;
+        self.cleanup_progress_done = 0;
+        self.cleanup_active_branch = None;
     }
 
     /// Set loading state
@@ -1632,6 +1692,7 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect, has_f
     let visible_height = inner_area.height as usize;
     // FR-031b: Pass spinner_frame for safety check pending indicator
     let spinner_frame = state.spinner_frame;
+    let cleanup_active_branch = state.cleanup_active_branch();
     let mut items: Vec<ListItem> = state
         .visible_filtered_indices(visible_height)
         .iter()
@@ -1639,11 +1700,15 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect, has_f
         .map(|(i, index)| {
             let branch = &state.branches[*index];
             let running_agent = state.get_running_agent(&branch.name);
+            let is_cleanup_active = cleanup_active_branch
+                .map(|name| name == branch.name)
+                .unwrap_or(false);
             render_branch_row(
                 branch,
                 state.offset + i == state.selected,
                 &state.selected_branches,
                 spinner_frame,
+                is_cleanup_active,
                 running_agent,
                 inner_area.width,
             )
@@ -1675,20 +1740,27 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect, has_f
 /// Render a single branch row
 /// FR-070: Tool display format: ToolName@X.Y.Z
 /// FR-031b: Show spinner for safety check pending branches
+/// FR-011f: Show spinner in safety icon while cleanup is running
 /// FR-020~024: Running agent info displayed on right side (right-aligned)
 fn render_branch_row(
     branch: &BranchItem,
     is_selected: bool,
     selected_set: &HashSet<String>,
     spinner_frame: usize,
+    cleanup_active: bool,
     running_agent: Option<&AgentPane>,
     width: u16,
 ) -> ListItem<'static> {
     // Only show selection icons when at least one branch is selected
     let show_selection = !selected_set.is_empty();
     let is_checked = selected_set.contains(&branch.name);
-    // FR-031b: Pass spinner_frame for pending safety check
-    let (safety_icon, safety_color) = branch.safety_icon(Some(spinner_frame));
+    let (safety_icon, safety_color) = if cleanup_active {
+        let spinner_char = SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()];
+        (spinner_char.to_string(), Color::Yellow)
+    } else {
+        // FR-031b: Pass spinner_frame for pending safety check
+        branch.safety_icon(Some(spinner_frame))
+    };
     // FR-082/FR-083/FR-084/FR-085: Get branch name color based on worktree/gone status
     let branch_name_color = branch.branch_name_color();
 
@@ -2021,7 +2093,7 @@ fn render_details_panel(
     let links = build_summary_links(state.repo_web_url(), selected_branch.as_ref());
 
     // Get progress status line if active
-    let status_line = state.status_progress_line();
+    let status_line = state.active_status_line();
 
     // Render the full summary panel with optional status line
     let panel = SummaryPanel::new(&summary)
@@ -2842,6 +2914,61 @@ mod tests {
     }
 
     #[test]
+    fn test_cleanup_active_branch_shows_spinner_in_safety_icon() {
+        let branches = vec![BranchItem {
+            name: "cleanupbranch".to_string(),
+            branch_type: BranchType::Local,
+            is_current: false,
+            has_worktree: true,
+            worktree_path: Some("/path".to_string()),
+            worktree_status: WorktreeStatus::Active,
+            has_changes: false,
+            has_unpushed: false,
+            divergence: DivergenceStatus::UpToDate,
+            has_remote_counterpart: true,
+            remote_name: None,
+            safe_to_cleanup: Some(true),
+            safety_status: SafetyStatus::Safe,
+            is_unmerged: false,
+            last_commit_timestamp: None,
+            last_tool_usage: None,
+            last_tool_id: None,
+            last_session_id: None,
+            is_selected: false,
+            pr_title: None,
+            pr_number: None,
+            pr_url: None,
+            is_gone: false,
+        }];
+
+        let mut state = BranchListState::new().with_branches(branches);
+        state.start_cleanup_progress(1);
+        state.set_cleanup_active_branch(Some("cleanupbranch".to_string()));
+        state.spinner_frame = 0; // '|' frame
+
+        let backend = TestBackend::new(30, 5);
+        let mut terminal = Terminal::new(backend).expect("terminal init");
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_branches(&state, f, area, true);
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        let mut found = false;
+        for y in 0..5 {
+            let line: String = (0..30).map(|x| buffer[(x, y)].symbol()).collect();
+            if line.contains("| cleanupbranch") {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "cleanup spinner should appear in safety icon column");
+    }
+
+    #[test]
     fn test_status_progress_line_renders() {
         let branches = vec![BranchItem {
             name: "main".to_string(),
@@ -2895,6 +3022,60 @@ mod tests {
             }
         }
         assert!(found, "Progress line should appear somewhere in the panel");
+    }
+
+    #[test]
+    fn test_cleanup_progress_line_renders() {
+        let branches = vec![BranchItem {
+            name: "main".to_string(),
+            branch_type: BranchType::Local,
+            is_current: true,
+            has_worktree: true,
+            worktree_path: Some("/path".to_string()),
+            worktree_status: WorktreeStatus::Active,
+            has_changes: false,
+            has_unpushed: false,
+            divergence: DivergenceStatus::UpToDate,
+            has_remote_counterpart: true,
+            remote_name: None,
+            safe_to_cleanup: Some(true),
+            safety_status: SafetyStatus::Safe,
+            is_unmerged: false,
+            last_commit_timestamp: None,
+            last_tool_usage: None,
+            last_tool_id: None,
+            last_session_id: None,
+            is_selected: false,
+            pr_title: None,
+            pr_number: None,
+            pr_url: None,
+            is_gone: false,
+        }];
+
+        let mut state = BranchListState::new().with_branches(branches);
+        state.start_cleanup_progress(3);
+        state.spinner_frame = 0;
+
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal init");
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_branch_list(&mut state, f, area, None, true);
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        let mut found = false;
+        for y in 0..20 {
+            let line: String = (0..60).map(|x| buffer[(x, y)].symbol()).collect();
+            if line.contains("Cleanup: Running") {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "Cleanup progress line should appear in the panel");
     }
 
     #[test]
