@@ -12,14 +12,6 @@
 - [x] **T1334** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` で削除中の安全アイコンスピナー表示と進捗行の描画を実装
 - [x] **T1335** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
 
-## 追加作業: クリーンアップ中ブランチの選択スキップ (2026-01-26)
-
-- [x] **T1336** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にクリーンアップ中ブランチのカーソルスキップ/クリック無効を追記
-- [x] **T1337** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にクリーンアップ中ブランチをカーソルがスキップするテストを追加
-- [x] **T1338** [Test] `crates/gwt-cli/src/tui/app.rs` にクリーンアップ中ブランチのクリックが無視されることを検証するテストを追加
-- [x] **T1339** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` でカーソル移動時にクリーンアップ中ブランチをスキップする
-- [x] **T1340** [Impl] `crates/gwt-cli/src/tui/app.rs` でクリーンアップ中ブランチのクリック選択を無効化する
-- [x] **T1341** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
 ## 追加作業: ベースブランチのリモートフォールバック (2026-01-26)
 
 - [x] **T1336** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にベースブランチのリモートフォールバック要件・方針を追記
