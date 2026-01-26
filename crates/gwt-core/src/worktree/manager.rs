@@ -2,7 +2,7 @@
 
 use super::{CleanupCandidate, Worktree, WorktreePath, WorktreeStatus};
 use crate::error::{GwtError, Result};
-use crate::git::{get_main_repo_root, Branch, Repository};
+use crate::git::{get_main_repo_root, Branch, Remote, Repository};
 use std::path::{Path, PathBuf};
 use tracing::{debug, error, info, warn};
 
@@ -129,23 +129,22 @@ impl WorktreeManager {
             branch = branch_name,
             "Creating worktree for existing branch"
         );
-        let normalized_branch = normalize_remote_ref(branch_name);
         let mut resolved_branch = branch_name.to_string();
         if !Branch::exists(&self.repo_root, branch_name)? {
-            if let Some((remote, branch)) = split_remote_ref(normalized_branch) {
-                if !Branch::remote_exists(&self.repo_root, remote, branch)? {
-                    error!(
-                        category = "worktree",
-                        branch = branch_name,
-                        "Branch not found"
-                    );
-                    return Err(GwtError::BranchNotFound {
-                        name: branch_name.to_string(),
-                    });
-                }
-                resolved_branch = branch.to_string();
+            let normalized_branch = normalize_remote_ref(branch_name);
+            let remotes = Remote::list(&self.repo_root)?;
+            let mut remote_branch = resolve_remote_branch(&self.repo_root, normalized_branch, &remotes)?;
+
+            if remote_branch.is_none() && !remotes.is_empty() {
+                // Refresh remote refs once if branch isn't found locally
+                self.repo.fetch_all()?;
+                remote_branch = resolve_remote_branch(&self.repo_root, normalized_branch, &remotes)?;
+            }
+
+            if let Some((remote, branch)) = remote_branch {
+                resolved_branch = branch;
                 if !Branch::exists(&self.repo_root, &resolved_branch)? {
-                    let remote_ref = format!("{}/{}", remote, branch);
+                    let remote_ref = format!("{}/{}", remote, resolved_branch);
                     Branch::create(&self.repo_root, &resolved_branch, &remote_ref)?;
                 }
             } else {
@@ -582,11 +581,86 @@ fn split_remote_ref(name: &str) -> Option<(&str, &str)> {
     name.split_once('/')
 }
 
+fn ordered_remote_names(remotes: &[Remote]) -> Vec<String> {
+    let mut names: Vec<String> = remotes.iter().map(|r| r.name.clone()).collect();
+    names.sort_by(|a, b| {
+        if a == "origin" && b != "origin" {
+            std::cmp::Ordering::Less
+        } else if b == "origin" && a != "origin" {
+            std::cmp::Ordering::Greater
+        } else {
+            a.cmp(b)
+        }
+    });
+    names
+}
+
+fn resolve_remote_branch(
+    repo_root: &Path,
+    branch_name: &str,
+    remotes: &[Remote],
+) -> Result<Option<(String, String)>> {
+    if remotes.is_empty() {
+        return Ok(None);
+    }
+
+    let normalized_branch = normalize_remote_ref(branch_name);
+    let remote_names = ordered_remote_names(remotes);
+
+    if let Some((remote_candidate, branch_candidate)) = split_remote_ref(normalized_branch) {
+        if remote_names.iter().any(|name| name == remote_candidate)
+            && Branch::remote_exists(repo_root, remote_candidate, branch_candidate)?
+        {
+            return Ok(Some((
+                remote_candidate.to_string(),
+                branch_candidate.to_string(),
+            )));
+        }
+    }
+
+    for remote in remote_names {
+        if Branch::remote_exists(repo_root, &remote, normalized_branch)? {
+            return Ok(Some((remote, normalized_branch.to_string())));
+        }
+    }
+
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::process::Command;
     use tempfile::TempDir;
+
+    fn run_git_in(dir: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_stdout(dir: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
 
     fn create_test_repo() -> TempDir {
         let temp = TempDir::new().unwrap();
@@ -659,6 +733,48 @@ mod tests {
 
         let wt = manager.create_for_branch("feature/existing").unwrap();
         assert_eq!(wt.branch, Some("feature/existing".to_string()));
+        assert!(wt.path.exists());
+    }
+
+    #[test]
+    fn test_create_for_remote_branch_with_slash_fetches() {
+        let temp = create_test_repo();
+
+        let remote = TempDir::new().unwrap();
+        let remote_path = remote.path().to_string_lossy().to_string();
+        run_git_in(remote.path(), &["init", "--bare"]);
+
+        run_git_in(temp.path(), &["remote", "add", "origin", remote_path.as_str()]);
+
+        let default_branch = git_stdout(temp.path(), &["rev-parse", "--abbrev-ref", "HEAD"]);
+        run_git_in(
+            temp.path(),
+            &["push", "-u", "origin", default_branch.as_str()],
+        );
+
+        let creator = TempDir::new().unwrap();
+        let creator_path = creator.path().to_string_lossy().to_string();
+        let clone_output = Command::new("git")
+            .args(["clone", remote_path.as_str(), creator_path.as_str()])
+            .output()
+            .unwrap();
+        assert!(
+            clone_output.status.success(),
+            "git clone failed: {}",
+            String::from_utf8_lossy(&clone_output.stderr)
+        );
+
+        run_git_in(creator.path(), &["checkout", "-b", "feature/issue-42"]);
+        run_git_in(creator.path(), &["push", "origin", "feature/issue-42"]);
+
+        assert!(!Branch::exists(temp.path(), "feature/issue-42").unwrap());
+        assert!(
+            !Branch::remote_exists(temp.path(), "origin", "feature/issue-42").unwrap()
+        );
+
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+        let wt = manager.create_for_branch("feature/issue-42").unwrap();
+        assert_eq!(wt.branch, Some("feature/issue-42".to_string()));
         assert!(wt.path.exists());
     }
 
