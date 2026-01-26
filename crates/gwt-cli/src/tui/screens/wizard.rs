@@ -1086,28 +1086,30 @@ impl WizardState {
 
         // Handle IssueSelect step (SPEC-e4798383)
         if self.step == WizardStep::IssueSelect {
-            if !self.filtered_issues.is_empty()
-                && self.issue_selected_index < self.filtered_issues.len()
-            {
-                // Issue selected - set selected_issue and generate branch name (FR-009)
-                let issue_idx = self.filtered_issues[self.issue_selected_index];
-                if let Some(issue) = self.issue_list.get(issue_idx).cloned() {
-                    // FR-011: Check for duplicate branch
-                    if let Some(existing) = &self.issue_existing_branch {
-                        self.issue_error = Some(format!(
-                            "Branch for issue #{} already exists: {}",
-                            issue.number, existing
-                        ));
-                        return WizardConfirmResult::Advance; // Stay on same step
-                    }
+            // Index 0 = Skip option, Index 1+ = actual issues
+            if self.issue_selected_index > 0 && !self.filtered_issues.is_empty() {
+                let adjusted_index = self.issue_selected_index - 1; // Adjust for Skip option
+                if adjusted_index < self.filtered_issues.len() {
+                    // Issue selected - set selected_issue and generate branch name (FR-009)
+                    let issue_idx = self.filtered_issues[adjusted_index];
+                    if let Some(issue) = self.issue_list.get(issue_idx).cloned() {
+                        // FR-011: Check for duplicate branch
+                        if let Some(existing) = &self.issue_existing_branch {
+                            self.issue_error = Some(format!(
+                                "Branch for issue #{} already exists: {}",
+                                issue.number, existing
+                            ));
+                            return WizardConfirmResult::Advance; // Stay on same step
+                        }
 
-                    // Generate branch name: {type}/issue-{number}
-                    self.new_branch_name = issue.branch_name_suffix();
-                    self.cursor = self.new_branch_name.len();
-                    self.selected_issue = Some(issue);
+                        // Generate branch name: {type}/issue-{number}
+                        self.new_branch_name = issue.branch_name_suffix();
+                        self.cursor = self.new_branch_name.len();
+                        self.selected_issue = Some(issue);
+                    }
                 }
             }
-            // If no issue selected (empty list, error, or skip), proceed with no issue (FR-004, T603)
+            // If index 0 (Skip) or no issues, proceed without issue (FR-004, T603)
             // selected_issue remains None, new_branch_name remains empty
             self.issue_error = None; // Clear error when skipping
             self.next_step();
@@ -1189,8 +1191,8 @@ impl WizardState {
                 }
             }
             WizardStep::IssueSelect => {
-                // Navigate through filtered issues (FR-008)
-                let max = self.filtered_issues.len().saturating_sub(1);
+                // Navigate through Skip option (0) + filtered issues (1+) (FR-008)
+                let max = self.filtered_issues.len(); // 0=Skip, 1..=len=issues
                 if self.issue_selected_index < max {
                     self.issue_selected_index += 1;
                 }
@@ -1335,13 +1337,15 @@ impl WizardState {
         self.issue_existing_branch = None;
         self.issue_error = None;
 
-        if !self.filtered_issues.is_empty()
-            && self.issue_selected_index < self.filtered_issues.len()
-        {
-            let issue_idx = self.filtered_issues[self.issue_selected_index];
-            if let Some(issue) = self.issue_list.get(issue_idx) {
-                if let Ok(Some(branch)) = find_branch_for_issue(repo_path, issue.number) {
-                    self.issue_existing_branch = Some(branch);
+        // Index 0 = Skip option, so actual issues start at index 1
+        if self.issue_selected_index > 0 && !self.filtered_issues.is_empty() {
+            let adjusted_index = self.issue_selected_index - 1;
+            if adjusted_index < self.filtered_issues.len() {
+                let issue_idx = self.filtered_issues[adjusted_index];
+                if let Some(issue) = self.issue_list.get(issue_idx) {
+                    if let Ok(Some(branch)) = find_branch_for_issue(repo_path, issue.number) {
+                        self.issue_existing_branch = Some(branch);
+                    }
                 }
             }
         }
@@ -1431,8 +1435,8 @@ impl WizardState {
             WizardStep::QuickStart => self.quick_start_option_count(),
             WizardStep::BranchAction => self.branch_action_options().len(),
             WizardStep::BranchTypeSelect => BranchType::all().len(),
-            WizardStep::IssueSelect => self.filtered_issues.len(),
-            WizardStep::BranchNameInput => 0, // Text input, no list items
+            WizardStep::IssueSelect => self.filtered_issues.len() + 1, // +1 for Skip option
+            WizardStep::BranchNameInput => 0,                          // Text input, no list items
             WizardStep::AgentSelect => CodingAgent::all().len(),
             WizardStep::ModelSelect => self.agent.models().len(),
             WizardStep::ReasoningLevel => ReasoningLevel::all().len(),
@@ -2086,27 +2090,35 @@ fn render_issue_select_step(state: &WizardState, frame: &mut Frame, area: Rect) 
         return;
     }
 
-    // Issue list
+    // Issue list with Skip option at index 0
     let max_width = chunks[2].width as usize;
-    let items: Vec<ListItem> = state
-        .filtered_issues
-        .iter()
-        .enumerate()
-        .map(|(i, &issue_idx)| {
-            let issue = &state.issue_list[issue_idx];
-            let is_selected = i == state.issue_selected_index;
-            let prefix = if is_selected { "> " } else { "  " };
-            let style = if is_selected {
-                Style::default().bg(Color::Cyan).fg(Color::Black)
-            } else {
-                Style::default()
-            };
-            // Format: "> #42: Title..."
-            let display = issue.display_truncated(max_width.saturating_sub(2));
-            let text = format!("{}{}", prefix, display);
-            ListItem::new(text).style(style)
-        })
-        .collect();
+    let mut items: Vec<ListItem> = Vec::with_capacity(state.filtered_issues.len() + 1);
+
+    // Add Skip option at index 0
+    let skip_selected = state.issue_selected_index == 0;
+    let skip_prefix = if skip_selected { "> " } else { "  " };
+    let skip_style = if skip_selected {
+        Style::default().bg(Color::Cyan).fg(Color::Black)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    items.push(ListItem::new(format!("{}(Skip - no issue)", skip_prefix)).style(skip_style));
+
+    // Add actual issues starting at index 1
+    for (i, &issue_idx) in state.filtered_issues.iter().enumerate() {
+        let issue = &state.issue_list[issue_idx];
+        let is_selected = (i + 1) == state.issue_selected_index; // +1 for Skip option
+        let prefix = if is_selected { "> " } else { "  " };
+        let style = if is_selected {
+            Style::default().bg(Color::Cyan).fg(Color::Black)
+        } else {
+            Style::default()
+        };
+        // Format: "> #42: Title..."
+        let display = issue.display_truncated(max_width.saturating_sub(2));
+        let text = format!("{}{}", prefix, display);
+        items.push(ListItem::new(text).style(style));
+    }
 
     let list = List::new(items);
     frame.render_widget(list, chunks[2]);
@@ -2827,7 +2839,7 @@ mod tests {
             "2025-01-25T10:00:00Z".to_string(),
         )];
         state.filtered_issues = vec![0];
-        state.issue_selected_index = 0;
+        state.issue_selected_index = 1; // Index 0 = Skip, Index 1 = first issue
 
         // Set existing branch (duplicate)
         state.issue_existing_branch = Some("feature/issue-42".to_string());
@@ -2861,7 +2873,7 @@ mod tests {
             "2025-01-25T10:00:00Z".to_string(),
         )];
         state.filtered_issues = vec![0];
-        state.issue_selected_index = 0;
+        state.issue_selected_index = 1; // Index 0 = Skip, Index 1 = first issue
         state.issue_existing_branch = None;
 
         // Confirm issue selection
@@ -2871,6 +2883,33 @@ mod tests {
         assert_eq!(state.new_branch_name, "issue-42");
         assert!(state.selected_issue.is_some());
         assert_eq!(state.selected_issue.as_ref().unwrap().number, 42);
+    }
+
+    /// Test Skip option (index 0) skips issue selection
+    #[test]
+    fn test_issue_select_skip_option() {
+        let mut state = WizardState::new();
+        state.open_for_new_branch();
+        state.branch_type = BranchType::Feature;
+        state.step = WizardStep::IssueSelect;
+
+        // Add a test issue
+        state.issue_list = vec![GitHubIssue::new(
+            42,
+            "Test issue".to_string(),
+            "2025-01-25T10:00:00Z".to_string(),
+        )];
+        state.filtered_issues = vec![0];
+        state.issue_selected_index = 0; // Index 0 = Skip option
+        state.issue_existing_branch = None;
+
+        // Confirm with Skip selected
+        let result = state.confirm();
+        assert_eq!(result, WizardConfirmResult::Advance);
+        assert_eq!(state.step, WizardStep::BranchNameInput);
+        // Skip should not set branch name or selected issue
+        assert!(state.new_branch_name.is_empty());
+        assert!(state.selected_issue.is_none());
     }
 
     /// Test incremental search filtering
