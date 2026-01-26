@@ -73,7 +73,13 @@ impl CodexAgent {
         let mut cmd = Command::new("codex");
         let version = get_command_version("codex", "--version");
         cmd.arg("--quiet")
-            .args(codex_default_args(None, None, version.as_deref(), false, false))
+            .args(codex_default_args(
+                None,
+                None,
+                version.as_deref(),
+                false,
+                false,
+            ))
             .arg(prompt)
             .current_dir(directory)
             .stdin(Stdio::null())
@@ -166,9 +172,7 @@ pub fn supports_collaboration_modes(version: Option<&str>) -> bool {
     let parsed = parse_version(version);
     let threshold = parse_version(Some(CODEX_COLLABORATION_MODES_MIN_VERSION));
     match (parsed, threshold) {
-        (Some(parsed), Some(threshold)) => {
-            compare_versions(&parsed, &threshold) != Ordering::Less
-        }
+        (Some(parsed), Some(threshold)) => compare_versions(&parsed, &threshold) != Ordering::Less,
         _ => false,
     }
 }
@@ -440,7 +444,10 @@ mod tests {
         // collaboration_modes=true should add --enable collaboration_modes
         let args = codex_default_args(None, None, None, false, true);
         let has_collab = args.iter().enumerate().any(|(idx, arg)| {
-            arg == "--enable" && args.get(idx + 1).is_some_and(|v| v == "collaboration_modes")
+            arg == "--enable"
+                && args
+                    .get(idx + 1)
+                    .is_some_and(|v| v == "collaboration_modes")
         });
         assert!(has_collab);
 
