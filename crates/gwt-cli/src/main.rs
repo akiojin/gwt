@@ -88,12 +88,23 @@ fn run() -> Result<(), GwtError> {
                         // Run in background thread to avoid blocking agent startup
                         let history_repo_root = repo_root.clone();
                         let history_branch_name = launch_plan.config.branch_name.clone();
-                        let history_agent_id = launch_plan.config.agent.id().to_string();
-                        let history_agent_label = format!(
-                            "{}@{}",
-                            launch_plan.config.agent.label(),
-                            launch_plan.selected_version
-                        );
+                        // T603: Use custom agent ID/label when available (SPEC-71f2742d US6)
+                        let (history_agent_id, history_agent_label) =
+                            if let Some(ref custom) = launch_plan.config.custom_agent {
+                                (
+                                    custom.id.clone(),
+                                    format!("{}@{}", custom.display_name, launch_plan.selected_version),
+                                )
+                            } else {
+                                (
+                                    launch_plan.config.agent.id().to_string(),
+                                    format!(
+                                        "{}@{}",
+                                        launch_plan.config.agent.label(),
+                                        launch_plan.selected_version
+                                    ),
+                                )
+                            };
                         thread::spawn(move || {
                             let mut agent_history = AgentHistoryStore::load().unwrap_or_default();
                             if let Err(e) = agent_history.record(

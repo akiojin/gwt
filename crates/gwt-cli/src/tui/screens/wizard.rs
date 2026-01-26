@@ -893,14 +893,35 @@ impl WizardState {
     /// Apply Quick Start selection to wizard state (FR-050)
     pub fn apply_quick_start_selection(&mut self, tool_index: usize, action: QuickStartAction) {
         if let Some(entry) = self.quick_start_entries.get(tool_index) {
-            // Map tool_id to CodingAgent
-            self.agent = match entry.tool_id.as_str() {
-                "claude-code" => CodingAgent::ClaudeCode,
-                "codex-cli" => CodingAgent::CodexCli,
-                "gemini-cli" => CodingAgent::GeminiCli,
-                "opencode" => CodingAgent::OpenCode,
-                _ => CodingAgent::ClaudeCode,
-            };
+            // T604, T605: Find agent by ID in all_agents (supports custom agents and builtin ID overwrite)
+            // SPEC-71f2742d US6
+            if let Some((agent_index, agent_entry)) = self
+                .all_agents
+                .iter()
+                .enumerate()
+                .find(|(_, a)| a.id == entry.tool_id)
+            {
+                // Found in all_agents (could be builtin, custom, or custom overwriting builtin)
+                self.agent_index = agent_index;
+                self.selected_agent_entry = Some(agent_entry.clone());
+
+                if let Some(builtin) = agent_entry.builtin {
+                    self.agent = builtin;
+                } else {
+                    // Custom agent without builtin association - use default but selected_agent_entry is set
+                    self.agent = CodingAgent::ClaudeCode;
+                }
+            } else {
+                // Fallback: Map tool_id to builtin CodingAgent
+                self.agent = match entry.tool_id.as_str() {
+                    "claude-code" => CodingAgent::ClaudeCode,
+                    "codex-cli" => CodingAgent::CodexCli,
+                    "gemini-cli" => CodingAgent::GeminiCli,
+                    "opencode" => CodingAgent::OpenCode,
+                    _ => CodingAgent::ClaudeCode,
+                };
+                self.selected_agent_entry = None;
+            }
 
             // Set model if available
             if let Some(model) = &entry.model {
@@ -3181,6 +3202,137 @@ mod tests {
         assert_eq!(result, WizardConfirmResult::Advance);
         assert_eq!(state.step, WizardStep::BranchAction);
         assert!(state.session_id.is_none());
+    }
+
+    // ==========================================================
+    // SPEC-71f2742d US6: Custom Agent Quick Start Tests (T602)
+    // ==========================================================
+
+    /// T602: Quick Start restores custom agent settings
+    #[test]
+    fn test_quick_start_restores_custom_agent() {
+        use gwt_core::config::{AgentType, CustomCodingAgent};
+
+        let mut state = WizardState::new();
+
+        // Create Quick Start entry with custom agent ID
+        let history = vec![QuickStartEntry {
+            tool_id: "my-custom-agent".to_string(),
+            tool_label: "My Custom Agent".to_string(),
+            model: Some("default".to_string()),
+            reasoning_level: None,
+            version: Some("1.0.0".to_string()),
+            session_id: Some("session-123".to_string()),
+            skip_permissions: Some(true),
+        }];
+        state.open_for_branch("feature/custom", history, None);
+
+        // Add custom agent to all_agents AFTER open_for_branch (which calls reset_selections)
+        let custom_agent = CustomCodingAgent {
+            id: "my-custom-agent".to_string(),
+            display_name: "My Custom Agent".to_string(),
+            agent_type: AgentType::Command,
+            command: "my-agent".to_string(),
+            default_args: vec![],
+            mode_args: None,
+            permission_skip_args: vec![],
+            env: std::collections::HashMap::new(),
+            models: vec![],
+            version_command: None,
+        };
+
+        state.all_agents.push(AgentEntry::from_custom(
+            custom_agent.clone(),
+            Color::Magenta,
+            true,
+        ));
+
+        assert_eq!(state.step, WizardStep::QuickStart);
+
+        // Select "Resume with previous settings"
+        state.quick_start_index = 0;
+        state.apply_quick_start_selection(0, QuickStartAction::ResumeWithPrevious);
+
+        // Verify custom agent is selected via selected_agent_entry
+        assert!(state.selected_agent_entry.is_some());
+        let entry = state.selected_agent_entry.as_ref().unwrap();
+        assert_eq!(entry.id, "my-custom-agent");
+        assert!(entry.custom.is_some());
+        assert_eq!(entry.custom.as_ref().unwrap().id, "my-custom-agent");
+
+        // Verify settings are restored
+        assert_eq!(state.model, "default");
+        assert_eq!(state.version, "1.0.0");
+        assert!(state.skip_permissions);
+        assert_eq!(state.session_id, Some("session-123".to_string()));
+        assert_eq!(state.execution_mode, ExecutionMode::Resume);
+    }
+
+    /// T605: Custom agent with builtin ID overwrites builtin in Quick Start
+    #[test]
+    fn test_quick_start_custom_overwrites_builtin() {
+        use gwt_core::config::{AgentType, CustomCodingAgent};
+
+        let mut state = WizardState::new();
+
+        // Create Quick Start entry with "claude-code" ID
+        let history = vec![QuickStartEntry {
+            tool_id: "claude-code".to_string(),
+            tool_label: "Custom Claude".to_string(),
+            model: Some("opus".to_string()),
+            reasoning_level: None,
+            version: Some("2.0.0".to_string()),
+            session_id: None,
+            skip_permissions: None,
+        }];
+        state.open_for_branch("feature/overwrite", history, None);
+
+        // Create custom agent with builtin ID "claude-code"
+        let custom_agent = CustomCodingAgent {
+            id: "claude-code".to_string(),
+            display_name: "Custom Claude".to_string(),
+            agent_type: AgentType::Command,
+            command: "custom-claude".to_string(),
+            default_args: vec!["--custom".to_string()],
+            mode_args: None,
+            permission_skip_args: vec![],
+            env: std::collections::HashMap::new(),
+            models: vec![],
+            version_command: None,
+        };
+
+        // Replace builtin in all_agents with custom version (simulating merge behavior)
+        // Find and replace the claude-code entry
+        if let Some(idx) = state.all_agents.iter().position(|a| a.id == "claude-code") {
+            state.all_agents[idx] = AgentEntry {
+                id: "claude-code".to_string(),
+                display_name: "Custom Claude".to_string(),
+                color: Color::Blue,
+                is_builtin: false,
+                is_installed: true,
+                builtin: Some(CodingAgent::ClaudeCode), // Keep builtin association for launching
+                custom: Some(custom_agent),
+            };
+        }
+
+        // Select "Start new with previous settings"
+        state.quick_start_index = 1;
+        state.apply_quick_start_selection(0, QuickStartAction::StartNewWithPrevious);
+
+        // Verify custom agent overwrites builtin
+        assert!(state.selected_agent_entry.is_some());
+        let entry = state.selected_agent_entry.as_ref().unwrap();
+        assert_eq!(entry.id, "claude-code");
+        assert!(entry.custom.is_some());
+        assert_eq!(entry.custom.as_ref().unwrap().display_name, "Custom Claude");
+
+        // Builtin is still set for launching
+        assert_eq!(state.agent, CodingAgent::ClaudeCode);
+
+        // Settings are restored
+        assert_eq!(state.model, "opus");
+        assert_eq!(state.version, "2.0.0");
+        assert_eq!(state.execution_mode, ExecutionMode::Normal);
     }
 
     // ==========================================================

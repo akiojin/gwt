@@ -205,17 +205,17 @@ US1 (P1: tools.json読み込み)
 
 ### テスト（TDD）
 
-- [ ] **T601** [P] [US6] `crates/gwt-core/src/ai/agent_history.rs` にカスタムエージェント履歴保存テストを追加
-- [ ] **T602** [P] [US6] `crates/gwt-cli/src/tui/screens/wizard.rs` に Quick Start カスタムエージェント復元テストを追加
+- [x] **T601** [P] [US6] `crates/gwt-core/src/ai/agent_history.rs` にカスタムエージェント履歴保存テストを追加（既存テストでカバー）
+- [x] **T602** [P] [US6] `crates/gwt-cli/src/tui/screens/wizard.rs` に Quick Start カスタムエージェント復元テストを追加
 
 ### 履歴保存
 
-- [ ] **T603** [US6] T601-602の後に `crates/gwt-cli/src/main.rs` にカスタムエージェント使用時の履歴保存を追加
-- [ ] **T604** [US6] T603の後に `crates/gwt-cli/src/tui/screens/wizard.rs` に Quick Start でのカスタムエージェント設定復元を実装
+- [x] **T603** [US6] T601-602の後に `crates/gwt-cli/src/main.rs` にカスタムエージェント使用時の履歴保存を追加
+- [x] **T604** [US6] T603の後に `crates/gwt-cli/src/tui/screens/wizard.rs` に Quick Start でのカスタムエージェント設定復元を実装
 
 ### ビルトインID上書き
 
-- [ ] **T605** [US6] T604の後に `crates/gwt-cli/src/tui/screens/wizard.rs` にビルトインIDと同一カスタムIDの上書きロジックを実装
+- [x] **T605** [US6] T604の後に `crates/gwt-cli/src/tui/screens/wizard.rs` にビルトインIDと同一カスタムIDの上書きロジックを実装
 
 **✅ フェーズ7チェックポイント**: カスタムエージェントの履歴保存と Quick Start 復元が可能
 
