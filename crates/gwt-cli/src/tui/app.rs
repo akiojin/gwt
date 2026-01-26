@@ -4030,9 +4030,12 @@ impl Model {
             };
             step(ProgressStepKind::FetchRemote, StepStatus::Completed);
 
-            // Step 2: Validate branch
+            // Step 2: Validate branch (lightweight)
             step(ProgressStepKind::ValidateBranch, StepStatus::Running);
-            let existing_wt = manager.get_by_branch(&request.branch_name).ok().flatten();
+            let existing_wt = manager
+                .get_by_branch_basic(&request.branch_name)
+                .ok()
+                .flatten();
             let has_existing_wt = existing_wt.is_some();
             step(ProgressStepKind::ValidateBranch, StepStatus::Completed);
 
@@ -4052,7 +4055,6 @@ impl Model {
                 // Step 5: Create worktree
                 step(ProgressStepKind::CreateWorktree, StepStatus::Running);
             }
-
             let result = if let Some(wt) = existing_wt {
                 Ok(wt)
             } else if request.create_new_branch {
