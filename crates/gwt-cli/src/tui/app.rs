@@ -3120,7 +3120,8 @@ impl Model {
                     }
                     ProfileMode::Add | ProfileMode::Edit(_) => {
                         // Enter in form: save if on last field, otherwise next field
-                        if self.settings.profile_form.current_field == ProfileFormField::AIModel {
+                        if self.settings.profile_form.current_field == ProfileFormField::Description
+                        {
                             // On last field, try to save
                             match self.settings.save_profile() {
                                 Ok(()) => {
@@ -3173,6 +3174,10 @@ impl Model {
                         }
                     }
                 }
+            }
+            SettingsCategory::AISettings => {
+                // Enter: open AI Settings Wizard
+                self.screen = Screen::AISettingsWizard;
             }
             _ => {}
         }

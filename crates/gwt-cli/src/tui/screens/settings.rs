@@ -6,7 +6,7 @@
 #![allow(dead_code)] // Screen components for future use
 
 use gwt_core::config::{
-    AISettings, AgentType, CustomCodingAgent, Profile, ProfilesConfig, Settings, ToolsConfig,
+    AgentType, CustomCodingAgent, Profile, ProfilesConfig, Settings, ToolsConfig,
 };
 use ratatui::{prelude::*, widgets::*};
 use std::collections::HashMap;
@@ -20,8 +20,10 @@ pub enum SettingsCategory {
     Agent,
     /// Custom coding agents management (SPEC-71f2742d US3)
     CustomAgents,
-    /// Profile management (environment variables, AI settings)
+    /// Profile management (name, description, environment variables)
     Profile,
+    /// AI settings management (endpoint, key, model)
+    AISettings,
 }
 
 /// Custom agent edit mode (T310, T311, T312)
@@ -225,47 +227,32 @@ pub enum ProfileMode {
     EnvEdit(String), // profile name
 }
 
-/// Form field for profile editing
+/// Form field for profile editing (name and description only, AI settings are separate)
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ProfileFormField {
     #[default]
     Name,
     Description,
-    AIEndpoint,
-    AIKey,
-    AIModel,
 }
 
 impl ProfileFormField {
     pub fn all() -> &'static [ProfileFormField] {
-        &[
-            ProfileFormField::Name,
-            ProfileFormField::Description,
-            ProfileFormField::AIEndpoint,
-            ProfileFormField::AIKey,
-            ProfileFormField::AIModel,
-        ]
+        &[ProfileFormField::Name, ProfileFormField::Description]
     }
 
     pub fn label(&self) -> &'static str {
         match self {
             ProfileFormField::Name => "Name",
             ProfileFormField::Description => "Description",
-            ProfileFormField::AIEndpoint => "AI Endpoint",
-            ProfileFormField::AIKey => "AI API Key",
-            ProfileFormField::AIModel => "AI Model",
         }
     }
 }
 
-/// Profile form state
+/// Profile form state (name and description only, AI settings are separate)
 #[derive(Debug, Clone, Default)]
 pub struct ProfileFormState {
     pub name: String,
     pub description: String,
-    pub ai_endpoint: String,
-    pub ai_key: String,
-    pub ai_model: String,
     pub current_field: ProfileFormField,
     pub cursor: usize,
 }
@@ -273,53 +260,27 @@ pub struct ProfileFormState {
 impl ProfileFormState {
     /// Create form for new profile
     pub fn new() -> Self {
-        Self {
-            ai_endpoint: "https://api.openai.com/v1".to_string(),
-            ..Default::default()
-        }
+        Self::default()
     }
 
     /// Create form from existing profile
     pub fn from_profile(profile: &Profile) -> Self {
-        let (ai_endpoint, ai_key, ai_model) = if let Some(ref ai) = profile.ai {
-            (ai.endpoint.clone(), ai.api_key.clone(), ai.model.clone())
-        } else {
-            (
-                "https://api.openai.com/v1".to_string(),
-                String::new(),
-                String::new(),
-            )
-        };
         Self {
             name: profile.name.clone(),
             description: profile.description.clone(),
-            ai_endpoint,
-            ai_key,
-            ai_model,
             current_field: ProfileFormField::Name,
             cursor: profile.name.len(),
         }
     }
 
-    /// Build Profile from form (preserves env from original if editing)
-    pub fn to_profile(&self, original_env: Option<&HashMap<String, String>>) -> Profile {
-        let ai =
-            if !self.ai_endpoint.is_empty() || !self.ai_key.is_empty() || !self.ai_model.is_empty()
-            {
-                Some(AISettings {
-                    endpoint: self.ai_endpoint.clone(),
-                    api_key: self.ai_key.clone(),
-                    model: self.ai_model.clone(),
-                })
-            } else {
-                None
-            };
+    /// Build Profile from form (preserves env and ai from original if editing)
+    pub fn to_profile(&self, original: Option<&Profile>) -> Profile {
         Profile {
             name: self.name.clone(),
             description: self.description.clone(),
-            env: original_env.cloned().unwrap_or_default(),
-            disabled_env: Vec::new(),
-            ai,
+            env: original.map(|p| p.env.clone()).unwrap_or_default(),
+            disabled_env: original.map(|p| p.disabled_env.clone()).unwrap_or_default(),
+            ai: original.and_then(|p| p.ai.clone()),
         }
     }
 
@@ -328,9 +289,6 @@ impl ProfileFormState {
         match self.current_field {
             ProfileFormField::Name => &self.name,
             ProfileFormField::Description => &self.description,
-            ProfileFormField::AIEndpoint => &self.ai_endpoint,
-            ProfileFormField::AIKey => &self.ai_key,
-            ProfileFormField::AIModel => &self.ai_model,
         }
     }
 
@@ -339,9 +297,6 @@ impl ProfileFormState {
         match self.current_field {
             ProfileFormField::Name => &mut self.name,
             ProfileFormField::Description => &mut self.description,
-            ProfileFormField::AIEndpoint => &mut self.ai_endpoint,
-            ProfileFormField::AIKey => &mut self.ai_key,
-            ProfileFormField::AIModel => &mut self.ai_model,
         }
     }
 
@@ -619,6 +574,8 @@ impl SettingsState {
             SettingsCategory::CustomAgents => vec![],
             // Profile uses separate rendering
             SettingsCategory::Profile => vec![],
+            // AISettings uses separate rendering
+            SettingsCategory::AISettings => vec![],
         }
     }
 
@@ -638,7 +595,8 @@ impl SettingsState {
             SettingsCategory::Web => SettingsCategory::Agent,
             SettingsCategory::Agent => SettingsCategory::CustomAgents,
             SettingsCategory::CustomAgents => SettingsCategory::Profile,
-            SettingsCategory::Profile => SettingsCategory::General,
+            SettingsCategory::Profile => SettingsCategory::AISettings,
+            SettingsCategory::AISettings => SettingsCategory::General,
         };
         self.reset_category_state();
     }
@@ -646,12 +604,13 @@ impl SettingsState {
     /// Select previous category
     pub fn prev_category(&mut self) {
         self.category = match self.category {
-            SettingsCategory::General => SettingsCategory::Profile,
+            SettingsCategory::General => SettingsCategory::AISettings,
             SettingsCategory::Worktree => SettingsCategory::General,
             SettingsCategory::Web => SettingsCategory::Worktree,
             SettingsCategory::Agent => SettingsCategory::Web,
             SettingsCategory::CustomAgents => SettingsCategory::Agent,
             SettingsCategory::Profile => SettingsCategory::CustomAgents,
+            SettingsCategory::AISettings => SettingsCategory::Profile,
         };
         self.reset_category_state();
     }
@@ -983,8 +942,8 @@ impl SettingsState {
             ProfileMode::Edit(original_name) => {
                 if let Some(ref mut config) = self.profiles_config {
                     let new_name = self.profile_form.name.clone();
-                    let original_env = config.profiles.get(original_name).map(|p| &p.env);
-                    let profile = self.profile_form.to_profile(original_env);
+                    let original_profile = config.profiles.get(original_name);
+                    let profile = self.profile_form.to_profile(original_profile);
 
                     // If name changed, remove old and insert new
                     if &new_name != original_name {
@@ -1097,8 +1056,11 @@ fn selected_description(state: &SettingsState) -> &'static str {
             } else if state.selected_profile().is_some() {
                 "Enter=Edit, E=Env vars, A=Toggle active, D=Delete"
             } else {
-                "Manage profiles (environment variables, AI settings)."
+                "Manage profiles (name, description, environment variables)."
             }
+        }
+        SettingsCategory::AISettings => {
+            "Configure AI settings (endpoint, API key, model). Press Enter to open wizard."
         }
     }
 }
@@ -1132,6 +1094,7 @@ fn render_tabs(state: &SettingsState, frame: &mut Frame, area: Rect) {
         ("Agent", SettingsCategory::Agent),
         ("Custom", SettingsCategory::CustomAgents), // T309
         ("Profile", SettingsCategory::Profile),
+        ("AI", SettingsCategory::AISettings),
     ];
 
     let titles: Vec<Line> = categories
@@ -1158,6 +1121,7 @@ fn render_tabs(state: &SettingsState, frame: &mut Frame, area: Rect) {
             SettingsCategory::Agent => 3,
             SettingsCategory::CustomAgents => 4,
             SettingsCategory::Profile => 5,
+            SettingsCategory::AISettings => 6,
         });
 
     frame.render_widget(tabs, area);
@@ -1173,6 +1137,12 @@ fn render_settings_content(state: &SettingsState, frame: &mut Frame, area: Rect)
     // Profile has special rendering
     if state.category == SettingsCategory::Profile {
         render_profile_content(state, frame, area);
+        return;
+    }
+
+    // AISettings has special rendering
+    if state.category == SettingsCategory::AISettings {
+        render_ai_settings_content(state, frame, area);
         return;
     }
 
@@ -1222,6 +1192,7 @@ fn render_settings_content(state: &SettingsState, frame: &mut Frame, area: Rect)
         SettingsCategory::Agent => "Agent",
         SettingsCategory::CustomAgents => "Custom Agents", // Handled separately
         SettingsCategory::Profile => "Profile",            // Handled separately
+        SettingsCategory::AISettings => "AI",              // Handled separately
     };
 
     let list = List::new(list_items).block(
@@ -1582,7 +1553,7 @@ fn render_profile_form(state: &SettingsState, frame: &mut Frame, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Form fields layout
+    // Form fields layout (Name and Description only)
     let field_height = 3;
     let fields = ProfileFormField::all();
     let constraints: Vec<Constraint> = fields
@@ -1604,9 +1575,6 @@ fn render_profile_form(state: &SettingsState, frame: &mut Frame, area: Rect) {
         let value = match field {
             ProfileFormField::Name => &form.name,
             ProfileFormField::Description => &form.description,
-            ProfileFormField::AIEndpoint => &form.ai_endpoint,
-            ProfileFormField::AIKey => &form.ai_key,
-            ProfileFormField::AIModel => &form.ai_model,
         };
 
         // Build display text with cursor
@@ -1615,9 +1583,6 @@ fn render_profile_form(state: &SettingsState, frame: &mut Frame, area: Rect) {
             let cursor_pos = form.cursor.min(text.len());
             text.insert(cursor_pos, '|');
             text
-        } else if *field == ProfileFormField::AIKey && !value.is_empty() {
-            // Mask API key
-            "*".repeat(value.len().min(20))
         } else {
             value.clone()
         };
@@ -1832,12 +1797,59 @@ fn render_instructions(state: &SettingsState, frame: &mut Frame, area: Rect) {
                 "[Enter] Edit | [A] Add | [D] Delete | [S] Save | [Esc] Back"
             }
         }
+    } else if state.category == SettingsCategory::AISettings {
+        "[Enter] Open AI Settings Wizard | [L/R] Category | [Tab] Screen | [Esc] Back"
     } else {
         "[Left/Right] Category | [Up/Down] Select | [Tab] Screen | [Esc] Back"
     };
     let paragraph =
         Paragraph::new(format!(" {} ", instructions)).block(Block::default().borders(Borders::ALL));
     frame.render_widget(paragraph, area);
+}
+
+/// Render AI settings content
+fn render_ai_settings_content(_state: &SettingsState, frame: &mut Frame, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" AI Settings ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Info text
+            Constraint::Length(3), // Button
+            Constraint::Min(0),    // Padding
+        ])
+        .margin(1)
+        .split(inner);
+
+    // Info text
+    let info = Paragraph::new("Configure AI endpoint, API key, and model settings.")
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true });
+    frame.render_widget(info, chunks[0]);
+
+    // Button
+    let button_area = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(25),
+            Constraint::Percentage(50),
+            Constraint::Percentage(25),
+        ])
+        .split(chunks[1])[1];
+
+    let button = Paragraph::new("[ Open AI Settings Wizard ]")
+        .alignment(Alignment::Center)
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(Block::default().borders(Borders::ALL));
+    frame.render_widget(button, button_area);
 }
 
 #[cfg(test)]
