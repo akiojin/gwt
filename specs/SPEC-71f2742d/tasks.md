@@ -94,22 +94,22 @@ US1 (P1: tools.json読み込み)
 
 ### 起動ロジック
 
-- [ ] **T205** [US2] T201-204の後に `crates/gwt-cli/src/main.rs` に CustomAgentLaunchConfig 構造体を追加
-- [ ] **T206** [US2] T205の後に `crates/gwt-cli/src/main.rs` に build_custom_agent_args() 関数を追加
-- [ ] **T207** [US2] T206の後に `crates/gwt-cli/src/main.rs` に type 別実行分岐を追加（command/path/bunx）
-- [ ] **T208** [US2] T207の後に `crates/gwt-cli/src/main.rs` に modeArgs 適用ロジックを追加
-- [ ] **T209** [US2] T208の後に `crates/gwt-cli/src/main.rs` に env 環境変数設定ロジックを追加
-- [ ] **T210** [US2] T209の後に `crates/gwt-cli/src/main.rs` に permissionSkipArgs 適用ロジックを追加
+- [x] **T205** [US2] T201-204の後に `crates/gwt-cli/src/main.rs` に CustomAgentLaunchConfig 構造体を追加
+- [x] **T206** [US2] T205の後に `crates/gwt-cli/src/main.rs` に build_custom_agent_args() 関数を追加
+- [x] **T207** [US2] T206の後に `crates/gwt-cli/src/main.rs` に type 別実行分岐を追加（command/path/bunx）
+- [x] **T208** [US2] T207の後に `crates/gwt-cli/src/main.rs` に modeArgs 適用ロジックを追加
+- [x] **T209** [US2] T208の後に `crates/gwt-cli/src/main.rs` に env 環境変数設定ロジックを追加
+- [x] **T210** [US2] T209の後に `crates/gwt-cli/src/main.rs` に permissionSkipArgs 適用ロジックを追加
 
 ### Wizard連携
 
-- [ ] **T211** [US2] T210の後に `crates/gwt-cli/src/tui/screens/wizard.rs` の WizardState にカスタムエージェント選択状態を追加
-- [ ] **T212** [US2] T211の後に `crates/gwt-cli/src/tui/screens/wizard.rs` にサポートモード表示制御を追加（modeArgs定義のみ表示）
-- [ ] **T213** [US2] T212の後に `crates/gwt-cli/src/tui/screens/wizard.rs` に permissionSkipArgs 非表示制御を追加
+- [x] **T211** [US2] T210の後に `crates/gwt-cli/src/tui/screens/wizard.rs` の WizardState にカスタムエージェント選択状態を追加
+- [x] **T212** [US2] T211の後に `crates/gwt-cli/src/tui/screens/wizard.rs` にサポートモード表示制御を追加（modeArgs定義のみ表示）
+- [x] **T213** [US2] T212の後に `crates/gwt-cli/src/tui/screens/wizard.rs` に permissionSkipArgs 非表示制御を追加
 
 ### tmux連携
 
-- [ ] **T214** [US2] T213の後に `crates/gwt-cli/src/tui/app.rs` の build_agent_args_for_tmux() にカスタムエージェント対応を追加
+- [x] **T214** [US2] T213の後に `crates/gwt-cli/src/tui/app.rs` の build_agent_args_for_tmux() にカスタムエージェント対応を追加
 
 **✅ MVP2チェックポイント**: US1+US2完了後、カスタムエージェントの選択・起動が可能
 

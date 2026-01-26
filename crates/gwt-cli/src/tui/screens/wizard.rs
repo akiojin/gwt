@@ -1000,6 +1000,45 @@ impl WizardState {
         self.visible = false;
     }
 
+    /// Get supported execution modes for the current agent (T212 SPEC-71f2742d)
+    /// For builtin agents, all modes are supported.
+    /// For custom agents, only modes with non-empty modeArgs are supported.
+    pub fn supported_execution_modes(&self) -> Vec<ExecutionMode> {
+        if let Some(ref entry) = self.selected_agent_entry {
+            if let Some(ref custom) = entry.custom {
+                // Custom agent: check mode_args
+                if let Some(ref mode_args) = custom.mode_args {
+                    let mut modes = vec![ExecutionMode::Normal]; // Normal is always supported
+                    if !mode_args.continue_mode.is_empty() {
+                        modes.push(ExecutionMode::Continue);
+                    }
+                    if !mode_args.resume.is_empty() {
+                        modes.push(ExecutionMode::Resume);
+                    }
+                    return modes;
+                } else {
+                    // No mode_args defined, only Normal is supported
+                    return vec![ExecutionMode::Normal];
+                }
+            }
+        }
+        // Builtin agent: all modes supported
+        ExecutionMode::all().to_vec()
+    }
+
+    /// Check if skip_permissions option should be shown (T213 SPEC-71f2742d)
+    /// For builtin agents, always show.
+    /// For custom agents, only show if permission_skip_args is non-empty.
+    pub fn supports_skip_permissions(&self) -> bool {
+        if let Some(ref entry) = self.selected_agent_entry {
+            if let Some(ref custom) = entry.custom {
+                return !custom.permission_skip_args.is_empty();
+            }
+        }
+        // Builtin agent: always supports skip_permissions
+        true
+    }
+
     /// Go to next step
     pub fn next_step(&mut self) {
         self.step = match self.step {
@@ -1094,8 +1133,25 @@ impl WizardState {
                 self.fetch_versions_for_agent();
                 WizardStep::VersionSelect
             }
-            WizardStep::VersionSelect => WizardStep::ExecutionMode,
-            WizardStep::ExecutionMode => WizardStep::SkipPermissions,
+            WizardStep::VersionSelect => {
+                // T212: Reset execution mode index for supported modes
+                let supported = self.supported_execution_modes();
+                self.execution_mode_index = 0;
+                if !supported.is_empty() {
+                    self.execution_mode = supported[0];
+                }
+                WizardStep::ExecutionMode
+            }
+            WizardStep::ExecutionMode => {
+                // T213: Skip SkipPermissions if custom agent doesn't support it
+                if self.supports_skip_permissions() {
+                    WizardStep::SkipPermissions
+                } else {
+                    // Auto-disable skip_permissions and stay at final step
+                    self.skip_permissions = false;
+                    WizardStep::SkipPermissions
+                }
+            }
             WizardStep::SkipPermissions => WizardStep::SkipPermissions, // Final step
         };
         self.scroll_offset = 0;
@@ -1300,10 +1356,12 @@ impl WizardState {
                 }
             }
             WizardStep::ExecutionMode => {
-                let max = ExecutionMode::all().len().saturating_sub(1);
+                // T212: Only navigate through supported modes
+                let supported = self.supported_execution_modes();
+                let max = supported.len().saturating_sub(1);
                 if self.execution_mode_index < max {
                     self.execution_mode_index += 1;
-                    self.execution_mode = ExecutionMode::all()[self.execution_mode_index];
+                    self.execution_mode = supported[self.execution_mode_index];
                 }
             }
             WizardStep::SkipPermissions => {
@@ -1379,13 +1437,18 @@ impl WizardState {
                 }
             }
             WizardStep::ExecutionMode => {
+                // T212: Only navigate through supported modes
+                let supported = self.supported_execution_modes();
                 if self.execution_mode_index > 0 {
                     self.execution_mode_index -= 1;
-                    self.execution_mode = ExecutionMode::all()[self.execution_mode_index];
+                    self.execution_mode = supported[self.execution_mode_index];
                 }
             }
             WizardStep::SkipPermissions => {
-                self.skip_permissions = !self.skip_permissions;
+                // T213: Only toggle if skip_permissions is supported
+                if self.supports_skip_permissions() {
+                    self.skip_permissions = !self.skip_permissions;
+                }
             }
             WizardStep::BranchTypeSelect => {
                 let types = BranchType::all();
@@ -1591,8 +1654,15 @@ impl WizardState {
             WizardStep::ModelSelect => self.agent.models().len(),
             WizardStep::ReasoningLevel => ReasoningLevel::all().len(),
             WizardStep::VersionSelect => self.version_options.len(),
-            WizardStep::ExecutionMode => ExecutionMode::all().len(),
-            WizardStep::SkipPermissions => 2, // Yes/No
+            WizardStep::ExecutionMode => self.supported_execution_modes().len(), // T212
+            WizardStep::SkipPermissions => {
+                // T213: If skip_permissions not supported, show only "No" option (auto-confirm)
+                if self.supports_skip_permissions() {
+                    2 // Yes/No
+                } else {
+                    1 // Only "No" (auto-confirm)
+                }
+            }
         }
     }
 
@@ -1678,11 +1748,18 @@ impl WizardState {
                 self.ensure_version_visible();
             }
             WizardStep::ExecutionMode => {
+                // T212: Use supported modes
+                let supported = self.supported_execution_modes();
                 self.execution_mode_index = index;
-                self.execution_mode = ExecutionMode::all()[index];
+                self.execution_mode = supported[index];
             }
             WizardStep::SkipPermissions => {
-                self.skip_permissions = index == 0;
+                // T213: Only allow toggle if supported
+                if self.supports_skip_permissions() {
+                    self.skip_permissions = index == 0;
+                } else {
+                    self.skip_permissions = false;
+                }
             }
         }
         true
@@ -2587,7 +2664,8 @@ fn render_version_step(state: &WizardState, frame: &mut Frame, area: Rect) {
 }
 
 fn render_execution_mode_step(state: &WizardState, frame: &mut Frame, area: Rect) {
-    let modes = ExecutionMode::all();
+    // T212: Show only supported execution modes for current agent
+    let modes = state.supported_execution_modes();
     let items: Vec<ListItem> = modes
         .iter()
         .enumerate()
@@ -2612,6 +2690,16 @@ fn render_execution_mode_step(state: &WizardState, frame: &mut Frame, area: Rect
 }
 
 fn render_skip_permissions_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    // T213: Check if skip_permissions is supported for current agent
+    if !state.supports_skip_permissions() {
+        // Show "not available" message for custom agents without permissionSkipArgs
+        let items = vec![ListItem::new("> No   (Not available for this agent)")
+            .style(Style::default().bg(Color::Cyan).fg(Color::Black))];
+        let list = List::new(items);
+        frame.render_widget(list, area);
+        return;
+    }
+
     let options = [("Yes", true), ("No", false)];
     let items: Vec<ListItem> = options
         .iter()

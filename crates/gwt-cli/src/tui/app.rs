@@ -22,8 +22,8 @@ use gwt_core::ai::{
 use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{
     get_claude_settings_path, is_gwt_hooks_registered, is_temporary_execution, register_gwt_hooks,
-    reregister_gwt_hooks, save_session_entry, AISettings, Profile, ProfilesConfig,
-    ResolvedAISettings, ToolSessionEntry,
+    reregister_gwt_hooks, save_session_entry, AISettings, CustomCodingAgent, Profile,
+    ProfilesConfig, ResolvedAISettings, ToolSessionEntry,
 };
 use gwt_core::error::GwtError;
 use gwt_core::git::{Branch, PrCache, Remote, Repository};
@@ -169,8 +169,10 @@ pub struct AgentLaunchConfig {
     pub worktree_path: PathBuf,
     /// Branch name
     pub branch_name: String,
-    /// Coding agent to launch
+    /// Coding agent to launch (builtin)
     pub agent: CodingAgent,
+    /// Custom agent configuration (SPEC-71f2742d)
+    pub custom_agent: Option<CustomCodingAgent>,
     /// Model to use
     pub model: Option<String>,
     /// Reasoning level (Codex only)
@@ -189,6 +191,31 @@ pub struct AgentLaunchConfig {
     pub env_remove: Vec<String>,
     /// Auto install dependencies before launching agent
     pub auto_install_deps: bool,
+}
+
+impl AgentLaunchConfig {
+    /// Check if this config is for a custom agent
+    pub fn is_custom(&self) -> bool {
+        self.custom_agent.is_some()
+    }
+
+    /// Get the agent ID (builtin or custom)
+    pub fn agent_id(&self) -> String {
+        if let Some(ref custom) = self.custom_agent {
+            custom.id.clone()
+        } else {
+            self.agent.id().to_string()
+        }
+    }
+
+    /// Get the display name (builtin or custom)
+    pub fn display_name(&self) -> String {
+        if let Some(ref custom) = self.custom_agent {
+            custom.display_name.clone()
+        } else {
+            self.agent.label().to_string()
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -304,6 +331,8 @@ struct LaunchRequest {
     create_new_branch: bool,
     base_branch: Option<String>,
     agent: CodingAgent,
+    /// Custom agent configuration (SPEC-71f2742d)
+    custom_agent: Option<CustomCodingAgent>,
     model: Option<String>,
     reasoning_level: Option<ReasoningLevel>,
     version: String,
@@ -3957,11 +3986,19 @@ impl Model {
             .map(|settings| settings.agent.auto_install_deps)
             .unwrap_or(false);
 
+        // SPEC-71f2742d: Get custom agent from selected_agent_entry
+        let custom_agent = self
+            .wizard
+            .selected_agent_entry
+            .as_ref()
+            .and_then(|e| e.custom.clone());
+
         let request = LaunchRequest {
             branch_name: branch,
             create_new_branch: self.worktree_create.create_new_branch,
             base_branch: base,
             agent: self.wizard.agent,
+            custom_agent,
             model: if self.wizard.model.is_empty() {
                 None
             } else {
@@ -4119,6 +4156,7 @@ impl Model {
                 worktree_path: worktree.path.clone(),
                 branch_name: request.branch_name.clone(),
                 agent: request.agent,
+                custom_agent: request.custom_agent.clone(),
                 model: request.model.clone(),
                 reasoning_level: request.reasoning_level,
                 version: request.version.clone(),
@@ -5564,6 +5602,11 @@ fn canonical_tool_id(tool_id: &str) -> String {
 fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
     use gwt_core::agent::codex::{codex_default_args, codex_skip_permissions_flag};
 
+    // SPEC-71f2742d: Handle custom agents
+    if let Some(ref custom) = config.custom_agent {
+        return build_custom_agent_args_for_tmux(custom, config);
+    }
+
     let mut args = Vec::new();
 
     match config.agent {
@@ -5690,6 +5733,40 @@ fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
 
     args
 }
+
+/// Build command line arguments for custom agents (SPEC-71f2742d T206)
+fn build_custom_agent_args_for_tmux(
+    custom: &CustomCodingAgent,
+    config: &AgentLaunchConfig,
+) -> Vec<String> {
+    let mut args = Vec::new();
+
+    // Add default args
+    args.extend(custom.default_args.clone());
+
+    // Add mode-specific args (T208)
+    if let Some(ref mode_args) = custom.mode_args {
+        match config.execution_mode {
+            ExecutionMode::Normal => {
+                args.extend(mode_args.normal.clone());
+            }
+            ExecutionMode::Continue => {
+                args.extend(mode_args.continue_mode.clone());
+            }
+            ExecutionMode::Resume => {
+                args.extend(mode_args.resume.clone());
+            }
+        }
+    }
+
+    // Add permission skip args if skip_permissions is true (T210)
+    if config.skip_permissions && !custom.permission_skip_args.is_empty() {
+        args.extend(custom.permission_skip_args.clone());
+    }
+
+    args
+}
+
 fn is_valid_env_name(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
