@@ -87,7 +87,7 @@
 
 ## リリースワークフロー
 
-- feature/\* ブランチは develop へ Auto Merge し、develop で次回リリース候補を蓄積する。
+- feature/\* ブランチは develop への PR を作成し、オーナー承認後にマージする。develop で次回リリース候補を蓄積する。
 - `/release` コマンド（または `gh workflow run prepare-release.yml --ref develop`）で Release PR を作成:
   - Conventional Commits を解析してバージョン自動判定（feat→minor, fix→patch, !→major）
   - git-cliff で CHANGELOG.md を更新
