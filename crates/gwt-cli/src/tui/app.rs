@@ -6529,4 +6529,36 @@ mod tests {
         // Wizard should NOT open because it's a different branch
         assert!(!model.wizard.visible);
     }
+
+    #[test]
+    fn test_mouse_click_ignores_cleanup_active_branch() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+        let branches = [
+            Branch::new("feature/one", "deadbeef"),
+            Branch::new("feature/two", "deadbeef"),
+        ];
+        let items = branches
+            .iter()
+            .map(|branch| BranchItem::from_branch(branch, &[]))
+            .collect();
+        model.branch_list = BranchListState::new().with_branches(items);
+        model.branch_list.update_list_area(Rect::new(0, 0, 20, 5));
+        model.branch_list.start_cleanup_progress(2);
+        model
+            .branch_list
+            .set_cleanup_active_branch(Some("feature/two".to_string()));
+
+        assert_eq!(model.branch_list.selected, 0);
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        model.handle_branch_list_mouse(mouse);
+
+        assert_eq!(model.branch_list.selected, 0);
+        assert!(!model.wizard.visible);
+    }
 }
