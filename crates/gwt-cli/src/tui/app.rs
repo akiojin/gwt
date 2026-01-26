@@ -38,6 +38,7 @@ use ratatui::{prelude::*, widgets::*};
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -218,6 +219,19 @@ struct WorktreeStatusTarget {
     path: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+struct CleanupPlanItem {
+    branch: String,
+    force_remove: bool,
+}
+
+#[derive(Debug)]
+enum CleanupUpdate {
+    BranchStarted { branch: String },
+    BranchFinished { branch: String, success: bool },
+    Completed { deleted: usize, errors: Vec<String> },
+}
+
 struct SessionSummaryTask {
     branch: String,
     session_id: String,
@@ -367,6 +381,8 @@ pub struct Model {
     safety_rx: Option<Receiver<SafetyUpdate>>,
     /// Worktree status update receiver
     worktree_status_rx: Option<Receiver<WorktreeStatusUpdate>>,
+    /// Cleanup update receiver
+    cleanup_rx: Option<Receiver<CleanupUpdate>>,
     /// Session summary update sender
     session_summary_tx: Option<Sender<SessionSummaryUpdate>>,
     /// Session summary update receiver
@@ -529,6 +545,7 @@ impl Model {
             pr_title_rx: None,
             safety_rx: None,
             worktree_status_rx: None,
+            cleanup_rx: None,
             session_summary_tx: None,
             session_summary_rx: None,
             agent_mode_tx: Some(agent_mode_tx),
@@ -669,13 +686,14 @@ impl Model {
         self.branch_list = branch_list;
 
         let repo_root = self.repo_root.clone();
-        let base_branch = settings.default_base_branch.clone();
+        let configured_base_branch = settings.default_base_branch.clone();
         let agent_history = self.agent_history.clone();
         let (tx, rx) = mpsc::channel();
         self.branch_list_rx = Some(rx);
 
         thread::spawn(move || {
-            let base_branch_exists = Branch::exists(&repo_root, &base_branch).unwrap_or(false);
+            let (base_branch, base_branch_exists) =
+                resolve_safety_base(&repo_root, &configured_base_branch);
             let worktrees = WorktreeManager::new(&repo_root)
                 .ok()
                 .and_then(|manager| manager.list_basic().ok())
@@ -1605,6 +1623,10 @@ impl Model {
             .or(self.status_message.as_deref())
     }
 
+    fn cleanup_input_locked(&self) -> bool {
+        matches!(self.screen, Screen::BranchList) && self.branch_list.cleanup_in_progress()
+    }
+
     fn apply_branch_list_updates(&mut self) {
         let Some(rx) = &self.branch_list_rx else {
             return;
@@ -1831,6 +1853,42 @@ impl Model {
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.worktree_status_rx = None;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn apply_cleanup_updates(&mut self) {
+        let Some(rx) = &self.cleanup_rx else {
+            return;
+        };
+
+        loop {
+            match rx.try_recv() {
+                Ok(update) => match update {
+                    CleanupUpdate::BranchStarted { branch } => {
+                        self.branch_list.set_cleanup_active_branch(Some(branch));
+                    }
+                    CleanupUpdate::BranchFinished { branch, success } => {
+                        self.branch_list.increment_cleanup_progress();
+                        if success {
+                            self.branch_list.selected_branches.remove(&branch);
+                        }
+                        if self.branch_list.cleanup_active_branch() == Some(branch.as_str()) {
+                            self.branch_list.set_cleanup_active_branch(None);
+                        }
+                    }
+                    CleanupUpdate::Completed { deleted, errors } => {
+                        self.finish_cleanup(deleted, errors);
+                        self.cleanup_rx = None;
+                        break;
+                    }
+                },
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.cleanup_rx = None;
+                    self.branch_list.finish_cleanup_progress();
                     break;
                 }
             }
@@ -2165,6 +2223,10 @@ impl Model {
             self.last_mouse_click = None;
             return;
         }
+        if self.branch_list.cleanup_in_progress() {
+            self.last_mouse_click = None;
+            return;
+        }
         if self.wizard.visible {
             self.last_mouse_click = None;
             return;
@@ -2208,6 +2270,9 @@ impl Model {
 
     fn handle_branch_list_scroll(&mut self, mouse: MouseEvent) {
         if !matches!(self.screen, Screen::BranchList) {
+            return;
+        }
+        if self.branch_list.cleanup_in_progress() {
             return;
         }
         if self.wizard.visible || self.ai_wizard.visible {
@@ -3132,6 +3197,9 @@ impl Model {
 
     /// Update function (Elm Architecture)
     pub fn update(&mut self, msg: Message) {
+        if self.cleanup_input_locked() && !matches!(msg, Message::Tick | Message::CtrlC) {
+            return;
+        }
         match msg {
             Message::Quit => {
                 self.should_quit = true;
@@ -3227,6 +3295,7 @@ impl Model {
                 self.apply_pr_title_updates();
                 self.apply_safety_updates();
                 self.apply_worktree_updates();
+                self.apply_cleanup_updates();
                 self.apply_launch_updates();
                 // FR-051: Auto-close progress modal after 2-second summary display
                 if let Some(ref modal) = self.progress_modal {
@@ -4451,57 +4520,98 @@ impl Model {
 
     /// Execute branch cleanup (FR-010)
     fn execute_cleanup(&mut self, branches: &[String]) {
+        if branches.is_empty() {
+            return;
+        }
+        if self.branch_list.cleanup_in_progress() || self.cleanup_rx.is_some() {
+            return;
+        }
+
         debug!(
             category = "tui",
             branch_count = branches.len(),
             "Starting branch cleanup"
         );
-        let mut deleted = 0;
-        let mut errors = Vec::new();
-        let manager = WorktreeManager::new(&self.repo_root).ok();
 
-        for branch_name in branches {
-            let branch_item = self
-                .branch_list
-                .branches
-                .iter()
-                .find(|b| &b.name == branch_name);
-
-            let force_remove = branch_item.is_some_and(|item| {
-                item.worktree_status == WorktreeStatus::Inaccessible
-                    || item.has_changes
-                    || WorktreeManager::is_protected(&item.name)
-            });
-
-            let result = if let Some(manager) = manager.as_ref() {
-                manager.cleanup_branch(branch_name, force_remove, true)
-            } else {
-                Branch::delete(&self.repo_root, branch_name, true)
-            };
-
-            match result {
-                Ok(_) => {
-                    debug!(
-                        category = "tui",
-                        branch = %branch_name,
-                        "Branch cleanup succeeded"
-                    );
-                    deleted += 1;
-                    self.branch_list.selected_branches.remove(branch_name);
+        let cleanup_items: Vec<CleanupPlanItem> = branches
+            .iter()
+            .map(|branch_name| {
+                let branch_item = self
+                    .branch_list
+                    .branches
+                    .iter()
+                    .find(|b| &b.name == branch_name);
+                let force_remove = branch_item.is_some_and(|item| {
+                    item.worktree_status == WorktreeStatus::Inaccessible
+                        || item.has_changes
+                        || WorktreeManager::is_protected(&item.name)
+                });
+                CleanupPlanItem {
+                    branch: branch_name.clone(),
+                    force_remove,
                 }
-                Err(e) => {
-                    error!(
-                        category = "tui",
-                        branch = %branch_name,
-                        error = %e,
-                        "Branch cleanup failed"
-                    );
-                    errors.push(format!("{}: {}", branch_name, e));
+            })
+            .collect();
+
+        self.branch_list.start_cleanup_progress(cleanup_items.len());
+        self.branch_list.set_cleanup_active_branch(None);
+
+        let repo_root = self.repo_root.clone();
+        let (tx, rx) = mpsc::channel();
+        self.cleanup_rx = Some(rx);
+
+        thread::spawn(move || {
+            let mut deleted = 0;
+            let mut errors = Vec::new();
+            let manager = WorktreeManager::new(&repo_root).ok();
+
+            for item in cleanup_items {
+                let _ = tx.send(CleanupUpdate::BranchStarted {
+                    branch: item.branch.clone(),
+                });
+
+                let result = if let Some(manager) = manager.as_ref() {
+                    manager.cleanup_branch(&item.branch, item.force_remove, true)
+                } else {
+                    Branch::delete(&repo_root, &item.branch, true)
+                };
+
+                match result {
+                    Ok(_) => {
+                        debug!(
+                            category = "tui",
+                            branch = %item.branch,
+                            "Branch cleanup succeeded"
+                        );
+                        deleted += 1;
+                        let _ = tx.send(CleanupUpdate::BranchFinished {
+                            branch: item.branch.clone(),
+                            success: true,
+                        });
+                    }
+                    Err(e) => {
+                        error!(
+                            category = "tui",
+                            branch = %item.branch,
+                            error = %e,
+                            "Branch cleanup failed"
+                        );
+                        errors.push(format!("{}: {}", item.branch, e));
+                        let _ = tx.send(CleanupUpdate::BranchFinished {
+                            branch: item.branch.clone(),
+                            success: false,
+                        });
+                    }
                 }
             }
-        }
 
-        // Show result message
+            let _ = tx.send(CleanupUpdate::Completed { deleted, errors });
+        });
+    }
+
+    fn finish_cleanup(&mut self, deleted: usize, errors: Vec<String>) {
+        self.branch_list.finish_cleanup_progress();
+
         if errors.is_empty() {
             info!(
                 category = "tui",
@@ -4967,6 +5077,16 @@ impl Model {
                 }
             }
             // Block all other input while modal is visible (FR-043)
+            return None;
+        }
+
+        if self.cleanup_input_locked() {
+            if is_key_press
+                && key.code == KeyCode::Char('c')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                return Some(Message::CtrlC);
+            }
             return None;
         }
 
@@ -5611,6 +5731,48 @@ fn build_tmux_command(
     }
 }
 
+fn resolve_remote_head(repo_root: &Path, remote: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args([
+            "symbolic-ref",
+            "--quiet",
+            &format!("refs/remotes/{remote}/HEAD"),
+        ])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let ref_name = stdout.trim();
+    let ref_name = ref_name.strip_prefix("refs/remotes/")?;
+    if ref_name.ends_with("/HEAD") {
+        return None;
+    }
+    Some(ref_name.to_string())
+}
+
+fn resolve_safety_base(repo_root: &Path, base_branch: &str) -> (String, bool) {
+    if Branch::exists(repo_root, base_branch).unwrap_or(false) {
+        return (base_branch.to_string(), true);
+    }
+
+    let default_remote = Remote::default(repo_root).ok().flatten();
+    if let Some(remote) = default_remote {
+        if Branch::remote_exists(repo_root, &remote.name, base_branch).unwrap_or(false) {
+            return (format!("{}/{}", remote.name, base_branch), true);
+        }
+        if let Some(remote_head) = resolve_remote_head(repo_root, &remote.name) {
+            return (remote_head, true);
+        }
+    }
+
+    (base_branch.to_string(), false)
+}
+
 fn resolve_repo_web_url(repo_root: &Path) -> Option<String> {
     let remote = Remote::get(repo_root, "origin").ok().flatten()?;
     let slug = github_repo_slug(&remote.fetch_url)?;
@@ -5679,6 +5841,33 @@ mod tests {
         temp
     }
 
+    fn create_test_repo_with_branch(branch: &str) -> TempDir {
+        let temp = TempDir::new().unwrap();
+        run_git(temp.path(), &["init", "-b", branch]);
+        run_git(temp.path(), &["config", "user.email", "test@test.com"]);
+        run_git(temp.path(), &["config", "user.name", "Test"]);
+        std::fs::write(temp.path().join("test.txt"), "hello").unwrap();
+        run_git(temp.path(), &["add", "."]);
+        run_git(temp.path(), &["commit", "-m", "initial"]);
+        temp
+    }
+
+    fn create_repo_with_remote_main_only() -> (TempDir, TempDir) {
+        let origin = TempDir::new().unwrap();
+        run_git(origin.path(), &["init", "--bare", "-b", "main"]);
+
+        let repo = create_test_repo_with_branch("main");
+        let origin_path = origin.path().to_string_lossy().to_string();
+        run_git(repo.path(), &["remote", "add", "origin", &origin_path]);
+        run_git(repo.path(), &["push", "-u", "origin", "main"]);
+        run_git(repo.path(), &["checkout", "-b", "develop"]);
+        run_git(repo.path(), &["branch", "-D", "main"]);
+        run_git(repo.path(), &["fetch", "origin"]);
+        run_git(repo.path(), &["remote", "set-head", "origin", "-a"]);
+
+        (repo, origin)
+    }
+
     fn worktree_list_output(repo_root: &Path) -> String {
         let output = Command::new("git")
             .args(["worktree", "list", "--porcelain"])
@@ -5707,6 +5896,24 @@ mod tests {
             tool_version: None,
             timestamp: 0,
         }
+    }
+
+    #[test]
+    fn test_resolve_safety_base_uses_remote_branch_when_local_missing() {
+        let (repo, _origin) = create_repo_with_remote_main_only();
+        let (base_ref, exists) = resolve_safety_base(repo.path(), "main");
+
+        assert!(exists);
+        assert_eq!(base_ref, "origin/main");
+    }
+
+    #[test]
+    fn test_resolve_safety_base_falls_back_to_remote_head() {
+        let (repo, _origin) = create_repo_with_remote_main_only();
+        let (base_ref, exists) = resolve_safety_base(repo.path(), "trunk");
+
+        assert!(exists);
+        assert_eq!(base_ref, "origin/main");
     }
 
     #[test]
@@ -6011,6 +6218,23 @@ mod tests {
 
         model.update(Message::SelectNext);
         assert_eq!(model.branch_list.selected, 1);
+    }
+
+    #[test]
+    fn test_cleanup_input_lock_blocks_navigation() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let branches = vec![
+            sample_branch_with_session("feature/one"),
+            sample_branch_with_session("feature/two"),
+        ];
+
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.branch_list.start_cleanup_progress(2);
+
+        model.update(Message::SelectNext);
+        assert_eq!(model.branch_list.selected, 0);
     }
 
     #[test]

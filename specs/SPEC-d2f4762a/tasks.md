@@ -3,6 +3,22 @@
 **仕様ID**: `SPEC-d2f4762a`
 **ポリシー**: CLAUDE.md の TDD ルールに基づき、必ず RED→GREEN→リグレッションチェックの順に進める。
 
+## 追加作業: クリーンアップ中の安全アイコンスピナー表示 (2026-01-26)
+
+- [x] **T1330** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にクリーンアップ中スピナー表示と入力ロック要件を追記
+- [x] **T1331** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にクリーンアップ進捗行と削除中スピナー表示のテストを追加
+- [x] **T1332** [Test] `crates/gwt-cli/src/tui/app.rs` にクリーンアップ中の入力ロックを検証するテストを追加
+- [x] **T1333** [Impl] `crates/gwt-cli/src/tui/app.rs` でクリーンアップ処理の非同期化と入力ロック、進捗更新を実装
+- [x] **T1334** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` で削除中の安全アイコンスピナー表示と進捗行の描画を実装
+- [x] **T1335** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
+## 追加作業: ベースブランチのリモートフォールバック (2026-01-26)
+
+- [x] **T1336** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にベースブランチのリモートフォールバック要件・方針を追記
+- [x] **T1337** [Test] `crates/gwt-cli/src/tui/app.rs` にローカルにベースブランチが無い場合でもリモートブランチ/remote HEADを参照するテストを追加
+- [x] **T1338** [Impl] `crates/gwt-cli/src/tui/app.rs` にベースブランチ解決ロジック（remote/<base> → remote/HEAD）を実装し、安全判定に適用
+- [x] **T1339** [検証] `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
 ## 追加作業: ブランチ詳細サマリの非同期更新 (2026-01-21)
 
 - [x] **T1323** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に詳細サマリの非同期更新要件・方針を追記
