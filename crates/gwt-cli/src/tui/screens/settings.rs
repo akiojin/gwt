@@ -448,6 +448,26 @@ impl EnvEditState {
             }
         }
     }
+
+    /// Toggle between Key and Value editing
+    pub fn toggle_key_value(&mut self) {
+        if let Some(ref mode) = self.editing.clone() {
+            match mode {
+                EnvEditMode::Key(pos) => {
+                    if self.selected_index < self.vars.len() {
+                        let val_len = self.vars[self.selected_index].1.len();
+                        self.editing = Some(EnvEditMode::Value(val_len.min(*pos)));
+                    }
+                }
+                EnvEditMode::Value(pos) => {
+                    if self.selected_index < self.vars.len() {
+                        let key_len = self.vars[self.selected_index].0.len();
+                        self.editing = Some(EnvEditMode::Key(key_len.min(*pos)));
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Settings state
@@ -655,11 +675,21 @@ impl SettingsState {
                 self.custom_agent_index += 1;
             }
         } else if self.category == SettingsCategory::Profile {
-            let profiles = self.profile_names();
-            // +1 for "Add new profile" option at the end
-            let max = profiles.len();
-            if self.profile_index < max {
-                self.profile_index += 1;
+            // Check if in EnvEdit mode
+            if matches!(self.profile_mode, ProfileMode::EnvEdit(_)) {
+                // Navigate env vars (+1 for "Add new" option)
+                let max = self.env_edit_state.vars.len();
+                if self.env_edit_state.selected_index < max {
+                    self.env_edit_state.selected_index += 1;
+                    self.env_edit_state.editing = None;
+                }
+            } else {
+                let profiles = self.profile_names();
+                // +1 for "Add new profile" option at the end
+                let max = profiles.len();
+                if self.profile_index < max {
+                    self.profile_index += 1;
+                }
             }
         } else {
             let items = self.category_items();
@@ -676,7 +706,14 @@ impl SettingsState {
                 self.custom_agent_index -= 1;
             }
         } else if self.category == SettingsCategory::Profile {
-            if self.profile_index > 0 {
+            // Check if in EnvEdit mode
+            if matches!(self.profile_mode, ProfileMode::EnvEdit(_)) {
+                // Navigate env vars
+                if self.env_edit_state.selected_index > 0 {
+                    self.env_edit_state.selected_index -= 1;
+                    self.env_edit_state.editing = None;
+                }
+            } else if self.profile_index > 0 {
                 self.profile_index -= 1;
             }
         } else if self.selected_item > 0 {
@@ -777,12 +814,27 @@ impl SettingsState {
         false
     }
 
-    /// Check if in form mode
+    /// Check if in form mode (CustomAgents or Profile)
     pub fn is_form_mode(&self) -> bool {
         matches!(
             self.custom_agent_mode,
             CustomAgentMode::Add | CustomAgentMode::Edit(_)
-        )
+        ) || matches!(self.profile_mode, ProfileMode::Add | ProfileMode::Edit(_))
+    }
+
+    /// Check if in Profile form mode specifically
+    pub fn is_profile_form_mode(&self) -> bool {
+        matches!(self.profile_mode, ProfileMode::Add | ProfileMode::Edit(_))
+    }
+
+    /// Check if in EnvEdit mode
+    pub fn is_env_edit_mode(&self) -> bool {
+        matches!(self.profile_mode, ProfileMode::EnvEdit(_))
+    }
+
+    /// Check if in Profile delete confirmation mode
+    pub fn is_profile_delete_mode(&self) -> bool {
+        matches!(self.profile_mode, ProfileMode::ConfirmDelete(_))
     }
 
     /// Check if in delete confirmation mode
@@ -896,6 +948,17 @@ impl SettingsState {
         self.env_edit_state = EnvEditState::default();
     }
 
+    /// Save env edit state back to profile
+    pub fn save_env_to_profile(&mut self) {
+        if let ProfileMode::EnvEdit(profile_name) = &self.profile_mode {
+            if let Some(ref mut config) = self.profiles_config {
+                if let Some(profile) = config.profiles.get_mut(profile_name) {
+                    profile.env = self.env_edit_state.to_env();
+                }
+            }
+        }
+    }
+
     /// Save profile from form
     pub fn save_profile(&mut self) -> Result<(), &'static str> {
         self.profile_form.validate()?;
@@ -980,21 +1043,6 @@ impl SettingsState {
             }
         }
         false
-    }
-
-    /// Check if in profile form mode
-    pub fn is_profile_form_mode(&self) -> bool {
-        matches!(self.profile_mode, ProfileMode::Add | ProfileMode::Edit(_))
-    }
-
-    /// Check if in profile delete confirmation mode
-    pub fn is_profile_delete_mode(&self) -> bool {
-        matches!(self.profile_mode, ProfileMode::ConfirmDelete(_))
-    }
-
-    /// Check if in env edit mode
-    pub fn is_env_edit_mode(&self) -> bool {
-        matches!(self.profile_mode, ProfileMode::EnvEdit(_))
     }
 }
 
