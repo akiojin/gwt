@@ -218,6 +218,19 @@ struct WorktreeStatusTarget {
     path: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+struct CleanupPlanItem {
+    branch: String,
+    force_remove: bool,
+}
+
+#[derive(Debug)]
+enum CleanupUpdate {
+    BranchStarted { branch: String },
+    BranchFinished { branch: String, success: bool },
+    Completed { deleted: usize, errors: Vec<String> },
+}
+
 struct SessionSummaryTask {
     branch: String,
     session_id: String,
@@ -367,6 +380,8 @@ pub struct Model {
     safety_rx: Option<Receiver<SafetyUpdate>>,
     /// Worktree status update receiver
     worktree_status_rx: Option<Receiver<WorktreeStatusUpdate>>,
+    /// Cleanup update receiver
+    cleanup_rx: Option<Receiver<CleanupUpdate>>,
     /// Session summary update sender
     session_summary_tx: Option<Sender<SessionSummaryUpdate>>,
     /// Session summary update receiver
@@ -529,6 +544,7 @@ impl Model {
             pr_title_rx: None,
             safety_rx: None,
             worktree_status_rx: None,
+            cleanup_rx: None,
             session_summary_tx: None,
             session_summary_rx: None,
             agent_mode_tx: Some(agent_mode_tx),
@@ -1605,6 +1621,10 @@ impl Model {
             .or(self.status_message.as_deref())
     }
 
+    fn cleanup_input_locked(&self) -> bool {
+        matches!(self.screen, Screen::BranchList) && self.branch_list.cleanup_in_progress()
+    }
+
     fn apply_branch_list_updates(&mut self) {
         let Some(rx) = &self.branch_list_rx else {
             return;
@@ -1831,6 +1851,42 @@ impl Model {
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.worktree_status_rx = None;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn apply_cleanup_updates(&mut self) {
+        let Some(rx) = &self.cleanup_rx else {
+            return;
+        };
+
+        loop {
+            match rx.try_recv() {
+                Ok(update) => match update {
+                    CleanupUpdate::BranchStarted { branch } => {
+                        self.branch_list.set_cleanup_active_branch(Some(branch));
+                    }
+                    CleanupUpdate::BranchFinished { branch, success } => {
+                        self.branch_list.increment_cleanup_progress();
+                        if success {
+                            self.branch_list.selected_branches.remove(&branch);
+                        }
+                        if self.branch_list.cleanup_active_branch() == Some(branch.as_str()) {
+                            self.branch_list.set_cleanup_active_branch(None);
+                        }
+                    }
+                    CleanupUpdate::Completed { deleted, errors } => {
+                        self.finish_cleanup(deleted, errors);
+                        self.cleanup_rx = None;
+                        break;
+                    }
+                },
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.cleanup_rx = None;
+                    self.branch_list.finish_cleanup_progress();
                     break;
                 }
             }
@@ -2165,6 +2221,10 @@ impl Model {
             self.last_mouse_click = None;
             return;
         }
+        if self.branch_list.cleanup_in_progress() {
+            self.last_mouse_click = None;
+            return;
+        }
         if self.wizard.visible {
             self.last_mouse_click = None;
             return;
@@ -2208,6 +2268,9 @@ impl Model {
 
     fn handle_branch_list_scroll(&mut self, mouse: MouseEvent) {
         if !matches!(self.screen, Screen::BranchList) {
+            return;
+        }
+        if self.branch_list.cleanup_in_progress() {
             return;
         }
         if self.wizard.visible || self.ai_wizard.visible {
@@ -3132,6 +3195,9 @@ impl Model {
 
     /// Update function (Elm Architecture)
     pub fn update(&mut self, msg: Message) {
+        if self.cleanup_input_locked() && !matches!(msg, Message::Tick | Message::CtrlC) {
+            return;
+        }
         match msg {
             Message::Quit => {
                 self.should_quit = true;
@@ -3227,6 +3293,7 @@ impl Model {
                 self.apply_pr_title_updates();
                 self.apply_safety_updates();
                 self.apply_worktree_updates();
+                self.apply_cleanup_updates();
                 self.apply_launch_updates();
                 // FR-051: Auto-close progress modal after 2-second summary display
                 if let Some(ref modal) = self.progress_modal {
@@ -4451,57 +4518,98 @@ impl Model {
 
     /// Execute branch cleanup (FR-010)
     fn execute_cleanup(&mut self, branches: &[String]) {
+        if branches.is_empty() {
+            return;
+        }
+        if self.branch_list.cleanup_in_progress() || self.cleanup_rx.is_some() {
+            return;
+        }
+
         debug!(
             category = "tui",
             branch_count = branches.len(),
             "Starting branch cleanup"
         );
-        let mut deleted = 0;
-        let mut errors = Vec::new();
-        let manager = WorktreeManager::new(&self.repo_root).ok();
 
-        for branch_name in branches {
-            let branch_item = self
-                .branch_list
-                .branches
-                .iter()
-                .find(|b| &b.name == branch_name);
-
-            let force_remove = branch_item.is_some_and(|item| {
-                item.worktree_status == WorktreeStatus::Inaccessible
-                    || item.has_changes
-                    || WorktreeManager::is_protected(&item.name)
-            });
-
-            let result = if let Some(manager) = manager.as_ref() {
-                manager.cleanup_branch(branch_name, force_remove, true)
-            } else {
-                Branch::delete(&self.repo_root, branch_name, true)
-            };
-
-            match result {
-                Ok(_) => {
-                    debug!(
-                        category = "tui",
-                        branch = %branch_name,
-                        "Branch cleanup succeeded"
-                    );
-                    deleted += 1;
-                    self.branch_list.selected_branches.remove(branch_name);
+        let cleanup_items: Vec<CleanupPlanItem> = branches
+            .iter()
+            .map(|branch_name| {
+                let branch_item = self
+                    .branch_list
+                    .branches
+                    .iter()
+                    .find(|b| &b.name == branch_name);
+                let force_remove = branch_item.map_or(false, |item| {
+                    item.worktree_status == WorktreeStatus::Inaccessible
+                        || item.has_changes
+                        || WorktreeManager::is_protected(&item.name)
+                });
+                CleanupPlanItem {
+                    branch: branch_name.clone(),
+                    force_remove,
                 }
-                Err(e) => {
-                    error!(
-                        category = "tui",
-                        branch = %branch_name,
-                        error = %e,
-                        "Branch cleanup failed"
-                    );
-                    errors.push(format!("{}: {}", branch_name, e));
+            })
+            .collect();
+
+        self.branch_list.start_cleanup_progress(cleanup_items.len());
+        self.branch_list.set_cleanup_active_branch(None);
+
+        let repo_root = self.repo_root.clone();
+        let (tx, rx) = mpsc::channel();
+        self.cleanup_rx = Some(rx);
+
+        thread::spawn(move || {
+            let mut deleted = 0;
+            let mut errors = Vec::new();
+            let manager = WorktreeManager::new(&repo_root).ok();
+
+            for item in cleanup_items {
+                let _ = tx.send(CleanupUpdate::BranchStarted {
+                    branch: item.branch.clone(),
+                });
+
+                let result = if let Some(manager) = manager.as_ref() {
+                    manager.cleanup_branch(&item.branch, item.force_remove, true)
+                } else {
+                    Branch::delete(&repo_root, &item.branch, true)
+                };
+
+                match result {
+                    Ok(_) => {
+                        debug!(
+                            category = "tui",
+                            branch = %item.branch,
+                            "Branch cleanup succeeded"
+                        );
+                        deleted += 1;
+                        let _ = tx.send(CleanupUpdate::BranchFinished {
+                            branch: item.branch.clone(),
+                            success: true,
+                        });
+                    }
+                    Err(e) => {
+                        error!(
+                            category = "tui",
+                            branch = %item.branch,
+                            error = %e,
+                            "Branch cleanup failed"
+                        );
+                        errors.push(format!("{}: {}", item.branch, e));
+                        let _ = tx.send(CleanupUpdate::BranchFinished {
+                            branch: item.branch.clone(),
+                            success: false,
+                        });
+                    }
                 }
             }
-        }
 
-        // Show result message
+            let _ = tx.send(CleanupUpdate::Completed { deleted, errors });
+        });
+    }
+
+    fn finish_cleanup(&mut self, deleted: usize, errors: Vec<String>) {
+        self.branch_list.finish_cleanup_progress();
+
         if errors.is_empty() {
             info!(
                 category = "tui",
@@ -4967,6 +5075,16 @@ impl Model {
                 }
             }
             // Block all other input while modal is visible (FR-043)
+            return None;
+        }
+
+        if self.cleanup_input_locked() {
+            if is_key_press
+                && key.code == KeyCode::Char('c')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                return Some(Message::CtrlC);
+            }
             return None;
         }
 
@@ -6011,6 +6129,23 @@ mod tests {
 
         model.update(Message::SelectNext);
         assert_eq!(model.branch_list.selected, 1);
+    }
+
+    #[test]
+    fn test_cleanup_input_lock_blocks_navigation() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let branches = vec![
+            sample_branch_with_session("feature/one"),
+            sample_branch_with_session("feature/two"),
+        ];
+
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.branch_list.start_cleanup_progress(2);
+
+        model.update(Message::SelectNext);
+        assert_eq!(model.branch_list.selected, 0);
     }
 
     #[test]
