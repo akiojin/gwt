@@ -1109,8 +1109,7 @@ impl WizardState {
             if let Some(ref custom) = entry.custom {
                 if let Some(ref cmd) = custom.version_command {
                     // Execute version command
-                    if let Ok(output) =
-                        std::process::Command::new("sh").args(["-c", cmd]).output()
+                    if let Ok(output) = std::process::Command::new("sh").args(["-c", cmd]).output()
                     {
                         if output.status.success() {
                             let version =
