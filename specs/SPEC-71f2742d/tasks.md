@@ -123,25 +123,25 @@ US1 (P1: tools.json読み込み)
 
 ### テスト（TDD）
 
-- [ ] **T301** [P] [US3] `crates/gwt-core/src/config/tools.rs` に ToolsConfig 保存テストを追加
-- [ ] **T302** [P] [US3] `crates/gwt-core/src/config/tools.rs` に CustomCodingAgent 追加・更新・削除テストを追加
+- [x] **T301** [P] [US3] `crates/gwt-core/src/config/tools.rs` に ToolsConfig 保存テストを追加
+- [x] **T302** [P] [US3] `crates/gwt-core/src/config/tools.rs` に CustomCodingAgent 追加・更新・削除テストを追加
 
 ### 保存ロジック
 
-- [ ] **T303** [US3] T301-302の後に `crates/gwt-core/src/config/tools.rs` に save() 関数を実装
-- [ ] **T304** [US3] T303の後に `crates/gwt-core/src/config/tools.rs` に add_agent() 関数を実装
-- [ ] **T305** [US3] T304の後に `crates/gwt-core/src/config/tools.rs` に update_agent() 関数を実装
-- [ ] **T306** [US3] T305の後に `crates/gwt-core/src/config/tools.rs` に remove_agent() 関数を実装
+- [x] **T303** [US3] T301-302の後に `crates/gwt-core/src/config/tools.rs` に save() 関数を実装
+- [x] **T304** [US3] T303の後に `crates/gwt-core/src/config/tools.rs` に add_agent() 関数を実装
+- [x] **T305** [US3] T304の後に `crates/gwt-core/src/config/tools.rs` に update_agent() 関数を実装
+- [x] **T306** [US3] T305の後に `crates/gwt-core/src/config/tools.rs` に remove_agent() 関数を実装
 
 ### 設定画面UI
 
-- [ ] **T307** [US3] T306の後に `crates/gwt-cli/src/tui/screens/settings.rs` を新規作成
-- [ ] **T308** [US3] T307の後に `crates/gwt-cli/src/tui/screens/settings.rs` に SettingsState 構造体を定義
-- [ ] **T309** [US3] T308の後に `crates/gwt-cli/src/tui/screens/settings.rs` にカスタムエージェント一覧表示を実装
+- [x] **T307** [US3] T306の後に `crates/gwt-cli/src/tui/screens/settings.rs` を新規作成（既存ファイル拡張）
+- [x] **T308** [US3] T307の後に `crates/gwt-cli/src/tui/screens/settings.rs` に SettingsState 構造体を定義
+- [x] **T309** [US3] T308の後に `crates/gwt-cli/src/tui/screens/settings.rs` にカスタムエージェント一覧表示を実装
 - [ ] **T310** [US3] T309の後に `crates/gwt-cli/src/tui/screens/settings.rs` に新規エージェント追加フォームを実装
 - [ ] **T311** [US3] T310の後に `crates/gwt-cli/src/tui/screens/settings.rs` にエージェント編集フォームを実装
 - [ ] **T312** [US3] T311の後に `crates/gwt-cli/src/tui/screens/settings.rs` にエージェント削除確認を実装
-- [ ] **T313** [US3] T312の後に `crates/gwt-cli/src/tui/screens/mod.rs` に settings モジュールを追加
+- [x] **T313** [US3] T312の後に `crates/gwt-cli/src/tui/screens/mod.rs` に settings モジュールを追加（既存）
 
 ### App統合
 
