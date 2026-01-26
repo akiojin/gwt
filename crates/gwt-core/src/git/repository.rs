@@ -16,6 +16,12 @@ pub struct Repository {
 
 impl Repository {
     /// Discover a repository from a path
+    ///
+    /// This method first tries gix::discover(), and falls back to external git commands
+    /// if that fails. This provides better compatibility with environments where
+    /// gix may have issues (e.g., WSL).
+    ///
+    /// Issue #774: Added fallback to external git commands for WSL compatibility.
     pub fn discover(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
 
@@ -31,29 +37,81 @@ impl Repository {
                     gix_repo: Some(repo),
                 })
             }
-            Err(_) => {
-                // Fallback: Manual .git directory search
-                let mut current = path.to_path_buf();
-                loop {
-                    if current.join(".git").exists() {
-                        return Ok(Self {
-                            root: current,
-                            gix_repo: None,
-                        });
-                    }
-                    if !current.pop() {
-                        break;
-                    }
-                }
-
-                Err(GwtError::RepositoryNotFound {
-                    path: path.to_path_buf(),
-                })
+            Err(gix_err) => {
+                // Fallback: Use external git command for environments where gix fails
+                // (Issue #774: WSL compatibility)
+                tracing::debug!(
+                    "Repository::discover: gix::discover failed for {:?}, trying external git fallback: {}",
+                    path,
+                    gix_err
+                );
+                Self::discover_with_git_command(path)
             }
         }
     }
 
+    /// Discover a repository using external git command (fallback for gix failures)
+    fn discover_with_git_command(path: &Path) -> Result<Self> {
+        // Use git rev-parse to find the repository root
+        let output = Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(path)
+            .output();
+
+        match output {
+            Ok(o) if o.status.success() => {
+                let root = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                let root = PathBuf::from(root);
+
+                tracing::debug!(
+                    "Repository::discover_with_git_command: input_path={:?}, resolved_root={:?}",
+                    path,
+                    root
+                );
+
+                Ok(Self {
+                    root,
+                    gix_repo: None,
+                })
+            }
+            _ => {
+                // Final fallback: Manual .git file/directory search
+                // This handles cases where git command itself fails
+                Self::discover_manual(path)
+            }
+        }
+    }
+
+    /// Manual discovery by searching for .git file or directory
+    fn discover_manual(path: &Path) -> Result<Self> {
+        let mut current = path.to_path_buf();
+        loop {
+            let git_path = current.join(".git");
+            if git_path.exists() {
+                // .git can be a directory (normal repo) or a file (worktree)
+                // Both are valid Git repository markers
+                return Ok(Self {
+                    root: current,
+                    gix_repo: None,
+                });
+            }
+            if !current.pop() {
+                break;
+            }
+        }
+
+        Err(GwtError::RepositoryNotFound {
+            path: path.to_path_buf(),
+        })
+    }
+
     /// Open a repository at the given path
+    ///
+    /// This method first tries gix::open(), and falls back to external git commands
+    /// if that fails. This provides better compatibility with environments where
+    /// gix may have issues (e.g., WSL).
+    ///
+    /// Issue #774: Added fallback to external git commands for WSL compatibility.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         match gix::open(path) {
@@ -72,9 +130,49 @@ impl Repository {
                     gix_repo: Some(repo),
                 })
             }
-            Err(_) => Err(GwtError::RepositoryNotFound {
+            Err(gix_err) => {
+                // Fallback: Use external git command for environments where gix fails
+                // (Issue #774: WSL compatibility)
+                tracing::debug!(
+                    "Repository::open: gix::open failed for {:?}, trying external git fallback: {}",
+                    path,
+                    gix_err
+                );
+                Self::open_with_git_command(path)
+            }
+        }
+    }
+
+    /// Open a repository using external git command (fallback for gix failures)
+    fn open_with_git_command(path: &Path) -> Result<Self> {
+        // Verify this is a valid git repository by running git rev-parse
+        let output = Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(path)
+            .output()
+            .map_err(|e| GwtError::GitOperationFailed {
+                operation: "rev-parse --show-toplevel".to_string(),
+                details: e.to_string(),
+            })?;
+
+        if output.status.success() {
+            let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let root = PathBuf::from(root);
+
+            tracing::debug!(
+                "Repository::open_with_git_command: input_path={:?}, resolved_root={:?}",
+                path,
+                root
+            );
+
+            Ok(Self {
+                root,
+                gix_repo: None,
+            })
+        } else {
+            Err(GwtError::RepositoryNotFound {
                 path: path.to_path_buf(),
-            }),
+            })
         }
     }
 
@@ -630,6 +728,22 @@ mod tests {
         (temp, repo)
     }
 
+    fn create_test_repo_with_commit() -> (TempDir, Repository) {
+        let (temp, repo) = create_test_repo();
+        std::fs::write(temp.path().join("test.txt"), "hello").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        (temp, repo)
+    }
+
     #[test]
     fn test_discover_not_found() {
         let temp = TempDir::new().unwrap();
@@ -690,5 +804,81 @@ mod tests {
         let worktrees = repo.list_worktrees().unwrap();
         assert_eq!(worktrees.len(), 1);
         assert_eq!(worktrees[0].path, temp.path());
+    }
+
+    /// Issue #774: Repository::open should work with worktrees
+    /// Worktrees have a .git file (not directory) pointing to the main repo
+    #[test]
+    fn test_open_worktree() {
+        let (temp, repo) = create_test_repo_with_commit();
+
+        // Create a worktree
+        let worktree_path = temp.path().join(".worktrees").join("test-branch");
+        repo.create_worktree(&worktree_path, "test-branch", true)
+            .unwrap();
+
+        // Verify the worktree has a .git file (not directory)
+        let git_path = worktree_path.join(".git");
+        assert!(git_path.exists(), ".git should exist in worktree");
+        assert!(git_path.is_file(), ".git should be a file in worktree");
+
+        // Repository::open should succeed on the worktree
+        let wt_repo = Repository::open(&worktree_path);
+        assert!(
+            wt_repo.is_ok(),
+            "Repository::open should succeed on worktree: {:?}",
+            wt_repo.err()
+        );
+
+        let wt_repo = wt_repo.unwrap();
+        assert_eq!(wt_repo.root(), worktree_path);
+    }
+
+    /// Issue #774: Repository::discover should work with worktrees
+    #[test]
+    fn test_discover_worktree() {
+        let (temp, repo) = create_test_repo_with_commit();
+
+        // Create a worktree
+        let worktree_path = temp.path().join(".worktrees").join("test-branch");
+        repo.create_worktree(&worktree_path, "test-branch", true)
+            .unwrap();
+
+        // Repository::discover should succeed from within the worktree
+        let wt_repo = Repository::discover(&worktree_path);
+        assert!(
+            wt_repo.is_ok(),
+            "Repository::discover should succeed on worktree: {:?}",
+            wt_repo.err()
+        );
+
+        let wt_repo = wt_repo.unwrap();
+        assert_eq!(wt_repo.root(), worktree_path);
+    }
+
+    /// Issue #774: Repository::discover should work from subdirectory of worktree
+    #[test]
+    fn test_discover_worktree_subdirectory() {
+        let (temp, repo) = create_test_repo_with_commit();
+
+        // Create a worktree
+        let worktree_path = temp.path().join(".worktrees").join("test-branch");
+        repo.create_worktree(&worktree_path, "test-branch", true)
+            .unwrap();
+
+        // Create a subdirectory in the worktree
+        let subdir = worktree_path.join("subdir");
+        std::fs::create_dir(&subdir).unwrap();
+
+        // Repository::discover should succeed from subdirectory
+        let wt_repo = Repository::discover(&subdir);
+        assert!(
+            wt_repo.is_ok(),
+            "Repository::discover should succeed from worktree subdirectory: {:?}",
+            wt_repo.err()
+        );
+
+        let wt_repo = wt_repo.unwrap();
+        assert_eq!(wt_repo.root(), worktree_path);
     }
 }
