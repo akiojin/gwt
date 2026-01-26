@@ -8,6 +8,7 @@
 
 #![allow(dead_code)]
 
+use gwt_core::agent::codex::supports_collaboration_modes;
 use gwt_core::config::{CustomCodingAgent, ToolsConfig};
 use gwt_core::git::GitHubIssue;
 use ratatui::{prelude::*, widgets::*};
@@ -107,6 +108,8 @@ pub enum WizardStep {
     ModelSelect,
     ReasoningLevel, // Codex only
     VersionSelect,
+    /// Collaboration modes (Codex v0.91.0+, SPEC-fdebd681)
+    CollaborationModes,
     ExecutionMode,
     SkipPermissions,
     // New branch flow
@@ -708,6 +711,8 @@ pub struct WizardState {
     pub execution_mode_index: usize,
     /// Skip permissions
     pub skip_permissions: bool,
+    /// Collaboration modes (Codex v0.91.0+, SPEC-fdebd681)
+    pub collaboration_modes: bool,
     /// Session ID for resume/continue
     pub session_id: Option<String>,
     /// Scroll offset for popup content
@@ -826,6 +831,7 @@ impl WizardState {
         self.execution_mode = ExecutionMode::default();
         self.execution_mode_index = 0;
         self.skip_permissions = false;
+        self.collaboration_modes = false;
         self.session_id = None;
         self.branch_type = BranchType::default();
         self.new_branch_name.clear();
@@ -860,6 +866,31 @@ impl WizardState {
             // Each entry has 2 options, plus 1 "Choose different" at the end
             self.quick_start_entries.len() * 2 + 1
         }
+    }
+
+    /// Resolve version string to semantic version for collaboration_modes check (SPEC-fdebd681)
+    fn resolve_version_for_collaboration_modes(&self) -> Option<String> {
+        match self.version.as_str() {
+            "latest" => Some("99.99.99".to_string()), // latest always supports
+            "installed" => {
+                // Get installed version from cache
+                self.installed_cache
+                    .get(&CodingAgent::CodexCli)
+                    .and_then(|info| info.as_ref())
+                    .map(|info| info.version.clone())
+            }
+            v => Some(v.to_string()), // concrete version
+        }
+    }
+
+    /// Check if CollaborationModes step should be shown (SPEC-fdebd681)
+    fn should_show_collaboration_modes(&self) -> bool {
+        self.agent == CodingAgent::CodexCli
+            && self
+                .resolve_version_for_collaboration_modes()
+                .as_deref()
+                .map(|v| supports_collaboration_modes(Some(v)))
+                .unwrap_or(false)
     }
 
     /// Get the selected Quick Start action and tool index (FR-050)
@@ -1251,12 +1282,20 @@ impl WizardState {
                 WizardStep::VersionSelect
             }
             WizardStep::VersionSelect => {
-                // T212: Reset execution mode index for supported modes
+                // SPEC-fdebd681: Auto-enable collaboration_modes for Codex v0.91.0+
+                if self.should_show_collaboration_modes() {
+                    self.collaboration_modes = true;
+                }
+                // CollaborationModes step skipped - go directly to ExecutionMode
                 let supported = self.supported_execution_modes();
                 self.execution_mode_index = 0;
                 if !supported.is_empty() {
                     self.execution_mode = supported[0];
                 }
+                WizardStep::ExecutionMode
+            }
+            WizardStep::CollaborationModes => {
+                // No longer used - step is skipped, but keep for enum exhaustiveness
                 WizardStep::ExecutionMode
             }
             WizardStep::ExecutionMode => {
@@ -1332,8 +1371,12 @@ impl WizardState {
                     WizardStep::AgentSelect
                 }
             }
+            WizardStep::CollaborationModes => {
+                // No longer used - step is skipped, but keep for enum exhaustiveness
+                WizardStep::VersionSelect
+            }
             WizardStep::ExecutionMode => {
-                // T506: Go back to VersionSelect if has version, else to ModelSelect if has models, else to AgentSelect
+                // SPEC-fdebd681: CollaborationModes step skipped - go back directly
                 if self.has_version_command() {
                     WizardStep::VersionSelect
                 } else if self.has_models() {
@@ -1484,6 +1527,9 @@ impl WizardState {
                     self.ensure_version_visible();
                 }
             }
+            WizardStep::CollaborationModes => {
+                // Step is skipped - no-op (kept for enum exhaustiveness)
+            }
             WizardStep::ExecutionMode => {
                 // T212: Only navigate through supported modes
                 let supported = self.supported_execution_modes();
@@ -1565,6 +1611,9 @@ impl WizardState {
                     // FR-062: Scroll to keep cursor in view
                     self.ensure_version_visible();
                 }
+            }
+            WizardStep::CollaborationModes => {
+                // Step is skipped - no-op (kept for enum exhaustiveness)
             }
             WizardStep::ExecutionMode => {
                 // T212: Only navigate through supported modes
@@ -1784,6 +1833,7 @@ impl WizardState {
             WizardStep::ModelSelect => self.get_models().len(), // T503: Use get_models() for custom agent support
             WizardStep::ReasoningLevel => ReasoningLevel::all().len(),
             WizardStep::VersionSelect => self.version_options.len(),
+            WizardStep::CollaborationModes => 0, // Step is skipped (kept for enum exhaustiveness)
             WizardStep::ExecutionMode => self.supported_execution_modes().len(), // T212
             WizardStep::SkipPermissions => {
                 // T213: If skip_permissions not supported, show only "No" option (auto-confirm)
@@ -1811,6 +1861,7 @@ impl WizardState {
             WizardStep::ModelSelect => self.model_index,
             WizardStep::ReasoningLevel => self.reasoning_level_index,
             WizardStep::VersionSelect => self.version_index,
+            WizardStep::CollaborationModes => 0, // Step is skipped (kept for enum exhaustiveness)
             WizardStep::ExecutionMode => self.execution_mode_index,
             WizardStep::SkipPermissions => {
                 if self.skip_permissions {
@@ -1877,6 +1928,9 @@ impl WizardState {
                 self.version_index = index;
                 self.version = self.version_options[index].value.clone();
                 self.ensure_version_visible();
+            }
+            WizardStep::CollaborationModes => {
+                // Step is skipped - no-op (kept for enum exhaustiveness)
             }
             WizardStep::ExecutionMode => {
                 // T212: Use supported modes
@@ -1994,6 +2048,9 @@ pub fn render_wizard(state: &mut WizardState, frame: &mut Frame, area: Rect) {
         WizardStep::ModelSelect => render_model_step(state, frame, content_area),
         WizardStep::ReasoningLevel => render_reasoning_step(state, frame, content_area),
         WizardStep::VersionSelect => render_version_step(state, frame, content_area),
+        WizardStep::CollaborationModes => {
+            // Step is skipped - kept for enum exhaustiveness but never reached
+        }
         WizardStep::ExecutionMode => render_execution_mode_step(state, frame, content_area),
         WizardStep::SkipPermissions => render_skip_permissions_step(state, frame, content_area),
     }
@@ -2027,6 +2084,7 @@ fn wizard_title(step: WizardStep) -> &'static str {
         WizardStep::ModelSelect => " Select Model ",
         WizardStep::ReasoningLevel => " Select Reasoning Level ",
         WizardStep::VersionSelect => " Select Version ",
+        WizardStep::CollaborationModes => " (Skipped) ", // Step is skipped (enum exhaustiveness)
         WizardStep::ExecutionMode => " Select Execution Mode ",
         WizardStep::SkipPermissions => " Skip Permissions? ",
     }
@@ -2177,6 +2235,9 @@ fn wizard_required_content_width(state: &WizardState) -> usize {
                     consider(format!("  {}", opt.label));
                 }
             }
+        }
+        WizardStep::CollaborationModes => {
+            // Step is skipped - no-op (kept for enum exhaustiveness)
         }
         WizardStep::ExecutionMode => {
             for mode in ExecutionMode::all() {
@@ -2596,25 +2657,14 @@ fn render_agent_step(state: &WizardState, frame: &mut Frame, area: Rect) {
         let is_selected = i == state.agent_index;
         let prefix = if is_selected { "> " } else { "  " };
 
-        // T118: Grayed out for uninstalled agents
-        let style = if !entry.is_installed {
-            if is_selected {
-                Style::default().bg(Color::DarkGray).fg(Color::Black)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            }
-        } else if is_selected {
+        // Always show agents in their color (grayed-out styling removed)
+        let style = if is_selected {
             Style::default().bg(Color::Cyan).fg(Color::Black)
         } else {
             Style::default().fg(entry.color)
         };
 
-        // Add "Not installed" suffix for unavailable agents
-        let label = if entry.is_installed {
-            entry.display_name.clone()
-        } else {
-            format!("{} (Not installed)", entry.display_name)
-        };
+        let label = entry.display_name.clone();
 
         let text = truncate_with_ellipsis(&format!("{}{}", prefix, label), area.width as usize);
         items.push(ListItem::new(text).style(style));
@@ -2812,6 +2862,36 @@ fn render_execution_mode_step(state: &WizardState, frame: &mut Frame, area: Rect
             };
             let text = truncate_with_ellipsis(
                 &format!("{}{:<12} {}", prefix, mode.label(), mode.description()),
+                area.width as usize,
+            );
+            ListItem::new(text).style(style)
+        })
+        .collect();
+
+    let list = List::new(items);
+    frame.render_widget(list, area);
+}
+
+/// Render Collaboration Modes step (SPEC-fdebd681)
+fn render_collaboration_modes_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    let options = [("Enabled", true), ("Disabled", false)];
+    let items: Vec<ListItem> = options
+        .iter()
+        .map(|(label, value)| {
+            let is_selected = state.collaboration_modes == *value;
+            let prefix = if is_selected { "> " } else { "  " };
+            let style = if is_selected {
+                Style::default().bg(Color::Cyan).fg(Color::Black)
+            } else {
+                Style::default()
+            };
+            let desc = if *value {
+                "Plan/Execute mode switching"
+            } else {
+                "Standard single mode"
+            };
+            let text = truncate_with_ellipsis(
+                &format!("{}{:<10} {}", prefix, label, desc),
                 area.width as usize,
             );
             ListItem::new(text).style(style)
@@ -3502,5 +3582,71 @@ mod tests {
 
         // Error should be cleared
         assert!(state.issue_error.is_none());
+    }
+
+    /// SPEC-fdebd681: Test collaboration_modes auto-enabled for Codex v0.91.0+
+    #[test]
+    fn test_collaboration_modes_auto_enabled_for_codex_091() {
+        let mut state = WizardState::new();
+        state.agent = CodingAgent::CodexCli;
+        state.version = "0.91.0".to_string();
+        // Set up version_options to satisfy version selection
+        state.version_options = vec![VersionOption {
+            value: "0.91.0".to_string(),
+            label: "0.91.0".to_string(),
+            description: None,
+        }];
+        state.version_index = 0;
+
+        // Start from VersionSelect step
+        state.step = WizardStep::VersionSelect;
+        state.next_step();
+
+        // collaboration_modes should be automatically set to true
+        assert!(state.collaboration_modes);
+        // Should skip CollaborationModes step and go directly to ExecutionMode
+        assert_eq!(state.step, WizardStep::ExecutionMode);
+    }
+
+    /// SPEC-fdebd681: Test collaboration_modes not enabled for old Codex
+    #[test]
+    fn test_collaboration_modes_not_enabled_for_old_codex() {
+        let mut state = WizardState::new();
+        state.agent = CodingAgent::CodexCli;
+        state.version = "0.90.0".to_string();
+        state.version_options = vec![VersionOption {
+            value: "0.90.0".to_string(),
+            label: "0.90.0".to_string(),
+            description: None,
+        }];
+        state.version_index = 0;
+
+        state.step = WizardStep::VersionSelect;
+        state.next_step();
+
+        // v0.90.0 should not enable collaboration_modes
+        assert!(!state.collaboration_modes);
+        // Should still skip CollaborationModes step
+        assert_eq!(state.step, WizardStep::ExecutionMode);
+    }
+
+    /// SPEC-fdebd681: Test prev_step skips CollaborationModes
+    #[test]
+    fn test_prev_step_skips_collaboration_modes() {
+        let mut state = WizardState::new();
+        state.agent = CodingAgent::CodexCli;
+        state.version = "0.91.0".to_string();
+        state.version_options = vec![VersionOption {
+            value: "0.91.0".to_string(),
+            label: "0.91.0".to_string(),
+            description: None,
+        }];
+
+        // Start from ExecutionMode
+        state.step = WizardStep::ExecutionMode;
+        state.prev_step();
+
+        // Should go directly to VersionSelect, not CollaborationModes
+        assert_eq!(state.step, WizardStep::VersionSelect);
     }
 }
