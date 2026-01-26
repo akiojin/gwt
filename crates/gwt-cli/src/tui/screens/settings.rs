@@ -1808,48 +1808,115 @@ fn render_instructions(state: &SettingsState, frame: &mut Frame, area: Rect) {
 }
 
 /// Render AI settings content
-fn render_ai_settings_content(_state: &SettingsState, frame: &mut Frame, area: Rect) {
+fn render_ai_settings_content(state: &SettingsState, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" AI Settings ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Info text
-            Constraint::Length(3), // Button
-            Constraint::Min(0),    // Padding
-        ])
-        .margin(1)
-        .split(inner);
+    // Check if AI settings exist
+    let default_ai = state
+        .profiles_config
+        .as_ref()
+        .and_then(|c| c.default_ai.as_ref());
 
-    // Info text
-    let info = Paragraph::new("Configure AI endpoint, API key, and model settings.")
-        .alignment(Alignment::Center)
-        .wrap(Wrap { trim: true });
-    frame.render_widget(info, chunks[0]);
+    if let Some(ai) = default_ai {
+        // Show current settings
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // Endpoint label
+                Constraint::Length(1), // Endpoint value
+                Constraint::Length(1), // API Key label
+                Constraint::Length(1), // API Key value
+                Constraint::Length(1), // Model label
+                Constraint::Length(1), // Model value
+                Constraint::Length(1), // Spacing
+                Constraint::Length(3), // Button
+                Constraint::Min(0),    // Padding
+            ])
+            .margin(1)
+            .split(inner);
 
-    // Button
-    let button_area = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(25),
-            Constraint::Percentage(50),
-            Constraint::Percentage(25),
-        ])
-        .split(chunks[1])[1];
+        // Endpoint
+        let label = Paragraph::new("Endpoint:").style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(label, chunks[0]);
+        let value = Paragraph::new(format!("  {}", ai.endpoint)).style(Style::default().fg(Color::White));
+        frame.render_widget(value, chunks[1]);
 
-    let button = Paragraph::new("[ Open AI Settings Wizard ]")
-        .alignment(Alignment::Center)
-        .style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
-        .block(Block::default().borders(Borders::ALL));
-    frame.render_widget(button, button_area);
+        // API Key
+        let label = Paragraph::new("API Key:").style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(label, chunks[2]);
+        let key_display = if ai.api_key.is_empty() {
+            "(not set)".to_string()
+        } else {
+            format!("  {}...", &ai.api_key.chars().take(8).collect::<String>())
+        };
+        let value = Paragraph::new(key_display).style(Style::default().fg(Color::White));
+        frame.render_widget(value, chunks[3]);
+
+        // Model
+        let label = Paragraph::new("Model:").style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(label, chunks[4]);
+        let value = Paragraph::new(format!("  {}", ai.model)).style(Style::default().fg(Color::White));
+        frame.render_widget(value, chunks[5]);
+
+        // Button
+        let button_area = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(25),
+                Constraint::Percentage(50),
+                Constraint::Percentage(25),
+            ])
+            .split(chunks[7])[1];
+
+        let button = Paragraph::new("[ Edit AI Settings ]")
+            .alignment(Alignment::Center)
+            .style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .block(Block::default().borders(Borders::ALL));
+        frame.render_widget(button, button_area);
+    } else {
+        // No settings - show create button
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // Info text
+                Constraint::Length(3), // Button
+                Constraint::Min(0),    // Padding
+            ])
+            .margin(1)
+            .split(inner);
+
+        let info = Paragraph::new("No AI settings configured.")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(info, chunks[0]);
+
+        let button_area = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(25),
+                Constraint::Percentage(50),
+                Constraint::Percentage(25),
+            ])
+            .split(chunks[1])[1];
+
+        let button = Paragraph::new("[ Configure AI Settings ]")
+            .alignment(Alignment::Center)
+            .style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .block(Block::default().borders(Borders::ALL));
+        frame.render_widget(button, button_area);
+    }
 }
 
 #[cfg(test)]
