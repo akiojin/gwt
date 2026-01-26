@@ -3177,6 +3177,21 @@ impl Model {
             }
             SettingsCategory::AISettings => {
                 // Enter: open AI Settings Wizard
+                // Check if default_ai exists in profiles_config
+                if let Some(ai) = &self.profiles_config.default_ai {
+                    // Edit existing settings
+                    self.ai_wizard.open_edit(
+                        true, // is_default_ai
+                        None, // no profile name
+                        &ai.endpoint,
+                        &ai.api_key,
+                        &ai.model,
+                    );
+                } else {
+                    // Create new settings
+                    self.ai_wizard.open_new(true, None);
+                }
+                self.screen_stack.push(self.screen.clone());
                 self.screen = Screen::AISettingsWizard;
             }
             _ => {}
