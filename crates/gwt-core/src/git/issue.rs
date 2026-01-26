@@ -167,6 +167,17 @@ pub fn generate_branch_name(type_prefix: &str, issue_number: u64) -> String {
     format!("{}issue-{}", type_prefix, issue_number)
 }
 
+fn issue_develop_args(issue_number: u64, branch_name: &str) -> Vec<String> {
+    vec![
+        "issue".to_string(),
+        "develop".to_string(),
+        issue_number.to_string(),
+        "--name".to_string(),
+        branch_name.to_string(),
+        "--checkout=false".to_string(),
+    ]
+}
+
 /// Create a branch linked to a GitHub Issue using `gh issue develop` (FR-016)
 ///
 /// This creates a branch on GitHub that is officially linked to the issue,
@@ -186,15 +197,9 @@ pub fn create_linked_branch(
     branch_name: &str,
 ) -> Result<(), String> {
     // FR-016a: Use --name to specify branch name
-    // FR-016b: Omit --checkout flag (default: no checkout) since worktree will handle checkout
+    // FR-016b: Use --checkout=false so worktree handles checkout
     let output = Command::new("gh")
-        .args([
-            "issue",
-            "develop",
-            &issue_number.to_string(),
-            "--name",
-            branch_name,
-        ])
+        .args(issue_develop_args(issue_number, branch_name))
         .current_dir(repo_path)
         .output()
         .map_err(|e| format!("Failed to execute gh issue develop: {}", e))?;
@@ -300,6 +305,29 @@ mod tests {
     #[test]
     fn test_generate_branch_name_release() {
         assert_eq!(generate_branch_name("release/", 100), "release/issue-100");
+    }
+
+    // ==========================================================
+    // FR-016b: gh issue develop args tests
+    // ==========================================================
+
+    #[test]
+    fn test_issue_develop_args_includes_checkout_false() {
+        let args = issue_develop_args(42, "feature/issue-42");
+        assert_eq!(
+            args,
+            vec![
+                "issue",
+                "develop",
+                "42",
+                "--name",
+                "feature/issue-42",
+                "--checkout=false"
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<String>>()
+        );
     }
 
     // ==========================================================
