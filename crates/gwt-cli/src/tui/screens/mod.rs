@@ -27,6 +27,6 @@ pub use profiles::{render_profiles, ProfilesState};
 pub use settings::{render_settings, SettingsState};
 pub use wizard::{
     render_wizard, CodingAgent, ExecutionMode, QuickStartEntry, ReasoningLevel,
-    WizardConfirmResult, WizardState,
+    WizardConfirmResult, WizardState, WizardStep,
 };
 pub use worktree_create::{render_worktree_create, WorktreeCreateState};
