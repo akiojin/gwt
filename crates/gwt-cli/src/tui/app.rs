@@ -38,6 +38,7 @@ use ratatui::{prelude::*, widgets::*};
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -685,13 +686,14 @@ impl Model {
         self.branch_list = branch_list;
 
         let repo_root = self.repo_root.clone();
-        let base_branch = settings.default_base_branch.clone();
+        let configured_base_branch = settings.default_base_branch.clone();
         let agent_history = self.agent_history.clone();
         let (tx, rx) = mpsc::channel();
         self.branch_list_rx = Some(rx);
 
         thread::spawn(move || {
-            let base_branch_exists = Branch::exists(&repo_root, &base_branch).unwrap_or(false);
+            let (base_branch, base_branch_exists) =
+                resolve_safety_base(&repo_root, &configured_base_branch);
             let worktrees = WorktreeManager::new(&repo_root)
                 .ok()
                 .and_then(|manager| manager.list_basic().ok())
@@ -5729,6 +5731,48 @@ fn build_tmux_command(
     }
 }
 
+fn resolve_remote_head(repo_root: &Path, remote: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args([
+            "symbolic-ref",
+            "--quiet",
+            &format!("refs/remotes/{remote}/HEAD"),
+        ])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let ref_name = stdout.trim();
+    let ref_name = ref_name.strip_prefix("refs/remotes/")?;
+    if ref_name.ends_with("/HEAD") {
+        return None;
+    }
+    Some(ref_name.to_string())
+}
+
+fn resolve_safety_base(repo_root: &Path, base_branch: &str) -> (String, bool) {
+    if Branch::exists(repo_root, base_branch).unwrap_or(false) {
+        return (base_branch.to_string(), true);
+    }
+
+    let default_remote = Remote::default(repo_root).ok().flatten();
+    if let Some(remote) = default_remote {
+        if Branch::remote_exists(repo_root, &remote.name, base_branch).unwrap_or(false) {
+            return (format!("{}/{}", remote.name, base_branch), true);
+        }
+        if let Some(remote_head) = resolve_remote_head(repo_root, &remote.name) {
+            return (remote_head, true);
+        }
+    }
+
+    (base_branch.to_string(), false)
+}
+
 fn resolve_repo_web_url(repo_root: &Path) -> Option<String> {
     let remote = Remote::get(repo_root, "origin").ok().flatten()?;
     let slug = github_repo_slug(&remote.fetch_url)?;
@@ -5797,6 +5841,33 @@ mod tests {
         temp
     }
 
+    fn create_test_repo_with_branch(branch: &str) -> TempDir {
+        let temp = TempDir::new().unwrap();
+        run_git(temp.path(), &["init", "-b", branch]);
+        run_git(temp.path(), &["config", "user.email", "test@test.com"]);
+        run_git(temp.path(), &["config", "user.name", "Test"]);
+        std::fs::write(temp.path().join("test.txt"), "hello").unwrap();
+        run_git(temp.path(), &["add", "."]);
+        run_git(temp.path(), &["commit", "-m", "initial"]);
+        temp
+    }
+
+    fn create_repo_with_remote_main_only() -> (TempDir, TempDir) {
+        let origin = TempDir::new().unwrap();
+        run_git(origin.path(), &["init", "--bare", "-b", "main"]);
+
+        let repo = create_test_repo_with_branch("main");
+        let origin_path = origin.path().to_string_lossy().to_string();
+        run_git(repo.path(), &["remote", "add", "origin", &origin_path]);
+        run_git(repo.path(), &["push", "-u", "origin", "main"]);
+        run_git(repo.path(), &["checkout", "-b", "develop"]);
+        run_git(repo.path(), &["branch", "-D", "main"]);
+        run_git(repo.path(), &["fetch", "origin"]);
+        run_git(repo.path(), &["remote", "set-head", "origin", "-a"]);
+
+        (repo, origin)
+    }
+
     fn worktree_list_output(repo_root: &Path) -> String {
         let output = Command::new("git")
             .args(["worktree", "list", "--porcelain"])
@@ -5825,6 +5896,24 @@ mod tests {
             tool_version: None,
             timestamp: 0,
         }
+    }
+
+    #[test]
+    fn test_resolve_safety_base_uses_remote_branch_when_local_missing() {
+        let (repo, _origin) = create_repo_with_remote_main_only();
+        let (base_ref, exists) = resolve_safety_base(repo.path(), "main");
+
+        assert!(exists);
+        assert_eq!(base_ref, "origin/main");
+    }
+
+    #[test]
+    fn test_resolve_safety_base_falls_back_to_remote_head() {
+        let (repo, _origin) = create_repo_with_remote_main_only();
+        let (base_ref, exists) = resolve_safety_base(repo.path(), "trunk");
+
+        assert!(exists);
+        assert_eq!(base_ref, "origin/main");
     }
 
     #[test]
