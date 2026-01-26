@@ -2,7 +2,10 @@
 
 #![allow(dead_code)] // TUI application components for future expansion
 
-use crate::{prepare_launch_plan, InstallPlan, LaunchPlan, LaunchProgress};
+use super::widgets::ProgressModalState;
+use crate::{
+    prepare_launch_plan, InstallPlan, LaunchPlan, LaunchProgress, ProgressStepKind, StepStatus,
+};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -32,9 +35,11 @@ use gwt_core::tmux::{
 use gwt_core::worktree::WorktreeManager;
 use gwt_core::TmuxMode;
 use ratatui::{prelude::*, widgets::*};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -58,7 +63,7 @@ use super::screens::{
     render_settings, render_wizard, render_worktree_create, AIWizardState, AgentMessage,
     AgentModeState, AgentRole, BranchItem, BranchListState, BranchType, CodingAgent, ConfirmState,
     EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, HelpState, LogsState, ProfilesState,
-    QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult, WizardState,
+    QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult, WizardState, WizardStep,
     WorktreeCreateState,
 };
 // log_gwt_error is available for use when GwtError types are available
@@ -83,6 +88,43 @@ fn resolve_orphaned_agent_name(
 
 fn format_ai_error(err: AIError) -> String {
     err.to_string()
+}
+
+fn background_window_name(branch_name: &str) -> String {
+    branch_name.to_string()
+}
+
+fn normalize_branch_name_for_history(branch_name: &str) -> Cow<'_, str> {
+    if let Some(stripped) = branch_name.strip_prefix("remotes/") {
+        if let Some((_, name)) = stripped.split_once('/') {
+            return Cow::Owned(name.to_string());
+        }
+        return Cow::Owned(stripped.to_string());
+    }
+    Cow::Borrowed(branch_name)
+}
+
+fn apply_last_tool_usage(
+    item: &mut BranchItem,
+    repo_root: &Path,
+    tool_usage_map: &HashMap<String, ToolSessionEntry>,
+    agent_history: &AgentHistoryStore,
+) {
+    let lookup = normalize_branch_name_for_history(&item.name);
+    if let Some(entry) = tool_usage_map.get(lookup.as_ref()) {
+        item.last_tool_usage = Some(entry.format_tool_usage());
+        item.last_tool_id = Some(entry.tool_id.clone());
+        item.last_session_id = entry.session_id.clone();
+        let session_timestamp = entry.timestamp / 1000;
+        let git_timestamp = item.last_commit_timestamp.unwrap_or(0);
+        item.last_commit_timestamp = Some(session_timestamp.max(git_timestamp));
+        return;
+    }
+
+    if let Some(history_entry) = agent_history.get(repo_root, lookup.as_ref()) {
+        item.last_tool_usage = Some(history_entry.agent_label.clone());
+        item.last_tool_id = Some(history_entry.agent_id.clone());
+    }
 }
 
 fn session_poll_due(last_poll: Option<Instant>, now: Instant) -> bool {
@@ -211,6 +253,19 @@ struct WorktreeStatusTarget {
     path: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+struct CleanupPlanItem {
+    branch: String,
+    force_remove: bool,
+}
+
+#[derive(Debug)]
+enum CleanupUpdate {
+    BranchStarted { branch: String },
+    BranchFinished { branch: String, success: bool },
+    Completed { deleted: usize, errors: Vec<String> },
+}
+
 struct SessionSummaryTask {
     branch: String,
     session_id: String,
@@ -258,10 +313,26 @@ struct LaunchRequest {
     env: Vec<(String, String)>,
     env_remove: Vec<String>,
     auto_install_deps: bool,
+    /// SPEC-e4798383 US6: Selected GitHub Issue for branch linking
+    selected_issue: Option<gwt_core::git::GitHubIssue>,
 }
 
 enum LaunchUpdate {
     Progress(LaunchProgress),
+    /// Progress step update for modal display (FR-041)
+    ProgressStep {
+        kind: ProgressStepKind,
+        status: StepStatus,
+    },
+    /// Progress step error (FR-052)
+    ProgressStepError {
+        kind: ProgressStepKind,
+        message: String,
+    },
+    WorktreeReady {
+        branch: String,
+        path: PathBuf,
+    },
     Ready(Box<LaunchPlan>),
     Failed(String),
 }
@@ -344,6 +415,8 @@ pub struct Model {
     safety_rx: Option<Receiver<SafetyUpdate>>,
     /// Worktree status update receiver
     worktree_status_rx: Option<Receiver<WorktreeStatusUpdate>>,
+    /// Cleanup update receiver
+    cleanup_rx: Option<Receiver<CleanupUpdate>>,
     /// Session summary update sender
     session_summary_tx: Option<Sender<SessionSummaryUpdate>>,
     /// Session summary update receiver
@@ -374,6 +447,8 @@ pub struct Model {
     session_poll_deferred: bool,
     /// Agent history store for persisting agent usage per branch (FR-088)
     agent_history: AgentHistoryStore,
+    /// Progress modal state for worktree preparation (FR-041)
+    progress_modal: Option<ProgressModalState>,
 }
 
 /// Screen types
@@ -436,8 +511,6 @@ pub enum Message {
     WizardConfirm,
     /// Wizard: go back or close
     WizardBack,
-    /// Repair worktrees (disabled)
-    RepairWorktrees,
     /// Copy selected log to clipboard
     CopyLogToClipboard,
     /// FR-095: Hide active agent pane (ESC key in branch list)
@@ -506,6 +579,7 @@ impl Model {
             pr_title_rx: None,
             safety_rx: None,
             worktree_status_rx: None,
+            cleanup_rx: None,
             session_summary_tx: None,
             session_summary_rx: None,
             agent_mode_tx: Some(agent_mode_tx),
@@ -521,6 +595,7 @@ impl Model {
             last_session_poll: None,
             session_poll_deferred: false,
             agent_history: AgentHistoryStore::load().unwrap_or_default(),
+            progress_modal: None,
         };
 
         model
@@ -645,13 +720,14 @@ impl Model {
         self.branch_list = branch_list;
 
         let repo_root = self.repo_root.clone();
-        let base_branch = settings.default_base_branch.clone();
+        let configured_base_branch = settings.default_base_branch.clone();
         let agent_history = self.agent_history.clone();
         let (tx, rx) = mpsc::channel();
         self.branch_list_rx = Some(rx);
 
         thread::spawn(move || {
-            let base_branch_exists = Branch::exists(&repo_root, &base_branch).unwrap_or(false);
+            let (base_branch, base_branch_exists) =
+                resolve_safety_base(&repo_root, &configured_base_branch);
             let worktrees = WorktreeManager::new(&repo_root)
                 .ok()
                 .and_then(|manager| manager.list_basic().ok())
@@ -692,23 +768,8 @@ impl Model {
                 .map(|b| {
                     let mut item = BranchItem::from_branch_minimal(b, &worktrees);
 
-                    // Set tool usage from TypeScript session history (FR-070)
-                    if let Some(entry) = tool_usage_map.get(&b.name) {
-                        item.last_tool_usage = Some(entry.format_tool_usage());
-                        item.last_tool_id = Some(entry.tool_id.clone());
-                        item.last_session_id = entry.session_id.clone();
-                        // FR-041: Compare git commit timestamp and session timestamp,
-                        // use the newer one
-                        let session_timestamp = entry.timestamp / 1000; // Convert ms to seconds
-                        let git_timestamp = item.last_commit_timestamp.unwrap_or(0);
-                        item.last_commit_timestamp = Some(session_timestamp.max(git_timestamp));
-                    } else if !item.has_worktree {
-                        // FR-088: Fallback to agent history for branches without worktrees
-                        if let Some(history_entry) = agent_history.get(&repo_root, &b.name) {
-                            item.last_tool_usage = Some(history_entry.agent_label.clone());
-                            item.last_tool_id = Some(history_entry.agent_id.clone());
-                        }
-                    }
+                    // Set tool usage from TypeScript session history or agent history (FR-070/088)
+                    apply_last_tool_usage(&mut item, &repo_root, &tool_usage_map, &agent_history);
 
                     // Safety check short-circuit: use immediate signals first
                     if item.branch_type == BranchType::Local {
@@ -728,11 +789,11 @@ impl Model {
                     item
                 })
                 .collect();
-            branch_items.extend(
-                remote_only_branches
-                    .iter()
-                    .map(|b| BranchItem::from_branch_minimal(b, &worktrees)),
-            );
+            branch_items.extend(remote_only_branches.iter().map(|b| {
+                let mut item = BranchItem::from_branch_minimal(b, &worktrees);
+                apply_last_tool_usage(&mut item, &repo_root, &tool_usage_map, &agent_history);
+                item
+            }));
 
             // Sort branches by timestamp for those with sessions
             branch_items.iter_mut().for_each(|item| {
@@ -1581,6 +1642,10 @@ impl Model {
             .or(self.status_message.as_deref())
     }
 
+    fn cleanup_input_locked(&self) -> bool {
+        matches!(self.screen, Screen::BranchList) && self.branch_list.cleanup_in_progress()
+    }
+
     fn apply_branch_list_updates(&mut self) {
         let Some(rx) = &self.branch_list_rx else {
             return;
@@ -1673,51 +1738,92 @@ impl Model {
     }
 
     fn apply_launch_updates(&mut self) {
-        let Some(rx) = &self.launch_rx else {
-            return;
-        };
+        let refresh_after = {
+            let Some(rx) = &self.launch_rx else {
+                return;
+            };
 
-        loop {
-            match rx.try_recv() {
-                Ok(update) => match update {
-                    LaunchUpdate::Progress(progress) => {
-                        self.launch_status = Some(progress.message());
-                    }
-                    LaunchUpdate::Ready(plan) => {
-                        self.launch_in_progress = false;
-                        self.launch_rx = None;
-                        let next_status = match &plan.install_plan {
-                            InstallPlan::Install { manager } => {
-                                LaunchProgress::InstallingDependencies {
-                                    manager: manager.clone(),
-                                }
-                                .message()
+            let mut refresh_after = false;
+
+            loop {
+                match rx.try_recv() {
+                    Ok(update) => match update {
+                        LaunchUpdate::Progress(progress) => {
+                            // Only update launch_status if modal is not showing (FR-057)
+                            if self.progress_modal.is_none() {
+                                self.launch_status = Some(progress.message());
                             }
-                            _ => "Launching agent...".to_string(),
-                        };
-                        self.launch_status = Some(next_status);
-                        self.handle_launch_plan(*plan);
-                        break;
-                    }
-                    LaunchUpdate::Failed(message) => {
-                        self.launch_in_progress = false;
+                        }
+                        LaunchUpdate::ProgressStep { kind, status } => {
+                            // Update progress modal step (FR-041)
+                            if let Some(ref mut modal) = self.progress_modal {
+                                modal.update_step(kind, status);
+                                // Check if all steps are done
+                                if modal.all_done() && !modal.has_failed() {
+                                    modal.mark_completed();
+                                }
+                            }
+                        }
+                        LaunchUpdate::ProgressStepError { kind, message } => {
+                            // Set error on progress modal step (FR-052)
+                            if let Some(ref mut modal) = self.progress_modal {
+                                modal.set_step_error(kind, message);
+                            }
+                        }
+                        LaunchUpdate::WorktreeReady { branch, path } => {
+                            if self.branch_list.apply_worktree_created(&branch, &path) {
+                                self.active_count = self.branch_list.stats.worktree_count;
+                            } else {
+                                refresh_after = true;
+                            }
+                        }
+                        LaunchUpdate::Ready(plan) => {
+                            self.launch_in_progress = false;
+                            self.launch_rx = None;
+                            // FR-051: Mark progress modal as completed
+                            if let Some(ref mut modal) = self.progress_modal {
+                                modal.mark_completed();
+                            }
+                            let next_status = match &plan.install_plan {
+                                InstallPlan::Install { manager } => {
+                                    LaunchProgress::InstallingDependencies {
+                                        manager: manager.clone(),
+                                    }
+                                    .message()
+                                }
+                                _ => "Launching agent...".to_string(),
+                            };
+                            self.launch_status = Some(next_status);
+                            self.handle_launch_plan(*plan);
+                            break;
+                        }
+                        LaunchUpdate::Failed(message) => {
+                            self.launch_in_progress = false;
+                            self.launch_rx = None;
+                            self.launch_status = None;
+                            // FR-052: Show error in modal (waiting_for_key is set by set_step_error)
+                            gwt_core::logging::log_error_message("E4001", "agent", &message, None);
+                            self.worktree_create.error_message = Some(message.clone());
+                            self.status_message = Some(format!("Error: {}", message));
+                            self.status_message_time = Some(Instant::now());
+                            break;
+                        }
+                    },
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
                         self.launch_rx = None;
+                        self.launch_in_progress = false;
                         self.launch_status = None;
-                        gwt_core::logging::log_error_message("E4001", "agent", &message, None);
-                        self.worktree_create.error_message = Some(message.clone());
-                        self.status_message = Some(format!("Error: {}", message));
-                        self.status_message_time = Some(Instant::now());
                         break;
                     }
-                },
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    self.launch_rx = None;
-                    self.launch_in_progress = false;
-                    self.launch_status = None;
-                    break;
                 }
             }
+
+            refresh_after
+        };
+
+        if refresh_after {
+            self.refresh_data();
         }
     }
 
@@ -1766,6 +1872,42 @@ impl Model {
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.worktree_status_rx = None;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn apply_cleanup_updates(&mut self) {
+        let Some(rx) = &self.cleanup_rx else {
+            return;
+        };
+
+        loop {
+            match rx.try_recv() {
+                Ok(update) => match update {
+                    CleanupUpdate::BranchStarted { branch } => {
+                        self.branch_list.set_cleanup_active_branch(Some(branch));
+                    }
+                    CleanupUpdate::BranchFinished { branch, success } => {
+                        self.branch_list.increment_cleanup_progress();
+                        if success {
+                            self.branch_list.selected_branches.remove(&branch);
+                        }
+                        if self.branch_list.cleanup_active_branch() == Some(branch.as_str()) {
+                            self.branch_list.set_cleanup_active_branch(None);
+                        }
+                    }
+                    CleanupUpdate::Completed { deleted, errors } => {
+                        self.finish_cleanup(deleted, errors);
+                        self.cleanup_rx = None;
+                        break;
+                    }
+                },
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.cleanup_rx = None;
+                    self.branch_list.finish_cleanup_progress();
                     break;
                 }
             }
@@ -1918,10 +2060,7 @@ impl Model {
         };
 
         // Hide the pane (break to background window)
-        let window_name = format!(
-            "gwt-agent-{}",
-            pane.branch_name.replace('/', "-").replace(' ', "_")
-        );
+        let window_name = background_window_name(&pane.branch_name);
 
         match gwt_core::tmux::hide_pane(&pane.pane_id, &window_name) {
             Ok(background_window) => {
@@ -2103,6 +2242,10 @@ impl Model {
             self.last_mouse_click = None;
             return;
         }
+        if self.branch_list.cleanup_in_progress() {
+            self.last_mouse_click = None;
+            return;
+        }
         if self.wizard.visible {
             self.last_mouse_click = None;
             return;
@@ -2141,6 +2284,29 @@ impl Model {
                 self.refresh_branch_summary();
             }
             self.last_mouse_click = Some(MouseClick { index, at: now });
+        }
+    }
+
+    fn handle_branch_list_scroll(&mut self, mouse: MouseEvent) {
+        if !matches!(self.screen, Screen::BranchList) {
+            return;
+        }
+        if self.branch_list.cleanup_in_progress() {
+            return;
+        }
+        if self.wizard.visible || self.ai_wizard.visible {
+            return;
+        }
+        if !self
+            .branch_list
+            .session_panel_contains(mouse.column, mouse.row)
+        {
+            return;
+        }
+        match mouse.kind {
+            MouseEventKind::ScrollUp => self.branch_list.scroll_session_line_up(),
+            MouseEventKind::ScrollDown => self.branch_list.scroll_session_line_down(),
+            _ => {}
         }
     }
 
@@ -2472,7 +2638,9 @@ impl Model {
         {
             match std::process::Command::new("open").arg(url).spawn() {
                 Ok(_) => return,
-                Err(err) => last_error = Some(err),
+                Err(err) => {
+                    last_error.replace(err);
+                }
             }
         }
 
@@ -2486,7 +2654,9 @@ impl Model {
             for (cmd, args) in candidates {
                 match std::process::Command::new(cmd).args(args).spawn() {
                     Ok(_) => return,
-                    Err(err) => last_error = Some(err),
+                    Err(err) => {
+                        last_error.replace(err);
+                    }
                 }
             }
         }
@@ -2498,7 +2668,9 @@ impl Model {
                 .spawn()
             {
                 Ok(_) => return,
-                Err(err) => last_error = Some(err),
+                Err(err) => {
+                    last_error.replace(err);
+                }
             }
 
             match std::process::Command::new("powershell")
@@ -2506,7 +2678,9 @@ impl Model {
                 .spawn()
             {
                 Ok(_) => return,
-                Err(err) => last_error = Some(err),
+                Err(err) => {
+                    last_error.replace(err);
+                }
             }
         }
 
@@ -3042,6 +3216,9 @@ impl Model {
 
     /// Update function (Elm Architecture)
     pub fn update(&mut self, msg: Message) {
+        if self.cleanup_input_locked() && !matches!(msg, Message::Tick | Message::CtrlC) {
+            return;
+        }
         match msg {
             Message::Quit => {
                 self.should_quit = true;
@@ -3137,7 +3314,14 @@ impl Model {
                 self.apply_pr_title_updates();
                 self.apply_safety_updates();
                 self.apply_worktree_updates();
+                self.apply_cleanup_updates();
                 self.apply_launch_updates();
+                // FR-051: Auto-close progress modal after 2-second summary display
+                if let Some(ref modal) = self.progress_modal {
+                    if modal.completed && modal.summary_display_elapsed() && !modal.has_failed() {
+                        self.progress_modal = None;
+                    }
+                }
                 self.apply_session_summary_updates();
                 self.apply_agent_mode_updates();
                 self.poll_session_summary_if_needed();
@@ -3489,10 +3673,6 @@ impl Model {
             Message::RefreshData => {
                 self.refresh_data();
             }
-            Message::RepairWorktrees => {
-                self.status_message = Some("Worktree repair is disabled.".to_string());
-                self.status_message_time = Some(Instant::now());
-            }
             Message::CopyLogToClipboard => {
                 if matches!(self.screen, Screen::Logs) {
                     if let Some(entry) = self.logs.selected_entry() {
@@ -3698,6 +3878,12 @@ impl Model {
             }
             Message::WizardConfirm => {
                 if self.wizard.visible {
+                    // SPEC-e4798383: Check for duplicate branch before confirming IssueSelect
+                    if self.wizard.step == WizardStep::IssueSelect {
+                        self.wizard.check_issue_duplicate(&self.repo_root);
+                    }
+
+                    let prev_step = self.wizard.step;
                     match self.wizard.confirm() {
                         WizardConfirmResult::Complete => {
                             // Start worktree creation with wizard settings
@@ -3715,7 +3901,14 @@ impl Model {
                             // Create the worktree directly
                             self.create_worktree();
                         }
-                        WizardConfirmResult::Advance => {}
+                        WizardConfirmResult::Advance => {
+                            // SPEC-e4798383: Load issues when entering IssueSelect step
+                            if self.wizard.step == WizardStep::IssueSelect
+                                && prev_step != WizardStep::IssueSelect
+                            {
+                                self.wizard.load_issues(&self.repo_root);
+                            }
+                        }
                         WizardConfirmResult::FocusPane(pane_idx) => {
                             // Focus on existing agent pane (wizard already closed itself)
                             self.pane_list.selected = pane_idx;
@@ -3786,6 +3979,8 @@ impl Model {
             env: self.active_env_overrides(),
             env_remove: self.active_env_removals(),
             auto_install_deps,
+            // SPEC-e4798383 US6: Pass selected issue for GitHub linking
+            selected_issue: self.wizard.selected_issue.clone(),
         };
 
         self.start_launch_preparation(request);
@@ -3801,7 +3996,10 @@ impl Model {
         }
 
         self.launch_in_progress = true;
-        self.launch_status = Some(LaunchProgress::ResolvingWorktree.message());
+        // FR-041: Show progress modal instead of status bar
+        self.progress_modal = Some(ProgressModalState::new());
+        // Clear launch_status since modal is showing (FR-057)
+        self.launch_status = None;
 
         let repo_root = self.repo_root.clone();
         let (tx, rx) = mpsc::channel();
@@ -3812,35 +4010,112 @@ impl Model {
                 let _ = tx.send(update);
             };
 
-            send(LaunchUpdate::Progress(LaunchProgress::ResolvingWorktree));
+            // Helper to send progress step updates
+            let step = |kind: ProgressStepKind, status: StepStatus| {
+                let _ = tx.send(LaunchUpdate::ProgressStep { kind, status });
+            };
 
+            // Step 1: Fetch remote (initialize manager)
+            step(ProgressStepKind::FetchRemote, StepStatus::Running);
             let manager = match WorktreeManager::new(&repo_root) {
                 Ok(manager) => manager,
                 Err(e) => {
+                    let _ = tx.send(LaunchUpdate::ProgressStepError {
+                        kind: ProgressStepKind::FetchRemote,
+                        message: e.to_string(),
+                    });
                     send(LaunchUpdate::Failed(e.to_string()));
                     return;
                 }
             };
+            step(ProgressStepKind::FetchRemote, StepStatus::Completed);
 
+            // Step 2: Validate branch (lightweight)
+            step(ProgressStepKind::ValidateBranch, StepStatus::Running);
             let existing_wt = manager
                 .get_by_branch_basic(&request.branch_name)
                 .ok()
                 .flatten();
+            let has_existing_wt = existing_wt.is_some();
+            step(ProgressStepKind::ValidateBranch, StepStatus::Completed);
+
+            // Step 3: Generate path
+            step(ProgressStepKind::GeneratePath, StepStatus::Running);
+            // Path generation happens inside create_for_branch/create_new_branch
+            step(ProgressStepKind::GeneratePath, StepStatus::Completed);
+
+            // Step 4: Check conflicts (skip if existing worktree)
+            if has_existing_wt {
+                step(ProgressStepKind::CheckConflicts, StepStatus::Skipped);
+                step(ProgressStepKind::CreateWorktree, StepStatus::Skipped);
+            } else {
+                step(ProgressStepKind::CheckConflicts, StepStatus::Running);
+                step(ProgressStepKind::CheckConflicts, StepStatus::Completed);
+
+                // Step 5: Create worktree
+                step(ProgressStepKind::CreateWorktree, StepStatus::Running);
+            }
             let result = if let Some(wt) = existing_wt {
                 Ok(wt)
             } else if request.create_new_branch {
-                manager.create_new_branch(&request.branch_name, request.base_branch.as_deref())
+                // SPEC-e4798383 US6: Try GitHub Issue linking if issue is selected
+                if let Some(ref issue) = request.selected_issue {
+                    match gwt_core::git::create_linked_branch(
+                        &repo_root,
+                        issue.number,
+                        &request.branch_name,
+                    ) {
+                        Ok(()) => {
+                            // FR-019: Log success
+                            tracing::info!("Branch linked to issue #{} on GitHub", issue.number);
+                            // Branch created by gh, now create worktree for it
+                            manager.create_for_branch(&request.branch_name)
+                        }
+                        Err(e) => {
+                            // FR-017/FR-017a: Fallback to local branch creation with warning
+                            tracing::warn!("GitHub linking failed, creating local branch: {}", e);
+                            manager.create_new_branch(
+                                &request.branch_name,
+                                request.base_branch.as_deref(),
+                            )
+                        }
+                    }
+                } else {
+                    // FR-018: No issue selected, use regular local branch creation
+                    manager.create_new_branch(&request.branch_name, request.base_branch.as_deref())
+                }
             } else {
                 manager.create_for_branch(&request.branch_name)
             };
 
             let worktree = match result {
-                Ok(wt) => wt,
+                Ok(wt) => {
+                    if !has_existing_wt {
+                        step(ProgressStepKind::CreateWorktree, StepStatus::Completed);
+                    }
+                    wt
+                }
                 Err(e) => {
+                    let _ = tx.send(LaunchUpdate::ProgressStepError {
+                        kind: ProgressStepKind::CreateWorktree,
+                        message: e.to_string(),
+                    });
                     send(LaunchUpdate::Failed(e.to_string()));
                     return;
                 }
             };
+
+            let branch_name = worktree
+                .branch
+                .clone()
+                .unwrap_or_else(|| request.branch_name.clone());
+            send(LaunchUpdate::WorktreeReady {
+                branch: branch_name,
+                path: worktree.path.clone(),
+            });
+
+            // Step 6: Check dependencies
+            step(ProgressStepKind::CheckDependencies, StepStatus::Running);
 
             let config = AgentLaunchConfig {
                 worktree_path: worktree.path.clone(),
@@ -3862,10 +4137,16 @@ impl Model {
             }) {
                 Ok(plan) => plan,
                 Err(e) => {
+                    let _ = tx.send(LaunchUpdate::ProgressStepError {
+                        kind: ProgressStepKind::CheckDependencies,
+                        message: e.to_string(),
+                    });
                     send(LaunchUpdate::Failed(e.to_string()));
                     return;
                 }
             };
+
+            step(ProgressStepKind::CheckDependencies, StepStatus::Completed);
 
             send(LaunchUpdate::Ready(Box::new(plan)));
         });
@@ -4260,60 +4541,98 @@ impl Model {
 
     /// Execute branch cleanup (FR-010)
     fn execute_cleanup(&mut self, branches: &[String]) {
+        if branches.is_empty() {
+            return;
+        }
+        if self.branch_list.cleanup_in_progress() || self.cleanup_rx.is_some() {
+            return;
+        }
+
         debug!(
             category = "tui",
             branch_count = branches.len(),
             "Starting branch cleanup"
         );
-        let mut deleted = 0;
-        let mut errors = Vec::new();
-        let manager = WorktreeManager::new(&self.repo_root).ok();
 
-        for branch_name in branches {
-            let branch_item = self
-                .branch_list
-                .branches
-                .iter()
-                .find(|b| &b.name == branch_name);
-
-            if let (Some(manager), Some(item)) = (manager.as_ref(), branch_item) {
-                if let Some(path) = item.worktree_path.as_deref() {
-                    let force_remove = item.worktree_status == WorktreeStatus::Inaccessible
+        let cleanup_items: Vec<CleanupPlanItem> = branches
+            .iter()
+            .map(|branch_name| {
+                let branch_item = self
+                    .branch_list
+                    .branches
+                    .iter()
+                    .find(|b| &b.name == branch_name);
+                let force_remove = branch_item.is_some_and(|item| {
+                    item.worktree_status == WorktreeStatus::Inaccessible
                         || item.has_changes
-                        || WorktreeManager::is_protected(&item.name);
-                    let path_buf = PathBuf::from(path);
-                    if let Err(e) = manager.remove(&path_buf, force_remove) {
-                        errors.push(format!("{}: {}", branch_name, e));
-                        continue;
+                        || WorktreeManager::is_protected(&item.name)
+                });
+                CleanupPlanItem {
+                    branch: branch_name.clone(),
+                    force_remove,
+                }
+            })
+            .collect();
+
+        self.branch_list.start_cleanup_progress(cleanup_items.len());
+        self.branch_list.set_cleanup_active_branch(None);
+
+        let repo_root = self.repo_root.clone();
+        let (tx, rx) = mpsc::channel();
+        self.cleanup_rx = Some(rx);
+
+        thread::spawn(move || {
+            let mut deleted = 0;
+            let mut errors = Vec::new();
+            let manager = WorktreeManager::new(&repo_root).ok();
+
+            for item in cleanup_items {
+                let _ = tx.send(CleanupUpdate::BranchStarted {
+                    branch: item.branch.clone(),
+                });
+
+                let result = if let Some(manager) = manager.as_ref() {
+                    manager.cleanup_branch(&item.branch, item.force_remove, true)
+                } else {
+                    Branch::delete(&repo_root, &item.branch, true)
+                };
+
+                match result {
+                    Ok(_) => {
+                        debug!(
+                            category = "tui",
+                            branch = %item.branch,
+                            "Branch cleanup succeeded"
+                        );
+                        deleted += 1;
+                        let _ = tx.send(CleanupUpdate::BranchFinished {
+                            branch: item.branch.clone(),
+                            success: true,
+                        });
+                    }
+                    Err(e) => {
+                        error!(
+                            category = "tui",
+                            branch = %item.branch,
+                            error = %e,
+                            "Branch cleanup failed"
+                        );
+                        errors.push(format!("{}: {}", item.branch, e));
+                        let _ = tx.send(CleanupUpdate::BranchFinished {
+                            branch: item.branch.clone(),
+                            success: false,
+                        });
                     }
                 }
             }
 
-            // Try to delete the branch
-            match Branch::delete(&self.repo_root, branch_name, true) {
-                Ok(_) => {
-                    debug!(
-                        category = "tui",
-                        branch = %branch_name,
-                        "Branch deleted successfully"
-                    );
-                    deleted += 1;
-                    // Remove from selection
-                    self.branch_list.selected_branches.remove(branch_name);
-                }
-                Err(e) => {
-                    error!(
-                        category = "tui",
-                        branch = %branch_name,
-                        error = %e,
-                        "Failed to delete branch"
-                    );
-                    errors.push(format!("{}: {}", branch_name, e));
-                }
-            }
-        }
+            let _ = tx.send(CleanupUpdate::Completed { deleted, errors });
+        });
+    }
 
-        // Show result message
+    fn finish_cleanup(&mut self, deleted: usize, errors: Vec<String>) {
+        self.branch_list.finish_cleanup_progress();
+
         if errors.is_empty() {
             info!(
                 category = "tui",
@@ -4402,8 +4721,8 @@ impl Model {
         // Content
         match base_screen {
             Screen::BranchList => {
-                // Show launch status bar if launching
-                let content_area = if self.launch_in_progress {
+                // Show launch status bar if launching (FR-057: hide when modal is showing)
+                let content_area = if self.launch_in_progress && self.progress_modal.is_none() {
                     if let Some(status) = &self.launch_status {
                         // Split content area: status bar (1 line) + rest
                         let status_chunks = Layout::default()
@@ -4481,6 +4800,13 @@ impl Model {
         // Wizard overlay (FR-044: popup on top of branch list)
         if self.wizard.visible {
             render_wizard(&mut self.wizard, frame, frame.area());
+        }
+
+        // Progress modal overlay (FR-041: highest z-index)
+        if let Some(ref modal) = self.progress_modal {
+            use super::widgets::ProgressModal;
+            let widget = ProgressModal::new(modal);
+            frame.render_widget(widget, frame.area());
         }
     }
 
@@ -4752,6 +5078,39 @@ impl Model {
 
     fn handle_key_event(&mut self, key: KeyEvent) -> Option<Message> {
         let is_key_press = key.kind == KeyEventKind::Press;
+
+        // FR-054: Progress modal has highest priority when visible
+        if let Some(ref mut modal) = self.progress_modal {
+            if is_key_press {
+                if modal.has_failed() && modal.waiting_for_key {
+                    // FR-052: Any key dismisses error modal
+                    self.progress_modal = None;
+                    self.launch_in_progress = false;
+                    return None;
+                } else if key.code == KeyCode::Esc && !modal.completed {
+                    // FR-054: ESC cancels preparation
+                    modal.cancellation_requested = true;
+                    self.progress_modal = None;
+                    self.launch_in_progress = false;
+                    self.launch_rx = None;
+                    // FR-055: Cleanup is handled by the background thread
+                    return None;
+                }
+            }
+            // Block all other input while modal is visible (FR-043)
+            return None;
+        }
+
+        if self.cleanup_input_locked() {
+            if is_key_press
+                && key.code == KeyCode::Char('c')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                return Some(Message::CtrlC);
+            }
+            return None;
+        }
+
         // Wizard has priority when visible
         if self.wizard.visible {
             match key.code {
@@ -5091,22 +5450,34 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
                     // Error screen handles all mouse events (click, scroll)
                     if matches!(model.screen, Screen::Error) {
                         model.handle_error_mouse(mouse);
-                    } else if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                        // Overlay priority: wizard > ai_wizard > confirm > screen-specific
-                        if model.wizard.visible {
-                            model.handle_wizard_mouse(mouse);
-                        } else if model.ai_wizard.visible {
-                            model.handle_ai_wizard_mouse(mouse);
-                        } else if matches!(model.screen, Screen::Confirm) {
-                            model.handle_confirm_mouse(mouse);
-                        } else {
-                            match model.screen {
-                                Screen::BranchList => model.handle_branch_list_mouse(mouse),
-                                Screen::Profiles => model.handle_profiles_mouse(mouse),
-                                Screen::Environment => model.handle_environment_mouse(mouse),
-                                Screen::Logs => model.handle_logs_mouse(mouse),
-                                _ => {}
+                    } else {
+                        match mouse.kind {
+                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                                if matches!(model.screen, Screen::BranchList) {
+                                    model.handle_branch_list_scroll(mouse);
+                                }
                             }
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                // Overlay priority: wizard > ai_wizard > confirm > screen-specific
+                                if model.wizard.visible {
+                                    model.handle_wizard_mouse(mouse);
+                                } else if model.ai_wizard.visible {
+                                    model.handle_ai_wizard_mouse(mouse);
+                                } else if matches!(model.screen, Screen::Confirm) {
+                                    model.handle_confirm_mouse(mouse);
+                                } else {
+                                    match model.screen {
+                                        Screen::BranchList => model.handle_branch_list_mouse(mouse),
+                                        Screen::Profiles => model.handle_profiles_mouse(mouse),
+                                        Screen::Environment => {
+                                            model.handle_environment_mouse(mouse)
+                                        }
+                                        Screen::Logs => model.handle_logs_mouse(mouse),
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -5129,16 +5500,7 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
     // Get pending agent launch before cleanup
     let pending_launch = model.pending_agent_launch.take();
 
-    // Cleanup on exit - check for orphaned worktrees (only if not launching agent)
-    if pending_launch.is_none() {
-        if let Ok(manager) = WorktreeManager::new(&model.repo_root) {
-            let orphans = manager.detect_orphans();
-            if !orphans.is_empty() {
-                // Attempt to prune automatically
-                let _ = manager.prune();
-            }
-        }
-    }
+    auto_cleanup_orphans_on_exit(&model.repo_root, pending_launch.is_some());
 
     // Cleanup agent panes on exit (tmux multi-mode)
     if model.tmux_mode.is_multi() && !model.agent_panes.is_empty() {
@@ -5169,6 +5531,17 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
     terminal.show_cursor()?;
 
     Ok(pending_launch)
+}
+
+fn auto_cleanup_orphans_on_exit(repo_root: &Path, pending_launch: bool) -> usize {
+    if pending_launch {
+        return 0;
+    }
+
+    match WorktreeManager::new(repo_root) {
+        Ok(manager) => manager.auto_cleanup_orphans().unwrap_or(0),
+        Err(_) => 0,
+    }
 }
 
 fn canonical_tool_id(tool_id: &str) -> String {
@@ -5379,6 +5752,48 @@ fn build_tmux_command(
     }
 }
 
+fn resolve_remote_head(repo_root: &Path, remote: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args([
+            "symbolic-ref",
+            "--quiet",
+            &format!("refs/remotes/{remote}/HEAD"),
+        ])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let ref_name = stdout.trim();
+    let ref_name = ref_name.strip_prefix("refs/remotes/")?;
+    if ref_name.ends_with("/HEAD") {
+        return None;
+    }
+    Some(ref_name.to_string())
+}
+
+fn resolve_safety_base(repo_root: &Path, base_branch: &str) -> (String, bool) {
+    if Branch::exists(repo_root, base_branch).unwrap_or(false) {
+        return (base_branch.to_string(), true);
+    }
+
+    let default_remote = Remote::default(repo_root).ok().flatten();
+    if let Some(remote) = default_remote {
+        if Branch::remote_exists(repo_root, &remote.name, base_branch).unwrap_or(false) {
+            return (format!("{}/{}", remote.name, base_branch), true);
+        }
+        if let Some(remote_head) = resolve_remote_head(repo_root, &remote.name) {
+            return (remote_head, true);
+        }
+    }
+
+    (base_branch.to_string(), false)
+}
+
 fn resolve_repo_web_url(repo_root: &Path) -> Option<String> {
     let remote = Remote::get(repo_root, "origin").ok().flatten()?;
     let slug = github_repo_slug(&remote.fetch_url)?;
@@ -5418,7 +5833,76 @@ mod tests {
     use gwt_core::git::Branch;
     use gwt_core::git::BranchSummary;
     use gwt_core::git::DivergenceStatus;
+    use std::collections::HashMap;
+    use std::process::Command;
     use std::sync::mpsc;
+    use tempfile::TempDir;
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git execution failed");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn create_test_repo() -> TempDir {
+        let temp = TempDir::new().unwrap();
+        run_git(temp.path(), &["init"]);
+        run_git(temp.path(), &["config", "user.email", "test@test.com"]);
+        run_git(temp.path(), &["config", "user.name", "Test"]);
+        std::fs::write(temp.path().join("test.txt"), "hello").unwrap();
+        run_git(temp.path(), &["add", "."]);
+        run_git(temp.path(), &["commit", "-m", "initial"]);
+        temp
+    }
+
+    fn create_test_repo_with_branch(branch: &str) -> TempDir {
+        let temp = TempDir::new().unwrap();
+        run_git(temp.path(), &["init", "-b", branch]);
+        run_git(temp.path(), &["config", "user.email", "test@test.com"]);
+        run_git(temp.path(), &["config", "user.name", "Test"]);
+        std::fs::write(temp.path().join("test.txt"), "hello").unwrap();
+        run_git(temp.path(), &["add", "."]);
+        run_git(temp.path(), &["commit", "-m", "initial"]);
+        temp
+    }
+
+    fn create_repo_with_remote_main_only() -> (TempDir, TempDir) {
+        let origin = TempDir::new().unwrap();
+        run_git(origin.path(), &["init", "--bare", "-b", "main"]);
+
+        let repo = create_test_repo_with_branch("main");
+        let origin_path = origin.path().to_string_lossy().to_string();
+        run_git(repo.path(), &["remote", "add", "origin", &origin_path]);
+        run_git(repo.path(), &["push", "-u", "origin", "main"]);
+        run_git(repo.path(), &["checkout", "-b", "develop"]);
+        run_git(repo.path(), &["branch", "-D", "main"]);
+        run_git(repo.path(), &["fetch", "origin"]);
+        run_git(repo.path(), &["remote", "set-head", "origin", "-a"]);
+
+        (repo, origin)
+    }
+
+    fn worktree_list_output(repo_root: &Path) -> String {
+        let output = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(repo_root)
+            .output()
+            .expect("git worktree list execution failed");
+        assert!(
+            output.status.success(),
+            "git worktree list failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).to_string()
+    }
 
     fn sample_tool_entry(tool_id: &str) -> ToolSessionEntry {
         ToolSessionEntry {
@@ -5434,6 +5918,84 @@ mod tests {
             tool_version: None,
             timestamp: 0,
         }
+    }
+
+    #[test]
+    fn test_resolve_safety_base_uses_remote_branch_when_local_missing() {
+        let (repo, _origin) = create_repo_with_remote_main_only();
+        let (base_ref, exists) = resolve_safety_base(repo.path(), "main");
+
+        assert!(exists);
+        assert_eq!(base_ref, "origin/main");
+    }
+
+    #[test]
+    fn test_resolve_safety_base_falls_back_to_remote_head() {
+        let (repo, _origin) = create_repo_with_remote_main_only();
+        let (base_ref, exists) = resolve_safety_base(repo.path(), "trunk");
+
+        assert!(exists);
+        assert_eq!(base_ref, "origin/main");
+    }
+
+    #[test]
+    fn test_auto_cleanup_orphans_on_exit_does_not_prune() {
+        let temp = create_test_repo();
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+
+        let wt = manager
+            .create_new_branch("feature/orphan-exit", None)
+            .unwrap();
+        let wt_path = wt.path.clone();
+        std::fs::remove_dir_all(&wt_path).unwrap();
+
+        let before = worktree_list_output(temp.path());
+        assert!(before.contains(wt_path.to_string_lossy().as_ref()));
+
+        let cleaned = auto_cleanup_orphans_on_exit(temp.path(), false);
+        assert_eq!(cleaned, 0);
+
+        let after = worktree_list_output(temp.path());
+        assert!(after.contains(wt_path.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn test_background_window_name_uses_branch_name_only() {
+        let branch = "feature/clean-name";
+        assert_eq!(background_window_name(branch), branch);
+    }
+
+    #[test]
+    fn test_normalize_branch_name_for_history_strips_remote_prefix() {
+        let normalized = normalize_branch_name_for_history("remotes/origin/feature/test");
+        assert_eq!(normalized.as_ref(), "feature/test");
+    }
+
+    #[test]
+    fn test_normalize_branch_name_for_history_keeps_local_name() {
+        let normalized = normalize_branch_name_for_history("feature/test");
+        assert_eq!(normalized.as_ref(), "feature/test");
+    }
+
+    #[test]
+    fn test_apply_last_tool_usage_falls_back_to_agent_history_for_remote_branch() {
+        let branch = Branch::new("remotes/origin/feature/test", "deadbeef");
+        let mut item = BranchItem::from_branch_minimal(&branch, &[]);
+        let mut history = AgentHistoryStore::new();
+        history
+            .record(
+                Path::new("/tmp/repo"),
+                "feature/test",
+                "codex-cli",
+                "Codex@latest",
+            )
+            .unwrap();
+        let tool_usage_map: HashMap<String, ToolSessionEntry> = HashMap::new();
+
+        apply_last_tool_usage(&mut item, Path::new("/tmp/repo"), &tool_usage_map, &history);
+
+        assert_eq!(item.last_tool_usage.as_deref(), Some("Codex@latest"));
+        assert_eq!(item.last_tool_id.as_deref(), Some("codex-cli"));
     }
 
     fn sample_branch_with_session(name: &str) -> BranchItem {
@@ -5711,6 +6273,23 @@ mod tests {
 
         model.update(Message::SelectNext);
         assert_eq!(model.branch_list.selected, 1);
+    }
+
+    #[test]
+    fn test_cleanup_input_lock_blocks_navigation() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let branches = vec![
+            sample_branch_with_session("feature/one"),
+            sample_branch_with_session("feature/two"),
+        ];
+
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.branch_list.start_cleanup_progress(2);
+
+        model.update(Message::SelectNext);
+        assert_eq!(model.branch_list.selected, 0);
     }
 
     #[test]
@@ -6003,6 +6582,38 @@ mod tests {
         model.handle_branch_list_mouse(mouse2);
         assert_eq!(model.branch_list.selected, 1);
         // Wizard should NOT open because it's a different branch
+        assert!(!model.wizard.visible);
+    }
+
+    #[test]
+    fn test_mouse_click_ignores_cleanup_active_branch() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+        let branches = [
+            Branch::new("feature/one", "deadbeef"),
+            Branch::new("feature/two", "deadbeef"),
+        ];
+        let items = branches
+            .iter()
+            .map(|branch| BranchItem::from_branch(branch, &[]))
+            .collect();
+        model.branch_list = BranchListState::new().with_branches(items);
+        model.branch_list.update_list_area(Rect::new(0, 0, 20, 5));
+        model.branch_list.start_cleanup_progress(2);
+        model
+            .branch_list
+            .set_cleanup_active_branch(Some("feature/two".to_string()));
+
+        assert_eq!(model.branch_list.selected, 0);
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        model.handle_branch_list_mouse(mouse);
+
+        assert_eq!(model.branch_list.selected, 0);
         assert!(!model.wizard.visible);
     }
 }

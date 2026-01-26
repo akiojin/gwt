@@ -56,6 +56,8 @@ pub struct AIWizardState {
     pub model_index: usize,
     /// Selected model ID
     pub selected_model: String,
+    /// Scroll offset for model list
+    pub model_scroll_offset: usize,
 
     // Status
     /// Error message (if any)
@@ -131,6 +133,7 @@ impl AIWizardState {
         self.models.clear();
         self.model_index = 0;
         self.selected_model.clear();
+        self.model_scroll_offset = 0;
         self.error = None;
         self.loading_message = None;
         self.show_delete_confirm = false;
@@ -203,6 +206,7 @@ impl AIWizardState {
         } else {
             self.model_index = 0;
         }
+        self.model_scroll_offset = 0;
 
         Ok(())
     }
@@ -230,6 +234,7 @@ impl AIWizardState {
         if self.model_index < self.models.len().saturating_sub(1) {
             self.model_index += 1;
         }
+        self.ensure_model_visible(self.model_visible_height());
     }
 
     /// Select previous model in list
@@ -237,6 +242,35 @@ impl AIWizardState {
         if self.model_index > 0 {
             self.model_index -= 1;
         }
+        self.ensure_model_visible(self.model_visible_height());
+    }
+
+    /// Ensure selected model is visible within viewport
+    fn ensure_model_visible(&mut self, visible_height: usize) {
+        if self.models.is_empty() {
+            self.model_scroll_offset = 0;
+            return;
+        }
+        if visible_height == 0 {
+            return;
+        }
+
+        if self.model_index < self.model_scroll_offset {
+            self.model_scroll_offset = self.model_index;
+        } else if self.model_index >= self.model_scroll_offset + visible_height {
+            self.model_scroll_offset = self.model_index + 1 - visible_height;
+        }
+
+        let max_offset = self.models.len().saturating_sub(visible_height);
+        if self.model_scroll_offset > max_offset {
+            self.model_scroll_offset = max_offset;
+        }
+    }
+
+    fn model_visible_height(&self) -> usize {
+        self.list_inner_area
+            .map(|area| area.height as usize)
+            .unwrap_or(0)
     }
 
     // Input handling methods
@@ -373,8 +407,9 @@ impl AIWizardState {
             return None;
         }
         let relative_y = y.saturating_sub(area.y) as usize;
-        if relative_y < self.models.len() {
-            Some(relative_y)
+        let index = self.model_scroll_offset.saturating_add(relative_y);
+        if index < self.models.len() {
+            Some(index)
         } else {
             None
         }
@@ -384,6 +419,7 @@ impl AIWizardState {
     pub fn select_model_index(&mut self, index: usize) -> bool {
         if index < self.models.len() {
             self.model_index = index;
+            self.ensure_model_visible(self.model_visible_height());
             true
         } else {
             false
@@ -650,12 +686,17 @@ fn render_model_select_step(state: &mut AIWizardState, frame: &mut Frame, area: 
             .border_style(Style::default().fg(Color::DarkGray));
 
         // Record list inner area for mouse click detection
-        state.list_inner_area = Some(list_block.inner(chunks[1]));
+        let list_inner = list_block.inner(chunks[1]);
+        state.list_inner_area = Some(list_inner);
+        let visible_height = list_inner.height as usize;
+        state.ensure_model_visible(visible_height);
 
         let items: Vec<ListItem> = state
             .models
             .iter()
             .enumerate()
+            .skip(state.model_scroll_offset)
+            .take(visible_height)
             .map(|(i, model)| {
                 let style = if i == state.model_index {
                     Style::default().bg(Color::Blue).fg(Color::White)
@@ -669,6 +710,22 @@ fn render_model_select_step(state: &mut AIWizardState, frame: &mut Frame, area: 
 
         let list = List::new(items).block(list_block);
         frame.render_widget(list, chunks[1]);
+
+        if state.models.len() > visible_height && visible_height > 0 {
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("^"))
+                .end_symbol(Some("v"));
+            let mut scrollbar_state =
+                ScrollbarState::new(state.models.len()).position(state.model_index);
+            frame.render_stateful_widget(
+                scrollbar,
+                chunks[1].inner(Margin {
+                    vertical: 1,
+                    horizontal: 0,
+                }),
+                &mut scrollbar_state,
+            );
+        }
     }
 
     // Info
@@ -807,6 +864,58 @@ mod tests {
 
         state.select_prev_model();
         assert_eq!(state.model_index, 0);
+    }
+
+    #[test]
+    fn test_model_scroll_offset_keeps_selection_visible() {
+        let mut state = AIWizardState::new();
+        state.models = (0..10)
+            .map(|i| ModelInfo {
+                id: format!("model-{}", i),
+                created: 0,
+                owned_by: "test".to_string(),
+            })
+            .collect();
+
+        state.model_index = 0;
+        state.ensure_model_visible(3);
+        assert_eq!(state.model_scroll_offset, 0);
+
+        state.model_index = 4;
+        state.ensure_model_visible(3);
+        assert_eq!(state.model_scroll_offset, 2);
+
+        state.model_index = 1;
+        state.ensure_model_visible(3);
+        assert_eq!(state.model_scroll_offset, 1);
+
+        state.model_index = 9;
+        state.ensure_model_visible(3);
+        assert_eq!(state.model_scroll_offset, 7);
+    }
+
+    #[test]
+    fn test_selection_index_from_point_respects_scroll_offset() {
+        let mut state = AIWizardState::new();
+        state.models = (0..8)
+            .map(|i| ModelInfo {
+                id: format!("model-{}", i),
+                created: 0,
+                owned_by: "test".to_string(),
+            })
+            .collect();
+        state.model_scroll_offset = 3;
+        state.list_inner_area = Some(Rect {
+            x: 10,
+            y: 5,
+            width: 20,
+            height: 3,
+        });
+
+        assert_eq!(state.selection_index_from_point(10, 5), Some(3));
+        assert_eq!(state.selection_index_from_point(10, 6), Some(4));
+        assert_eq!(state.selection_index_from_point(10, 7), Some(5));
+        assert_eq!(state.selection_index_from_point(10, 8), None);
     }
 
     #[test]

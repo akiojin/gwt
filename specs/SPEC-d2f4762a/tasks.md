@@ -3,12 +3,37 @@
 **仕様ID**: `SPEC-d2f4762a`
 **ポリシー**: CLAUDE.md の TDD ルールに基づき、必ず RED→GREEN→リグレッションチェックの順に進める。
 
+## 追加作業: クリーンアップ中の安全アイコンスピナー表示 (2026-01-26)
+
+- [x] **T1330** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にクリーンアップ中スピナー表示と入力ロック要件を追記
+- [x] **T1331** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にクリーンアップ進捗行と削除中スピナー表示のテストを追加
+- [x] **T1332** [Test] `crates/gwt-cli/src/tui/app.rs` にクリーンアップ中の入力ロックを検証するテストを追加
+- [x] **T1333** [Impl] `crates/gwt-cli/src/tui/app.rs` でクリーンアップ処理の非同期化と入力ロック、進捗更新を実装
+- [x] **T1334** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` で削除中の安全アイコンスピナー表示と進捗行の描画を実装
+- [x] **T1335** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
+## 追加作業: ベースブランチのリモートフォールバック (2026-01-26)
+
+- [x] **T1336** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にベースブランチのリモートフォールバック要件・方針を追記
+- [x] **T1337** [Test] `crates/gwt-cli/src/tui/app.rs` にローカルにベースブランチが無い場合でもリモートブランチ/remote HEADを参照するテストを追加
+- [x] **T1338** [Impl] `crates/gwt-cli/src/tui/app.rs` にベースブランチ解決ロジック（remote/<base> → remote/HEAD）を実装し、安全判定に適用
+- [x] **T1339** [検証] `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
+## 追加作業: クリーンアップ中ブランチの選択スキップ (2026-01-26)
+
+- [x] **T1336** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にクリーンアップ中ブランチのカーソルスキップ/クリック無効を追記
+- [x] **T1337** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にクリーンアップ中ブランチをカーソルがスキップするテストを追加
+- [x] **T1338** [Test] `crates/gwt-cli/src/tui/app.rs` にクリーンアップ中ブランチのクリックが無視されることを検証するテストを追加
+- [x] **T1339** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` でカーソル移動時にクリーンアップ中ブランチをスキップする
+- [x] **T1340** [Impl] `crates/gwt-cli/src/tui/app.rs` でクリーンアップ中ブランチのクリック選択を無効化する
+- [x] **T1341** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
 ## 追加作業: エージェント起動前の軽量Worktree解決 (2026-01-26)
 
-- [x] **T1329** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に起動前ブランチ検証の軽量化要件・方針を追記
-- [x] **T1330** [Test] `crates/gwt-core/src/worktree/manager.rs` に軽量worktree検索が詳細状態チェックを行わないことを検証するテストを追加
-- [x] **T1331** [Impl] `crates/gwt-core/src/worktree/manager.rs` に軽量検索を追加し、`crates/gwt-cli/src/tui/app.rs` の起動前worktree解決で使用する
-- [x] **T1332** `cargo test -p gwt-core` を実行し、失敗がないことを確認する
+- [x] **T1342** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に起動前ブランチ検証の軽量化要件・方針を追記
+- [x] **T1343** [Test] `crates/gwt-core/src/worktree/manager.rs` に軽量worktree検索が詳細状態チェックを行わないことを検証するテストを追加
+- [x] **T1344** [Impl] `crates/gwt-core/src/worktree/manager.rs` に軽量検索を追加し、`crates/gwt-cli/src/tui/app.rs` の起動前worktree解決で使用する
+- [x] **T1345** `cargo test -p gwt-core` を実行し、失敗がないことを確認する
 
 ## 追加作業: ブランチ詳細サマリの非同期更新 (2026-01-21)
 
@@ -227,7 +252,7 @@
 
 ## フェーズ4: ユーザーストーリー6 - Worktree復元の無効化
 
-**ストーリー**: Worktree作成時や起動時の自動復元・修復を行わず、手動解決のみ許可する。
+**ストーリー**: Worktree作成時や起動時の自動復元を行わず、repair操作はCLI/TUIから提供しない。
 
 **価値**: 予期しない削除や修復の自動実行を防ぎ、運用の透明性を高める。
 
@@ -235,11 +260,15 @@
 
 - [x] **T301** [US6] `crates/gwt-core/src/worktree/manager.rs` の既存パス時エラー/自動クリーンアップ無効化テストを更新
 - [x] **T302** [US6] `crates/gwt-cli/src/main.rs` にrepair無効化のテストを追加
+- [x] **T305** [US6] `crates/gwt-cli/src/cli.rs` に`gwt repair`が未定義サブコマンドとして扱われるテストを追加
 
 ### 実装
 
 - [x] **T303** [US6] `crates/gwt-core/src/worktree/manager.rs` で自動復元を無効化し、既存パスはエラーにする
 - [x] **T304** [US6] `crates/gwt-cli/src/main.rs` / `crates/gwt-cli/src/tui/app.rs` / `crates/gwt-cli/src/tui/screens/branch_list.rs` で自動クリーンアップとrepair操作を無効化し、キーバインド表示を更新
+- [x] **T306** [US6] `crates/gwt-cli/src/cli.rs` から`repair`サブコマンドを削除し、`crates/gwt-cli/src/main.rs` のrepairハンドラ/テストを削除
+- [x] **T307** [US6] `crates/gwt-cli/src/tui/app.rs` のRepairWorktreesメッセージを削除
+- [x] **T308** [US6] `crates/gwt-core/src/worktree/manager.rs` と `crates/gwt-core/src/git/repository.rs` のrepair APIを削除
 
 ## フェーズ5: ユーザーストーリー8 - ブランチ選択後のウィザードポップアップ (優先度: P0)
 
@@ -623,6 +652,13 @@
 ### 検証
 
 - [ ] **T1514** [検証] `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認
+
+## 追加作業: 終了時の自動クリーンアップ無効化 (2026-01-25)
+
+- [x] **T1521** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に終了時の自動クリーンアップ無効化要件・方針を追記
+- [x] **T1522** [Test] `crates/gwt-cli/src/tui/app.rs` に終了時の自動クリーンアップが実行されないことを検証するテストを追加
+- [x] **T1523** [Impl] `crates/gwt-cli/src/tui/app.rs` の終了処理で `git worktree prune` を実行しないよう修正
+- [x] **T1524** [検証] `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
 
 ## タスク凡例（追加分）
 

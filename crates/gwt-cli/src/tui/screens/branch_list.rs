@@ -425,6 +425,10 @@ pub struct BranchListState {
     pub status_progress_total: usize,
     pub status_progress_done: usize,
     pub status_progress_active: bool,
+    pub cleanup_in_progress: bool,
+    pub cleanup_progress_total: usize,
+    pub cleanup_progress_done: usize,
+    pub cleanup_active_branch: Option<String>,
     /// Viewport height for scroll calculations (updated by renderer)
     pub visible_height: usize,
     /// Cached branch list area (outer, with border)
@@ -451,6 +455,10 @@ pub struct BranchListState {
     session_scroll_max: usize,
     /// Session summary scroll page size
     session_scroll_page: usize,
+    /// Cached session panel area (outer, with border)
+    session_panel_area: Option<Rect>,
+    /// Cached session panel inner area (content rows)
+    session_panel_inner_area: Option<Rect>,
     /// Cached repo web URL for GitHub links
     repo_web_url: Option<String>,
     /// Clickable link regions in details panel
@@ -480,6 +488,10 @@ impl Default for BranchListState {
             status_progress_total: 0,
             status_progress_done: 0,
             status_progress_active: false,
+            cleanup_in_progress: false,
+            cleanup_progress_total: 0,
+            cleanup_progress_done: 0,
+            cleanup_active_branch: None,
             visible_height: 15, // Default fallback (previously hardcoded)
             list_area: None,
             list_inner_area: None,
@@ -493,6 +505,8 @@ impl Default for BranchListState {
             session_scroll_offset: 0,
             session_scroll_max: 0,
             session_scroll_page: 0,
+            session_panel_area: None,
+            session_panel_inner_area: None,
             repo_web_url: None,
             detail_links: Vec::new(),
         }
@@ -621,6 +635,21 @@ impl BranchListState {
         self.ensure_visible();
     }
 
+    fn rebuild_filtered_cache_preserve_selection(&mut self) {
+        let selected_name = self.selected_branch().map(|branch| branch.name.clone());
+        self.rebuild_filtered_cache();
+        if let Some(name) = selected_name {
+            if let Some(index) = self
+                .filtered_indices
+                .iter()
+                .position(|&idx| self.branches[idx].name == name)
+            {
+                self.selected = index;
+                self.ensure_visible();
+            }
+        }
+    }
+
     pub fn filtered_len(&self) -> usize {
         self.filtered_indices.len()
     }
@@ -719,24 +748,41 @@ impl BranchListState {
 
     /// Move selection up
     pub fn select_prev(&mut self) {
-        if self.filtered_len() > 0 && self.selected > 0 {
-            self.selected -= 1;
-            self.ensure_visible();
+        if self.filtered_len() == 0 || self.selected == 0 {
+            return;
+        }
+        let mut index = self.selected;
+        while index > 0 {
+            index -= 1;
+            if !self.is_cleanup_active_index(index) {
+                self.selected = index;
+                self.ensure_visible();
+                break;
+            }
         }
     }
 
     /// Move selection down
     pub fn select_next(&mut self) {
         let filtered_len = self.filtered_len();
-        if filtered_len > 0 && self.selected < filtered_len - 1 {
-            self.selected += 1;
-            self.ensure_visible();
+        if filtered_len == 0 || self.selected >= filtered_len - 1 {
+            return;
+        }
+        let mut index = self.selected;
+        while index + 1 < filtered_len {
+            index += 1;
+            if !self.is_cleanup_active_index(index) {
+                self.selected = index;
+                self.ensure_visible();
+                break;
+            }
         }
     }
 
     /// Page up
     pub fn page_up(&mut self, page_size: usize) {
         self.selected = self.selected.saturating_sub(page_size);
+        self.move_selection_off_cleanup_active();
         self.ensure_visible();
     }
 
@@ -745,6 +791,7 @@ impl BranchListState {
         let filtered_len = self.filtered_len();
         if filtered_len > 0 {
             self.selected = (self.selected + page_size).min(filtered_len - 1);
+            self.move_selection_off_cleanup_active();
             self.ensure_visible();
         }
     }
@@ -753,6 +800,7 @@ impl BranchListState {
     pub fn go_home(&mut self) {
         self.selected = 0;
         self.offset = 0;
+        self.move_selection_off_cleanup_active();
     }
 
     /// Go to end
@@ -761,6 +809,7 @@ impl BranchListState {
         if filtered_len > 0 {
             self.selected = filtered_len - 1;
         }
+        self.move_selection_off_cleanup_active();
         self.ensure_visible();
     }
 
@@ -806,6 +855,25 @@ impl BranchListState {
         self.update_visible_height(inner.height as usize);
     }
 
+    /// Update cached session panel areas based on rendered panel
+    pub fn update_session_panel_area(&mut self, area: Rect, inner: Rect) {
+        self.session_panel_area = Some(area);
+        self.session_panel_inner_area = Some(inner);
+    }
+
+    /// Check if a point is inside the session panel content area
+    pub fn session_panel_contains(&self, x: u16, y: u16) -> bool {
+        let Some(inner) = self.session_panel_inner_area else {
+            return false;
+        };
+        if inner.width == 0 || inner.height == 0 {
+            return false;
+        }
+        let right = inner.x.saturating_add(inner.width);
+        let bottom = inner.y.saturating_add(inner.height);
+        x >= inner.x && x < right && y >= inner.y && y < bottom
+    }
+
     /// Resolve selection index from a mouse position within the list area
     pub fn selection_index_from_point(&self, x: u16, y: u16) -> Option<usize> {
         let inner = self.list_inner_area?;
@@ -828,6 +896,9 @@ impl BranchListState {
     /// Set selected index directly (returns true if selection changed)
     pub fn select_index(&mut self, index: usize) -> bool {
         if index >= self.filtered_indices.len() {
+            return false;
+        }
+        if self.is_cleanup_active_index(index) {
             return false;
         }
         if self.selected != index {
@@ -949,6 +1020,25 @@ impl BranchListState {
         }
     }
 
+    pub fn apply_worktree_created(&mut self, branch_name: &str, worktree_path: &Path) -> bool {
+        let Some(item) = self.branches.iter_mut().find(|b| b.name == branch_name) else {
+            return false;
+        };
+
+        item.has_worktree = true;
+        item.worktree_path = Some(worktree_path.display().to_string());
+        item.worktree_status = if worktree_path.exists() {
+            WorktreeStatus::Active
+        } else {
+            WorktreeStatus::Inaccessible
+        };
+        item.update_safety_status();
+
+        self.stats.worktree_count = self.branches.iter().filter(|b| b.has_worktree).count();
+        self.rebuild_filtered_cache_preserve_selection();
+        true
+    }
+
     pub fn reset_status_progress(&mut self, total: usize) {
         self.status_progress_total = total;
         self.status_progress_done = 0;
@@ -975,6 +1065,94 @@ impl BranchListState {
             "Status: Updating branch status ({}/{})",
             self.status_progress_done, self.status_progress_total
         ))
+    }
+
+    pub fn start_cleanup_progress(&mut self, total: usize) {
+        self.cleanup_in_progress = total > 0;
+        self.cleanup_progress_total = total;
+        self.cleanup_progress_done = 0;
+        self.cleanup_active_branch = None;
+    }
+
+    pub fn increment_cleanup_progress(&mut self) {
+        if !self.cleanup_in_progress {
+            return;
+        }
+        if self.cleanup_progress_done < self.cleanup_progress_total {
+            self.cleanup_progress_done += 1;
+        }
+    }
+
+    pub fn cleanup_progress_line(&self) -> Option<String> {
+        if !self.cleanup_in_progress {
+            return None;
+        }
+        Some(format!(
+            "Cleanup: Running {} ({}/{})",
+            self.spinner_char(),
+            self.cleanup_progress_done,
+            self.cleanup_progress_total
+        ))
+    }
+
+    pub fn active_status_line(&self) -> Option<String> {
+        self.cleanup_progress_line()
+            .or_else(|| self.status_progress_line())
+    }
+
+    pub fn cleanup_in_progress(&self) -> bool {
+        self.cleanup_in_progress
+    }
+
+    pub fn set_cleanup_active_branch(&mut self, branch: Option<String>) {
+        self.cleanup_active_branch = branch;
+        self.move_selection_off_cleanup_active();
+    }
+
+    pub fn cleanup_active_branch(&self) -> Option<&str> {
+        self.cleanup_active_branch.as_deref()
+    }
+
+    fn is_cleanup_active_index(&self, index: usize) -> bool {
+        if !self.cleanup_in_progress {
+            return false;
+        }
+        let Some(active) = self.cleanup_active_branch.as_deref() else {
+            return false;
+        };
+        self.filtered_branch_at(index)
+            .is_some_and(|branch| branch.name == active)
+    }
+
+    fn move_selection_off_cleanup_active(&mut self) {
+        if !self.is_cleanup_active_index(self.selected) {
+            return;
+        }
+        let filtered_len = self.filtered_len();
+        if filtered_len == 0 {
+            return;
+        }
+        for index in (self.selected + 1)..filtered_len {
+            if !self.is_cleanup_active_index(index) {
+                self.selected = index;
+                self.ensure_visible();
+                return;
+            }
+        }
+        for index in (0..self.selected).rev() {
+            if !self.is_cleanup_active_index(index) {
+                self.selected = index;
+                self.ensure_visible();
+                return;
+            }
+        }
+    }
+
+    pub fn finish_cleanup_progress(&mut self) {
+        self.cleanup_in_progress = false;
+        self.cleanup_progress_total = 0;
+        self.cleanup_progress_done = 0;
+        self.cleanup_active_branch = None;
     }
 
     /// Set loading state
@@ -1167,6 +1345,14 @@ impl BranchListState {
         let page = self.session_scroll_page.max(1);
         self.session_scroll_offset =
             (self.session_scroll_offset + page).min(self.session_scroll_max);
+    }
+
+    pub fn scroll_session_line_up(&mut self) {
+        self.session_scroll_offset = self.session_scroll_offset.saturating_sub(1);
+    }
+
+    pub fn scroll_session_line_down(&mut self) {
+        self.session_scroll_offset = (self.session_scroll_offset + 1).min(self.session_scroll_max);
     }
 
     pub fn session_summary(&self, branch: &str) -> Option<&gwt_core::ai::SessionSummary> {
@@ -1565,6 +1751,7 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect, has_f
     let visible_height = inner_area.height as usize;
     // FR-031b: Pass spinner_frame for safety check pending indicator
     let spinner_frame = state.spinner_frame;
+    let cleanup_active_branch = state.cleanup_active_branch();
     let mut items: Vec<ListItem> = state
         .visible_filtered_indices(visible_height)
         .iter()
@@ -1572,11 +1759,15 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect, has_f
         .map(|(i, index)| {
             let branch = &state.branches[*index];
             let running_agent = state.get_running_agent(&branch.name);
+            let is_cleanup_active = cleanup_active_branch
+                .map(|name| name == branch.name)
+                .unwrap_or(false);
             render_branch_row(
                 branch,
                 state.offset + i == state.selected,
                 &state.selected_branches,
                 spinner_frame,
+                is_cleanup_active,
                 running_agent,
                 inner_area.width,
             )
@@ -1608,20 +1799,27 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect, has_f
 /// Render a single branch row
 /// FR-070: Tool display format: ToolName@X.Y.Z
 /// FR-031b: Show spinner for safety check pending branches
+/// FR-011f: Show spinner in safety icon while cleanup is running
 /// FR-020~024: Running agent info displayed on right side (right-aligned)
 fn render_branch_row(
     branch: &BranchItem,
     is_selected: bool,
     selected_set: &HashSet<String>,
     spinner_frame: usize,
+    cleanup_active: bool,
     running_agent: Option<&AgentPane>,
     width: u16,
 ) -> ListItem<'static> {
     // Only show selection icons when at least one branch is selected
     let show_selection = !selected_set.is_empty();
     let is_checked = selected_set.contains(&branch.name);
-    // FR-031b: Pass spinner_frame for pending safety check
-    let (safety_icon, safety_color) = branch.safety_icon(Some(spinner_frame));
+    let (safety_icon, safety_color) = if cleanup_active {
+        let spinner_char = SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()];
+        (spinner_char.to_string(), Color::Yellow)
+    } else {
+        // FR-031b: Pass spinner_frame for pending safety check
+        branch.safety_icon(Some(spinner_frame))
+    };
     // FR-082/FR-083/FR-084/FR-085: Get branch name color based on worktree/gone status
     let branch_name_color = branch.branch_name_color();
 
@@ -1800,10 +1998,36 @@ fn panel_title_line(branch_name: &str, label: &str) -> Line<'static> {
 
 fn session_panel_hint() -> Line<'static> {
     Line::from(Span::styled(
-        " PgUp/PgDn: Scroll ",
+        " PgUp/PgDn/Wheel: Scroll ",
         Style::default().fg(Color::DarkGray),
     ))
     .right_aligned()
+}
+
+fn session_scroll_layout(inner: Rect, scrollable: bool) -> (Rect, Option<Rect>) {
+    if !scrollable || inner.width <= 1 {
+        return (inner, None);
+    }
+
+    let content = Rect {
+        width: inner.width.saturating_sub(1),
+        ..inner
+    };
+    let scrollbar = Rect {
+        x: inner.x + inner.width.saturating_sub(1),
+        y: inner.y,
+        width: 1,
+        height: inner.height,
+    };
+    (content, Some(scrollbar))
+}
+
+fn session_scrollbar_content_length(total_lines: usize, viewport_len: usize) -> usize {
+    if total_lines == 0 {
+        return 1;
+    }
+    let viewport_len = viewport_len.max(1);
+    total_lines.saturating_sub(viewport_len).saturating_add(1)
 }
 
 fn build_summary_links(repo_web_url: Option<&String>, branch: Option<&BranchItem>) -> SummaryLinks {
@@ -1928,7 +2152,7 @@ fn render_details_panel(
     let links = build_summary_links(state.repo_web_url(), selected_branch.as_ref());
 
     // Get progress status line if active
-    let status_line = state.status_progress_line();
+    let status_line = state.active_status_line();
 
     // Render the full summary panel with optional status line
     let panel = SummaryPanel::new(&summary)
@@ -1959,6 +2183,7 @@ fn render_session_panel(
         .title_bottom(session_panel_hint())
         .padding(Padding::new(PANEL_PADDING_X, PANEL_PADDING_X, 0, 0));
     let inner = block.inner(area);
+    state.update_session_panel_area(area, inner);
     frame.render_widget(block, area);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -2076,13 +2301,32 @@ fn render_session_panel(
         )));
     }
 
-    let wrapped_lines = wrap_lines_by_char(lines, inner.width as usize);
-    let total_lines = wrapped_lines.len();
-    let max_scroll = total_lines.saturating_sub(inner.height as usize);
-    state.update_session_scroll_bounds(max_scroll, inner.height as usize);
+    let mut wrapped_lines = wrap_lines_by_char(lines.clone(), inner.width as usize);
+    let mut total_lines = wrapped_lines.len();
+    let scrollable = total_lines > inner.height as usize;
+    let (content_area, scrollbar_area) = session_scroll_layout(inner, scrollable);
+    if content_area.width != inner.width {
+        wrapped_lines = wrap_lines_by_char(lines, content_area.width as usize);
+        total_lines = wrapped_lines.len();
+    }
+
+    let viewport_len = content_area.height as usize;
+    let max_scroll = total_lines.saturating_sub(viewport_len);
+    state.update_session_scroll_bounds(max_scroll, viewport_len);
 
     let paragraph = Paragraph::new(wrapped_lines).scroll((state.session_scroll_offset as u16, 0));
-    frame.render_widget(paragraph, inner);
+    frame.render_widget(paragraph, content_area);
+
+    if let Some(scrollbar_area) = scrollbar_area {
+        let scrollbar_length = session_scrollbar_content_length(total_lines, viewport_len);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("^"))
+            .end_symbol(Some("v"));
+        let mut scrollbar_state = ScrollbarState::new(scrollbar_length)
+            .position(state.session_scroll_offset)
+            .viewport_content_length(viewport_len);
+        frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+    }
 }
 
 fn render_markdown_lines(markdown: &str) -> Vec<Line<'static>> {
@@ -2332,6 +2576,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::path::Path;
+    use tempfile::tempdir;
 
     fn line_text(line: &Line<'_>) -> String {
         let mut text = String::new();
@@ -2395,6 +2640,101 @@ mod tests {
     }
 
     #[test]
+    fn test_session_scroll_layout_no_scrollbar_when_not_scrollable() {
+        let inner = Rect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 5,
+        };
+        let (content, scrollbar) = session_scroll_layout(inner, false);
+        assert_eq!(content, inner);
+        assert!(scrollbar.is_none());
+    }
+
+    #[test]
+    fn test_session_scroll_layout_scrollbar_when_scrollable() {
+        let inner = Rect {
+            x: 2,
+            y: 3,
+            width: 10,
+            height: 5,
+        };
+        let (content, scrollbar) = session_scroll_layout(inner, true);
+        assert_eq!(content.width, 9);
+        assert_eq!(content.x, inner.x);
+        assert_eq!(content.y, inner.y);
+        assert_eq!(content.height, inner.height);
+        let scrollbar = scrollbar.expect("scrollbar");
+        assert_eq!(scrollbar.x, inner.x + inner.width - 1);
+        assert_eq!(scrollbar.y, inner.y);
+        assert_eq!(scrollbar.width, 1);
+        assert_eq!(scrollbar.height, inner.height);
+    }
+
+    #[test]
+    fn test_session_scroll_layout_no_scrollbar_when_narrow() {
+        let inner = Rect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 5,
+        };
+        let (content, scrollbar) = session_scroll_layout(inner, true);
+        assert_eq!(content, inner);
+        assert!(scrollbar.is_none());
+    }
+
+    #[test]
+    fn test_session_scrollbar_content_length_from_total_and_viewport() {
+        assert_eq!(session_scrollbar_content_length(10, 3), 8);
+        assert_eq!(session_scrollbar_content_length(5, 5), 1);
+        assert_eq!(session_scrollbar_content_length(0, 5), 1);
+    }
+
+    #[test]
+    fn test_session_panel_contains_point() {
+        let mut state = BranchListState::new();
+        let area = Rect::new(0, 0, 20, 5);
+        let inner = Rect::new(2, 1, 16, 3);
+        state.update_session_panel_area(area, inner);
+
+        assert!(state.session_panel_contains(2, 1));
+        assert!(state.session_panel_contains(17, 3));
+        assert!(!state.session_panel_contains(1, 1));
+        assert!(!state.session_panel_contains(18, 1));
+        assert!(!state.session_panel_contains(2, 4));
+    }
+
+    #[test]
+    fn test_session_panel_contains_point_with_empty_inner() {
+        let mut state = BranchListState::new();
+        let area = Rect::new(0, 0, 2, 2);
+        let inner = Rect::new(0, 0, 0, 0);
+        state.update_session_panel_area(area, inner);
+
+        assert!(!state.session_panel_contains(0, 0));
+    }
+
+    #[test]
+    fn test_session_scroll_line_clamps_to_bounds() {
+        let mut state = BranchListState::new();
+        state.update_session_scroll_bounds(3, 5);
+        state.session_scroll_offset = 2;
+
+        state.scroll_session_line_down();
+        assert_eq!(state.session_scroll_offset, 3);
+        state.scroll_session_line_down();
+        assert_eq!(state.session_scroll_offset, 3);
+        state.scroll_session_line_up();
+        assert_eq!(state.session_scroll_offset, 2);
+        state.scroll_session_line_up();
+        state.scroll_session_line_up();
+        state.scroll_session_line_up();
+        assert_eq!(state.session_scroll_offset, 0);
+    }
+
+    #[test]
     fn test_branch_name_color_by_worktree_status() {
         let mut branch = sample_branch("feature/color");
 
@@ -2411,6 +2751,46 @@ mod tests {
         branch.is_gone = true;
         branch.worktree_status = WorktreeStatus::None;
         assert_eq!(branch.branch_name_color(), Color::Red);
+    }
+
+    #[test]
+    fn test_apply_worktree_created_updates_branch_and_preserves_selection() {
+        let temp = tempdir().expect("tempdir");
+        let expected_path = temp.path().display().to_string();
+
+        let mut branch_a = sample_branch("feature/a");
+        branch_a.has_worktree = false;
+        branch_a.worktree_path = None;
+        branch_a.worktree_status = WorktreeStatus::None;
+
+        let mut branch_b = sample_branch("feature/b");
+        branch_b.worktree_path = Some("/path".to_string());
+
+        let mut state = BranchListState::new().with_branches(vec![branch_a, branch_b]);
+        assert_eq!(
+            state.selected_branch().map(|branch| branch.name.as_str()),
+            Some("feature/b")
+        );
+
+        let updated = state.apply_worktree_created("feature/a", temp.path());
+        assert!(updated);
+
+        let updated_branch = state
+            .branches
+            .iter()
+            .find(|branch| branch.name == "feature/a")
+            .expect("branch exists");
+        assert!(updated_branch.has_worktree);
+        assert_eq!(updated_branch.worktree_status, WorktreeStatus::Active);
+        assert_eq!(
+            updated_branch.worktree_path.as_deref(),
+            Some(expected_path.as_str())
+        );
+        assert_eq!(state.stats.worktree_count, 2);
+        assert_eq!(
+            state.selected_branch().map(|branch| branch.name.as_str()),
+            Some("feature/b")
+        );
     }
 
     #[test]
@@ -2506,6 +2886,65 @@ mod tests {
     }
 
     #[test]
+    fn test_cleanup_active_branch_is_skipped_by_cursor() {
+        let branches = vec![
+            sample_branch("branch-a"),
+            sample_branch("branch-b"),
+            sample_branch("branch-c"),
+        ];
+        let mut state = BranchListState::new().with_branches(branches);
+        state.selected = 1;
+        state.start_cleanup_progress(3);
+        state.set_cleanup_active_branch(Some("branch-b".to_string()));
+
+        assert_eq!(
+            state.selected_branch().map(|branch| branch.name.as_str()),
+            Some("branch-c")
+        );
+
+        state.selected = 0;
+        state.select_next();
+        assert_eq!(
+            state.selected_branch().map(|branch| branch.name.as_str()),
+            Some("branch-c")
+        );
+
+        state.select_prev();
+        assert_eq!(
+            state.selected_branch().map(|branch| branch.name.as_str()),
+            Some("branch-a")
+        );
+    }
+
+    #[test]
+    fn test_select_index_ignores_cleanup_active_branch() {
+        let branches = vec![
+            sample_branch("branch-a"),
+            sample_branch("branch-b"),
+            sample_branch("branch-c"),
+        ];
+        let mut state = BranchListState::new().with_branches(branches);
+        state.start_cleanup_progress(3);
+        state.set_cleanup_active_branch(Some("branch-b".to_string()));
+
+        assert_eq!(
+            state.selected_branch().map(|branch| branch.name.as_str()),
+            Some("branch-a")
+        );
+
+        let cleanup_index = state
+            .filtered_indices
+            .iter()
+            .position(|&idx| state.branches[idx].name == "branch-b")
+            .expect("cleanup branch index");
+        assert!(!state.select_index(cleanup_index));
+        assert_eq!(
+            state.selected_branch().map(|branch| branch.name.as_str()),
+            Some("branch-a")
+        );
+    }
+
+    #[test]
     fn test_mouse_position_selects_visible_row() {
         let branches = vec![
             sample_branch("feature/one"),
@@ -2593,6 +3032,61 @@ mod tests {
     }
 
     #[test]
+    fn test_cleanup_active_branch_shows_spinner_in_safety_icon() {
+        let branches = vec![BranchItem {
+            name: "cleanupbranch".to_string(),
+            branch_type: BranchType::Local,
+            is_current: false,
+            has_worktree: true,
+            worktree_path: Some("/path".to_string()),
+            worktree_status: WorktreeStatus::Active,
+            has_changes: false,
+            has_unpushed: false,
+            divergence: DivergenceStatus::UpToDate,
+            has_remote_counterpart: true,
+            remote_name: None,
+            safe_to_cleanup: Some(true),
+            safety_status: SafetyStatus::Safe,
+            is_unmerged: false,
+            last_commit_timestamp: None,
+            last_tool_usage: None,
+            last_tool_id: None,
+            last_session_id: None,
+            is_selected: false,
+            pr_title: None,
+            pr_number: None,
+            pr_url: None,
+            is_gone: false,
+        }];
+
+        let mut state = BranchListState::new().with_branches(branches);
+        state.start_cleanup_progress(1);
+        state.set_cleanup_active_branch(Some("cleanupbranch".to_string()));
+        state.spinner_frame = 0; // '|' frame
+
+        let backend = TestBackend::new(30, 5);
+        let mut terminal = Terminal::new(backend).expect("terminal init");
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_branches(&state, f, area, true);
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        let mut found = false;
+        for y in 0..5 {
+            let line: String = (0..30).map(|x| buffer[(x, y)].symbol()).collect();
+            if line.contains("| cleanupbranch") {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "cleanup spinner should appear in safety icon column");
+    }
+
+    #[test]
     fn test_status_progress_line_renders() {
         let branches = vec![BranchItem {
             name: "main".to_string(),
@@ -2646,6 +3140,60 @@ mod tests {
             }
         }
         assert!(found, "Progress line should appear somewhere in the panel");
+    }
+
+    #[test]
+    fn test_cleanup_progress_line_renders() {
+        let branches = vec![BranchItem {
+            name: "main".to_string(),
+            branch_type: BranchType::Local,
+            is_current: true,
+            has_worktree: true,
+            worktree_path: Some("/path".to_string()),
+            worktree_status: WorktreeStatus::Active,
+            has_changes: false,
+            has_unpushed: false,
+            divergence: DivergenceStatus::UpToDate,
+            has_remote_counterpart: true,
+            remote_name: None,
+            safe_to_cleanup: Some(true),
+            safety_status: SafetyStatus::Safe,
+            is_unmerged: false,
+            last_commit_timestamp: None,
+            last_tool_usage: None,
+            last_tool_id: None,
+            last_session_id: None,
+            is_selected: false,
+            pr_title: None,
+            pr_number: None,
+            pr_url: None,
+            is_gone: false,
+        }];
+
+        let mut state = BranchListState::new().with_branches(branches);
+        state.start_cleanup_progress(3);
+        state.spinner_frame = 0;
+
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal init");
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_branch_list(&mut state, f, area, None, true);
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        let mut found = false;
+        for y in 0..20 {
+            let line: String = (0..60).map(|x| buffer[(x, y)].symbol()).collect();
+            if line.contains("Cleanup: Running") {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "Cleanup progress line should appear in the panel");
     }
 
     #[test]
