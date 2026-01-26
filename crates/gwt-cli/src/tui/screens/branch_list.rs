@@ -1147,6 +1147,7 @@ impl BranchListState {
             }
         }
     }
+
     pub fn finish_cleanup_progress(&mut self) {
         self.cleanup_in_progress = false;
         self.cleanup_progress_total = 0;
