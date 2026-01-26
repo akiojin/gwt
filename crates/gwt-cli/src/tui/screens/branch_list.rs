@@ -748,24 +748,41 @@ impl BranchListState {
 
     /// Move selection up
     pub fn select_prev(&mut self) {
-        if self.filtered_len() > 0 && self.selected > 0 {
-            self.selected -= 1;
-            self.ensure_visible();
+        if self.filtered_len() == 0 || self.selected == 0 {
+            return;
+        }
+        let mut index = self.selected;
+        while index > 0 {
+            index -= 1;
+            if !self.is_cleanup_active_index(index) {
+                self.selected = index;
+                self.ensure_visible();
+                break;
+            }
         }
     }
 
     /// Move selection down
     pub fn select_next(&mut self) {
         let filtered_len = self.filtered_len();
-        if filtered_len > 0 && self.selected < filtered_len - 1 {
-            self.selected += 1;
-            self.ensure_visible();
+        if filtered_len == 0 || self.selected >= filtered_len - 1 {
+            return;
+        }
+        let mut index = self.selected;
+        while index + 1 < filtered_len {
+            index += 1;
+            if !self.is_cleanup_active_index(index) {
+                self.selected = index;
+                self.ensure_visible();
+                break;
+            }
         }
     }
 
     /// Page up
     pub fn page_up(&mut self, page_size: usize) {
         self.selected = self.selected.saturating_sub(page_size);
+        self.move_selection_off_cleanup_active();
         self.ensure_visible();
     }
 
@@ -774,6 +791,7 @@ impl BranchListState {
         let filtered_len = self.filtered_len();
         if filtered_len > 0 {
             self.selected = (self.selected + page_size).min(filtered_len - 1);
+            self.move_selection_off_cleanup_active();
             self.ensure_visible();
         }
     }
@@ -782,6 +800,7 @@ impl BranchListState {
     pub fn go_home(&mut self) {
         self.selected = 0;
         self.offset = 0;
+        self.move_selection_off_cleanup_active();
     }
 
     /// Go to end
@@ -790,6 +809,7 @@ impl BranchListState {
         if filtered_len > 0 {
             self.selected = filtered_len - 1;
         }
+        self.move_selection_off_cleanup_active();
         self.ensure_visible();
     }
 
@@ -876,6 +896,9 @@ impl BranchListState {
     /// Set selected index directly (returns true if selection changed)
     pub fn select_index(&mut self, index: usize) -> bool {
         if index >= self.filtered_indices.len() {
+            return false;
+        }
+        if self.is_cleanup_active_index(index) {
             return false;
         }
         if self.selected != index {
@@ -1083,12 +1106,47 @@ impl BranchListState {
 
     pub fn set_cleanup_active_branch(&mut self, branch: Option<String>) {
         self.cleanup_active_branch = branch;
+        self.move_selection_off_cleanup_active();
     }
 
     pub fn cleanup_active_branch(&self) -> Option<&str> {
         self.cleanup_active_branch.as_deref()
     }
 
+    fn is_cleanup_active_index(&self, index: usize) -> bool {
+        if !self.cleanup_in_progress {
+            return false;
+        }
+        let Some(active) = self.cleanup_active_branch.as_deref() else {
+            return false;
+        };
+        self.filtered_branch_at(index)
+            .is_some_and(|branch| branch.name == active)
+    }
+
+    fn move_selection_off_cleanup_active(&mut self) {
+        if !self.is_cleanup_active_index(self.selected) {
+            return;
+        }
+        let filtered_len = self.filtered_len();
+        if filtered_len == 0 {
+            return;
+        }
+        for index in (self.selected + 1)..filtered_len {
+            if !self.is_cleanup_active_index(index) {
+                self.selected = index;
+                self.ensure_visible();
+                return;
+            }
+        }
+        for index in (0..self.selected).rev() {
+            if !self.is_cleanup_active_index(index) {
+                self.selected = index;
+                self.ensure_visible();
+                return;
+            }
+        }
+    }
     pub fn finish_cleanup_progress(&mut self) {
         self.cleanup_in_progress = false;
         self.cleanup_progress_total = 0;
@@ -2824,6 +2882,65 @@ mod tests {
 
         state.select_prev();
         assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn test_cleanup_active_branch_is_skipped_by_cursor() {
+        let branches = vec![
+            sample_branch("branch-a"),
+            sample_branch("branch-b"),
+            sample_branch("branch-c"),
+        ];
+        let mut state = BranchListState::new().with_branches(branches);
+        state.selected = 1;
+        state.start_cleanup_progress(3);
+        state.set_cleanup_active_branch(Some("branch-b".to_string()));
+
+        assert_eq!(
+            state.selected_branch().map(|branch| branch.name.as_str()),
+            Some("branch-c")
+        );
+
+        state.selected = 0;
+        state.select_next();
+        assert_eq!(
+            state.selected_branch().map(|branch| branch.name.as_str()),
+            Some("branch-c")
+        );
+
+        state.select_prev();
+        assert_eq!(
+            state.selected_branch().map(|branch| branch.name.as_str()),
+            Some("branch-a")
+        );
+    }
+
+    #[test]
+    fn test_select_index_ignores_cleanup_active_branch() {
+        let branches = vec![
+            sample_branch("branch-a"),
+            sample_branch("branch-b"),
+            sample_branch("branch-c"),
+        ];
+        let mut state = BranchListState::new().with_branches(branches);
+        state.start_cleanup_progress(3);
+        state.set_cleanup_active_branch(Some("branch-b".to_string()));
+
+        assert_eq!(
+            state.selected_branch().map(|branch| branch.name.as_str()),
+            Some("branch-a")
+        );
+
+        let cleanup_index = state
+            .filtered_indices
+            .iter()
+            .position(|&idx| state.branches[idx].name == "branch-b")
+            .expect("cleanup branch index");
+        assert!(!state.select_index(cleanup_index));
+        assert_eq!(
+            state.selected_branch().map(|branch| branch.name.as_str()),
+            Some("branch-a")
+        );
     }
 
     #[test]
