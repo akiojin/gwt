@@ -1351,6 +1351,23 @@ impl WizardState {
         }
     }
 
+    fn apply_loaded_issues(&mut self, issues: Vec<GitHubIssue>) {
+        self.issue_list = issues;
+        self.filtered_issues = (0..self.issue_list.len()).collect();
+        self.issue_loading = false;
+
+        if self.issue_list.is_empty() {
+            self.selected_issue = None;
+            self.issue_existing_branch = None;
+            self.issue_error = None;
+            self.issue_search_query.clear();
+            self.issue_selected_index = 0;
+            self.new_branch_name.clear();
+            self.cursor = 0;
+            self.step = WizardStep::BranchNameInput;
+        }
+    }
+
     /// Load issues from GitHub (FR-005)
     pub fn load_issues(&mut self, repo_path: &Path) {
         use gwt_core::git::{fetch_open_issues, is_gh_cli_available};
@@ -1372,9 +1389,7 @@ impl WizardState {
 
         match fetch_open_issues(repo_path) {
             Ok(issues) => {
-                self.issue_list = issues;
-                self.filtered_issues = (0..self.issue_list.len()).collect();
-                self.issue_loading = false;
+                self.apply_loaded_issues(issues);
             }
             Err(e) => {
                 self.issue_error = Some(e);
@@ -2822,6 +2837,21 @@ mod tests {
         assert_eq!(state.step, WizardStep::BranchNameInput);
         assert!(state.new_branch_name.is_empty());
         assert!(state.selected_issue.is_none());
+    }
+
+    #[test]
+    fn test_issue_select_auto_skip_when_no_issues() {
+        let mut state = WizardState::new();
+        state.open_for_new_branch();
+        state.step = WizardStep::IssueSelect;
+        state.issue_loading = true;
+
+        state.apply_loaded_issues(vec![]);
+
+        assert_eq!(state.step, WizardStep::BranchNameInput);
+        assert!(!state.issue_loading);
+        assert!(state.selected_issue.is_none());
+        assert!(state.new_branch_name.is_empty());
     }
 
     /// T505: Duplicate branch detection blocks issue selection
