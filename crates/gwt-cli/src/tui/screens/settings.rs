@@ -906,13 +906,14 @@ fn render_delete_confirmation(state: &SettingsState, frame: &mut Frame, area: Re
 }
 
 fn render_instructions(state: &SettingsState, frame: &mut Frame, area: Rect) {
+    // FR-020: Tab cycles screens, Left/Right cycles categories
     let instructions = if state.category == SettingsCategory::CustomAgents {
         match &state.custom_agent_mode {
             CustomAgentMode::List => {
                 if state.is_add_agent_selected() {
-                    "[Enter] Add | [Tab] Category | [Up/Down] Select | [Esc] Back"
+                    "[Enter] Add | [L/R] Category | [U/D] Select | [Tab] Screen | [Esc] Back"
                 } else {
-                    "[Enter] Edit | [D] Delete | [Tab] Category | [Up/Down] Select | [Esc] Back"
+                    "[Enter] Edit | [D] Delete | [L/R] Cat | [U/D] Sel | [Tab] Scr | [Esc] Back"
                 }
             }
             CustomAgentMode::Add | CustomAgentMode::Edit(_) => {
@@ -923,7 +924,7 @@ fn render_instructions(state: &SettingsState, frame: &mut Frame, area: Rect) {
             }
         }
     } else {
-        "[Tab] Category | [Up/Down] Select | [Enter] Edit | [Esc] Back"
+        "[Left/Right] Category | [Up/Down] Select | [Tab] Screen | [Esc] Back"
     };
     let paragraph =
         Paragraph::new(format!(" {} ", instructions)).block(Block::default().borders(Borders::ALL));

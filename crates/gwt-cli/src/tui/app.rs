@@ -3786,6 +3786,12 @@ impl Model {
                 } else if matches!(self.screen, Screen::Settings) && self.settings.is_delete_mode()
                 {
                     self.settings.delete_confirm = !self.settings.delete_confirm;
+                // SPEC-71f2742d US4: Settings category navigation with Left/Right
+                } else if matches!(self.screen, Screen::Settings)
+                    && !self.settings.is_form_mode()
+                    && !self.settings.is_delete_mode()
+                {
+                    self.settings.prev_category();
                 } else if matches!(self.screen, Screen::AISettingsWizard)
                     && self.ai_wizard.is_text_input()
                 {
@@ -3808,6 +3814,12 @@ impl Model {
                 } else if matches!(self.screen, Screen::Settings) && self.settings.is_delete_mode()
                 {
                     self.settings.delete_confirm = !self.settings.delete_confirm;
+                // SPEC-71f2742d US4: Settings category navigation with Left/Right
+                } else if matches!(self.screen, Screen::Settings)
+                    && !self.settings.is_form_mode()
+                    && !self.settings.is_delete_mode()
+                {
+                    self.settings.next_category();
                 } else if matches!(self.screen, Screen::AISettingsWizard)
                     && self.ai_wizard.is_text_input()
                 {
@@ -3903,15 +3915,26 @@ impl Model {
                     self.status_message_time = Some(Instant::now());
                 }
             }
+            // FR-020 SPEC-71f2742d: Tab cycles BranchList → AgentMode → Settings → BranchList
             Message::Tab => match self.screen {
-                Screen::Settings => self.settings.next_category(),
+                Screen::Settings => {
+                    // In form mode, Tab cycles fields
+                    if self.settings.is_form_mode() {
+                        self.settings.agent_form.next_field();
+                    } else {
+                        // Exit Settings and go to BranchList (FR-020)
+                        self.screen = Screen::BranchList;
+                    }
+                }
                 Screen::BranchList => {
                     if !self.branch_list.filter_mode {
                         self.enter_agent_mode();
                     }
                 }
                 Screen::AgentMode => {
-                    self.screen = Screen::BranchList;
+                    // Go to Settings (FR-020)
+                    self.settings.load_tools_config();
+                    self.screen = Screen::Settings;
                 }
                 _ => {}
             },
@@ -5114,7 +5137,8 @@ impl Model {
                 }
             }
             Screen::WorktreeCreate => "[Enter] Next | [Esc] Back",
-            Screen::Settings => "[Tab] Category | [Esc] Back",
+            // FR-020: Tab cycles screens, Left/Right cycles categories
+            Screen::Settings => "[Left/Right] Category | [Tab] Screen | [Esc] Back",
             Screen::Logs => "[Up/Down] Navigate | [Enter] Detail | [c] Copy | [f] Filter | [/] Search | [Esc] Back",
             Screen::Help => "[Esc] Close | [Up/Down] Scroll",
             Screen::Confirm => "[Left/Right] Select | [Enter] Confirm | [Esc] Cancel",
@@ -6536,14 +6560,21 @@ mod tests {
         assert_eq!(model.last_session_poll, Some(previous));
     }
 
+    // FR-020: Tab cycles BranchList → AgentMode → Settings → BranchList
     #[test]
-    fn test_tab_switches_between_branch_and_agent_mode() {
+    fn test_tab_cycles_three_screens() {
         let mut model = Model::new_with_context(None);
         model.screen = Screen::BranchList;
 
+        // BranchList → AgentMode
         model.update(Message::Tab);
         assert!(matches!(model.screen, Screen::AgentMode));
 
+        // AgentMode → Settings
+        model.update(Message::Tab);
+        assert!(matches!(model.screen, Screen::Settings));
+
+        // Settings → BranchList
         model.update(Message::Tab);
         assert!(matches!(model.screen, Screen::BranchList));
     }

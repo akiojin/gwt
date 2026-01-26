@@ -160,13 +160,13 @@ US1 (P1: tools.json読み込み)
 
 ### テスト（TDD）
 
-- [ ] **T401** [P] [US4] `crates/gwt-cli/src/tui/app.rs` にタブ切り替え順序テストを追加
+- [x] **T401** [P] [US4] `crates/gwt-cli/src/tui/app.rs` にタブ切り替え順序テストを追加（test_tab_cycles_three_screens）
 
 ### タブ切り替え実装
 
-- [ ] **T402** [US4] T401の後に `crates/gwt-cli/src/tui/app.rs` の handle_key_event() にタブ切り替えロジックを追加（3画面循環）
-- [ ] **T403** [US4] T402の後に `crates/gwt-cli/src/tui/screens/settings.rs` に Profile設定セクションを追加
-- [ ] **T404** [US4] T403の後に `crates/gwt-cli/src/tui/screens/settings.rs` にカスタムエージェントセクションとProfile セクションの統合表示を実装
+- [x] **T402** [US4] T401の後に `crates/gwt-cli/src/tui/app.rs` の handle_key_event() にタブ切り替えロジックを追加（3画面循環）
+- [x] **T403** [US4] T402の後に `crates/gwt-cli/src/tui/screens/settings.rs` に Profile設定セクションを追加（既存のGeneral/Worktree/Web/Agentカテゴリで実現）
+- [x] **T404** [US4] T403の後に `crates/gwt-cli/src/tui/screens/settings.rs` にカスタムエージェントセクションとProfile セクションの統合表示を実装（CustomAgentsカテゴリとして統合済み）
 
 **✅ フェーズ5チェックポイント**: Tab キーで 3 画面をシームレスに切り替え可能
 
