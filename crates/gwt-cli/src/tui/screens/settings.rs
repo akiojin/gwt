@@ -1051,13 +1051,7 @@ fn selected_description(state: &SettingsState) -> &'static str {
             }
         }
         SettingsCategory::Environment => {
-            if state.is_add_profile_selected() {
-                "Add a new environment profile."
-            } else if state.selected_profile().is_some() {
-                "Enter=Edit, E=Env vars, A=Toggle active, D=Delete"
-            } else {
-                "Manage environment profiles (name, description, env vars)."
-            }
+            "Press Enter to open Profiles screen for environment variable management."
         }
         SettingsCategory::AISettings => {
             "Configure AI settings (endpoint, API key, model). Press Enter to open wizard."
@@ -1134,9 +1128,9 @@ fn render_settings_content(state: &SettingsState, frame: &mut Frame, area: Rect)
         return;
     }
 
-    // Profile has special rendering
+    // Environment: show simple message to navigate to Profiles screen
     if state.category == SettingsCategory::Environment {
-        render_profile_content(state, frame, area);
+        render_environment_nav(frame, area);
         return;
     }
 
@@ -1451,10 +1445,58 @@ fn render_delete_confirmation(state: &SettingsState, frame: &mut Frame, area: Re
 }
 
 // ============================================================================
-// Profile Rendering Functions
+// Environment Navigation (delegates to Profiles screen)
+// ============================================================================
+
+/// Render simple navigation message for Environment category
+fn render_environment_nav(frame: &mut Frame, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Environment Profiles ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Info text
+            Constraint::Length(3), // Button
+            Constraint::Min(0),    // Padding
+        ])
+        .margin(1)
+        .split(inner);
+
+    let info = Paragraph::new("Manage environment variable profiles for coding agents.")
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true });
+    frame.render_widget(info, chunks[0]);
+
+    let button_area = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(25),
+            Constraint::Percentage(50),
+            Constraint::Percentage(25),
+        ])
+        .split(chunks[1])[1];
+
+    let button = Paragraph::new("[ Open Profiles Screen ]")
+        .alignment(Alignment::Center)
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(Block::default().borders(Borders::ALL));
+    frame.render_widget(button, button_area);
+}
+
+// ============================================================================
+// Profile Rendering Functions (kept for backwards compatibility)
 // ============================================================================
 
 /// Render profile content based on mode
+#[allow(dead_code)]
 fn render_profile_content(state: &SettingsState, frame: &mut Frame, area: Rect) {
     match &state.profile_mode {
         ProfileMode::List => render_profile_list(state, frame, area),
@@ -1781,22 +1823,7 @@ fn render_instructions(state: &SettingsState, frame: &mut Frame, area: Rect) {
             }
         }
     } else if state.category == SettingsCategory::Environment {
-        match &state.profile_mode {
-            ProfileMode::List => {
-                if state.is_add_profile_selected() {
-                    "[Enter] Add | [L/R] Category | [U/D] Select | [Tab] Screen | [Esc] Back"
-                } else {
-                    "[Enter] Edit | [E] Env | [A] Active | [D] Del | [Tab] Scr | [Esc] Back"
-                }
-            }
-            ProfileMode::Add | ProfileMode::Edit(_) => {
-                "[Tab/Up/Down] Field | [Enter] Save | [Esc] Cancel"
-            }
-            ProfileMode::ConfirmDelete(_) => "[Left/Right] Select | [Enter] Confirm | [Esc] Cancel",
-            ProfileMode::EnvEdit(_) => {
-                "[Enter] Edit | [A] Add | [D] Delete | [S] Save | [Esc] Back"
-            }
-        }
+        "[Enter] Open Profiles Screen | [L/R] Category | [Tab] Screen | [Esc] Back"
     } else if state.category == SettingsCategory::AISettings {
         "[Enter] Open AI Settings Wizard | [L/R] Category | [Tab] Screen | [Esc] Back"
     } else {

@@ -3050,9 +3050,7 @@ impl Model {
 
     /// Handle Enter key in Settings screen (SPEC-71f2742d US3)
     fn handle_settings_enter(&mut self) {
-        use super::screens::settings::{
-            AgentFormField, CustomAgentMode, ProfileFormField, ProfileMode, SettingsCategory,
-        };
+        use super::screens::settings::{AgentFormField, CustomAgentMode, SettingsCategory};
 
         match self.settings.category {
             SettingsCategory::CustomAgents => {
@@ -3109,71 +3107,9 @@ impl Model {
                 }
             }
             SettingsCategory::Environment => {
-                match &self.settings.profile_mode {
-                    ProfileMode::List => {
-                        // Enter on list: add or edit
-                        if self.settings.is_add_profile_selected() {
-                            self.settings.enter_profile_add_mode();
-                        } else if self.settings.selected_profile().is_some() {
-                            self.settings.enter_profile_edit_mode();
-                        }
-                    }
-                    ProfileMode::Add | ProfileMode::Edit(_) => {
-                        // Enter in form: save if on last field, otherwise next field
-                        if self.settings.profile_form.current_field == ProfileFormField::Description
-                        {
-                            // On last field, try to save
-                            match self.settings.save_profile() {
-                                Ok(()) => {
-                                    // Save to file
-                                    if let Some(ref config) = self.settings.profiles_config {
-                                        if let Err(e) = config.save() {
-                                            self.settings.error_message =
-                                                Some(format!("Failed to save: {}", e));
-                                        }
-                                    }
-                                }
-                                Err(msg) => {
-                                    self.settings.error_message = Some(msg.to_string());
-                                }
-                            }
-                        } else {
-                            self.settings.profile_form.next_field();
-                        }
-                    }
-                    ProfileMode::ConfirmDelete(_) => {
-                        // Enter in delete confirm: execute if Yes selected
-                        if self.settings.profile_delete_confirm {
-                            if self.settings.delete_profile() {
-                                // Save to file
-                                if let Some(ref config) = self.settings.profiles_config {
-                                    if let Err(e) = config.save() {
-                                        self.settings.error_message =
-                                            Some(format!("Failed to save: {}", e));
-                                    }
-                                }
-                            }
-                        } else {
-                            self.settings.cancel_profile_mode();
-                        }
-                    }
-                    ProfileMode::EnvEdit(_) => {
-                        // Enter in env edit: edit selected var or add new
-                        let env_state = &mut self.settings.env_edit_state;
-                        if env_state.editing.is_some() {
-                            // Finish editing current var
-                            env_state.editing = None;
-                        } else if env_state.selected_index >= env_state.vars.len() {
-                            // On "Add new" option
-                            env_state.add_new_var();
-                        } else {
-                            // Start editing selected var's value
-                            let value_len = env_state.vars[env_state.selected_index].1.len();
-                            env_state.editing =
-                                Some(super::screens::settings::EnvEditMode::Value(value_len));
-                        }
-                    }
-                }
+                // Navigate to existing Profiles screen
+                self.screen_stack.push(self.screen.clone());
+                self.screen = Screen::Profiles;
             }
             SettingsCategory::AISettings => {
                 // Enter: open AI Settings Wizard
@@ -3200,9 +3136,7 @@ impl Model {
 
     /// Handle character input in Settings screen (SPEC-71f2742d US3)
     fn handle_settings_char(&mut self, c: char) {
-        use super::screens::settings::{
-            AgentFormField, CustomAgentMode, EnvEditMode, ProfileMode, SettingsCategory,
-        };
+        use super::screens::settings::{AgentFormField, CustomAgentMode, SettingsCategory};
 
         match self.settings.category {
             SettingsCategory::CustomAgents => {
@@ -3230,53 +3164,7 @@ impl Model {
                 }
             }
             SettingsCategory::Environment => {
-                match &self.settings.profile_mode {
-                    ProfileMode::List => {
-                        // 'd' or 'D' to enter delete mode
-                        if (c == 'd' || c == 'D') && self.settings.selected_profile().is_some() {
-                            self.settings.enter_profile_delete_mode();
-                        }
-                        // 'e' or 'E' to enter env edit mode
-                        else if (c == 'e' || c == 'E')
-                            && self.settings.selected_profile().is_some()
-                        {
-                            self.settings.enter_env_edit_mode();
-                        }
-                        // 'a' or 'A' to toggle active profile
-                        else if (c == 'a' || c == 'A')
-                            && self.settings.selected_profile().is_some()
-                        {
-                            self.settings.toggle_active_profile();
-                        }
-                    }
-                    ProfileMode::Add | ProfileMode::Edit(_) => {
-                        // In form mode: insert char
-                        self.settings.profile_form.insert_char(c);
-                    }
-                    ProfileMode::ConfirmDelete(_) => {
-                        // In delete confirm: ignore chars
-                    }
-                    ProfileMode::EnvEdit(_) => {
-                        // In env edit mode: handle char input
-                        let env_state = &mut self.settings.env_edit_state;
-                        if let Some(ref mode) = env_state.editing.clone() {
-                            match mode {
-                                EnvEditMode::Key(pos) => {
-                                    if env_state.selected_index < env_state.vars.len() {
-                                        env_state.vars[env_state.selected_index].0.insert(*pos, c);
-                                        env_state.editing = Some(EnvEditMode::Key(pos + 1));
-                                    }
-                                }
-                                EnvEditMode::Value(pos) => {
-                                    if env_state.selected_index < env_state.vars.len() {
-                                        env_state.vars[env_state.selected_index].1.insert(*pos, c);
-                                        env_state.editing = Some(EnvEditMode::Value(pos + 1));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                // Environment category navigates to Profiles screen, no char handling needed
             }
             _ => {
                 // Other categories don't handle char input
