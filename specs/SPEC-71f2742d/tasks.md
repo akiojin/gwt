@@ -185,13 +185,13 @@ US1 (P1: tools.json読み込み)
 
 ### モデル選択
 
-- [ ] **T503** [US5] T501-502の後に `crates/gwt-cli/src/tui/screens/wizard.rs` にカスタムエージェント用モデル一覧取得を実装
-- [ ] **T504** [US5] T503の後に `crates/gwt-cli/src/tui/screens/wizard.rs` に models 未定義時のモデル選択スキップを実装
+- [x] **T503** [US5] T501-502の後に `crates/gwt-cli/src/tui/screens/wizard.rs` にカスタムエージェント用モデル一覧取得を実装
+- [x] **T504** [US5] T503の後に `crates/gwt-cli/src/tui/screens/wizard.rs` に models 未定義時のモデル選択スキップを実装
 
 ### バージョン取得
 
-- [ ] **T505** [US5] T504の後に `crates/gwt-cli/src/tui/screens/wizard.rs` に versionCommand 実行ロジックを追加
-- [ ] **T506** [US5] T505の後に `crates/gwt-cli/src/tui/screens/wizard.rs` に versionCommand 未定義時のバージョン選択スキップを実装
+- [x] **T505** [US5] T504の後に `crates/gwt-cli/src/tui/screens/wizard.rs` に versionCommand 実行ロジックを追加
+- [x] **T506** [US5] T505の後に `crates/gwt-cli/src/tui/screens/wizard.rs` に versionCommand 未定義時のバージョン選択スキップを実装
 
 **✅ フェーズ6チェックポイント**: カスタムエージェントでモデル/バージョン選択が可能
 

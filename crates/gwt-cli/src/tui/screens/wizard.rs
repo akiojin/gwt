@@ -1039,6 +1039,77 @@ impl WizardState {
         true
     }
 
+    /// Get models for current agent (T503 SPEC-71f2742d FR-011)
+    /// For custom agents, returns models from CustomCodingAgent.models.
+    /// For builtin agents, returns CodingAgent.models().
+    pub fn get_models(&self) -> Vec<ModelOption> {
+        if let Some(ref entry) = self.selected_agent_entry {
+            if let Some(ref custom) = entry.custom {
+                // Convert ModelDef to ModelOption
+                if custom.models.is_empty() {
+                    return vec![];
+                }
+                return custom
+                    .models
+                    .iter()
+                    .map(|m| ModelOption::new(&m.id, &m.label, ""))
+                    .collect();
+            }
+        }
+        // Builtin agent
+        self.agent.models()
+    }
+
+    /// Check if model selection step should be shown (T504 SPEC-71f2742d FR-011)
+    pub fn has_models(&self) -> bool {
+        if let Some(ref entry) = self.selected_agent_entry {
+            if let Some(ref custom) = entry.custom {
+                return !custom.models.is_empty();
+            }
+        }
+        // Builtin agents always have models
+        true
+    }
+
+    /// Check if version command is available (T505 SPEC-71f2742d FR-012)
+    pub fn has_version_command(&self) -> bool {
+        if let Some(ref entry) = self.selected_agent_entry {
+            if let Some(ref custom) = entry.custom {
+                return custom.version_command.is_some();
+            }
+        }
+        // Builtin agents use installed version detection
+        true
+    }
+
+    /// Get version from custom agent's versionCommand (T505 SPEC-71f2742d FR-012)
+    pub fn get_custom_version(&self) -> Option<String> {
+        if let Some(ref entry) = self.selected_agent_entry {
+            if let Some(ref custom) = entry.custom {
+                if let Some(ref cmd) = custom.version_command {
+                    // Execute version command
+                    match std::process::Command::new("sh")
+                        .args(["-c", cmd])
+                        .output()
+                    {
+                        Ok(output) => {
+                            if output.status.success() {
+                                let version = String::from_utf8_lossy(&output.stdout)
+                                    .trim()
+                                    .to_string();
+                                if !version.is_empty() {
+                                    return Some(version);
+                                }
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Go to next step
     pub fn next_step(&mut self) {
         self.step = match self.step {
@@ -1109,23 +1180,54 @@ impl WizardState {
             }
             WizardStep::BranchNameInput => WizardStep::AgentSelect,
             WizardStep::AgentSelect => {
-                // Set model based on selected agent
-                let models = self.agent.models();
+                // Set model based on selected agent (T503 SPEC-71f2742d)
+                let models = self.get_models();
                 if !models.is_empty() {
                     self.model = models[0].id.clone();
+                    self.model_index = 0;
                 }
                 // Reset version fetch when agent changes
                 self.versions_fetched = false;
-                WizardStep::ModelSelect
+
+                // T504: Skip ModelSelect if no models defined
+                if !self.has_models() {
+                    // T506: Skip VersionSelect if no versionCommand
+                    if !self.has_version_command() {
+                        // Go directly to ExecutionMode
+                        let supported = self.supported_execution_modes();
+                        self.execution_mode_index = 0;
+                        if !supported.is_empty() {
+                            self.execution_mode = supported[0];
+                        }
+                        WizardStep::ExecutionMode
+                    } else {
+                        // Fetch versions
+                        self.fetch_versions_for_agent();
+                        WizardStep::VersionSelect
+                    }
+                } else {
+                    WizardStep::ModelSelect
+                }
             }
             WizardStep::ModelSelect => {
                 // Skip to version select unless Codex
                 if self.agent == CodingAgent::CodexCli {
                     WizardStep::ReasoningLevel
                 } else {
-                    // Fetch versions when entering VersionSelect (FR-063)
-                    self.fetch_versions_for_agent();
-                    WizardStep::VersionSelect
+                    // T506: Skip VersionSelect if custom agent without versionCommand
+                    if !self.has_version_command() {
+                        // Go directly to ExecutionMode
+                        let supported = self.supported_execution_modes();
+                        self.execution_mode_index = 0;
+                        if !supported.is_empty() {
+                            self.execution_mode = supported[0];
+                        }
+                        WizardStep::ExecutionMode
+                    } else {
+                        // Fetch versions when entering VersionSelect (FR-063)
+                        self.fetch_versions_for_agent();
+                        WizardStep::VersionSelect
+                    }
                 }
             }
             WizardStep::ReasoningLevel => {
@@ -1208,11 +1310,23 @@ impl WizardState {
             WizardStep::VersionSelect => {
                 if self.agent == CodingAgent::CodexCli {
                     WizardStep::ReasoningLevel
-                } else {
+                } else if self.has_models() {
                     WizardStep::ModelSelect
+                } else {
+                    // T504: Skip back to AgentSelect if no models
+                    WizardStep::AgentSelect
                 }
             }
-            WizardStep::ExecutionMode => WizardStep::VersionSelect,
+            WizardStep::ExecutionMode => {
+                // T506: Go back to VersionSelect if has version, else to ModelSelect if has models, else to AgentSelect
+                if self.has_version_command() {
+                    WizardStep::VersionSelect
+                } else if self.has_models() {
+                    WizardStep::ModelSelect
+                } else {
+                    WizardStep::AgentSelect
+                }
+            }
             WizardStep::SkipPermissions => WizardStep::ExecutionMode,
         };
         self.step = prev;
@@ -1332,7 +1446,7 @@ impl WizardState {
                 }
             }
             WizardStep::ModelSelect => {
-                let models = self.agent.models();
+                let models = self.get_models(); // T503: Use get_models() for custom agent support
                 let max = models.len().saturating_sub(1);
                 if self.model_index < max {
                     self.model_index += 1;
@@ -1417,9 +1531,10 @@ impl WizardState {
                 }
             }
             WizardStep::ModelSelect => {
+                let models = self.get_models(); // T503: Use get_models() for custom agent support
                 if self.model_index > 0 {
                     self.model_index -= 1;
-                    self.model = self.agent.models()[self.model_index].id.clone();
+                    self.model = models[self.model_index].id.clone();
                 }
             }
             WizardStep::ReasoningLevel => {
@@ -1651,7 +1766,7 @@ impl WizardState {
             WizardStep::IssueSelect => self.filtered_issues.len() + 1, // +1 for Skip option
             WizardStep::BranchNameInput => 0,                          // Text input, no list items
             WizardStep::AgentSelect => self.all_agents.len(),
-            WizardStep::ModelSelect => self.agent.models().len(),
+            WizardStep::ModelSelect => self.get_models().len(), // T503: Use get_models() for custom agent support
             WizardStep::ReasoningLevel => ReasoningLevel::all().len(),
             WizardStep::VersionSelect => self.version_options.len(),
             WizardStep::ExecutionMode => self.supported_execution_modes().len(), // T212
@@ -1735,8 +1850,9 @@ impl WizardState {
                 }
             }
             WizardStep::ModelSelect => {
+                let models = self.get_models(); // T503: Use get_models() for custom agent support
                 self.model_index = index;
-                self.model = self.agent.models()[index].id.clone();
+                self.model = models[index].id.clone();
             }
             WizardStep::ReasoningLevel => {
                 self.reasoning_level_index = index;
@@ -2024,7 +2140,8 @@ fn wizard_required_content_width(state: &WizardState) -> usize {
             }
         }
         WizardStep::ModelSelect => {
-            for model in state.agent.models() {
+            // T503: Use get_models() for custom agent support
+            for model in state.get_models() {
                 if let Some(desc) = &model.description {
                     consider(format!("  {} - {}", model.label, desc));
                 } else {
@@ -2499,7 +2616,8 @@ fn render_agent_step(state: &WizardState, frame: &mut Frame, area: Rect) {
 }
 
 fn render_model_step(state: &WizardState, frame: &mut Frame, area: Rect) {
-    let models = state.agent.models();
+    // T503: Use get_models() for custom agent support
+    let models = state.get_models();
     let available_width = area.width as usize;
 
     let items: Vec<ListItem> = models
