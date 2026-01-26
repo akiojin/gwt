@@ -789,13 +789,11 @@ impl Model {
                     item
                 })
                 .collect();
-            branch_items.extend(
-                remote_only_branches.iter().map(|b| {
-                    let mut item = BranchItem::from_branch_minimal(b, &worktrees);
-                    apply_last_tool_usage(&mut item, &repo_root, &tool_usage_map, &agent_history);
-                    item
-                }),
-            );
+            branch_items.extend(remote_only_branches.iter().map(|b| {
+                let mut item = BranchItem::from_branch_minimal(b, &worktrees);
+                apply_last_tool_usage(&mut item, &repo_root, &tool_usage_map, &agent_history);
+                item
+            }));
 
             // Sort branches by timestamp for those with sessions
             branch_items.iter_mut().for_each(|item| {
@@ -5992,12 +5990,7 @@ mod tests {
             .unwrap();
         let tool_usage_map: HashMap<String, ToolSessionEntry> = HashMap::new();
 
-        apply_last_tool_usage(
-            &mut item,
-            Path::new("/tmp/repo"),
-            &tool_usage_map,
-            &history,
-        );
+        apply_last_tool_usage(&mut item, Path::new("/tmp/repo"), &tool_usage_map, &history);
 
         assert_eq!(item.last_tool_usage.as_deref(), Some("Codex@latest"));
         assert_eq!(item.last_tool_id.as_deref(), Some("codex-cli"));
