@@ -88,12 +88,24 @@ fn run() -> Result<(), GwtError> {
                         // Run in background thread to avoid blocking agent startup
                         let history_repo_root = repo_root.clone();
                         let history_branch_name = launch_plan.config.branch_name.clone();
-                        let history_agent_id = launch_plan.config.agent.id().to_string();
-                        let history_agent_label = format!(
-                            "{}@{}",
-                            launch_plan.config.agent.label(),
-                            launch_plan.selected_version
-                        );
+                        // T603: Use custom agent ID/label when available (SPEC-71f2742d US6)
+                        let (history_agent_id, history_agent_label) = if let Some(ref custom) =
+                            launch_plan.config.custom_agent
+                        {
+                            (
+                                custom.id.clone(),
+                                format!("{}@{}", custom.display_name, launch_plan.selected_version),
+                            )
+                        } else {
+                            (
+                                launch_plan.config.agent.id().to_string(),
+                                format!(
+                                    "{}@{}",
+                                    launch_plan.config.agent.label(),
+                                    launch_plan.selected_version
+                                ),
+                            )
+                        };
                         thread::spawn(move || {
                             let mut agent_history = AgentHistoryStore::load().unwrap_or_default();
                             if let Err(e) = agent_history.record(
@@ -1058,6 +1070,11 @@ pub(crate) fn prepare_launch_plan(
 ) -> Result<LaunchPlan, GwtError> {
     progress(LaunchProgress::BuildingCommand);
 
+    // SPEC-71f2742d: Handle custom agents (T207)
+    if config.custom_agent.is_some() {
+        return prepare_custom_agent_launch_plan(config, progress);
+    }
+
     let env = build_launch_env(&config);
 
     let cmd_name = config.agent.command_name();
@@ -1137,6 +1154,84 @@ pub(crate) fn prepare_launch_plan(
         command_args,
         log_lines,
         selected_version,
+        install_plan,
+        env,
+    })
+}
+
+/// Prepare a launch plan for a custom coding agent (SPEC-71f2742d T207)
+fn prepare_custom_agent_launch_plan(
+    config: AgentLaunchConfig,
+    mut progress: impl FnMut(LaunchProgress),
+) -> Result<LaunchPlan, GwtError> {
+    use gwt_core::config::AgentType;
+
+    let custom = config
+        .custom_agent
+        .as_ref()
+        .expect("custom_agent must be Some when calling this function");
+
+    // Build environment including custom env vars (T209)
+    let mut env = build_launch_env(&config);
+    for (key, value) in &custom.env {
+        env.push((key.clone(), value.clone()));
+    }
+
+    // Determine executable and base args based on agent type (T207)
+    let (executable, base_args) = match custom.agent_type {
+        AgentType::Command => {
+            // PATH search for command
+            match which::which(&custom.command) {
+                Ok(path) => (path.to_string_lossy().to_string(), vec![]),
+                Err(_) => {
+                    return Err(GwtError::AgentNotFound {
+                        name: custom.command.clone(),
+                    });
+                }
+            }
+        }
+        AgentType::Path => {
+            // Use absolute path directly
+            let path = std::path::Path::new(&custom.command);
+            if !path.exists() {
+                return Err(GwtError::AgentNotFound {
+                    name: custom.command.clone(),
+                });
+            }
+            (custom.command.clone(), vec![])
+        }
+        AgentType::Bunx => {
+            // Use bunx to run the command
+            get_bunx_command(&custom.command, "latest")
+        }
+    };
+
+    // Build agent-specific arguments
+    let agent_args = build_agent_args(&config);
+    let mut command_args = base_args;
+    command_args.extend(agent_args.clone());
+
+    let version_label = "custom".to_string();
+    let execution_method = ExecutionMethod::Installed {
+        command: custom.command.clone(),
+    };
+
+    let log_lines = build_launch_log_lines(&config, &agent_args, &version_label, &execution_method);
+
+    progress(LaunchProgress::CheckingDependencies);
+    let install_plan = build_install_plan(&config.worktree_path, config.auto_install_deps);
+    if let InstallPlan::Install { manager } = &install_plan {
+        progress(LaunchProgress::InstallingDependencies {
+            manager: manager.clone(),
+        });
+    }
+
+    Ok(LaunchPlan {
+        config,
+        executable,
+        command_args,
+        log_lines,
+        selected_version: version_label,
         install_plan,
         env,
     })
@@ -1909,6 +2004,11 @@ fn apply_pty_wrapper(executable: &str, args: &[String]) -> (String, Vec<String>)
 
 /// Build agent-specific command line arguments
 fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
+    // SPEC-71f2742d: Handle custom agents
+    if let Some(ref custom) = config.custom_agent {
+        return build_custom_agent_args(custom, config);
+    }
+
     let mut args = Vec::new();
 
     match config.agent {
@@ -2033,6 +2133,39 @@ fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
     args
 }
 
+/// Build command line arguments for custom agents (SPEC-71f2742d T206)
+fn build_custom_agent_args(
+    custom: &gwt_core::config::CustomCodingAgent,
+    config: &AgentLaunchConfig,
+) -> Vec<String> {
+    let mut args = Vec::new();
+
+    // Add default args
+    args.extend(custom.default_args.clone());
+
+    // Add mode-specific args (T208)
+    if let Some(ref mode_args) = custom.mode_args {
+        match config.execution_mode {
+            ExecutionMode::Normal => {
+                args.extend(mode_args.normal.clone());
+            }
+            ExecutionMode::Continue => {
+                args.extend(mode_args.continue_mode.clone());
+            }
+            ExecutionMode::Resume => {
+                args.extend(mode_args.resume.clone());
+            }
+        }
+    }
+
+    // Add permission skip args if skip_permissions is true (T210)
+    if config.skip_permissions && !custom.permission_skip_args.is_empty() {
+        args.extend(custom.permission_skip_args.clone());
+    }
+
+    args
+}
+
 fn resolve_codex_flag_version(config: &AgentLaunchConfig) -> Option<String> {
     match config.version.as_str() {
         "installed" => get_command_version("codex", "--version"),
@@ -2128,6 +2261,7 @@ mod tests {
             worktree_path: PathBuf::from("/tmp/worktree"),
             branch_name: "feature/test".to_string(),
             agent,
+            custom_agent: None,
             model: Some("sonnet".to_string()),
             reasoning_level: None,
             version: "latest".to_string(),
