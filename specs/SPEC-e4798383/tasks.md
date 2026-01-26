@@ -82,6 +82,7 @@
 
 - [x] **T201** [US2] crates/gwt-cli/src/tui/screens/wizard.rs のhandle_issue_select_input()で空Enterでスキップする処理を実装
 - [x] **T202** [US2] スキップ時はselected_issueをNoneのまま維持し、new_branch_nameを空のまま次のステップへ遷移
+- [x] **T206** [US2] crates/gwt-cli/src/tui/screens/wizard.rs でIssue一覧0件時にIssue選択を自動スキップする処理を追加
 
 ### gh CLI未インストール時の自動スキップ
 
@@ -91,6 +92,7 @@
 ### テスト
 
 - [x] **T205** [P] [US2] スキップ時にnew_branch_nameが空のままであることのユニットテストを追加
+- [x] **T207** [P] [US2] Issue一覧0件時にIssueSelectを自動スキップするユニットテストを追加
 
 **MVP2チェックポイント**: US2完了後、Issue連携なしでも従来通りブランチ作成可能
 
