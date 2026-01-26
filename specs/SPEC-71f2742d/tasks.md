@@ -241,8 +241,8 @@ US1 (P1: tools.json読み込み)
 
 ### コミット
 
-- [ ] **T708** [デプロイ] 全変更を Conventional Commits 形式でコミット（`feat(custom-agent): ...`）
-- [ ] **T709** [デプロイ] `bunx commitlint --from HEAD~1 --to HEAD` でコミットメッセージを検証
+- [x] **T708** [デプロイ] 全変更を Conventional Commits 形式でコミット（`feat(custom-agent): ...`）
+- [x] **T709** [デプロイ] `bunx commitlint --from HEAD~1 --to HEAD` でコミットメッセージを検証
 
 ## タスク凡例
 
