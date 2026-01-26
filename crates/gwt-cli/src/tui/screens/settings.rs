@@ -4,8 +4,9 @@
 
 #![allow(dead_code)] // Screen components for future use
 
-use gwt_core::config::{CustomCodingAgent, Settings, ToolsConfig};
+use gwt_core::config::{AgentType, CustomCodingAgent, Settings, ToolsConfig};
 use ratatui::{prelude::*, widgets::*};
+use std::collections::HashMap;
 
 /// Settings categories
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +33,173 @@ pub enum CustomAgentMode {
     ConfirmDelete(String), // agent id
 }
 
+/// Form field for custom agent (T310, T311)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AgentFormField {
+    #[default]
+    Id,
+    DisplayName,
+    Type,
+    Command,
+}
+
+impl AgentFormField {
+    pub fn all() -> &'static [AgentFormField] {
+        &[
+            AgentFormField::Id,
+            AgentFormField::DisplayName,
+            AgentFormField::Type,
+            AgentFormField::Command,
+        ]
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            AgentFormField::Id => "ID",
+            AgentFormField::DisplayName => "Display Name",
+            AgentFormField::Type => "Type",
+            AgentFormField::Command => "Command",
+        }
+    }
+}
+
+/// Custom agent form state (T310, T311)
+#[derive(Debug, Clone, Default)]
+pub struct AgentFormState {
+    pub id: String,
+    pub display_name: String,
+    pub agent_type: AgentType,
+    pub command: String,
+    pub current_field: AgentFormField,
+    pub cursor: usize,
+}
+
+impl AgentFormState {
+    /// Create form for new agent
+    pub fn new() -> Self {
+        Self {
+            agent_type: AgentType::Command,
+            ..Default::default()
+        }
+    }
+
+    /// Create form from existing agent
+    pub fn from_agent(agent: &CustomCodingAgent) -> Self {
+        Self {
+            id: agent.id.clone(),
+            display_name: agent.display_name.clone(),
+            agent_type: agent.agent_type,
+            command: agent.command.clone(),
+            current_field: AgentFormField::Id,
+            cursor: agent.id.len(),
+        }
+    }
+
+    /// Build CustomCodingAgent from form
+    pub fn to_agent(&self) -> CustomCodingAgent {
+        CustomCodingAgent {
+            id: self.id.clone(),
+            display_name: self.display_name.clone(),
+            agent_type: self.agent_type,
+            command: self.command.clone(),
+            default_args: vec![],
+            mode_args: None,
+            permission_skip_args: vec![],
+            env: HashMap::new(),
+            models: vec![],
+            version_command: None,
+        }
+    }
+
+    /// Get current field value
+    fn current_value(&self) -> &str {
+        match self.current_field {
+            AgentFormField::Id => &self.id,
+            AgentFormField::DisplayName => &self.display_name,
+            AgentFormField::Type => "", // Type uses selection, not text
+            AgentFormField::Command => &self.command,
+        }
+    }
+
+    /// Get mutable reference to current field value
+    fn current_value_mut(&mut self) -> Option<&mut String> {
+        match self.current_field {
+            AgentFormField::Id => Some(&mut self.id),
+            AgentFormField::DisplayName => Some(&mut self.display_name),
+            AgentFormField::Type => None, // Type uses selection
+            AgentFormField::Command => Some(&mut self.command),
+        }
+    }
+
+    /// Move to next field
+    pub fn next_field(&mut self) {
+        let fields = AgentFormField::all();
+        let idx = fields
+            .iter()
+            .position(|f| *f == self.current_field)
+            .unwrap_or(0);
+        self.current_field = fields[(idx + 1) % fields.len()];
+        self.cursor = self.current_value().len();
+    }
+
+    /// Move to previous field
+    pub fn prev_field(&mut self) {
+        let fields = AgentFormField::all();
+        let idx = fields
+            .iter()
+            .position(|f| *f == self.current_field)
+            .unwrap_or(0);
+        self.current_field = fields[(idx + fields.len() - 1) % fields.len()];
+        self.cursor = self.current_value().len();
+    }
+
+    /// Insert character at cursor
+    pub fn insert_char(&mut self, c: char) {
+        let cursor = self.cursor;
+        if let Some(value) = self.current_value_mut() {
+            value.insert(cursor, c);
+        }
+        self.cursor += 1;
+    }
+
+    /// Delete character before cursor
+    pub fn delete_char(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+            let cursor = self.cursor;
+            if let Some(value) = self.current_value_mut() {
+                value.remove(cursor);
+            }
+        }
+    }
+
+    /// Cycle agent type (for Type field)
+    pub fn cycle_type(&mut self) {
+        self.agent_type = match self.agent_type {
+            AgentType::Command => AgentType::Path,
+            AgentType::Path => AgentType::Bunx,
+            AgentType::Bunx => AgentType::Command,
+        };
+    }
+
+    /// Validate form
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.id.is_empty() {
+            return Err("ID is required");
+        }
+        if !self.id.chars().all(|c| c.is_alphanumeric() || c == '-') {
+            return Err("ID must be alphanumeric with hyphens only");
+        }
+        if self.display_name.is_empty() {
+            return Err("Display Name is required");
+        }
+        if self.command.is_empty() {
+            return Err("Command is required");
+        }
+        Ok(())
+    }
+}
+
 /// Settings state
 #[derive(Debug)]
 pub struct SettingsState {
@@ -45,6 +213,10 @@ pub struct SettingsState {
     pub custom_agent_mode: CustomAgentMode,
     /// Selected custom agent index
     pub custom_agent_index: usize,
+    /// Form state for add/edit (T310, T311)
+    pub agent_form: AgentFormState,
+    /// Delete confirmation selection (true = Yes, false = No) (T312)
+    pub delete_confirm: bool,
 }
 
 impl Default for SettingsState {
@@ -57,6 +229,8 @@ impl Default for SettingsState {
             tools_config: None,
             custom_agent_mode: CustomAgentMode::default(),
             custom_agent_index: 0,
+            agent_form: AgentFormState::default(),
+            delete_confirm: false,
         }
     }
 }
@@ -219,6 +393,101 @@ impl SettingsState {
         self.category == SettingsCategory::CustomAgents
             && self.custom_agent_index == self.custom_agents().len()
     }
+
+    /// Enter add mode (T310)
+    pub fn enter_add_mode(&mut self) {
+        self.agent_form = AgentFormState::new();
+        self.custom_agent_mode = CustomAgentMode::Add;
+    }
+
+    /// Enter edit mode for selected agent (T311)
+    pub fn enter_edit_mode(&mut self) {
+        if let Some(agent) = self.selected_custom_agent() {
+            let id = agent.id.clone();
+            self.agent_form = AgentFormState::from_agent(agent);
+            self.custom_agent_mode = CustomAgentMode::Edit(id);
+        }
+    }
+
+    /// Enter delete confirmation mode (T312)
+    pub fn enter_delete_mode(&mut self) {
+        if let Some(agent) = self.selected_custom_agent() {
+            self.custom_agent_mode = CustomAgentMode::ConfirmDelete(agent.id.clone());
+            self.delete_confirm = false;
+        }
+    }
+
+    /// Cancel current mode and return to list
+    pub fn cancel_mode(&mut self) {
+        self.custom_agent_mode = CustomAgentMode::List;
+        self.agent_form = AgentFormState::default();
+        self.delete_confirm = false;
+    }
+
+    /// Save agent from form (returns true if successful)
+    pub fn save_agent(&mut self) -> Result<(), &'static str> {
+        self.agent_form.validate()?;
+        let agent = self.agent_form.to_agent();
+
+        match &self.custom_agent_mode {
+            CustomAgentMode::Add => {
+                if let Some(ref mut config) = self.tools_config {
+                    if !config.add_agent(agent) {
+                        return Err("Agent with this ID already exists");
+                    }
+                } else {
+                    let mut config = ToolsConfig::empty();
+                    config.add_agent(agent);
+                    self.tools_config = Some(config);
+                }
+            }
+            CustomAgentMode::Edit(_) => {
+                if let Some(ref mut config) = self.tools_config {
+                    if !config.update_agent(agent) {
+                        return Err("Agent not found");
+                    }
+                }
+            }
+            _ => return Err("Invalid mode for save"),
+        }
+
+        self.cancel_mode();
+        Ok(())
+    }
+
+    /// Delete selected agent (returns true if successful)
+    pub fn delete_agent(&mut self) -> bool {
+        if let CustomAgentMode::ConfirmDelete(ref id) = self.custom_agent_mode {
+            let id = id.clone();
+            if let Some(ref mut config) = self.tools_config {
+                if config.remove_agent(&id) {
+                    // Adjust index if needed
+                    if self.custom_agent_index > 0
+                        && self.custom_agent_index >= config.custom_coding_agents.len()
+                    {
+                        self.custom_agent_index =
+                            config.custom_coding_agents.len().saturating_sub(1);
+                    }
+                    self.cancel_mode();
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Check if in form mode
+    pub fn is_form_mode(&self) -> bool {
+        matches!(
+            self.custom_agent_mode,
+            CustomAgentMode::Add | CustomAgentMode::Edit(_)
+        )
+    }
+
+    /// Check if in delete confirmation mode
+    pub fn is_delete_mode(&self) -> bool {
+        matches!(self.custom_agent_mode, CustomAgentMode::ConfirmDelete(_))
+    }
 }
 
 fn selected_description(state: &SettingsState) -> &'static str {
@@ -287,7 +556,7 @@ pub fn render_settings(state: &SettingsState, frame: &mut Frame, area: Rect) {
     render_settings_content(state, frame, chunks[1]);
 
     // Instructions
-    render_instructions(frame, chunks[2]);
+    render_instructions(state, frame, chunks[2]);
 }
 
 fn render_tabs(state: &SettingsState, frame: &mut Frame, area: Rect) {
@@ -399,8 +668,21 @@ fn render_settings_content(state: &SettingsState, frame: &mut Frame, area: Rect)
     }
 }
 
-/// Render custom agents list (T309)
+/// Render custom agents content based on mode (T309, T310, T311, T312)
 fn render_custom_agents_content(state: &SettingsState, frame: &mut Frame, area: Rect) {
+    match &state.custom_agent_mode {
+        CustomAgentMode::List => render_custom_agents_list(state, frame, area),
+        CustomAgentMode::Add | CustomAgentMode::Edit(_) => {
+            render_agent_form(state, frame, area);
+        }
+        CustomAgentMode::ConfirmDelete(_) => {
+            render_delete_confirmation(state, frame, area);
+        }
+    }
+}
+
+/// Render custom agents list (T309)
+fn render_custom_agents_list(state: &SettingsState, frame: &mut Frame, area: Rect) {
     let agents = state.custom_agents();
 
     let (list_area, desc_area) = if area.height >= 6 {
@@ -464,8 +746,185 @@ fn render_custom_agents_content(state: &SettingsState, frame: &mut Frame, area: 
     }
 }
 
-fn render_instructions(frame: &mut Frame, area: Rect) {
-    let instructions = "[Tab] Category | [Up/Down] Select | [Enter] Edit | [Esc] Back";
+/// Render agent form for add/edit (T310, T311)
+fn render_agent_form(state: &SettingsState, frame: &mut Frame, area: Rect) {
+    let form = &state.agent_form;
+    let is_edit = matches!(state.custom_agent_mode, CustomAgentMode::Edit(_));
+    let title = if is_edit {
+        " Edit Custom Agent "
+    } else {
+        " Add Custom Agent "
+    };
+
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Form fields layout
+    let field_height = 3;
+    let fields = AgentFormField::all();
+    let constraints: Vec<Constraint> = fields
+        .iter()
+        .map(|_| Constraint::Length(field_height))
+        .chain(std::iter::once(Constraint::Min(0)))
+        .collect();
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints(constraints)
+        .split(inner);
+
+    for (i, field) in fields.iter().enumerate() {
+        let is_selected = *field == form.current_field;
+        let label = field.label();
+
+        let (value, show_cursor) = match field {
+            AgentFormField::Id => (form.id.as_str(), is_selected),
+            AgentFormField::DisplayName => (form.display_name.as_str(), is_selected),
+            AgentFormField::Type => {
+                let type_str = match form.agent_type {
+                    AgentType::Command => "command (PATH search)",
+                    AgentType::Path => "path (absolute path)",
+                    AgentType::Bunx => "bunx (bunx execution)",
+                };
+                (type_str, false)
+            }
+            AgentFormField::Command => (form.command.as_str(), is_selected),
+        };
+
+        // Build display text with cursor
+        let display_text = if show_cursor {
+            let mut text = String::from(value);
+            // Insert cursor indicator
+            let cursor_pos = form.cursor.min(text.len());
+            text.insert(cursor_pos, '|');
+            text
+        } else {
+            value.to_string()
+        };
+
+        let field_style = if is_selected {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default()
+        };
+
+        let field_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(field_style)
+            .title(format!(" {} ", label));
+
+        let hint = if is_selected && *field == AgentFormField::Type {
+            " (Space/Enter to cycle)"
+        } else {
+            ""
+        };
+
+        let paragraph = Paragraph::new(format!("{}{}", display_text, hint)).block(field_block);
+        frame.render_widget(paragraph, chunks[i]);
+    }
+}
+
+/// Render delete confirmation dialog (T312)
+fn render_delete_confirmation(state: &SettingsState, frame: &mut Frame, area: Rect) {
+    let agent_id = match &state.custom_agent_mode {
+        CustomAgentMode::ConfirmDelete(id) => id.as_str(),
+        _ => return,
+    };
+
+    // Find agent display name
+    let display_name = state
+        .custom_agents()
+        .iter()
+        .find(|a| a.id == agent_id)
+        .map(|a| a.display_name.as_str())
+        .unwrap_or(agent_id);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Delete Custom Agent ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([
+            Constraint::Length(2), // Question
+            Constraint::Length(3), // Buttons
+            Constraint::Min(0),    // Padding
+        ])
+        .split(inner);
+
+    // Question
+    let question = Paragraph::new(format!(
+        "Are you sure you want to delete '{}'?",
+        display_name
+    ))
+    .alignment(Alignment::Center);
+    frame.render_widget(question, chunks[0]);
+
+    // Buttons
+    let button_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(30),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+            Constraint::Percentage(30),
+        ])
+        .split(chunks[1]);
+
+    let yes_style = if state.delete_confirm {
+        Style::default()
+            .fg(Color::Red)
+            .add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default().fg(Color::Red)
+    };
+
+    let no_style = if !state.delete_confirm {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default().fg(Color::Green)
+    };
+
+    let yes_btn = Paragraph::new(" Yes ")
+        .alignment(Alignment::Center)
+        .style(yes_style)
+        .block(Block::default().borders(Borders::ALL));
+    let no_btn = Paragraph::new(" No ")
+        .alignment(Alignment::Center)
+        .style(no_style)
+        .block(Block::default().borders(Borders::ALL));
+
+    frame.render_widget(yes_btn, button_chunks[1]);
+    frame.render_widget(no_btn, button_chunks[2]);
+}
+
+fn render_instructions(state: &SettingsState, frame: &mut Frame, area: Rect) {
+    let instructions = if state.category == SettingsCategory::CustomAgents {
+        match &state.custom_agent_mode {
+            CustomAgentMode::List => {
+                if state.is_add_agent_selected() {
+                    "[Enter] Add | [Tab] Category | [Up/Down] Select | [Esc] Back"
+                } else {
+                    "[Enter] Edit | [D] Delete | [Tab] Category | [Up/Down] Select | [Esc] Back"
+                }
+            }
+            CustomAgentMode::Add | CustomAgentMode::Edit(_) => {
+                "[Tab/Up/Down] Field | [Space] Type | [Enter] Save | [Esc] Cancel"
+            }
+            CustomAgentMode::ConfirmDelete(_) => {
+                "[Left/Right] Select | [Enter] Confirm | [Esc] Cancel"
+            }
+        }
+    } else {
+        "[Tab] Category | [Up/Down] Select | [Enter] Edit | [Esc] Back"
+    };
     let paragraph =
         Paragraph::new(format!(" {} ", instructions)).block(Block::default().borders(Borders::ALL));
     frame.render_widget(paragraph, area);

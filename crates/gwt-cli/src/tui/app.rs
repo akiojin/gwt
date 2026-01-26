@@ -3048,6 +3048,97 @@ impl Model {
         }
     }
 
+    /// Handle Enter key in Settings screen (SPEC-71f2742d US3)
+    fn handle_settings_enter(&mut self) {
+        use super::screens::settings::{AgentFormField, CustomAgentMode, SettingsCategory};
+
+        if self.settings.category != SettingsCategory::CustomAgents {
+            return;
+        }
+
+        match &self.settings.custom_agent_mode {
+            CustomAgentMode::List => {
+                // Enter on list: add or edit
+                if self.settings.is_add_agent_selected() {
+                    self.settings.enter_add_mode();
+                } else if self.settings.selected_custom_agent().is_some() {
+                    self.settings.enter_edit_mode();
+                }
+            }
+            CustomAgentMode::Add | CustomAgentMode::Edit(_) => {
+                // Enter in form: save if on last field, otherwise cycle type or next field
+                if self.settings.agent_form.current_field == AgentFormField::Type {
+                    self.settings.agent_form.cycle_type();
+                } else if self.settings.agent_form.current_field == AgentFormField::Command {
+                    // On last field, try to save
+                    match self.settings.save_agent() {
+                        Ok(()) => {
+                            // Save to file
+                            if let Some(ref config) = self.settings.tools_config {
+                                if let Err(e) = config.save_global() {
+                                    self.settings.error_message =
+                                        Some(format!("Failed to save: {}", e));
+                                }
+                            }
+                        }
+                        Err(msg) => {
+                            self.settings.error_message = Some(msg.to_string());
+                        }
+                    }
+                } else {
+                    self.settings.agent_form.next_field();
+                }
+            }
+            CustomAgentMode::ConfirmDelete(_) => {
+                // Enter in delete confirm: execute if Yes selected
+                if self.settings.delete_confirm {
+                    if self.settings.delete_agent() {
+                        // Save to file
+                        if let Some(ref config) = self.settings.tools_config {
+                            if let Err(e) = config.save_global() {
+                                self.settings.error_message =
+                                    Some(format!("Failed to save: {}", e));
+                            }
+                        }
+                    }
+                } else {
+                    self.settings.cancel_mode();
+                }
+            }
+        }
+    }
+
+    /// Handle character input in Settings screen (SPEC-71f2742d US3)
+    fn handle_settings_char(&mut self, c: char) {
+        use super::screens::settings::{AgentFormField, CustomAgentMode, SettingsCategory};
+
+        if self.settings.category != SettingsCategory::CustomAgents {
+            return;
+        }
+
+        match &self.settings.custom_agent_mode {
+            CustomAgentMode::List => {
+                // 'd' or 'D' to enter delete mode
+                if (c == 'd' || c == 'D') && self.settings.selected_custom_agent().is_some() {
+                    self.settings.enter_delete_mode();
+                }
+            }
+            CustomAgentMode::Add | CustomAgentMode::Edit(_) => {
+                // In form mode: insert char or cycle type
+                if self.settings.agent_form.current_field == AgentFormField::Type {
+                    if c == ' ' {
+                        self.settings.agent_form.cycle_type();
+                    }
+                } else {
+                    self.settings.agent_form.insert_char(c);
+                }
+            }
+            CustomAgentMode::ConfirmDelete(_) => {
+                // In delete confirm: ignore chars
+            }
+        }
+    }
+
     /// Save AI settings from wizard
     fn save_ai_wizard_settings(&mut self) {
         let model = self
@@ -3271,6 +3362,10 @@ impl Model {
                 self.status_message_time = Some(Instant::now());
             }
             Message::NavigateTo(screen) => {
+                // SPEC-71f2742d US3: Load tools config when entering Settings
+                if matches!(screen, Screen::Settings) {
+                    self.settings.load_tools_config();
+                }
                 self.screen_stack.push(self.screen.clone());
                 self.screen = screen;
                 self.status_message = None;
@@ -3298,6 +3393,11 @@ impl Model {
                     if let Some(prev_screen) = self.screen_stack.pop() {
                         self.screen = prev_screen;
                     }
+                // SPEC-71f2742d US3: Cancel form/delete mode in Settings
+                } else if matches!(self.screen, Screen::Settings)
+                    && (self.settings.is_form_mode() || self.settings.is_delete_mode())
+                {
+                    self.settings.cancel_mode();
                 } else if matches!(self.screen, Screen::AISettingsWizard) {
                     // Go back in AI wizard or close if at first step
                     if self.ai_wizard.show_delete_confirm {
@@ -3569,7 +3669,10 @@ impl Model {
                 Screen::AISettingsWizard => {
                     self.handle_ai_wizard_enter();
                 }
-                _ => {}
+                // SPEC-71f2742d US3: Settings screen Enter handling
+                Screen::Settings => {
+                    self.handle_settings_enter();
+                }
             },
             Message::Char(c) => {
                 if matches!(self.screen, Screen::WorktreeCreate) {
@@ -3589,6 +3692,9 @@ impl Model {
                     self.logs.search.push(c);
                 } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
                     self.agent_mode.insert_char(c);
+                // SPEC-71f2742d US3: Settings screen character input
+                } else if matches!(self.screen, Screen::Settings) {
+                    self.handle_settings_char(c);
                 } else if matches!(self.screen, Screen::AISettingsWizard) {
                     if self.ai_wizard.show_delete_confirm {
                         // Handle delete confirmation
@@ -3657,6 +3763,9 @@ impl Model {
                     self.logs.search.pop();
                 } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
                     self.agent_mode.backspace();
+                // SPEC-71f2742d US3: Settings screen backspace
+                } else if matches!(self.screen, Screen::Settings) && self.settings.is_form_mode() {
+                    self.settings.agent_form.delete_char();
                 } else if matches!(self.screen, Screen::AISettingsWizard)
                     && self.ai_wizard.is_text_input()
                 {
@@ -3673,6 +3782,10 @@ impl Model {
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029c: Left/Right toggle selection in confirm dialog
                     self.confirm.toggle_selection();
+                // SPEC-71f2742d US3: Settings delete confirmation toggle
+                } else if matches!(self.screen, Screen::Settings) && self.settings.is_delete_mode()
+                {
+                    self.settings.delete_confirm = !self.settings.delete_confirm;
                 } else if matches!(self.screen, Screen::AISettingsWizard)
                     && self.ai_wizard.is_text_input()
                 {
@@ -3691,6 +3804,10 @@ impl Model {
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029c: Left/Right toggle selection in confirm dialog
                     self.confirm.toggle_selection();
+                // SPEC-71f2742d US3: Settings delete confirmation toggle
+                } else if matches!(self.screen, Screen::Settings) && self.settings.is_delete_mode()
+                {
+                    self.settings.delete_confirm = !self.settings.delete_confirm;
                 } else if matches!(self.screen, Screen::AISettingsWizard)
                     && self.ai_wizard.is_text_input()
                 {
@@ -5092,12 +5209,18 @@ impl Model {
             KeyCode::Tab => {
                 if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.switch_field();
+                // SPEC-71f2742d US3: Settings form field navigation
+                } else if matches!(self.screen, Screen::Settings) && self.settings.is_form_mode() {
+                    self.settings.agent_form.next_field();
                 }
                 None
             }
             KeyCode::BackTab => {
                 if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.switch_field();
+                // SPEC-71f2742d US3: Settings form field navigation (reverse)
+                } else if matches!(self.screen, Screen::Settings) && self.settings.is_form_mode() {
+                    self.settings.agent_form.prev_field();
                 }
                 None
             }

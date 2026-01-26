@@ -138,15 +138,15 @@ US1 (P1: tools.json読み込み)
 - [x] **T307** [US3] T306の後に `crates/gwt-cli/src/tui/screens/settings.rs` を新規作成（既存ファイル拡張）
 - [x] **T308** [US3] T307の後に `crates/gwt-cli/src/tui/screens/settings.rs` に SettingsState 構造体を定義
 - [x] **T309** [US3] T308の後に `crates/gwt-cli/src/tui/screens/settings.rs` にカスタムエージェント一覧表示を実装
-- [ ] **T310** [US3] T309の後に `crates/gwt-cli/src/tui/screens/settings.rs` に新規エージェント追加フォームを実装
-- [ ] **T311** [US3] T310の後に `crates/gwt-cli/src/tui/screens/settings.rs` にエージェント編集フォームを実装
-- [ ] **T312** [US3] T311の後に `crates/gwt-cli/src/tui/screens/settings.rs` にエージェント削除確認を実装
+- [x] **T310** [US3] T309の後に `crates/gwt-cli/src/tui/screens/settings.rs` に新規エージェント追加フォームを実装
+- [x] **T311** [US3] T310の後に `crates/gwt-cli/src/tui/screens/settings.rs` にエージェント編集フォームを実装
+- [x] **T312** [US3] T311の後に `crates/gwt-cli/src/tui/screens/settings.rs` にエージェント削除確認を実装
 - [x] **T313** [US3] T312の後に `crates/gwt-cli/src/tui/screens/mod.rs` に settings モジュールを追加（既存）
 
 ### App統合
 
-- [ ] **T314** [US3] T313の後に `crates/gwt-cli/src/tui/app.rs` に Screen::Settings を追加
-- [ ] **T315** [US3] T314の後に `crates/gwt-cli/src/tui/app.rs` に設定画面への遷移ロジックを追加
+- [x] **T314** [US3] T313の後に `crates/gwt-cli/src/tui/app.rs` に Screen::Settings を追加（既存）
+- [x] **T315** [US3] T314の後に `crates/gwt-cli/src/tui/app.rs` に設定画面への遷移ロジックを追加（既存）
 
 **✅ MVP3チェックポイント**: US1+US2+US3完了後、TUIからカスタムエージェントのCRUD操作が可能
 

@@ -9,10 +9,11 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
 /// Agent execution type
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentType {
     /// Execute via PATH search
+    #[default]
     Command,
     /// Execute via absolute path
     Path,
@@ -274,6 +275,18 @@ impl ToolsConfig {
             "Saved tools.json"
         );
         Ok(())
+    }
+
+    /// Save configuration to global path (~/.gwt/tools.json)
+    pub fn save_global(&self) -> std::io::Result<()> {
+        if let Some(path) = Self::global_path() {
+            self.save(&path)
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Could not determine global tools.json path",
+            ))
+        }
     }
 
     /// Add a new agent
