@@ -1,6 +1,17 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+## [6.21.0] - 2026-01-26
+
+### Bug Fixes
+
+- ブランチ一覧の履歴表示をリモートにも適用
+
+### Miscellaneous Tasks
+
+- Apply cargo fmt
+
 ## [6.20.1] - 2026-01-26
 
 ### Bug Fixes
