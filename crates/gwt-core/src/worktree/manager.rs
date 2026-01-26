@@ -133,12 +133,14 @@ impl WorktreeManager {
         if !Branch::exists(&self.repo_root, branch_name)? {
             let normalized_branch = normalize_remote_ref(branch_name);
             let remotes = Remote::list(&self.repo_root)?;
-            let mut remote_branch = resolve_remote_branch(&self.repo_root, normalized_branch, &remotes)?;
+            let mut remote_branch =
+                resolve_remote_branch(&self.repo_root, normalized_branch, &remotes)?;
 
             if remote_branch.is_none() && !remotes.is_empty() {
                 // Refresh remote refs once if branch isn't found locally
                 self.repo.fetch_all()?;
-                remote_branch = resolve_remote_branch(&self.repo_root, normalized_branch, &remotes)?;
+                remote_branch =
+                    resolve_remote_branch(&self.repo_root, normalized_branch, &remotes)?;
             }
 
             if let Some((remote, branch)) = remote_branch {
@@ -744,7 +746,10 @@ mod tests {
         let remote_path = remote.path().to_string_lossy().to_string();
         run_git_in(remote.path(), &["init", "--bare"]);
 
-        run_git_in(temp.path(), &["remote", "add", "origin", remote_path.as_str()]);
+        run_git_in(
+            temp.path(),
+            &["remote", "add", "origin", remote_path.as_str()],
+        );
 
         let default_branch = git_stdout(temp.path(), &["rev-parse", "--abbrev-ref", "HEAD"]);
         run_git_in(
@@ -768,9 +773,7 @@ mod tests {
         run_git_in(creator.path(), &["push", "origin", "feature/issue-42"]);
 
         assert!(!Branch::exists(temp.path(), "feature/issue-42").unwrap());
-        assert!(
-            !Branch::remote_exists(temp.path(), "origin", "feature/issue-42").unwrap()
-        );
+        assert!(!Branch::remote_exists(temp.path(), "origin", "feature/issue-42").unwrap());
 
         let manager = WorktreeManager::new(temp.path()).unwrap();
         let wt = manager.create_for_branch("feature/issue-42").unwrap();
