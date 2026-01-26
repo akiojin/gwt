@@ -1,6 +1,13 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+## [6.17.1] - 2026-01-26
+
+### Bug Fixes
+
+- Add Skip option to GitHub Issue selection (#794)
+
 ## [6.17.0] - 2026-01-26
 
 ### Bug Fixes
