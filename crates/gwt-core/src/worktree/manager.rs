@@ -91,6 +91,14 @@ impl WorktreeManager {
             .find(|wt| wt.branch.as_deref() == Some(branch_name)))
     }
 
+    /// Get a specific worktree by branch name without status checks (fast path)
+    pub fn get_by_branch_basic(&self, branch_name: &str) -> Result<Option<Worktree>> {
+        let worktrees = self.list_basic()?;
+        Ok(worktrees
+            .into_iter()
+            .find(|wt| wt.branch.as_deref() == Some(branch_name)))
+    }
+
     /// Get a specific worktree by path
     pub fn get_by_path(&self, path: &Path) -> Result<Option<Worktree>> {
         let worktrees = self.list()?;
@@ -601,6 +609,28 @@ mod tests {
         let wt = manager.create_for_branch("feature/existing").unwrap();
         assert_eq!(wt.branch, Some("feature/existing".to_string()));
         assert!(wt.path.exists());
+    }
+
+    #[test]
+    fn test_get_by_branch_basic_skips_status_checks() {
+        let temp = create_test_repo();
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+
+        let wt = manager.create_new_branch("feature/dirty", None).unwrap();
+        std::fs::write(wt.path.join("dirty.txt"), "dirty").unwrap();
+
+        let basic = manager
+            .get_by_branch_basic("feature/dirty")
+            .unwrap()
+            .expect("worktree should exist");
+        assert_eq!(basic.branch.as_deref(), Some("feature/dirty"));
+        assert!(!basic.has_changes);
+
+        let detailed = manager
+            .get_by_branch("feature/dirty")
+            .unwrap()
+            .expect("worktree should exist");
+        assert!(detailed.has_changes);
     }
 
     #[test]

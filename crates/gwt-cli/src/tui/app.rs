@@ -3822,7 +3822,10 @@ impl Model {
                 }
             };
 
-            let existing_wt = manager.get_by_branch(&request.branch_name).ok().flatten();
+            let existing_wt = manager
+                .get_by_branch_basic(&request.branch_name)
+                .ok()
+                .flatten();
             let result = if let Some(wt) = existing_wt {
                 Ok(wt)
             } else if request.create_new_branch {
