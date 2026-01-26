@@ -20,8 +20,8 @@ pub enum SettingsCategory {
     Agent,
     /// Custom coding agents management (SPEC-71f2742d US3)
     CustomAgents,
-    /// Profile management (name, description, environment variables)
-    Profile,
+    /// Environment variables management (profile env settings)
+    Environment,
     /// AI settings management (endpoint, key, model)
     AISettings,
 }
@@ -573,7 +573,7 @@ impl SettingsState {
             // CustomAgents uses separate rendering (T309)
             SettingsCategory::CustomAgents => vec![],
             // Profile uses separate rendering
-            SettingsCategory::Profile => vec![],
+            SettingsCategory::Environment => vec![],
             // AISettings uses separate rendering
             SettingsCategory::AISettings => vec![],
         }
@@ -594,8 +594,8 @@ impl SettingsState {
             SettingsCategory::Worktree => SettingsCategory::Web,
             SettingsCategory::Web => SettingsCategory::Agent,
             SettingsCategory::Agent => SettingsCategory::CustomAgents,
-            SettingsCategory::CustomAgents => SettingsCategory::Profile,
-            SettingsCategory::Profile => SettingsCategory::AISettings,
+            SettingsCategory::CustomAgents => SettingsCategory::Environment,
+            SettingsCategory::Environment => SettingsCategory::AISettings,
             SettingsCategory::AISettings => SettingsCategory::General,
         };
         self.reset_category_state();
@@ -609,8 +609,8 @@ impl SettingsState {
             SettingsCategory::Web => SettingsCategory::Worktree,
             SettingsCategory::Agent => SettingsCategory::Web,
             SettingsCategory::CustomAgents => SettingsCategory::Agent,
-            SettingsCategory::Profile => SettingsCategory::CustomAgents,
-            SettingsCategory::AISettings => SettingsCategory::Profile,
+            SettingsCategory::Environment => SettingsCategory::CustomAgents,
+            SettingsCategory::AISettings => SettingsCategory::Environment,
         };
         self.reset_category_state();
     }
@@ -633,7 +633,7 @@ impl SettingsState {
             if self.custom_agent_index < max {
                 self.custom_agent_index += 1;
             }
-        } else if self.category == SettingsCategory::Profile {
+        } else if self.category == SettingsCategory::Environment {
             // Check if in EnvEdit mode
             if matches!(self.profile_mode, ProfileMode::EnvEdit(_)) {
                 // Navigate env vars (+1 for "Add new" option)
@@ -664,7 +664,7 @@ impl SettingsState {
             if self.custom_agent_index > 0 {
                 self.custom_agent_index -= 1;
             }
-        } else if self.category == SettingsCategory::Profile {
+        } else if self.category == SettingsCategory::Environment {
             // Check if in EnvEdit mode
             if matches!(self.profile_mode, ProfileMode::EnvEdit(_)) {
                 // Navigate env vars
@@ -835,7 +835,7 @@ impl SettingsState {
 
     /// Check if "Add new profile" option is selected
     pub fn is_add_profile_selected(&self) -> bool {
-        self.category == SettingsCategory::Profile
+        self.category == SettingsCategory::Environment
             && self.profile_index == self.profile_names().len()
     }
 
@@ -1050,13 +1050,13 @@ fn selected_description(state: &SettingsState) -> &'static str {
                 "Manage custom coding agents defined in ~/.gwt/tools.json."
             }
         }
-        SettingsCategory::Profile => {
+        SettingsCategory::Environment => {
             if state.is_add_profile_selected() {
-                "Add a new profile to profiles.yaml."
+                "Add a new environment profile."
             } else if state.selected_profile().is_some() {
                 "Enter=Edit, E=Env vars, A=Toggle active, D=Delete"
             } else {
-                "Manage profiles (name, description, environment variables)."
+                "Manage environment profiles (name, description, env vars)."
             }
         }
         SettingsCategory::AISettings => {
@@ -1093,7 +1093,7 @@ fn render_tabs(state: &SettingsState, frame: &mut Frame, area: Rect) {
         ("Web", SettingsCategory::Web),
         ("Agent", SettingsCategory::Agent),
         ("Custom", SettingsCategory::CustomAgents), // T309
-        ("Profile", SettingsCategory::Profile),
+        ("Env", SettingsCategory::Environment),
         ("AI", SettingsCategory::AISettings),
     ];
 
@@ -1120,7 +1120,7 @@ fn render_tabs(state: &SettingsState, frame: &mut Frame, area: Rect) {
             SettingsCategory::Web => 2,
             SettingsCategory::Agent => 3,
             SettingsCategory::CustomAgents => 4,
-            SettingsCategory::Profile => 5,
+            SettingsCategory::Environment => 5,
             SettingsCategory::AISettings => 6,
         });
 
@@ -1135,7 +1135,7 @@ fn render_settings_content(state: &SettingsState, frame: &mut Frame, area: Rect)
     }
 
     // Profile has special rendering
-    if state.category == SettingsCategory::Profile {
+    if state.category == SettingsCategory::Environment {
         render_profile_content(state, frame, area);
         return;
     }
@@ -1191,7 +1191,7 @@ fn render_settings_content(state: &SettingsState, frame: &mut Frame, area: Rect)
         SettingsCategory::Web => "Web UI",
         SettingsCategory::Agent => "Agent",
         SettingsCategory::CustomAgents => "Custom Agents", // Handled separately
-        SettingsCategory::Profile => "Profile",            // Handled separately
+        SettingsCategory::Environment => "Environment",        // Handled separately
         SettingsCategory::AISettings => "AI",              // Handled separately
     };
 
@@ -1780,7 +1780,7 @@ fn render_instructions(state: &SettingsState, frame: &mut Frame, area: Rect) {
                 "[Left/Right] Select | [Enter] Confirm | [Esc] Cancel"
             }
         }
-    } else if state.category == SettingsCategory::Profile {
+    } else if state.category == SettingsCategory::Environment {
         match &state.profile_mode {
             ProfileMode::List => {
                 if state.is_add_profile_selected() {

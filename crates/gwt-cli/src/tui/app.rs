@@ -3108,7 +3108,7 @@ impl Model {
                     }
                 }
             }
-            SettingsCategory::Profile => {
+            SettingsCategory::Environment => {
                 match &self.settings.profile_mode {
                     ProfileMode::List => {
                         // Enter on list: add or edit
@@ -3229,7 +3229,7 @@ impl Model {
                     }
                 }
             }
-            SettingsCategory::Profile => {
+            SettingsCategory::Environment => {
                 match &self.settings.profile_mode {
                     ProfileMode::List => {
                         // 'd' or 'D' to enter delete mode
