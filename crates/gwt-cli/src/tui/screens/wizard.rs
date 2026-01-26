@@ -1109,21 +1109,16 @@ impl WizardState {
             if let Some(ref custom) = entry.custom {
                 if let Some(ref cmd) = custom.version_command {
                     // Execute version command
-                    match std::process::Command::new("sh")
-                        .args(["-c", cmd])
-                        .output()
+                    if let Ok(output) =
+                        std::process::Command::new("sh").args(["-c", cmd]).output()
                     {
-                        Ok(output) => {
-                            if output.status.success() {
-                                let version = String::from_utf8_lossy(&output.stdout)
-                                    .trim()
-                                    .to_string();
-                                if !version.is_empty() {
-                                    return Some(version);
-                                }
+                        if output.status.success() {
+                            let version =
+                                String::from_utf8_lossy(&output.stdout).trim().to_string();
+                            if !version.is_empty() {
+                                return Some(version);
                             }
                         }
-                        Err(_) => {}
                     }
                 }
             }

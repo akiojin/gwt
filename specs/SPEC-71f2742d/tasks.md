@@ -230,14 +230,14 @@ US1 (P1: tools.json読み込み)
 
 ### 品質チェック
 
-- [ ] **T703** [統合] `cargo clippy --all-targets --all-features -- -D warnings` をローカルで実行し、警告を修正
-- [ ] **T704** [統合] `cargo fmt` を実行してフォーマット統一
-- [ ] **T705** [統合] `cargo test` で全テストパスを確認
+- [x] **T703** [統合] `cargo clippy --all-targets --all-features -- -D warnings` をローカルで実行し、警告を修正
+- [x] **T704** [統合] `cargo fmt` を実行してフォーマット統一
+- [x] **T705** [統合] `cargo test` で全テストパスを確認
 
 ### ドキュメント
 
-- [ ] **T706** [P] [ドキュメント] `README.md` のカスタムエージェント説明を更新（tools.json スキーマ、使用方法）
-- [ ] **T707** [P] [ドキュメント] `README.ja.md` に同内容を追加
+- [x] **T706** [P] [ドキュメント] `README.md` のカスタムエージェント説明を更新（tools.json スキーマ、使用方法）
+- [x] **T707** [P] [ドキュメント] `README.ja.md` に同内容を追加
 
 ### コミット
 
