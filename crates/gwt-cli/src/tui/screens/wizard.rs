@@ -8,6 +8,7 @@
 
 #![allow(dead_code)]
 
+use gwt_core::config::{CustomCodingAgent, ToolsConfig};
 use gwt_core::git::GitHubIssue;
 use ratatui::{prelude::*, widgets::*};
 use serde::Deserialize;
@@ -221,6 +222,120 @@ impl CodingAgent {
             CodingAgent::OpenCode => "opencode",
         }
     }
+}
+
+/// Unified agent entry for display (SPEC-71f2742d)
+/// Represents both builtin and custom agents in a unified way
+#[derive(Debug, Clone)]
+pub struct AgentEntry {
+    /// Unique identifier
+    pub id: String,
+    /// Display name
+    pub display_name: String,
+    /// Display color
+    pub color: Color,
+    /// Whether this is a builtin agent
+    pub is_builtin: bool,
+    /// Whether the agent is installed/available
+    pub is_installed: bool,
+    /// Associated builtin agent (if any)
+    pub builtin: Option<CodingAgent>,
+    /// Associated custom agent (if any)
+    pub custom: Option<CustomCodingAgent>,
+}
+
+impl AgentEntry {
+    /// Create from builtin agent
+    pub fn from_builtin(agent: CodingAgent, is_installed: bool) -> Self {
+        Self {
+            id: agent.id().to_string(),
+            display_name: agent.label().to_string(),
+            color: agent.color(),
+            is_builtin: true,
+            is_installed,
+            builtin: Some(agent),
+            custom: None,
+        }
+    }
+
+    /// Create from custom agent with auto-assigned color
+    pub fn from_custom(agent: CustomCodingAgent, color: Color, is_installed: bool) -> Self {
+        Self {
+            id: agent.id.clone(),
+            display_name: agent.display_name.clone(),
+            color,
+            is_builtin: false,
+            is_installed,
+            builtin: None,
+            custom: Some(agent),
+        }
+    }
+}
+
+/// Colors for custom agents (SPEC-71f2742d)
+/// Cycles through: Blue -> Red -> White -> Gray
+const CUSTOM_AGENT_COLORS: [Color; 4] = [Color::Blue, Color::Red, Color::White, Color::Gray];
+
+/// Check if a custom agent command is installed
+fn is_custom_agent_installed(agent: &CustomCodingAgent) -> bool {
+    use gwt_core::config::AgentType;
+
+    match agent.agent_type {
+        AgentType::Command => {
+            // Check if command exists in PATH
+            Command::new("which")
+                .arg(&agent.command)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+        AgentType::Path => {
+            // Check if path exists
+            Path::new(&agent.command).exists()
+        }
+        AgentType::Bunx => {
+            // Check if bunx is available
+            Command::new("which")
+                .arg("bunx")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+    }
+}
+
+/// Get all agents (builtin + custom) as unified entries (SPEC-71f2742d T115)
+pub fn get_all_agents(
+    installed_cache: &HashMap<CodingAgent, Option<InstalledVersionInfo>>,
+) -> Vec<AgentEntry> {
+    let mut entries = Vec::new();
+
+    // Add builtin agents first
+    for agent in CodingAgent::all() {
+        let is_installed = installed_cache
+            .get(agent)
+            .map(|v| v.is_some())
+            .unwrap_or(false);
+        entries.push(AgentEntry::from_builtin(*agent, is_installed));
+    }
+
+    // Load and add custom agents
+    let repo_root = std::env::current_dir().unwrap_or_default();
+    let tools_config = ToolsConfig::load_merged(&repo_root);
+    let custom_agents = tools_config.custom_coding_agents;
+
+    for (idx, custom) in custom_agents.into_iter().enumerate() {
+        // Skip if ID conflicts with builtin
+        if entries.iter().any(|e| e.id == custom.id) {
+            continue;
+        }
+
+        let color = CUSTOM_AGENT_COLORS[idx % CUSTOM_AGENT_COLORS.len()];
+        let is_installed = is_custom_agent_installed(&custom);
+        entries.push(AgentEntry::from_custom(custom, color, is_installed));
+    }
+
+    entries
 }
 
 /// Fetch package versions from npm registry (FR-063, FR-064)
@@ -635,6 +750,11 @@ pub struct WizardState {
     pub issue_loading: bool,
     /// Issue loading error message
     pub issue_error: Option<String>,
+    // Custom agents (SPEC-71f2742d)
+    /// All available agents (builtin + custom)
+    pub all_agents: Vec<AgentEntry>,
+    /// Selected agent entry (may be custom)
+    pub selected_agent_entry: Option<AgentEntry>,
     /// Existing branch for selected issue (FR-011 duplicate detection)
     pub issue_existing_branch: Option<String>,
 }
@@ -717,6 +837,9 @@ impl WizardState {
         self.quick_start_index = 0;
         self.has_running_agent = false;
         self.running_agent_pane_idx = None;
+        // Load all agents (builtin + custom)
+        self.all_agents = get_all_agents(&self.installed_cache);
+        self.selected_agent_entry = self.all_agents.first().cloned();
     }
 
     /// Get branch action options based on running agent status
@@ -1140,10 +1263,16 @@ impl WizardState {
                 }
             }
             WizardStep::AgentSelect => {
-                let max = CodingAgent::all().len().saturating_sub(1);
+                let max = self.all_agents.len().saturating_sub(1);
                 if self.agent_index < max {
                     self.agent_index += 1;
-                    self.agent = CodingAgent::all()[self.agent_index];
+                    self.selected_agent_entry = self.all_agents.get(self.agent_index).cloned();
+                    // Keep builtin agent in sync if it's a builtin
+                    if let Some(ref entry) = self.selected_agent_entry {
+                        if let Some(builtin) = entry.builtin {
+                            self.agent = builtin;
+                        }
+                    }
                 }
             }
             WizardStep::ModelSelect => {
@@ -1220,7 +1349,13 @@ impl WizardState {
             WizardStep::AgentSelect => {
                 if self.agent_index > 0 {
                     self.agent_index -= 1;
-                    self.agent = CodingAgent::all()[self.agent_index];
+                    self.selected_agent_entry = self.all_agents.get(self.agent_index).cloned();
+                    // Keep builtin agent in sync if it's a builtin
+                    if let Some(ref entry) = self.selected_agent_entry {
+                        if let Some(builtin) = entry.builtin {
+                            self.agent = builtin;
+                        }
+                    }
                 }
             }
             WizardStep::ModelSelect => {
@@ -1452,7 +1587,7 @@ impl WizardState {
             WizardStep::BranchTypeSelect => BranchType::all().len(),
             WizardStep::IssueSelect => self.filtered_issues.len() + 1, // +1 for Skip option
             WizardStep::BranchNameInput => 0,                          // Text input, no list items
-            WizardStep::AgentSelect => CodingAgent::all().len(),
+            WizardStep::AgentSelect => self.all_agents.len(),
             WizardStep::ModelSelect => self.agent.models().len(),
             WizardStep::ReasoningLevel => ReasoningLevel::all().len(),
             WizardStep::VersionSelect => self.version_options.len(),
@@ -1520,7 +1655,14 @@ impl WizardState {
             }
             WizardStep::AgentSelect => {
                 self.agent_index = index;
-                self.agent = CodingAgent::all()[index];
+                // Update selected_agent_entry for custom agent support
+                self.selected_agent_entry = self.all_agents.get(index).cloned();
+                // Keep builtin agent in sync if it's a builtin
+                if let Some(ref entry) = self.selected_agent_entry {
+                    if let Some(builtin) = entry.builtin {
+                        self.agent = builtin;
+                    }
+                }
             }
             WizardStep::ModelSelect => {
                 self.model_index = index;
@@ -2229,25 +2371,45 @@ fn render_agent_step(state: &WizardState, frame: &mut Frame, area: Rect) {
         0
     };
 
-    let agents = CodingAgent::all();
-    let items: Vec<ListItem> = agents
-        .iter()
-        .enumerate()
-        .map(|(i, agent)| {
-            let is_selected = i == state.agent_index;
-            let prefix = if is_selected { "> " } else { "  " };
-            let style = if is_selected {
-                Style::default().bg(Color::Cyan).fg(Color::Black)
+    // Use unified agent list (builtin + custom) - SPEC-71f2742d
+    let mut items: Vec<ListItem> = Vec::new();
+    let builtin_count = CodingAgent::all().len();
+    let has_custom = state.all_agents.len() > builtin_count;
+
+    for (i, entry) in state.all_agents.iter().enumerate() {
+        // Add separator before custom agents (T117)
+        if i == builtin_count && has_custom {
+            let separator =
+                ListItem::new("  --- Custom ---").style(Style::default().fg(Color::DarkGray));
+            items.push(separator);
+        }
+
+        let is_selected = i == state.agent_index;
+        let prefix = if is_selected { "> " } else { "  " };
+
+        // T118: Grayed out for uninstalled agents
+        let style = if !entry.is_installed {
+            if is_selected {
+                Style::default().bg(Color::DarkGray).fg(Color::Black)
             } else {
-                Style::default().fg(agent.color())
-            };
-            let text = truncate_with_ellipsis(
-                &format!("{}{}", prefix, agent.label()),
-                area.width as usize,
-            );
-            ListItem::new(text).style(style)
-        })
-        .collect();
+                Style::default().fg(Color::DarkGray)
+            }
+        } else if is_selected {
+            Style::default().bg(Color::Cyan).fg(Color::Black)
+        } else {
+            Style::default().fg(entry.color)
+        };
+
+        // Add "Not installed" suffix for unavailable agents
+        let label = if entry.is_installed {
+            entry.display_name.clone()
+        } else {
+            format!("{} (Not installed)", entry.display_name)
+        };
+
+        let text = truncate_with_ellipsis(&format!("{}{}", prefix, label), area.width as usize);
+        items.push(ListItem::new(text).style(style));
+    }
 
     let list_area = Rect::new(
         area.x,
