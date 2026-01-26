@@ -5733,7 +5733,11 @@ fn build_tmux_command(
 
 fn resolve_remote_head(repo_root: &Path, remote: &str) -> Option<String> {
     let output = Command::new("git")
-        .args(["symbolic-ref", "--quiet", &format!("refs/remotes/{remote}/HEAD")])
+        .args([
+            "symbolic-ref",
+            "--quiet",
+            &format!("refs/remotes/{remote}/HEAD"),
+        ])
         .current_dir(repo_root)
         .output()
         .ok()?;
