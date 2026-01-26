@@ -171,6 +171,7 @@ mod tests {
             reasoning_level: None,
             skip_permissions: Some(true),
             tool_version: Some("latest".to_string()),
+            collaboration_modes: None,
             timestamp: 1_700_000_000_000,
         };
         save_session_entry(repo.path(), entry).unwrap();

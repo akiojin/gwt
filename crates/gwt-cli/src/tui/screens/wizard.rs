@@ -8,6 +8,7 @@
 
 #![allow(dead_code)]
 
+use gwt_core::agent::codex::supports_collaboration_modes;
 use gwt_core::git::GitHubIssue;
 use ratatui::{prelude::*, widgets::*};
 use serde::Deserialize;
@@ -106,6 +107,8 @@ pub enum WizardStep {
     ModelSelect,
     ReasoningLevel, // Codex only
     VersionSelect,
+    /// Collaboration modes (Codex v0.91.0+, SPEC-fdebd681)
+    CollaborationModes,
     ExecutionMode,
     SkipPermissions,
     // New branch flow
@@ -593,6 +596,8 @@ pub struct WizardState {
     pub execution_mode_index: usize,
     /// Skip permissions
     pub skip_permissions: bool,
+    /// Collaboration modes (Codex v0.91.0+, SPEC-fdebd681)
+    pub collaboration_modes: bool,
     /// Session ID for resume/continue
     pub session_id: Option<String>,
     /// Scroll offset for popup content
@@ -706,6 +711,7 @@ impl WizardState {
         self.execution_mode = ExecutionMode::default();
         self.execution_mode_index = 0;
         self.skip_permissions = false;
+        self.collaboration_modes = false;
         self.session_id = None;
         self.branch_type = BranchType::default();
         self.new_branch_name.clear();
@@ -737,6 +743,31 @@ impl WizardState {
             // Each entry has 2 options, plus 1 "Choose different" at the end
             self.quick_start_entries.len() * 2 + 1
         }
+    }
+
+    /// Resolve version string to semantic version for collaboration_modes check (SPEC-fdebd681)
+    fn resolve_version_for_collaboration_modes(&self) -> Option<String> {
+        match self.version.as_str() {
+            "latest" => Some("99.99.99".to_string()), // latest always supports
+            "installed" => {
+                // Get installed version from cache
+                self.installed_cache
+                    .get(&CodingAgent::CodexCli)
+                    .and_then(|info| info.as_ref())
+                    .map(|info| info.version.clone())
+            }
+            v => Some(v.to_string()), // concrete version
+        }
+    }
+
+    /// Check if CollaborationModes step should be shown (SPEC-fdebd681)
+    fn should_show_collaboration_modes(&self) -> bool {
+        self.agent == CodingAgent::CodexCli
+            && self
+                .resolve_version_for_collaboration_modes()
+                .as_deref()
+                .map(|v| supports_collaboration_modes(Some(v)))
+                .unwrap_or(false)
     }
 
     /// Get the selected Quick Start action and tool index (FR-050)
@@ -971,7 +1002,15 @@ impl WizardState {
                 self.fetch_versions_for_agent();
                 WizardStep::VersionSelect
             }
-            WizardStep::VersionSelect => WizardStep::ExecutionMode,
+            WizardStep::VersionSelect => {
+                // SPEC-fdebd681: Show CollaborationModes for Codex v0.91.0+
+                if self.should_show_collaboration_modes() {
+                    WizardStep::CollaborationModes
+                } else {
+                    WizardStep::ExecutionMode
+                }
+            }
+            WizardStep::CollaborationModes => WizardStep::ExecutionMode,
             WizardStep::ExecutionMode => WizardStep::SkipPermissions,
             WizardStep::SkipPermissions => WizardStep::SkipPermissions, // Final step
         };
@@ -1033,7 +1072,15 @@ impl WizardState {
                     WizardStep::ModelSelect
                 }
             }
-            WizardStep::ExecutionMode => WizardStep::VersionSelect,
+            WizardStep::CollaborationModes => WizardStep::VersionSelect,
+            WizardStep::ExecutionMode => {
+                // SPEC-fdebd681: Go back to CollaborationModes if shown
+                if self.should_show_collaboration_modes() {
+                    WizardStep::CollaborationModes
+                } else {
+                    WizardStep::VersionSelect
+                }
+            }
             WizardStep::SkipPermissions => WizardStep::ExecutionMode,
         };
         self.step = prev;
@@ -1170,6 +1217,10 @@ impl WizardState {
                     self.ensure_version_visible();
                 }
             }
+            WizardStep::CollaborationModes => {
+                // Toggle collaboration_modes (SPEC-fdebd681)
+                self.collaboration_modes = !self.collaboration_modes;
+            }
             WizardStep::ExecutionMode => {
                 let max = ExecutionMode::all().len().saturating_sub(1);
                 if self.execution_mode_index < max {
@@ -1242,6 +1293,10 @@ impl WizardState {
                     // FR-062: Scroll to keep cursor in view
                     self.ensure_version_visible();
                 }
+            }
+            WizardStep::CollaborationModes => {
+                // Toggle collaboration_modes (SPEC-fdebd681)
+                self.collaboration_modes = !self.collaboration_modes;
             }
             WizardStep::ExecutionMode => {
                 if self.execution_mode_index > 0 {
@@ -1456,6 +1511,7 @@ impl WizardState {
             WizardStep::ModelSelect => self.agent.models().len(),
             WizardStep::ReasoningLevel => ReasoningLevel::all().len(),
             WizardStep::VersionSelect => self.version_options.len(),
+            WizardStep::CollaborationModes => 2, // Enabled/Disabled
             WizardStep::ExecutionMode => ExecutionMode::all().len(),
             WizardStep::SkipPermissions => 2, // Yes/No
         }
@@ -1476,6 +1532,13 @@ impl WizardState {
             WizardStep::ModelSelect => self.model_index,
             WizardStep::ReasoningLevel => self.reasoning_level_index,
             WizardStep::VersionSelect => self.version_index,
+            WizardStep::CollaborationModes => {
+                if self.collaboration_modes {
+                    0 // Enabled
+                } else {
+                    1 // Disabled
+                }
+            }
             WizardStep::ExecutionMode => self.execution_mode_index,
             WizardStep::SkipPermissions => {
                 if self.skip_permissions {
@@ -1534,6 +1597,9 @@ impl WizardState {
                 self.version_index = index;
                 self.version = self.version_options[index].value.clone();
                 self.ensure_version_visible();
+            }
+            WizardStep::CollaborationModes => {
+                self.collaboration_modes = index == 0; // 0 = Enabled, 1 = Disabled
             }
             WizardStep::ExecutionMode => {
                 self.execution_mode_index = index;
@@ -1644,6 +1710,9 @@ pub fn render_wizard(state: &mut WizardState, frame: &mut Frame, area: Rect) {
         WizardStep::ModelSelect => render_model_step(state, frame, content_area),
         WizardStep::ReasoningLevel => render_reasoning_step(state, frame, content_area),
         WizardStep::VersionSelect => render_version_step(state, frame, content_area),
+        WizardStep::CollaborationModes => {
+            render_collaboration_modes_step(state, frame, content_area)
+        }
         WizardStep::ExecutionMode => render_execution_mode_step(state, frame, content_area),
         WizardStep::SkipPermissions => render_skip_permissions_step(state, frame, content_area),
     }
@@ -1677,6 +1746,7 @@ fn wizard_title(step: WizardStep) -> &'static str {
         WizardStep::ModelSelect => " Select Model ",
         WizardStep::ReasoningLevel => " Select Reasoning Level ",
         WizardStep::VersionSelect => " Select Version ",
+        WizardStep::CollaborationModes => " Collaboration Modes ",
         WizardStep::ExecutionMode => " Select Execution Mode ",
         WizardStep::SkipPermissions => " Skip Permissions? ",
     }
@@ -1826,6 +1896,10 @@ fn wizard_required_content_width(state: &WizardState) -> usize {
                     consider(format!("  {}", opt.label));
                 }
             }
+        }
+        WizardStep::CollaborationModes => {
+            consider("  Enabled   Plan/Execute mode switching".to_string());
+            consider("  Disabled  Standard single mode".to_string());
         }
         WizardStep::ExecutionMode => {
             for mode in ExecutionMode::all() {
@@ -2439,6 +2513,36 @@ fn render_execution_mode_step(state: &WizardState, frame: &mut Frame, area: Rect
             };
             let text = truncate_with_ellipsis(
                 &format!("{}{:<12} {}", prefix, mode.label(), mode.description()),
+                area.width as usize,
+            );
+            ListItem::new(text).style(style)
+        })
+        .collect();
+
+    let list = List::new(items);
+    frame.render_widget(list, area);
+}
+
+/// Render Collaboration Modes step (SPEC-fdebd681)
+fn render_collaboration_modes_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    let options = [("Enabled", true), ("Disabled", false)];
+    let items: Vec<ListItem> = options
+        .iter()
+        .map(|(label, value)| {
+            let is_selected = state.collaboration_modes == *value;
+            let prefix = if is_selected { "> " } else { "  " };
+            let style = if is_selected {
+                Style::default().bg(Color::Cyan).fg(Color::Black)
+            } else {
+                Style::default()
+            };
+            let desc = if *value {
+                "Plan/Execute mode switching"
+            } else {
+                "Standard single mode"
+            };
+            let text = truncate_with_ellipsis(
+                &format!("{}{:<10} {}", prefix, label, desc),
                 area.width as usize,
             );
             ListItem::new(text).style(style)

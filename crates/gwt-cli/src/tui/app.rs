@@ -189,6 +189,8 @@ pub struct AgentLaunchConfig {
     pub env_remove: Vec<String>,
     /// Auto install dependencies before launching agent
     pub auto_install_deps: bool,
+    /// Enable collaboration_modes (Codex v0.91.0+, SPEC-fdebd681)
+    pub collaboration_modes: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -310,6 +312,8 @@ struct LaunchRequest {
     execution_mode: ExecutionMode,
     session_id: Option<String>,
     skip_permissions: bool,
+    /// Collaboration modes (Codex v0.91.0+, SPEC-fdebd681)
+    collaboration_modes: bool,
     env: Vec<(String, String)>,
     env_remove: Vec<String>,
     auto_install_deps: bool,
@@ -1216,6 +1220,7 @@ impl Model {
             reasoning_level: None,
             skip_permissions: None,
             tool_version,
+            collaboration_modes: None,
             timestamp: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
@@ -1993,6 +1998,7 @@ impl Model {
                 reasoning_level: last_entry.and_then(|entry| entry.reasoning_level.clone()),
                 skip_permissions: last_entry.and_then(|entry| entry.skip_permissions),
                 tool_version: last_entry.and_then(|entry| entry.tool_version.clone()),
+                collaboration_modes: last_entry.and_then(|entry| entry.collaboration_modes),
                 timestamp: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as i64)
@@ -3976,6 +3982,8 @@ impl Model {
             execution_mode: self.wizard.execution_mode,
             session_id: self.wizard.session_id.clone(),
             skip_permissions: self.wizard.skip_permissions,
+            // SPEC-fdebd681: Collaboration modes for Codex v0.91.0+
+            collaboration_modes: self.wizard.collaboration_modes,
             env: self.active_env_overrides(),
             env_remove: self.active_env_removals(),
             auto_install_deps,
@@ -4130,6 +4138,7 @@ impl Model {
                 env: request.env.clone(),
                 env_remove: request.env_remove.clone(),
                 auto_install_deps: request.auto_install_deps,
+                collaboration_modes: request.collaboration_modes,
             };
 
             let plan = match prepare_launch_plan(config, |progress| {
@@ -4318,6 +4327,7 @@ impl Model {
             reasoning_level: plan.config.reasoning_level.map(|r| r.label().to_string()),
             skip_permissions: Some(plan.config.skip_permissions),
             tool_version: Some(plan.selected_version.clone()),
+            collaboration_modes: Some(plan.config.collaboration_modes),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
@@ -5629,6 +5639,7 @@ fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
                 reasoning_override,
                 None, // skills_flag_version
                 bypass_sandbox,
+                config.collaboration_modes,
             ));
 
             if let Some(flag) = skip_flag {
@@ -5916,6 +5927,7 @@ mod tests {
             reasoning_level: None,
             skip_permissions: None,
             tool_version: None,
+            collaboration_modes: None,
             timestamp: 0,
         }
     }

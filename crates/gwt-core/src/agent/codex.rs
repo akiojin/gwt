@@ -15,6 +15,7 @@ const DEFAULT_CODEX_MODEL: &str = "gpt-5.2-codex";
 const DEFAULT_CODEX_REASONING: &str = "high";
 const CODEX_SKILLS_FLAG_DEPRECATED_FROM: &str = "0.80.0";
 const CODEX_SKIP_FLAG_DEPRECATED_FROM: &str = "0.80.0";
+const CODEX_COLLABORATION_MODES_MIN_VERSION: &str = "0.91.0";
 const CODEX_SKIP_FLAG_LEGACY: &str = "--yolo";
 const CODEX_SKIP_FLAG_DANGEROUS: &str = "--dangerously-bypass-approvals-and-sandbox";
 const MODEL_FLAG_PREFIX: &str = "--model=";
@@ -72,7 +73,7 @@ impl CodexAgent {
         let mut cmd = Command::new("codex");
         let version = get_command_version("codex", "--version");
         cmd.arg("--quiet")
-            .args(codex_default_args(None, None, version.as_deref(), false))
+            .args(codex_default_args(None, None, version.as_deref(), false, false))
             .arg(prompt)
             .current_dir(directory)
             .stdin(Stdio::null())
@@ -156,6 +157,22 @@ fn should_enable_codex_skills_flag(version: Option<&str>) -> bool {
     }
 }
 
+/// Check if Codex version supports collaboration_modes (SPEC-fdebd681)
+///
+/// Returns true if version is v0.91.0 or later.
+/// Note: This function accepts semantic version strings only.
+/// Special values like "latest" or "installed" must be resolved before calling.
+pub fn supports_collaboration_modes(version: Option<&str>) -> bool {
+    let parsed = parse_version(version);
+    let threshold = parse_version(Some(CODEX_COLLABORATION_MODES_MIN_VERSION));
+    match (parsed, threshold) {
+        (Some(parsed), Some(threshold)) => {
+            compare_versions(&parsed, &threshold) != Ordering::Less
+        }
+        _ => false,
+    }
+}
+
 pub fn codex_skip_permissions_flag(version: Option<&str>) -> &'static str {
     let parsed = parse_version(version);
     let threshold = parse_version(Some(CODEX_SKIP_FLAG_DEPRECATED_FROM));
@@ -197,6 +214,7 @@ pub fn codex_default_args(
     reasoning_override: Option<&str>,
     skills_flag_version: Option<&str>,
     bypass_sandbox: bool,
+    collaboration_modes: bool,
 ) -> Vec<String> {
     let model = model_override
         .map(str::trim)
@@ -243,6 +261,13 @@ pub fn codex_default_args(
 
     let enable_skills = should_enable_codex_skills_flag(skills_flag_version);
     args = with_codex_skills_flag(args, enable_skills);
+
+    // SPEC-fdebd681: Enable collaboration_modes (Plan/Execute mode switching)
+    if collaboration_modes {
+        args.push("--enable".to_string());
+        args.push("collaboration_modes".to_string());
+    }
+
     args
 }
 
@@ -354,7 +379,7 @@ mod tests {
 
     #[test]
     fn test_codex_default_args_defaults() {
-        let args = codex_default_args(None, None, None, false);
+        let args = codex_default_args(None, None, None, false, false);
         assert!(args.contains(&"--enable".to_string()));
         assert!(args.contains(&"web_search_request".to_string()));
         assert!(args.contains(&"--model=gpt-5.2-codex".to_string()));
@@ -363,20 +388,20 @@ mod tests {
 
     #[test]
     fn test_codex_default_args_overrides() {
-        let args = codex_default_args(Some("gpt-5.2"), Some("xhigh"), None, false);
+        let args = codex_default_args(Some("gpt-5.2"), Some("xhigh"), None, false, false);
         assert!(args.contains(&"--model=gpt-5.2".to_string()));
         assert!(args.contains(&"model_reasoning_effort=xhigh".to_string()));
     }
 
     #[test]
     fn test_codex_skills_flag_version_gate() {
-        let args_old = codex_default_args(None, None, Some("0.79.0"), false);
+        let args_old = codex_default_args(None, None, Some("0.79.0"), false, false);
         let skills_present_old = args_old.iter().enumerate().any(|(idx, arg)| {
             arg == "--enable" && args_old.get(idx + 1).is_some_and(|v| v == "skills")
         });
         assert!(skills_present_old);
 
-        let args_new = codex_default_args(None, None, Some("0.80.0"), false);
+        let args_new = codex_default_args(None, None, Some("0.80.0"), false, false);
         let skills_present_new = args_new.iter().enumerate().any(|(idx, arg)| {
             arg == "--enable" && args_new.get(idx + 1).is_some_and(|v| v == "skills")
         });
@@ -385,9 +410,49 @@ mod tests {
 
     #[test]
     fn test_codex_default_args_bypass_sandbox() {
-        let args = codex_default_args(None, None, None, true);
+        let args = codex_default_args(None, None, None, true, false);
         assert!(!args.contains(&"--sandbox".to_string()));
         assert!(!args.contains(&"sandbox_workspace_write.network_access=true".to_string()));
+    }
+
+    #[test]
+    fn test_supports_collaboration_modes_version_gate() {
+        // v0.91.0 and later support collaboration_modes
+        assert!(supports_collaboration_modes(Some("0.91.0")));
+        assert!(supports_collaboration_modes(Some("0.91.1")));
+        assert!(supports_collaboration_modes(Some("0.92.0")));
+        assert!(supports_collaboration_modes(Some("1.0.0")));
+        assert!(supports_collaboration_modes(Some("99.99.99")));
+
+        // v0.90.x and earlier do not support collaboration_modes
+        assert!(!supports_collaboration_modes(Some("0.90.0")));
+        assert!(!supports_collaboration_modes(Some("0.90.9")));
+        assert!(!supports_collaboration_modes(Some("0.89.0")));
+
+        // Invalid or None values return false
+        assert!(!supports_collaboration_modes(None));
+        assert!(!supports_collaboration_modes(Some("invalid")));
+        assert!(!supports_collaboration_modes(Some("latest")));
+    }
+
+    #[test]
+    fn test_codex_default_args_with_collaboration_modes() {
+        // collaboration_modes=true should add --enable collaboration_modes
+        let args = codex_default_args(None, None, None, false, true);
+        let has_collab = args.iter().enumerate().any(|(idx, arg)| {
+            arg == "--enable" && args.get(idx + 1).is_some_and(|v| v == "collaboration_modes")
+        });
+        assert!(has_collab);
+
+        // collaboration_modes=false should not add the flags
+        let args_disabled = codex_default_args(None, None, None, false, false);
+        let has_collab_disabled = args_disabled.iter().enumerate().any(|(idx, arg)| {
+            arg == "--enable"
+                && args_disabled
+                    .get(idx + 1)
+                    .is_some_and(|v| v == "collaboration_modes")
+        });
+        assert!(!has_collab_disabled);
     }
 
     #[test]
