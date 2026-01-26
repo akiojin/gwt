@@ -35,6 +35,7 @@ use gwt_core::tmux::{
 use gwt_core::worktree::WorktreeManager;
 use gwt_core::TmuxMode;
 use ratatui::{prelude::*, widgets::*};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -91,6 +92,39 @@ fn format_ai_error(err: AIError) -> String {
 
 fn background_window_name(branch_name: &str) -> String {
     branch_name.to_string()
+}
+
+fn normalize_branch_name_for_history(branch_name: &str) -> Cow<'_, str> {
+    if let Some(stripped) = branch_name.strip_prefix("remotes/") {
+        if let Some((_, name)) = stripped.split_once('/') {
+            return Cow::Owned(name.to_string());
+        }
+        return Cow::Owned(stripped.to_string());
+    }
+    Cow::Borrowed(branch_name)
+}
+
+fn apply_last_tool_usage(
+    item: &mut BranchItem,
+    repo_root: &Path,
+    tool_usage_map: &HashMap<String, ToolSessionEntry>,
+    agent_history: &AgentHistoryStore,
+) {
+    let lookup = normalize_branch_name_for_history(&item.name);
+    if let Some(entry) = tool_usage_map.get(lookup.as_ref()) {
+        item.last_tool_usage = Some(entry.format_tool_usage());
+        item.last_tool_id = Some(entry.tool_id.clone());
+        item.last_session_id = entry.session_id.clone();
+        let session_timestamp = entry.timestamp / 1000;
+        let git_timestamp = item.last_commit_timestamp.unwrap_or(0);
+        item.last_commit_timestamp = Some(session_timestamp.max(git_timestamp));
+        return;
+    }
+
+    if let Some(history_entry) = agent_history.get(repo_root, lookup.as_ref()) {
+        item.last_tool_usage = Some(history_entry.agent_label.clone());
+        item.last_tool_id = Some(history_entry.agent_id.clone());
+    }
 }
 
 fn session_poll_due(last_poll: Option<Instant>, now: Instant) -> bool {
@@ -734,23 +768,8 @@ impl Model {
                 .map(|b| {
                     let mut item = BranchItem::from_branch_minimal(b, &worktrees);
 
-                    // Set tool usage from TypeScript session history (FR-070)
-                    if let Some(entry) = tool_usage_map.get(&b.name) {
-                        item.last_tool_usage = Some(entry.format_tool_usage());
-                        item.last_tool_id = Some(entry.tool_id.clone());
-                        item.last_session_id = entry.session_id.clone();
-                        // FR-041: Compare git commit timestamp and session timestamp,
-                        // use the newer one
-                        let session_timestamp = entry.timestamp / 1000; // Convert ms to seconds
-                        let git_timestamp = item.last_commit_timestamp.unwrap_or(0);
-                        item.last_commit_timestamp = Some(session_timestamp.max(git_timestamp));
-                    } else if !item.has_worktree {
-                        // FR-088: Fallback to agent history for branches without worktrees
-                        if let Some(history_entry) = agent_history.get(&repo_root, &b.name) {
-                            item.last_tool_usage = Some(history_entry.agent_label.clone());
-                            item.last_tool_id = Some(history_entry.agent_id.clone());
-                        }
-                    }
+                    // Set tool usage from TypeScript session history or agent history (FR-070/088)
+                    apply_last_tool_usage(&mut item, &repo_root, &tool_usage_map, &agent_history);
 
                     // Safety check short-circuit: use immediate signals first
                     if item.branch_type == BranchType::Local {
@@ -771,9 +790,11 @@ impl Model {
                 })
                 .collect();
             branch_items.extend(
-                remote_only_branches
-                    .iter()
-                    .map(|b| BranchItem::from_branch_minimal(b, &worktrees)),
+                remote_only_branches.iter().map(|b| {
+                    let mut item = BranchItem::from_branch_minimal(b, &worktrees);
+                    apply_last_tool_usage(&mut item, &repo_root, &tool_usage_map, &agent_history);
+                    item
+                }),
             );
 
             // Sort branches by timestamp for those with sessions
@@ -5812,6 +5833,7 @@ mod tests {
     use gwt_core::git::Branch;
     use gwt_core::git::BranchSummary;
     use gwt_core::git::DivergenceStatus;
+    use std::collections::HashMap;
     use std::process::Command;
     use std::sync::mpsc;
     use tempfile::TempDir;
@@ -5941,6 +5963,44 @@ mod tests {
     fn test_background_window_name_uses_branch_name_only() {
         let branch = "feature/clean-name";
         assert_eq!(background_window_name(branch), branch);
+    }
+
+    #[test]
+    fn test_normalize_branch_name_for_history_strips_remote_prefix() {
+        let normalized = normalize_branch_name_for_history("remotes/origin/feature/test");
+        assert_eq!(normalized.as_ref(), "feature/test");
+    }
+
+    #[test]
+    fn test_normalize_branch_name_for_history_keeps_local_name() {
+        let normalized = normalize_branch_name_for_history("feature/test");
+        assert_eq!(normalized.as_ref(), "feature/test");
+    }
+
+    #[test]
+    fn test_apply_last_tool_usage_falls_back_to_agent_history_for_remote_branch() {
+        let branch = Branch::new("remotes/origin/feature/test", "deadbeef");
+        let mut item = BranchItem::from_branch_minimal(&branch, &[]);
+        let mut history = AgentHistoryStore::new();
+        history
+            .record(
+                Path::new("/tmp/repo"),
+                "feature/test",
+                "codex-cli",
+                "Codex@latest",
+            )
+            .unwrap();
+        let tool_usage_map: HashMap<String, ToolSessionEntry> = HashMap::new();
+
+        apply_last_tool_usage(
+            &mut item,
+            Path::new("/tmp/repo"),
+            &tool_usage_map,
+            &history,
+        );
+
+        assert_eq!(item.last_tool_usage.as_deref(), Some("Codex@latest"));
+        assert_eq!(item.last_tool_id.as_deref(), Some("codex-cli"));
     }
 
     fn sample_branch_with_session(name: &str) -> BranchItem {
