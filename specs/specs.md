@@ -7,6 +7,7 @@
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
+| [SPEC-71f2742d](SPEC-71f2742d/spec.md) | 機能仕様: [機能名] | [日付] |
 | [SPEC-f59c553d](SPEC-f59c553d/spec.md) | 機能仕様: npm postinstall ダウンロード安定化 | 2026-01-26 |
 | [SPEC-f47db390](SPEC-f47db390/spec.md) | 機能仕様: セッションID永続化とContinue/Resume強化 | 2025-12-06 |
 | [SPEC-e66acf66](SPEC-e66acf66/spec.md) | 機能仕様: エラーポップアップ・ログ出力システム | 2026-01-22 |

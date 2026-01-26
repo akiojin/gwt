@@ -22,8 +22,8 @@ use gwt_core::ai::{
 use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{
     get_claude_settings_path, is_gwt_hooks_registered, is_temporary_execution, register_gwt_hooks,
-    reregister_gwt_hooks, save_session_entry, AISettings, Profile, ProfilesConfig,
-    ResolvedAISettings, ToolSessionEntry,
+    reregister_gwt_hooks, save_session_entry, AISettings, CustomCodingAgent, Profile,
+    ProfilesConfig, ResolvedAISettings, ToolSessionEntry,
 };
 use gwt_core::error::GwtError;
 use gwt_core::git::{Branch, PrCache, Remote, Repository};
@@ -169,8 +169,10 @@ pub struct AgentLaunchConfig {
     pub worktree_path: PathBuf,
     /// Branch name
     pub branch_name: String,
-    /// Coding agent to launch
+    /// Coding agent to launch (builtin)
     pub agent: CodingAgent,
+    /// Custom agent configuration (SPEC-71f2742d)
+    pub custom_agent: Option<CustomCodingAgent>,
     /// Model to use
     pub model: Option<String>,
     /// Reasoning level (Codex only)
@@ -189,6 +191,33 @@ pub struct AgentLaunchConfig {
     pub env_remove: Vec<String>,
     /// Auto install dependencies before launching agent
     pub auto_install_deps: bool,
+    /// Enable collaboration_modes (Codex v0.91.0+, SPEC-fdebd681)
+    pub collaboration_modes: bool,
+}
+
+impl AgentLaunchConfig {
+    /// Check if this config is for a custom agent
+    pub fn is_custom(&self) -> bool {
+        self.custom_agent.is_some()
+    }
+
+    /// Get the agent ID (builtin or custom)
+    pub fn agent_id(&self) -> String {
+        if let Some(ref custom) = self.custom_agent {
+            custom.id.clone()
+        } else {
+            self.agent.id().to_string()
+        }
+    }
+
+    /// Get the display name (builtin or custom)
+    pub fn display_name(&self) -> String {
+        if let Some(ref custom) = self.custom_agent {
+            custom.display_name.clone()
+        } else {
+            self.agent.label().to_string()
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -304,12 +333,16 @@ struct LaunchRequest {
     create_new_branch: bool,
     base_branch: Option<String>,
     agent: CodingAgent,
+    /// Custom agent configuration (SPEC-71f2742d)
+    custom_agent: Option<CustomCodingAgent>,
     model: Option<String>,
     reasoning_level: Option<ReasoningLevel>,
     version: String,
     execution_mode: ExecutionMode,
     session_id: Option<String>,
     skip_permissions: bool,
+    /// Collaboration modes (Codex v0.91.0+, SPEC-fdebd681)
+    collaboration_modes: bool,
     env: Vec<(String, String)>,
     env_remove: Vec<String>,
     auto_install_deps: bool,
@@ -1216,6 +1249,7 @@ impl Model {
             reasoning_level: None,
             skip_permissions: None,
             tool_version,
+            collaboration_modes: None,
             timestamp: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
@@ -1993,6 +2027,7 @@ impl Model {
                 reasoning_level: last_entry.and_then(|entry| entry.reasoning_level.clone()),
                 skip_permissions: last_entry.and_then(|entry| entry.skip_permissions),
                 tool_version: last_entry.and_then(|entry| entry.tool_version.clone()),
+                collaboration_modes: last_entry.and_then(|entry| entry.collaboration_modes),
                 timestamp: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as i64)
@@ -3019,6 +3054,97 @@ impl Model {
         }
     }
 
+    /// Handle Enter key in Settings screen (SPEC-71f2742d US3)
+    fn handle_settings_enter(&mut self) {
+        use super::screens::settings::{AgentFormField, CustomAgentMode, SettingsCategory};
+
+        if self.settings.category != SettingsCategory::CustomAgents {
+            return;
+        }
+
+        match &self.settings.custom_agent_mode {
+            CustomAgentMode::List => {
+                // Enter on list: add or edit
+                if self.settings.is_add_agent_selected() {
+                    self.settings.enter_add_mode();
+                } else if self.settings.selected_custom_agent().is_some() {
+                    self.settings.enter_edit_mode();
+                }
+            }
+            CustomAgentMode::Add | CustomAgentMode::Edit(_) => {
+                // Enter in form: save if on last field, otherwise cycle type or next field
+                if self.settings.agent_form.current_field == AgentFormField::Type {
+                    self.settings.agent_form.cycle_type();
+                } else if self.settings.agent_form.current_field == AgentFormField::Command {
+                    // On last field, try to save
+                    match self.settings.save_agent() {
+                        Ok(()) => {
+                            // Save to file
+                            if let Some(ref config) = self.settings.tools_config {
+                                if let Err(e) = config.save_global() {
+                                    self.settings.error_message =
+                                        Some(format!("Failed to save: {}", e));
+                                }
+                            }
+                        }
+                        Err(msg) => {
+                            self.settings.error_message = Some(msg.to_string());
+                        }
+                    }
+                } else {
+                    self.settings.agent_form.next_field();
+                }
+            }
+            CustomAgentMode::ConfirmDelete(_) => {
+                // Enter in delete confirm: execute if Yes selected
+                if self.settings.delete_confirm {
+                    if self.settings.delete_agent() {
+                        // Save to file
+                        if let Some(ref config) = self.settings.tools_config {
+                            if let Err(e) = config.save_global() {
+                                self.settings.error_message =
+                                    Some(format!("Failed to save: {}", e));
+                            }
+                        }
+                    }
+                } else {
+                    self.settings.cancel_mode();
+                }
+            }
+        }
+    }
+
+    /// Handle character input in Settings screen (SPEC-71f2742d US3)
+    fn handle_settings_char(&mut self, c: char) {
+        use super::screens::settings::{AgentFormField, CustomAgentMode, SettingsCategory};
+
+        if self.settings.category != SettingsCategory::CustomAgents {
+            return;
+        }
+
+        match &self.settings.custom_agent_mode {
+            CustomAgentMode::List => {
+                // 'd' or 'D' to enter delete mode
+                if (c == 'd' || c == 'D') && self.settings.selected_custom_agent().is_some() {
+                    self.settings.enter_delete_mode();
+                }
+            }
+            CustomAgentMode::Add | CustomAgentMode::Edit(_) => {
+                // In form mode: insert char or cycle type
+                if self.settings.agent_form.current_field == AgentFormField::Type {
+                    if c == ' ' {
+                        self.settings.agent_form.cycle_type();
+                    }
+                } else {
+                    self.settings.agent_form.insert_char(c);
+                }
+            }
+            CustomAgentMode::ConfirmDelete(_) => {
+                // In delete confirm: ignore chars
+            }
+        }
+    }
+
     /// Save AI settings from wizard
     fn save_ai_wizard_settings(&mut self) {
         let model = self
@@ -3242,6 +3368,10 @@ impl Model {
                 self.status_message_time = Some(Instant::now());
             }
             Message::NavigateTo(screen) => {
+                // SPEC-71f2742d US3: Load tools config when entering Settings
+                if matches!(screen, Screen::Settings) {
+                    self.settings.load_tools_config();
+                }
                 self.screen_stack.push(self.screen.clone());
                 self.screen = screen;
                 self.status_message = None;
@@ -3269,6 +3399,11 @@ impl Model {
                     if let Some(prev_screen) = self.screen_stack.pop() {
                         self.screen = prev_screen;
                     }
+                // SPEC-71f2742d US3: Cancel form/delete mode in Settings
+                } else if matches!(self.screen, Screen::Settings)
+                    && (self.settings.is_form_mode() || self.settings.is_delete_mode())
+                {
+                    self.settings.cancel_mode();
                 } else if matches!(self.screen, Screen::AISettingsWizard) {
                     // Go back in AI wizard or close if at first step
                     if self.ai_wizard.show_delete_confirm {
@@ -3540,7 +3675,10 @@ impl Model {
                 Screen::AISettingsWizard => {
                     self.handle_ai_wizard_enter();
                 }
-                _ => {}
+                // SPEC-71f2742d US3: Settings screen Enter handling
+                Screen::Settings => {
+                    self.handle_settings_enter();
+                }
             },
             Message::Char(c) => {
                 if matches!(self.screen, Screen::WorktreeCreate) {
@@ -3560,6 +3698,9 @@ impl Model {
                     self.logs.search.push(c);
                 } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
                     self.agent_mode.insert_char(c);
+                // SPEC-71f2742d US3: Settings screen character input
+                } else if matches!(self.screen, Screen::Settings) {
+                    self.handle_settings_char(c);
                 } else if matches!(self.screen, Screen::AISettingsWizard) {
                     if self.ai_wizard.show_delete_confirm {
                         // Handle delete confirmation
@@ -3628,6 +3769,9 @@ impl Model {
                     self.logs.search.pop();
                 } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
                     self.agent_mode.backspace();
+                // SPEC-71f2742d US3: Settings screen backspace
+                } else if matches!(self.screen, Screen::Settings) && self.settings.is_form_mode() {
+                    self.settings.agent_form.delete_char();
                 } else if matches!(self.screen, Screen::AISettingsWizard)
                     && self.ai_wizard.is_text_input()
                 {
@@ -3644,6 +3788,16 @@ impl Model {
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029c: Left/Right toggle selection in confirm dialog
                     self.confirm.toggle_selection();
+                // SPEC-71f2742d US3: Settings delete confirmation toggle
+                } else if matches!(self.screen, Screen::Settings) && self.settings.is_delete_mode()
+                {
+                    self.settings.delete_confirm = !self.settings.delete_confirm;
+                // SPEC-71f2742d US4: Settings category navigation with Left/Right
+                } else if matches!(self.screen, Screen::Settings)
+                    && !self.settings.is_form_mode()
+                    && !self.settings.is_delete_mode()
+                {
+                    self.settings.prev_category();
                 } else if matches!(self.screen, Screen::AISettingsWizard)
                     && self.ai_wizard.is_text_input()
                 {
@@ -3662,6 +3816,16 @@ impl Model {
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029c: Left/Right toggle selection in confirm dialog
                     self.confirm.toggle_selection();
+                // SPEC-71f2742d US3: Settings delete confirmation toggle
+                } else if matches!(self.screen, Screen::Settings) && self.settings.is_delete_mode()
+                {
+                    self.settings.delete_confirm = !self.settings.delete_confirm;
+                // SPEC-71f2742d US4: Settings category navigation with Left/Right
+                } else if matches!(self.screen, Screen::Settings)
+                    && !self.settings.is_form_mode()
+                    && !self.settings.is_delete_mode()
+                {
+                    self.settings.next_category();
                 } else if matches!(self.screen, Screen::AISettingsWizard)
                     && self.ai_wizard.is_text_input()
                 {
@@ -3757,15 +3921,26 @@ impl Model {
                     self.status_message_time = Some(Instant::now());
                 }
             }
+            // FR-020 SPEC-71f2742d: Tab cycles BranchList → AgentMode → Settings → BranchList
             Message::Tab => match self.screen {
-                Screen::Settings => self.settings.next_category(),
+                Screen::Settings => {
+                    // In form mode, Tab cycles fields
+                    if self.settings.is_form_mode() {
+                        self.settings.agent_form.next_field();
+                    } else {
+                        // Exit Settings and go to BranchList (FR-020)
+                        self.screen = Screen::BranchList;
+                    }
+                }
                 Screen::BranchList => {
                     if !self.branch_list.filter_mode {
                         self.enter_agent_mode();
                     }
                 }
                 Screen::AgentMode => {
-                    self.screen = Screen::BranchList;
+                    // Go to Settings (FR-020)
+                    self.settings.load_tools_config();
+                    self.screen = Screen::Settings;
                 }
                 _ => {}
             },
@@ -3957,11 +4132,19 @@ impl Model {
             .map(|settings| settings.agent.auto_install_deps)
             .unwrap_or(false);
 
+        // SPEC-71f2742d: Get custom agent from selected_agent_entry
+        let custom_agent = self
+            .wizard
+            .selected_agent_entry
+            .as_ref()
+            .and_then(|e| e.custom.clone());
+
         let request = LaunchRequest {
             branch_name: branch,
             create_new_branch: self.worktree_create.create_new_branch,
             base_branch: base,
             agent: self.wizard.agent,
+            custom_agent,
             model: if self.wizard.model.is_empty() {
                 None
             } else {
@@ -3976,6 +4159,8 @@ impl Model {
             execution_mode: self.wizard.execution_mode,
             session_id: self.wizard.session_id.clone(),
             skip_permissions: self.wizard.skip_permissions,
+            // SPEC-fdebd681: Collaboration modes for Codex v0.91.0+
+            collaboration_modes: self.wizard.collaboration_modes,
             env: self.active_env_overrides(),
             env_remove: self.active_env_removals(),
             auto_install_deps,
@@ -4030,9 +4215,12 @@ impl Model {
             };
             step(ProgressStepKind::FetchRemote, StepStatus::Completed);
 
-            // Step 2: Validate branch
+            // Step 2: Validate branch (lightweight)
             step(ProgressStepKind::ValidateBranch, StepStatus::Running);
-            let existing_wt = manager.get_by_branch(&request.branch_name).ok().flatten();
+            let existing_wt = manager
+                .get_by_branch_basic(&request.branch_name)
+                .ok()
+                .flatten();
             let has_existing_wt = existing_wt.is_some();
             step(ProgressStepKind::ValidateBranch, StepStatus::Completed);
 
@@ -4052,7 +4240,6 @@ impl Model {
                 // Step 5: Create worktree
                 step(ProgressStepKind::CreateWorktree, StepStatus::Running);
             }
-
             let result = if let Some(wt) = existing_wt {
                 Ok(wt)
             } else if request.create_new_branch {
@@ -4119,6 +4306,7 @@ impl Model {
                 worktree_path: worktree.path.clone(),
                 branch_name: request.branch_name.clone(),
                 agent: request.agent,
+                custom_agent: request.custom_agent.clone(),
                 model: request.model.clone(),
                 reasoning_level: request.reasoning_level,
                 version: request.version.clone(),
@@ -4128,6 +4316,7 @@ impl Model {
                 env: request.env.clone(),
                 env_remove: request.env_remove.clone(),
                 auto_install_deps: request.auto_install_deps,
+                collaboration_modes: request.collaboration_modes,
             };
 
             let plan = match prepare_launch_plan(config, |progress| {
@@ -4316,6 +4505,7 @@ impl Model {
             reasoning_level: plan.config.reasoning_level.map(|r| r.label().to_string()),
             skip_permissions: Some(plan.config.skip_permissions),
             tool_version: Some(plan.selected_version.clone()),
+            collaboration_modes: Some(plan.config.collaboration_modes),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
@@ -4959,7 +5149,8 @@ impl Model {
                 }
             }
             Screen::WorktreeCreate => "[Enter] Next | [Esc] Back",
-            Screen::Settings => "[Tab] Category | [Esc] Back",
+            // FR-020: Tab cycles screens, Left/Right cycles categories
+            Screen::Settings => "[Left/Right] Category | [Tab] Screen | [Esc] Back",
             Screen::Logs => "[Up/Down] Navigate | [Enter] Detail | [c] Copy | [f] Filter | [/] Search | [Esc] Back",
             Screen::Help => "[Esc] Close | [Up/Down] Scroll",
             Screen::Confirm => "[Left/Right] Select | [Enter] Confirm | [Esc] Cancel",
@@ -5054,12 +5245,18 @@ impl Model {
             KeyCode::Tab => {
                 if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.switch_field();
+                // SPEC-71f2742d US3: Settings form field navigation
+                } else if matches!(self.screen, Screen::Settings) && self.settings.is_form_mode() {
+                    self.settings.agent_form.next_field();
                 }
                 None
             }
             KeyCode::BackTab => {
                 if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.switch_field();
+                // SPEC-71f2742d US3: Settings form field navigation (reverse)
+                } else if matches!(self.screen, Screen::Settings) && self.settings.is_form_mode() {
+                    self.settings.agent_form.prev_field();
                 }
                 None
             }
@@ -5564,6 +5761,11 @@ fn canonical_tool_id(tool_id: &str) -> String {
 fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
     use gwt_core::agent::codex::{codex_default_args, codex_skip_permissions_flag};
 
+    // SPEC-71f2742d: Handle custom agents
+    if let Some(ref custom) = config.custom_agent {
+        return build_custom_agent_args_for_tmux(custom, config);
+    }
+
     let mut args = Vec::new();
 
     match config.agent {
@@ -5627,6 +5829,7 @@ fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
                 reasoning_override,
                 None, // skills_flag_version
                 bypass_sandbox,
+                config.collaboration_modes,
             ));
 
             if let Some(flag) = skip_flag {
@@ -5690,6 +5893,40 @@ fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
 
     args
 }
+
+/// Build command line arguments for custom agents (SPEC-71f2742d T206)
+fn build_custom_agent_args_for_tmux(
+    custom: &CustomCodingAgent,
+    config: &AgentLaunchConfig,
+) -> Vec<String> {
+    let mut args = Vec::new();
+
+    // Add default args
+    args.extend(custom.default_args.clone());
+
+    // Add mode-specific args (T208)
+    if let Some(ref mode_args) = custom.mode_args {
+        match config.execution_mode {
+            ExecutionMode::Normal => {
+                args.extend(mode_args.normal.clone());
+            }
+            ExecutionMode::Continue => {
+                args.extend(mode_args.continue_mode.clone());
+            }
+            ExecutionMode::Resume => {
+                args.extend(mode_args.resume.clone());
+            }
+        }
+    }
+
+    // Add permission skip args if skip_permissions is true (T210)
+    if config.skip_permissions && !custom.permission_skip_args.is_empty() {
+        args.extend(custom.permission_skip_args.clone());
+    }
+
+    args
+}
+
 fn is_valid_env_name(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
@@ -5914,6 +6151,7 @@ mod tests {
             reasoning_level: None,
             skip_permissions: None,
             tool_version: None,
+            collaboration_modes: None,
             timestamp: 0,
         }
     }
@@ -6336,14 +6574,21 @@ mod tests {
         assert_eq!(model.last_session_poll, Some(previous));
     }
 
+    // FR-020: Tab cycles BranchList → AgentMode → Settings → BranchList
     #[test]
-    fn test_tab_switches_between_branch_and_agent_mode() {
+    fn test_tab_cycles_three_screens() {
         let mut model = Model::new_with_context(None);
         model.screen = Screen::BranchList;
 
+        // BranchList → AgentMode
         model.update(Message::Tab);
         assert!(matches!(model.screen, Screen::AgentMode));
 
+        // AgentMode → Settings
+        model.update(Message::Tab);
+        assert!(matches!(model.screen, Screen::Settings));
+
+        // Settings → BranchList
         model.update(Message::Tab);
         assert!(matches!(model.screen, Screen::BranchList));
     }

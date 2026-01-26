@@ -30,6 +30,9 @@ pub struct ToolSessionEntry {
     pub skip_permissions: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_version: Option<String>,
+    /// collaboration_modes enabled (Codex v0.91.0+, SPEC-fdebd681)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collaboration_modes: Option<bool>,
     /// Unix timestamp in milliseconds
     pub timestamp: i64,
 }
@@ -340,6 +343,7 @@ pub fn get_last_tool_usage_map(repo_root: &Path) -> HashMap<String, ToolSessionE
                 reasoning_level: None,
                 skip_permissions: None,
                 tool_version: session.tool_version,
+                collaboration_modes: None,
                 timestamp: session.timestamp,
             };
             map.insert(branch, entry);
@@ -432,6 +436,7 @@ pub fn get_branch_tool_history(repo_root: &Path, branch: &str) -> Vec<ToolSessio
                     reasoning_level: None,
                     skip_permissions: None,
                     tool_version,
+                    collaboration_modes: None,
                     timestamp,
                 };
                 tool_map.insert(entry.tool_id.clone(), entry);
@@ -584,6 +589,7 @@ mod tests {
                     reasoning_level: None,
                     skip_permissions: None,
                     tool_version: Some("latest".to_string()),
+                    collaboration_modes: None,
                     timestamp: 2_000,
                 },
                 ToolSessionEntry {
@@ -597,6 +603,7 @@ mod tests {
                     reasoning_level: None,
                     skip_permissions: None,
                     tool_version: Some("latest".to_string()),
+                    collaboration_modes: None,
                     timestamp: 1_000,
                 },
             ],
@@ -652,6 +659,7 @@ mod tests {
                     reasoning_level: None,
                     skip_permissions: Some(true),
                     tool_version: Some("latest".to_string()),
+                    collaboration_modes: None,
                     timestamp: 1_000,
                 },
                 ToolSessionEntry {
@@ -665,6 +673,7 @@ mod tests {
                     reasoning_level: None,
                     skip_permissions: None,
                     tool_version: Some("latest".to_string()),
+                    collaboration_modes: None,
                     timestamp: 2_000,
                 },
             ],
@@ -728,6 +737,7 @@ mod tests {
                 reasoning_level: None,
                 skip_permissions: None,
                 tool_version: Some("latest".to_string()),
+                collaboration_modes: None,
                 timestamp: 2_000,
             }],
         };
@@ -770,6 +780,7 @@ mod tests {
             reasoning_level: None,
             skip_permissions: None,
             tool_version: Some("1.0.3".to_string()),
+            collaboration_modes: None,
             timestamp: 1704067200000,
         };
         let result = entry.format_tool_usage();
@@ -789,6 +800,7 @@ mod tests {
             reasoning_level: None,
             skip_permissions: None,
             tool_version: None,
+            collaboration_modes: None,
             timestamp: 1704067200000,
         };
         let result = entry.format_tool_usage();

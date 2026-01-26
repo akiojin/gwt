@@ -220,7 +220,12 @@ Minimal example:
       "permissionSkipArgs": ["--yes"],
       "env": {
         "OPENAI_API_KEY": "sk-..."
-      }
+      },
+      "models": [
+        { "id": "gpt-4o", "label": "GPT-4o" },
+        { "id": "claude-3-opus", "label": "Claude 3 Opus" }
+      ],
+      "versionCommand": "aider --version"
     }
   ]
 }
@@ -231,6 +236,8 @@ Notes:
 - `type` supports `path`, `bunx`, or `command`.
 - `modeArgs` defines args per execution mode (Normal/Continue/Resume).
 - `env` is optional per-agent environment variables.
+- `models` is optional. If defined, model selection step will be shown for this agent.
+- `versionCommand` is optional. If defined, version detection will use this command instead of skipping version selection.
 
 ## Advanced Workflows
 

@@ -220,7 +220,12 @@ gwt は PATH 上のエージェントを検出し、ランチャーに表示し�
       "permissionSkipArgs": ["--yes"],
       "env": {
         "OPENAI_API_KEY": "sk-..."
-      }
+      },
+      "models": [
+        { "id": "gpt-4o", "label": "GPT-4o" },
+        { "id": "claude-3-opus", "label": "Claude 3 Opus" }
+      ],
+      "versionCommand": "aider --version"
     }
   ]
 }
@@ -231,6 +236,8 @@ gwt は PATH 上のエージェントを検出し、ランチャーに表示し�
 - `type` は `path` / `bunx` / `command` を指定します。
 - `modeArgs` で実行モード別の引数を定義します（Normal/Continue/Resume）。
 - `env` はエージェントごとの環境変数（任意）です。
+- `models` は任意です。定義するとモデル選択ステップが表示されます。
+- `versionCommand` は任意です。定義するとバージョン検出に使用されます。
 
 ## 高度なワークフロー
 

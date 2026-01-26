@@ -8,6 +8,8 @@
 
 #![allow(dead_code)]
 
+use gwt_core::agent::codex::supports_collaboration_modes;
+use gwt_core::config::{CustomCodingAgent, ToolsConfig};
 use gwt_core::git::GitHubIssue;
 use ratatui::{prelude::*, widgets::*};
 use serde::Deserialize;
@@ -106,6 +108,8 @@ pub enum WizardStep {
     ModelSelect,
     ReasoningLevel, // Codex only
     VersionSelect,
+    /// Collaboration modes (Codex v0.91.0+, SPEC-fdebd681)
+    CollaborationModes,
     ExecutionMode,
     SkipPermissions,
     // New branch flow
@@ -221,6 +225,120 @@ impl CodingAgent {
             CodingAgent::OpenCode => "opencode",
         }
     }
+}
+
+/// Unified agent entry for display (SPEC-71f2742d)
+/// Represents both builtin and custom agents in a unified way
+#[derive(Debug, Clone)]
+pub struct AgentEntry {
+    /// Unique identifier
+    pub id: String,
+    /// Display name
+    pub display_name: String,
+    /// Display color
+    pub color: Color,
+    /// Whether this is a builtin agent
+    pub is_builtin: bool,
+    /// Whether the agent is installed/available
+    pub is_installed: bool,
+    /// Associated builtin agent (if any)
+    pub builtin: Option<CodingAgent>,
+    /// Associated custom agent (if any)
+    pub custom: Option<CustomCodingAgent>,
+}
+
+impl AgentEntry {
+    /// Create from builtin agent
+    pub fn from_builtin(agent: CodingAgent, is_installed: bool) -> Self {
+        Self {
+            id: agent.id().to_string(),
+            display_name: agent.label().to_string(),
+            color: agent.color(),
+            is_builtin: true,
+            is_installed,
+            builtin: Some(agent),
+            custom: None,
+        }
+    }
+
+    /// Create from custom agent with auto-assigned color
+    pub fn from_custom(agent: CustomCodingAgent, color: Color, is_installed: bool) -> Self {
+        Self {
+            id: agent.id.clone(),
+            display_name: agent.display_name.clone(),
+            color,
+            is_builtin: false,
+            is_installed,
+            builtin: None,
+            custom: Some(agent),
+        }
+    }
+}
+
+/// Colors for custom agents (SPEC-71f2742d)
+/// Cycles through: Blue -> Red -> White -> Gray
+const CUSTOM_AGENT_COLORS: [Color; 4] = [Color::Blue, Color::Red, Color::White, Color::Gray];
+
+/// Check if a custom agent command is installed
+fn is_custom_agent_installed(agent: &CustomCodingAgent) -> bool {
+    use gwt_core::config::AgentType;
+
+    match agent.agent_type {
+        AgentType::Command => {
+            // Check if command exists in PATH
+            Command::new("which")
+                .arg(&agent.command)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+        AgentType::Path => {
+            // Check if path exists
+            Path::new(&agent.command).exists()
+        }
+        AgentType::Bunx => {
+            // Check if bunx is available
+            Command::new("which")
+                .arg("bunx")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+    }
+}
+
+/// Get all agents (builtin + custom) as unified entries (SPEC-71f2742d T115)
+pub fn get_all_agents(
+    installed_cache: &HashMap<CodingAgent, Option<InstalledVersionInfo>>,
+) -> Vec<AgentEntry> {
+    let mut entries = Vec::new();
+
+    // Add builtin agents first
+    for agent in CodingAgent::all() {
+        let is_installed = installed_cache
+            .get(agent)
+            .map(|v| v.is_some())
+            .unwrap_or(false);
+        entries.push(AgentEntry::from_builtin(*agent, is_installed));
+    }
+
+    // Load and add custom agents
+    let repo_root = std::env::current_dir().unwrap_or_default();
+    let tools_config = ToolsConfig::load_merged(&repo_root);
+    let custom_agents = tools_config.custom_coding_agents;
+
+    for (idx, custom) in custom_agents.into_iter().enumerate() {
+        // Skip if ID conflicts with builtin
+        if entries.iter().any(|e| e.id == custom.id) {
+            continue;
+        }
+
+        let color = CUSTOM_AGENT_COLORS[idx % CUSTOM_AGENT_COLORS.len()];
+        let is_installed = is_custom_agent_installed(&custom);
+        entries.push(AgentEntry::from_custom(custom, color, is_installed));
+    }
+
+    entries
 }
 
 /// Fetch package versions from npm registry (FR-063, FR-064)
@@ -593,6 +711,8 @@ pub struct WizardState {
     pub execution_mode_index: usize,
     /// Skip permissions
     pub skip_permissions: bool,
+    /// Collaboration modes (Codex v0.91.0+, SPEC-fdebd681)
+    pub collaboration_modes: bool,
     /// Session ID for resume/continue
     pub session_id: Option<String>,
     /// Scroll offset for popup content
@@ -635,6 +755,11 @@ pub struct WizardState {
     pub issue_loading: bool,
     /// Issue loading error message
     pub issue_error: Option<String>,
+    // Custom agents (SPEC-71f2742d)
+    /// All available agents (builtin + custom)
+    pub all_agents: Vec<AgentEntry>,
+    /// Selected agent entry (may be custom)
+    pub selected_agent_entry: Option<AgentEntry>,
     /// Existing branch for selected issue (FR-011 duplicate detection)
     pub issue_existing_branch: Option<String>,
 }
@@ -706,6 +831,7 @@ impl WizardState {
         self.execution_mode = ExecutionMode::default();
         self.execution_mode_index = 0;
         self.skip_permissions = false;
+        self.collaboration_modes = false;
         self.session_id = None;
         self.branch_type = BranchType::default();
         self.new_branch_name.clear();
@@ -717,6 +843,9 @@ impl WizardState {
         self.quick_start_index = 0;
         self.has_running_agent = false;
         self.running_agent_pane_idx = None;
+        // Load all agents (builtin + custom)
+        self.all_agents = get_all_agents(&self.installed_cache);
+        self.selected_agent_entry = self.all_agents.first().cloned();
     }
 
     /// Get branch action options based on running agent status
@@ -737,6 +866,31 @@ impl WizardState {
             // Each entry has 2 options, plus 1 "Choose different" at the end
             self.quick_start_entries.len() * 2 + 1
         }
+    }
+
+    /// Resolve version string to semantic version for collaboration_modes check (SPEC-fdebd681)
+    fn resolve_version_for_collaboration_modes(&self) -> Option<String> {
+        match self.version.as_str() {
+            "latest" => Some("99.99.99".to_string()), // latest always supports
+            "installed" => {
+                // Get installed version from cache
+                self.installed_cache
+                    .get(&CodingAgent::CodexCli)
+                    .and_then(|info| info.as_ref())
+                    .map(|info| info.version.clone())
+            }
+            v => Some(v.to_string()), // concrete version
+        }
+    }
+
+    /// Check if CollaborationModes step should be shown (SPEC-fdebd681)
+    fn should_show_collaboration_modes(&self) -> bool {
+        self.agent == CodingAgent::CodexCli
+            && self
+                .resolve_version_for_collaboration_modes()
+                .as_deref()
+                .map(|v| supports_collaboration_modes(Some(v)))
+                .unwrap_or(false)
     }
 
     /// Get the selected Quick Start action and tool index (FR-050)
@@ -770,14 +924,35 @@ impl WizardState {
     /// Apply Quick Start selection to wizard state (FR-050)
     pub fn apply_quick_start_selection(&mut self, tool_index: usize, action: QuickStartAction) {
         if let Some(entry) = self.quick_start_entries.get(tool_index) {
-            // Map tool_id to CodingAgent
-            self.agent = match entry.tool_id.as_str() {
-                "claude-code" => CodingAgent::ClaudeCode,
-                "codex-cli" => CodingAgent::CodexCli,
-                "gemini-cli" => CodingAgent::GeminiCli,
-                "opencode" => CodingAgent::OpenCode,
-                _ => CodingAgent::ClaudeCode,
-            };
+            // T604, T605: Find agent by ID in all_agents (supports custom agents and builtin ID overwrite)
+            // SPEC-71f2742d US6
+            if let Some((agent_index, agent_entry)) = self
+                .all_agents
+                .iter()
+                .enumerate()
+                .find(|(_, a)| a.id == entry.tool_id)
+            {
+                // Found in all_agents (could be builtin, custom, or custom overwriting builtin)
+                self.agent_index = agent_index;
+                self.selected_agent_entry = Some(agent_entry.clone());
+
+                if let Some(builtin) = agent_entry.builtin {
+                    self.agent = builtin;
+                } else {
+                    // Custom agent without builtin association - use default but selected_agent_entry is set
+                    self.agent = CodingAgent::ClaudeCode;
+                }
+            } else {
+                // Fallback: Map tool_id to builtin CodingAgent
+                self.agent = match entry.tool_id.as_str() {
+                    "claude-code" => CodingAgent::ClaudeCode,
+                    "codex-cli" => CodingAgent::CodexCli,
+                    "gemini-cli" => CodingAgent::GeminiCli,
+                    "opencode" => CodingAgent::OpenCode,
+                    _ => CodingAgent::ClaudeCode,
+                };
+                self.selected_agent_entry = None;
+            }
 
             // Set model if available
             if let Some(model) = &entry.model {
@@ -877,6 +1052,110 @@ impl WizardState {
         self.visible = false;
     }
 
+    /// Get supported execution modes for the current agent (T212 SPEC-71f2742d)
+    /// For builtin agents, all modes are supported.
+    /// For custom agents, only modes with non-empty modeArgs are supported.
+    pub fn supported_execution_modes(&self) -> Vec<ExecutionMode> {
+        if let Some(ref entry) = self.selected_agent_entry {
+            if let Some(ref custom) = entry.custom {
+                // Custom agent: check mode_args
+                if let Some(ref mode_args) = custom.mode_args {
+                    let mut modes = vec![ExecutionMode::Normal]; // Normal is always supported
+                    if !mode_args.continue_mode.is_empty() {
+                        modes.push(ExecutionMode::Continue);
+                    }
+                    if !mode_args.resume.is_empty() {
+                        modes.push(ExecutionMode::Resume);
+                    }
+                    return modes;
+                } else {
+                    // No mode_args defined, only Normal is supported
+                    return vec![ExecutionMode::Normal];
+                }
+            }
+        }
+        // Builtin agent: all modes supported
+        ExecutionMode::all().to_vec()
+    }
+
+    /// Check if skip_permissions option should be shown (T213 SPEC-71f2742d)
+    /// For builtin agents, always show.
+    /// For custom agents, only show if permission_skip_args is non-empty.
+    pub fn supports_skip_permissions(&self) -> bool {
+        if let Some(ref entry) = self.selected_agent_entry {
+            if let Some(ref custom) = entry.custom {
+                return !custom.permission_skip_args.is_empty();
+            }
+        }
+        // Builtin agent: always supports skip_permissions
+        true
+    }
+
+    /// Get models for current agent (T503 SPEC-71f2742d FR-011)
+    /// For custom agents, returns models from CustomCodingAgent.models.
+    /// For builtin agents, returns CodingAgent.models().
+    pub fn get_models(&self) -> Vec<ModelOption> {
+        if let Some(ref entry) = self.selected_agent_entry {
+            if let Some(ref custom) = entry.custom {
+                // Convert ModelDef to ModelOption
+                if custom.models.is_empty() {
+                    return vec![];
+                }
+                return custom
+                    .models
+                    .iter()
+                    .map(|m| ModelOption::new(&m.id, &m.label, ""))
+                    .collect();
+            }
+        }
+        // Builtin agent
+        self.agent.models()
+    }
+
+    /// Check if model selection step should be shown (T504 SPEC-71f2742d FR-011)
+    pub fn has_models(&self) -> bool {
+        if let Some(ref entry) = self.selected_agent_entry {
+            if let Some(ref custom) = entry.custom {
+                return !custom.models.is_empty();
+            }
+        }
+        // Builtin agents always have models
+        true
+    }
+
+    /// Check if version command is available (T505 SPEC-71f2742d FR-012)
+    pub fn has_version_command(&self) -> bool {
+        if let Some(ref entry) = self.selected_agent_entry {
+            if let Some(ref custom) = entry.custom {
+                return custom.version_command.is_some();
+            }
+        }
+        // Builtin agents use installed version detection
+        true
+    }
+
+    /// Get version from custom agent's versionCommand (T505 SPEC-71f2742d FR-012)
+    pub fn get_custom_version(&self) -> Option<String> {
+        if let Some(ref entry) = self.selected_agent_entry {
+            if let Some(ref custom) = entry.custom {
+                if let Some(ref cmd) = custom.version_command {
+                    // Execute version command
+                    if let Ok(output) = std::process::Command::new("sh").args(["-c", cmd]).output()
+                    {
+                        if output.status.success() {
+                            let version =
+                                String::from_utf8_lossy(&output.stdout).trim().to_string();
+                            if !version.is_empty() {
+                                return Some(version);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Go to next step
     pub fn next_step(&mut self) {
         self.step = match self.step {
@@ -947,23 +1226,54 @@ impl WizardState {
             }
             WizardStep::BranchNameInput => WizardStep::AgentSelect,
             WizardStep::AgentSelect => {
-                // Set model based on selected agent
-                let models = self.agent.models();
+                // Set model based on selected agent (T503 SPEC-71f2742d)
+                let models = self.get_models();
                 if !models.is_empty() {
                     self.model = models[0].id.clone();
+                    self.model_index = 0;
                 }
                 // Reset version fetch when agent changes
                 self.versions_fetched = false;
-                WizardStep::ModelSelect
+
+                // T504: Skip ModelSelect if no models defined
+                if !self.has_models() {
+                    // T506: Skip VersionSelect if no versionCommand
+                    if !self.has_version_command() {
+                        // Go directly to ExecutionMode
+                        let supported = self.supported_execution_modes();
+                        self.execution_mode_index = 0;
+                        if !supported.is_empty() {
+                            self.execution_mode = supported[0];
+                        }
+                        WizardStep::ExecutionMode
+                    } else {
+                        // Fetch versions
+                        self.fetch_versions_for_agent();
+                        WizardStep::VersionSelect
+                    }
+                } else {
+                    WizardStep::ModelSelect
+                }
             }
             WizardStep::ModelSelect => {
                 // Skip to version select unless Codex
                 if self.agent == CodingAgent::CodexCli {
                     WizardStep::ReasoningLevel
                 } else {
-                    // Fetch versions when entering VersionSelect (FR-063)
-                    self.fetch_versions_for_agent();
-                    WizardStep::VersionSelect
+                    // T506: Skip VersionSelect if custom agent without versionCommand
+                    if !self.has_version_command() {
+                        // Go directly to ExecutionMode
+                        let supported = self.supported_execution_modes();
+                        self.execution_mode_index = 0;
+                        if !supported.is_empty() {
+                            self.execution_mode = supported[0];
+                        }
+                        WizardStep::ExecutionMode
+                    } else {
+                        // Fetch versions when entering VersionSelect (FR-063)
+                        self.fetch_versions_for_agent();
+                        WizardStep::VersionSelect
+                    }
                 }
             }
             WizardStep::ReasoningLevel => {
@@ -971,8 +1281,33 @@ impl WizardState {
                 self.fetch_versions_for_agent();
                 WizardStep::VersionSelect
             }
-            WizardStep::VersionSelect => WizardStep::ExecutionMode,
-            WizardStep::ExecutionMode => WizardStep::SkipPermissions,
+            WizardStep::VersionSelect => {
+                // SPEC-fdebd681: Auto-enable collaboration_modes for Codex v0.91.0+
+                if self.should_show_collaboration_modes() {
+                    self.collaboration_modes = true;
+                }
+                // CollaborationModes step skipped - go directly to ExecutionMode
+                let supported = self.supported_execution_modes();
+                self.execution_mode_index = 0;
+                if !supported.is_empty() {
+                    self.execution_mode = supported[0];
+                }
+                WizardStep::ExecutionMode
+            }
+            WizardStep::CollaborationModes => {
+                // No longer used - step is skipped, but keep for enum exhaustiveness
+                WizardStep::ExecutionMode
+            }
+            WizardStep::ExecutionMode => {
+                // T213: Skip SkipPermissions if custom agent doesn't support it
+                if self.supports_skip_permissions() {
+                    WizardStep::SkipPermissions
+                } else {
+                    // Auto-disable skip_permissions and stay at final step
+                    self.skip_permissions = false;
+                    WizardStep::SkipPermissions
+                }
+            }
             WizardStep::SkipPermissions => WizardStep::SkipPermissions, // Final step
         };
         self.scroll_offset = 0;
@@ -1029,11 +1364,27 @@ impl WizardState {
             WizardStep::VersionSelect => {
                 if self.agent == CodingAgent::CodexCli {
                     WizardStep::ReasoningLevel
-                } else {
+                } else if self.has_models() {
                     WizardStep::ModelSelect
+                } else {
+                    // T504: Skip back to AgentSelect if no models
+                    WizardStep::AgentSelect
                 }
             }
-            WizardStep::ExecutionMode => WizardStep::VersionSelect,
+            WizardStep::CollaborationModes => {
+                // No longer used - step is skipped, but keep for enum exhaustiveness
+                WizardStep::VersionSelect
+            }
+            WizardStep::ExecutionMode => {
+                // SPEC-fdebd681: CollaborationModes step skipped - go back directly
+                if self.has_version_command() {
+                    WizardStep::VersionSelect
+                } else if self.has_models() {
+                    WizardStep::ModelSelect
+                } else {
+                    WizardStep::AgentSelect
+                }
+            }
             WizardStep::SkipPermissions => WizardStep::ExecutionMode,
         };
         self.step = prev;
@@ -1140,14 +1491,20 @@ impl WizardState {
                 }
             }
             WizardStep::AgentSelect => {
-                let max = CodingAgent::all().len().saturating_sub(1);
+                let max = self.all_agents.len().saturating_sub(1);
                 if self.agent_index < max {
                     self.agent_index += 1;
-                    self.agent = CodingAgent::all()[self.agent_index];
+                    self.selected_agent_entry = self.all_agents.get(self.agent_index).cloned();
+                    // Keep builtin agent in sync if it's a builtin
+                    if let Some(ref entry) = self.selected_agent_entry {
+                        if let Some(builtin) = entry.builtin {
+                            self.agent = builtin;
+                        }
+                    }
                 }
             }
             WizardStep::ModelSelect => {
-                let models = self.agent.models();
+                let models = self.get_models(); // T503: Use get_models() for custom agent support
                 let max = models.len().saturating_sub(1);
                 if self.model_index < max {
                     self.model_index += 1;
@@ -1170,11 +1527,16 @@ impl WizardState {
                     self.ensure_version_visible();
                 }
             }
+            WizardStep::CollaborationModes => {
+                // Step is skipped - no-op (kept for enum exhaustiveness)
+            }
             WizardStep::ExecutionMode => {
-                let max = ExecutionMode::all().len().saturating_sub(1);
+                // T212: Only navigate through supported modes
+                let supported = self.supported_execution_modes();
+                let max = supported.len().saturating_sub(1);
                 if self.execution_mode_index < max {
                     self.execution_mode_index += 1;
-                    self.execution_mode = ExecutionMode::all()[self.execution_mode_index];
+                    self.execution_mode = supported[self.execution_mode_index];
                 }
             }
             WizardStep::SkipPermissions => {
@@ -1220,13 +1582,20 @@ impl WizardState {
             WizardStep::AgentSelect => {
                 if self.agent_index > 0 {
                     self.agent_index -= 1;
-                    self.agent = CodingAgent::all()[self.agent_index];
+                    self.selected_agent_entry = self.all_agents.get(self.agent_index).cloned();
+                    // Keep builtin agent in sync if it's a builtin
+                    if let Some(ref entry) = self.selected_agent_entry {
+                        if let Some(builtin) = entry.builtin {
+                            self.agent = builtin;
+                        }
+                    }
                 }
             }
             WizardStep::ModelSelect => {
+                let models = self.get_models(); // T503: Use get_models() for custom agent support
                 if self.model_index > 0 {
                     self.model_index -= 1;
-                    self.model = self.agent.models()[self.model_index].id.clone();
+                    self.model = models[self.model_index].id.clone();
                 }
             }
             WizardStep::ReasoningLevel => {
@@ -1243,14 +1612,22 @@ impl WizardState {
                     self.ensure_version_visible();
                 }
             }
+            WizardStep::CollaborationModes => {
+                // Step is skipped - no-op (kept for enum exhaustiveness)
+            }
             WizardStep::ExecutionMode => {
+                // T212: Only navigate through supported modes
+                let supported = self.supported_execution_modes();
                 if self.execution_mode_index > 0 {
                     self.execution_mode_index -= 1;
-                    self.execution_mode = ExecutionMode::all()[self.execution_mode_index];
+                    self.execution_mode = supported[self.execution_mode_index];
                 }
             }
             WizardStep::SkipPermissions => {
-                self.skip_permissions = !self.skip_permissions;
+                // T213: Only toggle if skip_permissions is supported
+                if self.supports_skip_permissions() {
+                    self.skip_permissions = !self.skip_permissions;
+                }
             }
             WizardStep::BranchTypeSelect => {
                 let types = BranchType::all();
@@ -1452,12 +1829,20 @@ impl WizardState {
             WizardStep::BranchTypeSelect => BranchType::all().len(),
             WizardStep::IssueSelect => self.filtered_issues.len() + 1, // +1 for Skip option
             WizardStep::BranchNameInput => 0,                          // Text input, no list items
-            WizardStep::AgentSelect => CodingAgent::all().len(),
-            WizardStep::ModelSelect => self.agent.models().len(),
+            WizardStep::AgentSelect => self.all_agents.len(),
+            WizardStep::ModelSelect => self.get_models().len(), // T503: Use get_models() for custom agent support
             WizardStep::ReasoningLevel => ReasoningLevel::all().len(),
             WizardStep::VersionSelect => self.version_options.len(),
-            WizardStep::ExecutionMode => ExecutionMode::all().len(),
-            WizardStep::SkipPermissions => 2, // Yes/No
+            WizardStep::CollaborationModes => 0, // Step is skipped (kept for enum exhaustiveness)
+            WizardStep::ExecutionMode => self.supported_execution_modes().len(), // T212
+            WizardStep::SkipPermissions => {
+                // T213: If skip_permissions not supported, show only "No" option (auto-confirm)
+                if self.supports_skip_permissions() {
+                    2 // Yes/No
+                } else {
+                    1 // Only "No" (auto-confirm)
+                }
+            }
         }
     }
 
@@ -1476,6 +1861,7 @@ impl WizardState {
             WizardStep::ModelSelect => self.model_index,
             WizardStep::ReasoningLevel => self.reasoning_level_index,
             WizardStep::VersionSelect => self.version_index,
+            WizardStep::CollaborationModes => 0, // Step is skipped (kept for enum exhaustiveness)
             WizardStep::ExecutionMode => self.execution_mode_index,
             WizardStep::SkipPermissions => {
                 if self.skip_permissions {
@@ -1520,11 +1906,19 @@ impl WizardState {
             }
             WizardStep::AgentSelect => {
                 self.agent_index = index;
-                self.agent = CodingAgent::all()[index];
+                // Update selected_agent_entry for custom agent support
+                self.selected_agent_entry = self.all_agents.get(index).cloned();
+                // Keep builtin agent in sync if it's a builtin
+                if let Some(ref entry) = self.selected_agent_entry {
+                    if let Some(builtin) = entry.builtin {
+                        self.agent = builtin;
+                    }
+                }
             }
             WizardStep::ModelSelect => {
+                let models = self.get_models(); // T503: Use get_models() for custom agent support
                 self.model_index = index;
-                self.model = self.agent.models()[index].id.clone();
+                self.model = models[index].id.clone();
             }
             WizardStep::ReasoningLevel => {
                 self.reasoning_level_index = index;
@@ -1535,12 +1929,22 @@ impl WizardState {
                 self.version = self.version_options[index].value.clone();
                 self.ensure_version_visible();
             }
+            WizardStep::CollaborationModes => {
+                // Step is skipped - no-op (kept for enum exhaustiveness)
+            }
             WizardStep::ExecutionMode => {
+                // T212: Use supported modes
+                let supported = self.supported_execution_modes();
                 self.execution_mode_index = index;
-                self.execution_mode = ExecutionMode::all()[index];
+                self.execution_mode = supported[index];
             }
             WizardStep::SkipPermissions => {
-                self.skip_permissions = index == 0;
+                // T213: Only allow toggle if supported
+                if self.supports_skip_permissions() {
+                    self.skip_permissions = index == 0;
+                } else {
+                    self.skip_permissions = false;
+                }
             }
         }
         true
@@ -1644,6 +2048,9 @@ pub fn render_wizard(state: &mut WizardState, frame: &mut Frame, area: Rect) {
         WizardStep::ModelSelect => render_model_step(state, frame, content_area),
         WizardStep::ReasoningLevel => render_reasoning_step(state, frame, content_area),
         WizardStep::VersionSelect => render_version_step(state, frame, content_area),
+        WizardStep::CollaborationModes => {
+            // Step is skipped - kept for enum exhaustiveness but never reached
+        }
         WizardStep::ExecutionMode => render_execution_mode_step(state, frame, content_area),
         WizardStep::SkipPermissions => render_skip_permissions_step(state, frame, content_area),
     }
@@ -1677,6 +2084,7 @@ fn wizard_title(step: WizardStep) -> &'static str {
         WizardStep::ModelSelect => " Select Model ",
         WizardStep::ReasoningLevel => " Select Reasoning Level ",
         WizardStep::VersionSelect => " Select Version ",
+        WizardStep::CollaborationModes => " (Skipped) ", // Step is skipped (enum exhaustiveness)
         WizardStep::ExecutionMode => " Select Execution Mode ",
         WizardStep::SkipPermissions => " Skip Permissions? ",
     }
@@ -1805,7 +2213,8 @@ fn wizard_required_content_width(state: &WizardState) -> usize {
             }
         }
         WizardStep::ModelSelect => {
-            for model in state.agent.models() {
+            // T503: Use get_models() for custom agent support
+            for model in state.get_models() {
                 if let Some(desc) = &model.description {
                     consider(format!("  {} - {}", model.label, desc));
                 } else {
@@ -1826,6 +2235,9 @@ fn wizard_required_content_width(state: &WizardState) -> usize {
                     consider(format!("  {}", opt.label));
                 }
             }
+        }
+        WizardStep::CollaborationModes => {
+            // Step is skipped - no-op (kept for enum exhaustiveness)
         }
         WizardStep::ExecutionMode => {
             for mode in ExecutionMode::all() {
@@ -2229,25 +2641,34 @@ fn render_agent_step(state: &WizardState, frame: &mut Frame, area: Rect) {
         0
     };
 
-    let agents = CodingAgent::all();
-    let items: Vec<ListItem> = agents
-        .iter()
-        .enumerate()
-        .map(|(i, agent)| {
-            let is_selected = i == state.agent_index;
-            let prefix = if is_selected { "> " } else { "  " };
-            let style = if is_selected {
-                Style::default().bg(Color::Cyan).fg(Color::Black)
-            } else {
-                Style::default().fg(agent.color())
-            };
-            let text = truncate_with_ellipsis(
-                &format!("{}{}", prefix, agent.label()),
-                area.width as usize,
-            );
-            ListItem::new(text).style(style)
-        })
-        .collect();
+    // Use unified agent list (builtin + custom) - SPEC-71f2742d
+    let mut items: Vec<ListItem> = Vec::new();
+    let builtin_count = CodingAgent::all().len();
+    let has_custom = state.all_agents.len() > builtin_count;
+
+    for (i, entry) in state.all_agents.iter().enumerate() {
+        // Add separator before custom agents (T117)
+        if i == builtin_count && has_custom {
+            let separator =
+                ListItem::new("  --- Custom ---").style(Style::default().fg(Color::DarkGray));
+            items.push(separator);
+        }
+
+        let is_selected = i == state.agent_index;
+        let prefix = if is_selected { "> " } else { "  " };
+
+        // Always show agents in their color (grayed-out styling removed)
+        let style = if is_selected {
+            Style::default().bg(Color::Cyan).fg(Color::Black)
+        } else {
+            Style::default().fg(entry.color)
+        };
+
+        let label = entry.display_name.clone();
+
+        let text = truncate_with_ellipsis(&format!("{}{}", prefix, label), area.width as usize);
+        items.push(ListItem::new(text).style(style));
+    }
 
     let list_area = Rect::new(
         area.x,
@@ -2260,7 +2681,8 @@ fn render_agent_step(state: &WizardState, frame: &mut Frame, area: Rect) {
 }
 
 fn render_model_step(state: &WizardState, frame: &mut Frame, area: Rect) {
-    let models = state.agent.models();
+    // T503: Use get_models() for custom agent support
+    let models = state.get_models();
     let available_width = area.width as usize;
 
     let items: Vec<ListItem> = models
@@ -2425,7 +2847,8 @@ fn render_version_step(state: &WizardState, frame: &mut Frame, area: Rect) {
 }
 
 fn render_execution_mode_step(state: &WizardState, frame: &mut Frame, area: Rect) {
-    let modes = ExecutionMode::all();
+    // T212: Show only supported execution modes for current agent
+    let modes = state.supported_execution_modes();
     let items: Vec<ListItem> = modes
         .iter()
         .enumerate()
@@ -2449,7 +2872,47 @@ fn render_execution_mode_step(state: &WizardState, frame: &mut Frame, area: Rect
     frame.render_widget(list, area);
 }
 
+/// Render Collaboration Modes step (SPEC-fdebd681)
+fn render_collaboration_modes_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    let options = [("Enabled", true), ("Disabled", false)];
+    let items: Vec<ListItem> = options
+        .iter()
+        .map(|(label, value)| {
+            let is_selected = state.collaboration_modes == *value;
+            let prefix = if is_selected { "> " } else { "  " };
+            let style = if is_selected {
+                Style::default().bg(Color::Cyan).fg(Color::Black)
+            } else {
+                Style::default()
+            };
+            let desc = if *value {
+                "Plan/Execute mode switching"
+            } else {
+                "Standard single mode"
+            };
+            let text = truncate_with_ellipsis(
+                &format!("{}{:<10} {}", prefix, label, desc),
+                area.width as usize,
+            );
+            ListItem::new(text).style(style)
+        })
+        .collect();
+
+    let list = List::new(items);
+    frame.render_widget(list, area);
+}
+
 fn render_skip_permissions_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    // T213: Check if skip_permissions is supported for current agent
+    if !state.supports_skip_permissions() {
+        // Show "not available" message for custom agents without permissionSkipArgs
+        let items = vec![ListItem::new("> No   (Not available for this agent)")
+            .style(Style::default().bg(Color::Cyan).fg(Color::Black))];
+        let list = List::new(items);
+        frame.render_widget(list, area);
+        return;
+    }
+
     let options = [("Yes", true), ("No", false)];
     let items: Vec<ListItem> = options
         .iter()
@@ -2816,6 +3279,137 @@ mod tests {
     }
 
     // ==========================================================
+    // SPEC-71f2742d US6: Custom Agent Quick Start Tests (T602)
+    // ==========================================================
+
+    /// T602: Quick Start restores custom agent settings
+    #[test]
+    fn test_quick_start_restores_custom_agent() {
+        use gwt_core::config::{AgentType, CustomCodingAgent};
+
+        let mut state = WizardState::new();
+
+        // Create Quick Start entry with custom agent ID
+        let history = vec![QuickStartEntry {
+            tool_id: "my-custom-agent".to_string(),
+            tool_label: "My Custom Agent".to_string(),
+            model: Some("default".to_string()),
+            reasoning_level: None,
+            version: Some("1.0.0".to_string()),
+            session_id: Some("session-123".to_string()),
+            skip_permissions: Some(true),
+        }];
+        state.open_for_branch("feature/custom", history, None);
+
+        // Add custom agent to all_agents AFTER open_for_branch (which calls reset_selections)
+        let custom_agent = CustomCodingAgent {
+            id: "my-custom-agent".to_string(),
+            display_name: "My Custom Agent".to_string(),
+            agent_type: AgentType::Command,
+            command: "my-agent".to_string(),
+            default_args: vec![],
+            mode_args: None,
+            permission_skip_args: vec![],
+            env: std::collections::HashMap::new(),
+            models: vec![],
+            version_command: None,
+        };
+
+        state.all_agents.push(AgentEntry::from_custom(
+            custom_agent.clone(),
+            Color::Magenta,
+            true,
+        ));
+
+        assert_eq!(state.step, WizardStep::QuickStart);
+
+        // Select "Resume with previous settings"
+        state.quick_start_index = 0;
+        state.apply_quick_start_selection(0, QuickStartAction::ResumeWithPrevious);
+
+        // Verify custom agent is selected via selected_agent_entry
+        assert!(state.selected_agent_entry.is_some());
+        let entry = state.selected_agent_entry.as_ref().unwrap();
+        assert_eq!(entry.id, "my-custom-agent");
+        assert!(entry.custom.is_some());
+        assert_eq!(entry.custom.as_ref().unwrap().id, "my-custom-agent");
+
+        // Verify settings are restored
+        assert_eq!(state.model, "default");
+        assert_eq!(state.version, "1.0.0");
+        assert!(state.skip_permissions);
+        assert_eq!(state.session_id, Some("session-123".to_string()));
+        assert_eq!(state.execution_mode, ExecutionMode::Resume);
+    }
+
+    /// T605: Custom agent with builtin ID overwrites builtin in Quick Start
+    #[test]
+    fn test_quick_start_custom_overwrites_builtin() {
+        use gwt_core::config::{AgentType, CustomCodingAgent};
+
+        let mut state = WizardState::new();
+
+        // Create Quick Start entry with "claude-code" ID
+        let history = vec![QuickStartEntry {
+            tool_id: "claude-code".to_string(),
+            tool_label: "Custom Claude".to_string(),
+            model: Some("opus".to_string()),
+            reasoning_level: None,
+            version: Some("2.0.0".to_string()),
+            session_id: None,
+            skip_permissions: None,
+        }];
+        state.open_for_branch("feature/overwrite", history, None);
+
+        // Create custom agent with builtin ID "claude-code"
+        let custom_agent = CustomCodingAgent {
+            id: "claude-code".to_string(),
+            display_name: "Custom Claude".to_string(),
+            agent_type: AgentType::Command,
+            command: "custom-claude".to_string(),
+            default_args: vec!["--custom".to_string()],
+            mode_args: None,
+            permission_skip_args: vec![],
+            env: std::collections::HashMap::new(),
+            models: vec![],
+            version_command: None,
+        };
+
+        // Replace builtin in all_agents with custom version (simulating merge behavior)
+        // Find and replace the claude-code entry
+        if let Some(idx) = state.all_agents.iter().position(|a| a.id == "claude-code") {
+            state.all_agents[idx] = AgentEntry {
+                id: "claude-code".to_string(),
+                display_name: "Custom Claude".to_string(),
+                color: Color::Blue,
+                is_builtin: false,
+                is_installed: true,
+                builtin: Some(CodingAgent::ClaudeCode), // Keep builtin association for launching
+                custom: Some(custom_agent),
+            };
+        }
+
+        // Select "Start new with previous settings"
+        state.quick_start_index = 1;
+        state.apply_quick_start_selection(0, QuickStartAction::StartNewWithPrevious);
+
+        // Verify custom agent overwrites builtin
+        assert!(state.selected_agent_entry.is_some());
+        let entry = state.selected_agent_entry.as_ref().unwrap();
+        assert_eq!(entry.id, "claude-code");
+        assert!(entry.custom.is_some());
+        assert_eq!(entry.custom.as_ref().unwrap().display_name, "Custom Claude");
+
+        // Builtin is still set for launching
+        assert_eq!(state.agent, CodingAgent::ClaudeCode);
+
+        // Settings are restored
+        assert_eq!(state.model, "opus");
+        assert_eq!(state.version, "2.0.0");
+        assert_eq!(state.execution_mode, ExecutionMode::Normal);
+    }
+
+    // ==========================================================
     // SPEC-e4798383: GitHub Issue Selection Tests
     // ==========================================================
 
@@ -2988,5 +3582,71 @@ mod tests {
 
         // Error should be cleared
         assert!(state.issue_error.is_none());
+    }
+
+    /// SPEC-fdebd681: Test collaboration_modes auto-enabled for Codex v0.91.0+
+    #[test]
+    fn test_collaboration_modes_auto_enabled_for_codex_091() {
+        let mut state = WizardState::new();
+        state.agent = CodingAgent::CodexCli;
+        state.version = "0.91.0".to_string();
+        // Set up version_options to satisfy version selection
+        state.version_options = vec![VersionOption {
+            value: "0.91.0".to_string(),
+            label: "0.91.0".to_string(),
+            description: None,
+        }];
+        state.version_index = 0;
+
+        // Start from VersionSelect step
+        state.step = WizardStep::VersionSelect;
+        state.next_step();
+
+        // collaboration_modes should be automatically set to true
+        assert!(state.collaboration_modes);
+        // Should skip CollaborationModes step and go directly to ExecutionMode
+        assert_eq!(state.step, WizardStep::ExecutionMode);
+    }
+
+    /// SPEC-fdebd681: Test collaboration_modes not enabled for old Codex
+    #[test]
+    fn test_collaboration_modes_not_enabled_for_old_codex() {
+        let mut state = WizardState::new();
+        state.agent = CodingAgent::CodexCli;
+        state.version = "0.90.0".to_string();
+        state.version_options = vec![VersionOption {
+            value: "0.90.0".to_string(),
+            label: "0.90.0".to_string(),
+            description: None,
+        }];
+        state.version_index = 0;
+
+        state.step = WizardStep::VersionSelect;
+        state.next_step();
+
+        // v0.90.0 should not enable collaboration_modes
+        assert!(!state.collaboration_modes);
+        // Should still skip CollaborationModes step
+        assert_eq!(state.step, WizardStep::ExecutionMode);
+    }
+
+    /// SPEC-fdebd681: Test prev_step skips CollaborationModes
+    #[test]
+    fn test_prev_step_skips_collaboration_modes() {
+        let mut state = WizardState::new();
+        state.agent = CodingAgent::CodexCli;
+        state.version = "0.91.0".to_string();
+        state.version_options = vec![VersionOption {
+            value: "0.91.0".to_string(),
+            label: "0.91.0".to_string(),
+            description: None,
+        }];
+
+        // Start from ExecutionMode
+        state.step = WizardStep::ExecutionMode;
+        state.prev_step();
+
+        // Should go directly to VersionSelect, not CollaborationModes
+        assert_eq!(state.step, WizardStep::VersionSelect);
     }
 }
