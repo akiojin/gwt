@@ -28,6 +28,13 @@
 - [x] **T1340** [Impl] `crates/gwt-cli/src/tui/app.rs` でクリーンアップ中ブランチのクリック選択を無効化する
 - [x] **T1341** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
 
+## 追加作業: エージェント起動前の軽量Worktree解決 (2026-01-26)
+
+- [x] **T1342** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に起動前ブランチ検証の軽量化要件・方針を追記
+- [x] **T1343** [Test] `crates/gwt-core/src/worktree/manager.rs` に軽量worktree検索が詳細状態チェックを行わないことを検証するテストを追加
+- [x] **T1344** [Impl] `crates/gwt-core/src/worktree/manager.rs` に軽量検索を追加し、`crates/gwt-cli/src/tui/app.rs` の起動前worktree解決で使用する
+- [x] **T1345** `cargo test -p gwt-core` を実行し、失敗がないことを確認する
+
 ## 追加作業: ブランチ詳細サマリの非同期更新 (2026-01-21)
 
 - [x] **T1323** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に詳細サマリの非同期更新要件・方針を追記
