@@ -3107,9 +3107,68 @@ impl Model {
                 }
             }
             SettingsCategory::Environment => {
-                // Navigate to existing Profiles screen
-                self.screen_stack.push(self.screen.clone());
-                self.screen = Screen::Profiles;
+                use super::screens::settings::ProfileMode;
+                match &self.settings.profile_mode {
+                    ProfileMode::List => {
+                        if self.settings.is_add_profile_selected() {
+                            // Enter add mode
+                            self.settings.enter_profile_add_mode();
+                        } else if self.settings.selected_profile().is_some() {
+                            // Enter edit mode for selected profile
+                            self.settings.enter_profile_edit_mode();
+                        }
+                    }
+                    ProfileMode::Add | ProfileMode::Edit(_) => {
+                        // Save profile
+                        if let Err(e) = self.settings.save_profile() {
+                            self.settings.error_message = Some(e.to_string());
+                        } else {
+                            // Save to file
+                            if let Some(ref config) = self.settings.profiles_config {
+                                if let Err(e) = config.save() {
+                                    self.settings.error_message =
+                                        Some(format!("Failed to save: {}", e));
+                                } else {
+                                    self.load_profiles();
+                                }
+                            }
+                        }
+                    }
+                    ProfileMode::ConfirmDelete(_) => {
+                        // Confirm delete
+                        if self.settings.profile_delete_confirm {
+                            if self.settings.delete_profile() {
+                                // Save to file
+                                if let Some(ref config) = self.settings.profiles_config {
+                                    if let Err(e) = config.save() {
+                                        self.settings.error_message =
+                                            Some(format!("Failed to save: {}", e));
+                                    } else {
+                                        self.load_profiles();
+                                    }
+                                }
+                            }
+                        } else {
+                            self.settings.cancel_profile_mode();
+                        }
+                    }
+                    ProfileMode::EnvEdit(_) => {
+                        let env_state = &mut self.settings.env_edit_state;
+                        // Check if "Add new" is selected
+                        if env_state.selected_index >= env_state.vars.len() {
+                            // Add new variable
+                            env_state.add_new_var();
+                        } else if env_state.editing.is_some() {
+                            // Finish editing
+                            env_state.editing = None;
+                        } else {
+                            // Start editing key
+                            use super::screens::settings::EnvEditMode;
+                            let key_len = env_state.vars[env_state.selected_index].0.len();
+                            env_state.editing = Some(EnvEditMode::Key(key_len));
+                        }
+                    }
+                }
             }
             SettingsCategory::AISettings => {
                 // Enter: open AI Settings Wizard
@@ -3164,7 +3223,71 @@ impl Model {
                 }
             }
             SettingsCategory::Environment => {
-                // Environment category navigates to Profiles screen, no char handling needed
+                use super::screens::settings::{EnvEditMode, ProfileMode};
+                match &self.settings.profile_mode {
+                    ProfileMode::List => {
+                        // 'd' or 'D' to enter delete mode
+                        if (c == 'd' || c == 'D') && self.settings.selected_profile().is_some() {
+                            self.settings.enter_profile_delete_mode();
+                        }
+                        // 'e' or 'E' to enter env edit mode
+                        else if (c == 'e' || c == 'E') && self.settings.selected_profile().is_some()
+                        {
+                            self.settings.enter_env_edit_mode();
+                        }
+                        // Space to toggle active profile
+                        else if c == ' ' && self.settings.selected_profile().is_some() {
+                            self.settings.toggle_active_profile();
+                            // Save to file
+                            if let Some(ref config) = self.settings.profiles_config {
+                                let _ = config.save();
+                                self.load_profiles();
+                            }
+                        }
+                    }
+                    ProfileMode::Add | ProfileMode::Edit(_) => {
+                        // Insert character in form
+                        self.settings.profile_form.insert_char(c);
+                    }
+                    ProfileMode::ConfirmDelete(_) => {
+                        // Ignore chars
+                    }
+                    ProfileMode::EnvEdit(_) => {
+                        let env_state = &mut self.settings.env_edit_state;
+                        // Handle special keys
+                        if (c == 'a' || c == 'A') && env_state.editing.is_none() {
+                            // Add new variable
+                            env_state.add_new_var();
+                        } else if (c == 'd' || c == 'D') && env_state.editing.is_none() {
+                            // Delete selected variable
+                            env_state.delete_selected();
+                        } else if (c == 's' || c == 'S') && env_state.editing.is_none() {
+                            // Save env vars
+                            if self.settings.save_profile_env() {
+                                if let Some(ref config) = self.settings.profiles_config {
+                                    let _ = config.save();
+                                    self.load_profiles();
+                                }
+                            }
+                        } else if let Some(ref mode) = env_state.editing.clone() {
+                            // Insert char while editing
+                            match mode {
+                                EnvEditMode::Key(pos) => {
+                                    if env_state.selected_index < env_state.vars.len() {
+                                        env_state.vars[env_state.selected_index].0.insert(*pos, c);
+                                        env_state.editing = Some(EnvEditMode::Key(pos + 1));
+                                    }
+                                }
+                                EnvEditMode::Value(pos) => {
+                                    if env_state.selected_index < env_state.vars.len() {
+                                        env_state.vars[env_state.selected_index].1.insert(*pos, c);
+                                        env_state.editing = Some(EnvEditMode::Value(pos + 1));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             _ => {
                 // Other categories don't handle char input
@@ -4010,8 +4133,14 @@ impl Model {
             // FR-020 SPEC-71f2742d: Tab cycles BranchList → AgentMode → Settings → BranchList
             Message::Tab => match self.screen {
                 Screen::Settings => {
-                    // In form mode, Tab cycles fields
-                    if self.settings.is_form_mode() {
+                    // In profile form mode, Tab cycles profile form fields
+                    if self.settings.is_profile_form_mode() {
+                        self.settings.profile_form.next_field();
+                    } else if self.settings.is_env_edit_mode() {
+                        // Toggle between Key/Value editing
+                        self.settings.env_edit_state.toggle_key_value();
+                    } else if self.settings.is_form_mode() {
+                        // In agent form mode, Tab cycles agent form fields
                         self.settings.agent_form.next_field();
                     } else {
                         // Exit Settings and go to BranchList (FR-020)
@@ -5629,8 +5758,12 @@ impl Model {
                 }
                 (KeyCode::Char('p'), KeyModifiers::NONE) => {
                     // In filter mode, 'p' goes to filter input
+                    // 'p' now navigates to Settings → Environment tab (SPEC-71f2742d)
                     if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
-                        Some(Message::NavigateTo(Screen::Profiles))
+                        use super::screens::settings::SettingsCategory;
+                        self.settings.category = SettingsCategory::Environment;
+                        self.settings.load_profiles_config();
+                        Some(Message::NavigateTo(Screen::Settings))
                     } else {
                         Some(Message::Char('p'))
                     }
