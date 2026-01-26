@@ -1,6 +1,13 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+## [6.19.0] - 2026-01-26
+
+### Bug Fixes
+
+- Issue連携ブランチ作成で--checkout=falseを付与 (#799)
+
 ## [6.18.0] - 2026-01-26
 
 ### Bug Fixes
