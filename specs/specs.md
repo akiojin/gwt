@@ -1,16 +1,16 @@
 <!-- markdownlint-disable MD013 -->
 # 仕様一覧
 
-**最終更新**: 2026-01-25
+**最終更新**: 2026-01-26
 
 このファイルは `.specify/scripts/bash/update-specs-index.sh` により自動生成されました。
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
-| [SPEC-1a24a94b](SPEC-1a24a94b/spec.md) | 機能仕様: [機能名] | [日付] |
-| [SPEC-bf7fb63e](SPEC-bf7fb63e/spec.md) | 機能仕様: Worktree作成進捗モーダル | 2026-01-25 |
+| [SPEC-f59c553d](SPEC-f59c553d/spec.md) | 機能仕様: npm postinstall ダウンロード安定化 | 2026-01-26 |
 | [SPEC-f47db390](SPEC-f47db390/spec.md) | 機能仕様: セッションID永続化とContinue/Resume強化 | 2025-12-06 |
 | [SPEC-e66acf66](SPEC-e66acf66/spec.md) | 機能仕様: エラーポップアップ・ログ出力システム | 2026-01-22 |
+| [SPEC-e4798383](SPEC-e4798383/spec.md) | 機能仕様: GitHub Issue連携によるブランチ作成 | 2025-01-25 |
 | [SPEC-dafff079](SPEC-dafff079/spec.md) | 機能仕様: 環境変数プロファイル機能 | 2025-12-15 |
 | [SPEC-d2f4762a](SPEC-d2f4762a/spec.md) | 機能仕様: ブランチ選択画面（Branch Selection Screen） | 2025-11-18 |
 | [SPEC-d27be71b](SPEC-d27be71b/spec.md) | SPEC-d27be71b: Ink.js から OpenTUI への移行 | 2026-01-04 |
