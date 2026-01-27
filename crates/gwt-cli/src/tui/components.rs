@@ -522,19 +522,12 @@ impl<'a> SummaryPanel<'a> {
 
     pub fn render_with_links(&self, frame: &mut Frame, area: Rect) -> Vec<LinkRegion> {
         let title = self.title.clone().unwrap_or_else(|| {
-            Line::from(vec![
-                Span::styled(
-                    "Details",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" "),
-                Span::styled(
-                    self.summary.branch_name.clone(),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ])
+            Line::from(Span::styled(
+                " Details ".to_string(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ))
         });
         let block = Block::default()
             .borders(Borders::ALL)
