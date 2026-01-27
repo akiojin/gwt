@@ -3110,12 +3110,13 @@ impl Model {
                 use super::screens::settings::ProfileMode;
                 match &self.settings.profile_mode {
                     ProfileMode::List => {
+                        // FR-029: Enter opens environment variable edit mode
                         if self.settings.is_add_profile_selected() {
-                            // Enter add mode
+                            // Enter add mode for new profile
                             self.settings.enter_profile_add_mode();
                         } else if self.settings.selected_profile().is_some() {
-                            // Enter edit mode for selected profile
-                            self.settings.enter_profile_edit_mode();
+                            // Enter env edit mode for selected profile
+                            self.settings.enter_env_edit_mode();
                         }
                     }
                     ProfileMode::Add | ProfileMode::Edit(_) => {
@@ -3230,10 +3231,10 @@ impl Model {
                         if (c == 'd' || c == 'D') && self.settings.selected_profile().is_some() {
                             self.settings.enter_profile_delete_mode();
                         }
-                        // 'e' or 'E' to enter env edit mode
+                        // FR-030: 'e' or 'E' to enter profile edit mode (name/description)
                         else if (c == 'e' || c == 'E') && self.settings.selected_profile().is_some()
                         {
-                            self.settings.enter_env_edit_mode();
+                            self.settings.enter_profile_edit_mode();
                         }
                         // Space to toggle active profile
                         else if c == ' ' && self.settings.selected_profile().is_some() {

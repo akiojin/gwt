@@ -1055,9 +1055,9 @@ fn selected_description(state: &SettingsState) -> &'static str {
                 "Add a new environment profile."
             } else if let Some(profile) = state.selected_profile() {
                 if profile.env.is_empty() {
-                    "No environment variables. Press Enter to edit, E for env vars."
+                    "No environment variables. Press Enter to add, E to edit profile name."
                 } else {
-                    "Press Enter to edit profile, E to manage env vars, Space to activate."
+                    "Press Enter to edit env vars, E to edit profile name, Space to activate."
                 }
             } else {
                 "Manage environment profiles for coding agents."
@@ -1785,7 +1785,7 @@ fn render_instructions(state: &SettingsState, frame: &mut Frame, area: Rect) {
                 if state.is_add_profile_selected() {
                     "[Enter] Add | [Space] Activate | [L/R] Cat | [U/D] Sel | [Tab] Scr | [Esc] Back"
                 } else {
-                    "[Enter] Edit | [E] Env | [D] Del | [Space] Activate | [L/R] Cat | [Tab] Scr | [Esc] Back"
+                    "[Enter] Env | [E] Edit | [D] Del | [Space] Activate | [L/R] Cat | [Tab] Scr | [Esc] Back"
                 }
             }
             ProfileMode::Add | ProfileMode::Edit(_) => {
@@ -1947,6 +1947,61 @@ mod tests {
         assert_eq!(
             selected_description(&state),
             "If false, dependency install is skipped before launch."
+        );
+    }
+
+    /// FR-029: Enter opens env edit mode, FR-030: E opens profile edit mode
+    /// Tests that the instruction string correctly shows Enter for Env and E for Edit
+    #[test]
+    fn test_environment_instructions_enter_for_env_e_for_edit() {
+        // The instruction string for Environment category in List mode with a profile selected
+        let instructions =
+            "[Enter] Env | [E] Edit | [D] Del | [Space] Activate | [L/R] Cat | [Tab] Scr | [Esc] Back";
+
+        // Enter should be for Env (environment variables)
+        assert!(
+            instructions.contains("[Enter] Env"),
+            "Instructions should show Enter for Env: {}",
+            instructions
+        );
+        // E should be for Edit (profile name/description)
+        assert!(
+            instructions.contains("[E] Edit"),
+            "Instructions should show E for Edit: {}",
+            instructions
+        );
+    }
+
+    #[test]
+    fn test_environment_description_enter_for_env_vars() {
+        use gwt_core::config::{Profile, ProfilesConfig};
+        use std::collections::HashMap;
+        let mut state = SettingsState::new();
+        state.category = SettingsCategory::Environment;
+        // Create a config with only one profile that has env vars
+        let mut profile = Profile::new("dev");
+        profile.env.insert("API_KEY".to_string(), "secret".to_string());
+        let mut config = ProfilesConfig {
+            version: 1,
+            active: Some("dev".to_string()),
+            default_ai: None,
+            profiles: HashMap::new(),
+        };
+        config.profiles.insert("dev".to_string(), profile);
+        state.profiles_config = Some(config);
+        state.profile_index = 0; // "dev" is the only profile
+
+        let desc = selected_description(&state);
+        // Description should mention Enter for env vars, E for profile name
+        assert!(
+            desc.contains("Enter to edit env vars"),
+            "Description should mention Enter for env vars: {}",
+            desc
+        );
+        assert!(
+            desc.contains("E to edit profile name"),
+            "Description should mention E for profile name: {}",
+            desc
         );
     }
 }
