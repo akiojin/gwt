@@ -64,7 +64,7 @@ futures-util = "0.3"
 portable-pty = "0.9"
 
 # Leptos (WASM frontend)
-leptos = { version = "0.7", features = ["csr"] }
+leptos = { version = "0.8", features = ["csr"] }
 leptos_router = "0.7"
 gloo-net = "0.6"
 wasm-bindgen = "0.2"
