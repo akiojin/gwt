@@ -1,11 +1,19 @@
 ---
-description: developブランチからmainへのRelease PRを作成します（LLMベース）。
+description: developブランチからrelease-X.Y.Zブランチを作成し、mainへのRelease PRを作成します（LLMベース）。
 tags: [project]
 ---
 
 # リリースコマンド（LLMベース）
 
-develop ブランチ上でリリース準備を行い、main への Release PR を作成します。
+develop ブランチからリリースブランチを作成し、main への Release PR を作成します。
+
+## フロー概要
+
+```
+develop → release-X.Y.Z → main (PR)
+                ↓
+        GitHub Release & npm publish (自動)
+```
 
 ## 前提条件
 
@@ -38,16 +46,7 @@ git merge-base --is-ancestor origin/main origin/develop
 > 「エラー: mainとdevelopに差異があります。先にmainをdevelopにマージしてください。」
 > 「実行: `git merge origin/main`」
 
-### 3. 既存リリースコミット確認
-
-```bash
-git log -1 --pretty=%s
-```
-
-**判定**: 結果が `chore(release):` で始まる場合、以下のメッセージを表示して中断：
-> 「エラー: 既にリリースコミットが存在します。追加の変更をコミットしてから再実行してください。」
-
-### 4. リリース対象コミット確認
+### 3. リリース対象コミット確認
 
 ```bash
 git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0"
@@ -62,7 +61,7 @@ git rev-list {前回タグ}..HEAD --count
 **判定**: コミット数が 0 の場合、以下のメッセージを表示して中断：
 > 「エラー: リリース対象のコミットがありません。」
 
-### 5. バージョン判定
+### 4. バージョン判定
 
 ```bash
 git-cliff --bumped-version
@@ -72,6 +71,14 @@ git-cliff --bumped-version
 
 このバージョンを `NEW_VERSION` として記録（例: `6.5.2`、`v` は除去）。
 
+### 5. リリースブランチ作成
+
+```bash
+git checkout -b release-{NEW_VERSION}
+```
+
+**例**: `release-6.5.2`
+
 ### 6. ファイル更新
 
 以下のファイルを更新してください：
@@ -80,24 +87,17 @@ git-cliff --bumped-version
 
 `version = "X.Y.Z"` を `version = "{NEW_VERSION}"` に更新
 
-#### 6.2 crates/配下の全 Cargo.toml
-
-以下のファイルの `version = "X.Y.Z"` を更新：
-- `crates/gwt-cli/Cargo.toml`
-- `crates/gwt-core/Cargo.toml`
-- その他 `crates/*/Cargo.toml` が存在する場合
-
-#### 6.3 package.json
+#### 6.2 package.json
 
 `"version": "X.Y.Z"` を `"version": "{NEW_VERSION}"` に更新
 
-#### 6.4 Cargo.lock
+#### 6.3 Cargo.lock
 
 ```bash
 cargo update -w
 ```
 
-#### 6.5 CHANGELOG.md
+#### 6.4 CHANGELOG.md
 
 ```bash
 git-cliff --unreleased --tag v{NEW_VERSION} --prepend CHANGELOG.md
@@ -110,21 +110,21 @@ git add -A
 git commit -m "chore(release): v{NEW_VERSION}"
 ```
 
-### 8. developへプッシュ
+### 8. リリースブランチをプッシュ
 
 ```bash
-git push origin develop
+git push origin release-{NEW_VERSION}
 ```
 
 **失敗時**: 最大3回リトライ。それでも失敗した場合：
-> 「エラー: pushに失敗しました。ネットワーク接続を確認し、手動で `git push origin develop` を実行してください。」
+> 「エラー: pushに失敗しました。ネットワーク接続を確認してください。」
 
-### 9. PR作成または確認
+### 9. PR作成
 
 まず既存PRを確認：
 
 ```bash
-gh pr list --base main --head develop --state open --json number,title
+gh pr list --base main --head release-{NEW_VERSION} --state open --json number,title
 ```
 
 #### 既存PRがある場合
@@ -139,7 +139,7 @@ PRを作成：
 ```bash
 gh pr create \
   --base main \
-  --head develop \
+  --head release-{NEW_VERSION} \
   --title "chore(release): v{NEW_VERSION}" \
   --label release \
   --body "{PR_BODY}"
@@ -152,12 +152,28 @@ PR bodyには以下を含めてください：
 - `## Changes` - 主な変更点をリスト形式で
 - `## Version` - バージョン番号
 
-### 10. 完了メッセージ
+### 10. developに戻る
+
+```bash
+git checkout develop
+```
+
+### 11. 完了メッセージ
 
 > 「リリース準備が完了しました。」
 > 「バージョン: v{NEW_VERSION}」
+> 「リリースブランチ: release-{NEW_VERSION}」
 > 「PR URL: {PR URL}」
-> 「PRをレビューし、問題なければmainにマージしてください。」
+> 「PRがマージされると、GitHub ReleaseとnpmへのPublishが自動実行されます。」
+
+## マージ後の自動処理
+
+PRがmainにマージされると、`.github/workflows/release.yml` が以下を自動実行：
+
+1. Git タグを作成 (`v{NEW_VERSION}`)
+2. GitHub Release を作成
+3. クロスコンパイル済みバイナリをアップロード
+4. npm へ publish
 
 ## トラブルシューティング
 
@@ -176,3 +192,12 @@ gh auth login
 ### push が拒否された場合
 
 ブランチ保護ルールを確認するか、管理者に連絡してください。
+
+### リリースブランチが既に存在する場合
+
+```bash
+git branch -D release-{NEW_VERSION}
+git push origin --delete release-{NEW_VERSION}
+```
+
+その後、再度 `/release` を実行してください。

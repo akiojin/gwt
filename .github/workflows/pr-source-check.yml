@@ -18,13 +18,13 @@ jobs:
         run: |
           echo "PR head ref: $PR_HEAD_REF"
 
-          # Allow PRs from develop or release/* branches only
-          if [[ "$PR_HEAD_REF" == "develop" ]] || [[ "$PR_HEAD_REF" == release/* ]]; then
+          # Allow PRs from release-* branches only (not develop directly)
+          if [[ "$PR_HEAD_REF" == release-* ]]; then
             echo "Valid source branch: $PR_HEAD_REF"
             exit 0
           fi
 
-          echo "::error::PRs to main must come from 'develop' or 'release/*' branches."
+          echo "::error::PRs to main must come from 'release-*' branches only."
           echo "::error::Current source branch: $PR_HEAD_REF"
           echo ""
           echo "Please:"
