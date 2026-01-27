@@ -155,6 +155,8 @@ pub struct QuickStartEntry {
     pub session_id: Option<String>,
     /// Skip permissions setting
     pub skip_permissions: Option<bool>,
+    /// collaboration_modes setting (Codex v0.91.0+, SPEC-fdebd681)
+    pub collaboration_modes: Option<bool>,
 }
 
 /// Coding agent types
@@ -973,6 +975,25 @@ impl WizardState {
             // Set version if available
             if let Some(version) = &entry.version {
                 self.version = version.clone();
+            }
+
+            // Restore or auto-enable collaboration_modes for Codex (SPEC-fdebd681)
+            if self.agent == CodingAgent::CodexCli {
+                if self.version == "installed"
+                    && !self.installed_cache.contains_key(&CodingAgent::CodexCli)
+                {
+                    let detected = detect_installed_version(CodingAgent::CodexCli);
+                    self.installed_cache.insert(CodingAgent::CodexCli, detected);
+                }
+                let supports = self
+                    .resolve_version_for_collaboration_modes()
+                    .as_deref()
+                    .map(|v| supports_collaboration_modes(Some(v)))
+                    .unwrap_or(false);
+                // collaboration_modes is auto-enabled for supported versions
+                self.collaboration_modes = supports;
+            } else {
+                self.collaboration_modes = false;
             }
 
             // Set skip permissions
@@ -2967,6 +2988,7 @@ mod tests {
             version: Some("1.0.0".to_string()),
             session_id: Some("abc123".to_string()),
             skip_permissions: None,
+            collaboration_modes: None,
         }];
         state.open_for_branch("feature/test", history, None);
         assert!(state.visible);
@@ -3197,6 +3219,7 @@ mod tests {
             version: Some("1.0.0".to_string()),
             session_id: Some("abc123".to_string()),
             skip_permissions: Some(true),
+            collaboration_modes: None,
         }];
         state.open_for_branch("feature/test", history, None);
 
@@ -3231,6 +3254,7 @@ mod tests {
             version: Some("2.0.0".to_string()),
             session_id: Some("xyz789".to_string()),
             skip_permissions: Some(false),
+            collaboration_modes: None,
         }];
         state.open_for_branch("feature/test", history, None);
 
@@ -3254,6 +3278,31 @@ mod tests {
     }
 
     #[test]
+    fn test_quick_start_auto_enables_collaboration_modes_for_codex_091() {
+        let mut state = WizardState::new();
+        let history = vec![QuickStartEntry {
+            tool_id: "codex-cli".to_string(),
+            tool_label: "Codex".to_string(),
+            model: None,
+            reasoning_level: None,
+            version: Some("0.91.0".to_string()),
+            session_id: None,
+            skip_permissions: Some(false),
+            collaboration_modes: None,
+        }];
+        state.open_for_branch("feature/test", history, None);
+        assert_eq!(state.step, WizardStep::QuickStart);
+
+        // Index 1 = Start new with previous settings
+        state.quick_start_index = 1;
+        let result = state.confirm();
+
+        assert_eq!(result, WizardConfirmResult::Complete);
+        assert_eq!(state.step, WizardStep::SkipPermissions);
+        assert!(state.collaboration_modes);
+    }
+
+    #[test]
     fn test_quick_start_choose_different_goes_to_branch_action() {
         let mut state = WizardState::new();
         let history = vec![QuickStartEntry {
@@ -3264,6 +3313,7 @@ mod tests {
             version: Some("1.0.0".to_string()),
             session_id: Some("abc123".to_string()),
             skip_permissions: None,
+            collaboration_modes: None,
         }];
         state.open_for_branch("feature/test", history, None);
 
@@ -3298,6 +3348,7 @@ mod tests {
             version: Some("1.0.0".to_string()),
             session_id: Some("session-123".to_string()),
             skip_permissions: Some(true),
+            collaboration_modes: None,
         }];
         state.open_for_branch("feature/custom", history, None);
 
@@ -3358,6 +3409,7 @@ mod tests {
             version: Some("2.0.0".to_string()),
             session_id: None,
             skip_permissions: None,
+            collaboration_modes: None,
         }];
         state.open_for_branch("feature/overwrite", history, None);
 

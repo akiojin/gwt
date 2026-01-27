@@ -14,6 +14,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use gwt_core::agent::codex::supports_collaboration_modes;
 use gwt_core::ai::{
     summarize_session, AIClient, AIError, AgentHistoryStore, AgentType, ChatMessage,
     ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, OpenCodeSessionParser,
@@ -1238,6 +1239,15 @@ impl Model {
             return;
         }
         let tool_version = Self::extract_tool_version_from_usage(branch, tool_id);
+        let collaboration_modes = if tool_id.contains("codex") {
+            match tool_version.as_deref() {
+                Some("latest") => Some(true),
+                Some(version) => Some(supports_collaboration_modes(Some(version))),
+                None => None,
+            }
+        } else {
+            None
+        };
         let entry = ToolSessionEntry {
             branch: branch.name.clone(),
             worktree_path: branch.worktree_path.clone(),
@@ -1249,7 +1259,7 @@ impl Model {
             reasoning_level: None,
             skip_permissions: None,
             tool_version,
-            collaboration_modes: None,
+            collaboration_modes,
             timestamp: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
@@ -2262,6 +2272,7 @@ impl Model {
                 version: entry.tool_version,
                 session_id: entry.session_id,
                 skip_permissions: entry.skip_permissions,
+                collaboration_modes: entry.collaboration_modes,
             })
             .collect();
         self.wizard
@@ -4241,6 +4252,7 @@ impl Model {
                             version: entry.tool_version,
                             session_id: entry.session_id,
                             skip_permissions: entry.skip_permissions,
+                            collaboration_modes: entry.collaboration_modes,
                         })
                         .collect();
                     self.wizard

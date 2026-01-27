@@ -735,6 +735,7 @@ struct SessionUpdateContext {
     mode: String,
     reasoning_level: Option<String>,
     skip_permissions: bool,
+    collaboration_modes: bool,
 }
 
 impl SessionUpdateContext {
@@ -750,7 +751,7 @@ impl SessionUpdateContext {
             reasoning_level: self.reasoning_level.clone(),
             skip_permissions: Some(self.skip_permissions),
             tool_version: Some(self.version.clone()),
-            collaboration_modes: None,
+            collaboration_modes: Some(self.collaboration_modes),
             timestamp: Utc::now().timestamp_millis(),
         }
     }
@@ -1332,6 +1333,7 @@ fn execute_launch_plan(plan: LaunchPlan) -> Result<AgentExitKind, GwtError> {
         mode: config.execution_mode.label().to_string(),
         reasoning_level: config.reasoning_level.map(|r| r.label().to_string()),
         skip_permissions: config.skip_permissions,
+        collaboration_modes: config.collaboration_modes,
     };
     let updater = spawn_session_updater(update_context, Duration::from_secs(30));
 
@@ -2290,6 +2292,7 @@ mod tests {
             mode: ExecutionMode::Continue.label().to_string(),
             reasoning_level: None,
             skip_permissions: false,
+            collaboration_modes: true,
         }
     }
 
@@ -2535,6 +2538,14 @@ mod tests {
         let started = Instant::now();
         updater.stop();
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_session_update_context_sets_collaboration_modes() {
+        let temp = TempDir::new().unwrap();
+        let context = sample_update_context(temp.path().to_path_buf());
+        let entry = context.to_entry();
+        assert_eq!(entry.collaboration_modes, Some(true));
     }
 
     #[test]
