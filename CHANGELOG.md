@@ -1,6 +1,7 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
 ## [6.22.1] - 2026-01-27
 
 ### Bug Fixes
@@ -126,6 +127,10 @@ All notable changes to this project will be documented in this file.
 - Origin/develop をマージ
 - Developマージ後にrustfmtを適用
 - Merge origin/main into develop
+- Strengthen repository security settings
+- Restore auto-merge for main branch PRs
+- Update release workflow to use release branches
+- Merge origin/main into develop (keep auto-merge.yml)
 
 ### Performance
 
@@ -152,8 +157,6 @@ All notable changes to this project will be documented in this file.
 ### Ci
 
 - Developブランチへの自動マージを無効化 (#804)
-
-
 ## [6.22.0] - 2026-01-26
 
 ### Bug Fixes
