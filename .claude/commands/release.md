@@ -49,16 +49,22 @@ git merge-base --is-ancestor origin/main origin/develop
 ### 3. リリース対象コミット確認
 
 ```bash
-git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0"
+PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
 ```
 
 上記で取得したタグから現在までのコミット数を確認:
 
 ```bash
-git rev-list {前回タグ}..HEAD --count
+# タグが存在する場合
+git rev-list {PREV_TAG}..HEAD --count
+
+# タグが存在しない場合（初回リリース）
+git rev-list --count HEAD
 ```
 
-**判定**: コミット数が 0 の場合、以下のメッセージを表示して中断：
+**判定**:
+- タグが存在しない場合: 初回リリースとして続行（全コミットがリリース対象）
+- タグが存在し、コミット数が 0 の場合、以下のメッセージを表示して中断：
 > 「エラー: リリース対象のコミットがありません。」
 
 ### 4. バージョン判定
