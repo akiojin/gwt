@@ -2903,7 +2903,7 @@ mod tests {
         let mut state = BranchListState::new().with_branches(branches);
         state.selected = 1;
         state.start_cleanup_progress(3);
-        state.set_cleanup_target_branches(&vec!["branch-b".to_string()]);
+        state.set_cleanup_target_branches(&["branch-b".to_string()]);
 
         assert_eq!(
             state.selected_branch().map(|branch| branch.name.as_str()),
@@ -2933,7 +2933,7 @@ mod tests {
         ];
         let mut state = BranchListState::new().with_branches(branches);
         state.start_cleanup_progress(3);
-        state.set_cleanup_target_branches(&vec!["branch-b".to_string()]);
+        state.set_cleanup_target_branches(&["branch-b".to_string()]);
 
         assert_eq!(
             state.selected_branch().map(|branch| branch.name.as_str()),

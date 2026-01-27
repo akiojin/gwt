@@ -6752,7 +6752,7 @@ mod tests {
         model.branch_list.start_cleanup_progress(3);
         model
             .branch_list
-            .set_cleanup_target_branches(&vec!["feature/b".to_string()]);
+            .set_cleanup_target_branches(&["feature/b".to_string()]);
 
         model.update(Message::SelectNext);
         assert_eq!(
@@ -7080,7 +7080,7 @@ mod tests {
         model.branch_list.start_cleanup_progress(2);
         model
             .branch_list
-            .set_cleanup_target_branches(&vec!["feature/two".to_string()]);
+            .set_cleanup_target_branches(&["feature/two".to_string()]);
 
         assert_eq!(model.branch_list.selected, 0);
         let mouse = MouseEvent {
