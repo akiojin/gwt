@@ -5096,7 +5096,11 @@ impl Model {
             let keybinds = self.get_footer_keybinds();
             let footer_text_len = keybinds.len() + 2; // " {} " padding
             let available_width = frame.area().width as usize;
-            if footer_text_len > available_width { 2 } else { 1 }
+            if footer_text_len > available_width {
+                2
+            } else {
+                1
+            }
         } else {
             0
         };
@@ -5108,9 +5112,9 @@ impl Model {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(header_height),    // Header
-                Constraint::Min(0),                   // Content
-                Constraint::Length(footer_height),    // Footer help
+                Constraint::Length(header_height),     // Header
+                Constraint::Min(0),                    // Content
+                Constraint::Length(footer_height),     // Footer help
                 Constraint::Length(status_bar_height), // Status bar
             ])
             .split(frame.area());
@@ -6288,10 +6292,10 @@ mod tests {
     use crate::tui::screens::wizard::WizardStep;
     use crate::tui::screens::{BranchItem, BranchListState, BranchType};
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use gwt_core::config::Settings;
     use gwt_core::git::Branch;
     use gwt_core::git::BranchSummary;
     use gwt_core::git::DivergenceStatus;
-    use gwt_core::config::Settings;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::collections::HashMap;

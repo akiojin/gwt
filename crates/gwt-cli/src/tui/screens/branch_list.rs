@@ -1524,7 +1524,10 @@ pub fn render_branch_list(
 }
 
 /// Build the unified status bar line for the bottom status bar (FR-093~FR-096).
-pub fn build_status_bar_line(state: &BranchListState, status_message: Option<&str>) -> Line<'static> {
+pub fn build_status_bar_line(
+    state: &BranchListState,
+    status_message: Option<&str>,
+) -> Line<'static> {
     let agents: Vec<_> = state.running_agents.values().cloned().collect();
     let summary = StatusBarSummary::from_agents(&agents);
 
@@ -1573,10 +1576,7 @@ pub fn build_status_bar_line(state: &BranchListState, status_message: Option<&st
             ));
         }
     } else {
-        spans.push(Span::styled(
-            "none",
-            Style::default().fg(Color::DarkGray),
-        ));
+        spans.push(Span::styled("none", Style::default().fg(Color::DarkGray)));
     }
 
     let selected_count = state.selected_branches.len();
