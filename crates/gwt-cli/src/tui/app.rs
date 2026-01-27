@@ -3154,19 +3154,30 @@ impl Model {
                         }
                     }
                     ProfileMode::EnvEdit(_) => {
-                        let env_state = &mut self.settings.env_edit_state;
-                        // Check if "Add new" is selected
-                        if env_state.selected_index >= env_state.vars.len() {
-                            // Add new variable
-                            env_state.add_new_var();
-                        } else if env_state.editing.is_some() {
-                            // Finish editing
-                            env_state.editing = None;
+                        // Use EnvironmentState methods (SPEC-dafff079)
+                        let env_state = &mut self.settings.env_state;
+                        if env_state.edit_mode {
+                            // Finish editing - validate and apply
+                            if let Some(ai_field) = env_state.editing_ai_field() {
+                                if let Ok(value) = env_state.validate_ai_value() {
+                                    env_state.apply_ai_value(ai_field, value);
+                                }
+                            } else if env_state.is_new {
+                                // New variable: validate and add
+                                if let Ok((key, value)) = env_state.validate() {
+                                    env_state.variables.push(
+                                        super::screens::environment::EnvItem {
+                                            key,
+                                            value,
+                                            is_secret: false,
+                                        },
+                                    );
+                                }
+                            }
+                            env_state.cancel_edit();
                         } else {
-                            // Start editing key
-                            use super::screens::settings::EnvEditMode;
-                            let key_len = env_state.vars[env_state.selected_index].0.len();
-                            env_state.editing = Some(EnvEditMode::Key(key_len));
+                            // Start editing selected item
+                            env_state.start_edit_selected();
                         }
                     }
                 }
@@ -3224,7 +3235,7 @@ impl Model {
                 }
             }
             SettingsCategory::Environment => {
-                use super::screens::settings::{EnvEditMode, ProfileMode};
+                use super::screens::settings::ProfileMode;
                 match &self.settings.profile_mode {
                     ProfileMode::List => {
                         // 'd' or 'D' to enter delete mode
@@ -3232,7 +3243,8 @@ impl Model {
                             self.settings.enter_profile_delete_mode();
                         }
                         // FR-030: 'e' or 'E' to enter profile edit mode (name/description)
-                        else if (c == 'e' || c == 'E') && self.settings.selected_profile().is_some()
+                        else if (c == 'e' || c == 'E')
+                            && self.settings.selected_profile().is_some()
                         {
                             self.settings.enter_profile_edit_mode();
                         }
@@ -3254,37 +3266,39 @@ impl Model {
                         // Ignore chars
                     }
                     ProfileMode::EnvEdit(_) => {
-                        let env_state = &mut self.settings.env_edit_state;
-                        // Handle special keys
-                        if (c == 'a' || c == 'A') && env_state.editing.is_none() {
-                            // Add new variable
-                            env_state.add_new_var();
-                        } else if (c == 'd' || c == 'D') && env_state.editing.is_none() {
-                            // Delete selected variable
-                            env_state.delete_selected();
-                        } else if (c == 's' || c == 'S') && env_state.editing.is_none() {
-                            // Save env vars
-                            if self.settings.save_profile_env() {
-                                if let Some(ref config) = self.settings.profiles_config {
-                                    let _ = config.save();
-                                    self.load_profiles();
+                        // Use EnvironmentState methods (SPEC-dafff079)
+                        let env_state = &mut self.settings.env_state;
+                        if env_state.edit_mode {
+                            // Insert character while editing
+                            env_state.insert_char(c);
+                        } else {
+                            // Handle special keys when not editing
+                            match c {
+                                'n' | 'N' => {
+                                    // Add new variable
+                                    env_state.start_new();
                                 }
-                            }
-                        } else if let Some(ref mode) = env_state.editing.clone() {
-                            // Insert char while editing
-                            match mode {
-                                EnvEditMode::Key(pos) => {
-                                    if env_state.selected_index < env_state.vars.len() {
-                                        env_state.vars[env_state.selected_index].0.insert(*pos, c);
-                                        env_state.editing = Some(EnvEditMode::Key(pos + 1));
+                                'd' | 'D' => {
+                                    // SPEC-dafff079 FR-020: Toggle disable for OS variables
+                                    env_state.toggle_selected_disabled();
+                                }
+                                'r' | 'R' => {
+                                    // SPEC-dafff079 FR-019: Reset to OS value
+                                    // Delete the override (profile variable) to reveal OS value
+                                    if env_state.selected_is_overridden() {
+                                        env_state.delete_selected_override();
                                     }
                                 }
-                                EnvEditMode::Value(pos) => {
-                                    if env_state.selected_index < env_state.vars.len() {
-                                        env_state.vars[env_state.selected_index].1.insert(*pos, c);
-                                        env_state.editing = Some(EnvEditMode::Value(pos + 1));
+                                's' | 'S' => {
+                                    // Save env vars
+                                    if self.settings.save_profile_env() {
+                                        if let Some(ref config) = self.settings.profiles_config {
+                                            let _ = config.save();
+                                            self.load_profiles();
+                                        }
                                     }
                                 }
+                                _ => {}
                             }
                         }
                     }
@@ -3296,26 +3310,11 @@ impl Model {
         }
     }
 
-    /// Handle Backspace in EnvEdit mode
+    /// Handle Backspace in EnvEdit mode (SPEC-dafff079)
     fn handle_settings_env_backspace(&mut self) {
-        use super::screens::settings::EnvEditMode;
-
-        let env_state = &mut self.settings.env_edit_state;
-        if let Some(ref mode) = env_state.editing.clone() {
-            match mode {
-                EnvEditMode::Key(pos) => {
-                    if *pos > 0 && env_state.selected_index < env_state.vars.len() {
-                        env_state.vars[env_state.selected_index].0.remove(pos - 1);
-                        env_state.editing = Some(EnvEditMode::Key(pos - 1));
-                    }
-                }
-                EnvEditMode::Value(pos) => {
-                    if *pos > 0 && env_state.selected_index < env_state.vars.len() {
-                        env_state.vars[env_state.selected_index].1.remove(pos - 1);
-                        env_state.editing = Some(EnvEditMode::Value(pos - 1));
-                    }
-                }
-            }
+        let env_state = &mut self.settings.env_state;
+        if env_state.edit_mode {
+            env_state.delete_char();
         }
     }
 
@@ -4138,8 +4137,8 @@ impl Model {
                     if self.settings.is_profile_form_mode() {
                         self.settings.profile_form.next_field();
                     } else if self.settings.is_env_edit_mode() {
-                        // Toggle between Key/Value editing
-                        self.settings.env_edit_state.toggle_key_value();
+                        // Toggle between Key/Value editing (SPEC-dafff079)
+                        self.settings.env_state.switch_field();
                     } else if self.settings.is_form_mode() {
                         // In agent form mode, Tab cycles agent form fields
                         self.settings.agent_form.next_field();
@@ -5469,7 +5468,7 @@ impl Model {
                     && self.settings.is_env_edit_mode()
                 {
                     // Tab in EnvEdit mode: switch between key and value
-                    self.settings.env_edit_state.toggle_key_value();
+                    self.settings.env_state.switch_field();
                 }
                 None
             }
@@ -5487,7 +5486,7 @@ impl Model {
                     && self.settings.is_env_edit_mode()
                 {
                     // BackTab in EnvEdit mode: switch between key and value
-                    self.settings.env_edit_state.toggle_key_value();
+                    self.settings.env_state.switch_field();
                 }
                 None
             }

@@ -70,7 +70,7 @@ pub enum EditField {
 }
 
 /// Environment variables state
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct EnvironmentState {
     /// Environment variables
     pub variables: Vec<EnvItem>,
@@ -228,6 +228,33 @@ impl EnvironmentState {
 
     pub fn selected_key(&self) -> Option<String> {
         self.selected_display_item().map(|item| item.key)
+    }
+
+    /// SPEC-dafff079 FR-020: Toggle disabled status for currently selected OS entry
+    pub fn toggle_selected_disabled(&mut self) -> bool {
+        if let Some(item) = self.selected_display_item() {
+            // Only allow toggling for OS entries
+            if matches!(
+                item.kind,
+                EnvDisplayKind::OsOnly | EnvDisplayKind::OsDisabled
+            ) {
+                return self.toggle_disabled_key(&item.key);
+            }
+        }
+        false
+    }
+
+    /// SPEC-dafff079 FR-019: Delete override for currently selected overridden entry
+    /// This resets the value back to the OS original
+    pub fn delete_selected_override(&mut self) {
+        if let Some(item) = self.selected_display_item() {
+            if item.kind == EnvDisplayKind::Overridden {
+                // Find and remove the profile variable that overrides
+                if let Some(pos) = self.variables.iter().position(|v| v.key == item.key) {
+                    self.variables.remove(pos);
+                }
+            }
+        }
     }
 
     /// Move selection up

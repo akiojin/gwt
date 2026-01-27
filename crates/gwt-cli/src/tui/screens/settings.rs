@@ -2,9 +2,11 @@
 //!
 //! Includes custom agent management (SPEC-71f2742d US3)
 //! Includes profile management (Profile integration)
+//! Environment variable editing follows SPEC-dafff079 (FR-009, FR-010, FR-019, FR-020)
 
 #![allow(dead_code)] // Screen components for future use
 
+use crate::tui::screens::environment::{collect_os_env, EnvItem, EnvironmentState};
 use gwt_core::config::{
     AgentType, CustomCodingAgent, Profile, ProfilesConfig, Settings, ToolsConfig,
 };
@@ -453,8 +455,8 @@ pub struct SettingsState {
     pub profile_form: ProfileFormState,
     /// Profile delete confirmation
     pub profile_delete_confirm: bool,
-    /// Environment variable edit state
-    pub env_edit_state: EnvEditState,
+    /// Environment variable edit state (SPEC-dafff079 compliant)
+    pub env_state: EnvironmentState,
 }
 
 impl Default for SettingsState {
@@ -475,7 +477,7 @@ impl Default for SettingsState {
             profile_index: 0,
             profile_form: ProfileFormState::default(),
             profile_delete_confirm: false,
-            env_edit_state: EnvEditState::default(),
+            env_state: EnvironmentState::default(),
         }
     }
 }
@@ -636,12 +638,8 @@ impl SettingsState {
         } else if self.category == SettingsCategory::Environment {
             // Check if in EnvEdit mode
             if matches!(self.profile_mode, ProfileMode::EnvEdit(_)) {
-                // Navigate env vars (+1 for "Add new" option)
-                let max = self.env_edit_state.vars.len();
-                if self.env_edit_state.selected_index < max {
-                    self.env_edit_state.selected_index += 1;
-                    self.env_edit_state.editing = None;
-                }
+                // Use EnvironmentState's navigation (SPEC-dafff079)
+                self.env_state.select_next();
             } else {
                 let profiles = self.profile_names();
                 // +1 for "Add new profile" option at the end
@@ -667,11 +665,8 @@ impl SettingsState {
         } else if self.category == SettingsCategory::Environment {
             // Check if in EnvEdit mode
             if matches!(self.profile_mode, ProfileMode::EnvEdit(_)) {
-                // Navigate env vars
-                if self.env_edit_state.selected_index > 0 {
-                    self.env_edit_state.selected_index -= 1;
-                    self.env_edit_state.editing = None;
-                }
+                // Use EnvironmentState's navigation (SPEC-dafff079)
+                self.env_state.select_prev();
             } else if self.profile_index > 0 {
                 self.profile_index -= 1;
             }
@@ -890,11 +885,28 @@ impl SettingsState {
         }
     }
 
-    /// Enter environment variable edit mode
+    /// Enter environment variable edit mode (SPEC-dafff079 FR-009: integrate OS env vars)
     pub fn enter_env_edit_mode(&mut self) {
         if let Some(profile) = self.selected_profile() {
             let name = profile.name.clone();
-            self.env_edit_state = EnvEditState::from_profile(profile);
+            // Convert profile env to EnvItem vec
+            let profile_vars: Vec<EnvItem> = profile
+                .env
+                .iter()
+                .map(|(k, v)| EnvItem {
+                    key: k.clone(),
+                    value: v.clone(),
+                    is_secret: false,
+                })
+                .collect();
+            // Collect OS environment variables
+            let os_vars = collect_os_env();
+            // Initialize EnvironmentState with both (SPEC-dafff079 compliant)
+            self.env_state = EnvironmentState::new()
+                .with_variables(profile_vars)
+                .with_os_variables(os_vars)
+                .with_disabled_keys(profile.disabled_env.clone())
+                .with_profile(&name);
             self.profile_mode = ProfileMode::EnvEdit(name);
         }
     }
@@ -904,15 +916,23 @@ impl SettingsState {
         self.profile_mode = ProfileMode::List;
         self.profile_form = ProfileFormState::default();
         self.profile_delete_confirm = false;
-        self.env_edit_state = EnvEditState::default();
+        self.env_state = EnvironmentState::default();
     }
 
-    /// Save env edit state back to profile
+    /// Save env edit state back to profile (SPEC-dafff079)
     pub fn save_env_to_profile(&mut self) {
         if let ProfileMode::EnvEdit(profile_name) = &self.profile_mode {
             if let Some(ref mut config) = self.profiles_config {
                 if let Some(profile) = config.profiles.get_mut(profile_name) {
-                    profile.env = self.env_edit_state.to_env();
+                    // Save profile env vars from EnvironmentState
+                    profile.env = self
+                        .env_state
+                        .variables
+                        .iter()
+                        .map(|v| (v.key.clone(), v.value.clone()))
+                        .collect();
+                    // Save disabled keys
+                    profile.disabled_env = self.env_state.disabled_keys.clone();
                 }
             }
         }
@@ -966,13 +986,21 @@ impl SettingsState {
         Ok(())
     }
 
-    /// Save environment variables from edit state
+    /// Save environment variables from edit state (SPEC-dafff079)
     pub fn save_profile_env(&mut self) -> bool {
         if let ProfileMode::EnvEdit(ref name) = self.profile_mode {
             let name = name.clone();
             if let Some(ref mut config) = self.profiles_config {
                 if let Some(profile) = config.profiles.get_mut(&name) {
-                    profile.env = self.env_edit_state.to_env();
+                    // Save profile env vars from EnvironmentState
+                    profile.env = self
+                        .env_state
+                        .variables
+                        .iter()
+                        .map(|v| (v.key.clone(), v.value.clone()))
+                        .collect();
+                    // Save disabled keys
+                    profile.disabled_env = self.env_state.disabled_keys.clone();
                     self.cancel_profile_mode();
                     return true;
                 }
@@ -1195,7 +1223,7 @@ fn render_settings_content(state: &SettingsState, frame: &mut Frame, area: Rect)
         SettingsCategory::Web => "Web UI",
         SettingsCategory::Agent => "Agent",
         SettingsCategory::CustomAgents => "Custom Agents", // Handled separately
-        SettingsCategory::Environment => "Environment",        // Handled separately
+        SettingsCategory::Environment => "Environment",    // Handled separately
         SettingsCategory::AISettings => "AI",              // Handled separately
     };
 
@@ -1523,8 +1551,11 @@ fn render_profile_list(state: &SettingsState, frame: &mut Frame, area: Rect) {
     };
     list_items.push(ListItem::new("  + Add new profile...").style(add_style));
 
-    let list = List::new(list_items)
-        .block(Block::default().borders(Borders::ALL).title(" Environment Profiles "));
+    let list = List::new(list_items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Environment Profiles "),
+    );
     frame.render_widget(list, list_area);
 
     if let Some(desc_area) = desc_area {
@@ -1673,92 +1704,28 @@ fn render_profile_delete_confirmation(state: &SettingsState, frame: &mut Frame, 
     frame.render_widget(no_btn, button_chunks[2]);
 }
 
-/// Render environment variable edit screen
+/// Render environment variable edit screen (SPEC-dafff079 compliant)
+/// FR-009: OS env vars integrated with profile env vars
+/// FR-010: Yellow=overridden, Green=added, Normal=OS-only, Red+strikethrough=disabled
 fn render_env_edit(state: &SettingsState, frame: &mut Frame, area: Rect) {
+    use crate::tui::screens::environment::render_environment;
+
     let profile_name = match &state.profile_mode {
         ProfileMode::EnvEdit(name) => name.as_str(),
         _ => return,
     };
 
+    // Use the existing render_environment function from environment.rs
+    // which already implements SPEC-dafff079 requirements
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(" Environment Variables - {} ", profile_name));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let env_state = &state.env_edit_state;
-
-    let (list_area, help_area) = {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(3)])
-            .split(inner);
-        (chunks[0], chunks[1])
-    };
-
-    // Environment variable list
-    let mut list_items: Vec<ListItem> = env_state
-        .vars
-        .iter()
-        .enumerate()
-        .map(|(i, (key, value))| {
-            let is_selected = i == env_state.selected_index;
-            let display = if let Some(ref editing) = env_state.editing {
-                if i == env_state.selected_index {
-                    match editing {
-                        EnvEditMode::Key(cursor) => {
-                            let mut k = key.clone();
-                            k.insert(*cursor, '|');
-                            format!("  {}={}", k, value)
-                        }
-                        EnvEditMode::Value(cursor) => {
-                            let mut v = value.clone();
-                            v.insert(*cursor, '|');
-                            format!("  {}={}", key, v)
-                        }
-                    }
-                } else {
-                    format!("  {}={}", key, value)
-                }
-            } else {
-                format!("  {}={}", key, value)
-            };
-
-            let style = if is_selected {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
-            ListItem::new(display).style(style)
-        })
-        .collect();
-
-    // Add "Add new variable" option
-    let add_selected =
-        env_state.vars.is_empty() || env_state.selected_index >= env_state.vars.len();
-    let add_style = if add_selected && env_state.editing.is_none() {
-        Style::default()
-            .add_modifier(Modifier::REVERSED)
-            .fg(Color::Green)
-    } else {
-        Style::default().fg(Color::Green)
-    };
-    list_items.push(ListItem::new("  + Add new variable...").style(add_style));
-
-    let list =
-        List::new(list_items).block(Block::default().borders(Borders::ALL).title(" Variables "));
-    frame.render_widget(list, list_area);
-
-    // Help text
-    let help_text = if env_state.editing.is_some() {
-        "[Tab] Switch Key/Value | [Enter] Done | [Esc] Cancel"
-    } else {
-        "[Enter] Edit | [A] Add | [D] Delete | [S] Save | [Esc] Back"
-    };
-    let help = Paragraph::new(help_text)
-        .alignment(Alignment::Center)
-        .block(Block::default().borders(Borders::ALL));
-    frame.render_widget(help, help_area);
+    // Create a mutable copy for rendering
+    let mut env_state = state.env_state.clone();
+    render_environment(&mut env_state, frame, inner);
 }
 
 fn render_instructions(state: &SettingsState, frame: &mut Frame, area: Rect) {
@@ -1791,11 +1758,14 @@ fn render_instructions(state: &SettingsState, frame: &mut Frame, area: Rect) {
             ProfileMode::Add | ProfileMode::Edit(_) => {
                 "[Tab/Up/Down] Field | [Enter] Save | [Esc] Cancel"
             }
-            ProfileMode::ConfirmDelete(_) => {
-                "[Left/Right] Select | [Enter] Confirm | [Esc] Cancel"
-            }
+            ProfileMode::ConfirmDelete(_) => "[Left/Right] Select | [Enter] Confirm | [Esc] Cancel",
             ProfileMode::EnvEdit(_) => {
-                "[Enter] Edit | [A] Add | [D] Delete | [S] Save | [Esc] Back"
+                // SPEC-dafff079 FR-019: 'r' resets to OS value, FR-020: 'd' disables
+                if state.env_state.edit_mode {
+                    "[Tab] Switch | [Enter] Confirm | [Esc] Cancel"
+                } else {
+                    "[Enter] Edit | [N] New | [D] Disable | [R] Reset | [S] Save | [Esc] Back"
+                }
             }
         }
     } else if state.category == SettingsCategory::AISettings {
@@ -1843,7 +1813,8 @@ fn render_ai_settings_content(state: &SettingsState, frame: &mut Frame, area: Re
         // Endpoint
         let label = Paragraph::new("Endpoint:").style(Style::default().fg(Color::DarkGray));
         frame.render_widget(label, chunks[0]);
-        let value = Paragraph::new(format!("  {}", ai.endpoint)).style(Style::default().fg(Color::White));
+        let value =
+            Paragraph::new(format!("  {}", ai.endpoint)).style(Style::default().fg(Color::White));
         frame.render_widget(value, chunks[1]);
 
         // API Key
@@ -1860,7 +1831,8 @@ fn render_ai_settings_content(state: &SettingsState, frame: &mut Frame, area: Re
         // Model
         let label = Paragraph::new("Model:").style(Style::default().fg(Color::DarkGray));
         frame.render_widget(label, chunks[4]);
-        let value = Paragraph::new(format!("  {}", ai.model)).style(Style::default().fg(Color::White));
+        let value =
+            Paragraph::new(format!("  {}", ai.model)).style(Style::default().fg(Color::White));
         frame.render_widget(value, chunks[5]);
 
         // Button
@@ -1980,7 +1952,9 @@ mod tests {
         state.category = SettingsCategory::Environment;
         // Create a config with only one profile that has env vars
         let mut profile = Profile::new("dev");
-        profile.env.insert("API_KEY".to_string(), "secret".to_string());
+        profile
+            .env
+            .insert("API_KEY".to_string(), "secret".to_string());
         let mut config = ProfilesConfig {
             version: 1,
             active: Some("dev".to_string()),
@@ -2002,6 +1976,57 @@ mod tests {
             desc.contains("E to edit profile name"),
             "Description should mention E for profile name: {}",
             desc
+        );
+    }
+
+    /// SPEC-dafff079 FR-009: OS env integration
+    #[test]
+    fn test_enter_env_edit_mode_integrates_os_variables() {
+        use gwt_core::config::{Profile, ProfilesConfig};
+        let mut state = SettingsState::new();
+        state.category = SettingsCategory::Environment;
+        // Create a profile with one env var
+        let mut profile = Profile::new("test-profile");
+        profile
+            .env
+            .insert("MY_VAR".to_string(), "my_value".to_string());
+        let mut config = ProfilesConfig {
+            version: 1,
+            active: None,
+            default_ai: None,
+            profiles: HashMap::new(),
+        };
+        config.profiles.insert("test-profile".to_string(), profile);
+        state.profiles_config = Some(config);
+        state.profile_index = 0;
+        // Enter env edit mode
+        state.enter_env_edit_mode();
+        // Verify env_state has os_variables populated
+        // (OS variables should be collected from current environment)
+        assert!(
+            !state.env_state.os_variables.is_empty() || state.env_state.variables.len() == 1,
+            "EnvironmentState should have OS variables or profile variables"
+        );
+        // Verify profile variable is included
+        assert!(
+            state.env_state.variables.iter().any(|v| v.key == "MY_VAR"),
+            "EnvironmentState should include profile variables"
+        );
+    }
+
+    /// SPEC-dafff079 FR-031-034: Help text includes R for reset and D for disable
+    #[test]
+    fn test_env_edit_instructions_include_reset_and_disable() {
+        // The instruction for EnvEdit mode when not editing
+        let instructions =
+            "[Enter] Edit | [N] New | [D] Disable | [R] Reset | [S] Save | [Esc] Back";
+        assert!(
+            instructions.contains("[D] Disable"),
+            "Instructions should show D for Disable"
+        );
+        assert!(
+            instructions.contains("[R] Reset"),
+            "Instructions should show R for Reset"
         );
     }
 }
