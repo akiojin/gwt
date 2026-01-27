@@ -796,6 +796,60 @@ impl SettingsState {
         matches!(self.custom_agent_mode, CustomAgentMode::ConfirmDelete(_))
     }
 
+    /// Footer keybinds for Settings screen (used by app footer help)
+    pub fn footer_keybinds(&self) -> String {
+        if self.category == SettingsCategory::CustomAgents {
+            match &self.custom_agent_mode {
+                CustomAgentMode::List => {
+                    if self.is_add_agent_selected() {
+                        "[Enter] Add | [L/R] Category | [U/D] Select | [Tab] Screen | [Esc] Back"
+                            .to_string()
+                    } else {
+                        "[Enter] Edit | [D] Delete | [L/R] Cat | [U/D] Sel | [Tab] Scr | [Esc] Back"
+                            .to_string()
+                    }
+                }
+                CustomAgentMode::Add | CustomAgentMode::Edit(_) => {
+                    "[Tab/Up/Down] Field | [Space] Type | [Enter] Save | [Esc] Cancel".to_string()
+                }
+                CustomAgentMode::ConfirmDelete(_) => {
+                    "[Left/Right] Select | [Enter] Confirm | [Esc] Cancel".to_string()
+                }
+            }
+        } else if self.category == SettingsCategory::Environment {
+            match &self.profile_mode {
+                ProfileMode::List => {
+                    if self.is_add_profile_selected() {
+                        "[Enter] Add | [Space] Activate | [L/R] Cat | [U/D] Sel | [Tab] Scr | [Esc] Back"
+                            .to_string()
+                    } else {
+                        "[Enter] Env | [E] Edit | [D] Del | [Space] Activate | [L/R] Cat | [Tab] Scr | [Esc] Back"
+                            .to_string()
+                    }
+                }
+                ProfileMode::Add | ProfileMode::Edit(_) => {
+                    "[Tab/Up/Down] Field | [Enter] Save | [Esc] Cancel".to_string()
+                }
+                ProfileMode::ConfirmDelete(_) => {
+                    "[Left/Right] Select | [Enter] Confirm | [Esc] Cancel".to_string()
+                }
+                ProfileMode::EnvEdit(_) => {
+                    if self.env_state.edit_mode {
+                        "[Tab] Switch | [Enter] Confirm | [Esc] Cancel".to_string()
+                    } else {
+                        "[Enter] Edit | [N] New | [D] Disable | [R] Reset | [S] Save | [Esc] Back"
+                            .to_string()
+                    }
+                }
+            }
+        } else if self.category == SettingsCategory::AISettings {
+            "[Enter] Open AI Settings Wizard | [L/R] Category | [Tab] Screen | [Esc] Back"
+                .to_string()
+        } else {
+            "[Left/Right] Category | [Up/Down] Select | [Tab] Screen | [Esc] Back".to_string()
+        }
+    }
+
     // ========================================================================
     // Profile Management Methods
     // ========================================================================
@@ -1099,6 +1153,23 @@ fn selected_description(state: &SettingsState) -> &'static str {
     }
 }
 
+fn panel_title_style() -> Style {
+    Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn styled_block<'a, T>(title: T) -> Block<'a>
+where
+    T: Into<Line<'a>>,
+{
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::White))
+        .title(title)
+        .title_style(panel_title_style())
+}
+
 /// Render settings screen
 pub fn render_settings(state: &SettingsState, frame: &mut Frame, area: Rect) {
     let chunks = Layout::default()
@@ -1106,7 +1177,6 @@ pub fn render_settings(state: &SettingsState, frame: &mut Frame, area: Rect) {
         .constraints([
             Constraint::Length(3), // Tabs
             Constraint::Min(0),    // Content
-            Constraint::Length(3), // Instructions
         ])
         .split(area);
 
@@ -1115,9 +1185,6 @@ pub fn render_settings(state: &SettingsState, frame: &mut Frame, area: Rect) {
 
     // Settings content
     render_settings_content(state, frame, chunks[1]);
-
-    // Instructions
-    render_instructions(state, frame, chunks[2]);
 }
 
 fn render_tabs(state: &SettingsState, frame: &mut Frame, area: Rect) {
@@ -1146,7 +1213,7 @@ fn render_tabs(state: &SettingsState, frame: &mut Frame, area: Rect) {
         .collect();
 
     let tabs = Tabs::new(titles)
-        .block(Block::default().borders(Borders::ALL).title(" Settings "))
+        .block(styled_block(" Categories "))
         .highlight_style(Style::default().fg(Color::Cyan))
         .select(match state.category {
             SettingsCategory::General => 0,
@@ -1190,7 +1257,7 @@ fn render_settings_content(state: &SettingsState, frame: &mut Frame, area: Rect)
         };
         let paragraph = Paragraph::new(text)
             .alignment(Alignment::Center)
-            .block(Block::default().borders(Borders::ALL));
+            .block(styled_block(" Settings "));
         frame.render_widget(paragraph, area);
         return;
     }
@@ -1229,20 +1296,14 @@ fn render_settings_content(state: &SettingsState, frame: &mut Frame, area: Rect)
         SettingsCategory::AISettings => "AI",              // Handled separately
     };
 
-    let list = List::new(list_items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" {} Settings ", category_name)),
-    );
+    let list = List::new(list_items).block(styled_block(format!(" {} Settings ", category_name)));
     frame.render_widget(list, list_area);
 
     if let Some(desc_area) = desc_area {
         let description = selected_description(state);
-        let paragraph = Paragraph::new(description).wrap(Wrap { trim: true }).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Description "),
-        );
+        let paragraph = Paragraph::new(description)
+            .wrap(Wrap { trim: true })
+            .block(styled_block(" Description "));
         frame.render_widget(paragraph, desc_area);
     }
 }
@@ -1307,20 +1368,14 @@ fn render_custom_agents_list(state: &SettingsState, frame: &mut Frame, area: Rec
     };
     list_items.push(ListItem::new("  + Add new custom agent...").style(add_style));
 
-    let list = List::new(list_items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Custom Coding Agents "),
-    );
+    let list = List::new(list_items).block(styled_block(" Custom Coding Agents "));
     frame.render_widget(list, list_area);
 
     if let Some(desc_area) = desc_area {
         let description = selected_description(state);
-        let paragraph = Paragraph::new(description).wrap(Wrap { trim: true }).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Description "),
-        );
+        let paragraph = Paragraph::new(description)
+            .wrap(Wrap { trim: true })
+            .block(styled_block(" Description "));
         frame.render_widget(paragraph, desc_area);
     }
 }
@@ -1335,7 +1390,7 @@ fn render_agent_form(state: &SettingsState, frame: &mut Frame, area: Rect) {
         " Add Custom Agent "
     };
 
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let block = styled_block(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -1389,10 +1444,7 @@ fn render_agent_form(state: &SettingsState, frame: &mut Frame, area: Rect) {
             Style::default()
         };
 
-        let field_block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(field_style)
-            .title(format!(" {} ", label));
+        let field_block = styled_block(format!(" {} ", label)).border_style(field_style);
 
         let hint = if is_selected && *field == AgentFormField::Type {
             " (Space/Enter to cycle)"
@@ -1420,9 +1472,7 @@ fn render_delete_confirmation(state: &SettingsState, frame: &mut Frame, area: Re
         .map(|a| a.display_name.as_str())
         .unwrap_or(agent_id);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Delete Custom Agent ");
+    let block = styled_block(" Delete Custom Agent ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -1474,11 +1524,19 @@ fn render_delete_confirmation(state: &SettingsState, frame: &mut Frame, area: Re
     let yes_btn = Paragraph::new(" Yes ")
         .alignment(Alignment::Center)
         .style(yes_style)
-        .block(Block::default().borders(Borders::ALL));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::White)),
+        );
     let no_btn = Paragraph::new(" No ")
         .alignment(Alignment::Center)
         .style(no_style)
-        .block(Block::default().borders(Borders::ALL));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::White)),
+        );
 
     frame.render_widget(yes_btn, button_chunks[1]);
     frame.render_widget(no_btn, button_chunks[2]);
@@ -1553,20 +1611,14 @@ fn render_profile_list(state: &SettingsState, frame: &mut Frame, area: Rect) {
     };
     list_items.push(ListItem::new("  + Add new profile...").style(add_style));
 
-    let list = List::new(list_items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Environment Profiles "),
-    );
+    let list = List::new(list_items).block(styled_block(" Environment Profiles "));
     frame.render_widget(list, list_area);
 
     if let Some(desc_area) = desc_area {
         let description = selected_description(state);
-        let paragraph = Paragraph::new(description).wrap(Wrap { trim: true }).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Description "),
-        );
+        let paragraph = Paragraph::new(description)
+            .wrap(Wrap { trim: true })
+            .block(styled_block(" Description "));
         frame.render_widget(paragraph, desc_area);
     }
 }
@@ -1581,7 +1633,7 @@ fn render_profile_form(state: &SettingsState, frame: &mut Frame, area: Rect) {
         " Add Profile "
     };
 
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let block = styled_block(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -1625,10 +1677,7 @@ fn render_profile_form(state: &SettingsState, frame: &mut Frame, area: Rect) {
             Style::default()
         };
 
-        let field_block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(field_style)
-            .title(format!(" {} ", label));
+        let field_block = styled_block(format!(" {} ", label)).border_style(field_style);
 
         let paragraph = Paragraph::new(display_text).block(field_block);
         frame.render_widget(paragraph, chunks[i]);
@@ -1642,9 +1691,7 @@ fn render_profile_delete_confirmation(state: &SettingsState, frame: &mut Frame, 
         _ => return,
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Delete Profile ");
+    let block = styled_block(" Delete Profile ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -1696,11 +1743,19 @@ fn render_profile_delete_confirmation(state: &SettingsState, frame: &mut Frame, 
     let yes_btn = Paragraph::new(" Yes ")
         .alignment(Alignment::Center)
         .style(yes_style)
-        .block(Block::default().borders(Borders::ALL));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::White)),
+        );
     let no_btn = Paragraph::new(" No ")
         .alignment(Alignment::Center)
         .style(no_style)
-        .block(Block::default().borders(Borders::ALL));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::White)),
+        );
 
     frame.render_widget(yes_btn, button_chunks[1]);
     frame.render_widget(no_btn, button_chunks[2]);
@@ -1719,9 +1774,7 @@ fn render_env_edit(state: &SettingsState, frame: &mut Frame, area: Rect) {
 
     // Use the existing render_environment function from environment.rs
     // which already implements SPEC-dafff079 requirements
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!(" Environment Variables - {} ", profile_name));
+    let block = styled_block(format!(" Environment Variables - {} ", profile_name));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -1730,61 +1783,9 @@ fn render_env_edit(state: &SettingsState, frame: &mut Frame, area: Rect) {
     render_environment(&mut env_state, frame, inner);
 }
 
-fn render_instructions(state: &SettingsState, frame: &mut Frame, area: Rect) {
-    // FR-020: Tab cycles screens, Left/Right cycles categories
-    let instructions = if state.category == SettingsCategory::CustomAgents {
-        match &state.custom_agent_mode {
-            CustomAgentMode::List => {
-                if state.is_add_agent_selected() {
-                    "[Enter] Add | [L/R] Category | [U/D] Select | [Tab] Screen | [Esc] Back"
-                } else {
-                    "[Enter] Edit | [D] Delete | [L/R] Cat | [U/D] Sel | [Tab] Scr | [Esc] Back"
-                }
-            }
-            CustomAgentMode::Add | CustomAgentMode::Edit(_) => {
-                "[Tab/Up/Down] Field | [Space] Type | [Enter] Save | [Esc] Cancel"
-            }
-            CustomAgentMode::ConfirmDelete(_) => {
-                "[Left/Right] Select | [Enter] Confirm | [Esc] Cancel"
-            }
-        }
-    } else if state.category == SettingsCategory::Environment {
-        match &state.profile_mode {
-            ProfileMode::List => {
-                if state.is_add_profile_selected() {
-                    "[Enter] Add | [Space] Activate | [L/R] Cat | [U/D] Sel | [Tab] Scr | [Esc] Back"
-                } else {
-                    "[Enter] Env | [E] Edit | [D] Del | [Space] Activate | [L/R] Cat | [Tab] Scr | [Esc] Back"
-                }
-            }
-            ProfileMode::Add | ProfileMode::Edit(_) => {
-                "[Tab/Up/Down] Field | [Enter] Save | [Esc] Cancel"
-            }
-            ProfileMode::ConfirmDelete(_) => "[Left/Right] Select | [Enter] Confirm | [Esc] Cancel",
-            ProfileMode::EnvEdit(_) => {
-                // SPEC-dafff079 FR-019: 'r' resets to OS value, FR-020: 'd' disables
-                if state.env_state.edit_mode {
-                    "[Tab] Switch | [Enter] Confirm | [Esc] Cancel"
-                } else {
-                    "[Enter] Edit | [N] New | [D] Disable | [R] Reset | [S] Save | [Esc] Back"
-                }
-            }
-        }
-    } else if state.category == SettingsCategory::AISettings {
-        "[Enter] Open AI Settings Wizard | [L/R] Category | [Tab] Screen | [Esc] Back"
-    } else {
-        "[Left/Right] Category | [Up/Down] Select | [Tab] Screen | [Esc] Back"
-    };
-    let paragraph =
-        Paragraph::new(format!(" {} ", instructions)).block(Block::default().borders(Borders::ALL));
-    frame.render_widget(paragraph, area);
-}
-
 /// Render AI settings content
 fn render_ai_settings_content(state: &SettingsState, frame: &mut Frame, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" AI Settings ");
+    let block = styled_block(" AI Settings ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -1854,7 +1855,11 @@ fn render_ai_settings_content(state: &SettingsState, frame: &mut Frame, area: Re
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             )
-            .block(Block::default().borders(Borders::ALL));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::White)),
+            );
         frame.render_widget(button, button_area);
     } else {
         // No settings - show create button
@@ -1889,7 +1894,11 @@ fn render_ai_settings_content(state: &SettingsState, frame: &mut Frame, area: Re
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             )
-            .block(Block::default().borders(Borders::ALL));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::White)),
+            );
         frame.render_widget(button, button_area);
     }
 }
@@ -1897,6 +1906,10 @@ fn render_ai_settings_content(state: &SettingsState, frame: &mut Frame, area: Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gwt_core::config::{Profile, ProfilesConfig, Settings};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::collections::HashMap;
 
     #[test]
     fn test_category_navigation() {
@@ -1928,9 +1941,24 @@ mod tests {
     /// Tests that the instruction string correctly shows Enter for Env and E for Edit
     #[test]
     fn test_environment_instructions_enter_for_env_e_for_edit() {
-        // The instruction string for Environment category in List mode with a profile selected
-        let instructions =
-            "[Enter] Env | [E] Edit | [D] Del | [Space] Activate | [L/R] Cat | [Tab] Scr | [Esc] Back";
+        let mut state = SettingsState::new().with_settings(Settings::default());
+        state.category = SettingsCategory::Environment;
+
+        let mut profile = Profile::new("dev");
+        profile
+            .env
+            .insert("API_KEY".to_string(), "secret".to_string());
+        let mut config = ProfilesConfig {
+            version: 1,
+            active: Some("dev".to_string()),
+            default_ai: None,
+            profiles: HashMap::new(),
+        };
+        config.profiles.insert("dev".to_string(), profile);
+        state.profiles_config = Some(config);
+        state.profile_index = 0;
+
+        let instructions = state.footer_keybinds();
 
         // Enter should be for Env (environment variables)
         assert!(
@@ -1948,8 +1976,6 @@ mod tests {
 
     #[test]
     fn test_environment_description_enter_for_env_vars() {
-        use gwt_core::config::{Profile, ProfilesConfig};
-        use std::collections::HashMap;
         let mut state = SettingsState::new();
         state.category = SettingsCategory::Environment;
         // Create a config with only one profile that has env vars
@@ -1981,10 +2007,48 @@ mod tests {
         );
     }
 
+    fn find_text_style(
+        buffer: &ratatui::buffer::Buffer,
+        width: u16,
+        height: u16,
+        text: &str,
+    ) -> Option<Style> {
+        for y in 0..height {
+            let line: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
+            if let Some(idx) = line.find(text) {
+                let x = idx as u16;
+                return Some(buffer[(x, y)].style());
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn test_settings_titles_use_cyan_bold_style() {
+        let state = SettingsState::new().with_settings(Settings::default());
+        let width = 100;
+        let height = 20;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal init");
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_settings(&state, f, area);
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        let style = find_text_style(buffer, width, height, " General Settings ")
+            .expect("General Settings title should be rendered");
+
+        assert_eq!(style.fg, Some(Color::Cyan));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
     /// SPEC-dafff079 FR-009: OS env integration
     #[test]
     fn test_enter_env_edit_mode_integrates_os_variables() {
-        use gwt_core::config::{Profile, ProfilesConfig};
         let mut state = SettingsState::new();
         state.category = SettingsCategory::Environment;
         // Create a profile with one env var
