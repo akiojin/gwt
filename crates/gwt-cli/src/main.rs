@@ -750,6 +750,7 @@ impl SessionUpdateContext {
             reasoning_level: self.reasoning_level.clone(),
             skip_permissions: Some(self.skip_permissions),
             tool_version: Some(self.version.clone()),
+            collaboration_modes: None,
             timestamp: Utc::now().timestamp_millis(),
         }
     }
@@ -1283,6 +1284,7 @@ fn execute_launch_plan(plan: LaunchPlan) -> Result<AgentExitKind, GwtError> {
         reasoning_level: config.reasoning_level.map(|r| r.label().to_string()),
         skip_permissions: Some(config.skip_permissions),
         tool_version: Some(selected_version.clone()),
+        collaboration_modes: Some(config.collaboration_modes),
         timestamp: Utc::now().timestamp_millis(),
     };
     if let Err(e) = save_session_entry(&config.worktree_path, session_entry) {
@@ -1360,6 +1362,7 @@ fn execute_launch_plan(plan: LaunchPlan) -> Result<AgentExitKind, GwtError> {
             reasoning_level: config.reasoning_level.map(|r| r.label().to_string()),
             skip_permissions: Some(config.skip_permissions),
             tool_version: Some(selected_version.clone()),
+            collaboration_modes: Some(config.collaboration_modes),
             timestamp: Utc::now().timestamp_millis(),
         };
         if let Err(e) = save_session_entry(&config.worktree_path, entry) {
@@ -2074,6 +2077,7 @@ fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
                 reasoning_override,
                 skills_flag_version.as_deref(),
                 bypass_sandbox,
+                config.collaboration_modes,
             ));
 
             if let Some(flag) = skip_flag {
@@ -2271,6 +2275,7 @@ mod tests {
             env: Vec::new(),
             env_remove: Vec::new(),
             auto_install_deps: false,
+            collaboration_modes: false,
         }
     }
 
