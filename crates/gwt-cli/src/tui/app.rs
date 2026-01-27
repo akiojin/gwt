@@ -1686,10 +1686,6 @@ impl Model {
             .or(self.status_message.as_deref())
     }
 
-    fn cleanup_input_locked(&self) -> bool {
-        matches!(self.screen, Screen::BranchList) && self.branch_list.cleanup_in_progress()
-    }
-
     fn apply_branch_list_updates(&mut self) {
         let Some(rx) = &self.branch_list_rx else {
             return;
@@ -2288,10 +2284,6 @@ impl Model {
             self.last_mouse_click = None;
             return;
         }
-        if self.branch_list.cleanup_in_progress() {
-            self.last_mouse_click = None;
-            return;
-        }
         if self.wizard.visible {
             self.last_mouse_click = None;
             return;
@@ -2310,6 +2302,11 @@ impl Model {
             self.last_mouse_click = None;
             return;
         };
+
+        if self.branch_list.is_cleanup_target_index(index) {
+            self.last_mouse_click = None;
+            return;
+        }
 
         let now = Instant::now();
         let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
@@ -2335,9 +2332,6 @@ impl Model {
 
     fn handle_branch_list_scroll(&mut self, mouse: MouseEvent) {
         if !matches!(self.screen, Screen::BranchList) {
-            return;
-        }
-        if self.branch_list.cleanup_in_progress() {
             return;
         }
         if self.wizard.visible || self.ai_wizard.visible {
@@ -3069,59 +3063,156 @@ impl Model {
     fn handle_settings_enter(&mut self) {
         use super::screens::settings::{AgentFormField, CustomAgentMode, SettingsCategory};
 
-        if self.settings.category != SettingsCategory::CustomAgents {
-            return;
-        }
-
-        match &self.settings.custom_agent_mode {
-            CustomAgentMode::List => {
-                // Enter on list: add or edit
-                if self.settings.is_add_agent_selected() {
-                    self.settings.enter_add_mode();
-                } else if self.settings.selected_custom_agent().is_some() {
-                    self.settings.enter_edit_mode();
+        match self.settings.category {
+            SettingsCategory::CustomAgents => {
+                match &self.settings.custom_agent_mode {
+                    CustomAgentMode::List => {
+                        // Enter on list: add or edit
+                        if self.settings.is_add_agent_selected() {
+                            self.settings.enter_add_mode();
+                        } else if self.settings.selected_custom_agent().is_some() {
+                            self.settings.enter_edit_mode();
+                        }
+                    }
+                    CustomAgentMode::Add | CustomAgentMode::Edit(_) => {
+                        // Enter in form: save if on last field, otherwise cycle type or next field
+                        if self.settings.agent_form.current_field == AgentFormField::Type {
+                            self.settings.agent_form.cycle_type();
+                        } else if self.settings.agent_form.current_field == AgentFormField::Command
+                        {
+                            // On last field, try to save
+                            match self.settings.save_agent() {
+                                Ok(()) => {
+                                    // Save to file
+                                    if let Some(ref config) = self.settings.tools_config {
+                                        if let Err(e) = config.save_global() {
+                                            self.settings.error_message =
+                                                Some(format!("Failed to save: {}", e));
+                                        }
+                                    }
+                                }
+                                Err(msg) => {
+                                    self.settings.error_message = Some(msg.to_string());
+                                }
+                            }
+                        } else {
+                            self.settings.agent_form.next_field();
+                        }
+                    }
+                    CustomAgentMode::ConfirmDelete(_) => {
+                        // Enter in delete confirm: execute if Yes selected
+                        if self.settings.delete_confirm {
+                            if self.settings.delete_agent() {
+                                // Save to file
+                                if let Some(ref config) = self.settings.tools_config {
+                                    if let Err(e) = config.save_global() {
+                                        self.settings.error_message =
+                                            Some(format!("Failed to save: {}", e));
+                                    }
+                                }
+                            }
+                        } else {
+                            self.settings.cancel_mode();
+                        }
+                    }
                 }
             }
-            CustomAgentMode::Add | CustomAgentMode::Edit(_) => {
-                // Enter in form: save if on last field, otherwise cycle type or next field
-                if self.settings.agent_form.current_field == AgentFormField::Type {
-                    self.settings.agent_form.cycle_type();
-                } else if self.settings.agent_form.current_field == AgentFormField::Command {
-                    // On last field, try to save
-                    match self.settings.save_agent() {
-                        Ok(()) => {
+            SettingsCategory::Environment => {
+                use super::screens::settings::ProfileMode;
+                match &self.settings.profile_mode {
+                    ProfileMode::List => {
+                        // FR-029: Enter opens environment variable edit mode
+                        if self.settings.is_add_profile_selected() {
+                            // Enter add mode for new profile
+                            self.settings.enter_profile_add_mode();
+                        } else if self.settings.selected_profile().is_some() {
+                            // Enter env edit mode for selected profile
+                            self.settings.enter_env_edit_mode();
+                        }
+                    }
+                    ProfileMode::Add | ProfileMode::Edit(_) => {
+                        // Save profile
+                        if let Err(e) = self.settings.save_profile() {
+                            self.settings.error_message = Some(e.to_string());
+                        } else {
                             // Save to file
-                            if let Some(ref config) = self.settings.tools_config {
-                                if let Err(e) = config.save_global() {
+                            if let Some(ref config) = self.settings.profiles_config {
+                                if let Err(e) = config.save() {
                                     self.settings.error_message =
                                         Some(format!("Failed to save: {}", e));
+                                } else {
+                                    self.load_profiles();
                                 }
                             }
                         }
-                        Err(msg) => {
-                            self.settings.error_message = Some(msg.to_string());
-                        }
                     }
-                } else {
-                    self.settings.agent_form.next_field();
-                }
-            }
-            CustomAgentMode::ConfirmDelete(_) => {
-                // Enter in delete confirm: execute if Yes selected
-                if self.settings.delete_confirm {
-                    if self.settings.delete_agent() {
-                        // Save to file
-                        if let Some(ref config) = self.settings.tools_config {
-                            if let Err(e) = config.save_global() {
-                                self.settings.error_message =
-                                    Some(format!("Failed to save: {}", e));
+                    ProfileMode::ConfirmDelete(_) => {
+                        // Confirm delete
+                        if self.settings.profile_delete_confirm {
+                            if self.settings.delete_profile() {
+                                // Save to file
+                                if let Some(ref config) = self.settings.profiles_config {
+                                    if let Err(e) = config.save() {
+                                        self.settings.error_message =
+                                            Some(format!("Failed to save: {}", e));
+                                    } else {
+                                        self.load_profiles();
+                                    }
+                                }
                             }
+                        } else {
+                            self.settings.cancel_profile_mode();
                         }
                     }
-                } else {
-                    self.settings.cancel_mode();
+                    ProfileMode::EnvEdit(_) => {
+                        // Use EnvironmentState methods (SPEC-dafff079)
+                        let env_state = &mut self.settings.env_state;
+                        if env_state.edit_mode {
+                            // Finish editing - validate and apply
+                            if let Some(ai_field) = env_state.editing_ai_field() {
+                                if let Ok(value) = env_state.validate_ai_value() {
+                                    env_state.apply_ai_value(ai_field, value);
+                                }
+                            } else if env_state.is_new {
+                                // New variable: validate and add
+                                if let Ok((key, value)) = env_state.validate() {
+                                    env_state.variables.push(
+                                        super::screens::environment::EnvItem {
+                                            key,
+                                            value,
+                                            is_secret: false,
+                                        },
+                                    );
+                                }
+                            }
+                            env_state.cancel_edit();
+                        } else {
+                            // Start editing selected item
+                            env_state.start_edit_selected();
+                        }
+                    }
                 }
             }
+            SettingsCategory::AISettings => {
+                // Enter: open AI Settings Wizard
+                // Check if default_ai exists in profiles_config
+                if let Some(ai) = &self.profiles_config.default_ai {
+                    // Edit existing settings
+                    self.ai_wizard.open_edit(
+                        true, // is_default_ai
+                        None, // no profile name
+                        &ai.endpoint,
+                        &ai.api_key,
+                        &ai.model,
+                    );
+                } else {
+                    // Create new settings
+                    self.ai_wizard.open_new(true, None);
+                }
+                self.screen_stack.push(self.screen.clone());
+                self.screen = Screen::AISettingsWizard;
+            }
+            _ => {}
         }
     }
 
@@ -3129,30 +3220,112 @@ impl Model {
     fn handle_settings_char(&mut self, c: char) {
         use super::screens::settings::{AgentFormField, CustomAgentMode, SettingsCategory};
 
-        if self.settings.category != SettingsCategory::CustomAgents {
-            return;
-        }
-
-        match &self.settings.custom_agent_mode {
-            CustomAgentMode::List => {
-                // 'd' or 'D' to enter delete mode
-                if (c == 'd' || c == 'D') && self.settings.selected_custom_agent().is_some() {
-                    self.settings.enter_delete_mode();
-                }
-            }
-            CustomAgentMode::Add | CustomAgentMode::Edit(_) => {
-                // In form mode: insert char or cycle type
-                if self.settings.agent_form.current_field == AgentFormField::Type {
-                    if c == ' ' {
-                        self.settings.agent_form.cycle_type();
+        match self.settings.category {
+            SettingsCategory::CustomAgents => {
+                match &self.settings.custom_agent_mode {
+                    CustomAgentMode::List => {
+                        // 'd' or 'D' to enter delete mode
+                        if (c == 'd' || c == 'D') && self.settings.selected_custom_agent().is_some()
+                        {
+                            self.settings.enter_delete_mode();
+                        }
                     }
-                } else {
-                    self.settings.agent_form.insert_char(c);
+                    CustomAgentMode::Add | CustomAgentMode::Edit(_) => {
+                        // In form mode: insert char or cycle type
+                        if self.settings.agent_form.current_field == AgentFormField::Type {
+                            if c == ' ' {
+                                self.settings.agent_form.cycle_type();
+                            }
+                        } else {
+                            self.settings.agent_form.insert_char(c);
+                        }
+                    }
+                    CustomAgentMode::ConfirmDelete(_) => {
+                        // In delete confirm: ignore chars
+                    }
                 }
             }
-            CustomAgentMode::ConfirmDelete(_) => {
-                // In delete confirm: ignore chars
+            SettingsCategory::Environment => {
+                use super::screens::settings::ProfileMode;
+                match &self.settings.profile_mode {
+                    ProfileMode::List => {
+                        // 'd' or 'D' to enter delete mode
+                        if (c == 'd' || c == 'D') && self.settings.selected_profile().is_some() {
+                            self.settings.enter_profile_delete_mode();
+                        }
+                        // FR-030: 'e' or 'E' to enter profile edit mode (name/description)
+                        else if (c == 'e' || c == 'E')
+                            && self.settings.selected_profile().is_some()
+                        {
+                            self.settings.enter_profile_edit_mode();
+                        }
+                        // Space to toggle active profile
+                        else if c == ' ' && self.settings.selected_profile().is_some() {
+                            self.settings.toggle_active_profile();
+                            // Save to file
+                            if let Some(ref config) = self.settings.profiles_config {
+                                let _ = config.save();
+                                self.load_profiles();
+                            }
+                        }
+                    }
+                    ProfileMode::Add | ProfileMode::Edit(_) => {
+                        // Insert character in form
+                        self.settings.profile_form.insert_char(c);
+                    }
+                    ProfileMode::ConfirmDelete(_) => {
+                        // Ignore chars
+                    }
+                    ProfileMode::EnvEdit(_) => {
+                        // Use EnvironmentState methods (SPEC-dafff079)
+                        let env_state = &mut self.settings.env_state;
+                        if env_state.edit_mode {
+                            // Insert character while editing
+                            env_state.insert_char(c);
+                        } else {
+                            // Handle special keys when not editing
+                            match c {
+                                'n' | 'N' => {
+                                    // Add new variable
+                                    env_state.start_new();
+                                }
+                                'd' | 'D' => {
+                                    // SPEC-dafff079 FR-020: Toggle disable for OS variables
+                                    env_state.toggle_selected_disabled();
+                                }
+                                'r' | 'R' => {
+                                    // SPEC-dafff079 FR-019: Reset to OS value
+                                    // Delete the override (profile variable) to reveal OS value
+                                    if env_state.selected_is_overridden() {
+                                        env_state.delete_selected_override();
+                                    }
+                                }
+                                's' | 'S' => {
+                                    // Save env vars
+                                    if self.settings.save_profile_env() {
+                                        if let Some(ref config) = self.settings.profiles_config {
+                                            let _ = config.save();
+                                            self.load_profiles();
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
             }
+            _ => {
+                // Other categories don't handle char input
+            }
+        }
+    }
+
+    /// Handle Backspace in EnvEdit mode (SPEC-dafff079)
+    fn handle_settings_env_backspace(&mut self) {
+        let env_state = &mut self.settings.env_state;
+        if env_state.edit_mode {
+            env_state.delete_char();
         }
     }
 
@@ -3353,9 +3526,6 @@ impl Model {
 
     /// Update function (Elm Architecture)
     pub fn update(&mut self, msg: Message) {
-        if self.cleanup_input_locked() && !matches!(msg, Message::Tick | Message::CtrlC) {
-            return;
-        }
         match msg {
             Message::Quit => {
                 self.should_quit = true;
@@ -3382,6 +3552,7 @@ impl Model {
                 // SPEC-71f2742d US3: Load tools config when entering Settings
                 if matches!(screen, Screen::Settings) {
                     self.settings.load_tools_config();
+                    self.settings.load_profiles_config();
                 }
                 self.screen_stack.push(self.screen.clone());
                 self.screen = screen;
@@ -3411,10 +3582,23 @@ impl Model {
                         self.screen = prev_screen;
                     }
                 // SPEC-71f2742d US3: Cancel form/delete mode in Settings
-                } else if matches!(self.screen, Screen::Settings)
-                    && (self.settings.is_form_mode() || self.settings.is_delete_mode())
-                {
-                    self.settings.cancel_mode();
+                } else if matches!(self.screen, Screen::Settings) {
+                    // Check Profile modes first
+                    if self.settings.is_profile_form_mode()
+                        || self.settings.is_profile_delete_mode()
+                    {
+                        self.settings.cancel_profile_mode();
+                    } else if self.settings.is_env_edit_mode() {
+                        // Save env changes and exit EnvEdit mode
+                        self.settings.save_env_to_profile();
+                        self.settings.cancel_profile_mode();
+                    } else if self.settings.is_form_mode() || self.settings.is_delete_mode() {
+                        // CustomAgents mode
+                        self.settings.cancel_mode();
+                    } else if let Some(prev_screen) = self.screen_stack.pop() {
+                        // Not in any special mode, navigate back
+                        self.screen = prev_screen;
+                    }
                 } else if matches!(self.screen, Screen::AISettingsWizard) {
                     // Go back in AI wizard or close if at first step
                     if self.ai_wizard.show_delete_confirm {
@@ -3781,8 +3965,14 @@ impl Model {
                 } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
                     self.agent_mode.backspace();
                 // SPEC-71f2742d US3: Settings screen backspace
-                } else if matches!(self.screen, Screen::Settings) && self.settings.is_form_mode() {
-                    self.settings.agent_form.delete_char();
+                } else if matches!(self.screen, Screen::Settings) {
+                    if self.settings.is_profile_form_mode() {
+                        self.settings.profile_form.delete_char();
+                    } else if self.settings.is_env_edit_mode() {
+                        self.handle_settings_env_backspace();
+                    } else if self.settings.is_form_mode() {
+                        self.settings.agent_form.delete_char();
+                    }
                 } else if matches!(self.screen, Screen::AISettingsWizard)
                     && self.ai_wizard.is_text_input()
                 {
@@ -3799,14 +3989,22 @@ impl Model {
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029c: Left/Right toggle selection in confirm dialog
                     self.confirm.toggle_selection();
-                // SPEC-71f2742d US3: Settings delete confirmation toggle
-                } else if matches!(self.screen, Screen::Settings) && self.settings.is_delete_mode()
+                // SPEC-71f2742d US3: Settings delete confirmation toggle (CustomAgents or Profile)
+                } else if matches!(self.screen, Screen::Settings)
+                    && (self.settings.is_delete_mode() || self.settings.is_profile_delete_mode())
                 {
-                    self.settings.delete_confirm = !self.settings.delete_confirm;
+                    if self.settings.is_profile_delete_mode() {
+                        self.settings.profile_delete_confirm =
+                            !self.settings.profile_delete_confirm;
+                    } else {
+                        self.settings.delete_confirm = !self.settings.delete_confirm;
+                    }
                 // SPEC-71f2742d US4: Settings category navigation with Left/Right
                 } else if matches!(self.screen, Screen::Settings)
                     && !self.settings.is_form_mode()
                     && !self.settings.is_delete_mode()
+                    && !self.settings.is_profile_delete_mode()
+                    && !self.settings.is_env_edit_mode()
                 {
                     self.settings.prev_category();
                 } else if matches!(self.screen, Screen::AISettingsWizard)
@@ -3827,14 +4025,22 @@ impl Model {
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029c: Left/Right toggle selection in confirm dialog
                     self.confirm.toggle_selection();
-                // SPEC-71f2742d US3: Settings delete confirmation toggle
-                } else if matches!(self.screen, Screen::Settings) && self.settings.is_delete_mode()
+                // SPEC-71f2742d US3: Settings delete confirmation toggle (CustomAgents or Profile)
+                } else if matches!(self.screen, Screen::Settings)
+                    && (self.settings.is_delete_mode() || self.settings.is_profile_delete_mode())
                 {
-                    self.settings.delete_confirm = !self.settings.delete_confirm;
+                    if self.settings.is_profile_delete_mode() {
+                        self.settings.profile_delete_confirm =
+                            !self.settings.profile_delete_confirm;
+                    } else {
+                        self.settings.delete_confirm = !self.settings.delete_confirm;
+                    }
                 // SPEC-71f2742d US4: Settings category navigation with Left/Right
                 } else if matches!(self.screen, Screen::Settings)
                     && !self.settings.is_form_mode()
                     && !self.settings.is_delete_mode()
+                    && !self.settings.is_profile_delete_mode()
+                    && !self.settings.is_env_edit_mode()
                 {
                     self.settings.next_category();
                 } else if matches!(self.screen, Screen::AISettingsWizard)
@@ -3935,8 +4141,14 @@ impl Model {
             // FR-020 SPEC-71f2742d: Tab cycles BranchList → AgentMode → Settings → BranchList
             Message::Tab => match self.screen {
                 Screen::Settings => {
-                    // In form mode, Tab cycles fields
-                    if self.settings.is_form_mode() {
+                    // In profile form mode, Tab cycles profile form fields
+                    if self.settings.is_profile_form_mode() {
+                        self.settings.profile_form.next_field();
+                    } else if self.settings.is_env_edit_mode() {
+                        // Toggle between Key/Value editing (SPEC-dafff079)
+                        self.settings.env_state.switch_field();
+                    } else if self.settings.is_form_mode() {
+                        // In agent form mode, Tab cycles agent form fields
                         self.settings.agent_form.next_field();
                     } else {
                         // Exit Settings and go to BranchList (FR-020)
@@ -3951,6 +4163,7 @@ impl Model {
                 Screen::AgentMode => {
                     // Go to Settings (FR-020)
                     self.settings.load_tools_config();
+                    self.settings.load_profiles_config();
                     self.screen = Screen::Settings;
                 }
                 _ => {}
@@ -4775,6 +4988,7 @@ impl Model {
             .collect();
 
         self.branch_list.start_cleanup_progress(cleanup_items.len());
+        self.branch_list.set_cleanup_target_branches(branches);
         self.branch_list.set_cleanup_active_branch(None);
 
         let repo_root = self.repo_root.clone();
@@ -5259,7 +5473,16 @@ impl Model {
                     self.environment.switch_field();
                 // SPEC-71f2742d US3: Settings form field navigation
                 } else if matches!(self.screen, Screen::Settings) && self.settings.is_form_mode() {
-                    self.settings.agent_form.next_field();
+                    if self.settings.is_profile_form_mode() {
+                        self.settings.profile_form.next_field();
+                    } else {
+                        self.settings.agent_form.next_field();
+                    }
+                } else if matches!(self.screen, Screen::Settings)
+                    && self.settings.is_env_edit_mode()
+                {
+                    // Tab in EnvEdit mode: switch between key and value
+                    self.settings.env_state.switch_field();
                 }
                 None
             }
@@ -5268,7 +5491,16 @@ impl Model {
                     self.environment.switch_field();
                 // SPEC-71f2742d US3: Settings form field navigation (reverse)
                 } else if matches!(self.screen, Screen::Settings) && self.settings.is_form_mode() {
-                    self.settings.agent_form.prev_field();
+                    if self.settings.is_profile_form_mode() {
+                        self.settings.profile_form.prev_field();
+                    } else {
+                        self.settings.agent_form.prev_field();
+                    }
+                } else if matches!(self.screen, Screen::Settings)
+                    && self.settings.is_env_edit_mode()
+                {
+                    // BackTab in EnvEdit mode: switch between key and value
+                    self.settings.env_state.switch_field();
                 }
                 None
             }
@@ -5305,16 +5537,6 @@ impl Model {
                 }
             }
             // Block all other input while modal is visible (FR-043)
-            return None;
-        }
-
-        if self.cleanup_input_locked() {
-            if is_key_press
-                && key.code == KeyCode::Char('c')
-                && key.modifiers.contains(KeyModifiers::CONTROL)
-            {
-                return Some(Message::CtrlC);
-            }
             return None;
         }
 
@@ -5540,8 +5762,12 @@ impl Model {
                 }
                 (KeyCode::Char('p'), KeyModifiers::NONE) => {
                     // In filter mode, 'p' goes to filter input
+                    // 'p' now navigates to Settings → Environment tab (SPEC-71f2742d)
                     if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
-                        Some(Message::NavigateTo(Screen::Profiles))
+                        use super::screens::settings::SettingsCategory;
+                        self.settings.category = SettingsCategory::Environment;
+                        self.settings.load_profiles_config();
+                        Some(Message::NavigateTo(Screen::Settings))
                     } else {
                         Some(Message::Char('p'))
                     }
@@ -6524,20 +6750,30 @@ mod tests {
     }
 
     #[test]
-    fn test_cleanup_input_lock_blocks_navigation() {
+    fn test_cleanup_allows_navigation_and_skips_target_branch() {
         let mut model = Model::new_with_context(None);
         model.screen = Screen::BranchList;
 
         let branches = vec![
-            sample_branch_with_session("feature/one"),
-            sample_branch_with_session("feature/two"),
+            sample_branch_with_session("feature/a"),
+            sample_branch_with_session("feature/b"),
+            sample_branch_with_session("feature/c"),
         ];
 
         model.branch_list = BranchListState::new().with_branches(branches);
-        model.branch_list.start_cleanup_progress(2);
+        model.branch_list.start_cleanup_progress(3);
+        model
+            .branch_list
+            .set_cleanup_target_branches(&["feature/b".to_string()]);
 
         model.update(Message::SelectNext);
-        assert_eq!(model.branch_list.selected, 0);
+        assert_eq!(
+            model
+                .branch_list
+                .selected_branch()
+                .map(|branch| branch.name.as_str()),
+            Some("feature/c")
+        );
     }
 
     #[test]
@@ -6841,7 +7077,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mouse_click_ignores_cleanup_active_branch() {
+    fn test_mouse_click_ignores_cleanup_target_branch() {
         let mut model = Model::new_with_context(None);
         model.screen = Screen::BranchList;
         let branches = [
@@ -6857,7 +7093,7 @@ mod tests {
         model.branch_list.start_cleanup_progress(2);
         model
             .branch_list
-            .set_cleanup_active_branch(Some("feature/two".to_string()));
+            .set_cleanup_target_branches(&["feature/two".to_string()]);
 
         assert_eq!(model.branch_list.selected, 0);
         let mouse = MouseEvent {
