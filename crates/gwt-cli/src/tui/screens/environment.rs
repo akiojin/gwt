@@ -112,6 +112,8 @@ pub struct EnvironmentState {
     editing_ai_field: Option<AiField>,
     /// AI-only mode (no environment variables)
     ai_only: bool,
+    /// Hide AI settings (for Settings Environment tab - SPEC-71f2742d FR-023)
+    hide_ai: bool,
 
     // Mouse click support
     /// List inner area for click detection
@@ -172,8 +174,18 @@ impl EnvironmentState {
         self
     }
 
+    /// Hide AI settings (SPEC-71f2742d FR-023: Environment only manages env vars, not AI)
+    pub fn with_hide_ai(mut self, hide_ai: bool) -> Self {
+        self.hide_ai = hide_ai;
+        self
+    }
+
     pub fn is_ai_only(&self) -> bool {
         self.ai_only
+    }
+
+    pub fn is_hide_ai(&self) -> bool {
+        self.hide_ai
     }
 
     pub fn editing_ai_field(&self) -> Option<AiField> {
@@ -554,7 +566,12 @@ impl EnvironmentState {
         if self.ai_only {
             return self.ai_display_items().len();
         }
-        let ai_count = self.ai_display_items().len();
+        // SPEC-71f2742d FR-023: hide_ai mode excludes AI settings
+        let ai_count = if self.hide_ai {
+            0
+        } else {
+            self.ai_display_items().len()
+        };
         let mut keys: HashMap<&str, ()> = HashMap::new();
         for var in &self.os_variables {
             keys.insert(var.key.as_str(), ());
@@ -574,7 +591,12 @@ impl EnvironmentState {
         if self.ai_only {
             return self.ai_display_items();
         }
-        let mut items = self.ai_display_items();
+        // SPEC-71f2742d FR-023: hide_ai mode excludes AI settings from Environment tab
+        let mut items = if self.hide_ai {
+            Vec::new()
+        } else {
+            self.ai_display_items()
+        };
         let mut os_map: HashMap<String, String> = HashMap::new();
         for var in &self.os_variables {
             os_map.insert(var.key.clone(), var.value.clone());

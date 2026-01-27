@@ -902,11 +902,13 @@ impl SettingsState {
             // Collect OS environment variables
             let os_vars = collect_os_env();
             // Initialize EnvironmentState with both (SPEC-dafff079 compliant)
+            // FR-023: hide AI settings - managed separately in AI tab
             self.env_state = EnvironmentState::new()
                 .with_variables(profile_vars)
                 .with_os_variables(os_vars)
                 .with_disabled_keys(profile.disabled_env.clone())
-                .with_profile(&name);
+                .with_profile(&name)
+                .with_hide_ai(true);
             self.profile_mode = ProfileMode::EnvEdit(name);
         }
     }
