@@ -6756,7 +6756,8 @@ mod tests {
 
         model.update(Message::SelectNext);
         assert_eq!(
-            model.branch_list
+            model
+                .branch_list
                 .selected_branch()
                 .map(|branch| branch.name.as_str()),
             Some("feature/c")
