@@ -1,0 +1,5 @@
+# CODEOWNERS - All changes require review from repository owner
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default: All files require owner approval
+* @akiojin

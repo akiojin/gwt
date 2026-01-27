@@ -429,6 +429,7 @@ pub struct BranchListState {
     pub cleanup_progress_total: usize,
     pub cleanup_progress_done: usize,
     pub cleanup_active_branch: Option<String>,
+    cleanup_target_branches: HashSet<String>,
     /// Viewport height for scroll calculations (updated by renderer)
     pub visible_height: usize,
     /// Cached branch list area (outer, with border)
@@ -492,6 +493,7 @@ impl Default for BranchListState {
             cleanup_progress_total: 0,
             cleanup_progress_done: 0,
             cleanup_active_branch: None,
+            cleanup_target_branches: HashSet::new(),
             visible_height: 15, // Default fallback (previously hardcoded)
             list_area: None,
             list_inner_area: None,
@@ -754,7 +756,7 @@ impl BranchListState {
         let mut index = self.selected;
         while index > 0 {
             index -= 1;
-            if !self.is_cleanup_active_index(index) {
+            if !self.is_cleanup_target_index(index) {
                 self.selected = index;
                 self.ensure_visible();
                 break;
@@ -771,7 +773,7 @@ impl BranchListState {
         let mut index = self.selected;
         while index + 1 < filtered_len {
             index += 1;
-            if !self.is_cleanup_active_index(index) {
+            if !self.is_cleanup_target_index(index) {
                 self.selected = index;
                 self.ensure_visible();
                 break;
@@ -782,7 +784,7 @@ impl BranchListState {
     /// Page up
     pub fn page_up(&mut self, page_size: usize) {
         self.selected = self.selected.saturating_sub(page_size);
-        self.move_selection_off_cleanup_active();
+        self.move_selection_off_cleanup_target();
         self.ensure_visible();
     }
 
@@ -791,7 +793,7 @@ impl BranchListState {
         let filtered_len = self.filtered_len();
         if filtered_len > 0 {
             self.selected = (self.selected + page_size).min(filtered_len - 1);
-            self.move_selection_off_cleanup_active();
+            self.move_selection_off_cleanup_target();
             self.ensure_visible();
         }
     }
@@ -800,7 +802,7 @@ impl BranchListState {
     pub fn go_home(&mut self) {
         self.selected = 0;
         self.offset = 0;
-        self.move_selection_off_cleanup_active();
+        self.move_selection_off_cleanup_target();
     }
 
     /// Go to end
@@ -809,7 +811,7 @@ impl BranchListState {
         if filtered_len > 0 {
             self.selected = filtered_len - 1;
         }
-        self.move_selection_off_cleanup_active();
+        self.move_selection_off_cleanup_target();
         self.ensure_visible();
     }
 
@@ -898,7 +900,7 @@ impl BranchListState {
         if index >= self.filtered_indices.len() {
             return false;
         }
-        if self.is_cleanup_active_index(index) {
+        if self.is_cleanup_target_index(index) {
             return false;
         }
         if self.selected != index {
@@ -1072,6 +1074,7 @@ impl BranchListState {
         self.cleanup_progress_total = total;
         self.cleanup_progress_done = 0;
         self.cleanup_active_branch = None;
+        self.cleanup_target_branches.clear();
     }
 
     pub fn increment_cleanup_progress(&mut self) {
@@ -1104,28 +1107,32 @@ impl BranchListState {
         self.cleanup_in_progress
     }
 
+    pub fn set_cleanup_target_branches(&mut self, branches: &[String]) {
+        self.cleanup_target_branches.clear();
+        self.cleanup_target_branches
+            .extend(branches.iter().cloned());
+        self.move_selection_off_cleanup_target();
+    }
+
     pub fn set_cleanup_active_branch(&mut self, branch: Option<String>) {
         self.cleanup_active_branch = branch;
-        self.move_selection_off_cleanup_active();
+        self.move_selection_off_cleanup_target();
     }
 
     pub fn cleanup_active_branch(&self) -> Option<&str> {
         self.cleanup_active_branch.as_deref()
     }
 
-    fn is_cleanup_active_index(&self, index: usize) -> bool {
-        if !self.cleanup_in_progress {
+    pub fn is_cleanup_target_index(&self, index: usize) -> bool {
+        if !self.cleanup_in_progress || self.cleanup_target_branches.is_empty() {
             return false;
         }
-        let Some(active) = self.cleanup_active_branch.as_deref() else {
-            return false;
-        };
         self.filtered_branch_at(index)
-            .is_some_and(|branch| branch.name == active)
+            .is_some_and(|branch| self.cleanup_target_branches.contains(&branch.name))
     }
 
-    fn move_selection_off_cleanup_active(&mut self) {
-        if !self.is_cleanup_active_index(self.selected) {
+    fn move_selection_off_cleanup_target(&mut self) {
+        if !self.is_cleanup_target_index(self.selected) {
             return;
         }
         let filtered_len = self.filtered_len();
@@ -1133,14 +1140,14 @@ impl BranchListState {
             return;
         }
         for index in (self.selected + 1)..filtered_len {
-            if !self.is_cleanup_active_index(index) {
+            if !self.is_cleanup_target_index(index) {
                 self.selected = index;
                 self.ensure_visible();
                 return;
             }
         }
         for index in (0..self.selected).rev() {
-            if !self.is_cleanup_active_index(index) {
+            if !self.is_cleanup_target_index(index) {
                 self.selected = index;
                 self.ensure_visible();
                 return;
@@ -1153,6 +1160,7 @@ impl BranchListState {
         self.cleanup_progress_total = 0;
         self.cleanup_progress_done = 0;
         self.cleanup_active_branch = None;
+        self.cleanup_target_branches.clear();
     }
 
     /// Set loading state
@@ -1488,7 +1496,7 @@ impl BranchListState {
 
 /// Render branch list screen
 /// Note: Header, Filter, Mode are rendered by app.rs view_boxed_header
-/// This function only renders: BranchList + StatusBar + WorktreePath/Status
+/// This function only renders the main panels inside the content area.
 pub fn render_branch_list(
     state: &mut BranchListState,
     frame: &mut Frame,
@@ -1499,53 +1507,29 @@ pub fn render_branch_list(
     // SPEC-4b893dae: Summary panel height is 12 lines (FR-003)
     let panel_height = crate::tui::components::SummaryPanel::height();
 
-    // Check if we have agents to show status bar
-    let has_agents = !state.running_agents.is_empty();
-
-    let chunks = if has_agents {
-        // With status bar (SPEC-861d8cdf FR-104a)
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(panel_height), // Branch list
-                Constraint::Length(1),            // Status bar (FR-104a)
-                Constraint::Length(panel_height), // Details panel
-                Constraint::Min(6),               // Session panel
-            ])
-            .split(area)
-    } else {
-        // Without status bar (no agents)
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(panel_height), // Branch list
-                Constraint::Length(panel_height), // Details panel
-                Constraint::Min(6),               // Session panel
-            ])
-            .split(area)
-    };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(panel_height), // Branch list
+            Constraint::Length(panel_height), // Details panel
+            Constraint::Min(6),               // Session panel
+        ])
+        .split(area);
 
     // Cache branch list area for mouse selection and update visible height
     state.update_list_area(chunks[0]);
 
     render_branches(state, frame, chunks[0], has_focus);
-
-    if has_agents {
-        render_status_bar(state, frame, chunks[1]);
-        render_summary_panels(state, frame, chunks[2], chunks[3], status_message);
-    } else {
-        render_summary_panels(state, frame, chunks[1], chunks[2], status_message);
-    }
+    render_summary_panels(state, frame, chunks[1], chunks[2], status_message);
 }
 
-/// Render agent status bar (SPEC-861d8cdf T-105, FR-104a, FR-104b, FR-104c)
-fn render_status_bar(state: &BranchListState, frame: &mut Frame, area: Rect) {
+/// Build the unified status bar line for the bottom status bar (FR-093~FR-096).
+pub fn build_status_bar_line(
+    state: &BranchListState,
+    status_message: Option<&str>,
+) -> Line<'static> {
     let agents: Vec<_> = state.running_agents.values().cloned().collect();
     let summary = StatusBarSummary::from_agents(&agents);
-
-    if !summary.has_agents() {
-        return;
-    }
 
     let mut spans = Vec::new();
 
@@ -1555,43 +1539,73 @@ fn render_status_bar(state: &BranchListState, frame: &mut Frame, area: Rect) {
         Style::default().fg(Color::DarkGray),
     ));
 
-    // Add running count
-    if summary.running_count > 0 {
-        spans.push(Span::styled(
-            format!("{} running", summary.running_count),
-            Style::default().fg(Color::Green),
-        ));
+    if summary.has_agents() {
+        // Add running count
+        if summary.running_count > 0 {
+            spans.push(Span::styled(
+                format!("{} running", summary.running_count),
+                Style::default().fg(Color::Green),
+            ));
+        }
+
+        // Add separator if needed
+        if summary.running_count > 0 && (summary.waiting_count > 0 || summary.stopped_count > 0) {
+            spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+        }
+
+        // Add waiting count (FR-104c: highlighted in yellow)
+        if summary.waiting_count > 0 {
+            spans.push(Span::styled(
+                format!("{} waiting", summary.waiting_count),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        // Add separator if needed
+        if summary.waiting_count > 0 && summary.stopped_count > 0 {
+            spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+        }
+
+        // Add stopped count
+        if summary.stopped_count > 0 {
+            spans.push(Span::styled(
+                format!("{} stopped", summary.stopped_count),
+                Style::default().fg(Color::Red),
+            ));
+        }
+    } else {
+        spans.push(Span::styled("none", Style::default().fg(Color::DarkGray)));
     }
 
-    // Add separator if needed
-    if summary.running_count > 0 && (summary.waiting_count > 0 || summary.stopped_count > 0) {
+    let selected_count = state.selected_branches.len();
+    if selected_count > 0 {
         spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
-    }
-
-    // Add waiting count (FR-104c: highlighted in yellow)
-    if summary.waiting_count > 0 {
         spans.push(Span::styled(
-            format!("{} waiting", summary.waiting_count),
+            format!("Selected: {}", selected_count),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ));
     }
 
-    // Add separator if needed
-    if summary.waiting_count > 0 && summary.stopped_count > 0 {
+    if let Some(message) = status_message {
+        let style = if message.starts_with("Error") || message.starts_with("Failed") {
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Yellow)
+        };
         spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(message.to_string(), style));
     }
 
-    // Add stopped count
-    if summary.stopped_count > 0 {
-        spans.push(Span::styled(
-            format!("{} stopped", summary.stopped_count),
-            Style::default().fg(Color::Red),
-        ));
-    }
+    Line::from(spans)
+}
 
-    let line = Line::from(spans);
+/// Render agent status bar (kept for compatibility in tests and previews).
+fn render_status_bar(state: &BranchListState, frame: &mut Frame, area: Rect) {
+    let line = build_status_bar_line(state, None);
     frame.render_widget(Paragraph::new(line), area);
 }
 
@@ -1980,20 +1994,13 @@ fn render_summary_panels(
     render_session_panel(state, frame, session_area, status_message);
 }
 
-fn panel_title_line(branch_name: &str, label: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(
-            label.to_string(),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            branch_name.to_string(),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ])
+fn panel_title_line(label: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        format!(" {} ", label),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ))
 }
 
 fn session_panel_hint() -> Line<'static> {
@@ -2070,7 +2077,7 @@ fn render_details_panel(
     state: &mut BranchListState,
     frame: &mut Frame,
     area: Rect,
-    status_message: Option<&str>,
+    _status_message: Option<&str>,
 ) {
     use crate::tui::components::SummaryPanel;
     use std::path::PathBuf;
@@ -2102,30 +2109,9 @@ fn render_details_panel(
         BranchSummary::new("(no branch selected)")
     };
 
-    // Handle status messages - show them in the panel area if present
-    if let Some(status) = status_message {
-        // Draw the panel frame first
-        let title = panel_title_line(&summary.branch_name, "Details");
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::White))
-            .title(title)
-            .padding(Padding::new(PANEL_PADDING_X, PANEL_PADDING_X, 0, 0));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
-        // Show status message inside
-        let line = Line::from(vec![Span::styled(
-            status,
-            Style::default().fg(Color::Yellow),
-        )]);
-        frame.render_widget(Paragraph::new(line), inner);
-        return;
-    }
-
     // Handle loading state - show spinner in panel
     if state.is_loading {
-        let title = panel_title_line(&summary.branch_name, "Details");
+        let title = panel_title_line("Details");
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::White))
@@ -2157,7 +2143,7 @@ fn render_details_panel(
     // Render the full summary panel with optional status line
     let panel = SummaryPanel::new(&summary)
         .with_tick(state.spinner_frame)
-        .with_title(panel_title_line(&summary.branch_name, "Details"))
+        .with_title(panel_title_line("Details"))
         .with_links(links)
         .with_status_line(status_line);
 
@@ -2169,13 +2155,9 @@ fn render_session_panel(
     state: &mut BranchListState,
     frame: &mut Frame,
     area: Rect,
-    status_message: Option<&str>,
+    _status_message: Option<&str>,
 ) {
-    let branch_name = state
-        .selected_branch()
-        .map(|branch| branch.name.clone())
-        .unwrap_or_else(|| "(no branch selected)".to_string());
-    let title = panel_title_line(&branch_name, "Session");
+    let title = panel_title_line("Session");
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::White))
@@ -2188,12 +2170,7 @@ fn render_session_panel(
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    if let Some(status) = status_message {
-        lines.push(Line::from(Span::styled(
-            status.to_string(),
-            Style::default().fg(Color::Yellow),
-        )));
-    } else if state.is_loading {
+    if state.is_loading {
         lines.push(Line::from(vec![
             Span::styled(
                 format!("{} ", state.spinner_char()),
@@ -2886,7 +2863,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cleanup_active_branch_is_skipped_by_cursor() {
+    fn test_cleanup_target_branch_is_skipped_by_cursor() {
         let branches = vec![
             sample_branch("branch-a"),
             sample_branch("branch-b"),
@@ -2895,7 +2872,7 @@ mod tests {
         let mut state = BranchListState::new().with_branches(branches);
         state.selected = 1;
         state.start_cleanup_progress(3);
-        state.set_cleanup_active_branch(Some("branch-b".to_string()));
+        state.set_cleanup_target_branches(&["branch-b".to_string()]);
 
         assert_eq!(
             state.selected_branch().map(|branch| branch.name.as_str()),
@@ -2917,7 +2894,7 @@ mod tests {
     }
 
     #[test]
-    fn test_select_index_ignores_cleanup_active_branch() {
+    fn test_select_index_ignores_cleanup_target_branch() {
         let branches = vec![
             sample_branch("branch-a"),
             sample_branch("branch-b"),
@@ -2925,7 +2902,7 @@ mod tests {
         ];
         let mut state = BranchListState::new().with_branches(branches);
         state.start_cleanup_progress(3);
-        state.set_cleanup_active_branch(Some("branch-b".to_string()));
+        state.set_cleanup_target_branches(&["branch-b".to_string()]);
 
         assert_eq!(
             state.selected_branch().map(|branch| branch.name.as_str()),
@@ -3223,6 +3200,48 @@ mod tests {
             }
         }
         assert!(found, "Loading text should appear somewhere in the panel");
+    }
+
+    #[test]
+    fn test_status_message_not_duplicated_in_panels() {
+        let branches = vec![sample_branch("feature/status")];
+        let mut state = BranchListState::new().with_branches(branches);
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal init");
+
+        let status = "STATUS_UNIQUE_123";
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_branch_list(&mut state, f, area, Some(status), true);
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        let mut found = false;
+        for y in 0..20 {
+            let line: String = (0..60).map(|x| buffer[(x, y)].symbol()).collect();
+            if line.contains(status) {
+                found = true;
+                break;
+            }
+        }
+        assert!(
+            !found,
+            "Global status message should not be rendered inside Details/Session panels"
+        );
+    }
+
+    #[test]
+    fn test_panel_title_line_is_label_only_and_consistent() {
+        let title = panel_title_line("Details");
+        let text = line_text(&title);
+        assert_eq!(text, " Details ");
+        assert_eq!(title.spans.len(), 1);
+
+        let span = &title.spans[0];
+        assert_eq!(span.style.fg, Some(Color::Cyan));
+        assert!(span.style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]
