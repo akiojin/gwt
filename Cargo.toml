@@ -50,7 +50,7 @@ clap = { version = "4", features = ["derive", "env"] }
 
 # TUI
 ratatui = "0.29"
-crossterm = "0.28"
+crossterm = "0.29"
 
 # Web server
 axum = "0.8"
