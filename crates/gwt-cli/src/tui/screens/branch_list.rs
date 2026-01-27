@@ -429,6 +429,7 @@ pub struct BranchListState {
     pub cleanup_progress_total: usize,
     pub cleanup_progress_done: usize,
     pub cleanup_active_branch: Option<String>,
+    cleanup_target_branches: HashSet<String>,
     /// Viewport height for scroll calculations (updated by renderer)
     pub visible_height: usize,
     /// Cached branch list area (outer, with border)
@@ -492,6 +493,7 @@ impl Default for BranchListState {
             cleanup_progress_total: 0,
             cleanup_progress_done: 0,
             cleanup_active_branch: None,
+            cleanup_target_branches: HashSet::new(),
             visible_height: 15, // Default fallback (previously hardcoded)
             list_area: None,
             list_inner_area: None,
@@ -754,7 +756,7 @@ impl BranchListState {
         let mut index = self.selected;
         while index > 0 {
             index -= 1;
-            if !self.is_cleanup_active_index(index) {
+            if !self.is_cleanup_target_index(index) {
                 self.selected = index;
                 self.ensure_visible();
                 break;
@@ -771,7 +773,7 @@ impl BranchListState {
         let mut index = self.selected;
         while index + 1 < filtered_len {
             index += 1;
-            if !self.is_cleanup_active_index(index) {
+            if !self.is_cleanup_target_index(index) {
                 self.selected = index;
                 self.ensure_visible();
                 break;
@@ -782,7 +784,7 @@ impl BranchListState {
     /// Page up
     pub fn page_up(&mut self, page_size: usize) {
         self.selected = self.selected.saturating_sub(page_size);
-        self.move_selection_off_cleanup_active();
+        self.move_selection_off_cleanup_target();
         self.ensure_visible();
     }
 
@@ -791,7 +793,7 @@ impl BranchListState {
         let filtered_len = self.filtered_len();
         if filtered_len > 0 {
             self.selected = (self.selected + page_size).min(filtered_len - 1);
-            self.move_selection_off_cleanup_active();
+            self.move_selection_off_cleanup_target();
             self.ensure_visible();
         }
     }
@@ -800,7 +802,7 @@ impl BranchListState {
     pub fn go_home(&mut self) {
         self.selected = 0;
         self.offset = 0;
-        self.move_selection_off_cleanup_active();
+        self.move_selection_off_cleanup_target();
     }
 
     /// Go to end
@@ -809,7 +811,7 @@ impl BranchListState {
         if filtered_len > 0 {
             self.selected = filtered_len - 1;
         }
-        self.move_selection_off_cleanup_active();
+        self.move_selection_off_cleanup_target();
         self.ensure_visible();
     }
 
@@ -898,7 +900,7 @@ impl BranchListState {
         if index >= self.filtered_indices.len() {
             return false;
         }
-        if self.is_cleanup_active_index(index) {
+        if self.is_cleanup_target_index(index) {
             return false;
         }
         if self.selected != index {
@@ -1072,6 +1074,7 @@ impl BranchListState {
         self.cleanup_progress_total = total;
         self.cleanup_progress_done = 0;
         self.cleanup_active_branch = None;
+        self.cleanup_target_branches.clear();
     }
 
     pub fn increment_cleanup_progress(&mut self) {
@@ -1104,28 +1107,32 @@ impl BranchListState {
         self.cleanup_in_progress
     }
 
+    pub fn set_cleanup_target_branches(&mut self, branches: &[String]) {
+        self.cleanup_target_branches.clear();
+        self.cleanup_target_branches
+            .extend(branches.iter().cloned());
+        self.move_selection_off_cleanup_target();
+    }
+
     pub fn set_cleanup_active_branch(&mut self, branch: Option<String>) {
         self.cleanup_active_branch = branch;
-        self.move_selection_off_cleanup_active();
+        self.move_selection_off_cleanup_target();
     }
 
     pub fn cleanup_active_branch(&self) -> Option<&str> {
         self.cleanup_active_branch.as_deref()
     }
 
-    fn is_cleanup_active_index(&self, index: usize) -> bool {
-        if !self.cleanup_in_progress {
+    pub fn is_cleanup_target_index(&self, index: usize) -> bool {
+        if !self.cleanup_in_progress || self.cleanup_target_branches.is_empty() {
             return false;
         }
-        let Some(active) = self.cleanup_active_branch.as_deref() else {
-            return false;
-        };
         self.filtered_branch_at(index)
-            .is_some_and(|branch| branch.name == active)
+            .is_some_and(|branch| self.cleanup_target_branches.contains(&branch.name))
     }
 
-    fn move_selection_off_cleanup_active(&mut self) {
-        if !self.is_cleanup_active_index(self.selected) {
+    fn move_selection_off_cleanup_target(&mut self) {
+        if !self.is_cleanup_target_index(self.selected) {
             return;
         }
         let filtered_len = self.filtered_len();
@@ -1133,14 +1140,14 @@ impl BranchListState {
             return;
         }
         for index in (self.selected + 1)..filtered_len {
-            if !self.is_cleanup_active_index(index) {
+            if !self.is_cleanup_target_index(index) {
                 self.selected = index;
                 self.ensure_visible();
                 return;
             }
         }
         for index in (0..self.selected).rev() {
-            if !self.is_cleanup_active_index(index) {
+            if !self.is_cleanup_target_index(index) {
                 self.selected = index;
                 self.ensure_visible();
                 return;
@@ -1153,6 +1160,7 @@ impl BranchListState {
         self.cleanup_progress_total = 0;
         self.cleanup_progress_done = 0;
         self.cleanup_active_branch = None;
+        self.cleanup_target_branches.clear();
     }
 
     /// Set loading state
@@ -2886,7 +2894,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cleanup_active_branch_is_skipped_by_cursor() {
+    fn test_cleanup_target_branch_is_skipped_by_cursor() {
         let branches = vec![
             sample_branch("branch-a"),
             sample_branch("branch-b"),
@@ -2895,7 +2903,7 @@ mod tests {
         let mut state = BranchListState::new().with_branches(branches);
         state.selected = 1;
         state.start_cleanup_progress(3);
-        state.set_cleanup_active_branch(Some("branch-b".to_string()));
+        state.set_cleanup_target_branches(&vec!["branch-b".to_string()]);
 
         assert_eq!(
             state.selected_branch().map(|branch| branch.name.as_str()),
@@ -2917,7 +2925,7 @@ mod tests {
     }
 
     #[test]
-    fn test_select_index_ignores_cleanup_active_branch() {
+    fn test_select_index_ignores_cleanup_target_branch() {
         let branches = vec![
             sample_branch("branch-a"),
             sample_branch("branch-b"),
@@ -2925,7 +2933,7 @@ mod tests {
         ];
         let mut state = BranchListState::new().with_branches(branches);
         state.start_cleanup_progress(3);
-        state.set_cleanup_active_branch(Some("branch-b".to_string()));
+        state.set_cleanup_target_branches(&vec!["branch-b".to_string()]);
 
         assert_eq!(
             state.selected_branch().map(|branch| branch.name.as_str()),
