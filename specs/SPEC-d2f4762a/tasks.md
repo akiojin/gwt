@@ -35,6 +35,15 @@
 - [x] **T1344** [Impl] `crates/gwt-core/src/worktree/manager.rs` に軽量検索を追加し、`crates/gwt-cli/src/tui/app.rs` の起動前worktree解決で使用する
 - [x] **T1345** `cargo test -p gwt-core` を実行し、失敗がないことを確認する
 
+## 追加作業: クリーンアップ中の入力継続と対象ブランチ制限 (2026-01-27)
+
+- [x] **T1346** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に入力ロック解除と対象ブランチの選択制限を追記
+- [x] **T1347** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にクリーンアップ対象ブランチのスキップ選択を検証するテストを追加
+- [x] **T1348** [Test] `crates/gwt-cli/src/tui/app.rs` にクリーンアップ中もカーソル移動が継続できることを検証するテストを追加
+- [x] **T1349** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` でクリーンアップ対象ブランチの一覧管理とカーソルスキップを実装
+- [x] **T1350** [Impl] `crates/gwt-cli/src/tui/app.rs` でクリーンアップ中の入力ロックを解除し、対象ブランチクリックを無効化する
+- [x] **T1351** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
 ## 追加作業: ブランチ詳細サマリの非同期更新 (2026-01-21)
 
 - [x] **T1323** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に詳細サマリの非同期更新要件・方針を追記

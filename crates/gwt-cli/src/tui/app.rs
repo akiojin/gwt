@@ -1676,10 +1676,6 @@ impl Model {
             .or(self.status_message.as_deref())
     }
 
-    fn cleanup_input_locked(&self) -> bool {
-        matches!(self.screen, Screen::BranchList) && self.branch_list.cleanup_in_progress()
-    }
-
     fn apply_branch_list_updates(&mut self) {
         let Some(rx) = &self.branch_list_rx else {
             return;
@@ -2277,10 +2273,6 @@ impl Model {
             self.last_mouse_click = None;
             return;
         }
-        if self.branch_list.cleanup_in_progress() {
-            self.last_mouse_click = None;
-            return;
-        }
         if self.wizard.visible {
             self.last_mouse_click = None;
             return;
@@ -2299,6 +2291,11 @@ impl Model {
             self.last_mouse_click = None;
             return;
         };
+
+        if self.branch_list.is_cleanup_target_index(index) {
+            self.last_mouse_click = None;
+            return;
+        }
 
         let now = Instant::now();
         let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
@@ -2324,9 +2321,6 @@ impl Model {
 
     fn handle_branch_list_scroll(&mut self, mouse: MouseEvent) {
         if !matches!(self.screen, Screen::BranchList) {
-            return;
-        }
-        if self.branch_list.cleanup_in_progress() {
             return;
         }
         if self.wizard.visible || self.ai_wizard.visible {
@@ -3521,9 +3515,6 @@ impl Model {
 
     /// Update function (Elm Architecture)
     pub fn update(&mut self, msg: Message) {
-        if self.cleanup_input_locked() && !matches!(msg, Message::Tick | Message::CtrlC) {
-            return;
-        }
         match msg {
             Message::Quit => {
                 self.should_quit = true;
@@ -4985,6 +4976,7 @@ impl Model {
             .collect();
 
         self.branch_list.start_cleanup_progress(cleanup_items.len());
+        self.branch_list.set_cleanup_target_branches(branches);
         self.branch_list.set_cleanup_active_branch(None);
 
         let repo_root = self.repo_root.clone();
@@ -5533,16 +5525,6 @@ impl Model {
                 }
             }
             // Block all other input while modal is visible (FR-043)
-            return None;
-        }
-
-        if self.cleanup_input_locked() {
-            if is_key_press
-                && key.code == KeyCode::Char('c')
-                && key.modifiers.contains(KeyModifiers::CONTROL)
-            {
-                return Some(Message::CtrlC);
-            }
             return None;
         }
 
@@ -6756,20 +6738,30 @@ mod tests {
     }
 
     #[test]
-    fn test_cleanup_input_lock_blocks_navigation() {
+    fn test_cleanup_allows_navigation_and_skips_target_branch() {
         let mut model = Model::new_with_context(None);
         model.screen = Screen::BranchList;
 
         let branches = vec![
-            sample_branch_with_session("feature/one"),
-            sample_branch_with_session("feature/two"),
+            sample_branch_with_session("feature/a"),
+            sample_branch_with_session("feature/b"),
+            sample_branch_with_session("feature/c"),
         ];
 
         model.branch_list = BranchListState::new().with_branches(branches);
-        model.branch_list.start_cleanup_progress(2);
+        model.branch_list.start_cleanup_progress(3);
+        model
+            .branch_list
+            .set_cleanup_target_branches(&["feature/b".to_string()]);
 
         model.update(Message::SelectNext);
-        assert_eq!(model.branch_list.selected, 0);
+        assert_eq!(
+            model
+                .branch_list
+                .selected_branch()
+                .map(|branch| branch.name.as_str()),
+            Some("feature/c")
+        );
     }
 
     #[test]
@@ -7073,7 +7065,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mouse_click_ignores_cleanup_active_branch() {
+    fn test_mouse_click_ignores_cleanup_target_branch() {
         let mut model = Model::new_with_context(None);
         model.screen = Screen::BranchList;
         let branches = [
@@ -7089,7 +7081,7 @@ mod tests {
         model.branch_list.start_cleanup_progress(2);
         model
             .branch_list
-            .set_cleanup_active_branch(Some("feature/two".to_string()));
+            .set_cleanup_target_branches(&["feature/two".to_string()]);
 
         assert_eq!(model.branch_list.selected, 0);
         let mouse = MouseEvent {
