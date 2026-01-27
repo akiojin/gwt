@@ -5086,95 +5086,56 @@ impl Model {
             self.screen.clone()
         };
 
-        // Profiles, Environment, and Logs screens don't need header
-        let needs_header = !matches!(
-            base_screen,
-            Screen::Profiles | Screen::Environment | Screen::Logs | Screen::AISettingsWizard
-        );
+        // Keep a consistent header across major screens.
+        let needs_header = !matches!(base_screen, Screen::AISettingsWizard);
         let header_height = if needs_header { 6 } else { 0 };
 
-        // BranchList screen doesn't need footer (shortcut legend removed)
-        let needs_footer = !matches!(base_screen, Screen::BranchList);
+        // Footer help sits above the status bar.
+        let needs_footer = !matches!(base_screen, Screen::AISettingsWizard);
         let footer_height = if needs_footer {
-            // Calculate footer height dynamically based on text length
             let keybinds = self.get_footer_keybinds();
-            let status = self.active_status_message().unwrap_or("");
-            let footer_text_len = if status.is_empty() {
-                keybinds.len() + 2 // " {} " format adds 2 spaces
+            let footer_text_len = keybinds.len() + 2; // " {} " padding
+            let available_width = frame.area().width as usize;
+            if footer_text_len > available_width {
+                2
             } else {
-                keybinds.len() + status.len() + 5 // " {} | {} " format adds 5 chars
-            };
-            let inner_width = frame.area().width.saturating_sub(2) as usize; // borders
-            if footer_text_len > inner_width {
-                4
-            } else {
-                3
+                1
             }
         } else {
             0
         };
 
+        // Status bar is always the bottom-most line.
+        let needs_status_bar = !matches!(base_screen, Screen::AISettingsWizard);
+        let status_bar_height = if needs_status_bar { 1 } else { 0 };
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(header_height), // Header (0 for Profiles/Environment)
-                Constraint::Min(0),                // Content
-                Constraint::Length(footer_height), // Footer (0 for BranchList)
+                Constraint::Length(header_height),     // Header
+                Constraint::Min(0),                    // Content
+                Constraint::Length(footer_height),     // Footer help
+                Constraint::Length(status_bar_height), // Status bar
             ])
             .split(frame.area());
 
-        // Header (for branch list screen, render boxed header)
+        // Header
         if needs_header {
-            if matches!(base_screen, Screen::BranchList | Screen::AgentMode) {
-                self.view_boxed_header(frame, chunks[0]);
-            } else {
-                self.view_header(frame, chunks[0], &base_screen);
-            }
+            self.view_boxed_header(frame, chunks[0], &base_screen);
         }
 
         // Content
         match base_screen {
             Screen::BranchList => {
-                // Show launch status bar if launching (FR-057: hide when modal is showing)
-                let content_area = if self.launch_in_progress && self.progress_modal.is_none() {
-                    if let Some(status) = &self.launch_status {
-                        // Split content area: status bar (1 line) + rest
-                        let status_chunks = Layout::default()
-                            .direction(Direction::Vertical)
-                            .constraints([Constraint::Length(1), Constraint::Min(0)])
-                            .split(chunks[1]);
-
-                        // Render status bar with star indicator
-                        let status_line = Line::from(vec![
-                            Span::styled(
-                                " * ",
-                                Style::default()
-                                    .fg(Color::Yellow)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(status.as_str(), Style::default().fg(Color::Yellow)),
-                        ]);
-                        frame.render_widget(Paragraph::new(status_line), status_chunks[0]);
-                        status_chunks[1]
-                    } else {
-                        chunks[1]
-                    }
-                } else {
-                    chunks[1]
-                };
-
                 // Use split layout (branch list takes full area, PaneList abolished)
-                let split_areas = calculate_split_layout(content_area, &self.split_layout);
-                let status_message = self
-                    .active_status_message()
-                    .map(|message| message.to_string());
+                let split_areas = calculate_split_layout(chunks[1], &self.split_layout);
 
                 // Render branch list (always has focus now)
                 render_branch_list(
                     &mut self.branch_list,
                     frame,
                     split_areas.branch_list,
-                    status_message.as_deref(),
+                    None,
                     true, // Branch list always has focus
                 );
             }
@@ -5182,15 +5143,7 @@ impl Model {
                 render_worktree_create(&self.worktree_create, frame, chunks[1])
             }
             Screen::AgentMode => {
-                let status_message = self
-                    .active_status_message()
-                    .map(|message| message.to_string());
-                render_agent_mode(
-                    &self.agent_mode,
-                    frame,
-                    chunks[1],
-                    status_message.as_deref(),
-                );
+                render_agent_mode(&self.agent_mode, frame, chunks[1], None);
             }
             Screen::Settings => render_settings(&self.settings, frame, chunks[1]),
             Screen::Logs => render_logs(&mut self.logs, frame, chunks[1]),
@@ -5206,9 +5159,14 @@ impl Model {
             render_confirm(&mut self.confirm, frame, chunks[1]);
         }
 
-        // Footer (not for BranchList screen)
+        // Footer help
         if needs_footer {
             self.view_footer(frame, chunks[2]);
+        }
+
+        // Bottom status bar
+        if needs_status_bar {
+            self.view_status_bar(frame, chunks[3], &base_screen);
         }
 
         // Wizard overlay (FR-044: popup on top of branch list)
@@ -5224,8 +5182,8 @@ impl Model {
         }
     }
 
-    /// Boxed header for branch list screen
-    fn view_boxed_header(&self, frame: &mut Frame, area: Rect) {
+    /// Boxed header shared across major screens
+    fn view_boxed_header(&self, frame: &mut Frame, area: Rect, screen: &Screen) {
         let version = env!("CARGO_PKG_VERSION");
         let offline_indicator = if self.is_offline { " [OFFLINE]" } else { "" };
         let profile = self
@@ -5239,8 +5197,21 @@ impl Model {
             .as_deref()
             .unwrap_or_else(|| self.repo_root.to_str().unwrap_or("."));
 
-        // Title for the box
-        let title = format!(" gwt - Branch Selection v{}{} ", version, offline_indicator);
+        let screen_title = match screen {
+            Screen::BranchList => "Branch Screen",
+            Screen::AgentMode => "Agent Screen",
+            Screen::WorktreeCreate => "Worktree Create",
+            Screen::Settings => "Settings",
+            Screen::Logs => "Logs",
+            Screen::Help => "Help",
+            Screen::Confirm => "Confirm",
+            Screen::Error => "Errors",
+            Screen::Profiles => "Profiles",
+            Screen::Environment => "Environment",
+            Screen::AISettingsWizard => "AI Settings",
+        };
+
+        let title = format!(" gwt - {} v{}{} ", screen_title, version, offline_indicator);
         let header_block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
@@ -5281,53 +5252,72 @@ impl Model {
         ]);
         frame.render_widget(Paragraph::new(profile_line), inner_chunks[1]);
 
-        // Line 3: Filter
-        let filtered = self.branch_list.filtered_branches();
-        let total = self.branch_list.branches.len();
-        let mut filter_spans = vec![
-            Span::raw(" "),
-            Span::styled("Filter(f): ", Style::default().fg(Color::DarkGray)),
-        ];
-        if self.branch_list.filter_mode {
-            if self.branch_list.filter.is_empty() {
+        let branch_context = matches!(screen, Screen::BranchList | Screen::AgentMode);
+        if branch_context {
+            // Line 3: Filter
+            let filtered = self.branch_list.filtered_branches();
+            let total = self.branch_list.branches.len();
+            let mut filter_spans = vec![
+                Span::raw(" "),
+                Span::styled("Filter(f): ", Style::default().fg(Color::DarkGray)),
+            ];
+            if self.branch_list.filter_mode {
+                if self.branch_list.filter.is_empty() {
+                    filter_spans.push(Span::styled(
+                        "Type to search...",
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                } else {
+                    filter_spans.push(Span::raw(&self.branch_list.filter));
+                }
+                filter_spans.push(Span::styled("|", Style::default().fg(Color::White)));
+            } else {
                 filter_spans.push(Span::styled(
-                    "Type to search...",
+                    if self.branch_list.filter.is_empty() {
+                        "(press f to filter)"
+                    } else {
+                        &self.branch_list.filter
+                    },
                     Style::default().fg(Color::DarkGray),
                 ));
-            } else {
-                filter_spans.push(Span::raw(&self.branch_list.filter));
             }
-            filter_spans.push(Span::styled("|", Style::default().fg(Color::White)));
-        } else {
-            filter_spans.push(Span::styled(
-                if self.branch_list.filter.is_empty() {
-                    "(press f to filter)"
-                } else {
-                    &self.branch_list.filter
-                },
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
-        if !self.branch_list.filter.is_empty() {
-            filter_spans.push(Span::styled(
-                format!(" (Showing {} of {})", filtered.len(), total),
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
-        frame.render_widget(Paragraph::new(Line::from(filter_spans)), inner_chunks[2]);
+            if !self.branch_list.filter.is_empty() {
+                filter_spans.push(Span::styled(
+                    format!(" (Showing {} of {})", filtered.len(), total),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            frame.render_widget(Paragraph::new(Line::from(filter_spans)), inner_chunks[2]);
 
-        // Line 4: Mode
-        let mode_spans = vec![
-            Span::raw(" "),
-            Span::styled("Mode(m):", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                self.branch_list.view_mode.label(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ];
-        frame.render_widget(Paragraph::new(Line::from(mode_spans)), inner_chunks[3]);
+            // Line 4: Mode
+            let mode_spans = vec![
+                Span::raw(" "),
+                Span::styled("Mode(m):", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    self.branch_list.view_mode.label(),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ];
+            frame.render_widget(Paragraph::new(Line::from(mode_spans)), inner_chunks[3]);
+        } else {
+            let screen_line = Line::from(vec![
+                Span::raw(" "),
+                Span::styled("Screen: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    screen_title,
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]);
+            frame.render_widget(Paragraph::new(screen_line), inner_chunks[2]);
+
+            // Clear the last line to avoid stale content when switching screens.
+            let blank = " ".repeat(inner_chunks[3].width as usize);
+            frame.render_widget(Paragraph::new(blank), inner_chunks[3]);
+        }
     }
 
     fn view_header(&self, frame: &mut Frame, area: Rect, screen: &Screen) {
@@ -5340,14 +5330,14 @@ impl Model {
             .as_deref()
             .unwrap_or("default");
 
-        // Match TypeScript format: gwt - Branch Selection v{version} | Profile(p): {name}
+        // Keep header naming consistent with boxed header labels.
         let title = match screen {
             Screen::AgentMode => format!(
-                " gwt - Agent Mode v{} | Profile(p): {} {}",
+                " gwt - Agent Screen v{} | Profile(p): {} {}",
                 version, profile, offline_indicator
             ),
             _ => format!(
-                " gwt - Branch Selection v{} | Profile(p): {} {}",
+                " gwt - Branch Screen v{} | Profile(p): {} {}",
                 version, profile, offline_indicator
             ),
         };
@@ -5358,54 +5348,55 @@ impl Model {
         frame.render_widget(header, area);
     }
 
-    fn get_footer_keybinds(&self) -> &'static str {
+    fn get_footer_keybinds(&self) -> String {
         match self.screen {
             Screen::BranchList => {
                 if self.branch_list.filter_mode {
-                    "[Esc] Exit filter | Type to search"
+                    "[Esc] Exit filter | Type to search".to_string()
                 } else {
-                    "[r] Refresh | [c] Cleanup | [l] Logs"
+                    "[r] Refresh | [c] Cleanup | [l] Logs".to_string()
                 }
             }
             Screen::AgentMode => {
                 if self.agent_mode.ai_ready {
-                    "[Enter] Send | [Tab] Back"
+                    "[Enter] Send | [Tab] Back".to_string()
                 } else {
-                    "[Enter] Configure AI | [Tab] Back"
+                    "[Enter] Configure AI | [Tab] Back".to_string()
                 }
             }
-            Screen::WorktreeCreate => "[Enter] Next | [Esc] Back",
-            // FR-020: Tab cycles screens, Left/Right cycles categories
-            Screen::Settings => "[Left/Right] Category | [Tab] Screen | [Esc] Back",
-            Screen::Logs => "[Up/Down] Navigate | [Enter] Detail | [c] Copy | [f] Filter | [/] Search | [Esc] Back",
-            Screen::Help => "[Esc] Close | [Up/Down] Scroll",
-            Screen::Confirm => "[Left/Right] Select | [Enter] Confirm | [Esc] Cancel",
-            Screen::Error => "[Enter/Esc] Close | [Up/Down] Scroll",
+            Screen::WorktreeCreate => "[Enter] Next | [Esc] Back".to_string(),
+            Screen::Settings => self.settings.footer_keybinds(),
+            Screen::Logs => "[Up/Down] Navigate | [Enter] Detail | [c] Copy | [f] Filter | [/] Search | [Esc] Back".to_string(),
+            Screen::Help => "[Esc] Close | [Up/Down] Scroll".to_string(),
+            Screen::Confirm => "[Left/Right] Select | [Enter] Confirm | [Esc] Cancel".to_string(),
+            Screen::Error => "[Enter/Esc] Close | [Up/Down] Scroll".to_string(),
             Screen::Profiles => {
                 if self.profiles.create_mode {
-                    "[Enter] Save | [Esc] Cancel"
+                    "[Enter] Save | [Esc] Cancel".to_string()
                 } else {
                     "[Space] Activate | [Enter] Edit AI/env | [n] New | [d] Delete | [Esc] Back"
+                        .to_string()
                 }
             }
             Screen::Environment => {
                 if self.environment.is_ai_only() {
                     if self.environment.edit_mode {
-                        "[Enter] Save | [Tab] Switch | [Esc] Cancel"
+                        "[Enter] Save | [Tab] Switch | [Esc] Cancel".to_string()
                     } else {
-                        "[Enter] Edit | [Esc] Back"
+                        "[Enter] Edit | [Esc] Back".to_string()
                     }
                 } else if self.environment.edit_mode {
-                    "[Enter] Save | [Tab] Switch | [Esc] Cancel"
+                    "[Enter] Save | [Tab] Switch | [Esc] Cancel".to_string()
                 } else {
                     "[Enter] Edit | [n] New | [d] Delete (profile)/Disable (OS) | [r] Reset (override) | [Esc] Back"
+                        .to_string()
                 }
             }
             Screen::AISettingsWizard => {
                 if self.ai_wizard.show_delete_confirm {
-                    "[y] Confirm Delete | [n] Cancel"
+                    "[y] Confirm Delete | [n] Cancel".to_string()
                 } else {
-                    self.ai_wizard.step_title()
+                    self.ai_wizard.step_title().to_string()
                 }
             }
         }
@@ -5414,12 +5405,7 @@ impl Model {
     fn view_footer(&self, frame: &mut Frame, area: Rect) {
         let keybinds = self.get_footer_keybinds();
 
-        let status = self.active_status_message().unwrap_or("");
-        let footer_text = if status.is_empty() {
-            format!(" {} ", keybinds)
-        } else {
-            format!(" {} | {} ", keybinds, status)
-        };
+        let footer_text = format!(" {} ", keybinds);
 
         let style = if self.ctrl_c_count > 0 {
             Style::default().fg(Color::Yellow)
@@ -5427,19 +5413,22 @@ impl Model {
             Style::default()
         };
 
-        // Calculate if wrap is needed based on text length and available width
-        let inner_width = area.width.saturating_sub(2); // borders
-        let needs_wrap = footer_text.len() > inner_width as usize;
-
-        let mut footer = Paragraph::new(footer_text)
-            .style(style)
-            .block(Block::default().borders(Borders::ALL));
+        let needs_wrap = footer_text.len() > area.width as usize;
+        let mut footer = Paragraph::new(footer_text).style(style);
 
         if needs_wrap {
             footer = footer.wrap(Wrap { trim: true });
         }
 
         frame.render_widget(footer, area);
+    }
+
+    fn view_status_bar(&self, frame: &mut Frame, area: Rect, _screen: &Screen) {
+        let line = crate::tui::screens::branch_list::build_status_bar_line(
+            &self.branch_list,
+            self.active_status_message(),
+        );
+        frame.render_widget(Paragraph::new(line), area);
     }
 
     fn text_input_active(&self) -> bool {
@@ -6303,9 +6292,12 @@ mod tests {
     use crate::tui::screens::wizard::WizardStep;
     use crate::tui::screens::{BranchItem, BranchListState, BranchType};
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use gwt_core::config::Settings;
     use gwt_core::git::Branch;
     use gwt_core::git::BranchSummary;
     use gwt_core::git::DivergenceStatus;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
     use std::collections::HashMap;
     use std::process::Command;
     use std::sync::mpsc;
@@ -6505,6 +6497,103 @@ mod tests {
         branch.last_tool_usage = Some(usage.to_string());
         branch.last_tool_id = tool_id.map(|id| id.to_string());
         branch
+    }
+
+    fn render_model_lines(model: &mut Model, width: u16, height: u16) -> Vec<String> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal init");
+        terminal.draw(|f| model.view(f)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn test_branchlist_footer_and_status_bar_present_without_agents() {
+        let mut model = Model::new_with_context(None);
+        let branches = vec![sample_branch_with_session("feature/layout")];
+        model.branch_list = BranchListState::new().with_branches(branches);
+
+        let height = 24;
+        let lines = render_model_lines(&mut model, 80, height);
+        let footer_line = &lines[(height - 2) as usize];
+        let status_line = &lines[(height - 1) as usize];
+
+        assert!(
+            footer_line.contains("[r] Refresh"),
+            "Footer help should be visible on BranchList"
+        );
+        assert!(
+            status_line.contains("Agents:") && status_line.contains("none"),
+            "Status bar should show Agents: none when no agents are running"
+        );
+    }
+
+    #[test]
+    fn test_logs_screen_renders_header_working_directory() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Logs;
+
+        let lines = render_model_lines(&mut model, 80, 24);
+        let has_working_dir = lines.iter().any(|line| line.contains("Working Directory:"));
+        assert!(
+            has_working_dir,
+            "Header should be present on Logs screen and include Working Directory"
+        );
+    }
+
+    #[test]
+    fn test_branch_screen_header_label() {
+        let mut model = Model::new_with_context(None);
+        let branches = vec![sample_branch_with_session("feature/branch-screen")];
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.screen = Screen::BranchList;
+
+        let lines = render_model_lines(&mut model, 80, 24);
+        assert!(
+            lines.iter().any(|line| line.contains("Branch Screen")),
+            "Header should label BranchList as Branch Screen"
+        );
+    }
+
+    #[test]
+    fn test_agent_screen_header_label() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::AgentMode;
+
+        let lines = render_model_lines(&mut model, 80, 24);
+        assert!(
+            lines.iter().any(|line| line.contains("Agent Screen")),
+            "Header should label AgentMode as Agent Screen"
+        );
+    }
+
+    #[test]
+    fn test_settings_footer_has_context_keybinds_without_duplicate_instructions() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Settings;
+        model.settings = SettingsState::new().with_settings(Settings::default());
+
+        let width = 120;
+        let height = 24;
+        let lines = render_model_lines(&mut model, width, height);
+        let footer_line = &lines[(height - 2) as usize];
+        let instruction_key = "[Left/Right] Category";
+
+        assert!(
+            footer_line.contains(instruction_key),
+            "Settings footer help should include category navigation"
+        );
+
+        let occurrences = lines
+            .iter()
+            .filter(|line| line.contains(instruction_key))
+            .count();
+        assert_eq!(
+            occurrences, 1,
+            "Settings instructions should appear once in the footer help"
+        );
     }
 
     #[test]

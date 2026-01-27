@@ -1496,7 +1496,7 @@ impl BranchListState {
 
 /// Render branch list screen
 /// Note: Header, Filter, Mode are rendered by app.rs view_boxed_header
-/// This function only renders: BranchList + StatusBar + WorktreePath/Status
+/// This function only renders the main panels inside the content area.
 pub fn render_branch_list(
     state: &mut BranchListState,
     frame: &mut Frame,
@@ -1507,53 +1507,29 @@ pub fn render_branch_list(
     // SPEC-4b893dae: Summary panel height is 12 lines (FR-003)
     let panel_height = crate::tui::components::SummaryPanel::height();
 
-    // Check if we have agents to show status bar
-    let has_agents = !state.running_agents.is_empty();
-
-    let chunks = if has_agents {
-        // With status bar (SPEC-861d8cdf FR-104a)
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(panel_height), // Branch list
-                Constraint::Length(1),            // Status bar (FR-104a)
-                Constraint::Length(panel_height), // Details panel
-                Constraint::Min(6),               // Session panel
-            ])
-            .split(area)
-    } else {
-        // Without status bar (no agents)
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(panel_height), // Branch list
-                Constraint::Length(panel_height), // Details panel
-                Constraint::Min(6),               // Session panel
-            ])
-            .split(area)
-    };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(panel_height), // Branch list
+            Constraint::Length(panel_height), // Details panel
+            Constraint::Min(6),               // Session panel
+        ])
+        .split(area);
 
     // Cache branch list area for mouse selection and update visible height
     state.update_list_area(chunks[0]);
 
     render_branches(state, frame, chunks[0], has_focus);
-
-    if has_agents {
-        render_status_bar(state, frame, chunks[1]);
-        render_summary_panels(state, frame, chunks[2], chunks[3], status_message);
-    } else {
-        render_summary_panels(state, frame, chunks[1], chunks[2], status_message);
-    }
+    render_summary_panels(state, frame, chunks[1], chunks[2], status_message);
 }
 
-/// Render agent status bar (SPEC-861d8cdf T-105, FR-104a, FR-104b, FR-104c)
-fn render_status_bar(state: &BranchListState, frame: &mut Frame, area: Rect) {
+/// Build the unified status bar line for the bottom status bar (FR-093~FR-096).
+pub fn build_status_bar_line(
+    state: &BranchListState,
+    status_message: Option<&str>,
+) -> Line<'static> {
     let agents: Vec<_> = state.running_agents.values().cloned().collect();
     let summary = StatusBarSummary::from_agents(&agents);
-
-    if !summary.has_agents() {
-        return;
-    }
 
     let mut spans = Vec::new();
 
@@ -1563,43 +1539,73 @@ fn render_status_bar(state: &BranchListState, frame: &mut Frame, area: Rect) {
         Style::default().fg(Color::DarkGray),
     ));
 
-    // Add running count
-    if summary.running_count > 0 {
-        spans.push(Span::styled(
-            format!("{} running", summary.running_count),
-            Style::default().fg(Color::Green),
-        ));
+    if summary.has_agents() {
+        // Add running count
+        if summary.running_count > 0 {
+            spans.push(Span::styled(
+                format!("{} running", summary.running_count),
+                Style::default().fg(Color::Green),
+            ));
+        }
+
+        // Add separator if needed
+        if summary.running_count > 0 && (summary.waiting_count > 0 || summary.stopped_count > 0) {
+            spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+        }
+
+        // Add waiting count (FR-104c: highlighted in yellow)
+        if summary.waiting_count > 0 {
+            spans.push(Span::styled(
+                format!("{} waiting", summary.waiting_count),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        // Add separator if needed
+        if summary.waiting_count > 0 && summary.stopped_count > 0 {
+            spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+        }
+
+        // Add stopped count
+        if summary.stopped_count > 0 {
+            spans.push(Span::styled(
+                format!("{} stopped", summary.stopped_count),
+                Style::default().fg(Color::Red),
+            ));
+        }
+    } else {
+        spans.push(Span::styled("none", Style::default().fg(Color::DarkGray)));
     }
 
-    // Add separator if needed
-    if summary.running_count > 0 && (summary.waiting_count > 0 || summary.stopped_count > 0) {
+    let selected_count = state.selected_branches.len();
+    if selected_count > 0 {
         spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
-    }
-
-    // Add waiting count (FR-104c: highlighted in yellow)
-    if summary.waiting_count > 0 {
         spans.push(Span::styled(
-            format!("{} waiting", summary.waiting_count),
+            format!("Selected: {}", selected_count),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ));
     }
 
-    // Add separator if needed
-    if summary.waiting_count > 0 && summary.stopped_count > 0 {
+    if let Some(message) = status_message {
+        let style = if message.starts_with("Error") || message.starts_with("Failed") {
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Yellow)
+        };
         spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(message.to_string(), style));
     }
 
-    // Add stopped count
-    if summary.stopped_count > 0 {
-        spans.push(Span::styled(
-            format!("{} stopped", summary.stopped_count),
-            Style::default().fg(Color::Red),
-        ));
-    }
+    Line::from(spans)
+}
 
-    let line = Line::from(spans);
+/// Render agent status bar (kept for compatibility in tests and previews).
+fn render_status_bar(state: &BranchListState, frame: &mut Frame, area: Rect) {
+    let line = build_status_bar_line(state, None);
     frame.render_widget(Paragraph::new(line), area);
 }
 
@@ -1988,20 +1994,13 @@ fn render_summary_panels(
     render_session_panel(state, frame, session_area, status_message);
 }
 
-fn panel_title_line(branch_name: &str, label: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(
-            label.to_string(),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            branch_name.to_string(),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ])
+fn panel_title_line(label: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        format!(" {} ", label),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ))
 }
 
 fn session_panel_hint() -> Line<'static> {
@@ -2078,7 +2077,7 @@ fn render_details_panel(
     state: &mut BranchListState,
     frame: &mut Frame,
     area: Rect,
-    status_message: Option<&str>,
+    _status_message: Option<&str>,
 ) {
     use crate::tui::components::SummaryPanel;
     use std::path::PathBuf;
@@ -2110,30 +2109,9 @@ fn render_details_panel(
         BranchSummary::new("(no branch selected)")
     };
 
-    // Handle status messages - show them in the panel area if present
-    if let Some(status) = status_message {
-        // Draw the panel frame first
-        let title = panel_title_line(&summary.branch_name, "Details");
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::White))
-            .title(title)
-            .padding(Padding::new(PANEL_PADDING_X, PANEL_PADDING_X, 0, 0));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
-        // Show status message inside
-        let line = Line::from(vec![Span::styled(
-            status,
-            Style::default().fg(Color::Yellow),
-        )]);
-        frame.render_widget(Paragraph::new(line), inner);
-        return;
-    }
-
     // Handle loading state - show spinner in panel
     if state.is_loading {
-        let title = panel_title_line(&summary.branch_name, "Details");
+        let title = panel_title_line("Details");
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::White))
@@ -2165,7 +2143,7 @@ fn render_details_panel(
     // Render the full summary panel with optional status line
     let panel = SummaryPanel::new(&summary)
         .with_tick(state.spinner_frame)
-        .with_title(panel_title_line(&summary.branch_name, "Details"))
+        .with_title(panel_title_line("Details"))
         .with_links(links)
         .with_status_line(status_line);
 
@@ -2177,13 +2155,9 @@ fn render_session_panel(
     state: &mut BranchListState,
     frame: &mut Frame,
     area: Rect,
-    status_message: Option<&str>,
+    _status_message: Option<&str>,
 ) {
-    let branch_name = state
-        .selected_branch()
-        .map(|branch| branch.name.clone())
-        .unwrap_or_else(|| "(no branch selected)".to_string());
-    let title = panel_title_line(&branch_name, "Session");
+    let title = panel_title_line("Session");
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::White))
@@ -2196,12 +2170,7 @@ fn render_session_panel(
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    if let Some(status) = status_message {
-        lines.push(Line::from(Span::styled(
-            status.to_string(),
-            Style::default().fg(Color::Yellow),
-        )));
-    } else if state.is_loading {
+    if state.is_loading {
         lines.push(Line::from(vec![
             Span::styled(
                 format!("{} ", state.spinner_char()),
@@ -3231,6 +3200,48 @@ mod tests {
             }
         }
         assert!(found, "Loading text should appear somewhere in the panel");
+    }
+
+    #[test]
+    fn test_status_message_not_duplicated_in_panels() {
+        let branches = vec![sample_branch("feature/status")];
+        let mut state = BranchListState::new().with_branches(branches);
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal init");
+
+        let status = "STATUS_UNIQUE_123";
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_branch_list(&mut state, f, area, Some(status), true);
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        let mut found = false;
+        for y in 0..20 {
+            let line: String = (0..60).map(|x| buffer[(x, y)].symbol()).collect();
+            if line.contains(status) {
+                found = true;
+                break;
+            }
+        }
+        assert!(
+            !found,
+            "Global status message should not be rendered inside Details/Session panels"
+        );
+    }
+
+    #[test]
+    fn test_panel_title_line_is_label_only_and_consistent() {
+        let title = panel_title_line("Details");
+        let text = line_text(&title);
+        assert_eq!(text, " Details ");
+        assert_eq!(title.spans.len(), 1);
+
+        let span = &title.spans[0];
+        assert_eq!(span.style.fg, Some(Color::Cyan));
+        assert!(span.style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]

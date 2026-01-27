@@ -3,6 +3,33 @@
 **仕様ID**: `SPEC-d2f4762a`
 **ポリシー**: CLAUDE.md の TDD ルールに基づき、必ず RED→GREEN→リグレッションチェックの順に進める。
 
+## 追加作業: レイアウト統一とステータスバー統合 (2026-01-27)
+
+- [x] **T1400** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` / `specs/SPEC-861d8cdf/spec.md` にレイアウト統一と常時ステータスバー要件を反映
+- [x] **T1401** [Test] `crates/gwt-cli/src/tui/app.rs` に主要画面でヘッダーと下部2行（フッターヘルプ + ステータスバー）が確保されることを検証するテストを追加
+- [x] **T1402** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にステータスバーがエージェント0件でも表示され、選択数/ステータスメッセージが統合表示されることと、Details/Sessionに重複表示されないことを検証するテストを追加
+- [x] **T1403** [Impl] `crates/gwt-cli/src/tui/app.rs` でBranchListのヘッダー省略/フッター省略/起動ステータス行を廃止し、共通レイアウトへ統合する
+- [x] **T1404** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` でステータスバー統合（Agents: none/選択数/ステータスメッセージ）と下部固定レイアウト、パネルの重複表示除去、枠線/余白の統一を実装する
+- [x] **T1405** [検証] `cargo test -p gwt-cli` と `cargo clippy --all-targets --all-features -- -D warnings` を実行し、失敗がないことを確認する
+
+## 追加作業: 画面名とタイトル統一 (2026-01-27)
+
+- [x] **T1410** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に `Branch Screen` / `Agent Screen` への画面名統一と、タイトル/パネル見出し統一要件を反映
+- [x] **T1411** [Test] `crates/gwt-cli/src/tui/app.rs` にヘッダーが `Branch Screen` / `Agent Screen` を表示することを検証するテストを追加/更新
+- [x] **T1412** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にDetails/Sessionタイトルがラベルのみで、タイトル色とパディングが統一されていることを検証するテストを追加
+- [x] **T1413** [Impl] `crates/gwt-cli/src/tui/app.rs` のヘッダー画面名を `Branch Screen` / `Agent Screen` に変更し、タイトル表記の揺れを抑える
+- [x] **T1414** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` のDetails/Sessionタイトルからブランチ名を除去し、タイトル色とパディングを統一する
+- [x] **T1415** [検証] `cargo test -p gwt-cli` / `cargo clippy --all-targets --all-features -- -D warnings` / markdownlint を実行し、失敗がないことを確認する
+
+## 追加作業: Settings画面の統一 (2026-01-27)
+
+- [x] **T1420** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にSettings専用Instructions廃止とタイトル/枠線スタイル統一要件を反映
+- [x] **T1421** [Test] `crates/gwt-cli/src/tui/app.rs` にSettings画面の操作ヒントがフッターヘルプに出ることと、Instructionsが重複表示されないことを検証するテストを追加
+- [x] **T1422** [Test] `crates/gwt-cli/src/tui/screens/settings.rs` にSettingsパネルタイトルが統一規約（前後スペース + シアン太字）で構成されることを検証するテストを追加/更新
+- [x] **T1423** [Impl] `crates/gwt-cli/src/tui/app.rs` のフッターヘルプをSettings状態に応じて切り替えるよう拡張し、Settings内Instructions描画を不要にする
+- [x] **T1424** [Impl] `crates/gwt-cli/src/tui/screens/settings.rs` のInstructionsブロックを廃止し、タブ/一覧/説明/フォーム/確認/AI/環境変数のタイトル色と枠線色を統一する
+- [x] **T1425** [検証] `cargo test -p gwt-cli` / `cargo clippy --all-targets --all-features -- -D warnings` / markdownlint を実行し、失敗がないことを確認する
+
 ## 追加作業: クリーンアップ中の安全アイコンスピナー表示 (2026-01-26)
 
 - [x] **T1330** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にクリーンアップ中スピナー表示と入力ロック要件を追記
