@@ -1239,6 +1239,115 @@ impl WizardState {
         self.convert_sessions.get(self.convert_session_index)
     }
 
+    /// Perform session conversion from source agent to target agent
+    pub fn perform_session_conversion(&mut self) -> bool {
+        use gwt_core::ai::{
+            convert_session, ClaudeSessionParser, CodexSessionParser, GeminiSessionParser,
+            OpenCodeSessionParser, SessionParser,
+        };
+
+        // Clear previous error/result
+        self.convert_error = None;
+        self.converted_session_id = None;
+
+        // Get source agent and session
+        let source_agent = match self.selected_convert_source_agent() {
+            Some(a) => a.agent,
+            None => {
+                self.convert_error = Some("No source agent selected".to_string());
+                return false;
+            }
+        };
+
+        let source_session_id = match self.selected_convert_session() {
+            Some(s) => s.session_id.clone(),
+            None => {
+                self.convert_error = Some("No session selected".to_string());
+                return false;
+            }
+        };
+
+        // Parse the source session
+        let parsed_session = match source_agent {
+            CodingAgent::ClaudeCode => {
+                let parser = match ClaudeSessionParser::with_default_home() {
+                    Some(p) => p,
+                    None => {
+                        self.convert_error = Some("Could not initialize Claude parser".to_string());
+                        return false;
+                    }
+                };
+                parser.parse(&source_session_id)
+            }
+            CodingAgent::CodexCli => {
+                let parser = match CodexSessionParser::with_default_home() {
+                    Some(p) => p,
+                    None => {
+                        self.convert_error = Some("Could not initialize Codex parser".to_string());
+                        return false;
+                    }
+                };
+                parser.parse(&source_session_id)
+            }
+            CodingAgent::GeminiCli => {
+                let parser = match GeminiSessionParser::with_default_home() {
+                    Some(p) => p,
+                    None => {
+                        self.convert_error = Some("Could not initialize Gemini parser".to_string());
+                        return false;
+                    }
+                };
+                parser.parse(&source_session_id)
+            }
+            CodingAgent::OpenCode => {
+                let parser = match OpenCodeSessionParser::with_default_home() {
+                    Some(p) => p,
+                    None => {
+                        self.convert_error =
+                            Some("Could not initialize OpenCode parser".to_string());
+                        return false;
+                    }
+                };
+                parser.parse(&source_session_id)
+            }
+        };
+
+        let parsed = match parsed_session {
+            Ok(p) => p,
+            Err(e) => {
+                self.convert_error = Some(format!("Failed to parse session: {}", e));
+                return false;
+            }
+        };
+
+        // Determine target agent type
+        let target_agent_type = match self.agent {
+            CodingAgent::ClaudeCode => AgentType::ClaudeCode,
+            CodingAgent::CodexCli => AgentType::CodexCli,
+            CodingAgent::GeminiCli => AgentType::GeminiCli,
+            CodingAgent::OpenCode => AgentType::OpenCode,
+        };
+
+        // Get worktree path
+        let worktree_path = self
+            .worktree_path
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+        // Perform conversion
+        match convert_session(&parsed, target_agent_type, &worktree_path) {
+            Ok(result) => {
+                self.converted_session_id = Some(result.new_session_id.clone());
+                self.session_id = Some(result.new_session_id);
+                true
+            }
+            Err(e) => {
+                self.convert_error = Some(format!("Conversion failed: {}", e));
+                false
+            }
+        }
+    }
+
     /// Fetch versions for current agent (FR-063, FR-064)
     /// Called when entering VersionSelect step
     pub fn fetch_versions_for_agent(&mut self) {
@@ -1570,11 +1679,12 @@ impl WizardState {
                 }
             }
             WizardStep::ConvertSessionSelect => {
-                // Session selected - set session_id and proceed to SkipPermissions
-                if let Some(session) = self.selected_convert_session() {
-                    self.session_id = Some(session.session_id.clone());
-                }
-                if self.supports_skip_permissions() {
+                // Perform session conversion
+                if !self.perform_session_conversion() {
+                    // Conversion failed - stay on this step
+                    // Error is stored in self.convert_error
+                    WizardStep::ConvertSessionSelect
+                } else if self.supports_skip_permissions() {
                     WizardStep::SkipPermissions
                 } else {
                     self.skip_permissions = false;
@@ -4253,12 +4363,13 @@ mod tests {
         assert_eq!(state.step, WizardStep::ConvertSessionSelect);
     }
 
-    /// Test session selection sets session_id and advances
+    /// Test session selection stays on step when conversion fails (no source agent)
     #[test]
-    fn test_session_selection_sets_session_id() {
+    fn test_session_selection_stays_on_conversion_error() {
         let mut state = WizardState::new();
         state.step = WizardStep::ConvertSessionSelect;
 
+        // Set up sessions but no source agent (will cause conversion to fail)
         state.convert_sessions = vec![
             ConvertSessionEntry {
                 session_id: "session-abc".to_string(),
@@ -4275,11 +4386,20 @@ mod tests {
         ];
         state.convert_session_index = 1; // Select second session
 
+        // Without source agent, conversion should fail
         state.next_step();
 
-        assert_eq!(state.session_id.as_deref(), Some("session-xyz"));
-        // Should go to SkipPermissions after Convert selection
-        assert_eq!(state.step, WizardStep::SkipPermissions);
+        // Conversion failed - should stay on same step
+        assert_eq!(state.step, WizardStep::ConvertSessionSelect);
+        // Error should be set
+        assert!(state.convert_error.is_some());
+        assert!(state
+            .convert_error
+            .as_ref()
+            .unwrap()
+            .contains("source agent"));
+        // session_id should remain None
+        assert!(state.session_id.is_none());
     }
 
     /// Test prev_step from ConvertAgentSelect goes back to ExecutionMode
