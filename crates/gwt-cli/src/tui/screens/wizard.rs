@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 use gwt_core::agent::codex::supports_collaboration_modes;
+use gwt_core::ai::{is_conversion_available, AgentType};
 use gwt_core::config::{CustomCodingAgent, ToolsConfig};
 use gwt_core::git::GitHubIssue;
 use ratatui::{prelude::*, widgets::*};
@@ -101,6 +102,8 @@ fn is_prerelease(version: &str) -> bool {
 pub enum WizardStep {
     /// Quick Start: Show previous settings per agent (FR-050, SPEC-f47db390)
     QuickStart,
+    /// Session Convert Confirm: Offer to convert session when switching agents
+    SessionConvertConfirm,
     /// Branch action: use selected branch or create new branch from it (FR-052)
     BranchAction,
     #[default]
@@ -225,6 +228,27 @@ impl CodingAgent {
             CodingAgent::CodexCli => "codex",
             CodingAgent::GeminiCli => "gemini",
             CodingAgent::OpenCode => "opencode",
+        }
+    }
+
+    /// Convert to AgentType for session conversion
+    pub fn as_agent_type(self) -> AgentType {
+        match self {
+            CodingAgent::ClaudeCode => AgentType::ClaudeCode,
+            CodingAgent::CodexCli => AgentType::CodexCli,
+            CodingAgent::GeminiCli => AgentType::GeminiCli,
+            CodingAgent::OpenCode => AgentType::OpenCode,
+        }
+    }
+
+    /// Create from tool_id string
+    pub fn from_tool_id(tool_id: &str) -> Option<Self> {
+        match tool_id {
+            "claude-code" => Some(CodingAgent::ClaudeCode),
+            "codex-cli" => Some(CodingAgent::CodexCli),
+            "gemini-cli" => Some(CodingAgent::GeminiCli),
+            "opencode" => Some(CodingAgent::OpenCode),
+            _ => None,
         }
     }
 }
@@ -764,6 +788,21 @@ pub struct WizardState {
     pub selected_agent_entry: Option<AgentEntry>,
     /// Existing branch for selected issue (FR-011 duplicate detection)
     pub issue_existing_branch: Option<String>,
+    // Session conversion
+    /// Whether session conversion should be offered
+    pub should_convert_session: bool,
+    /// Session conversion confirmation choice (true = yes, convert)
+    pub session_convert_confirmed: bool,
+    /// Source agent for session conversion (the agent that created the original session)
+    pub convert_source_agent: Option<String>,
+    /// Target agent for session conversion (the agent to convert to)
+    pub convert_target_agent: Option<String>,
+    /// Source session ID for conversion
+    pub convert_source_session_id: Option<String>,
+    /// Converted session ID (set after successful conversion)
+    pub converted_session_id: Option<String>,
+    /// Session conversion error message
+    pub convert_error: Option<String>,
 }
 
 impl WizardState {
@@ -848,6 +887,14 @@ impl WizardState {
         // Load all agents (builtin + custom)
         self.all_agents = get_all_agents(&self.installed_cache);
         self.selected_agent_entry = self.all_agents.first().cloned();
+        // Reset session conversion state
+        self.should_convert_session = false;
+        self.session_convert_confirmed = false;
+        self.convert_source_agent = None;
+        self.convert_target_agent = None;
+        self.convert_source_session_id = None;
+        self.converted_session_id = None;
+        self.convert_error = None;
     }
 
     /// Get branch action options based on running agent status
@@ -1015,7 +1062,62 @@ impl WizardState {
                 QuickStartAction::ResumeWithPrevious => entry.session_id.clone(),
                 _ => None,
             };
+
+            // Check if session conversion should be offered
+            // Offer conversion when:
+            // 1. User selects Resume or StartNew (not ChooseDifferent)
+            // 2. There are other agent entries with sessions
+            // 3. The selected agent is different from the other agents
+            if matches!(
+                action,
+                QuickStartAction::ResumeWithPrevious | QuickStartAction::StartNewWithPrevious
+            ) {
+                let tool_id = entry.tool_id.clone();
+                self.check_session_conversion_available(tool_index, &tool_id);
+            }
         }
+    }
+
+    /// Check if session conversion should be offered
+    fn check_session_conversion_available(
+        &mut self,
+        selected_tool_index: usize,
+        selected_tool_id: &str,
+    ) {
+        // Find other entries with session IDs that can be converted
+        for (idx, other_entry) in self.quick_start_entries.iter().enumerate() {
+            if idx == selected_tool_index {
+                continue;
+            }
+            // Check if the other entry has a session and is a different agent
+            if let Some(ref session_id) = other_entry.session_id {
+                if other_entry.tool_id != selected_tool_id {
+                    // Check if conversion is available between these agents
+                    if let (Some(source_agent), Some(target_agent)) = (
+                        CodingAgent::from_tool_id(&other_entry.tool_id),
+                        CodingAgent::from_tool_id(selected_tool_id),
+                    ) {
+                        if is_conversion_available(
+                            source_agent.as_agent_type(),
+                            target_agent.as_agent_type(),
+                        ) {
+                            // Offer conversion from the other agent's session
+                            self.should_convert_session = true;
+                            self.convert_source_agent = Some(other_entry.tool_label.clone());
+                            self.convert_target_agent = Some(
+                                CodingAgent::from_tool_id(selected_tool_id)
+                                    .map(|a| a.label().to_string())
+                                    .unwrap_or_else(|| selected_tool_id.to_string()),
+                            );
+                            self.convert_source_session_id = Some(session_id.clone());
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        // No conversion available
+        self.should_convert_session = false;
     }
 
     /// Fetch versions for current agent (FR-063, FR-064)
@@ -1188,7 +1290,12 @@ impl WizardState {
                         | QuickStartAction::StartNewWithPrevious => {
                             // Apply settings from history and skip to completion
                             self.apply_quick_start_selection(tool_index, action);
-                            WizardStep::SkipPermissions
+                            // Check if session conversion should be offered
+                            if self.should_convert_session {
+                                WizardStep::SessionConvertConfirm
+                            } else {
+                                WizardStep::SkipPermissions
+                            }
                         }
                         QuickStartAction::ChooseDifferent => {
                             // Go to branch action selection for manual configuration
@@ -1199,6 +1306,10 @@ impl WizardState {
                     // No history, go to branch action selection
                     WizardStep::BranchAction
                 }
+            }
+            WizardStep::SessionConvertConfirm => {
+                // Session conversion confirmed or skipped, proceed to completion
+                WizardStep::SkipPermissions
             }
             WizardStep::BranchAction => {
                 if self.branch_action_index == 0 {
@@ -1342,6 +1453,10 @@ impl WizardState {
                 self.close();
                 return false;
             }
+            WizardStep::SessionConvertConfirm => {
+                // Go back to Quick Start
+                WizardStep::QuickStart
+            }
             WizardStep::BranchAction => {
                 if self.has_quick_start {
                     WizardStep::QuickStart
@@ -1420,6 +1535,12 @@ impl WizardState {
                     QuickStartAction::ResumeWithPrevious
                     | QuickStartAction::StartNewWithPrevious => {
                         self.apply_quick_start_selection(tool_index, action);
+                        // Check if session conversion should be offered
+                        if self.should_convert_session {
+                            self.step = WizardStep::SessionConvertConfirm;
+                            self.scroll_offset = 0;
+                            return WizardConfirmResult::Advance;
+                        }
                         self.step = WizardStep::SkipPermissions;
                         self.scroll_offset = 0;
                         return WizardConfirmResult::Complete;
@@ -1441,6 +1562,14 @@ impl WizardState {
                 self.base_branch_override = None;
                 return WizardConfirmResult::Advance;
             }
+        }
+
+        // Handle SessionConvertConfirm step
+        if self.step == WizardStep::SessionConvertConfirm {
+            // Proceed to completion (conversion happens during launch)
+            self.step = WizardStep::SkipPermissions;
+            self.scroll_offset = 0;
+            return WizardConfirmResult::Complete;
         }
 
         // Handle BranchAction step with running agent: "Focus agent pane" selected
@@ -1505,6 +1634,10 @@ impl WizardState {
                 if self.quick_start_index < max {
                     self.quick_start_index += 1;
                 }
+            }
+            WizardStep::SessionConvertConfirm => {
+                // Toggle between Yes and No
+                self.session_convert_confirmed = !self.session_convert_confirmed;
             }
             WizardStep::BranchAction => {
                 if self.branch_action_index < 1 {
@@ -1594,6 +1727,10 @@ impl WizardState {
                 if self.quick_start_index > 0 {
                     self.quick_start_index -= 1;
                 }
+            }
+            WizardStep::SessionConvertConfirm => {
+                // Toggle between Yes and No
+                self.session_convert_confirmed = !self.session_convert_confirmed;
             }
             WizardStep::BranchAction => {
                 if self.branch_action_index > 0 {
@@ -1846,6 +1983,7 @@ impl WizardState {
     pub fn current_step_item_count(&self) -> usize {
         match self.step {
             WizardStep::QuickStart => self.quick_start_option_count(),
+            WizardStep::SessionConvertConfirm => 2, // Yes/No
             WizardStep::BranchAction => self.branch_action_options().len(),
             WizardStep::BranchTypeSelect => BranchType::all().len(),
             WizardStep::IssueSelect => self.filtered_issues.len() + 1, // +1 for Skip option
@@ -1871,6 +2009,13 @@ impl WizardState {
     pub fn current_selection_index(&self) -> usize {
         match self.step {
             WizardStep::QuickStart => self.quick_start_index,
+            WizardStep::SessionConvertConfirm => {
+                if self.session_convert_confirmed {
+                    0
+                } else {
+                    1
+                }
+            }
             WizardStep::BranchAction => self.branch_action_index,
             WizardStep::BranchTypeSelect => BranchType::all()
                 .iter()
@@ -1908,6 +2053,9 @@ impl WizardState {
         match self.step {
             WizardStep::QuickStart => {
                 self.quick_start_index = index;
+            }
+            WizardStep::SessionConvertConfirm => {
+                self.session_convert_confirmed = index == 0;
             }
             WizardStep::BranchAction => {
                 self.branch_action_index = index;
@@ -2061,6 +2209,9 @@ pub fn render_wizard(state: &mut WizardState, frame: &mut Frame, area: Rect) {
 
     match state.step {
         WizardStep::QuickStart => render_quick_start_step(state, frame, content_area),
+        WizardStep::SessionConvertConfirm => {
+            render_session_convert_step(state, frame, content_area)
+        }
         WizardStep::BranchAction => render_branch_action_step(state, frame, content_area),
         WizardStep::BranchTypeSelect => render_branch_type_step(state, frame, content_area),
         WizardStep::IssueSelect => render_issue_select_step(state, frame, content_area),
@@ -2097,6 +2248,7 @@ pub fn render_wizard(state: &mut WizardState, frame: &mut Frame, area: Rect) {
 fn wizard_title(step: WizardStep) -> &'static str {
     match step {
         WizardStep::QuickStart => " Quick Start ",
+        WizardStep::SessionConvertConfirm => " Convert Session? ",
         WizardStep::BranchAction => " Select Branch Action ",
         WizardStep::BranchTypeSelect => " Select Branch Type ",
         WizardStep::IssueSelect => " GitHub Issue ",
@@ -2194,6 +2346,14 @@ fn wizard_required_content_width(state: &WizardState) -> usize {
             }
             consider("  Choose different settings...".to_string());
         }
+        WizardStep::SessionConvertConfirm => {
+            let source = state.convert_source_agent.as_deref().unwrap_or("Previous");
+            let target = state.convert_target_agent.as_deref().unwrap_or("Selected");
+            consider(format!("A session from {} was found.", source));
+            consider(format!("Convert it to {} format?", target));
+            consider("  Yes, convert the session".to_string());
+            consider("  No, start fresh".to_string());
+        }
         WizardStep::BranchAction => {
             consider(format!("Branch: {}", state.branch_name));
             consider("  Use selected branch".to_string());
@@ -2272,6 +2432,82 @@ fn wizard_required_content_width(state: &WizardState) -> usize {
     }
 
     max_line
+}
+
+/// Render Session Convert Confirm step
+fn render_session_convert_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    let source_agent = state
+        .convert_source_agent
+        .as_deref()
+        .unwrap_or("Previous agent");
+    let target_agent = state
+        .convert_target_agent
+        .as_deref()
+        .unwrap_or("Selected agent");
+
+    // Description text
+    let desc_text = format!(
+        "A session from {} was found.\nConvert it to {} format?",
+        source_agent, target_agent
+    );
+    let desc = Paragraph::new(desc_text).style(Style::default().fg(Color::White));
+    let desc_area = Rect::new(area.x, area.y, area.width, 3);
+    frame.render_widget(desc, desc_area);
+
+    // Session ID hint (truncated)
+    if let Some(ref session_id) = state.convert_source_session_id {
+        let session_hint = format!("Session: {}...", &session_id[..session_id.len().min(12)]);
+        let session_hint = truncate_with_ellipsis(&session_hint, area.width as usize);
+        let hint = Paragraph::new(session_hint).style(Style::default().fg(Color::DarkGray));
+        let hint_area = Rect::new(area.x, area.y + 3, area.width, 1);
+        frame.render_widget(hint, hint_area);
+    }
+
+    // Options
+    let list_area = Rect::new(
+        area.x,
+        area.y + 5,
+        area.width,
+        area.height.saturating_sub(5),
+    );
+
+    let yes_selected = state.session_convert_confirmed;
+    let no_selected = !state.session_convert_confirmed;
+
+    let yes_prefix = if yes_selected { "> " } else { "  " };
+    let no_prefix = if no_selected { "> " } else { "  " };
+
+    let yes_style = if yes_selected {
+        Style::default().bg(Color::Cyan).fg(Color::Black)
+    } else {
+        Style::default()
+    };
+    let no_style = if no_selected {
+        Style::default().bg(Color::Cyan).fg(Color::Black)
+    } else {
+        Style::default()
+    };
+
+    let items = vec![
+        ListItem::new(format!("{}Yes, convert the session", yes_prefix)).style(yes_style),
+        ListItem::new(format!("{}No, start fresh", no_prefix)).style(no_style),
+    ];
+
+    let list = List::new(items);
+    frame.render_widget(list, list_area);
+
+    // Show error if conversion failed
+    if let Some(ref error) = state.convert_error {
+        let error_text = truncate_with_ellipsis(error, area.width as usize);
+        let error_widget = Paragraph::new(error_text).style(Style::default().fg(Color::Red));
+        let error_area = Rect::new(
+            area.x,
+            area.y + area.height.saturating_sub(2),
+            area.width,
+            1,
+        );
+        frame.render_widget(error_widget, error_area);
+    }
 }
 
 /// Render Quick Start step (FR-050, SPEC-f47db390)
