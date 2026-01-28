@@ -6007,7 +6007,7 @@ fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
 
             // Execution mode (FR-102) - same logic as single mode
             match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume => {
+                ExecutionMode::Continue | ExecutionMode::Resume | ExecutionMode::Convert => {
                     if let Some(session_id) = &config.session_id {
                         args.push("--resume".to_string());
                         args.push(session_id.clone());
@@ -6028,7 +6028,7 @@ fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
         CodingAgent::CodexCli => {
             // Execution mode - resume subcommand must come first
             match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume => {
+                ExecutionMode::Continue | ExecutionMode::Resume | ExecutionMode::Convert => {
                     args.push("resume".to_string());
                     if let Some(session_id) = &config.session_id {
                         args.push(session_id.clone());
@@ -6074,7 +6074,7 @@ fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
 
             // Execution mode
             match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume => {
+                ExecutionMode::Continue | ExecutionMode::Resume | ExecutionMode::Convert => {
                     if let Some(session_id) = &config.session_id {
                         args.push("--resume".to_string());
                         args.push(session_id.clone());
@@ -6103,7 +6103,7 @@ fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
 
             // Execution mode
             match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume => {
+                ExecutionMode::Continue | ExecutionMode::Resume | ExecutionMode::Convert => {
                     if let Some(session_id) = &config.session_id {
                         args.push("--resume".to_string());
                         args.push(session_id.clone());
@@ -6140,7 +6140,7 @@ fn build_custom_agent_args_for_tmux(
             ExecutionMode::Continue => {
                 args.extend(mode_args.continue_mode.clone());
             }
-            ExecutionMode::Resume => {
+            ExecutionMode::Resume | ExecutionMode::Convert => {
                 args.extend(mode_args.resume.clone());
             }
         }
