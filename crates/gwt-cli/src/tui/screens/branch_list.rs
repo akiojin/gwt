@@ -1821,6 +1821,7 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect, has_f
 /// FR-011f: Show spinner in safety icon while cleanup is running
 /// FR-013: Show DarkGray background for cleanup target branches
 /// FR-020~024: Running agent info displayed on right side (right-aligned)
+#[allow(clippy::too_many_arguments)]
 fn render_branch_row(
     branch: &BranchItem,
     is_selected: bool,
