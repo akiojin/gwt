@@ -186,7 +186,7 @@ pub struct ConvertSessionEntry {
     pub last_updated: Option<chrono::DateTime<chrono::Utc>>,
     /// Message count
     pub message_count: usize,
-    /// Display text (truncated session ID + date)
+    /// Display text (truncated session ID + message count + date)
     pub display: String,
 }
 
@@ -1215,11 +1215,16 @@ impl WizardState {
                 } else {
                     entry.session_id.clone()
                 };
+                let msg_label = if entry.message_count == 1 {
+                    "1 msg".to_string()
+                } else {
+                    format!("{} msgs", entry.message_count)
+                };
                 ConvertSessionEntry {
                     session_id: entry.session_id,
                     last_updated: entry.last_updated,
                     message_count: entry.message_count,
-                    display: format!("{} ({})", short_id, date_str),
+                    display: format!("{} | {} | updated {}", short_id, msg_label, date_str),
                 }
             })
             .collect();
