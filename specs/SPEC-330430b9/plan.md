@@ -5,7 +5,7 @@
 
 ## 概要
 
-セッション変換の一覧に「セッション名（Worktree名・ブランチ名相当） + 開始ユーザーメッセージ抜粋 + 更新日時」を表示し、Spaceでプレビュー（先頭10メッセージ）を開閉できるようにする。変換実行中はスピナー「Converting session...」を表示する。UIは英語のみ、ASCIIのみ。既存のExecution Mode: Convertフローは維持し、一覧/プレビューの失敗はプレースホルダ表示で継続する。
+セッション変換の一覧に「セッション名（Worktree名・ブランチ名相当） + 開始ユーザーメッセージ抜粋 + 更新日時」を表示し、Spaceでプレビュー（先頭10メッセージ）を開閉できるようにする。変換実行中はスピナー「Converting session...」を表示する。UIは英語のみ、ASCIIのみ。既存のExecution Mode: Convertフローは維持し、一覧/プレビューの失敗はプレースホルダ表示で継続する。加えて、各エージェントのセッション内容から `tool_use` / `tool_result` / `thinking` / `parts` を欠落させずに抽出し、変換/プレビューの内容を維持する。
 
 ## 技術コンテキスト
 
@@ -87,6 +87,9 @@ crates/
 - `crates/gwt-cli/src/tui/app.rs`
   - Wizard可視時のキー処理にSpace/Esc/スクロールを追加
   - 新しいMessage追加とハンドリング
+- `crates/gwt-core/src/ai/session_parser/mod.rs`
+  - セッション内容抽出の補完（`tool_result` / `thinking` / `parts` / placeholder）
+  - 解析ロジックのユニットテスト追加
 
 ### 実装方針（決定事項）
 
@@ -109,6 +112,8 @@ crates/
    - `load_sessions_for_agent` で `SessionParser::parse` を使い開始ユーザーメッセージを抽出
    - セッション名は `worktree_path` の末尾ディレクトリ名（Worktree名・ブランチ名相当）を使用
    - プレビューは選択中セッションを再パースし、先頭10メッセージを生成
+   - `tool_use` / `tool_result` / `thinking` / `parts` の要素を欠落させない
+   - 画像/バイナリは英語のプレースホルダで保持する
 
 4. 変換中表示
    - 変換処理はバックグラウンドで実行し、UIはスピナー表示

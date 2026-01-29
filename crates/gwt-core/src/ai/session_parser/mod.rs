@@ -439,6 +439,11 @@ fn extract_content(value: &Value) -> Option<String> {
     if let Some(text) = extract_string_field(value, &["text", "message", "prompt", "response"]) {
         return Some(text);
     }
+    if let Some(parts) = value.get("parts") {
+        if let Some(text) = value_to_text(parts) {
+            return Some(text);
+        }
+    }
     if let Some(input) = value.get("input") {
         if let Some(text) = value_to_text(input) {
             return Some(text);
@@ -480,6 +485,53 @@ fn format_tool_use_content(value: &Value) -> Option<String> {
     Some(text)
 }
 
+fn format_tool_result_content(value: &Value) -> Option<String> {
+    let kind = value.get("type").and_then(|v| v.as_str())?;
+    if kind != "tool_result" {
+        return None;
+    }
+    let mut text = String::from("[tool_result]");
+    if let Some(name) = extract_tool_name(value) {
+        text.push(' ');
+        text.push_str(&name);
+    }
+    if let Some(id) = value.get("tool_use_id").and_then(|v| v.as_str()) {
+        text.push(' ');
+        text.push_str(id);
+    }
+    let content = value
+        .get("content")
+        .or_else(|| value.get("result"))
+        .or_else(|| value.get("output"));
+    if let Some(content) = content {
+        let content_text = value_to_text(content)
+            .or_else(|| serde_json::to_string(content).ok())
+            .unwrap_or_default();
+        if !content_text.trim().is_empty() {
+            text.push(' ');
+            text.push_str(&content_text);
+        }
+    }
+    Some(text)
+}
+
+fn format_thinking_content(value: &Value) -> Option<String> {
+    let kind = value.get("type").and_then(|v| v.as_str())?;
+    if kind != "thinking" {
+        return None;
+    }
+    let thinking = value
+        .get("thinking")
+        .and_then(|v| v.as_str())
+        .or_else(|| value.get("text").and_then(|v| v.as_str()))
+        .or_else(|| value.get("content").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    if thinking.trim().is_empty() {
+        return Some("[thinking]".to_string());
+    }
+    Some(format!("[thinking] {}", thinking))
+}
+
 fn value_to_text(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => Some(text.clone()),
@@ -514,8 +566,27 @@ fn value_to_text(value: &Value) -> Option<String> {
             {
                 return Some(text);
             }
+            if let Some(parts) = map.get("parts") {
+                if let Some(text) = value_to_text(parts) {
+                    return Some(text);
+                }
+            }
+            if map.get("inline_data").is_some() || map.get("inlineData").is_some() {
+                return Some("[inline_data]".to_string());
+            }
             if let Some(tool_text) = format_tool_use_content(value) {
                 return Some(tool_text);
+            }
+            if let Some(tool_text) = format_tool_result_content(value) {
+                return Some(tool_text);
+            }
+            if let Some(thinking_text) = format_thinking_content(value) {
+                return Some(thinking_text);
+            }
+            if let Some(kind) = map.get("type").and_then(|v| v.as_str()) {
+                if matches!(kind, "image" | "image_url" | "imageUrl") {
+                    return Some("[image]".to_string());
+                }
             }
             None
         }
@@ -668,6 +739,32 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_jsonl_session_includes_tool_result_content() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sess-result.jsonl");
+        let content = r#"{"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"text","text":"done"}]}]}}"#;
+        fs::write(&path, content).unwrap();
+
+        let parsed = parse_jsonl_session(&path, "sess-result", AgentType::ClaudeCode).unwrap();
+        assert_eq!(parsed.messages.len(), 1);
+        assert!(parsed.messages[0].content.contains("[tool_result]"));
+        assert!(parsed.messages[0].content.contains("done"));
+    }
+
+    #[test]
+    fn test_parse_jsonl_session_includes_thinking_content() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sess-thinking.jsonl");
+        let content = r#"{"message":{"role":"assistant","content":[{"type":"thinking","thinking":"plan"}]}}"#;
+        fs::write(&path, content).unwrap();
+
+        let parsed = parse_jsonl_session(&path, "sess-thinking", AgentType::ClaudeCode).unwrap();
+        assert_eq!(parsed.messages.len(), 1);
+        assert!(parsed.messages[0].content.contains("[thinking]"));
+        assert!(parsed.messages[0].content.contains("plan"));
+    }
+
+    #[test]
     fn test_parse_json_session_basic() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("sess-2.json");
@@ -686,6 +783,39 @@ mod tests {
         assert_eq!(parsed.messages.len(), 2);
         assert_eq!(parsed.tool_executions.len(), 1);
         assert_eq!(parsed.total_turns, 2);
+    }
+
+    #[test]
+    fn test_parse_json_session_includes_parts_content() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sess-parts.json");
+        let content = r#"{
+  "messages": [
+    {"role": "user", "parts": [{"text": "hello"}]}
+  ]
+}"#;
+        fs::write(&path, content).unwrap();
+
+        let parsed = parse_json_session(&path, "sess-parts", AgentType::GeminiCli).unwrap();
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].content, "hello");
+    }
+
+    #[test]
+    fn test_parse_json_session_includes_inline_data_placeholder() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sess-inline.json");
+        let content = r#"{
+  "messages": [
+    {"role": "user", "parts": [{"inline_data": {"mime_type": "image/png", "data": "AAAA"}}, {"text": "ok"}]}
+  ]
+}"#;
+        fs::write(&path, content).unwrap();
+
+        let parsed = parse_json_session(&path, "sess-inline", AgentType::GeminiCli).unwrap();
+        assert_eq!(parsed.messages.len(), 1);
+        assert!(parsed.messages[0].content.contains("[inline_data]"));
+        assert!(parsed.messages[0].content.contains("ok"));
     }
 
     #[test]

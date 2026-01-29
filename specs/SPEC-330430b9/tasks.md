@@ -63,7 +63,24 @@
 
 **✅ 完全な機能**: 失敗時も一覧と変換が継続する
 
-## フェーズ5: 統合とポリッシュ
+## フェーズ5: ユーザーストーリー4 - セッション内容の欠落を最小化できる (優先度: P1)
 
-- [ ] T401 [統合] `cargo test` を実行して失敗を修正 `crates/gwt-cli/src/tui/`
-- [ ] T402 [統合] `bun run format:check` / `bunx --bun markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore` / `bun run lint` を実行して失敗を修正 `.`
+**ストーリー**: 変換/プレビューで `tool_use` / `tool_result` / `thinking` / `parts` を欠落させない
+
+**価値**: 変換結果の内容連続性を維持できる
+
+### テスト（TDD）
+
+- [ ] T501 [P] [US4] `tool_result` / `thinking` / `parts` の解析テストを追加 `crates/gwt-core/src/ai/session_parser/mod.rs`
+- [ ] T502 [P] [US4] 画像/バイナリのプレースホルダ抽出テストを追加 `crates/gwt-core/src/ai/session_parser/mod.rs`
+
+### 実装
+
+- [ ] T503 [US4] セッションパーサーの内容抽出を拡張 `crates/gwt-core/src/ai/session_parser/mod.rs`
+
+**✅ MVP3チェックポイント**: 主要なセッション要素が欠落せず抽出される
+
+## フェーズ6: 統合とポリッシュ
+
+- [ ] T601 [統合] `cargo test` を実行して失敗を修正 `crates/gwt-cli/src/tui/`
+- [ ] T602 [統合] `bun run format:check` / `bunx --bun markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore` / `bun run lint` を実行して失敗を修正 `.`
