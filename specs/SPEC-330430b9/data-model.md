@@ -18,6 +18,8 @@
   - `convert_preview_scroll: u16`
   - `convert_preview_error: Option<String>`
   - `convert_preview_view_height: u16`（スクロール上限計算用）
+  - `convert_in_progress: bool`
+  - `convert_spinner_tick: usize`
 
 ## 生成ルール
 

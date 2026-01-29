@@ -34,12 +34,14 @@
 ### テスト（TDD）
 
 - [ ] T201 [P] [US2] プレビュー生成/スクロールのユニットテストを追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
+- [ ] T202 [P] [US2] 変換中スピナー表示のユニットテストを追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
 
 ### 実装
 
-- [ ] T202 [US2] プレビュー状態（open/scroll/lines/error）を追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
-- [ ] T203 [US2] プレビュー描画（モーダル/フッター）を追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
-- [ ] T204 [US2] Space/Esc/スクロールのキー処理とMessage追加 `crates/gwt-cli/src/tui/app.rs`
+- [ ] T203 [US2] プレビュー状態（open/scroll/lines/error）を追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
+- [ ] T204 [US2] プレビュー描画（モーダル/フッター）を追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
+- [ ] T205 [US2] 変換中スピナーの状態管理と描画を追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
+- [ ] T206 [US2] Space/Esc/スクロールのキー処理とMessage追加 `crates/gwt-cli/src/tui/app.rs`
 
 **✅ MVP2チェックポイント**: Spaceでプレビューが開閉し、先頭10メッセージが表示される
 

@@ -16,9 +16,9 @@ use crossterm::{
 };
 use gwt_core::agent::codex::supports_collaboration_modes;
 use gwt_core::ai::{
-    summarize_session, AIClient, AIError, AgentHistoryStore, AgentType, ChatMessage,
-    ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, OpenCodeSessionParser,
-    SessionParseError, SessionParser,
+    convert_session, summarize_session, AIClient, AIError, AgentHistoryStore, AgentType,
+    ChatMessage, ClaudeSessionParser, CodexSessionParser, GeminiSessionParser,
+    OpenCodeSessionParser, SessionParseError, SessionParser,
 };
 use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{
@@ -63,9 +63,9 @@ use super::screens::{
     render_environment, render_error_with_queue, render_help, render_logs, render_profiles,
     render_settings, render_wizard, render_worktree_create, AIWizardState, AgentMessage,
     AgentModeState, AgentRole, BranchItem, BranchListState, BranchType, CodingAgent, ConfirmState,
-    EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, HelpState, LogsState, ProfilesState,
-    QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult, WizardState, WizardStep,
-    WorktreeCreateState,
+    ConversionRequest, EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, HelpState,
+    LogsState, ProfilesState, QuickStartEntry, ReasoningLevel, SettingsState,
+    WizardConfirmResult, WizardState, WizardStep, WorktreeCreateState,
 };
 // log_gwt_error is available for use when GwtError types are available
 
@@ -84,6 +84,73 @@ fn resolve_orphaned_agent_name(
         "unknown".to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+fn run_conversion(request: ConversionRequest) -> ConversionUpdate {
+    let parsed = match request.source_agent {
+        CodingAgent::ClaudeCode => {
+            let parser = match ClaudeSessionParser::with_default_home() {
+                Some(p) => p,
+                None => {
+                    return ConversionUpdate::Error {
+                        message: "Could not initialize Claude parser".to_string(),
+                    }
+                }
+            };
+            parser.parse(&request.source_session_id)
+        }
+        CodingAgent::CodexCli => {
+            let parser = match CodexSessionParser::with_default_home() {
+                Some(p) => p,
+                None => {
+                    return ConversionUpdate::Error {
+                        message: "Could not initialize Codex parser".to_string(),
+                    }
+                }
+            };
+            parser.parse(&request.source_session_id)
+        }
+        CodingAgent::GeminiCli => {
+            let parser = match GeminiSessionParser::with_default_home() {
+                Some(p) => p,
+                None => {
+                    return ConversionUpdate::Error {
+                        message: "Could not initialize Gemini parser".to_string(),
+                    }
+                }
+            };
+            parser.parse(&request.source_session_id)
+        }
+        CodingAgent::OpenCode => {
+            let parser = match OpenCodeSessionParser::with_default_home() {
+                Some(p) => p,
+                None => {
+                    return ConversionUpdate::Error {
+                        message: "Could not initialize OpenCode parser".to_string(),
+                    }
+                }
+            };
+            parser.parse(&request.source_session_id)
+        }
+    };
+
+    let parsed = match parsed {
+        Ok(session) => session,
+        Err(err) => {
+            return ConversionUpdate::Error {
+                message: format!("Failed to parse session: {}", err),
+            }
+        }
+    };
+
+    match convert_session(&parsed, request.target_agent, &request.worktree_path) {
+        Ok(result) => ConversionUpdate::Success {
+            new_session_id: result.new_session_id,
+        },
+        Err(err) => ConversionUpdate::Error {
+            message: err.to_string(),
+        },
     }
 }
 
@@ -483,6 +550,8 @@ pub struct Model {
     agent_history: AgentHistoryStore,
     /// Progress modal state for worktree preparation (FR-041)
     progress_modal: Option<ProgressModalState>,
+    /// Session conversion update receiver
+    conversion_rx: Option<Receiver<ConversionUpdate>>,
 }
 
 /// Screen types
@@ -563,6 +632,12 @@ pub enum Message {
     ReregisterHooks,
 }
 
+#[derive(Debug)]
+enum ConversionUpdate {
+    Success { new_session_id: String },
+    Error { message: String },
+}
+
 impl Model {
     /// Create a new model
     pub fn new() -> Self {
@@ -636,6 +711,7 @@ impl Model {
             session_poll_deferred: false,
             agent_history: AgentHistoryStore::load().unwrap_or_default(),
             progress_modal: None,
+            conversion_rx: None,
         };
 
         model
@@ -1873,6 +1949,31 @@ impl Model {
         }
     }
 
+    fn apply_conversion_updates(&mut self) {
+        let Some(rx) = &self.conversion_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(update) => {
+                self.conversion_rx = None;
+                match update {
+                    ConversionUpdate::Success { new_session_id } => {
+                        self.wizard.apply_conversion_success(new_session_id);
+                    }
+                    ConversionUpdate::Error { message } => {
+                        self.wizard.apply_conversion_error(message);
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.conversion_rx = None;
+                self.wizard.apply_conversion_error("Conversion worker disconnected".to_string());
+            }
+        }
+    }
+
     fn apply_safety_updates(&mut self) {
         let Some(rx) = &self.safety_rx else {
             return;
@@ -2360,6 +2461,9 @@ impl Model {
         if !self.wizard.visible {
             return;
         }
+        if self.wizard.convert_in_progress {
+            return;
+        }
         if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             return;
         }
@@ -2396,6 +2500,25 @@ impl Model {
             }
             self.last_mouse_click = Some(MouseClick { index, at: now });
         }
+    }
+
+    fn start_conversion(&mut self) -> Result<(), String> {
+        if self.conversion_rx.is_some() {
+            return Err("Conversion already in progress".to_string());
+        }
+
+        let request = self.wizard.build_conversion_request()?;
+        self.wizard.begin_conversion();
+
+        let (tx, rx) = mpsc::channel();
+        self.conversion_rx = Some(rx);
+
+        thread::spawn(move || {
+            let update = run_conversion(request);
+            let _ = tx.send(update);
+        });
+
+        Ok(())
     }
 
     fn handle_confirm_mouse(&mut self, mouse: MouseEvent) {
@@ -3645,6 +3768,10 @@ impl Model {
                 }
                 // Update spinner animation
                 self.branch_list.tick_spinner();
+                if self.wizard.convert_in_progress {
+                    self.wizard.convert_spinner_tick =
+                        self.wizard.convert_spinner_tick.wrapping_add(1);
+                }
                 self.apply_branch_list_updates();
                 self.apply_branch_summary_updates();
                 self.apply_pr_title_updates();
@@ -3652,6 +3779,7 @@ impl Model {
                 self.apply_worktree_updates();
                 self.apply_cleanup_updates();
                 self.apply_launch_updates();
+                self.apply_conversion_updates();
                 // FR-051: Auto-close progress modal after 2-second summary display
                 if let Some(ref modal) = self.progress_modal {
                     if modal.completed && modal.summary_display_elapsed() && !modal.has_failed() {
@@ -4284,6 +4412,14 @@ impl Model {
             }
             Message::WizardConfirm => {
                 if self.wizard.visible {
+                    if self.wizard.step == WizardStep::ConvertSessionSelect {
+                        if !self.wizard.convert_in_progress {
+                            if let Err(message) = self.start_conversion() {
+                                self.wizard.convert_error = Some(message);
+                            }
+                        }
+                        return;
+                    }
                     // SPEC-e4798383: Check for duplicate branch before confirming IssueSelect
                     if self.wizard.step == WizardStep::IssueSelect {
                         self.wizard.check_issue_duplicate(&self.repo_root);
@@ -5552,6 +5688,9 @@ impl Model {
 
         // Wizard has priority when visible
         if self.wizard.visible {
+            if self.wizard.convert_in_progress {
+                return None;
+            }
             if self.wizard.convert_preview_open {
                 match key.code {
                     KeyCode::Esc => Some(Message::WizardTogglePreview),
@@ -6551,17 +6690,18 @@ mod tests {
         let branches = vec![sample_branch_with_session("feature/layout")];
         model.branch_list = BranchListState::new().with_branches(branches);
 
-        let height = 24;
-        let lines = render_model_lines(&mut model, 80, height);
-        let footer_line = &lines[(height - 2) as usize];
-        let status_line = &lines[(height - 1) as usize];
+        let lines = render_model_lines(&mut model, 80, 24);
+        let footer_present = lines.iter().any(|line| line.contains("[r] Refresh"));
+        let status_present = lines
+            .iter()
+            .any(|line| line.contains("Agents:") && line.contains("none"));
 
         assert!(
-            footer_line.contains("[r] Refresh"),
+            footer_present,
             "Footer help should be visible on BranchList"
         );
         assert!(
-            status_line.contains("Agents:") && status_line.contains("none"),
+            status_present,
             "Status bar should show Agents: none when no agents are running"
         );
     }

@@ -8,6 +8,7 @@
 
 #![allow(dead_code)]
 
+use crate::tui::components::{centered_rect, Spinner};
 use gwt_core::agent::codex::supports_collaboration_modes;
 use gwt_core::ai::AgentType;
 use gwt_core::config::{CustomCodingAgent, ToolsConfig};
@@ -15,7 +16,7 @@ use gwt_core::git::GitHubIssue;
 use ratatui::{prelude::*, widgets::*};
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Version information from npm registry (FR-063)
@@ -190,6 +191,15 @@ pub struct ConvertSessionEntry {
     pub first_user_message: Option<String>,
     /// Display text (start message + date)
     pub display: String,
+}
+
+/// Request payload for session conversion execution
+#[derive(Debug, Clone)]
+pub struct ConversionRequest {
+    pub source_agent: CodingAgent,
+    pub source_session_id: String,
+    pub target_agent: AgentType,
+    pub worktree_path: PathBuf,
 }
 
 /// Coding agent types
@@ -835,6 +845,10 @@ pub struct WizardState {
     pub converted_session_id: Option<String>,
     /// Session conversion error message
     pub convert_error: Option<String>,
+    /// Whether conversion is running
+    pub convert_in_progress: bool,
+    /// Spinner tick for conversion
+    pub convert_spinner_tick: usize,
     /// Whether session preview is open
     pub convert_preview_open: bool,
     /// Preview content lines (header + messages)
@@ -936,6 +950,8 @@ impl WizardState {
         self.convert_agent_index = 0;
         self.convert_sessions.clear();
         self.convert_session_index = 0;
+        self.convert_in_progress = false;
+        self.convert_spinner_tick = 0;
         self.convert_preview_open = false;
         self.convert_preview_lines.clear();
         self.convert_preview_scroll = 0;
@@ -943,6 +959,8 @@ impl WizardState {
         self.convert_preview_view_height = 0;
         self.converted_session_id = None;
         self.convert_error = None;
+        self.convert_in_progress = false;
+        self.convert_spinner_tick = 0;
         self.convert_preview_open = false;
         self.convert_preview_lines.clear();
         self.convert_preview_scroll = 0;
@@ -1246,10 +1264,75 @@ impl WizardState {
         self.convert_sessions.get(self.convert_session_index)
     }
 
+    /// Build conversion request from current wizard selection
+    pub fn build_conversion_request(&self) -> Result<ConversionRequest, String> {
+        let source_agent = self
+            .selected_convert_source_agent()
+            .map(|agent| agent.agent)
+            .ok_or_else(|| "No source agent selected".to_string())?;
+
+        let source_session_id = self
+            .selected_convert_session()
+            .map(|session| session.session_id.clone())
+            .ok_or_else(|| "No session selected".to_string())?;
+
+        let target_agent = match self.agent {
+            CodingAgent::ClaudeCode => AgentType::ClaudeCode,
+            CodingAgent::CodexCli => AgentType::CodexCli,
+            CodingAgent::GeminiCli => AgentType::GeminiCli,
+            CodingAgent::OpenCode => AgentType::OpenCode,
+        };
+
+        let worktree_path = self
+            .worktree_path
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+        Ok(ConversionRequest {
+            source_agent,
+            source_session_id,
+            target_agent,
+            worktree_path,
+        })
+    }
+
+    pub fn begin_conversion(&mut self) {
+        self.convert_in_progress = true;
+        self.convert_spinner_tick = 0;
+        self.convert_error = None;
+        self.close_convert_preview();
+    }
+
+    pub fn apply_conversion_success(&mut self, new_session_id: String) {
+        self.convert_in_progress = false;
+        self.convert_spinner_tick = 0;
+        self.converted_session_id = Some(new_session_id.clone());
+        self.session_id = Some(new_session_id);
+        self.convert_error = None;
+        self.close_convert_preview();
+
+        if self.supports_skip_permissions() {
+            self.step = WizardStep::SkipPermissions;
+        } else {
+            self.skip_permissions = false;
+            self.step = WizardStep::SkipPermissions;
+        }
+        self.scroll_offset = 0;
+    }
+
+    pub fn apply_conversion_error(&mut self, message: String) {
+        self.convert_in_progress = false;
+        self.convert_spinner_tick = 0;
+        self.convert_error = Some(format!("Conversion failed: {}", message));
+    }
+
     /// Toggle session preview for conversion selection
     pub fn toggle_convert_preview(&mut self) {
         if self.convert_preview_open {
             self.close_convert_preview();
+            return;
+        }
+        if self.convert_in_progress {
             return;
         }
         if self.step != WizardStep::ConvertSessionSelect {
@@ -2510,7 +2593,9 @@ pub fn render_wizard(state: &mut WizardState, frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, popup_area);
 
     // Popup border with close hint (FR-047)
-    let title = if state.convert_preview_open {
+    let title = if state.convert_in_progress {
+        " Converting Session "
+    } else if state.convert_preview_open {
         " Session Preview "
     } else {
         wizard_title(state.step)
@@ -2543,7 +2628,11 @@ pub fn render_wizard(state: &mut WizardState, frame: &mut Frame, area: Rect) {
     // Store list inner area for mouse click detection
     state.list_inner_area = Some(content_area);
 
-    if state.convert_preview_open {
+    if state.convert_in_progress {
+        let spinner_area = centered_rect(30, 3, content_area);
+        Spinner::new(SESSION_CONVERTING_MESSAGE, state.convert_spinner_tick)
+            .render(frame, spinner_area);
+    } else if state.convert_preview_open {
         render_convert_session_preview(state, frame, content_area);
     } else {
         match state.step {
@@ -2577,7 +2666,9 @@ pub fn render_wizard(state: &mut WizardState, frame: &mut Frame, area: Rect) {
         inner_area.width,
         1,
     );
-    let footer_text = if state.convert_preview_open {
+    let footer_text = if state.convert_in_progress {
+        "Converting session..."
+    } else if state.convert_preview_open {
         "[Space/Esc] Close  [Up/Down] Scroll"
     } else if state.step == WizardStep::BranchNameInput {
         "[Enter] Confirm  [Esc] Back"
@@ -2639,6 +2730,7 @@ fn truncate_with_ellipsis(text: &str, max_width: usize) -> String {
 const SESSION_PREVIEW_MAX_MESSAGES: usize = 10;
 const SESSION_NO_USER_MESSAGE: &str = "No user message";
 const SESSION_UNAVAILABLE_MESSAGE: &str = "Unavailable";
+const SESSION_CONVERTING_MESSAGE: &str = "Converting session...";
 
 fn normalize_message_snippet(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -2758,6 +2850,11 @@ fn wizard_required_content_width(state: &WizardState) -> usize {
     let mut consider = |text: String| {
         max_line = max_line.max(text_width(&text));
     };
+
+    if state.convert_in_progress {
+        consider(SESSION_CONVERTING_MESSAGE.to_string());
+        return max_line;
+    }
 
     if state.convert_preview_open {
         if let Some(ref error) = state.convert_preview_error {
@@ -3731,6 +3828,7 @@ fn render_skip_permissions_step(state: &WizardState, frame: &mut Frame, area: Re
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
+    use std::path::PathBuf;
 
     #[test]
     fn test_wizard_open_for_branch() {
@@ -4527,6 +4625,37 @@ mod tests {
             .filter(|line| line.starts_with("User:") || line.starts_with("Assistant:"))
             .count();
         assert_eq!(labeled_lines, 10);
+    }
+
+    #[test]
+    fn test_build_conversion_request_requires_selection() {
+        let state = WizardState::new();
+        assert!(state.build_conversion_request().is_err());
+    }
+
+    #[test]
+    fn test_build_conversion_request_maps_target_agent() {
+        let mut state = WizardState::new();
+        state.agent = CodingAgent::ClaudeCode;
+        state.worktree_path = Some(PathBuf::from("/tmp"));
+        state.convert_source_agents = vec![ConvertSourceAgent {
+            agent: CodingAgent::CodexCli,
+            label: "Codex".to_string(),
+            session_count: 1,
+            color: Color::Yellow,
+        }];
+        state.convert_sessions = vec![ConvertSessionEntry {
+            session_id: "session-1".to_string(),
+            last_updated: None,
+            message_count: 1,
+            first_user_message: None,
+            display: "session-1".to_string(),
+        }];
+
+        let request = state.build_conversion_request().unwrap();
+        assert_eq!(request.source_agent, CodingAgent::CodexCli);
+        assert_eq!(request.source_session_id, "session-1");
+        assert_eq!(request.target_agent, AgentType::ClaudeCode);
     }
 
     /// Test ExecutionMode::Convert selection transitions to ConvertAgentSelect
