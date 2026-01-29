@@ -186,7 +186,9 @@ pub struct ConvertSessionEntry {
     pub last_updated: Option<chrono::DateTime<chrono::Utc>>,
     /// Message count
     pub message_count: usize,
-    /// Display text (truncated session ID + message count + date)
+    /// First user message extracted from the session (if available)
+    pub first_user_message: Option<String>,
+    /// Display text (start message + date)
     pub display: String,
 }
 
@@ -833,6 +835,16 @@ pub struct WizardState {
     pub converted_session_id: Option<String>,
     /// Session conversion error message
     pub convert_error: Option<String>,
+    /// Whether session preview is open
+    pub convert_preview_open: bool,
+    /// Preview content lines (header + messages)
+    pub convert_preview_lines: Vec<String>,
+    /// Preview scroll offset
+    pub convert_preview_scroll: u16,
+    /// Preview error message
+    pub convert_preview_error: Option<String>,
+    /// Preview viewport height for scroll calculations
+    pub convert_preview_view_height: u16,
     /// Worktree path for session search
     pub worktree_path: Option<std::path::PathBuf>,
 }
@@ -924,8 +936,18 @@ impl WizardState {
         self.convert_agent_index = 0;
         self.convert_sessions.clear();
         self.convert_session_index = 0;
+        self.convert_preview_open = false;
+        self.convert_preview_lines.clear();
+        self.convert_preview_scroll = 0;
+        self.convert_preview_error = None;
+        self.convert_preview_view_height = 0;
         self.converted_session_id = None;
         self.convert_error = None;
+        self.convert_preview_open = false;
+        self.convert_preview_lines.clear();
+        self.convert_preview_scroll = 0;
+        self.convert_preview_error = None;
+        self.convert_preview_view_height = 0;
     }
 
     /// Get branch action options based on running agent status
@@ -1174,28 +1196,32 @@ impl WizardState {
         let sessions = match source_agent.agent {
             CodingAgent::ClaudeCode => {
                 if let Some(parser) = ClaudeSessionParser::with_default_home() {
-                    parser.list_sessions(worktree_path)
+                    let sessions = parser.list_sessions(worktree_path);
+                    build_convert_session_entries(&parser, sessions)
                 } else {
                     vec![]
                 }
             }
             CodingAgent::CodexCli => {
                 if let Some(parser) = CodexSessionParser::with_default_home() {
-                    parser.list_sessions(worktree_path)
+                    let sessions = parser.list_sessions(worktree_path);
+                    build_convert_session_entries(&parser, sessions)
                 } else {
                     vec![]
                 }
             }
             CodingAgent::GeminiCli => {
                 if let Some(parser) = GeminiSessionParser::with_default_home() {
-                    parser.list_sessions(worktree_path)
+                    let sessions = parser.list_sessions(worktree_path);
+                    build_convert_session_entries(&parser, sessions)
                 } else {
                     vec![]
                 }
             }
             CodingAgent::OpenCode => {
                 if let Some(parser) = OpenCodeSessionParser::with_default_home() {
-                    parser.list_sessions(worktree_path)
+                    let sessions = parser.list_sessions(worktree_path);
+                    build_convert_session_entries(&parser, sessions)
                 } else {
                     vec![]
                 }
@@ -1203,31 +1229,7 @@ impl WizardState {
         };
 
         // Convert to ConvertSessionEntry and sort by newest first
-        self.convert_sessions = sessions
-            .into_iter()
-            .map(|entry| {
-                let date_str = entry
-                    .last_updated
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                    .unwrap_or_else(|| "Unknown".to_string());
-                let short_id = if entry.session_id.len() > 12 {
-                    format!("{}...", &entry.session_id[..12])
-                } else {
-                    entry.session_id.clone()
-                };
-                let msg_label = if entry.message_count == 1 {
-                    "1 msg".to_string()
-                } else {
-                    format!("{} msgs", entry.message_count)
-                };
-                ConvertSessionEntry {
-                    session_id: entry.session_id,
-                    last_updated: entry.last_updated,
-                    message_count: entry.message_count,
-                    display: format!("{} | {} | updated {}", short_id, msg_label, date_str),
-                }
-            })
-            .collect();
+        self.convert_sessions = sessions;
 
         // Sort by newest first
         self.convert_sessions
@@ -1244,12 +1246,127 @@ impl WizardState {
         self.convert_sessions.get(self.convert_session_index)
     }
 
+    /// Toggle session preview for conversion selection
+    pub fn toggle_convert_preview(&mut self) {
+        if self.convert_preview_open {
+            self.close_convert_preview();
+            return;
+        }
+        if self.step != WizardStep::ConvertSessionSelect {
+            return;
+        }
+        self.open_convert_preview();
+    }
+
+    /// Scroll preview content by delta lines
+    pub fn scroll_convert_preview(&mut self, delta: i16) {
+        if !self.convert_preview_open {
+            return;
+        }
+        let view_height = self.convert_preview_view_height as usize;
+        if view_height == 0 {
+            return;
+        }
+        let max_scroll = self
+            .convert_preview_lines
+            .len()
+            .saturating_sub(view_height) as i16;
+        let next = (self.convert_preview_scroll as i16 + delta)
+            .clamp(0, max_scroll.max(0));
+        self.convert_preview_scroll = next as u16;
+    }
+
+    fn open_convert_preview(&mut self) {
+        self.convert_preview_error = None;
+        self.convert_preview_lines.clear();
+        self.convert_preview_scroll = 0;
+
+        let source_agent = match self.selected_convert_source_agent() {
+            Some(a) => a.agent,
+            None => {
+                self.convert_preview_error = Some("No source agent selected".to_string());
+                self.convert_preview_open = true;
+                return;
+            }
+        };
+
+        let source_session_id = match self.selected_convert_session() {
+            Some(s) => s.session_id.clone(),
+            None => {
+                self.convert_preview_error = Some("No session selected".to_string());
+                self.convert_preview_open = true;
+                return;
+            }
+        };
+
+        let parsed = match Self::parse_session_for_agent(source_agent, &source_session_id) {
+            Ok(session) => session,
+            Err(err) => {
+                self.convert_preview_error = Some(format!("Unable to load session: {}", err));
+                self.convert_preview_open = true;
+                return;
+            }
+        };
+
+        let updated = self
+            .selected_convert_session()
+            .and_then(|s| s.last_updated)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_else(|| "Unknown".to_string());
+        let agent_label = source_agent.label();
+
+        self.convert_preview_lines = build_preview_lines(agent_label, &updated, &parsed.messages);
+        if self.convert_preview_lines.is_empty() {
+            self.convert_preview_lines
+                .push("No preview available".to_string());
+        }
+        self.convert_preview_open = true;
+    }
+
+    fn close_convert_preview(&mut self) {
+        self.convert_preview_open = false;
+        self.convert_preview_lines.clear();
+        self.convert_preview_scroll = 0;
+        self.convert_preview_error = None;
+        self.convert_preview_view_height = 0;
+    }
+
+    fn parse_session_for_agent(
+        agent: CodingAgent,
+        session_id: &str,
+    ) -> Result<gwt_core::ai::ParsedSession, String> {
+        use gwt_core::ai::{
+            ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, OpenCodeSessionParser,
+            SessionParser,
+        };
+
+        match agent {
+            CodingAgent::ClaudeCode => {
+                let parser = ClaudeSessionParser::with_default_home()
+                    .ok_or_else(|| "Could not initialize Claude parser".to_string())?;
+                parser.parse(session_id).map_err(|e| e.to_string())
+            }
+            CodingAgent::CodexCli => {
+                let parser = CodexSessionParser::with_default_home()
+                    .ok_or_else(|| "Could not initialize Codex parser".to_string())?;
+                parser.parse(session_id).map_err(|e| e.to_string())
+            }
+            CodingAgent::GeminiCli => {
+                let parser = GeminiSessionParser::with_default_home()
+                    .ok_or_else(|| "Could not initialize Gemini parser".to_string())?;
+                parser.parse(session_id).map_err(|e| e.to_string())
+            }
+            CodingAgent::OpenCode => {
+                let parser = OpenCodeSessionParser::with_default_home()
+                    .ok_or_else(|| "Could not initialize OpenCode parser".to_string())?;
+                parser.parse(session_id).map_err(|e| e.to_string())
+            }
+        }
+    }
+
     /// Perform session conversion from source agent to target agent
     pub fn perform_session_conversion(&mut self) -> bool {
-        use gwt_core::ai::{
-            convert_session, ClaudeSessionParser, CodexSessionParser, GeminiSessionParser,
-            OpenCodeSessionParser, SessionParser,
-        };
+        use gwt_core::ai::convert_session;
 
         // Clear previous error/result
         self.convert_error = None;
@@ -1272,55 +1389,10 @@ impl WizardState {
             }
         };
 
-        // Parse the source session
-        let parsed_session = match source_agent {
-            CodingAgent::ClaudeCode => {
-                let parser = match ClaudeSessionParser::with_default_home() {
-                    Some(p) => p,
-                    None => {
-                        self.convert_error = Some("Could not initialize Claude parser".to_string());
-                        return false;
-                    }
-                };
-                parser.parse(&source_session_id)
-            }
-            CodingAgent::CodexCli => {
-                let parser = match CodexSessionParser::with_default_home() {
-                    Some(p) => p,
-                    None => {
-                        self.convert_error = Some("Could not initialize Codex parser".to_string());
-                        return false;
-                    }
-                };
-                parser.parse(&source_session_id)
-            }
-            CodingAgent::GeminiCli => {
-                let parser = match GeminiSessionParser::with_default_home() {
-                    Some(p) => p,
-                    None => {
-                        self.convert_error = Some("Could not initialize Gemini parser".to_string());
-                        return false;
-                    }
-                };
-                parser.parse(&source_session_id)
-            }
-            CodingAgent::OpenCode => {
-                let parser = match OpenCodeSessionParser::with_default_home() {
-                    Some(p) => p,
-                    None => {
-                        self.convert_error =
-                            Some("Could not initialize OpenCode parser".to_string());
-                        return false;
-                    }
-                };
-                parser.parse(&source_session_id)
-            }
-        };
-
-        let parsed = match parsed_session {
-            Ok(p) => p,
-            Err(e) => {
-                self.convert_error = Some(format!("Failed to parse session: {}", e));
+        let parsed = match Self::parse_session_for_agent(source_agent, &source_session_id) {
+            Ok(session) => session,
+            Err(err) => {
+                self.convert_error = Some(format!("Failed to parse session: {}", err));
                 return false;
             }
         };
@@ -2438,7 +2510,11 @@ pub fn render_wizard(state: &mut WizardState, frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, popup_area);
 
     // Popup border with close hint (FR-047)
-    let title = wizard_title(state.step);
+    let title = if state.convert_preview_open {
+        " Session Preview "
+    } else {
+        wizard_title(state.step)
+    };
 
     let popup_block = Block::default()
         .borders(Borders::ALL)
@@ -2467,27 +2543,31 @@ pub fn render_wizard(state: &mut WizardState, frame: &mut Frame, area: Rect) {
     // Store list inner area for mouse click detection
     state.list_inner_area = Some(content_area);
 
-    match state.step {
-        WizardStep::QuickStart => render_quick_start_step(state, frame, content_area),
-        WizardStep::ConvertAgentSelect => {
-            render_convert_agent_select_step(state, frame, content_area)
+    if state.convert_preview_open {
+        render_convert_session_preview(state, frame, content_area);
+    } else {
+        match state.step {
+            WizardStep::QuickStart => render_quick_start_step(state, frame, content_area),
+            WizardStep::ConvertAgentSelect => {
+                render_convert_agent_select_step(state, frame, content_area)
+            }
+            WizardStep::ConvertSessionSelect => {
+                render_convert_session_select_step(state, frame, content_area)
+            }
+            WizardStep::BranchAction => render_branch_action_step(state, frame, content_area),
+            WizardStep::BranchTypeSelect => render_branch_type_step(state, frame, content_area),
+            WizardStep::IssueSelect => render_issue_select_step(state, frame, content_area),
+            WizardStep::BranchNameInput => render_branch_name_step(state, frame, content_area),
+            WizardStep::AgentSelect => render_agent_step(state, frame, content_area),
+            WizardStep::ModelSelect => render_model_step(state, frame, content_area),
+            WizardStep::ReasoningLevel => render_reasoning_step(state, frame, content_area),
+            WizardStep::VersionSelect => render_version_step(state, frame, content_area),
+            WizardStep::CollaborationModes => {
+                // Step is skipped - kept for enum exhaustiveness but never reached
+            }
+            WizardStep::ExecutionMode => render_execution_mode_step(state, frame, content_area),
+            WizardStep::SkipPermissions => render_skip_permissions_step(state, frame, content_area),
         }
-        WizardStep::ConvertSessionSelect => {
-            render_convert_session_select_step(state, frame, content_area)
-        }
-        WizardStep::BranchAction => render_branch_action_step(state, frame, content_area),
-        WizardStep::BranchTypeSelect => render_branch_type_step(state, frame, content_area),
-        WizardStep::IssueSelect => render_issue_select_step(state, frame, content_area),
-        WizardStep::BranchNameInput => render_branch_name_step(state, frame, content_area),
-        WizardStep::AgentSelect => render_agent_step(state, frame, content_area),
-        WizardStep::ModelSelect => render_model_step(state, frame, content_area),
-        WizardStep::ReasoningLevel => render_reasoning_step(state, frame, content_area),
-        WizardStep::VersionSelect => render_version_step(state, frame, content_area),
-        WizardStep::CollaborationModes => {
-            // Step is skipped - kept for enum exhaustiveness but never reached
-        }
-        WizardStep::ExecutionMode => render_execution_mode_step(state, frame, content_area),
-        WizardStep::SkipPermissions => render_skip_permissions_step(state, frame, content_area),
     }
 
     // Footer with keybindings
@@ -2497,8 +2577,12 @@ pub fn render_wizard(state: &mut WizardState, frame: &mut Frame, area: Rect) {
         inner_area.width,
         1,
     );
-    let footer_text = if state.step == WizardStep::BranchNameInput {
+    let footer_text = if state.convert_preview_open {
+        "[Space/Esc] Close  [Up/Down] Scroll"
+    } else if state.step == WizardStep::BranchNameInput {
         "[Enter] Confirm  [Esc] Back"
+    } else if state.step == WizardStep::ConvertSessionSelect {
+        "[Enter] Select  [Space] Preview  [Esc] Back  [Up/Down] Navigate"
     } else {
         "[Enter] Select  [Esc] Back  [Up/Down] Navigate"
     };
@@ -2552,6 +2636,104 @@ fn truncate_with_ellipsis(text: &str, max_width: usize) -> String {
     truncated
 }
 
+const SESSION_PREVIEW_MAX_MESSAGES: usize = 10;
+const SESSION_NO_USER_MESSAGE: &str = "No user message";
+const SESSION_UNAVAILABLE_MESSAGE: &str = "Unavailable";
+
+fn normalize_message_snippet(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn format_convert_session_display(
+    message: &str,
+    last_updated: Option<chrono::DateTime<chrono::Utc>>,
+) -> String {
+    let date_str = last_updated
+        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| "Unknown".to_string());
+    format!("{} | updated {}", message, date_str)
+}
+
+fn extract_first_user_message(
+    session: &gwt_core::ai::ParsedSession,
+) -> Option<String> {
+    session
+        .messages
+        .iter()
+        .find(|message| matches!(message.role, gwt_core::ai::MessageRole::User))
+        .map(|message| message.content.clone())
+}
+
+fn build_preview_lines(
+    agent_label: &str,
+    updated: &str,
+    messages: &[gwt_core::ai::SessionMessage],
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format!("Agent: {}", agent_label));
+    lines.push(format!("Updated: {}", updated));
+    lines.push(String::new());
+
+    for message in messages.iter().take(SESSION_PREVIEW_MAX_MESSAGES) {
+        let role_label = match message.role {
+            gwt_core::ai::MessageRole::User => "User",
+            gwt_core::ai::MessageRole::Assistant => "Assistant",
+        };
+        append_message_lines(&mut lines, role_label, &message.content);
+        lines.push(String::new());
+    }
+
+    if lines.last().map(|line| line.is_empty()).unwrap_or(false) {
+        lines.pop();
+    }
+
+    lines
+}
+
+fn append_message_lines(lines: &mut Vec<String>, role_label: &str, content: &str) {
+    let mut iter = content.lines();
+    if let Some(first) = iter.next() {
+        lines.push(format!("{}: {}", role_label, first));
+    } else {
+        return;
+    }
+    for line in iter {
+        lines.push(format!("  {}", line));
+    }
+}
+
+fn build_convert_session_entries<P: gwt_core::ai::SessionParser>(
+    parser: &P,
+    sessions: Vec<gwt_core::ai::SessionListEntry>,
+) -> Vec<ConvertSessionEntry> {
+    sessions
+        .into_iter()
+        .map(|entry| {
+            let parsed = parser.parse(&entry.session_id).ok();
+            let (first_user_message, display_message) = match parsed {
+                Some(session) => {
+                    let snippet = extract_first_user_message(&session)
+                        .map(|message| normalize_message_snippet(&message))
+                        .filter(|message| !message.is_empty());
+                    match snippet.as_deref() {
+                        Some(message) => (Some(message.to_string()), message.to_string()),
+                        None => (None, SESSION_NO_USER_MESSAGE.to_string()),
+                    }
+                }
+                None => (None, SESSION_UNAVAILABLE_MESSAGE.to_string()),
+            };
+
+            ConvertSessionEntry {
+                session_id: entry.session_id,
+                last_updated: entry.last_updated,
+                message_count: entry.message_count,
+                first_user_message,
+                display: format_convert_session_display(&display_message, entry.last_updated),
+            }
+        })
+        .collect()
+}
+
 fn wizard_popup_width(state: &WizardState, max_width: u16) -> u16 {
     const H_PADDING: u16 = 2;
     let min_width = 40u16.min(max_width);
@@ -2566,11 +2748,27 @@ fn wizard_popup_width(state: &WizardState, max_width: u16) -> u16 {
 fn wizard_required_content_width(state: &WizardState) -> usize {
     let mut max_line = 0usize;
     let esc_width = text_width(" [ESC] ");
-    max_line = max_line.max(text_width(wizard_title(state.step)) + esc_width + 2);
+    let title = if state.convert_preview_open {
+        " Session Preview "
+    } else {
+        wizard_title(state.step)
+    };
+    max_line = max_line.max(text_width(title) + esc_width + 2);
 
     let mut consider = |text: String| {
         max_line = max_line.max(text_width(&text));
     };
+
+    if state.convert_preview_open {
+        if let Some(ref error) = state.convert_preview_error {
+            consider(error.clone());
+        } else {
+            for line in &state.convert_preview_lines {
+                consider(line.clone());
+            }
+        }
+        return max_line;
+    }
 
     match state.step {
         WizardStep::QuickStart => {
@@ -2808,6 +3006,37 @@ fn render_convert_session_select_step(state: &WizardState, frame: &mut Frame, ar
 
     let list = List::new(items);
     frame.render_widget(list, list_area);
+}
+
+/// Render session preview for conversion
+fn render_convert_session_preview(state: &mut WizardState, frame: &mut Frame, area: Rect) {
+    state.convert_preview_view_height = area.height;
+
+    if let Some(ref error) = state.convert_preview_error {
+        let paragraph = Paragraph::new(error.as_str())
+            .style(Style::default().fg(Color::Red))
+            .wrap(Wrap { trim: true });
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let max_scroll = state
+        .convert_preview_lines
+        .len()
+        .saturating_sub(area.height as usize) as u16;
+    if state.convert_preview_scroll > max_scroll {
+        state.convert_preview_scroll = max_scroll;
+    }
+
+    let lines: Vec<Line> = state
+        .convert_preview_lines
+        .iter()
+        .map(|line| Line::from(line.as_str()))
+        .collect();
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((state.convert_preview_scroll, 0));
+    frame.render_widget(paragraph, area);
 }
 
 /// Render Quick Start step (FR-050, SPEC-f47db390)
@@ -3501,6 +3730,7 @@ fn render_skip_permissions_step(state: &WizardState, frame: &mut Frame, area: Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{TimeZone, Utc};
 
     #[test]
     fn test_wizard_open_for_branch() {
@@ -4242,6 +4472,63 @@ mod tests {
     // Session Convert Feature Tests
     // ==========================================================
 
+    #[test]
+    fn test_format_convert_session_display() {
+        let dt = Utc.with_ymd_and_hms(2026, 1, 29, 3, 4, 0).unwrap();
+        let display = format_convert_session_display("Start here", Some(dt));
+        assert_eq!(display, "Start here | updated 2026-01-29 03:04");
+    }
+
+    #[test]
+    fn test_extract_first_user_message() {
+        let session = gwt_core::ai::ParsedSession {
+            session_id: "s1".to_string(),
+            agent_type: gwt_core::ai::AgentType::CodexCli,
+            messages: vec![
+                gwt_core::ai::SessionMessage {
+                    role: gwt_core::ai::MessageRole::Assistant,
+                    content: "assistant".to_string(),
+                    timestamp: None,
+                },
+                gwt_core::ai::SessionMessage {
+                    role: gwt_core::ai::MessageRole::User,
+                    content: "user message".to_string(),
+                    timestamp: None,
+                },
+            ],
+            tool_executions: vec![],
+            started_at: None,
+            last_updated_at: None,
+            total_turns: 2,
+        };
+
+        let first = extract_first_user_message(&session);
+        assert_eq!(first, Some("user message".to_string()));
+    }
+
+    #[test]
+    fn test_build_preview_lines_limits_to_ten_messages() {
+        let mut messages = Vec::new();
+        for i in 0..12 {
+            messages.push(gwt_core::ai::SessionMessage {
+                role: if i % 2 == 0 {
+                    gwt_core::ai::MessageRole::User
+                } else {
+                    gwt_core::ai::MessageRole::Assistant
+                },
+                content: format!("msg-{}", i),
+                timestamp: None,
+            });
+        }
+
+        let lines = build_preview_lines("Codex", "2026-01-29 03:04", &messages);
+        let labeled_lines = lines
+            .iter()
+            .filter(|line| line.starts_with("User:") || line.starts_with("Assistant:"))
+            .count();
+        assert_eq!(labeled_lines, 10);
+    }
+
     /// Test ExecutionMode::Convert selection transitions to ConvertAgentSelect
     #[test]
     fn test_convert_mode_goes_to_agent_select() {
@@ -4353,12 +4640,14 @@ mod tests {
                 session_id: "session-1".to_string(),
                 last_updated: None,
                 message_count: 10,
+                first_user_message: None,
                 display: "session-1 (10 msgs)".to_string(),
             },
             ConvertSessionEntry {
                 session_id: "session-2".to_string(),
                 last_updated: None,
                 message_count: 5,
+                first_user_message: None,
                 display: "session-2 (5 msgs)".to_string(),
             },
         ];
@@ -4380,12 +4669,14 @@ mod tests {
                 session_id: "session-abc".to_string(),
                 last_updated: None,
                 message_count: 15,
+                first_user_message: None,
                 display: "session-abc (15 msgs)".to_string(),
             },
             ConvertSessionEntry {
                 session_id: "session-xyz".to_string(),
                 last_updated: None,
                 message_count: 8,
+                first_user_message: None,
                 display: "session-xyz (8 msgs)".to_string(),
             },
         ];
@@ -4474,18 +4765,21 @@ mod tests {
                 session_id: "s1".to_string(),
                 last_updated: None,
                 message_count: 5,
+                first_user_message: None,
                 display: "s1".to_string(),
             },
             ConvertSessionEntry {
                 session_id: "s2".to_string(),
                 last_updated: None,
                 message_count: 10,
+                first_user_message: None,
                 display: "s2".to_string(),
             },
             ConvertSessionEntry {
                 session_id: "s3".to_string(),
                 last_updated: None,
                 message_count: 15,
+                first_user_message: None,
                 display: "s3".to_string(),
             },
         ];
@@ -4538,12 +4832,14 @@ mod tests {
                 session_id: "first".to_string(),
                 last_updated: None,
                 message_count: 5,
+                first_user_message: None,
                 display: "first".to_string(),
             },
             ConvertSessionEntry {
                 session_id: "second".to_string(),
                 last_updated: None,
                 message_count: 10,
+                first_user_message: None,
                 display: "second".to_string(),
             },
         ];

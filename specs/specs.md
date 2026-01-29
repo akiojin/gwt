@@ -1,13 +1,14 @@
 <!-- markdownlint-disable MD013 -->
 # 仕様一覧
 
-**最終更新**: 2026-01-26
+**最終更新**: 2026-01-29
 
 このファイルは `.specify/scripts/bash/update-specs-index.sh` により自動生成されました。
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
-| [SPEC-71f2742d](SPEC-71f2742d/spec.md) | 機能仕様: [機能名] | [日付] |
+| [SPEC-330430b9](SPEC-330430b9/spec.md) | 機能仕様: セッション変換一覧の内容表示とSpaceプレビュー | 2026-01-29 |
+| [SPEC-fdebd681](SPEC-fdebd681/spec.md) | Codex collaboration_modes Support | - |
 | [SPEC-f59c553d](SPEC-f59c553d/spec.md) | 機能仕様: npm postinstall ダウンロード安定化 | 2026-01-26 |
 | [SPEC-f47db390](SPEC-f47db390/spec.md) | 機能仕様: セッションID永続化とContinue/Resume強化 | 2025-12-06 |
 | [SPEC-e66acf66](SPEC-e66acf66/spec.md) | 機能仕様: エラーポップアップ・ログ出力システム | 2026-01-22 |
@@ -28,6 +29,7 @@
 | [SPEC-8adfd99e](SPEC-8adfd99e/spec.md) | 機能仕様: Web UI 環境変数編集機能 | 2025-11-11 |
 | [SPEC-861d8cdf](SPEC-861d8cdf/spec.md) | 機能仕様: エージェント状態の可視化 | 2026-01-20 |
 | [SPEC-77b1bc70](SPEC-77b1bc70/spec.md) | 機能仕様: リリースフロー要件の明文化とリリース開始時 main→develop 同期 | 2026-01-16 |
+| [SPEC-71f2742d](SPEC-71f2742d/spec.md) | 機能仕様: カスタムコーディングエージェント登録機能 | 2026-01-26 |
 | [SPEC-6408df0c](SPEC-6408df0c/spec.md) | 機能仕様: HuskyでCIと同等のLintを実行 | 2026-01-19 |
 | [SPEC-62c129ca](SPEC-62c129ca/spec.md) | SPEC-62c129ca: ブランチリストのマウスクリック動作改善 | - |
 | [SPEC-5e0c1c49](SPEC-5e0c1c49/spec.md) | 機能仕様: Codex CLI gpt-5.1 デフォルト更新 | 2025-11-14 |

@@ -545,6 +545,12 @@ pub enum Message {
     WizardConfirm,
     /// Wizard: go back or close
     WizardBack,
+    /// Wizard: toggle session preview
+    WizardTogglePreview,
+    /// Wizard: scroll preview up
+    WizardPreviewScrollUp,
+    /// Wizard: scroll preview down
+    WizardPreviewScrollDown,
     /// Copy selected log to clipboard
     CopyLogToClipboard,
     /// FR-095: Hide active agent pane (ESC key in branch list)
@@ -4322,6 +4328,21 @@ impl Model {
                     self.wizard.prev_step();
                 }
             }
+            Message::WizardTogglePreview => {
+                if self.wizard.visible {
+                    self.wizard.toggle_convert_preview();
+                }
+            }
+            Message::WizardPreviewScrollUp => {
+                if self.wizard.visible {
+                    self.wizard.scroll_convert_preview(-1);
+                }
+            }
+            Message::WizardPreviewScrollDown => {
+                if self.wizard.visible {
+                    self.wizard.scroll_convert_preview(1);
+                }
+            }
         }
     }
 
@@ -5531,30 +5552,45 @@ impl Model {
 
         // Wizard has priority when visible
         if self.wizard.visible {
-            match key.code {
-                KeyCode::Esc => Some(Message::WizardBack),
-                KeyCode::Enter if is_key_press => Some(Message::WizardConfirm),
-                KeyCode::Up if is_key_press => Some(Message::WizardPrev),
-                KeyCode::Down if is_key_press => Some(Message::WizardNext),
-                KeyCode::Backspace => {
-                    self.wizard.delete_char();
-                    None
+            if self.wizard.convert_preview_open {
+                match key.code {
+                    KeyCode::Esc => Some(Message::WizardTogglePreview),
+                    KeyCode::Char(' ') if is_key_press => Some(Message::WizardTogglePreview),
+                    KeyCode::Up if is_key_press => Some(Message::WizardPreviewScrollUp),
+                    KeyCode::Down if is_key_press => Some(Message::WizardPreviewScrollDown),
+                    _ => None,
                 }
-                KeyCode::Left => {
-                    self.wizard.cursor_left();
-                    None
+            } else {
+                match key.code {
+                    KeyCode::Esc => Some(Message::WizardBack),
+                    KeyCode::Enter if is_key_press => Some(Message::WizardConfirm),
+                    KeyCode::Up if is_key_press => Some(Message::WizardPrev),
+                    KeyCode::Down if is_key_press => Some(Message::WizardNext),
+                    KeyCode::Char(' ')
+                        if is_key_press && self.wizard.step == WizardStep::ConvertSessionSelect =>
+                    {
+                        Some(Message::WizardTogglePreview)
+                    }
+                    KeyCode::Backspace => {
+                        self.wizard.delete_char();
+                        None
+                    }
+                    KeyCode::Left => {
+                        self.wizard.cursor_left();
+                        None
+                    }
+                    KeyCode::Right => {
+                        self.wizard.cursor_right();
+                        None
+                    }
+                    KeyCode::Char(c)
+                        if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                    {
+                        self.wizard.insert_char(c);
+                        None
+                    }
+                    _ => None,
                 }
-                KeyCode::Right => {
-                    self.wizard.cursor_right();
-                    None
-                }
-                KeyCode::Char(c)
-                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
-                {
-                    self.wizard.insert_char(c);
-                    None
-                }
-                _ => None,
             }
         } else if self.text_input_active() {
             self.handle_text_input_key(key, is_key_press)
