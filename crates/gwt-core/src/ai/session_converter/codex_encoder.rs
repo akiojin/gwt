@@ -36,12 +36,36 @@ impl CodexEncoder {
     }
 
     /// Creates the metadata header for a Codex session file.
-    fn create_header(&self, session_id: &str, worktree_path: &Path) -> Value {
+    fn create_header(
+        &self,
+        session_id: &str,
+        worktree_path: &Path,
+        timestamp: &str,
+    ) -> Value {
+        let mut payload = serde_json::Map::new();
+
+        payload.insert("id".to_string(), json!(session_id));
+        payload.insert("timestamp".to_string(), json!(timestamp));
+        payload.insert(
+            "cwd".to_string(),
+            json!(worktree_path.to_string_lossy().to_string()),
+        );
+
+        payload.insert("originator".to_string(), json!("gwt"));
+        payload.insert("cli_version".to_string(), json!("unknown"));
+        payload.insert("source".to_string(), json!("cli"));
+        payload.insert("model_provider".to_string(), json!("openai"));
+        payload.insert("base_instructions".to_string(), json!({ "text": "" }));
+        payload.insert("instructions".to_string(), json!(""));
+
+        if let Some(template) = self.load_template_payload() {
+            apply_template_fields(&mut payload, &template);
+        }
+
         json!({
-            "payload": {
-                "id": session_id,
-                "cwd": worktree_path.to_string_lossy()
-            }
+            "timestamp": timestamp,
+            "type": "session_meta",
+            "payload": payload
         })
     }
 
@@ -57,13 +81,23 @@ impl CodexEncoder {
             MessageRole::Assistant => "assistant",
         };
 
-        let ts = timestamp.unwrap_or_else(Utc::now).timestamp_millis();
+        let ts = format_codex_timestamp(timestamp.unwrap_or_else(Utc::now));
+        let content_type = match role {
+            MessageRole::User => "input_text",
+            MessageRole::Assistant => "output_text",
+        };
 
         json!({
-            "type": "message",
-            "role": role_str,
-            "content": content,
-            "timestamp": ts
+            "timestamp": ts,
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": role_str,
+                "content": [{
+                    "type": content_type,
+                    "text": content
+                }]
+            }
         })
     }
 
@@ -113,8 +147,10 @@ impl SessionEncoder for CodexEncoder {
         let file = File::create(&output_path)?;
         let mut writer = BufWriter::new(file);
 
+        let header_timestamp = format_codex_timestamp(Utc::now());
+
         // Write the header line first
-        let header = self.create_header(&new_session_id, worktree_path);
+        let header = self.create_header(&new_session_id, worktree_path, &header_timestamp);
         let header_line = serde_json::to_string(&header)?;
         writeln!(writer, "{}", header_line)?;
 
@@ -151,6 +187,86 @@ impl SessionEncoder for CodexEncoder {
             .join(format!("{:02}", now.month()))
             .join(format!("{:02}", now.day()))
             .join(self.generate_filename(session_id))
+    }
+}
+
+fn format_codex_timestamp(timestamp: chrono::DateTime<Utc>) -> String {
+    timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+}
+
+fn apply_template_fields(payload: &mut serde_json::Map<String, Value>, template: &Value) {
+    let Some(template_obj) = template.as_object() else {
+        return;
+    };
+
+    if let Some(originator) = template_obj.get("originator").and_then(|v| v.as_str()) {
+        payload.insert("originator".to_string(), json!(originator));
+    }
+    if let Some(cli_version) = template_obj.get("cli_version").and_then(|v| v.as_str()) {
+        payload.insert("cli_version".to_string(), json!(cli_version));
+    }
+    if let Some(source) = template_obj.get("source").and_then(|v| v.as_str()) {
+        payload.insert("source".to_string(), json!(source));
+    }
+    if let Some(provider) = template_obj.get("model_provider").and_then(|v| v.as_str()) {
+        payload.insert("model_provider".to_string(), json!(provider));
+    }
+    if let Some(base_instructions) = template_obj.get("base_instructions") {
+        payload.insert("base_instructions".to_string(), base_instructions.clone());
+    }
+    if let Some(instructions) = template_obj.get("instructions") {
+        payload.insert("instructions".to_string(), instructions.clone());
+    }
+    if let Some(git) = template_obj.get("git") {
+        payload.insert("git".to_string(), git.clone());
+    }
+}
+
+impl CodexEncoder {
+    fn load_template_payload(&self) -> Option<Value> {
+        let base_dir = self.base_dir();
+        if !base_dir.exists() {
+            return None;
+        }
+
+        let mut stack = vec![base_dir];
+        let mut latest: Option<(std::time::SystemTime, PathBuf)> = None;
+
+        while let Some(dir) = stack.pop() {
+            let entries = match fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let metadata = entry.metadata().ok()?;
+                if metadata.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if !metadata.is_file() {
+                    continue;
+                }
+                let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+                if ext != "jsonl" && ext != "json" {
+                    continue;
+                }
+                let modified = metadata.modified().ok()?;
+                let should_replace = latest
+                    .as_ref()
+                    .map(|(prev, _)| modified > *prev)
+                    .unwrap_or(true);
+                if should_replace {
+                    latest = Some((modified, path));
+                }
+            }
+        }
+
+        let (_, path) = latest?;
+        let content = fs::read_to_string(path).ok()?;
+        let first_line = content.lines().find(|line| !line.trim().is_empty())?;
+        let value: Value = serde_json::from_str(first_line).ok()?;
+        value.get("payload").cloned()
     }
 }
 
@@ -215,18 +331,20 @@ mod tests {
         // Read and verify the output file
         let content = fs::read_to_string(&result.output_path).unwrap();
         let lines: Vec<&str> = content.lines().collect();
-        // Header + 2 messages
+        // Session meta + 2 messages
         assert_eq!(lines.len(), 3);
 
         // Verify header line
         let header: Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(header["type"], "session_meta");
         assert!(header["payload"]["id"].is_string());
         assert!(header["payload"]["cwd"].is_string());
 
         // Verify first message
         let first_msg: Value = serde_json::from_str(lines[1]).unwrap();
-        assert_eq!(first_msg["type"], "message");
-        assert_eq!(first_msg["role"], "user");
+        assert_eq!(first_msg["type"], "response_item");
+        assert_eq!(first_msg["payload"]["type"], "message");
+        assert_eq!(first_msg["payload"]["role"], "user");
     }
 
     #[test]
