@@ -51,8 +51,8 @@ impl CodexEncoder {
             json!(worktree_path.to_string_lossy().to_string()),
         );
 
-        payload.insert("originator".to_string(), json!("gwt"));
-        payload.insert("cli_version".to_string(), json!("unknown"));
+        payload.insert("originator".to_string(), json!("codex_cli_rs"));
+        payload.insert("cli_version".to_string(), json!("0.0.0"));
         payload.insert("source".to_string(), json!("cli"));
         payload.insert("model_provider".to_string(), json!("openai"));
         payload.insert("base_instructions".to_string(), json!({ "text": "" }));
@@ -97,6 +97,18 @@ impl CodexEncoder {
                     "type": content_type,
                     "text": content
                 }]
+            }
+        })
+    }
+
+    fn user_event_to_jsonl(&self, content: &str, timestamp: &str) -> Value {
+        json!({
+            "timestamp": timestamp,
+            "type": "event_msg",
+            "payload": {
+                "type": "user_message",
+                "message": content,
+                "images": []
             }
         })
     }
@@ -161,6 +173,13 @@ impl SessionEncoder for CodexEncoder {
             let line = serde_json::to_string(&entry)?;
             writeln!(writer, "{}", line)?;
             converted_count += 1;
+
+            if matches!(message.role, MessageRole::User) {
+                let ts = format_codex_timestamp(message.timestamp.unwrap_or_else(Utc::now));
+                let event = self.user_event_to_jsonl(&message.content, &ts);
+                let event_line = serde_json::to_string(&event)?;
+                writeln!(writer, "{}", event_line)?;
+            }
         }
 
         // Calculate dropped messages
@@ -230,7 +249,7 @@ impl CodexEncoder {
         }
 
         let mut stack = vec![base_dir];
-        let mut latest: Option<(std::time::SystemTime, PathBuf)> = None;
+        let mut latest: Option<(std::time::SystemTime, Value)> = None;
 
         while let Some(dir) = stack.pop() {
             let entries = match fs::read_dir(&dir) {
@@ -251,22 +270,62 @@ impl CodexEncoder {
                 if ext != "jsonl" && ext != "json" {
                     continue;
                 }
-                let modified = metadata.modified().ok()?;
+                let modified = match metadata.modified() {
+                    Ok(modified) => modified,
+                    Err(_) => continue,
+                };
+                let content = match fs::read_to_string(&path) {
+                    Ok(content) => content,
+                    Err(_) => continue,
+                };
+                let line = match content.lines().find(|line| !line.trim().is_empty()) {
+                    Some(line) => line,
+                    None => continue,
+                };
+                let value: Value = match serde_json::from_str(line) {
+                    Ok(value) => value,
+                    Err(_) => continue,
+                };
+                if value.get("type").and_then(|v| v.as_str()) != Some("session_meta") {
+                    continue;
+                }
+                let payload = match value.get("payload") {
+                    Some(payload) => payload.clone(),
+                    None => continue,
+                };
+                let originator = payload
+                    .get("originator")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if originator == "gwt" {
+                    continue;
+                }
+                let instructions = payload
+                    .get("instructions")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
+                let base_text = payload
+                    .get("base_instructions")
+                    .and_then(|v| v.get("text"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
+                if instructions.is_empty() && base_text.is_empty() {
+                    continue;
+                }
+
                 let should_replace = latest
                     .as_ref()
                     .map(|(prev, _)| modified > *prev)
                     .unwrap_or(true);
                 if should_replace {
-                    latest = Some((modified, path));
+                    latest = Some((modified, payload));
                 }
             }
         }
 
-        let (_, path) = latest?;
-        let content = fs::read_to_string(path).ok()?;
-        let first_line = content.lines().find(|line| !line.trim().is_empty())?;
-        let value: Value = serde_json::from_str(first_line).ok()?;
-        value.get("payload").cloned()
+        latest.map(|(_, payload)| payload)
     }
 }
 
@@ -331,8 +390,8 @@ mod tests {
         // Read and verify the output file
         let content = fs::read_to_string(&result.output_path).unwrap();
         let lines: Vec<&str> = content.lines().collect();
-        // Session meta + 2 messages
-        assert_eq!(lines.len(), 3);
+        // Session meta + 2 messages + user event
+        assert_eq!(lines.len(), 4);
 
         // Verify header line
         let header: Value = serde_json::from_str(lines[0]).unwrap();
@@ -345,6 +404,14 @@ mod tests {
         assert_eq!(first_msg["type"], "response_item");
         assert_eq!(first_msg["payload"]["type"], "message");
         assert_eq!(first_msg["payload"]["role"], "user");
+
+        let event_msg: Value = serde_json::from_str(lines[2]).unwrap();
+        assert_eq!(event_msg["type"], "event_msg");
+        assert_eq!(event_msg["payload"]["type"], "user_message");
+
+        let second_msg: Value = serde_json::from_str(lines[3]).unwrap();
+        assert_eq!(second_msg["type"], "response_item");
+        assert_eq!(second_msg["payload"]["role"], "assistant");
     }
 
     #[test]
