@@ -10,12 +10,15 @@
 
 use crate::tui::components::{centered_rect, Spinner};
 use gwt_core::agent::codex::supports_collaboration_modes;
-use gwt_core::ai::AgentType;
+use gwt_core::ai::{AgentType, SessionParser};
 use gwt_core::config::{CustomCodingAgent, ToolsConfig};
 use gwt_core::git::GitHubIssue;
 use ratatui::{prelude::*, widgets::*};
 use serde::Deserialize;
-use std::collections::HashMap;
+use serde_json::Value;
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -189,6 +192,10 @@ pub struct ConvertSessionEntry {
     pub message_count: usize,
     /// First user message extracted from the session (if available)
     pub first_user_message: Option<String>,
+    /// Whether session cwd matches current worktree
+    pub cwd_match: bool,
+    /// Whether session has a conversion pair for the target agent
+    pub has_conversion_pair: bool,
     /// Display text (start message + date)
     pub display: String,
 }
@@ -1196,11 +1203,6 @@ impl WizardState {
 
     /// Load sessions for the selected source agent
     pub fn load_sessions_for_agent(&mut self) {
-        use gwt_core::ai::{
-            ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, OpenCodeSessionParser,
-            SessionParser,
-        };
-
         self.convert_sessions.clear();
         self.convert_session_index = 0;
 
@@ -1210,48 +1212,74 @@ impl WizardState {
 
         let source_agent = &self.convert_source_agents[self.convert_agent_index];
         let worktree_path = self.worktree_path.as_deref();
+        let target_agent = match self.agent {
+            CodingAgent::ClaudeCode => AgentType::ClaudeCode,
+            CodingAgent::CodexCli => AgentType::CodexCli,
+            CodingAgent::GeminiCli => AgentType::GeminiCli,
+            CodingAgent::OpenCode => AgentType::OpenCode,
+        };
+        let conversion_pairs =
+            collect_conversion_pairs_for_target(source_agent.agent, target_agent);
 
         let sessions = match source_agent.agent {
             CodingAgent::ClaudeCode => {
-                if let Some(parser) = ClaudeSessionParser::with_default_home() {
+                if let Some(parser) = gwt_core::ai::ClaudeSessionParser::with_default_home() {
                     let sessions = parser.list_sessions(worktree_path);
-                    build_convert_session_entries(&parser, sessions)
+                    build_convert_session_entries(
+                        &parser,
+                        sessions,
+                        worktree_path,
+                        &conversion_pairs,
+                    )
                 } else {
                     vec![]
                 }
             }
             CodingAgent::CodexCli => {
-                if let Some(parser) = CodexSessionParser::with_default_home() {
+                if let Some(parser) = gwt_core::ai::CodexSessionParser::with_default_home() {
                     let sessions = parser.list_sessions(worktree_path);
-                    build_convert_session_entries(&parser, sessions)
+                    build_convert_session_entries(
+                        &parser,
+                        sessions,
+                        worktree_path,
+                        &conversion_pairs,
+                    )
                 } else {
                     vec![]
                 }
             }
             CodingAgent::GeminiCli => {
-                if let Some(parser) = GeminiSessionParser::with_default_home() {
+                if let Some(parser) = gwt_core::ai::GeminiSessionParser::with_default_home() {
                     let sessions = parser.list_sessions(worktree_path);
-                    build_convert_session_entries(&parser, sessions)
+                    build_convert_session_entries(
+                        &parser,
+                        sessions,
+                        worktree_path,
+                        &conversion_pairs,
+                    )
                 } else {
                     vec![]
                 }
             }
             CodingAgent::OpenCode => {
-                if let Some(parser) = OpenCodeSessionParser::with_default_home() {
+                if let Some(parser) = gwt_core::ai::OpenCodeSessionParser::with_default_home() {
                     let sessions = parser.list_sessions(worktree_path);
-                    build_convert_session_entries(&parser, sessions)
+                    build_convert_session_entries(
+                        &parser,
+                        sessions,
+                        worktree_path,
+                        &conversion_pairs,
+                    )
                 } else {
                     vec![]
                 }
             }
         };
 
-        // Convert to ConvertSessionEntry and sort by newest first
+        // Convert to ConvertSessionEntry and sort by priority
         self.convert_sessions = sessions;
 
-        // Sort by newest first
-        self.convert_sessions
-            .sort_by(|a, b| b.last_updated.cmp(&a.last_updated));
+        sort_convert_sessions(&mut self.convert_sessions);
     }
 
     /// Get selected source agent for conversion
@@ -2756,6 +2784,96 @@ fn extract_first_user_message(
         .map(|message| message.content.clone())
 }
 
+fn coding_agent_to_agent_type(agent: CodingAgent) -> AgentType {
+    match agent {
+        CodingAgent::ClaudeCode => AgentType::ClaudeCode,
+        CodingAgent::CodexCli => AgentType::CodexCli,
+        CodingAgent::GeminiCli => AgentType::GeminiCli,
+        CodingAgent::OpenCode => AgentType::OpenCode,
+    }
+}
+
+fn session_parser_for_agent(
+    agent: AgentType,
+) -> Option<Box<dyn gwt_core::ai::SessionParser>> {
+    match agent {
+        AgentType::ClaudeCode => gwt_core::ai::ClaudeSessionParser::with_default_home()
+            .map(|parser| Box::new(parser) as Box<dyn gwt_core::ai::SessionParser>),
+        AgentType::CodexCli => gwt_core::ai::CodexSessionParser::with_default_home()
+            .map(|parser| Box::new(parser) as Box<dyn gwt_core::ai::SessionParser>),
+        AgentType::GeminiCli => gwt_core::ai::GeminiSessionParser::with_default_home()
+            .map(|parser| Box::new(parser) as Box<dyn gwt_core::ai::SessionParser>),
+        AgentType::OpenCode => gwt_core::ai::OpenCodeSessionParser::with_default_home()
+            .map(|parser| Box::new(parser) as Box<dyn gwt_core::ai::SessionParser>),
+    }
+}
+
+fn collect_conversion_pairs_for_target(
+    source_agent: CodingAgent,
+    target_agent: AgentType,
+) -> HashSet<String> {
+    let mut pairs = HashSet::new();
+    let store = match gwt_core::ai::ConversionMetadataStore::new() {
+        Ok(store) => store,
+        Err(_) => return pairs,
+    };
+    let Some(target_parser) = session_parser_for_agent(target_agent) else {
+        return pairs;
+    };
+    let source_agent_name = coding_agent_to_agent_type(source_agent).display_name();
+    let ids = store.list().unwrap_or_default();
+
+    for new_session_id in ids {
+        if !target_parser.session_exists(&new_session_id) {
+            continue;
+        }
+        let metadata = match store.load(&new_session_id) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        if metadata.converted_from_agent == source_agent_name {
+            pairs.insert(metadata.converted_from_session_id);
+        }
+    }
+
+    pairs
+}
+
+fn extract_session_cwd_from_file(path: &Path) -> Option<String> {
+    let file = File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    for (idx, line) in reader.lines().enumerate() {
+        if idx > 60 {
+            break;
+        }
+        let line = line.ok()?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: Value = match serde_json::from_str(trimmed) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if let Some(cwd) = value.get("cwd").and_then(|v| v.as_str()) {
+            return Some(cwd.to_string());
+        }
+        if let Some(payload) = value.get("payload") {
+            if let Some(cwd) = payload.get("cwd").and_then(|v| v.as_str()) {
+                return Some(cwd.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn session_cwd_matches(path: &Path, worktree_path: &Path) -> bool {
+    let worktree = worktree_path.to_string_lossy();
+    extract_session_cwd_from_file(path)
+        .map(|cwd| cwd.contains(worktree.as_ref()))
+        .unwrap_or(false)
+}
+
 fn build_preview_lines(
     agent_label: &str,
     updated: &str,
@@ -2797,6 +2915,8 @@ fn append_message_lines(lines: &mut Vec<String>, role_label: &str, content: &str
 fn build_convert_session_entries<P: gwt_core::ai::SessionParser>(
     parser: &P,
     sessions: Vec<gwt_core::ai::SessionListEntry>,
+    worktree_path: Option<&Path>,
+    conversion_pairs: &HashSet<String>,
 ) -> Vec<ConvertSessionEntry> {
     sessions
         .into_iter()
@@ -2815,15 +2935,32 @@ fn build_convert_session_entries<P: gwt_core::ai::SessionParser>(
                 None => (None, SESSION_UNAVAILABLE_MESSAGE.to_string()),
             };
 
+            let has_conversion_pair = conversion_pairs.contains(&entry.session_id);
+            let cwd_match = worktree_path
+                .map(|wt_path| session_cwd_matches(&entry.file_path, wt_path))
+                .unwrap_or(false);
+
             ConvertSessionEntry {
                 session_id: entry.session_id,
                 last_updated: entry.last_updated,
                 message_count: entry.message_count,
                 first_user_message,
+                cwd_match,
+                has_conversion_pair,
                 display: format_convert_session_display(&display_message, entry.last_updated),
             }
         })
         .collect()
+}
+
+fn sort_convert_sessions(entries: &mut Vec<ConvertSessionEntry>) {
+    entries.sort_by(|a, b| {
+        b.cwd_match
+            .cmp(&a.cwd_match)
+            .then_with(|| b.has_conversion_pair.cmp(&a.has_conversion_pair))
+            .then_with(|| b.last_updated.cmp(&a.last_updated))
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
 }
 
 fn wizard_popup_width(state: &WizardState, max_width: u16) -> u16 {
@@ -3827,7 +3964,7 @@ fn render_skip_permissions_step(state: &WizardState, frame: &mut Frame, area: Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{TimeZone, Utc};
+    use chrono::{Duration, TimeZone, Utc};
     use std::path::PathBuf;
 
     #[test]
@@ -4649,6 +4786,8 @@ mod tests {
             last_updated: None,
             message_count: 1,
             first_user_message: None,
+            cwd_match: false,
+            has_conversion_pair: false,
             display: "session-1".to_string(),
         }];
 
@@ -4770,6 +4909,8 @@ mod tests {
                 last_updated: None,
                 message_count: 10,
                 first_user_message: None,
+                cwd_match: false,
+                has_conversion_pair: false,
                 display: "session-1 (10 msgs)".to_string(),
             },
             ConvertSessionEntry {
@@ -4777,6 +4918,8 @@ mod tests {
                 last_updated: None,
                 message_count: 5,
                 first_user_message: None,
+                cwd_match: false,
+                has_conversion_pair: false,
                 display: "session-2 (5 msgs)".to_string(),
             },
         ];
@@ -4799,6 +4942,8 @@ mod tests {
                 last_updated: None,
                 message_count: 15,
                 first_user_message: None,
+                cwd_match: false,
+                has_conversion_pair: false,
                 display: "session-abc (15 msgs)".to_string(),
             },
             ConvertSessionEntry {
@@ -4806,6 +4951,8 @@ mod tests {
                 last_updated: None,
                 message_count: 8,
                 first_user_message: None,
+                cwd_match: false,
+                has_conversion_pair: false,
                 display: "session-xyz (8 msgs)".to_string(),
             },
         ];
@@ -4895,6 +5042,8 @@ mod tests {
                 last_updated: None,
                 message_count: 5,
                 first_user_message: None,
+                cwd_match: false,
+                has_conversion_pair: false,
                 display: "s1".to_string(),
             },
             ConvertSessionEntry {
@@ -4902,6 +5051,8 @@ mod tests {
                 last_updated: None,
                 message_count: 10,
                 first_user_message: None,
+                cwd_match: false,
+                has_conversion_pair: false,
                 display: "s2".to_string(),
             },
             ConvertSessionEntry {
@@ -4909,6 +5060,8 @@ mod tests {
                 last_updated: None,
                 message_count: 15,
                 first_user_message: None,
+                cwd_match: false,
+                has_conversion_pair: false,
                 display: "s3".to_string(),
             },
         ];
@@ -4925,6 +5078,48 @@ mod tests {
 
         state.select_prev();
         assert_eq!(state.convert_session_index, 1);
+    }
+
+    #[test]
+    fn test_convert_session_sort_prioritizes_cwd_then_conversion() {
+        let now = Utc::now();
+        let older = now - Duration::minutes(10);
+
+        let mut sessions = vec![
+            ConvertSessionEntry {
+                session_id: "pair".to_string(),
+                last_updated: Some(now),
+                message_count: 0,
+                first_user_message: None,
+                cwd_match: false,
+                has_conversion_pair: true,
+                display: "pair".to_string(),
+            },
+            ConvertSessionEntry {
+                session_id: "cwd".to_string(),
+                last_updated: Some(older),
+                message_count: 0,
+                first_user_message: None,
+                cwd_match: true,
+                has_conversion_pair: false,
+                display: "cwd".to_string(),
+            },
+            ConvertSessionEntry {
+                session_id: "recent".to_string(),
+                last_updated: Some(now),
+                message_count: 0,
+                first_user_message: None,
+                cwd_match: false,
+                has_conversion_pair: false,
+                display: "recent".to_string(),
+            },
+        ];
+
+        sort_convert_sessions(&mut sessions);
+
+        assert_eq!(sessions[0].session_id, "cwd");
+        assert_eq!(sessions[1].session_id, "pair");
+        assert_eq!(sessions[2].session_id, "recent");
     }
 
     /// Test selected_convert_source_agent returns correct agent
@@ -4962,6 +5157,8 @@ mod tests {
                 last_updated: None,
                 message_count: 5,
                 first_user_message: None,
+                cwd_match: false,
+                has_conversion_pair: false,
                 display: "first".to_string(),
             },
             ConvertSessionEntry {
@@ -4969,6 +5166,8 @@ mod tests {
                 last_updated: None,
                 message_count: 10,
                 first_user_message: None,
+                cwd_match: false,
+                has_conversion_pair: false,
                 display: "second".to_string(),
             },
         ];

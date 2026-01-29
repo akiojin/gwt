@@ -2358,6 +2358,11 @@ impl Model {
             return;
         };
         let branch_name = branch.name.clone();
+        let worktree_path = branch
+            .worktree_path
+            .as_ref()
+            .map(PathBuf::from)
+            .or_else(|| Some(self.repo_root.clone()));
 
         // Check if agent is running for this branch
         let running_pane_idx = self
@@ -2384,6 +2389,7 @@ impl Model {
             .collect();
         self.wizard
             .open_for_branch(&branch_name, history, running_pane_idx);
+        self.wizard.worktree_path = worktree_path;
     }
 
     fn handle_branch_list_mouse(&mut self, mouse: MouseEvent) {
@@ -4368,6 +4374,11 @@ impl Model {
                 // Always open wizard regardless of worktree status (matches TypeScript behavior)
                 if let Some(branch) = self.branch_list.selected_branch() {
                     let branch_name = branch.name.clone();
+                    let worktree_path = branch
+                        .worktree_path
+                        .as_ref()
+                        .map(PathBuf::from)
+                        .or_else(|| Some(self.repo_root.clone()));
                     // Check if agent is running for this branch
                     let running_pane_idx = self
                         .pane_list
@@ -4391,6 +4402,7 @@ impl Model {
                         .collect();
                     self.wizard
                         .open_for_branch(&branch_name, history, running_pane_idx);
+                    self.wizard.worktree_path = worktree_path;
                 } else {
                     self.status_message = Some("No branch selected".to_string());
                     self.status_message_time = Some(Instant::now());
@@ -4399,6 +4411,7 @@ impl Model {
             Message::OpenWizardNewBranch => {
                 // Open wizard for new branch
                 self.wizard.open_for_new_branch();
+                self.wizard.worktree_path = Some(self.repo_root.clone());
             }
             Message::WizardNext => {
                 if self.wizard.visible {
