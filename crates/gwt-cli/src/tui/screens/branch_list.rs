@@ -1766,6 +1766,7 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect, has_f
     // FR-031b: Pass spinner_frame for safety check pending indicator
     let spinner_frame = state.spinner_frame;
     let cleanup_active_branch = state.cleanup_active_branch();
+    let cleanup_target_branches = &state.cleanup_target_branches;
     let mut items: Vec<ListItem> = state
         .visible_filtered_indices(visible_height)
         .iter()
@@ -1776,12 +1777,16 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect, has_f
             let is_cleanup_active = cleanup_active_branch
                 .map(|name| name == branch.name)
                 .unwrap_or(false);
+            // FR-013: Check if branch is a cleanup target
+            let is_cleanup_target =
+                state.cleanup_in_progress && cleanup_target_branches.contains(&branch.name);
             render_branch_row(
                 branch,
                 state.offset + i == state.selected,
                 &state.selected_branches,
                 spinner_frame,
                 is_cleanup_active,
+                is_cleanup_target,
                 running_agent,
                 inner_area.width,
             )
@@ -1814,6 +1819,7 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect, has_f
 /// FR-070: Tool display format: ToolName@X.Y.Z
 /// FR-031b: Show spinner for safety check pending branches
 /// FR-011f: Show spinner in safety icon while cleanup is running
+/// FR-013: Show DarkGray background for cleanup target branches
 /// FR-020~024: Running agent info displayed on right side (right-aligned)
 fn render_branch_row(
     branch: &BranchItem,
@@ -1821,6 +1827,7 @@ fn render_branch_row(
     selected_set: &HashSet<String>,
     spinner_frame: usize,
     cleanup_active: bool,
+    is_cleanup_target: bool,
     running_agent: Option<&AgentPane>,
     width: u16,
 ) -> ListItem<'static> {
@@ -1972,8 +1979,11 @@ fn render_branch_row(
     }
 
     // FR-018: Selected branch shown with cyan background
+    // FR-013: Cleanup target branches shown with DarkGray background
     let style = if is_selected {
         Style::default().bg(Color::Cyan).fg(Color::Black)
+    } else if is_cleanup_target {
+        Style::default().bg(Color::DarkGray)
     } else {
         Style::default()
     };
@@ -3061,6 +3071,113 @@ mod tests {
             }
         }
         assert!(found, "cleanup spinner should appear in safety icon column");
+    }
+
+    /// FR-013: Cleanup target branches should have DarkGray background
+    #[test]
+    fn test_cleanup_target_branch_has_gray_background() {
+        let branches = vec![
+            BranchItem {
+                name: "normal-branch".to_string(),
+                branch_type: BranchType::Local,
+                is_current: false,
+                has_worktree: false,
+                worktree_path: None,
+                worktree_status: WorktreeStatus::None,
+                has_changes: false,
+                has_unpushed: false,
+                divergence: DivergenceStatus::UpToDate,
+                has_remote_counterpart: true,
+                remote_name: None,
+                safe_to_cleanup: Some(true),
+                safety_status: SafetyStatus::Safe,
+                is_unmerged: false,
+                last_commit_timestamp: None,
+                last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
+                is_selected: false,
+                pr_title: None,
+                pr_number: None,
+                pr_url: None,
+                is_gone: false,
+            },
+            BranchItem {
+                name: "cleanup-target".to_string(),
+                branch_type: BranchType::Local,
+                is_current: false,
+                has_worktree: false,
+                worktree_path: None,
+                worktree_status: WorktreeStatus::None,
+                has_changes: false,
+                has_unpushed: false,
+                divergence: DivergenceStatus::UpToDate,
+                has_remote_counterpart: true,
+                remote_name: None,
+                safe_to_cleanup: Some(true),
+                safety_status: SafetyStatus::Safe,
+                is_unmerged: false,
+                last_commit_timestamp: None,
+                last_tool_usage: None,
+                last_tool_id: None,
+                last_session_id: None,
+                is_selected: false,
+                pr_title: None,
+                pr_number: None,
+                pr_url: None,
+                is_gone: false,
+            },
+        ];
+
+        let mut state = BranchListState::new().with_branches(branches);
+        state.start_cleanup_progress(1);
+        state.set_cleanup_target_branches(&["cleanup-target".to_string()]);
+
+        let backend = TestBackend::new(40, 5);
+        let mut terminal = Terminal::new(backend).expect("terminal init");
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_branches(&state, f, area, true);
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+
+        // Find the row containing cleanup-target and check background color
+        let mut cleanup_row_has_gray_bg = false;
+        let mut normal_row_has_no_gray_bg = true;
+
+        for y in 0..5 {
+            let line: String = (0..40).map(|x| buffer[(x, y)].symbol()).collect();
+            if line.contains("cleanup-target") {
+                // Check that at least one cell has DarkGray background
+                for x in 0..40 {
+                    if buffer[(x, y)].bg == Color::DarkGray {
+                        cleanup_row_has_gray_bg = true;
+                        break;
+                    }
+                }
+            } else if line.contains("normal-branch") {
+                // Check that normal branch does NOT have gray background
+                for x in 0..40 {
+                    if buffer[(x, y)].bg == Color::DarkGray {
+                        normal_row_has_no_gray_bg = false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        assert!(
+            cleanup_row_has_gray_bg,
+            "FR-013: Cleanup target branch should have DarkGray background"
+        );
+        assert!(
+            normal_row_has_no_gray_bg,
+            "Normal branch should not have DarkGray background"
+        );
     }
 
     #[test]
