@@ -452,6 +452,34 @@ fn extract_content(value: &Value) -> Option<String> {
     None
 }
 
+fn format_tool_use_content(value: &Value) -> Option<String> {
+    let kind = value.get("type").and_then(|v| v.as_str())?;
+    if kind != "tool_use" {
+        return None;
+    }
+    let name = extract_tool_name(value);
+    let input = value
+        .get("input")
+        .or_else(|| value.get("arguments"))
+        .or_else(|| value.get("args"));
+    let mut text = String::from("[tool_use]");
+    if let Some(name) = name {
+        text.push(' ');
+        text.push_str(&name);
+    }
+    if let Some(input) = input {
+        let input_text = match input {
+            Value::String(s) => s.clone(),
+            _ => serde_json::to_string(input).unwrap_or_default(),
+        };
+        if !input_text.is_empty() {
+            text.push(' ');
+            text.push_str(&input_text);
+        }
+    }
+    Some(text)
+}
+
 fn value_to_text(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => Some(text.clone()),
@@ -485,6 +513,9 @@ fn value_to_text(value: &Value) -> Option<String> {
                 .map(|s| s.to_string())
             {
                 return Some(text);
+            }
+            if let Some(tool_text) = format_tool_use_content(value) {
+                return Some(tool_text);
             }
             None
         }
@@ -618,6 +649,22 @@ mod tests {
         assert_eq!(parsed.messages.len(), 2);
         assert_eq!(parsed.tool_executions.len(), 1);
         assert_eq!(parsed.total_turns, 2);
+    }
+
+    #[test]
+    fn test_parse_jsonl_session_includes_tool_use_content() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sess-tool.jsonl");
+        let content = r#"{"message":{"role":"assistant","content":[{"type":"tool_use","name":"exec_command","input":{"cmd":"ls"}}]}}"#;
+        fs::write(&path, content).unwrap();
+
+        let parsed = parse_jsonl_session(&path, "sess-tool", AgentType::ClaudeCode).unwrap();
+        assert_eq!(parsed.messages.len(), 1);
+        assert!(
+            parsed.messages[0]
+                .content
+                .contains("[tool_use] exec_command")
+        );
     }
 
     #[test]
