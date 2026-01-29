@@ -37,12 +37,12 @@ impl ClaudeEncoder {
 
     /// Encodes a worktree path for use in Claude's project directory structure.
     fn encode_path(path: &Path) -> String {
-        // Claude Code uses URL-encoded paths with slashes replaced by hyphens
+        // Claude Code replaces non-alphanumeric characters with hyphens.
         let path_str = path.to_string_lossy();
         path_str
             .chars()
             .map(|c| {
-                if c.is_alphanumeric() || c == '.' || c == '_' {
+                if c.is_alphanumeric() || c == '_' {
                     c.to_string()
                 } else {
                     "-".to_string()
@@ -186,9 +186,10 @@ mod tests {
 
     #[test]
     fn test_encode_path() {
-        let path = PathBuf::from("/home/user/projects/my-app");
+        let path = PathBuf::from("/home/user/projects/.my-app");
         let encoded = ClaudeEncoder::encode_path(&path);
         assert!(!encoded.contains('/'));
+        assert!(!encoded.contains('.'));
         assert!(!encoded.is_empty());
     }
 
