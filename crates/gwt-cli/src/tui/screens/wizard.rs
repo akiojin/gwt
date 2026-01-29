@@ -2899,63 +2899,12 @@ fn extract_session_cwd_from_file(path: &Path) -> Option<String> {
     None
 }
 
-fn extract_session_name_from_file(path: &Path) -> Result<Option<String>, ()> {
-    let file = File::open(path).map_err(|_| ())?;
-    let reader = BufReader::new(file);
-    for (idx, line) in reader.lines().enumerate() {
-        if idx > 120 {
-            break;
-        }
-        let line = line.map_err(|_| ())?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let value: Value = match serde_json::from_str(trimmed) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        if let Some(name) = find_session_name_in_value(&value) {
-            return Ok(Some(name));
-        }
-    }
-    Ok(None)
-}
-
-fn find_session_name_in_value(value: &Value) -> Option<String> {
-    if let Some(name) = value.get("title").and_then(|v| v.as_str()) {
-        return normalize_session_name(name);
-    }
-    if let Some(name) = value.get("session_name").and_then(|v| v.as_str()) {
-        return normalize_session_name(name);
-    }
-    if let Some(name) = value.get("sessionName").and_then(|v| v.as_str()) {
-        return normalize_session_name(name);
-    }
-    if let Some(name) = value.get("name").and_then(|v| v.as_str()) {
-        if session_name_from_name_field_is_valid(value) {
-            return normalize_session_name(name);
-        }
-    }
-    if let Some(payload) = value.get("payload") {
-        if let Some(name) = find_session_name_in_value(payload) {
-            return Some(name);
-        }
-    }
-    None
-}
-
-fn session_name_from_name_field_is_valid(value: &Value) -> bool {
-    if value.get("role").is_some() || value.get("content").is_some() {
-        return false;
-    }
-    if let Some(kind) = value.get("type").and_then(|v| v.as_str()) {
-        let kind = kind.to_ascii_lowercase();
-        if matches!(kind.as_str(), "tool_use" | "tool_result" | "message") {
-            return false;
-        }
-    }
-    true
+fn worktree_name_from_path(worktree_path: Option<&Path>) -> Option<String> {
+    worktree_path
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
+        .filter(|name| !name.is_empty())
 }
 
 fn session_cwd_matches(path: &Path, worktree_path: &Path) -> bool {
@@ -3032,11 +2981,8 @@ fn build_convert_session_entries<P: gwt_core::ai::SessionParser>(
             let cwd_match = worktree_path
                 .map(|wt_path| session_cwd_matches(&entry.file_path, wt_path))
                 .unwrap_or(false);
-            let (session_name, name_unavailable) =
-                match extract_session_name_from_file(&entry.file_path) {
-                    Ok(name) => (name, false),
-                    Err(_) => (None, true),
-                };
+            let session_name = worktree_name_from_path(worktree_path);
+            let name_unavailable = session_name.is_none();
             let name_display =
                 session_name_display_from_parts(session_name.as_deref(), name_unavailable);
 
@@ -4071,9 +4017,7 @@ fn render_skip_permissions_step(state: &WizardState, frame: &mut Frame, area: Re
 mod tests {
     use super::*;
     use chrono::{Duration, TimeZone, Utc};
-    use std::io::Write;
     use std::path::PathBuf;
-    use tempfile::NamedTempFile;
 
     #[test]
     fn test_wizard_open_for_branch() {
@@ -4823,19 +4767,9 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_session_name_from_file_title() {
-        let mut file = NamedTempFile::new().unwrap();
-        writeln!(file, "{{\"title\":\"My Session\"}}").unwrap();
-        let name = extract_session_name_from_file(file.path()).unwrap();
-        assert_eq!(name, Some("My Session".to_string()));
-    }
-
-    #[test]
-    fn test_extract_session_name_from_file_ignores_tool_use_name() {
-        let mut file = NamedTempFile::new().unwrap();
-        writeln!(file, "{{\"type\":\"tool_use\",\"name\":\"read_file\"}}").unwrap();
-        let name = extract_session_name_from_file(file.path()).unwrap();
-        assert_eq!(name, None);
+    fn test_worktree_name_from_path_extracts_basename() {
+        let name = worktree_name_from_path(Some(Path::new("/tmp/feature-xyz")));
+        assert_eq!(name, Some("feature-xyz".to_string()));
     }
 
     #[test]

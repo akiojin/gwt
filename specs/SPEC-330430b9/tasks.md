@@ -16,11 +16,11 @@
 ### テスト（TDD）
 
 - [ ] T101 [P] [US1] 一覧表示フォーマット（セッション名+メッセージ+更新日時）のユニットテストを追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
-- [ ] T102 [P] [US1] セッション名抽出ロジックのユニットテストを追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
+- [ ] T102 [P] [US1] Worktree名抽出ロジックのユニットテストを追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
 
 ### 実装
 
-- [ ] T103 [US1] 開始ユーザーメッセージ/セッション名抽出ロジックを追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
+- [ ] T103 [US1] 開始ユーザーメッセージ/Worktree名抽出ロジックを追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
 - [ ] T104 [US1] `load_sessions_for_agent` で一覧表示用の `display` を生成（セッション名を含む） `crates/gwt-cli/src/tui/screens/wizard.rs`
 - [ ] T105 [US1] `render_convert_session_select_step` と幅計算を更新 `crates/gwt-cli/src/tui/screens/wizard.rs`
 

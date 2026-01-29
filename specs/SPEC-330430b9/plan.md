@@ -5,7 +5,7 @@
 
 ## 概要
 
-セッション変換の一覧に「セッション名 + 開始ユーザーメッセージ抜粋 + 更新日時」を表示し、Spaceでプレビュー（先頭10メッセージ）を開閉できるようにする。変換実行中はスピナー「Converting session...」を表示する。UIは英語のみ、ASCIIのみ。既存のExecution Mode: Convertフローは維持し、一覧/プレビューの失敗はプレースホルダ表示で継続する。
+セッション変換の一覧に「セッション名（Worktree名・ブランチ名相当） + 開始ユーザーメッセージ抜粋 + 更新日時」を表示し、Spaceでプレビュー（先頭10メッセージ）を開閉できるようにする。変換実行中はスピナー「Converting session...」を表示する。UIは英語のみ、ASCIIのみ。既存のExecution Mode: Convertフローは維持し、一覧/プレビューの失敗はプレースホルダ表示で継続する。
 
 ## 技術コンテキスト
 
@@ -67,7 +67,7 @@ crates/
 
 ### 1.1 データモデル設計
 
-- `ConvertSessionEntry` にセッション名と開始ユーザーメッセージ抜粋を保持
+- `ConvertSessionEntry` にセッション名（Worktree名）と開始ユーザーメッセージ抜粋を保持
 - `WizardState` にプレビュー状態（open/scroll/lines/error）を追加
 
 ### 1.2 クイックスタート
@@ -80,7 +80,7 @@ crates/
 
 - `crates/gwt-cli/src/tui/screens/wizard.rs`
   - `ConvertSessionEntry` 拡張
-  - セッション一覧生成時にセッション名と開始ユーザーメッセージを抽出
+  - セッション一覧生成時にセッション名（Worktree名）と開始ユーザーメッセージを抽出
   - プレビュー生成と表示レンダリング
   - Wizard footerのキー表記更新
   - テスト追加・更新
@@ -107,7 +107,7 @@ crates/
 
 3. 解析
    - `load_sessions_for_agent` で `SessionParser::parse` を使い開始ユーザーメッセージを抽出
-   - セッションファイルから `title/name/session_name` を探索してセッション名を抽出
+   - セッション名は `worktree_path` の末尾ディレクトリ名（Worktree名・ブランチ名相当）を使用
    - プレビューは選択中セッションを再パースし、先頭10メッセージを生成
 
 4. 変換中表示
