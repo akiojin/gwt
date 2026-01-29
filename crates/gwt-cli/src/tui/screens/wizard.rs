@@ -192,6 +192,10 @@ pub struct ConvertSessionEntry {
     pub message_count: usize,
     /// First user message extracted from the session (if available)
     pub first_user_message: Option<String>,
+    /// Session name extracted from metadata (if available)
+    pub session_name: Option<String>,
+    /// Whether session name could not be read from file
+    pub name_unavailable: bool,
     /// Whether session cwd matches current worktree
     pub cwd_match: bool,
     /// Whether session has a conversion pair for the target agent
@@ -1401,14 +1405,16 @@ impl WizardState {
             }
         };
 
-        let source_session_id = match self.selected_convert_session() {
-            Some(s) => s.session_id.clone(),
+        let selected_session = match self.selected_convert_session() {
+            Some(s) => s,
             None => {
                 self.convert_preview_error = Some("No session selected".to_string());
                 self.convert_preview_open = true;
                 return;
             }
         };
+        let source_session_id = selected_session.session_id.clone();
+        let session_name = session_name_display(selected_session);
 
         let parsed = match Self::parse_session_for_agent(source_agent, &source_session_id) {
             Ok(session) => session,
@@ -1426,7 +1432,8 @@ impl WizardState {
             .unwrap_or_else(|| "Unknown".to_string());
         let agent_label = source_agent.label();
 
-        self.convert_preview_lines = build_preview_lines(agent_label, &updated, &parsed.messages);
+        self.convert_preview_lines =
+            build_preview_lines(agent_label, &session_name, &updated, &parsed.messages);
         if self.convert_preview_lines.is_empty() {
             self.convert_preview_lines
                 .push("No preview available".to_string());
@@ -2756,6 +2763,7 @@ fn truncate_with_ellipsis(text: &str, max_width: usize) -> String {
 }
 
 const SESSION_PREVIEW_MAX_MESSAGES: usize = 10;
+const SESSION_NO_NAME_MESSAGE: &str = "No name";
 const SESSION_NO_USER_MESSAGE: &str = "No user message";
 const SESSION_UNAVAILABLE_MESSAGE: &str = "Unavailable";
 const SESSION_CONVERTING_MESSAGE: &str = "Converting session...";
@@ -2764,14 +2772,38 @@ fn normalize_message_snippet(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn normalize_session_name(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn session_name_display_from_parts(name: Option<&str>, unavailable: bool) -> String {
+    if unavailable {
+        return SESSION_UNAVAILABLE_MESSAGE.to_string();
+    }
+    match name.and_then(normalize_session_name) {
+        Some(name) => name,
+        None => SESSION_NO_NAME_MESSAGE.to_string(),
+    }
+}
+
+fn session_name_display(entry: &ConvertSessionEntry) -> String {
+    session_name_display_from_parts(entry.session_name.as_deref(), entry.name_unavailable)
+}
+
 fn format_convert_session_display(
+    name: &str,
     message: &str,
     last_updated: Option<chrono::DateTime<chrono::Utc>>,
 ) -> String {
     let date_str = last_updated
         .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_else(|| "Unknown".to_string());
-    format!("{} | updated {}", message, date_str)
+    format!("{} | {} | updated {}", name, message, date_str)
 }
 
 fn extract_first_user_message(
@@ -2867,6 +2899,65 @@ fn extract_session_cwd_from_file(path: &Path) -> Option<String> {
     None
 }
 
+fn extract_session_name_from_file(path: &Path) -> Result<Option<String>, ()> {
+    let file = File::open(path).map_err(|_| ())?;
+    let reader = BufReader::new(file);
+    for (idx, line) in reader.lines().enumerate() {
+        if idx > 120 {
+            break;
+        }
+        let line = line.map_err(|_| ())?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: Value = match serde_json::from_str(trimmed) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if let Some(name) = find_session_name_in_value(&value) {
+            return Ok(Some(name));
+        }
+    }
+    Ok(None)
+}
+
+fn find_session_name_in_value(value: &Value) -> Option<String> {
+    if let Some(name) = value.get("title").and_then(|v| v.as_str()) {
+        return normalize_session_name(name);
+    }
+    if let Some(name) = value.get("session_name").and_then(|v| v.as_str()) {
+        return normalize_session_name(name);
+    }
+    if let Some(name) = value.get("sessionName").and_then(|v| v.as_str()) {
+        return normalize_session_name(name);
+    }
+    if let Some(name) = value.get("name").and_then(|v| v.as_str()) {
+        if session_name_from_name_field_is_valid(value) {
+            return normalize_session_name(name);
+        }
+    }
+    if let Some(payload) = value.get("payload") {
+        if let Some(name) = find_session_name_in_value(payload) {
+            return Some(name);
+        }
+    }
+    None
+}
+
+fn session_name_from_name_field_is_valid(value: &Value) -> bool {
+    if value.get("role").is_some() || value.get("content").is_some() {
+        return false;
+    }
+    if let Some(kind) = value.get("type").and_then(|v| v.as_str()) {
+        let kind = kind.to_ascii_lowercase();
+        if matches!(kind.as_str(), "tool_use" | "tool_result" | "message") {
+            return false;
+        }
+    }
+    true
+}
+
 fn session_cwd_matches(path: &Path, worktree_path: &Path) -> bool {
     let worktree = worktree_path.to_string_lossy();
     extract_session_cwd_from_file(path)
@@ -2876,11 +2967,13 @@ fn session_cwd_matches(path: &Path, worktree_path: &Path) -> bool {
 
 fn build_preview_lines(
     agent_label: &str,
+    session_name: &str,
     updated: &str,
     messages: &[gwt_core::ai::SessionMessage],
 ) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push(format!("Agent: {}", agent_label));
+    lines.push(format!("Name: {}", session_name));
     lines.push(format!("Updated: {}", updated));
     lines.push(String::new());
 
@@ -2939,15 +3032,28 @@ fn build_convert_session_entries<P: gwt_core::ai::SessionParser>(
             let cwd_match = worktree_path
                 .map(|wt_path| session_cwd_matches(&entry.file_path, wt_path))
                 .unwrap_or(false);
+            let (session_name, name_unavailable) =
+                match extract_session_name_from_file(&entry.file_path) {
+                    Ok(name) => (name, false),
+                    Err(_) => (None, true),
+                };
+            let name_display =
+                session_name_display_from_parts(session_name.as_deref(), name_unavailable);
 
             ConvertSessionEntry {
                 session_id: entry.session_id,
                 last_updated: entry.last_updated,
                 message_count: entry.message_count,
                 first_user_message,
+                session_name,
+                name_unavailable,
                 cwd_match,
                 has_conversion_pair,
-                display: format_convert_session_display(&display_message, entry.last_updated),
+                display: format_convert_session_display(
+                    &name_display,
+                    &display_message,
+                    entry.last_updated,
+                ),
             }
         })
         .collect()
@@ -3965,7 +4071,9 @@ fn render_skip_permissions_step(state: &WizardState, frame: &mut Frame, area: Re
 mod tests {
     use super::*;
     use chrono::{Duration, TimeZone, Utc};
+    use std::io::Write;
     use std::path::PathBuf;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_wizard_open_for_branch() {
@@ -4710,8 +4818,62 @@ mod tests {
     #[test]
     fn test_format_convert_session_display() {
         let dt = Utc.with_ymd_and_hms(2026, 1, 29, 3, 4, 0).unwrap();
-        let display = format_convert_session_display("Start here", Some(dt));
-        assert_eq!(display, "Start here | updated 2026-01-29 03:04");
+        let display = format_convert_session_display("Session A", "Start here", Some(dt));
+        assert_eq!(display, "Session A | Start here | updated 2026-01-29 03:04");
+    }
+
+    #[test]
+    fn test_extract_session_name_from_file_title() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "{{\"title\":\"My Session\"}}").unwrap();
+        let name = extract_session_name_from_file(file.path()).unwrap();
+        assert_eq!(name, Some("My Session".to_string()));
+    }
+
+    #[test]
+    fn test_extract_session_name_from_file_ignores_tool_use_name() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "{{\"type\":\"tool_use\",\"name\":\"read_file\"}}").unwrap();
+        let name = extract_session_name_from_file(file.path()).unwrap();
+        assert_eq!(name, None);
+    }
+
+    #[test]
+    fn test_session_name_display_placeholders() {
+        let base = ConvertSessionEntry {
+            session_id: "s1".to_string(),
+            last_updated: None,
+            message_count: 0,
+            first_user_message: None,
+            session_name: None,
+            name_unavailable: false,
+            cwd_match: false,
+            has_conversion_pair: false,
+            display: String::new(),
+        };
+
+        let unavailable = ConvertSessionEntry {
+            name_unavailable: true,
+            ..base.clone()
+        };
+        assert_eq!(session_name_display(&unavailable), "Unavailable");
+
+        let missing = ConvertSessionEntry { ..base.clone() };
+        assert_eq!(session_name_display(&missing), "No name");
+
+        let named = ConvertSessionEntry {
+            session_name: Some("Session A".to_string()),
+            ..base
+        };
+        assert_eq!(session_name_display(&named), "Session A");
+    }
+
+    #[test]
+    fn test_build_preview_lines_includes_session_name() {
+        let lines = build_preview_lines("Codex", "Session A", "2026-01-29 03:04", &[]);
+        assert_eq!(lines[0], "Agent: Codex");
+        assert_eq!(lines[1], "Name: Session A");
+        assert_eq!(lines[2], "Updated: 2026-01-29 03:04");
     }
 
     #[test]
@@ -4756,7 +4918,7 @@ mod tests {
             });
         }
 
-        let lines = build_preview_lines("Codex", "2026-01-29 03:04", &messages);
+        let lines = build_preview_lines("Codex", "Session A", "2026-01-29 03:04", &messages);
         let labeled_lines = lines
             .iter()
             .filter(|line| line.starts_with("User:") || line.starts_with("Assistant:"))
@@ -4786,6 +4948,8 @@ mod tests {
             last_updated: None,
             message_count: 1,
             first_user_message: None,
+            session_name: None,
+            name_unavailable: false,
             cwd_match: false,
             has_conversion_pair: false,
             display: "session-1".to_string(),
@@ -4909,6 +5073,8 @@ mod tests {
                 last_updated: None,
                 message_count: 10,
                 first_user_message: None,
+                session_name: None,
+                name_unavailable: false,
                 cwd_match: false,
                 has_conversion_pair: false,
                 display: "session-1 (10 msgs)".to_string(),
@@ -4918,6 +5084,8 @@ mod tests {
                 last_updated: None,
                 message_count: 5,
                 first_user_message: None,
+                session_name: None,
+                name_unavailable: false,
                 cwd_match: false,
                 has_conversion_pair: false,
                 display: "session-2 (5 msgs)".to_string(),
@@ -4942,6 +5110,8 @@ mod tests {
                 last_updated: None,
                 message_count: 15,
                 first_user_message: None,
+                session_name: None,
+                name_unavailable: false,
                 cwd_match: false,
                 has_conversion_pair: false,
                 display: "session-abc (15 msgs)".to_string(),
@@ -4951,6 +5121,8 @@ mod tests {
                 last_updated: None,
                 message_count: 8,
                 first_user_message: None,
+                session_name: None,
+                name_unavailable: false,
                 cwd_match: false,
                 has_conversion_pair: false,
                 display: "session-xyz (8 msgs)".to_string(),
@@ -5042,6 +5214,8 @@ mod tests {
                 last_updated: None,
                 message_count: 5,
                 first_user_message: None,
+                session_name: None,
+                name_unavailable: false,
                 cwd_match: false,
                 has_conversion_pair: false,
                 display: "s1".to_string(),
@@ -5051,6 +5225,8 @@ mod tests {
                 last_updated: None,
                 message_count: 10,
                 first_user_message: None,
+                session_name: None,
+                name_unavailable: false,
                 cwd_match: false,
                 has_conversion_pair: false,
                 display: "s2".to_string(),
@@ -5060,6 +5236,8 @@ mod tests {
                 last_updated: None,
                 message_count: 15,
                 first_user_message: None,
+                session_name: None,
+                name_unavailable: false,
                 cwd_match: false,
                 has_conversion_pair: false,
                 display: "s3".to_string(),
@@ -5091,6 +5269,8 @@ mod tests {
                 last_updated: Some(now),
                 message_count: 0,
                 first_user_message: None,
+                session_name: None,
+                name_unavailable: false,
                 cwd_match: false,
                 has_conversion_pair: true,
                 display: "pair".to_string(),
@@ -5100,6 +5280,8 @@ mod tests {
                 last_updated: Some(older),
                 message_count: 0,
                 first_user_message: None,
+                session_name: None,
+                name_unavailable: false,
                 cwd_match: true,
                 has_conversion_pair: false,
                 display: "cwd".to_string(),
@@ -5109,6 +5291,8 @@ mod tests {
                 last_updated: Some(now),
                 message_count: 0,
                 first_user_message: None,
+                session_name: None,
+                name_unavailable: false,
                 cwd_match: false,
                 has_conversion_pair: false,
                 display: "recent".to_string(),
@@ -5157,6 +5341,8 @@ mod tests {
                 last_updated: None,
                 message_count: 5,
                 first_user_message: None,
+                session_name: None,
+                name_unavailable: false,
                 cwd_match: false,
                 has_conversion_pair: false,
                 display: "first".to_string(),
@@ -5166,6 +5352,8 @@ mod tests {
                 last_updated: None,
                 message_count: 10,
                 first_user_message: None,
+                session_name: None,
+                name_unavailable: false,
                 cwd_match: false,
                 has_conversion_pair: false,
                 display: "second".to_string(),

@@ -9,21 +9,22 @@
 
 ## フェーズ2: ユーザーストーリー1 - 一覧で開始メッセージを識別できる (優先度: P1)
 
-**ストーリー**: セッション変換一覧に開始ユーザーメッセージと更新日時を表示
+**ストーリー**: セッション変換一覧にセッション名・開始ユーザーメッセージ・更新日時を表示
 
 **価値**: セッションIDなしでも対象を識別できる
 
 ### テスト（TDD）
 
-- [ ] T101 [P] [US1] 一覧表示フォーマットのユニットテストを追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
+- [ ] T101 [P] [US1] 一覧表示フォーマット（セッション名+メッセージ+更新日時）のユニットテストを追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
+- [ ] T102 [P] [US1] セッション名抽出ロジックのユニットテストを追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
 
 ### 実装
 
-- [ ] T102 [US1] 開始ユーザーメッセージ抽出ロジックを追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
-- [ ] T103 [US1] `load_sessions_for_agent` で一覧表示用の `display` を生成 `crates/gwt-cli/src/tui/screens/wizard.rs`
-- [ ] T104 [US1] `render_convert_session_select_step` と幅計算を更新 `crates/gwt-cli/src/tui/screens/wizard.rs`
+- [ ] T103 [US1] 開始ユーザーメッセージ/セッション名抽出ロジックを追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
+- [ ] T104 [US1] `load_sessions_for_agent` で一覧表示用の `display` を生成（セッション名を含む） `crates/gwt-cli/src/tui/screens/wizard.rs`
+- [ ] T105 [US1] `render_convert_session_select_step` と幅計算を更新 `crates/gwt-cli/src/tui/screens/wizard.rs`
 
-**✅ MVP1チェックポイント**: 一覧で開始ユーザーメッセージと更新日時が表示される
+**✅ MVP1チェックポイント**: 一覧でセッション名・開始ユーザーメッセージ・更新日時が表示される
 
 ## フェーズ3: ユーザーストーリー2 - Spaceでセッション内容をプレビューできる (優先度: P1)
 
@@ -34,14 +35,15 @@
 ### テスト（TDD）
 
 - [ ] T201 [P] [US2] プレビュー生成/スクロールのユニットテストを追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
-- [ ] T202 [P] [US2] 変換中スピナー表示のユニットテストを追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
+- [ ] T202 [P] [US2] プレビューにセッション名が含まれるテストを追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
+- [ ] T203 [P] [US2] 変換中スピナー表示のユニットテストを追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
 
 ### 実装
 
-- [ ] T203 [US2] プレビュー状態（open/scroll/lines/error）を追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
-- [ ] T204 [US2] プレビュー描画（モーダル/フッター）を追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
-- [ ] T205 [US2] 変換中スピナーの状態管理と描画を追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
-- [ ] T206 [US2] Space/Esc/スクロールのキー処理とMessage追加 `crates/gwt-cli/src/tui/app.rs`
+- [ ] T204 [US2] プレビュー状態（open/scroll/lines/error）を追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
+- [ ] T205 [US2] プレビュー描画（モーダル/フッター）を追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
+- [ ] T206 [US2] 変換中スピナーの状態管理と描画を追加 `crates/gwt-cli/src/tui/screens/wizard.rs`
+- [ ] T207 [US2] Space/Esc/スクロールのキー処理とMessage追加 `crates/gwt-cli/src/tui/app.rs`
 
 **✅ MVP2チェックポイント**: Spaceでプレビューが開閉し、先頭10メッセージが表示される
 

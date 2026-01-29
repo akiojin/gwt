@@ -7,7 +7,9 @@
 - **目的**: セッション変換一覧の表示用データ
 - **追加/更新する属性**:
   - `first_user_message: Option<String>`
-  - `display: String`（`<snippet> | updated YYYY-MM-DD HH:MM` を格納）
+  - `session_name: Option<String>`
+  - `name_unavailable: bool`（セッション名の読み取り失敗フラグ）
+  - `display: String`（`<name> | <snippet> | updated YYYY-MM-DD HH:MM` を格納）
 
 ### WizardState (既存)
 
@@ -23,6 +25,7 @@
 
 ## 生成ルール
 
-- `display` は開始ユーザーメッセージ抜粋と更新日時のみを含む。
+- `display` はセッション名・開始ユーザーメッセージ抜粋・更新日時を含む。
+- セッション名の読み取りに失敗した場合は `Unavailable`、未設定の場合は `No name` を表示する。
 - 抜粋取得に失敗した場合は `Unavailable`、ユーザーメッセージが無い場合は `No user message`。
 - プレビューは先頭10メッセージ（User/Assistant）を ASCII ラベルで整形して `convert_preview_lines` に格納。

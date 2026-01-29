@@ -5,7 +5,7 @@
 
 ## 概要
 
-セッション変換の一覧に「開始ユーザーメッセージ抜粋 + 更新日時」を表示し、Spaceでプレビュー（先頭10メッセージ）を開閉できるようにする。変換実行中はスピナー「Converting session...」を表示する。UIは英語のみ、ASCIIのみ。既存のExecution Mode: Convertフローは維持し、一覧/プレビューの失敗はプレースホルダ表示で継続する。
+セッション変換の一覧に「セッション名 + 開始ユーザーメッセージ抜粋 + 更新日時」を表示し、Spaceでプレビュー（先頭10メッセージ）を開閉できるようにする。変換実行中はスピナー「Converting session...」を表示する。UIは英語のみ、ASCIIのみ。既存のExecution Mode: Convertフローは維持し、一覧/プレビューの失敗はプレースホルダ表示で継続する。
 
 ## 技術コンテキスト
 
@@ -67,7 +67,7 @@ crates/
 
 ### 1.1 データモデル設計
 
-- `ConvertSessionEntry` に開始ユーザーメッセージ抜粋を保持
+- `ConvertSessionEntry` にセッション名と開始ユーザーメッセージ抜粋を保持
 - `WizardState` にプレビュー状態（open/scroll/lines/error）を追加
 
 ### 1.2 クイックスタート
@@ -80,7 +80,7 @@ crates/
 
 - `crates/gwt-cli/src/tui/screens/wizard.rs`
   - `ConvertSessionEntry` 拡張
-  - セッション一覧生成時に開始ユーザーメッセージを抽出
+  - セッション一覧生成時にセッション名と開始ユーザーメッセージを抽出
   - プレビュー生成と表示レンダリング
   - Wizard footerのキー表記更新
   - テスト追加・更新
@@ -91,20 +91,23 @@ crates/
 ### 実装方針（決定事項）
 
 1. 一覧表示
-   - 表示形式: `<start_user_message_snippet> | updated YYYY-MM-DD HH:MM`
+   - 表示形式: `<session_name> | <start_user_message_snippet> | updated YYYY-MM-DD HH:MM`
    - ID/メッセージ数は表示しない
+   - セッション名がない場合は `No name` を表示
    - 開始ユーザーメッセージがない場合は `No user message` を表示
    - 解析失敗は `Unavailable` を表示
 
 2. プレビュー
    - Spaceで開閉、Escで閉じる
    - 先頭10メッセージ（User/Assistant）のみ表示
+   - ヘッダーに `Name:` を表示
    - `User:` / `Assistant:` のASCIIラベル
    - Up/Downでスクロール
    - 失敗時は英語のエラーメッセージのみ表示
 
 3. 解析
    - `load_sessions_for_agent` で `SessionParser::parse` を使い開始ユーザーメッセージを抽出
+   - セッションファイルから `title/name/session_name` を探索してセッション名を抽出
    - プレビューは選択中セッションを再パースし、先頭10メッセージを生成
 
 4. 変換中表示
