@@ -1979,11 +1979,11 @@ fn render_branch_row(
     }
 
     // FR-018: Selected branch shown with cyan background
-    // FR-013: Cleanup target branches shown with DarkGray background
+    // FR-013: Cleanup target branches shown with DarkGray background and text
     let style = if is_selected {
         Style::default().bg(Color::Cyan).fg(Color::Black)
     } else if is_cleanup_target {
-        Style::default().bg(Color::DarkGray)
+        Style::default().bg(Color::DarkGray).fg(Color::DarkGray)
     } else {
         Style::default()
     };
@@ -3145,18 +3145,21 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
 
-        // Find the row containing cleanup-target and check background color
+        // Find the row containing cleanup-target and check background/foreground color
         let mut cleanup_row_has_gray_bg = false;
+        let mut cleanup_row_has_gray_fg = false;
         let mut normal_row_has_no_gray_bg = true;
 
         for y in 0..5 {
             let line: String = (0..40).map(|x| buffer[(x, y)].symbol()).collect();
             if line.contains("cleanup-target") {
-                // Check that at least one cell has DarkGray background
+                // Check that at least one cell has DarkGray background and foreground
                 for x in 0..40 {
                     if buffer[(x, y)].bg == Color::DarkGray {
                         cleanup_row_has_gray_bg = true;
-                        break;
+                    }
+                    if buffer[(x, y)].fg == Color::DarkGray {
+                        cleanup_row_has_gray_fg = true;
                     }
                 }
             } else if line.contains("normal-branch") {
@@ -3173,6 +3176,10 @@ mod tests {
         assert!(
             cleanup_row_has_gray_bg,
             "FR-013: Cleanup target branch should have DarkGray background"
+        );
+        assert!(
+            cleanup_row_has_gray_fg,
+            "FR-013: Cleanup target branch should have DarkGray text color"
         );
         assert!(
             normal_row_has_no_gray_bg,
