@@ -1,6 +1,7 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
 ## [6.22.3] - 2026-01-30
 
 ### Bug Fixes
@@ -83,8 +84,6 @@ All notable changes to this project will be documented in this file.
 - **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
-- セッション要約に依頼と直近指示の明示を追加
-- セッション要約に状態と次アクション要件を追加
 - Add agent mode scaffolding and branch list layout updates (#755)
 - ViewModeのデフォルトをAllからLocalに変更 (#760)
 - UキーでClaude Codeフック設定を手動再登録できる機能を追加 (#761)
@@ -243,8 +242,6 @@ All notable changes to this project will be documented in this file.
 - **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
-- セッション要約に依頼と直近指示の明示を追加
-- セッション要約に状態と次アクション要件を追加
 - Add agent mode scaffolding and branch list layout updates (#755)
 - ViewModeのデフォルトをAllからLocalに変更 (#760)
 - UキーでClaude Codeフック設定を手動再登録できる機能を追加 (#761)
@@ -401,8 +398,6 @@ All notable changes to this project will be documented in this file.
 - **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
-- セッション要約に依頼と直近指示の明示を追加
-- セッション要約に状態と次アクション要件を追加
 - Add agent mode scaffolding and branch list layout updates (#755)
 - ViewModeのデフォルトをAllからLocalに変更 (#760)
 - UキーでClaude Codeフック設定を手動再登録できる機能を追加 (#761)
@@ -552,8 +547,6 @@ All notable changes to this project will be documented in this file.
 - **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
-- セッション要約に依頼と直近指示の明示を追加
-- セッション要約に状態と次アクション要件を追加
 - Add agent mode scaffolding and branch list layout updates (#755)
 - ViewModeのデフォルトをAllからLocalに変更 (#760)
 - UキーでClaude Codeフック設定を手動再登録できる機能を追加 (#761)
@@ -687,8 +680,6 @@ All notable changes to this project will be documented in this file.
 - **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
-- セッション要約に依頼と直近指示の明示を追加
-- セッション要約に状態と次アクション要件を追加
 - Add agent mode scaffolding and branch list layout updates (#755)
 - ViewModeのデフォルトをAllからLocalに変更 (#760)
 - UキーでClaude Codeフック設定を手動再登録できる機能を追加 (#761)
@@ -801,8 +792,6 @@ All notable changes to this project will be documented in this file.
 - **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
-- セッション要約に依頼と直近指示の明示を追加
-- セッション要約に状態と次アクション要件を追加
 - Add agent mode scaffolding and branch list layout updates (#755)
 - ViewModeのデフォルトをAllからLocalに変更 (#760)
 - UキーでClaude Codeフック設定を手動再登録できる機能を追加 (#761)
@@ -903,8 +892,6 @@ All notable changes to this project will be documented in this file.
 - **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
-- セッション要約に依頼と直近指示の明示を追加
-- セッション要約に状態と次アクション要件を追加
 - Add agent mode scaffolding and branch list layout updates (#755)
 - ViewModeのデフォルトをAllからLocalに変更 (#760)
 - UキーでClaude Codeフック設定を手動再登録できる機能を追加 (#761)
@@ -992,8 +979,6 @@ All notable changes to this project will be documented in this file.
 - **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
-- セッション要約に依頼と直近指示の明示を追加
-- セッション要約に状態と次アクション要件を追加
 - Add agent mode scaffolding and branch list layout updates (#755)
 - ViewModeのデフォルトをAllからLocalに変更 (#760)
 - UキーでClaude Codeフック設定を手動再登録できる機能を追加 (#761)
@@ -1082,8 +1067,6 @@ All notable changes to this project will be documented in this file.
 - **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
-- セッション要約に依頼と直近指示の明示を追加
-- セッション要約に状態と次アクション要件を追加
 - Add agent mode scaffolding and branch list layout updates (#755)
 - ViewModeのデフォルトをAllからLocalに変更 (#760)
 - UキーでClaude Codeフック設定を手動再登録できる機能を追加 (#761)
@@ -1154,8 +1137,6 @@ All notable changes to this project will be documented in this file.
 - **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
-- セッション要約に依頼と直近指示の明示を追加
-- セッション要約に状態と次アクション要件を追加
 - Add agent mode scaffolding and branch list layout updates (#755)
 - ViewModeのデフォルトをAllからLocalに変更 (#760)
 - UキーでClaude Codeフック設定を手動再登録できる機能を追加 (#761)
@@ -1214,8 +1195,6 @@ All notable changes to this project will be documented in this file.
 - **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
 - **tui:** 全画面にマウスクリック対応を拡張 (#745)
 - セッション要約に状態と次アクション要件を追加 (#751)
-- セッション要約に依頼と直近指示の明示を追加
-- セッション要約に状態と次アクション要件を追加
 - Add agent mode scaffolding and branch list layout updates (#755)
 
 ### Miscellaneous Tasks
