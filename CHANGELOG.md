@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [6.22.4] - 2026-01-30
+
+### Bug Fixes
+
+- Fallback when saved session id missing (#839)
+- Enable env edit autosave (#840)
+
+### Miscellaneous Tasks
+
+- Merge main (v6.22.3) into develop
+- Enable speckit plugin
+
 ## [6.22.3] - 2026-01-30
 
 ### Bug Fixes
