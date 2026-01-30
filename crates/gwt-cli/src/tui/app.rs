@@ -3182,7 +3182,6 @@ impl Model {
                                     }
                                     Err(msg) => {
                                         env_state.error = Some(msg.to_string());
-                                        return;
                                     }
                                 }
                             } else {
@@ -3211,7 +3210,6 @@ impl Model {
                                     }
                                     Err(msg) => {
                                         env_state.error = Some(msg.to_string());
-                                        return;
                                     }
                                 }
                             }
