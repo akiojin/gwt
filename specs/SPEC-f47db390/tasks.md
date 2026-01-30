@@ -86,3 +86,7 @@ description: "Continue/Resumeで正しいセッションを再開するための
 - [ ] **T0604** `[US6]` Web UI起動セッションの終了時にID検出と履歴保存を行う（`src/web/server/pty/manager.ts`, `src/utils/session/*`）。
 - [ ] **T0605** `[US6]` `getLastToolUsageMap`の後方互換で`lastSessionId`を補完する（`src/config/index.ts`）。
 - [ ] **T0606** `[US6]` `buildClaudeArgs`/`buildCodexArgs`のID指定をユニットテストで検証する（`tests/unit/*codingAgentResolver*.test.ts`）。
+
+## 追加作業: セッションID存在チェックのフォールバック (2026-01-30)
+- [x] **T0621** `[Test]` `crates/gwt-cli/src/main.rs` に保存済みsession_idの存在チェックでフォールバックされることを検証するテストを追加
+- [x] **T0622** `[実装]` `crates/gwt-cli/src/main.rs` でセッションファイルの存在チェックと警告フォールバックを追加し、`crates/gwt-cli/src/tui/app.rs` で警告を表示

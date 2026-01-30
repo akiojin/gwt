@@ -4663,10 +4663,18 @@ impl Model {
                     if let Err(e) = self.agent_history.save() {
                         warn!(category = "tui", "Failed to save agent history: {}", e);
                     }
-                    self.status_message = Some(format!(
-                        "Agent launched in tmux pane for {}",
-                        plan.config.branch_name
-                    ));
+                    let launch_message = if let Some(warning) = plan.session_warning.as_ref() {
+                        format!(
+                            "Agent launched in tmux pane for {}. {}",
+                            plan.config.branch_name, warning
+                        )
+                    } else {
+                        format!(
+                            "Agent launched in tmux pane for {}",
+                            plan.config.branch_name
+                        )
+                    };
+                    self.status_message = Some(launch_message);
                     self.status_message_time = Some(Instant::now());
                     self.wizard.visible = false;
                     self.screen = Screen::BranchList;
