@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 use gwt_core::agent::codex::supports_collaboration_modes;
+use gwt_core::ai::AgentType;
 use gwt_core::config::{CustomCodingAgent, ToolsConfig};
 use gwt_core::git::GitHubIssue;
 use ratatui::{prelude::*, widgets::*};
@@ -111,6 +112,10 @@ pub enum WizardStep {
     /// Collaboration modes (Codex v0.91.0+, SPEC-fdebd681)
     CollaborationModes,
     ExecutionMode,
+    /// Source agent selection for session conversion
+    ConvertAgentSelect,
+    /// Session selection for conversion
+    ConvertSessionSelect,
     SkipPermissions,
     // New branch flow
     BranchTypeSelect,
@@ -157,6 +162,32 @@ pub struct QuickStartEntry {
     pub skip_permissions: Option<bool>,
     /// collaboration_modes setting (Codex v0.91.0+, SPEC-fdebd681)
     pub collaboration_modes: Option<bool>,
+}
+
+/// Source agent for session conversion
+#[derive(Debug, Clone)]
+pub struct ConvertSourceAgent {
+    /// Agent type
+    pub agent: CodingAgent,
+    /// Display name
+    pub label: String,
+    /// Number of available sessions
+    pub session_count: usize,
+    /// Agent color
+    pub color: Color,
+}
+
+/// Session entry for conversion selection
+#[derive(Debug, Clone)]
+pub struct ConvertSessionEntry {
+    /// Session ID
+    pub session_id: String,
+    /// Last updated timestamp
+    pub last_updated: Option<chrono::DateTime<chrono::Utc>>,
+    /// Message count
+    pub message_count: usize,
+    /// Display text (truncated session ID + date)
+    pub display: String,
 }
 
 /// Coding agent types
@@ -225,6 +256,27 @@ impl CodingAgent {
             CodingAgent::CodexCli => "codex",
             CodingAgent::GeminiCli => "gemini",
             CodingAgent::OpenCode => "opencode",
+        }
+    }
+
+    /// Convert to AgentType for session conversion
+    pub fn as_agent_type(self) -> AgentType {
+        match self {
+            CodingAgent::ClaudeCode => AgentType::ClaudeCode,
+            CodingAgent::CodexCli => AgentType::CodexCli,
+            CodingAgent::GeminiCli => AgentType::GeminiCli,
+            CodingAgent::OpenCode => AgentType::OpenCode,
+        }
+    }
+
+    /// Create from tool_id string
+    pub fn from_tool_id(tool_id: &str) -> Option<Self> {
+        match tool_id {
+            "claude-code" => Some(CodingAgent::ClaudeCode),
+            "codex-cli" => Some(CodingAgent::CodexCli),
+            "gemini-cli" => Some(CodingAgent::GeminiCli),
+            "opencode" => Some(CodingAgent::OpenCode),
+            _ => None,
         }
     }
 }
@@ -601,6 +653,7 @@ pub enum ExecutionMode {
     Normal,
     Continue,
     Resume,
+    Convert,
 }
 
 impl ExecutionMode {
@@ -609,6 +662,7 @@ impl ExecutionMode {
             ExecutionMode::Normal => "Normal",
             ExecutionMode::Continue => "Continue",
             ExecutionMode::Resume => "Resume",
+            ExecutionMode::Convert => "Convert",
         }
     }
 
@@ -617,6 +671,7 @@ impl ExecutionMode {
             ExecutionMode::Normal => "Start a new session",
             ExecutionMode::Continue => "Continue from last session",
             ExecutionMode::Resume => "Resume a specific session",
+            ExecutionMode::Convert => "Convert session from another agent",
         }
     }
 
@@ -625,6 +680,7 @@ impl ExecutionMode {
             ExecutionMode::Normal,
             ExecutionMode::Continue,
             ExecutionMode::Resume,
+            ExecutionMode::Convert,
         ]
     }
 }
@@ -764,6 +820,21 @@ pub struct WizardState {
     pub selected_agent_entry: Option<AgentEntry>,
     /// Existing branch for selected issue (FR-011 duplicate detection)
     pub issue_existing_branch: Option<String>,
+    // Session conversion (Execution Mode: Convert)
+    /// Available source agents with convertible sessions (excludes target agent)
+    pub convert_source_agents: Vec<ConvertSourceAgent>,
+    /// Selected source agent index for conversion
+    pub convert_agent_index: usize,
+    /// Sessions for the selected source agent (sorted by newest first)
+    pub convert_sessions: Vec<ConvertSessionEntry>,
+    /// Selected session index for conversion
+    pub convert_session_index: usize,
+    /// Converted session ID (set after successful conversion)
+    pub converted_session_id: Option<String>,
+    /// Session conversion error message
+    pub convert_error: Option<String>,
+    /// Worktree path for session search
+    pub worktree_path: Option<std::path::PathBuf>,
 }
 
 impl WizardState {
@@ -848,6 +919,13 @@ impl WizardState {
         // Load all agents (builtin + custom)
         self.all_agents = get_all_agents(&self.installed_cache);
         self.selected_agent_entry = self.all_agents.first().cloned();
+        // Reset session conversion state
+        self.convert_source_agents.clear();
+        self.convert_agent_index = 0;
+        self.convert_sessions.clear();
+        self.convert_session_index = 0;
+        self.converted_session_id = None;
+        self.convert_error = None;
     }
 
     /// Get branch action options based on running agent status
@@ -1015,6 +1093,258 @@ impl WizardState {
                 QuickStartAction::ResumeWithPrevious => entry.session_id.clone(),
                 _ => None,
             };
+        }
+    }
+
+    /// Collect source agents with convertible sessions (excludes target agent)
+    pub fn collect_convert_source_agents(&mut self) {
+        use gwt_core::ai::{
+            ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, OpenCodeSessionParser,
+            SessionParser,
+        };
+
+        self.convert_source_agents.clear();
+        let target_agent = self.agent;
+        let worktree_path = self.worktree_path.as_deref();
+
+        // Check each agent type (except target)
+        for agent in CodingAgent::all() {
+            if *agent == target_agent {
+                continue;
+            }
+
+            // Get session count for this agent
+            let session_count = match agent {
+                CodingAgent::ClaudeCode => {
+                    if let Some(parser) = ClaudeSessionParser::with_default_home() {
+                        parser.list_sessions(worktree_path).len()
+                    } else {
+                        0
+                    }
+                }
+                CodingAgent::CodexCli => {
+                    if let Some(parser) = CodexSessionParser::with_default_home() {
+                        parser.list_sessions(worktree_path).len()
+                    } else {
+                        0
+                    }
+                }
+                CodingAgent::GeminiCli => {
+                    if let Some(parser) = GeminiSessionParser::with_default_home() {
+                        parser.list_sessions(worktree_path).len()
+                    } else {
+                        0
+                    }
+                }
+                CodingAgent::OpenCode => {
+                    if let Some(parser) = OpenCodeSessionParser::with_default_home() {
+                        parser.list_sessions(worktree_path).len()
+                    } else {
+                        0
+                    }
+                }
+            };
+
+            self.convert_source_agents.push(ConvertSourceAgent {
+                agent: *agent,
+                label: format!("{} ({} sessions)", agent.label(), session_count),
+                session_count,
+                color: agent.color(),
+            });
+        }
+    }
+
+    /// Load sessions for the selected source agent
+    pub fn load_sessions_for_agent(&mut self) {
+        use gwt_core::ai::{
+            ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, OpenCodeSessionParser,
+            SessionParser,
+        };
+
+        self.convert_sessions.clear();
+        self.convert_session_index = 0;
+
+        if self.convert_agent_index >= self.convert_source_agents.len() {
+            return;
+        }
+
+        let source_agent = &self.convert_source_agents[self.convert_agent_index];
+        let worktree_path = self.worktree_path.as_deref();
+
+        let sessions = match source_agent.agent {
+            CodingAgent::ClaudeCode => {
+                if let Some(parser) = ClaudeSessionParser::with_default_home() {
+                    parser.list_sessions(worktree_path)
+                } else {
+                    vec![]
+                }
+            }
+            CodingAgent::CodexCli => {
+                if let Some(parser) = CodexSessionParser::with_default_home() {
+                    parser.list_sessions(worktree_path)
+                } else {
+                    vec![]
+                }
+            }
+            CodingAgent::GeminiCli => {
+                if let Some(parser) = GeminiSessionParser::with_default_home() {
+                    parser.list_sessions(worktree_path)
+                } else {
+                    vec![]
+                }
+            }
+            CodingAgent::OpenCode => {
+                if let Some(parser) = OpenCodeSessionParser::with_default_home() {
+                    parser.list_sessions(worktree_path)
+                } else {
+                    vec![]
+                }
+            }
+        };
+
+        // Convert to ConvertSessionEntry and sort by newest first
+        self.convert_sessions = sessions
+            .into_iter()
+            .map(|entry| {
+                let date_str = entry
+                    .last_updated
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| "Unknown".to_string());
+                let short_id = if entry.session_id.len() > 12 {
+                    format!("{}...", &entry.session_id[..12])
+                } else {
+                    entry.session_id.clone()
+                };
+                ConvertSessionEntry {
+                    session_id: entry.session_id,
+                    last_updated: entry.last_updated,
+                    message_count: entry.message_count,
+                    display: format!("{} ({})", short_id, date_str),
+                }
+            })
+            .collect();
+
+        // Sort by newest first
+        self.convert_sessions
+            .sort_by(|a, b| b.last_updated.cmp(&a.last_updated));
+    }
+
+    /// Get selected source agent for conversion
+    pub fn selected_convert_source_agent(&self) -> Option<&ConvertSourceAgent> {
+        self.convert_source_agents.get(self.convert_agent_index)
+    }
+
+    /// Get selected session for conversion
+    pub fn selected_convert_session(&self) -> Option<&ConvertSessionEntry> {
+        self.convert_sessions.get(self.convert_session_index)
+    }
+
+    /// Perform session conversion from source agent to target agent
+    pub fn perform_session_conversion(&mut self) -> bool {
+        use gwt_core::ai::{
+            convert_session, ClaudeSessionParser, CodexSessionParser, GeminiSessionParser,
+            OpenCodeSessionParser, SessionParser,
+        };
+
+        // Clear previous error/result
+        self.convert_error = None;
+        self.converted_session_id = None;
+
+        // Get source agent and session
+        let source_agent = match self.selected_convert_source_agent() {
+            Some(a) => a.agent,
+            None => {
+                self.convert_error = Some("No source agent selected".to_string());
+                return false;
+            }
+        };
+
+        let source_session_id = match self.selected_convert_session() {
+            Some(s) => s.session_id.clone(),
+            None => {
+                self.convert_error = Some("No session selected".to_string());
+                return false;
+            }
+        };
+
+        // Parse the source session
+        let parsed_session = match source_agent {
+            CodingAgent::ClaudeCode => {
+                let parser = match ClaudeSessionParser::with_default_home() {
+                    Some(p) => p,
+                    None => {
+                        self.convert_error = Some("Could not initialize Claude parser".to_string());
+                        return false;
+                    }
+                };
+                parser.parse(&source_session_id)
+            }
+            CodingAgent::CodexCli => {
+                let parser = match CodexSessionParser::with_default_home() {
+                    Some(p) => p,
+                    None => {
+                        self.convert_error = Some("Could not initialize Codex parser".to_string());
+                        return false;
+                    }
+                };
+                parser.parse(&source_session_id)
+            }
+            CodingAgent::GeminiCli => {
+                let parser = match GeminiSessionParser::with_default_home() {
+                    Some(p) => p,
+                    None => {
+                        self.convert_error = Some("Could not initialize Gemini parser".to_string());
+                        return false;
+                    }
+                };
+                parser.parse(&source_session_id)
+            }
+            CodingAgent::OpenCode => {
+                let parser = match OpenCodeSessionParser::with_default_home() {
+                    Some(p) => p,
+                    None => {
+                        self.convert_error =
+                            Some("Could not initialize OpenCode parser".to_string());
+                        return false;
+                    }
+                };
+                parser.parse(&source_session_id)
+            }
+        };
+
+        let parsed = match parsed_session {
+            Ok(p) => p,
+            Err(e) => {
+                self.convert_error = Some(format!("Failed to parse session: {}", e));
+                return false;
+            }
+        };
+
+        // Determine target agent type
+        let target_agent_type = match self.agent {
+            CodingAgent::ClaudeCode => AgentType::ClaudeCode,
+            CodingAgent::CodexCli => AgentType::CodexCli,
+            CodingAgent::GeminiCli => AgentType::GeminiCli,
+            CodingAgent::OpenCode => AgentType::OpenCode,
+        };
+
+        // Get worktree path
+        let worktree_path = self
+            .worktree_path
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+        // Perform conversion
+        match convert_session(&parsed, target_agent_type, &worktree_path) {
+            Ok(result) => {
+                self.converted_session_id = Some(result.new_session_id.clone());
+                self.session_id = Some(result.new_session_id);
+                true
+            }
+            Err(e) => {
+                self.convert_error = Some(format!("Conversion failed: {}", e));
+                false
+            }
         }
     }
 
@@ -1320,11 +1650,43 @@ impl WizardState {
                 WizardStep::ExecutionMode
             }
             WizardStep::ExecutionMode => {
-                // T213: Skip SkipPermissions if custom agent doesn't support it
-                if self.supports_skip_permissions() {
+                // Check if Convert mode is selected
+                if self.execution_mode == ExecutionMode::Convert {
+                    // Collect source agents and go to agent selection
+                    self.collect_convert_source_agents();
+                    WizardStep::ConvertAgentSelect
+                } else if self.supports_skip_permissions() {
                     WizardStep::SkipPermissions
                 } else {
                     // Auto-disable skip_permissions and stay at final step
+                    self.skip_permissions = false;
+                    WizardStep::SkipPermissions
+                }
+            }
+            WizardStep::ConvertAgentSelect => {
+                // Check if selected agent has sessions
+                if let Some(agent) = self.selected_convert_source_agent() {
+                    if agent.session_count == 0 {
+                        // Stay on this step - can't select agent with 0 sessions
+                        WizardStep::ConvertAgentSelect
+                    } else {
+                        // Load sessions for the selected agent
+                        self.load_sessions_for_agent();
+                        WizardStep::ConvertSessionSelect
+                    }
+                } else {
+                    WizardStep::ConvertAgentSelect
+                }
+            }
+            WizardStep::ConvertSessionSelect => {
+                // Perform session conversion
+                if !self.perform_session_conversion() {
+                    // Conversion failed - stay on this step
+                    // Error is stored in self.convert_error
+                    WizardStep::ConvertSessionSelect
+                } else if self.supports_skip_permissions() {
+                    WizardStep::SkipPermissions
+                } else {
                     self.skip_permissions = false;
                     WizardStep::SkipPermissions
                 }
@@ -1406,7 +1768,16 @@ impl WizardState {
                     WizardStep::AgentSelect
                 }
             }
-            WizardStep::SkipPermissions => WizardStep::ExecutionMode,
+            WizardStep::ConvertAgentSelect => WizardStep::ExecutionMode,
+            WizardStep::ConvertSessionSelect => WizardStep::ConvertAgentSelect,
+            WizardStep::SkipPermissions => {
+                // Check if we came from Convert flow
+                if self.execution_mode == ExecutionMode::Convert {
+                    WizardStep::ConvertSessionSelect
+                } else {
+                    WizardStep::ExecutionMode
+                }
+            }
         };
         self.step = prev;
         self.scroll_offset = 0;
@@ -1506,6 +1877,18 @@ impl WizardState {
                     self.quick_start_index += 1;
                 }
             }
+            WizardStep::ConvertAgentSelect => {
+                let max = self.convert_source_agents.len().saturating_sub(1);
+                if self.convert_agent_index < max {
+                    self.convert_agent_index += 1;
+                }
+            }
+            WizardStep::ConvertSessionSelect => {
+                let max = self.convert_sessions.len().saturating_sub(1);
+                if self.convert_session_index < max {
+                    self.convert_session_index += 1;
+                }
+            }
             WizardStep::BranchAction => {
                 if self.branch_action_index < 1 {
                     self.branch_action_index += 1;
@@ -1593,6 +1976,16 @@ impl WizardState {
                 // FR-050: Navigate Quick Start options
                 if self.quick_start_index > 0 {
                     self.quick_start_index -= 1;
+                }
+            }
+            WizardStep::ConvertAgentSelect => {
+                if self.convert_agent_index > 0 {
+                    self.convert_agent_index -= 1;
+                }
+            }
+            WizardStep::ConvertSessionSelect => {
+                if self.convert_session_index > 0 {
+                    self.convert_session_index -= 1;
                 }
             }
             WizardStep::BranchAction => {
@@ -1846,6 +2239,8 @@ impl WizardState {
     pub fn current_step_item_count(&self) -> usize {
         match self.step {
             WizardStep::QuickStart => self.quick_start_option_count(),
+            WizardStep::ConvertAgentSelect => self.convert_source_agents.len(),
+            WizardStep::ConvertSessionSelect => self.convert_sessions.len(),
             WizardStep::BranchAction => self.branch_action_options().len(),
             WizardStep::BranchTypeSelect => BranchType::all().len(),
             WizardStep::IssueSelect => self.filtered_issues.len() + 1, // +1 for Skip option
@@ -1871,6 +2266,8 @@ impl WizardState {
     pub fn current_selection_index(&self) -> usize {
         match self.step {
             WizardStep::QuickStart => self.quick_start_index,
+            WizardStep::ConvertAgentSelect => self.convert_agent_index,
+            WizardStep::ConvertSessionSelect => self.convert_session_index,
             WizardStep::BranchAction => self.branch_action_index,
             WizardStep::BranchTypeSelect => BranchType::all()
                 .iter()
@@ -1908,6 +2305,12 @@ impl WizardState {
         match self.step {
             WizardStep::QuickStart => {
                 self.quick_start_index = index;
+            }
+            WizardStep::ConvertAgentSelect => {
+                self.convert_agent_index = index;
+            }
+            WizardStep::ConvertSessionSelect => {
+                self.convert_session_index = index;
             }
             WizardStep::BranchAction => {
                 self.branch_action_index = index;
@@ -2061,6 +2464,12 @@ pub fn render_wizard(state: &mut WizardState, frame: &mut Frame, area: Rect) {
 
     match state.step {
         WizardStep::QuickStart => render_quick_start_step(state, frame, content_area),
+        WizardStep::ConvertAgentSelect => {
+            render_convert_agent_select_step(state, frame, content_area)
+        }
+        WizardStep::ConvertSessionSelect => {
+            render_convert_session_select_step(state, frame, content_area)
+        }
         WizardStep::BranchAction => render_branch_action_step(state, frame, content_area),
         WizardStep::BranchTypeSelect => render_branch_type_step(state, frame, content_area),
         WizardStep::IssueSelect => render_issue_select_step(state, frame, content_area),
@@ -2097,6 +2506,8 @@ pub fn render_wizard(state: &mut WizardState, frame: &mut Frame, area: Rect) {
 fn wizard_title(step: WizardStep) -> &'static str {
     match step {
         WizardStep::QuickStart => " Quick Start ",
+        WizardStep::ConvertAgentSelect => " Select Source Agent ",
+        WizardStep::ConvertSessionSelect => " Select Session to Convert ",
         WizardStep::BranchAction => " Select Branch Action ",
         WizardStep::BranchTypeSelect => " Select Branch Type ",
         WizardStep::IssueSelect => " GitHub Issue ",
@@ -2194,6 +2605,18 @@ fn wizard_required_content_width(state: &WizardState) -> usize {
             }
             consider("  Choose different settings...".to_string());
         }
+        WizardStep::ConvertAgentSelect => {
+            consider("Select source agent to convert session from:".to_string());
+            for agent in &state.convert_source_agents {
+                consider(format!("  {}", agent.label));
+            }
+        }
+        WizardStep::ConvertSessionSelect => {
+            consider("Select session to convert:".to_string());
+            for session in &state.convert_sessions {
+                consider(format!("  {}", session.display));
+            }
+        }
         WizardStep::BranchAction => {
             consider(format!("Branch: {}", state.branch_name));
             consider("  Use selected branch".to_string());
@@ -2272,6 +2695,114 @@ fn wizard_required_content_width(state: &WizardState) -> usize {
     }
 
     max_line
+}
+
+/// Render source agent selection for session conversion
+fn render_convert_agent_select_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    // Description text
+    let desc = Paragraph::new("Select source agent to convert session from:")
+        .style(Style::default().fg(Color::White));
+    let desc_area = Rect::new(area.x, area.y, area.width, 1);
+    frame.render_widget(desc, desc_area);
+
+    // Agent list
+    let list_area = Rect::new(
+        area.x,
+        area.y + 2,
+        area.width,
+        area.height.saturating_sub(2),
+    );
+
+    let items: Vec<ListItem> = state
+        .convert_source_agents
+        .iter()
+        .enumerate()
+        .map(|(i, agent)| {
+            let is_selected = i == state.convert_agent_index;
+            let prefix = if is_selected { "> " } else { "  " };
+            let style = if is_selected {
+                Style::default().bg(Color::Cyan).fg(Color::Black)
+            } else if agent.session_count == 0 {
+                // Gray out agents with no sessions
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default().fg(agent.color)
+            };
+            let text =
+                truncate_with_ellipsis(&format!("{}{}", prefix, agent.label), area.width as usize);
+            ListItem::new(text).style(style)
+        })
+        .collect();
+
+    let list = List::new(items);
+    frame.render_widget(list, list_area);
+
+    // Show error if any
+    if let Some(ref error) = state.convert_error {
+        let error_text = truncate_with_ellipsis(error, area.width as usize);
+        let error_widget = Paragraph::new(error_text).style(Style::default().fg(Color::Red));
+        let error_area = Rect::new(
+            area.x,
+            area.y + area.height.saturating_sub(1),
+            area.width,
+            1,
+        );
+        frame.render_widget(error_widget, error_area);
+    }
+}
+
+/// Render session selection for conversion
+fn render_convert_session_select_step(state: &WizardState, frame: &mut Frame, area: Rect) {
+    // Show source agent name
+    let agent_name = state
+        .selected_convert_source_agent()
+        .map(|a| a.agent.label())
+        .unwrap_or("Unknown");
+    let desc = Paragraph::new(format!("Select session from {}:", agent_name)).style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
+    let desc_area = Rect::new(area.x, area.y, area.width, 1);
+    frame.render_widget(desc, desc_area);
+
+    // Session list
+    let list_area = Rect::new(
+        area.x,
+        area.y + 2,
+        area.width,
+        area.height.saturating_sub(2),
+    );
+
+    if state.convert_sessions.is_empty() {
+        let no_sessions =
+            Paragraph::new("No sessions available").style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(no_sessions, list_area);
+        return;
+    }
+
+    let items: Vec<ListItem> = state
+        .convert_sessions
+        .iter()
+        .enumerate()
+        .map(|(i, session)| {
+            let is_selected = i == state.convert_session_index;
+            let prefix = if is_selected { "> " } else { "  " };
+            let style = if is_selected {
+                Style::default().bg(Color::Cyan).fg(Color::Black)
+            } else {
+                Style::default()
+            };
+            let text = truncate_with_ellipsis(
+                &format!("{}{}", prefix, session.display),
+                area.width as usize,
+            );
+            ListItem::new(text).style(style)
+        })
+        .collect();
+
+    let list = List::new(items);
+    frame.render_widget(list, list_area);
 }
 
 /// Render Quick Start step (FR-050, SPEC-f47db390)
@@ -3700,5 +4231,321 @@ mod tests {
 
         // Should go directly to VersionSelect, not CollaborationModes
         assert_eq!(state.step, WizardStep::VersionSelect);
+    }
+
+    // ==========================================================
+    // Session Convert Feature Tests
+    // ==========================================================
+
+    /// Test ExecutionMode::Convert selection transitions to ConvertAgentSelect
+    #[test]
+    fn test_convert_mode_goes_to_agent_select() {
+        let mut state = WizardState::new();
+        state.step = WizardStep::ExecutionMode;
+        state.execution_mode = ExecutionMode::Convert;
+
+        state.next_step();
+
+        assert_eq!(state.step, WizardStep::ConvertAgentSelect);
+    }
+
+    /// Test collect_convert_source_agents excludes target agent
+    #[test]
+    fn test_collect_convert_source_agents_excludes_target() {
+        let mut state = WizardState::new();
+        state.agent = CodingAgent::ClaudeCode;
+
+        state.collect_convert_source_agents();
+
+        // Target agent (ClaudeCode) should not be in the list
+        let has_claude = state
+            .convert_source_agents
+            .iter()
+            .any(|a| a.agent == CodingAgent::ClaudeCode);
+        assert!(!has_claude);
+
+        // Other agents should be present
+        let has_codex = state
+            .convert_source_agents
+            .iter()
+            .any(|a| a.agent == CodingAgent::CodexCli);
+        assert!(has_codex);
+    }
+
+    /// Test collect_convert_source_agents includes agents with 0 sessions
+    #[test]
+    fn test_collect_convert_source_agents_includes_zero_sessions() {
+        let mut state = WizardState::new();
+        state.agent = CodingAgent::ClaudeCode;
+
+        state.collect_convert_source_agents();
+
+        // All source agents should be present (even those with 0 sessions)
+        // We check that the list is not empty and contains expected agents
+        assert!(!state.convert_source_agents.is_empty());
+
+        // Every agent except ClaudeCode should be in the list
+        let expected_agents = [
+            CodingAgent::CodexCli,
+            CodingAgent::GeminiCli,
+            CodingAgent::OpenCode,
+        ];
+        for expected in &expected_agents {
+            let found = state
+                .convert_source_agents
+                .iter()
+                .any(|a| a.agent == *expected);
+            assert!(found, "Expected {:?} to be in source agents", expected);
+        }
+    }
+
+    /// Test 0-session agent selection does not advance step
+    #[test]
+    fn test_zero_session_agent_does_not_advance() {
+        let mut state = WizardState::new();
+        state.step = WizardStep::ConvertAgentSelect;
+
+        // Create source agents with one having 0 sessions
+        state.convert_source_agents = vec![
+            ConvertSourceAgent {
+                agent: CodingAgent::CodexCli,
+                label: "Codex CLI".to_string(),
+                session_count: 0,
+                color: Color::Yellow,
+            },
+            ConvertSourceAgent {
+                agent: CodingAgent::GeminiCli,
+                label: "Gemini CLI".to_string(),
+                session_count: 2,
+                color: Color::Cyan,
+            },
+        ];
+        state.convert_agent_index = 0; // Select 0-session agent
+
+        state.next_step();
+
+        // Should stay on ConvertAgentSelect (no sessions available)
+        assert_eq!(state.step, WizardStep::ConvertAgentSelect);
+    }
+
+    /// Test non-zero session agent selection advances to session select
+    #[test]
+    fn test_nonzero_session_agent_advances() {
+        let mut state = WizardState::new();
+        state.step = WizardStep::ConvertAgentSelect;
+
+        state.convert_source_agents = vec![ConvertSourceAgent {
+            agent: CodingAgent::GeminiCli,
+            label: "Gemini CLI".to_string(),
+            session_count: 2,
+            color: Color::Cyan,
+        }];
+        state.convert_agent_index = 0;
+
+        // Mock session loading by setting convert_sessions
+        state.convert_sessions = vec![
+            ConvertSessionEntry {
+                session_id: "session-1".to_string(),
+                last_updated: None,
+                message_count: 10,
+                display: "session-1 (10 msgs)".to_string(),
+            },
+            ConvertSessionEntry {
+                session_id: "session-2".to_string(),
+                last_updated: None,
+                message_count: 5,
+                display: "session-2 (5 msgs)".to_string(),
+            },
+        ];
+
+        state.next_step();
+
+        assert_eq!(state.step, WizardStep::ConvertSessionSelect);
+    }
+
+    /// Test session selection stays on step when conversion fails (no source agent)
+    #[test]
+    fn test_session_selection_stays_on_conversion_error() {
+        let mut state = WizardState::new();
+        state.step = WizardStep::ConvertSessionSelect;
+
+        // Set up sessions but no source agent (will cause conversion to fail)
+        state.convert_sessions = vec![
+            ConvertSessionEntry {
+                session_id: "session-abc".to_string(),
+                last_updated: None,
+                message_count: 15,
+                display: "session-abc (15 msgs)".to_string(),
+            },
+            ConvertSessionEntry {
+                session_id: "session-xyz".to_string(),
+                last_updated: None,
+                message_count: 8,
+                display: "session-xyz (8 msgs)".to_string(),
+            },
+        ];
+        state.convert_session_index = 1; // Select second session
+
+        // Without source agent, conversion should fail
+        state.next_step();
+
+        // Conversion failed - should stay on same step
+        assert_eq!(state.step, WizardStep::ConvertSessionSelect);
+        // Error should be set
+        assert!(state.convert_error.is_some());
+        assert!(state
+            .convert_error
+            .as_ref()
+            .unwrap()
+            .contains("source agent"));
+        // session_id should remain None
+        assert!(state.session_id.is_none());
+    }
+
+    /// Test prev_step from ConvertAgentSelect goes back to ExecutionMode
+    #[test]
+    fn test_prev_step_from_convert_agent_select() {
+        let mut state = WizardState::new();
+        state.step = WizardStep::ConvertAgentSelect;
+        state.execution_mode = ExecutionMode::Convert;
+
+        state.prev_step();
+
+        assert_eq!(state.step, WizardStep::ExecutionMode);
+    }
+
+    /// Test prev_step from ConvertSessionSelect goes back to ConvertAgentSelect
+    #[test]
+    fn test_prev_step_from_convert_session_select() {
+        let mut state = WizardState::new();
+        state.step = WizardStep::ConvertSessionSelect;
+
+        state.prev_step();
+
+        assert_eq!(state.step, WizardStep::ConvertAgentSelect);
+    }
+
+    /// Test select_next/select_prev on ConvertAgentSelect step
+    #[test]
+    fn test_convert_agent_selection_navigation() {
+        let mut state = WizardState::new();
+        state.step = WizardStep::ConvertAgentSelect;
+        state.convert_source_agents = vec![
+            ConvertSourceAgent {
+                agent: CodingAgent::CodexCli,
+                label: "Codex CLI".to_string(),
+                session_count: 1,
+                color: Color::Yellow,
+            },
+            ConvertSourceAgent {
+                agent: CodingAgent::GeminiCli,
+                label: "Gemini CLI".to_string(),
+                session_count: 2,
+                color: Color::Cyan,
+            },
+        ];
+        state.convert_agent_index = 0;
+
+        state.select_next();
+        assert_eq!(state.convert_agent_index, 1);
+
+        state.select_next();
+        assert_eq!(state.convert_agent_index, 1); // Should stay at max
+
+        state.select_prev();
+        assert_eq!(state.convert_agent_index, 0);
+
+        state.select_prev();
+        assert_eq!(state.convert_agent_index, 0); // Should stay at 0
+    }
+
+    /// Test select_next/select_prev on ConvertSessionSelect step
+    #[test]
+    fn test_convert_session_selection_navigation() {
+        let mut state = WizardState::new();
+        state.step = WizardStep::ConvertSessionSelect;
+        state.convert_sessions = vec![
+            ConvertSessionEntry {
+                session_id: "s1".to_string(),
+                last_updated: None,
+                message_count: 5,
+                display: "s1".to_string(),
+            },
+            ConvertSessionEntry {
+                session_id: "s2".to_string(),
+                last_updated: None,
+                message_count: 10,
+                display: "s2".to_string(),
+            },
+            ConvertSessionEntry {
+                session_id: "s3".to_string(),
+                last_updated: None,
+                message_count: 15,
+                display: "s3".to_string(),
+            },
+        ];
+        state.convert_session_index = 0;
+
+        state.select_next();
+        assert_eq!(state.convert_session_index, 1);
+
+        state.select_next();
+        assert_eq!(state.convert_session_index, 2);
+
+        state.select_next();
+        assert_eq!(state.convert_session_index, 2); // Should stay at max
+
+        state.select_prev();
+        assert_eq!(state.convert_session_index, 1);
+    }
+
+    /// Test selected_convert_source_agent returns correct agent
+    #[test]
+    fn test_selected_convert_source_agent() {
+        let mut state = WizardState::new();
+        state.convert_source_agents = vec![
+            ConvertSourceAgent {
+                agent: CodingAgent::CodexCli,
+                label: "Codex".to_string(),
+                session_count: 3,
+                color: Color::Yellow,
+            },
+            ConvertSourceAgent {
+                agent: CodingAgent::GeminiCli,
+                label: "Gemini".to_string(),
+                session_count: 1,
+                color: Color::Cyan,
+            },
+        ];
+        state.convert_agent_index = 1;
+
+        let selected = state.selected_convert_source_agent();
+        assert!(selected.is_some());
+        assert_eq!(selected.unwrap().agent, CodingAgent::GeminiCli);
+    }
+
+    /// Test selected_convert_session returns correct session
+    #[test]
+    fn test_selected_convert_session() {
+        let mut state = WizardState::new();
+        state.convert_sessions = vec![
+            ConvertSessionEntry {
+                session_id: "first".to_string(),
+                last_updated: None,
+                message_count: 5,
+                display: "first".to_string(),
+            },
+            ConvertSessionEntry {
+                session_id: "second".to_string(),
+                last_updated: None,
+                message_count: 10,
+                display: "second".to_string(),
+            },
+        ];
+        state.convert_session_index = 0;
+
+        let selected = state.selected_convert_session();
+        assert!(selected.is_some());
+        assert_eq!(selected.unwrap().session_id, "first");
     }
 }

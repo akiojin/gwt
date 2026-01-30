@@ -1516,6 +1516,7 @@ fn execution_mode_label(mode: ExecutionMode) -> &'static str {
         ExecutionMode::Normal => "Start new session",
         ExecutionMode::Continue => "Continue session",
         ExecutionMode::Resume => "Resume session",
+        ExecutionMode::Convert => "Convert session",
     }
 }
 
@@ -2055,7 +2056,7 @@ fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
 
             // Execution mode (FR-102)
             match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume => {
+                ExecutionMode::Continue | ExecutionMode::Resume | ExecutionMode::Convert => {
                     if let Some(session_id) = &config.session_id {
                         args.push("--resume".to_string());
                         args.push(session_id.clone());
@@ -2076,7 +2077,7 @@ fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
         CodingAgent::CodexCli => {
             // Execution mode - resume subcommand must come first
             match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume => {
+                ExecutionMode::Continue | ExecutionMode::Resume | ExecutionMode::Convert => {
                     args.push("resume".to_string());
                     if let Some(session_id) = &config.session_id {
                         args.push(session_id.clone());
@@ -2124,7 +2125,7 @@ fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
 
             // Execution mode
             match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume => {
+                ExecutionMode::Continue | ExecutionMode::Resume | ExecutionMode::Convert => {
                     args.push("-r".to_string());
                     if let Some(session_id) = &config.session_id {
                         args.push(session_id.clone());
@@ -2152,7 +2153,7 @@ fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
             // Execution mode
             match config.execution_mode {
                 ExecutionMode::Continue => args.push("-c".to_string()),
-                ExecutionMode::Resume => {
+                ExecutionMode::Resume | ExecutionMode::Convert => {
                     if let Some(session_id) = &config.session_id {
                         args.push("-s".to_string());
                         args.push(session_id.clone());
@@ -2185,7 +2186,7 @@ fn build_custom_agent_args(
             ExecutionMode::Continue => {
                 args.extend(mode_args.continue_mode.clone());
             }
-            ExecutionMode::Resume => {
+            ExecutionMode::Resume | ExecutionMode::Convert => {
                 args.extend(mode_args.resume.clone());
             }
         }
