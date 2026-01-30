@@ -1115,11 +1115,7 @@ pub(crate) fn prepare_launch_plan(
     } else {
         config.version.clone()
     };
-    let version_label = if selected_version == "installed" {
-        "installed".to_string()
-    } else {
-        format!("@{}", selected_version)
-    };
+    let version_label = selected_version.clone();
 
     let execution_method = if selected_version == "installed" && using_local {
         ExecutionMethod::Installed {
@@ -1140,7 +1136,13 @@ pub(crate) fn prepare_launch_plan(
         }
     };
 
-    let log_lines = build_launch_log_lines(&config, &agent_args, &version_label, &execution_method);
+    let log_lines = build_launch_log_lines(
+        &config,
+        &agent_args,
+        &version_label,
+        &execution_method,
+        &env,
+    );
 
     progress(LaunchProgress::CheckingDependencies);
     let install_plan = build_install_plan(&config.worktree_path, config.auto_install_deps);
@@ -1218,7 +1220,13 @@ fn prepare_custom_agent_launch_plan(
         command: custom.command.clone(),
     };
 
-    let log_lines = build_launch_log_lines(&config, &agent_args, &version_label, &execution_method);
+    let log_lines = build_launch_log_lines(
+        &config,
+        &agent_args,
+        &version_label,
+        &execution_method,
+        &env,
+    );
 
     progress(LaunchProgress::CheckingDependencies);
     let install_plan = build_install_plan(&config.worktree_path, config.auto_install_deps);
@@ -1525,11 +1533,29 @@ fn extract_codex_model_reasoning(args: &[String]) -> (Option<String>, Option<Str
     (model, reasoning)
 }
 
+fn format_env_log_lines(env_vars: &[(String, String)]) -> Vec<String> {
+    if env_vars.is_empty() {
+        return vec!["Env: (none)".to_string()];
+    }
+    let mut vars: Vec<(String, String)> = env_vars
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    vars.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut lines = Vec::with_capacity(vars.len() + 1);
+    lines.push("Env:".to_string());
+    for (key, value) in vars {
+        lines.push(format!("  {}={}", key, value));
+    }
+    lines
+}
+
 fn build_launch_log_lines(
     config: &AgentLaunchConfig,
     agent_args: &[String],
     version_label: &str,
     execution_method: &ExecutionMethod,
+    env_vars: &[(String, String)],
 ) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push(format!(
@@ -1573,6 +1599,7 @@ fn build_launch_log_lines(
         agent_args.join(" ")
     };
     lines.push(format!("Args: {}", args_text));
+    lines.extend(format_env_log_lines(env_vars));
     lines.push(format!("Version: {}", version_label));
 
     match execution_method {
@@ -2488,21 +2515,29 @@ mod tests {
             "-c".to_string(),
             "model_reasoning_effort=high".to_string(),
         ];
+        let env_vars = vec![
+            ("API_KEY".to_string(), "secret".to_string()),
+            ("DEBUG".to_string(), "true".to_string()),
+        ];
         let lines = build_launch_log_lines(
             &config,
             &agent_args,
-            "@latest",
+            "latest",
             &ExecutionMethod::Runner {
                 label: "bunx".to_string(),
                 package_spec: "@openai/codex@latest".to_string(),
             },
+            &env_vars,
         );
         assert!(lines.contains(&"Working directory: /tmp/worktree".to_string()));
         assert!(lines.contains(&"Model: gpt-5.2-codex".to_string()));
         assert!(lines.contains(&"Reasoning: high".to_string()));
         assert!(lines.contains(&"Mode: Continue session".to_string()));
         assert!(lines.contains(&"Skip permissions: enabled".to_string()));
-        assert!(lines.contains(&"Version: @latest".to_string()));
+        assert!(lines.contains(&"Env:".to_string()));
+        assert!(lines.contains(&"  API_KEY=secret".to_string()));
+        assert!(lines.contains(&"  DEBUG=true".to_string()));
+        assert!(lines.contains(&"Version: latest".to_string()));
         assert!(lines.contains(&"Using bunx @openai/codex@latest".to_string()));
         assert!(lines
             .iter()
@@ -2517,6 +2552,7 @@ mod tests {
             "sonnet".to_string(),
             "--dangerously-skip-permissions".to_string(),
         ];
+        let env_vars = Vec::new();
         let lines = build_launch_log_lines(
             &config,
             &agent_args,
@@ -2524,9 +2560,11 @@ mod tests {
             &ExecutionMethod::Installed {
                 command: "claude".to_string(),
             },
+            &env_vars,
         );
         assert!(lines.contains(&"Model: sonnet".to_string()));
         assert!(!lines.iter().any(|line| line.starts_with("Reasoning: ")));
+        assert!(lines.contains(&"Env: (none)".to_string()));
         assert!(lines.contains(&"Using locally installed claude".to_string()));
     }
 
