@@ -22,9 +22,10 @@ use gwt_core::ai::{
 };
 use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{
-    get_claude_settings_path, is_gwt_hooks_registered, is_temporary_execution, register_gwt_hooks,
-    reregister_gwt_hooks, save_session_entry, AISettings, CustomCodingAgent, Profile,
-    ProfilesConfig, ResolvedAISettings, ToolSessionEntry,
+    get_claude_settings_path, is_gwt_hooks_registered, is_gwt_marketplace_registered,
+    is_temporary_execution, register_gwt_hooks, reregister_gwt_hooks, save_session_entry,
+    setup_gwt_plugin, AISettings, CustomCodingAgent, Profile, ProfilesConfig, ResolvedAISettings,
+    ToolSessionEntry,
 };
 use gwt_core::error::GwtError;
 use gwt_core::git::{Branch, PrCache, Remote, Repository};
@@ -439,6 +440,10 @@ pub struct Model {
     pending_cleanup_branches: Vec<String>,
     /// Pending hook setup (SPEC-861d8cdf T-104)
     pending_hook_setup: bool,
+    /// Pending plugin setup (SPEC-f8dab6e2 T-110)
+    pending_plugin_setup: bool,
+    /// Pending launch plan for plugin setup (SPEC-f8dab6e2 T-110)
+    pending_plugin_setup_launch: Option<LaunchPlan>,
     /// Branch list update receiver
     branch_list_rx: Option<Receiver<BranchListUpdate>>,
     /// Branch summary update receiver
@@ -608,6 +613,8 @@ impl Model {
             pending_agent_termination: None,
             pending_cleanup_branches: Vec::new(),
             pending_hook_setup: false,
+            pending_plugin_setup: false,
+            pending_plugin_setup_launch: None,
             branch_list_rx: None,
             branch_summary_rx: None,
             pr_title_rx: None,
@@ -2472,14 +2479,30 @@ impl Model {
                     }
                 }
             }
+            // SPEC-f8dab6e2 T-110: Handle plugin setup confirmation
+            if self.pending_plugin_setup {
+                if let Err(e) = setup_gwt_plugin() {
+                    debug!(category = "tui", error = %e, "Failed to setup gwt plugin");
+                }
+            }
         }
+
+        // SPEC-f8dab6e2: Continue agent launch after plugin setup confirmation
+        let pending_launch = self.pending_plugin_setup_launch.take();
+
         // Clear pending state and return to previous screen
         self.pending_unsafe_selection = None;
         self.pending_agent_termination = None;
         self.pending_cleanup_branches.clear();
         self.pending_hook_setup = false;
+        self.pending_plugin_setup = false;
         if let Some(prev_screen) = self.screen_stack.pop() {
             self.screen = prev_screen;
+        }
+
+        // Continue agent launch if pending (after plugin setup dialog)
+        if let Some(plan) = pending_launch {
+            self.handle_launch_plan_internal(plan);
         }
     }
 
@@ -4639,6 +4662,23 @@ impl Model {
     }
 
     fn handle_launch_plan(&mut self, plan: LaunchPlan) {
+        // SPEC-f8dab6e2 T-110: Check if plugin setup is needed for Claude Code
+        // FR-007: Only show for Claude Code (not Codex or other agents)
+        // FR-008: Skip if marketplace is already registered
+        if plan.config.agent == CodingAgent::ClaudeCode && !is_gwt_marketplace_registered() {
+            self.pending_plugin_setup = true;
+            self.pending_plugin_setup_launch = Some(plan);
+            self.confirm = ConfirmState::plugin_setup();
+            self.screen_stack.push(self.screen.clone());
+            self.screen = Screen::Confirm;
+            return;
+        }
+
+        self.handle_launch_plan_internal(plan);
+    }
+
+    /// Internal implementation of launch plan handling (called after plugin setup confirmation)
+    fn handle_launch_plan_internal(&mut self, plan: LaunchPlan) {
         // Note: refresh_data() removed for startup optimization - TUI exits after
         // agent launch in single mode, and tmux mode updates status message directly.
         // The branch list refresh is unnecessary here. (FR-008b still satisfied)
