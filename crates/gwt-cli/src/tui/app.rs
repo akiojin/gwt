@@ -6848,11 +6848,13 @@ mod tests {
         model.screen = Screen::Settings;
         model.settings.category = SettingsCategory::Environment;
         model.settings.profile_mode = ProfileMode::EnvEdit("dev".to_string());
-        model.settings.env_state = EnvironmentState::new().with_variables(vec![EnvItem {
-            key: "MY_VAR".to_string(),
-            value: "old".to_string(),
-            is_secret: false,
-        }]);
+        model.settings.env_state = EnvironmentState::new()
+            .with_variables(vec![EnvItem {
+                key: "MY_VAR".to_string(),
+                value: "old".to_string(),
+                is_secret: false,
+            }])
+            .with_hide_ai(true);
         model.settings.env_state.selected = 0;
         model.settings.env_state.start_edit_selected();
         model.settings.env_state.edit_value = "new".to_string();
@@ -6869,11 +6871,13 @@ mod tests {
         model.screen = Screen::Settings;
         model.settings.category = SettingsCategory::Environment;
         model.settings.profile_mode = ProfileMode::EnvEdit("dev".to_string());
-        model.settings.env_state = EnvironmentState::new().with_variables(vec![EnvItem {
-            key: "MY_VAR".to_string(),
-            value: "value".to_string(),
-            is_secret: false,
-        }]);
+        model.settings.env_state = EnvironmentState::new()
+            .with_variables(vec![EnvItem {
+                key: "MY_VAR".to_string(),
+                value: "value".to_string(),
+                is_secret: false,
+            }])
+            .with_hide_ai(true);
         model.settings.env_state.selected = 0;
 
         model.update(Message::Char('d'));
