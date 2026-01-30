@@ -497,4 +497,80 @@ mod tests {
         std::fs::write(&path, content).unwrap();
         assert!(!is_plugin_enabled_in_settings(&path));
     }
+
+    // T504: Edge case tests
+
+    #[test]
+    fn test_register_marketplace_with_empty_json_object() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("known_marketplaces.json");
+
+        // Write empty JSON object
+        std::fs::write(&path, "{}").unwrap();
+
+        register_gwt_marketplace_at(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let marketplaces: KnownMarketplaces = serde_json::from_str(&content).unwrap();
+
+        assert!(marketplaces.contains_key(GWT_MARKETPLACE_NAME));
+    }
+
+    #[test]
+    fn test_enable_plugin_with_settings_without_enabled_plugins() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("settings.json");
+
+        // Write settings without enabledPlugins
+        std::fs::write(&path, r#"{"mcpServers": {}}"#).unwrap();
+
+        enable_worktree_protection_plugin(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        // Should have both mcpServers and enabledPlugins
+        assert!(settings["mcpServers"].is_object());
+        assert_eq!(
+            settings["enabledPlugins"][GWT_PLUGIN_FULL_NAME],
+            serde_json::json!(true)
+        );
+    }
+
+    #[test]
+    fn test_enable_plugin_with_empty_settings_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("settings.json");
+
+        // Write empty JSON object
+        std::fs::write(&path, "{}").unwrap();
+
+        enable_worktree_protection_plugin(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        assert_eq!(
+            settings["enabledPlugins"][GWT_PLUGIN_FULL_NAME],
+            serde_json::json!(true)
+        );
+    }
+
+    #[test]
+    fn test_enable_plugin_with_invalid_settings_json() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("settings.json");
+
+        // Write invalid JSON
+        std::fs::write(&path, "not valid json").unwrap();
+
+        // Should handle gracefully
+        let result = enable_worktree_protection_plugin(&path);
+        assert!(result.is_ok());
+
+        // File should now be valid
+        let content = std::fs::read_to_string(&path).unwrap();
+        let settings: Result<serde_json::Value, _> = serde_json::from_str(&content);
+        assert!(settings.is_ok());
+    }
 }
