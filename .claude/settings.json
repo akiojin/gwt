@@ -12,11 +12,11 @@
     "playwright@claude-plugins-official": true,
     "cli-design@akiojin-skills": true,
     "github@akiojin-skills": true,
-    "requirements-spec-kit@akiojin-skills": true,
     "typescript-lsp@claude-plugins-official": true,
     "ralph-loop@claude-plugins-official": true,
     "code-simplifier@claude-plugins-official": true,
     "plugin-dev@claude-plugins-official": true,
-    "worktree-protection-hooks@gwt-plugins": true
+    "worktree-protection-hooks@gwt-plugins": true,
+    "speckit@akiojin-skills": true
   }
 }

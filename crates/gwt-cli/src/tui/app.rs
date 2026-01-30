@@ -3168,24 +3168,51 @@ impl Model {
                         // Use EnvironmentState methods (SPEC-dafff079)
                         let env_state = &mut self.settings.env_state;
                         if env_state.edit_mode {
+                            if env_state.is_new && env_state.edit_field == EditField::Key {
+                                // New variable: Enter on key field switches to value input (FR-016)
+                                env_state.switch_field();
+                                return;
+                            }
                             // Finish editing - validate and apply
                             if let Some(ai_field) = env_state.editing_ai_field() {
-                                if let Ok(value) = env_state.validate_ai_value() {
-                                    env_state.apply_ai_value(ai_field, value);
+                                match env_state.validate_ai_value() {
+                                    Ok(value) => {
+                                        env_state.apply_ai_value(ai_field, value);
+                                        env_state.cancel_edit();
+                                    }
+                                    Err(msg) => {
+                                        env_state.error = Some(msg.to_string());
+                                    }
                                 }
-                            } else if env_state.is_new {
-                                // New variable: validate and add
-                                if let Ok((key, value)) = env_state.validate() {
-                                    env_state.variables.push(
-                                        super::screens::environment::EnvItem {
-                                            key,
-                                            value,
-                                            is_secret: false,
-                                        },
-                                    );
+                            } else {
+                                match env_state.validate() {
+                                    Ok((key, value)) => {
+                                        if env_state.is_new {
+                                            // New variable: add
+                                            env_state.variables.push(
+                                                super::screens::environment::EnvItem {
+                                                    key,
+                                                    value,
+                                                    is_secret: false,
+                                                },
+                                            );
+                                        } else if let Some(index) =
+                                            env_state.selected_profile_index()
+                                        {
+                                            // Existing variable: update
+                                            if let Some(var) = env_state.variables.get_mut(index) {
+                                                var.key = key;
+                                                var.value = value;
+                                            }
+                                        }
+                                        env_state.cancel_edit();
+                                        env_state.refresh_selection();
+                                    }
+                                    Err(msg) => {
+                                        env_state.error = Some(msg.to_string());
+                                    }
                                 }
                             }
-                            env_state.cancel_edit();
                         } else {
                             // Start editing selected item
                             env_state.start_edit_selected();
@@ -3290,14 +3317,38 @@ impl Model {
                                     env_state.start_new();
                                 }
                                 'd' | 'D' => {
-                                    // SPEC-dafff079 FR-020: Toggle disable for OS variables
-                                    env_state.toggle_selected_disabled();
+                                    if env_state.selected_is_overridden() {
+                                        self.status_message = Some(
+                                            "Use 'r' to reset overridden environment variable."
+                                                .to_string(),
+                                        );
+                                        self.status_message_time = Some(Instant::now());
+                                    } else if env_state.selected_is_os_entry() {
+                                        // SPEC-dafff079 FR-020: Toggle disable for OS variables
+                                        let disabled = env_state.toggle_selected_disabled();
+                                        self.status_message = Some(if disabled {
+                                            "OS environment variable disabled.".to_string()
+                                        } else {
+                                            "OS environment variable enabled.".to_string()
+                                        });
+                                        self.status_message_time = Some(Instant::now());
+                                    } else if let Some(index) = env_state.selected_profile_index() {
+                                        if index < env_state.variables.len() {
+                                            env_state.variables.remove(index);
+                                            env_state.refresh_selection();
+                                        }
+                                    }
                                 }
                                 'r' | 'R' => {
                                     // SPEC-dafff079 FR-019: Reset to OS value
                                     // Delete the override (profile variable) to reveal OS value
                                     if env_state.selected_is_overridden() {
                                         env_state.delete_selected_override();
+                                        env_state.refresh_selection();
+                                        self.status_message = Some(
+                                            "Environment variable reset to OS value.".to_string(),
+                                        );
+                                        self.status_message_time = Some(Instant::now());
                                     }
                                 }
                                 's' | 'S' => {
@@ -3589,9 +3640,14 @@ impl Model {
                     {
                         self.settings.cancel_profile_mode();
                     } else if self.settings.is_env_edit_mode() {
-                        // Save env changes and exit EnvEdit mode
-                        self.settings.save_env_to_profile();
-                        self.settings.cancel_profile_mode();
+                        if self.settings.env_state.edit_mode {
+                            // Cancel current env edit without leaving EnvEdit mode
+                            self.settings.env_state.cancel_edit();
+                        } else {
+                            // Save env changes and exit EnvEdit mode
+                            self.settings.save_env_to_profile();
+                            self.settings.cancel_profile_mode();
+                        }
                     } else if self.settings.is_form_mode() || self.settings.is_delete_mode() {
                         // CustomAgents mode
                         self.settings.cancel_mode();
@@ -3986,6 +4042,11 @@ impl Model {
                     self.profiles.cursor_left();
                 } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.cursor_left();
+                } else if matches!(self.screen, Screen::Settings)
+                    && self.settings.is_env_edit_mode()
+                    && self.settings.env_state.edit_mode
+                {
+                    self.settings.env_state.cursor_left();
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029c: Left/Right toggle selection in confirm dialog
                     self.confirm.toggle_selection();
@@ -4022,6 +4083,11 @@ impl Model {
                     self.profiles.cursor_right();
                 } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.cursor_right();
+                } else if matches!(self.screen, Screen::Settings)
+                    && self.settings.is_env_edit_mode()
+                    && self.settings.env_state.edit_mode
+                {
+                    self.settings.env_state.cursor_right();
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029c: Left/Right toggle selection in confirm dialog
                     self.confirm.toggle_selection();
@@ -6015,7 +6081,7 @@ fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
 
             // Execution mode (FR-102) - same logic as single mode
             match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume => {
+                ExecutionMode::Continue | ExecutionMode::Resume | ExecutionMode::Convert => {
                     if let Some(session_id) = &config.session_id {
                         args.push("--resume".to_string());
                         args.push(session_id.clone());
@@ -6036,7 +6102,7 @@ fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
         CodingAgent::CodexCli => {
             // Execution mode - resume subcommand must come first
             match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume => {
+                ExecutionMode::Continue | ExecutionMode::Resume | ExecutionMode::Convert => {
                     args.push("resume".to_string());
                     if let Some(session_id) = &config.session_id {
                         args.push(session_id.clone());
@@ -6082,7 +6148,7 @@ fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
 
             // Execution mode
             match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume => {
+                ExecutionMode::Continue | ExecutionMode::Resume | ExecutionMode::Convert => {
                     if let Some(session_id) = &config.session_id {
                         args.push("--resume".to_string());
                         args.push(session_id.clone());
@@ -6111,7 +6177,7 @@ fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
 
             // Execution mode
             match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume => {
+                ExecutionMode::Continue | ExecutionMode::Resume | ExecutionMode::Convert => {
                     if let Some(session_id) = &config.session_id {
                         args.push("--resume".to_string());
                         args.push(session_id.clone());
@@ -6148,7 +6214,7 @@ fn build_custom_agent_args_for_tmux(
             ExecutionMode::Continue => {
                 args.extend(mode_args.continue_mode.clone());
             }
-            ExecutionMode::Resume => {
+            ExecutionMode::Resume | ExecutionMode::Convert => {
                 args.extend(mode_args.resume.clone());
             }
         }
@@ -6297,6 +6363,8 @@ fn github_repo_slug(url: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::tui::screens::branch_list::{SafetyStatus, WorktreeStatus};
+    use crate::tui::screens::environment::EnvItem;
+    use crate::tui::screens::settings::{ProfileMode, SettingsCategory};
     use crate::tui::screens::wizard::WizardStep;
     use crate::tui::screens::{BranchItem, BranchListState, BranchType};
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
@@ -6764,6 +6832,63 @@ mod tests {
         let msg = model.handle_text_input_key(key, true);
         assert!(msg.is_none());
         assert_eq!(model.environment.edit_field, EditField::Value);
+    }
+
+    #[test]
+    fn test_settings_env_edit_enter_switches_to_value_field() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Settings;
+        model.settings.category = SettingsCategory::Environment;
+        model.settings.profile_mode = ProfileMode::EnvEdit("dev".to_string());
+        model.settings.env_state.start_new();
+
+        assert_eq!(model.settings.env_state.edit_field, EditField::Key);
+        model.update(Message::Enter);
+        assert_eq!(model.settings.env_state.edit_field, EditField::Value);
+        assert!(model.settings.env_state.edit_mode);
+    }
+
+    #[test]
+    fn test_settings_env_edit_updates_existing_variable() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Settings;
+        model.settings.category = SettingsCategory::Environment;
+        model.settings.profile_mode = ProfileMode::EnvEdit("dev".to_string());
+        model.settings.env_state = EnvironmentState::new()
+            .with_variables(vec![EnvItem {
+                key: "MY_VAR".to_string(),
+                value: "old".to_string(),
+                is_secret: false,
+            }])
+            .with_hide_ai(true);
+        model.settings.env_state.selected = 0;
+        model.settings.env_state.start_edit_selected();
+        model.settings.env_state.edit_value = "new".to_string();
+
+        model.update(Message::Enter);
+
+        assert_eq!(model.settings.env_state.variables[0].value, "new");
+        assert!(!model.settings.env_state.edit_mode);
+    }
+
+    #[test]
+    fn test_settings_env_edit_deletes_added_variable_with_d() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Settings;
+        model.settings.category = SettingsCategory::Environment;
+        model.settings.profile_mode = ProfileMode::EnvEdit("dev".to_string());
+        model.settings.env_state = EnvironmentState::new()
+            .with_variables(vec![EnvItem {
+                key: "MY_VAR".to_string(),
+                value: "value".to_string(),
+                is_secret: false,
+            }])
+            .with_hide_ai(true);
+        model.settings.env_state.selected = 0;
+
+        model.update(Message::Char('d'));
+
+        assert!(model.settings.env_state.variables.is_empty());
     }
 
     #[test]
