@@ -4,7 +4,10 @@ use chrono::Utc;
 use clap::Parser;
 use gwt_core::agent::codex::{codex_default_args, codex_skip_permissions_flag};
 use gwt_core::agent::get_command_version;
-use gwt_core::ai::AgentHistoryStore;
+use gwt_core::ai::{
+    AgentHistoryStore, AgentType as SessionAgentType, ClaudeSessionParser, CodexSessionParser,
+    GeminiSessionParser, OpenCodeSessionParser, SessionParser,
+};
 use gwt_core::config::{save_session_entry, AgentStatus, Session, Settings, ToolSessionEntry};
 use gwt_core::error::GwtError;
 use gwt_core::git::Branch;
@@ -975,6 +978,7 @@ pub(crate) struct LaunchPlan {
     pub executable: String,
     pub command_args: Vec<String>,
     pub log_lines: Vec<String>,
+    pub session_warning: Option<String>,
     pub selected_version: String,
     pub install_plan: InstallPlan,
     pub env: Vec<(String, String)>,
@@ -1072,9 +1076,11 @@ pub(crate) fn prepare_launch_plan(
 ) -> Result<LaunchPlan, GwtError> {
     progress(LaunchProgress::BuildingCommand);
 
+    let (config, session_warning) = normalize_session_id_for_launch(config);
+
     // SPEC-71f2742d: Handle custom agents (T207)
     if config.custom_agent.is_some() {
-        return prepare_custom_agent_launch_plan(config, progress);
+        return prepare_custom_agent_launch_plan(config, session_warning, progress);
     }
 
     let env = build_launch_env(&config);
@@ -1155,6 +1161,7 @@ pub(crate) fn prepare_launch_plan(
         executable,
         command_args,
         log_lines,
+        session_warning,
         selected_version,
         install_plan,
         env,
@@ -1164,6 +1171,7 @@ pub(crate) fn prepare_launch_plan(
 /// Prepare a launch plan for a custom coding agent (SPEC-71f2742d T207)
 fn prepare_custom_agent_launch_plan(
     config: AgentLaunchConfig,
+    session_warning: Option<String>,
     mut progress: impl FnMut(LaunchProgress),
 ) -> Result<LaunchPlan, GwtError> {
     use gwt_core::config::AgentType;
@@ -1233,6 +1241,7 @@ fn prepare_custom_agent_launch_plan(
         executable,
         command_args,
         log_lines,
+        session_warning,
         selected_version: version_label,
         install_plan,
         env,
@@ -1245,6 +1254,7 @@ fn execute_launch_plan(plan: LaunchPlan) -> Result<AgentExitKind, GwtError> {
         executable,
         command_args,
         log_lines,
+        session_warning,
         selected_version,
         install_plan,
         env,
@@ -1252,6 +1262,10 @@ fn execute_launch_plan(plan: LaunchPlan) -> Result<AgentExitKind, GwtError> {
     } = plan;
     println!("{}", build_launching_message(&config));
     println!();
+    if let Some(warning) = session_warning.as_ref() {
+        eprintln!("{}", warning);
+        eprintln!();
+    }
     if config.version == "installed" && selected_version == "latest" {
         eprintln!(
             "Note: Local '{}' not found, using bunx fallback",
@@ -1601,6 +1615,70 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
+}
+
+fn session_exists_for_tool_at(home: &Path, tool_id: &str, session_id: &str) -> Option<bool> {
+    let agent = SessionAgentType::from_tool_id(tool_id)?;
+    let exists = match agent {
+        SessionAgentType::ClaudeCode => {
+            ClaudeSessionParser::new(home.to_path_buf()).session_exists(session_id)
+        }
+        SessionAgentType::CodexCli => {
+            CodexSessionParser::new(home.to_path_buf()).session_exists(session_id)
+        }
+        SessionAgentType::GeminiCli => {
+            GeminiSessionParser::new(home.to_path_buf()).session_exists(session_id)
+        }
+        SessionAgentType::OpenCode => {
+            OpenCodeSessionParser::new(home.to_path_buf()).session_exists(session_id)
+        }
+    };
+    Some(exists)
+}
+
+fn normalize_session_id_for_launch_with_home(
+    mut config: AgentLaunchConfig,
+    home: Option<PathBuf>,
+) -> (AgentLaunchConfig, Option<String>) {
+    if config.custom_agent.is_some() {
+        return (config, None);
+    }
+
+    if !matches!(
+        config.execution_mode,
+        ExecutionMode::Continue | ExecutionMode::Resume
+    ) {
+        return (config, None);
+    }
+
+    let Some(session_id) = config.session_id.clone().filter(|id| !id.trim().is_empty()) else {
+        return (config, None);
+    };
+
+    let Some(home) = home else {
+        return (config, None);
+    };
+
+    let Some(exists) = session_exists_for_tool_at(&home, config.agent.id(), &session_id) else {
+        return (config, None);
+    };
+
+    if exists {
+        return (config, None);
+    }
+
+    config.session_id = None;
+    let warning = format!(
+        "Warning: Saved session '{}' not found; falling back to default resume behavior.",
+        session_id
+    );
+    (config, Some(warning))
+}
+
+fn normalize_session_id_for_launch(
+    config: AgentLaunchConfig,
+) -> (AgentLaunchConfig, Option<String>) {
+    normalize_session_id_for_launch_with_home(config, home_dir())
 }
 
 fn encode_claude_project_path(path: &Path) -> String {
@@ -2704,6 +2782,41 @@ mod tests {
 
         let id = detect_claude_session_id_at(home, Path::new("/repo/wt"));
         assert_eq!(id.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn test_normalize_session_id_for_launch_keeps_existing_session() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let sessions_dir = home.join(".codex").join("sessions").join("2026");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        fs::write(sessions_dir.join("rollout-sess-123.jsonl"), "{}").unwrap();
+
+        let mut config = sample_config(CodingAgent::CodexCli);
+        config.execution_mode = ExecutionMode::Resume;
+        config.session_id = Some("sess-123".to_string());
+
+        let (normalized, warning) =
+            normalize_session_id_for_launch_with_home(config, Some(home.to_path_buf()));
+
+        assert_eq!(normalized.session_id.as_deref(), Some("sess-123"));
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn test_normalize_session_id_for_launch_drops_missing_session() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+
+        let mut config = sample_config(CodingAgent::CodexCli);
+        config.execution_mode = ExecutionMode::Continue;
+        config.session_id = Some("missing".to_string());
+
+        let (normalized, warning) =
+            normalize_session_id_for_launch_with_home(config, Some(home.to_path_buf()));
+
+        assert!(normalized.session_id.is_none());
+        assert!(warning.is_some());
     }
 
     #[test]

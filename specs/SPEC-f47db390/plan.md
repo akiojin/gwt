@@ -1,6 +1,6 @@
 # 実装計画: セッションID永続化とContinue/Resume強化
 
-**仕様ID**: `SPEC-f47db390` | **日付**: 2025-12-06 | **更新日**: 2026-01-19 | **仕様書**: [spec.md](./spec.md)  
+**仕様ID**: `SPEC-f47db390` | **日付**: 2025-12-06 | **更新日**: 2026-01-30 | **仕様書**: [spec.md](./spec.md)  
 **入力**: `/specs/SPEC-f47db390/spec.md` からの機能仕様
 
 ## 概要
@@ -55,6 +55,7 @@ specs/SPEC-f47db390/
 ### 起動フロー
 - Continue: 保存済みIDがあればCodexに`resume <id>`, Claudeに`--resume <id>`。なければ従来`--last`/`-c`。
 - Resume: SessionSelectorに保存履歴を渡し、選択IDで起動。履歴なしなら警告して通常起動。
+- 起動前に`sessionId`に対応するセッションファイルの存在を確認し、見つからない場合は`sessionId`を無効化して警告のうえデフォルト挙動にフォールバック。
 - 終了時: IDと再開コマンド例を表示（ツール別文言）。
 - Web UI: `resumeSessionId`が渡された場合はCLI起動引数へ反映し、セッション終了時にWeb UI起動分もIDを検出して保存する。
 
