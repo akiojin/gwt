@@ -2,14 +2,20 @@
 
 pub mod agent_history;
 pub mod client;
+pub mod session_converter;
 pub mod session_parser;
 pub mod summary;
 
 pub use client::{format_error_for_display, AIClient, AIError, ChatMessage, ModelInfo};
+pub use session_converter::{
+    convert_session, get_encoder, is_conversion_available, ClaudeEncoder, CodexEncoder,
+    ConversionError, ConversionMetadata, ConversionMetadataStore, ConversionResult, GeminiEncoder,
+    LossInfo, MetadataStoreError, OpenCodeEncoder, SessionEncoder,
+};
 pub use session_parser::{
     AgentType, ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, MessageRole,
-    OpenCodeSessionParser, ParsedSession, SessionMessage, SessionParseError, SessionParser,
-    ToolExecution,
+    OpenCodeSessionParser, ParsedSession, SessionListEntry, SessionMessage, SessionParseError,
+    SessionParser, ToolExecution,
 };
 pub use summary::{
     build_session_prompt, parse_summary_lines, summarize_session, SessionMetrics, SessionSummary,
