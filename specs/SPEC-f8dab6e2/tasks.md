@@ -20,9 +20,9 @@
 
 ### テストタスク
 
-- [ ] **T001** [P] [共通] `crates/gwt-core/src/config/claude_plugins.rs` に新規ファイルを作成し、テストモジュールを追加
-- [ ] **T002** [P] [共通] `crates/gwt-core/src/config/mod.rs` に `claude_plugins` モジュールを追加
-- [ ] **T003** [共通] T001の後に FR-001〜FR-010 に対応するテストケースを作成（全テストは失敗状態）
+- [x] **T001** [P] [共通] `crates/gwt-core/src/config/claude_plugins.rs` に新規ファイルを作成し、テストモジュールを追加
+- [x] **T002** [P] [共通] `crates/gwt-core/src/config/mod.rs` に `claude_plugins` モジュールを追加
+- [x] **T003** [共通] T001の後に FR-001〜FR-010 に対応するテストケースを作成（全テストは失敗状態）
 
 ## フェーズ2: ユーザーストーリー1 - マーケットプレイス未登録時の自動登録 (優先度: P1)
 
@@ -32,26 +32,26 @@
 
 ### データ層
 
-- [ ] **T101** [US1] `crates/gwt-core/src/config/claude_plugins.rs` に `KnownMarketplaces` 構造体を定義
-- [ ] **T102** [US1] T101の後に `get_known_marketplaces_path()` 関数を実装
-- [ ] **T103** [US1] T102の後に `load_known_marketplaces()` 関数を実装
-- [ ] **T104** [US1] T103の後に `save_known_marketplaces()` 関数を実装
+- [x] **T101** [US1] `crates/gwt-core/src/config/claude_plugins.rs` に `KnownMarketplaces` 構造体を定義
+- [x] **T102** [US1] T101の後に `get_known_marketplaces_path()` 関数を実装
+- [x] **T103** [US1] T102の後に `load_known_marketplaces()` 関数を実装
+- [x] **T104** [US1] T103の後に `save_known_marketplaces()` 関数を実装
 
 ### ビジネスロジック
 
-- [ ] **T105** [US1] T104の後に `is_gwt_marketplace_registered()` 関数を実装
-- [ ] **T106** [US1] T105の後に `register_gwt_marketplace()` 関数を実装
-- [ ] **T107** [US1] T106の後に `enable_worktree_protection_plugin()` 関数を実装
-- [ ] **T108** [US1] T107の後に `setup_gwt_plugin()` 関数を実装（一括実行）
+- [x] **T105** [US1] T104の後に `is_gwt_marketplace_registered()` 関数を実装
+- [x] **T106** [US1] T105の後に `register_gwt_marketplace()` 関数を実装
+- [x] **T107** [US1] T106の後に `enable_worktree_protection_plugin()` 関数を実装
+- [x] **T108** [US1] T107の後に `setup_gwt_plugin()` 関数を実装（一括実行）
 
 ### UI/確認ダイアログ
 
-- [ ] **T109** [US1] `crates/gwt-cli/src/tui/screens/confirm.rs` に `plugin_setup()` メソッドを追加
-- [ ] **T110** [US1] T109の後に Claude Code起動フローに確認ダイアログ呼び出しを追加
+- [x] **T109** [US1] `crates/gwt-cli/src/tui/screens/confirm.rs` に `plugin_setup()` メソッドを追加
+- [x] **T110** [US1] T109の後に Claude Code起動フローに確認ダイアログ呼び出しを追加
 
 ### テスト検証
 
-- [ ] **T111** [US1] T110の後に US1関連のテストがすべて成功することを確認
+- [x] **T111** [US1] T110の後に US1関連のテストがすべて成功することを確認
 
 **✅ MVP1チェックポイント**: US1完了後、基本的なプラグイン自動登録が動作
 
@@ -63,11 +63,11 @@
 
 ### ビジネスロジック
 
-- [ ] **T201** [US2] Claude Code起動フローで `is_gwt_marketplace_registered()` を呼び出し、登録済みならスキップ
+- [x] **T201** [US2] Claude Code起動フローで `is_gwt_marketplace_registered()` を呼び出し、登録済みならスキップ
 
 ### テスト検証
 
-- [ ] **T202** [US2] T201の後に US2関連のテストがすべて成功することを確認
+- [x] **T202** [US2] T201の後に US2関連のテストがすべて成功することを確認
 
 **✅ MVP2チェックポイント**: US2完了後、登録済み時のスキップが動作
 
@@ -79,11 +79,11 @@
 
 ### ビジネスロジック
 
-- [ ] **T301** [US3] エージェント選択でCodexが選ばれた場合、プラグイン登録フローをスキップする条件を追加
+- [x] **T301** [US3] エージェント選択でCodexが選ばれた場合、プラグイン登録フローをスキップする条件を追加
 
 ### テスト検証
 
-- [ ] **T302** [US3] T301の後に US3関連のテストがすべて成功することを確認
+- [x] **T302** [US3] T301の後に US3関連のテストがすべて成功することを確認
 
 **✅ MVP3チェックポイント**: US3完了後、Codex起動時のスキップが動作
 
@@ -95,11 +95,11 @@
 
 ### ビジネスロジック
 
-- [ ] **T401** [US4] `register_gwt_marketplace()` 内でディレクトリ自動作成ロジックを追加
+- [x] **T401** [US4] `register_gwt_marketplace()` 内でディレクトリ自動作成ロジックを追加
 
 ### テスト検証
 
-- [ ] **T402** [US4] T401の後に US4関連のテストがすべて成功することを確認
+- [x] **T402** [US4] T401の後に US4関連のテストがすべて成功することを確認
 
 **✅ 完全な機能**: US4完了後、すべての要件が満たされます
 
@@ -109,9 +109,9 @@
 
 ### 統合
 
-- [ ] **T501** [統合] `cargo test` ですべてのテストが成功することを確認
-- [ ] **T502** [統合] `cargo clippy --all-targets --all-features -- -D warnings` が成功することを確認
-- [ ] **T503** [統合] `cargo fmt --check` が成功することを確認
+- [x] **T501** [統合] `cargo test` ですべてのテストが成功することを確認
+- [x] **T502** [統合] `cargo clippy --all-targets --all-features -- -D warnings` が成功することを確認
+- [x] **T503** [統合] `cargo fmt --check` が成功することを確認
 - [ ] **T504** [統合] エッジケース（不正JSON、権限エラー等）のテストを追加
 
 ### ドキュメント
