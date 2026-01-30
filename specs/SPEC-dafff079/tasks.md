@@ -20,6 +20,8 @@ description: "環境変数プロファイル機能（Ratatui）のタスク"
 - [x] **T003** [US6] `crates/gwt-cli/src/tui/app.rs` に Enter 編集・OSのみ削除警告・スクロールキー統合を追加
 - [x] **T012** [US6] `crates/gwt-cli/src/tui/app.rs` に環境変数編集の保存/キャンセル/更新/削除の挙動を追加
 - [x] **T013** [US6] `crates/gwt-cli/src/tui/app.rs` にSettingsのEnvEditで左右カーソル移動を追加
+- [x] **T014** [US1] `crates/gwt-cli/src/main.rs` に起動ログの環境変数表示を追加
+- [x] **T015** [US1] `crates/gwt-cli/src/main.rs` の `Version:` 表記を `@` なしに変更
 - [x] **T005** [US3] `crates/gwt-cli/src/tui/app.rs` に Enter で環境変数編集へ遷移する処理を追加
 - [x] **T004** [US4] `crates/gwt-cli/src/tui/screens/mod.rs` からOS専用画面の公開を削除
 - [x] **T006** [US4] `crates/gwt-cli/src/tui/app.rs` に `r` リセット操作を追加
@@ -42,6 +44,7 @@ description: "環境変数プロファイル機能（Ratatui）のタスク"
 - [x] **T109** [US6] `crates/gwt-cli/src/tui/app.rs` にSettings EnvEditのEnter切替テストを追加
 - [x] **T110** [US6] `crates/gwt-cli/src/tui/app.rs` にSettings EnvEditの既存変数更新テストを追加
 - [x] **T111** [US6] `crates/gwt-cli/src/tui/app.rs` にSettings EnvEditの削除テストを追加
+- [x] **T112** [US1] `crates/gwt-cli/src/main.rs` に起動ログのEnv/Version表記テストを追加
 
 ## フェーズ3: 統合とチェック
 
