@@ -3179,6 +3179,7 @@ impl Model {
                                     Ok(value) => {
                                         env_state.apply_ai_value(ai_field, value);
                                         env_state.cancel_edit();
+                                        self.persist_settings_env_changes();
                                     }
                                     Err(msg) => {
                                         env_state.error = Some(msg.to_string());
@@ -3207,6 +3208,7 @@ impl Model {
                                         }
                                         env_state.cancel_edit();
                                         env_state.refresh_selection();
+                                        self.persist_settings_env_changes();
                                     }
                                     Err(msg) => {
                                         env_state.error = Some(msg.to_string());
@@ -3332,10 +3334,12 @@ impl Model {
                                             "OS environment variable enabled.".to_string()
                                         });
                                         self.status_message_time = Some(Instant::now());
+                                        self.persist_settings_env_changes();
                                     } else if let Some(index) = env_state.selected_profile_index() {
                                         if index < env_state.variables.len() {
                                             env_state.variables.remove(index);
                                             env_state.refresh_selection();
+                                            self.persist_settings_env_changes();
                                         }
                                     }
                                 }
@@ -3349,15 +3353,7 @@ impl Model {
                                             "Environment variable reset to OS value.".to_string(),
                                         );
                                         self.status_message_time = Some(Instant::now());
-                                    }
-                                }
-                                's' | 'S' => {
-                                    // Save env vars
-                                    if self.settings.save_profile_env() {
-                                        if let Some(ref config) = self.settings.profiles_config {
-                                            let _ = config.save();
-                                            self.load_profiles();
-                                        }
+                                        self.persist_settings_env_changes();
                                     }
                                 }
                                 _ => {}
@@ -3474,6 +3470,19 @@ impl Model {
             profile.ai = None;
         }
         self.save_profiles();
+    }
+
+    fn persist_settings_env_changes(&mut self) {
+        match self.settings.persist_env_edit() {
+            Ok(_) => {
+                self.load_profiles();
+            }
+            Err(message) => {
+                self.status_message =
+                    Some(format!("Failed to save environment changes: {}", message));
+                self.status_message_time = Some(Instant::now());
+            }
+        }
     }
 
     fn delete_selected_profile(&mut self) {
@@ -3644,8 +3653,7 @@ impl Model {
                             // Cancel current env edit without leaving EnvEdit mode
                             self.settings.env_state.cancel_edit();
                         } else {
-                            // Save env changes and exit EnvEdit mode
-                            self.settings.save_env_to_profile();
+                            // Exit EnvEdit mode without saving (auto-save happens on edit)
                             self.settings.cancel_profile_mode();
                         }
                     } else if self.settings.is_form_mode() || self.settings.is_delete_mode() {
