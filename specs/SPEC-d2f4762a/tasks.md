@@ -3,6 +3,13 @@
 **仕様ID**: `SPEC-d2f4762a`
 **ポリシー**: CLAUDE.md の TDD ルールに基づき、必ず RED→GREEN→リグレッションチェックの順に進める。
 
+## 追加作業: 現在ブランチのラベル表示 (2026-01-31)
+
+- [x] **T1430** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に現在ブランチの `(current)` 表示要件・方針を追記
+- [x] **T1431** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` に現在ブランチの `(current)` 表示と緑色表示を検証するテストを追加
+- [x] **T1432** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` で現在ブランチの `(current)` 描画と左側幅計算の更新を実装
+- [x] **T1433** [検証] `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
 ## 追加作業: レイアウト統一とステータスバー統合 (2026-01-27)
 
 - [x] **T1400** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` / `specs/SPEC-861d8cdf/spec.md` にレイアウト統一と常時ステータスバー要件を反映
