@@ -76,13 +76,17 @@
 ### 機能要件
 
 - **FR-001**: システムはClaude Code起動時に`~/.claude/plugins/known_marketplaces.json`の`gwt-plugins`登録状態を確認**しなければならない**
+- **FR-001b**: 登録済み判定は`installLocation`と`lastUpdated`が文字列として存在することを含む
 - **FR-002**: システムは未登録時に確認ダイアログを表示**しなければならない**
 - **FR-003**: システムはユーザーが「Setup」を選択した場合、`known_marketplaces.json`に以下の形式で登録**しなければならない**:
   ```json
   "gwt-plugins": {
-    "source": {"source": "github", "repo": "akiojin/gwt"}
+    "source": {"source": "github", "repo": "akiojin/gwt"},
+    "installLocation": "<string>",
+    "lastUpdated": "<string>"
   }
   ```
+- **FR-003b**: `installLocation`と`lastUpdated`は空文字ではない文字列でなければならない
 - **FR-004**: システムはユーザーが「Setup」を選択した場合、`~/.claude/settings.json`と`.claude/settings.json`の`enabledPlugins`に`worktree-protection-hooks@gwt-plugins: true`を追加**しなければならない**
 - **FR-005**: システムは`.claude/`ディレクトリが存在しない場合、作成**しなければならない**
 - **FR-006**: システムは`~/.claude/plugins/`ディレクトリが存在しない場合、作成**しなければならない**
