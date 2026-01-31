@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [6.23.2] - 2026-01-31
+
+### Bug Fixes
+
+- CHANGELOGのセクション見出しを修正（Ci → CI）
+
+### Miscellaneous Tasks
+
+- リリースフローを簡素化（releaseブランチ廃止、develop→main直接PR）
+
 ## [6.23.1] - 2026-01-31
 
 ### Bug Fixes
@@ -14,7 +24,7 @@ All notable changes to this project will be documented in this file.
 - **codex:** Codexバージョンに基づくweb_searchパラメーター切り替え (#851)
 - **tui:** 現在ブランチに(current)表示を追加 (#852)
 
-### Ci
+### CI
 
 - **release:** ARM Linuxビルドをネイティブランナーに変更
 
