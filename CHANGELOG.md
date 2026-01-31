@@ -1,6 +1,23 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+## [6.23.1] - 2026-01-31
+
+### Bug Fixes
+
+- **codex:** Web_search_request を web_search に変更 (#849)
+- **core:** サブモジュールを含むworktreeの削除に対応 (#850)
+
+### Features
+
+- **codex:** Codexバージョンに基づくweb_searchパラメーター切り替え (#851)
+- **tui:** 現在ブランチに(current)表示を追加 (#852)
+
+### Ci
+
+- **release:** ARM Linuxビルドをネイティブランナーに変更
+
 ## [6.23.0] - 2026-01-31
 
 ### Bug Fixes
