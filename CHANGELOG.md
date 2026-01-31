@@ -1,6 +1,177 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [6.22.6] - 2026-01-31
+
+### Bug Fixes
+
+- AI設定ウィザードでdキーが入力できない問題を修正 (#722)
+- ブランチステータス更新中も詳細パネルにブランチ情報を表示 (#721)
+- 起動直後終了時の可視化を改善 (#719)
+- タブ状態をグローバル管理に変更しリフレッシュ時のリセットを修正 (#724)
+- CHANGELOG.mdの重複エントリを修正
+- MacOSのPTYラッパーで引数解釈を遮断 (#731)
+- Hook登録を上書き更新方式に変更 (#734)
+- Worktree復元を無効化 (#735)
+- タブ選択状態がリフレッシュ時にリセットされる問題を修正 (#736)
+- WindowsでClaudeのIS_SANDBOXを無効化 (#737)
+- Prioritize filter input over shortcuts (#746)
+- Remoteモードでリモート専用ブランチを表示 (#747)
+- MacOSのscriptラッパーから--を削除 (#748)
+- ブランチ詳細とセッション要約を文字単位で折り返し (#749)
+- ブランチ一覧のエージェントバージョン保持 (#752)
+- セッション要約のタイムアウトを10分に延長 (#753)
+- Tmux起動ラッパーのstatus変数衝突を回避 (#754)
+- Tmux起動ラッパーのstatus変数衝突を回避 (#756)
+- セッション要約の言語指示を明確化
+- Developとのマージコンフリクトを解消
+- Markdownlint違反を修正（連続空白行）
+- ブランチ一覧でリモートブランチの'remotes/'プレフィックスを削除 (#758)
+- Agent mode UI issues (#759)
+- Agent mode UI issues (#763)
+- TUIパネルのタイトルとボーダースタイルを統一 (#764)
+- Gwt hookコマンドの検出パターンを改善し重複登録を防止 (FR-102j) (#767)
+- セッションファイルをworktreeローカルからグローバルストレージに移行 (#768)
+- CI環境でのtest_legacy_session_migration失敗を修正
+- CodeRabbit指摘対応 - sessions_dir安全性向上とテスト分離
+- セッションファイルをworktreeローカルからグローバルストレージに移行 (#770)
+- Cleanup branch even if worktree missing (#773)
+- Worktree作成後の一覧更新とtmux背景名 (#775)
+- テスト間の環境変数競合を修正
+- AI設定モデル一覧のスクロール対応 (#778)
+- Remove repair command (#779)
+- CHANGELOG.mdの重複エントリを削除
+- CHANGELOG.mdのMD022違反を修正（見出し前の空行追加）
+- Bunxがnode_modules配下の場合はnpxへフォールバック (#783)
+- Disable worktree prune on exit (#784)
+- Add git command success checks in test helpers
+- Npx使用時に--yesを付与 (#788)
+- Add external git command fallback for Repository::open and discover (#792)
+- Add Skip option to GitHub Issue selection (#794)
+- Postinstall ダウンロード安定化 (issue #795) (#797)
+- Issue連携ブランチ作成で--checkout=falseを付与 (#799)
+- Remove duplicate entries in CHANGELOG.md for v6.19.0
+- Cleanup spinner + input lock (#802)
+- Base branch fallback for safety checks (#805)
+- Cleanup active branch selection skip (#806)
+- Issue一覧0件時にIssue選択を自動スキップ (#807)
+- Handle remote-only issue-linked branches in worktree creation (#808)
+- ブランチ一覧の履歴表示をリモートにも適用
+- Rustfmt CI互換のフォーマット修正
+- Remove duplicate entries from CHANGELOG.md v6.21.0
+- Add blank line before heading in CHANGELOG.md (MD022)
+- セッション要約に直近対応項目を追加
+- **settings:** AISettingsWizardを正しく初期化
+- **settings:** Environmentタブから AI設定を非表示に
+- クリーンアップ中の入力ロックを解除
+- Quick Startでもcollaboration_modesを自動付与
+- セッションコンバートで実際の変換処理を実行するように修正 (#835)
+- Env edit and launch log output (#837)
+- Fallback when saved session id missing (#839)
+- Enable env edit autosave (#840)
+- Claude marketplace metadata and layout (#845)
+
+### Documentation
+
+- Add PR #789 link to tasks.md (#791)
+- README.md/README.ja.mdにカスタムエージェントのmodels/versionCommand説明を追加
+
+### Features
+
+- Allow variable session summary highlights (#718)
+- 起動最適化 - 非同期化と進捗表示の改善 (#723)
+- **tui:** ブランチ名色分けとエージェント履歴永続化 (#730)
+- **tui:** シングルクリックでブランチ選択、ダブルクリックで実行に変更 (#740)
+- セッション要約に依頼と直近指示の明示を追加 (#742)
+- **tui:** エラーポップアップ・ログ出力システム (SPEC-e66acf66) (#743)
+- **tui:** 全画面にマウスクリック対応を拡張 (#745)
+- セッション要約に状態と次アクション要件を追加 (#751)
+- セッション要約に依頼と直近指示の明示を追加
+- セッション要約に状態と次アクション要件を追加
+- Add agent mode scaffolding and branch list layout updates (#755)
+- ViewModeのデフォルトをAllからLocalに変更 (#760)
+- UキーでClaude Codeフック設定を手動再登録できる機能を追加 (#761)
+- Bunx/npx一時実行環境でのHook警告機能を追加 (FR-102i) (#762)
+- セッション要約スクロールバーを表示 (#772)
+- フックスクリプトをプラグイン形式に移行 (#776)
+- Add mouse wheel scrolling for session summary (#781)
+- **tui:** Add progress modal for worktree preparation (US15) (#786)
+- GitHub Issue連携によるブランチ作成機能 (SPEC-e4798383) (#787)
+- GitHub Issue-Branch自動リンク機能 (US6, SPEC-e4798383) (#789)
+- **custom-agent:** Tools.json読み込みとWizard表示機能を追加
+- **custom-agent:** カスタムエージェント起動機能を実装 (US2)
+- **settings:** 設定画面にカスタムエージェント管理機能を追加 (US3)
+- **settings:** カスタムエージェント追加/編集/削除フォームを実装 (US3)
+- **tui:** Tab キーで3画面循環を実装 (US4 FR-020)
+- **wizard:** カスタムエージェントのモデル選択とバージョン取得を実装 (US5)
+- **history:** カスタムエージェントの履歴保存とQuick Start復元を実装 (US6)
+- **settings:** Add Profile category with full CRUD support
+- **settings:** プロファイルカテゴリのキーハンドラーを実装
+- **settings:** AI設定を専用タブに分離
+- **settings:** AIタブに現在の設定値を表示
+- **settings:** Integrate Environment profiles into Settings screen
+- **settings:** Swap Enter and E key bindings in Environment category
+- **settings:** SPEC-dafff079準拠の環境変数編集機能を実装
+- Codex collaboration_modes サポートを追加
+- Codex v0.91.0+でcollaboration_modesを強制有効化
+- **tui:** 画面レイアウトとタイトル表記を統一
+- セッションコンバート機能のExecution Mode統合 (#834)
+- クリーンアップ対象ブランチの視覚的フィードバック改善 (FR-013/FR-014) (#836)
+- Claude Code プラグインマーケットプレイス自動登録 (#843)
+
+### Miscellaneous Tasks
+
+- Add .gwt-session.toml to .gitignore
+- Merge main into develop
+- Merge origin/develop
+- Package-lock.jsonのバージョンを6.13.0に更新
+- Bun.lockを.gitignoreに追加 (#771)
+- Add commitlint as dev dependency
+- Apply cargo fmt
+- SPEC-71f2742d tasks.mdの完了タスクを更新
+- Develop取り込み
+- Developブランチをマージ
+- Origin/develop をマージ
+- Developマージ後にrustfmtを適用
+- Merge origin/main into develop
+- Strengthen repository security settings
+- Restore auto-merge for main branch PRs
+- Update release workflow to use release branches
+- Merge origin/main into develop (keep auto-merge.yml)
+- Merge origin/main into develop (resolve conflicts)
+- Merge origin/main into develop (resolve conflicts)
+- Enable speckit plugin
+- Merge main (v6.22.3) into develop
+- Add CodeRabbit config for develop branch reviews (#842)
+- Merge main into develop
+- Merge main into develop
+
+### Performance
+
+- エージェント起動時のブロッキング処理を削減 (#766)
+- エージェント起動時のブロッキング処理を削減
+- エージェント起動前のworktree解決を軽量化
+
+### Refactor
+
+- **settings:** ProfileカテゴリをEnvironmentに改名
+- **settings:** Env category navigates to existing Profiles screen
+
+### Styling
+
+- Rustfmtフォーマット修正 (#732)
+- Rustfmtによるコードフォーマット修正
+- Apply rustfmt
+
+### Testing
+
+- Hook setup重複登録防止のテスト追加 (#726)
+- Fix clippy useless vec in cleanup tests
+
+### Ci
+
+- Developブランチへの自動マージを無効化 (#804)
+
 ## [6.22.5] - 2026-01-30
 
 ### Bug Fixes

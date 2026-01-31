@@ -10,14 +10,17 @@
 //!     "source": {
 //!       "source": "github",
 //!       "repo": "akiojin/gwt"
-//!     }
+//!     },
+//!     "installLocation": "/path/to/.claude/plugins/marketplaces/gwt-plugins",
+//!     "lastUpdated": "2025-01-01T00:00:00.000Z"
 //!   }
 //! }
 //! ```
 
 use crate::error::GwtError;
+use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use std::path::{Path, PathBuf};
 
 /// Marketplace source information
@@ -80,18 +83,61 @@ pub fn is_gwt_marketplace_registered_at(path: &Path) -> bool {
         return false;
     };
 
-    marketplaces.contains_key(GWT_MARKETPLACE_NAME)
+    let Some(entry) = marketplaces.get(GWT_MARKETPLACE_NAME) else {
+        return false;
+    };
+
+    is_valid_marketplace_entry(entry)
 }
 
-/// Create gwt-plugins marketplace entry
-fn create_gwt_marketplace_entry() -> MarketplaceEntry {
+/// Marketplace entry helpers
+fn marketplace_install_location(path: &Path) -> String {
+    let base = path.parent().unwrap_or_else(|| Path::new("."));
+    base.join("marketplaces")
+        .join(GWT_MARKETPLACE_NAME)
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn now_timestamp() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn is_non_empty_string(value: &Option<String>) -> bool {
+    value
+        .as_ref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn is_valid_marketplace_entry(entry: &MarketplaceEntry) -> bool {
+    is_non_empty_string(&entry.install_location) && is_non_empty_string(&entry.last_updated)
+}
+
+fn ensure_marketplace_entry(entry: &mut MarketplaceEntry, path: &Path) -> bool {
+    let mut changed = false;
+
+    if !is_non_empty_string(&entry.install_location) {
+        entry.install_location = Some(marketplace_install_location(path));
+        changed = true;
+    }
+
+    if !is_non_empty_string(&entry.last_updated) {
+        entry.last_updated = Some(now_timestamp());
+        changed = true;
+    }
+
+    changed
+}
+
+fn create_gwt_marketplace_entry(path: &Path) -> MarketplaceEntry {
     MarketplaceEntry {
         source: MarketplaceSource {
             source: GWT_MARKETPLACE_SOURCE.to_string(),
             repo: GWT_MARKETPLACE_REPO.to_string(),
         },
-        install_location: None,
-        last_updated: None,
+        install_location: Some(marketplace_install_location(path)),
+        last_updated: Some(now_timestamp()),
     }
 }
 
@@ -120,13 +166,21 @@ pub fn register_gwt_marketplace_at(path: &Path) -> Result<(), GwtError> {
         KnownMarketplaces::new()
     };
 
-    // Add gwt-plugins marketplace if not exists
-    if !marketplaces.contains_key(GWT_MARKETPLACE_NAME) {
-        marketplaces.insert(
-            GWT_MARKETPLACE_NAME.to_string(),
-            create_gwt_marketplace_entry(),
-        );
+    let mut changed = false;
 
+    match marketplaces.entry(GWT_MARKETPLACE_NAME.to_string()) {
+        Entry::Vacant(entry) => {
+            entry.insert(create_gwt_marketplace_entry(path));
+            changed = true;
+        }
+        Entry::Occupied(mut entry) => {
+            if ensure_marketplace_entry(entry.get_mut(), path) {
+                changed = true;
+            }
+        }
+    }
+
+    if changed {
         // Write back
         let content = serde_json::to_string_pretty(&marketplaces).map_err(|e| {
             GwtError::ConfigWriteError {
@@ -279,10 +333,21 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("known_marketplaces.json");
 
-        let content = r#"{"gwt-plugins": {"source": {"source": "github", "repo": "akiojin/gwt"}}}"#;
+        let content = r#"{"gwt-plugins": {"source": {"source": "github", "repo": "akiojin/gwt"}, "installLocation": "/tmp/marketplaces/gwt-plugins", "lastUpdated": "2025-01-01T00:00:00.000Z"}}"#;
         std::fs::write(&path, content).unwrap();
 
         assert!(is_gwt_marketplace_registered_at(&path));
+    }
+
+    #[test]
+    fn test_is_gwt_marketplace_registered_when_missing_required_fields() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("known_marketplaces.json");
+
+        let content = r#"{"gwt-plugins": {"source": {"source": "github", "repo": "akiojin/gwt"}}}"#;
+        std::fs::write(&path, content).unwrap();
+
+        assert!(!is_gwt_marketplace_registered_at(&path));
     }
 
     #[test]
@@ -312,6 +377,21 @@ mod tests {
         let entry = marketplaces.get(GWT_MARKETPLACE_NAME).unwrap();
         assert_eq!(entry.source.source, GWT_MARKETPLACE_SOURCE);
         assert_eq!(entry.source.repo, GWT_MARKETPLACE_REPO);
+        let expected_install_location = path
+            .parent()
+            .unwrap()
+            .join("marketplaces")
+            .join(GWT_MARKETPLACE_NAME)
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            entry.install_location.as_deref(),
+            Some(expected_install_location.as_str())
+        );
+        assert!(matches!(
+            entry.last_updated.as_deref(),
+            Some(value) if !value.is_empty()
+        ));
     }
 
     #[test]
@@ -345,6 +425,30 @@ mod tests {
         let marketplaces: KnownMarketplaces = serde_json::from_str(&content).unwrap();
 
         assert_eq!(marketplaces.len(), 1);
+    }
+
+    #[test]
+    fn test_register_gwt_marketplace_repairs_missing_fields() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("known_marketplaces.json");
+
+        let content = r#"{"gwt-plugins": {"source": {"source": "github", "repo": "akiojin/gwt"}}}"#;
+        std::fs::write(&path, content).unwrap();
+
+        register_gwt_marketplace_at(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let marketplaces: KnownMarketplaces = serde_json::from_str(&content).unwrap();
+        let entry = marketplaces.get(GWT_MARKETPLACE_NAME).unwrap();
+
+        assert!(matches!(
+            entry.install_location.as_deref(),
+            Some(value) if !value.is_empty()
+        ));
+        assert!(matches!(
+            entry.last_updated.as_deref(),
+            Some(value) if !value.is_empty()
+        ));
     }
 
     // FR-004: Plugin enable
@@ -421,6 +525,17 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         let marketplaces: Result<KnownMarketplaces, _> = serde_json::from_str(&content);
         assert!(marketplaces.is_ok());
+
+        let marketplaces = marketplaces.unwrap();
+        let entry = marketplaces.get(GWT_MARKETPLACE_NAME).unwrap();
+        assert!(matches!(
+            entry.install_location.as_deref(),
+            Some(value) if !value.is_empty()
+        ));
+        assert!(matches!(
+            entry.last_updated.as_deref(),
+            Some(value) if !value.is_empty()
+        ));
     }
 
     // FR-010: Don't re-enable disabled plugin
@@ -514,6 +629,15 @@ mod tests {
         let marketplaces: KnownMarketplaces = serde_json::from_str(&content).unwrap();
 
         assert!(marketplaces.contains_key(GWT_MARKETPLACE_NAME));
+        let entry = marketplaces.get(GWT_MARKETPLACE_NAME).unwrap();
+        assert!(matches!(
+            entry.install_location.as_deref(),
+            Some(value) if !value.is_empty()
+        ));
+        assert!(matches!(
+            entry.last_updated.as_deref(),
+            Some(value) if !value.is_empty()
+        ));
     }
 
     #[test]
