@@ -2,7 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
-## [6.23.2] - 2026-01-31
+## [6.24.0] - 2026-01-31
+
+### Features
+
+- **codex:** /releaseスキルを追加
 
 ### Bug Fixes
 
