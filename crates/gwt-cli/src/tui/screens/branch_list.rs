@@ -1852,12 +1852,13 @@ fn render_branch_row(
     } else {
         &branch.name
     };
+    let current_label = if branch.is_current { " (current)" } else { "" };
 
     // Calculate left side width: optionally "[*] " + safety + " " + branch_name
     // FR-082: Worktree column removed, branch name color indicates status
     // selection_icon(3) + space(1) if showing selection, plus safety_icon + space(1) + name
     let selection_width = if show_selection { 3 } else { 0 }; // "◉ " or "◎ " (2 + 1)
-    let left_width = selection_width + safety_icon.len() + 1 + display_name.width();
+    let left_width = selection_width + safety_icon.len() + 1 + display_name.width() + current_label.width();
 
     // Build right side (agent info) and calculate its width
     // SPEC-861d8cdf T-103: Status-based display
@@ -1972,6 +1973,12 @@ fn render_branch_row(
             Style::default().fg(branch_name_color),
         ),
     ]);
+    if branch.is_current {
+        spans.push(Span::styled(
+            current_label,
+            Style::default().fg(Color::Green),
+        ));
+    }
 
     // Add padding and right side if there's agent info
     if !right_spans.is_empty() {
@@ -2739,6 +2746,54 @@ mod tests {
         branch.is_gone = true;
         branch.worktree_status = WorktreeStatus::None;
         assert_eq!(branch.branch_name_color(), Color::Red);
+    }
+
+    #[test]
+    fn test_current_branch_label_renders_in_green() {
+        let mut branch = sample_branch("main");
+        branch.is_current = true;
+
+        let other = sample_branch("feature/other");
+        let mut state = BranchListState::new().with_branches(vec![branch, other]);
+        state.selected = 1;
+
+        let backend = TestBackend::new(40, 5);
+        let mut terminal = Terminal::new(backend).expect("terminal init");
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_branches(&state, f, area, true);
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        let label = "(current)";
+        let label_chars: Vec<char> = label.chars().collect();
+        let width = 40u16;
+        let height = 5u16;
+        let mut found = false;
+
+        'rows: for y in 0..height {
+            for x in 0..=width.saturating_sub(label_chars.len() as u16) {
+                let matches = label_chars.iter().enumerate().all(|(offset, ch)| {
+                    buffer[(x + offset as u16, y)]
+                        .symbol()
+                        .chars()
+                        .next()
+                        == Some(*ch)
+                });
+                if matches {
+                    found = true;
+                    for offset in 0..label_chars.len() {
+                        assert_eq!(buffer[(x + offset as u16, y)].fg, Color::Green);
+                    }
+                    break 'rows;
+                }
+            }
+        }
+
+        assert!(found, "current label should appear in the branch row");
     }
 
     #[test]
