@@ -252,7 +252,7 @@ pub fn codex_default_args(
     let web_search_feature = get_web_search_feature_name(skills_flag_version);
     let mut args = vec![
         "--enable".to_string(),
-        web_search_feature.to_string(),
+web_search_feature.to_string(),
         format!("--model={}", model),
     ];
 
