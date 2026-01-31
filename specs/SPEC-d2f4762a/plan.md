@@ -1,6 +1,6 @@
 # 実装計画: ブランチ選択画面 クリーンアップ選択モード
 
-**仕様ID**: `SPEC-d2f4762a` | **対象US**: 0, 0b, 4 | **日付**: 2026-01-26
+**仕様ID**: `SPEC-d2f4762a` | **対象US**: 0, 0b, 4 | **日付**: 2026-01-31
 
 ## 方針
 - アイコンは行頭の「選択 + 安全性」に絞り、アイコン間にスペースを入れる。ASCIIに限定せず、単幅（1セル）にならない文字はASCIIへフォールバックする。
@@ -129,6 +129,18 @@
 - **No.34** パネルタイトルの簡素化と統一: `crates/gwt-cli/src/tui/screens/branch_list.rs` のDetails/Sessionタイトルからブランチ名を除去し、タイトル色とパディングを揃える。
 - **No.35** Settings下部構造の統一: `crates/gwt-cli/src/tui/screens/settings.rs` のInstructionsブロックを廃止し、フッターヘルプへ寄せる。
 - **No.36** Settingsタイトル規約の統一: `crates/gwt-cli/src/tui/screens/settings.rs` のタブ/一覧/説明/フォーム/確認/AI/環境変数のタイトル色とパディングを揃える。
+
+## 追加方針: 現在ブランチのラベル表示 (2026-01-31)
+
+- ブランチ一覧で現在ブランチのブランチ名直後に `(current)` を追加し、緑色で表示する。
+- 右側のエージェント情報のアライメントを維持するため、左側幅計算に `(current)` の幅を加算する。
+- 選択中のブランチでも `(current)` は緑色で表示する。
+
+## 追加 ハイレベル ToDo (2026-01-31)
+
+1) **表示仕様反映**: `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に現在ブランチの `(current)` 表示要件を追記する。
+2) **TDD**: `crates/gwt-cli/src/tui/screens/branch_list.rs` に `(current)` 表示と色を検証するテストを追加する。
+3) **実装**: `crates/gwt-cli/src/tui/screens/branch_list.rs` で現在ブランチに `(current)` を緑で描画し、左側幅計算を更新する。
 
 ## リスクと緩和
 - **パフォーマンス**: `getMergedPRWorktrees()` を表示用に呼ぶ頻度を制御（ブランチ更新時のみ）し、結果をキャッシュ。

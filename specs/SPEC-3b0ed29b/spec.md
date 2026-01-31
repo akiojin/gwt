@@ -27,7 +27,7 @@ gwtから各コーディングエージェント（Claude Code、Codex、Gemini�
 
 **受け入れシナリオ**:
 
-1. **前提条件** gwtが起動しブランチが選択されている、**操作** エージェント選択画面でCodexを選択して起動、**期待結果** Codexが`--enable web_search_request`、(v0.80.0未満の場合のみ)`--enable skills`、`--sandbox workspace-write`などのデフォルト引数付きで起動する
+1. **前提条件** gwtが起動しブランチが選択されている、**操作** エージェント選択画面でCodexを選択して起動、**期待結果** Codexが`--enable web_search`（v0.90.0以上）または`--enable web_search_request`（v0.89.x以下）、(v0.80.0未満の場合のみ)`--enable skills`、`--sandbox workspace-write`などのデフォルト引数付きで起動する
 2. **前提条件** gwtが起動しブランチが選択されている、**操作** エージェント選択画面でClaude Codeを選択して起動、**期待結果** Claude Codeがデフォルト設定で起動し、モデル選択が可能
 3. **前提条件** gwtが起動しブランチが選択されている、**操作** エージェント選択画面でGeminiを選択して起動、**期待結果** Gemini CLIがデフォルト設定で起動する
 4. **前提条件** gwtが起動しブランチが選択されている、**操作** エージェント選択画面でOpenCodeを選択して起動、**期待結果** OpenCodeがデフォルト設定で起動する
@@ -404,7 +404,7 @@ gwtから各コーディングエージェント（Claude Code、Codex、Gemini�
 
 #### Codex固有要件
 
-- **FR-201**: Codexは、デフォルト引数として`--enable web_search_request`を含め**なければならない**
+- **FR-201**: Codexは、デフォルト引数としてWeb検索機能を有効化する`--enable`フラグを含め**なければならない**。フィーチャー名はCodex CLIバージョンに応じて切り替える（FR-210参照）
 - **FR-202**: Codexは、Codex CLIバージョンが0.80.0未満の場合にのみ`--enable skills`を付与し、0.80.0以上またはバージョン判定不能の場合は付与してはならない
 - **FR-203**: Codexは、デフォルト引数として`--sandbox workspace-write`を含め**なければならない**
 - **FR-204**: Codexは、デフォルト引数として推論設定（`-c model_reasoning_effort`、`-c model_reasoning_summaries`）を含め**なければならない**
@@ -413,6 +413,7 @@ gwtから各コーディングエージェント（Claude Code、Codex、Gemini�
 - **FR-207**: Codexは、起動開始時刻近傍のセッションファイルを優先して`sessionId`を記録し、他ブランチのセッションを誤って再開してはならない
 - **FR-208**: Codexは、起動完了後に取得可能な最新セッションIDを保存時に必ず再解決し、履歴より新しいIDがある場合はそれを使用しなければならない
 - **FR-209**: Codexは、モデル選択肢に`gpt-5.2`を含め、選択時に`--model=gpt-5.2`を渡し、推論レベルとして`Extra high`（xhigh）を選択可能にしなければならない
+- **FR-210**: Codexは、Codex CLIバージョンが0.90.0以上の場合は`--enable web_search`を、0.89.x以下の場合は`--enable web_search_request`を渡さ**なければならない**。バージョン判定不能の場合は`web_search`（最新の挙動）を優先する
 
 #### Gemini固有要件
 

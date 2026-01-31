@@ -16,6 +16,7 @@ const DEFAULT_CODEX_REASONING: &str = "high";
 const CODEX_SKILLS_FLAG_DEPRECATED_FROM: &str = "0.80.0";
 const CODEX_SKIP_FLAG_DEPRECATED_FROM: &str = "0.80.0";
 const CODEX_COLLABORATION_MODES_MIN_VERSION: &str = "0.91.0";
+const CODEX_WEB_SEARCH_RENAMED_FROM: &str = "0.90.0";
 const CODEX_SKIP_FLAG_LEGACY: &str = "--yolo";
 const CODEX_SKIP_FLAG_DANGEROUS: &str = "--dangerously-bypass-approvals-and-sandbox";
 const MODEL_FLAG_PREFIX: &str = "--model=";
@@ -192,6 +193,25 @@ pub fn codex_skip_permissions_flag(version: Option<&str>) -> &'static str {
     }
 }
 
+/// Get the web search feature name based on Codex CLI version
+///
+/// Returns "web_search" for v0.90.0 or later, "web_search_request" for earlier versions.
+/// If version is unknown or invalid, defaults to "web_search" (latest behavior).
+pub fn get_web_search_feature_name(version: Option<&str>) -> &'static str {
+    let parsed = parse_version(version);
+    let threshold = parse_version(Some(CODEX_WEB_SEARCH_RENAMED_FROM));
+    match (parsed, threshold) {
+        (Some(parsed), Some(threshold)) => {
+            if compare_versions(&parsed, &threshold) == Ordering::Less {
+                "web_search_request"
+            } else {
+                "web_search"
+            }
+        }
+        _ => "web_search",
+    }
+}
+
 fn with_codex_skills_flag(mut args: Vec<String>, enable: bool) -> Vec<String> {
     if !enable {
         return args;
@@ -229,9 +249,10 @@ pub fn codex_default_args(
         .filter(|value| !value.is_empty())
         .unwrap_or(DEFAULT_CODEX_REASONING);
 
+    let web_search_feature = get_web_search_feature_name(skills_flag_version);
     let mut args = vec![
         "--enable".to_string(),
-        "web_search_request".to_string(),
+        web_search_feature.to_string(),
         format!("--model={}", model),
     ];
 
@@ -385,7 +406,7 @@ mod tests {
     fn test_codex_default_args_defaults() {
         let args = codex_default_args(None, None, None, false, false);
         assert!(args.contains(&"--enable".to_string()));
-        assert!(args.contains(&"web_search_request".to_string()));
+        assert!(args.contains(&"web_search".to_string()));
         assert!(args.contains(&"--model=gpt-5.2-codex".to_string()));
         assert!(args.contains(&"model_reasoning_effort=high".to_string()));
     }
@@ -482,5 +503,54 @@ mod tests {
             codex_skip_permissions_flag(Some("unknown")),
             "--dangerously-bypass-approvals-and-sandbox"
         );
+    }
+
+    #[test]
+    fn test_get_web_search_feature_name_version_gate() {
+        // v0.90.0 and later use "web_search"
+        assert_eq!(get_web_search_feature_name(Some("0.90.0")), "web_search");
+        assert_eq!(get_web_search_feature_name(Some("0.90.1")), "web_search");
+        assert_eq!(get_web_search_feature_name(Some("0.91.0")), "web_search");
+        assert_eq!(get_web_search_feature_name(Some("1.0.0")), "web_search");
+
+        // v0.89.x and earlier use "web_search_request"
+        assert_eq!(
+            get_web_search_feature_name(Some("0.89.0")),
+            "web_search_request"
+        );
+        assert_eq!(
+            get_web_search_feature_name(Some("0.89.9")),
+            "web_search_request"
+        );
+        assert_eq!(
+            get_web_search_feature_name(Some("0.80.0")),
+            "web_search_request"
+        );
+        assert_eq!(
+            get_web_search_feature_name(Some("0.66.0")),
+            "web_search_request"
+        );
+
+        // Invalid or None values default to "web_search" (latest behavior)
+        assert_eq!(get_web_search_feature_name(None), "web_search");
+        assert_eq!(get_web_search_feature_name(Some("unknown")), "web_search");
+        assert_eq!(get_web_search_feature_name(Some("latest")), "web_search");
+    }
+
+    #[test]
+    fn test_codex_default_args_web_search_version_gate() {
+        // v0.90.0+ should use "web_search"
+        let args_new = codex_default_args(None, None, Some("0.90.0"), false, false);
+        assert!(args_new.contains(&"web_search".to_string()));
+        assert!(!args_new.contains(&"web_search_request".to_string()));
+
+        // v0.89.x should use "web_search_request"
+        let args_old = codex_default_args(None, None, Some("0.89.0"), false, false);
+        assert!(args_old.contains(&"web_search_request".to_string()));
+        assert!(!args_old.contains(&"web_search".to_string()));
+
+        // None (unknown version) should default to "web_search"
+        let args_default = codex_default_args(None, None, None, false, false);
+        assert!(args_default.contains(&"web_search".to_string()));
     }
 }
