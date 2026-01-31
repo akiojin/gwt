@@ -231,7 +231,7 @@ pub fn codex_default_args(
 
     let mut args = vec![
         "--enable".to_string(),
-        "web_search_request".to_string(),
+        "web_search".to_string(),
         format!("--model={}", model),
     ];
 
@@ -385,7 +385,7 @@ mod tests {
     fn test_codex_default_args_defaults() {
         let args = codex_default_args(None, None, None, false, false);
         assert!(args.contains(&"--enable".to_string()));
-        assert!(args.contains(&"web_search_request".to_string()));
+        assert!(args.contains(&"web_search".to_string()));
         assert!(args.contains(&"--model=gpt-5.2-codex".to_string()));
         assert!(args.contains(&"model_reasoning_effort=high".to_string()));
     }
