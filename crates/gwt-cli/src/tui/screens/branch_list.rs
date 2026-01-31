@@ -1858,7 +1858,8 @@ fn render_branch_row(
     // FR-082: Worktree column removed, branch name color indicates status
     // selection_icon(3) + space(1) if showing selection, plus safety_icon + space(1) + name
     let selection_width = if show_selection { 3 } else { 0 }; // "◉ " or "◎ " (2 + 1)
-    let left_width = selection_width + safety_icon.len() + 1 + display_name.width() + current_label.width();
+    let left_width =
+        selection_width + safety_icon.len() + 1 + display_name.width() + current_label.width();
 
     // Build right side (agent info) and calculate its width
     // SPEC-861d8cdf T-103: Status-based display
@@ -2779,9 +2780,7 @@ mod tests {
                 let matches = label_chars.iter().enumerate().all(|(offset, ch)| {
                     buffer[(x + offset as u16, y)]
                         .symbol()
-                        .chars()
-                        .next()
-                        == Some(*ch)
+                        .starts_with(*ch)
                 });
                 if matches {
                     found = true;
