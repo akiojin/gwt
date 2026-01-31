@@ -2777,11 +2777,10 @@ mod tests {
 
         'rows: for y in 0..height {
             for x in 0..=width.saturating_sub(label_chars.len() as u16) {
-                let matches = label_chars.iter().enumerate().all(|(offset, ch)| {
-                    buffer[(x + offset as u16, y)]
-                        .symbol()
-                        .starts_with(*ch)
-                });
+                let matches = label_chars
+                    .iter()
+                    .enumerate()
+                    .all(|(offset, ch)| buffer[(x + offset as u16, y)].symbol().starts_with(*ch));
                 if matches {
                     found = true;
                     for offset in 0..label_chars.len() {
