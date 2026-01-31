@@ -3,7 +3,7 @@
 use crate::error::{GwtError, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Represents a Git repository
 #[derive(Debug)]
@@ -597,21 +597,51 @@ impl Repository {
                 force,
                 "Git worktree removed"
             );
-            Ok(())
-        } else {
-            let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
-            error!(
+            return Ok(());
+        }
+
+        let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+
+        // Handle submodule-related errors by manually removing the directory
+        // Git cannot remove worktrees containing submodules even with --force
+        if err_msg.contains("submodules cannot be moved or removed") {
+            warn!(
+                category = "git",
+                path = %path.display(),
+                "Worktree contains submodules, removing directory manually"
+            );
+
+            if path.exists() {
+                std::fs::remove_dir_all(path).map_err(|e| GwtError::GitOperationFailed {
+                    operation: "worktree remove (manual)".to_string(),
+                    details: format!("Failed to remove worktree directory: {}", e),
+                })?;
+            }
+
+            // Prune stale worktree metadata
+            self.prune_worktrees()?;
+
+            info!(
                 category = "git",
                 operation = "worktree_remove",
                 path = %path.display(),
-                error = err_msg.as_str(),
-                "Failed to remove git worktree"
+                force,
+                "Git worktree removed (with submodules)"
             );
-            Err(GwtError::GitOperationFailed {
-                operation: "worktree remove".to_string(),
-                details: err_msg,
-            })
+            return Ok(());
         }
+
+        error!(
+            category = "git",
+            operation = "worktree_remove",
+            path = %path.display(),
+            error = err_msg.as_str(),
+            "Failed to remove git worktree"
+        );
+        Err(GwtError::GitOperationFailed {
+            operation: "worktree remove".to_string(),
+            details: err_msg,
+        })
     }
 
     /// Prune stale worktree metadata
