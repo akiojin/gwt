@@ -16,7 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     if: >
       github.event.pull_request.draft == false &&
-      startsWith(github.event.pull_request.head.ref, 'release-')
+      (startsWith(github.event.pull_request.head.ref, 'release-') ||
+       github.event.pull_request.head.ref == 'develop')
     steps:
       - name: Enable auto-merge
         env:
