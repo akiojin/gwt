@@ -28,7 +28,9 @@ use gwt_core::config::{
     ToolSessionEntry,
 };
 use gwt_core::error::GwtError;
-use gwt_core::git::{Branch, PrCache, Remote, Repository};
+use gwt_core::git::{
+    detect_repo_type, get_header_context, Branch, PrCache, Remote, RepoType, Repository,
+};
 use gwt_core::tmux::{
     break_pane, compute_equal_splits, get_current_session, group_panes_by_left,
     join_pane_to_target, kill_pane, launcher, list_pane_geometries, resize_pane_height,
@@ -488,6 +490,11 @@ pub struct Model {
     agent_history: AgentHistoryStore,
     /// Progress modal state for worktree preparation (FR-041)
     progress_modal: Option<ProgressModalState>,
+    /// Startup branch name for header display (SPEC-a70a1ece FR-103)
+    /// This is fixed at startup and does not change when selecting other branches.
+    startup_branch: Option<String>,
+    /// Repository type detected at startup (SPEC-a70a1ece US2)
+    repo_type: RepoType,
 }
 
 /// Screen types
@@ -577,6 +584,11 @@ impl Model {
             "Initializing TUI model"
         );
 
+        // SPEC-a70a1ece: Capture startup context before repo_root is moved
+        let header_ctx = get_header_context(&repo_root);
+        let startup_branch = header_ctx.branch_name;
+        let repo_type = detect_repo_type(&repo_root);
+
         let (agent_mode_tx, agent_mode_rx) = mpsc::channel();
 
         let mut model = Self {
@@ -637,6 +649,8 @@ impl Model {
             session_poll_deferred: false,
             agent_history: AgentHistoryStore::load().unwrap_or_default(),
             progress_modal: None,
+            startup_branch,
+            repo_type,
         };
 
         model
@@ -5358,12 +5372,25 @@ impl Model {
             ])
             .split(inner);
 
-        // Line 1: Working Directory
-        let working_dir_line = Line::from(vec![
+        // Line 1: Working Directory with branch name (SPEC-a70a1ece FR-103) and repo type indicator
+        let mut working_dir_spans = vec![
             Span::raw(" "),
             Span::styled("Working Directory: ", Style::default().fg(Color::DarkGray)),
             Span::raw(working_dir),
-        ]);
+        ];
+        if let Some(ref branch) = self.startup_branch {
+            working_dir_spans.push(Span::raw(" "));
+            working_dir_spans.push(Span::styled(
+                format!("[{}]", branch),
+                Style::default().fg(Color::Green),
+            ));
+        }
+        // SPEC-a70a1ece T206: Show [bare] indicator for bare repositories
+        if self.repo_type == RepoType::Bare {
+            working_dir_spans.push(Span::raw(" "));
+            working_dir_spans.push(Span::styled("[bare]", Style::default().fg(Color::Yellow)));
+        }
+        let working_dir_line = Line::from(working_dir_spans);
         frame.render_widget(Paragraph::new(working_dir_line), inner_chunks[0]);
 
         // Line 2: Profile

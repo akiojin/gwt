@@ -1,12 +1,14 @@
 <!-- markdownlint-disable MD013 -->
 # 仕様一覧
 
-**最終更新**: 2026-01-31
+**最終更新**: 2026-02-01
 
 このファイルは `.specify/scripts/bash/update-specs-index.sh` により自動生成されました。
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
+| [SPEC-a70a1ece](SPEC-a70a1ece/spec.md) | 機能仕様: [機能名] | [日付] |
+| [SPEC-9de4b385](SPEC-9de4b385/spec.md) | 機能仕様: bareリポジトリ対応とヘッダーブランチ表示 | 2026-02-01 |
 | [SPEC-fdebd681](SPEC-fdebd681/spec.md) | Codex collaboration_modes Support | - |
 | [SPEC-f8dab6e2](SPEC-f8dab6e2/spec.md) | 機能仕様: Claude Code プラグインマーケットプレイス自動登録 | 2026-01-30 |
 | [SPEC-f59c553d](SPEC-f59c553d/spec.md) | 機能仕様: npm postinstall ダウンロード安定化 | 2026-01-26 |

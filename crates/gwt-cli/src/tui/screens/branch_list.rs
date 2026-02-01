@@ -1852,7 +1852,8 @@ fn render_branch_row(
     } else {
         &branch.name
     };
-    let current_label = if branch.is_current { " (current)" } else { "" };
+    // SPEC-a70a1ece FR-101: Remove (current) label - branch shown in header instead
+    let current_label = "";
 
     // Calculate left side width: optionally "[*] " + safety + " " + branch_name
     // FR-082: Worktree column removed, branch name color indicates status
@@ -2750,7 +2751,8 @@ mod tests {
     }
 
     #[test]
-    fn test_current_branch_label_renders_in_green() {
+    fn test_current_branch_label_not_displayed() {
+        // SPEC-a70a1ece FR-101: (current) label removed - branch shown in header instead
         let mut branch = sample_branch("main");
         branch.is_current = true;
 
@@ -2773,25 +2775,17 @@ mod tests {
         let label_chars: Vec<char> = label.chars().collect();
         let width = 40u16;
         let height = 5u16;
-        let mut found = false;
 
-        'rows: for y in 0..height {
+        // Verify (current) label does NOT appear anywhere
+        for y in 0..height {
             for x in 0..=width.saturating_sub(label_chars.len() as u16) {
                 let matches = label_chars
                     .iter()
                     .enumerate()
                     .all(|(offset, ch)| buffer[(x + offset as u16, y)].symbol().starts_with(*ch));
-                if matches {
-                    found = true;
-                    for offset in 0..label_chars.len() {
-                        assert_eq!(buffer[(x + offset as u16, y)].fg, Color::Green);
-                    }
-                    break 'rows;
-                }
+                assert!(!matches, "(current) label should NOT appear in branch row");
             }
         }
-
-        assert!(found, "current label should appear in the branch row");
     }
 
     #[test]
