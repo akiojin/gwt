@@ -143,12 +143,20 @@ pub fn validate_migration(config: &MigrationConfig) -> Result<ValidationResult, 
         "Validating migration"
     );
 
-    // Check disk space
-    let (space_needed, space_available) = check_disk_space(&config.source_root)?;
+    // Check disk space (non-fatal: use defaults if check fails)
+    let (space_needed, space_available) = match check_disk_space(&config.source_root) {
+        Ok((needed, available)) => (needed, available),
+        Err(e) => {
+            debug!("Disk space check failed (non-fatal): {}", e);
+            // Use reasonable defaults if check fails (e.g., Docker environment)
+            (0, u64::MAX)
+        }
+    };
     let mut result = ValidationResult::success(space_needed, space_available);
 
     // Check if we have enough space (FR-212, FR-213)
-    if space_available < space_needed {
+    // Skip this check if we couldn't get disk space info
+    if space_needed > 0 && space_available < space_needed {
         result.add_error(MigrationError::InsufficientDiskSpace {
             needed: space_needed,
             available: space_available,
@@ -156,20 +164,22 @@ pub fn validate_migration(config: &MigrationConfig) -> Result<ValidationResult, 
     }
 
     // Check for locked worktrees (FR-222)
-    let locked = check_locked_worktrees(&config.source_root)?;
-    for locked_path in locked {
-        result.add_error(MigrationError::LockedWorktree {
-            path: locked_path.into(),
-        });
+    match check_locked_worktrees(&config.source_root) {
+        Ok(locked) => {
+            for locked_path in locked {
+                result.add_error(MigrationError::LockedWorktree {
+                    path: locked_path.into(),
+                });
+            }
+        }
+        Err(e) => {
+            // Non-fatal: might not have worktrees yet
+            debug!("Locked worktree check failed (non-fatal): {}", e);
+        }
     }
 
-    // Check if source has .worktrees/ directory
-    let worktrees_dir = config.source_root.join(".worktrees");
-    if !worktrees_dir.exists() {
-        result.add_error(MigrationError::InvalidSource {
-            reason: "No .worktrees/ directory found".to_string(),
-        });
-    }
+    // SPEC-a70a1ece FR-200: All normal repositories are migration candidates
+    // (no longer require .worktrees/ directory to exist)
 
     // Check if target already exists
     if config.bare_repo_path().exists() {
