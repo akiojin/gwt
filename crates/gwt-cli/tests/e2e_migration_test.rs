@@ -315,24 +315,34 @@ fn test_migration_for_fresh_repo() {
 }
 
 /// Verify the expected post-migration directory structure
+/// SPEC-a70a1ece FR-150: bareリポジトリはプロジェクトディレクトリ直下に配置
 #[test]
 fn test_expected_post_migration_structure() {
     // This test documents the expected structure after migration
+    // SPEC-a70a1ece: Migration creates structure INSIDE the original repo directory
     let temp = TempDir::new().expect("Failed to create temp directory");
 
-    // Expected structure after migration:
-    // /tmp/xxx/
+    // Before migration:
+    // /tmp/xxx/myrepo/         <- original repository (source_root)
+    //   ├── .git/              <- git directory
+    //   ├── README.md
+    //   └── .worktrees/        <- old gwt worktrees (if any)
+    //
+    // Expected structure after migration (FR-150):
+    // /tmp/xxx/myrepo/         <- project root (same as original repo dir)
     //   ├── myrepo.git/        <- bare repository
     //   ├── main/              <- worktree for main branch
     //   ├── feature/
     //   │   └── test/          <- worktree for feature/test branch
     //   └── .gwt/              <- gwt config directory
 
-    let parent = temp.path();
-    let bare_repo = parent.join("myrepo.git");
-    let main_worktree = parent.join("main");
-    let feature_worktree = parent.join("feature").join("test");
-    let gwt_config = parent.join(".gwt");
+    let project_root = temp.path().join("myrepo"); // Original repo becomes project root
+    std::fs::create_dir_all(&project_root).expect("Failed to create project root");
+
+    let bare_repo = project_root.join("myrepo.git");
+    let main_worktree = project_root.join("main");
+    let feature_worktree = project_root.join("feature").join("test");
+    let gwt_config = project_root.join(".gwt");
 
     // Create expected structure for verification
     std::fs::create_dir_all(&bare_repo).expect("Failed to create bare repo dir");
@@ -340,8 +350,11 @@ fn test_expected_post_migration_structure() {
     std::fs::create_dir_all(&feature_worktree).expect("Failed to create feature worktree");
     std::fs::create_dir_all(&gwt_config).expect("Failed to create .gwt config");
 
-    // Verify structure
-    assert!(bare_repo.exists(), "Bare repo should exist");
+    // Verify structure - all inside project_root (original repo directory)
+    assert!(
+        bare_repo.exists(),
+        "Bare repo should exist inside project root"
+    );
     assert!(bare_repo
         .file_name()
         .unwrap()
@@ -350,16 +363,26 @@ fn test_expected_post_migration_structure() {
         .ends_with(".git"));
     assert!(
         main_worktree.exists(),
-        "Main worktree should exist at sibling level"
+        "Main worktree should exist inside project root"
     );
     assert!(
         feature_worktree.exists(),
-        "Feature worktree should be in subdirectory structure"
+        "Feature worktree should be in subdirectory structure inside project root"
     );
-    assert!(gwt_config.exists(), ".gwt config should be at parent level");
+    assert!(
+        gwt_config.exists(),
+        ".gwt config should be inside project root"
+    );
+
+    // Verify parent directory does NOT have these files (they're inside myrepo/)
+    let wrong_bare_repo = temp.path().join("myrepo.git");
+    assert!(
+        !wrong_bare_repo.exists(),
+        "Bare repo should NOT be in parent directory"
+    );
 
     // Verify feature worktree is in feature/ subdirectory, not flat
-    let flat_path = parent.join("feature-test");
+    let flat_path = project_root.join("feature-test");
     assert!(
         !flat_path.exists(),
         "Worktree should NOT be flat at {:?}",

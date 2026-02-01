@@ -785,11 +785,9 @@ impl Model {
             // Create migration config
             let bare_repo_name =
                 gwt_core::migration::derive_bare_repo_name(&model.repo_root.display().to_string());
-            let target_root = model
-                .repo_root
-                .parent()
-                .unwrap_or(&model.repo_root)
-                .to_path_buf();
+            // SPEC-a70a1ece FR-150: target_root is the same as source_root
+            // Migration creates bare repo and worktrees INSIDE the original repo directory
+            let target_root = model.repo_root.clone();
             let config = gwt_core::migration::MigrationConfig::new(
                 model.repo_root.clone(),
                 target_root,
