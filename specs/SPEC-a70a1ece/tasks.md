@@ -128,9 +128,9 @@ US9 (マイグレーション追加) → US7, US8 に依存
 
 ### worktree作成ロジック
 
-- [ ] **T401** [US4] `crates/gwt-core/src/worktree/manager.rs` に `WorktreeLocation` を考慮した `create_for_branch_bare()` を追加
-- [ ] **T402** [US4] T401の後に `crates/gwt-core/src/worktree/manager.rs` で bare方式の場合は親ディレクトリにworktreeを作成
-- [ ] **T403** [US4] T402の後に `crates/gwt-core/src/worktree/manager.rs` でスラッシュを含むブランチ名のサブディレクトリ構造を処理
+- [x] **T401** [US4] `crates/gwt-core/src/worktree/path.rs` に `WorktreeLocation` を考慮した `generate_with_location()` を追加
+- [x] **T402** [US4] T401の後に Sibling方式の場合は親ディレクトリにworktreeパスを生成
+- [x] **T403** [US4] T402の後にスラッシュを含むブランチ名がサブディレクトリ構造になるよう実装
 
 ### TUI統合
 
