@@ -225,7 +225,51 @@ git worktree list
 git worktree add ../branch-name branch-name
 ```
 
-## 6. 関連ドキュメント
+## 6. マイグレーション
+
+### 6.1 既存リポジトリのマイグレーション
+
+既存の`.worktrees/`方式のリポジトリでgwtを起動すると、自動的にマイグレーションダイアログが表示されます。
+
+```bash
+# .worktrees/方式のリポジトリでgwtを起動
+cd /path/to/repo-with-worktrees
+cargo run
+
+# マイグレーションダイアログが表示される
+# - [Exit]: gwtを終了（マイグレーションせずに終了）
+# - [Migrate]: マイグレーションを実行
+```
+
+### 6.2 マイグレーションの流れ
+
+1. **バックアップ作成**: `.gwt-migration-backup/` にバックアップを作成
+2. **bareリポジトリ作成**: `{repo-name}.git` を作成
+3. **worktree移行**:
+   - クリーンなworktree: 再clone方式
+   - 変更があるworktree: ファイル移動方式
+4. **クリーンアップ**: 古い`.worktrees/`ディレクトリを削除
+5. **設定作成**: `.gwt/project.json` を作成
+
+### 6.3 マイグレーション後のディレクトリ構造
+
+```text
+/project/
+├── repo.git/           # bareリポジトリ
+├── main/               # worktree (mainブランチ)
+├── feature-x/          # worktree (feature/xブランチ)
+└── .gwt/               # gwt設定
+    └── project.json
+```
+
+### 6.4 マイグレーションの注意点
+
+- **ロック済みworktree**: 事前にアンロックが必要（`git worktree unlock`）
+- **ディスク容量**: バックアップ用に十分な空き容量が必要
+- **submodule**: 自動的に初期化されます
+- **stash**: 手動でのマイグレーションが必要な場合があります
+
+## 7. 関連ドキュメント
 
 - [spec.md](./spec.md) - 機能仕様
 - [plan.md](./plan.md) - 実装計画
