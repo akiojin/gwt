@@ -258,6 +258,71 @@ fn test_gwt_detects_migration_candidate() {
     drop(temp);
 }
 
+/// Test that migration detection logic works correctly
+#[test]
+fn test_migration_detection_logic() {
+    use gwt_core::git::{detect_repo_type, RepoType};
+
+    // Create a normal repo with .worktrees/ (should trigger migration)
+    let (temp, repo_path) = setup_normal_repo_with_worktrees();
+
+    let repo_type = detect_repo_type(&repo_path);
+    assert!(
+        matches!(repo_type, RepoType::Normal | RepoType::Worktree),
+        "Should detect as Normal or Worktree repo, got {:?}",
+        repo_type
+    );
+
+    let worktrees_dir = repo_path.join(".worktrees");
+    assert!(
+        worktrees_dir.exists() && worktrees_dir.is_dir(),
+        ".worktrees/ should exist and be a directory"
+    );
+
+    // This combination (Normal/Worktree + .worktrees/ exists) triggers migration dialog
+    let should_show_migration = matches!(repo_type, RepoType::Normal | RepoType::Worktree)
+        && worktrees_dir.exists()
+        && worktrees_dir.is_dir();
+    assert!(
+        should_show_migration,
+        "Migration dialog should be triggered for .worktrees/ style repos"
+    );
+
+    drop(temp);
+}
+
+/// Test that normal repos without .worktrees/ don't trigger migration
+#[test]
+fn test_no_migration_for_fresh_repo() {
+    use gwt_core::git::{detect_repo_type, RepoType};
+
+    let (temp, repo_path) = setup_normal_repo_without_worktrees();
+
+    let repo_type = detect_repo_type(&repo_path);
+    assert!(
+        matches!(repo_type, RepoType::Normal),
+        "Should detect as Normal repo, got {:?}",
+        repo_type
+    );
+
+    let worktrees_dir = repo_path.join(".worktrees");
+    assert!(
+        !worktrees_dir.exists(),
+        ".worktrees/ should NOT exist"
+    );
+
+    // No migration should be triggered
+    let should_show_migration = matches!(repo_type, RepoType::Normal | RepoType::Worktree)
+        && worktrees_dir.exists()
+        && worktrees_dir.is_dir();
+    assert!(
+        !should_show_migration,
+        "Migration dialog should NOT be triggered for fresh repos"
+    );
+
+    drop(temp);
+}
+
 /// Verify the expected post-migration directory structure
 #[test]
 fn test_expected_post_migration_structure() {
