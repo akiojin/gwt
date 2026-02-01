@@ -6,6 +6,14 @@ use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
 
+/// Initialize tracing for tests
+fn init_tracing() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_test_writer()
+        .try_init();
+}
+
 /// Helper to create a .worktrees/ style repository
 fn setup_worktrees_style_repo() -> (TempDir, PathBuf) {
     let temp = TempDir::new().expect("Failed to create temp directory");
@@ -392,6 +400,156 @@ fn test_original_repo_main_branch_becomes_worktree() {
         stdout.contains(&main_branch),
         "main branch should be in worktree list"
     );
+
+    drop(temp);
+}
+
+/// Test: Full migration with multiple worktrees in .worktrees/
+/// SPEC-a70a1ece: 完全なマイグレーションテスト
+#[test]
+fn test_full_migration_with_worktrees() {
+    init_tracing();
+
+    let temp = TempDir::new().expect("Failed to create temp directory");
+    let repo_path = temp.path().join("myrepo");
+
+    // Create a normal repository
+    Command::new("git")
+        .args(["init"])
+        .arg(&repo_path)
+        .output()
+        .expect("Failed to init repo");
+
+    // Configure git user
+    Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(&repo_path)
+        .output()
+        .expect("Failed to set email");
+    Command::new("git")
+        .args(["config", "user.name", "Test User"])
+        .current_dir(&repo_path)
+        .output()
+        .expect("Failed to set name");
+
+    // Create initial commit
+    std::fs::write(repo_path.join("README.md"), "# Test Repo").expect("Failed to write file");
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(&repo_path)
+        .output()
+        .expect("Failed to add");
+    Command::new("git")
+        .args(["commit", "-m", "Initial commit"])
+        .current_dir(&repo_path)
+        .output()
+        .expect("Failed to commit");
+
+    // Create .worktrees/ directory and add worktrees
+    let worktrees_dir = repo_path.join(".worktrees");
+    std::fs::create_dir(&worktrees_dir).expect("Failed to create .worktrees");
+
+    // Create feature/test worktree
+    let feature_path = worktrees_dir.join("feature-test");
+    Command::new("git")
+        .args(["worktree", "add", "-b", "feature/test"])
+        .arg(&feature_path)
+        .current_dir(&repo_path)
+        .output()
+        .expect("Failed to create feature worktree");
+
+    // Create develop worktree
+    let develop_path = worktrees_dir.join("develop");
+    Command::new("git")
+        .args(["worktree", "add", "-b", "develop"])
+        .arg(&develop_path)
+        .current_dir(&repo_path)
+        .output()
+        .expect("Failed to create develop worktree");
+
+    // Get main branch name
+    let output = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(&repo_path)
+        .output()
+        .expect("Failed to get branch");
+    let main_branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // Execute migration
+    let config = gwt_core::migration::MigrationConfig::new(
+        repo_path.clone(),
+        repo_path.clone(),
+        "myrepo.git".to_string(),
+    );
+
+    println!("Starting migration test with config:");
+    println!("  source_root: {}", config.source_root.display());
+    println!("  target_root: {}", config.target_root.display());
+    println!("  bare_repo_name: {}", config.bare_repo_name);
+
+    let result = gwt_core::migration::execute_migration(&config, None);
+
+    match &result {
+        Ok(()) => println!("Migration succeeded"),
+        Err(e) => println!("Migration failed: {:?}", e),
+    }
+
+    assert!(result.is_ok(), "Migration should succeed: {:?}", result);
+
+    // Verify bare repo exists
+    let bare_path = repo_path.join("myrepo.git");
+    assert!(
+        bare_path.exists(),
+        "Bare repo should exist at {}",
+        bare_path.display()
+    );
+
+    // Verify main worktree exists
+    let main_wt_path = repo_path.join(&main_branch);
+    assert!(
+        main_wt_path.exists(),
+        "Main worktree should exist at {}",
+        main_wt_path.display()
+    );
+    assert!(
+        main_wt_path.join(".git").is_file(),
+        "Main worktree .git should be a file"
+    );
+
+    // Verify feature/test worktree exists
+    let feature_wt_path = repo_path.join("feature").join("test");
+    assert!(
+        feature_wt_path.exists(),
+        "Feature worktree should exist at {}",
+        feature_wt_path.display()
+    );
+
+    // Verify develop worktree exists
+    let develop_wt_path = repo_path.join("develop");
+    assert!(
+        develop_wt_path.exists(),
+        "Develop worktree should exist at {}",
+        develop_wt_path.display()
+    );
+
+    // Verify .worktrees/ directory was cleaned up
+    assert!(
+        !worktrees_dir.exists(),
+        ".worktrees/ should be removed after migration"
+    );
+
+    // Verify git worktree list shows all worktrees
+    let output = Command::new("git")
+        .args(["worktree", "list"])
+        .current_dir(&bare_path)
+        .output()
+        .expect("Failed to list worktrees");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    println!("git worktree list output:\n{}", stdout);
+
+    assert!(stdout.contains(&main_branch), "Should list main worktree");
+    assert!(stdout.contains("develop"), "Should list develop worktree");
+    assert!(stdout.contains("feature"), "Should list feature worktree");
 
     drop(temp);
 }

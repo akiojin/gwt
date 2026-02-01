@@ -19,6 +19,9 @@ pub struct WorktreeMigrationInfo {
     pub target_path: PathBuf,
     /// Whether the worktree has uncommitted changes
     pub is_dirty: bool,
+    /// Whether this is the main repository (not a worktree)
+    /// This must be determined before .git is deleted
+    pub is_main_repo: bool,
 }
 
 /// Migration progress callback
@@ -37,8 +40,10 @@ pub fn execute_migration(
     };
 
     // Phase 1: Validate
+    info!("Phase 1: Validating migration config");
     report_progress(MigrationState::Validating);
     let validation = validate_migration(config)?;
+    info!("Phase 1 complete: Validation passed");
     if !validation.passed {
         return Err(validation.errors.into_iter().next().unwrap_or(
             MigrationError::ValidationFailed {
@@ -48,69 +53,107 @@ pub fn execute_migration(
     }
 
     // Phase 2: Backup
+    info!("Phase 2: Creating backup");
     if !config.dry_run {
         report_progress(MigrationState::BackingUp);
         create_backup(&config.source_root, &config.backup_path())?;
     }
+    info!("Phase 2 complete: Backup created");
 
     // Phase 3: Collect worktree info and prepare for migration
+    info!("Phase 3: Collecting worktree info");
     let worktrees = list_worktrees_to_migrate(config)?;
     let total = worktrees.len();
+    info!("Phase 3 complete: Found {} worktrees to migrate", total);
+    for wt in &worktrees {
+        info!(
+            "  - branch={}, dirty={}, source={}",
+            wt.branch,
+            wt.is_dirty,
+            wt.source_path.display()
+        );
+    }
 
     // Phase 4: Evacuate main repo files to temp directory (for dirty main worktree)
+    info!("Phase 4: Checking if main repo files need evacuation");
     let temp_evacuation_dir = config.target_root.join(".gwt-migration-temp");
     if !config.dry_run {
-        // Find main worktree (the original repo itself)
-        if let Some(main_wt) = worktrees
-            .iter()
-            .find(|wt| is_main_repository(&wt.source_path))
-        {
+        // Find main worktree (the original repo itself) using pre-computed is_main_repo
+        if let Some(main_wt) = worktrees.iter().find(|wt| wt.is_main_repo) {
             if main_wt.is_dirty {
-                debug!("Evacuating main repo files to temp directory");
+                info!("Main repo is dirty, evacuating files to temp directory");
                 evacuate_main_repo_files(&config.source_root, &temp_evacuation_dir)?;
+                info!("Phase 4 complete: Files evacuated");
+            } else {
+                info!("Phase 4 complete: Main repo is clean, no evacuation needed");
             }
+        } else {
+            info!("Phase 4 complete: No main repo found");
         }
     }
 
     // Phase 5: Create bare repository
+    info!(
+        "Phase 5: Creating bare repository at {}",
+        config.bare_repo_path().display()
+    );
     report_progress(MigrationState::CreatingBareRepo);
     if !config.dry_run {
         create_bare_repository(config)?;
     }
+    info!("Phase 5 complete: Bare repository created");
 
     // Phase 6: Cleanup original .git directory BEFORE creating worktrees
     // This is necessary because worktrees will be created in the same directory
+    info!("Phase 6: Cleaning up original .git directory");
     if !config.dry_run {
         cleanup_original_git_dir(config)?;
     }
+    info!("Phase 6 complete: Original .git directory removed");
 
     // Phase 7: Migrate worktrees
+    info!("Phase 7: Migrating {} worktrees", total);
     for (i, wt_info) in worktrees.iter().enumerate() {
+        info!(
+            "Migrating worktree {}/{}: branch={}, source={}, target={}",
+            i + 1,
+            total,
+            wt_info.branch,
+            wt_info.source_path.display(),
+            wt_info.target_path.display()
+        );
         report_progress(MigrationState::MigratingWorktrees { current: i, total });
         if !config.dry_run {
             migrate_worktree(config, wt_info)?;
         }
+        info!("Completed worktree {}/{}: {}", i + 1, total, wt_info.branch);
     }
 
     // Phase 8: Restore evacuated files to main worktree (if dirty)
+    info!("Phase 8: Restoring evacuated files (if any)");
     if !config.dry_run && temp_evacuation_dir.exists() {
-        if let Some(main_wt) = worktrees
-            .iter()
-            .find(|wt| is_main_repository(&wt.source_path))
-        {
-            debug!("Restoring evacuated files to main worktree");
+        // Find main worktree using pre-computed is_main_repo
+        if let Some(main_wt) = worktrees.iter().find(|wt| wt.is_main_repo) {
+            info!(
+                "Restoring evacuated files to main worktree: {}",
+                main_wt.target_path.display()
+            );
             restore_evacuated_files(&temp_evacuation_dir, &main_wt.target_path)?;
         }
         // Remove temp directory
+        info!("Removing temp evacuation directory");
         let _ = std::fs::remove_dir_all(&temp_evacuation_dir);
     }
+    info!("Phase 8 complete");
 
     // Phase 9: Cleanup old .worktrees/ directory
+    info!("Phase 9: Cleaning up old .worktrees/ directory");
     report_progress(MigrationState::CleaningUp);
     if !config.dry_run {
         cleanup_old_worktrees_dir(config)?;
         create_project_config(config)?;
     }
+    info!("Phase 9 complete: Migration cleanup done");
 
     report_progress(MigrationState::Completed);
     info!("Migration completed successfully");
@@ -355,8 +398,10 @@ fn list_worktrees_to_migrate(
 
     // First, add the main repository itself (SPEC-a70a1ece)
     // This is the original repo's main/master branch that needs to become a worktree
+    // IMPORTANT: Check is_main_repository NOW before .git is deleted
     if let Some(main_branch) = get_worktree_branch(repo_root) {
         let is_dirty = is_worktree_dirty(repo_root);
+        let is_main = is_main_repository(repo_root);
         // Use branch name as directory (feature/test -> feature/test/)
         let target_path = target_dir.join(&main_branch);
 
@@ -365,6 +410,7 @@ fn list_worktrees_to_migrate(
             source_path: repo_root.to_path_buf(),
             target_path,
             is_dirty,
+            is_main_repo: is_main,
         });
     }
 
@@ -388,8 +434,10 @@ fn list_worktrees_to_migrate(
             }
 
             // Get branch name from worktree
+            // IMPORTANT: Check is_main_repository NOW before .git is deleted
             if let Some(branch) = get_worktree_branch(&source_path) {
                 let is_dirty = is_worktree_dirty(&source_path);
+                let is_main = is_main_repository(&source_path);
                 // Use branch name as directory (feature/test -> feature/test/)
                 let target_path = target_dir.join(&branch);
 
@@ -398,6 +446,7 @@ fn list_worktrees_to_migrate(
                     source_path,
                     target_path,
                     is_dirty,
+                    is_main_repo: is_main,
                 });
             }
         }
@@ -447,30 +496,38 @@ fn migrate_worktree(
     config: &MigrationConfig,
     wt_info: &WorktreeMigrationInfo,
 ) -> Result<(), MigrationError> {
-    debug!(
+    info!(
         branch = %wt_info.branch,
         dirty = wt_info.is_dirty,
+        is_main_repo = wt_info.is_main_repo,
         source = %wt_info.source_path.display(),
         target = %wt_info.target_path.display(),
-        "Migrating worktree"
+        "migrate_worktree: Starting"
     );
 
-    // For the main repository, we need special handling
-    // The source is the original repo with .git directory, not a worktree
-    let is_main_repo = is_main_repository(&wt_info.source_path);
+    // Use pre-computed is_main_repo (determined before .git was deleted)
+    let is_main_repo = wt_info.is_main_repo;
 
     if wt_info.is_dirty {
+        info!("migrate_worktree: Calling migrate_dirty_worktree");
         migrate_dirty_worktree(config, wt_info, is_main_repo)?;
     } else {
+        info!("migrate_worktree: Calling migrate_clean_worktree");
         migrate_clean_worktree(config, wt_info, is_main_repo)?;
     }
+    info!("migrate_worktree: Worktree created");
 
-    // Migrate stash if any (FR-220)
-    migrate_stash(&wt_info.source_path, &wt_info.target_path)?;
+    // Migrate stash if any (FR-220) - only for non-main repos since source may be gone
+    if !is_main_repo {
+        info!("migrate_worktree: Migrating stash");
+        migrate_stash(&wt_info.source_path, &wt_info.target_path)?;
+    }
 
     // Preserve tracking relationships (FR-221)
+    info!("migrate_worktree: Preserving tracking relationships");
     preserve_tracking_relationships(&wt_info.target_path, &wt_info.branch)?;
 
+    info!("migrate_worktree: Complete for branch={}", wt_info.branch);
     Ok(())
 }
 
@@ -481,17 +538,19 @@ fn migrate_dirty_worktree(
     wt_info: &WorktreeMigrationInfo,
     is_main_repo: bool,
 ) -> Result<(), MigrationError> {
-    debug!(
+    info!(
         branch = %wt_info.branch,
         is_main_repo = is_main_repo,
-        "Migrating dirty worktree (file move)"
+        "migrate_dirty_worktree: Starting"
     );
 
     let bare_path = config.bare_repo_path();
 
-    // For main repo, we need to remove old worktree reference first (if any)
+    // For non-main-repo worktrees, remove old worktree reference first
     if !is_main_repo {
         // Remove the old worktree registration from the original repo
+        // Note: This may fail if .git is already removed, but we ignore errors
+        info!("migrate_dirty_worktree: Removing old worktree reference (may fail)");
         let _ = Command::new("git")
             .args(["worktree", "remove", "--force"])
             .arg(&wt_info.source_path)
@@ -500,6 +559,7 @@ fn migrate_dirty_worktree(
     }
 
     // Create new worktree from bare repo with --no-checkout
+    info!("migrate_dirty_worktree: Creating worktree with --no-checkout");
     let output = Command::new("git")
         .args(["worktree", "add", "--no-checkout"])
         .arg(&wt_info.target_path)
@@ -519,11 +579,18 @@ fn migrate_dirty_worktree(
         });
     }
 
-    // Copy working directory files, excluding .git and gitignored (FR-208)
-    copy_working_files(&wt_info.source_path, &wt_info.target_path)?;
+    // For main repo: files are handled via evacuate (Phase 4) / restore (Phase 8)
+    // For other worktrees: copy files from source to target
+    if !is_main_repo {
+        info!("migrate_dirty_worktree: Copying working files from source to target");
+        // Copy working directory files, excluding .git and gitignored (FR-208)
+        copy_working_files(&wt_info.source_path, &wt_info.target_path)?;
 
-    // Preserve file permissions (FR-214)
-    preserve_file_permissions(&wt_info.source_path, &wt_info.target_path)?;
+        // Preserve file permissions (FR-214)
+        preserve_file_permissions(&wt_info.source_path, &wt_info.target_path)?;
+    } else {
+        info!("migrate_dirty_worktree: Main repo - files will be restored in Phase 8");
+    }
 
     Ok(())
 }
