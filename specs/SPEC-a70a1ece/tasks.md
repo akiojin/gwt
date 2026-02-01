@@ -109,12 +109,12 @@ US9 (マイグレーション追加) → US7, US8 に依存
 
 ### CLIオプション
 
-- [ ] **T312** [US3] `crates/gwt-cli/src/main.rs` に `gwt init <url>` サブコマンドを追加
-- [ ] **T313** [US3] T312の後に `crates/gwt-cli/src/main.rs` で `init` コマンドがデフォルトでshallow clone（--depth=1）を実行
+- [x] **T312** [US3] `crates/gwt-cli/src/main.rs` に `gwt init <url>` サブコマンドを追加
+- [x] **T313** [US3] T312の後に `crates/gwt-cli/src/main.rs` で `init` コマンドがデフォルトでshallow clone（--depth=1）を実行
 
 ### テスト
 
-- [ ] **T314** [P] [US3] `crates/gwt-core/src/git/` に `clone_bare()` のユニットテストを追加
+- [x] **T314** [P] [US3] `crates/gwt-core/src/git/` に `clone_bare()` のユニットテストを追加
 
 **✅ MVP3チェックポイント**: US3完了後、空ディレクトリからbare cloneが可能
 
@@ -134,12 +134,12 @@ US9 (マイグレーション追加) → US7, US8 に依存
 
 ### TUI統合
 
-- [ ] **T404** [US4] T403の後に `crates/gwt-cli/src/tui/app.rs` で bareリポジトリ+worktree0件の場合にブランチ選択画面を表示
-- [ ] **T405** [US4] T404の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` で bare方式のworktree作成を呼び出し
+- [x] **T404** [US4] T403の後に `crates/gwt-cli/src/tui/app.rs` で bareリポジトリ+worktree0件の場合にブランチ選択画面を表示
+- [x] **T405** [US4] T404の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` で bare方式のworktree作成を呼び出し
 
 ### テスト
 
-- [ ] **T406** [P] [US4] `crates/gwt-core/src/worktree/` に bare方式worktree作成のユニットテストを追加
+- [x] **T406** [P] [US4] `crates/gwt-core/src/worktree/` に bare方式worktree作成のユニットテストを追加
 
 **✅ MVP4チェックポイント**: US4完了後、bareリポジトリからworktree作成が可能
 
@@ -153,22 +153,22 @@ US9 (マイグレーション追加) → US7, US8 に依存
 
 ### 設定管理
 
-- [ ] **T501** [US5] `crates/gwt-core/src/config/bare_project.rs` に `BareProjectConfig` 構造体を追加
-- [ ] **T502** [US5] T501の後に `crates/gwt-core/src/config/bare_project.rs` に設定ファイルの読み書き関数を実装
-- [ ] **T503** [US5] T502の後に `crates/gwt-core/src/config/mod.rs` に bare_project モジュールを公開
+- [x] **T501** [US5] `crates/gwt-core/src/config/bare_project.rs` に `BareProjectConfig` 構造体を追加
+- [x] **T502** [US5] T501の後に `crates/gwt-core/src/config/bare_project.rs` に設定ファイルの読み書き関数を実装
+- [x] **T503** [US5] T502の後に `crates/gwt-core/src/config/mod.rs` に bare_project モジュールを公開
 
 ### パス解決
 
-- [ ] **T504** [US5] T503の後に `crates/gwt-core/src/worktree/manager.rs` で `.gwt/` をプロジェクトルート（bareの親）に配置
-- [ ] **T505** [US5] T504の後に `crates/gwt-core/src/worktree/manager.rs` で URL から bareリポジトリ名（`{repo-name}.git`）を抽出
+- [x] **T504** [US5] T503の後に `crates/gwt-core/src/worktree/manager.rs` で `.gwt/` をプロジェクトルート（bareの親）に配置
+- [x] **T505** [US5] T504の後に `crates/gwt-core/src/worktree/manager.rs` で URL から bareリポジトリ名（`{repo-name}.git`）を抽出
 
 ### ヘッダー表示拡張
 
-- [ ] **T506** [US5] T505の後に `crates/gwt-cli/src/tui/app.rs` で bare方式worktree内の場合に `[branch] (repo.git)` を表示
+- [x] **T506** [US5] T505の後に `crates/gwt-cli/src/tui/app.rs` で bare方式worktree内の場合に `[branch] (repo.git)` を表示
 
 ### テスト
 
-- [ ] **T507** [P] [US5] `crates/gwt-core/src/config/` に `BareProjectConfig` のユニットテストを追加
+- [x] **T507** [P] [US5] `crates/gwt-core/src/config/` に `BareProjectConfig` のユニットテストを追加
 
 **✅ MVP5チェックポイント**: US5完了後、bare方式のディレクトリ構造が完成
 
@@ -327,9 +327,9 @@ US9 (マイグレーション追加) → US7, US8 に依存
 
 ### 品質チェック
 
-- [ ] **T1104** [統合] `cargo clippy --all-targets --all-features -- -D warnings` を実行して警告を解消
-- [ ] **T1105** [統合] `cargo fmt` を実行してフォーマットを統一
-- [ ] **T1106** [統合] `cargo test` を実行して全テストがパスすることを確認
+- [x] **T1104** [統合] `cargo clippy --all-targets --all-features -- -D warnings` を実行して警告を解消
+- [x] **T1105** [統合] `cargo fmt` を実行してフォーマットを統一
+- [x] **T1106** [統合] `cargo test` を実行して全テストがパスすることを確認
 
 ### ドキュメント
 

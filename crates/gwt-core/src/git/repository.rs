@@ -888,6 +888,7 @@ pub struct WorktreeInfo {
 /// Get the main repository root from any path (resolves through worktree to main repo)
 /// This is a standalone function that doesn't require a Repository instance.
 /// For worktrees, this returns the path to the main repository.
+/// For bare repos, this returns the bare repo path itself (SPEC-a70a1ece).
 /// For normal repos or non-repo paths, this returns the original path.
 pub fn get_main_repo_root(path: &Path) -> PathBuf {
     let output = Command::new("git")
@@ -898,6 +899,12 @@ pub fn get_main_repo_root(path: &Path) -> PathBuf {
     match output {
         Ok(o) if o.status.success() => {
             let common_dir = String::from_utf8_lossy(&o.stdout).trim().to_string();
+
+            // SPEC-a70a1ece: For bare repos, git-common-dir returns "." - return path as-is
+            if common_dir == "." {
+                return path.to_path_buf();
+            }
+
             let common_path = PathBuf::from(&common_dir);
             if common_path.is_absolute() {
                 common_path

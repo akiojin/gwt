@@ -498,6 +498,8 @@ pub struct Model {
     repo_type: RepoType,
     /// Clone wizard state (SPEC-a70a1ece US3)
     clone_wizard: CloneWizardState,
+    /// Bare repository name when inside a bare-based worktree (SPEC-a70a1ece T506)
+    bare_name: Option<String>,
 }
 
 /// Screen types
@@ -592,6 +594,7 @@ impl Model {
         // SPEC-a70a1ece: Capture startup context before repo_root is moved
         let header_ctx = get_header_context(&repo_root);
         let startup_branch = header_ctx.branch_name;
+        let bare_name = header_ctx.bare_name; // T506: Capture bare repo name
         let repo_type = detect_repo_type(&repo_root);
 
         let (agent_mode_tx, agent_mode_rx) = mpsc::channel();
@@ -657,6 +660,7 @@ impl Model {
             startup_branch,
             repo_type,
             clone_wizard: CloneWizardState::new(),
+            bare_name,
         };
 
         model
@@ -5423,6 +5427,14 @@ impl Model {
         if self.repo_type == RepoType::Bare {
             working_dir_spans.push(Span::raw(" "));
             working_dir_spans.push(Span::styled("[bare]", Style::default().fg(Color::Yellow)));
+        }
+        // SPEC-a70a1ece T506: Show (repo.git) for worktrees in bare-based projects
+        if let Some(ref name) = self.bare_name {
+            working_dir_spans.push(Span::raw(" "));
+            working_dir_spans.push(Span::styled(
+                format!("({})", name),
+                Style::default().fg(Color::DarkGray),
+            ));
         }
         let working_dir_line = Line::from(working_dir_spans);
         frame.render_widget(Paragraph::new(working_dir_line), inner_chunks[0]);

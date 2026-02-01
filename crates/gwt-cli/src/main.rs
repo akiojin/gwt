@@ -164,7 +164,7 @@ fn handle_command(cmd: Commands, repo_root: &PathBuf, settings: &Settings) -> Re
         Commands::Clean { dry_run, prune } => cmd_clean(repo_root, dry_run, prune),
         Commands::Logs { limit, follow: _ } => cmd_logs(repo_root, settings, limit),
         Commands::Serve { port, address } => cmd_serve(port, &address),
-        Commands::Init { force } => cmd_init(repo_root, force),
+        Commands::Init { url, force, full } => cmd_init(repo_root, url.as_deref(), force, full),
         Commands::Lock { target, reason } => cmd_lock(repo_root, &target, reason.as_deref()),
         Commands::Unlock { target } => cmd_unlock(repo_root, &target),
         Commands::Hook { action } => cmd_hook(action),
@@ -424,19 +424,58 @@ fn cmd_serve(port: u16, address: &str) -> Result<(), GwtError> {
     Ok(())
 }
 
-fn cmd_init(repo_root: &Path, force: bool) -> Result<(), GwtError> {
-    let config_path = repo_root.join(".gwt.toml");
+/// Initialize gwt: clone a bare repository or create config (SPEC-a70a1ece T312-T313)
+fn cmd_init(repo_root: &Path, url: Option<&str>, force: bool, full: bool) -> Result<(), GwtError> {
+    // If URL is provided, clone as bare repository
+    if let Some(url) = url {
+        use gwt_core::git::{clone_bare, CloneConfig};
 
-    if config_path.exists() && !force {
-        println!("Configuration already exists at: {}", config_path.display());
-        println!("Use --force to overwrite.");
-        return Ok(());
+        info!(
+            category = "cli",
+            command = "init",
+            url,
+            full,
+            "Cloning bare repository"
+        );
+
+        // T313: Default to shallow clone (--depth=1) unless --full is specified
+        let config = if full {
+            CloneConfig::bare(url, repo_root)
+        } else {
+            CloneConfig::bare_shallow(url, repo_root, 1)
+        };
+
+        let clone_type = if full { "full" } else { "shallow (--depth=1)" };
+        println!("Cloning {} as {} bare repository...", url, clone_type);
+
+        match clone_bare(&config) {
+            Ok(path) => {
+                println!("Successfully cloned to: {}", path.display());
+                println!("\nNext steps:");
+                println!("  cd {}", path.display());
+                println!("  gwt           # Open TUI to create worktree");
+                Ok(())
+            }
+            Err(e) => {
+                error!(category = "cli", error = %e, "Failed to clone repository");
+                Err(e)
+            }
+        }
+    } else {
+        // Original behavior: create config file
+        let config_path = repo_root.join(".gwt.toml");
+
+        if config_path.exists() && !force {
+            println!("Configuration already exists at: {}", config_path.display());
+            println!("Use --force to overwrite.");
+            return Ok(());
+        }
+
+        Settings::create_default(&config_path)?;
+        println!("Created configuration at: {}", config_path.display());
+
+        Ok(())
     }
-
-    Settings::create_default(&config_path)?;
-    println!("Created configuration at: {}", config_path.display());
-
-    Ok(())
 }
 
 fn cmd_lock(repo_root: &PathBuf, target: &str, reason: Option<&str>) -> Result<(), GwtError> {
