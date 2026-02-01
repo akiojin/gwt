@@ -515,6 +515,8 @@ pub struct Model {
     bare_name: Option<String>,
     /// Migration dialog state (SPEC-a70a1ece US7 T705-T710)
     migration_dialog: MigrationDialogState,
+    /// Migration result receiver (for background migration)
+    migration_rx: Option<mpsc::Receiver<Result<(), gwt_core::migration::MigrationError>>>,
 }
 
 /// Screen types
@@ -698,6 +700,7 @@ impl Model {
             clone_wizard: CloneWizardState::new(),
             bare_name,
             migration_dialog: MigrationDialogState::default(),
+            migration_rx: None,
         };
 
         model
@@ -3856,6 +3859,37 @@ impl Model {
                 if matches!(self.screen, Screen::CloneWizard) && self.clone_wizard.is_cloning() {
                     self.clone_wizard.poll_clone();
                 }
+                // SPEC-a70a1ece: Poll migration progress
+                if matches!(self.screen, Screen::MigrationDialog)
+                    && matches!(
+                        self.migration_dialog.phase,
+                        MigrationDialogPhase::InProgress | MigrationDialogPhase::Validating
+                    )
+                {
+                    if let Some(ref rx) = self.migration_rx {
+                        match rx.try_recv() {
+                            Ok(Ok(())) => {
+                                self.migration_dialog.phase = MigrationDialogPhase::Completed;
+                                self.migration_rx = None;
+                            }
+                            Ok(Err(e)) => {
+                                self.migration_dialog.phase = MigrationDialogPhase::Failed;
+                                self.migration_dialog.error = Some(format!("{}", e));
+                                self.migration_rx = None;
+                            }
+                            Err(mpsc::TryRecvError::Empty) => {
+                                // Still running, keep polling
+                            }
+                            Err(mpsc::TryRecvError::Disconnected) => {
+                                // Thread crashed or channel closed
+                                self.migration_dialog.phase = MigrationDialogPhase::Failed;
+                                self.migration_dialog.error =
+                                    Some("Migration thread disconnected".to_string());
+                                self.migration_rx = None;
+                            }
+                        }
+                    }
+                }
             }
             Message::SelectNext => match self.screen {
                 Screen::BranchList => {
@@ -4109,7 +4143,22 @@ impl Model {
                     if self.migration_dialog.phase == MigrationDialogPhase::Confirmation {
                         if self.migration_dialog.selected_proceed {
                             self.migration_dialog.accept();
-                            // TODO: Start actual migration in background
+                            // Start actual migration in background
+                            if let Some(config) = self.migration_dialog.config.clone() {
+                                let (tx, rx) = mpsc::channel();
+                                self.migration_rx = Some(rx);
+                                std::thread::spawn(move || {
+                                    let result =
+                                        gwt_core::migration::execute_migration(&config, None);
+                                    let _ = tx.send(result);
+                                });
+                                self.migration_dialog.phase = MigrationDialogPhase::InProgress;
+                            } else {
+                                // No config, show error
+                                self.migration_dialog.phase = MigrationDialogPhase::Failed;
+                                self.migration_dialog.error =
+                                    Some("Migration config not available".to_string());
+                            }
                         } else {
                             // T710: User chose to exit - quit gwt
                             self.migration_dialog.reject();
