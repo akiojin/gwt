@@ -4039,7 +4039,20 @@ impl Model {
                 }
                 // SPEC-a70a1ece US3: Clone wizard Enter handling
                 Screen::CloneWizard => {
-                    self.clone_wizard.next();
+                    if self.clone_wizard.is_complete() {
+                        // Clone successful - reinitialize with new bare repo
+                        if let Some(cloned_path) = self.clone_wizard.cloned_path.take() {
+                            let msg = format!("Cloned to {}", cloned_path.display());
+                            self.repo_root = cloned_path;
+                            self.repo_type = RepoType::Bare;
+                            self.refresh_data();
+                            self.screen = Screen::BranchList;
+                            self.status_message = Some(msg);
+                            self.status_message_time = Some(Instant::now());
+                        }
+                    } else {
+                        self.clone_wizard.next();
+                    }
                 }
                 // SPEC-a70a1ece T709-T710: Migration dialog Enter handling
                 Screen::MigrationDialog => {
