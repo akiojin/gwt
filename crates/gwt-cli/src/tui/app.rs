@@ -4066,6 +4066,16 @@ impl Model {
                         // Clone successful - reinitialize with new bare repo
                         if let Some(cloned_path) = self.clone_wizard.cloned_path.take() {
                             let msg = format!("Cloned to {}", cloned_path.display());
+                            // SPEC-a70a1ece: Change process working directory to bare repo
+                            // This ensures subsequent TUI restarts detect the correct repo type
+                            if let Err(e) = std::env::set_current_dir(&cloned_path) {
+                                debug!(
+                                    category = "tui",
+                                    error = %e,
+                                    path = %cloned_path.display(),
+                                    "Failed to change working directory to bare repo"
+                                );
+                            }
                             self.repo_root = cloned_path;
                             self.repo_type = RepoType::Bare;
                             self.refresh_data();
