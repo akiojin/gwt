@@ -6086,7 +6086,7 @@ impl Model {
                     if matches!(self.screen, Screen::BranchList) {
                         Some(Message::CycleViewMode)
                     } else {
-                        None
+                        Some(Message::Char('m'))
                     }
                 }
                 (KeyCode::Up, _) if is_key_press => Some(Message::SelectPrev),
