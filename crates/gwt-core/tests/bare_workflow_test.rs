@@ -199,7 +199,10 @@ fn test_worktree_list_from_bare() {
         .expect("Failed to add worktree");
 
     if !output.status.success() {
-        eprintln!("Worktree add failed: {}", String::from_utf8_lossy(&output.stderr));
+        eprintln!(
+            "Worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     // List worktrees
@@ -240,7 +243,10 @@ fn test_worktree_remove() {
         .expect("Failed to add worktree");
 
     if !output.status.success() {
-        eprintln!("Worktree add failed: {}", String::from_utf8_lossy(&output.stderr));
+        eprintln!(
+            "Worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         return; // Skip the rest of the test
     }
 

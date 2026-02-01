@@ -64,14 +64,8 @@ fn test_detect_worktrees_style_repo() {
     let (temp, repo_path) = setup_worktrees_style_repo();
 
     let worktrees_dir = repo_path.join(".worktrees");
-    assert!(
-        worktrees_dir.exists(),
-        ".worktrees/ directory should exist"
-    );
-    assert!(
-        worktrees_dir.is_dir(),
-        ".worktrees should be a directory"
-    );
+    assert!(worktrees_dir.exists(), ".worktrees/ directory should exist");
+    assert!(worktrees_dir.is_dir(), ".worktrees should be a directory");
 
     drop(temp);
 }

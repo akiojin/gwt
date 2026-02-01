@@ -1,10 +1,7 @@
 //! Migration executor (SPEC-a70a1ece T806-T812, T815, T901-T909)
 
 use super::{
-    backup::create_backup,
-    config::MigrationConfig,
-    error::MigrationError,
-    state::MigrationState,
+    backup::create_backup, config::MigrationConfig, error::MigrationError, state::MigrationState,
     validator::validate_migration,
 };
 use std::path::{Path, PathBuf};

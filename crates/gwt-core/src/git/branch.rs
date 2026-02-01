@@ -211,7 +211,9 @@ impl Branch {
         if !output.status.success() {
             // If origin doesn't exist, return empty list
             let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("No such remote") || stderr.contains("does not appear to be a git repository") {
+            if stderr.contains("No such remote")
+                || stderr.contains("does not appear to be a git repository")
+            {
                 debug!(category = "git", "No origin remote configured");
                 return Ok(Vec::new());
             }

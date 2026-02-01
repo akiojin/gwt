@@ -170,6 +170,8 @@ fn session_parser_for_tool(tool_id: &str) -> Option<Box<dyn SessionParser>> {
 /// Configuration for launching a coding agent after TUI exits
 #[derive(Debug, Clone)]
 pub struct AgentLaunchConfig {
+    /// Repository root (bare repository path for SPEC-a70a1ece)
+    pub repo_root: PathBuf,
     /// Worktree path where agent should run
     pub worktree_path: PathBuf,
     /// Branch name
@@ -229,6 +231,8 @@ impl AgentLaunchConfig {
 pub struct TuiEntryContext {
     status_message: Option<String>,
     error_message: Option<String>,
+    /// Repository root for re-entry after agent termination (SPEC-a70a1ece)
+    repo_root: Option<PathBuf>,
 }
 
 impl TuiEntryContext {
@@ -236,6 +240,7 @@ impl TuiEntryContext {
         Self {
             status_message: Some(message),
             error_message: None,
+            repo_root: None,
         }
     }
 
@@ -243,6 +248,7 @@ impl TuiEntryContext {
         Self {
             status_message: Some(message),
             error_message: None,
+            repo_root: None,
         }
     }
 
@@ -250,7 +256,14 @@ impl TuiEntryContext {
         Self {
             status_message: None,
             error_message: Some(message),
+            repo_root: None,
         }
+    }
+
+    /// Set repo_root for single mode re-entry (SPEC-a70a1ece)
+    pub fn with_repo_root(mut self, repo_root: PathBuf) -> Self {
+        self.repo_root = Some(repo_root);
+        self
     }
 }
 
@@ -587,7 +600,11 @@ impl Model {
     }
 
     pub fn new_with_context(context: Option<TuiEntryContext>) -> Self {
-        let repo_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        // SPEC-a70a1ece: Use repo_root from context if available (single mode re-entry)
+        let repo_root = context
+            .as_ref()
+            .and_then(|ctx| ctx.repo_root.clone())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
         debug!(
             category = "tui",
@@ -4758,6 +4775,7 @@ impl Model {
             step(ProgressStepKind::CheckDependencies, StepStatus::Running);
 
             let config = AgentLaunchConfig {
+                repo_root: repo_root.clone(),
                 worktree_path: worktree.path.clone(),
                 branch_name: request.branch_name.clone(),
                 agent: request.agent,

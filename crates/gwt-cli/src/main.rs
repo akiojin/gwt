@@ -123,19 +123,28 @@ fn run() -> Result<(), GwtError> {
                                 warn!(category = "main", "Failed to save agent history: {}", e);
                             }
                         });
+                        // SPEC-a70a1ece: Capture repo_root before launch_plan is consumed
+                        let entry_repo_root = launch_plan.repo_root.clone();
                         match execute_launch_plan(launch_plan) {
                             Ok(AgentExitKind::Success) => {
-                                entry = Some(TuiEntryContext::success(
-                                    "Session completed successfully.".to_string(),
-                                ));
+                                entry = Some(
+                                    TuiEntryContext::success(
+                                        "Session completed successfully.".to_string(),
+                                    )
+                                    .with_repo_root(entry_repo_root),
+                                );
                             }
                             Ok(AgentExitKind::Interrupted) => {
-                                entry = Some(TuiEntryContext::warning(
-                                    "Session interrupted.".to_string(),
-                                ));
+                                entry = Some(
+                                    TuiEntryContext::warning("Session interrupted.".to_string())
+                                        .with_repo_root(entry_repo_root),
+                                );
                             }
                             Err(err) => {
-                                entry = Some(TuiEntryContext::error(err.to_string()));
+                                entry = Some(
+                                    TuiEntryContext::error(err.to_string())
+                                        .with_repo_root(entry_repo_root),
+                                );
                             }
                         }
                     }
@@ -1021,6 +1030,8 @@ pub(crate) struct LaunchPlan {
     pub selected_version: String,
     pub install_plan: InstallPlan,
     pub env: Vec<(String, String)>,
+    /// Repository root for single mode re-entry (SPEC-a70a1ece)
+    pub repo_root: PathBuf,
 }
 
 fn should_set_claude_sandbox_env(target_os: &str) -> bool {
@@ -1197,6 +1208,9 @@ pub(crate) fn prepare_launch_plan(
         });
     }
 
+    // SPEC-a70a1ece: Capture repo_root for single mode re-entry
+    let repo_root = config.repo_root.clone();
+
     Ok(LaunchPlan {
         config,
         executable,
@@ -1206,6 +1220,7 @@ pub(crate) fn prepare_launch_plan(
         selected_version,
         install_plan,
         env,
+        repo_root,
     })
 }
 
@@ -1283,6 +1298,9 @@ fn prepare_custom_agent_launch_plan(
         });
     }
 
+    // SPEC-a70a1ece: Capture repo_root for single mode re-entry
+    let repo_root = config.repo_root.clone();
+
     Ok(LaunchPlan {
         config,
         executable,
@@ -1292,6 +1310,7 @@ fn prepare_custom_agent_launch_plan(
         selected_version: version_label,
         install_plan,
         env,
+        repo_root,
     })
 }
 
@@ -2409,6 +2428,7 @@ mod tests {
 
     fn sample_config(agent: CodingAgent) -> AgentLaunchConfig {
         AgentLaunchConfig {
+            repo_root: PathBuf::from("/tmp/repo"),
             worktree_path: PathBuf::from("/tmp/worktree"),
             branch_name: "feature/test".to_string(),
             agent,

@@ -192,11 +192,7 @@ impl WorktreeManager {
                     } else {
                         // SPEC-a70a1ece FR-124: No local remote ref, fetch from remote
                         let fetch_output = std::process::Command::new("git")
-                            .args([
-                                "fetch",
-                                &remote,
-                                &format!("{}:{}", branch, branch),
-                            ])
+                            .args(["fetch", &remote, &format!("{}:{}", branch, branch)])
                             .current_dir(&self.repo_root)
                             .output()
                             .map_err(|e| GwtError::GitOperationFailed {
