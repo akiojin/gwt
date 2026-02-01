@@ -324,6 +324,58 @@ US9 (マイグレーション追加) → US7, US8 に依存
 - [x] **T1101** [統合] `crates/gwt-core/tests/` にbare clone → worktree作成のエンドツーエンドテストを追加
 - [x] **T1102** [統合] `crates/gwt-core/tests/` にマイグレーションのエンドツーエンドテストを追加
 - [x] **T1103** [統合] エッジケース（書き込み権限なし、ネットワークエラー等）のテストを追加
+- [x] **T1109** [統合] `crates/gwt-cli/tests/e2e_migration_test.rs` にgwtバイナリを使ったE2Eテストを追加
+
+### E2Eテスト実行方法
+
+#### 自動テスト（CI向け）
+
+```bash
+# 1. リリースバイナリをビルド
+cargo build --release
+
+# 2. E2Eテストを実行（--ignoredフラグでgwtバイナリ依存テストを含む）
+cargo test --package gwt-cli --test e2e_migration_test -- --ignored --nocapture
+```
+
+#### 手動E2Eテスト（マイグレーション動作確認）
+
+```bash
+# 1. テスト環境を作成
+export TEST_DIR=$(mktemp -d)
+cd $TEST_DIR
+
+# 2. 通常リポジトリ + .worktrees/ 構造を作成（旧gwt形式）
+git init myrepo && cd myrepo
+git config user.email "test@example.com"
+git config user.name "Test User"
+echo "# Test" > README.md
+git add . && git commit -m "Initial"
+mkdir -p .worktrees
+git worktree add .worktrees/feature-test -b feature/test
+
+# 3. gwtを実行してマイグレーションダイアログを確認
+./target/release/gwt
+
+# 4. マイグレーション結果を検証
+# 期待される構造:
+#   $TEST_DIR/
+#   ├── myrepo.git/        <- bareリポジトリ
+#   ├── main/              <- mainブランチのworktree
+#   ├── feature/
+#   │   └── test/          <- feature/testブランチのworktree
+#   └── .gwt/              <- gwt設定ディレクトリ
+
+# 5. クリーンアップ
+rm -rf $TEST_DIR
+```
+
+#### worktreeディレクトリ構造テスト
+
+```bash
+# feature/やbugfix/がサブディレクトリとして作成されることを確認
+cargo test --package gwt-core test_bare_repo_worktree -- --nocapture
+```
 
 ### 品質チェック
 
