@@ -877,26 +877,56 @@ impl Model {
                 .ok()
                 .and_then(|manager| manager.list_basic().ok())
                 .unwrap_or_default();
-            let branches = Branch::list_basic(&repo_root).unwrap_or_default();
-            // SPEC-a70a1ece: For bare repos, use ls-remote to get remote branches
+            let all_branches = Branch::list_basic(&repo_root).unwrap_or_default();
+
+            // SPEC-a70a1ece FR-170/171: For bare repos, only show worktree branches as Local
+            let worktree_branch_names: HashSet<String> = worktrees
+                .iter()
+                .filter_map(|wt| wt.branch.clone())
+                .collect();
+
+            let branches: Vec<_> = if repo_type == RepoType::Bare {
+                // Bare repo: Local = only branches with worktrees
+                all_branches
+                    .into_iter()
+                    .filter(|b| worktree_branch_names.contains(&b.name))
+                    .collect()
+            } else {
+                all_branches
+            };
+
+            // SPEC-a70a1ece FR-171: For bare repos, branches without worktrees go to Remote
             let remote_branches = if repo_type == RepoType::Bare {
-                Branch::list_remote_from_origin(&repo_root).unwrap_or_default()
+                // Get all branches and filter out ones with worktrees
+                let all_for_remote = Branch::list_basic(&repo_root).unwrap_or_default();
+                all_for_remote
+                    .into_iter()
+                    .filter(|b| !worktree_branch_names.contains(&b.name))
+                    .collect::<Vec<_>>()
             } else {
                 Branch::list_remote(&repo_root).unwrap_or_default()
             };
+
             let local_branch_names: HashSet<String> =
                 branches.iter().map(|b| b.name.clone()).collect();
             let mut remote_only_branches = Vec::new();
             for mut branch in remote_branches {
-                let short_name = branch
-                    .name
-                    .split_once('/')
-                    .map(|(_, name)| name)
-                    .unwrap_or(branch.name.as_str());
+                let short_name = if repo_type == RepoType::Bare {
+                    // For bare repos, branch name doesn't have origin/ prefix
+                    branch.name.as_str()
+                } else {
+                    branch
+                        .name
+                        .split_once('/')
+                        .map(|(_, name)| name)
+                        .unwrap_or(branch.name.as_str())
+                };
                 if local_branch_names.contains(short_name) {
                     continue;
                 }
-                branch.name = format!("remotes/{}", branch.name);
+                if repo_type != RepoType::Bare {
+                    branch.name = format!("remotes/{}", branch.name);
+                }
                 remote_only_branches.push(branch);
             }
             let worktree_targets: Vec<WorktreeStatusTarget> = worktrees
