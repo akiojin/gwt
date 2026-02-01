@@ -178,42 +178,62 @@ fn migrate_local_only_repo(config: &MigrationConfig) -> Result<(), MigrationErro
 }
 
 /// List worktrees that need to be migrated
+/// SPEC-a70a1ece: 元のリポジトリのメインブランチもworktreeとして再作成
 fn list_worktrees_to_migrate(
     repo_root: &Path,
 ) -> Result<Vec<WorktreeMigrationInfo>, MigrationError> {
-    let worktrees_dir = repo_root.join(".worktrees");
-    if !worktrees_dir.exists() {
-        return Ok(Vec::new());
+    let mut worktrees = Vec::new();
+    let parent_dir = repo_root.parent().unwrap_or(repo_root);
+
+    // First, add the main repository itself (SPEC-a70a1ece)
+    // This is the original repo's main/master branch that needs to become a worktree
+    if let Some(main_branch) = get_worktree_branch(repo_root) {
+        let is_dirty = is_worktree_dirty(repo_root);
+        // Sanitize branch name for directory (replace / with -)
+        let dir_name = main_branch.replace('/', "-");
+        let target_path = parent_dir.join(&dir_name);
+
+        worktrees.push(WorktreeMigrationInfo {
+            branch: main_branch,
+            source_path: repo_root.to_path_buf(),
+            target_path,
+            is_dirty,
+        });
     }
 
-    let mut worktrees = Vec::new();
-    let entries = std::fs::read_dir(&worktrees_dir).map_err(|e| MigrationError::IoError {
-        path: worktrees_dir.clone(),
-        reason: format!("Failed to read .worktrees directory: {}", e),
-    })?;
-
-    for entry in entries {
-        let entry = entry.map_err(|e| MigrationError::IoError {
+    // Then add worktrees from .worktrees/ directory (if exists)
+    let worktrees_dir = repo_root.join(".worktrees");
+    if worktrees_dir.exists() {
+        let entries = std::fs::read_dir(&worktrees_dir).map_err(|e| MigrationError::IoError {
             path: worktrees_dir.clone(),
-            reason: format!("Failed to read directory entry: {}", e),
+            reason: format!("Failed to read .worktrees directory: {}", e),
         })?;
 
-        let source_path = entry.path();
-        if !source_path.is_dir() {
-            continue;
-        }
+        for entry in entries {
+            let entry = entry.map_err(|e| MigrationError::IoError {
+                path: worktrees_dir.clone(),
+                reason: format!("Failed to read directory entry: {}", e),
+            })?;
 
-        // Get branch name from worktree
-        if let Some(branch) = get_worktree_branch(&source_path) {
-            let is_dirty = is_worktree_dirty(&source_path);
-            let target_path = repo_root.parent().unwrap_or(repo_root).join(&branch);
+            let source_path = entry.path();
+            if !source_path.is_dir() {
+                continue;
+            }
 
-            worktrees.push(WorktreeMigrationInfo {
-                branch,
-                source_path,
-                target_path,
-                is_dirty,
-            });
+            // Get branch name from worktree
+            if let Some(branch) = get_worktree_branch(&source_path) {
+                let is_dirty = is_worktree_dirty(&source_path);
+                // Sanitize branch name for directory
+                let dir_name = branch.replace('/', "-");
+                let target_path = parent_dir.join(&dir_name);
+
+                worktrees.push(WorktreeMigrationInfo {
+                    branch,
+                    source_path,
+                    target_path,
+                    is_dirty,
+                });
+            }
         }
     }
 
@@ -248,7 +268,15 @@ pub fn is_worktree_dirty(worktree_path: &Path) -> bool {
     }
 }
 
+/// Check if the source path is the main repository (not a worktree)
+fn is_main_repository(source_path: &Path) -> bool {
+    let git_path = source_path.join(".git");
+    // Main repo has .git as directory, worktree has .git as file
+    git_path.is_dir()
+}
+
 /// Migrate a single worktree (SPEC-a70a1ece T808-T809)
+/// SPEC-a70a1ece US9-S10: すべてのworktreeはgit worktree addで新規作成
 fn migrate_worktree(
     config: &MigrationConfig,
     wt_info: &WorktreeMigrationInfo,
@@ -256,13 +284,19 @@ fn migrate_worktree(
     debug!(
         branch = %wt_info.branch,
         dirty = wt_info.is_dirty,
+        source = %wt_info.source_path.display(),
+        target = %wt_info.target_path.display(),
         "Migrating worktree"
     );
 
+    // For the main repository, we need special handling
+    // The source is the original repo with .git directory, not a worktree
+    let is_main_repo = is_main_repository(&wt_info.source_path);
+
     if wt_info.is_dirty {
-        migrate_dirty_worktree(config, wt_info)?;
+        migrate_dirty_worktree(config, wt_info, is_main_repo)?;
     } else {
-        migrate_clean_worktree(config, wt_info)?;
+        migrate_clean_worktree(config, wt_info, is_main_repo)?;
     }
 
     // Migrate stash if any (FR-220)
@@ -275,14 +309,31 @@ fn migrate_worktree(
 }
 
 /// Migrate dirty worktree using file move (SPEC-a70a1ece T808, FR-206)
+/// SPEC-a70a1ece: dirty worktreeの場合、ファイルを移動後にgit worktree addで再登録
 fn migrate_dirty_worktree(
     config: &MigrationConfig,
     wt_info: &WorktreeMigrationInfo,
+    is_main_repo: bool,
 ) -> Result<(), MigrationError> {
-    debug!(branch = %wt_info.branch, "Migrating dirty worktree (file move)");
+    debug!(
+        branch = %wt_info.branch,
+        is_main_repo = is_main_repo,
+        "Migrating dirty worktree (file move)"
+    );
 
-    // Create new worktree from bare repo
     let bare_path = config.bare_repo_path();
+
+    // For main repo, we need to remove old worktree reference first (if any)
+    if !is_main_repo {
+        // Remove the old worktree registration from the original repo
+        let _ = Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(&wt_info.source_path)
+            .current_dir(&config.source_root)
+            .output();
+    }
+
+    // Create new worktree from bare repo with --no-checkout
     let output = Command::new("git")
         .args(["worktree", "add", "--no-checkout"])
         .arg(&wt_info.target_path)
@@ -312,13 +363,30 @@ fn migrate_dirty_worktree(
 }
 
 /// Migrate clean worktree using re-clone (SPEC-a70a1ece T809, FR-207)
+/// SPEC-a70a1ece US9-S10: すべてのworktreeはgit worktree addで新規作成
 fn migrate_clean_worktree(
     config: &MigrationConfig,
     wt_info: &WorktreeMigrationInfo,
+    is_main_repo: bool,
 ) -> Result<(), MigrationError> {
-    debug!(branch = %wt_info.branch, "Migrating clean worktree (re-clone)");
+    debug!(
+        branch = %wt_info.branch,
+        is_main_repo = is_main_repo,
+        "Migrating clean worktree (re-clone)"
+    );
 
     let bare_path = config.bare_repo_path();
+
+    // For non-main-repo worktrees, remove old worktree reference first
+    if !is_main_repo {
+        let _ = Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(&wt_info.source_path)
+            .current_dir(&config.source_root)
+            .output();
+    }
+
+    // Create new worktree from bare repo using git worktree add
     let output = Command::new("git")
         .args(["worktree", "add"])
         .arg(&wt_info.target_path)
@@ -506,26 +574,29 @@ fn migrate_stash(source: &Path, _target: &Path) -> Result<(), MigrationError> {
     Ok(())
 }
 
-/// Cleanup old worktrees directory (SPEC-a70a1ece T903, FR-204)
+/// Cleanup old worktrees directory and original repo (SPEC-a70a1ece T903, FR-204)
+/// SPEC-a70a1ece: 元のリポジトリディレクトリも削除（bareリポジトリに変換済み）
 fn cleanup_old_worktrees(repo_root: &Path) -> Result<(), MigrationError> {
+    // Remove .worktrees directory if exists
     let worktrees_dir = repo_root.join(".worktrees");
     if worktrees_dir.exists() {
-        // Remove old worktrees first
-        let output = Command::new("git")
-            .args(["worktree", "prune"])
-            .current_dir(repo_root)
-            .output();
-
-        if let Err(e) = output {
-            warn!("Failed to prune worktrees: {}", e);
-        }
-
-        // Remove .worktrees directory
+        debug!(path = %worktrees_dir.display(), "Removing .worktrees directory");
         std::fs::remove_dir_all(&worktrees_dir).map_err(|e| MigrationError::IoError {
             path: worktrees_dir,
             reason: format!("Failed to remove .worktrees: {}", e),
         })?;
     }
+
+    // Remove the original repository directory
+    // At this point:
+    // - Bare repo has been created (repo_root.git)
+    // - All worktrees have been migrated to sibling directories
+    // - Original repo is no longer needed
+    debug!(path = %repo_root.display(), "Removing original repository directory");
+    std::fs::remove_dir_all(repo_root).map_err(|e| MigrationError::IoError {
+        path: repo_root.to_path_buf(),
+        reason: format!("Failed to remove original repository: {}", e),
+    })?;
 
     Ok(())
 }
