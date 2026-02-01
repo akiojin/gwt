@@ -829,6 +829,7 @@ impl Model {
         self.branch_list = branch_list;
 
         let repo_root = self.repo_root.clone();
+        let repo_type = self.repo_type;
         let configured_base_branch = settings.default_base_branch.clone();
         let agent_history = self.agent_history.clone();
         let (tx, rx) = mpsc::channel();
@@ -842,7 +843,12 @@ impl Model {
                 .and_then(|manager| manager.list_basic().ok())
                 .unwrap_or_default();
             let branches = Branch::list_basic(&repo_root).unwrap_or_default();
-            let remote_branches = Branch::list_remote(&repo_root).unwrap_or_default();
+            // SPEC-a70a1ece: For bare repos, use ls-remote to get remote branches
+            let remote_branches = if repo_type == RepoType::Bare {
+                Branch::list_remote_from_origin(&repo_root).unwrap_or_default()
+            } else {
+                Branch::list_remote(&repo_root).unwrap_or_default()
+            };
             let local_branch_names: HashSet<String> =
                 branches.iter().map(|b| b.name.clone()).collect();
             let mut remote_only_branches = Vec::new();

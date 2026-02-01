@@ -190,6 +190,71 @@ impl Branch {
         Ok(branches)
     }
 
+    /// List remote branches using ls-remote (for bare repositories)
+    /// SPEC-a70a1ece: Bare repositories don't have refs/remotes/, so we use ls-remote
+    pub fn list_remote_from_origin(repo_path: &Path) -> Result<Vec<Branch>> {
+        debug!(
+            category = "git",
+            repo_path = %repo_path.display(),
+            "Listing remote branches via ls-remote (bare repo)"
+        );
+
+        let output = Command::new("git")
+            .args(["ls-remote", "--heads", "origin"])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| GwtError::GitOperationFailed {
+                operation: "ls-remote".to_string(),
+                details: e.to_string(),
+            })?;
+
+        if !output.status.success() {
+            // If origin doesn't exist, return empty list
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("No such remote") || stderr.contains("does not appear to be a git repository") {
+                debug!(category = "git", "No origin remote configured");
+                return Ok(Vec::new());
+            }
+            return Err(GwtError::GitOperationFailed {
+                operation: "ls-remote".to_string(),
+                details: stderr.to_string(),
+            });
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut branches = Vec::new();
+
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() >= 2 {
+                let commit = &parts[0][..7.min(parts[0].len())]; // Short SHA
+                let ref_name = parts[1];
+                // Convert refs/heads/branch-name to origin/branch-name
+                if let Some(branch_name) = ref_name.strip_prefix("refs/heads/") {
+                    branches.push(Branch {
+                        name: format!("origin/{}", branch_name),
+                        is_current: false,
+                        has_remote: true,
+                        upstream: None,
+                        commit: commit.to_string(),
+                        ahead: 0,
+                        behind: 0,
+                        commit_timestamp: None, // ls-remote doesn't provide timestamp
+                        is_gone: false,
+                    });
+                }
+            }
+        }
+
+        debug!(
+            category = "git",
+            count = branches.len(),
+            "Found remote branches via ls-remote"
+        );
+
+        Ok(branches)
+    }
+
     /// Get the current branch
     pub fn current(repo_path: &Path) -> Result<Option<Branch>> {
         debug!(
