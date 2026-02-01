@@ -180,10 +180,7 @@ fn test_detect_worktrees_style_repo() {
         ".worktrees directory should exist at {:?}",
         worktrees_dir
     );
-    assert!(
-        worktrees_dir.is_dir(),
-        ".worktrees should be a directory"
-    );
+    assert!(worktrees_dir.is_dir(), ".worktrees should be a directory");
 
     // Check worktree exists
     let worktree_path = worktrees_dir.join("feature-test");
@@ -229,10 +226,7 @@ fn test_normal_repo_detection() {
 fn test_gwt_detects_migration_candidate() {
     let gwt_path = gwt_binary_path();
     if !gwt_path.exists() && gwt_path.to_str() != Some("gwt") {
-        eprintln!(
-            "Skipping E2E test: gwt binary not found at {:?}",
-            gwt_path
-        );
+        eprintln!("Skipping E2E test: gwt binary not found at {:?}", gwt_path);
         eprintln!("Build with: cargo build --release");
         return;
     }
@@ -259,6 +253,7 @@ fn test_gwt_detects_migration_candidate() {
 }
 
 /// Test that migration detection logic works correctly
+/// SPEC-a70a1ece FR-200: ALL normal repositories should trigger migration
 #[test]
 fn test_migration_detection_logic() {
     use gwt_core::git::{detect_repo_type, RepoType};
@@ -276,24 +271,24 @@ fn test_migration_detection_logic() {
     let worktrees_dir = repo_path.join(".worktrees");
     assert!(
         worktrees_dir.exists() && worktrees_dir.is_dir(),
-        ".worktrees/ should exist and be a directory"
+        ".worktrees/ should exist and be a directory (old gwt style)"
     );
 
-    // This combination (Normal/Worktree + .worktrees/ exists) triggers migration dialog
-    let should_show_migration = matches!(repo_type, RepoType::Normal | RepoType::Worktree)
-        && worktrees_dir.exists()
-        && worktrees_dir.is_dir();
+    // SPEC-a70a1ece FR-200: Migration is triggered for ALL normal repos
+    // (not just those with .worktrees/)
+    let should_show_migration = matches!(repo_type, RepoType::Normal);
     assert!(
         should_show_migration,
-        "Migration dialog should be triggered for .worktrees/ style repos"
+        "Migration dialog should be triggered for normal repos (SPEC-a70a1ece FR-200)"
     );
 
     drop(temp);
 }
 
-/// Test that normal repos without .worktrees/ don't trigger migration
+/// Test that ALL normal repos (with or without .worktrees/) trigger migration
+/// SPEC-a70a1ece FR-200: Migration dialog should show for all normal repositories
 #[test]
-fn test_no_migration_for_fresh_repo() {
+fn test_migration_for_fresh_repo() {
     use gwt_core::git::{detect_repo_type, RepoType};
 
     let (temp, repo_path) = setup_normal_repo_without_worktrees();
@@ -306,18 +301,14 @@ fn test_no_migration_for_fresh_repo() {
     );
 
     let worktrees_dir = repo_path.join(".worktrees");
-    assert!(
-        !worktrees_dir.exists(),
-        ".worktrees/ should NOT exist"
-    );
+    assert!(!worktrees_dir.exists(), ".worktrees/ should NOT exist");
 
-    // No migration should be triggered
-    let should_show_migration = matches!(repo_type, RepoType::Normal | RepoType::Worktree)
-        && worktrees_dir.exists()
-        && worktrees_dir.is_dir();
+    // SPEC-a70a1ece FR-200: Migration should be triggered for ALL normal repos
+    // (regardless of whether .worktrees/ exists)
+    let should_show_migration = matches!(repo_type, RepoType::Normal);
     assert!(
-        !should_show_migration,
-        "Migration dialog should NOT be triggered for fresh repos"
+        should_show_migration,
+        "Migration dialog SHOULD be triggered for ALL normal repos (SPEC-a70a1ece FR-200)"
     );
 
     drop(temp);
@@ -351,14 +342,29 @@ fn test_expected_post_migration_structure() {
 
     // Verify structure
     assert!(bare_repo.exists(), "Bare repo should exist");
-    assert!(bare_repo.file_name().unwrap().to_str().unwrap().ends_with(".git"));
-    assert!(main_worktree.exists(), "Main worktree should exist at sibling level");
-    assert!(feature_worktree.exists(), "Feature worktree should be in subdirectory structure");
+    assert!(bare_repo
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .ends_with(".git"));
+    assert!(
+        main_worktree.exists(),
+        "Main worktree should exist at sibling level"
+    );
+    assert!(
+        feature_worktree.exists(),
+        "Feature worktree should be in subdirectory structure"
+    );
     assert!(gwt_config.exists(), ".gwt config should be at parent level");
 
     // Verify feature worktree is in feature/ subdirectory, not flat
     let flat_path = parent.join("feature-test");
-    assert!(!flat_path.exists(), "Worktree should NOT be flat at {:?}", flat_path);
+    assert!(
+        !flat_path.exists(),
+        "Worktree should NOT be flat at {:?}",
+        flat_path
+    );
 
     drop(temp);
 }

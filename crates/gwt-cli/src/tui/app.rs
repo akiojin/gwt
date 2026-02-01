@@ -765,33 +765,35 @@ impl Model {
             model.screen = Screen::CloneWizard;
         }
 
-        // SPEC-a70a1ece T709-T710: Show migration dialog for .worktrees/ method repos
-        // Only check if we're in a normal repo (not already bare, empty, or non-repo)
-        if model.repo_type == RepoType::Normal || model.repo_type == RepoType::Worktree {
-            let worktrees_dir = model.repo_root.join(".worktrees");
-            if worktrees_dir.exists() && worktrees_dir.is_dir() {
-                debug!(
-                    category = "tui",
-                    worktrees_dir = %worktrees_dir.display(),
-                    "Legacy .worktrees/ directory detected, showing migration dialog"
-                );
-                // Create migration config
-                let bare_repo_name = gwt_core::migration::derive_bare_repo_name(
-                    &model.repo_root.display().to_string(),
-                );
-                let target_root = model
-                    .repo_root
-                    .parent()
-                    .unwrap_or(&model.repo_root)
-                    .to_path_buf();
-                let config = gwt_core::migration::MigrationConfig::new(
-                    model.repo_root.clone(),
-                    target_root,
-                    bare_repo_name,
-                );
-                model.migration_dialog = MigrationDialogState::new(config);
-                model.screen = Screen::MigrationDialog;
-            }
+        // SPEC-a70a1ece FR-200: Show migration dialog for ALL normal repositories
+        // (regardless of whether .worktrees/ exists)
+        debug!(
+            category = "tui",
+            repo_type = ?model.repo_type,
+            repo_root = %model.repo_root.display(),
+            "Checking for migration dialog eligibility"
+        );
+        if model.repo_type == RepoType::Normal {
+            debug!(
+                category = "tui",
+                repo_root = %model.repo_root.display(),
+                "Normal repository detected, showing migration dialog for bare conversion"
+            );
+            // Create migration config
+            let bare_repo_name =
+                gwt_core::migration::derive_bare_repo_name(&model.repo_root.display().to_string());
+            let target_root = model
+                .repo_root
+                .parent()
+                .unwrap_or(&model.repo_root)
+                .to_path_buf();
+            let config = gwt_core::migration::MigrationConfig::new(
+                model.repo_root.clone(),
+                target_root,
+                bare_repo_name,
+            );
+            model.migration_dialog = MigrationDialogState::new(config);
+            model.screen = Screen::MigrationDialog;
         }
 
         model
@@ -6874,6 +6876,8 @@ mod tests {
         let mut model = Model::new_with_context(None);
         let branches = vec![sample_branch_with_session("feature/layout")];
         model.branch_list = BranchListState::new().with_branches(branches);
+        // Force BranchList screen (normal repos now show migration dialog by default)
+        model.screen = Screen::BranchList;
 
         let height = 24;
         let lines = render_model_lines(&mut model, 80, height);
