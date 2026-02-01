@@ -99,6 +99,31 @@ pub fn is_inside_worktree(path: &Path) -> bool {
     git_path.is_file()
 }
 
+/// Find a bare repository (*.git directory) in the given directory (SPEC-a70a1ece)
+///
+/// Returns the path to the first bare repository found, if any.
+/// This is used to detect bare repos when gwt is started from the parent directory.
+pub fn find_bare_repo_in_dir(path: &Path) -> Option<std::path::PathBuf> {
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(_) => return None,
+    };
+
+    for entry in entries.flatten() {
+        let entry_path = entry.path();
+        if entry_path.is_dir() {
+            // Check if it's a *.git directory and is a bare repository
+            if let Some(name) = entry_path.file_name().and_then(|n| n.to_str()) {
+                if name.ends_with(".git") && is_bare_repository(&entry_path) {
+                    return Some(entry_path);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Detect the repository type at a given path (SPEC-a70a1ece)
 pub fn detect_repo_type(path: &Path) -> RepoType {
     // 1. Check if directory is empty
@@ -1231,5 +1256,47 @@ mod tests {
             .output()
             .unwrap();
         assert!(!is_inside_worktree(temp.path()));
+    }
+
+    #[test]
+    fn test_find_bare_repo_in_dir_found() {
+        let temp = TempDir::new().unwrap();
+        // Create a bare repository with .git suffix
+        let bare_path = temp.path().join("my-repo.git");
+        std::fs::create_dir(&bare_path).unwrap();
+        Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(&bare_path)
+            .output()
+            .unwrap();
+
+        // Should find the bare repo from the parent directory
+        let result = find_bare_repo_in_dir(temp.path());
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), bare_path);
+    }
+
+    #[test]
+    fn test_find_bare_repo_in_dir_not_found() {
+        let temp = TempDir::new().unwrap();
+        // Create a regular file
+        std::fs::write(temp.path().join("file.txt"), "content").unwrap();
+
+        // Should not find any bare repo
+        let result = find_bare_repo_in_dir(temp.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_bare_repo_in_dir_ignores_non_bare() {
+        let temp = TempDir::new().unwrap();
+        // Create a directory with .git suffix but NOT a bare repo
+        let fake_git = temp.path().join("fake.git");
+        std::fs::create_dir(&fake_git).unwrap();
+        std::fs::write(fake_git.join("file.txt"), "content").unwrap();
+
+        // Should not find it (not a bare repo)
+        let result = find_bare_repo_in_dir(temp.path());
+        assert!(result.is_none());
     }
 }

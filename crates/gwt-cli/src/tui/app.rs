@@ -601,7 +601,7 @@ impl Model {
 
     pub fn new_with_context(context: Option<TuiEntryContext>) -> Self {
         // SPEC-a70a1ece: Use repo_root from context if available (single mode re-entry)
-        let repo_root = context
+        let mut repo_root = context
             .as_ref()
             .and_then(|ctx| ctx.repo_root.clone())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
@@ -612,11 +612,26 @@ impl Model {
             "Initializing TUI model"
         );
 
-        // SPEC-a70a1ece: Capture startup context before repo_root is moved
+        // SPEC-a70a1ece: Detect repo type, with fallback to find bare repo in directory
+        let mut repo_type = detect_repo_type(&repo_root);
+
+        // If NonRepo, check if there's a *.git bare repository in the directory
+        if repo_type == RepoType::NonRepo {
+            if let Some(bare_path) = gwt_core::git::find_bare_repo_in_dir(&repo_root) {
+                debug!(
+                    category = "tui",
+                    bare_path = %bare_path.display(),
+                    "Found bare repository in directory, switching to it"
+                );
+                repo_root = bare_path;
+                repo_type = RepoType::Bare;
+            }
+        }
+
+        // SPEC-a70a1ece: Capture startup context
         let header_ctx = get_header_context(&repo_root);
         let startup_branch = header_ctx.branch_name;
         let bare_name = header_ctx.bare_name; // T506: Capture bare repo name
-        let repo_type = detect_repo_type(&repo_root);
 
         let (agent_mode_tx, agent_mode_rx) = mpsc::channel();
 
