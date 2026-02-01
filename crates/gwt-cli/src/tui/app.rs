@@ -62,12 +62,13 @@ use super::screens::environment::EditField;
 use super::screens::pane_list::PaneListState;
 use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
 use super::screens::{
-    collect_os_env, render_agent_mode, render_ai_wizard, render_branch_list, render_confirm,
-    render_environment, render_error_with_queue, render_help, render_logs, render_profiles,
-    render_settings, render_wizard, render_worktree_create, AIWizardState, AgentMessage,
-    AgentModeState, AgentRole, BranchItem, BranchListState, BranchType, CodingAgent, ConfirmState,
-    EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, HelpState, LogsState, ProfilesState,
-    QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult, WizardState, WizardStep,
+    collect_os_env, render_agent_mode, render_ai_wizard, render_branch_list, render_clone_wizard,
+    render_confirm, render_environment, render_error_with_queue, render_help, render_logs,
+    render_profiles, render_settings, render_wizard, render_worktree_create, AIWizardState,
+    AgentMessage, AgentModeState, AgentRole, BranchItem, BranchListState, BranchType,
+    CloneWizardState, CloneWizardStep, CodingAgent, ConfirmState, EnvironmentState, ErrorQueue,
+    ErrorState, ExecutionMode, HelpState, LogsState, ProfilesState, QuickStartEntry,
+    ReasoningLevel, SettingsState, WizardConfirmResult, WizardState, WizardStep,
     WorktreeCreateState,
 };
 // log_gwt_error is available for use when GwtError types are available
@@ -495,6 +496,8 @@ pub struct Model {
     startup_branch: Option<String>,
     /// Repository type detected at startup (SPEC-a70a1ece US2)
     repo_type: RepoType,
+    /// Clone wizard state (SPEC-a70a1ece US3)
+    clone_wizard: CloneWizardState,
 }
 
 /// Screen types
@@ -512,6 +515,8 @@ pub enum Screen {
     Environment,
     /// AI settings wizard (FR-100)
     AISettingsWizard,
+    /// Clone wizard for empty/non-repo directories (SPEC-a70a1ece US3)
+    CloneWizard,
 }
 
 /// Messages (Events in Elm Architecture)
@@ -651,6 +656,7 @@ impl Model {
             progress_modal: None,
             startup_branch,
             repo_type,
+            clone_wizard: CloneWizardState::new(),
         };
 
         model
@@ -706,6 +712,16 @@ impl Model {
                 model.screen_stack.push(model.screen.clone());
                 model.screen = Screen::Confirm;
             }
+        }
+
+        // SPEC-a70a1ece T310-T311: Show clone wizard for empty/non-repo directories
+        if matches!(model.repo_type, RepoType::Empty | RepoType::NonRepo) {
+            debug!(
+                category = "tui",
+                repo_type = ?model.repo_type,
+                "Empty or non-repo directory detected, showing clone wizard"
+            );
+            model.screen = Screen::CloneWizard;
         }
 
         model
@@ -3778,6 +3794,7 @@ impl Model {
                 Screen::Profiles => self.profiles.select_next(),
                 Screen::Environment => self.environment.select_next(),
                 Screen::AISettingsWizard => self.ai_wizard.select_next_model(),
+                Screen::CloneWizard => self.clone_wizard.down(),
                 Screen::Confirm => {}
             },
             Message::SelectPrev => match self.screen {
@@ -3799,6 +3816,7 @@ impl Model {
                 Screen::Profiles => self.profiles.select_prev(),
                 Screen::Environment => self.environment.select_prev(),
                 Screen::AISettingsWizard => self.ai_wizard.select_prev_model(),
+                Screen::CloneWizard => self.clone_wizard.up(),
                 Screen::Confirm => {}
             },
             Message::PageUp => match self.screen {
@@ -3975,9 +3993,17 @@ impl Model {
                 Screen::Settings => {
                     self.handle_settings_enter();
                 }
+                // SPEC-a70a1ece US3: Clone wizard Enter handling
+                Screen::CloneWizard => {
+                    self.clone_wizard.next();
+                }
             },
             Message::Char(c) => {
-                if matches!(self.screen, Screen::WorktreeCreate) {
+                if matches!(self.screen, Screen::CloneWizard)
+                    && self.clone_wizard.step == CloneWizardStep::UrlInput
+                {
+                    self.clone_wizard.handle_char(c);
+                } else if matches!(self.screen, Screen::WorktreeCreate) {
                     self.worktree_create.insert_char(c);
                 } else if matches!(self.screen, Screen::BranchList) && self.branch_list.filter_mode
                 {
@@ -4050,7 +4076,13 @@ impl Model {
                 }
             }
             Message::Backspace => {
-                if matches!(self.screen, Screen::WorktreeCreate) {
+                if matches!(self.screen, Screen::CloneWizard) {
+                    if self.clone_wizard.step == CloneWizardStep::UrlInput {
+                        self.clone_wizard.handle_backspace();
+                    } else {
+                        self.clone_wizard.prev();
+                    }
+                } else if matches!(self.screen, Screen::WorktreeCreate) {
                     self.worktree_create.delete_char();
                 } else if matches!(self.screen, Screen::BranchList) && self.branch_list.filter_mode
                 {
@@ -5288,6 +5320,7 @@ impl Model {
             Screen::Profiles => render_profiles(&mut self.profiles, frame, chunks[1]),
             Screen::Environment => render_environment(&mut self.environment, frame, chunks[1]),
             Screen::AISettingsWizard => render_ai_wizard(&mut self.ai_wizard, frame, chunks[1]),
+            Screen::CloneWizard => render_clone_wizard(&self.clone_wizard, frame, chunks[1]),
             Screen::Confirm => {}
         }
 
@@ -5345,6 +5378,7 @@ impl Model {
             Screen::Profiles => "Profiles",
             Screen::Environment => "Environment",
             Screen::AISettingsWizard => "AI Settings",
+            Screen::CloneWizard => "Clone Repository",
         };
 
         let title = format!(" gwt - {} v{}{} ", screen_title, version, offline_indicator);
@@ -5548,6 +5582,15 @@ impl Model {
                     self.ai_wizard.step_title().to_string()
                 }
             }
+            Screen::CloneWizard => match self.clone_wizard.step {
+                CloneWizardStep::UrlInput => "[Enter] Continue | [Esc] Quit".to_string(),
+                CloneWizardStep::TypeSelect => {
+                    "[Up/Down] Select | [Enter] Clone | [Backspace] Back | [Esc] Quit".to_string()
+                }
+                CloneWizardStep::Cloning => "Cloning...".to_string(),
+                CloneWizardStep::Complete => "[Enter] Continue".to_string(),
+                CloneWizardStep::Failed => "[Backspace] Try again | [Esc] Quit".to_string(),
+            },
         }
     }
 

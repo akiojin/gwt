@@ -4,6 +4,7 @@
 
 mod backend;
 mod branch;
+mod clone;
 mod commit;
 mod issue;
 mod pullrequest;
@@ -12,6 +13,7 @@ mod repository;
 
 pub use backend::GitBackend;
 pub use branch::{Branch, DivergenceStatus};
+pub use clone::{clone_bare, extract_repo_name, CloneConfig};
 pub use commit::{
     BranchMeta, BranchSummary, ChangeStats, CommitEntry, LoadingState, SectionErrors,
 };

@@ -89,23 +89,23 @@ US9 (マイグレーション追加) → US7, US8 に依存
 
 ### clone設定
 
-- [ ] **T301** [US3] `crates/gwt-core/src/git/clone.rs` に `CloneConfig` 構造体を追加
-- [ ] **T302** [US3] T301の後に `crates/gwt-core/src/git/clone.rs` に `clone_bare()` 関数を実装
-- [ ] **T303** [US3] T302の後に `crates/gwt-core/src/git/mod.rs` に clone モジュールを公開
+- [x] **T301** [US3] `crates/gwt-core/src/git/clone.rs` に `CloneConfig` 構造体を追加
+- [x] **T302** [US3] T301の後に `crates/gwt-core/src/git/clone.rs` に `clone_bare()` 関数を実装
+- [x] **T303** [US3] T302の後に `crates/gwt-core/src/git/mod.rs` に clone モジュールを公開
 
 ### ウィザードUI
 
-- [ ] **T304** [US3] `crates/gwt-cli/src/tui/screens/clone_wizard.rs` に `CloneWizardState` 構造体を作成
-- [ ] **T305** [US3] T304の後に `crates/gwt-cli/src/tui/screens/clone_wizard.rs` に `CloneWizardStep` enum を作成
-- [ ] **T306** [US3] T305の後に `crates/gwt-cli/src/tui/screens/clone_wizard.rs` に URL入力ステップを実装
-- [ ] **T307** [US3] T306の後に `crates/gwt-cli/src/tui/screens/clone_wizard.rs` に clone種別選択ステップを実装
-- [ ] **T308** [US3] T307の後に `crates/gwt-cli/src/tui/screens/clone_wizard.rs` に clone実行・進捗表示を実装
-- [ ] **T309** [US3] T308の後に `crates/gwt-cli/src/tui/screens/mod.rs` に clone_wizard モジュールを公開
+- [x] **T304** [US3] `crates/gwt-cli/src/tui/screens/clone_wizard.rs` に `CloneWizardState` 構造体を作成
+- [x] **T305** [US3] T304の後に `crates/gwt-cli/src/tui/screens/clone_wizard.rs` に `CloneWizardStep` enum を作成
+- [x] **T306** [US3] T305の後に `crates/gwt-cli/src/tui/screens/clone_wizard.rs` に URL入力ステップを実装
+- [x] **T307** [US3] T306の後に `crates/gwt-cli/src/tui/screens/clone_wizard.rs` に clone種別選択ステップを実装
+- [x] **T308** [US3] T307の後に `crates/gwt-cli/src/tui/screens/clone_wizard.rs` に clone実行・進捗表示を実装
+- [x] **T309** [US3] T308の後に `crates/gwt-cli/src/tui/screens/mod.rs` に clone_wizard モジュールを公開
 
 ### TUI統合
 
-- [ ] **T310** [US3] T309の後に `crates/gwt-cli/src/tui/app.rs` で `RepoType::Empty` の場合にcloneウィザードを表示
-- [ ] **T311** [US3] T310の後に `crates/gwt-cli/src/tui/app.rs` で `RepoType::NonRepo` の場合に警告+cloneウィザードを表示
+- [x] **T310** [US3] T309の後に `crates/gwt-cli/src/tui/app.rs` で `RepoType::Empty` の場合にcloneウィザードを表示
+- [x] **T311** [US3] T310の後に `crates/gwt-cli/src/tui/app.rs` で `RepoType::NonRepo` の場合に警告+cloneウィザードを表示
 
 ### CLIオプション
 
