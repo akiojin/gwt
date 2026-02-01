@@ -199,6 +199,16 @@ impl WorktreeManager {
         // Create worktree
         self.repo.create_worktree(&path, &resolved_branch, false)?;
 
+        // SPEC-a70a1ece T1004-T1005: Initialize submodules (non-fatal on failure)
+        if let Err(e) = crate::git::init_submodules(&path) {
+            warn!(
+                category = "worktree",
+                path = %path.display(),
+                error = %e,
+                "Submodule initialization failed (non-fatal)"
+            );
+        }
+
         // Return the created worktree
         let worktree = self
             .get_by_path(&path)?
@@ -290,6 +300,16 @@ impl WorktreeManager {
                     reason: e.to_string(),
                 })?;
             drop(wt_repo);
+        }
+
+        // SPEC-a70a1ece T1004-T1005: Initialize submodules (non-fatal on failure)
+        if let Err(e) = crate::git::init_submodules(&path) {
+            warn!(
+                category = "worktree",
+                path = %path.display(),
+                error = %e,
+                "Submodule initialization failed (non-fatal)"
+            );
         }
 
         // Return the created worktree

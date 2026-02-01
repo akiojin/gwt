@@ -182,26 +182,26 @@ US9 (マイグレーション追加) → US7, US8 に依存
 
 ### マイグレーションモジュール基盤
 
-- [ ] **T701** [US7] `crates/gwt-core/src/migration/mod.rs` にマイグレーションモジュールを作成
-- [ ] **T702** [US7] T701の後に `crates/gwt-core/src/migration/config.rs` に `MigrationConfig` 構造体を追加
-- [ ] **T703** [US7] T702の後に `crates/gwt-core/src/migration/state.rs` に `MigrationState` enum を追加
-- [ ] **T704** [US7] T703の後に `crates/gwt-core/src/migration/error.rs` に `MigrationError` enum を追加
+- [x] **T701** [US7] `crates/gwt-core/src/migration/mod.rs` にマイグレーションモジュールを作成
+- [x] **T702** [US7] T701の後に `crates/gwt-core/src/migration/config.rs` に `MigrationConfig` 構造体を追加
+- [x] **T703** [US7] T702の後に `crates/gwt-core/src/migration/state.rs` に `MigrationState` enum を追加
+- [x] **T704** [US7] T703の後に `crates/gwt-core/src/migration/error.rs` に `MigrationError` enum を追加
 
 ### マイグレーションダイアログUI
 
-- [ ] **T705** [US7] T704の後に `crates/gwt-cli/src/tui/screens/migration_dialog.rs` にダイアログ構造体を作成
-- [ ] **T706** [US7] T705の後に `crates/gwt-cli/src/tui/screens/migration_dialog.rs` に続行/拒否の選択肢を実装
-- [ ] **T707** [US7] T706の後に `crates/gwt-cli/src/tui/screens/migration_dialog.rs` にステップ別進捗表示を実装
-- [ ] **T708** [US7] T707の後に `crates/gwt-cli/src/tui/screens/mod.rs` に migration_dialog モジュールを公開
+- [x] **T705** [US7] T704の後に `crates/gwt-cli/src/tui/screens/migration_dialog.rs` にダイアログ構造体を作成
+- [x] **T706** [US7] T705の後に `crates/gwt-cli/src/tui/screens/migration_dialog.rs` に続行/拒否の選択肢を実装
+- [x] **T707** [US7] T706の後に `crates/gwt-cli/src/tui/screens/migration_dialog.rs` にステップ別進捗表示を実装
+- [x] **T708** [US7] T707の後に `crates/gwt-cli/src/tui/screens/mod.rs` に migration_dialog モジュールを公開
 
 ### TUI統合
 
-- [ ] **T709** [US7] T708の後に `crates/gwt-cli/src/tui/app.rs` で `.worktrees/` 方式検出時にマイグレーションダイアログを表示
-- [ ] **T710** [US7] T709の後に `crates/gwt-cli/src/tui/app.rs` で拒否選択時にgwtを終了
+- [x] **T709** [US7] T708の後に `crates/gwt-cli/src/tui/app.rs` で `.worktrees/` 方式検出時にマイグレーションダイアログを表示
+- [x] **T710** [US7] T709の後に `crates/gwt-cli/src/tui/app.rs` で拒否選択時にgwtを終了
 
 ### テスト
 
-- [ ] **T711** [P] [US7] `crates/gwt-core/src/migration/` にマイグレーション状態遷移のユニットテストを追加
+- [x] **T711** [P] [US7] `crates/gwt-core/src/migration/` にマイグレーション状態遷移のユニットテストを追加
 
 **✅ MVP6チェックポイント**: US7完了後、マイグレーションダイアログが表示される
 
@@ -215,39 +215,39 @@ US9 (マイグレーション追加) → US7, US8 に依存
 
 ### 検証処理
 
-- [ ] **T801** [US8] `crates/gwt-core/src/migration/validator.rs` に `check_disk_space()` 関数を実装
-- [ ] **T802** [US8] T801の後に `crates/gwt-core/src/migration/validator.rs` に `check_locked_worktrees()` 関数を実装
-- [ ] **T803** [US8] T802の後に `crates/gwt-core/src/migration/validator.rs` に `validate_migration()` 関数を実装
+- [x] **T801** [US8] `crates/gwt-core/src/migration/validator.rs` に `check_disk_space()` 関数を実装
+- [x] **T802** [US8] T801の後に `crates/gwt-core/src/migration/validator.rs` に `check_locked_worktrees()` 関数を実装
+- [x] **T803** [US8] T802の後に `crates/gwt-core/src/migration/validator.rs` に `validate_migration()` 関数を実装
 
 ### バックアップ処理
 
-- [ ] **T804** [US8] T803の後に `crates/gwt-core/src/migration/backup.rs` に `create_backup()` 関数を実装
-- [ ] **T805** [US8] T804の後に `crates/gwt-core/src/migration/backup.rs` に `restore_backup()` 関数を実装
+- [x] **T804** [US8] T803の後に `crates/gwt-core/src/migration/backup.rs` に `create_backup()` 関数を実装
+- [x] **T805** [US8] T804の後に `crates/gwt-core/src/migration/backup.rs` に `restore_backup()` 関数を実装
 
 ### worktree移行処理
 
-- [ ] **T806** [US8] T805の後に `crates/gwt-core/src/migration/executor.rs` に `WorktreeMigrationInfo` 構造体を追加
-- [ ] **T807** [US8] T806の後に `crates/gwt-core/src/migration/executor.rs` に `is_worktree_dirty()` 関数を実装
-- [ ] **T808** [US8] T807の後に `crates/gwt-core/src/migration/executor.rs` に `migrate_dirty_worktree()` 関数を実装（ファイル移動方式）
-- [ ] **T809** [US8] T808の後に `crates/gwt-core/src/migration/executor.rs` に `migrate_clean_worktree()` 関数を実装（re-clone方式）
-- [ ] **T810** [US8] T809の後に `crates/gwt-core/src/migration/executor.rs` に `copy_git_hooks()` 関数を実装
-- [ ] **T811** [US8] T810の後に `crates/gwt-core/src/migration/executor.rs` に `preserve_submodules()` 関数を実装
-- [ ] **T812** [US8] T811の後に `crates/gwt-core/src/migration/executor.rs` に `exclude_gitignored_files()` 関数を実装
+- [x] **T806** [US8] T805の後に `crates/gwt-core/src/migration/executor.rs` に `WorktreeMigrationInfo` 構造体を追加
+- [x] **T807** [US8] T806の後に `crates/gwt-core/src/migration/executor.rs` に `is_worktree_dirty()` 関数を実装
+- [x] **T808** [US8] T807の後に `crates/gwt-core/src/migration/executor.rs` に `migrate_dirty_worktree()` 関数を実装（ファイル移動方式）
+- [x] **T809** [US8] T808の後に `crates/gwt-core/src/migration/executor.rs` に `migrate_clean_worktree()` 関数を実装（re-clone方式）
+- [x] **T810** [US8] T809の後に `crates/gwt-core/src/migration/executor.rs` に `copy_git_hooks()` 関数を実装
+- [x] **T811** [US8] T810の後に `crates/gwt-core/src/migration/executor.rs` に `preserve_submodules()` 関数を実装
+- [x] **T812** [US8] T811の後に `crates/gwt-core/src/migration/executor.rs` に `exclude_gitignored_files()` 関数を実装
 
 ### ロールバック処理
 
-- [ ] **T813** [US8] T812の後に `crates/gwt-core/src/migration/rollback.rs` に `rollback_migration()` 関数を実装
-- [ ] **T814** [US8] T813の後に `crates/gwt-core/src/migration/rollback.rs` にネットワークエラー時のリトライ（最大3回）を実装
+- [x] **T813** [US8] T812の後に `crates/gwt-core/src/migration/rollback.rs` に `rollback_migration()` 関数を実装
+- [x] **T814** [US8] T813の後に `crates/gwt-core/src/migration/rollback.rs` にネットワークエラー時のリトライ（最大3回）を実装
 
 ### 実行オーケストレーション
 
-- [ ] **T815** [US8] T814の後に `crates/gwt-core/src/migration/executor.rs` に `execute_migration()` 関数を実装（順次処理）
-- [ ] **T816** [US8] T815の後に `crates/gwt-core/src/migration/mod.rs` にモジュール公開を追加
+- [x] **T815** [US8] T814の後に `crates/gwt-core/src/migration/executor.rs` に `execute_migration()` 関数を実装（順次処理）
+- [x] **T816** [US8] T815の後に `crates/gwt-core/src/migration/mod.rs` にモジュール公開を追加
 
 ### テスト
 
-- [ ] **T817** [P] [US8] `crates/gwt-core/src/migration/` に dirty/clean worktree移行のユニットテストを追加
-- [ ] **T818** [P] [US8] `crates/gwt-core/src/migration/` にロールバック処理のユニットテストを追加
+- [x] **T817** [P] [US8] `crates/gwt-core/src/migration/` に dirty/clean worktree移行のユニットテストを追加
+- [x] **T818** [P] [US8] `crates/gwt-core/src/migration/` にロールバック処理のユニットテストを追加
 
 **✅ MVP7チェックポイント**: US8完了後、マイグレーションが安全に実行される
 
@@ -261,29 +261,29 @@ US9 (マイグレーション追加) → US7, US8 に依存
 
 ### パーミッション・stash処理
 
-- [ ] **T901** [US9] `crates/gwt-core/src/migration/executor.rs` に `preserve_file_permissions()` 関数を実装
-- [ ] **T902** [US9] T901の後に `crates/gwt-core/src/migration/executor.rs` に `migrate_stash()` 関数を実装
+- [x] **T901** [US9] `crates/gwt-core/src/migration/executor.rs` に `preserve_file_permissions()` 関数を実装
+- [x] **T902** [US9] T901の後に `crates/gwt-core/src/migration/executor.rs` に `migrate_stash()` 関数を実装
 
 ### クリーンアップ・通知
 
-- [ ] **T903** [US9] T902の後に `crates/gwt-core/src/migration/executor.rs` に `cleanup_old_worktrees()` 関数を実装（即時削除）
-- [ ] **T904** [US9] T903の後に `crates/gwt-cli/src/tui/screens/migration_dialog.rs` に簡潔な完了メッセージを実装
+- [x] **T903** [US9] T902の後に `crates/gwt-core/src/migration/executor.rs` に `cleanup_old_worktrees()` 関数を実装（即時削除）
+- [x] **T904** [US9] T903の後に `crates/gwt-cli/src/tui/screens/migration_dialog.rs` に簡潔な完了メッセージを実装
 
 ### 設定・トラッキング
 
-- [ ] **T905** [US9] T904の後に `crates/gwt-core/src/migration/executor.rs` に `create_project_config()` 関数を実装（bareの親に.gwt/配置）
-- [ ] **T906** [US9] T905の後に `crates/gwt-core/src/migration/executor.rs` に `derive_bare_repo_name()` 関数を実装（`{元のリポジトリ名}.git`形式）
-- [ ] **T907** [US9] T906の後に `crates/gwt-core/src/migration/executor.rs` に `preserve_tracking_relationships()` 関数を実装
+- [x] **T905** [US9] T904の後に `crates/gwt-core/src/migration/executor.rs` に `create_project_config()` 関数を実装（bareの親に.gwt/配置）
+- [x] **T906** [US9] T905の後に `crates/gwt-core/src/migration/executor.rs` に `derive_bare_repo_name()` 関数を実装（`{元のリポジトリ名}.git`形式）
+- [x] **T907** [US9] T906の後に `crates/gwt-core/src/migration/executor.rs` に `preserve_tracking_relationships()` 関数を実装
 
 ### 特殊ケース
 
-- [ ] **T908** [US9] T907の後に `crates/gwt-core/src/migration/executor.rs` に `migrate_local_only_repo()` 関数を実装（ローカル変換）
-- [ ] **T909** [US9] T908の後に `crates/gwt-cli/src/tui/screens/migration_dialog.rs` に locked worktree検出時のunlock指示表示を実装
+- [x] **T908** [US9] T907の後に `crates/gwt-core/src/migration/executor.rs` に `migrate_local_only_repo()` 関数を実装（ローカル変換）
+- [x] **T909** [US9] T908の後に `crates/gwt-cli/src/tui/screens/migration_dialog.rs` に locked worktree検出時のunlock指示表示を実装
 
 ### テスト
 
-- [ ] **T910** [P] [US9] `crates/gwt-core/src/migration/` にパーミッション保持のユニットテストを追加
-- [ ] **T911** [P] [US9] `crates/gwt-core/src/migration/` にstash統合のユニットテストを追加
+- [x] **T910** [P] [US9] `crates/gwt-core/src/migration/` にパーミッション保持のユニットテストを追加
+- [x] **T911** [P] [US9] `crates/gwt-core/src/migration/` にstash統合のユニットテストを追加
 
 **✅ MVP8チェックポイント**: US9完了後、マイグレーションが完全に動作
 
@@ -297,21 +297,21 @@ US9 (マイグレーション追加) → US7, US8 に依存
 
 ### submodule処理
 
-- [ ] **T1001** [US6] `crates/gwt-core/src/git/submodule.rs` に `has_submodules()` 関数を実装
-- [ ] **T1002** [US6] T1001の後に `crates/gwt-core/src/git/submodule.rs` に `init_submodules()` 関数を実装
-- [ ] **T1003** [US6] T1002の後に `crates/gwt-core/src/git/mod.rs` に submodule モジュールを公開
+- [x] **T1001** [US6] `crates/gwt-core/src/git/submodule.rs` に `has_submodules()` 関数を実装
+- [x] **T1002** [US6] T1001の後に `crates/gwt-core/src/git/submodule.rs` に `init_submodules()` 関数を実装
+- [x] **T1003** [US6] T1002の後に `crates/gwt-core/src/git/mod.rs` に submodule モジュールを公開
 
 ### worktree作成統合
 
-- [ ] **T1004** [US6] T1003の後に `crates/gwt-core/src/worktree/manager.rs` で worktree作成後に `init_submodules()` を呼び出し
+- [x] **T1004** [US6] T1003の後に `crates/gwt-core/src/worktree/manager.rs` で worktree作成後に `init_submodules()` を呼び出し
 
 ### エラーハンドリング
 
-- [ ] **T1005** [US6] T1004の後に `crates/gwt-core/src/worktree/manager.rs` で submodule初期化失敗時は警告のみ（worktree作成は成功）
+- [x] **T1005** [US6] T1004の後に `crates/gwt-core/src/worktree/manager.rs` で submodule初期化失敗時は警告のみ（worktree作成は成功）
 
 ### テスト
 
-- [ ] **T1006** [P] [US6] `crates/gwt-core/src/git/` に submodule処理のユニットテストを追加
+- [x] **T1006** [P] [US6] `crates/gwt-core/src/git/` に submodule処理のユニットテストを追加
 
 **✅ 完全な機能**: US6完了後、submodule対応が完了
 

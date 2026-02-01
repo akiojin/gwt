@@ -10,6 +10,7 @@ mod issue;
 mod pullrequest;
 mod remote;
 mod repository;
+mod submodule;
 
 pub use backend::GitBackend;
 pub use branch::{Branch, DivergenceStatus};
@@ -27,3 +28,4 @@ pub use repository::{
     detect_repo_type, get_header_context, get_main_repo_root, is_bare_repository, is_empty_dir,
     is_git_repo, is_inside_worktree, HeaderContext, RepoType, Repository, WorktreeInfo,
 };
+pub use submodule::{has_submodules, init_submodules, list_submodules};

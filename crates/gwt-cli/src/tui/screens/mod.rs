@@ -9,6 +9,7 @@ pub mod environment;
 pub mod error;
 pub mod help;
 pub mod logs;
+pub mod migration_dialog;
 pub mod pane_list;
 pub mod profiles;
 pub mod settings;
@@ -25,6 +26,7 @@ pub use environment::{collect_os_env, render_environment, EnvironmentState};
 pub use error::{render_error_with_queue, ErrorQueue, ErrorState};
 pub use help::{render_help, HelpState};
 pub use logs::{render_logs, LogsState};
+pub use migration_dialog::{render_migration_dialog, MigrationDialogPhase, MigrationDialogState};
 pub use profiles::{render_profiles, ProfilesState};
 pub use settings::{render_settings, SettingsState};
 pub use wizard::{

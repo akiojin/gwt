@@ -64,12 +64,12 @@ use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
 use super::screens::{
     collect_os_env, render_agent_mode, render_ai_wizard, render_branch_list, render_clone_wizard,
     render_confirm, render_environment, render_error_with_queue, render_help, render_logs,
-    render_profiles, render_settings, render_wizard, render_worktree_create, AIWizardState,
-    AgentMessage, AgentModeState, AgentRole, BranchItem, BranchListState, BranchType,
-    CloneWizardState, CloneWizardStep, CodingAgent, ConfirmState, EnvironmentState, ErrorQueue,
-    ErrorState, ExecutionMode, HelpState, LogsState, ProfilesState, QuickStartEntry,
-    ReasoningLevel, SettingsState, WizardConfirmResult, WizardState, WizardStep,
-    WorktreeCreateState,
+    render_migration_dialog, render_profiles, render_settings, render_wizard,
+    render_worktree_create, AIWizardState, AgentMessage, AgentModeState, AgentRole, BranchItem,
+    BranchListState, BranchType, CloneWizardState, CloneWizardStep, CodingAgent, ConfirmState,
+    EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, HelpState, LogsState,
+    MigrationDialogPhase, MigrationDialogState, ProfilesState, QuickStartEntry, ReasoningLevel,
+    SettingsState, WizardConfirmResult, WizardState, WizardStep, WorktreeCreateState,
 };
 // log_gwt_error is available for use when GwtError types are available
 
@@ -500,6 +500,8 @@ pub struct Model {
     clone_wizard: CloneWizardState,
     /// Bare repository name when inside a bare-based worktree (SPEC-a70a1ece T506)
     bare_name: Option<String>,
+    /// Migration dialog state (SPEC-a70a1ece US7 T705-T710)
+    migration_dialog: MigrationDialogState,
 }
 
 /// Screen types
@@ -519,6 +521,8 @@ pub enum Screen {
     AISettingsWizard,
     /// Clone wizard for empty/non-repo directories (SPEC-a70a1ece US3)
     CloneWizard,
+    /// Migration dialog for .worktrees/ method conversion (SPEC-a70a1ece US7)
+    MigrationDialog,
 }
 
 /// Messages (Events in Elm Architecture)
@@ -661,6 +665,7 @@ impl Model {
             repo_type,
             clone_wizard: CloneWizardState::new(),
             bare_name,
+            migration_dialog: MigrationDialogState::default(),
         };
 
         model
@@ -726,6 +731,35 @@ impl Model {
                 "Empty or non-repo directory detected, showing clone wizard"
             );
             model.screen = Screen::CloneWizard;
+        }
+
+        // SPEC-a70a1ece T709-T710: Show migration dialog for .worktrees/ method repos
+        // Only check if we're in a normal repo (not already bare, empty, or non-repo)
+        if model.repo_type == RepoType::Normal || model.repo_type == RepoType::Worktree {
+            let worktrees_dir = model.repo_root.join(".worktrees");
+            if worktrees_dir.exists() && worktrees_dir.is_dir() {
+                debug!(
+                    category = "tui",
+                    worktrees_dir = %worktrees_dir.display(),
+                    "Legacy .worktrees/ directory detected, showing migration dialog"
+                );
+                // Create migration config
+                let bare_repo_name = gwt_core::migration::derive_bare_repo_name(
+                    &model.repo_root.display().to_string(),
+                );
+                let target_root = model
+                    .repo_root
+                    .parent()
+                    .unwrap_or(&model.repo_root)
+                    .to_path_buf();
+                let config = gwt_core::migration::MigrationConfig::new(
+                    model.repo_root.clone(),
+                    target_root,
+                    bare_repo_name,
+                );
+                model.migration_dialog = MigrationDialogState::new(config);
+                model.screen = Screen::MigrationDialog;
+            }
         }
 
         model
@@ -3799,6 +3833,7 @@ impl Model {
                 Screen::Environment => self.environment.select_next(),
                 Screen::AISettingsWizard => self.ai_wizard.select_next_model(),
                 Screen::CloneWizard => self.clone_wizard.down(),
+                Screen::MigrationDialog => self.migration_dialog.toggle_selection(),
                 Screen::Confirm => {}
             },
             Message::SelectPrev => match self.screen {
@@ -3821,6 +3856,7 @@ impl Model {
                 Screen::Environment => self.environment.select_prev(),
                 Screen::AISettingsWizard => self.ai_wizard.select_prev_model(),
                 Screen::CloneWizard => self.clone_wizard.up(),
+                Screen::MigrationDialog => self.migration_dialog.toggle_selection(),
                 Screen::Confirm => {}
             },
             Message::PageUp => match self.screen {
@@ -4000,6 +4036,30 @@ impl Model {
                 // SPEC-a70a1ece US3: Clone wizard Enter handling
                 Screen::CloneWizard => {
                     self.clone_wizard.next();
+                }
+                // SPEC-a70a1ece T709-T710: Migration dialog Enter handling
+                Screen::MigrationDialog => {
+                    if self.migration_dialog.phase == MigrationDialogPhase::Confirmation {
+                        if self.migration_dialog.selected_proceed {
+                            self.migration_dialog.accept();
+                            // TODO: Start actual migration in background
+                        } else {
+                            // T710: User chose to exit - quit gwt
+                            self.migration_dialog.reject();
+                            self.should_quit = true;
+                        }
+                    } else if matches!(
+                        self.migration_dialog.phase,
+                        MigrationDialogPhase::Completed | MigrationDialogPhase::Failed
+                    ) {
+                        // Continue or exit after migration completion/failure
+                        if self.migration_dialog.is_completed() {
+                            self.screen = Screen::BranchList;
+                            self.refresh_data();
+                        } else {
+                            self.should_quit = true;
+                        }
+                    }
                 }
             },
             Message::Char(c) => {
@@ -5325,6 +5385,9 @@ impl Model {
             Screen::Environment => render_environment(&mut self.environment, frame, chunks[1]),
             Screen::AISettingsWizard => render_ai_wizard(&mut self.ai_wizard, frame, chunks[1]),
             Screen::CloneWizard => render_clone_wizard(&self.clone_wizard, frame, chunks[1]),
+            Screen::MigrationDialog => {
+                render_migration_dialog(&mut self.migration_dialog, frame, chunks[1])
+            }
             Screen::Confirm => {}
         }
 
@@ -5383,6 +5446,7 @@ impl Model {
             Screen::Environment => "Environment",
             Screen::AISettingsWizard => "AI Settings",
             Screen::CloneWizard => "Clone Repository",
+            Screen::MigrationDialog => "Migration Required",
         };
 
         let title = format!(" gwt - {} v{}{} ", screen_title, version, offline_indicator);
@@ -5602,6 +5666,17 @@ impl Model {
                 CloneWizardStep::Cloning => "Cloning...".to_string(),
                 CloneWizardStep::Complete => "[Enter] Continue".to_string(),
                 CloneWizardStep::Failed => "[Backspace] Try again | [Esc] Quit".to_string(),
+            },
+            Screen::MigrationDialog => match self.migration_dialog.phase {
+                MigrationDialogPhase::Confirmation => {
+                    "[Left/Right] Select | [Enter] Confirm".to_string()
+                }
+                MigrationDialogPhase::Validating | MigrationDialogPhase::InProgress => {
+                    "Migration in progress...".to_string()
+                }
+                MigrationDialogPhase::Completed => "[Enter] Continue".to_string(),
+                MigrationDialogPhase::Failed => "[Enter] Exit".to_string(),
+                MigrationDialogPhase::Exited => String::new(),
             },
         }
     }
