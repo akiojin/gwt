@@ -28,7 +28,7 @@ urlencoding.workspace = true
 which = "8"
 libc.workspace = true
 arboard = "3"
-unicode-width = "0.1"
+unicode-width = "0.2"
 pulldown-cmark = "0.13"
 
 [dev-dependencies]
