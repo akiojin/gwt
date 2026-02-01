@@ -1119,6 +1119,77 @@ mod tests {
     }
 
     #[test]
+    fn test_bare_repo_worktree_creates_subdirectory_structure() {
+        // SPEC-a70a1ece FR-152: Slash-containing branches create subdirectory structure
+        // e.g., "feature/branch-name" creates feature/branch-name/ directory
+        let (temp, bare_path) = create_bare_test_repo();
+
+        let manager = WorktreeManager::new(&bare_path).unwrap();
+        let wt = manager
+            .create_new_branch("feature/my-feature", Some("master"))
+            .unwrap();
+
+        // Verify worktree is at /temp/feature/my-feature
+        let expected_path = temp.path().join("feature").join("my-feature");
+        assert_eq!(wt.path, expected_path);
+
+        // Verify the feature/ subdirectory exists
+        let feature_dir = temp.path().join("feature");
+        assert!(
+            feature_dir.exists(),
+            "Parent directory 'feature/' should exist at {:?}",
+            feature_dir
+        );
+        assert!(
+            feature_dir.is_dir(),
+            "'feature/' should be a directory, not a file"
+        );
+
+        // Verify the worktree directory exists inside feature/
+        assert!(
+            wt.path.exists(),
+            "Worktree path should exist at {:?}",
+            wt.path
+        );
+        assert!(wt.path.is_dir(), "Worktree should be a directory");
+
+        // Verify worktree is NOT created flat at bare repo level
+        // i.e., /temp/feature-my-feature should NOT exist
+        let flat_path = temp.path().join("feature-my-feature");
+        assert!(
+            !flat_path.exists(),
+            "Worktree should NOT be created flat at {:?}",
+            flat_path
+        );
+
+        // Verify *.git directory still exists at expected location
+        assert!(bare_path.exists(), "Bare repo should still exist");
+    }
+
+    #[test]
+    fn test_bare_repo_worktree_bugfix_branch() {
+        // SPEC-a70a1ece FR-152: Test bugfix/ prefix as well
+        let (temp, bare_path) = create_bare_test_repo();
+
+        let manager = WorktreeManager::new(&bare_path).unwrap();
+        let wt = manager
+            .create_new_branch("bugfix/fix-123", Some("master"))
+            .unwrap();
+
+        // Verify worktree is at /temp/bugfix/fix-123
+        let expected_path = temp.path().join("bugfix").join("fix-123");
+        assert_eq!(wt.path, expected_path);
+
+        // Verify the bugfix/ subdirectory exists
+        let bugfix_dir = temp.path().join("bugfix");
+        assert!(
+            bugfix_dir.exists(),
+            "Parent directory 'bugfix/' should exist"
+        );
+        assert!(bugfix_dir.is_dir(), "'bugfix/' should be a directory");
+    }
+
+    #[test]
     fn test_normal_repo_uses_subdir_location() {
         // Non-bare repository should use Subdir location (default)
         let temp = create_test_repo();
