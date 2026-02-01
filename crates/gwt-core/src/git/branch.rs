@@ -555,6 +555,7 @@ impl Branch {
 
     /// Check if a branch exists remotely
     pub fn remote_exists(repo_path: &Path, remote: &str, branch: &str) -> Result<bool> {
+        // First try local refs/remotes (works for normal repos)
         let output = Command::new("git")
             .args([
                 "show-ref",
@@ -569,7 +570,31 @@ impl Branch {
                 details: e.to_string(),
             })?;
 
-        Ok(output.status.success())
+        if output.status.success() {
+            return Ok(true);
+        }
+
+        // SPEC-a70a1ece FR-124: For bare repos, check via ls-remote
+        let ls_output = Command::new("git")
+            .args(["ls-remote", "--heads", remote, branch])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| GwtError::GitOperationFailed {
+                operation: "ls-remote".to_string(),
+                details: e.to_string(),
+            })?;
+
+        if ls_output.status.success() {
+            let stdout = String::from_utf8_lossy(&ls_output.stdout);
+            // ls-remote returns lines like: <sha>\trefs/heads/<branch>
+            return Ok(stdout.lines().any(|line| {
+                line.split('\t')
+                    .nth(1)
+                    .is_some_and(|r| r == format!("refs/heads/{}", branch))
+            }));
+        }
+
+        Ok(false)
     }
 
     /// Checkout this branch

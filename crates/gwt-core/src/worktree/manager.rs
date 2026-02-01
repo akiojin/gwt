@@ -170,10 +170,59 @@ impl WorktreeManager {
             }
 
             if let Some((remote, branch)) = remote_branch {
-                resolved_branch = branch;
+                resolved_branch = branch.clone();
                 if !Branch::exists(&self.repo_root, &resolved_branch)? {
-                    let remote_ref = format!("{}/{}", remote, resolved_branch);
-                    Branch::create(&self.repo_root, &resolved_branch, &remote_ref)?;
+                    // Check if refs/remotes/{remote}/{branch} exists locally
+                    let has_local_remote_ref = std::process::Command::new("git")
+                        .args([
+                            "show-ref",
+                            "--verify",
+                            "--quiet",
+                            &format!("refs/remotes/{}/{}", remote, branch),
+                        ])
+                        .current_dir(&self.repo_root)
+                        .output()
+                        .map(|o| o.status.success())
+                        .unwrap_or(false);
+
+                    if has_local_remote_ref {
+                        // Normal repo with local remote ref: create branch from it
+                        let remote_ref = format!("{}/{}", remote, resolved_branch);
+                        Branch::create(&self.repo_root, &resolved_branch, &remote_ref)?;
+                    } else {
+                        // SPEC-a70a1ece FR-124: No local remote ref, fetch from remote
+                        let fetch_output = std::process::Command::new("git")
+                            .args([
+                                "fetch",
+                                &remote,
+                                &format!("{}:{}", branch, branch),
+                            ])
+                            .current_dir(&self.repo_root)
+                            .output()
+                            .map_err(|e| GwtError::GitOperationFailed {
+                                operation: "fetch".to_string(),
+                                details: e.to_string(),
+                            })?;
+
+                        if !fetch_output.status.success() {
+                            let err = String::from_utf8_lossy(&fetch_output.stderr);
+                            error!(
+                                category = "worktree",
+                                branch = branch.as_str(),
+                                error = %err,
+                                "Failed to fetch branch"
+                            );
+                            return Err(GwtError::GitOperationFailed {
+                                operation: "fetch".to_string(),
+                                details: err.to_string(),
+                            });
+                        }
+                        debug!(
+                            category = "worktree",
+                            branch = branch.as_str(),
+                            "Fetched branch from remote"
+                        );
+                    }
                 }
             } else {
                 error!(
@@ -845,7 +894,8 @@ mod tests {
         run_git_in(creator.path(), &["push", "origin", "feature/issue-42"]);
 
         assert!(!Branch::exists(temp.path(), "feature/issue-42").unwrap());
-        assert!(!Branch::remote_exists(temp.path(), "origin", "feature/issue-42").unwrap());
+        // SPEC-a70a1ece FR-124: remote_exists now uses ls-remote fallback, so it finds the branch
+        assert!(Branch::remote_exists(temp.path(), "origin", "feature/issue-42").unwrap());
 
         let manager = WorktreeManager::new(temp.path()).unwrap();
         let wt = manager.create_for_branch("feature/issue-42").unwrap();
