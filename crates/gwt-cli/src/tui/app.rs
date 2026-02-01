@@ -3812,6 +3812,10 @@ impl Model {
                 self.poll_session_summary_if_needed();
                 // FR-033: Update pane list every 1 second in tmux multi mode
                 self.update_pane_list();
+                // SPEC-a70a1ece: Poll clone wizard progress
+                if matches!(self.screen, Screen::CloneWizard) && self.clone_wizard.is_cloning() {
+                    self.clone_wizard.poll_clone();
+                }
             }
             Message::SelectNext => match self.screen {
                 Screen::BranchList => {
