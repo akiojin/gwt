@@ -4887,6 +4887,19 @@ impl Model {
                     if let Err(e) = self.agent_history.save() {
                         warn!(category = "tui", "Failed to save agent history: {}", e);
                     }
+
+                    // Update branch list item directly to reflect agent usage immediately
+                    // (refresh_data() is not called after agent launch for optimization)
+                    let branch_name_for_lookup =
+                        normalize_branch_name_for_history(&plan.config.branch_name);
+                    for item in &mut self.branch_list.branches {
+                        let item_lookup = normalize_branch_name_for_history(&item.name);
+                        if item_lookup == branch_name_for_lookup {
+                            item.last_tool_usage = Some(agent_label.clone());
+                            item.last_tool_id = Some(agent_id.to_string());
+                            break;
+                        }
+                    }
                     let launch_message = if let Some(warning) = plan.session_warning.as_ref() {
                         format!(
                             "Agent launched in tmux pane for {}. {}",
