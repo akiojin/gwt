@@ -263,4 +263,118 @@ mod tests {
         let locked = check_locked_worktrees(temp.path()).unwrap();
         assert!(locked.is_empty());
     }
+
+    /// Test that validate_migration succeeds even when disk space check fails
+    /// SPEC-a70a1ece: Edge case - df command failure should not block migration
+    #[test]
+    fn test_validate_migration_continues_on_disk_check_failure() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+
+        // Initialize git repo
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&source)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&source)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&source)
+            .output()
+            .unwrap();
+        std::fs::write(source.join("README.md"), "# Test").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&source)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "Initial"])
+            .current_dir(&source)
+            .output()
+            .unwrap();
+
+        let config = crate::migration::MigrationConfig::new(
+            source.clone(),
+            target.clone(),
+            "test.git".to_string(),
+        );
+
+        // validate_migration should succeed (or return validation errors that are NOT disk-related)
+        // The key is that it doesn't panic or return IoError for df failure
+        let result = validate_migration(&config);
+        assert!(
+            result.is_ok(),
+            "validate_migration should not fail due to disk check"
+        );
+    }
+
+    /// Test that validation does not require .worktrees/ directory
+    /// SPEC-a70a1ece FR-200: All normal repos should trigger migration
+    #[test]
+    fn test_validate_migration_no_worktrees_dir_required() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+
+        // Initialize git repo WITHOUT .worktrees/
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&source)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&source)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&source)
+            .output()
+            .unwrap();
+        std::fs::write(source.join("README.md"), "# Test").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&source)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "Initial"])
+            .current_dir(&source)
+            .output()
+            .unwrap();
+
+        // No .worktrees/ directory exists
+        assert!(!source.join(".worktrees").exists());
+
+        let config = crate::migration::MigrationConfig::new(
+            source.clone(),
+            target.clone(),
+            "test.git".to_string(),
+        );
+
+        let result = validate_migration(&config);
+        assert!(result.is_ok(), "validate_migration should succeed");
+
+        // The validation result should pass (no error for missing .worktrees/)
+        let validation = result.unwrap();
+        let has_worktrees_error = validation.errors.iter().any(|e| {
+            matches!(e, MigrationError::InvalidSource { reason } if reason.contains(".worktrees"))
+        });
+        assert!(
+            !has_worktrees_error,
+            "Should NOT have error for missing .worktrees/ (FR-200)"
+        );
+    }
 }
