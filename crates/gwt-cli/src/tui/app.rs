@@ -983,6 +983,10 @@ impl Model {
                 .collect();
             branch_items.extend(remote_only_branches.iter().map(|b| {
                 let mut item = BranchItem::from_branch_minimal(b, &worktrees);
+                // SPEC-a70a1ece FR-171: For bare repos, branches without worktrees are Remote
+                if repo_type == RepoType::Bare {
+                    item.branch_type = BranchType::Remote;
+                }
                 apply_last_tool_usage(&mut item, &repo_root, &tool_usage_map, &agent_history);
                 item
             }));
