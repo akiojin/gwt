@@ -140,6 +140,14 @@ pub fn execute_migration(
             );
             restore_evacuated_files(&temp_evacuation_dir, &main_wt.target_path)?;
 
+            // Reset index to HEAD so files appear as unstaged changes, not deleted
+            // This is needed because --no-checkout leaves the index empty
+            info!("Resetting index to HEAD in main worktree");
+            let _ = Command::new("git")
+                .args(["reset"])
+                .current_dir(&main_wt.target_path)
+                .output();
+
             // Clean up root directory files (they've been moved to main worktree)
             info!("Cleaning up root directory files");
             cleanup_root_files(config, &worktrees)?;
@@ -659,6 +667,13 @@ fn migrate_dirty_worktree(
 
         // Preserve file permissions (FR-214)
         preserve_file_permissions(&wt_info.source_path, &wt_info.target_path)?;
+
+        // Reset index to HEAD so files appear as unstaged changes, not deleted
+        info!("migrate_dirty_worktree: Resetting index to HEAD");
+        let _ = Command::new("git")
+            .args(["reset"])
+            .current_dir(&wt_info.target_path)
+            .output();
     } else {
         info!("migrate_dirty_worktree: Main repo - files will be restored in Phase 8");
     }
