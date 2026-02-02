@@ -517,6 +517,8 @@ pub struct Model {
     migration_dialog: MigrationDialogState,
     /// Migration result receiver (for background migration)
     migration_rx: Option<mpsc::Receiver<Result<(), gwt_core::migration::MigrationError>>>,
+    /// Path to bare repository when in bare project (SPEC-a70a1ece)
+    bare_repo_path: Option<PathBuf>,
 }
 
 /// Screen types
@@ -707,6 +709,7 @@ impl Model {
             bare_name,
             migration_dialog: MigrationDialogState::default(),
             migration_rx: None,
+            bare_repo_path,
         };
 
         model
@@ -871,19 +874,22 @@ impl Model {
 
         let repo_root = self.repo_root.clone();
         let repo_type = self.repo_type;
+        let bare_repo_path = self.bare_repo_path.clone();
         let configured_base_branch = settings.default_base_branch.clone();
         let agent_history = self.agent_history.clone();
         let (tx, rx) = mpsc::channel();
         self.branch_list_rx = Some(rx);
 
         thread::spawn(move || {
+            // SPEC-a70a1ece: Use bare repo path for git commands in bare projects
+            let git_path = bare_repo_path.as_ref().unwrap_or(&repo_root);
             let (base_branch, base_branch_exists) =
-                resolve_safety_base(&repo_root, &configured_base_branch);
-            let worktrees = WorktreeManager::new(&repo_root)
+                resolve_safety_base(git_path, &configured_base_branch);
+            let worktrees = WorktreeManager::new(git_path)
                 .ok()
                 .and_then(|manager| manager.list_basic().ok())
                 .unwrap_or_default();
-            let all_branches = Branch::list_basic(&repo_root).unwrap_or_default();
+            let all_branches = Branch::list_basic(git_path).unwrap_or_default();
 
             // SPEC-a70a1ece FR-170/171: For bare repos, only show worktree branches as Local
             let worktree_branch_names: HashSet<String> = worktrees
@@ -904,13 +910,13 @@ impl Model {
             // SPEC-a70a1ece FR-171: For bare repos, branches without worktrees go to Remote
             let remote_branches = if repo_type == RepoType::Bare {
                 // Get all branches and filter out ones with worktrees
-                let all_for_remote = Branch::list_basic(&repo_root).unwrap_or_default();
+                let all_for_remote = Branch::list_basic(git_path).unwrap_or_default();
                 all_for_remote
                     .into_iter()
                     .filter(|b| !worktree_branch_names.contains(&b.name))
                     .collect::<Vec<_>>()
             } else {
-                Branch::list_remote(&repo_root).unwrap_or_default()
+                Branch::list_remote(git_path).unwrap_or_default()
             };
 
             let local_branch_names: HashSet<String> =
