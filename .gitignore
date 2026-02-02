@@ -52,5 +52,6 @@ lcov.info
 # Temporary folders
 tmp/
 temp/
+.tmp/
 .tmp-tests/
 .worktrees/

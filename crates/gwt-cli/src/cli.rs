@@ -102,11 +102,18 @@ pub enum Commands {
         address: String,
     },
 
-    /// Initialize gwt configuration
+    /// Initialize gwt by cloning a repository or creating config (SPEC-a70a1ece)
     Init {
+        /// Repository URL to clone as bare repository
+        url: Option<String>,
+
         /// Force overwrite existing config
         #[arg(short, long)]
         force: bool,
+
+        /// Full clone (disable shallow clone, default: --depth=1)
+        #[arg(long)]
+        full: bool,
     },
 
     /// Lock a worktree

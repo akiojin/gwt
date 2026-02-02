@@ -28,7 +28,9 @@ use gwt_core::config::{
     ToolSessionEntry,
 };
 use gwt_core::error::GwtError;
-use gwt_core::git::{Branch, PrCache, Remote, Repository};
+use gwt_core::git::{
+    detect_repo_type, get_header_context, Branch, PrCache, Remote, RepoType, Repository,
+};
 use gwt_core::tmux::{
     break_pane, compute_equal_splits, get_current_session, group_panes_by_left,
     join_pane_to_target, kill_pane, launcher, list_pane_geometries, resize_pane_height,
@@ -60,13 +62,14 @@ use super::screens::environment::EditField;
 use super::screens::pane_list::PaneListState;
 use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
 use super::screens::{
-    collect_os_env, render_agent_mode, render_ai_wizard, render_branch_list, render_confirm,
-    render_environment, render_error_with_queue, render_help, render_logs, render_profiles,
-    render_settings, render_wizard, render_worktree_create, AIWizardState, AgentMessage,
-    AgentModeState, AgentRole, BranchItem, BranchListState, BranchType, CodingAgent, ConfirmState,
-    EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, HelpState, LogsState, ProfilesState,
-    QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult, WizardState, WizardStep,
-    WorktreeCreateState,
+    collect_os_env, render_agent_mode, render_ai_wizard, render_branch_list, render_clone_wizard,
+    render_confirm, render_environment, render_error_with_queue, render_help, render_logs,
+    render_migration_dialog, render_profiles, render_settings, render_wizard,
+    render_worktree_create, AIWizardState, AgentMessage, AgentModeState, AgentRole, BranchItem,
+    BranchListState, BranchType, CloneWizardState, CloneWizardStep, CodingAgent, ConfirmState,
+    EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, HelpState, LogsState,
+    MigrationDialogPhase, MigrationDialogState, ProfilesState, QuickStartEntry, ReasoningLevel,
+    SettingsState, WizardConfirmResult, WizardState, WizardStep, WorktreeCreateState,
 };
 // log_gwt_error is available for use when GwtError types are available
 
@@ -167,6 +170,8 @@ fn session_parser_for_tool(tool_id: &str) -> Option<Box<dyn SessionParser>> {
 /// Configuration for launching a coding agent after TUI exits
 #[derive(Debug, Clone)]
 pub struct AgentLaunchConfig {
+    /// Repository root (bare repository path for SPEC-a70a1ece)
+    pub repo_root: PathBuf,
     /// Worktree path where agent should run
     pub worktree_path: PathBuf,
     /// Branch name
@@ -226,6 +231,8 @@ impl AgentLaunchConfig {
 pub struct TuiEntryContext {
     status_message: Option<String>,
     error_message: Option<String>,
+    /// Repository root for re-entry after agent termination (SPEC-a70a1ece)
+    repo_root: Option<PathBuf>,
 }
 
 impl TuiEntryContext {
@@ -233,6 +240,7 @@ impl TuiEntryContext {
         Self {
             status_message: Some(message),
             error_message: None,
+            repo_root: None,
         }
     }
 
@@ -240,6 +248,7 @@ impl TuiEntryContext {
         Self {
             status_message: Some(message),
             error_message: None,
+            repo_root: None,
         }
     }
 
@@ -247,7 +256,14 @@ impl TuiEntryContext {
         Self {
             status_message: None,
             error_message: Some(message),
+            repo_root: None,
         }
+    }
+
+    /// Set repo_root for single mode re-entry (SPEC-a70a1ece)
+    pub fn with_repo_root(mut self, repo_root: PathBuf) -> Self {
+        self.repo_root = Some(repo_root);
+        self
     }
 }
 
@@ -488,6 +504,21 @@ pub struct Model {
     agent_history: AgentHistoryStore,
     /// Progress modal state for worktree preparation (FR-041)
     progress_modal: Option<ProgressModalState>,
+    /// Startup branch name for header display (SPEC-a70a1ece FR-103)
+    /// This is fixed at startup and does not change when selecting other branches.
+    startup_branch: Option<String>,
+    /// Repository type detected at startup (SPEC-a70a1ece US2)
+    repo_type: RepoType,
+    /// Clone wizard state (SPEC-a70a1ece US3)
+    clone_wizard: CloneWizardState,
+    /// Bare repository name when inside a bare-based worktree (SPEC-a70a1ece T506)
+    bare_name: Option<String>,
+    /// Migration dialog state (SPEC-a70a1ece US7 T705-T710)
+    migration_dialog: MigrationDialogState,
+    /// Migration result receiver (for background migration)
+    migration_rx: Option<mpsc::Receiver<Result<(), gwt_core::migration::MigrationError>>>,
+    /// Path to bare repository when in bare project (SPEC-a70a1ece)
+    bare_repo_path: Option<PathBuf>,
 }
 
 /// Screen types
@@ -505,6 +536,10 @@ pub enum Screen {
     Environment,
     /// AI settings wizard (FR-100)
     AISettingsWizard,
+    /// Clone wizard for empty/non-repo directories (SPEC-a70a1ece US3)
+    CloneWizard,
+    /// Migration dialog for .worktrees/ method conversion (SPEC-a70a1ece US7)
+    MigrationDialog,
 }
 
 /// Messages (Events in Elm Architecture)
@@ -569,13 +604,44 @@ impl Model {
     }
 
     pub fn new_with_context(context: Option<TuiEntryContext>) -> Self {
-        let repo_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        // SPEC-a70a1ece: Use repo_root from context if available (single mode re-entry)
+        let repo_root = context
+            .as_ref()
+            .and_then(|ctx| ctx.repo_root.clone())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
         debug!(
             category = "tui",
             repo_root = %repo_root.display(),
             "Initializing TUI model"
         );
+
+        // SPEC-a70a1ece: First check if there's a *.git bare repository in the directory
+        // This takes priority because parent directory's .git might be detected otherwise
+        let (repo_type, bare_repo_path) =
+            if let Some(bare_path) = gwt_core::git::find_bare_repo_in_dir(&repo_root) {
+                debug!(
+                    category = "tui",
+                    bare_path = %bare_path.display(),
+                    "Found bare repository in directory, treating as bare project"
+                );
+                (RepoType::Bare, Some(bare_path))
+            } else {
+                (detect_repo_type(&repo_root), None)
+            };
+
+        // SPEC-a70a1ece: Capture startup context
+        // For bare projects, use the bare repo path; otherwise use repo_root
+        let (startup_branch, bare_name) = if let Some(ref bare_path) = bare_repo_path {
+            // Bare project: no startup branch, get bare name from path
+            let name = bare_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string());
+            (None, name)
+        } else {
+            let header_ctx = get_header_context(&repo_root);
+            (header_ctx.branch_name, header_ctx.bare_name)
+        };
 
         let (agent_mode_tx, agent_mode_rx) = mpsc::channel();
 
@@ -637,6 +703,13 @@ impl Model {
             session_poll_deferred: false,
             agent_history: AgentHistoryStore::load().unwrap_or_default(),
             progress_modal: None,
+            startup_branch,
+            repo_type,
+            clone_wizard: CloneWizardState::new(),
+            bare_name,
+            migration_dialog: MigrationDialogState::default(),
+            migration_rx: None,
+            bare_repo_path,
         };
 
         model
@@ -692,6 +765,45 @@ impl Model {
                 model.screen_stack.push(model.screen.clone());
                 model.screen = Screen::Confirm;
             }
+        }
+
+        // SPEC-a70a1ece T310-T311: Show clone wizard for empty/non-repo directories
+        if matches!(model.repo_type, RepoType::Empty | RepoType::NonRepo) {
+            debug!(
+                category = "tui",
+                repo_type = ?model.repo_type,
+                "Empty or non-repo directory detected, showing clone wizard"
+            );
+            model.screen = Screen::CloneWizard;
+        }
+
+        // SPEC-a70a1ece FR-200: Show migration dialog for ALL normal repositories
+        // (regardless of whether .worktrees/ exists)
+        debug!(
+            category = "tui",
+            repo_type = ?model.repo_type,
+            repo_root = %model.repo_root.display(),
+            "Checking for migration dialog eligibility"
+        );
+        if model.repo_type == RepoType::Normal {
+            debug!(
+                category = "tui",
+                repo_root = %model.repo_root.display(),
+                "Normal repository detected, showing migration dialog for bare conversion"
+            );
+            // Create migration config
+            let bare_repo_name =
+                gwt_core::migration::derive_bare_repo_name(&model.repo_root.display().to_string());
+            // SPEC-a70a1ece FR-150: target_root is the same as source_root
+            // Migration creates bare repo and worktrees INSIDE the original repo directory
+            let target_root = model.repo_root.clone();
+            let config = gwt_core::migration::MigrationConfig::new(
+                model.repo_root.clone(),
+                target_root,
+                bare_repo_name,
+            );
+            model.migration_dialog = MigrationDialogState::new(config);
+            model.screen = Screen::MigrationDialog;
         }
 
         model
@@ -761,33 +873,72 @@ impl Model {
         self.branch_list = branch_list;
 
         let repo_root = self.repo_root.clone();
+        let repo_type = self.repo_type;
+        let bare_repo_path = self.bare_repo_path.clone();
         let configured_base_branch = settings.default_base_branch.clone();
         let agent_history = self.agent_history.clone();
         let (tx, rx) = mpsc::channel();
         self.branch_list_rx = Some(rx);
 
         thread::spawn(move || {
+            // SPEC-a70a1ece: Use bare repo path for git commands in bare projects
+            let git_path = bare_repo_path.as_ref().unwrap_or(&repo_root);
             let (base_branch, base_branch_exists) =
-                resolve_safety_base(&repo_root, &configured_base_branch);
-            let worktrees = WorktreeManager::new(&repo_root)
+                resolve_safety_base(git_path, &configured_base_branch);
+            let worktrees = WorktreeManager::new(git_path)
                 .ok()
                 .and_then(|manager| manager.list_basic().ok())
                 .unwrap_or_default();
-            let branches = Branch::list_basic(&repo_root).unwrap_or_default();
-            let remote_branches = Branch::list_remote(&repo_root).unwrap_or_default();
+            let all_branches = Branch::list_basic(git_path).unwrap_or_default();
+
+            // SPEC-a70a1ece FR-170/171: For bare repos, only show worktree branches as Local
+            let worktree_branch_names: HashSet<String> = worktrees
+                .iter()
+                .filter_map(|wt| wt.branch.clone())
+                .collect();
+
+            let branches: Vec<_> = if repo_type == RepoType::Bare {
+                // Bare repo: Local = only branches with worktrees
+                all_branches
+                    .into_iter()
+                    .filter(|b| worktree_branch_names.contains(&b.name))
+                    .collect()
+            } else {
+                all_branches
+            };
+
+            // SPEC-a70a1ece FR-171: For bare repos, branches without worktrees go to Remote
+            let remote_branches = if repo_type == RepoType::Bare {
+                // Get all branches and filter out ones with worktrees
+                let all_for_remote = Branch::list_basic(git_path).unwrap_or_default();
+                all_for_remote
+                    .into_iter()
+                    .filter(|b| !worktree_branch_names.contains(&b.name))
+                    .collect::<Vec<_>>()
+            } else {
+                Branch::list_remote(git_path).unwrap_or_default()
+            };
+
             let local_branch_names: HashSet<String> =
                 branches.iter().map(|b| b.name.clone()).collect();
             let mut remote_only_branches = Vec::new();
             for mut branch in remote_branches {
-                let short_name = branch
-                    .name
-                    .split_once('/')
-                    .map(|(_, name)| name)
-                    .unwrap_or(branch.name.as_str());
+                let short_name = if repo_type == RepoType::Bare {
+                    // For bare repos, branch name doesn't have origin/ prefix
+                    branch.name.as_str()
+                } else {
+                    branch
+                        .name
+                        .split_once('/')
+                        .map(|(_, name)| name)
+                        .unwrap_or(branch.name.as_str())
+                };
                 if local_branch_names.contains(short_name) {
                     continue;
                 }
-                branch.name = format!("remotes/{}", branch.name);
+                if repo_type != RepoType::Bare {
+                    branch.name = format!("remotes/{}", branch.name);
+                }
                 remote_only_branches.push(branch);
             }
             let worktree_targets: Vec<WorktreeStatusTarget> = worktrees
@@ -832,6 +983,10 @@ impl Model {
                 .collect();
             branch_items.extend(remote_only_branches.iter().map(|b| {
                 let mut item = BranchItem::from_branch_minimal(b, &worktrees);
+                // SPEC-a70a1ece FR-171: For bare repos, branches without worktrees are Remote
+                if repo_type == RepoType::Bare {
+                    item.branch_type = BranchType::Remote;
+                }
                 apply_last_tool_usage(&mut item, &repo_root, &tool_usage_map, &agent_history);
                 item
             }));
@@ -931,7 +1086,11 @@ impl Model {
             return;
         }
 
-        let repo_root = self.repo_root.clone();
+        // SPEC-a70a1ece: Use bare repo path for git commands in bare projects
+        let repo_root = self
+            .bare_repo_path
+            .clone()
+            .unwrap_or_else(|| self.repo_root.clone());
         let (tx, rx) = mpsc::channel();
         self.safety_rx = Some(rx);
 
@@ -1613,17 +1772,18 @@ impl Model {
         };
 
         // Get worktree list synchronously for matching
-        let worktrees: Vec<(String, std::path::PathBuf)> =
-            match WorktreeManager::new(&self.repo_root) {
-                Ok(manager) => match manager.list_basic() {
-                    Ok(wts) => wts
-                        .into_iter()
-                        .filter_map(|wt| wt.branch.map(|b| (b, wt.path)))
-                        .collect(),
-                    Err(_) => return,
-                },
+        // SPEC-a70a1ece: Use bare repo path for worktree operations in bare projects
+        let git_path = self.bare_repo_path.as_ref().unwrap_or(&self.repo_root);
+        let worktrees: Vec<(String, std::path::PathBuf)> = match WorktreeManager::new(git_path) {
+            Ok(manager) => match manager.list_basic() {
+                Ok(wts) => wts
+                    .into_iter()
+                    .filter_map(|wt| wt.branch.map(|b| (b, wt.path)))
+                    .collect(),
                 Err(_) => return,
-            };
+            },
+            Err(_) => return,
+        };
 
         if worktrees.is_empty() {
             return;
@@ -3744,6 +3904,50 @@ impl Model {
                 self.poll_session_summary_if_needed();
                 // FR-033: Update pane list every 1 second in tmux multi mode
                 self.update_pane_list();
+                // SPEC-a70a1ece: Poll clone wizard progress
+                if matches!(self.screen, Screen::CloneWizard) && self.clone_wizard.is_cloning() {
+                    self.clone_wizard.poll_clone();
+                }
+                // SPEC-a70a1ece: Poll migration progress
+                if matches!(self.screen, Screen::MigrationDialog)
+                    && matches!(
+                        self.migration_dialog.phase,
+                        MigrationDialogPhase::InProgress | MigrationDialogPhase::Validating
+                    )
+                {
+                    if let Some(ref rx) = self.migration_rx {
+                        match rx.try_recv() {
+                            Ok(Ok(())) => {
+                                self.migration_dialog.phase = MigrationDialogPhase::Completed;
+                                self.migration_rx = None;
+                                // SPEC-a70a1ece: Update repo_type to Bare after successful migration
+                                self.repo_type = RepoType::Bare;
+                                // Update bare_name and bare_repo_path from migration config
+                                if let Some(ref config) = self.migration_dialog.config {
+                                    self.bare_name = Some(config.bare_repo_name.clone());
+                                    self.bare_repo_path =
+                                        Some(self.repo_root.join(&config.bare_repo_name));
+                                }
+                                self.startup_branch = None;
+                            }
+                            Ok(Err(e)) => {
+                                self.migration_dialog.phase = MigrationDialogPhase::Failed;
+                                self.migration_dialog.error = Some(format!("{}", e));
+                                self.migration_rx = None;
+                            }
+                            Err(mpsc::TryRecvError::Empty) => {
+                                // Still running, keep polling
+                            }
+                            Err(mpsc::TryRecvError::Disconnected) => {
+                                // Thread crashed or channel closed
+                                self.migration_dialog.phase = MigrationDialogPhase::Failed;
+                                self.migration_dialog.error =
+                                    Some("Migration thread disconnected".to_string());
+                                self.migration_rx = None;
+                            }
+                        }
+                    }
+                }
             }
             Message::SelectNext => match self.screen {
                 Screen::BranchList => {
@@ -3764,6 +3968,8 @@ impl Model {
                 Screen::Profiles => self.profiles.select_next(),
                 Screen::Environment => self.environment.select_next(),
                 Screen::AISettingsWizard => self.ai_wizard.select_next_model(),
+                Screen::CloneWizard => self.clone_wizard.down(),
+                Screen::MigrationDialog => self.migration_dialog.toggle_selection(),
                 Screen::Confirm => {}
             },
             Message::SelectPrev => match self.screen {
@@ -3785,6 +3991,8 @@ impl Model {
                 Screen::Profiles => self.profiles.select_prev(),
                 Screen::Environment => self.environment.select_prev(),
                 Screen::AISettingsWizard => self.ai_wizard.select_prev_model(),
+                Screen::CloneWizard => self.clone_wizard.up(),
+                Screen::MigrationDialog => self.migration_dialog.toggle_selection(),
                 Screen::Confirm => {}
             },
             Message::PageUp => match self.screen {
@@ -3961,9 +4169,79 @@ impl Model {
                 Screen::Settings => {
                     self.handle_settings_enter();
                 }
+                // SPEC-a70a1ece US3: Clone wizard Enter handling
+                Screen::CloneWizard => {
+                    if self.clone_wizard.is_complete() {
+                        // Clone successful - reinitialize with new bare repo
+                        if let Some(cloned_path) = self.clone_wizard.cloned_path.take() {
+                            let msg = format!("Cloned to {}", cloned_path.display());
+                            // SPEC-a70a1ece: Change process working directory to bare repo
+                            // This ensures subsequent TUI restarts detect the correct repo type
+                            if let Err(e) = std::env::set_current_dir(&cloned_path) {
+                                debug!(
+                                    category = "tui",
+                                    error = %e,
+                                    path = %cloned_path.display(),
+                                    "Failed to change working directory to bare repo"
+                                );
+                            }
+                            self.repo_root = cloned_path;
+                            self.repo_type = RepoType::Bare;
+                            self.refresh_data();
+                            self.screen = Screen::BranchList;
+                            self.status_message = Some(msg);
+                            self.status_message_time = Some(Instant::now());
+                        }
+                    } else {
+                        self.clone_wizard.next();
+                    }
+                }
+                // SPEC-a70a1ece T709-T710: Migration dialog Enter handling
+                Screen::MigrationDialog => {
+                    if self.migration_dialog.phase == MigrationDialogPhase::Confirmation {
+                        if self.migration_dialog.selected_proceed {
+                            self.migration_dialog.accept();
+                            // Start actual migration in background
+                            if let Some(config) = self.migration_dialog.config.clone() {
+                                let (tx, rx) = mpsc::channel();
+                                self.migration_rx = Some(rx);
+                                std::thread::spawn(move || {
+                                    let result =
+                                        gwt_core::migration::execute_migration(&config, None);
+                                    let _ = tx.send(result);
+                                });
+                                self.migration_dialog.phase = MigrationDialogPhase::InProgress;
+                            } else {
+                                // No config, show error
+                                self.migration_dialog.phase = MigrationDialogPhase::Failed;
+                                self.migration_dialog.error =
+                                    Some("Migration config not available".to_string());
+                            }
+                        } else {
+                            // T710: User chose to exit - quit gwt
+                            self.migration_dialog.reject();
+                            self.should_quit = true;
+                        }
+                    } else if matches!(
+                        self.migration_dialog.phase,
+                        MigrationDialogPhase::Completed | MigrationDialogPhase::Failed
+                    ) {
+                        // Continue or exit after migration completion/failure
+                        if self.migration_dialog.is_completed() {
+                            self.screen = Screen::BranchList;
+                            self.refresh_data();
+                        } else {
+                            self.should_quit = true;
+                        }
+                    }
+                }
             },
             Message::Char(c) => {
-                if matches!(self.screen, Screen::WorktreeCreate) {
+                if matches!(self.screen, Screen::CloneWizard)
+                    && self.clone_wizard.step == CloneWizardStep::UrlInput
+                {
+                    self.clone_wizard.handle_char(c);
+                } else if matches!(self.screen, Screen::WorktreeCreate) {
                     self.worktree_create.insert_char(c);
                 } else if matches!(self.screen, Screen::BranchList) && self.branch_list.filter_mode
                 {
@@ -4036,7 +4314,13 @@ impl Model {
                 }
             }
             Message::Backspace => {
-                if matches!(self.screen, Screen::WorktreeCreate) {
+                if matches!(self.screen, Screen::CloneWizard) {
+                    if self.clone_wizard.step == CloneWizardStep::UrlInput {
+                        self.clone_wizard.handle_backspace();
+                    } else {
+                        self.clone_wizard.prev();
+                    }
+                } else if matches!(self.screen, Screen::WorktreeCreate) {
                     self.worktree_create.delete_char();
                 } else if matches!(self.screen, Screen::BranchList) && self.branch_list.filter_mode
                 {
@@ -4508,7 +4792,11 @@ impl Model {
         // Clear launch_status since modal is showing (FR-057)
         self.launch_status = None;
 
-        let repo_root = self.repo_root.clone();
+        // SPEC-a70a1ece: Use bare repo path for worktree operations in bare projects
+        let repo_root = self
+            .bare_repo_path
+            .clone()
+            .unwrap_or_else(|| self.repo_root.clone());
         let (tx, rx) = mpsc::channel();
         self.launch_rx = Some(rx);
 
@@ -4625,6 +4913,7 @@ impl Model {
             step(ProgressStepKind::CheckDependencies, StepStatus::Running);
 
             let config = AgentLaunchConfig {
+                repo_root: repo_root.clone(),
                 worktree_path: worktree.path.clone(),
                 branch_name: request.branch_name.clone(),
                 agent: request.agent,
@@ -4710,6 +4999,19 @@ impl Model {
                     }
                     if let Err(e) = self.agent_history.save() {
                         warn!(category = "tui", "Failed to save agent history: {}", e);
+                    }
+
+                    // Update branch list item directly to reflect agent usage immediately
+                    // (refresh_data() is not called after agent launch for optimization)
+                    let branch_name_for_lookup =
+                        normalize_branch_name_for_history(&plan.config.branch_name);
+                    for item in &mut self.branch_list.branches {
+                        let item_lookup = normalize_branch_name_for_history(&item.name);
+                        if item_lookup == branch_name_for_lookup {
+                            item.last_tool_usage = Some(agent_label.clone());
+                            item.last_tool_id = Some(agent_id.to_string());
+                            break;
+                        }
                     }
                     let launch_message = if let Some(warning) = plan.session_warning.as_ref() {
                         format!(
@@ -5113,7 +5415,11 @@ impl Model {
         self.branch_list.set_cleanup_target_branches(branches);
         self.branch_list.set_cleanup_active_branch(None);
 
-        let repo_root = self.repo_root.clone();
+        // SPEC-a70a1ece: Use bare repo path for worktree operations in bare projects
+        let repo_root = self
+            .bare_repo_path
+            .clone()
+            .unwrap_or_else(|| self.repo_root.clone());
         let (tx, rx) = mpsc::channel();
         self.cleanup_rx = Some(rx);
 
@@ -5274,6 +5580,10 @@ impl Model {
             Screen::Profiles => render_profiles(&mut self.profiles, frame, chunks[1]),
             Screen::Environment => render_environment(&mut self.environment, frame, chunks[1]),
             Screen::AISettingsWizard => render_ai_wizard(&mut self.ai_wizard, frame, chunks[1]),
+            Screen::CloneWizard => render_clone_wizard(&self.clone_wizard, frame, chunks[1]),
+            Screen::MigrationDialog => {
+                render_migration_dialog(&mut self.migration_dialog, frame, chunks[1])
+            }
             Screen::Confirm => {}
         }
 
@@ -5331,6 +5641,8 @@ impl Model {
             Screen::Profiles => "Profiles",
             Screen::Environment => "Environment",
             Screen::AISettingsWizard => "AI Settings",
+            Screen::CloneWizard => "Clone Repository",
+            Screen::MigrationDialog => "Migration Required",
         };
 
         let title = format!(" gwt - {} v{}{} ", screen_title, version, offline_indicator);
@@ -5358,12 +5670,36 @@ impl Model {
             ])
             .split(inner);
 
-        // Line 1: Working Directory
-        let working_dir_line = Line::from(vec![
+        // Line 1: Working Directory with branch name (SPEC-a70a1ece FR-103) and repo type indicator
+        let mut working_dir_spans = vec![
             Span::raw(" "),
             Span::styled("Working Directory: ", Style::default().fg(Color::DarkGray)),
             Span::raw(working_dir),
-        ]);
+        ];
+        // SPEC-a70a1ece: Show startup branch only for non-bare repos
+        if self.repo_type != RepoType::Bare {
+            if let Some(ref branch) = self.startup_branch {
+                working_dir_spans.push(Span::raw(" "));
+                working_dir_spans.push(Span::styled(
+                    format!("[{}]", branch),
+                    Style::default().fg(Color::Green),
+                ));
+            }
+        }
+        // SPEC-a70a1ece T206: Show [bare] indicator for bare repositories
+        if self.repo_type == RepoType::Bare {
+            working_dir_spans.push(Span::raw(" "));
+            working_dir_spans.push(Span::styled("[bare]", Style::default().fg(Color::Yellow)));
+        }
+        // SPEC-a70a1ece T506: Show (repo.git) for worktrees in bare-based projects
+        if let Some(ref name) = self.bare_name {
+            working_dir_spans.push(Span::raw(" "));
+            working_dir_spans.push(Span::styled(
+                format!("({})", name),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        let working_dir_line = Line::from(working_dir_spans);
         frame.render_widget(Paragraph::new(working_dir_line), inner_chunks[0]);
 
         // Line 2: Profile
@@ -5521,6 +5857,26 @@ impl Model {
                     self.ai_wizard.step_title().to_string()
                 }
             }
+            Screen::CloneWizard => match self.clone_wizard.step {
+                CloneWizardStep::UrlInput => "[Enter] Continue | [Esc] Quit".to_string(),
+                CloneWizardStep::TypeSelect => {
+                    "[Up/Down] Select | [Enter] Clone | [Backspace] Back | [Esc] Quit".to_string()
+                }
+                CloneWizardStep::Cloning => "Cloning...".to_string(),
+                CloneWizardStep::Complete => "[Enter] Continue".to_string(),
+                CloneWizardStep::Failed => "[Backspace] Try again | [Esc] Quit".to_string(),
+            },
+            Screen::MigrationDialog => match self.migration_dialog.phase {
+                MigrationDialogPhase::Confirmation => {
+                    "[Left/Right] Select | [Enter] Confirm".to_string()
+                }
+                MigrationDialogPhase::Validating | MigrationDialogPhase::InProgress => {
+                    "Migration in progress...".to_string()
+                }
+                MigrationDialogPhase::Completed => "[Enter] Continue".to_string(),
+                MigrationDialogPhase::Failed => "[Enter] Exit".to_string(),
+                MigrationDialogPhase::Exited => String::new(),
+            },
         }
     }
 
@@ -5929,7 +6285,7 @@ impl Model {
                     if matches!(self.screen, Screen::BranchList) {
                         Some(Message::CycleViewMode)
                     } else {
-                        None
+                        Some(Message::Char('m'))
                     }
                 }
                 (KeyCode::Up, _) if is_key_press => Some(Message::SelectPrev),
@@ -6044,7 +6400,9 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
     // Get pending agent launch before cleanup
     let pending_launch = model.pending_agent_launch.take();
 
-    auto_cleanup_orphans_on_exit(&model.repo_root, pending_launch.is_some());
+    // SPEC-a70a1ece: Use bare repo path for worktree operations in bare projects
+    let cleanup_path = model.bare_repo_path.as_ref().unwrap_or(&model.repo_root);
+    auto_cleanup_orphans_on_exit(cleanup_path, pending_launch.is_some());
 
     // Cleanup agent panes on exit (tmux multi-mode)
     if model.tmux_mode.is_multi() && !model.agent_panes.is_empty() {
@@ -6638,6 +6996,8 @@ mod tests {
         let mut model = Model::new_with_context(None);
         let branches = vec![sample_branch_with_session("feature/layout")];
         model.branch_list = BranchListState::new().with_branches(branches);
+        // Force BranchList screen (normal repos now show migration dialog by default)
+        model.screen = Screen::BranchList;
 
         let height = 24;
         let lines = render_model_lines(&mut model, 80, height);
