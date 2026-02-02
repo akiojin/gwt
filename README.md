@@ -239,6 +239,58 @@ Notes:
 - `models` is optional. If defined, model selection step will be shown for this agent.
 - `versionCommand` is optional. If defined, version detection will use this command instead of skipping version selection.
 
+## Bare Repository Workflow
+
+gwt supports a bare repository workflow for efficient worktree management. This approach keeps the bare repository (`.git` data) separate from worktrees, providing cleaner project organization.
+
+### Directory Structure
+
+```text
+/project/
+├── repo.git/           # Bare repository
+├── main/               # Worktree (main branch)
+├── feature-x/          # Worktree (feature/x branch)
+└── .gwt/               # gwt configuration
+    └── project.json
+```
+
+### Setting Up a Bare Repository
+
+```bash
+# Clone as bare repository
+git clone --bare https://github.com/user/repo.git repo.git
+
+# Create worktrees from bare repository
+cd repo.git
+git worktree add ../main main
+git worktree add ../feature-x feature/x
+```
+
+### Using gwt with Bare Repositories
+
+When you run gwt in a bare repository or its worktrees:
+
+| Location | Header Display |
+|----------|----------------|
+| Normal repository | `Working Directory: /path [branch]` |
+| Bare repository | `Working Directory: /path/repo.git [bare]` |
+| Worktree (normal) | `Working Directory: /path [branch]` |
+| Worktree (bare-based) | `Working Directory: /path [branch] (repo.git)` |
+
+### Migration from `.worktrees/` Method
+
+If you have an existing repository using the `.worktrees/` directory method, gwt will detect this and offer migration to the bare repository method:
+
+1. **Backup**: Creates backup in `.gwt-migration-backup/`
+2. **Create bare repo**: Creates `{repo-name}.git`
+3. **Migrate worktrees**: Moves existing worktrees to new structure
+4. **Cleanup**: Removes old `.worktrees/` directory
+5. **Configure**: Creates `.gwt/project.json`
+
+### Submodule Support
+
+When creating worktrees, gwt automatically initializes submodules if present. This ensures submodules are ready to use immediately after worktree creation.
+
 ## Advanced Workflows
 
 ### Branch Strategy

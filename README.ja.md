@@ -239,6 +239,58 @@ gwt は PATH 上のエージェントを検出し、ランチャーに表示し�
 - `models` は任意です。定義するとモデル選択ステップが表示されます。
 - `versionCommand` は任意です。定義するとバージョン検出に使用されます。
 
+## Bareリポジトリワークフロー
+
+gwtは効率的なワークツリー管理のためにbareリポジトリワークフローをサポートしています。このアプローチではbareリポジトリ（`.git`データ）をワークツリーから分離し、より整理されたプロジェクト構成を提供します。
+
+### ディレクトリ構造
+
+```text
+/project/
+├── repo.git/           # Bareリポジトリ
+├── main/               # ワークツリー（mainブランチ）
+├── feature-x/          # ワークツリー（feature/xブランチ）
+└── .gwt/               # gwt設定
+    └── project.json
+```
+
+### Bareリポジトリのセットアップ
+
+```bash
+# bareリポジトリとしてクローン
+git clone --bare https://github.com/user/repo.git repo.git
+
+# bareリポジトリからワークツリーを作成
+cd repo.git
+git worktree add ../main main
+git worktree add ../feature-x feature/x
+```
+
+### Bareリポジトリでのgwt使用
+
+bareリポジトリまたはそのワークツリー内でgwtを実行した場合:
+
+| 起動場所 | ヘッダー表示 |
+|----------|-------------|
+| 通常リポジトリ | `Working Directory: /path [branch]` |
+| Bareリポジトリ | `Working Directory: /path/repo.git [bare]` |
+| ワークツリー（通常） | `Working Directory: /path [branch]` |
+| ワークツリー（bare方式） | `Working Directory: /path [branch] (repo.git)` |
+
+### `.worktrees/`方式からのマイグレーション
+
+既存の`.worktrees/`ディレクトリ方式を使用しているリポジトリがある場合、gwtはこれを検出してbareリポジトリ方式へのマイグレーションを提案します:
+
+1. **バックアップ**: `.gwt-migration-backup/`にバックアップを作成
+2. **bareリポジトリ作成**: `{repo-name}.git`を作成
+3. **ワークツリー移行**: 既存ワークツリーを新構造に移動
+4. **クリーンアップ**: 古い`.worktrees/`ディレクトリを削除
+5. **設定作成**: `.gwt/project.json`を作成
+
+### サブモジュールサポート
+
+ワークツリー作成時、gwtはサブモジュールが存在する場合は自動的に初期化します。これにより、ワークツリー作成直後からサブモジュールを使用できます。
+
 ## 高度なワークフロー
 
 ### ブランチ戦略

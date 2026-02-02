@@ -1,8 +1,8 @@
 //! Worktree manager
 
-use super::{CleanupCandidate, Worktree, WorktreePath, WorktreeStatus};
+use super::{CleanupCandidate, Worktree, WorktreeLocation, WorktreePath, WorktreeStatus};
 use crate::error::{GwtError, Result};
-use crate::git::{get_main_repo_root, Branch, Remote, Repository};
+use crate::git::{get_main_repo_root, is_bare_repository, Branch, Remote, Repository};
 use std::path::{Path, PathBuf};
 use tracing::{debug, error, info, warn};
 
@@ -15,6 +15,8 @@ pub struct WorktreeManager {
     repo_root: PathBuf,
     /// Git repository handle
     repo: Repository,
+    /// Worktree location strategy (SPEC-a70a1ece T404-T405)
+    location: WorktreeLocation,
 }
 
 impl WorktreeManager {
@@ -23,14 +25,30 @@ impl WorktreeManager {
     /// If the given path is inside a worktree, this automatically resolves
     /// to the main repository root to ensure worktrees are created at the
     /// correct location (e.g., /repo/.worktrees/ instead of /repo/.worktrees/branch/.worktrees/)
+    ///
+    /// SPEC-a70a1ece T404-T405: Auto-detects bare repositories and uses Sibling location
     pub fn new(repo_root: impl AsRef<Path>) -> Result<Self> {
         let repo_root = repo_root.as_ref().to_path_buf();
         // Resolve to main repo root in case we're inside a worktree
         let main_repo_root = get_main_repo_root(&repo_root);
         let repo = Repository::discover(&main_repo_root)?;
+
+        // SPEC-a70a1ece: Detect bare repository and use appropriate location strategy
+        let location = if is_bare_repository(&main_repo_root) {
+            debug!(
+                category = "worktree",
+                repo = %main_repo_root.display(),
+                "Bare repository detected, using Sibling location"
+            );
+            WorktreeLocation::Sibling
+        } else {
+            WorktreeLocation::Subdir
+        };
+
         Ok(Self {
             repo_root: main_repo_root,
             repo,
+            location,
         })
     }
 
@@ -152,10 +170,55 @@ impl WorktreeManager {
             }
 
             if let Some((remote, branch)) = remote_branch {
-                resolved_branch = branch;
+                resolved_branch = branch.clone();
                 if !Branch::exists(&self.repo_root, &resolved_branch)? {
-                    let remote_ref = format!("{}/{}", remote, resolved_branch);
-                    Branch::create(&self.repo_root, &resolved_branch, &remote_ref)?;
+                    // Check if refs/remotes/{remote}/{branch} exists locally
+                    let has_local_remote_ref = std::process::Command::new("git")
+                        .args([
+                            "show-ref",
+                            "--verify",
+                            "--quiet",
+                            &format!("refs/remotes/{}/{}", remote, branch),
+                        ])
+                        .current_dir(&self.repo_root)
+                        .output()
+                        .map(|o| o.status.success())
+                        .unwrap_or(false);
+
+                    if has_local_remote_ref {
+                        // Normal repo with local remote ref: create branch from it
+                        let remote_ref = format!("{}/{}", remote, resolved_branch);
+                        Branch::create(&self.repo_root, &resolved_branch, &remote_ref)?;
+                    } else {
+                        // SPEC-a70a1ece FR-124: No local remote ref, fetch from remote
+                        let fetch_output = std::process::Command::new("git")
+                            .args(["fetch", &remote, &format!("{}:{}", branch, branch)])
+                            .current_dir(&self.repo_root)
+                            .output()
+                            .map_err(|e| GwtError::GitOperationFailed {
+                                operation: "fetch".to_string(),
+                                details: e.to_string(),
+                            })?;
+
+                        if !fetch_output.status.success() {
+                            let err = String::from_utf8_lossy(&fetch_output.stderr);
+                            error!(
+                                category = "worktree",
+                                branch = branch.as_str(),
+                                error = %err,
+                                "Failed to fetch branch"
+                            );
+                            return Err(GwtError::GitOperationFailed {
+                                operation: "fetch".to_string(),
+                                details: err.to_string(),
+                            });
+                        }
+                        debug!(
+                            category = "worktree",
+                            branch = branch.as_str(),
+                            "Fetched branch from remote"
+                        );
+                    }
                 }
             } else {
                 error!(
@@ -169,7 +232,9 @@ impl WorktreeManager {
             }
         }
 
-        let path = WorktreePath::generate(&self.repo_root, &resolved_branch);
+        // SPEC-a70a1ece T405: Use location-aware path generation
+        let path =
+            WorktreePath::generate_with_location(&self.repo_root, &resolved_branch, self.location);
 
         // FR-038-040: Handle existing path (auto-recovery disabled)
         if path.exists() {
@@ -178,6 +243,16 @@ impl WorktreeManager {
 
         // Create worktree
         self.repo.create_worktree(&path, &resolved_branch, false)?;
+
+        // SPEC-a70a1ece T1004-T1005: Initialize submodules (non-fatal on failure)
+        if let Err(e) = crate::git::init_submodules(&path) {
+            warn!(
+                category = "worktree",
+                path = %path.display(),
+                error = %e,
+                "Submodule initialization failed (non-fatal)"
+            );
+        }
 
         // Return the created worktree
         let worktree = self
@@ -206,7 +281,9 @@ impl WorktreeManager {
             base = base_branch.unwrap_or("HEAD"),
             "Creating worktree with new branch"
         );
-        let path = WorktreePath::generate(&self.repo_root, branch_name);
+        // SPEC-a70a1ece T405: Use location-aware path generation
+        let path =
+            WorktreePath::generate_with_location(&self.repo_root, branch_name, self.location);
 
         // FR-038-040: Handle existing path (auto-recovery disabled)
         if path.exists() {
@@ -268,6 +345,16 @@ impl WorktreeManager {
                     reason: e.to_string(),
                 })?;
             drop(wt_repo);
+        }
+
+        // SPEC-a70a1ece T1004-T1005: Initialize submodules (non-fatal on failure)
+        if let Err(e) = crate::git::init_submodules(&path) {
+            warn!(
+                category = "worktree",
+                path = %path.display(),
+                error = %e,
+                "Submodule initialization failed (non-fatal)"
+            );
         }
 
         // Return the created worktree
@@ -803,7 +890,8 @@ mod tests {
         run_git_in(creator.path(), &["push", "origin", "feature/issue-42"]);
 
         assert!(!Branch::exists(temp.path(), "feature/issue-42").unwrap());
-        assert!(!Branch::remote_exists(temp.path(), "origin", "feature/issue-42").unwrap());
+        // SPEC-a70a1ece FR-124: remote_exists now uses ls-remote fallback, so it finds the branch
+        assert!(Branch::remote_exists(temp.path(), "origin", "feature/issue-42").unwrap());
 
         let manager = WorktreeManager::new(temp.path()).unwrap();
         let wt = manager.create_for_branch("feature/issue-42").unwrap();
@@ -967,5 +1055,146 @@ mod tests {
             result,
             Err(GwtError::WorktreeAlreadyExists { .. })
         ));
+    }
+
+    /// Create a bare test repository (SPEC-a70a1ece T406)
+    /// Returns (TempDir, PathBuf) where PathBuf is the bare repo path
+    fn create_bare_test_repo() -> (TempDir, PathBuf) {
+        let temp = TempDir::new().unwrap();
+        // Create a source repo first
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+
+        run_git_in(&source, &["init"]);
+        run_git_in(&source, &["config", "user.email", "test@test.com"]);
+        run_git_in(&source, &["config", "user.name", "Test"]);
+        std::fs::write(source.join("test.txt"), "hello").unwrap();
+        run_git_in(&source, &["add", "."]);
+        run_git_in(&source, &["commit", "-m", "initial"]);
+
+        // Clone as bare
+        let bare = temp.path().join("repo.git");
+        let output = Command::new("git")
+            .args([
+                "clone",
+                "--bare",
+                source.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Failed to create bare clone: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        (temp, bare)
+    }
+
+    #[test]
+    fn test_bare_repo_uses_sibling_location() {
+        // SPEC-a70a1ece T406: Bare repository should use Sibling location
+        let (_temp, bare_path) = create_bare_test_repo();
+
+        let manager = WorktreeManager::new(&bare_path).unwrap();
+        assert_eq!(manager.location, WorktreeLocation::Sibling);
+    }
+
+    #[test]
+    fn test_bare_repo_worktree_sibling_path() {
+        // SPEC-a70a1ece T406: Worktree should be created as sibling to bare repo
+        let (temp, bare_path) = create_bare_test_repo();
+
+        let manager = WorktreeManager::new(&bare_path).unwrap();
+        // Note: bare clone from local repo may have 'master' as default branch
+        let wt = manager
+            .create_new_branch("feature/test", Some("master"))
+            .unwrap();
+
+        // Worktree should be at sibling path: /temp/feature/test
+        assert_eq!(wt.path, temp.path().join("feature/test"));
+        assert!(wt.path.exists());
+    }
+
+    #[test]
+    fn test_bare_repo_worktree_creates_subdirectory_structure() {
+        // SPEC-a70a1ece FR-152: Slash-containing branches create subdirectory structure
+        // e.g., "feature/branch-name" creates feature/branch-name/ directory
+        let (temp, bare_path) = create_bare_test_repo();
+
+        let manager = WorktreeManager::new(&bare_path).unwrap();
+        let wt = manager
+            .create_new_branch("feature/my-feature", Some("master"))
+            .unwrap();
+
+        // Verify worktree is at /temp/feature/my-feature
+        let expected_path = temp.path().join("feature").join("my-feature");
+        assert_eq!(wt.path, expected_path);
+
+        // Verify the feature/ subdirectory exists
+        let feature_dir = temp.path().join("feature");
+        assert!(
+            feature_dir.exists(),
+            "Parent directory 'feature/' should exist at {:?}",
+            feature_dir
+        );
+        assert!(
+            feature_dir.is_dir(),
+            "'feature/' should be a directory, not a file"
+        );
+
+        // Verify the worktree directory exists inside feature/
+        assert!(
+            wt.path.exists(),
+            "Worktree path should exist at {:?}",
+            wt.path
+        );
+        assert!(wt.path.is_dir(), "Worktree should be a directory");
+
+        // Verify worktree is NOT created flat at bare repo level
+        // i.e., /temp/feature-my-feature should NOT exist
+        let flat_path = temp.path().join("feature-my-feature");
+        assert!(
+            !flat_path.exists(),
+            "Worktree should NOT be created flat at {:?}",
+            flat_path
+        );
+
+        // Verify *.git directory still exists at expected location
+        assert!(bare_path.exists(), "Bare repo should still exist");
+    }
+
+    #[test]
+    fn test_bare_repo_worktree_bugfix_branch() {
+        // SPEC-a70a1ece FR-152: Test bugfix/ prefix as well
+        let (temp, bare_path) = create_bare_test_repo();
+
+        let manager = WorktreeManager::new(&bare_path).unwrap();
+        let wt = manager
+            .create_new_branch("bugfix/fix-123", Some("master"))
+            .unwrap();
+
+        // Verify worktree is at /temp/bugfix/fix-123
+        let expected_path = temp.path().join("bugfix").join("fix-123");
+        assert_eq!(wt.path, expected_path);
+
+        // Verify the bugfix/ subdirectory exists
+        let bugfix_dir = temp.path().join("bugfix");
+        assert!(
+            bugfix_dir.exists(),
+            "Parent directory 'bugfix/' should exist"
+        );
+        assert!(bugfix_dir.is_dir(), "'bugfix/' should be a directory");
+    }
+
+    #[test]
+    fn test_normal_repo_uses_subdir_location() {
+        // Non-bare repository should use Subdir location (default)
+        let temp = create_test_repo();
+
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+        assert_eq!(manager.location, WorktreeLocation::Subdir);
     }
 }
