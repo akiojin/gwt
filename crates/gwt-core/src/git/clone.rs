@@ -144,7 +144,11 @@ pub fn clone_bare(config: &CloneConfig) -> Result<std::path::PathBuf> {
 
         // Configure remote to track all branches
         let config_output = Command::new("git")
-            .args(["config", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"])
+            .args([
+                "config",
+                "remote.origin.fetch",
+                "+refs/heads/*:refs/heads/*",
+            ])
             .current_dir(&bare_path)
             .output()
             .map_err(|e| GwtError::GitOperationFailed {

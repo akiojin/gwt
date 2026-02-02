@@ -1775,15 +1775,15 @@ impl Model {
         // SPEC-a70a1ece: Use bare repo path for worktree operations in bare projects
         let git_path = self.bare_repo_path.as_ref().unwrap_or(&self.repo_root);
         let worktrees: Vec<(String, std::path::PathBuf)> = match WorktreeManager::new(git_path) {
-                Ok(manager) => match manager.list_basic() {
-                    Ok(wts) => wts
-                        .into_iter()
-                        .filter_map(|wt| wt.branch.map(|b| (b, wt.path)))
-                        .collect(),
-                    Err(_) => return,
-                },
+            Ok(manager) => match manager.list_basic() {
+                Ok(wts) => wts
+                    .into_iter()
+                    .filter_map(|wt| wt.branch.map(|b| (b, wt.path)))
+                    .collect(),
                 Err(_) => return,
-            };
+            },
+            Err(_) => return,
+        };
 
         if worktrees.is_empty() {
             return;
