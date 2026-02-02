@@ -1046,4 +1046,45 @@ mod tests {
         assert_eq!(format_size_change(2048), "+2.0KB");
         assert_eq!(format_size_change(1048576), "+1.0MB");
     }
+
+    // T201: PRリンクフォーカス状態のテスト
+    #[test]
+    fn test_gitview_pr_link_focus() {
+        // With PR URL, index 0 should be PR link
+        let state = GitViewState::new(
+            "feature/test".to_string(),
+            Some(PathBuf::from("/tmp/test")),
+            Some("https://github.com/test/pr/1".to_string()),
+            Some("Test PR".to_string()),
+            DivergenceStatus::Ahead(1),
+        );
+        assert!(state.is_pr_link_selected());
+
+        // Without PR URL, index 0 should not be PR link
+        let state = GitViewState::new(
+            "feature/test".to_string(),
+            Some(PathBuf::from("/tmp/test")),
+            None,
+            None,
+            DivergenceStatus::NoRemote,
+        );
+        assert!(!state.is_pr_link_selected());
+    }
+
+    // T301: ワークツリーなしブランチの表示テスト
+    #[test]
+    fn test_gitview_no_worktree() {
+        let state = GitViewState::new(
+            "feature/no-worktree".to_string(),
+            None, // No worktree
+            None,
+            None,
+            DivergenceStatus::NoRemote,
+        );
+
+        assert!(!state.has_worktree);
+        assert!(state.worktree_path.is_none());
+        // Files should be empty for no-worktree branches
+        assert!(state.files.is_empty());
+    }
 }

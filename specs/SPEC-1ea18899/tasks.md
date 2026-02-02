@@ -101,7 +101,7 @@ US3 (ワークツリーなし)  ─┘
 
 ### テスト（TDD）
 
-- [ ] **T201** [P] [US2] `crates/gwt-cli/src/tui/screens/git_view.rs` に PRリンクフォーカス状態のユニットテストを作成
+- [x] **T201** [P] [US2] `crates/gwt-cli/src/tui/screens/git_view.rs` に PRリンクフォーカス状態のユニットテストを作成
 
 ### PRリンク機能
 
@@ -120,7 +120,7 @@ US3 (ワークツリーなし)  ─┘
 
 ### テスト（TDD）
 
-- [ ] **T301** [P] [US3] `crates/gwt-cli/src/tui/screens/git_view.rs` に ワークツリーなしブランチの表示テストを作成
+- [x] **T301** [P] [US3] `crates/gwt-cli/src/tui/screens/git_view.rs` に ワークツリーなしブランチの表示テストを作成
 
 ### ワークツリーなし対応
 
@@ -136,11 +136,11 @@ US3 (ワークツリーなし)  ─┘
 
 ### 統合
 
-- [ ] **T401** [統合] 全画面遷移パス（BranchList ↔ GitView）の動作確認
-- [ ] **T402** [統合] エッジケース対応確認（50+ファイル、50+行diff、バイナリファイル）
-- [ ] **T403** [統合] `cargo clippy --all-targets --all-features -- -D warnings` をローカルで完走させ、失敗時は修正
-- [ ] **T404** [統合] `cargo fmt --check` をローカルで完走させ、失敗時は修正
-- [ ] **T405** [統合] `cargo test` をローカルで完走させ、失敗時は修正
+- [x] **T401** [統合] 全画面遷移パス（BranchList ↔ GitView）の動作確認
+- [x] **T402** [統合] エッジケース対応確認（50+ファイル、50+行diff、バイナリファイル）
+- [x] **T403** [統合] `cargo clippy --all-targets --all-features -- -D warnings` をローカルで完走させ、失敗時は修正
+- [x] **T404** [統合] `cargo fmt --check` をローカルで完走させ、失敗時は修正
+- [x] **T405** [統合] `cargo test` をローカルで完走させ、失敗時は修正
 
 ### ドキュメント
 
