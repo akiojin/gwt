@@ -1,0 +1,8 @@
+[core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = true
+	ignorecase = true
+[remote "origin"]
+	url = https://github.com/akiojin/gwt
+	fetch = +refs/heads/*:refs/heads/*
