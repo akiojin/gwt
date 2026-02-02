@@ -139,6 +139,10 @@ pub fn execute_migration(
                 main_wt.target_path.display()
             );
             restore_evacuated_files(&temp_evacuation_dir, &main_wt.target_path)?;
+
+            // Clean up root directory files (they've been moved to main worktree)
+            info!("Cleaning up root directory files");
+            cleanup_root_files(config, &worktrees)?;
         }
         // Remove temp directory
         info!("Removing temp evacuation directory");
@@ -273,6 +277,73 @@ fn cleanup_original_git_dir(config: &MigrationConfig) -> Result<(), MigrationErr
             reason: format!("Failed to remove .git directory: {}", e),
         })?;
     }
+    Ok(())
+}
+
+/// Cleanup root directory files after migration
+/// Files have been moved to main worktree, so we remove them from root
+fn cleanup_root_files(
+    config: &MigrationConfig,
+    worktrees: &[WorktreeMigrationInfo],
+) -> Result<(), MigrationError> {
+    let root = &config.source_root;
+
+    // Collect worktree directory names to skip
+    let worktree_dirs: std::collections::HashSet<_> = worktrees
+        .iter()
+        .filter_map(|wt| {
+            wt.target_path
+                .strip_prefix(root)
+                .ok()
+                .and_then(|p| p.components().next())
+                .map(|c| c.as_os_str().to_string_lossy().to_string())
+        })
+        .collect();
+
+    for entry in std::fs::read_dir(root).map_err(|e| MigrationError::IoError {
+        path: root.to_path_buf(),
+        reason: format!("Failed to read root directory: {}", e),
+    })? {
+        let entry = entry.map_err(|e| MigrationError::IoError {
+            path: root.to_path_buf(),
+            reason: format!("Failed to read directory entry: {}", e),
+        })?;
+
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        // Skip directories that should remain:
+        // - .git (already removed)
+        // - .worktrees (will be cleaned up later)
+        // - .gwt-* (migration temp/backup)
+        // - *.git (bare repo)
+        // - .gwt (config directory)
+        // - worktree directories (main, develop, feature, etc.)
+        if name_str == ".git"
+            || name_str == ".worktrees"
+            || name_str.starts_with(".gwt")
+            || name_str.ends_with(".git")
+            || worktree_dirs.contains(name_str.as_ref())
+        {
+            continue;
+        }
+
+        let path = entry.path();
+        debug!(path = %path.display(), "Removing root file/directory");
+
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path).map_err(|e| MigrationError::IoError {
+                path: path.clone(),
+                reason: format!("Failed to remove directory: {}", e),
+            })?;
+        } else {
+            std::fs::remove_file(&path).map_err(|e| MigrationError::IoError {
+                path: path.clone(),
+                reason: format!("Failed to remove file: {}", e),
+            })?;
+        }
+    }
+
     Ok(())
 }
 
@@ -858,8 +929,32 @@ fn preserve_tracking_relationships(
 }
 
 /// Derive bare repository name from URL or directory (SPEC-a70a1ece T906, FR-219)
+/// Priority: remote URL > directory name
 pub fn derive_bare_repo_name(url_or_path: &str) -> String {
-    // Extract repo name from URL or path
+    // First, try to get the name from remote URL if it's a path
+    let path = std::path::Path::new(url_or_path);
+    if path.exists() {
+        if let Ok(output) = Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(path)
+            .output()
+        {
+            if output.status.success() {
+                let remote_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !remote_url.is_empty() {
+                    let name = remote_url
+                        .trim_end_matches('/')
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or("repo")
+                        .trim_end_matches(".git");
+                    return format!("{}.git", name);
+                }
+            }
+        }
+    }
+
+    // Fallback: extract repo name from path
     let name = url_or_path
         .trim_end_matches('/')
         .rsplit('/')
