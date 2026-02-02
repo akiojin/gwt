@@ -59,17 +59,19 @@ use super::screens::branch_list::{
     BranchSummaryRequest, BranchSummaryUpdate, PrInfo, WorktreeStatus,
 };
 use super::screens::environment::EditField;
+use super::screens::git_view::{build_git_view_data, build_git_view_data_no_worktree, GitViewData};
 use super::screens::pane_list::PaneListState;
 use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
 use super::screens::{
     collect_os_env, render_agent_mode, render_ai_wizard, render_branch_list, render_clone_wizard,
-    render_confirm, render_environment, render_error_with_queue, render_help, render_logs,
-    render_migration_dialog, render_profiles, render_settings, render_wizard,
+    render_confirm, render_environment, render_error_with_queue, render_git_view, render_help,
+    render_logs, render_migration_dialog, render_profiles, render_settings, render_wizard,
     render_worktree_create, AIWizardState, AgentMessage, AgentModeState, AgentRole, BranchItem,
     BranchListState, BranchType, CloneWizardState, CloneWizardStep, CodingAgent, ConfirmState,
-    EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, HelpState, LogsState,
-    MigrationDialogPhase, MigrationDialogState, ProfilesState, QuickStartEntry, ReasoningLevel,
-    SettingsState, WizardConfirmResult, WizardState, WizardStep, WorktreeCreateState,
+    EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, GitViewCache, GitViewState, HelpState,
+    LogsState, MigrationDialogPhase, MigrationDialogState, ProfilesState, QuickStartEntry,
+    ReasoningLevel, SettingsState, WizardConfirmResult, WizardState, WizardStep,
+    WorktreeCreateState,
 };
 // log_gwt_error is available for use when GwtError types are available
 
@@ -346,6 +348,12 @@ struct BranchListUpdate {
     active_count: usize,
 }
 
+/// Update for GitView cache (SPEC-1ea18899 FR-050)
+struct GitViewCacheUpdate {
+    branch: String,
+    data: GitViewData,
+}
+
 struct LaunchRequest {
     branch_name: String,
     create_new_branch: bool,
@@ -519,6 +527,12 @@ pub struct Model {
     migration_rx: Option<mpsc::Receiver<Result<(), gwt_core::migration::MigrationError>>>,
     /// Path to bare repository when in bare project (SPEC-a70a1ece)
     bare_repo_path: Option<PathBuf>,
+    /// GitView state (SPEC-1ea18899)
+    git_view: GitViewState,
+    /// GitView cache for all branches (SPEC-1ea18899 FR-050)
+    git_view_cache: GitViewCache,
+    /// GitView cache update receiver (SPEC-1ea18899)
+    git_view_cache_rx: Option<Receiver<GitViewCacheUpdate>>,
 }
 
 /// Screen types
@@ -540,6 +554,8 @@ pub enum Screen {
     CloneWizard,
     /// Migration dialog for .worktrees/ method conversion (SPEC-a70a1ece US7)
     MigrationDialog,
+    /// Git status view for selected branch (SPEC-1ea18899)
+    GitView,
 }
 
 /// Messages (Events in Elm Architecture)
@@ -710,6 +726,9 @@ impl Model {
             migration_dialog: MigrationDialogState::default(),
             migration_rx: None,
             bare_repo_path,
+            git_view: GitViewState::default(),
+            git_view_cache: GitViewCache::new(),
+            git_view_cache_rx: None,
         };
 
         model
@@ -853,10 +872,13 @@ impl Model {
         }
 
         self.load_profiles();
+        // SPEC-1ea18899 FR-052: Clear GitView cache on refresh
+        self.git_view_cache.clear();
         self.start_branch_list_refresh(settings);
     }
 
     fn start_branch_list_refresh(&mut self, settings: gwt_core::config::Settings) {
+        let cleanup_snapshot = self.branch_list.cleanup_snapshot();
         self.pr_title_rx = None;
         self.safety_rx = None;
         self.worktree_status_rx = None;
@@ -870,6 +892,7 @@ impl Model {
         branch_list.working_directory = Some(self.repo_root.display().to_string());
         branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
         branch_list.set_loading(true);
+        branch_list.restore_cleanup_snapshot(&cleanup_snapshot);
         self.branch_list = branch_list;
 
         let repo_root = self.repo_root.clone();
@@ -1073,6 +1096,54 @@ impl Model {
                 summary,
             });
         });
+    }
+
+    /// SPEC-1ea18899: Spawn background fetch for GitView data
+    fn spawn_git_view_data_fetch(&mut self, branch: &str, worktree_path: Option<&Path>) {
+        let branch = branch.to_string();
+        let worktree_path = worktree_path.map(|p| p.to_path_buf());
+        // Use bare repo path if available for branches without worktree
+        let repo_root = self
+            .bare_repo_path
+            .clone()
+            .unwrap_or_else(|| self.repo_root.clone());
+        let (tx, rx) = mpsc::channel();
+        self.git_view_cache_rx = Some(rx);
+
+        thread::spawn(move || {
+            let data = if let Some(ref wt_path) = worktree_path {
+                build_git_view_data(wt_path)
+            } else {
+                build_git_view_data_no_worktree(&repo_root, &branch)
+            };
+            let _ = tx.send(GitViewCacheUpdate { branch, data });
+        });
+    }
+
+    /// SPEC-1ea18899: Apply GitView cache updates from background fetch
+    fn apply_git_view_cache_updates(&mut self) {
+        let Some(rx) = &self.git_view_cache_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(update) => {
+                // Update cache
+                self.git_view_cache
+                    .insert(update.branch.clone(), update.data.clone());
+                // If we're on GitView for this branch, update state
+                if matches!(self.screen, Screen::GitView)
+                    && self.git_view.branch_name == update.branch
+                {
+                    self.git_view.load_from_cache(&update.data);
+                }
+                self.git_view_cache_rx = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.git_view_cache_rx = None;
+            }
+        }
     }
 
     fn spawn_safety_checks(
@@ -1860,6 +1931,7 @@ impl Model {
 
         match rx.try_recv() {
             Ok(update) => {
+                let cleanup_snapshot = self.branch_list.cleanup_snapshot();
                 let session_cache = self.branch_list.clone_session_cache();
                 let session_inflight = self.branch_list.clone_session_inflight();
                 let session_missing = self.branch_list.clone_session_missing();
@@ -1881,6 +1953,7 @@ impl Model {
                     .map(|b| b.name.clone())
                     .collect();
                 branch_list.cleanup_session_warnings(&remaining_branches);
+                branch_list.restore_cleanup_snapshot(&cleanup_snapshot);
                 self.branch_list = branch_list;
                 // SPEC-4b893dae: Update branch summary after branches are loaded
                 self.refresh_branch_summary();
@@ -2818,6 +2891,30 @@ impl Model {
                 // Single click: just select the log entry
                 self.logs.select_index(index);
                 self.last_mouse_click = Some(MouseClick { index, at: now });
+            }
+        }
+    }
+
+    /// SPEC-1ea18899: Handle mouse events for GitView screen (FR-007)
+    fn handle_gitview_mouse(&mut self, mouse: MouseEvent) {
+        if !matches!(self.screen, Screen::GitView) {
+            return;
+        }
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+
+        // Check if click is within PR link region
+        if let Some(ref link_region) = self.git_view.pr_link_region {
+            let x = mouse.column;
+            let y = mouse.row;
+            if y == link_region.area.y
+                && x >= link_region.area.x
+                && x < link_region.area.x + link_region.area.width
+            {
+                // Click on PR link - open in browser
+                let url = link_region.url.clone();
+                self.open_url(&url);
             }
         }
     }
@@ -3797,6 +3894,30 @@ impl Model {
                     self.settings.load_tools_config();
                     self.settings.load_profiles_config();
                 }
+                // SPEC-1ea18899: Initialize GitViewState when entering GitView
+                if matches!(screen, Screen::GitView) {
+                    if let Some(branch) = self.branch_list.selected_branch().cloned() {
+                        let worktree_path = branch.worktree_path.clone().map(PathBuf::from);
+                        let worktree_path_for_fetch = worktree_path.clone();
+                        self.git_view = GitViewState::new(
+                            branch.name.clone(),
+                            worktree_path,
+                            branch.pr_url.clone(),
+                            branch.pr_title.clone(),
+                            branch.divergence,
+                        );
+                        // Try to load from cache
+                        if let Some(cached) = self.git_view_cache.get(&branch.name) {
+                            self.git_view.load_from_cache(cached);
+                        } else {
+                            // Trigger background data fetch
+                            self.spawn_git_view_data_fetch(
+                                &branch.name,
+                                worktree_path_for_fetch.as_deref(),
+                            );
+                        }
+                    }
+                }
                 self.screen_stack.push(self.screen.clone());
                 self.screen = screen;
                 self.status_message = None;
@@ -3902,6 +4023,8 @@ impl Model {
                 self.apply_session_summary_updates();
                 self.apply_agent_mode_updates();
                 self.poll_session_summary_if_needed();
+                // SPEC-1ea18899: Apply GitView cache updates
+                self.apply_git_view_cache_updates();
                 // FR-033: Update pane list every 1 second in tmux multi mode
                 self.update_pane_list();
                 // SPEC-a70a1ece: Poll clone wizard progress
@@ -3971,6 +4094,8 @@ impl Model {
                 Screen::CloneWizard => self.clone_wizard.down(),
                 Screen::MigrationDialog => self.migration_dialog.toggle_selection(),
                 Screen::Confirm => {}
+                // SPEC-1ea18899: GitView navigation
+                Screen::GitView => self.git_view.select_next(),
             },
             Message::SelectPrev => match self.screen {
                 Screen::BranchList => {
@@ -3994,6 +4119,8 @@ impl Model {
                 Screen::CloneWizard => self.clone_wizard.up(),
                 Screen::MigrationDialog => self.migration_dialog.toggle_selection(),
                 Screen::Confirm => {}
+                // SPEC-1ea18899: GitView navigation
+                Screen::GitView => self.git_view.select_prev(),
             },
             Message::PageUp => match self.screen {
                 Screen::BranchList => {
@@ -4232,6 +4359,15 @@ impl Model {
                             self.refresh_data();
                         } else {
                             self.should_quit = true;
+                        }
+                    }
+                }
+                // SPEC-1ea18899: GitView Enter handling - open PR link (FR-007)
+                Screen::GitView => {
+                    // If PR link is selected (selected_index == 0 and pr_url exists), open it
+                    if self.git_view.selected_index == 0 {
+                        if let Some(url) = self.git_view.pr_url.clone() {
+                            self.open_url(&url);
                         }
                     }
                 }
@@ -4608,6 +4744,9 @@ impl Model {
                     }
                 } else if matches!(self.screen, Screen::Profiles) && !self.profiles.create_mode {
                     self.activate_selected_profile();
+                } else if matches!(self.screen, Screen::GitView) {
+                    // SPEC-1ea18899: Toggle expand in GitView (FR-003)
+                    self.git_view.toggle_expand();
                 }
             }
             Message::OpenWizard => {
@@ -5584,6 +5723,9 @@ impl Model {
             Screen::MigrationDialog => {
                 render_migration_dialog(&mut self.migration_dialog, frame, chunks[1])
             }
+            Screen::GitView => {
+                render_git_view(&mut self.git_view, frame, chunks[1]);
+            }
             Screen::Confirm => {}
         }
 
@@ -5643,6 +5785,7 @@ impl Model {
             Screen::AISettingsWizard => "AI Settings",
             Screen::CloneWizard => "Clone Repository",
             Screen::MigrationDialog => "Migration Required",
+            Screen::GitView => "Git View",
         };
 
         let title = format!(" gwt - {} v{}{} ", screen_title, version, offline_indicator);
@@ -5877,6 +6020,10 @@ impl Model {
                 MigrationDialogPhase::Failed => "[Enter] Exit".to_string(),
                 MigrationDialogPhase::Exited => String::new(),
             },
+            // SPEC-1ea18899: GitView footer keybinds
+            Screen::GitView => {
+                "[Up/Down] Navigate | [Space] Expand | [Enter] Open PR | [v/Esc] Back".to_string()
+            }
         }
     }
 
@@ -6288,6 +6435,17 @@ impl Model {
                         Some(Message::Char('m'))
                     }
                 }
+                // SPEC-1ea18899: 'v' opens GitView for selected branch
+                (KeyCode::Char('v'), KeyModifiers::NONE) => {
+                    if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
+                        Some(Message::NavigateTo(Screen::GitView))
+                    } else if matches!(self.screen, Screen::GitView) {
+                        // v key to go back from GitView (FR-004)
+                        Some(Message::NavigateBack)
+                    } else {
+                        Some(Message::Char('v'))
+                    }
+                }
                 (KeyCode::Up, _) if is_key_press => Some(Message::SelectPrev),
                 (KeyCode::Down, _) if is_key_press => Some(Message::SelectNext),
                 (KeyCode::PageUp, _) if is_key_press => Some(Message::PageUp),
@@ -6373,6 +6531,8 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
                                             model.handle_environment_mouse(mouse)
                                         }
                                         Screen::Logs => model.handle_logs_mouse(mouse),
+                                        // SPEC-1ea18899: GitView mouse handling (FR-007)
+                                        Screen::GitView => model.handle_gitview_mouse(mouse),
                                         _ => {}
                                     }
                                 }
@@ -7404,6 +7564,89 @@ mod tests {
                 .map(|branch| branch.name.as_str()),
             Some("feature/c")
         );
+    }
+
+    #[test]
+    fn test_refresh_data_keeps_cleanup_state() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let branches = vec![
+            sample_branch_with_session("feature/a"),
+            sample_branch_with_session("feature/b"),
+        ];
+
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.branch_list.start_cleanup_progress(2);
+        model
+            .branch_list
+            .set_cleanup_target_branches(&["feature/b".to_string()]);
+        model
+            .branch_list
+            .set_cleanup_active_branch(Some("feature/b".to_string()));
+        model.branch_list.increment_cleanup_progress();
+
+        model.update(Message::RefreshData);
+
+        assert!(model.branch_list.cleanup_in_progress());
+        assert_eq!(model.branch_list.cleanup_progress_total, 2);
+        assert_eq!(model.branch_list.cleanup_progress_done, 1);
+        assert_eq!(model.branch_list.cleanup_active_branch(), Some("feature/b"));
+    }
+
+    #[test]
+    fn test_branch_list_update_preserves_cleanup_targets() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let branches = vec![
+            sample_branch_with_session("feature/a"),
+            sample_branch_with_session("feature/b"),
+        ];
+
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.branch_list.start_cleanup_progress(2);
+        model
+            .branch_list
+            .set_cleanup_target_branches(&["feature/b".to_string()]);
+        model
+            .branch_list
+            .set_cleanup_active_branch(Some("feature/b".to_string()));
+        model.branch_list.increment_cleanup_progress();
+
+        let (tx, rx) = mpsc::channel();
+        model.branch_list_rx = Some(rx);
+
+        let update = BranchListUpdate {
+            branches: vec![
+                sample_branch_with_session("feature/a"),
+                sample_branch_with_session("feature/b"),
+            ],
+            branch_names: Vec::new(),
+            worktree_targets: Vec::new(),
+            safety_targets: Vec::new(),
+            base_branches: Vec::new(),
+            base_branch: "main".to_string(),
+            base_branch_exists: true,
+            total_count: 2,
+            active_count: 2,
+        };
+        tx.send(update).unwrap();
+
+        model.apply_branch_list_updates();
+
+        assert!(model.branch_list.cleanup_in_progress());
+        assert_eq!(model.branch_list.cleanup_progress_total, 2);
+        assert_eq!(model.branch_list.cleanup_progress_done, 1);
+        assert_eq!(model.branch_list.cleanup_active_branch(), Some("feature/b"));
+
+        let target_index = model
+            .branch_list
+            .filtered_indices
+            .iter()
+            .position(|&idx| model.branch_list.branches[idx].name == "feature/b")
+            .expect("cleanup branch index");
+        assert!(model.branch_list.is_cleanup_target_index(target_index));
     }
 
     #[test]
