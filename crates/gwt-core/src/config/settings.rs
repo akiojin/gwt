@@ -532,8 +532,7 @@ mod tests {
     fn test_new_global_config_priority() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp.path());
+        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         // Create new global config
         let new_gwt = temp.path().join(".gwt");
@@ -554,21 +553,13 @@ default_base_branch = "new-global"
         let settings = Settings::load(&repo).unwrap();
         assert!(settings.debug);
         assert_eq!(settings.default_base_branch, "new-global");
-
-        match prev_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
     fn test_legacy_global_config_fallback() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
-        std::env::set_var("HOME", temp.path());
-        std::env::set_var("XDG_CONFIG_HOME", temp.path().join(".config"));
+        let _env = crate::config::TestEnvGuard::with_xdg(temp.path(), &temp.path().join(".config"));
 
         // Only create legacy global config (no new global)
         let legacy_config = temp.path().join(".config").join("gwt");
@@ -589,25 +580,13 @@ default_base_branch = "legacy-global"
         let settings = Settings::load(&repo).unwrap();
         assert!(settings.debug);
         assert_eq!(settings.default_base_branch, "legacy-global");
-
-        match prev_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        match prev_xdg {
-            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
     }
 
     #[test]
     fn test_needs_global_path_migration() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
-        std::env::set_var("HOME", temp.path());
-        std::env::set_var("XDG_CONFIG_HOME", temp.path().join(".config"));
+        let _env = crate::config::TestEnvGuard::with_xdg(temp.path(), &temp.path().join(".config"));
 
         // No files - no migration needed
         assert!(!Settings::needs_global_path_migration());
@@ -623,23 +602,13 @@ default_base_branch = "legacy-global"
         std::fs::create_dir_all(&new_gwt).unwrap();
         std::fs::write(new_gwt.join("config.toml"), "debug = false").unwrap();
         assert!(!Settings::needs_global_path_migration());
-
-        match prev_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        match prev_xdg {
-            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
     }
 
     #[test]
     fn test_save_global() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp.path());
+        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         let settings = Settings {
             debug: true,
@@ -656,10 +625,5 @@ default_base_branch = "legacy-global"
         let content = std::fs::read_to_string(&new_path).unwrap();
         assert!(content.contains("debug = true"));
         assert!(content.contains("save-global-test"));
-
-        match prev_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
     }
 }

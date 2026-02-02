@@ -579,8 +579,7 @@ mod tests {
     fn test_toml_priority_over_json() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp_dir = TempDir::new().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp_dir.path());
+        let _env = crate::config::TestEnvGuard::new(temp_dir.path());
 
         // Create legacy JSON in ~/.config/gwt/
         let config_gwt = temp_dir.path().join(".config").join("gwt");
@@ -606,11 +605,6 @@ mod tests {
         let loaded = AgentHistoryStore::load().unwrap();
         let entry = loaded.get(Path::new("/repo"), "main").unwrap();
         assert_eq!(entry.agent_id, "toml-agent");
-
-        match prev_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     // Test needs_migration
@@ -618,8 +612,7 @@ mod tests {
     fn test_needs_migration() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp_dir = TempDir::new().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp_dir.path());
+        let _env = crate::config::TestEnvGuard::new(temp_dir.path());
 
         // No files - no migration needed
         assert!(!AgentHistoryStore::needs_migration());
@@ -635,11 +628,6 @@ mod tests {
         fs::create_dir_all(&gwt_dir).unwrap();
         fs::write(gwt_dir.join("agent-history.toml"), "").unwrap();
         assert!(!AgentHistoryStore::needs_migration());
-
-        match prev_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     // Test migrate_if_needed
@@ -647,8 +635,7 @@ mod tests {
     fn test_migrate_if_needed() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp_dir = TempDir::new().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp_dir.path());
+        let _env = crate::config::TestEnvGuard::new(temp_dir.path());
 
         // Create JSON file
         let config_gwt = temp_dir.path().join(".config").join("gwt");
@@ -682,10 +669,5 @@ mod tests {
         // Second migration should be no-op
         let migrated_again = AgentHistoryStore::migrate_if_needed().unwrap();
         assert!(!migrated_again);
-
-        match prev_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
     }
 }

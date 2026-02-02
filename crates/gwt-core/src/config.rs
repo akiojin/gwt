@@ -41,3 +41,56 @@ pub use ts_session::{
 
 #[cfg(test)]
 pub(crate) static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Helper for tests that need to manipulate HOME and XDG_CONFIG_HOME
+#[cfg(test)]
+pub(crate) struct TestEnvGuard {
+    prev_home: Option<std::ffi::OsString>,
+    prev_xdg_config: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl TestEnvGuard {
+    /// Create a new guard that sets HOME to the given path and clears XDG_CONFIG_HOME
+    pub fn new(home_path: &std::path::Path) -> Self {
+        let prev_home = std::env::var_os("HOME");
+        let prev_xdg_config = std::env::var_os("XDG_CONFIG_HOME");
+
+        std::env::set_var("HOME", home_path);
+        // Clear XDG_CONFIG_HOME so dirs crate uses HOME/.config
+        std::env::remove_var("XDG_CONFIG_HOME");
+
+        Self {
+            prev_home,
+            prev_xdg_config,
+        }
+    }
+
+    /// Create a guard with explicit XDG_CONFIG_HOME setting
+    pub fn with_xdg(home_path: &std::path::Path, xdg_config_home: &std::path::Path) -> Self {
+        let prev_home = std::env::var_os("HOME");
+        let prev_xdg_config = std::env::var_os("XDG_CONFIG_HOME");
+
+        std::env::set_var("HOME", home_path);
+        std::env::set_var("XDG_CONFIG_HOME", xdg_config_home);
+
+        Self {
+            prev_home,
+            prev_xdg_config,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestEnvGuard {
+    fn drop(&mut self) {
+        match &self.prev_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match &self.prev_xdg_config {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+    }
+}

@@ -389,8 +389,7 @@ mod tests {
     fn test_profiles_config_roundtrip_toml() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp.path());
+        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         let mut config = ProfilesConfig::default();
         config
@@ -411,19 +410,13 @@ mod tests {
         let loaded = ProfilesConfig::load().unwrap();
         assert_eq!(loaded.active.as_deref(), Some("dev"));
         assert!(loaded.profiles.contains_key("dev"));
-
-        match prev_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
     fn test_load_yaml_fallback() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp.path());
+        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         // Create YAML file manually
         let gwt_dir = temp.path().join(".gwt");
@@ -446,19 +439,13 @@ profiles:
         let loaded = ProfilesConfig::load().unwrap();
         assert_eq!(loaded.active.as_deref(), Some("legacy"));
         assert!(loaded.profiles.contains_key("legacy"));
-
-        match prev_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
     fn test_toml_priority_over_yaml() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp.path());
+        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         let gwt_dir = temp.path().join(".gwt");
         std::fs::create_dir_all(&gwt_dir).unwrap();
@@ -496,19 +483,13 @@ description = ""
         // TOML should be loaded (priority)
         let loaded = ProfilesConfig::load().unwrap();
         assert_eq!(loaded.active.as_deref(), Some("toml-profile"));
-
-        match prev_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
     fn test_needs_migration() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp.path());
+        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         // No files - no migration needed
         assert!(!ProfilesConfig::needs_migration());
@@ -522,19 +503,13 @@ description = ""
         // Create TOML - no longer needs migration
         std::fs::write(gwt_dir.join("profiles.toml"), "version = 1").unwrap();
         assert!(!ProfilesConfig::needs_migration());
-
-        match prev_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
     fn test_migrate_if_needed() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp.path());
+        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         let gwt_dir = temp.path().join(".gwt");
         std::fs::create_dir_all(&gwt_dir).unwrap();
@@ -569,11 +544,6 @@ profiles:
         // Second migration should be no-op
         let migrated_again = ProfilesConfig::migrate_if_needed().unwrap();
         assert!(!migrated_again);
-
-        match prev_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]

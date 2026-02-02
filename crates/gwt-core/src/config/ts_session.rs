@@ -702,8 +702,7 @@ mod tests {
     fn test_load_session_fallback_by_repo_name() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp.path());
+        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         let session_dir = temp.path().join(".config").join("gwt").join("sessions");
         std::fs::create_dir_all(&session_dir).unwrap();
@@ -730,19 +729,13 @@ mod tests {
         let loaded = load_ts_session(&repo_root).expect("fallback session should load");
         assert_eq!(loaded.timestamp, session.timestamp);
         assert_eq!(loaded.last_branch, session.last_branch);
-
-        match prev_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
     fn test_get_branch_tool_history_fallback_to_last_branch() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp.path());
+        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         let repo_root = temp.path().join("sample-repo");
         std::fs::create_dir_all(&repo_root).unwrap();
@@ -776,19 +769,13 @@ mod tests {
         assert_eq!(entry.model.as_deref(), Some("gpt-5.2-codex"));
         assert_eq!(entry.tool_version.as_deref(), Some("latest"));
         assert_eq!(entry.session_id.as_deref(), Some("session-123"));
-
-        match prev_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
     fn test_get_branch_tool_history_canonicalizes_tool_id() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp.path());
+        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         let repo_root = temp.path().join("sample-repo");
         std::fs::create_dir_all(&repo_root).unwrap();
@@ -846,19 +833,13 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].tool_id, "claude-code");
         assert_eq!(entries[0].timestamp, 2_000);
-
-        match prev_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
     fn test_get_branch_tool_history_backfills_skip_permissions() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp.path());
+        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         let repo_root = temp.path().join("sample-repo");
         std::fs::create_dir_all(&repo_root).unwrap();
@@ -916,11 +897,6 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].tool_id, "claude-code");
         assert_eq!(entries[0].skip_permissions, Some(true));
-
-        match prev_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
@@ -936,8 +912,7 @@ mod tests {
     fn test_load_ts_session_persists_canonical_tool_ids() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp.path());
+        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         let repo_root = temp.path().join("sample-repo");
         std::fs::create_dir_all(&repo_root).unwrap();
@@ -992,11 +967,6 @@ mod tests {
             Some("claude-code")
         );
         assert_eq!(updated_session.history[0].tool_id, "codex-cli");
-
-        match prev_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
@@ -1053,8 +1023,7 @@ mod tests {
     fn test_needs_ts_session_migration() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp.path());
+        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         let repo_root = temp.path().join("sample-repo");
         std::fs::create_dir_all(&repo_root).unwrap();
@@ -1095,19 +1064,13 @@ mod tests {
 
         // Both files - no migration needed (TOML exists)
         assert!(!needs_ts_session_migration(&repo_root));
-
-        match prev_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
     fn test_migrate_ts_session_if_needed() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp.path());
+        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         let repo_root = temp.path().join("sample-repo");
         std::fs::create_dir_all(&repo_root).unwrap();
@@ -1160,19 +1123,13 @@ mod tests {
         let result2 = migrate_ts_session_if_needed(&repo_root);
         assert!(result2.is_ok());
         assert!(!result2.unwrap()); // Should return false (no migration needed)
-
-        match prev_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
     fn test_load_ts_session_prefers_toml() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp.path());
+        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         let repo_root = temp.path().join("sample-repo");
         std::fs::create_dir_all(&repo_root).unwrap();
@@ -1221,19 +1178,13 @@ mod tests {
         let loaded = load_ts_session(&repo_root).expect("should load session");
         assert_eq!(loaded.last_branch.as_deref(), Some("toml-branch"));
         assert_eq!(loaded.last_used_tool.as_deref(), Some("claude-code"));
-
-        match prev_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
     fn test_save_session_entry_writes_toml() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp.path());
+        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         // Create a mock git repo
         let repo_root = temp.path().join("sample-repo");
@@ -1268,10 +1219,5 @@ mod tests {
         let content = std::fs::read_to_string(&toml_path).unwrap();
         assert!(content.contains("feature/new"));
         assert!(content.contains("claude-code"));
-
-        match prev_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
     }
 }

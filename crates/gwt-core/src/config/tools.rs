@@ -939,8 +939,7 @@ command = "test-cmd"
     fn test_toml_priority_over_json() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp_dir = TempDir::new().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp_dir.path());
+        let _env = crate::config::TestEnvGuard::new(temp_dir.path());
 
         let gwt_dir = temp_dir.path().join(".gwt");
         std::fs::create_dir_all(&gwt_dir).unwrap();
@@ -981,11 +980,6 @@ command = "toml"
         // TOML should be loaded
         let config = ToolsConfig::load_global().unwrap();
         assert_eq!(config.custom_coding_agents[0].id, "toml-agent");
-
-        match prev_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     // Test needs_global_migration
@@ -993,8 +987,7 @@ command = "toml"
     fn test_needs_global_migration() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp_dir = TempDir::new().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp_dir.path());
+        let _env = crate::config::TestEnvGuard::new(temp_dir.path());
 
         // No files - no migration needed
         assert!(!ToolsConfig::needs_global_migration());
@@ -1008,11 +1001,6 @@ command = "toml"
         // Create TOML - no longer needs migration
         std::fs::write(gwt_dir.join("tools.toml"), "version = \"1.0.0\"").unwrap();
         assert!(!ToolsConfig::needs_global_migration());
-
-        match prev_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     // Test needs_local_migration
