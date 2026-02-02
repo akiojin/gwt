@@ -603,7 +603,7 @@ impl Model {
 
     pub fn new_with_context(context: Option<TuiEntryContext>) -> Self {
         // SPEC-a70a1ece: Use repo_root from context if available (single mode re-entry)
-        let mut repo_root = context
+        let repo_root = context
             .as_ref()
             .and_then(|ctx| ctx.repo_root.clone())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
@@ -614,26 +614,32 @@ impl Model {
             "Initializing TUI model"
         );
 
-        // SPEC-a70a1ece: Detect repo type, with fallback to find bare repo in directory
-        let mut repo_type = detect_repo_type(&repo_root);
-
-        // If NonRepo, check if there's a *.git bare repository in the directory
-        if repo_type == RepoType::NonRepo {
+        // SPEC-a70a1ece: First check if there's a *.git bare repository in the directory
+        // This takes priority because parent directory's .git might be detected otherwise
+        let (repo_type, bare_repo_path) =
             if let Some(bare_path) = gwt_core::git::find_bare_repo_in_dir(&repo_root) {
                 debug!(
                     category = "tui",
                     bare_path = %bare_path.display(),
-                    "Found bare repository in directory, switching to it"
+                    "Found bare repository in directory, treating as bare project"
                 );
-                repo_root = bare_path;
-                repo_type = RepoType::Bare;
-            }
-        }
+                (RepoType::Bare, Some(bare_path))
+            } else {
+                (detect_repo_type(&repo_root), None)
+            };
 
         // SPEC-a70a1ece: Capture startup context
-        let header_ctx = get_header_context(&repo_root);
-        let startup_branch = header_ctx.branch_name;
-        let bare_name = header_ctx.bare_name; // T506: Capture bare repo name
+        // For bare projects, use the bare repo path; otherwise use repo_root
+        let (startup_branch, bare_name) = if let Some(ref bare_path) = bare_repo_path {
+            // Bare project: no startup branch, get bare name from path
+            let name = bare_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string());
+            (None, name)
+        } else {
+            let header_ctx = get_header_context(&repo_root);
+            (header_ctx.branch_name, header_ctx.bare_name)
+        };
 
         let (agent_mode_tx, agent_mode_rx) = mpsc::channel();
 
@@ -3899,6 +3905,13 @@ impl Model {
                             Ok(Ok(())) => {
                                 self.migration_dialog.phase = MigrationDialogPhase::Completed;
                                 self.migration_rx = None;
+                                // SPEC-a70a1ece: Update repo_type to Bare after successful migration
+                                self.repo_type = RepoType::Bare;
+                                // Update bare_name from migration config
+                                if let Some(ref config) = self.migration_dialog.config {
+                                    self.bare_name = Some(config.bare_repo_name.clone());
+                                }
+                                self.startup_branch = None;
                             }
                             Ok(Err(e)) => {
                                 self.migration_dialog.phase = MigrationDialogPhase::Failed;
