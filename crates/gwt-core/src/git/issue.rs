@@ -139,7 +139,7 @@ fn parse_repo_slug_from_remote_url(remote_url: &str) -> Option<String> {
 
     if let Some(rest) = trimmed.split("://").nth(1) {
         // Strip userinfo if present (e.g., git@host)
-        let rest = rest.split('@').last().unwrap_or(rest);
+        let rest = rest.rsplit_once('@').map(|(_, host)| host).unwrap_or(rest);
         let path_idx = rest.find('/').or_else(|| rest.find(':'))?;
         let path = &rest[path_idx + 1..];
         return normalize_repo_slug(path);
@@ -619,8 +619,7 @@ mod tests {
 
     #[test]
     fn test_parse_repo_slug_https() {
-        let slug =
-            parse_repo_slug_from_remote_url("https://github.com/user/repo.git").unwrap();
+        let slug = parse_repo_slug_from_remote_url("https://github.com/user/repo.git").unwrap();
         assert_eq!(slug, "user/repo");
     }
 
