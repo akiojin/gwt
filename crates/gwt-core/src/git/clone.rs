@@ -133,6 +133,55 @@ pub fn clone_bare(config: &CloneConfig) -> Result<std::path::PathBuf> {
 
     info!(path = %bare_path.display(), "Repository cloned successfully");
 
+    // SPEC-a70a1ece: For shallow clones, fetch all branch references
+    // Shallow clone only downloads the default branch. We need to configure
+    // the remote to track all branches and fetch their references.
+    if config.depth.is_some() {
+        debug!(
+            path = %bare_path.display(),
+            "Fetching all branch references for shallow clone"
+        );
+
+        // Configure remote to track all branches
+        let config_output = Command::new("git")
+            .args(["config", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"])
+            .current_dir(&bare_path)
+            .output()
+            .map_err(|e| GwtError::GitOperationFailed {
+                operation: "config".to_string(),
+                details: format!("Failed to configure remote fetch: {}", e),
+            })?;
+
+        if !config_output.status.success() {
+            debug!(
+                stderr = %String::from_utf8_lossy(&config_output.stderr),
+                "Failed to configure remote fetch, continuing anyway"
+            );
+        }
+
+        // Fetch all branch references with shallow depth
+        let fetch_output = Command::new("git")
+            .args(["fetch", "--depth=1", "origin"])
+            .current_dir(&bare_path)
+            .output()
+            .map_err(|e| GwtError::GitOperationFailed {
+                operation: "fetch".to_string(),
+                details: format!("Failed to fetch branch references: {}", e),
+            })?;
+
+        if !fetch_output.status.success() {
+            debug!(
+                stderr = %String::from_utf8_lossy(&fetch_output.stderr),
+                "Failed to fetch branch references, continuing anyway"
+            );
+        } else {
+            info!(
+                path = %bare_path.display(),
+                "Fetched all branch references successfully"
+            );
+        }
+    }
+
     Ok(bare_path)
 }
 
