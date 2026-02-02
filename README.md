@@ -145,7 +145,7 @@ The tool presents an interactive interface with the following options:
 |-----|--------|
 | `Enter` | Focus existing agent pane / Show hidden pane / Open wizard |
 | `d` | Delete agent pane (with confirmation) |
-| `v` | Toggle agent pane visibility (show/hide) |
+| `v` | Open GitView (git status details for selected branch) |
 | `Space` | Select/Deselect branch |
 | `Up/Down` | Navigate branches |
 | `PageUp/PageDown` | Page navigation |
@@ -166,6 +166,20 @@ Mouse:
 |-----|--------|
 | `Esc` | Exit filter mode |
 | Type | Filter branches by name |
+
+### GitView Screen
+
+The GitView screen shows detailed git status for a branch, including files and recent commits.
+
+| Key | Action |
+|-----|--------|
+| `Up/Down` | Navigate files and commits |
+| `Space` | Expand/collapse file diff or commit details |
+| `Enter` | Open PR link in browser (when focused on header) |
+| `v` / `Esc` | Return to branch list |
+
+Mouse:
+- Click on the PR link in the header to open it in your browser.
 
 ## Status Icons Legend
 
