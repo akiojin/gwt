@@ -5,6 +5,9 @@
 use std::path::Path;
 use std::process::Command;
 
+use super::remote::Remote;
+use super::repository::{find_bare_repo_in_dir, is_git_repo};
+
 /// GitHub Issue information
 #[derive(Debug, Clone)]
 pub struct GitHubIssue {
@@ -71,17 +74,11 @@ pub fn is_gh_cli_available() -> bool {
 /// Returns issues sorted by updated_at descending (most recently updated first)
 /// Limited to 50 issues per FR-005a
 pub fn fetch_open_issues(repo_path: &Path) -> Result<Vec<GitHubIssue>, String> {
+    let repo_slug = resolve_repo_slug(repo_path);
+    let args = issue_list_args(repo_slug.as_deref());
+
     let output = Command::new("gh")
-        .args([
-            "issue",
-            "list",
-            "--state",
-            "open",
-            "--json",
-            "number,title,updatedAt",
-            "--limit",
-            "50",
-        ])
+        .args(args)
         .current_dir(repo_path)
         .output()
         .map_err(|e| format!("Failed to execute gh CLI: {}", e))?;
@@ -93,6 +90,86 @@ pub fn fetch_open_issues(repo_path: &Path) -> Result<Vec<GitHubIssue>, String> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_gh_issues_json(&stdout)
+}
+
+fn issue_list_args(repo_slug: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "issue",
+        "list",
+        "--state",
+        "open",
+        "--json",
+        "number,title,updatedAt",
+        "--limit",
+        "50",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect::<Vec<String>>();
+
+    if let Some(slug) = repo_slug {
+        args.push("--repo".to_string());
+        args.push(slug.to_string());
+    }
+
+    args
+}
+
+fn resolve_repo_slug(repo_path: &Path) -> Option<String> {
+    let candidate_repo = if is_git_repo(repo_path) {
+        Some(repo_path.to_path_buf())
+    } else {
+        find_bare_repo_in_dir(repo_path)
+    }?;
+
+    let remote = Remote::default(&candidate_repo).ok().flatten()?;
+    parse_repo_slug_from_remote_url(&remote.fetch_url)
+        .or_else(|| parse_repo_slug_from_remote_url(&remote.push_url))
+}
+
+fn parse_repo_slug_from_remote_url(remote_url: &str) -> Option<String> {
+    let trimmed = remote_url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.starts_with("file://") {
+        return None;
+    }
+
+    if let Some(rest) = trimmed.split("://").nth(1) {
+        // Strip userinfo if present (e.g., git@host)
+        let rest = rest.split('@').last().unwrap_or(rest);
+        let path_idx = rest.find('/').or_else(|| rest.find(':'))?;
+        let path = &rest[path_idx + 1..];
+        return normalize_repo_slug(path);
+    }
+
+    if let Some(at_pos) = trimmed.find('@') {
+        let after_at = &trimmed[at_pos + 1..];
+        if let Some(colon_pos) = after_at.find(':') {
+            let path = &after_at[colon_pos + 1..];
+            return normalize_repo_slug(path);
+        }
+        if let Some(slash_pos) = after_at.find('/') {
+            let path = &after_at[slash_pos + 1..];
+            return normalize_repo_slug(path);
+        }
+    }
+
+    None
+}
+
+fn normalize_repo_slug(path: &str) -> Option<String> {
+    let path = path.trim_start_matches('/').trim_end_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let mut parts = path.split('/').filter(|part| !part.is_empty());
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(format!("{}/{}", owner, repo))
 }
 
 /// Parse gh issue list JSON output
@@ -490,5 +567,94 @@ mod tests {
             "2025-01-25T10:00:00Z".to_string(),
         );
         assert_eq!(issue.display(), "#1: 日本語タイトル");
+    }
+
+    // ==========================================================
+    // FR-005d: gh issue list repo resolution tests
+    // ==========================================================
+
+    #[test]
+    fn test_issue_list_args_without_repo() {
+        let args = issue_list_args(None);
+        assert_eq!(
+            args,
+            vec![
+                "issue",
+                "list",
+                "--state",
+                "open",
+                "--json",
+                "number,title,updatedAt",
+                "--limit",
+                "50"
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<String>>()
+        );
+    }
+
+    #[test]
+    fn test_issue_list_args_with_repo() {
+        let args = issue_list_args(Some("owner/repo"));
+        assert_eq!(
+            args,
+            vec![
+                "issue",
+                "list",
+                "--state",
+                "open",
+                "--json",
+                "number,title,updatedAt",
+                "--limit",
+                "50",
+                "--repo",
+                "owner/repo"
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<String>>()
+        );
+    }
+
+    #[test]
+    fn test_parse_repo_slug_https() {
+        let slug =
+            parse_repo_slug_from_remote_url("https://github.com/user/repo.git").unwrap();
+        assert_eq!(slug, "user/repo");
+    }
+
+    #[test]
+    fn test_parse_repo_slug_https_no_git_suffix() {
+        let slug = parse_repo_slug_from_remote_url("https://github.com/user/repo").unwrap();
+        assert_eq!(slug, "user/repo");
+    }
+
+    #[test]
+    fn test_parse_repo_slug_https_trailing_slash() {
+        let slug = parse_repo_slug_from_remote_url("https://github.com/user/repo/").unwrap();
+        assert_eq!(slug, "user/repo");
+    }
+
+    #[test]
+    fn test_parse_repo_slug_ssh_scp_style() {
+        let slug = parse_repo_slug_from_remote_url("git@github.com:user/repo.git").unwrap();
+        assert_eq!(slug, "user/repo");
+    }
+
+    #[test]
+    fn test_parse_repo_slug_ssh_url() {
+        let slug = parse_repo_slug_from_remote_url("ssh://git@github.com/user/repo.git").unwrap();
+        assert_eq!(slug, "user/repo");
+    }
+
+    #[test]
+    fn test_parse_repo_slug_invalid_local_path() {
+        assert!(parse_repo_slug_from_remote_url("/tmp/repo.git").is_none());
+    }
+
+    #[test]
+    fn test_parse_repo_slug_rejects_extra_segments() {
+        assert!(parse_repo_slug_from_remote_url("https://github.com/owner/repo/extra").is_none());
     }
 }
