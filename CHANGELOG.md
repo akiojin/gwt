@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [6.25.0] - 2026-02-02
+
+### Features
+
+- **tui:** bareリポジトリ対応とマイグレーション機能 (SPEC-a70a1ece) (#862)
+
+### Bug Fixes
+
+- **codex:** 日付ベースバージョンでweb_search設定形式を変更 (#860)
+- **ci:** developブランチからのPRも自動マージ対象に追加
+- **ci:** developブランチからのmainへのPRを許可
+
+### Miscellaneous Tasks
+
+- **deps-dev:** bump @commitlint/config-conventional (#857)
+- **deps:** bump unicode-width from 0.1.14 to 0.2.2 (#858)
+- **deps-dev:** bump @commitlint/cli from 20.3.1 to 20.4.0 (#856)
+
 ## [6.24.0] - 2026-01-31
 
 ### Features
