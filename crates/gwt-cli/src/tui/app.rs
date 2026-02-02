@@ -857,6 +857,7 @@ impl Model {
     }
 
     fn start_branch_list_refresh(&mut self, settings: gwt_core::config::Settings) {
+        let cleanup_snapshot = self.branch_list.cleanup_snapshot();
         self.pr_title_rx = None;
         self.safety_rx = None;
         self.worktree_status_rx = None;
@@ -870,6 +871,7 @@ impl Model {
         branch_list.working_directory = Some(self.repo_root.display().to_string());
         branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
         branch_list.set_loading(true);
+        branch_list.restore_cleanup_snapshot(&cleanup_snapshot);
         self.branch_list = branch_list;
 
         let repo_root = self.repo_root.clone();
@@ -1860,6 +1862,7 @@ impl Model {
 
         match rx.try_recv() {
             Ok(update) => {
+                let cleanup_snapshot = self.branch_list.cleanup_snapshot();
                 let session_cache = self.branch_list.clone_session_cache();
                 let session_inflight = self.branch_list.clone_session_inflight();
                 let session_missing = self.branch_list.clone_session_missing();
@@ -1881,6 +1884,7 @@ impl Model {
                     .map(|b| b.name.clone())
                     .collect();
                 branch_list.cleanup_session_warnings(&remaining_branches);
+                branch_list.restore_cleanup_snapshot(&cleanup_snapshot);
                 self.branch_list = branch_list;
                 // SPEC-4b893dae: Update branch summary after branches are loaded
                 self.refresh_branch_summary();
@@ -7404,6 +7408,95 @@ mod tests {
                 .map(|branch| branch.name.as_str()),
             Some("feature/c")
         );
+    }
+
+    #[test]
+    fn test_refresh_data_keeps_cleanup_state() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let branches = vec![
+            sample_branch_with_session("feature/a"),
+            sample_branch_with_session("feature/b"),
+        ];
+
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.branch_list.start_cleanup_progress(2);
+        model
+            .branch_list
+            .set_cleanup_target_branches(&["feature/b".to_string()]);
+        model
+            .branch_list
+            .set_cleanup_active_branch(Some("feature/b".to_string()));
+        model.branch_list.increment_cleanup_progress();
+
+        model.update(Message::RefreshData);
+
+        assert!(model.branch_list.cleanup_in_progress());
+        assert_eq!(model.branch_list.cleanup_progress_total, 2);
+        assert_eq!(model.branch_list.cleanup_progress_done, 1);
+        assert_eq!(
+            model.branch_list.cleanup_active_branch(),
+            Some("feature/b")
+        );
+    }
+
+    #[test]
+    fn test_branch_list_update_preserves_cleanup_targets() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let branches = vec![
+            sample_branch_with_session("feature/a"),
+            sample_branch_with_session("feature/b"),
+        ];
+
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.branch_list.start_cleanup_progress(2);
+        model
+            .branch_list
+            .set_cleanup_target_branches(&["feature/b".to_string()]);
+        model
+            .branch_list
+            .set_cleanup_active_branch(Some("feature/b".to_string()));
+        model.branch_list.increment_cleanup_progress();
+
+        let (tx, rx) = mpsc::channel();
+        model.branch_list_rx = Some(rx);
+
+        let update = BranchListUpdate {
+            branches: vec![
+                sample_branch_with_session("feature/a"),
+                sample_branch_with_session("feature/b"),
+            ],
+            branch_names: Vec::new(),
+            worktree_targets: Vec::new(),
+            safety_targets: Vec::new(),
+            base_branches: Vec::new(),
+            base_branch: "main".to_string(),
+            base_branch_exists: true,
+            total_count: 2,
+            active_count: 2,
+        };
+        tx.send(update).unwrap();
+
+        model.apply_branch_list_updates();
+
+        assert!(model.branch_list.cleanup_in_progress());
+        assert_eq!(model.branch_list.cleanup_progress_total, 2);
+        assert_eq!(model.branch_list.cleanup_progress_done, 1);
+        assert_eq!(
+            model.branch_list.cleanup_active_branch(),
+            Some("feature/b")
+        );
+
+        let target_index = model
+            .branch_list
+            .filtered_indices
+            .iter()
+            .position(|&idx| model.branch_list.branches[idx].name == "feature/b")
+            .expect("cleanup branch index");
+        assert!(model.branch_list.is_cleanup_target_index(target_index));
     }
 
     #[test]
