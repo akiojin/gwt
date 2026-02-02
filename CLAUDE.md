@@ -88,11 +88,11 @@
 ## リリースワークフロー
 
 - feature/\* ブランチは develop への PR を作成し、オーナー承認後にマージする。develop で次回リリース候補を蓄積する。
-- `/release` コマンド（または `gh workflow run prepare-release.yml --ref develop`）で Release PR を作成:
+- `/release` コマンドで Release PR を作成:
   - Conventional Commits を解析してバージョン自動判定（feat→minor, fix→patch, !→major）
   - git-cliff で CHANGELOG.md を更新
   - Cargo.toml, package.json のバージョンを更新
-  - release/YYYYMMDD-HHMMSS ブランチから main への PR を作成
+  - develop → main への PR を作成（リリースブランチは作成しない）
 - Release PR が main にマージされると `.github/workflows/release.yml` が以下を自動実行:
   - タグ・GitHub Release を作成
   - クロスコンパイル済みバイナリを GitHub Release にアップロード
