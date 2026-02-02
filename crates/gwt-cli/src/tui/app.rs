@@ -3913,9 +3913,11 @@ impl Model {
                                 self.migration_rx = None;
                                 // SPEC-a70a1ece: Update repo_type to Bare after successful migration
                                 self.repo_type = RepoType::Bare;
-                                // Update bare_name from migration config
+                                // Update bare_name and bare_repo_path from migration config
                                 if let Some(ref config) = self.migration_dialog.config {
                                     self.bare_name = Some(config.bare_repo_name.clone());
+                                    self.bare_repo_path =
+                                        Some(self.repo_root.join(&config.bare_repo_name));
                                 }
                                 self.startup_branch = None;
                             }
