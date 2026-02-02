@@ -172,3 +172,4 @@
 - SPEC-1ea18899: 追加: Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, serde, serde_json, chrono
 - SPEC-a70a1ece: 追加: Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, serde, serde_json, chrono
 - SPEC-71f2742d: 追加: Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, serde, serde_json, chrono, directories
+- SPEC-ba3f610c: 追加: Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, reqwest (blocking), serde_json, chrono, tracing
