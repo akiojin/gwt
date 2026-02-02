@@ -1768,8 +1768,9 @@ impl Model {
         };
 
         // Get worktree list synchronously for matching
-        let worktrees: Vec<(String, std::path::PathBuf)> =
-            match WorktreeManager::new(&self.repo_root) {
+        // SPEC-a70a1ece: Use bare repo path for worktree operations in bare projects
+        let git_path = self.bare_repo_path.as_ref().unwrap_or(&self.repo_root);
+        let worktrees: Vec<(String, std::path::PathBuf)> = match WorktreeManager::new(git_path) {
                 Ok(manager) => match manager.list_basic() {
                     Ok(wts) => wts
                         .into_iter()
@@ -4787,7 +4788,11 @@ impl Model {
         // Clear launch_status since modal is showing (FR-057)
         self.launch_status = None;
 
-        let repo_root = self.repo_root.clone();
+        // SPEC-a70a1ece: Use bare repo path for worktree operations in bare projects
+        let repo_root = self
+            .bare_repo_path
+            .clone()
+            .unwrap_or_else(|| self.repo_root.clone());
         let (tx, rx) = mpsc::channel();
         self.launch_rx = Some(rx);
 
@@ -5406,7 +5411,11 @@ impl Model {
         self.branch_list.set_cleanup_target_branches(branches);
         self.branch_list.set_cleanup_active_branch(None);
 
-        let repo_root = self.repo_root.clone();
+        // SPEC-a70a1ece: Use bare repo path for worktree operations in bare projects
+        let repo_root = self
+            .bare_repo_path
+            .clone()
+            .unwrap_or_else(|| self.repo_root.clone());
         let (tx, rx) = mpsc::channel();
         self.cleanup_rx = Some(rx);
 
@@ -6387,7 +6396,9 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
     // Get pending agent launch before cleanup
     let pending_launch = model.pending_agent_launch.take();
 
-    auto_cleanup_orphans_on_exit(&model.repo_root, pending_launch.is_some());
+    // SPEC-a70a1ece: Use bare repo path for worktree operations in bare projects
+    let cleanup_path = model.bare_repo_path.as_ref().unwrap_or(&model.repo_root);
+    auto_cleanup_orphans_on_exit(cleanup_path, pending_launch.is_some());
 
     // Cleanup agent panes on exit (tmux multi-mode)
     if model.tmux_mode.is_multi() && !model.agent_panes.is_empty() {
