@@ -700,6 +700,30 @@ fn cmd_config(action: ConfigAction, repo_root: &Path) -> Result<(), GwtError> {
                 );
             }
 
+            // Session history
+            let session_toml = gwt_core::config::get_ts_session_toml_path(repo_root);
+            let session_json = gwt_core::config::get_ts_session_json_path(repo_root);
+            let session_toml_status = if session_toml.exists() {
+                "exists"
+            } else {
+                "not found"
+            };
+            let session_json_status = if session_json.exists() {
+                "exists"
+            } else {
+                "not found"
+            };
+            println!(
+                "  Session (TOML):    {} [{}]",
+                session_toml.display(),
+                session_toml_status
+            );
+            println!(
+                "  Session (JSON):    {} [{}]",
+                session_json.display(),
+                session_json_status
+            );
+
             println!("\nLocal config locations ({})", repo_root.display());
 
             // Local Settings
@@ -801,6 +825,10 @@ fn cmd_config(action: ConfigAction, repo_root: &Path) -> Result<(), GwtError> {
                 println!("  - Settings: path migration needed (~/.config/gwt/ → ~/.gwt/)");
                 needs_migration = true;
             }
+            if gwt_core::config::needs_ts_session_migration(repo_root) {
+                println!("  - Session history: migration needed (JSON → TOML)");
+                needs_migration = true;
+            }
 
             if !needs_migration {
                 println!("  All config files are up to date.");
@@ -874,6 +902,16 @@ fn cmd_config(action: ConfigAction, repo_root: &Path) -> Result<(), GwtError> {
                 }
                 Ok(false) => {}
                 Err(e) => eprintln!("  Failed to migrate settings path: {}", e),
+            }
+
+            // Session history
+            match gwt_core::config::migrate_ts_session_if_needed(repo_root) {
+                Ok(true) => {
+                    println!("  Migrated: session history (JSON → TOML)");
+                    migrated += 1;
+                }
+                Ok(false) => {}
+                Err(e) => eprintln!("  Failed to migrate session history: {}", e),
             }
 
             if migrated == 0 {

@@ -34,8 +34,9 @@ pub use session::{get_session_for_branch, load_sessions_from_worktrees, AgentSta
 pub use settings::Settings;
 pub use tools::{AgentType, CustomCodingAgent, ModeArgs, ModelDef, ToolsConfig};
 pub use ts_session::{
-    get_branch_tool_history, get_last_tool_usage_map, get_ts_session_path, load_ts_session,
-    save_session_entry, ToolSessionEntry, TsSessionData,
+    get_branch_tool_history, get_last_tool_usage_map, get_ts_session_json_path,
+    get_ts_session_path, get_ts_session_toml_path, load_ts_session, migrate_ts_session_if_needed,
+    needs_ts_session_migration, save_session_entry, ToolSessionEntry, TsSessionData,
 };
 
 #[cfg(test)]
