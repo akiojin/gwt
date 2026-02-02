@@ -466,6 +466,15 @@ pub struct BranchListState {
     detail_links: Vec<LinkRegion>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CleanupStateSnapshot {
+    pub in_progress: bool,
+    pub progress_total: usize,
+    pub progress_done: usize,
+    pub active_branch: Option<String>,
+    pub target_branches: Vec<String>,
+}
+
 impl Default for BranchListState {
     fn default() -> Self {
         Self {
@@ -1079,6 +1088,34 @@ impl BranchListState {
         self.cleanup_progress_done = 0;
         self.cleanup_active_branch = None;
         self.cleanup_target_branches.clear();
+    }
+
+    pub fn cleanup_snapshot(&self) -> CleanupStateSnapshot {
+        let mut target_branches: Vec<String> =
+            self.cleanup_target_branches.iter().cloned().collect();
+        target_branches.sort();
+        CleanupStateSnapshot {
+            in_progress: self.cleanup_in_progress,
+            progress_total: self.cleanup_progress_total,
+            progress_done: self.cleanup_progress_done,
+            active_branch: self.cleanup_active_branch.clone(),
+            target_branches,
+        }
+    }
+
+    pub fn restore_cleanup_snapshot(&mut self, snapshot: &CleanupStateSnapshot) {
+        if !snapshot.in_progress {
+            self.finish_cleanup_progress();
+            return;
+        }
+        self.cleanup_in_progress = true;
+        self.cleanup_progress_total = snapshot.progress_total;
+        self.cleanup_progress_done = snapshot.progress_done;
+        self.cleanup_active_branch = snapshot.active_branch.clone();
+        self.cleanup_target_branches.clear();
+        self.cleanup_target_branches
+            .extend(snapshot.target_branches.iter().cloned());
+        self.move_selection_off_cleanup_target();
     }
 
     pub fn increment_cleanup_progress(&mut self) {
