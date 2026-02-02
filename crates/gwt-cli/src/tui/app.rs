@@ -7435,10 +7435,7 @@ mod tests {
         assert!(model.branch_list.cleanup_in_progress());
         assert_eq!(model.branch_list.cleanup_progress_total, 2);
         assert_eq!(model.branch_list.cleanup_progress_done, 1);
-        assert_eq!(
-            model.branch_list.cleanup_active_branch(),
-            Some("feature/b")
-        );
+        assert_eq!(model.branch_list.cleanup_active_branch(), Some("feature/b"));
     }
 
     #[test]
@@ -7485,10 +7482,7 @@ mod tests {
         assert!(model.branch_list.cleanup_in_progress());
         assert_eq!(model.branch_list.cleanup_progress_total, 2);
         assert_eq!(model.branch_list.cleanup_progress_done, 1);
-        assert_eq!(
-            model.branch_list.cleanup_active_branch(),
-            Some("feature/b")
-        );
+        assert_eq!(model.branch_list.cleanup_active_branch(), Some("feature/b"));
 
         let target_index = model
             .branch_list
