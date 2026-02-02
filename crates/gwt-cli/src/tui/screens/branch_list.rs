@@ -1034,6 +1034,10 @@ impl BranchListState {
         } else {
             WorktreeStatus::Inaccessible
         };
+        // SPEC-a70a1ece FR-170: For bare repos, branch with worktree becomes Local
+        if item.branch_type == BranchType::Remote {
+            item.branch_type = BranchType::Local;
+        }
         item.update_safety_status();
 
         self.stats.worktree_count = self.branches.iter().filter(|b| b.has_worktree).count();
