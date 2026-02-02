@@ -2073,6 +2073,15 @@ fn render_session_panel(
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
+    // Show active status line (cleanup/status progress) at top if present
+    if let Some(status_line) = state.active_status_line() {
+        lines.push(Line::from(Span::styled(
+            status_line,
+            Style::default().fg(Color::Yellow),
+        )));
+        lines.push(Line::from(""));
+    }
+
     if state.is_loading {
         lines.push(Line::from(vec![
             Span::styled(
