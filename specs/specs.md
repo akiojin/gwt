@@ -7,7 +7,7 @@
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
-| [SPEC-a70a1ece](SPEC-a70a1ece/spec.md) | 機能仕様: bareリポジトリ対応とヘッダーブランチ表示 | 2026-02-01 |
+| [SPEC-1ea18899](SPEC-1ea18899/spec.md) | 機能仕様: [機能名] | [日付] |
 | [SPEC-fdebd681](SPEC-fdebd681/spec.md) | Codex collaboration_modes Support | - |
 | [SPEC-f8dab6e2](SPEC-f8dab6e2/spec.md) | 機能仕様: Claude Code プラグインマーケットプレイス自動登録 | 2026-01-30 |
 | [SPEC-f59c553d](SPEC-f59c553d/spec.md) | 機能仕様: npm postinstall ダウンロード安定化 | 2026-01-26 |
@@ -23,6 +23,7 @@
 | [SPEC-b9f5c4a1](SPEC-b9f5c4a1/spec.md) | ログ運用統一仕様 | 2025-12-11 |
 | [SPEC-b7bde3ff](SPEC-b7bde3ff/spec.md) | 機能仕様: tmuxマルチモードサポート | 2026-01-18 |
 | [SPEC-b0b1b0b1](SPEC-b0b1b0b1/spec.md) | 機能仕様: AIツール終了時の未コミット警告と未プッシュ確認 | 2025-12-20 |
+| [SPEC-a70a1ece](SPEC-a70a1ece/spec.md) | 機能仕様: bareリポジトリ対応とヘッダーブランチ表示 | 2026-02-01 |
 | [SPEC-a0d7334d](SPEC-a0d7334d/spec.md) | 機能仕様: Dependabot PR の向き先を develop に固定 | 2025-12-22 |
 | [SPEC-96e694b4](SPEC-96e694b4/spec.md) | 機能仕様: Codex CLI gpt-5.2-codex 対応 | 2025-12-18 |
 | [SPEC-925c010b](SPEC-925c010b/spec.md) | 機能仕様: Docker Compose の Playwright noVNC を arm64 で起動可能にする | 2026-01-17 |
