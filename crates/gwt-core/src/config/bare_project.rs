@@ -112,7 +112,23 @@ impl BareProjectConfig {
                 "Loading bare project config from JSON (legacy)"
             );
             match Self::load_from_json(&json_path) {
-                Ok(config) => return Ok(Some(config)),
+                Ok(config) => {
+                    // Auto-migrate: save as TOML for next time (SPEC-a3f4c9df)
+                    if let Err(e) = config.save(project_root) {
+                        warn!(
+                            category = "config",
+                            error = %e,
+                            "Failed to auto-migrate project.json to TOML"
+                        );
+                    } else {
+                        info!(
+                            category = "config",
+                            operation = "auto_migrate",
+                            "Auto-migrated project.json to project.toml"
+                        );
+                    }
+                    return Ok(Some(config));
+                }
                 Err(e) => {
                     warn!(
                         category = "config",

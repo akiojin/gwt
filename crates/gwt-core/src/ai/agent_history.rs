@@ -106,7 +106,15 @@ impl AgentHistoryStore {
                     "Loading agent history from JSON (legacy): {}",
                     json_path.display()
                 );
-                return Self::load_from_json(&json_path);
+                if let Ok(store) = Self::load_from_json(&json_path) {
+                    // Auto-migrate: save as TOML for next time (SPEC-a3f4c9df)
+                    if let Err(e) = store.save() {
+                        warn!("Failed to auto-migrate agent history to TOML: {}", e);
+                    } else {
+                        info!("Auto-migrated agent-history.json to agent-history.toml");
+                    }
+                    return Ok(store);
+                }
             }
         }
 

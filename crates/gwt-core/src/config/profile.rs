@@ -207,6 +207,20 @@ impl ProfilesConfig {
             match Self::load_yaml(&yaml_path) {
                 Ok(mut config) => {
                     config.ensure_defaults();
+                    // Auto-migrate: save as TOML for next time (SPEC-a3f4c9df)
+                    if let Err(e) = config.save() {
+                        warn!(
+                            category = "config",
+                            error = %e,
+                            "Failed to auto-migrate profiles to TOML"
+                        );
+                    } else {
+                        info!(
+                            category = "config",
+                            operation = "auto_migrate",
+                            "Auto-migrated profiles.yaml to profiles.toml"
+                        );
+                    }
                     return Ok(config);
                 }
                 Err(e) => {

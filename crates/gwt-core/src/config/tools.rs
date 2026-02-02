@@ -137,6 +137,7 @@ impl ToolsConfig {
     /// Load global tools config with format auto-detection (SPEC-a3f4c9df FR-005)
     ///
     /// Priority: TOML > JSON
+    /// Auto-migrates JSON to TOML on load
     pub fn load_global() -> Option<Self> {
         // Try TOML first
         if let Some(toml_path) = Self::global_toml_path() {
@@ -147,10 +148,26 @@ impl ToolsConfig {
             }
         }
 
-        // Fall back to JSON
+        // Fall back to JSON and auto-migrate
         if let Some(json_path) = Self::global_json_path() {
             if json_path.exists() {
-                return Self::load_from_json(&json_path);
+                if let Some(config) = Self::load_from_json(&json_path) {
+                    // Auto-migrate: save as TOML for next time (SPEC-a3f4c9df)
+                    if let Err(e) = config.save_global() {
+                        tracing::warn!(
+                            category = "config",
+                            error = %e,
+                            "Failed to auto-migrate global tools.json to TOML"
+                        );
+                    } else {
+                        tracing::info!(
+                            category = "config",
+                            operation = "auto_migrate",
+                            "Auto-migrated global tools.json to tools.toml"
+                        );
+                    }
+                    return Some(config);
+                }
             }
         }
 
@@ -160,6 +177,7 @@ impl ToolsConfig {
     /// Load local tools config from repository root with format auto-detection
     ///
     /// Priority: TOML > JSON
+    /// Auto-migrates JSON to TOML on load
     pub fn load_local(repo_root: &Path) -> Option<Self> {
         // Try TOML first
         let toml_path = Self::local_toml_path(repo_root);
@@ -169,10 +187,26 @@ impl ToolsConfig {
             }
         }
 
-        // Fall back to JSON
+        // Fall back to JSON and auto-migrate
         let json_path = Self::local_json_path(repo_root);
         if json_path.exists() {
-            return Self::load_from_json(&json_path);
+            if let Some(config) = Self::load_from_json(&json_path) {
+                // Auto-migrate: save as TOML for next time (SPEC-a3f4c9df)
+                if let Err(e) = config.save(&toml_path) {
+                    tracing::warn!(
+                        category = "config",
+                        error = %e,
+                        "Failed to auto-migrate local tools.json to TOML"
+                    );
+                } else {
+                    tracing::info!(
+                        category = "config",
+                        operation = "auto_migrate",
+                        "Auto-migrated local tools.json to tools.toml"
+                    );
+                }
+                return Some(config);
+            }
         }
 
         None

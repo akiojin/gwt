@@ -311,15 +311,30 @@ pub fn load_ts_session(repo_root: &Path) -> Option<TsSessionData> {
         }
     }
 
-    // Fallback to JSON (legacy format)
+    // Fallback to JSON (legacy format) and auto-migrate
     let json_path = get_ts_session_json_path(repo_root);
     if let Ok(content) = std::fs::read_to_string(&json_path) {
-        if let Ok(session) = serde_json::from_str(&content) {
+        if let Ok(session) = serde_json::from_str::<TsSessionData>(&content) {
             debug!(
                 category = "config",
                 path = %json_path.display(),
                 "Loaded session from JSON (legacy)"
             );
+            // Auto-migrate: save as TOML for next time (SPEC-a3f4c9df)
+            if let Ok(toml_content) = toml::to_string_pretty(&session) {
+                if let Some(parent) = toml_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if crate::config::write_atomic(&toml_path, &toml_content).is_ok() {
+                    info!(
+                        category = "config",
+                        operation = "auto_migrate",
+                        "Auto-migrated session history JSON to TOML"
+                    );
+                    // Return from TOML path after migration
+                    return Some(normalize_and_persist_session(toml_path, session, true));
+                }
+            }
             return Some(normalize_and_persist_session(json_path, session, false));
         }
     }
@@ -964,8 +979,11 @@ mod tests {
         assert_eq!(loaded.last_used_tool.as_deref(), Some("claude-code"));
         assert_eq!(loaded.history[0].tool_id, "codex-cli");
 
-        let updated = std::fs::read_to_string(&session_path).unwrap();
-        let updated_session: TsSessionData = serde_json::from_str(&updated).unwrap();
+        // After auto-migration, TOML file should exist with canonical IDs
+        let toml_path = get_ts_session_toml_path(&repo_root);
+        assert!(toml_path.exists(), "TOML file should be created by auto-migration");
+        let updated = std::fs::read_to_string(&toml_path).unwrap();
+        let updated_session: TsSessionData = toml::from_str(&updated).unwrap();
         assert_eq!(
             updated_session.last_used_tool.as_deref(),
             Some("claude-code")

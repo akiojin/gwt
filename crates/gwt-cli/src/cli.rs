@@ -138,32 +138,6 @@ pub enum Commands {
         action: HookAction,
     },
 
-    /// Manage gwt configuration (SPEC-a3f4c9df)
-    Config {
-        #[command(subcommand)]
-        action: ConfigAction,
-    },
-}
-
-/// Config subcommands (SPEC-a3f4c9df)
-#[derive(Subcommand, Debug)]
-pub enum ConfigAction {
-    /// Clean up old config files after migration (SPEC-a3f4c9df FR-011)
-    Cleanup {
-        /// Dry run (show what would be cleaned without deleting)
-        #[arg(short, long)]
-        dry_run: bool,
-    },
-
-    /// Show current config file locations and status
-    Status,
-
-    /// Migrate config files to new format/location
-    Migrate {
-        /// Force migration even if new files exist
-        #[arg(short, long)]
-        force: bool,
-    },
 }
 
 /// Hook subcommands (SPEC-861d8cdf FR-101, T-102)

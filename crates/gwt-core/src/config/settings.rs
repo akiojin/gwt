@@ -14,7 +14,7 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Application settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +105,28 @@ impl Settings {
         );
 
         auto_migrate(repo_root)?;
+
+        // Auto-migrate global path if needed (SPEC-a3f4c9df)
+        if Self::needs_global_path_migration() {
+            match Self::migrate_global_path_if_needed() {
+                Ok(true) => {
+                    info!(
+                        category = "config",
+                        operation = "auto_migrate",
+                        "Auto-migrated global config from ~/.config/gwt/ to ~/.gwt/"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        category = "config",
+                        error = %e,
+                        "Failed to auto-migrate global config path"
+                    );
+                }
+                _ => {}
+            }
+        }
+
         let config_path = Self::find_config_file(repo_root);
 
         let mut figment = Figment::new().merge(Toml::string(&Self::default_toml()));
