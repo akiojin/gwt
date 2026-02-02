@@ -107,8 +107,8 @@ US3 (ワークツリーなし)  ─┘
 
 - [x] **T202** [US2] T119の後に `crates/gwt-cli/src/tui/screens/git_view.rs` の render_header() にPRリンク表示とLinkRegion設定を追加
 - [x] **T203** [US2] T202の後に `crates/gwt-cli/src/tui/app.rs` の handle_key_event で GitView 画面の Enter キー処理を追加（リンク開く）
-- [ ] **T204** [US2] T203の後に `crates/gwt-cli/src/tui/app.rs` に handle_gitview_mouse() 関数を追加（マウスクリックでリンク開く）
-- [ ] **T205** [US2] T204の後に `crates/gwt-cli/src/tui/app.rs` の handle_mouse_event で Screen::GitView の分岐を追加
+- [x] **T204** [US2] T203の後に `crates/gwt-cli/src/tui/app.rs` に handle_gitview_mouse() 関数を追加（マウスクリックでリンク開く）
+- [x] **T205** [US2] T204の後に `crates/gwt-cli/src/tui/app.rs` の handle_mouse_event で Screen::GitView の分岐を追加
 
 **✅ MVP2チェックポイント**: US2完了後、PRリンクをクリックまたはEnterでブラウザで開ける
 

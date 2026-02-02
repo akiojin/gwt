@@ -2891,6 +2891,30 @@ impl Model {
         }
     }
 
+    /// SPEC-1ea18899: Handle mouse events for GitView screen (FR-007)
+    fn handle_gitview_mouse(&mut self, mouse: MouseEvent) {
+        if !matches!(self.screen, Screen::GitView) {
+            return;
+        }
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+
+        // Check if click is within PR link region
+        if let Some(ref link_region) = self.git_view.pr_link_region {
+            let x = mouse.column;
+            let y = mouse.row;
+            if y == link_region.area.y
+                && x >= link_region.area.x
+                && x < link_region.area.x + link_region.area.width
+            {
+                // Click on PR link - open in browser
+                let url = link_region.url.clone();
+                self.open_url(&url);
+            }
+        }
+    }
+
     /// Handle mouse events for the error popup
     fn handle_error_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
@@ -6503,6 +6527,8 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
                                             model.handle_environment_mouse(mouse)
                                         }
                                         Screen::Logs => model.handle_logs_mouse(mouse),
+                                        // SPEC-1ea18899: GitView mouse handling (FR-007)
+                                        Screen::GitView => model.handle_gitview_mouse(mouse),
                                         _ => {}
                                     }
                                 }
