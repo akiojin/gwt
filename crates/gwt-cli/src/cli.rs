@@ -137,7 +137,6 @@ pub enum Commands {
         #[command(subcommand)]
         action: HookAction,
     },
-
 }
 
 /// Hook subcommands (SPEC-861d8cdf FR-101, T-102)

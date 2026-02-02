@@ -981,7 +981,10 @@ mod tests {
 
         // After auto-migration, TOML file should exist with canonical IDs
         let toml_path = get_ts_session_toml_path(&repo_root);
-        assert!(toml_path.exists(), "TOML file should be created by auto-migration");
+        assert!(
+            toml_path.exists(),
+            "TOML file should be created by auto-migration"
+        );
         let updated = std::fs::read_to_string(&toml_path).unwrap();
         let updated_session: TsSessionData = toml::from_str(&updated).unwrap();
         assert_eq!(
