@@ -73,9 +73,9 @@ US3 (ワークツリーなし)  ─┘
 
 ### Detailsパネル削除（US4）
 
-- [ ] **T120** [US4] `crates/gwt-cli/src/tui/screens/branch_list.rs` の render_branch_list() から Detailsパネルのレイアウト分割を削除
-- [ ] **T121** [US4] T120の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` の render_summary_panels() を修正し Sessionパネルのみ表示
-- [ ] **T122** [US4] T121の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` から render_details_panel() 関数を削除またはコメントアウト
+- [x] **T120** [US4] `crates/gwt-cli/src/tui/screens/branch_list.rs` の render_branch_list() から Detailsパネルのレイアウト分割を削除
+- [x] **T121** [US4] T120の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` の render_summary_panels() を修正し Sessionパネルのみ表示
+- [x] **T122** [US4] T121の後に `crates/gwt-cli/src/tui/screens/branch_list.rs` から render_details_panel() 関数を削除またはコメントアウト
 
 ### データ取得
 

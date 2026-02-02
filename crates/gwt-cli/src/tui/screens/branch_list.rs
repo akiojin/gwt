@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use crate::tui::components::{LinkRegion, SummaryLinks};
+use crate::tui::components::LinkRegion;
 use gwt_core::ai::SessionSummaryCache;
 use gwt_core::config::AgentStatus;
 use gwt_core::git::{Branch, BranchMeta, BranchSummary, DivergenceStatus, Repository};
@@ -1508,14 +1508,14 @@ pub fn render_branch_list(
     status_message: Option<&str>,
     has_focus: bool,
 ) {
-    // SPEC-4b893dae: Summary panel height is 12 lines (FR-003)
+    // SPEC-1ea18899 US4: Changed from 3-pane to 2-pane layout (removed Details panel)
+    // Use 'v' key to open GitView for detailed branch info
     let panel_height = crate::tui::components::SummaryPanel::height();
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(panel_height), // Branch list
-            Constraint::Length(panel_height), // Details panel
             Constraint::Min(6),               // Session panel
         ])
         .split(area);
@@ -1524,7 +1524,9 @@ pub fn render_branch_list(
     state.update_list_area(chunks[0]);
 
     render_branches(state, frame, chunks[0], has_focus);
-    render_summary_panels(state, frame, chunks[1], chunks[2], status_message);
+    // SPEC-1ea18899 US4: Only render Session panel (Details panel removed)
+    state.clear_detail_links();
+    render_session_panel(state, frame, chunks[1], status_message);
 }
 
 /// Build the unified status bar line for the bottom status bar (FR-093~FR-096).
@@ -2005,18 +2007,7 @@ fn render_branch_row(
     ListItem::new(Line::from(spans)).style(style)
 }
 
-/// Render summary panel (SPEC-4b893dae FR-001~FR-006)
-fn render_summary_panels(
-    state: &mut BranchListState,
-    frame: &mut Frame,
-    details_area: Rect,
-    session_area: Rect,
-    status_message: Option<&str>,
-) {
-    render_details_panel(state, frame, details_area, status_message);
-    state.clear_detail_links();
-    render_session_panel(state, frame, session_area, status_message);
-}
+// SPEC-1ea18899 US4: render_summary_panels removed (use GitView for details)
 
 fn panel_title_line(label: &str) -> Line<'static> {
     Line::from(Span::styled(
@@ -2061,119 +2052,7 @@ fn session_scrollbar_content_length(total_lines: usize, viewport_len: usize) -> 
     total_lines.saturating_sub(viewport_len).saturating_add(1)
 }
 
-fn build_summary_links(repo_web_url: Option<&String>, branch: Option<&BranchItem>) -> SummaryLinks {
-    let Some(branch) = branch else {
-        return SummaryLinks::default();
-    };
-
-    let branch_url = repo_web_url.and_then(|base| {
-        let base = base.trim_end_matches('/');
-        let normalized = normalize_branch_name_for_url(&branch.name);
-        if normalized.is_empty() {
-            None
-        } else {
-            Some(format!("{}/tree/{}", base, normalized))
-        }
-    });
-
-    let pr_url = branch.pr_url.clone().or_else(|| {
-        repo_web_url.and_then(|base| {
-            branch
-                .pr_number
-                .map(|n| format!("{}/pull/{}", base.trim_end_matches('/'), n))
-        })
-    });
-
-    SummaryLinks { branch_url, pr_url }
-}
-
-fn normalize_branch_name_for_url(branch_name: &str) -> String {
-    if let Some(stripped) = branch_name.strip_prefix("remotes/") {
-        if let Some((_, name)) = stripped.split_once('/') {
-            return name.to_string();
-        }
-        return stripped.to_string();
-    }
-    branch_name.to_string()
-}
-
-fn render_details_panel(
-    state: &mut BranchListState,
-    frame: &mut Frame,
-    area: Rect,
-    _status_message: Option<&str>,
-) {
-    use crate::tui::components::SummaryPanel;
-    use std::path::PathBuf;
-
-    state.clear_detail_links();
-
-    // Create or get branch summary
-    let summary = if let Some(ref summary) = state.branch_summary {
-        summary.clone()
-    } else if let Some(branch) = state.selected_branch() {
-        // Create a basic summary from available branch data
-        let mut summary = BranchSummary::new(&branch.name);
-
-        // Set worktree path if available
-        if let Some(wt_path) = &branch.worktree_path {
-            summary = summary.with_worktree_path(Some(PathBuf::from(wt_path)));
-        }
-
-        // Set loading state based on global loading state
-        if state.is_loading {
-            summary.loading.commits = true;
-            summary.loading.stats = true;
-            summary.loading.meta = true;
-        }
-
-        summary
-    } else {
-        // No branch selected - show empty panel
-        BranchSummary::new("(no branch selected)")
-    };
-
-    // Handle loading state - show spinner in panel
-    if state.is_loading {
-        let title = panel_title_line("Details");
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::White))
-            .title(title)
-            .padding(Padding::new(PANEL_PADDING_X, PANEL_PADDING_X, 0, 0));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
-        let line = Line::from(vec![
-            Span::styled(
-                format!("{} ", state.spinner_char()),
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::styled(
-                "Loading branch information...",
-                Style::default().fg(Color::Yellow),
-            ),
-        ]);
-        frame.render_widget(Paragraph::new(line), inner);
-        return;
-    }
-
-    let selected_branch = state.selected_branch().cloned();
-    let links = build_summary_links(state.repo_web_url(), selected_branch.as_ref());
-
-    // Get progress status line if active
-    let status_line = state.active_status_line();
-
-    // Render the full summary panel with optional status line
-    let panel = SummaryPanel::new(&summary)
-        .with_tick(state.spinner_frame)
-        .with_title(panel_title_line("Details"))
-        .with_links(links)
-        .with_status_line(status_line);
-
-    let link_regions = panel.render_with_links(frame, area);
-    state.set_detail_links(link_regions);
-}
+// SPEC-1ea18899 US4: build_summary_links, normalize_branch_name_for_url, render_details_panel removed
 
 fn render_session_panel(
     state: &mut BranchListState,
