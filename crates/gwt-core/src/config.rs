@@ -5,7 +5,7 @@
 mod bare_project;
 mod claude_hooks;
 mod claude_plugins;
-mod migration;
+pub mod migration;
 mod profile;
 mod session;
 mod settings;
@@ -25,7 +25,10 @@ pub use claude_plugins::{
     register_gwt_marketplace, register_gwt_marketplace_at, setup_gwt_plugin, GWT_MARKETPLACE_NAME,
     GWT_MARKETPLACE_REPO, GWT_MARKETPLACE_SOURCE, GWT_PLUGIN_FULL_NAME, GWT_PLUGIN_NAME,
 };
-pub use migration::migrate_json_to_toml;
+pub use migration::{
+    backup_broken_file, ensure_config_dir, get_cleanup_candidates, migrate_json_to_toml,
+    migrate_yaml_to_toml, write_atomic, CleanupCandidate,
+};
 pub use profile::{AISettings, Profile, ProfilesConfig, ResolvedAISettings};
 pub use session::{get_session_for_branch, load_sessions_from_worktrees, AgentStatus, Session};
 pub use settings::Settings;
