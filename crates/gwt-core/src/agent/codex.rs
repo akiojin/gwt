@@ -16,7 +16,6 @@ const DEFAULT_CODEX_REASONING: &str = "high";
 const CODEX_SKILLS_FLAG_DEPRECATED_FROM: &str = "0.80.0";
 const CODEX_SKIP_FLAG_DEPRECATED_FROM: &str = "0.80.0";
 const CODEX_COLLABORATION_MODES_MIN_VERSION: &str = "0.91.0";
-const CODEX_WEB_SEARCH_RENAMED_FROM: &str = "0.90.0";
 const CODEX_SKIP_FLAG_LEGACY: &str = "--yolo";
 const CODEX_SKIP_FLAG_DANGEROUS: &str = "--dangerously-bypass-approvals-and-sandbox";
 const MODEL_FLAG_PREFIX: &str = "--model=";
