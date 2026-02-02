@@ -5663,12 +5663,15 @@ impl Model {
             Span::styled("Working Directory: ", Style::default().fg(Color::DarkGray)),
             Span::raw(working_dir),
         ];
-        if let Some(ref branch) = self.startup_branch {
-            working_dir_spans.push(Span::raw(" "));
-            working_dir_spans.push(Span::styled(
-                format!("[{}]", branch),
-                Style::default().fg(Color::Green),
-            ));
+        // SPEC-a70a1ece: Show startup branch only for non-bare repos
+        if self.repo_type != RepoType::Bare {
+            if let Some(ref branch) = self.startup_branch {
+                working_dir_spans.push(Span::raw(" "));
+                working_dir_spans.push(Span::styled(
+                    format!("[{}]", branch),
+                    Style::default().fg(Color::Green),
+                ));
+            }
         }
         // SPEC-a70a1ece T206: Show [bare] indicator for bare repositories
         if self.repo_type == RepoType::Bare {
