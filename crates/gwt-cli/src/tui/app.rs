@@ -1086,7 +1086,11 @@ impl Model {
             return;
         }
 
-        let repo_root = self.repo_root.clone();
+        // SPEC-a70a1ece: Use bare repo path for git commands in bare projects
+        let repo_root = self
+            .bare_repo_path
+            .clone()
+            .unwrap_or_else(|| self.repo_root.clone());
         let (tx, rx) = mpsc::channel();
         self.safety_rx = Some(rx);
 
