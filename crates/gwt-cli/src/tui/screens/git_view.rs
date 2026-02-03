@@ -657,7 +657,7 @@ fn format_size_change(bytes: i64) -> String {
 pub fn render_git_view(state: &mut GitViewState, frame: &mut Frame, area: Rect) {
     // Vertical layout: Header -> Files -> Commits (FR-010)
     let chunks = Layout::vertical([
-        Constraint::Length(4),  // Header
+        Constraint::Length(5),  // Header (3 lines + borders)
         Constraint::Min(8),     // Files section
         Constraint::Length(10), // Commits section
     ])
