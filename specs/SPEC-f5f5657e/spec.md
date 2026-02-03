@@ -25,7 +25,9 @@
 6. **前提条件** 複数サービスのcompose、**操作** サービス選択画面を表示、**期待結果** `HostOS` と `Docker:{service}` が同一リストに表示され、カーソルの背景反転は1行全体に適用される
 7. **前提条件** Docker起動が必要、**操作** 起動時にビルド確認を行い「No Build」を選択、**期待結果** `docker compose up` は `--no-build` を使用する
 8. **前提条件** Docker起動が必要、**操作** 起動時にビルド確認を行い「Build」を選択、**期待結果** `docker compose up` は `--build` を使用する
-9. **前提条件** ホストにCodexのauth.jsonが存在、**操作** Dockerコンテナ起動、**期待結果** コンテナ内のCodex認証情報がホストのauth.jsonに同期される
+9. **前提条件** Docker起動が必要、**操作** 起動時にRecreate/Reuse確認を行い「Reuse」を選択、**期待結果** `docker compose up` は `--force-recreate` を付与しない
+10. **前提条件** Docker起動が必要、**操作** 起動時にRecreate/Reuse確認を行い「Recreate」を選択、**期待結果** `docker compose up` は `--force-recreate` を使用する
+11. **前提条件** ホストにCodexのauth.jsonが存在、**操作** Dockerコンテナ起動、**期待結果** コンテナ内のCodex認証情報がホストのauth.jsonに同期される
 9. **前提条件** ホストにCodexのauth.jsonが存在、**操作** Dockerコンテナ起動、**期待結果** コンテナ内のCodex認証情報がホストのauth.jsonに同期される
 
 ---
@@ -171,6 +173,7 @@ gwtは以下の方法でポート競合を回避:
 - 環境変数の継承はホストの環境変数をそのまま使用
 - worktreeの.gitが参照するgitdirはコンテナ内から参照できる必要がある（HOST_GIT_COMMON_DIRをバインド）
 - Docker起動前に「Build/No Build」を選択するUIを表示し、デフォルトはNo Build
+- Docker起動前に「Recreate/Reuse」を選択するUIを表示し、デフォルトはReuse
 
 ### TUI進捗表示
 
@@ -208,10 +211,11 @@ Docker起動中はスピナーとステータスメッセージを表示:
    │  │  ├─ 更新あり → 再ビルド
    │  │  └─ 更新なし → そのまま
    │  c. 複数サービス → TUIで毎回選択（HostOS/Docker:{service}）
-   │  d. ビルド確認 → Build/No Buildを選択（デフォルトNo Build）
-   │  e. ポート競合確認 → 動的割り当て
-   │  f. docker compose up -d (--build or --no-build)
-   │  g. コンテナ内でエージェント起動
+   │  d. 再作成確認 → Recreate/Reuseを選択（デフォルトReuse）
+   │  e. ビルド確認 → Build/No Buildを選択（デフォルトNo Build）
+   │  f. ポート競合確認 → 動的割り当て
+   │  g. docker compose up -d (--build or --no-build, --force-recreate optional)
+   │  h. コンテナ内でエージェント起動
    │     docker exec -it {container} {agent_command}
    │  h. エージェント終了 → docker compose down
    │

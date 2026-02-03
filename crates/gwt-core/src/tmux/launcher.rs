@@ -906,6 +906,7 @@ fn build_compose_agent_command(
     compose_env_prefix: &str,
     env_flags: &str,
     build: bool,
+    force_recreate: bool,
 ) -> String {
     let command_escaped = shell_escape(command);
     let args_str = if args.is_empty() {
@@ -934,6 +935,7 @@ fn build_compose_agent_command(
     };
 
     let build_flag = if build { " --build" } else { " --no-build" };
+    let recreate_flag = if force_recreate { " --force-recreate" } else { "" };
     let mut exec_script = format!("exec {}{}", command_escaped, args_str);
     if command.to_lowercase().contains("codex") {
         let sync_script = concat!(
@@ -952,7 +954,7 @@ fn build_compose_agent_command(
     let exec_shell = format!("sh -lc {}", shell_escape(&exec_script));
     format!(
         r#"cd {} && \
-{}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{} || {{ status=$?; echo "[gwt] docker compose up failed (status=$status)."; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $status; }} && \
+{}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ status=$?; echo "[gwt] docker compose up failed (status=$status)."; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $status; }} && \
 trap "{}COMPOSE_PROJECT_NAME='{}' docker compose{} down" EXIT && \
 {}COMPOSE_PROJECT_NAME={} docker compose{} exec{} {} {} || {{ status=$?; echo "[gwt] docker compose exec failed (status=$status)."; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $status; }}"#,
         working_dir,
@@ -962,6 +964,7 @@ trap "{}COMPOSE_PROJECT_NAME='{}' docker compose{} down" EXIT && \
         compose_args_str,
         up_target,
         build_flag,
+        recreate_flag,
         compose_env_prefix,
         container_name,
         compose_args_str,
@@ -1072,6 +1075,7 @@ pub fn build_docker_agent_command(
     service: Option<&str>,
     env_vars: &HashMap<String, String>,
     build: bool,
+    force_recreate: bool,
 ) -> TmuxResult<String> {
     let container_name = DockerManager::generate_container_name(worktree_name);
     let env_flags = build_docker_env_flags(env_vars);
@@ -1109,6 +1113,7 @@ pub fn build_docker_agent_command(
                 &compose_env_prefix,
                 &env_flags,
                 build,
+                force_recreate,
             ))
         }
         DockerFileType::Dockerfile(dockerfile_path) => {
@@ -1171,6 +1176,7 @@ pub fn build_docker_agent_command(
                     &compose_env_prefix,
                     &env_flags,
                     build,
+                    force_recreate,
                 ))
             } else if config.uses_dockerfile() {
                 let dockerfile_rel =
@@ -1293,6 +1299,7 @@ pub fn launch_in_pane_with_docker(
     args: &[String],
     service: Option<&str>,
     build: bool,
+    force_recreate: bool,
 ) -> TmuxResult<(String, DockerLaunchResult)> {
     // Prepare Docker launch (detect files, create manager)
     let mut docker_result = prepare_docker_launch(worktree_path, worktree_name)?;
@@ -1334,6 +1341,7 @@ pub fn launch_in_pane_with_docker(
             resolved_service.as_deref(),
             &env_vars,
             build,
+            force_recreate,
         ) {
             Ok(cmd) => cmd,
             Err(e) => {
@@ -1645,6 +1653,7 @@ mod tests {
             None,
             &env_vars,
             false,
+            false,
         );
         let cmd = cmd.unwrap();
 
@@ -1673,11 +1682,35 @@ mod tests {
             None,
             &env_vars,
             true,
+            false,
         )
         .unwrap();
 
         assert!(cmd.contains("--build"));
         assert!(!cmd.contains("--no-build --build"));
+    }
+
+    #[test]
+    fn test_build_docker_agent_command_force_recreate_flag() {
+        use std::path::PathBuf;
+
+        let worktree_path = PathBuf::from("/tmp/my-worktree");
+        let docker_type = DockerFileType::Compose(PathBuf::from("docker-compose.yml"));
+        let env_vars = HashMap::new();
+        let cmd = build_docker_agent_command(
+            &worktree_path,
+            "my-worktree",
+            &docker_type,
+            "claude",
+            &[],
+            None,
+            &env_vars,
+            false,
+            true,
+        )
+        .unwrap();
+
+        assert!(cmd.contains("--force-recreate"));
     }
 
     #[test]
@@ -1696,6 +1729,7 @@ mod tests {
             &args,
             Some("web"),
             &env_vars,
+            false,
             false,
         );
         let cmd = cmd.unwrap();
@@ -1724,6 +1758,7 @@ mod tests {
             None,
             &env_vars,
             false,
+            false,
         )
         .unwrap();
 
@@ -1746,6 +1781,7 @@ mod tests {
             &[],
             None,
             &env_vars,
+            false,
             false,
         )
         .unwrap();
@@ -1772,6 +1808,7 @@ mod tests {
             None,
             &env_vars,
             false,
+            false,
         )
         .unwrap();
 
@@ -1794,6 +1831,7 @@ mod tests {
             &[],
             None,
             &env_vars,
+            false,
             false,
         )
         .unwrap();
@@ -1831,6 +1869,7 @@ mod tests {
             &[],
             None,
             &env_vars,
+            false,
             false,
         )
         .unwrap();

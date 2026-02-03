@@ -466,7 +466,7 @@ TASK-006 ─> TASK-010 (進捗画面) ─> TASK-011 (サービス選択) ─> TA
 | Phase 6 | TASK-014〜015 | 小 |
 | 統合 | TASK-016〜018 | 中 |
 
-## 合計タスク数: 21
+## 合計タスク数: 22
 
 ---
 
@@ -542,3 +542,23 @@ TASK-006 ─> TASK-010 (進捗画面) ─> TASK-011 (サービス選択) ─> TA
 **受け入れ基準**:
 
 - Codex起動時に`/root/.codex-host/auth.json`が存在すれば`/root/.codex/auth.json`へ同期される
+
+---
+
+### TASK-025: 起動時のRecreate/Reuse選択ダイアログ
+
+**ステータス**: 未着手 ⬜
+**優先度**: P1
+**依存**: TASK-021
+
+**内容**:
+
+- [ ] Docker起動時にRecreate/Reuseを選択するUIを表示
+- [ ] デフォルト選択を「Reuse」にする
+- [ ] Recreate選択時のみ`docker compose up -d --force-recreate`を使用
+
+**受け入れ基準**:
+
+- 起動毎にRecreate/Reuseの選択ダイアログが表示される
+- Reuse選択で`--force-recreate`が付与されない
+- Recreate選択で`--force-recreate`が付与される
