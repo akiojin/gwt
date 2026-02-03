@@ -7,6 +7,7 @@
 pub mod agent;
 pub mod ai;
 pub mod config;
+pub mod docker;
 pub mod error;
 pub mod execution_mode;
 pub mod git;
