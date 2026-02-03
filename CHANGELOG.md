@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [6.27.0] - 2026-02-03
+
+### Features
+
+- CLI/TUI改善とWeb連携を追加 (#869)
+
+### Refactor
+
+- 未使用のgit backendを削除
+
+### Documentation
+
+- Web UIとREADMEの整合を更新
+
 ## [6.26.0] - 2026-02-02
 
 ### Bug Fixes
