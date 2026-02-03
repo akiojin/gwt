@@ -45,7 +45,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -97,6 +97,16 @@ fn resolve_orphaned_agent_name(
     } else {
         trimmed.to_string()
     }
+}
+
+fn normalize_branch_name(name: &str) -> String {
+    if let Some(stripped) = name.strip_prefix("remotes/") {
+        if let Some((_, branch)) = stripped.split_once('/') {
+            return branch.to_string();
+        }
+        return stripped.to_string();
+    }
+    name.to_string()
 }
 
 fn format_ai_error(err: AIError) -> String {
@@ -364,6 +374,12 @@ struct GitViewCacheUpdate {
     data: GitViewData,
 }
 
+/// Update for GitView PR info (SPEC-1ea18899)
+struct GitViewPrUpdate {
+    branch: String,
+    info: Option<PrInfo>,
+}
+
 struct LaunchRequest {
     branch_name: String,
     create_new_branch: bool,
@@ -557,6 +573,8 @@ pub struct Model {
     git_view_cache: GitViewCache,
     /// GitView cache update receiver (SPEC-1ea18899)
     git_view_cache_rx: Option<Receiver<GitViewCacheUpdate>>,
+    /// GitView PR update receiver (SPEC-1ea18899)
+    git_view_pr_rx: Option<Receiver<GitViewPrUpdate>>,
 }
 
 /// Screen types
@@ -762,6 +780,7 @@ impl Model {
             git_view: GitViewState::default(),
             git_view_cache: GitViewCache::new(),
             git_view_cache_rx: None,
+            git_view_pr_rx: None,
         };
 
         model
@@ -914,6 +933,7 @@ impl Model {
         let cleanup_snapshot = self.branch_list.cleanup_snapshot();
         let sort_mode = self.branch_list.sort_mode;
         self.pr_title_rx = None;
+        self.git_view_pr_rx = None;
         self.safety_rx = None;
         self.worktree_status_rx = None;
         self.branch_list_rx = None;
@@ -1082,23 +1102,16 @@ impl Model {
             return;
         }
 
-        let repo_root = self.repo_root.clone();
+        let repo_root = self
+            .bare_repo_path
+            .clone()
+            .unwrap_or_else(|| self.repo_root.clone());
         let (tx, rx) = mpsc::channel();
         self.pr_title_rx = Some(rx);
 
         thread::spawn(move || {
             let mut cache = PrCache::new();
             cache.populate(&repo_root);
-
-            let normalize_branch_name = |name: &str| {
-                if let Some(stripped) = name.strip_prefix("remotes/") {
-                    if let Some((_, branch)) = stripped.split_once('/') {
-                        return branch.to_string();
-                    }
-                    return stripped.to_string();
-                }
-                name.to_string()
-            };
 
             let mut info = HashMap::new();
             for name in branch_names {
@@ -1110,6 +1123,7 @@ impl Model {
                             title: pr.title.clone(),
                             number: pr.number,
                             url: pr.url.clone(),
+                            state: pr.state.clone(),
                         },
                     );
                 }
@@ -1155,6 +1169,28 @@ impl Model {
         });
     }
 
+    /// SPEC-1ea18899: Spawn background fetch for GitView PR info
+    fn spawn_git_view_pr_fetch(&mut self, branch: &str) {
+        let branch = branch.to_string();
+        let lookup = normalize_branch_name(&branch);
+        let repo_root = self
+            .bare_repo_path
+            .clone()
+            .unwrap_or_else(|| self.repo_root.clone());
+        let (tx, rx) = mpsc::channel();
+        self.git_view_pr_rx = Some(rx);
+
+        thread::spawn(move || {
+            let info = PrCache::fetch_latest_for_branch(&repo_root, &lookup).map(|pr| PrInfo {
+                title: pr.title,
+                number: pr.number,
+                url: pr.url,
+                state: pr.state,
+            });
+            let _ = tx.send(GitViewPrUpdate { branch, info });
+        });
+    }
+
     /// SPEC-1ea18899: Apply GitView cache updates from background fetch
     fn apply_git_view_cache_updates(&mut self) {
         let Some(rx) = &self.git_view_cache_rx else {
@@ -1177,6 +1213,38 @@ impl Model {
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.git_view_cache_rx = None;
+            }
+        }
+    }
+
+    /// SPEC-1ea18899: Apply GitView PR updates from background fetch
+    fn apply_git_view_pr_updates(&mut self) {
+        let Some(rx) = &self.git_view_pr_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(update) => {
+                if let Some(info) = update.info {
+                    let mut map = HashMap::new();
+                    map.insert(update.branch.clone(), info.clone());
+                    self.branch_list.apply_pr_info(&map);
+                    if matches!(self.screen, Screen::GitView)
+                        && self.git_view.branch_name == update.branch
+                    {
+                        self.git_view.update_pr_info(
+                            Some(info.number),
+                            Some(info.title.clone()),
+                            info.url.clone(),
+                            Some(info.state.clone()),
+                        );
+                    }
+                }
+                self.git_view_pr_rx = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.git_view_pr_rx = None;
             }
         }
     }
@@ -2029,6 +2097,29 @@ impl Model {
         match rx.try_recv() {
             Ok(update) => {
                 self.branch_list.apply_pr_info(&update.info);
+                if matches!(self.screen, Screen::GitView) {
+                    if let Some(branch) = self
+                        .branch_list
+                        .branches
+                        .iter()
+                        .find(|b| b.name == self.git_view.branch_name)
+                    {
+                        let branch_has_pr = branch.pr_number.is_some()
+                            || branch.pr_title.is_some()
+                            || branch.pr_state.is_some();
+                        let git_view_has_pr = self.git_view.pr_number.is_some()
+                            || self.git_view.pr_title.is_some()
+                            || self.git_view.pr_state.is_some();
+                        if branch_has_pr || !git_view_has_pr {
+                            self.git_view.update_pr_info(
+                                branch.pr_number,
+                                branch.pr_title.clone(),
+                                branch.pr_url.clone(),
+                                branch.pr_state.clone(),
+                            );
+                        }
+                    }
+                }
                 self.pr_title_rx = None;
             }
             Err(TryRecvError::Empty) => {}
@@ -2944,13 +3035,37 @@ impl Model {
         }
 
         let mut last_error: Option<std::io::Error> = None;
+        let mut try_open = |cmd: &str, args: &[&str]| -> bool {
+            match Command::new(cmd)
+                .args(args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+            {
+                Ok(output) => {
+                    if output.status.success() {
+                        return true;
+                    }
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let message = stderr.trim();
+                    let message = if message.is_empty() {
+                        format!("{} exited with status {}", cmd, output.status)
+                    } else {
+                        message.to_string()
+                    };
+                    last_error = Some(std::io::Error::other(message));
+                    false
+                }
+                Err(err) => {
+                    last_error = Some(err);
+                    false
+                }
+            }
+        };
         #[cfg(target_os = "macos")]
         {
-            match std::process::Command::new("open").arg(url).spawn() {
-                Ok(_) => return,
-                Err(err) => {
-                    last_error.replace(err);
-                }
+            if try_open("open", &[url]) {
+                return;
             }
         }
 
@@ -2962,35 +3077,23 @@ impl Model {
                 ("x-www-browser", vec![url]),
             ];
             for (cmd, args) in candidates {
-                match std::process::Command::new(cmd).args(args).spawn() {
-                    Ok(_) => return,
-                    Err(err) => {
-                        last_error.replace(err);
-                    }
+                if try_open(cmd, &args) {
+                    return;
                 }
             }
         }
 
         #[cfg(target_os = "windows")]
         {
-            match std::process::Command::new("cmd")
-                .args(["/C", "start", "", url])
-                .spawn()
-            {
-                Ok(_) => return,
-                Err(err) => {
-                    last_error.replace(err);
-                }
+            if try_open("cmd", &["/C", "start", "", url]) {
+                return;
             }
 
-            match std::process::Command::new("powershell")
-                .args(["-NoProfile", "-Command", "Start-Process", url])
-                .spawn()
-            {
-                Ok(_) => return,
-                Err(err) => {
-                    last_error.replace(err);
-                }
+            if try_open(
+                "powershell",
+                &["-NoProfile", "-Command", "Start-Process", url],
+            ) {
+                return;
             }
         }
 
@@ -3016,7 +3119,7 @@ impl Model {
             }
         }
 
-        let err = last_error.unwrap_or_else(|| std::io::Error::from(std::io::ErrorKind::Other));
+        let err = last_error.unwrap_or_else(|| std::io::Error::other("unknown error"));
         let message = if err.kind() == std::io::ErrorKind::NotFound {
             #[cfg(target_os = "linux")]
             {
@@ -3814,10 +3917,18 @@ impl Model {
                         self.git_view = GitViewState::new(
                             branch.name.clone(),
                             worktree_path,
+                            branch.pr_number,
                             branch.pr_url.clone(),
                             branch.pr_title.clone(),
+                            branch.pr_state.clone(),
                             branch.divergence,
                         );
+                        let has_pr = branch.pr_number.is_some()
+                            || branch.pr_title.is_some()
+                            || branch.pr_state.is_some();
+                        if !has_pr {
+                            self.spawn_git_view_pr_fetch(&branch.name);
+                        }
                         // Try to load from cache
                         if let Some(cached) = self.git_view_cache.get(&branch.name) {
                             self.git_view.load_from_cache(cached);
@@ -3942,6 +4053,8 @@ impl Model {
                 self.poll_session_summary_if_needed();
                 // SPEC-1ea18899: Apply GitView cache updates
                 self.apply_git_view_cache_updates();
+                // SPEC-1ea18899: Apply GitView PR updates
+                self.apply_git_view_pr_updates();
                 // FR-033: Update pane list every 1 second in tmux multi mode
                 self.update_pane_list();
                 // SPEC-a70a1ece: Poll clone wizard progress
@@ -7317,6 +7430,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: false,
         }
     }
@@ -7897,6 +8011,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -7922,6 +8037,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
@@ -8175,6 +8291,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -8200,6 +8317,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
