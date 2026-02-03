@@ -40,5 +40,4 @@ pub use wizard::{
 pub use worktree_create::{render_worktree_create, WorktreeCreateState};
 
 // Docker integration screens (SPEC-f5f5657e)
-pub use docker_progress::{render_docker_progress, DockerProgressState, DockerStatus};
 pub use service_select::{render_service_select, ServiceSelectState};

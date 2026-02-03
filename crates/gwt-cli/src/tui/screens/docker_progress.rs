@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Docker Progress Screen (SPEC-f5f5657e)
 //!
 //! Displays Docker container startup progress with animated spinner.
@@ -209,12 +210,27 @@ mod tests {
     // T-401: Progress display rendering test
     #[test]
     fn test_docker_status_messages() {
-        assert_eq!(DockerStatus::DetectingFiles.message(), "Detecting Docker files...");
-        assert_eq!(DockerStatus::BuildingImage.message(), "Building Docker image...");
-        assert_eq!(DockerStatus::StartingContainer.message(), "Starting container...");
-        assert_eq!(DockerStatus::WaitingForServices.message(), "Waiting for services...");
+        assert_eq!(
+            DockerStatus::DetectingFiles.message(),
+            "Detecting Docker files..."
+        );
+        assert_eq!(
+            DockerStatus::BuildingImage.message(),
+            "Building Docker image..."
+        );
+        assert_eq!(
+            DockerStatus::StartingContainer.message(),
+            "Starting container..."
+        );
+        assert_eq!(
+            DockerStatus::WaitingForServices.message(),
+            "Waiting for services..."
+        );
         assert_eq!(DockerStatus::Ready.message(), "Container ready");
-        assert_eq!(DockerStatus::Failed("error".to_string()).message(), "Failed");
+        assert_eq!(
+            DockerStatus::Failed("error".to_string()).message(),
+            "Failed"
+        );
     }
 
     #[test]
