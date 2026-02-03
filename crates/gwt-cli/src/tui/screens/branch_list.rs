@@ -483,6 +483,8 @@ pub struct BranchListState {
     pub branch_summary: Option<BranchSummary>,
     /// AI settings enabled for active profile
     pub ai_enabled: bool,
+    /// Session summary enabled for active profile
+    pub session_summary_enabled: bool,
     /// Session summary cache (session)
     session_summary_cache: SessionSummaryCache,
     /// Session summary requests in-flight
@@ -551,6 +553,7 @@ impl Default for BranchListState {
             running_agents: HashMap::new(),
             branch_summary: None,
             ai_enabled: false,
+            session_summary_enabled: false,
             session_summary_cache: SessionSummaryCache::default(),
             session_summary_inflight: HashSet::new(),
             session_missing: HashSet::new(),
@@ -1357,7 +1360,7 @@ impl BranchListState {
         summary.loading.commits = true;
         summary.loading.meta = true;
 
-        if self.ai_enabled {
+        if self.session_summary_enabled {
             if let Some(summary_data) = self.session_summary_cache.get(&branch.name) {
                 summary = summary.with_session_summary(summary_data.clone());
             } else if self.session_summary_inflight.contains(&branch.name) {
@@ -2225,6 +2228,11 @@ fn render_session_panel(
         if !state.ai_enabled {
             lines.push(Line::from(Span::styled(
                 "Configure AI in Profiles to enable session summary",
+                Style::default().fg(Color::Yellow),
+            )));
+        } else if !state.session_summary_enabled {
+            lines.push(Line::from(Span::styled(
+                "Session summary disabled",
                 Style::default().fg(Color::Yellow),
             )));
         } else if branch.last_session_id.is_none() || state.is_session_missing(&branch.name) {

@@ -190,6 +190,9 @@ pub struct AISettings {
     /// モデル名
     #[serde(default = "default_model")]
     pub model: String,
+    /// セッション要約の有効/無効
+    #[serde(default = "default_summary_enabled")]
+    pub summary_enabled: bool,
 }
 
 fn default_endpoint() -> String {
@@ -198,6 +201,10 @@ fn default_endpoint() -> String {
 
 fn default_model() -> String {
     "gpt-4o-mini".to_string()
+}
+
+fn default_summary_enabled() -> bool {
+    true
 }
 ```
 
