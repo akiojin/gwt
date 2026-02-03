@@ -28,6 +28,70 @@ const ENV_PASSTHROUGH_PREFIXES: &[&str] = &[
     "SHELL",
 ];
 
+/// Maximum number of retry attempts for Docker operations
+const MAX_RETRY_ATTEMPTS: u32 = 3;
+
+/// Retry delay in seconds (increases: 2s, 5s)
+const RETRY_DELAYS_SECS: &[u64] = &[2, 5];
+
+/// Check if an error is retryable
+fn is_retryable_error(error: &GwtError) -> bool {
+    match error {
+        GwtError::DockerDaemonNotRunning => true,
+        GwtError::DockerTimeout => true,
+        GwtError::Docker(msg) => {
+            // Network-related errors are typically retryable
+            msg.contains("connection refused")
+                || msg.contains("timeout")
+                || msg.contains("network")
+                || msg.contains("temporary")
+        }
+        GwtError::DockerStartFailed { reason } => {
+            reason.contains("network") || reason.contains("timeout")
+        }
+        _ => false,
+    }
+}
+
+/// Execute a Docker operation with retry logic
+fn with_retry<T, F>(operation_name: &str, mut operation: F) -> Result<T>
+where
+    F: FnMut() -> Result<T>,
+{
+    let mut last_error = None;
+
+    for attempt in 0..MAX_RETRY_ATTEMPTS {
+        match operation() {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                if !is_retryable_error(&e) || attempt == MAX_RETRY_ATTEMPTS - 1 {
+                    return Err(e);
+                }
+
+                let delay = RETRY_DELAYS_SECS
+                    .get(attempt as usize)
+                    .copied()
+                    .unwrap_or(5);
+
+                warn!(
+                    category = "docker",
+                    operation = operation_name,
+                    attempt = attempt + 1,
+                    max_attempts = MAX_RETRY_ATTEMPTS,
+                    delay_secs = delay,
+                    error = %e,
+                    "Docker operation failed, retrying"
+                );
+
+                std::thread::sleep(std::time::Duration::from_secs(delay));
+                last_error = Some(e);
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| GwtError::Docker("Unknown error".to_string())))
+}
+
 /// Manager for Docker containers associated with a worktree
 #[derive(Debug)]
 pub struct DockerManager {
@@ -172,6 +236,18 @@ impl DockerManager {
     ///
     /// Runs `docker compose up -d` in the worktree directory.
     pub fn start(&self) -> Result<ContainerInfo> {
+        self.start_internal()
+    }
+
+    /// Start the Docker container with automatic retry on transient failures
+    ///
+    /// Retries up to 3 times with delays of 2s and 5s between attempts.
+    pub fn start_with_retry(&self) -> Result<ContainerInfo> {
+        with_retry("start", || self.start_internal())
+    }
+
+    /// Internal start implementation
+    fn start_internal(&self) -> Result<ContainerInfo> {
         info!(
             category = "docker",
             container = %self.container_name,
@@ -567,5 +643,70 @@ mod tests {
 
         // feature/JIRA-123/add-feature -> feature-jira-123-add-feature
         assert_eq!(manager.container_name(), "gwt-feature-jira-123-add-feature");
+    }
+
+    // T-601: Retry logic tests
+    #[test]
+    fn test_is_retryable_error_daemon_not_running() {
+        let error = GwtError::DockerDaemonNotRunning;
+        assert!(is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_is_retryable_error_timeout() {
+        let error = GwtError::DockerTimeout;
+        assert!(is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_is_retryable_error_connection_refused() {
+        let error = GwtError::Docker("connection refused".to_string());
+        assert!(is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_is_retryable_error_network() {
+        let error = GwtError::DockerStartFailed {
+            reason: "network error".to_string(),
+        };
+        assert!(is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_is_not_retryable_build_error() {
+        let error = GwtError::DockerBuildFailed {
+            reason: "syntax error in Dockerfile".to_string(),
+        };
+        assert!(!is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_is_not_retryable_port_conflict() {
+        let error = GwtError::DockerPortConflict { port: 8080 };
+        assert!(!is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_with_retry_success_first_attempt() {
+        let mut attempts = 0;
+        let result = with_retry("test", || {
+            attempts += 1;
+            Ok::<i32, GwtError>(42)
+        });
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn test_with_retry_non_retryable_error() {
+        let mut attempts = 0;
+        let result: Result<i32> = with_retry("test", || {
+            attempts += 1;
+            Err(GwtError::DockerBuildFailed {
+                reason: "syntax error".to_string(),
+            })
+        });
+        assert!(result.is_err());
+        assert_eq!(attempts, 1); // Should not retry for non-retryable error
     }
 }
