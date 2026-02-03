@@ -95,6 +95,16 @@ fn resolve_orphaned_agent_name(
     }
 }
 
+fn normalize_branch_name(name: &str) -> String {
+    if let Some(stripped) = name.strip_prefix("remotes/") {
+        if let Some((_, branch)) = stripped.split_once('/') {
+            return branch.to_string();
+        }
+        return stripped.to_string();
+    }
+    name.to_string()
+}
+
 fn format_ai_error(err: AIError) -> String {
     err.to_string()
 }
@@ -360,6 +370,12 @@ struct GitViewCacheUpdate {
     data: GitViewData,
 }
 
+/// Update for GitView PR info (SPEC-1ea18899)
+struct GitViewPrUpdate {
+    branch: String,
+    info: Option<PrInfo>,
+}
+
 struct LaunchRequest {
     branch_name: String,
     create_new_branch: bool,
@@ -541,6 +557,8 @@ pub struct Model {
     git_view_cache: GitViewCache,
     /// GitView cache update receiver (SPEC-1ea18899)
     git_view_cache_rx: Option<Receiver<GitViewCacheUpdate>>,
+    /// GitView PR update receiver (SPEC-1ea18899)
+    git_view_pr_rx: Option<Receiver<GitViewPrUpdate>>,
 }
 
 /// Screen types
@@ -738,6 +756,7 @@ impl Model {
             git_view: GitViewState::default(),
             git_view_cache: GitViewCache::new(),
             git_view_cache_rx: None,
+            git_view_pr_rx: None,
         };
 
         model
@@ -889,6 +908,7 @@ impl Model {
     fn start_branch_list_refresh(&mut self, settings: gwt_core::config::Settings) {
         let cleanup_snapshot = self.branch_list.cleanup_snapshot();
         self.pr_title_rx = None;
+        self.git_view_pr_rx = None;
         self.safety_rx = None;
         self.worktree_status_rx = None;
         self.branch_list_rx = None;
@@ -1064,16 +1084,6 @@ impl Model {
             let mut cache = PrCache::new();
             cache.populate(&repo_root);
 
-            let normalize_branch_name = |name: &str| {
-                if let Some(stripped) = name.strip_prefix("remotes/") {
-                    if let Some((_, branch)) = stripped.split_once('/') {
-                        return branch.to_string();
-                    }
-                    return stripped.to_string();
-                }
-                name.to_string()
-            };
-
             let mut info = HashMap::new();
             for name in branch_names {
                 let lookup = normalize_branch_name(&name);
@@ -1084,6 +1094,7 @@ impl Model {
                             title: pr.title.clone(),
                             number: pr.number,
                             url: pr.url.clone(),
+                            state: pr.state.clone(),
                         },
                     );
                 }
@@ -1129,6 +1140,25 @@ impl Model {
         });
     }
 
+    /// SPEC-1ea18899: Spawn background fetch for GitView PR info
+    fn spawn_git_view_pr_fetch(&mut self, branch: &str) {
+        let branch = branch.to_string();
+        let lookup = normalize_branch_name(&branch);
+        let repo_root = self.repo_root.clone();
+        let (tx, rx) = mpsc::channel();
+        self.git_view_pr_rx = Some(rx);
+
+        thread::spawn(move || {
+            let info = PrCache::fetch_latest_for_branch(&repo_root, &lookup).map(|pr| PrInfo {
+                title: pr.title,
+                number: pr.number,
+                url: pr.url,
+                state: pr.state,
+            });
+            let _ = tx.send(GitViewPrUpdate { branch, info });
+        });
+    }
+
     /// SPEC-1ea18899: Apply GitView cache updates from background fetch
     fn apply_git_view_cache_updates(&mut self) {
         let Some(rx) = &self.git_view_cache_rx else {
@@ -1151,6 +1181,45 @@ impl Model {
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.git_view_cache_rx = None;
+            }
+        }
+    }
+
+    /// SPEC-1ea18899: Apply GitView PR updates from background fetch
+    fn apply_git_view_pr_updates(&mut self) {
+        let Some(rx) = &self.git_view_pr_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(update) => {
+                if let Some(info) = update.info {
+                    let mut map = HashMap::new();
+                    map.insert(update.branch.clone(), info);
+                    self.branch_list.apply_pr_info(&map);
+                    if matches!(self.screen, Screen::GitView)
+                        && self.git_view.branch_name == update.branch
+                    {
+                        if let Some(branch) = self
+                            .branch_list
+                            .branches
+                            .iter()
+                            .find(|b| b.name == update.branch)
+                        {
+                            self.git_view.update_pr_info(
+                                branch.pr_number,
+                                branch.pr_title.clone(),
+                                branch.pr_url.clone(),
+                                branch.pr_state.clone(),
+                            );
+                        }
+                    }
+                }
+                self.git_view_pr_rx = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.git_view_pr_rx = None;
             }
         }
     }
@@ -2011,6 +2080,7 @@ impl Model {
                             branch.pr_number,
                             branch.pr_title.clone(),
                             branch.pr_url.clone(),
+                            branch.pr_state.clone(),
                         );
                     }
                 }
@@ -3802,8 +3872,15 @@ impl Model {
                             branch.pr_number,
                             branch.pr_url.clone(),
                             branch.pr_title.clone(),
+                            branch.pr_state.clone(),
                             branch.divergence,
                         );
+                        let has_pr = branch.pr_number.is_some()
+                            || branch.pr_title.is_some()
+                            || branch.pr_state.is_some();
+                        if !has_pr {
+                            self.spawn_git_view_pr_fetch(&branch.name);
+                        }
                         // Try to load from cache
                         if let Some(cached) = self.git_view_cache.get(&branch.name) {
                             self.git_view.load_from_cache(cached);
@@ -3925,6 +4002,8 @@ impl Model {
                 self.poll_session_summary_if_needed();
                 // SPEC-1ea18899: Apply GitView cache updates
                 self.apply_git_view_cache_updates();
+                // SPEC-1ea18899: Apply GitView PR updates
+                self.apply_git_view_pr_updates();
                 // FR-033: Update pane list every 1 second in tmux multi mode
                 self.update_pane_list();
                 // SPEC-a70a1ece: Poll clone wizard progress
@@ -7030,6 +7109,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: false,
         }
     }
@@ -7399,6 +7479,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -7424,6 +7505,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
@@ -7677,6 +7759,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -7702,6 +7785,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];

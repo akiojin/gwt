@@ -137,6 +137,8 @@ pub struct GitViewState {
     pub pr_title: Option<String>,
     /// PR number
     pub pr_number: Option<u64>,
+    /// PR state
+    pub pr_state: Option<String>,
     /// Divergence status (ahead/behind)
     pub divergence: DivergenceStatus,
     /// File entries
@@ -165,6 +167,7 @@ impl Default for GitViewState {
             pr_url: None,
             pr_title: None,
             pr_number: None,
+            pr_state: None,
             divergence: DivergenceStatus::NoRemote,
             files: Vec::new(),
             visible_file_count: 20,
@@ -193,6 +196,7 @@ impl GitViewState {
         pr_number: Option<u64>,
         pr_url: Option<String>,
         pr_title: Option<String>,
+        pr_state: Option<String>,
         divergence: DivergenceStatus,
     ) -> Self {
         let has_worktree = worktree_path.is_some();
@@ -202,6 +206,7 @@ impl GitViewState {
             pr_url,
             pr_title,
             pr_number,
+            pr_state,
             divergence,
             files: Vec::new(),
             visible_file_count: MAX_VISIBLE_FILES,
@@ -351,6 +356,7 @@ impl GitViewState {
         pr_number: Option<u64>,
         pr_title: Option<String>,
         pr_url: Option<String>,
+        pr_state: Option<String>,
     ) {
         let had_pr = self.pr_url.is_some();
         let had_items = self.total_item_count();
@@ -359,6 +365,7 @@ impl GitViewState {
         self.pr_number = pr_number;
         self.pr_title = pr_title;
         self.pr_url = pr_url;
+        self.pr_state = pr_state;
 
         if had_pr != has_pr && had_items > 0 {
             if has_pr {
@@ -682,38 +689,61 @@ fn render_header(state: &mut GitViewState, frame: &mut Frame, area: Rect) {
         ]),
     ];
 
-    // PR line (FR-011a)
-    if let Some(ref url) = state.pr_url {
+    // PR line (FR-011a, FR-011b)
+    let has_pr = state.pr_number.is_some() || state.pr_title.is_some() || state.pr_state.is_some();
+    if has_pr {
         let pr_text = match (state.pr_number, state.pr_title.as_deref()) {
             (Some(number), Some(title)) => format!("#{} {}", number, title),
             (Some(number), None) => format!("#{}", number),
             (None, Some(title)) => title.to_string(),
             (None, None) => "Pull Request".to_string(),
         };
+        let has_link = state.pr_url.is_some();
         let is_selected = state.is_pr_link_selected();
-        let style = if is_selected {
-            Style::default().fg(Color::Blue).underlined().bold()
+        let style = if has_link {
+            if is_selected {
+                Style::default().fg(Color::Blue).underlined().bold()
+            } else {
+                Style::default().fg(Color::Blue).underlined()
+            }
         } else {
-            Style::default().fg(Color::Blue).underlined()
+            Style::default().fg(Color::Gray)
         };
 
-        lines.push(Line::from(vec![
+        let mut spans = vec![
             Span::styled("PR: ", Style::default().fg(Color::Gray)),
             Span::styled(pr_text.clone(), style),
-            Span::styled(" ", Style::default()),
-            Span::styled(
-                if is_selected { "[Enter to open]" } else { "" },
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]));
+        ];
 
-        // Store link region for mouse click (calculated after render)
-        let pr_x = area.x + 4; // "PR: " length
-        let pr_width = pr_text.chars().count() as u16;
-        state.pr_link_region = Some(LinkRegion {
-            area: Rect::new(pr_x, area.y + 2, pr_width, 1),
-            url: url.clone(),
-        });
+        let is_merged = state
+            .pr_state
+            .as_deref()
+            .is_some_and(|state| state.eq_ignore_ascii_case("MERGED"));
+        if is_merged {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                "(merged)",
+                Style::default().fg(Color::Green).bold(),
+            ));
+        }
+
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            if is_selected { "[Enter to open]" } else { "" },
+            Style::default().fg(Color::DarkGray),
+        ));
+
+        lines.push(Line::from(spans));
+
+        if let Some(ref url) = state.pr_url {
+            // Store link region for mouse click (calculated after render)
+            let pr_x = area.x + 4; // "PR: " length
+            let pr_width = pr_text.chars().count() as u16;
+            state.pr_link_region = Some(LinkRegion {
+                area: Rect::new(pr_x, area.y + 2, pr_width, 1),
+                url: url.clone(),
+            });
+        }
     } else {
         lines.push(Line::from(vec![
             Span::styled("PR: ", Style::default().fg(Color::Gray)),
@@ -972,6 +1002,7 @@ mod tests {
             Some(1),
             Some("https://github.com/test/pr/1".to_string()),
             Some("Test PR".to_string()),
+            Some("OPEN".to_string()),
             DivergenceStatus::Ahead(3),
         );
 
@@ -1098,6 +1129,7 @@ mod tests {
             Some(1),
             Some("https://github.com/test/pr/1".to_string()),
             Some("Test PR".to_string()),
+            Some("OPEN".to_string()),
             DivergenceStatus::Ahead(1),
         );
         assert!(state.is_pr_link_selected());
@@ -1106,6 +1138,7 @@ mod tests {
         let state = GitViewState::new(
             "feature/test".to_string(),
             Some(PathBuf::from("/tmp/test")),
+            None,
             None,
             None,
             None,
@@ -1120,6 +1153,7 @@ mod tests {
         let state = GitViewState::new(
             "feature/no-worktree".to_string(),
             None, // No worktree
+            None,
             None,
             None,
             None,
@@ -1142,10 +1176,12 @@ mod tests {
             Some(42),
             Some("Test PR".to_string()),
             Some("https://example.com/pr/42".to_string()),
+            Some("OPEN".to_string()),
         );
 
         assert_eq!(state.selected_index, 1);
         assert!(state.pr_url.is_some());
+        assert_eq!(state.pr_state.as_deref(), Some("OPEN"));
     }
 
     #[test]
@@ -1154,7 +1190,7 @@ mod tests {
         state.pr_url = Some("https://example.com/pr/1".to_string());
         state.selected_index = 1;
 
-        state.update_pr_info(None, None, None);
+        state.update_pr_info(None, None, None, None);
 
         assert_eq!(state.selected_index, 0);
         assert!(state.pr_url.is_none());
