@@ -188,11 +188,18 @@ fn parse_gh_pr_json(json_str: &str) -> Result<Vec<PullRequest>, std::io::Error> 
 }
 
 fn is_newer_pr(candidate: &PullRequest, current: &PullRequest) -> bool {
+    let candidate_open = candidate.state.eq_ignore_ascii_case("OPEN");
+    let current_open = current.state.eq_ignore_ascii_case("OPEN");
+
+    if candidate_open != current_open {
+        return candidate_open;
+    }
+
     match (&candidate.updated_at, &current.updated_at) {
         (Some(candidate_ts), Some(current_ts)) => candidate_ts > current_ts,
         (Some(_), None) => true,
         (None, Some(_)) => false,
-        (None, None) => candidate.state == "OPEN" && current.state != "OPEN",
+        (None, None) => false,
     }
 }
 
@@ -269,5 +276,51 @@ mod tests {
         assert!(cache.is_merged("feature/merged"));
         assert!(!cache.is_merged("feature/open"));
         assert!(!cache.is_merged("feature/missing"));
+    }
+
+    #[test]
+    fn test_is_newer_pr_open_priority() {
+        let current = PullRequest {
+            number: 1,
+            title: "Merged".to_string(),
+            head_branch: "feature/test".to_string(),
+            state: "MERGED".to_string(),
+            url: None,
+            updated_at: Some("2024-02-01T00:00:00Z".to_string()),
+        };
+        let candidate = PullRequest {
+            number: 2,
+            title: "Open".to_string(),
+            head_branch: "feature/test".to_string(),
+            state: "OPEN".to_string(),
+            url: None,
+            updated_at: Some("2024-01-01T00:00:00Z".to_string()),
+        };
+
+        assert!(is_newer_pr(&candidate, &current));
+        assert!(!is_newer_pr(&current, &candidate));
+    }
+
+    #[test]
+    fn test_is_newer_pr_updated_at_same_state() {
+        let current = PullRequest {
+            number: 1,
+            title: "Old".to_string(),
+            head_branch: "feature/test".to_string(),
+            state: "OPEN".to_string(),
+            url: None,
+            updated_at: Some("2024-01-01T00:00:00Z".to_string()),
+        };
+        let candidate = PullRequest {
+            number: 2,
+            title: "New".to_string(),
+            head_branch: "feature/test".to_string(),
+            state: "OPEN".to_string(),
+            url: None,
+            updated_at: Some("2024-02-01T00:00:00Z".to_string()),
+        };
+
+        assert!(is_newer_pr(&candidate, &current));
+        assert!(!is_newer_pr(&current, &candidate));
     }
 }

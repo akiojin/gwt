@@ -135,6 +135,8 @@ pub struct GitViewState {
     pub pr_url: Option<String>,
     /// PR title
     pub pr_title: Option<String>,
+    /// PR number
+    pub pr_number: Option<u64>,
     /// Divergence status (ahead/behind)
     pub divergence: DivergenceStatus,
     /// File entries
@@ -162,6 +164,7 @@ impl Default for GitViewState {
             worktree_path: None,
             pr_url: None,
             pr_title: None,
+            pr_number: None,
             divergence: DivergenceStatus::NoRemote,
             files: Vec::new(),
             visible_file_count: 20,
@@ -187,6 +190,7 @@ impl GitViewState {
     pub fn new(
         branch_name: String,
         worktree_path: Option<PathBuf>,
+        pr_number: Option<u64>,
         pr_url: Option<String>,
         pr_title: Option<String>,
         divergence: DivergenceStatus,
@@ -197,6 +201,7 @@ impl GitViewState {
             worktree_path,
             pr_url,
             pr_title,
+            pr_number,
             divergence,
             files: Vec::new(),
             visible_file_count: MAX_VISIBLE_FILES,
@@ -338,6 +343,30 @@ impl GitViewState {
     #[allow(dead_code)]
     pub fn show_more_files(&mut self) {
         self.visible_file_count = self.files.len();
+    }
+
+    /// Update PR info and keep selection stable when PR presence changes
+    pub fn update_pr_info(
+        &mut self,
+        pr_number: Option<u64>,
+        pr_title: Option<String>,
+        pr_url: Option<String>,
+    ) {
+        let had_pr = self.pr_url.is_some();
+        let had_items = self.total_item_count();
+        let has_pr = pr_url.is_some();
+
+        self.pr_number = pr_number;
+        self.pr_title = pr_title;
+        self.pr_url = pr_url;
+
+        if had_pr != has_pr && had_items > 0 {
+            if has_pr {
+                self.selected_index = self.selected_index.saturating_add(1);
+            } else {
+                self.selected_index = self.selected_index.saturating_sub(1);
+            }
+        }
     }
 
     /// Check if current selection is PR link
@@ -641,6 +670,7 @@ pub fn render_git_view(state: &mut GitViewState, frame: &mut Frame, area: Rect) 
 
 /// Render header section (FR-011)
 fn render_header(state: &mut GitViewState, frame: &mut Frame, area: Rect) {
+    state.pr_link_region = None;
     let mut lines = vec![
         Line::from(vec![
             Span::styled("Branch: ", Style::default().fg(Color::Gray)),
@@ -652,9 +682,14 @@ fn render_header(state: &mut GitViewState, frame: &mut Frame, area: Rect) {
         ]),
     ];
 
-    // PR link line (FR-011)
+    // PR line (FR-011a)
     if let Some(ref url) = state.pr_url {
-        let pr_title = state.pr_title.as_deref().unwrap_or("Pull Request");
+        let pr_text = match (state.pr_number, state.pr_title.as_deref()) {
+            (Some(number), Some(title)) => format!("#{} {}", number, title),
+            (Some(number), None) => format!("#{}", number),
+            (None, Some(title)) => title.to_string(),
+            (None, None) => "Pull Request".to_string(),
+        };
         let is_selected = state.is_pr_link_selected();
         let style = if is_selected {
             Style::default().fg(Color::Blue).underlined().bold()
@@ -664,7 +699,7 @@ fn render_header(state: &mut GitViewState, frame: &mut Frame, area: Rect) {
 
         lines.push(Line::from(vec![
             Span::styled("PR: ", Style::default().fg(Color::Gray)),
-            Span::styled(pr_title, style),
+            Span::styled(pr_text.clone(), style),
             Span::styled(" ", Style::default()),
             Span::styled(
                 if is_selected { "[Enter to open]" } else { "" },
@@ -674,11 +709,16 @@ fn render_header(state: &mut GitViewState, frame: &mut Frame, area: Rect) {
 
         // Store link region for mouse click (calculated after render)
         let pr_x = area.x + 4; // "PR: " length
-        let pr_width = pr_title.len() as u16;
+        let pr_width = pr_text.chars().count() as u16;
         state.pr_link_region = Some(LinkRegion {
             area: Rect::new(pr_x, area.y + 2, pr_width, 1),
             url: url.clone(),
         });
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("PR: ", Style::default().fg(Color::Gray)),
+            Span::styled("No PR", Style::default().fg(Color::DarkGray)),
+        ]));
     }
 
     let block = Block::default()
@@ -929,6 +969,7 @@ mod tests {
         let state = GitViewState::new(
             "feature/test".to_string(),
             Some(PathBuf::from("/tmp/test")),
+            Some(1),
             Some("https://github.com/test/pr/1".to_string()),
             Some("Test PR".to_string()),
             DivergenceStatus::Ahead(3),
@@ -1054,6 +1095,7 @@ mod tests {
         let state = GitViewState::new(
             "feature/test".to_string(),
             Some(PathBuf::from("/tmp/test")),
+            Some(1),
             Some("https://github.com/test/pr/1".to_string()),
             Some("Test PR".to_string()),
             DivergenceStatus::Ahead(1),
@@ -1064,6 +1106,7 @@ mod tests {
         let state = GitViewState::new(
             "feature/test".to_string(),
             Some(PathBuf::from("/tmp/test")),
+            None,
             None,
             None,
             DivergenceStatus::NoRemote,
@@ -1079,6 +1122,7 @@ mod tests {
             None, // No worktree
             None,
             None,
+            None,
             DivergenceStatus::NoRemote,
         );
 
@@ -1086,5 +1130,33 @@ mod tests {
         assert!(state.worktree_path.is_none());
         // Files should be empty for no-worktree branches
         assert!(state.files.is_empty());
+    }
+
+    #[test]
+    fn test_gitview_update_pr_info_adds_offset() {
+        let mut state = GitViewState::default();
+        state.files = vec![FileEntry::default(); 1];
+        state.selected_index = 0;
+
+        state.update_pr_info(
+            Some(42),
+            Some("Test PR".to_string()),
+            Some("https://example.com/pr/42".to_string()),
+        );
+
+        assert_eq!(state.selected_index, 1);
+        assert!(state.pr_url.is_some());
+    }
+
+    #[test]
+    fn test_gitview_update_pr_info_removes_offset() {
+        let mut state = GitViewState::default();
+        state.pr_url = Some("https://example.com/pr/1".to_string());
+        state.selected_index = 1;
+
+        state.update_pr_info(None, None, None);
+
+        assert_eq!(state.selected_index, 0);
+        assert!(state.pr_url.is_none());
     }
 }

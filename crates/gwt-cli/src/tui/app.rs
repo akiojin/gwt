@@ -2000,6 +2000,20 @@ impl Model {
         match rx.try_recv() {
             Ok(update) => {
                 self.branch_list.apply_pr_info(&update.info);
+                if matches!(self.screen, Screen::GitView) {
+                    if let Some(branch) = self
+                        .branch_list
+                        .branches
+                        .iter()
+                        .find(|b| b.name == self.git_view.branch_name)
+                    {
+                        self.git_view.update_pr_info(
+                            branch.pr_number,
+                            branch.pr_title.clone(),
+                            branch.pr_url.clone(),
+                        );
+                    }
+                }
                 self.pr_title_rx = None;
             }
             Err(TryRecvError::Empty) => {}
@@ -3785,6 +3799,7 @@ impl Model {
                         self.git_view = GitViewState::new(
                             branch.name.clone(),
                             worktree_path,
+                            branch.pr_number,
                             branch.pr_url.clone(),
                             branch.pr_title.clone(),
                             branch.divergence,
