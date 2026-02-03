@@ -185,6 +185,7 @@ impl DockerManager {
         let output = Command::new("docker")
             .args(["compose", "ps", "-q"])
             .current_dir(&self.worktree_path)
+            .env("COMPOSE_PROJECT_NAME", &self.container_name)
             .output();
 
         match output {
@@ -215,6 +216,7 @@ impl DockerManager {
         let output = Command::new("docker")
             .args(["compose", "ps", "--format", "json"])
             .current_dir(&self.worktree_path)
+            .env("COMPOSE_PROJECT_NAME", &self.container_name)
             .output();
 
         match output {

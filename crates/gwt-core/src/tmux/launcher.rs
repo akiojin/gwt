@@ -11,7 +11,7 @@ use super::error::{TmuxError, TmuxResult};
 use super::pane::{enable_mouse, select_pane, AgentPane, SplitDirection};
 use tracing::{debug, info, warn};
 
-use crate::docker::{detect_docker_files, DockerFileType, DockerManager};
+use crate::docker::{detect_docker_files, DevContainerConfig, DockerFileType, DockerManager};
 
 /// Configuration for launching an agent in a tmux pane
 #[derive(Debug, Clone)]
@@ -574,47 +574,289 @@ pub fn detect_docker_environment(worktree_path: &Path) -> Option<DockerFileType>
     detect_docker_files(worktree_path)
 }
 
-/// Build a command string for executing an agent inside a Docker container
-///
-/// Generates a command that:
-/// 1. Starts the Docker container (docker compose up -d)
-/// 2. Executes the agent inside the container (docker compose exec)
-/// 3. Stops the container when the agent exits (docker compose down)
-pub fn build_docker_agent_command(
+fn build_docker_env_flags(env_vars: &HashMap<String, String>) -> String {
+    if env_vars.is_empty() {
+        return String::new();
+    }
+
+    let mut keys: Vec<&String> = env_vars.keys().collect();
+    keys.sort();
+
+    let mut flags = Vec::new();
+    for key in keys {
+        if !is_valid_env_name(key) {
+            continue;
+        }
+        if let Some(value) = env_vars.get(key) {
+            let pair = format!("{}={}", key, value);
+            flags.push(format!("-e {}", shell_escape(&pair)));
+        }
+    }
+
+    if flags.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", flags.join(" "))
+    }
+}
+
+fn build_compose_args_string(args: &[String]) -> String {
+    if args.is_empty() {
+        return String::new();
+    }
+    let escaped: Vec<String> = args.iter().map(|arg| shell_escape(arg)).collect();
+    format!(" {}", escaped.join(" "))
+}
+
+fn build_compose_agent_command(
     worktree_path: &Path,
-    worktree_name: &str,
+    container_name: &str,
+    compose_args: &[String],
     command: &str,
     args: &[String],
-    service: Option<&str>,
+    service: &str,
+    env_flags: &str,
 ) -> String {
-    let container_name = DockerManager::generate_container_name(worktree_name);
-    let service_name = service.unwrap_or("app"); // Default service name
-
-    // Build the full command that:
-    // 1. Starts container
-    // 2. Runs agent in container
-    // 3. Stops container when done (even on error)
+    let command_escaped = shell_escape(command);
     let args_str = if args.is_empty() {
         String::new()
     } else {
-        format!(" {}", args.join(" "))
+        let escaped_args: Vec<String> = args.iter().map(|arg| shell_escape(arg)).collect();
+        format!(" {}", escaped_args.join(" "))
     };
 
-    let working_dir = worktree_path.to_string_lossy();
+    let working_dir = shell_escape(worktree_path.to_string_lossy().as_ref());
+    let compose_args_str = build_compose_args_string(compose_args);
+    let service_name = shell_escape(service);
 
     format!(
-        r#"cd '{}' && \
-COMPOSE_PROJECT_NAME='{}' docker compose up -d && \
-trap 'COMPOSE_PROJECT_NAME="{}" docker compose down' EXIT && \
-COMPOSE_PROJECT_NAME='{}' docker compose exec -T {} {}{}"#,
+        r#"cd {} && \
+COMPOSE_PROJECT_NAME={} docker compose{} up -d && \
+trap "COMPOSE_PROJECT_NAME='{}' docker compose{} down" EXIT && \
+COMPOSE_PROJECT_NAME={} docker compose{} exec -T{} {} {}{}"#,
         working_dir,
         container_name,
+        compose_args_str,
         container_name,
+        compose_args_str,
         container_name,
+        compose_args_str,
+        env_flags,
         service_name,
-        command,
+        command_escaped,
         args_str
     )
+}
+
+fn build_docker_run_agent_command(
+    worktree_path: &Path,
+    container_name: &str,
+    dockerfile_path: Option<&Path>,
+    build_context: Option<&Path>,
+    image: &str,
+    command: &str,
+    args: &[String],
+    workspace_folder: &str,
+    run_args: &[String],
+    env_flags: &str,
+) -> String {
+    let working_dir = shell_escape(worktree_path.to_string_lossy().as_ref());
+    let container_name_escaped = shell_escape(container_name);
+    let workspace_escaped = shell_escape(workspace_folder);
+    let volume = format!("{}:{}", worktree_path.to_string_lossy(), workspace_folder);
+    let volume_escaped = shell_escape(&volume);
+
+    let image_escaped = shell_escape(image);
+    let command_escaped = shell_escape(command);
+    let args_str = if args.is_empty() {
+        command_escaped
+    } else {
+        let escaped_args: Vec<String> = args.iter().map(|arg| shell_escape(arg)).collect();
+        format!("{} {}", command_escaped, escaped_args.join(" "))
+    };
+
+    let run_args_str = if run_args.is_empty() {
+        String::new()
+    } else {
+        let escaped: Vec<String> = run_args.iter().map(|arg| shell_escape(arg)).collect();
+        format!(" {}", escaped.join(" "))
+    };
+
+    let build_step = match (dockerfile_path, build_context) {
+        (Some(dockerfile_path), Some(build_context)) => {
+            let dockerfile_escaped = shell_escape(dockerfile_path.to_string_lossy().as_ref());
+            let context_escaped = shell_escape(build_context.to_string_lossy().as_ref());
+            Some(format!(
+                "docker build -t {} -f {} {}",
+                image_escaped, dockerfile_escaped, context_escaped
+            ))
+        }
+        _ => None,
+    };
+
+    let cleanup_step = format!(
+        "docker rm -f {} >/dev/null 2>&1 || true",
+        container_name_escaped
+    );
+
+    let run_step = format!(
+        "docker run -it --rm --name {} -w {} -v {}{}{} {} {}",
+        container_name_escaped,
+        workspace_escaped,
+        volume_escaped,
+        env_flags,
+        run_args_str,
+        image_escaped,
+        args_str
+    );
+
+    match build_step {
+        Some(build_step) => format!(
+            "cd {} && {} && {} && {}",
+            working_dir, build_step, cleanup_step, run_step
+        ),
+        None => format!("cd {} && {} && {}", working_dir, cleanup_step, run_step),
+    }
+}
+
+/// Build a command string for executing an agent inside a Docker container
+///
+/// Generates a command that:
+/// 1. Starts the Docker container (compose or docker run)
+/// 2. Executes the agent inside the container
+/// 3. Stops the container when the agent exits
+pub fn build_docker_agent_command(
+    worktree_path: &Path,
+    worktree_name: &str,
+    docker_file_type: &DockerFileType,
+    command: &str,
+    args: &[String],
+    service: Option<&str>,
+    env_vars: &HashMap<String, String>,
+) -> TmuxResult<String> {
+    let container_name = DockerManager::generate_container_name(worktree_name);
+    let env_flags = build_docker_env_flags(env_vars);
+
+    match docker_file_type {
+        DockerFileType::Compose(_) => {
+            let service_name = service.unwrap_or("app");
+            Ok(build_compose_agent_command(
+                worktree_path,
+                &container_name,
+                &[],
+                command,
+                args,
+                service_name,
+                &env_flags,
+            ))
+        }
+        DockerFileType::Dockerfile(dockerfile_path) => {
+            let image_tag = format!("{}:latest", container_name);
+            Ok(build_docker_run_agent_command(
+                worktree_path,
+                &container_name,
+                Some(dockerfile_path.as_path()),
+                Some(worktree_path),
+                &image_tag,
+                command,
+                args,
+                "/workspace",
+                &[],
+                &env_flags,
+            ))
+        }
+        DockerFileType::DevContainer(devcontainer_path) => {
+            let config = DevContainerConfig::load(devcontainer_path).map_err(|e| {
+                TmuxError::CommandFailed {
+                    command: "devcontainer".to_string(),
+                    reason: e.to_string(),
+                }
+            })?;
+
+            let devcontainer_dir = devcontainer_path
+                .parent()
+                .unwrap_or(worktree_path);
+
+            if config.uses_compose() {
+                let compose_args = config.to_compose_args(devcontainer_dir);
+                let service_name = service
+                    .or_else(|| config.get_service())
+                    .unwrap_or("app");
+
+                Ok(build_compose_agent_command(
+                    worktree_path,
+                    &container_name,
+                    &compose_args,
+                    command,
+                    args,
+                    service_name,
+                    &env_flags,
+                ))
+            } else if config.uses_dockerfile() {
+                let dockerfile_rel = config.get_dockerfile().ok_or_else(|| {
+                    TmuxError::CommandFailed {
+                        command: "devcontainer".to_string(),
+                        reason: "Dockerfile not specified in devcontainer.json".to_string(),
+                    }
+                })?;
+                let dockerfile_path = devcontainer_dir.join(dockerfile_rel);
+                let build_context = config
+                    .build
+                    .as_ref()
+                    .and_then(|b| b.context.as_ref())
+                    .map(|ctx| devcontainer_dir.join(ctx))
+                    .unwrap_or_else(|| devcontainer_dir.to_path_buf());
+
+                let workspace_folder = config
+                    .workspace_folder
+                    .as_deref()
+                    .unwrap_or("/workspace");
+                let run_args = config.run_args.clone().unwrap_or_default();
+                let image_tag = format!("{}:latest", container_name);
+
+                Ok(build_docker_run_agent_command(
+                    worktree_path,
+                    &container_name,
+                    Some(dockerfile_path.as_path()),
+                    Some(build_context.as_path()),
+                    &image_tag,
+                    command,
+                    args,
+                    workspace_folder,
+                    &run_args,
+                    &env_flags,
+                ))
+            } else if config.uses_image() {
+                let image = config.image.clone().ok_or_else(|| TmuxError::CommandFailed {
+                    command: "devcontainer".to_string(),
+                    reason: "Image not specified in devcontainer.json".to_string(),
+                })?;
+                let workspace_folder = config
+                    .workspace_folder
+                    .as_deref()
+                    .unwrap_or("/workspace");
+                let run_args = config.run_args.clone().unwrap_or_default();
+
+                Ok(build_docker_run_agent_command(
+                    worktree_path,
+                    &container_name,
+                    None,
+                    None,
+                    &image,
+                    command,
+                    args,
+                    workspace_folder,
+                    &run_args,
+                    &env_flags,
+                ))
+            } else {
+                Err(TmuxError::CommandFailed {
+                    command: "devcontainer".to_string(),
+                    reason: "Unsupported devcontainer configuration".to_string(),
+                })
+            }
+        }
+    }
 }
 
 /// Launch an agent with Docker support
@@ -674,18 +916,46 @@ pub fn launch_in_pane_with_docker(
     service: Option<&str>,
 ) -> TmuxResult<(String, DockerLaunchResult)> {
     // Prepare Docker launch (detect files, create manager)
-    let docker_result = prepare_docker_launch(worktree_path, worktree_name)?;
+    let mut docker_result = prepare_docker_launch(worktree_path, worktree_name)?;
 
     let full_command = if docker_result.used_docker {
-        // Build Docker-wrapped command
-        build_docker_agent_command(worktree_path, worktree_name, command, args, service)
-    } else {
-        // Build host command
-        if args.is_empty() {
-            command.to_string()
-        } else {
-            format!("{} {}", command, args.join(" "))
+        let env_vars = docker_result
+            .manager
+            .as_ref()
+            .map(|manager| manager.collect_passthrough_env())
+            .unwrap_or_default();
+
+        match build_docker_agent_command(
+            worktree_path,
+            worktree_name,
+            docker_result
+                .docker_file_type
+                .as_ref()
+                .expect("docker_file_type should exist when used_docker is true"),
+            command,
+            args,
+            service,
+            &env_vars,
+        ) {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                warn!(
+                    category = "docker",
+                    error = %e,
+                    "Failed to build Docker command, falling back to host execution"
+                );
+                docker_result = DockerLaunchResult::host_launch();
+                if args.is_empty() {
+                    command.to_string()
+                } else {
+                    format!("{} {}", command, args.join(" "))
+                }
+            }
         }
+    } else if args.is_empty() {
+        command.to_string()
+    } else {
+        format!("{} {}", command, args.join(" "))
     };
 
     // Launch in tmux pane
@@ -970,19 +1240,24 @@ mod tests {
         use std::path::PathBuf;
 
         let worktree_path = PathBuf::from("/tmp/my-worktree");
+        let docker_type = DockerFileType::Compose(PathBuf::from("docker-compose.yml"));
+        let env_vars = HashMap::new();
         let cmd = build_docker_agent_command(
             &worktree_path,
             "my-worktree",
+            &docker_type,
             "claude",
             &[],
             None,
+            &env_vars,
         );
+        let cmd = cmd.unwrap();
 
         // Verify command structure
         assert!(cmd.contains("docker compose up -d"));
         assert!(cmd.contains("docker compose down"));
         assert!(cmd.contains("docker compose exec"));
-        assert!(cmd.contains("COMPOSE_PROJECT_NAME='gwt-my-worktree'"));
+        assert!(cmd.contains("COMPOSE_PROJECT_NAME=gwt-my-worktree"));
         assert!(cmd.contains("claude"));
     }
 
@@ -991,17 +1266,108 @@ mod tests {
         use std::path::PathBuf;
 
         let worktree_path = PathBuf::from("/tmp/my-worktree");
+        let docker_type = DockerFileType::Compose(PathBuf::from("docker-compose.yml"));
+        let env_vars = HashMap::new();
         let args = vec!["--model".to_string(), "opus".to_string()];
         let cmd = build_docker_agent_command(
             &worktree_path,
             "my-worktree",
+            &docker_type,
             "claude",
             &args,
             Some("web"),
+            &env_vars,
         );
+        let cmd = cmd.unwrap();
 
-        assert!(cmd.contains("claude --model opus"));
-        assert!(cmd.contains("exec -T web"));
+        assert!(cmd.contains("'claude'"));
+        assert!(cmd.contains("'--model'"));
+        assert!(cmd.contains("'opus'"));
+        assert!(cmd.contains("exec -T 'web'"));
+    }
+
+    #[test]
+    fn test_build_docker_agent_command_includes_env_flags() {
+        use std::path::PathBuf;
+
+        let worktree_path = PathBuf::from("/tmp/my-worktree");
+        let docker_type = DockerFileType::Compose(PathBuf::from("docker-compose.yml"));
+        let mut env_vars = HashMap::new();
+        env_vars.insert("OPENAI_API_KEY".to_string(), "test-key".to_string());
+
+        let cmd = build_docker_agent_command(
+            &worktree_path,
+            "my-worktree",
+            &docker_type,
+            "claude",
+            &[],
+            None,
+            &env_vars,
+        )
+        .unwrap();
+
+        assert!(cmd.contains("docker compose exec"));
+        assert!(cmd.contains("-e 'OPENAI_API_KEY=test-key'"));
+    }
+
+    #[test]
+    fn test_build_docker_agent_command_dockerfile() {
+        use std::path::PathBuf;
+
+        let worktree_path = PathBuf::from("/tmp/my-worktree");
+        let docker_type = DockerFileType::Dockerfile(worktree_path.join("Dockerfile"));
+        let env_vars = HashMap::new();
+
+        let cmd = build_docker_agent_command(
+            &worktree_path,
+            "my-worktree",
+            &docker_type,
+            "claude",
+            &[],
+            None,
+            &env_vars,
+        )
+        .unwrap();
+
+        assert!(cmd.contains("docker build"));
+        assert!(cmd.contains("docker run"));
+        assert!(!cmd.contains("docker compose up -d"));
+    }
+
+    #[test]
+    fn test_build_docker_agent_command_devcontainer_compose() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let worktree_path = temp_dir.path();
+        let devcontainer_dir = worktree_path.join(".devcontainer");
+        std::fs::create_dir(&devcontainer_dir).unwrap();
+        std::fs::write(
+            devcontainer_dir.join("devcontainer.json"),
+            r#"{
+                "dockerComposeFile": ["docker-compose.yml", "docker-compose.override.yml"],
+                "service": "app"
+            }"#,
+        )
+        .unwrap();
+
+        let docker_type = DockerFileType::DevContainer(devcontainer_dir.join("devcontainer.json"));
+        let env_vars = HashMap::new();
+
+        let cmd = build_docker_agent_command(
+            worktree_path,
+            "my-worktree",
+            &docker_type,
+            "claude",
+            &[],
+            None,
+            &env_vars,
+        )
+        .unwrap();
+
+        assert!(cmd.contains("docker compose"));
+        assert!(cmd.contains("-f"));
+        assert!(cmd.contains("docker-compose.yml"));
     }
 
     #[test]

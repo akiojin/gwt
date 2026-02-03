@@ -5138,8 +5138,22 @@ impl Model {
             .gwt_pane_id
             .as_ref()
             .ok_or_else(|| "No gwt pane ID available".to_string())?;
-        let pane_id =
-            launcher::launch_in_pane(target, &working_dir, &command).map_err(|e| e.to_string())?;
+        let pane_id = if launcher::detect_docker_environment(&plan.config.worktree_path).is_some()
+        {
+            let docker_args = vec!["-lc".to_string(), command.clone()];
+            let (pane_id, _docker_result) = launcher::launch_in_pane_with_docker(
+                target,
+                &plan.config.worktree_path,
+                &plan.config.branch_name,
+                "sh",
+                &docker_args,
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+            pane_id
+        } else {
+            launcher::launch_in_pane(target, &working_dir, &command).map_err(|e| e.to_string())?
+        };
 
         // Focus the new pane (FR-022)
         if let Err(e) = gwt_core::tmux::pane::select_pane(&pane_id) {
