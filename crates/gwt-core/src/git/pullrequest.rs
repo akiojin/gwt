@@ -94,6 +94,39 @@ impl PrCache {
         self.branch_to_pr.clear();
         self.populated = false;
     }
+
+    /// Fetch latest PR for a specific branch using GitHub CLI
+    pub fn fetch_latest_for_branch(repo_path: &Path, branch: &str) -> Option<PullRequest> {
+        if !is_gh_available() {
+            return None;
+        }
+
+        let output = Command::new("gh")
+            .args([
+                "pr",
+                "list",
+                "--state",
+                "all",
+                "--head",
+                branch,
+                "--limit",
+                "20",
+                "--json",
+                "number,title,headRefName,state,url,updatedAt",
+            ])
+            .current_dir(repo_path)
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let prs = parse_gh_pr_json(&stdout).ok()?;
+
+        select_latest_pr(prs)
+    }
 }
 
 /// Check if GitHub CLI (gh) is available
@@ -187,12 +220,36 @@ fn parse_gh_pr_json(json_str: &str) -> Result<Vec<PullRequest>, std::io::Error> 
     Ok(prs)
 }
 
+fn select_latest_pr(prs: Vec<PullRequest>) -> Option<PullRequest> {
+    let mut selected: Option<PullRequest> = None;
+    for pr in prs {
+        selected = match selected {
+            Some(current) => {
+                if is_newer_pr(&pr, &current) {
+                    Some(pr)
+                } else {
+                    Some(current)
+                }
+            }
+            None => Some(pr),
+        };
+    }
+    selected
+}
+
 fn is_newer_pr(candidate: &PullRequest, current: &PullRequest) -> bool {
+    let candidate_open = candidate.state.eq_ignore_ascii_case("OPEN");
+    let current_open = current.state.eq_ignore_ascii_case("OPEN");
+
+    if candidate_open != current_open {
+        return candidate_open;
+    }
+
     match (&candidate.updated_at, &current.updated_at) {
         (Some(candidate_ts), Some(current_ts)) => candidate_ts > current_ts,
         (Some(_), None) => true,
         (None, Some(_)) => false,
-        (None, None) => candidate.state == "OPEN" && current.state != "OPEN",
+        (None, None) => false,
     }
 }
 
@@ -269,5 +326,75 @@ mod tests {
         assert!(cache.is_merged("feature/merged"));
         assert!(!cache.is_merged("feature/open"));
         assert!(!cache.is_merged("feature/missing"));
+    }
+
+    #[test]
+    fn test_is_newer_pr_open_priority() {
+        let current = PullRequest {
+            number: 1,
+            title: "Merged".to_string(),
+            head_branch: "feature/test".to_string(),
+            state: "MERGED".to_string(),
+            url: None,
+            updated_at: Some("2024-02-01T00:00:00Z".to_string()),
+        };
+        let candidate = PullRequest {
+            number: 2,
+            title: "Open".to_string(),
+            head_branch: "feature/test".to_string(),
+            state: "OPEN".to_string(),
+            url: None,
+            updated_at: Some("2024-01-01T00:00:00Z".to_string()),
+        };
+
+        assert!(is_newer_pr(&candidate, &current));
+        assert!(!is_newer_pr(&current, &candidate));
+    }
+
+    #[test]
+    fn test_is_newer_pr_updated_at_same_state() {
+        let current = PullRequest {
+            number: 1,
+            title: "Old".to_string(),
+            head_branch: "feature/test".to_string(),
+            state: "OPEN".to_string(),
+            url: None,
+            updated_at: Some("2024-01-01T00:00:00Z".to_string()),
+        };
+        let candidate = PullRequest {
+            number: 2,
+            title: "New".to_string(),
+            head_branch: "feature/test".to_string(),
+            state: "OPEN".to_string(),
+            url: None,
+            updated_at: Some("2024-02-01T00:00:00Z".to_string()),
+        };
+
+        assert!(is_newer_pr(&candidate, &current));
+        assert!(!is_newer_pr(&current, &candidate));
+    }
+
+    #[test]
+    fn test_select_latest_pr_prefers_open() {
+        let merged = PullRequest {
+            number: 1,
+            title: "Merged".to_string(),
+            head_branch: "feature/test".to_string(),
+            state: "MERGED".to_string(),
+            url: None,
+            updated_at: Some("2024-02-01T00:00:00Z".to_string()),
+        };
+        let open = PullRequest {
+            number: 2,
+            title: "Open".to_string(),
+            head_branch: "feature/test".to_string(),
+            state: "OPEN".to_string(),
+            url: None,
+            updated_at: Some("2024-01-01T00:00:00Z".to_string()),
+        };
+
+        let selected = select_latest_pr(vec![merged, open]).unwrap();
+        assert_eq!(selected.state, "OPEN");
+        assert_eq!(selected.number, 2);
     }
 }
