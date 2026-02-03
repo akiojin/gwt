@@ -108,6 +108,8 @@ pub struct EnvironmentState {
     pub ai_api_key: String,
     /// AI model
     pub ai_model: String,
+    /// Session summary enabled
+    pub ai_summary_enabled: bool,
     /// AI field currently being edited
     editing_ai_field: Option<AiField>,
     /// AI-only mode (no environment variables)
@@ -161,11 +163,13 @@ impl EnvironmentState {
         endpoint: String,
         api_key: String,
         model: String,
+        summary_enabled: bool,
     ) -> Self {
         self.ai_enabled = enabled;
         self.ai_endpoint = endpoint;
         self.ai_api_key = api_key;
         self.ai_model = model;
+        self.ai_summary_enabled = summary_enabled;
         self
     }
 
@@ -1080,6 +1084,7 @@ mod tests {
             "".to_string(),
             "".to_string(),
             "".to_string(),
+            true,
         );
 
         let (endpoint, _) = state.ai_display_value(AiField::Endpoint);

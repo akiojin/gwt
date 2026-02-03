@@ -129,6 +129,7 @@ impl Model {
             endpoint: self.ai_wizard.endpoint.trim().to_string(),
             api_key: self.ai_wizard.api_key.trim().to_string(),
             model,
+            summary_enabled: self.ai_wizard.summary_enabled,
         };
 
         if self.ai_wizard.is_default_ai {

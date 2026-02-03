@@ -10,6 +10,7 @@ use gwt_core::tmux::{AgentPane, StatusBarSummary};
 use gwt_core::worktree::Worktree;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::{prelude::*, widgets::*};
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -56,20 +57,27 @@ const PANEL_PADDING_X: u16 = 1;
 /// Get branch name type for sorting
 fn get_branch_name_type(name: &str) -> BranchNameType {
     let lower = name.to_lowercase();
-    // Strip remote prefix for comparison
-    let name_part = lower.split('/').next_back().unwrap_or(&lower);
+    // Strip only the "remotes/<remote>/" prefix for comparison
+    let short_name = if let Some(stripped) = lower.strip_prefix("remotes/") {
+        stripped
+            .split_once('/')
+            .map(|(_, rest)| rest)
+            .unwrap_or(stripped)
+    } else {
+        lower.as_str()
+    };
 
-    if name_part == "main" || name_part == "master" {
+    if short_name == "main" || short_name == "master" {
         BranchNameType::Main
-    } else if name_part == "develop" || name_part == "dev" {
+    } else if short_name == "develop" || short_name == "dev" {
         BranchNameType::Develop
-    } else if lower.contains("feature/") {
+    } else if short_name.starts_with("feature/") {
         BranchNameType::Feature
-    } else if lower.contains("bugfix/") || lower.contains("bug/") {
+    } else if short_name.starts_with("bugfix/") || short_name.starts_with("bug/") {
         BranchNameType::Bugfix
-    } else if lower.contains("hotfix/") {
+    } else if short_name.starts_with("hotfix/") {
         BranchNameType::Hotfix
-    } else if lower.contains("release/") {
+    } else if short_name.starts_with("release/") {
         BranchNameType::Release
     } else {
         BranchNameType::Other
@@ -99,6 +107,33 @@ impl ViewMode {
             ViewMode::All => ViewMode::Local,
             ViewMode::Local => ViewMode::Remote,
             ViewMode::Remote => ViewMode::All,
+        }
+    }
+}
+
+/// Sort mode for branch list
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BranchSortMode {
+    #[default]
+    Default,
+    Name,
+    Updated,
+}
+
+impl BranchSortMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            BranchSortMode::Default => "Default",
+            BranchSortMode::Name => "Name",
+            BranchSortMode::Updated => "Updated",
+        }
+    }
+
+    pub fn cycle(&self) -> Self {
+        match self {
+            BranchSortMode::Default => BranchSortMode::Name,
+            BranchSortMode::Name => BranchSortMode::Updated,
+            BranchSortMode::Updated => BranchSortMode::Default,
         }
     }
 }
@@ -167,6 +202,8 @@ pub struct BranchItem {
     pub pr_number: Option<u64>,
     /// PR URL for latest PR (if any)
     pub pr_url: Option<String>,
+    /// PR state for latest PR (if any)
+    pub pr_state: Option<String>,
     /// FR-085: Whether the upstream branch has been deleted (gone)
     pub is_gone: bool,
 }
@@ -177,6 +214,7 @@ pub struct PrInfo {
     pub title: String,
     pub number: u64,
     pub url: Option<String>,
+    pub state: String,
 }
 
 #[derive(Debug, Clone)]
@@ -257,7 +295,8 @@ impl BranchItem {
             is_selected: false,
             pr_title: None,
             pr_number: None,
-            pr_url: None,            // FR-016: Will be populated from PrCache
+            pr_url: None, // FR-016: Will be populated from PrCache
+            pr_state: None,
             is_gone: branch.is_gone, // FR-085: Populate gone status from Branch
         };
         item.update_safety_status();
@@ -313,6 +352,7 @@ impl BranchItem {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: branch.is_gone, // FR-085: Populate gone status from Branch
         };
         item.update_safety_status();
@@ -417,6 +457,7 @@ pub struct BranchListState {
     pub is_loading: bool,
     pub loading_started: Option<Instant>,
     pub error: Option<String>,
+    pub sort_mode: BranchSortMode,
     pub version: Option<String>,
     pub working_directory: Option<String>,
     pub active_profile: Option<String>,
@@ -442,6 +483,8 @@ pub struct BranchListState {
     pub branch_summary: Option<BranchSummary>,
     /// AI settings enabled for active profile
     pub ai_enabled: bool,
+    /// Session summary enabled for active profile
+    pub session_summary_enabled: bool,
     /// Session summary cache (session)
     session_summary_cache: SessionSummaryCache,
     /// Session summary requests in-flight
@@ -490,6 +533,7 @@ impl Default for BranchListState {
             is_loading: false,
             loading_started: None,
             error: None,
+            sort_mode: BranchSortMode::default(),
             version: None,
             working_directory: None,
             active_profile: None,
@@ -509,6 +553,7 @@ impl Default for BranchListState {
             running_agents: HashMap::new(),
             branch_summary: None,
             ai_enabled: false,
+            session_summary_enabled: false,
             session_summary_cache: SessionSummaryCache::default(),
             session_summary_inflight: HashSet::new(),
             session_missing: HashSet::new(),
@@ -574,65 +619,109 @@ impl BranchListState {
             });
         }
 
-        let has_main = result
-            .iter()
-            .any(|&index| get_branch_name_type(&self.branches[index].name) == BranchNameType::Main);
-
         result.sort_by(|&a_index, &b_index| {
             let a = &self.branches[a_index];
             let b = &self.branches[b_index];
 
-            if a.is_current && !b.is_current {
-                return std::cmp::Ordering::Less;
-            }
-            if !a.is_current && b.is_current {
-                return std::cmp::Ordering::Greater;
-            }
-
-            let a_type = get_branch_name_type(&a.name);
-            let b_type = get_branch_name_type(&b.name);
-            if a_type == BranchNameType::Main && b_type != BranchNameType::Main {
-                return std::cmp::Ordering::Less;
-            }
-            if a_type != BranchNameType::Main && b_type == BranchNameType::Main {
-                return std::cmp::Ordering::Greater;
-            }
-
-            if has_main {
-                if a_type == BranchNameType::Develop && b_type != BranchNameType::Develop {
-                    return std::cmp::Ordering::Less;
+            let compare_current = |a: &BranchItem, b: &BranchItem| -> Option<Ordering> {
+                if a.is_current && !b.is_current {
+                    Some(Ordering::Less)
+                } else if !a.is_current && b.is_current {
+                    Some(Ordering::Greater)
+                } else {
+                    None
                 }
-                if a_type != BranchNameType::Develop && b_type == BranchNameType::Develop {
-                    return std::cmp::Ordering::Greater;
+            };
+
+            let compare_timestamp = |a: &BranchItem, b: &BranchItem| -> Option<Ordering> {
+                match (a.last_commit_timestamp, b.last_commit_timestamp) {
+                    (Some(a_time), Some(b_time)) => {
+                        if a_time == b_time {
+                            None
+                        } else {
+                            Some(b_time.cmp(&a_time))
+                        }
+                    }
+                    (Some(_), None) => Some(Ordering::Less),
+                    (None, Some(_)) => Some(Ordering::Greater),
+                    (None, None) => None,
+                }
+            };
+
+            let compare_local_remote = |a: &BranchItem, b: &BranchItem| -> Option<Ordering> {
+                match (a.branch_type, b.branch_type) {
+                    (BranchType::Local, BranchType::Remote) => Some(Ordering::Less),
+                    (BranchType::Remote, BranchType::Local) => Some(Ordering::Greater),
+                    _ => None,
+                }
+            };
+
+            match self.sort_mode {
+                BranchSortMode::Default => {
+                    if let Some(ordering) = compare_current(a, b) {
+                        return ordering;
+                    }
+
+                    let a_type = get_branch_name_type(&a.name);
+                    let b_type = get_branch_name_type(&b.name);
+                    if a_type != b_type {
+                        return a_type.cmp(&b_type);
+                    }
+
+                    if a.has_worktree && !b.has_worktree {
+                        return Ordering::Less;
+                    }
+                    if !a.has_worktree && b.has_worktree {
+                        return Ordering::Greater;
+                    }
+
+                    if let Some(ordering) = compare_timestamp(a, b) {
+                        return ordering;
+                    }
+
+                    if let Some(ordering) = compare_local_remote(a, b) {
+                        return ordering;
+                    }
+
+                    a.name.to_lowercase().cmp(&b.name.to_lowercase())
+                }
+                BranchSortMode::Name => {
+                    if let Some(ordering) = compare_current(a, b) {
+                        return ordering;
+                    }
+
+                    let name_order = a.name.to_lowercase().cmp(&b.name.to_lowercase());
+                    if name_order != Ordering::Equal {
+                        return name_order;
+                    }
+
+                    if let Some(ordering) = compare_local_remote(a, b) {
+                        return ordering;
+                    }
+
+                    Ordering::Equal
+                }
+                BranchSortMode::Updated => {
+                    if let Some(ordering) = compare_current(a, b) {
+                        return ordering;
+                    }
+
+                    if let Some(ordering) = compare_timestamp(a, b) {
+                        return ordering;
+                    }
+
+                    let name_order = a.name.to_lowercase().cmp(&b.name.to_lowercase());
+                    if name_order != Ordering::Equal {
+                        return name_order;
+                    }
+
+                    if let Some(ordering) = compare_local_remote(a, b) {
+                        return ordering;
+                    }
+
+                    Ordering::Equal
                 }
             }
-
-            if a.has_worktree && !b.has_worktree {
-                return std::cmp::Ordering::Less;
-            }
-            if !a.has_worktree && b.has_worktree {
-                return std::cmp::Ordering::Greater;
-            }
-
-            if let (Some(a_time), Some(b_time)) = (a.last_commit_timestamp, b.last_commit_timestamp)
-            {
-                if a_time != b_time {
-                    return b_time.cmp(&a_time);
-                }
-            } else if a.last_commit_timestamp.is_some() {
-                return std::cmp::Ordering::Less;
-            } else if b.last_commit_timestamp.is_some() {
-                return std::cmp::Ordering::Greater;
-            }
-
-            if a.branch_type == BranchType::Local && b.branch_type == BranchType::Remote {
-                return std::cmp::Ordering::Less;
-            }
-            if a.branch_type == BranchType::Remote && b.branch_type == BranchType::Local {
-                return std::cmp::Ordering::Greater;
-            }
-
-            a.name.to_lowercase().cmp(&b.name.to_lowercase())
         });
 
         self.filtered_indices = result;
@@ -678,14 +767,7 @@ impl BranchListState {
     }
 
     /// Get filtered branches based on view mode and filter
-    /// Sorted according to SPEC-d2f4762a FR-003a:
-    /// 1. Current branch (highest priority)
-    /// 2. main branch
-    /// 3. develop branch (only if main exists)
-    /// 4. Branches with worktree
-    /// 5. Latest activity timestamp (descending)
-    /// 6. Local branches (over remote)
-    /// 7. Alphabetical order
+    /// Sorted according to current sort mode (Default/Name/Updated).
     pub fn filtered_branches(&self) -> Vec<&BranchItem> {
         self.filtered_indices
             .iter()
@@ -699,6 +781,17 @@ impl BranchListState {
         self.selected = 0;
         self.offset = 0;
         self.rebuild_filtered_cache();
+    }
+
+    /// Cycle sort mode
+    pub fn cycle_sort_mode(&mut self) {
+        self.sort_mode = self.sort_mode.cycle();
+        self.rebuild_filtered_cache_preserve_selection();
+    }
+
+    pub fn set_sort_mode(&mut self, sort_mode: BranchSortMode) {
+        self.sort_mode = sort_mode;
+        self.rebuild_filtered_cache_preserve_selection();
     }
 
     pub fn set_view_mode(&mut self, view_mode: ViewMode) {
@@ -957,6 +1050,7 @@ impl BranchListState {
                 item.pr_title = Some(pr.title.clone());
                 item.pr_number = Some(pr.number);
                 item.pr_url = pr.url.clone();
+                item.pr_state = Some(pr.state.clone());
             }
         }
 
@@ -1266,7 +1360,7 @@ impl BranchListState {
         summary.loading.commits = true;
         summary.loading.meta = true;
 
-        if self.ai_enabled {
+        if self.session_summary_enabled {
             if let Some(summary_data) = self.session_summary_cache.get(&branch.name) {
                 summary = summary.with_session_summary(summary_data.clone());
             } else if self.session_summary_inflight.contains(&branch.name) {
@@ -2136,6 +2230,11 @@ fn render_session_panel(
                 "Configure AI in Profiles to enable session summary",
                 Style::default().fg(Color::Yellow),
             )));
+        } else if !state.session_summary_enabled {
+            lines.push(Line::from(Span::styled(
+                "Session summary disabled",
+                Style::default().fg(Color::Yellow),
+            )));
         } else if branch.last_session_id.is_none() || state.is_session_missing(&branch.name) {
             lines.push(Line::from(Span::styled(
                 "No session",
@@ -2536,8 +2635,17 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: false,
         }
+    }
+
+    fn sort_branch(name: &str) -> BranchItem {
+        let mut item = sample_branch(name);
+        item.has_worktree = false;
+        item.worktree_status = WorktreeStatus::None;
+        item.safe_to_cleanup = Some(true);
+        item
     }
 
     #[test]
@@ -2545,6 +2653,87 @@ mod tests {
         assert_eq!(ViewMode::All.cycle(), ViewMode::Local);
         assert_eq!(ViewMode::Local.cycle(), ViewMode::Remote);
         assert_eq!(ViewMode::Remote.cycle(), ViewMode::All);
+    }
+
+    #[test]
+    fn test_sort_default_type_order() {
+        let branches = vec![
+            sort_branch("feature/one"),
+            sort_branch("bugfix/one"),
+            sort_branch("hotfix/one"),
+            sort_branch("release/one"),
+            sort_branch("develop"),
+            sort_branch("main"),
+            sort_branch("chore/one"),
+        ];
+        let state = BranchListState::new().with_branches(branches);
+        let names: Vec<_> = state
+            .filtered_branches()
+            .iter()
+            .map(|branch| branch.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "main",
+                "develop",
+                "feature/one",
+                "bugfix/one",
+                "hotfix/one",
+                "release/one",
+                "chore/one",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_branch_name_type_ignores_suffix_match() {
+        assert_eq!(
+            get_branch_name_type("feature/main"),
+            BranchNameType::Feature
+        );
+    }
+
+    #[test]
+    fn test_sort_current_branch_first() {
+        let mut current = sort_branch("feature/current");
+        current.is_current = true;
+        let branches = vec![sort_branch("main"), current, sort_branch("develop")];
+        let state = BranchListState::new().with_branches(branches);
+        assert_eq!(state.filtered_branches()[0].name, "feature/current");
+    }
+
+    #[test]
+    fn test_sort_mode_name_orders_by_name() {
+        let branches = vec![sort_branch("feature/beta"), sort_branch("feature/alpha")];
+        let mut state = BranchListState::new().with_branches(branches);
+        state.set_sort_mode(BranchSortMode::Name);
+        let names: Vec<_> = state
+            .filtered_branches()
+            .iter()
+            .map(|branch| branch.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["feature/alpha", "feature/beta"]);
+    }
+
+    #[test]
+    fn test_sort_mode_updated_orders_by_timestamp() {
+        let mut older = sort_branch("feature/old");
+        older.last_commit_timestamp = Some(100);
+        let mut newer = sort_branch("feature/new");
+        newer.last_commit_timestamp = Some(200);
+        let mut unknown = sort_branch("feature/unknown");
+        unknown.last_commit_timestamp = None;
+
+        let branches = vec![older, unknown, newer];
+        let mut state = BranchListState::new().with_branches(branches);
+        state.set_sort_mode(BranchSortMode::Updated);
+        let names: Vec<_> = state
+            .filtered_branches()
+            .iter()
+            .map(|branch| branch.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["feature/new", "feature/old", "feature/unknown"]);
     }
 
     #[test]
@@ -2807,6 +2996,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -2832,6 +3022,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
@@ -2972,6 +3163,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: false,
         }];
 
@@ -3020,6 +3212,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: false,
         }];
 
@@ -3077,6 +3270,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -3102,6 +3296,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
@@ -3189,6 +3384,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: false,
         }];
 
@@ -3245,6 +3441,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: false,
         }];
 
@@ -3371,6 +3568,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -3396,6 +3594,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
@@ -3440,6 +3639,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -3465,6 +3665,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
@@ -3509,6 +3710,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -3534,6 +3736,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
@@ -3549,6 +3752,7 @@ mod tests {
                 title: "Cool PR".to_string(),
                 number: 123,
                 url: Some("https://github.com/example/repo/pull/123".to_string()),
+                state: "OPEN".to_string(),
             },
         );
         state.apply_pr_info(&info);
@@ -3556,6 +3760,7 @@ mod tests {
         let filtered = state.filtered_branches();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "feature/one");
+        assert_eq!(filtered[0].pr_state.as_deref(), Some("OPEN"));
     }
 
     #[test]
@@ -3583,6 +3788,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: false,
         };
 
@@ -3637,6 +3843,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -3662,6 +3869,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
@@ -3715,6 +3923,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -3740,6 +3949,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -3765,6 +3975,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];

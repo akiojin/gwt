@@ -12,6 +12,18 @@
 - [x] **T8957** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にマウスホイールスクロールのユニットテストを追加
 - [x] **T8958** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
 
+## 追加作業: セッション要約の有効/無効切り替え (2026-02-03)
+
+- [x] **T8960** [P] [共通] `specs/SPEC-4b893dae/spec.md` / `specs/SPEC-4b893dae/plan.md` / `specs/SPEC-4b893dae/data-model.md` にセッション要約ON/OFF要件を追記
+- [ ] **T8961** [Impl] `crates/gwt-core/src/config/profile.rs` に`summary_enabled`を追加し、デフォルトを有効化
+- [ ] **T8962** [Impl] `crates/gwt-cli/src/tui/screens/ai_wizard.rs` にセッション要約ON/OFFトグルとクリア操作を追加
+- [ ] **T8963** [Impl] `crates/gwt-cli/src/tui/app.rs` にセッション要約ON/OFFの保存・判定ロジックを追加
+- [ ] **T8964** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` に無効時メッセージ表示と生成停止を追加
+- [ ] **T8965** [Test] `crates/gwt-core/src/config/profile.rs` のデフォルト値/有効判定テストを追加
+- [ ] **T8966** [Test] `crates/gwt-cli/src/tui/screens/ai_wizard.rs` のトグル状態反映テストを追加
+- [ ] **T8967** [Test] `crates/gwt-cli/src/tui/app.rs` のセッション要約ON/OFF判定テストを追加
+- [ ] **T8968** `cargo test -p gwt-core` と `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
 ## 追加作業: AI設定モデル一覧スクロール (2026-01-24)
 
 - [x] **T8950** [P] [共通] `specs/SPEC-4b893dae/spec.md` / `specs/SPEC-4b893dae/plan.md` にモデル一覧スクロール要件を追記
