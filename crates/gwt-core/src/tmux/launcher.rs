@@ -2,16 +2,21 @@
 //!
 //! Provides functionality to launch coding agents in tmux panes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::path::Path;
 use std::process::Command;
-use std::time::SystemTime;
 
 use super::error::{TmuxError, TmuxResult};
 use super::pane::{enable_mouse, select_pane, AgentPane, SplitDirection};
 use tracing::{debug, info, warn};
 
+use crate::docker::port::PortAllocator;
 use crate::docker::{detect_docker_files, DevContainerConfig, DockerFileType, DockerManager};
+use serde_yaml::value::{Tag, TaggedValue};
+use serde_yaml::{Mapping, Value};
 
 /// Configuration for launching an agent in a tmux pane
 #[derive(Debug, Clone)]
@@ -600,12 +605,295 @@ fn build_docker_env_flags(env_vars: &HashMap<String, String>) -> String {
     }
 }
 
+fn build_compose_env_prefix(env_vars: &HashMap<String, String>) -> String {
+    if env_vars.is_empty() {
+        return String::new();
+    }
+
+    let mut keys: Vec<&String> = env_vars.keys().collect();
+    keys.sort();
+
+    let mut parts = Vec::new();
+    for key in keys {
+        if !is_valid_env_name(key) {
+            continue;
+        }
+        if let Some(value) = env_vars.get(key) {
+            parts.push(format!("{}={}", key, shell_escape(value)));
+        }
+    }
+
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("{} ", parts.join(" "))
+    }
+}
+
 fn build_compose_args_string(args: &[String]) -> String {
     if args.is_empty() {
         return String::new();
     }
     let escaped: Vec<String> = args.iter().map(|arg| shell_escape(arg)).collect();
     format!(" {}", escaped.join(" "))
+}
+
+fn parse_port_parts(port_value: &str) -> Option<(Option<&str>, &str, &str)> {
+    if port_value.contains("${") {
+        return None;
+    }
+    let parts: Vec<&str> = port_value.split(':').collect();
+    if parts.len() == 2 {
+        Some((None, parts[0], parts[1]))
+    } else if parts.len() == 3 {
+        Some((Some(parts[0]), parts[1], parts[2]))
+    } else {
+        None
+    }
+}
+
+fn split_container_port(port_value: &str) -> (&str, Option<&str>) {
+    if let Some((port, proto)) = port_value.split_once('/') {
+        (port, Some(proto))
+    } else {
+        (port_value, None)
+    }
+}
+
+fn allocate_free_port(
+    allocator: &PortAllocator,
+    base_port: u16,
+    used_ports: &mut HashSet<u16>,
+) -> Option<u16> {
+    let mut current = base_port;
+    loop {
+        let port = allocator.find_available_port(current)?;
+        if used_ports.insert(port) {
+            return Some(port);
+        }
+        current = port.saturating_add(1);
+    }
+}
+
+fn parse_docker_ps_ports(output: &str) -> HashSet<u16> {
+    let mut ports = HashSet::new();
+    for line in output.lines() {
+        for segment in line.split(',') {
+            let segment = segment.trim();
+            let Some(arrow_idx) = segment.find("->") else {
+                continue;
+            };
+            let left = &segment[..arrow_idx];
+            let Some(colon_idx) = left.rfind(':') else {
+                continue;
+            };
+            let host_port = &left[colon_idx + 1..];
+            let host_port = host_port.trim_matches(']');
+            if let Ok(port) = host_port.parse::<u16>() {
+                ports.insert(port);
+            }
+        }
+    }
+    ports
+}
+
+fn docker_ports_in_use() -> HashSet<u16> {
+    let output = Command::new("docker")
+        .args(["ps", "--format", "{{.Ports}}"])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            parse_docker_ps_ports(&stdout)
+        }
+        _ => HashSet::new(),
+    }
+}
+
+fn rewrite_ports_value(
+    ports: &Value,
+    allocator: &PortAllocator,
+    used_ports: &mut HashSet<u16>,
+    docker_ports: &HashSet<u16>,
+) -> Option<(Value, bool)> {
+    let mut changed = false;
+    let mut rewritten = Vec::new();
+
+    let ports_seq = ports.as_sequence()?;
+    for entry in ports_seq {
+        match entry {
+            Value::String(port_value) => {
+                if let Some((ip, host_part, container_part)) = parse_port_parts(port_value) {
+                    let (container_port, proto) = split_container_port(container_part);
+                    if let Ok(host_port) = host_part.parse::<u16>() {
+                        let new_port = if docker_ports.contains(&host_port)
+                            || PortAllocator::is_port_in_use(host_port)
+                        {
+                            allocate_free_port(allocator, host_port, used_ports).unwrap_or(host_port)
+                        } else if used_ports.contains(&host_port) {
+                            allocate_free_port(allocator, host_port, used_ports).unwrap_or(host_port)
+                        } else {
+                            used_ports.insert(host_port);
+                            host_port
+                        };
+                        if new_port != host_port {
+                            changed = true;
+                        }
+                        let mut port_str = String::new();
+                        if let Some(ip) = ip {
+                            port_str.push_str(ip);
+                            port_str.push(':');
+                        }
+                        port_str.push_str(&new_port.to_string());
+                        port_str.push(':');
+                        port_str.push_str(container_port);
+                        if let Some(proto) = proto {
+                            port_str.push('/');
+                            port_str.push_str(proto);
+                        }
+                        rewritten.push(Value::String(port_str));
+                        continue;
+                    }
+                }
+                rewritten.push(entry.clone());
+            }
+            Value::Mapping(map) => {
+                let mut new_map = map.clone();
+                let published = map.get(&Value::String("published".to_string()));
+                let target = map.get(&Value::String("target".to_string()));
+                if let (Some(Value::Number(published)), Some(Value::Number(_target))) = (published, target) {
+                    if let Some(host_port) = published.as_u64().and_then(|p| u16::try_from(p).ok()) {
+                        let new_port = if docker_ports.contains(&host_port)
+                            || PortAllocator::is_port_in_use(host_port)
+                        {
+                            allocate_free_port(allocator, host_port, used_ports).unwrap_or(host_port)
+                        } else if used_ports.contains(&host_port) {
+                            allocate_free_port(allocator, host_port, used_ports).unwrap_or(host_port)
+                        } else {
+                            used_ports.insert(host_port);
+                            host_port
+                        };
+                        if new_port != host_port {
+                            changed = true;
+                            new_map.insert(
+                                Value::String("published".to_string()),
+                                Value::Number(new_port.into()),
+                            );
+                        }
+                    }
+                }
+                rewritten.push(Value::Mapping(new_map));
+            }
+            _ => rewritten.push(entry.clone()),
+        }
+    }
+
+    let tagged = Value::Tagged(Box::new(TaggedValue {
+        tag: Tag::new("!override"),
+        value: Value::Sequence(rewritten),
+    }));
+    Some((tagged, changed))
+}
+
+fn maybe_write_compose_override(
+    compose_path: &Path,
+    container_name: &str,
+    env_vars: &HashMap<String, String>,
+) -> TmuxResult<Option<PathBuf>> {
+    let content = fs::read_to_string(compose_path).map_err(|e| TmuxError::CommandFailed {
+        command: "docker compose".to_string(),
+        reason: format!("Failed to read compose file: {}", e),
+    })?;
+    let doc: Value = serde_yaml::from_str(&content).map_err(|e| TmuxError::CommandFailed {
+        command: "docker compose".to_string(),
+        reason: format!("Failed to parse compose file: {}", e),
+    })?;
+
+    let Some(services) = doc
+        .get("services")
+        .and_then(|v| v.as_mapping())
+    else {
+        return Ok(None);
+    };
+
+    let allocator = PortAllocator::new();
+    let mut used_ports = HashSet::new();
+    let docker_ports = docker_ports_in_use();
+    let mut override_services = Mapping::new();
+    let mut changed_any = false;
+    let host_git_common = env_vars.get("HOST_GIT_COMMON_DIR").cloned();
+    let host_git_worktree = env_vars.get("HOST_GIT_WORKTREE_DIR").cloned();
+
+    for (service_name, service_val) in services {
+        let Some(service_map) = service_val.as_mapping() else {
+            continue;
+        };
+        let mut service_override = Mapping::new();
+
+        if let Some(ports_val) = service_map.get(&Value::String("ports".to_string())) {
+            if let Some((rewritten_ports, changed)) = rewrite_ports_value(
+                ports_val,
+                &allocator,
+                &mut used_ports,
+                &docker_ports,
+            ) {
+                if changed {
+                    changed_any = true;
+                }
+                service_override.insert(Value::String("ports".to_string()), rewritten_ports);
+            }
+        }
+
+        if service_name.as_str().is_some_and(|s| s == "gwt") {
+            let mut volumes = Vec::new();
+            if let Some(common) = host_git_common.as_ref() {
+                volumes.push(Value::String(format!("{}:{}", common, common)));
+            }
+            if let Some(worktree) = host_git_worktree.as_ref() {
+                volumes.push(Value::String(format!("{}:{}", worktree, worktree)));
+            }
+            if !volumes.is_empty() {
+                service_override.insert(
+                    Value::String("volumes".to_string()),
+                    Value::Sequence(volumes),
+                );
+                changed_any = true;
+            }
+        }
+
+        if !service_override.is_empty() {
+            override_services.insert(service_name.clone(), Value::Mapping(service_override));
+        }
+    }
+
+    if !changed_any {
+        return Ok(None);
+    }
+
+    let mut override_doc = Mapping::new();
+    override_doc.insert(
+        Value::String("services".to_string()),
+        Value::Mapping(override_services),
+    );
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let filename = format!("gwt-compose-override-{}-{}.yml", container_name, ts);
+    let override_path = std::env::temp_dir().join(filename);
+    let yaml = serde_yaml::to_string(&Value::Mapping(override_doc)).map_err(|e| {
+        TmuxError::CommandFailed {
+            command: "docker compose".to_string(),
+            reason: format!("Failed to render compose override: {}", e),
+        }
+    })?;
+    fs::write(&override_path, yaml).map_err(|e| TmuxError::CommandFailed {
+        command: "docker compose".to_string(),
+        reason: format!("Failed to write compose override: {}", e),
+    })?;
+
+    Ok(Some(override_path))
 }
 
 fn build_compose_agent_command(
@@ -615,7 +903,9 @@ fn build_compose_agent_command(
     command: &str,
     args: &[String],
     service: &str,
+    compose_env_prefix: &str,
     env_flags: &str,
+    build: bool,
 ) -> String {
     let command_escaped = shell_escape(command);
     let args_str = if args.is_empty() {
@@ -627,24 +917,72 @@ fn build_compose_agent_command(
 
     let working_dir = shell_escape(worktree_path.to_string_lossy().as_ref());
     let compose_args_str = build_compose_args_string(compose_args);
+    let compose_args_debug = if compose_args.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "echo \"[gwt] docker compose args: {}\"; ",
+            compose_args.join(" ")
+        )
+    };
     let service_name = shell_escape(service);
 
+    let up_target = if service.is_empty() {
+        String::new()
+    } else {
+        format!(" --no-deps {}", service_name)
+    };
+
+    let build_flag = if build { " --build" } else { " --no-build" };
+    let mut exec_script = format!("exec {}{}", command_escaped, args_str);
+    if command.to_lowercase().contains("codex") {
+        let sync_script = concat!(
+            "mkdir -p /root/.codex; ",
+            "if [ -f /root/.codex-host/auth.json ]; then ",
+            "if [ -d /root/.codex/auth.json ]; then rm -rf /root/.codex/auth.json; fi; ",
+            "if [ ! -f /root/.codex/auth.json ] || [ ! -s /root/.codex/auth.json ] || ",
+            "[ /root/.codex-host/auth.json -nt /root/.codex/auth.json ]; then ",
+            "cp /root/.codex-host/auth.json /root/.codex/auth.json; ",
+            "chmod 600 /root/.codex/auth.json; ",
+            "fi; ",
+            "fi"
+        );
+        exec_script = format!("{}; {}", sync_script, exec_script);
+    }
+    let exec_shell = format!("sh -lc {}", shell_escape(&exec_script));
     format!(
         r#"cd {} && \
-COMPOSE_PROJECT_NAME={} docker compose{} up -d && \
-trap "COMPOSE_PROJECT_NAME='{}' docker compose{} down" EXIT && \
-COMPOSE_PROJECT_NAME={} docker compose{} exec -T{} {} {}{}"#,
+{}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{} || {{ status=$?; echo "[gwt] docker compose up failed (status=$status)."; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $status; }} && \
+trap "{}COMPOSE_PROJECT_NAME='{}' docker compose{} down" EXIT && \
+{}COMPOSE_PROJECT_NAME={} docker compose{} exec{} {} {} || {{ status=$?; echo "[gwt] docker compose exec failed (status=$status)."; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $status; }}"#,
         working_dir,
+        compose_args_debug,
+        compose_env_prefix,
         container_name,
         compose_args_str,
+        up_target,
+        build_flag,
+        compose_env_prefix,
         container_name,
         compose_args_str,
+        compose_env_prefix,
+        container_name,
+        compose_args_str,
+        compose_env_prefix,
+        container_name,
+        compose_args_str,
+        compose_env_prefix,
         container_name,
         compose_args_str,
         env_flags,
         service_name,
-        command_escaped,
-        args_str
+        exec_shell,
+        compose_env_prefix,
+        container_name,
+        compose_args_str,
+        compose_env_prefix,
+        container_name,
+        compose_args_str
     )
 }
 
@@ -733,21 +1071,44 @@ pub fn build_docker_agent_command(
     args: &[String],
     service: Option<&str>,
     env_vars: &HashMap<String, String>,
+    build: bool,
 ) -> TmuxResult<String> {
     let container_name = DockerManager::generate_container_name(worktree_name);
     let env_flags = build_docker_env_flags(env_vars);
+    let compose_env_prefix = build_compose_env_prefix(env_vars);
 
     match docker_file_type {
         DockerFileType::Compose(_) => {
             let service_name = service.unwrap_or("app");
+            let mut compose_args = Vec::new();
+            if let DockerFileType::Compose(compose_path) = docker_file_type {
+                if compose_path.exists() {
+                    if let Some(override_path) =
+                        maybe_write_compose_override(compose_path, &container_name, env_vars)?
+                    {
+                        info!(
+                            category = "docker",
+                            container = %container_name,
+                            override_path = %override_path.display(),
+                            "Generated compose override for ports"
+                        );
+                        compose_args.push("-f".to_string());
+                        compose_args.push(compose_path.to_string_lossy().to_string());
+                        compose_args.push("-f".to_string());
+                        compose_args.push(override_path.to_string_lossy().to_string());
+                    }
+                }
+            }
             Ok(build_compose_agent_command(
                 worktree_path,
                 &container_name,
-                &[],
+                &compose_args,
                 command,
                 args,
                 service_name,
+                &compose_env_prefix,
                 &env_flags,
+                build,
             ))
         }
         DockerFileType::Dockerfile(dockerfile_path) => {
@@ -773,15 +1134,32 @@ pub fn build_docker_agent_command(
                 }
             })?;
 
-            let devcontainer_dir = devcontainer_path
-                .parent()
-                .unwrap_or(worktree_path);
+            let devcontainer_dir = devcontainer_path.parent().unwrap_or(worktree_path);
 
             if config.uses_compose() {
-                let compose_args = config.to_compose_args(devcontainer_dir);
-                let service_name = service
-                    .or_else(|| config.get_service())
-                    .unwrap_or("app");
+                let mut compose_args = config.to_compose_args(devcontainer_dir);
+                if let Some(first) = config
+                    .docker_compose_file
+                    .as_ref()
+                    .and_then(|files| files.to_vec().into_iter().next())
+                {
+                    let compose_path = devcontainer_dir.join(first);
+                    if compose_path.exists() {
+                        if let Some(override_path) =
+                            maybe_write_compose_override(&compose_path, &container_name, env_vars)?
+                        {
+                            info!(
+                                category = "docker",
+                                container = %container_name,
+                                override_path = %override_path.display(),
+                                "Generated compose override for ports"
+                            );
+                            compose_args.push("-f".to_string());
+                            compose_args.push(override_path.to_string_lossy().to_string());
+                        }
+                    }
+                }
+                let service_name = service.or_else(|| config.get_service()).unwrap_or("app");
 
                 Ok(build_compose_agent_command(
                     worktree_path,
@@ -790,15 +1168,18 @@ pub fn build_docker_agent_command(
                     command,
                     args,
                     service_name,
+                    &compose_env_prefix,
                     &env_flags,
+                    build,
                 ))
             } else if config.uses_dockerfile() {
-                let dockerfile_rel = config.get_dockerfile().ok_or_else(|| {
-                    TmuxError::CommandFailed {
-                        command: "devcontainer".to_string(),
-                        reason: "Dockerfile not specified in devcontainer.json".to_string(),
-                    }
-                })?;
+                let dockerfile_rel =
+                    config
+                        .get_dockerfile()
+                        .ok_or_else(|| TmuxError::CommandFailed {
+                            command: "devcontainer".to_string(),
+                            reason: "Dockerfile not specified in devcontainer.json".to_string(),
+                        })?;
                 let dockerfile_path = devcontainer_dir.join(dockerfile_rel);
                 let build_context = config
                     .build
@@ -807,10 +1188,7 @@ pub fn build_docker_agent_command(
                     .map(|ctx| devcontainer_dir.join(ctx))
                     .unwrap_or_else(|| devcontainer_dir.to_path_buf());
 
-                let workspace_folder = config
-                    .workspace_folder
-                    .as_deref()
-                    .unwrap_or("/workspace");
+                let workspace_folder = config.workspace_folder.as_deref().unwrap_or("/workspace");
                 let run_args = config.run_args.clone().unwrap_or_default();
                 let image_tag = format!("{}:latest", container_name);
 
@@ -827,14 +1205,14 @@ pub fn build_docker_agent_command(
                     &env_flags,
                 ))
             } else if config.uses_image() {
-                let image = config.image.clone().ok_or_else(|| TmuxError::CommandFailed {
-                    command: "devcontainer".to_string(),
-                    reason: "Image not specified in devcontainer.json".to_string(),
-                })?;
-                let workspace_folder = config
-                    .workspace_folder
-                    .as_deref()
-                    .unwrap_or("/workspace");
+                let image = config
+                    .image
+                    .clone()
+                    .ok_or_else(|| TmuxError::CommandFailed {
+                        command: "devcontainer".to_string(),
+                        reason: "Image not specified in devcontainer.json".to_string(),
+                    })?;
+                let workspace_folder = config.workspace_folder.as_deref().unwrap_or("/workspace");
                 let run_args = config.run_args.clone().unwrap_or_default();
 
                 Ok(build_docker_run_agent_command(
@@ -914,6 +1292,7 @@ pub fn launch_in_pane_with_docker(
     command: &str,
     args: &[String],
     service: Option<&str>,
+    build: bool,
 ) -> TmuxResult<(String, DockerLaunchResult)> {
     // Prepare Docker launch (detect files, create manager)
     let mut docker_result = prepare_docker_launch(worktree_path, worktree_name)?;
@@ -924,6 +1303,24 @@ pub fn launch_in_pane_with_docker(
             .as_ref()
             .map(|manager| manager.collect_passthrough_env())
             .unwrap_or_default();
+        let mut resolved_service: Option<String> = service.map(|s| s.to_string());
+        if resolved_service.is_none() {
+            if let Some(manager) = docker_result.manager.as_ref() {
+                if let Ok(services) = manager.list_services() {
+                    if let Some(first) = services.first() {
+                        resolved_service = Some(first.to_string());
+                    }
+                }
+            }
+        }
+        info!(
+            category = "docker",
+            worktree = %worktree_path.display(),
+            container = %docker_result.container_name.as_deref().unwrap_or("unknown"),
+            service = %resolved_service.as_deref().unwrap_or(""),
+            passthrough_envs = env_vars.len(),
+            "Preparing Docker launch command"
+        );
 
         match build_docker_agent_command(
             worktree_path,
@@ -934,8 +1331,9 @@ pub fn launch_in_pane_with_docker(
                 .expect("docker_file_type should exist when used_docker is true"),
             command,
             args,
-            service,
+            resolved_service.as_deref(),
             &env_vars,
+            build,
         ) {
             Ok(cmd) => cmd,
             Err(e) => {
@@ -959,11 +1357,7 @@ pub fn launch_in_pane_with_docker(
     };
 
     // Launch in tmux pane
-    let pane_id = launch_in_pane(
-        target_pane,
-        &worktree_path.to_string_lossy(),
-        &full_command,
-    )?;
+    let pane_id = launch_in_pane(target_pane, &worktree_path.to_string_lossy(), &full_command)?;
 
     if docker_result.used_docker {
         info!(
@@ -1250,15 +1644,40 @@ mod tests {
             &[],
             None,
             &env_vars,
+            false,
         );
         let cmd = cmd.unwrap();
 
         // Verify command structure
         assert!(cmd.contains("docker compose up -d"));
+        assert!(cmd.contains("--no-build"));
         assert!(cmd.contains("docker compose down"));
         assert!(cmd.contains("docker compose exec"));
         assert!(cmd.contains("COMPOSE_PROJECT_NAME=gwt-my-worktree"));
         assert!(cmd.contains("claude"));
+    }
+
+    #[test]
+    fn test_build_docker_agent_command_build_flag() {
+        use std::path::PathBuf;
+
+        let worktree_path = PathBuf::from("/tmp/my-worktree");
+        let docker_type = DockerFileType::Compose(PathBuf::from("docker-compose.yml"));
+        let env_vars = HashMap::new();
+        let cmd = build_docker_agent_command(
+            &worktree_path,
+            "my-worktree",
+            &docker_type,
+            "claude",
+            &[],
+            None,
+            &env_vars,
+            true,
+        )
+        .unwrap();
+
+        assert!(cmd.contains("--build"));
+        assert!(!cmd.contains("--no-build --build"));
     }
 
     #[test]
@@ -1277,13 +1696,14 @@ mod tests {
             &args,
             Some("web"),
             &env_vars,
+            false,
         );
         let cmd = cmd.unwrap();
 
         assert!(cmd.contains("'claude'"));
         assert!(cmd.contains("'--model'"));
         assert!(cmd.contains("'opus'"));
-        assert!(cmd.contains("exec -T 'web'"));
+        assert!(cmd.contains("exec 'web'"));
     }
 
     #[test]
@@ -1303,11 +1723,59 @@ mod tests {
             &[],
             None,
             &env_vars,
+            false,
         )
         .unwrap();
 
         assert!(cmd.contains("docker compose exec"));
         assert!(cmd.contains("-e 'OPENAI_API_KEY=test-key'"));
+    }
+
+    #[test]
+    fn test_build_docker_agent_command_includes_codex_auth_sync() {
+        use std::path::PathBuf;
+
+        let worktree_path = PathBuf::from("/tmp/my-worktree");
+        let docker_type = DockerFileType::Compose(PathBuf::from("docker-compose.yml"));
+        let env_vars = HashMap::new();
+        let cmd = build_docker_agent_command(
+            &worktree_path,
+            "my-worktree",
+            &docker_type,
+            "codex",
+            &[],
+            None,
+            &env_vars,
+            false,
+        )
+        .unwrap();
+
+        assert!(cmd.contains("/root/.codex-host/auth.json"));
+        assert!(cmd.contains("codex"));
+    }
+
+    #[test]
+    fn test_build_docker_agent_command_includes_compose_env_prefix() {
+        use std::path::PathBuf;
+
+        let worktree_path = PathBuf::from("/tmp/my-worktree");
+        let docker_type = DockerFileType::Compose(PathBuf::from("docker-compose.yml"));
+        let mut env_vars = HashMap::new();
+        env_vars.insert("GWT_PORT".to_string(), "6401".to_string());
+
+        let cmd = build_docker_agent_command(
+            &worktree_path,
+            "my-worktree",
+            &docker_type,
+            "claude",
+            &[],
+            None,
+            &env_vars,
+            false,
+        )
+        .unwrap();
+
+        assert!(cmd.contains("GWT_PORT='6401' COMPOSE_PROJECT_NAME=gwt-my-worktree"));
     }
 
     #[test]
@@ -1326,6 +1794,7 @@ mod tests {
             &[],
             None,
             &env_vars,
+            false,
         )
         .unwrap();
 
@@ -1362,6 +1831,7 @@ mod tests {
             &[],
             None,
             &env_vars,
+            false,
         )
         .unwrap();
 
