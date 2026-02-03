@@ -2,7 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
-## [6.26.0] - 2026-02-03
+## [6.27.0] - 2026-02-03
+
+### Features
+
+- CLI/TUI改善とWeb連携を追加 (#869)
+
+### Refactor
+
+- 未使用のgit backendを削除
+
+### Documentation
+
+- Web UIとREADMEの整合を更新
+
+## [6.26.0] - 2026-02-02
 
 ### Bug Fixes
 
@@ -89,7 +103,6 @@ All notable changes to this project will be documented in this file.
 
 ### Features
 
-- CLI/TUI改善とWeb連携を追加 (#869)
 - Allow variable session summary highlights (#718)
 - 起動最適化 - 非同期化と進捗表示の改善 (#723)
 - **tui:** ブランチ名色分けとエージェント履歴永続化 (#730)
