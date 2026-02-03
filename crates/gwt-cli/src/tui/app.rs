@@ -3060,7 +3060,10 @@ impl Model {
                 return;
             }
 
-            if try_open("powershell", &["-NoProfile", "-Command", "Start-Process", url]) {
+            if try_open(
+                "powershell",
+                &["-NoProfile", "-Command", "Start-Process", url],
+            ) {
                 return;
             }
         }

@@ -260,7 +260,7 @@ impl BranchItem {
             is_selected: false,
             pr_title: None,
             pr_number: None,
-            pr_url: None,            // FR-016: Will be populated from PrCache
+            pr_url: None, // FR-016: Will be populated from PrCache
             pr_state: None,
             is_gone: branch.is_gone, // FR-085: Populate gone status from Branch
         };
