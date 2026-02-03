@@ -45,7 +45,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -56,6 +56,9 @@ const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const SESSION_SUMMARY_QUIET_PERIOD: Duration = Duration::from_secs(5);
 const FAST_EXIT_THRESHOLD_SECS: u64 = 2;
 const AGENT_SYSTEM_PROMPT: &str = "You are the master agent. Analyze tasks and propose a plan.";
+const FOOTER_VISIBLE_HEIGHT: usize = 1;
+const FOOTER_SCROLL_TICKS_PER_LINE: u16 = 2; // 0.5s per line (tick = 250ms)
+const FOOTER_SCROLL_PAUSE_TICKS: u16 = 4; // 1s pause at ends
 
 use super::screens::branch_list::{
     BranchSummaryRequest, BranchSummaryUpdate, PrInfo, WorktreeStatus,
@@ -64,6 +67,7 @@ use super::screens::environment::EditField;
 use super::screens::git_view::{build_git_view_data, build_git_view_data_no_worktree, GitViewData};
 use super::screens::pane_list::PaneListState;
 use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
+use super::screens::worktree_create::WorktreeCreateStep;
 use super::screens::{
     collect_os_env, render_agent_mode, render_ai_wizard, render_branch_list, render_clone_wizard,
     render_confirm, render_environment, render_error_with_queue, render_git_view, render_help,
@@ -93,6 +97,16 @@ fn resolve_orphaned_agent_name(
     } else {
         trimmed.to_string()
     }
+}
+
+fn normalize_branch_name(name: &str) -> String {
+    if let Some(stripped) = name.strip_prefix("remotes/") {
+        if let Some((_, branch)) = stripped.split_once('/') {
+            return branch.to_string();
+        }
+        return stripped.to_string();
+    }
+    name.to_string()
 }
 
 fn format_ai_error(err: AIError) -> String {
@@ -360,6 +374,12 @@ struct GitViewCacheUpdate {
     data: GitViewData,
 }
 
+/// Update for GitView PR info (SPEC-1ea18899)
+struct GitViewPrUpdate {
+    branch: String,
+    info: Option<PrInfo>,
+}
+
 struct LaunchRequest {
     branch_name: String,
     create_new_branch: bool,
@@ -448,6 +468,18 @@ pub struct Model {
     status_message: Option<String>,
     /// Status message timestamp (for auto-clear)
     status_message_time: Option<Instant>,
+    /// Footer scroll offset (top line index)
+    footer_scroll_offset: usize,
+    /// Footer scroll direction (1 = down, -1 = up)
+    footer_scroll_dir: i8,
+    /// Footer scroll tick counter
+    footer_scroll_tick: u16,
+    /// Footer scroll pause counter at ends
+    footer_scroll_pause: u16,
+    /// Footer line count (last computed)
+    footer_line_count: usize,
+    /// Footer width (last computed)
+    footer_last_width: u16,
     /// Launch progress message (not auto-cleared)
     launch_status: Option<String>,
     /// Launch preparation update receiver
@@ -541,6 +573,8 @@ pub struct Model {
     git_view_cache: GitViewCache,
     /// GitView cache update receiver (SPEC-1ea18899)
     git_view_cache_rx: Option<Receiver<GitViewCacheUpdate>>,
+    /// GitView PR update receiver (SPEC-1ea18899)
+    git_view_pr_rx: Option<Receiver<GitViewPrUpdate>>,
 }
 
 /// Screen types
@@ -593,6 +627,8 @@ pub enum Message {
     ToggleFilterMode,
     /// Cycle view mode (All/Local/Remote)
     CycleViewMode,
+    /// Cycle sort mode (Default/Name/Updated)
+    CycleSortMode,
     /// Toggle branch selection
     ToggleSelection,
     /// Space key for selection
@@ -692,6 +728,12 @@ impl Model {
             ai_wizard: AIWizardState::new(),
             status_message: None,
             status_message_time: None,
+            footer_scroll_offset: 0,
+            footer_scroll_dir: 1,
+            footer_scroll_tick: 0,
+            footer_scroll_pause: 0,
+            footer_line_count: 0,
+            footer_last_width: 0,
             launch_status: None,
             launch_rx: None,
             launch_in_progress: false,
@@ -738,6 +780,7 @@ impl Model {
             git_view: GitViewState::default(),
             git_view_cache: GitViewCache::new(),
             git_view_cache_rx: None,
+            git_view_pr_rx: None,
         };
 
         model
@@ -888,7 +931,9 @@ impl Model {
 
     fn start_branch_list_refresh(&mut self, settings: gwt_core::config::Settings) {
         let cleanup_snapshot = self.branch_list.cleanup_snapshot();
+        let sort_mode = self.branch_list.sort_mode;
         self.pr_title_rx = None;
+        self.git_view_pr_rx = None;
         self.safety_rx = None;
         self.worktree_status_rx = None;
         self.branch_list_rx = None;
@@ -896,6 +941,7 @@ impl Model {
         self.active_count = 0;
 
         let mut branch_list = BranchListState::new();
+        branch_list.sort_mode = sort_mode;
         branch_list.active_profile = self.profiles_config.active.clone();
         branch_list.ai_enabled = self.active_ai_enabled();
         branch_list.working_directory = Some(self.repo_root.display().to_string());
@@ -1056,23 +1102,16 @@ impl Model {
             return;
         }
 
-        let repo_root = self.repo_root.clone();
+        let repo_root = self
+            .bare_repo_path
+            .clone()
+            .unwrap_or_else(|| self.repo_root.clone());
         let (tx, rx) = mpsc::channel();
         self.pr_title_rx = Some(rx);
 
         thread::spawn(move || {
             let mut cache = PrCache::new();
             cache.populate(&repo_root);
-
-            let normalize_branch_name = |name: &str| {
-                if let Some(stripped) = name.strip_prefix("remotes/") {
-                    if let Some((_, branch)) = stripped.split_once('/') {
-                        return branch.to_string();
-                    }
-                    return stripped.to_string();
-                }
-                name.to_string()
-            };
 
             let mut info = HashMap::new();
             for name in branch_names {
@@ -1084,6 +1123,7 @@ impl Model {
                             title: pr.title.clone(),
                             number: pr.number,
                             url: pr.url.clone(),
+                            state: pr.state.clone(),
                         },
                     );
                 }
@@ -1129,6 +1169,28 @@ impl Model {
         });
     }
 
+    /// SPEC-1ea18899: Spawn background fetch for GitView PR info
+    fn spawn_git_view_pr_fetch(&mut self, branch: &str) {
+        let branch = branch.to_string();
+        let lookup = normalize_branch_name(&branch);
+        let repo_root = self
+            .bare_repo_path
+            .clone()
+            .unwrap_or_else(|| self.repo_root.clone());
+        let (tx, rx) = mpsc::channel();
+        self.git_view_pr_rx = Some(rx);
+
+        thread::spawn(move || {
+            let info = PrCache::fetch_latest_for_branch(&repo_root, &lookup).map(|pr| PrInfo {
+                title: pr.title,
+                number: pr.number,
+                url: pr.url,
+                state: pr.state,
+            });
+            let _ = tx.send(GitViewPrUpdate { branch, info });
+        });
+    }
+
     /// SPEC-1ea18899: Apply GitView cache updates from background fetch
     fn apply_git_view_cache_updates(&mut self) {
         let Some(rx) = &self.git_view_cache_rx else {
@@ -1151,6 +1213,38 @@ impl Model {
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.git_view_cache_rx = None;
+            }
+        }
+    }
+
+    /// SPEC-1ea18899: Apply GitView PR updates from background fetch
+    fn apply_git_view_pr_updates(&mut self) {
+        let Some(rx) = &self.git_view_pr_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(update) => {
+                if let Some(info) = update.info {
+                    let mut map = HashMap::new();
+                    map.insert(update.branch.clone(), info.clone());
+                    self.branch_list.apply_pr_info(&map);
+                    if matches!(self.screen, Screen::GitView)
+                        && self.git_view.branch_name == update.branch
+                    {
+                        self.git_view.update_pr_info(
+                            Some(info.number),
+                            Some(info.title.clone()),
+                            info.url.clone(),
+                            Some(info.state.clone()),
+                        );
+                    }
+                }
+                self.git_view_pr_rx = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.git_view_pr_rx = None;
             }
         }
     }
@@ -1945,7 +2039,10 @@ impl Model {
                 let session_inflight = self.branch_list.clone_session_inflight();
                 let session_missing = self.branch_list.clone_session_missing();
                 let session_warnings = self.branch_list.clone_session_warnings();
-                let mut branch_list = BranchListState::new().with_branches(update.branches);
+                let sort_mode = self.branch_list.sort_mode;
+                let mut branch_list = BranchListState::new();
+                branch_list.sort_mode = sort_mode;
+                let mut branch_list = branch_list.with_branches(update.branches);
                 branch_list.active_profile = self.profiles_config.active.clone();
                 branch_list.ai_enabled = self.active_ai_enabled();
                 branch_list.set_session_cache(session_cache);
@@ -2000,6 +2097,29 @@ impl Model {
         match rx.try_recv() {
             Ok(update) => {
                 self.branch_list.apply_pr_info(&update.info);
+                if matches!(self.screen, Screen::GitView) {
+                    if let Some(branch) = self
+                        .branch_list
+                        .branches
+                        .iter()
+                        .find(|b| b.name == self.git_view.branch_name)
+                    {
+                        let branch_has_pr = branch.pr_number.is_some()
+                            || branch.pr_title.is_some()
+                            || branch.pr_state.is_some();
+                        let git_view_has_pr = self.git_view.pr_number.is_some()
+                            || self.git_view.pr_title.is_some()
+                            || self.git_view.pr_state.is_some();
+                        if branch_has_pr || !git_view_has_pr {
+                            self.git_view.update_pr_info(
+                                branch.pr_number,
+                                branch.pr_title.clone(),
+                                branch.pr_url.clone(),
+                                branch.pr_state.clone(),
+                            );
+                        }
+                    }
+                }
                 self.pr_title_rx = None;
             }
             Err(TryRecvError::Empty) => {}
@@ -2915,13 +3035,37 @@ impl Model {
         }
 
         let mut last_error: Option<std::io::Error> = None;
+        let mut try_open = |cmd: &str, args: &[&str]| -> bool {
+            match Command::new(cmd)
+                .args(args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+            {
+                Ok(output) => {
+                    if output.status.success() {
+                        return true;
+                    }
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let message = stderr.trim();
+                    let message = if message.is_empty() {
+                        format!("{} exited with status {}", cmd, output.status)
+                    } else {
+                        message.to_string()
+                    };
+                    last_error = Some(std::io::Error::other(message));
+                    false
+                }
+                Err(err) => {
+                    last_error = Some(err);
+                    false
+                }
+            }
+        };
         #[cfg(target_os = "macos")]
         {
-            match std::process::Command::new("open").arg(url).spawn() {
-                Ok(_) => return,
-                Err(err) => {
-                    last_error.replace(err);
-                }
+            if try_open("open", &[url]) {
+                return;
             }
         }
 
@@ -2933,35 +3077,23 @@ impl Model {
                 ("x-www-browser", vec![url]),
             ];
             for (cmd, args) in candidates {
-                match std::process::Command::new(cmd).args(args).spawn() {
-                    Ok(_) => return,
-                    Err(err) => {
-                        last_error.replace(err);
-                    }
+                if try_open(cmd, &args) {
+                    return;
                 }
             }
         }
 
         #[cfg(target_os = "windows")]
         {
-            match std::process::Command::new("cmd")
-                .args(["/C", "start", "", url])
-                .spawn()
-            {
-                Ok(_) => return,
-                Err(err) => {
-                    last_error.replace(err);
-                }
+            if try_open("cmd", &["/C", "start", "", url]) {
+                return;
             }
 
-            match std::process::Command::new("powershell")
-                .args(["-NoProfile", "-Command", "Start-Process", url])
-                .spawn()
-            {
-                Ok(_) => return,
-                Err(err) => {
-                    last_error.replace(err);
-                }
+            if try_open(
+                "powershell",
+                &["-NoProfile", "-Command", "Start-Process", url],
+            ) {
+                return;
             }
         }
 
@@ -2987,7 +3119,7 @@ impl Model {
             }
         }
 
-        let err = last_error.unwrap_or_else(|| std::io::Error::from(std::io::ErrorKind::Other));
+        let err = last_error.unwrap_or_else(|| std::io::Error::other("unknown error"));
         let message = if err.kind() == std::io::ErrorKind::NotFound {
             #[cfg(target_os = "linux")]
             {
@@ -3785,10 +3917,18 @@ impl Model {
                         self.git_view = GitViewState::new(
                             branch.name.clone(),
                             worktree_path,
+                            branch.pr_number,
                             branch.pr_url.clone(),
                             branch.pr_title.clone(),
+                            branch.pr_state.clone(),
                             branch.divergence,
                         );
+                        let has_pr = branch.pr_number.is_some()
+                            || branch.pr_title.is_some()
+                            || branch.pr_state.is_some();
+                        if !has_pr {
+                            self.spawn_git_view_pr_fetch(&branch.name);
+                        }
                         // Try to load from cache
                         if let Some(cached) = self.git_view_cache.get(&branch.name) {
                             self.git_view.load_from_cache(cached);
@@ -3804,6 +3944,7 @@ impl Model {
                 self.screen_stack.push(self.screen.clone());
                 self.screen = screen;
                 self.status_message = None;
+                self.reset_footer_scroll();
             }
             Message::NavigateBack => {
                 // Check if we're in filter mode first
@@ -3874,6 +4015,7 @@ impl Model {
                     }
                 }
                 self.status_message = None;
+                self.reset_footer_scroll();
             }
             Message::Tick => {
                 // Reset Ctrl+C counter after timeout
@@ -3891,6 +4033,7 @@ impl Model {
                 }
                 // Update spinner animation
                 self.branch_list.tick_spinner();
+                self.update_footer_scroll();
                 self.apply_branch_list_updates();
                 self.apply_branch_summary_updates();
                 self.apply_pr_title_updates();
@@ -3910,6 +4053,8 @@ impl Model {
                 self.poll_session_summary_if_needed();
                 // SPEC-1ea18899: Apply GitView cache updates
                 self.apply_git_view_cache_updates();
+                // SPEC-1ea18899: Apply GitView PR updates
+                self.apply_git_view_pr_updates();
                 // FR-033: Update pane list every 1 second in tmux multi mode
                 self.update_pane_list();
                 // SPEC-a70a1ece: Poll clone wizard progress
@@ -4589,6 +4734,12 @@ impl Model {
                 // FR-036: 'm' key disabled in filter mode
                 if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
                     self.branch_list.cycle_view_mode();
+                    self.refresh_branch_summary();
+                }
+            }
+            Message::CycleSortMode => {
+                if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
+                    self.branch_list.cycle_sort_mode();
                     self.refresh_branch_summary();
                 }
             }
@@ -5558,15 +5709,20 @@ impl Model {
 
         // Footer help sits above the status bar.
         let needs_footer = !matches!(base_screen, Screen::AISettingsWizard);
+        let full_footer_lines = if needs_footer {
+            let lines = self.footer_lines(frame.area().width);
+            self.sync_footer_metrics(frame.area().width, lines.len());
+            lines
+        } else {
+            Vec::new()
+        };
+        let footer_lines = if needs_footer {
+            self.footer_visible_lines(&full_footer_lines, FOOTER_VISIBLE_HEIGHT)
+        } else {
+            Vec::new()
+        };
         let footer_height = if needs_footer {
-            let keybinds = self.get_footer_keybinds();
-            let footer_text_len = keybinds.len() + 2; // " {} " padding
-            let available_width = frame.area().width as usize;
-            if footer_text_len > available_width {
-                2
-            } else {
-                1
-            }
+            FOOTER_VISIBLE_HEIGHT as u16
         } else {
             0
         };
@@ -5634,7 +5790,7 @@ impl Model {
 
         // Footer help
         if needs_footer {
-            self.view_footer(frame, chunks[2]);
+            self.view_footer(frame, chunks[2], &footer_lines);
         }
 
         // Bottom status bar
@@ -5799,6 +5955,14 @@ impl Model {
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD),
                 ),
+                Span::raw(" "),
+                Span::styled("Sort(s):", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    self.branch_list.sort_mode.label(),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
             ];
             frame.render_widget(Paragraph::new(Line::from(mode_spans)), inner_chunks[3]);
         } else {
@@ -5848,101 +6012,352 @@ impl Model {
         frame.render_widget(header, area);
     }
 
-    fn get_footer_keybinds(&self) -> String {
+    fn footer_lines(&self, width: u16) -> Vec<String> {
+        let items = self.footer_items();
+        Self::wrap_footer_items(&items, width as usize)
+    }
+
+    fn sync_footer_metrics(&mut self, width: u16, line_count: usize) {
+        let width_changed = self.footer_last_width != width;
+        let count_changed = self.footer_line_count != line_count;
+
+        self.footer_last_width = width;
+        self.footer_line_count = line_count;
+
+        if width_changed || count_changed {
+            self.reset_footer_scroll();
+            return;
+        }
+
+        let max_offset = self.footer_line_count.saturating_sub(FOOTER_VISIBLE_HEIGHT);
+        if self.footer_scroll_offset > max_offset {
+            self.footer_scroll_offset = max_offset;
+        }
+    }
+
+    fn footer_visible_lines(&self, full_lines: &[String], height: usize) -> Vec<String> {
+        if full_lines.is_empty() || height == 0 {
+            return Vec::new();
+        }
+
+        let max_offset = full_lines.len().saturating_sub(height);
+        let offset = self.footer_scroll_offset.min(max_offset);
+        let end = (offset + height).min(full_lines.len());
+        full_lines[offset..end].to_vec()
+    }
+
+    fn footer_items(&self) -> Vec<String> {
         match self.screen {
             Screen::BranchList => {
                 if self.branch_list.filter_mode {
-                    "[Esc] Exit filter | Type to search".to_string()
+                    vec![
+                        Self::keybind_item("Esc", "Exit filter"),
+                        Self::keybind_item("Enter", "Apply"),
+                        Self::keybind_item("Backspace", "Delete"),
+                        Self::keybind_item("Up/Down", "Move"),
+                        Self::keybind_item("PgUp/PgDn", "Page"),
+                        Self::keybind_item("Home/End", "Top/Bottom"),
+                        "Type to search".to_string(),
+                    ]
                 } else {
-                    "[r] Refresh | [c] Cleanup | [l] Logs".to_string()
+                    let mut items = vec![
+                        Self::keybind_item("Up/Down", "Move"),
+                        Self::keybind_item("PgUp/PgDn", "Page"),
+                        Self::keybind_item("Home/End", "Top/Bottom"),
+                        Self::keybind_item("Enter", "Open/Focus"),
+                        Self::keybind_item("Space", "Select"),
+                        Self::keybind_item("r", "Refresh"),
+                        Self::keybind_item("c", "Cleanup"),
+                        Self::keybind_item("l", "Logs"),
+                        Self::keybind_item("s", "Sort"),
+                        Self::keybind_item("p", "Environment"),
+                        Self::keybind_item("f,/", "Filter"),
+                        Self::keybind_item("m", "Mode"),
+                        Self::keybind_item("Tab", "Agent"),
+                        Self::keybind_item("v", "GitView"),
+                        Self::keybind_item("u", "Hooks"),
+                        Self::keybind_item("?/h", "Help"),
+                    ];
+                    if self.selected_branch_has_agent() {
+                        items.push(Self::keybind_item("d", "Terminate"));
+                    }
+                    if !self.branch_list.filter.is_empty() || self.has_active_agent_pane() {
+                        items.push(Self::keybind_item("Esc", "Clear/Hide"));
+                    }
+                    items.push(Self::keybind_item("Ctrl+C", "Quit"));
+                    items
                 }
             }
             Screen::AgentMode => {
-                if self.agent_mode.ai_ready {
-                    "[Enter] Send | [Tab] Back".to_string()
+                let enter_label = if self.agent_mode.ai_ready {
+                    "Send"
                 } else {
-                    "[Enter] Configure AI | [Tab] Back".to_string()
-                }
+                    "Configure AI"
+                };
+                vec![
+                    Self::keybind_item("Enter", enter_label),
+                    Self::keybind_item("Tab", "Settings"),
+                    Self::keybind_item("Esc", "Back"),
+                ]
             }
-            Screen::WorktreeCreate => "[Enter] Next | [Esc] Back".to_string(),
-            Screen::Settings => self.settings.footer_keybinds(),
-            Screen::Logs => "[Up/Down] Navigate | [Enter] Detail | [c] Copy | [f] Filter | [/] Search | [Esc] Back".to_string(),
-            Screen::Help => "[Esc] Close | [Up/Down] Scroll".to_string(),
-            Screen::Confirm => "[Left/Right] Select | [Enter] Confirm | [Esc] Cancel".to_string(),
-            Screen::Error => "[Enter/Esc] Close | [Up/Down] Scroll".to_string(),
+            Screen::WorktreeCreate => match self.worktree_create.step {
+                WorktreeCreateStep::BranchName => vec![
+                    Self::keybind_item("Enter", "Next"),
+                    Self::keybind_item("Esc", "Back"),
+                ],
+                WorktreeCreateStep::BaseBranch => vec![
+                    Self::keybind_item("Up/Down", "Select"),
+                    Self::keybind_item("Enter", "Next"),
+                    Self::keybind_item("Esc", "Back"),
+                ],
+                WorktreeCreateStep::Confirm => vec![
+                    Self::keybind_item("Enter", "Create"),
+                    Self::keybind_item("Esc", "Back"),
+                ],
+            },
+            Screen::Settings => Self::split_footer_text(&self.settings.footer_keybinds()),
+            Screen::Logs => vec![
+                Self::keybind_item("Up/Down", "Navigate"),
+                Self::keybind_item("PgUp/PgDn", "Page"),
+                Self::keybind_item("Home/End", "Top/Bottom"),
+                Self::keybind_item("Enter", "Detail"),
+                Self::keybind_item("c", "Copy"),
+                Self::keybind_item("f", "Filter"),
+                Self::keybind_item("/", "Search"),
+                Self::keybind_item("Esc", "Back"),
+            ],
+            Screen::Help => vec![
+                Self::keybind_item("Up/Down", "Scroll"),
+                Self::keybind_item("PgUp/PgDn", "Page"),
+                Self::keybind_item("Esc", "Back"),
+            ],
+            Screen::Confirm => vec![
+                Self::keybind_item("Left/Right", "Select"),
+                Self::keybind_item("Enter", "Confirm"),
+                Self::keybind_item("Esc", "Cancel"),
+            ],
+            Screen::Error => vec![
+                Self::keybind_item("Enter", "Close"),
+                Self::keybind_item("Esc", "Close"),
+                Self::keybind_item("Up/Down", "Scroll"),
+                Self::keybind_item("l", "Logs"),
+                Self::keybind_item("c", "Copy"),
+            ],
             Screen::Profiles => {
                 if self.profiles.create_mode {
-                    "[Enter] Save | [Esc] Cancel".to_string()
+                    vec![
+                        Self::keybind_item("Enter", "Save"),
+                        Self::keybind_item("Esc", "Cancel"),
+                    ]
                 } else {
-                    "[Space] Activate | [Enter] Edit AI/env | [n] New | [d] Delete | [Esc] Back"
-                        .to_string()
+                    vec![
+                        Self::keybind_item("Up/Down", "Select"),
+                        Self::keybind_item("Space", "Activate"),
+                        Self::keybind_item("Enter", "Edit"),
+                        Self::keybind_item("n", "New"),
+                        Self::keybind_item("d", "Delete"),
+                        Self::keybind_item("Esc", "Back"),
+                    ]
                 }
             }
             Screen::Environment => {
                 if self.environment.is_ai_only() {
                     if self.environment.edit_mode {
-                        "[Enter] Save | [Tab] Switch | [Esc] Cancel".to_string()
+                        vec![
+                            Self::keybind_item("Enter", "Save"),
+                            Self::keybind_item("Tab", "Switch"),
+                            Self::keybind_item("Esc", "Cancel"),
+                        ]
                     } else {
-                        "[Enter] Edit | [Esc] Back".to_string()
+                        vec![
+                            Self::keybind_item("Up/Down", "Select"),
+                            Self::keybind_item("PgUp/PgDn", "Page"),
+                            Self::keybind_item("Home/End", "Top/Bottom"),
+                            Self::keybind_item("Enter", "Edit"),
+                            Self::keybind_item("Esc", "Back"),
+                        ]
                     }
                 } else if self.environment.edit_mode {
-                    "[Enter] Save | [Tab] Switch | [Esc] Cancel".to_string()
+                    vec![
+                        Self::keybind_item("Enter", "Save"),
+                        Self::keybind_item("Tab", "Switch"),
+                        Self::keybind_item("Esc", "Cancel"),
+                    ]
                 } else {
-                    "[Enter] Edit | [n] New | [d] Delete (profile)/Disable (OS) | [r] Reset (override) | [Esc] Back"
-                        .to_string()
+                    vec![
+                        Self::keybind_item("Up/Down", "Select"),
+                        Self::keybind_item("PgUp/PgDn", "Page"),
+                        Self::keybind_item("Home/End", "Top/Bottom"),
+                        Self::keybind_item("Enter", "Edit"),
+                        Self::keybind_item("n", "New"),
+                        Self::keybind_item("d", "Delete/Disable"),
+                        Self::keybind_item("r", "Reset"),
+                        Self::keybind_item("Esc", "Back"),
+                    ]
                 }
             }
             Screen::AISettingsWizard => {
                 if self.ai_wizard.show_delete_confirm {
-                    "[y] Confirm Delete | [n] Cancel".to_string()
+                    vec![
+                        Self::keybind_item("y", "Confirm Delete"),
+                        Self::keybind_item("n", "Cancel"),
+                    ]
                 } else {
-                    self.ai_wizard.step_title().to_string()
+                    vec![self.ai_wizard.step_title().to_string()]
                 }
             }
             Screen::CloneWizard => match self.clone_wizard.step {
-                CloneWizardStep::UrlInput => "[Enter] Continue | [Esc] Quit".to_string(),
-                CloneWizardStep::TypeSelect => {
-                    "[Up/Down] Select | [Enter] Clone | [Backspace] Back | [Esc] Quit".to_string()
-                }
-                CloneWizardStep::Cloning => "Cloning...".to_string(),
-                CloneWizardStep::Complete => "[Enter] Continue".to_string(),
-                CloneWizardStep::Failed => "[Backspace] Try again | [Esc] Quit".to_string(),
+                CloneWizardStep::UrlInput => vec![
+                    Self::keybind_item("Enter", "Continue"),
+                    Self::keybind_item("Esc", "Quit"),
+                ],
+                CloneWizardStep::TypeSelect => vec![
+                    Self::keybind_item("Up/Down", "Select"),
+                    Self::keybind_item("Enter", "Clone"),
+                    Self::keybind_item("Backspace", "Back"),
+                    Self::keybind_item("Esc", "Quit"),
+                ],
+                CloneWizardStep::Cloning => vec!["Cloning...".to_string()],
+                CloneWizardStep::Complete => vec![Self::keybind_item("Enter", "Continue")],
+                CloneWizardStep::Failed => vec![
+                    Self::keybind_item("Backspace", "Try again"),
+                    Self::keybind_item("Esc", "Quit"),
+                ],
             },
             Screen::MigrationDialog => match self.migration_dialog.phase {
-                MigrationDialogPhase::Confirmation => {
-                    "[Left/Right] Select | [Enter] Confirm".to_string()
-                }
+                MigrationDialogPhase::Confirmation => vec![
+                    Self::keybind_item("Left/Right", "Select"),
+                    Self::keybind_item("Enter", "Confirm"),
+                ],
                 MigrationDialogPhase::Validating | MigrationDialogPhase::InProgress => {
-                    "Migration in progress...".to_string()
+                    vec!["Migration in progress...".to_string()]
                 }
-                MigrationDialogPhase::Completed => "[Enter] Continue".to_string(),
-                MigrationDialogPhase::Failed => "[Enter] Exit".to_string(),
-                MigrationDialogPhase::Exited => String::new(),
+                MigrationDialogPhase::Completed => vec![Self::keybind_item("Enter", "Continue")],
+                MigrationDialogPhase::Failed => vec![Self::keybind_item("Enter", "Exit")],
+                MigrationDialogPhase::Exited => Vec::new(),
             },
             // SPEC-1ea18899: GitView footer keybinds
-            Screen::GitView => {
-                "[Up/Down] Navigate | [Space] Expand | [Enter] Open PR | [v/Esc] Back".to_string()
-            }
+            Screen::GitView => vec![
+                Self::keybind_item("Up/Down", "Navigate"),
+                Self::keybind_item("Space", "Expand"),
+                Self::keybind_item("Enter", "Open PR"),
+                Self::keybind_item("v/Esc", "Back"),
+            ],
         }
     }
 
-    fn view_footer(&self, frame: &mut Frame, area: Rect) {
-        let keybinds = self.get_footer_keybinds();
+    fn wrap_footer_items(items: &[String], width: usize) -> Vec<String> {
+        if items.is_empty() {
+            return vec![String::new()];
+        }
 
-        let footer_text = format!(" {} ", keybinds);
+        let mut lines = Vec::new();
+        let mut current = String::new();
 
+        for item in items {
+            let segment = item.trim();
+            if segment.is_empty() {
+                continue;
+            }
+            let separator = if current.is_empty() { "" } else { " | " };
+            let next_len = current.len() + separator.len() + segment.len();
+            if !current.is_empty() && width > 0 && next_len > width {
+                lines.push(current);
+                current = segment.to_string();
+            } else {
+                if !current.is_empty() {
+                    current.push_str(" | ");
+                }
+                current.push_str(segment);
+            }
+        }
+
+        if current.is_empty() && lines.is_empty() {
+            lines.push(String::new());
+        } else if !current.is_empty() {
+            lines.push(current);
+        }
+
+        lines
+    }
+
+    fn keybind_item(keys: &str, label: &str) -> String {
+        format!("[{}] {}", keys, label)
+    }
+
+    fn split_footer_text(text: &str) -> Vec<String> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Vec::new();
+        }
+        trimmed
+            .split(" | ")
+            .map(|segment| segment.trim().to_string())
+            .filter(|segment| !segment.is_empty())
+            .collect()
+    }
+
+    fn reset_footer_scroll(&mut self) {
+        self.footer_scroll_offset = 0;
+        self.footer_scroll_dir = 1;
+        self.footer_scroll_tick = 0;
+        self.footer_scroll_pause = 0;
+    }
+
+    fn update_footer_scroll(&mut self) {
+        if self.footer_line_count <= FOOTER_VISIBLE_HEIGHT {
+            self.reset_footer_scroll();
+            return;
+        }
+
+        if self.footer_scroll_pause > 0 {
+            self.footer_scroll_pause -= 1;
+            return;
+        }
+
+        self.footer_scroll_tick = self.footer_scroll_tick.saturating_add(1);
+        if self.footer_scroll_tick < FOOTER_SCROLL_TICKS_PER_LINE {
+            return;
+        }
+        self.footer_scroll_tick = 0;
+
+        let max_offset = self.footer_line_count.saturating_sub(FOOTER_VISIBLE_HEIGHT);
+        if self.footer_scroll_dir >= 0 {
+            if self.footer_scroll_offset < max_offset {
+                self.footer_scroll_offset += 1;
+                if self.footer_scroll_offset >= max_offset {
+                    self.footer_scroll_dir = -1;
+                    self.footer_scroll_pause = FOOTER_SCROLL_PAUSE_TICKS;
+                }
+            } else {
+                self.footer_scroll_dir = -1;
+                self.footer_scroll_pause = FOOTER_SCROLL_PAUSE_TICKS;
+            }
+        } else if self.footer_scroll_offset > 0 {
+            self.footer_scroll_offset -= 1;
+            if self.footer_scroll_offset == 0 {
+                self.footer_scroll_dir = 1;
+                self.footer_scroll_pause = FOOTER_SCROLL_PAUSE_TICKS;
+            }
+        } else {
+            self.footer_scroll_dir = 1;
+            self.footer_scroll_pause = FOOTER_SCROLL_PAUSE_TICKS;
+        }
+    }
+
+    fn view_footer(&self, frame: &mut Frame, area: Rect, lines: &[String]) {
         let style = if self.ctrl_c_count > 0 {
             Style::default().fg(Color::Yellow)
         } else {
             Style::default()
         };
 
-        let needs_wrap = footer_text.len() > area.width as usize;
-        let mut footer = Paragraph::new(footer_text).style(style);
-
-        if needs_wrap {
-            footer = footer.wrap(Wrap { trim: true });
-        }
+        let text = if lines.is_empty() {
+            String::new()
+        } else {
+            lines.join("\n")
+        };
+        let footer = Paragraph::new(text).style(style);
 
         frame.render_widget(footer, area);
     }
@@ -6164,7 +6579,7 @@ impl Model {
                 (KeyCode::Char('s'), KeyModifiers::NONE) => {
                     // In filter mode, 's' goes to filter input
                     if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
-                        Some(Message::NavigateTo(Screen::Settings))
+                        Some(Message::CycleSortMode)
                     } else {
                         Some(Message::Char('s'))
                     }
@@ -7029,6 +7444,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: false,
         }
     }
@@ -7050,6 +7466,12 @@ mod tests {
             .collect()
     }
 
+    fn footer_lines_for(model: &mut Model, width: u16) -> Vec<String> {
+        let lines = model.footer_lines(width);
+        model.sync_footer_metrics(width, lines.len());
+        lines
+    }
+
     #[test]
     fn test_branchlist_footer_and_status_bar_present_without_agents() {
         let mut model = Model::new_with_context(None);
@@ -7060,11 +7482,11 @@ mod tests {
 
         let height = 24;
         let lines = render_model_lines(&mut model, 80, height);
-        let footer_line = &lines[(height - 2) as usize];
+        let footer_text = footer_lines_for(&mut model, 80).join(" ");
         let status_line = &lines[(height - 1) as usize];
 
         assert!(
-            footer_line.contains("[r] Refresh"),
+            footer_text.contains("[r] Refresh"),
             "Footer help should be visible on BranchList"
         );
         assert!(
@@ -7121,11 +7543,11 @@ mod tests {
         let width = 120;
         let height = 24;
         let lines = render_model_lines(&mut model, width, height);
-        let footer_line = &lines[(height - 2) as usize];
+        let footer_text = footer_lines_for(&mut model, width).join(" ");
         let instruction_key = "[Left/Right] Category";
 
         assert!(
-            footer_line.contains(instruction_key),
+            footer_text.contains(instruction_key),
             "Settings footer help should include category navigation"
         );
 
@@ -7137,6 +7559,191 @@ mod tests {
             occurrences, 1,
             "Settings instructions should appear once in the footer help"
         );
+    }
+
+    #[test]
+    fn test_branchlist_footer_includes_all_shortcuts() {
+        let mut model = Model::new_with_context(None);
+        let branches = vec![sample_branch_with_session("feature/shortcuts")];
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.screen = Screen::BranchList;
+
+        let footer_text = footer_lines_for(&mut model, 140).join(" ");
+        let expected = [
+            "[Up/Down] Move",
+            "[PgUp/PgDn] Page",
+            "[Home/End] Top/Bottom",
+            "[Enter] Open/Focus",
+            "[Space] Select",
+            "[r] Refresh",
+            "[c] Cleanup",
+            "[l] Logs",
+            "[s] Sort",
+            "[p] Environment",
+            "[f,/] Filter",
+            "[m] Mode",
+            "[Tab] Agent",
+            "[v] GitView",
+            "[u] Hooks",
+            "[?/h] Help",
+            "[Ctrl+C] Quit",
+        ];
+
+        for key in expected {
+            assert!(
+                footer_text.contains(key),
+                "BranchList footer should include {}",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn test_branchlist_filter_footer_includes_controls() {
+        let mut model = Model::new_with_context(None);
+        let branches = vec![sample_branch_with_session("feature/filter")];
+        let mut state = BranchListState::new().with_branches(branches);
+        state.filter_mode = true;
+        model.branch_list = state;
+        model.screen = Screen::BranchList;
+
+        let footer_text = footer_lines_for(&mut model, 120).join(" ");
+        let expected = [
+            "[Esc] Exit filter",
+            "[Enter] Apply",
+            "[Backspace] Delete",
+            "[Up/Down] Move",
+            "[PgUp/PgDn] Page",
+            "[Home/End] Top/Bottom",
+            "Type to search",
+        ];
+
+        for key in expected {
+            assert!(
+                footer_text.contains(key),
+                "Filter-mode footer should include {}",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn test_logs_footer_includes_paging_shortcuts() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Logs;
+
+        let footer_text = footer_lines_for(&mut model, 120).join(" ");
+        let expected = ["[PgUp/PgDn] Page", "[Home/End] Top/Bottom"];
+
+        for key in expected {
+            assert!(
+                footer_text.contains(key),
+                "Logs footer should include {}",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn test_help_footer_includes_paging_shortcuts() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Help;
+
+        let footer_text = footer_lines_for(&mut model, 120).join(" ");
+        assert!(
+            footer_text.contains("[PgUp/PgDn] Page"),
+            "Help footer should include page navigation"
+        );
+    }
+
+    #[test]
+    fn test_error_footer_includes_actions() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Error;
+
+        let footer_text = footer_lines_for(&mut model, 120).join(" ");
+        let expected = [
+            "[Enter] Close",
+            "[Esc] Close",
+            "[Up/Down] Scroll",
+            "[l] Logs",
+            "[c] Copy",
+        ];
+
+        for key in expected {
+            assert!(
+                footer_text.contains(key),
+                "Error footer should include {}",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn test_footer_scroll_disabled_when_single_line() {
+        let mut model = Model::new_with_context(None);
+        let branches = vec![sample_branch_with_session("feature/scroll")];
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.screen = Screen::BranchList;
+
+        let lines = footer_lines_for(&mut model, 1000);
+        assert_eq!(lines.len(), 1, "Footer should fit in one line");
+
+        for _ in 0..10 {
+            model.update(Message::Tick);
+        }
+
+        assert_eq!(model.footer_scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_footer_scroll_advances_and_reverses() {
+        let mut model = Model::new_with_context(None);
+        let branches = vec![sample_branch_with_session("feature/scroll")];
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.screen = Screen::BranchList;
+
+        let lines = footer_lines_for(&mut model, 40);
+        assert!(lines.len() > 1, "Footer should overflow for scrolling");
+        let max_offset = lines.len().saturating_sub(1);
+
+        let advance_ticks = FOOTER_SCROLL_TICKS_PER_LINE as usize * max_offset.max(1);
+        for _ in 0..advance_ticks {
+            model.update(Message::Tick);
+        }
+
+        assert_eq!(model.footer_scroll_offset, max_offset);
+        assert_eq!(model.footer_scroll_pause, FOOTER_SCROLL_PAUSE_TICKS);
+
+        for _ in 0..FOOTER_SCROLL_PAUSE_TICKS {
+            model.update(Message::Tick);
+            assert_eq!(model.footer_scroll_offset, max_offset);
+        }
+
+        for _ in 0..FOOTER_SCROLL_TICKS_PER_LINE {
+            model.update(Message::Tick);
+        }
+
+        assert_eq!(model.footer_scroll_offset, max_offset.saturating_sub(1));
+    }
+
+    #[test]
+    fn test_footer_scroll_resets_on_navigation() {
+        let mut model = Model::new_with_context(None);
+        let branches = vec![sample_branch_with_session("feature/scroll")];
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.screen = Screen::BranchList;
+
+        let lines = footer_lines_for(&mut model, 40);
+        assert!(lines.len() > 1, "Footer should overflow for scrolling");
+
+        for _ in 0..FOOTER_SCROLL_TICKS_PER_LINE {
+            model.update(Message::Tick);
+        }
+        assert!(model.footer_scroll_offset > 0);
+
+        model.update(Message::NavigateTo(Screen::Logs));
+        assert_eq!(model.footer_scroll_offset, 0);
     }
 
     #[test]
@@ -7263,6 +7870,26 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
         let msg = model.handle_key_event(key);
         assert!(matches!(msg, Some(Message::Char('f'))));
+
+        let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
+        let msg = model.handle_key_event(key);
+        assert!(matches!(msg, Some(Message::Char('s'))));
+    }
+
+    #[test]
+    fn test_branchlist_s_key_cycles_sort_mode() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+        let branches = vec![sample_branch_with_session("feature/sort")];
+        model.branch_list = BranchListState::new().with_branches(branches);
+
+        let initial = model.branch_list.sort_mode;
+        let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
+        let msg = model.handle_key_event(key);
+        assert!(matches!(msg, Some(Message::CycleSortMode)));
+
+        model.update(Message::CycleSortMode);
+        assert_ne!(model.branch_list.sort_mode, initial);
     }
 
     #[test]
@@ -7398,6 +8025,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -7423,6 +8051,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
@@ -7676,6 +8305,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -7701,6 +8331,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
