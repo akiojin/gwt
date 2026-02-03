@@ -3256,6 +3256,13 @@ impl Model {
                 }
             }
             SettingsCategory::AISettings => {
+                if self.settings.is_ai_clear_mode() {
+                    if self.settings.ai_clear_confirm {
+                        self.clear_default_ai_settings();
+                    }
+                    self.settings.cancel_ai_clear_confirm();
+                    return;
+                }
                 // Enter: open AI Settings Wizard
                 // Check if default_ai exists in profiles_config
                 if let Some(ai) = &self.profiles_config.default_ai {
@@ -3402,6 +3409,25 @@ impl Model {
                     }
                 }
             }
+            SettingsCategory::AISettings => {
+                if self.settings.is_ai_clear_mode() {
+                    return;
+                }
+                match c {
+                    't' | 'T' => {
+                        self.toggle_default_ai_summary();
+                    }
+                    'c' | 'C' => {
+                        if self.profiles_config.default_ai.is_some() {
+                            self.settings.enter_ai_clear_confirm();
+                        } else {
+                            self.status_message = Some("No AI settings configured.".to_string());
+                            self.status_message_time = Some(Instant::now());
+                        }
+                    }
+                    _ => {}
+                }
+            }
             _ => {
                 // Other categories don't handle char input
             }
@@ -3455,6 +3481,28 @@ impl Model {
             self.screen = prev_screen;
         }
         self.load_profiles();
+    }
+
+    fn toggle_default_ai_summary(&mut self) {
+        if let Some(ai) = self.profiles_config.default_ai.as_mut() {
+            ai.summary_enabled = !ai.summary_enabled;
+            self.save_profiles();
+            self.settings.load_profiles_config();
+        } else {
+            self.status_message = Some("No AI settings configured.".to_string());
+            self.status_message_time = Some(Instant::now());
+        }
+    }
+
+    fn clear_default_ai_settings(&mut self) {
+        if self.profiles_config.default_ai.is_none() {
+            self.status_message = Some("No AI settings configured.".to_string());
+            self.status_message_time = Some(Instant::now());
+            return;
+        }
+        self.profiles_config.default_ai = None;
+        self.save_profiles();
+        self.settings.load_profiles_config();
     }
 
     fn persist_environment(&mut self) {
@@ -3674,7 +3722,9 @@ impl Model {
                 // SPEC-71f2742d US3: Cancel form/delete mode in Settings
                 } else if matches!(self.screen, Screen::Settings) {
                     // Check Profile modes first
-                    if self.settings.is_profile_form_mode()
+                    if self.settings.is_ai_clear_mode() {
+                        self.settings.cancel_ai_clear_confirm();
+                    } else if self.settings.is_profile_form_mode()
                         || self.settings.is_profile_delete_mode()
                     {
                         self.settings.cancel_profile_mode();
@@ -4097,19 +4147,24 @@ impl Model {
                     self.confirm.toggle_selection();
                 // SPEC-71f2742d US3: Settings delete confirmation toggle (CustomAgents or Profile)
                 } else if matches!(self.screen, Screen::Settings)
-                    && (self.settings.is_delete_mode() || self.settings.is_profile_delete_mode())
+                    && (self.settings.is_delete_mode()
+                        || self.settings.is_profile_delete_mode()
+                        || self.settings.is_ai_clear_mode())
                 {
                     if self.settings.is_profile_delete_mode() {
                         self.settings.profile_delete_confirm =
                             !self.settings.profile_delete_confirm;
-                    } else {
+                    } else if self.settings.is_delete_mode() {
                         self.settings.delete_confirm = !self.settings.delete_confirm;
+                    } else {
+                        self.settings.ai_clear_confirm = !self.settings.ai_clear_confirm;
                     }
                 // SPEC-71f2742d US4: Settings category navigation with Left/Right
                 } else if matches!(self.screen, Screen::Settings)
                     && !self.settings.is_form_mode()
                     && !self.settings.is_delete_mode()
                     && !self.settings.is_profile_delete_mode()
+                    && !self.settings.is_ai_clear_mode()
                     && !self.settings.is_env_edit_mode()
                 {
                     self.settings.prev_category();
@@ -4138,19 +4193,24 @@ impl Model {
                     self.confirm.toggle_selection();
                 // SPEC-71f2742d US3: Settings delete confirmation toggle (CustomAgents or Profile)
                 } else if matches!(self.screen, Screen::Settings)
-                    && (self.settings.is_delete_mode() || self.settings.is_profile_delete_mode())
+                    && (self.settings.is_delete_mode()
+                        || self.settings.is_profile_delete_mode()
+                        || self.settings.is_ai_clear_mode())
                 {
                     if self.settings.is_profile_delete_mode() {
                         self.settings.profile_delete_confirm =
                             !self.settings.profile_delete_confirm;
-                    } else {
+                    } else if self.settings.is_delete_mode() {
                         self.settings.delete_confirm = !self.settings.delete_confirm;
+                    } else {
+                        self.settings.ai_clear_confirm = !self.settings.ai_clear_confirm;
                     }
                 // SPEC-71f2742d US4: Settings category navigation with Left/Right
                 } else if matches!(self.screen, Screen::Settings)
                     && !self.settings.is_form_mode()
                     && !self.settings.is_delete_mode()
                     && !self.settings.is_profile_delete_mode()
+                    && !self.settings.is_ai_clear_mode()
                     && !self.settings.is_env_edit_mode()
                 {
                     self.settings.next_category();

@@ -455,6 +455,10 @@ pub struct SettingsState {
     pub profile_form: ProfileFormState,
     /// Profile delete confirmation
     pub profile_delete_confirm: bool,
+    /// AI settings clear confirmation selection (true = Yes)
+    pub ai_clear_confirm: bool,
+    /// AI settings clear confirmation dialog
+    pub ai_clear_dialog: bool,
     /// Environment variable edit state (SPEC-dafff079 compliant)
     pub env_state: EnvironmentState,
 }
@@ -477,6 +481,8 @@ impl Default for SettingsState {
             profile_index: 0,
             profile_form: ProfileFormState::default(),
             profile_delete_confirm: false,
+            ai_clear_confirm: false,
+            ai_clear_dialog: false,
             env_state: EnvironmentState::default(),
         }
     }
@@ -624,6 +630,8 @@ impl SettingsState {
         self.custom_agent_mode = CustomAgentMode::List;
         self.profile_index = 0;
         self.profile_mode = ProfileMode::List;
+        self.ai_clear_confirm = false;
+        self.ai_clear_dialog = false;
     }
 
     /// Select next item
@@ -796,6 +804,23 @@ impl SettingsState {
         matches!(self.custom_agent_mode, CustomAgentMode::ConfirmDelete(_))
     }
 
+    /// Check if in AI settings clear confirmation mode
+    pub fn is_ai_clear_mode(&self) -> bool {
+        self.ai_clear_dialog
+    }
+
+    /// Enter AI settings clear confirmation mode
+    pub fn enter_ai_clear_confirm(&mut self) {
+        self.ai_clear_dialog = true;
+        self.ai_clear_confirm = false;
+    }
+
+    /// Cancel AI settings clear confirmation mode
+    pub fn cancel_ai_clear_confirm(&mut self) {
+        self.ai_clear_dialog = false;
+        self.ai_clear_confirm = false;
+    }
+
     /// Footer keybinds for Settings screen (used by app footer help)
     pub fn footer_keybinds(&self) -> String {
         if self.category == SettingsCategory::CustomAgents {
@@ -843,8 +868,19 @@ impl SettingsState {
                 }
             }
         } else if self.category == SettingsCategory::AISettings {
-            "[Enter] Open AI Settings Wizard | [L/R] Category | [Tab] Screen | [Esc] Back"
-                .to_string()
+            if self.ai_clear_dialog {
+                "[Left/Right] Select | [Enter] Confirm | [Esc] Cancel".to_string()
+            } else if self
+                .profiles_config
+                .as_ref()
+                .and_then(|c| c.default_ai.as_ref())
+                .is_some()
+            {
+                "[Enter] Edit | [T] Toggle Summary | [C] Clear | [L/R] Cat | [Tab] Scr | [Esc] Back"
+                    .to_string()
+            } else {
+                "[Enter] Configure | [L/R] Cat | [Tab] Scr | [Esc] Back".to_string()
+            }
         } else {
             "[Left/Right] Category | [Up/Down] Select | [Tab] Screen | [Esc] Back".to_string()
         }
@@ -1761,6 +1797,75 @@ fn render_profile_delete_confirmation(state: &SettingsState, frame: &mut Frame, 
     frame.render_widget(no_btn, button_chunks[2]);
 }
 
+/// Render AI settings clear confirmation dialog
+fn render_ai_clear_confirmation(state: &SettingsState, frame: &mut Frame, area: Rect) {
+    let block = styled_block(" Clear AI Settings ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([
+            Constraint::Length(2), // Question
+            Constraint::Length(3), // Buttons
+            Constraint::Min(0),    // Padding
+        ])
+        .split(inner);
+
+    // Question
+    let question = Paragraph::new("Are you sure you want to clear AI settings?")
+        .alignment(Alignment::Center);
+    frame.render_widget(question, chunks[0]);
+
+    // Buttons
+    let button_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(30),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+            Constraint::Percentage(30),
+        ])
+        .split(chunks[1]);
+
+    let yes_style = if state.ai_clear_confirm {
+        Style::default()
+            .fg(Color::Red)
+            .add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default().fg(Color::Red)
+    };
+
+    let no_style = if !state.ai_clear_confirm {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default().fg(Color::Green)
+    };
+
+    let yes_btn = Paragraph::new(" Yes ")
+        .alignment(Alignment::Center)
+        .style(yes_style)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::White)),
+        );
+    let no_btn = Paragraph::new(" No ")
+        .alignment(Alignment::Center)
+        .style(no_style)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::White)),
+        );
+
+    frame.render_widget(yes_btn, button_chunks[1]);
+    frame.render_widget(no_btn, button_chunks[2]);
+}
+
 /// Render environment variable edit screen (SPEC-dafff079 compliant)
 /// FR-009: OS env vars integrated with profile env vars
 /// FR-010: Yellow=overridden, Green=added, Normal=OS-only, Red+strikethrough=disabled
@@ -1785,6 +1890,11 @@ fn render_env_edit(state: &SettingsState, frame: &mut Frame, area: Rect) {
 
 /// Render AI settings content
 fn render_ai_settings_content(state: &SettingsState, frame: &mut Frame, area: Rect) {
+    if state.ai_clear_dialog {
+        render_ai_clear_confirmation(state, frame, area);
+        return;
+    }
+
     let block = styled_block(" AI Settings ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1806,6 +1916,8 @@ fn render_ai_settings_content(state: &SettingsState, frame: &mut Frame, area: Re
                 Constraint::Length(1), // API Key value
                 Constraint::Length(1), // Model label
                 Constraint::Length(1), // Model value
+                Constraint::Length(1), // Session summary label
+                Constraint::Length(1), // Session summary value
                 Constraint::Length(1), // Spacing
                 Constraint::Length(3), // Button
                 Constraint::Min(0),    // Padding
@@ -1838,6 +1950,18 @@ fn render_ai_settings_content(state: &SettingsState, frame: &mut Frame, area: Re
             Paragraph::new(format!("  {}", ai.model)).style(Style::default().fg(Color::White));
         frame.render_widget(value, chunks[5]);
 
+        // Session summary
+        let label = Paragraph::new("Session summary:").style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(label, chunks[6]);
+        let summary_value = if ai.summary_enabled { "On" } else { "Off" };
+        let summary_style = if ai.summary_enabled {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::Red)
+        };
+        let value = Paragraph::new(format!("  {}", summary_value)).style(summary_style);
+        frame.render_widget(value, chunks[7]);
+
         // Button
         let button_area = Layout::default()
             .direction(Direction::Horizontal)
@@ -1846,7 +1970,7 @@ fn render_ai_settings_content(state: &SettingsState, frame: &mut Frame, area: Re
                 Constraint::Percentage(50),
                 Constraint::Percentage(25),
             ])
-            .split(chunks[7])[1];
+            .split(chunks[9])[1];
 
         let button = Paragraph::new("[ Edit AI Settings ]")
             .alignment(Alignment::Center)
