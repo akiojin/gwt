@@ -33,9 +33,7 @@ pub fn docker_available() -> bool {
 /// Check if `docker compose` is available
 pub fn compose_available() -> bool {
     // Try docker compose (v2)
-    let result = Command::new("docker")
-        .args(["compose", "version"])
-        .output();
+    let result = Command::new("docker").args(["compose", "version"]).output();
 
     match result {
         Ok(output) => {
@@ -97,10 +95,11 @@ pub fn try_start_daemon() -> crate::Result<()> {
     // Try to start Docker daemon based on platform
     #[cfg(target_os = "macos")]
     {
-        debug!(category = "docker", "Attempting to start Docker Desktop on macOS");
-        let result = Command::new("open")
-            .args(["-a", "Docker"])
-            .output();
+        debug!(
+            category = "docker",
+            "Attempting to start Docker Desktop on macOS"
+        );
+        let result = Command::new("open").args(["-a", "Docker"]).output();
 
         match result {
             Ok(output) if output.status.success() => {
@@ -117,11 +116,12 @@ pub fn try_start_daemon() -> crate::Result<()> {
 
     #[cfg(target_os = "linux")]
     {
-        debug!(category = "docker", "Attempting to start Docker daemon on Linux");
+        debug!(
+            category = "docker",
+            "Attempting to start Docker daemon on Linux"
+        );
         // Try systemctl first
-        let result = Command::new("systemctl")
-            .args(["start", "docker"])
-            .output();
+        let result = Command::new("systemctl").args(["start", "docker"]).output();
 
         if let Ok(output) = result {
             if output.status.success() {
@@ -131,9 +131,7 @@ pub fn try_start_daemon() -> crate::Result<()> {
         }
 
         // Try service command as fallback
-        let result = Command::new("service")
-            .args(["docker", "start"])
-            .output();
+        let result = Command::new("service").args(["docker", "start"]).output();
 
         if let Ok(output) = result {
             if output.status.success() {
@@ -143,7 +141,9 @@ pub fn try_start_daemon() -> crate::Result<()> {
         }
     }
 
-    Err(crate::GwtError::Docker("Failed to start Docker daemon".to_string()))
+    Err(crate::GwtError::Docker(
+        "Failed to start Docker daemon".to_string(),
+    ))
 }
 
 #[cfg(test)]

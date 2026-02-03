@@ -112,16 +112,14 @@ pub struct BuildConfig {
 impl DevContainerConfig {
     /// Load devcontainer.json from a path
     pub fn load(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            GwtError::Docker(format!("Failed to read devcontainer.json: {}", e))
-        })?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| GwtError::Docker(format!("Failed to read devcontainer.json: {}", e)))?;
 
         // Remove comments (JSON with comments support)
         let content = remove_json_comments(&content);
 
-        let config: DevContainerConfig = serde_json::from_str(&content).map_err(|e| {
-            GwtError::Docker(format!("Failed to parse devcontainer.json: {}", e))
-        })?;
+        let config: DevContainerConfig = serde_json::from_str(&content)
+            .map_err(|e| GwtError::Docker(format!("Failed to parse devcontainer.json: {}", e)))?;
 
         debug!(
             category = "docker",
@@ -143,7 +141,11 @@ impl DevContainerConfig {
     /// Check if this config uses a Dockerfile
     pub fn uses_dockerfile(&self) -> bool {
         self.dockerfile.is_some()
-            || self.build.as_ref().map(|b| b.dockerfile.is_some()).unwrap_or(false)
+            || self
+                .build
+                .as_ref()
+                .map(|b| b.dockerfile.is_some())
+                .unwrap_or(false)
     }
 
     /// Check if this config uses a pre-built image
@@ -161,9 +163,9 @@ impl DevContainerConfig {
 
     /// Get the Dockerfile path (relative to .devcontainer)
     pub fn get_dockerfile(&self) -> Option<String> {
-        self.dockerfile.clone().or_else(|| {
-            self.build.as_ref().and_then(|b| b.dockerfile.clone())
-        })
+        self.dockerfile
+            .clone()
+            .or_else(|| self.build.as_ref().and_then(|b| b.dockerfile.clone()))
     }
 
     /// Convert to docker compose arguments

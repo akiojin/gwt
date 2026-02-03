@@ -59,7 +59,12 @@ pub fn detect_docker_files(worktree_path: &Path) -> Option<DockerFileType> {
     );
 
     // Priority 1: docker-compose.yml or compose.yml
-    let compose_files = ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"];
+    let compose_files = [
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        "compose.yml",
+        "compose.yaml",
+    ];
     for filename in compose_files {
         let compose_path = worktree_path.join(filename);
         if compose_path.exists() && compose_path.is_file() {
@@ -75,27 +80,20 @@ pub fn detect_docker_files(worktree_path: &Path) -> Option<DockerFileType> {
     // Priority 2: Dockerfile
     let dockerfile_path = worktree_path.join("Dockerfile");
     if dockerfile_path.exists() && dockerfile_path.is_file() {
-        debug!(
-            category = "docker",
-            "Found Dockerfile"
-        );
+        debug!(category = "docker", "Found Dockerfile");
         return Some(DockerFileType::Dockerfile(dockerfile_path));
     }
 
     // Priority 3: .devcontainer/devcontainer.json
-    let devcontainer_path = worktree_path.join(".devcontainer").join("devcontainer.json");
+    let devcontainer_path = worktree_path
+        .join(".devcontainer")
+        .join("devcontainer.json");
     if devcontainer_path.exists() && devcontainer_path.is_file() {
-        debug!(
-            category = "docker",
-            "Found devcontainer.json"
-        );
+        debug!(category = "docker", "Found devcontainer.json");
         return Some(DockerFileType::DevContainer(devcontainer_path));
     }
 
-    debug!(
-        category = "docker",
-        "No Docker files found"
-    );
+    debug!(category = "docker", "No Docker files found");
     None
 }
 
@@ -215,7 +213,11 @@ mod tests {
         // Create devcontainer
         let devcontainer_dir = temp_dir.path().join(".devcontainer");
         std::fs::create_dir(&devcontainer_dir).unwrap();
-        std::fs::write(devcontainer_dir.join("devcontainer.json"), r#"{"name": "test"}"#).unwrap();
+        std::fs::write(
+            devcontainer_dir.join("devcontainer.json"),
+            r#"{"name": "test"}"#,
+        )
+        .unwrap();
 
         let result = detect_docker_files(temp_dir.path());
         assert!(result.is_some());
@@ -234,7 +236,11 @@ mod tests {
         std::fs::write(temp_dir.path().join("Dockerfile"), "FROM ubuntu:22.04").unwrap();
         let devcontainer_dir = temp_dir.path().join(".devcontainer");
         std::fs::create_dir(&devcontainer_dir).unwrap();
-        std::fs::write(devcontainer_dir.join("devcontainer.json"), r#"{"name": "test"}"#).unwrap();
+        std::fs::write(
+            devcontainer_dir.join("devcontainer.json"),
+            r#"{"name": "test"}"#,
+        )
+        .unwrap();
 
         let result = detect_docker_files(temp_dir.path());
         assert!(result.is_some());
@@ -305,7 +311,8 @@ mod tests {
         assert!(dockerfile.is_dockerfile());
         assert!(!dockerfile.is_devcontainer());
 
-        let devcontainer = DockerFileType::DevContainer(PathBuf::from(".devcontainer/devcontainer.json"));
+        let devcontainer =
+            DockerFileType::DevContainer(PathBuf::from(".devcontainer/devcontainer.json"));
         assert!(!devcontainer.is_compose());
         assert!(!devcontainer.is_dockerfile());
         assert!(devcontainer.is_devcontainer());

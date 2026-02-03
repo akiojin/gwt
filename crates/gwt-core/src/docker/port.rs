@@ -50,7 +50,7 @@ impl PortAllocator {
     ///
     /// Attempts to bind to the port on localhost. If successful, the port is available.
     pub fn is_port_in_use(port: u16) -> bool {
-        match TcpListener::bind(("127.0.0.1", port)) {
+        match TcpListener::bind(("0.0.0.0", port)) {
             Ok(_) => {
                 debug!(category = "docker", port = port, "Port is available");
                 false

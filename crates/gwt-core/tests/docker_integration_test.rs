@@ -160,7 +160,10 @@ fn test_container_naming_feature_branches() {
         ("main", "gwt-main"),
         ("develop", "gwt-develop"),
         ("feature/add-login", "gwt-feature-add-login"),
-        ("feature/JIRA-123/implement", "gwt-feature-jira-123-implement"),
+        (
+            "feature/JIRA-123/implement",
+            "gwt-feature-jira-123-implement",
+        ),
         ("bugfix/fix-crash", "gwt-bugfix-fix-crash"),
         ("release/v1.0.0", "gwt-release-v1-0-0"),
         ("user@branch", "gwt-user-branch"),
@@ -184,11 +187,8 @@ fn test_port_allocation_workflow() {
     let allocator = PortAllocator::new();
 
     // Allocate ports for typical web development
-    let ports = allocator.allocate_ports(&[
-        ("WEB_PORT", 3000),
-        ("API_PORT", 8080),
-        ("DB_PORT", 5432),
-    ]);
+    let ports =
+        allocator.allocate_ports(&[("WEB_PORT", 3000), ("API_PORT", 8080), ("DB_PORT", 5432)]);
 
     assert_eq!(ports.len(), 3);
     assert!(ports.contains_key("WEB_PORT"));
@@ -318,7 +318,9 @@ services:
     let manager = DockerManager::new(worktree_path, "retry-test", docker_type);
 
     // Start with retry
-    let info = manager.start_with_retry().expect("Failed to start with retry");
+    let info = manager
+        .start_with_retry()
+        .expect("Failed to start with retry");
     assert!(info.is_running());
 
     // Cleanup

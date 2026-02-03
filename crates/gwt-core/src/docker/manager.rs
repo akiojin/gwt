@@ -3,7 +3,7 @@
 //! Manages Docker containers for worktrees, including startup, shutdown,
 //! and executing commands inside containers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -12,7 +12,139 @@ use tracing::{debug, info, warn};
 
 use super::container::{ContainerInfo, ContainerStatus};
 use super::detector::DockerFileType;
+use super::port::PortAllocator;
 use crate::{GwtError, Result};
+use serde_yaml::Value;
+
+fn extract_port_envs_from_compose(content: &str) -> Vec<(String, u16)> {
+    let Ok(value) = serde_yaml::from_str::<Value>(content) else {
+        return Vec::new();
+    };
+
+    let Some(services) = value.get("services").and_then(|v| v.as_mapping()) else {
+        return Vec::new();
+    };
+
+    let mut results = Vec::new();
+
+    for service in services.values() {
+        let Some(service_map) = service.as_mapping() else {
+            continue;
+        };
+        let Some(ports) = service_map.get(&Value::String("ports".to_string())) else {
+            continue;
+        };
+
+        match ports {
+            Value::Sequence(items) => {
+                for item in items {
+                    match item {
+                        Value::String(s) => {
+                            if let Some((name, port)) = parse_port_env_default(s) {
+                                results.push((name, port));
+                            }
+                        }
+                        Value::Mapping(map) => {
+                            if let Some(Value::String(published)) =
+                                map.get(&Value::String("published".to_string()))
+                            {
+                                if let Some((name, port)) = parse_port_env_default(published) {
+                                    results.push((name, port));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    results
+}
+
+fn parse_port_env_default(value: &str) -> Option<(String, u16)> {
+    let start = value.find("${")?;
+    let rest = &value[start + 2..];
+    let end = rest.find('}')?;
+    let inner = &rest[..end];
+    let (name, default) = inner.split_once(":-")?;
+    let port = default.parse::<u16>().ok()?;
+    if name.is_empty() {
+        return None;
+    }
+    Some((name.to_string(), port))
+}
+
+fn detect_git_common_dir(worktree_path: &Path) -> Option<PathBuf> {
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["-C", &worktree_path.to_string_lossy(), "rev-parse", "--git-common-dir"])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let trimmed = stdout.trim();
+            if !trimmed.is_empty() {
+                return Some(PathBuf::from(trimmed));
+            }
+        }
+    }
+    let git_path = worktree_path.join(".git");
+    if git_path.is_dir() {
+        return Some(git_path);
+    }
+    let content = fs::read_to_string(&git_path).ok()?;
+    let gitdir = content.strip_prefix("gitdir: ")?.trim();
+    let gitdir_path = PathBuf::from(gitdir);
+    if let Some(common_dir) = gitdir_path
+        .components()
+        .position(|c| c.as_os_str() == "worktrees")
+        .and_then(|idx| {
+            let mut parts = Vec::new();
+            for (i, comp) in gitdir_path.components().enumerate() {
+                if i == idx {
+                    break;
+                }
+                parts.push(comp);
+            }
+            if parts.is_empty() {
+                None
+            } else {
+                let mut path = PathBuf::new();
+                for comp in parts {
+                    path.push(comp);
+                }
+                Some(path)
+            }
+        })
+    {
+        return Some(common_dir);
+    }
+    gitdir_path.parent().map(|p| p.to_path_buf())
+}
+
+fn detect_git_dir(worktree_path: &Path) -> Option<PathBuf> {
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["-C", &worktree_path.to_string_lossy(), "rev-parse", "--git-dir"])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let trimmed = stdout.trim();
+            if !trimmed.is_empty() {
+                return Some(PathBuf::from(trimmed));
+            }
+        }
+    }
+    let git_path = worktree_path.join(".git");
+    if git_path.is_dir() {
+        return Some(git_path);
+    }
+    let content = fs::read_to_string(&git_path).ok()?;
+    let gitdir = content.strip_prefix("gitdir: ")?.trim();
+    Some(PathBuf::from(gitdir))
+}
 
 /// Environment variable prefixes to pass through to containers
 const ENV_PASSTHROUGH_PREFIXES: &[&str] = &[
@@ -27,6 +159,16 @@ const ENV_PASSTHROUGH_PREFIXES: &[&str] = &[
     "USER",
     "SHELL",
 ];
+const ENV_PASSTHROUGH_DENYLIST: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+];
+const ENV_HOST_GIT_COMMON_DIR: &str = "HOST_GIT_COMMON_DIR";
+const ENV_HOST_GIT_WORKTREE_DIR: &str = "HOST_GIT_WORKTREE_DIR";
 
 /// Maximum number of retry attempts for Docker operations
 const MAX_RETRY_ATTEMPTS: u32 = 3;
@@ -112,7 +254,11 @@ impl DockerManager {
     /// * `worktree_path` - Path to the worktree directory
     /// * `worktree_name` - Name of the worktree (used for container naming)
     /// * `docker_file_type` - Type of Docker file detected
-    pub fn new(worktree_path: &Path, worktree_name: &str, docker_file_type: DockerFileType) -> Self {
+    pub fn new(
+        worktree_path: &Path,
+        worktree_name: &str,
+        docker_file_type: DockerFileType,
+    ) -> Self {
         let container_name = Self::generate_container_name(worktree_name);
         debug!(
             category = "docker",
@@ -257,10 +403,19 @@ impl DockerManager {
         );
 
         // Run docker compose up -d
-        let output = Command::new("docker")
-            .args(["compose", "up", "-d"])
+        let mut command = Command::new("docker");
+        command
+            .args(["compose", "up", "-d", "--build"])
             .current_dir(&self.worktree_path)
-            .env("COMPOSE_PROJECT_NAME", &self.container_name)
+            .env("COMPOSE_PROJECT_NAME", &self.container_name);
+
+        if let Ok(port_envs) = self.collect_compose_port_envs() {
+            for (key, value) in port_envs {
+                command.env(key, value);
+            }
+        }
+
+        let output = command
             .output()
             .map_err(|e| GwtError::Docker(format!("Failed to run docker compose: {}", e)))?;
 
@@ -285,10 +440,13 @@ impl DockerManager {
 
         // Get container info
         let container_id = self.get_container_id().unwrap_or_default();
-        let services = self.list_services().unwrap_or_default();
+        let services = self.list_services_internal().unwrap_or_default();
 
-        let mut info =
-            ContainerInfo::new(container_id, self.container_name.clone(), ContainerStatus::Running);
+        let mut info = ContainerInfo::new(
+            container_id,
+            self.container_name.clone(),
+            ContainerStatus::Running,
+        );
 
         for service in services {
             info.add_service(service);
@@ -359,7 +517,7 @@ impl DockerManager {
     }
 
     /// List services defined in the compose file
-    fn list_services(&self) -> Option<Vec<String>> {
+    fn list_services_internal(&self) -> Option<Vec<String>> {
         let output = Command::new("docker")
             .args(["compose", "config", "--services"])
             .current_dir(&self.worktree_path)
@@ -378,6 +536,12 @@ impl DockerManager {
             }
         }
         None
+    }
+
+    /// List services defined in the compose file (public API)
+    pub fn list_services(&self) -> Result<Vec<String>> {
+        self.list_services_internal()
+            .ok_or_else(|| GwtError::Docker("Failed to list docker compose services".to_string()))
     }
 
     /// Collect environment variables to pass through to the container
@@ -401,7 +565,82 @@ impl DockerManager {
             "Collected environment variables for passthrough"
         );
 
+        for key in ENV_PASSTHROUGH_DENYLIST {
+            env_vars.remove(*key);
+        }
+
+        if let Some(common_dir) = detect_git_common_dir(&self.worktree_path) {
+            env_vars.insert(
+                ENV_HOST_GIT_COMMON_DIR.to_string(),
+                common_dir.to_string_lossy().to_string(),
+            );
+        }
+        if let Some(gitdir) = detect_git_dir(&self.worktree_path) {
+            env_vars.insert(
+                ENV_HOST_GIT_WORKTREE_DIR.to_string(),
+                gitdir.to_string_lossy().to_string(),
+            );
+        }
+
+        if let Ok(port_envs) = self.collect_compose_port_envs() {
+            for (key, value) in port_envs {
+                env_vars.entry(key).or_insert(value);
+            }
+        }
+
         env_vars
+    }
+
+    fn collect_compose_port_envs(&self) -> Result<HashMap<String, String>> {
+        let compose_path = match &self.docker_file_type {
+            DockerFileType::Compose(path) => path,
+            DockerFileType::DevContainer(_) | DockerFileType::Dockerfile(_) => {
+                return Ok(HashMap::new())
+            }
+        };
+
+        let content = fs::read_to_string(compose_path)?;
+        let port_envs = extract_port_envs_from_compose(&content);
+        if port_envs.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let allocator = PortAllocator::new();
+        let mut allocated = HashMap::new();
+        let mut used_names = HashSet::new();
+
+        for (env_name, default_port) in port_envs {
+            if !used_names.insert(env_name.clone()) {
+                continue;
+            }
+            if let Ok(value) = std::env::var(&env_name) {
+                if let Ok(port) = value.parse::<u16>() {
+                    if PortAllocator::is_port_in_use(port) {
+                        let next = allocator
+                            .find_available_port(port)
+                            .unwrap_or(port)
+                            .to_string();
+                        allocated.insert(env_name, next);
+                    } else {
+                        allocated.insert(env_name, value);
+                    }
+                } else {
+                    allocated.insert(env_name, value);
+                }
+                continue;
+            }
+
+            let port = if PortAllocator::is_port_in_use(default_port) {
+                allocator
+                    .find_available_port(default_port)
+                    .unwrap_or(default_port)
+            } else {
+                default_port
+            };
+            allocated.insert(env_name, port.to_string());
+        }
+
+        Ok(allocated)
     }
 
     /// Check if the Docker image needs to be rebuilt
@@ -432,7 +671,10 @@ impl DockerManager {
             }
             (Some(_), None) => {
                 // No previous build time recorded, might need rebuild
-                debug!(category = "docker", "No previous build time, rebuild may be needed");
+                debug!(
+                    category = "docker",
+                    "No previous build time, rebuild may be needed"
+                );
                 true
             }
             _ => false,
@@ -484,13 +726,11 @@ impl DockerManager {
     ///
     /// Uses `docker compose exec` to run the command in the first service.
     pub fn run_in_container(&self, command: &str, args: &[String]) -> Result<()> {
-        let services = self.list_services().ok_or_else(|| {
-            GwtError::Docker("No services found in compose file".to_string())
-        })?;
+        let services = self.list_services()?;
 
-        let service = services.first().ok_or_else(|| {
-            GwtError::Docker("No services found in compose file".to_string())
-        })?;
+        let service = services
+            .first()
+            .ok_or_else(|| GwtError::Docker("No services found in compose file".to_string()))?;
 
         self.run_in_service(service, command, args)
     }
@@ -545,9 +785,9 @@ impl DockerManager {
         cmd.current_dir(&self.worktree_path)
             .env("COMPOSE_PROJECT_NAME", &self.container_name);
 
-        let status = cmd.status().map_err(|e| {
-            GwtError::Docker(format!("Failed to run docker compose exec: {}", e))
-        })?;
+        let status = cmd
+            .status()
+            .map_err(|e| GwtError::Docker(format!("Failed to run docker compose exec: {}", e)))?;
 
         if !status.success() {
             warn!(
@@ -710,5 +950,71 @@ mod tests {
         });
         assert!(result.is_err());
         assert_eq!(attempts, 1); // Should not retry for non-retryable error
+    }
+
+    #[test]
+    fn test_extract_port_envs_from_compose() {
+        let content = r#"
+services:
+  app:
+    ports:
+      - "${GWT_PORT:-6400}:6400"
+      - "127.0.0.1:${LOCAL_PORT:-8080}:8080"
+  worker:
+    ports:
+      - target: 3000
+        published: "${PUBLISHED_PORT:-3000}"
+"#;
+
+        let envs = extract_port_envs_from_compose(content);
+        assert!(envs.contains(&("GWT_PORT".to_string(), 6400)));
+        assert!(envs.contains(&("LOCAL_PORT".to_string(), 8080)));
+        assert!(envs.contains(&("PUBLISHED_PORT".to_string(), 3000)));
+    }
+
+    #[test]
+    fn test_collect_passthrough_env_excludes_git_internals() {
+        let path = PathBuf::from("/tmp/worktree");
+        let docker_type = DockerFileType::Compose(PathBuf::from("docker-compose.yml"));
+        let manager = DockerManager::new(&path, "worktree", docker_type);
+
+        std::env::set_var("GIT_DIR", "/tmp/gitdir");
+        std::env::set_var("GIT_WORK_TREE", "/tmp/worktree");
+
+        let envs = manager.collect_passthrough_env();
+        assert!(!envs.contains_key("GIT_DIR"));
+        assert!(!envs.contains_key("GIT_WORK_TREE"));
+
+        std::env::remove_var("GIT_DIR");
+        std::env::remove_var("GIT_WORK_TREE");
+    }
+
+    #[test]
+    fn test_detect_git_common_dir_from_worktree_gitfile() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let worktree = temp.path().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let git_file = worktree.join(".git");
+        let gitdir = temp
+            .path()
+            .join("repo.git")
+            .join("worktrees")
+            .join("worktree");
+        std::fs::create_dir_all(&gitdir).unwrap();
+        std::fs::write(&git_file, format!("gitdir: {}\n", gitdir.to_string_lossy())).unwrap();
+
+        let common = detect_git_common_dir(&worktree).unwrap();
+        assert_eq!(common, temp.path().join("repo.git"));
+    }
+
+    #[test]
+    fn test_detect_git_common_dir_from_git_dir() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = temp.path().join("repo");
+        let git_dir = repo.join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+
+        let common = detect_git_common_dir(&repo).unwrap();
+        assert_eq!(common, git_dir);
     }
 }
