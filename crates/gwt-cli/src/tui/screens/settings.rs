@@ -1804,8 +1804,8 @@ fn render_ai_clear_confirmation(state: &SettingsState, frame: &mut Frame, area: 
         .split(inner);
 
     // Question
-    let question = Paragraph::new("Are you sure you want to clear AI settings?")
-        .alignment(Alignment::Center);
+    let question =
+        Paragraph::new("Are you sure you want to clear AI settings?").alignment(Alignment::Center);
     frame.render_widget(question, chunks[0]);
 
     // Buttons

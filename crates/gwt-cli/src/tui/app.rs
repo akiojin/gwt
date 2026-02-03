@@ -3299,7 +3299,15 @@ impl Model {
     }
 
     fn open_environment_editor(&mut self, profile_name: &str) {
-        let (vars, disabled_keys, ai_enabled, ai_endpoint, ai_api_key, ai_model, ai_summary_enabled) = self
+        let (
+            vars,
+            disabled_keys,
+            ai_enabled,
+            ai_endpoint,
+            ai_api_key,
+            ai_model,
+            ai_summary_enabled,
+        ) = self
             .profiles_config
             .profiles
             .get(profile_name)
@@ -3316,24 +3324,24 @@ impl Model {
                 items.sort_by(|a, b| a.key.cmp(&b.key));
                 let (ai_enabled, ai_endpoint, ai_api_key, ai_model, ai_summary_enabled) =
                     match &profile.ai {
-                    Some(ai) => (
-                        true,
-                        ai.endpoint.clone(),
-                        ai.api_key.clone(),
-                        ai.model.clone(),
-                        ai.summary_enabled,
-                    ),
-                    None => {
-                        let defaults = AISettings::default();
-                        (
-                            false,
-                            defaults.endpoint,
-                            String::new(),
-                            defaults.model,
+                        Some(ai) => (
                             true,
-                        )
-                    }
-                };
+                            ai.endpoint.clone(),
+                            ai.api_key.clone(),
+                            ai.model.clone(),
+                            ai.summary_enabled,
+                        ),
+                        None => {
+                            let defaults = AISettings::default();
+                            (
+                                false,
+                                defaults.endpoint,
+                                String::new(),
+                                defaults.model,
+                                true,
+                            )
+                        }
+                    };
                 (
                     items,
                     profile.disabled_env.clone(),
@@ -3379,14 +3387,14 @@ impl Model {
         // FR-100: Use AI settings wizard for default AI settings
         if let Some(ai) = &self.profiles_config.default_ai {
             // Edit existing settings
-                self.ai_wizard.open_edit(
-                    true, // is_default_ai
-                    None, // no profile name
-                    &ai.endpoint,
-                    &ai.api_key,
-                    &ai.model,
-                    ai.summary_enabled,
-                );
+            self.ai_wizard.open_edit(
+                true, // is_default_ai
+                None, // no profile name
+                &ai.endpoint,
+                &ai.api_key,
+                &ai.model,
+                ai.summary_enabled,
+            );
         } else {
             // Create new settings
             self.ai_wizard.open_new(true, None);
@@ -4525,12 +4533,16 @@ impl Model {
                     } else if self.ai_wizard.is_text_input() {
                         // Text input mode: insert character (including 'd')
                         self.ai_wizard.insert_char(c);
-                    } else if matches!(self.ai_wizard.step, super::screens::ai_wizard::AIWizardStep::ModelSelect)
-                        && (c == 't' || c == 'T')
+                    } else if matches!(
+                        self.ai_wizard.step,
+                        super::screens::ai_wizard::AIWizardStep::ModelSelect
+                    ) && (c == 't' || c == 'T')
                     {
                         self.ai_wizard.toggle_summary_enabled();
-                    } else if matches!(self.ai_wizard.step, super::screens::ai_wizard::AIWizardStep::ModelSelect)
-                        && (c == 'c' || c == 'C' || c == 'd' || c == 'D')
+                    } else if matches!(
+                        self.ai_wizard.step,
+                        super::screens::ai_wizard::AIWizardStep::ModelSelect
+                    ) && (c == 'c' || c == 'C' || c == 'd' || c == 'D')
                     {
                         // Show clear confirmation (only in edit mode, non-text-input steps)
                         if self.ai_wizard.is_edit {
