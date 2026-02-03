@@ -94,12 +94,12 @@ pub enum Commands {
     /// Start the web UI server
     Serve {
         /// Port to listen on
-        #[arg(short, long, default_value = "3000")]
-        port: u16,
+        #[arg(short, long)]
+        port: Option<u16>,
 
         /// Bind address
-        #[arg(short, long, default_value = "127.0.0.1")]
-        address: String,
+        #[arg(short, long)]
+        address: Option<String>,
     },
 
     /// Initialize gwt by cloning a repository or creating config (SPEC-a70a1ece)

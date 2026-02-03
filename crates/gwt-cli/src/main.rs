@@ -8,10 +8,8 @@ use gwt_core::ai::{
     AgentHistoryStore, AgentType as SessionAgentType, ClaudeSessionParser, CodexSessionParser,
     GeminiSessionParser, OpenCodeSessionParser, SessionParser,
 };
-use gwt_core::config::{save_session_entry, AgentStatus, Session, Settings, ToolSessionEntry};
+use gwt_core::config::{save_session_entry, AgentStatus, Settings, ToolSessionEntry};
 use gwt_core::error::GwtError;
-use gwt_core::git::Branch;
-use gwt_core::worktree::WorktreeManager;
 use gwt_core::TmuxMode;
 use std::fs;
 #[cfg(unix)]
@@ -25,9 +23,10 @@ use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 mod cli;
+mod commands;
 mod tui;
 
-use cli::{Cli, Commands, HookAction, OutputFormat};
+use cli::Cli;
 use tui::{AgentLaunchConfig, CodingAgent, ExecutionMode, TuiEntryContext};
 
 fn main() {
@@ -64,6 +63,16 @@ fn run() -> Result<(), GwtError> {
         ..Default::default()
     };
     gwt_core::logging::init_logger(&log_config)?;
+    match cleanup_startup_logs(&repo_root, &settings) {
+        Ok(removed) => {
+            if removed > 0 {
+                info!(category = "logging", removed, "Removed old log files");
+            }
+        }
+        Err(err) => {
+            warn!(category = "logging", error = %err, "Failed to clean up old logs");
+        }
+    }
 
     info!(
         repo_root = %repo_root.display(),
@@ -72,7 +81,7 @@ fn run() -> Result<(), GwtError> {
     );
 
     match cli.command {
-        Some(cmd) => handle_command(cmd, &repo_root, &settings),
+        Some(cmd) => commands::handle_command(cmd, &repo_root, &settings),
         None => {
             // Interactive TUI mode - single or multi based on tmux detection
             let tmux_mode = detect_tui_tmux_mode();
@@ -160,510 +169,11 @@ fn detect_tui_tmux_mode() -> TmuxMode {
     TmuxMode::detect()
 }
 
-fn handle_command(cmd: Commands, repo_root: &PathBuf, settings: &Settings) -> Result<(), GwtError> {
-    match cmd {
-        Commands::List { format } => cmd_list(repo_root, format),
-        Commands::Add { branch, new, base } => cmd_add(repo_root, &branch, new, base.as_deref()),
-        Commands::Remove {
-            target,
-            force,
-            delete_branch,
-        } => cmd_remove(repo_root, &target, force, delete_branch),
-        Commands::Switch { branch, new_window } => cmd_switch(repo_root, &branch, new_window),
-        Commands::Clean { dry_run, prune } => cmd_clean(repo_root, dry_run, prune),
-        Commands::Logs { limit, follow: _ } => cmd_logs(repo_root, settings, limit),
-        Commands::Serve { port, address } => cmd_serve(port, &address),
-        Commands::Init { url, force, full } => cmd_init(repo_root, url.as_deref(), force, full),
-        Commands::Lock { target, reason } => cmd_lock(repo_root, &target, reason.as_deref()),
-        Commands::Unlock { target } => cmd_unlock(repo_root, &target),
-        Commands::Hook { action } => cmd_hook(action),
-    }
-}
-
-fn cmd_list(repo_root: &PathBuf, format: OutputFormat) -> Result<(), GwtError> {
-    let manager = WorktreeManager::new(repo_root)?;
-    let worktrees = manager.list()?;
-
-    match format {
-        OutputFormat::Table => {
-            println!(
-                "{:<40} {:<30} {:<10} {:<8}",
-                "PATH", "BRANCH", "STATUS", "CHANGES"
-            );
-            println!("{}", "-".repeat(88));
-            for wt in &worktrees {
-                let branch = wt
-                    .branch
-                    .clone()
-                    .unwrap_or_else(|| "(detached)".to_string());
-                let changes = if wt.has_changes { "dirty" } else { "clean" };
-                println!(
-                    "{:<40} {:<30} {:<10} {:<8}",
-                    wt.path.display(),
-                    branch,
-                    wt.status,
-                    changes
-                );
-            }
-        }
-        OutputFormat::Json => {
-            let json = serde_json::json!(worktrees
-                .iter()
-                .map(|wt| {
-                    serde_json::json!({
-                        "path": wt.path.to_string_lossy(),
-                        "branch": wt.branch,
-                        "status": wt.status.to_string(),
-                        "has_changes": wt.has_changes,
-                        "has_unpushed": wt.has_unpushed,
-                    })
-                })
-                .collect::<Vec<_>>());
-            println!("{}", serde_json::to_string_pretty(&json).unwrap());
-        }
-        OutputFormat::Simple => {
-            for wt in &worktrees {
-                println!("{}", wt.path.display());
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn cmd_add(
-    repo_root: &PathBuf,
-    branch: &str,
-    new_branch: bool,
-    base: Option<&str>,
-) -> Result<(), GwtError> {
-    info!(
-        category = "cli",
-        command = "add",
-        branch,
-        new_branch,
-        base = base.unwrap_or("HEAD"),
-        "Executing add command"
-    );
-
-    let manager = WorktreeManager::new(repo_root)?;
-
-    let wt = if new_branch {
-        manager.create_new_branch(branch, base)?
-    } else {
-        manager.create_for_branch(branch)?
-    };
-
-    println!("Created worktree at: {}", wt.path.display());
-    println!("Branch: {}", wt.display_name());
-
-    Ok(())
-}
-
-fn cmd_remove(
-    repo_root: &PathBuf,
-    target: &str,
-    force: bool,
-    delete_branch: bool,
-) -> Result<(), GwtError> {
-    info!(
-        category = "cli",
-        command = "remove",
-        target,
-        force,
-        delete_branch,
-        "Executing remove command"
-    );
-
-    let manager = WorktreeManager::new(repo_root)?;
-
-    // Find worktree by branch name or path
-    let wt = manager.get_by_branch(target)?.or_else(|| {
-        let path = PathBuf::from(target);
-        manager.get_by_path(&path).ok().flatten()
-    });
-
-    if delete_branch {
-        if let Some(wt) = wt {
-            if let Some(branch) = wt.branch.as_deref() {
-                manager.cleanup_branch(branch, force, force)?;
-                println!("Removed worktree and branch: {}", branch);
-            } else {
-                manager.remove(&wt.path, force)?;
-                println!("Removed worktree: {}", wt.path.display());
-            }
-            return Ok(());
-        }
-
-        if Branch::exists(repo_root, target)? {
-            manager.cleanup_branch(target, force, force)?;
-            println!("Removed branch: {}", target);
-            return Ok(());
-        }
-
-        return Err(GwtError::BranchNotFound {
-            name: target.to_string(),
-        });
-    }
-
-    let wt = wt.ok_or_else(|| GwtError::WorktreeNotFound {
-        path: PathBuf::from(target),
-    })?;
-    manager.remove(&wt.path, force)?;
-    println!("Removed worktree: {}", wt.path.display());
-
-    Ok(())
-}
-
-fn cmd_switch(repo_root: &PathBuf, branch: &str, new_window: bool) -> Result<(), GwtError> {
-    info!(
-        category = "cli",
-        command = "switch",
-        branch,
-        new_window,
-        "Executing switch command"
-    );
-
-    let manager = WorktreeManager::new(repo_root)?;
-
-    let wt = manager
-        .get_by_branch(branch)?
-        .ok_or_else(|| GwtError::WorktreeNotFound {
-            path: PathBuf::from(branch),
-        })?;
-
-    if new_window {
-        // Open in new terminal window (platform specific)
-        #[cfg(target_os = "macos")]
-        {
-            std::process::Command::new("open")
-                .args(["-a", "Terminal", wt.path.to_str().unwrap()])
-                .spawn()?;
-        }
-        #[cfg(target_os = "linux")]
-        {
-            // Try common terminal emulators
-            let terminals = ["gnome-terminal", "konsole", "xterm"];
-            for term in terminals {
-                if std::process::Command::new("which")
-                    .arg(term)
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false)
-                {
-                    std::process::Command::new(term)
-                        .arg("--working-directory")
-                        .arg(&wt.path)
-                        .spawn()?;
-                    break;
-                }
-            }
-        }
-        println!("Opened new terminal in: {}", wt.path.display());
-    } else {
-        println!("cd {}", wt.path.display());
-        println!("\nRun the above command to switch to the worktree.");
-    }
-
-    Ok(())
-}
-
-fn cmd_clean(repo_root: &PathBuf, dry_run: bool, prune: bool) -> Result<(), GwtError> {
-    info!(
-        category = "cli",
-        command = "clean",
-        dry_run,
-        prune,
-        "Executing clean command"
-    );
-
-    let manager = WorktreeManager::new(repo_root)?;
-
-    let orphans = manager.detect_orphans();
-
-    if orphans.is_empty() {
-        println!("No orphaned worktrees found.");
-        return Ok(());
-    }
-
-    for orphan in &orphans {
-        println!(
-            "{}: {} ({})",
-            if dry_run { "Would remove" } else { "Removing" },
-            orphan.path.display(),
-            orphan.reason
-        );
-
-        if !dry_run {
-            // Remove orphan (just metadata, path is already gone)
-            manager.prune()?;
-        }
-    }
-
-    if prune && !dry_run {
-        manager.prune()?;
-        println!("Pruned git worktree metadata.");
-    }
-
-    Ok(())
-}
-
-fn cmd_logs(repo_root: &Path, settings: &Settings, limit: usize) -> Result<(), GwtError> {
+fn cleanup_startup_logs(repo_root: &Path, settings: &Settings) -> Result<usize, GwtError> {
     let log_dir = settings.log_dir(repo_root);
-    let reader = gwt_core::logging::LogReader::new(&log_dir);
-
-    let entries = reader.read_latest(limit)?;
-
-    if entries.is_empty() {
-        println!("No log entries found.");
-        return Ok(());
-    }
-
-    for entry in entries {
-        println!("{} [{}] {}", entry.timestamp, entry.level, entry.message());
-    }
-
-    Ok(())
+    gwt_core::logging::cleanup_old_logs(&log_dir, settings.log_retention_days)
 }
 
-fn cmd_serve(port: u16, address: &str) -> Result<(), GwtError> {
-    println!("Starting web server on {}:{}...", address, port);
-    // TODO: Start web server (Phase 4)
-    println!("Web server is not yet implemented.");
-    Ok(())
-}
-
-/// Initialize gwt: clone a bare repository or create config (SPEC-a70a1ece T312-T313)
-fn cmd_init(repo_root: &Path, url: Option<&str>, force: bool, full: bool) -> Result<(), GwtError> {
-    // If URL is provided, clone as bare repository
-    if let Some(url) = url {
-        use gwt_core::git::{clone_bare, CloneConfig};
-
-        info!(
-            category = "cli",
-            command = "init",
-            url,
-            full,
-            "Cloning bare repository"
-        );
-
-        // T313: Default to shallow clone (--depth=1) unless --full is specified
-        let config = if full {
-            CloneConfig::bare(url, repo_root)
-        } else {
-            CloneConfig::bare_shallow(url, repo_root, 1)
-        };
-
-        let clone_type = if full { "full" } else { "shallow (--depth=1)" };
-        println!("Cloning {} as {} bare repository...", url, clone_type);
-
-        match clone_bare(&config) {
-            Ok(path) => {
-                println!("Successfully cloned to: {}", path.display());
-                println!("\nNext steps:");
-                println!("  cd {}", path.display());
-                println!("  gwt           # Open TUI to create worktree");
-                Ok(())
-            }
-            Err(e) => {
-                error!(category = "cli", error = %e, "Failed to clone repository");
-                Err(e)
-            }
-        }
-    } else {
-        // Original behavior: create config file
-        let config_path = repo_root.join(".gwt.toml");
-
-        if config_path.exists() && !force {
-            println!("Configuration already exists at: {}", config_path.display());
-            println!("Use --force to overwrite.");
-            return Ok(());
-        }
-
-        Settings::create_default(&config_path)?;
-        println!("Created configuration at: {}", config_path.display());
-
-        Ok(())
-    }
-}
-
-fn cmd_lock(repo_root: &PathBuf, target: &str, reason: Option<&str>) -> Result<(), GwtError> {
-    info!(
-        category = "cli",
-        command = "lock",
-        target,
-        reason = reason.unwrap_or("none"),
-        "Executing lock command"
-    );
-
-    let manager = WorktreeManager::new(repo_root)?;
-
-    let wt = manager
-        .get_by_branch(target)?
-        .ok_or_else(|| GwtError::WorktreeNotFound {
-            path: PathBuf::from(target),
-        })?;
-
-    manager.lock(&wt.path, reason)?;
-    println!("Locked worktree: {}", wt.path.display());
-
-    Ok(())
-}
-
-fn cmd_unlock(repo_root: &PathBuf, target: &str) -> Result<(), GwtError> {
-    info!(
-        category = "cli",
-        command = "unlock",
-        target,
-        "Executing unlock command"
-    );
-
-    let manager = WorktreeManager::new(repo_root)?;
-
-    let wt = manager
-        .get_by_branch(target)?
-        .ok_or_else(|| GwtError::WorktreeNotFound {
-            path: PathBuf::from(target),
-        })?;
-
-    manager.unlock(&wt.path)?;
-    println!("Unlocked worktree: {}", wt.path.display());
-
-    Ok(())
-}
-
-/// Handle Claude Code hook subcommands (SPEC-861d8cdf FR-101/T-101/T-102)
-fn cmd_hook(action: HookAction) -> Result<(), GwtError> {
-    use gwt_core::config::{
-        get_claude_settings_path, is_gwt_hooks_registered, register_gwt_hooks, unregister_gwt_hooks,
-    };
-
-    match action {
-        HookAction::Event { name } => handle_hook_event(&name),
-        HookAction::EventAlias(args) => {
-            let name = args
-                .first()
-                .ok_or_else(|| GwtError::Internal("Missing hook event name.".to_string()))?;
-            if args.len() > 1 {
-                return Err(GwtError::Internal(format!(
-                    "Unexpected hook arguments: {}",
-                    args.join(" ")
-                )));
-            }
-            handle_hook_event(name)
-        }
-        HookAction::Setup => {
-            let settings_path =
-                get_claude_settings_path().ok_or_else(|| GwtError::ConfigNotFound {
-                    path: PathBuf::from("~/.claude/settings.json"),
-                })?;
-
-            if is_gwt_hooks_registered(&settings_path) {
-                println!("gwt hooks are already registered in Claude Code settings.");
-                return Ok(());
-            }
-
-            register_gwt_hooks(&settings_path)?;
-            println!("Successfully registered gwt hooks in Claude Code settings.");
-            println!("Path: {}", settings_path.display());
-            Ok(())
-        }
-        HookAction::Uninstall => {
-            let settings_path =
-                get_claude_settings_path().ok_or_else(|| GwtError::ConfigNotFound {
-                    path: PathBuf::from("~/.claude/settings.json"),
-                })?;
-
-            if !is_gwt_hooks_registered(&settings_path) {
-                println!("gwt hooks are not registered in Claude Code settings.");
-                return Ok(());
-            }
-
-            unregister_gwt_hooks(&settings_path)?;
-            println!("Successfully removed gwt hooks from Claude Code settings.");
-            Ok(())
-        }
-        HookAction::Status => {
-            let settings_path =
-                get_claude_settings_path().ok_or_else(|| GwtError::ConfigNotFound {
-                    path: PathBuf::from("~/.claude/settings.json"),
-                })?;
-
-            if is_gwt_hooks_registered(&settings_path) {
-                println!("gwt hooks: registered");
-                println!("Path: {}", settings_path.display());
-            } else {
-                println!("gwt hooks: not registered");
-                println!("Run 'gwt hook setup' to enable agent status tracking.");
-            }
-            Ok(())
-        }
-    }
-}
-
-/// Process a hook event from Claude Code (SPEC-861d8cdf T-101)
-/// Called by Claude Code hooks via `gwt hook <name>` (or `gwt hook event <name>`)
-fn handle_hook_event(event: &str) -> Result<(), GwtError> {
-    use std::io::{self, Read};
-
-    info!(
-        category = "cli",
-        command = "hook",
-        event = event,
-        "Executing hook event command"
-    );
-
-    // Read JSON payload from stdin
-    let mut input = String::new();
-    io::stdin().read_to_string(&mut input)?;
-
-    // Parse the JSON payload
-    let payload: serde_json::Value = serde_json::from_str(&input).unwrap_or_default();
-
-    // Extract cwd from payload to determine which worktree to update
-    let cwd = payload
-        .get("cwd")
-        .and_then(|v| v.as_str())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-    debug!(
-        category = "hook",
-        event = event,
-        cwd = %cwd.display(),
-        "Processing hook event"
-    );
-
-    // Determine the new status based on the event
-    let new_status = hook_event_to_status(event, &payload);
-
-    // Load or create session for the worktree
-    let session_path = Session::session_path(&cwd);
-    let mut session = if session_path.exists() {
-        Session::load(&session_path).unwrap_or_else(|_| {
-            // Create new session if load fails
-            let branch = detect_branch_name(&cwd);
-            Session::new(&cwd, &branch)
-        })
-    } else {
-        let branch = detect_branch_name(&cwd);
-        Session::new(&cwd, &branch)
-    };
-
-    // Update the session status
-    session.update_status(new_status);
-    session.save(&session_path)?;
-
-    debug!(
-        category = "hook",
-        event = event,
-        status = ?new_status,
-        session_path = %session_path.display(),
-        "Session status updated"
-    );
-
-    Ok(())
-}
 
 /// Map hook event name to AgentStatus (SPEC-861d8cdf T-101)
 ///
@@ -1235,7 +745,9 @@ fn prepare_custom_agent_launch_plan(
     let custom = config
         .custom_agent
         .as_ref()
-        .expect("custom_agent must be Some when calling this function");
+        .ok_or_else(|| GwtError::AgentConfigInvalid {
+            name: config.agent.label().to_string(),
+        })?;
 
     // Build environment including custom env vars (T209)
     let mut env = build_launch_env(&config);
@@ -2459,6 +1971,30 @@ mod tests {
             skip_permissions: false,
             collaboration_modes: true,
         }
+    }
+
+    #[test]
+    fn test_cleanup_startup_logs_removes_old_logs() {
+        let temp = TempDir::new().unwrap();
+        let log_dir = temp.path().join("logs");
+        fs::create_dir_all(&log_dir).unwrap();
+        fs::write(log_dir.join("gwt.jsonl.2024-01-01"), "old").unwrap();
+
+        let settings = Settings {
+            log_dir: Some(log_dir),
+            log_retention_days: 0,
+            ..Default::default()
+        };
+
+        let removed = cleanup_startup_logs(temp.path(), &settings).unwrap();
+        assert!(removed >= 1);
+    }
+
+    #[test]
+    fn test_prepare_custom_agent_launch_plan_requires_custom_agent() {
+        let config = sample_config(CodingAgent::CodexCli);
+        let result = prepare_custom_agent_launch_plan(config, None, |_| {});
+        assert!(matches!(result, Err(GwtError::AgentConfigInvalid { .. })));
     }
 
     #[test]
