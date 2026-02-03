@@ -3024,7 +3024,7 @@ impl Model {
                     } else {
                         message.to_string()
                     };
-                    last_error = Some(std::io::Error::new(std::io::ErrorKind::Other, message));
+                    last_error = Some(std::io::Error::other(message));
                     false
                 }
                 Err(err) => {
@@ -3087,7 +3087,7 @@ impl Model {
             }
         }
 
-        let err = last_error.unwrap_or_else(|| std::io::Error::from(std::io::ErrorKind::Other));
+        let err = last_error.unwrap_or_else(|| std::io::Error::other("unknown error"));
         let message = if err.kind() == std::io::ErrorKind::NotFound {
             #[cfg(target_os = "linux")]
             {
