@@ -200,4 +200,29 @@ mod tests {
             None => env::remove_var("HOME"),
         }
     }
+
+    #[tokio::test]
+    async fn test_serve_with_config_invalid_address_fails() {
+        let repo = TempDir::new().unwrap();
+        let config = ServerConfig::new(3000)
+            .with_address("not-an-ip")
+            .with_repo_path(repo.path());
+
+        let result = serve_with_config(config).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_serve_with_config_port_in_use_fails() {
+        let repo = TempDir::new().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let config = ServerConfig::new(port)
+            .with_address("127.0.0.1")
+            .with_repo_path(repo.path());
+
+        let result = serve_with_config(config).await;
+        assert!(result.is_err());
+    }
 }

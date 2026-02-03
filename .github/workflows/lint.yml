@@ -15,7 +15,7 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: Run Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy -p gwt-cli -p gwt-core -p gwt-web --all-targets --all-features -- -D warnings
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run Markdownlint

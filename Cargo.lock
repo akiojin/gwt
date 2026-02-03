@@ -2180,6 +2180,7 @@ dependencies = [
  "clap",
  "crossterm",
  "gwt-core",
+ "gwt-web",
  "libc",
  "pulldown-cmark",
  "ratatui",

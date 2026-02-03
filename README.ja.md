@@ -86,8 +86,11 @@ cargo run -p gwt-cli
 git clone https://github.com/akiojin/gwt.git
 cd gwt
 
-# リリースバイナリをビルド
+# リリースバイナリをビルド（デフォルト: gwt-cli）
 cargo build --release
+
+# ワークスペース全体をビルド（Web/wasm含む）
+cargo build --workspace
 
 # バイナリは target/release/gwt にあります
 ./target/release/gwt
@@ -128,6 +131,12 @@ gwt remove feature/old-feature
 
 # 孤立したワークツリーをクリーンアップ
 gwt clean
+
+# ログを表示
+gwt logs --limit 100
+
+# ログをフォロー
+gwt logs --follow
 ```
 
 ツールは以下のオプションを持つ対話型インターフェースを提供します:
@@ -369,8 +378,8 @@ gwt
 ├── crates/
 │   ├── gwt-cli/         # CLIエントリポイントとTUI（Ratatui）
 │   ├── gwt-core/        # コアライブラリ（ワークツリー管理）
-│   ├── gwt-web/         # Webサーバー（将来）
-│   └── gwt-frontend/    # Webフロントエンド（将来）
+│   ├── gwt-web/         # Webサーバー（Axum）
+│   └── gwt-frontend/    # Webフロントエンド（Leptos CSR）
 ├── package.json         # npm配布用ラッパー
 ├── bin/gwt.js           # バイナリラッパースクリプト
 ├── scripts/postinstall.js  # バイナリダウンロードスクリプト

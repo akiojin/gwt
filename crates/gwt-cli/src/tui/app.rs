@@ -2,6 +2,8 @@
 
 #![allow(dead_code)] // TUI application components for future expansion
 
+mod ai_wizard;
+
 use super::widgets::ProgressModalState;
 use crate::{
     prepare_launch_plan, InstallPlan, LaunchPlan, LaunchProgress, ProgressStepKind, StepStatus,
@@ -17,7 +19,7 @@ use crossterm::{
 use gwt_core::agent::codex::supports_collaboration_modes;
 use gwt_core::ai::{
     summarize_session, AIClient, AIError, AgentHistoryStore, AgentType, ChatMessage,
-    ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, OpenCodeSessionParser,
+    ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, ModelInfo, OpenCodeSessionParser,
     SessionParseError, SessionParser,
 };
 use gwt_core::config::get_branch_tool_history;
@@ -336,6 +338,10 @@ struct AgentModeUpdate {
     error: Option<String>,
 }
 
+struct AiWizardUpdate {
+    result: Result<Vec<ModelInfo>, AIError>,
+}
+
 struct BranchListUpdate {
     branches: Vec<BranchItem>,
     branch_names: Vec<String>,
@@ -488,6 +494,8 @@ pub struct Model {
     agent_mode_tx: Option<Sender<AgentModeUpdate>>,
     /// Agent mode update receiver
     agent_mode_rx: Option<Receiver<AgentModeUpdate>>,
+    /// AI wizard model fetch receiver
+    ai_wizard_rx: Option<Receiver<AiWizardUpdate>>,
     /// Tmux mode (Single or Multi)
     tmux_mode: TmuxMode,
     /// Tmux session name (when in multi mode)
@@ -707,6 +715,7 @@ impl Model {
             session_summary_rx: None,
             agent_mode_tx: Some(agent_mode_tx),
             agent_mode_rx: Some(agent_mode_rx),
+            ai_wizard_rx: None,
             tmux_mode: TmuxMode::detect(),
             tmux_session: None,
             gwt_pane_id: None,
@@ -2739,54 +2748,6 @@ impl Model {
         }
     }
 
-    fn handle_ai_wizard_mouse(&mut self, mouse: MouseEvent) {
-        if !self.ai_wizard.visible {
-            return;
-        }
-        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-            return;
-        }
-
-        // Check if clicking outside popup area - close wizard
-        if !self.ai_wizard.is_point_in_popup(mouse.column, mouse.row) {
-            self.ai_wizard.close();
-            self.last_mouse_click = None;
-            return;
-        }
-
-        // Only handle model selection step mouse clicks
-        if !matches!(
-            self.ai_wizard.step,
-            crate::tui::screens::ai_wizard::AIWizardStep::ModelSelect
-        ) {
-            return;
-        }
-
-        // Check if clicking on model list
-        if let Some(index) = self
-            .ai_wizard
-            .selection_index_from_point(mouse.column, mouse.row)
-        {
-            let now = Instant::now();
-            let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
-                last.index == index
-                    && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
-            });
-
-            if is_double_click {
-                self.last_mouse_click = None;
-                // Double click: select model and proceed (same as Enter)
-                if self.ai_wizard.select_model_index(index) {
-                    self.handle_ai_wizard_enter();
-                }
-            } else {
-                // Single click: just select the model
-                self.ai_wizard.select_model_index(index);
-                self.last_mouse_click = Some(MouseClick { index, at: now });
-            }
-        }
-    }
-
     fn handle_profiles_mouse(&mut self, mouse: MouseEvent) {
         if !matches!(self.screen, Screen::Profiles) {
             return;
@@ -3301,44 +3262,6 @@ impl Model {
         self.open_default_ai_editor();
     }
 
-    /// Handle Enter key in AI settings wizard
-    fn handle_ai_wizard_enter(&mut self) {
-        use super::screens::ai_wizard::AIWizardStep;
-
-        match self.ai_wizard.step {
-            AIWizardStep::Endpoint => {
-                self.ai_wizard.next_step();
-            }
-            AIWizardStep::ApiKey => {
-                // Start fetching models
-                self.ai_wizard.step = AIWizardStep::FetchingModels;
-                self.ai_wizard.loading_message = Some("Fetching models...".to_string());
-
-                // Fetch models (blocking)
-                match self.ai_wizard.fetch_models() {
-                    Ok(()) => {
-                        self.ai_wizard.fetch_complete();
-                    }
-                    Err(e) => {
-                        self.ai_wizard.fetch_failed(&e);
-                    }
-                }
-            }
-            AIWizardStep::FetchingModels => {
-                // Do nothing while fetching
-            }
-            AIWizardStep::ModelSelect => {
-                // Save AI settings
-                self.save_ai_wizard_settings();
-                self.ai_wizard.close();
-                if let Some(prev_screen) = self.screen_stack.pop() {
-                    self.screen = prev_screen;
-                }
-                self.load_profiles();
-            }
-        }
-    }
-
     /// Handle Enter key in Settings screen (SPEC-71f2742d US3)
     fn handle_settings_enter(&mut self) {
         use super::screens::settings::{AgentFormField, CustomAgentMode, SettingsCategory};
@@ -3656,46 +3579,6 @@ impl Model {
         }
     }
 
-    /// Save AI settings from wizard
-    fn save_ai_wizard_settings(&mut self) {
-        let model = self
-            .ai_wizard
-            .current_model()
-            .map(|m| m.id.clone())
-            .unwrap_or_default();
-        let settings = AISettings {
-            endpoint: self.ai_wizard.endpoint.trim().to_string(),
-            api_key: self.ai_wizard.api_key.trim().to_string(),
-            model,
-        };
-
-        if self.ai_wizard.is_default_ai {
-            self.profiles_config.default_ai = Some(settings);
-        } else if let Some(profile_name) = &self.ai_wizard.profile_name {
-            if let Some(profile) = self.profiles_config.profiles.get_mut(profile_name) {
-                profile.ai = Some(settings);
-            }
-        }
-        self.save_profiles();
-    }
-
-    /// Delete AI settings from wizard
-    fn delete_ai_wizard_settings(&mut self) {
-        if self.ai_wizard.is_default_ai {
-            self.profiles_config.default_ai = None;
-        } else if let Some(profile_name) = &self.ai_wizard.profile_name {
-            if let Some(profile) = self.profiles_config.profiles.get_mut(profile_name) {
-                profile.ai = None;
-            }
-        }
-        self.save_profiles();
-        self.ai_wizard.close();
-        if let Some(prev_screen) = self.screen_stack.pop() {
-            self.screen = prev_screen;
-        }
-        self.load_profiles();
-    }
-
     fn persist_environment(&mut self) {
         if self.environment.is_ai_only() {
             if self.environment.ai_enabled {
@@ -3974,6 +3857,7 @@ impl Model {
                     } else {
                         self.ai_wizard.prev_step();
                         if !self.ai_wizard.visible {
+                            self.ai_wizard_rx = None;
                             // Wizard was closed
                             if let Some(prev_screen) = self.screen_stack.pop() {
                                 self.screen = prev_screen;
@@ -4022,6 +3906,7 @@ impl Model {
                 }
                 self.apply_session_summary_updates();
                 self.apply_agent_mode_updates();
+                self.apply_ai_wizard_updates();
                 self.poll_session_summary_if_needed();
                 // SPEC-1ea18899: Apply GitView cache updates
                 self.apply_git_view_cache_updates();

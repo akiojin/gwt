@@ -86,8 +86,11 @@ cargo run -p gwt-cli
 git clone https://github.com/akiojin/gwt.git
 cd gwt
 
-# Build release binary
+# Build release binary (default: gwt-cli)
 cargo build --release
+
+# Build all workspace crates (including web/wasm)
+cargo build --workspace
 
 # The binary is at target/release/gwt
 ./target/release/gwt
@@ -128,6 +131,12 @@ gwt remove feature/old-feature
 
 # Cleanup orphaned worktrees
 gwt clean
+
+# Show logs
+gwt logs --limit 100
+
+# Follow logs
+gwt logs --follow
 ```
 
 The tool presents an interactive interface with the following options:
@@ -369,8 +378,8 @@ gwt
 ├── crates/
 │   ├── gwt-cli/         # CLI entry point and TUI (Ratatui)
 │   ├── gwt-core/        # Core library (worktree management)
-│   ├── gwt-web/         # Web server (future)
-│   └── gwt-frontend/    # Web frontend (future)
+│   ├── gwt-web/         # Web server (Axum)
+│   └── gwt-frontend/    # Web frontend (Leptos CSR)
 ├── package.json         # npm distribution wrapper
 ├── bin/gwt.js           # Binary wrapper script
 ├── scripts/postinstall.js  # Binary download script

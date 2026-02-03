@@ -2,7 +2,6 @@
 //!
 //! Provides Git repository operations using gitoxide (gix) with fallback to external git commands.
 
-mod backend;
 mod branch;
 mod clone;
 mod commit;
@@ -12,7 +11,6 @@ mod remote;
 mod repository;
 mod submodule;
 
-pub use backend::GitBackend;
 pub use branch::{Branch, DivergenceStatus};
 pub use clone::{clone_bare, extract_repo_name, CloneConfig};
 pub use commit::{

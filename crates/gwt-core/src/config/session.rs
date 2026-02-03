@@ -360,6 +360,7 @@ mod tests {
     fn test_session_path_global() {
         // Lock mutex to prevent concurrent env var access
         let _guard = ENV_MUTEX.lock().unwrap();
+        let _home_lock = crate::config::HOME_LOCK.lock().unwrap();
         let _env_guard = EnvVarGuard::unset("GWT_SESSIONS_DIR");
 
         // Global session path should be under ~/.gwt/sessions/
@@ -383,6 +384,7 @@ mod tests {
     fn test_session_path_hash_consistency() {
         // Lock mutex to prevent concurrent env var access
         let _guard = ENV_MUTEX.lock().unwrap();
+        let _home_lock = crate::config::HOME_LOCK.lock().unwrap();
         let _env_guard = EnvVarGuard::unset("GWT_SESSIONS_DIR");
 
         // Same worktree path should always produce same session path
