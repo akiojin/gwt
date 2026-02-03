@@ -194,13 +194,18 @@ impl AIWizardState {
     pub fn fetch_models(&mut self) -> Result<(), AIError> {
         let client = AIClient::new_for_list_models(self.endpoint.trim(), self.api_key.trim())?;
         let models = client.list_models()?;
-        self.models = models;
-        if self.models.is_empty() {
+        self.apply_models(models)
+    }
+
+    /// Apply fetched model list to state
+    pub fn apply_models(&mut self, mut models: Vec<ModelInfo>) -> Result<(), AIError> {
+        if models.is_empty() {
             return Err(AIError::ConfigError("No models available".to_string()));
         }
 
         // Sort models by ID for consistent display
-        self.models.sort_by(|a, b| a.id.cmp(&b.id));
+        models.sort_by(|a, b| a.id.cmp(&b.id));
+        self.models = models;
 
         // If we have a previously selected model, find it in the list
         if !self.selected_model.is_empty() {
@@ -435,6 +440,63 @@ impl AIWizardState {
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod flow_tests {
+    use super::*;
+
+    fn model(id: &str) -> ModelInfo {
+        ModelInfo {
+            id: id.to_string(),
+            created: 0,
+            owned_by: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_apply_models_selects_existing_model() {
+        let mut state = AIWizardState::new();
+        state.selected_model = "gpt-5".to_string();
+        let models = vec![model("gpt-4"), model("gpt-5"), model("gpt-3.5")];
+
+        state.apply_models(models).unwrap();
+
+        assert_eq!(state.models.len(), 3);
+        assert_eq!(state.models[state.model_index].id, "gpt-5");
+    }
+
+    #[test]
+    fn test_apply_models_empty_fails() {
+        let mut state = AIWizardState::new();
+        let result = state.apply_models(Vec::new());
+        assert!(matches!(result, Err(AIError::ConfigError(_))));
+    }
+
+    #[test]
+    fn test_fetch_complete_sets_step() {
+        let mut state = AIWizardState::new();
+        state.loading_message = Some("Fetching".to_string());
+        state.step = AIWizardStep::FetchingModels;
+
+        state.fetch_complete();
+
+        assert!(state.loading_message.is_none());
+        assert_eq!(state.step, AIWizardStep::ModelSelect);
+    }
+
+    #[test]
+    fn test_fetch_failed_sets_error_and_step() {
+        let mut state = AIWizardState::new();
+        state.loading_message = Some("Fetching".to_string());
+        state.step = AIWizardStep::FetchingModels;
+
+        state.fetch_failed(&AIError::ConfigError("bad".to_string()));
+
+        assert!(state.loading_message.is_none());
+        assert_eq!(state.step, AIWizardStep::ApiKey);
+        assert!(state.error.is_some());
     }
 }
 

@@ -6,9 +6,12 @@ members = [
     "crates/gwt-web",
     "crates/gwt-frontend",
 ]
+default-members = [
+    "crates/gwt-cli",
+]
 
 [workspace.package]
-version = "6.22.2"
+version = "6.27.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/akiojin/gwt"
@@ -17,6 +20,7 @@ authors = ["akiojin"]
 [workspace.dependencies]
 # Internal crates
 gwt-core = { path = "crates/gwt-core" }
+gwt-web = { path = "crates/gwt-web" }
 
 # Error handling
 thiserror = "2"

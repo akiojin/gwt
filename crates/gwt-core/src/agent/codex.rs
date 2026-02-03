@@ -192,6 +192,42 @@ pub fn codex_skip_permissions_flag(version: Option<&str>) -> &'static str {
     }
 }
 
+/// Check if version uses date-based format (0.1.YYYYMMDDNN)
+fn is_date_based_version(version: Option<&str>) -> bool {
+    let parsed = parse_version(version);
+    matches!(parsed, Some(v) if v.major == 0 && v.minor == 1 && v.patch >= 2025000000)
+}
+
+/// Get the web search arguments based on Codex CLI version
+///
+/// Returns `-c web_search=live` for date-based versions (0.1.YYYYMMDDNN format),
+/// `--enable web_search` for v0.90.0 to legacy versions,
+/// `--enable web_search_request` for versions before v0.90.0.
+/// If version is unknown or invalid, defaults to config-based (latest behavior).
+pub fn get_web_search_args(version: Option<&str>) -> Vec<String> {
+    // Date-based versions (0.1.2025XXXXXX) use config-based web_search
+    if is_date_based_version(version) {
+        return vec!["-c".to_string(), "web_search=live".to_string()];
+    }
+
+    let parsed = parse_version(version);
+    let rename_threshold = parse_version(Some("0.90.0"));
+
+    match (parsed, rename_threshold) {
+        (Some(parsed), Some(rename_thresh)) => {
+            if compare_versions(&parsed, &rename_thresh) != Ordering::Less {
+                // v0.90.0+: Use --enable web_search
+                vec!["--enable".to_string(), "web_search".to_string()]
+            } else {
+                // Before v0.90.0: Use --enable web_search_request
+                vec!["--enable".to_string(), "web_search_request".to_string()]
+            }
+        }
+        // Unknown version defaults to config-based (latest behavior)
+        _ => vec!["-c".to_string(), "web_search=live".to_string()],
+    }
+}
+
 fn with_codex_skills_flag(mut args: Vec<String>, enable: bool) -> Vec<String> {
     if !enable {
         return args;
@@ -229,11 +265,9 @@ pub fn codex_default_args(
         .filter(|value| !value.is_empty())
         .unwrap_or(DEFAULT_CODEX_REASONING);
 
-    let mut args = vec![
-        "--enable".to_string(),
-        "web_search_request".to_string(),
-        format!("--model={}", model),
-    ];
+    let web_search_args = get_web_search_args(skills_flag_version);
+    let mut args = vec![format!("--model={}", model)];
+    args.extend(web_search_args);
 
     if !bypass_sandbox {
         args.push("--sandbox".to_string());
@@ -384,8 +418,9 @@ mod tests {
     #[test]
     fn test_codex_default_args_defaults() {
         let args = codex_default_args(None, None, None, false, false);
-        assert!(args.contains(&"--enable".to_string()));
-        assert!(args.contains(&"web_search_request".to_string()));
+        // Unknown version defaults to config-based web_search
+        assert!(args.contains(&"-c".to_string()));
+        assert!(args.contains(&"web_search=live".to_string()));
         assert!(args.contains(&"--model=gpt-5.2-codex".to_string()));
         assert!(args.contains(&"model_reasoning_effort=high".to_string()));
     }
@@ -482,5 +517,102 @@ mod tests {
             codex_skip_permissions_flag(Some("unknown")),
             "--dangerously-bypass-approvals-and-sandbox"
         );
+    }
+
+    #[test]
+    fn test_is_date_based_version() {
+        // Date-based versions (0.1.2025XXXXXX format)
+        assert!(is_date_based_version(Some("0.1.2025013100")));
+        assert!(is_date_based_version(Some("0.1.2025020100")));
+        assert!(is_date_based_version(Some("0.1.2026010100")));
+
+        // Traditional semver versions are not date-based
+        assert!(!is_date_based_version(Some("0.90.0")));
+        assert!(!is_date_based_version(Some("0.91.0")));
+        assert!(!is_date_based_version(Some("1.0.0")));
+        assert!(!is_date_based_version(Some("0.89.0")));
+
+        // Invalid or None
+        assert!(!is_date_based_version(None));
+        assert!(!is_date_based_version(Some("unknown")));
+    }
+
+    #[test]
+    fn test_get_web_search_args_version_gate() {
+        // Date-based versions use config-based "-c web_search=live"
+        assert_eq!(
+            get_web_search_args(Some("0.1.2025013100")),
+            vec!["-c".to_string(), "web_search=live".to_string()]
+        );
+        assert_eq!(
+            get_web_search_args(Some("0.1.2025020100")),
+            vec!["-c".to_string(), "web_search=live".to_string()]
+        );
+
+        // v0.90.0+ (traditional semver) use "--enable web_search"
+        assert_eq!(
+            get_web_search_args(Some("0.90.0")),
+            vec!["--enable".to_string(), "web_search".to_string()]
+        );
+        assert_eq!(
+            get_web_search_args(Some("0.91.0")),
+            vec!["--enable".to_string(), "web_search".to_string()]
+        );
+        assert_eq!(
+            get_web_search_args(Some("1.0.0")),
+            vec!["--enable".to_string(), "web_search".to_string()]
+        );
+
+        // v0.89.x and earlier use "--enable web_search_request"
+        assert_eq!(
+            get_web_search_args(Some("0.89.0")),
+            vec!["--enable".to_string(), "web_search_request".to_string()]
+        );
+        assert_eq!(
+            get_web_search_args(Some("0.89.9")),
+            vec!["--enable".to_string(), "web_search_request".to_string()]
+        );
+        assert_eq!(
+            get_web_search_args(Some("0.80.0")),
+            vec!["--enable".to_string(), "web_search_request".to_string()]
+        );
+
+        // Invalid or None values default to config-based (latest behavior)
+        assert_eq!(
+            get_web_search_args(None),
+            vec!["-c".to_string(), "web_search=live".to_string()]
+        );
+        assert_eq!(
+            get_web_search_args(Some("unknown")),
+            vec!["-c".to_string(), "web_search=live".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_codex_default_args_web_search_version_gate() {
+        // Date-based version should use "-c web_search=live"
+        let args_config = codex_default_args(None, None, Some("0.1.2025013100"), false, false);
+        assert!(args_config.contains(&"web_search=live".to_string()));
+        assert!(
+            !args_config.contains(&"--enable".to_string())
+                || !args_config
+                    .iter()
+                    .any(|a| a == "web_search" && !a.contains("="))
+        );
+
+        // v0.90.0 should use "--enable web_search"
+        let args_new = codex_default_args(None, None, Some("0.90.0"), false, false);
+        assert!(args_new.contains(&"web_search".to_string()));
+        assert!(!args_new.contains(&"web_search_request".to_string()));
+        assert!(!args_new.contains(&"web_search=live".to_string()));
+
+        // v0.89.x should use "--enable web_search_request"
+        let args_old = codex_default_args(None, None, Some("0.89.0"), false, false);
+        assert!(args_old.contains(&"web_search_request".to_string()));
+        assert!(!args_old.iter().any(|a| a == "web_search"));
+
+        // None (unknown version) should default to "-c web_search=live"
+        let args_default = codex_default_args(None, None, None, false, false);
+        assert!(args_default.contains(&"web_search=live".to_string()));
     }
 }

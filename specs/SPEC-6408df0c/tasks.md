@@ -21,13 +21,18 @@
 
 ## フェーズ3: ユーザーストーリー2 - Huskyの自動セットアップ (P2)
 
-- [ ] **T201** [US2] `package.json` の既存 `postinstall` と共存できる形でHuskyセットアップを統合
+- [ ] **T201** [US2] `package.json` の既存 `postinstall` と共存できる形でHuskyセットアップを統合（`bunx husky install`）
 
-## フェーズ4: ユーザーストーリー3 - 失敗時に明確な英語エラー (P3)
+## フェーズ4: ユーザーストーリー3 - commit-msgでcommitlintを自動取得 (P2)
 
-- [ ] **T301** [US3] フック内のメッセージを英語に統一し、失敗理由がわかる文言に調整
+- [ ] **T301** [US3] `.husky/commit-msg` を `bunx --package @commitlint/cli` で実行するよう更新
+
+## フェーズ5: ユーザーストーリー4 - 失敗時に明確な英語エラー (P3)
+
+- [ ] **T401** [US4] フック内のメッセージを英語に統一し、失敗理由がわかる文言に調整
 
 ## テスト
 
 - [ ] **T901** [TEST] `scripts/verify-husky-hooks.sh` を追加し、フック内容と `prepare` 設定を検証
 - [ ] **T902** [TEST] `package.json` に `lint:husky` スクリプトを追加し、T901を実行可能にする
+- [ ] **T903** [TEST] `scripts/verify-husky-hooks.sh` で `commit-msg` のcommitlint実行を検証

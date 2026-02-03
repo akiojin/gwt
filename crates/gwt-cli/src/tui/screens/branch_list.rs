@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use crate::tui::components::{LinkRegion, SummaryLinks};
+use crate::tui::components::LinkRegion;
 use gwt_core::ai::SessionSummaryCache;
 use gwt_core::config::AgentStatus;
 use gwt_core::git::{Branch, BranchMeta, BranchSummary, DivergenceStatus, Repository};
@@ -10,6 +10,7 @@ use gwt_core::tmux::{AgentPane, StatusBarSummary};
 use gwt_core::worktree::Worktree;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::{prelude::*, widgets::*};
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -56,20 +57,27 @@ const PANEL_PADDING_X: u16 = 1;
 /// Get branch name type for sorting
 fn get_branch_name_type(name: &str) -> BranchNameType {
     let lower = name.to_lowercase();
-    // Strip remote prefix for comparison
-    let name_part = lower.split('/').next_back().unwrap_or(&lower);
+    // Strip only the "remotes/<remote>/" prefix for comparison
+    let short_name = if let Some(stripped) = lower.strip_prefix("remotes/") {
+        stripped
+            .split_once('/')
+            .map(|(_, rest)| rest)
+            .unwrap_or(stripped)
+    } else {
+        lower.as_str()
+    };
 
-    if name_part == "main" || name_part == "master" {
+    if short_name == "main" || short_name == "master" {
         BranchNameType::Main
-    } else if name_part == "develop" || name_part == "dev" {
+    } else if short_name == "develop" || short_name == "dev" {
         BranchNameType::Develop
-    } else if lower.contains("feature/") {
+    } else if short_name.starts_with("feature/") {
         BranchNameType::Feature
-    } else if lower.contains("bugfix/") || lower.contains("bug/") {
+    } else if short_name.starts_with("bugfix/") || short_name.starts_with("bug/") {
         BranchNameType::Bugfix
-    } else if lower.contains("hotfix/") {
+    } else if short_name.starts_with("hotfix/") {
         BranchNameType::Hotfix
-    } else if lower.contains("release/") {
+    } else if short_name.starts_with("release/") {
         BranchNameType::Release
     } else {
         BranchNameType::Other
@@ -99,6 +107,33 @@ impl ViewMode {
             ViewMode::All => ViewMode::Local,
             ViewMode::Local => ViewMode::Remote,
             ViewMode::Remote => ViewMode::All,
+        }
+    }
+}
+
+/// Sort mode for branch list
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BranchSortMode {
+    #[default]
+    Default,
+    Name,
+    Updated,
+}
+
+impl BranchSortMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            BranchSortMode::Default => "Default",
+            BranchSortMode::Name => "Name",
+            BranchSortMode::Updated => "Updated",
+        }
+    }
+
+    pub fn cycle(&self) -> Self {
+        match self {
+            BranchSortMode::Default => BranchSortMode::Name,
+            BranchSortMode::Name => BranchSortMode::Updated,
+            BranchSortMode::Updated => BranchSortMode::Default,
         }
     }
 }
@@ -167,6 +202,8 @@ pub struct BranchItem {
     pub pr_number: Option<u64>,
     /// PR URL for latest PR (if any)
     pub pr_url: Option<String>,
+    /// PR state for latest PR (if any)
+    pub pr_state: Option<String>,
     /// FR-085: Whether the upstream branch has been deleted (gone)
     pub is_gone: bool,
 }
@@ -177,6 +214,7 @@ pub struct PrInfo {
     pub title: String,
     pub number: u64,
     pub url: Option<String>,
+    pub state: String,
 }
 
 #[derive(Debug, Clone)]
@@ -257,7 +295,8 @@ impl BranchItem {
             is_selected: false,
             pr_title: None,
             pr_number: None,
-            pr_url: None,            // FR-016: Will be populated from PrCache
+            pr_url: None, // FR-016: Will be populated from PrCache
+            pr_state: None,
             is_gone: branch.is_gone, // FR-085: Populate gone status from Branch
         };
         item.update_safety_status();
@@ -313,6 +352,7 @@ impl BranchItem {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: branch.is_gone, // FR-085: Populate gone status from Branch
         };
         item.update_safety_status();
@@ -417,6 +457,7 @@ pub struct BranchListState {
     pub is_loading: bool,
     pub loading_started: Option<Instant>,
     pub error: Option<String>,
+    pub sort_mode: BranchSortMode,
     pub version: Option<String>,
     pub working_directory: Option<String>,
     pub active_profile: Option<String>,
@@ -468,6 +509,15 @@ pub struct BranchListState {
     detail_links: Vec<LinkRegion>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CleanupStateSnapshot {
+    pub in_progress: bool,
+    pub progress_total: usize,
+    pub progress_done: usize,
+    pub active_branch: Option<String>,
+    pub target_branches: Vec<String>,
+}
+
 impl Default for BranchListState {
     fn default() -> Self {
         Self {
@@ -483,6 +533,7 @@ impl Default for BranchListState {
             is_loading: false,
             loading_started: None,
             error: None,
+            sort_mode: BranchSortMode::default(),
             version: None,
             working_directory: None,
             active_profile: None,
@@ -568,65 +619,109 @@ impl BranchListState {
             });
         }
 
-        let has_main = result
-            .iter()
-            .any(|&index| get_branch_name_type(&self.branches[index].name) == BranchNameType::Main);
-
         result.sort_by(|&a_index, &b_index| {
             let a = &self.branches[a_index];
             let b = &self.branches[b_index];
 
-            if a.is_current && !b.is_current {
-                return std::cmp::Ordering::Less;
-            }
-            if !a.is_current && b.is_current {
-                return std::cmp::Ordering::Greater;
-            }
-
-            let a_type = get_branch_name_type(&a.name);
-            let b_type = get_branch_name_type(&b.name);
-            if a_type == BranchNameType::Main && b_type != BranchNameType::Main {
-                return std::cmp::Ordering::Less;
-            }
-            if a_type != BranchNameType::Main && b_type == BranchNameType::Main {
-                return std::cmp::Ordering::Greater;
-            }
-
-            if has_main {
-                if a_type == BranchNameType::Develop && b_type != BranchNameType::Develop {
-                    return std::cmp::Ordering::Less;
+            let compare_current = |a: &BranchItem, b: &BranchItem| -> Option<Ordering> {
+                if a.is_current && !b.is_current {
+                    Some(Ordering::Less)
+                } else if !a.is_current && b.is_current {
+                    Some(Ordering::Greater)
+                } else {
+                    None
                 }
-                if a_type != BranchNameType::Develop && b_type == BranchNameType::Develop {
-                    return std::cmp::Ordering::Greater;
+            };
+
+            let compare_timestamp = |a: &BranchItem, b: &BranchItem| -> Option<Ordering> {
+                match (a.last_commit_timestamp, b.last_commit_timestamp) {
+                    (Some(a_time), Some(b_time)) => {
+                        if a_time == b_time {
+                            None
+                        } else {
+                            Some(b_time.cmp(&a_time))
+                        }
+                    }
+                    (Some(_), None) => Some(Ordering::Less),
+                    (None, Some(_)) => Some(Ordering::Greater),
+                    (None, None) => None,
+                }
+            };
+
+            let compare_local_remote = |a: &BranchItem, b: &BranchItem| -> Option<Ordering> {
+                match (a.branch_type, b.branch_type) {
+                    (BranchType::Local, BranchType::Remote) => Some(Ordering::Less),
+                    (BranchType::Remote, BranchType::Local) => Some(Ordering::Greater),
+                    _ => None,
+                }
+            };
+
+            match self.sort_mode {
+                BranchSortMode::Default => {
+                    if let Some(ordering) = compare_current(a, b) {
+                        return ordering;
+                    }
+
+                    let a_type = get_branch_name_type(&a.name);
+                    let b_type = get_branch_name_type(&b.name);
+                    if a_type != b_type {
+                        return a_type.cmp(&b_type);
+                    }
+
+                    if a.has_worktree && !b.has_worktree {
+                        return Ordering::Less;
+                    }
+                    if !a.has_worktree && b.has_worktree {
+                        return Ordering::Greater;
+                    }
+
+                    if let Some(ordering) = compare_timestamp(a, b) {
+                        return ordering;
+                    }
+
+                    if let Some(ordering) = compare_local_remote(a, b) {
+                        return ordering;
+                    }
+
+                    a.name.to_lowercase().cmp(&b.name.to_lowercase())
+                }
+                BranchSortMode::Name => {
+                    if let Some(ordering) = compare_current(a, b) {
+                        return ordering;
+                    }
+
+                    let name_order = a.name.to_lowercase().cmp(&b.name.to_lowercase());
+                    if name_order != Ordering::Equal {
+                        return name_order;
+                    }
+
+                    if let Some(ordering) = compare_local_remote(a, b) {
+                        return ordering;
+                    }
+
+                    Ordering::Equal
+                }
+                BranchSortMode::Updated => {
+                    if let Some(ordering) = compare_current(a, b) {
+                        return ordering;
+                    }
+
+                    if let Some(ordering) = compare_timestamp(a, b) {
+                        return ordering;
+                    }
+
+                    let name_order = a.name.to_lowercase().cmp(&b.name.to_lowercase());
+                    if name_order != Ordering::Equal {
+                        return name_order;
+                    }
+
+                    if let Some(ordering) = compare_local_remote(a, b) {
+                        return ordering;
+                    }
+
+                    Ordering::Equal
                 }
             }
-
-            if a.has_worktree && !b.has_worktree {
-                return std::cmp::Ordering::Less;
-            }
-            if !a.has_worktree && b.has_worktree {
-                return std::cmp::Ordering::Greater;
-            }
-
-            if let (Some(a_time), Some(b_time)) = (a.last_commit_timestamp, b.last_commit_timestamp)
-            {
-                if a_time != b_time {
-                    return b_time.cmp(&a_time);
-                }
-            } else if a.last_commit_timestamp.is_some() {
-                return std::cmp::Ordering::Less;
-            } else if b.last_commit_timestamp.is_some() {
-                return std::cmp::Ordering::Greater;
-            }
-
-            if a.branch_type == BranchType::Local && b.branch_type == BranchType::Remote {
-                return std::cmp::Ordering::Less;
-            }
-            if a.branch_type == BranchType::Remote && b.branch_type == BranchType::Local {
-                return std::cmp::Ordering::Greater;
-            }
-
-            a.name.to_lowercase().cmp(&b.name.to_lowercase())
         });
 
         self.filtered_indices = result;
@@ -672,14 +767,7 @@ impl BranchListState {
     }
 
     /// Get filtered branches based on view mode and filter
-    /// Sorted according to SPEC-d2f4762a FR-003a:
-    /// 1. Current branch (highest priority)
-    /// 2. main branch
-    /// 3. develop branch (only if main exists)
-    /// 4. Branches with worktree
-    /// 5. Latest activity timestamp (descending)
-    /// 6. Local branches (over remote)
-    /// 7. Alphabetical order
+    /// Sorted according to current sort mode (Default/Name/Updated).
     pub fn filtered_branches(&self) -> Vec<&BranchItem> {
         self.filtered_indices
             .iter()
@@ -693,6 +781,17 @@ impl BranchListState {
         self.selected = 0;
         self.offset = 0;
         self.rebuild_filtered_cache();
+    }
+
+    /// Cycle sort mode
+    pub fn cycle_sort_mode(&mut self) {
+        self.sort_mode = self.sort_mode.cycle();
+        self.rebuild_filtered_cache_preserve_selection();
+    }
+
+    pub fn set_sort_mode(&mut self, sort_mode: BranchSortMode) {
+        self.sort_mode = sort_mode;
+        self.rebuild_filtered_cache_preserve_selection();
     }
 
     pub fn set_view_mode(&mut self, view_mode: ViewMode) {
@@ -951,6 +1050,7 @@ impl BranchListState {
                 item.pr_title = Some(pr.title.clone());
                 item.pr_number = Some(pr.number);
                 item.pr_url = pr.url.clone();
+                item.pr_state = Some(pr.state.clone());
             }
         }
 
@@ -1037,6 +1137,10 @@ impl BranchListState {
         } else {
             WorktreeStatus::Inaccessible
         };
+        // SPEC-a70a1ece FR-170: For bare repos, branch with worktree becomes Local
+        if item.branch_type == BranchType::Remote {
+            item.branch_type = BranchType::Local;
+        }
         item.update_safety_status();
 
         self.stats.worktree_count = self.branches.iter().filter(|b| b.has_worktree).count();
@@ -1078,6 +1182,34 @@ impl BranchListState {
         self.cleanup_progress_done = 0;
         self.cleanup_active_branch = None;
         self.cleanup_target_branches.clear();
+    }
+
+    pub fn cleanup_snapshot(&self) -> CleanupStateSnapshot {
+        let mut target_branches: Vec<String> =
+            self.cleanup_target_branches.iter().cloned().collect();
+        target_branches.sort();
+        CleanupStateSnapshot {
+            in_progress: self.cleanup_in_progress,
+            progress_total: self.cleanup_progress_total,
+            progress_done: self.cleanup_progress_done,
+            active_branch: self.cleanup_active_branch.clone(),
+            target_branches,
+        }
+    }
+
+    pub fn restore_cleanup_snapshot(&mut self, snapshot: &CleanupStateSnapshot) {
+        if !snapshot.in_progress {
+            self.finish_cleanup_progress();
+            return;
+        }
+        self.cleanup_in_progress = true;
+        self.cleanup_progress_total = snapshot.progress_total;
+        self.cleanup_progress_done = snapshot.progress_done;
+        self.cleanup_active_branch = snapshot.active_branch.clone();
+        self.cleanup_target_branches.clear();
+        self.cleanup_target_branches
+            .extend(snapshot.target_branches.iter().cloned());
+        self.move_selection_off_cleanup_target();
     }
 
     pub fn increment_cleanup_progress(&mut self) {
@@ -1507,14 +1639,14 @@ pub fn render_branch_list(
     status_message: Option<&str>,
     has_focus: bool,
 ) {
-    // SPEC-4b893dae: Summary panel height is 12 lines (FR-003)
+    // SPEC-1ea18899 US4: Changed from 3-pane to 2-pane layout (removed Details panel)
+    // Use 'v' key to open GitView for detailed branch info
     let panel_height = crate::tui::components::SummaryPanel::height();
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(panel_height), // Branch list
-            Constraint::Length(panel_height), // Details panel
             Constraint::Min(6),               // Session panel
         ])
         .split(area);
@@ -1523,7 +1655,9 @@ pub fn render_branch_list(
     state.update_list_area(chunks[0]);
 
     render_branches(state, frame, chunks[0], has_focus);
-    render_summary_panels(state, frame, chunks[1], chunks[2], status_message);
+    // SPEC-1ea18899 US4: Only render Session panel (Details panel removed)
+    state.clear_detail_links();
+    render_session_panel(state, frame, chunks[1], status_message);
 }
 
 /// Build the unified status bar line for the bottom status bar (FR-093~FR-096).
@@ -1855,12 +1989,15 @@ fn render_branch_row(
     } else {
         &branch.name
     };
+    // SPEC-a70a1ece FR-101: Remove (current) label - branch shown in header instead
+    let current_label = "";
 
     // Calculate left side width: optionally "[*] " + safety + " " + branch_name
     // FR-082: Worktree column removed, branch name color indicates status
     // selection_icon(3) + space(1) if showing selection, plus safety_icon + space(1) + name
     let selection_width = if show_selection { 3 } else { 0 }; // "◉ " or "◎ " (2 + 1)
-    let left_width = selection_width + safety_icon.len() + 1 + display_name.width();
+    let left_width =
+        selection_width + safety_icon.len() + 1 + display_name.width() + current_label.width();
 
     // Build right side (agent info) and calculate its width
     // SPEC-861d8cdf T-103: Status-based display
@@ -1975,6 +2112,12 @@ fn render_branch_row(
             Style::default().fg(branch_name_color),
         ),
     ]);
+    if branch.is_current {
+        spans.push(Span::styled(
+            current_label,
+            Style::default().fg(Color::Green),
+        ));
+    }
 
     // Add padding and right side if there's agent info
     if !right_spans.is_empty() {
@@ -1995,18 +2138,7 @@ fn render_branch_row(
     ListItem::new(Line::from(spans)).style(style)
 }
 
-/// Render summary panel (SPEC-4b893dae FR-001~FR-006)
-fn render_summary_panels(
-    state: &mut BranchListState,
-    frame: &mut Frame,
-    details_area: Rect,
-    session_area: Rect,
-    status_message: Option<&str>,
-) {
-    render_details_panel(state, frame, details_area, status_message);
-    state.clear_detail_links();
-    render_session_panel(state, frame, session_area, status_message);
-}
+// SPEC-1ea18899 US4: render_summary_panels removed (use GitView for details)
 
 fn panel_title_line(label: &str) -> Line<'static> {
     Line::from(Span::styled(
@@ -2051,119 +2183,7 @@ fn session_scrollbar_content_length(total_lines: usize, viewport_len: usize) -> 
     total_lines.saturating_sub(viewport_len).saturating_add(1)
 }
 
-fn build_summary_links(repo_web_url: Option<&String>, branch: Option<&BranchItem>) -> SummaryLinks {
-    let Some(branch) = branch else {
-        return SummaryLinks::default();
-    };
-
-    let branch_url = repo_web_url.and_then(|base| {
-        let base = base.trim_end_matches('/');
-        let normalized = normalize_branch_name_for_url(&branch.name);
-        if normalized.is_empty() {
-            None
-        } else {
-            Some(format!("{}/tree/{}", base, normalized))
-        }
-    });
-
-    let pr_url = branch.pr_url.clone().or_else(|| {
-        repo_web_url.and_then(|base| {
-            branch
-                .pr_number
-                .map(|n| format!("{}/pull/{}", base.trim_end_matches('/'), n))
-        })
-    });
-
-    SummaryLinks { branch_url, pr_url }
-}
-
-fn normalize_branch_name_for_url(branch_name: &str) -> String {
-    if let Some(stripped) = branch_name.strip_prefix("remotes/") {
-        if let Some((_, name)) = stripped.split_once('/') {
-            return name.to_string();
-        }
-        return stripped.to_string();
-    }
-    branch_name.to_string()
-}
-
-fn render_details_panel(
-    state: &mut BranchListState,
-    frame: &mut Frame,
-    area: Rect,
-    _status_message: Option<&str>,
-) {
-    use crate::tui::components::SummaryPanel;
-    use std::path::PathBuf;
-
-    state.clear_detail_links();
-
-    // Create or get branch summary
-    let summary = if let Some(ref summary) = state.branch_summary {
-        summary.clone()
-    } else if let Some(branch) = state.selected_branch() {
-        // Create a basic summary from available branch data
-        let mut summary = BranchSummary::new(&branch.name);
-
-        // Set worktree path if available
-        if let Some(wt_path) = &branch.worktree_path {
-            summary = summary.with_worktree_path(Some(PathBuf::from(wt_path)));
-        }
-
-        // Set loading state based on global loading state
-        if state.is_loading {
-            summary.loading.commits = true;
-            summary.loading.stats = true;
-            summary.loading.meta = true;
-        }
-
-        summary
-    } else {
-        // No branch selected - show empty panel
-        BranchSummary::new("(no branch selected)")
-    };
-
-    // Handle loading state - show spinner in panel
-    if state.is_loading {
-        let title = panel_title_line("Details");
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::White))
-            .title(title)
-            .padding(Padding::new(PANEL_PADDING_X, PANEL_PADDING_X, 0, 0));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
-        let line = Line::from(vec![
-            Span::styled(
-                format!("{} ", state.spinner_char()),
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::styled(
-                "Loading branch information...",
-                Style::default().fg(Color::Yellow),
-            ),
-        ]);
-        frame.render_widget(Paragraph::new(line), inner);
-        return;
-    }
-
-    let selected_branch = state.selected_branch().cloned();
-    let links = build_summary_links(state.repo_web_url(), selected_branch.as_ref());
-
-    // Get progress status line if active
-    let status_line = state.active_status_line();
-
-    // Render the full summary panel with optional status line
-    let panel = SummaryPanel::new(&summary)
-        .with_tick(state.spinner_frame)
-        .with_title(panel_title_line("Details"))
-        .with_links(links)
-        .with_status_line(status_line);
-
-    let link_regions = panel.render_with_links(frame, area);
-    state.set_detail_links(link_regions);
-}
+// SPEC-1ea18899 US4: build_summary_links, normalize_branch_name_for_url, render_details_panel removed
 
 fn render_session_panel(
     state: &mut BranchListState,
@@ -2183,6 +2203,15 @@ fn render_session_panel(
     frame.render_widget(block, area);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Show active status line (cleanup/status progress) at top if present
+    if let Some(status_line) = state.active_status_line() {
+        lines.push(Line::from(Span::styled(
+            status_line,
+            Style::default().fg(Color::Yellow),
+        )));
+        lines.push(Line::from(""));
+    }
 
     if state.is_loading {
         lines.push(Line::from(vec![
@@ -2606,8 +2635,17 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: false,
         }
+    }
+
+    fn sort_branch(name: &str) -> BranchItem {
+        let mut item = sample_branch(name);
+        item.has_worktree = false;
+        item.worktree_status = WorktreeStatus::None;
+        item.safe_to_cleanup = Some(true);
+        item
     }
 
     #[test]
@@ -2615,6 +2653,87 @@ mod tests {
         assert_eq!(ViewMode::All.cycle(), ViewMode::Local);
         assert_eq!(ViewMode::Local.cycle(), ViewMode::Remote);
         assert_eq!(ViewMode::Remote.cycle(), ViewMode::All);
+    }
+
+    #[test]
+    fn test_sort_default_type_order() {
+        let branches = vec![
+            sort_branch("feature/one"),
+            sort_branch("bugfix/one"),
+            sort_branch("hotfix/one"),
+            sort_branch("release/one"),
+            sort_branch("develop"),
+            sort_branch("main"),
+            sort_branch("chore/one"),
+        ];
+        let state = BranchListState::new().with_branches(branches);
+        let names: Vec<_> = state
+            .filtered_branches()
+            .iter()
+            .map(|branch| branch.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "main",
+                "develop",
+                "feature/one",
+                "bugfix/one",
+                "hotfix/one",
+                "release/one",
+                "chore/one",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_branch_name_type_ignores_suffix_match() {
+        assert_eq!(
+            get_branch_name_type("feature/main"),
+            BranchNameType::Feature
+        );
+    }
+
+    #[test]
+    fn test_sort_current_branch_first() {
+        let mut current = sort_branch("feature/current");
+        current.is_current = true;
+        let branches = vec![sort_branch("main"), current, sort_branch("develop")];
+        let state = BranchListState::new().with_branches(branches);
+        assert_eq!(state.filtered_branches()[0].name, "feature/current");
+    }
+
+    #[test]
+    fn test_sort_mode_name_orders_by_name() {
+        let branches = vec![sort_branch("feature/beta"), sort_branch("feature/alpha")];
+        let mut state = BranchListState::new().with_branches(branches);
+        state.set_sort_mode(BranchSortMode::Name);
+        let names: Vec<_> = state
+            .filtered_branches()
+            .iter()
+            .map(|branch| branch.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["feature/alpha", "feature/beta"]);
+    }
+
+    #[test]
+    fn test_sort_mode_updated_orders_by_timestamp() {
+        let mut older = sort_branch("feature/old");
+        older.last_commit_timestamp = Some(100);
+        let mut newer = sort_branch("feature/new");
+        newer.last_commit_timestamp = Some(200);
+        let mut unknown = sort_branch("feature/unknown");
+        unknown.last_commit_timestamp = None;
+
+        let branches = vec![older, unknown, newer];
+        let mut state = BranchListState::new().with_branches(branches);
+        state.set_sort_mode(BranchSortMode::Updated);
+        let names: Vec<_> = state
+            .filtered_branches()
+            .iter()
+            .map(|branch| branch.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["feature/new", "feature/old", "feature/unknown"]);
     }
 
     #[test]
@@ -2750,6 +2869,44 @@ mod tests {
     }
 
     #[test]
+    fn test_current_branch_label_not_displayed() {
+        // SPEC-a70a1ece FR-101: (current) label removed - branch shown in header instead
+        let mut branch = sample_branch("main");
+        branch.is_current = true;
+
+        let other = sample_branch("feature/other");
+        let mut state = BranchListState::new().with_branches(vec![branch, other]);
+        state.selected = 1;
+
+        let backend = TestBackend::new(40, 5);
+        let mut terminal = Terminal::new(backend).expect("terminal init");
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_branches(&state, f, area, true);
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        let label = "(current)";
+        let label_chars: Vec<char> = label.chars().collect();
+        let width = 40u16;
+        let height = 5u16;
+
+        // Verify (current) label does NOT appear anywhere
+        for y in 0..height {
+            for x in 0..=width.saturating_sub(label_chars.len() as u16) {
+                let matches = label_chars
+                    .iter()
+                    .enumerate()
+                    .all(|(offset, ch)| buffer[(x + offset as u16, y)].symbol().starts_with(*ch));
+                assert!(!matches, "(current) label should NOT appear in branch row");
+            }
+        }
+    }
+
+    #[test]
     fn test_apply_worktree_created_updates_branch_and_preserves_selection() {
         let temp = tempdir().expect("tempdir");
         let expected_path = temp.path().display().to_string();
@@ -2839,6 +2996,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -2864,6 +3022,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
@@ -3004,6 +3163,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: false,
         }];
 
@@ -3052,6 +3212,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: false,
         }];
 
@@ -3109,6 +3270,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -3134,6 +3296,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
@@ -3221,6 +3384,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: false,
         }];
 
@@ -3277,6 +3441,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: false,
         }];
 
@@ -3403,6 +3568,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -3428,6 +3594,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
@@ -3472,6 +3639,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -3497,6 +3665,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
@@ -3541,6 +3710,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -3566,6 +3736,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
@@ -3581,6 +3752,7 @@ mod tests {
                 title: "Cool PR".to_string(),
                 number: 123,
                 url: Some("https://github.com/example/repo/pull/123".to_string()),
+                state: "OPEN".to_string(),
             },
         );
         state.apply_pr_info(&info);
@@ -3588,6 +3760,7 @@ mod tests {
         let filtered = state.filtered_branches();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "feature/one");
+        assert_eq!(filtered[0].pr_state.as_deref(), Some("OPEN"));
     }
 
     #[test]
@@ -3615,6 +3788,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: false,
         };
 
@@ -3669,6 +3843,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -3694,6 +3869,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
@@ -3747,6 +3923,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -3772,6 +3949,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -3797,6 +3975,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];

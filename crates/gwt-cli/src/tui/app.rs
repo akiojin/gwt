@@ -2,6 +2,8 @@
 
 #![allow(dead_code)] // TUI application components for future expansion
 
+mod ai_wizard;
+
 use super::widgets::ProgressModalState;
 use crate::{
     prepare_launch_plan, InstallPlan, LaunchPlan, LaunchProgress, ProgressStepKind, StepStatus,
@@ -17,17 +19,20 @@ use crossterm::{
 use gwt_core::agent::codex::supports_collaboration_modes;
 use gwt_core::ai::{
     summarize_session, AIClient, AIError, AgentHistoryStore, AgentType, ChatMessage,
-    ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, OpenCodeSessionParser,
+    ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, ModelInfo, OpenCodeSessionParser,
     SessionParseError, SessionParser,
 };
 use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{
-    get_claude_settings_path, is_gwt_hooks_registered, is_temporary_execution, register_gwt_hooks,
-    reregister_gwt_hooks, save_session_entry, AISettings, CustomCodingAgent, Profile,
-    ProfilesConfig, ResolvedAISettings, ToolSessionEntry,
+    get_claude_settings_path, is_gwt_hooks_registered, is_gwt_marketplace_registered,
+    is_temporary_execution, register_gwt_hooks, reregister_gwt_hooks, save_session_entry,
+    setup_gwt_plugin, AISettings, CustomCodingAgent, Profile, ProfilesConfig, ResolvedAISettings,
+    ToolSessionEntry,
 };
 use gwt_core::error::GwtError;
-use gwt_core::git::{Branch, PrCache, Remote, Repository};
+use gwt_core::git::{
+    detect_repo_type, get_header_context, Branch, PrCache, Remote, RepoType, Repository,
+};
 use gwt_core::tmux::{
     break_pane, compute_equal_splits, get_current_session, group_panes_by_left,
     join_pane_to_target, kill_pane, launcher, list_pane_geometries, resize_pane_height,
@@ -40,7 +45,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -51,20 +56,27 @@ const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const SESSION_SUMMARY_QUIET_PERIOD: Duration = Duration::from_secs(5);
 const FAST_EXIT_THRESHOLD_SECS: u64 = 2;
 const AGENT_SYSTEM_PROMPT: &str = "You are the master agent. Analyze tasks and propose a plan.";
+const FOOTER_VISIBLE_HEIGHT: usize = 1;
+const FOOTER_SCROLL_TICKS_PER_LINE: u16 = 2; // 0.5s per line (tick = 250ms)
+const FOOTER_SCROLL_PAUSE_TICKS: u16 = 4; // 1s pause at ends
 
 use super::screens::branch_list::{
     BranchSummaryRequest, BranchSummaryUpdate, PrInfo, WorktreeStatus,
 };
 use super::screens::environment::EditField;
+use super::screens::git_view::{build_git_view_data, build_git_view_data_no_worktree, GitViewData};
 use super::screens::pane_list::PaneListState;
 use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
+use super::screens::worktree_create::WorktreeCreateStep;
 use super::screens::{
-    collect_os_env, render_agent_mode, render_ai_wizard, render_branch_list, render_confirm,
-    render_environment, render_error_with_queue, render_help, render_logs, render_profiles,
-    render_settings, render_wizard, render_worktree_create, AIWizardState, AgentMessage,
-    AgentModeState, AgentRole, BranchItem, BranchListState, BranchType, CodingAgent, ConfirmState,
-    EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, HelpState, LogsState, ProfilesState,
-    QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult, WizardState, WizardStep,
+    collect_os_env, render_agent_mode, render_ai_wizard, render_branch_list, render_clone_wizard,
+    render_confirm, render_environment, render_error_with_queue, render_git_view, render_help,
+    render_logs, render_migration_dialog, render_profiles, render_settings, render_wizard,
+    render_worktree_create, AIWizardState, AgentMessage, AgentModeState, AgentRole, BranchItem,
+    BranchListState, BranchType, CloneWizardState, CloneWizardStep, CodingAgent, ConfirmState,
+    EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, GitViewCache, GitViewState, HelpState,
+    LogsState, MigrationDialogPhase, MigrationDialogState, ProfilesState, QuickStartEntry,
+    ReasoningLevel, SettingsState, WizardConfirmResult, WizardState, WizardStep,
     WorktreeCreateState,
 };
 // log_gwt_error is available for use when GwtError types are available
@@ -85,6 +97,16 @@ fn resolve_orphaned_agent_name(
     } else {
         trimmed.to_string()
     }
+}
+
+fn normalize_branch_name(name: &str) -> String {
+    if let Some(stripped) = name.strip_prefix("remotes/") {
+        if let Some((_, branch)) = stripped.split_once('/') {
+            return branch.to_string();
+        }
+        return stripped.to_string();
+    }
+    name.to_string()
 }
 
 fn format_ai_error(err: AIError) -> String {
@@ -166,6 +188,8 @@ fn session_parser_for_tool(tool_id: &str) -> Option<Box<dyn SessionParser>> {
 /// Configuration for launching a coding agent after TUI exits
 #[derive(Debug, Clone)]
 pub struct AgentLaunchConfig {
+    /// Repository root (bare repository path for SPEC-a70a1ece)
+    pub repo_root: PathBuf,
     /// Worktree path where agent should run
     pub worktree_path: PathBuf,
     /// Branch name
@@ -225,6 +249,8 @@ impl AgentLaunchConfig {
 pub struct TuiEntryContext {
     status_message: Option<String>,
     error_message: Option<String>,
+    /// Repository root for re-entry after agent termination (SPEC-a70a1ece)
+    repo_root: Option<PathBuf>,
 }
 
 impl TuiEntryContext {
@@ -232,6 +258,7 @@ impl TuiEntryContext {
         Self {
             status_message: Some(message),
             error_message: None,
+            repo_root: None,
         }
     }
 
@@ -239,6 +266,7 @@ impl TuiEntryContext {
         Self {
             status_message: Some(message),
             error_message: None,
+            repo_root: None,
         }
     }
 
@@ -246,7 +274,14 @@ impl TuiEntryContext {
         Self {
             status_message: None,
             error_message: Some(message),
+            repo_root: None,
         }
+    }
+
+    /// Set repo_root for single mode re-entry (SPEC-a70a1ece)
+    pub fn with_repo_root(mut self, repo_root: PathBuf) -> Self {
+        self.repo_root = Some(repo_root);
+        self
     }
 }
 
@@ -317,6 +352,10 @@ struct AgentModeUpdate {
     error: Option<String>,
 }
 
+struct AiWizardUpdate {
+    result: Result<Vec<ModelInfo>, AIError>,
+}
+
 struct BranchListUpdate {
     branches: Vec<BranchItem>,
     branch_names: Vec<String>,
@@ -327,6 +366,18 @@ struct BranchListUpdate {
     base_branch_exists: bool,
     total_count: usize,
     active_count: usize,
+}
+
+/// Update for GitView cache (SPEC-1ea18899 FR-050)
+struct GitViewCacheUpdate {
+    branch: String,
+    data: GitViewData,
+}
+
+/// Update for GitView PR info (SPEC-1ea18899)
+struct GitViewPrUpdate {
+    branch: String,
+    info: Option<PrInfo>,
 }
 
 struct LaunchRequest {
@@ -417,6 +468,18 @@ pub struct Model {
     status_message: Option<String>,
     /// Status message timestamp (for auto-clear)
     status_message_time: Option<Instant>,
+    /// Footer scroll offset (top line index)
+    footer_scroll_offset: usize,
+    /// Footer scroll direction (1 = down, -1 = up)
+    footer_scroll_dir: i8,
+    /// Footer scroll tick counter
+    footer_scroll_tick: u16,
+    /// Footer scroll pause counter at ends
+    footer_scroll_pause: u16,
+    /// Footer line count (last computed)
+    footer_line_count: usize,
+    /// Footer width (last computed)
+    footer_last_width: u16,
     /// Launch progress message (not auto-cleared)
     launch_status: Option<String>,
     /// Launch preparation update receiver
@@ -439,6 +502,10 @@ pub struct Model {
     pending_cleanup_branches: Vec<String>,
     /// Pending hook setup (SPEC-861d8cdf T-104)
     pending_hook_setup: bool,
+    /// Pending plugin setup (SPEC-f8dab6e2 T-110)
+    pending_plugin_setup: bool,
+    /// Pending launch plan for plugin setup (SPEC-f8dab6e2 T-110)
+    pending_plugin_setup_launch: Option<LaunchPlan>,
     /// Branch list update receiver
     branch_list_rx: Option<Receiver<BranchListUpdate>>,
     /// Branch summary update receiver
@@ -459,6 +526,8 @@ pub struct Model {
     agent_mode_tx: Option<Sender<AgentModeUpdate>>,
     /// Agent mode update receiver
     agent_mode_rx: Option<Receiver<AgentModeUpdate>>,
+    /// AI wizard model fetch receiver
+    ai_wizard_rx: Option<Receiver<AiWizardUpdate>>,
     /// Tmux mode (Single or Multi)
     tmux_mode: TmuxMode,
     /// Tmux session name (when in multi mode)
@@ -483,6 +552,29 @@ pub struct Model {
     agent_history: AgentHistoryStore,
     /// Progress modal state for worktree preparation (FR-041)
     progress_modal: Option<ProgressModalState>,
+    /// Startup branch name for header display (SPEC-a70a1ece FR-103)
+    /// This is fixed at startup and does not change when selecting other branches.
+    startup_branch: Option<String>,
+    /// Repository type detected at startup (SPEC-a70a1ece US2)
+    repo_type: RepoType,
+    /// Clone wizard state (SPEC-a70a1ece US3)
+    clone_wizard: CloneWizardState,
+    /// Bare repository name when inside a bare-based worktree (SPEC-a70a1ece T506)
+    bare_name: Option<String>,
+    /// Migration dialog state (SPEC-a70a1ece US7 T705-T710)
+    migration_dialog: MigrationDialogState,
+    /// Migration result receiver (for background migration)
+    migration_rx: Option<mpsc::Receiver<Result<(), gwt_core::migration::MigrationError>>>,
+    /// Path to bare repository when in bare project (SPEC-a70a1ece)
+    bare_repo_path: Option<PathBuf>,
+    /// GitView state (SPEC-1ea18899)
+    git_view: GitViewState,
+    /// GitView cache for all branches (SPEC-1ea18899 FR-050)
+    git_view_cache: GitViewCache,
+    /// GitView cache update receiver (SPEC-1ea18899)
+    git_view_cache_rx: Option<Receiver<GitViewCacheUpdate>>,
+    /// GitView PR update receiver (SPEC-1ea18899)
+    git_view_pr_rx: Option<Receiver<GitViewPrUpdate>>,
 }
 
 /// Screen types
@@ -500,6 +592,12 @@ pub enum Screen {
     Environment,
     /// AI settings wizard (FR-100)
     AISettingsWizard,
+    /// Clone wizard for empty/non-repo directories (SPEC-a70a1ece US3)
+    CloneWizard,
+    /// Migration dialog for .worktrees/ method conversion (SPEC-a70a1ece US7)
+    MigrationDialog,
+    /// Git status view for selected branch (SPEC-1ea18899)
+    GitView,
 }
 
 /// Messages (Events in Elm Architecture)
@@ -529,6 +627,8 @@ pub enum Message {
     ToggleFilterMode,
     /// Cycle view mode (All/Local/Remote)
     CycleViewMode,
+    /// Cycle sort mode (Default/Name/Updated)
+    CycleSortMode,
     /// Toggle branch selection
     ToggleSelection,
     /// Space key for selection
@@ -564,13 +664,44 @@ impl Model {
     }
 
     pub fn new_with_context(context: Option<TuiEntryContext>) -> Self {
-        let repo_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        // SPEC-a70a1ece: Use repo_root from context if available (single mode re-entry)
+        let repo_root = context
+            .as_ref()
+            .and_then(|ctx| ctx.repo_root.clone())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
         debug!(
             category = "tui",
             repo_root = %repo_root.display(),
             "Initializing TUI model"
         );
+
+        // SPEC-a70a1ece: First check if there's a *.git bare repository in the directory
+        // This takes priority because parent directory's .git might be detected otherwise
+        let (repo_type, bare_repo_path) =
+            if let Some(bare_path) = gwt_core::git::find_bare_repo_in_dir(&repo_root) {
+                debug!(
+                    category = "tui",
+                    bare_path = %bare_path.display(),
+                    "Found bare repository in directory, treating as bare project"
+                );
+                (RepoType::Bare, Some(bare_path))
+            } else {
+                (detect_repo_type(&repo_root), None)
+            };
+
+        // SPEC-a70a1ece: Capture startup context
+        // For bare projects, use the bare repo path; otherwise use repo_root
+        let (startup_branch, bare_name) = if let Some(ref bare_path) = bare_repo_path {
+            // Bare project: no startup branch, get bare name from path
+            let name = bare_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string());
+            (None, name)
+        } else {
+            let header_ctx = get_header_context(&repo_root);
+            (header_ctx.branch_name, header_ctx.bare_name)
+        };
 
         let (agent_mode_tx, agent_mode_rx) = mpsc::channel();
 
@@ -597,6 +728,12 @@ impl Model {
             ai_wizard: AIWizardState::new(),
             status_message: None,
             status_message_time: None,
+            footer_scroll_offset: 0,
+            footer_scroll_dir: 1,
+            footer_scroll_tick: 0,
+            footer_scroll_pause: 0,
+            footer_line_count: 0,
+            footer_last_width: 0,
             launch_status: None,
             launch_rx: None,
             launch_in_progress: false,
@@ -608,6 +745,8 @@ impl Model {
             pending_agent_termination: None,
             pending_cleanup_branches: Vec::new(),
             pending_hook_setup: false,
+            pending_plugin_setup: false,
+            pending_plugin_setup_launch: None,
             branch_list_rx: None,
             branch_summary_rx: None,
             pr_title_rx: None,
@@ -618,6 +757,7 @@ impl Model {
             session_summary_rx: None,
             agent_mode_tx: Some(agent_mode_tx),
             agent_mode_rx: Some(agent_mode_rx),
+            ai_wizard_rx: None,
             tmux_mode: TmuxMode::detect(),
             tmux_session: None,
             gwt_pane_id: None,
@@ -630,6 +770,17 @@ impl Model {
             session_poll_deferred: false,
             agent_history: AgentHistoryStore::load().unwrap_or_default(),
             progress_modal: None,
+            startup_branch,
+            repo_type,
+            clone_wizard: CloneWizardState::new(),
+            bare_name,
+            migration_dialog: MigrationDialogState::default(),
+            migration_rx: None,
+            bare_repo_path,
+            git_view: GitViewState::default(),
+            git_view_cache: GitViewCache::new(),
+            git_view_cache_rx: None,
+            git_view_pr_rx: None,
         };
 
         model
@@ -687,6 +838,45 @@ impl Model {
             }
         }
 
+        // SPEC-a70a1ece T310-T311: Show clone wizard for empty/non-repo directories
+        if matches!(model.repo_type, RepoType::Empty | RepoType::NonRepo) {
+            debug!(
+                category = "tui",
+                repo_type = ?model.repo_type,
+                "Empty or non-repo directory detected, showing clone wizard"
+            );
+            model.screen = Screen::CloneWizard;
+        }
+
+        // SPEC-a70a1ece FR-200: Show migration dialog for ALL normal repositories
+        // (regardless of whether .worktrees/ exists)
+        debug!(
+            category = "tui",
+            repo_type = ?model.repo_type,
+            repo_root = %model.repo_root.display(),
+            "Checking for migration dialog eligibility"
+        );
+        if model.repo_type == RepoType::Normal {
+            debug!(
+                category = "tui",
+                repo_root = %model.repo_root.display(),
+                "Normal repository detected, showing migration dialog for bare conversion"
+            );
+            // Create migration config
+            let bare_repo_name =
+                gwt_core::migration::derive_bare_repo_name(&model.repo_root.display().to_string());
+            // SPEC-a70a1ece FR-150: target_root is the same as source_root
+            // Migration creates bare repo and worktrees INSIDE the original repo directory
+            let target_root = model.repo_root.clone();
+            let config = gwt_core::migration::MigrationConfig::new(
+                model.repo_root.clone(),
+                target_root,
+                bare_repo_name,
+            );
+            model.migration_dialog = MigrationDialogState::new(config);
+            model.screen = Screen::MigrationDialog;
+        }
+
         model
     }
 
@@ -734,11 +924,16 @@ impl Model {
         }
 
         self.load_profiles();
+        // SPEC-1ea18899 FR-052: Clear GitView cache on refresh
+        self.git_view_cache.clear();
         self.start_branch_list_refresh(settings);
     }
 
     fn start_branch_list_refresh(&mut self, settings: gwt_core::config::Settings) {
+        let cleanup_snapshot = self.branch_list.cleanup_snapshot();
+        let sort_mode = self.branch_list.sort_mode;
         self.pr_title_rx = None;
+        self.git_view_pr_rx = None;
         self.safety_rx = None;
         self.worktree_status_rx = None;
         self.branch_list_rx = None;
@@ -746,42 +941,83 @@ impl Model {
         self.active_count = 0;
 
         let mut branch_list = BranchListState::new();
+        branch_list.sort_mode = sort_mode;
         branch_list.active_profile = self.profiles_config.active.clone();
         branch_list.ai_enabled = self.active_ai_enabled();
         branch_list.session_summary_enabled = self.active_session_summary_enabled();
         branch_list.working_directory = Some(self.repo_root.display().to_string());
         branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
         branch_list.set_loading(true);
+        branch_list.restore_cleanup_snapshot(&cleanup_snapshot);
         self.branch_list = branch_list;
 
         let repo_root = self.repo_root.clone();
+        let repo_type = self.repo_type;
+        let bare_repo_path = self.bare_repo_path.clone();
         let configured_base_branch = settings.default_base_branch.clone();
         let agent_history = self.agent_history.clone();
         let (tx, rx) = mpsc::channel();
         self.branch_list_rx = Some(rx);
 
         thread::spawn(move || {
+            // SPEC-a70a1ece: Use bare repo path for git commands in bare projects
+            let git_path = bare_repo_path.as_ref().unwrap_or(&repo_root);
             let (base_branch, base_branch_exists) =
-                resolve_safety_base(&repo_root, &configured_base_branch);
-            let worktrees = WorktreeManager::new(&repo_root)
+                resolve_safety_base(git_path, &configured_base_branch);
+            let worktrees = WorktreeManager::new(git_path)
                 .ok()
                 .and_then(|manager| manager.list_basic().ok())
                 .unwrap_or_default();
-            let branches = Branch::list_basic(&repo_root).unwrap_or_default();
-            let remote_branches = Branch::list_remote(&repo_root).unwrap_or_default();
+            let all_branches = Branch::list_basic(git_path).unwrap_or_default();
+
+            // SPEC-a70a1ece FR-170/171: For bare repos, only show worktree branches as Local
+            let worktree_branch_names: HashSet<String> = worktrees
+                .iter()
+                .filter_map(|wt| wt.branch.clone())
+                .collect();
+
+            let branches: Vec<_> = if repo_type == RepoType::Bare {
+                // Bare repo: Local = only branches with worktrees
+                all_branches
+                    .into_iter()
+                    .filter(|b| worktree_branch_names.contains(&b.name))
+                    .collect()
+            } else {
+                all_branches
+            };
+
+            // SPEC-a70a1ece FR-171: For bare repos, branches without worktrees go to Remote
+            let remote_branches = if repo_type == RepoType::Bare {
+                // Get all branches and filter out ones with worktrees
+                let all_for_remote = Branch::list_basic(git_path).unwrap_or_default();
+                all_for_remote
+                    .into_iter()
+                    .filter(|b| !worktree_branch_names.contains(&b.name))
+                    .collect::<Vec<_>>()
+            } else {
+                Branch::list_remote(git_path).unwrap_or_default()
+            };
+
             let local_branch_names: HashSet<String> =
                 branches.iter().map(|b| b.name.clone()).collect();
             let mut remote_only_branches = Vec::new();
             for mut branch in remote_branches {
-                let short_name = branch
-                    .name
-                    .split_once('/')
-                    .map(|(_, name)| name)
-                    .unwrap_or(branch.name.as_str());
+                let short_name = if repo_type == RepoType::Bare {
+                    // For bare repos, branch name doesn't have origin/ prefix
+                    branch.name.as_str()
+                } else {
+                    branch
+                        .name
+                        .split_once('/')
+                        .map(|(_, name)| name)
+                        .unwrap_or(branch.name.as_str())
+                };
                 if local_branch_names.contains(short_name) {
                     continue;
                 }
-                branch.name = format!("remotes/{}", branch.name);
+                if repo_type != RepoType::Bare {
+                    branch.name = format!("remotes/{}", branch.name);
+                }
                 remote_only_branches.push(branch);
             }
             let worktree_targets: Vec<WorktreeStatusTarget> = worktrees
@@ -826,6 +1062,10 @@ impl Model {
                 .collect();
             branch_items.extend(remote_only_branches.iter().map(|b| {
                 let mut item = BranchItem::from_branch_minimal(b, &worktrees);
+                // SPEC-a70a1ece FR-171: For bare repos, branches without worktrees are Remote
+                if repo_type == RepoType::Bare {
+                    item.branch_type = BranchType::Remote;
+                }
                 apply_last_tool_usage(&mut item, &repo_root, &tool_usage_map, &agent_history);
                 item
             }));
@@ -863,23 +1103,16 @@ impl Model {
             return;
         }
 
-        let repo_root = self.repo_root.clone();
+        let repo_root = self
+            .bare_repo_path
+            .clone()
+            .unwrap_or_else(|| self.repo_root.clone());
         let (tx, rx) = mpsc::channel();
         self.pr_title_rx = Some(rx);
 
         thread::spawn(move || {
             let mut cache = PrCache::new();
             cache.populate(&repo_root);
-
-            let normalize_branch_name = |name: &str| {
-                if let Some(stripped) = name.strip_prefix("remotes/") {
-                    if let Some((_, branch)) = stripped.split_once('/') {
-                        return branch.to_string();
-                    }
-                    return stripped.to_string();
-                }
-                name.to_string()
-            };
 
             let mut info = HashMap::new();
             for name in branch_names {
@@ -891,6 +1124,7 @@ impl Model {
                             title: pr.title.clone(),
                             number: pr.number,
                             url: pr.url.clone(),
+                            state: pr.state.clone(),
                         },
                     );
                 }
@@ -914,6 +1148,108 @@ impl Model {
         });
     }
 
+    /// SPEC-1ea18899: Spawn background fetch for GitView data
+    fn spawn_git_view_data_fetch(&mut self, branch: &str, worktree_path: Option<&Path>) {
+        let branch = branch.to_string();
+        let worktree_path = worktree_path.map(|p| p.to_path_buf());
+        // Use bare repo path if available for branches without worktree
+        let repo_root = self
+            .bare_repo_path
+            .clone()
+            .unwrap_or_else(|| self.repo_root.clone());
+        let (tx, rx) = mpsc::channel();
+        self.git_view_cache_rx = Some(rx);
+
+        thread::spawn(move || {
+            let data = if let Some(ref wt_path) = worktree_path {
+                build_git_view_data(wt_path)
+            } else {
+                build_git_view_data_no_worktree(&repo_root, &branch)
+            };
+            let _ = tx.send(GitViewCacheUpdate { branch, data });
+        });
+    }
+
+    /// SPEC-1ea18899: Spawn background fetch for GitView PR info
+    fn spawn_git_view_pr_fetch(&mut self, branch: &str) {
+        let branch = branch.to_string();
+        let lookup = normalize_branch_name(&branch);
+        let repo_root = self
+            .bare_repo_path
+            .clone()
+            .unwrap_or_else(|| self.repo_root.clone());
+        let (tx, rx) = mpsc::channel();
+        self.git_view_pr_rx = Some(rx);
+
+        thread::spawn(move || {
+            let info = PrCache::fetch_latest_for_branch(&repo_root, &lookup).map(|pr| PrInfo {
+                title: pr.title,
+                number: pr.number,
+                url: pr.url,
+                state: pr.state,
+            });
+            let _ = tx.send(GitViewPrUpdate { branch, info });
+        });
+    }
+
+    /// SPEC-1ea18899: Apply GitView cache updates from background fetch
+    fn apply_git_view_cache_updates(&mut self) {
+        let Some(rx) = &self.git_view_cache_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(update) => {
+                // Update cache
+                self.git_view_cache
+                    .insert(update.branch.clone(), update.data.clone());
+                // If we're on GitView for this branch, update state
+                if matches!(self.screen, Screen::GitView)
+                    && self.git_view.branch_name == update.branch
+                {
+                    self.git_view.load_from_cache(&update.data);
+                }
+                self.git_view_cache_rx = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.git_view_cache_rx = None;
+            }
+        }
+    }
+
+    /// SPEC-1ea18899: Apply GitView PR updates from background fetch
+    fn apply_git_view_pr_updates(&mut self) {
+        let Some(rx) = &self.git_view_pr_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(update) => {
+                if let Some(info) = update.info {
+                    let mut map = HashMap::new();
+                    map.insert(update.branch.clone(), info.clone());
+                    self.branch_list.apply_pr_info(&map);
+                    if matches!(self.screen, Screen::GitView)
+                        && self.git_view.branch_name == update.branch
+                    {
+                        self.git_view.update_pr_info(
+                            Some(info.number),
+                            Some(info.title.clone()),
+                            info.url.clone(),
+                            Some(info.state.clone()),
+                        );
+                    }
+                }
+                self.git_view_pr_rx = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.git_view_pr_rx = None;
+            }
+        }
+    }
+
     fn spawn_safety_checks(
         &mut self,
         targets: Vec<SafetyCheckTarget>,
@@ -925,7 +1261,11 @@ impl Model {
             return;
         }
 
-        let repo_root = self.repo_root.clone();
+        // SPEC-a70a1ece: Use bare repo path for git commands in bare projects
+        let repo_root = self
+            .bare_repo_path
+            .clone()
+            .unwrap_or_else(|| self.repo_root.clone());
         let (tx, rx) = mpsc::channel();
         self.safety_rx = Some(rx);
 
@@ -1608,17 +1948,18 @@ impl Model {
         };
 
         // Get worktree list synchronously for matching
-        let worktrees: Vec<(String, std::path::PathBuf)> =
-            match WorktreeManager::new(&self.repo_root) {
-                Ok(manager) => match manager.list_basic() {
-                    Ok(wts) => wts
-                        .into_iter()
-                        .filter_map(|wt| wt.branch.map(|b| (b, wt.path)))
-                        .collect(),
-                    Err(_) => return,
-                },
+        // SPEC-a70a1ece: Use bare repo path for worktree operations in bare projects
+        let git_path = self.bare_repo_path.as_ref().unwrap_or(&self.repo_root);
+        let worktrees: Vec<(String, std::path::PathBuf)> = match WorktreeManager::new(git_path) {
+            Ok(manager) => match manager.list_basic() {
+                Ok(wts) => wts
+                    .into_iter()
+                    .filter_map(|wt| wt.branch.map(|b| (b, wt.path)))
+                    .collect(),
                 Err(_) => return,
-            };
+            },
+            Err(_) => return,
+        };
 
         if worktrees.is_empty() {
             return;
@@ -1695,11 +2036,15 @@ impl Model {
 
         match rx.try_recv() {
             Ok(update) => {
+                let cleanup_snapshot = self.branch_list.cleanup_snapshot();
                 let session_cache = self.branch_list.clone_session_cache();
                 let session_inflight = self.branch_list.clone_session_inflight();
                 let session_missing = self.branch_list.clone_session_missing();
                 let session_warnings = self.branch_list.clone_session_warnings();
-                let mut branch_list = BranchListState::new().with_branches(update.branches);
+                let sort_mode = self.branch_list.sort_mode;
+                let mut branch_list = BranchListState::new();
+                branch_list.sort_mode = sort_mode;
+                let mut branch_list = branch_list.with_branches(update.branches);
                 branch_list.active_profile = self.profiles_config.active.clone();
                 branch_list.ai_enabled = self.active_ai_enabled();
                 branch_list.session_summary_enabled = self.active_session_summary_enabled();
@@ -1717,6 +2062,7 @@ impl Model {
                     .map(|b| b.name.clone())
                     .collect();
                 branch_list.cleanup_session_warnings(&remaining_branches);
+                branch_list.restore_cleanup_snapshot(&cleanup_snapshot);
                 self.branch_list = branch_list;
                 // SPEC-4b893dae: Update branch summary after branches are loaded
                 self.refresh_branch_summary();
@@ -1754,6 +2100,29 @@ impl Model {
         match rx.try_recv() {
             Ok(update) => {
                 self.branch_list.apply_pr_info(&update.info);
+                if matches!(self.screen, Screen::GitView) {
+                    if let Some(branch) = self
+                        .branch_list
+                        .branches
+                        .iter()
+                        .find(|b| b.name == self.git_view.branch_name)
+                    {
+                        let branch_has_pr = branch.pr_number.is_some()
+                            || branch.pr_title.is_some()
+                            || branch.pr_state.is_some();
+                        let git_view_has_pr = self.git_view.pr_number.is_some()
+                            || self.git_view.pr_title.is_some()
+                            || self.git_view.pr_state.is_some();
+                        if branch_has_pr || !git_view_has_pr {
+                            self.git_view.update_pr_info(
+                                branch.pr_number,
+                                branch.pr_title.clone(),
+                                branch.pr_url.clone(),
+                                branch.pr_state.clone(),
+                            );
+                        }
+                    }
+                }
                 self.pr_title_rx = None;
             }
             Err(TryRecvError::Empty) => {}
@@ -2475,62 +2844,30 @@ impl Model {
                     }
                 }
             }
+            // SPEC-f8dab6e2 T-110: Handle plugin setup confirmation
+            if self.pending_plugin_setup {
+                if let Err(e) = setup_gwt_plugin() {
+                    debug!(category = "tui", error = %e, "Failed to setup gwt plugin");
+                }
+            }
         }
+
+        // SPEC-f8dab6e2: Continue agent launch after plugin setup confirmation
+        let pending_launch = self.pending_plugin_setup_launch.take();
+
         // Clear pending state and return to previous screen
         self.pending_unsafe_selection = None;
         self.pending_agent_termination = None;
         self.pending_cleanup_branches.clear();
         self.pending_hook_setup = false;
+        self.pending_plugin_setup = false;
         if let Some(prev_screen) = self.screen_stack.pop() {
             self.screen = prev_screen;
         }
-    }
 
-    fn handle_ai_wizard_mouse(&mut self, mouse: MouseEvent) {
-        if !self.ai_wizard.visible {
-            return;
-        }
-        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-            return;
-        }
-
-        // Check if clicking outside popup area - close wizard
-        if !self.ai_wizard.is_point_in_popup(mouse.column, mouse.row) {
-            self.ai_wizard.close();
-            self.last_mouse_click = None;
-            return;
-        }
-
-        // Only handle model selection step mouse clicks
-        if !matches!(
-            self.ai_wizard.step,
-            crate::tui::screens::ai_wizard::AIWizardStep::ModelSelect
-        ) {
-            return;
-        }
-
-        // Check if clicking on model list
-        if let Some(index) = self
-            .ai_wizard
-            .selection_index_from_point(mouse.column, mouse.row)
-        {
-            let now = Instant::now();
-            let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
-                last.index == index
-                    && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
-            });
-
-            if is_double_click {
-                self.last_mouse_click = None;
-                // Double click: select model and proceed (same as Enter)
-                if self.ai_wizard.select_model_index(index) {
-                    self.handle_ai_wizard_enter();
-                }
-            } else {
-                // Single click: just select the model
-                self.ai_wizard.select_model_index(index);
-                self.last_mouse_click = Some(MouseClick { index, at: now });
-            }
+        // Continue agent launch if pending (after plugin setup dialog)
+        if let Some(plan) = pending_launch {
+            self.handle_launch_plan_internal(plan);
         }
     }
 
@@ -2642,6 +2979,30 @@ impl Model {
         }
     }
 
+    /// SPEC-1ea18899: Handle mouse events for GitView screen (FR-007)
+    fn handle_gitview_mouse(&mut self, mouse: MouseEvent) {
+        if !matches!(self.screen, Screen::GitView) {
+            return;
+        }
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+
+        // Check if click is within PR link region
+        if let Some(ref link_region) = self.git_view.pr_link_region {
+            let x = mouse.column;
+            let y = mouse.row;
+            if y == link_region.area.y
+                && x >= link_region.area.x
+                && x < link_region.area.x + link_region.area.width
+            {
+                // Click on PR link - open in browser
+                let url = link_region.url.clone();
+                self.open_url(&url);
+            }
+        }
+    }
+
     /// Handle mouse events for the error popup
     fn handle_error_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
@@ -2677,13 +3038,37 @@ impl Model {
         }
 
         let mut last_error: Option<std::io::Error> = None;
+        let mut try_open = |cmd: &str, args: &[&str]| -> bool {
+            match Command::new(cmd)
+                .args(args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+            {
+                Ok(output) => {
+                    if output.status.success() {
+                        return true;
+                    }
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let message = stderr.trim();
+                    let message = if message.is_empty() {
+                        format!("{} exited with status {}", cmd, output.status)
+                    } else {
+                        message.to_string()
+                    };
+                    last_error = Some(std::io::Error::other(message));
+                    false
+                }
+                Err(err) => {
+                    last_error = Some(err);
+                    false
+                }
+            }
+        };
         #[cfg(target_os = "macos")]
         {
-            match std::process::Command::new("open").arg(url).spawn() {
-                Ok(_) => return,
-                Err(err) => {
-                    last_error.replace(err);
-                }
+            if try_open("open", &[url]) {
+                return;
             }
         }
 
@@ -2695,35 +3080,23 @@ impl Model {
                 ("x-www-browser", vec![url]),
             ];
             for (cmd, args) in candidates {
-                match std::process::Command::new(cmd).args(args).spawn() {
-                    Ok(_) => return,
-                    Err(err) => {
-                        last_error.replace(err);
-                    }
+                if try_open(cmd, &args) {
+                    return;
                 }
             }
         }
 
         #[cfg(target_os = "windows")]
         {
-            match std::process::Command::new("cmd")
-                .args(["/C", "start", "", url])
-                .spawn()
-            {
-                Ok(_) => return,
-                Err(err) => {
-                    last_error.replace(err);
-                }
+            if try_open("cmd", &["/C", "start", "", url]) {
+                return;
             }
 
-            match std::process::Command::new("powershell")
-                .args(["-NoProfile", "-Command", "Start-Process", url])
-                .spawn()
-            {
-                Ok(_) => return,
-                Err(err) => {
-                    last_error.replace(err);
-                }
+            if try_open(
+                "powershell",
+                &["-NoProfile", "-Command", "Start-Process", url],
+            ) {
+                return;
             }
         }
 
@@ -2749,7 +3122,7 @@ impl Model {
             }
         }
 
-        let err = last_error.unwrap_or_else(|| std::io::Error::from(std::io::ErrorKind::Other));
+        let err = last_error.unwrap_or_else(|| std::io::Error::other("unknown error"));
         let message = if err.kind() == std::io::ErrorKind::NotFound {
             #[cfg(target_os = "linux")]
             {
@@ -3056,44 +3429,6 @@ impl Model {
         self.open_default_ai_editor();
     }
 
-    /// Handle Enter key in AI settings wizard
-    fn handle_ai_wizard_enter(&mut self) {
-        use super::screens::ai_wizard::AIWizardStep;
-
-        match self.ai_wizard.step {
-            AIWizardStep::Endpoint => {
-                self.ai_wizard.next_step();
-            }
-            AIWizardStep::ApiKey => {
-                // Start fetching models
-                self.ai_wizard.step = AIWizardStep::FetchingModels;
-                self.ai_wizard.loading_message = Some("Fetching models...".to_string());
-
-                // Fetch models (blocking)
-                match self.ai_wizard.fetch_models() {
-                    Ok(()) => {
-                        self.ai_wizard.fetch_complete();
-                    }
-                    Err(e) => {
-                        self.ai_wizard.fetch_failed(&e);
-                    }
-                }
-            }
-            AIWizardStep::FetchingModels => {
-                // Do nothing while fetching
-            }
-            AIWizardStep::ModelSelect => {
-                // Save AI settings
-                self.save_ai_wizard_settings();
-                self.ai_wizard.close();
-                if let Some(prev_screen) = self.screen_stack.pop() {
-                    self.screen = prev_screen;
-                }
-                self.load_profiles();
-            }
-        }
-    }
-
     /// Handle Enter key in Settings screen (SPEC-71f2742d US3)
     fn handle_settings_enter(&mut self) {
         use super::screens::settings::{AgentFormField, CustomAgentMode, SettingsCategory};
@@ -3214,6 +3549,7 @@ impl Model {
                                     Ok(value) => {
                                         env_state.apply_ai_value(ai_field, value);
                                         env_state.cancel_edit();
+                                        self.persist_settings_env_changes();
                                     }
                                     Err(msg) => {
                                         env_state.error = Some(msg.to_string());
@@ -3242,6 +3578,7 @@ impl Model {
                                         }
                                         env_state.cancel_edit();
                                         env_state.refresh_selection();
+                                        self.persist_settings_env_changes();
                                     }
                                     Err(msg) => {
                                         env_state.error = Some(msg.to_string());
@@ -3375,10 +3712,12 @@ impl Model {
                                             "OS environment variable enabled.".to_string()
                                         });
                                         self.status_message_time = Some(Instant::now());
+                                        self.persist_settings_env_changes();
                                     } else if let Some(index) = env_state.selected_profile_index() {
                                         if index < env_state.variables.len() {
                                             env_state.variables.remove(index);
                                             env_state.refresh_selection();
+                                            self.persist_settings_env_changes();
                                         }
                                     }
                                 }
@@ -3392,15 +3731,7 @@ impl Model {
                                             "Environment variable reset to OS value.".to_string(),
                                         );
                                         self.status_message_time = Some(Instant::now());
-                                    }
-                                }
-                                's' | 'S' => {
-                                    // Save env vars
-                                    if self.settings.save_profile_env() {
-                                        if let Some(ref config) = self.settings.profiles_config {
-                                            let _ = config.save();
-                                            self.load_profiles();
-                                        }
+                                        self.persist_settings_env_changes();
                                     }
                                 }
                                 _ => {}
@@ -3442,47 +3773,6 @@ impl Model {
         }
     }
 
-    /// Save AI settings from wizard
-    fn save_ai_wizard_settings(&mut self) {
-        let model = self
-            .ai_wizard
-            .current_model()
-            .map(|m| m.id.clone())
-            .unwrap_or_default();
-        let settings = AISettings {
-            endpoint: self.ai_wizard.endpoint.trim().to_string(),
-            api_key: self.ai_wizard.api_key.trim().to_string(),
-            model,
-            summary_enabled: self.ai_wizard.summary_enabled,
-        };
-
-        if self.ai_wizard.is_default_ai {
-            self.profiles_config.default_ai = Some(settings);
-        } else if let Some(profile_name) = &self.ai_wizard.profile_name {
-            if let Some(profile) = self.profiles_config.profiles.get_mut(profile_name) {
-                profile.ai = Some(settings);
-            }
-        }
-        self.save_profiles();
-    }
-
-    /// Delete AI settings from wizard
-    fn delete_ai_wizard_settings(&mut self) {
-        if self.ai_wizard.is_default_ai {
-            self.profiles_config.default_ai = None;
-        } else if let Some(profile_name) = &self.ai_wizard.profile_name {
-            if let Some(profile) = self.profiles_config.profiles.get_mut(profile_name) {
-                profile.ai = None;
-            }
-        }
-        self.save_profiles();
-        self.ai_wizard.close();
-        if let Some(prev_screen) = self.screen_stack.pop() {
-            self.screen = prev_screen;
-        }
-        self.load_profiles();
-    }
-
     fn toggle_default_ai_summary(&mut self) {
         if let Some(ai) = self.profiles_config.default_ai.as_mut() {
             ai.summary_enabled = !ai.summary_enabled;
@@ -3504,7 +3794,6 @@ impl Model {
         self.save_profiles();
         self.settings.load_profiles_config();
     }
-
     fn persist_environment(&mut self) {
         if self.environment.is_ai_only() {
             if self.environment.ai_enabled {
@@ -3561,6 +3850,19 @@ impl Model {
             profile.ai = None;
         }
         self.save_profiles();
+    }
+
+    fn persist_settings_env_changes(&mut self) {
+        match self.settings.persist_env_edit() {
+            Ok(_) => {
+                self.load_profiles();
+            }
+            Err(message) => {
+                self.status_message =
+                    Some(format!("Failed to save environment changes: {}", message));
+                self.status_message_time = Some(Instant::now());
+            }
+        }
     }
 
     fn delete_selected_profile(&mut self) {
@@ -3692,9 +3994,42 @@ impl Model {
                     self.settings.load_tools_config();
                     self.settings.load_profiles_config();
                 }
+                // SPEC-1ea18899: Initialize GitViewState when entering GitView
+                if matches!(screen, Screen::GitView) {
+                    if let Some(branch) = self.branch_list.selected_branch().cloned() {
+                        let worktree_path = branch.worktree_path.clone().map(PathBuf::from);
+                        let worktree_path_for_fetch = worktree_path.clone();
+                        self.git_view = GitViewState::new(
+                            branch.name.clone(),
+                            worktree_path,
+                            branch.pr_number,
+                            branch.pr_url.clone(),
+                            branch.pr_title.clone(),
+                            branch.pr_state.clone(),
+                            branch.divergence,
+                        );
+                        let has_pr = branch.pr_number.is_some()
+                            || branch.pr_title.is_some()
+                            || branch.pr_state.is_some();
+                        if !has_pr {
+                            self.spawn_git_view_pr_fetch(&branch.name);
+                        }
+                        // Try to load from cache
+                        if let Some(cached) = self.git_view_cache.get(&branch.name) {
+                            self.git_view.load_from_cache(cached);
+                        } else {
+                            // Trigger background data fetch
+                            self.spawn_git_view_data_fetch(
+                                &branch.name,
+                                worktree_path_for_fetch.as_deref(),
+                            );
+                        }
+                    }
+                }
                 self.screen_stack.push(self.screen.clone());
                 self.screen = screen;
                 self.status_message = None;
+                self.reset_footer_scroll();
             }
             Message::NavigateBack => {
                 // Check if we're in filter mode first
@@ -3733,8 +4068,7 @@ impl Model {
                             // Cancel current env edit without leaving EnvEdit mode
                             self.settings.env_state.cancel_edit();
                         } else {
-                            // Save env changes and exit EnvEdit mode
-                            self.settings.save_env_to_profile();
+                            // Exit EnvEdit mode without saving (auto-save happens on edit)
                             self.settings.cancel_profile_mode();
                         }
                     } else if self.settings.is_form_mode() || self.settings.is_delete_mode() {
@@ -3751,6 +4085,7 @@ impl Model {
                     } else {
                         self.ai_wizard.prev_step();
                         if !self.ai_wizard.visible {
+                            self.ai_wizard_rx = None;
                             // Wizard was closed
                             if let Some(prev_screen) = self.screen_stack.pop() {
                                 self.screen = prev_screen;
@@ -3767,6 +4102,7 @@ impl Model {
                     }
                 }
                 self.status_message = None;
+                self.reset_footer_scroll();
             }
             Message::Tick => {
                 // Reset Ctrl+C counter after timeout
@@ -3784,6 +4120,7 @@ impl Model {
                 }
                 // Update spinner animation
                 self.branch_list.tick_spinner();
+                self.update_footer_scroll();
                 self.apply_branch_list_updates();
                 self.apply_branch_summary_updates();
                 self.apply_pr_title_updates();
@@ -3799,9 +4136,58 @@ impl Model {
                 }
                 self.apply_session_summary_updates();
                 self.apply_agent_mode_updates();
+                self.apply_ai_wizard_updates();
                 self.poll_session_summary_if_needed();
+                // SPEC-1ea18899: Apply GitView cache updates
+                self.apply_git_view_cache_updates();
+                // SPEC-1ea18899: Apply GitView PR updates
+                self.apply_git_view_pr_updates();
                 // FR-033: Update pane list every 1 second in tmux multi mode
                 self.update_pane_list();
+                // SPEC-a70a1ece: Poll clone wizard progress
+                if matches!(self.screen, Screen::CloneWizard) && self.clone_wizard.is_cloning() {
+                    self.clone_wizard.poll_clone();
+                }
+                // SPEC-a70a1ece: Poll migration progress
+                if matches!(self.screen, Screen::MigrationDialog)
+                    && matches!(
+                        self.migration_dialog.phase,
+                        MigrationDialogPhase::InProgress | MigrationDialogPhase::Validating
+                    )
+                {
+                    if let Some(ref rx) = self.migration_rx {
+                        match rx.try_recv() {
+                            Ok(Ok(())) => {
+                                self.migration_dialog.phase = MigrationDialogPhase::Completed;
+                                self.migration_rx = None;
+                                // SPEC-a70a1ece: Update repo_type to Bare after successful migration
+                                self.repo_type = RepoType::Bare;
+                                // Update bare_name and bare_repo_path from migration config
+                                if let Some(ref config) = self.migration_dialog.config {
+                                    self.bare_name = Some(config.bare_repo_name.clone());
+                                    self.bare_repo_path =
+                                        Some(self.repo_root.join(&config.bare_repo_name));
+                                }
+                                self.startup_branch = None;
+                            }
+                            Ok(Err(e)) => {
+                                self.migration_dialog.phase = MigrationDialogPhase::Failed;
+                                self.migration_dialog.error = Some(format!("{}", e));
+                                self.migration_rx = None;
+                            }
+                            Err(mpsc::TryRecvError::Empty) => {
+                                // Still running, keep polling
+                            }
+                            Err(mpsc::TryRecvError::Disconnected) => {
+                                // Thread crashed or channel closed
+                                self.migration_dialog.phase = MigrationDialogPhase::Failed;
+                                self.migration_dialog.error =
+                                    Some("Migration thread disconnected".to_string());
+                                self.migration_rx = None;
+                            }
+                        }
+                    }
+                }
             }
             Message::SelectNext => match self.screen {
                 Screen::BranchList => {
@@ -3822,7 +4208,11 @@ impl Model {
                 Screen::Profiles => self.profiles.select_next(),
                 Screen::Environment => self.environment.select_next(),
                 Screen::AISettingsWizard => self.ai_wizard.select_next_model(),
+                Screen::CloneWizard => self.clone_wizard.down(),
+                Screen::MigrationDialog => self.migration_dialog.toggle_selection(),
                 Screen::Confirm => {}
+                // SPEC-1ea18899: GitView navigation
+                Screen::GitView => self.git_view.select_next(),
             },
             Message::SelectPrev => match self.screen {
                 Screen::BranchList => {
@@ -3843,7 +4233,11 @@ impl Model {
                 Screen::Profiles => self.profiles.select_prev(),
                 Screen::Environment => self.environment.select_prev(),
                 Screen::AISettingsWizard => self.ai_wizard.select_prev_model(),
+                Screen::CloneWizard => self.clone_wizard.up(),
+                Screen::MigrationDialog => self.migration_dialog.toggle_selection(),
                 Screen::Confirm => {}
+                // SPEC-1ea18899: GitView navigation
+                Screen::GitView => self.git_view.select_prev(),
             },
             Message::PageUp => match self.screen {
                 Screen::BranchList => {
@@ -4019,9 +4413,88 @@ impl Model {
                 Screen::Settings => {
                     self.handle_settings_enter();
                 }
+                // SPEC-a70a1ece US3: Clone wizard Enter handling
+                Screen::CloneWizard => {
+                    if self.clone_wizard.is_complete() {
+                        // Clone successful - reinitialize with new bare repo
+                        if let Some(cloned_path) = self.clone_wizard.cloned_path.take() {
+                            let msg = format!("Cloned to {}", cloned_path.display());
+                            // SPEC-a70a1ece: Change process working directory to bare repo
+                            // This ensures subsequent TUI restarts detect the correct repo type
+                            if let Err(e) = std::env::set_current_dir(&cloned_path) {
+                                debug!(
+                                    category = "tui",
+                                    error = %e,
+                                    path = %cloned_path.display(),
+                                    "Failed to change working directory to bare repo"
+                                );
+                            }
+                            self.repo_root = cloned_path;
+                            self.repo_type = RepoType::Bare;
+                            self.refresh_data();
+                            self.screen = Screen::BranchList;
+                            self.status_message = Some(msg);
+                            self.status_message_time = Some(Instant::now());
+                        }
+                    } else {
+                        self.clone_wizard.next();
+                    }
+                }
+                // SPEC-a70a1ece T709-T710: Migration dialog Enter handling
+                Screen::MigrationDialog => {
+                    if self.migration_dialog.phase == MigrationDialogPhase::Confirmation {
+                        if self.migration_dialog.selected_proceed {
+                            self.migration_dialog.accept();
+                            // Start actual migration in background
+                            if let Some(config) = self.migration_dialog.config.clone() {
+                                let (tx, rx) = mpsc::channel();
+                                self.migration_rx = Some(rx);
+                                std::thread::spawn(move || {
+                                    let result =
+                                        gwt_core::migration::execute_migration(&config, None);
+                                    let _ = tx.send(result);
+                                });
+                                self.migration_dialog.phase = MigrationDialogPhase::InProgress;
+                            } else {
+                                // No config, show error
+                                self.migration_dialog.phase = MigrationDialogPhase::Failed;
+                                self.migration_dialog.error =
+                                    Some("Migration config not available".to_string());
+                            }
+                        } else {
+                            // T710: User chose to exit - quit gwt
+                            self.migration_dialog.reject();
+                            self.should_quit = true;
+                        }
+                    } else if matches!(
+                        self.migration_dialog.phase,
+                        MigrationDialogPhase::Completed | MigrationDialogPhase::Failed
+                    ) {
+                        // Continue or exit after migration completion/failure
+                        if self.migration_dialog.is_completed() {
+                            self.screen = Screen::BranchList;
+                            self.refresh_data();
+                        } else {
+                            self.should_quit = true;
+                        }
+                    }
+                }
+                // SPEC-1ea18899: GitView Enter handling - open PR link (FR-007)
+                Screen::GitView => {
+                    // If PR link is selected (selected_index == 0 and pr_url exists), open it
+                    if self.git_view.selected_index == 0 {
+                        if let Some(url) = self.git_view.pr_url.clone() {
+                            self.open_url(&url);
+                        }
+                    }
+                }
             },
             Message::Char(c) => {
-                if matches!(self.screen, Screen::WorktreeCreate) {
+                if matches!(self.screen, Screen::CloneWizard)
+                    && self.clone_wizard.step == CloneWizardStep::UrlInput
+                {
+                    self.clone_wizard.handle_char(c);
+                } else if matches!(self.screen, Screen::WorktreeCreate) {
                     self.worktree_create.insert_char(c);
                 } else if matches!(self.screen, Screen::BranchList) && self.branch_list.filter_mode
                 {
@@ -4100,7 +4573,13 @@ impl Model {
                 }
             }
             Message::Backspace => {
-                if matches!(self.screen, Screen::WorktreeCreate) {
+                if matches!(self.screen, Screen::CloneWizard) {
+                    if self.clone_wizard.step == CloneWizardStep::UrlInput {
+                        self.clone_wizard.handle_backspace();
+                    } else {
+                        self.clone_wizard.prev();
+                    }
+                } else if matches!(self.screen, Screen::WorktreeCreate) {
                     self.worktree_create.delete_char();
                 } else if matches!(self.screen, Screen::BranchList) && self.branch_list.filter_mode
                 {
@@ -4361,6 +4840,12 @@ impl Model {
                     self.refresh_branch_summary();
                 }
             }
+            Message::CycleSortMode => {
+                if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
+                    self.branch_list.cycle_sort_mode();
+                    self.refresh_branch_summary();
+                }
+            }
             Message::ToggleSelection | Message::Space => {
                 if matches!(self.screen, Screen::BranchList) {
                     // FR-029b-e: Check if branch is unsafe before selecting
@@ -4398,6 +4883,9 @@ impl Model {
                     }
                 } else if matches!(self.screen, Screen::Profiles) && !self.profiles.create_mode {
                     self.activate_selected_profile();
+                } else if matches!(self.screen, Screen::GitView) {
+                    // SPEC-1ea18899: Toggle expand in GitView (FR-003)
+                    self.git_view.toggle_expand();
                 }
             }
             Message::OpenWizard => {
@@ -4582,7 +5070,11 @@ impl Model {
         // Clear launch_status since modal is showing (FR-057)
         self.launch_status = None;
 
-        let repo_root = self.repo_root.clone();
+        // SPEC-a70a1ece: Use bare repo path for worktree operations in bare projects
+        let repo_root = self
+            .bare_repo_path
+            .clone()
+            .unwrap_or_else(|| self.repo_root.clone());
         let (tx, rx) = mpsc::channel();
         self.launch_rx = Some(rx);
 
@@ -4699,6 +5191,7 @@ impl Model {
             step(ProgressStepKind::CheckDependencies, StepStatus::Running);
 
             let config = AgentLaunchConfig {
+                repo_root: repo_root.clone(),
                 worktree_path: worktree.path.clone(),
                 branch_name: request.branch_name.clone(),
                 agent: request.agent,
@@ -4736,6 +5229,23 @@ impl Model {
     }
 
     fn handle_launch_plan(&mut self, plan: LaunchPlan) {
+        // SPEC-f8dab6e2 T-110: Check if plugin setup is needed for Claude Code
+        // FR-007: Only show for Claude Code (not Codex or other agents)
+        // FR-008: Skip if marketplace is already registered
+        if plan.config.agent == CodingAgent::ClaudeCode && !is_gwt_marketplace_registered() {
+            self.pending_plugin_setup = true;
+            self.pending_plugin_setup_launch = Some(plan);
+            self.confirm = ConfirmState::plugin_setup();
+            self.screen_stack.push(self.screen.clone());
+            self.screen = Screen::Confirm;
+            return;
+        }
+
+        self.handle_launch_plan_internal(plan);
+    }
+
+    /// Internal implementation of launch plan handling (called after plugin setup confirmation)
+    fn handle_launch_plan_internal(&mut self, plan: LaunchPlan) {
         // Note: refresh_data() removed for startup optimization - TUI exits after
         // agent launch in single mode, and tmux mode updates status message directly.
         // The branch list refresh is unnecessary here. (FR-008b still satisfied)
@@ -4767,6 +5277,18 @@ impl Model {
                     }
                     if let Err(e) = self.agent_history.save() {
                         warn!(category = "tui", "Failed to save agent history: {}", e);
+                    }
+                    // Update branch list item directly to reflect agent usage immediately
+                    // (refresh_data() is not called after agent launch for optimization)
+                    let branch_name_for_lookup =
+                        normalize_branch_name_for_history(&plan.config.branch_name);
+                    for item in &mut self.branch_list.branches {
+                        let item_lookup = normalize_branch_name_for_history(&item.name);
+                        if item_lookup == branch_name_for_lookup {
+                            item.last_tool_usage = Some(agent_label.clone());
+                            item.last_tool_id = Some(agent_id.to_string());
+                            break;
+                        }
                     }
                     let launch_message = if let Some(warning) = plan.session_warning.as_ref() {
                         format!(
@@ -5170,7 +5692,11 @@ impl Model {
         self.branch_list.set_cleanup_target_branches(branches);
         self.branch_list.set_cleanup_active_branch(None);
 
-        let repo_root = self.repo_root.clone();
+        // SPEC-a70a1ece: Use bare repo path for worktree operations in bare projects
+        let repo_root = self
+            .bare_repo_path
+            .clone()
+            .unwrap_or_else(|| self.repo_root.clone());
         let (tx, rx) = mpsc::channel();
         self.cleanup_rx = Some(rx);
 
@@ -5271,15 +5797,20 @@ impl Model {
 
         // Footer help sits above the status bar.
         let needs_footer = !matches!(base_screen, Screen::AISettingsWizard);
+        let full_footer_lines = if needs_footer {
+            let lines = self.footer_lines(frame.area().width);
+            self.sync_footer_metrics(frame.area().width, lines.len());
+            lines
+        } else {
+            Vec::new()
+        };
+        let footer_lines = if needs_footer {
+            self.footer_visible_lines(&full_footer_lines, FOOTER_VISIBLE_HEIGHT)
+        } else {
+            Vec::new()
+        };
         let footer_height = if needs_footer {
-            let keybinds = self.get_footer_keybinds();
-            let footer_text_len = keybinds.len() + 2; // " {} " padding
-            let available_width = frame.area().width as usize;
-            if footer_text_len > available_width {
-                2
-            } else {
-                1
-            }
+            FOOTER_VISIBLE_HEIGHT as u16
         } else {
             0
         };
@@ -5331,6 +5862,13 @@ impl Model {
             Screen::Profiles => render_profiles(&mut self.profiles, frame, chunks[1]),
             Screen::Environment => render_environment(&mut self.environment, frame, chunks[1]),
             Screen::AISettingsWizard => render_ai_wizard(&mut self.ai_wizard, frame, chunks[1]),
+            Screen::CloneWizard => render_clone_wizard(&self.clone_wizard, frame, chunks[1]),
+            Screen::MigrationDialog => {
+                render_migration_dialog(&mut self.migration_dialog, frame, chunks[1])
+            }
+            Screen::GitView => {
+                render_git_view(&mut self.git_view, frame, chunks[1]);
+            }
             Screen::Confirm => {}
         }
 
@@ -5340,7 +5878,7 @@ impl Model {
 
         // Footer help
         if needs_footer {
-            self.view_footer(frame, chunks[2]);
+            self.view_footer(frame, chunks[2], &footer_lines);
         }
 
         // Bottom status bar
@@ -5388,6 +5926,9 @@ impl Model {
             Screen::Profiles => "Profiles",
             Screen::Environment => "Environment",
             Screen::AISettingsWizard => "AI Settings",
+            Screen::CloneWizard => "Clone Repository",
+            Screen::MigrationDialog => "Migration Required",
+            Screen::GitView => "Git View",
         };
 
         let title = format!(" gwt - {} v{}{} ", screen_title, version, offline_indicator);
@@ -5415,12 +5956,36 @@ impl Model {
             ])
             .split(inner);
 
-        // Line 1: Working Directory
-        let working_dir_line = Line::from(vec![
+        // Line 1: Working Directory with branch name (SPEC-a70a1ece FR-103) and repo type indicator
+        let mut working_dir_spans = vec![
             Span::raw(" "),
             Span::styled("Working Directory: ", Style::default().fg(Color::DarkGray)),
             Span::raw(working_dir),
-        ]);
+        ];
+        // SPEC-a70a1ece: Show startup branch only for non-bare repos
+        if self.repo_type != RepoType::Bare {
+            if let Some(ref branch) = self.startup_branch {
+                working_dir_spans.push(Span::raw(" "));
+                working_dir_spans.push(Span::styled(
+                    format!("[{}]", branch),
+                    Style::default().fg(Color::Green),
+                ));
+            }
+        }
+        // SPEC-a70a1ece T206: Show [bare] indicator for bare repositories
+        if self.repo_type == RepoType::Bare {
+            working_dir_spans.push(Span::raw(" "));
+            working_dir_spans.push(Span::styled("[bare]", Style::default().fg(Color::Yellow)));
+        }
+        // SPEC-a70a1ece T506: Show (repo.git) for worktrees in bare-based projects
+        if let Some(ref name) = self.bare_name {
+            working_dir_spans.push(Span::raw(" "));
+            working_dir_spans.push(Span::styled(
+                format!("({})", name),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        let working_dir_line = Line::from(working_dir_spans);
         frame.render_widget(Paragraph::new(working_dir_line), inner_chunks[0]);
 
         // Line 2: Profile
@@ -5478,6 +6043,14 @@ impl Model {
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD),
                 ),
+                Span::raw(" "),
+                Span::styled("Sort(s):", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    self.branch_list.sort_mode.label(),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
             ];
             frame.render_widget(Paragraph::new(Line::from(mode_spans)), inner_chunks[3]);
         } else {
@@ -5527,77 +6100,352 @@ impl Model {
         frame.render_widget(header, area);
     }
 
-    fn get_footer_keybinds(&self) -> String {
+    fn footer_lines(&self, width: u16) -> Vec<String> {
+        let items = self.footer_items();
+        Self::wrap_footer_items(&items, width as usize)
+    }
+
+    fn sync_footer_metrics(&mut self, width: u16, line_count: usize) {
+        let width_changed = self.footer_last_width != width;
+        let count_changed = self.footer_line_count != line_count;
+
+        self.footer_last_width = width;
+        self.footer_line_count = line_count;
+
+        if width_changed || count_changed {
+            self.reset_footer_scroll();
+            return;
+        }
+
+        let max_offset = self.footer_line_count.saturating_sub(FOOTER_VISIBLE_HEIGHT);
+        if self.footer_scroll_offset > max_offset {
+            self.footer_scroll_offset = max_offset;
+        }
+    }
+
+    fn footer_visible_lines(&self, full_lines: &[String], height: usize) -> Vec<String> {
+        if full_lines.is_empty() || height == 0 {
+            return Vec::new();
+        }
+
+        let max_offset = full_lines.len().saturating_sub(height);
+        let offset = self.footer_scroll_offset.min(max_offset);
+        let end = (offset + height).min(full_lines.len());
+        full_lines[offset..end].to_vec()
+    }
+
+    fn footer_items(&self) -> Vec<String> {
         match self.screen {
             Screen::BranchList => {
                 if self.branch_list.filter_mode {
-                    "[Esc] Exit filter | Type to search".to_string()
+                    vec![
+                        Self::keybind_item("Esc", "Exit filter"),
+                        Self::keybind_item("Enter", "Apply"),
+                        Self::keybind_item("Backspace", "Delete"),
+                        Self::keybind_item("Up/Down", "Move"),
+                        Self::keybind_item("PgUp/PgDn", "Page"),
+                        Self::keybind_item("Home/End", "Top/Bottom"),
+                        "Type to search".to_string(),
+                    ]
                 } else {
-                    "[r] Refresh | [c] Cleanup | [l] Logs".to_string()
+                    let mut items = vec![
+                        Self::keybind_item("Up/Down", "Move"),
+                        Self::keybind_item("PgUp/PgDn", "Page"),
+                        Self::keybind_item("Home/End", "Top/Bottom"),
+                        Self::keybind_item("Enter", "Open/Focus"),
+                        Self::keybind_item("Space", "Select"),
+                        Self::keybind_item("r", "Refresh"),
+                        Self::keybind_item("c", "Cleanup"),
+                        Self::keybind_item("l", "Logs"),
+                        Self::keybind_item("s", "Sort"),
+                        Self::keybind_item("p", "Environment"),
+                        Self::keybind_item("f,/", "Filter"),
+                        Self::keybind_item("m", "Mode"),
+                        Self::keybind_item("Tab", "Agent"),
+                        Self::keybind_item("v", "GitView"),
+                        Self::keybind_item("u", "Hooks"),
+                        Self::keybind_item("?/h", "Help"),
+                    ];
+                    if self.selected_branch_has_agent() {
+                        items.push(Self::keybind_item("d", "Terminate"));
+                    }
+                    if !self.branch_list.filter.is_empty() || self.has_active_agent_pane() {
+                        items.push(Self::keybind_item("Esc", "Clear/Hide"));
+                    }
+                    items.push(Self::keybind_item("Ctrl+C", "Quit"));
+                    items
                 }
             }
             Screen::AgentMode => {
-                if self.agent_mode.ai_ready {
-                    "[Enter] Send | [Tab] Back".to_string()
+                let enter_label = if self.agent_mode.ai_ready {
+                    "Send"
                 } else {
-                    "[Enter] Configure AI | [Tab] Back".to_string()
-                }
+                    "Configure AI"
+                };
+                vec![
+                    Self::keybind_item("Enter", enter_label),
+                    Self::keybind_item("Tab", "Settings"),
+                    Self::keybind_item("Esc", "Back"),
+                ]
             }
-            Screen::WorktreeCreate => "[Enter] Next | [Esc] Back".to_string(),
-            Screen::Settings => self.settings.footer_keybinds(),
-            Screen::Logs => "[Up/Down] Navigate | [Enter] Detail | [c] Copy | [f] Filter | [/] Search | [Esc] Back".to_string(),
-            Screen::Help => "[Esc] Close | [Up/Down] Scroll".to_string(),
-            Screen::Confirm => "[Left/Right] Select | [Enter] Confirm | [Esc] Cancel".to_string(),
-            Screen::Error => "[Enter/Esc] Close | [Up/Down] Scroll".to_string(),
+            Screen::WorktreeCreate => match self.worktree_create.step {
+                WorktreeCreateStep::BranchName => vec![
+                    Self::keybind_item("Enter", "Next"),
+                    Self::keybind_item("Esc", "Back"),
+                ],
+                WorktreeCreateStep::BaseBranch => vec![
+                    Self::keybind_item("Up/Down", "Select"),
+                    Self::keybind_item("Enter", "Next"),
+                    Self::keybind_item("Esc", "Back"),
+                ],
+                WorktreeCreateStep::Confirm => vec![
+                    Self::keybind_item("Enter", "Create"),
+                    Self::keybind_item("Esc", "Back"),
+                ],
+            },
+            Screen::Settings => Self::split_footer_text(&self.settings.footer_keybinds()),
+            Screen::Logs => vec![
+                Self::keybind_item("Up/Down", "Navigate"),
+                Self::keybind_item("PgUp/PgDn", "Page"),
+                Self::keybind_item("Home/End", "Top/Bottom"),
+                Self::keybind_item("Enter", "Detail"),
+                Self::keybind_item("c", "Copy"),
+                Self::keybind_item("f", "Filter"),
+                Self::keybind_item("/", "Search"),
+                Self::keybind_item("Esc", "Back"),
+            ],
+            Screen::Help => vec![
+                Self::keybind_item("Up/Down", "Scroll"),
+                Self::keybind_item("PgUp/PgDn", "Page"),
+                Self::keybind_item("Esc", "Back"),
+            ],
+            Screen::Confirm => vec![
+                Self::keybind_item("Left/Right", "Select"),
+                Self::keybind_item("Enter", "Confirm"),
+                Self::keybind_item("Esc", "Cancel"),
+            ],
+            Screen::Error => vec![
+                Self::keybind_item("Enter", "Close"),
+                Self::keybind_item("Esc", "Close"),
+                Self::keybind_item("Up/Down", "Scroll"),
+                Self::keybind_item("l", "Logs"),
+                Self::keybind_item("c", "Copy"),
+            ],
             Screen::Profiles => {
                 if self.profiles.create_mode {
-                    "[Enter] Save | [Esc] Cancel".to_string()
+                    vec![
+                        Self::keybind_item("Enter", "Save"),
+                        Self::keybind_item("Esc", "Cancel"),
+                    ]
                 } else {
-                    "[Space] Activate | [Enter] Edit AI/env | [n] New | [d] Delete | [Esc] Back"
-                        .to_string()
+                    vec![
+                        Self::keybind_item("Up/Down", "Select"),
+                        Self::keybind_item("Space", "Activate"),
+                        Self::keybind_item("Enter", "Edit"),
+                        Self::keybind_item("n", "New"),
+                        Self::keybind_item("d", "Delete"),
+                        Self::keybind_item("Esc", "Back"),
+                    ]
                 }
             }
             Screen::Environment => {
                 if self.environment.is_ai_only() {
                     if self.environment.edit_mode {
-                        "[Enter] Save | [Tab] Switch | [Esc] Cancel".to_string()
+                        vec![
+                            Self::keybind_item("Enter", "Save"),
+                            Self::keybind_item("Tab", "Switch"),
+                            Self::keybind_item("Esc", "Cancel"),
+                        ]
                     } else {
-                        "[Enter] Edit | [Esc] Back".to_string()
+                        vec![
+                            Self::keybind_item("Up/Down", "Select"),
+                            Self::keybind_item("PgUp/PgDn", "Page"),
+                            Self::keybind_item("Home/End", "Top/Bottom"),
+                            Self::keybind_item("Enter", "Edit"),
+                            Self::keybind_item("Esc", "Back"),
+                        ]
                     }
                 } else if self.environment.edit_mode {
-                    "[Enter] Save | [Tab] Switch | [Esc] Cancel".to_string()
+                    vec![
+                        Self::keybind_item("Enter", "Save"),
+                        Self::keybind_item("Tab", "Switch"),
+                        Self::keybind_item("Esc", "Cancel"),
+                    ]
                 } else {
-                    "[Enter] Edit | [n] New | [d] Delete (profile)/Disable (OS) | [r] Reset (override) | [Esc] Back"
-                        .to_string()
+                    vec![
+                        Self::keybind_item("Up/Down", "Select"),
+                        Self::keybind_item("PgUp/PgDn", "Page"),
+                        Self::keybind_item("Home/End", "Top/Bottom"),
+                        Self::keybind_item("Enter", "Edit"),
+                        Self::keybind_item("n", "New"),
+                        Self::keybind_item("d", "Delete/Disable"),
+                        Self::keybind_item("r", "Reset"),
+                        Self::keybind_item("Esc", "Back"),
+                    ]
                 }
             }
             Screen::AISettingsWizard => {
                 if self.ai_wizard.show_delete_confirm {
-                    "[y] Confirm Delete | [n] Cancel".to_string()
+                    vec![
+                        Self::keybind_item("y", "Confirm Delete"),
+                        Self::keybind_item("n", "Cancel"),
+                    ]
                 } else {
-                    self.ai_wizard.step_title().to_string()
+                    vec![self.ai_wizard.step_title().to_string()]
                 }
             }
+            Screen::CloneWizard => match self.clone_wizard.step {
+                CloneWizardStep::UrlInput => vec![
+                    Self::keybind_item("Enter", "Continue"),
+                    Self::keybind_item("Esc", "Quit"),
+                ],
+                CloneWizardStep::TypeSelect => vec![
+                    Self::keybind_item("Up/Down", "Select"),
+                    Self::keybind_item("Enter", "Clone"),
+                    Self::keybind_item("Backspace", "Back"),
+                    Self::keybind_item("Esc", "Quit"),
+                ],
+                CloneWizardStep::Cloning => vec!["Cloning...".to_string()],
+                CloneWizardStep::Complete => vec![Self::keybind_item("Enter", "Continue")],
+                CloneWizardStep::Failed => vec![
+                    Self::keybind_item("Backspace", "Try again"),
+                    Self::keybind_item("Esc", "Quit"),
+                ],
+            },
+            Screen::MigrationDialog => match self.migration_dialog.phase {
+                MigrationDialogPhase::Confirmation => vec![
+                    Self::keybind_item("Left/Right", "Select"),
+                    Self::keybind_item("Enter", "Confirm"),
+                ],
+                MigrationDialogPhase::Validating | MigrationDialogPhase::InProgress => {
+                    vec!["Migration in progress...".to_string()]
+                }
+                MigrationDialogPhase::Completed => vec![Self::keybind_item("Enter", "Continue")],
+                MigrationDialogPhase::Failed => vec![Self::keybind_item("Enter", "Exit")],
+                MigrationDialogPhase::Exited => Vec::new(),
+            },
+            // SPEC-1ea18899: GitView footer keybinds
+            Screen::GitView => vec![
+                Self::keybind_item("Up/Down", "Navigate"),
+                Self::keybind_item("Space", "Expand"),
+                Self::keybind_item("Enter", "Open PR"),
+                Self::keybind_item("v/Esc", "Back"),
+            ],
         }
     }
 
-    fn view_footer(&self, frame: &mut Frame, area: Rect) {
-        let keybinds = self.get_footer_keybinds();
+    fn wrap_footer_items(items: &[String], width: usize) -> Vec<String> {
+        if items.is_empty() {
+            return vec![String::new()];
+        }
 
-        let footer_text = format!(" {} ", keybinds);
+        let mut lines = Vec::new();
+        let mut current = String::new();
 
+        for item in items {
+            let segment = item.trim();
+            if segment.is_empty() {
+                continue;
+            }
+            let separator = if current.is_empty() { "" } else { " | " };
+            let next_len = current.len() + separator.len() + segment.len();
+            if !current.is_empty() && width > 0 && next_len > width {
+                lines.push(current);
+                current = segment.to_string();
+            } else {
+                if !current.is_empty() {
+                    current.push_str(" | ");
+                }
+                current.push_str(segment);
+            }
+        }
+
+        if current.is_empty() && lines.is_empty() {
+            lines.push(String::new());
+        } else if !current.is_empty() {
+            lines.push(current);
+        }
+
+        lines
+    }
+
+    fn keybind_item(keys: &str, label: &str) -> String {
+        format!("[{}] {}", keys, label)
+    }
+
+    fn split_footer_text(text: &str) -> Vec<String> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Vec::new();
+        }
+        trimmed
+            .split(" | ")
+            .map(|segment| segment.trim().to_string())
+            .filter(|segment| !segment.is_empty())
+            .collect()
+    }
+
+    fn reset_footer_scroll(&mut self) {
+        self.footer_scroll_offset = 0;
+        self.footer_scroll_dir = 1;
+        self.footer_scroll_tick = 0;
+        self.footer_scroll_pause = 0;
+    }
+
+    fn update_footer_scroll(&mut self) {
+        if self.footer_line_count <= FOOTER_VISIBLE_HEIGHT {
+            self.reset_footer_scroll();
+            return;
+        }
+
+        if self.footer_scroll_pause > 0 {
+            self.footer_scroll_pause -= 1;
+            return;
+        }
+
+        self.footer_scroll_tick = self.footer_scroll_tick.saturating_add(1);
+        if self.footer_scroll_tick < FOOTER_SCROLL_TICKS_PER_LINE {
+            return;
+        }
+        self.footer_scroll_tick = 0;
+
+        let max_offset = self.footer_line_count.saturating_sub(FOOTER_VISIBLE_HEIGHT);
+        if self.footer_scroll_dir >= 0 {
+            if self.footer_scroll_offset < max_offset {
+                self.footer_scroll_offset += 1;
+                if self.footer_scroll_offset >= max_offset {
+                    self.footer_scroll_dir = -1;
+                    self.footer_scroll_pause = FOOTER_SCROLL_PAUSE_TICKS;
+                }
+            } else {
+                self.footer_scroll_dir = -1;
+                self.footer_scroll_pause = FOOTER_SCROLL_PAUSE_TICKS;
+            }
+        } else if self.footer_scroll_offset > 0 {
+            self.footer_scroll_offset -= 1;
+            if self.footer_scroll_offset == 0 {
+                self.footer_scroll_dir = 1;
+                self.footer_scroll_pause = FOOTER_SCROLL_PAUSE_TICKS;
+            }
+        } else {
+            self.footer_scroll_dir = 1;
+            self.footer_scroll_pause = FOOTER_SCROLL_PAUSE_TICKS;
+        }
+    }
+
+    fn view_footer(&self, frame: &mut Frame, area: Rect, lines: &[String]) {
         let style = if self.ctrl_c_count > 0 {
             Style::default().fg(Color::Yellow)
         } else {
             Style::default()
         };
 
-        let needs_wrap = footer_text.len() > area.width as usize;
-        let mut footer = Paragraph::new(footer_text).style(style);
-
-        if needs_wrap {
-            footer = footer.wrap(Wrap { trim: true });
-        }
+        let text = if lines.is_empty() {
+            String::new()
+        } else {
+            lines.join("\n")
+        };
+        let footer = Paragraph::new(text).style(style);
 
         frame.render_widget(footer, area);
     }
@@ -5849,7 +6697,7 @@ impl Model {
                 (KeyCode::Char('s'), KeyModifiers::NONE) => {
                     // In filter mode, 's' goes to filter input
                     if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
-                        Some(Message::NavigateTo(Screen::Settings))
+                        Some(Message::CycleSortMode)
                     } else {
                         Some(Message::Char('s'))
                     }
@@ -6016,7 +6864,18 @@ impl Model {
                     if matches!(self.screen, Screen::BranchList) {
                         Some(Message::CycleViewMode)
                     } else {
-                        None
+                        Some(Message::Char('m'))
+                    }
+                }
+                // SPEC-1ea18899: 'v' opens GitView for selected branch
+                (KeyCode::Char('v'), KeyModifiers::NONE) => {
+                    if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
+                        Some(Message::NavigateTo(Screen::GitView))
+                    } else if matches!(self.screen, Screen::GitView) {
+                        // v key to go back from GitView (FR-004)
+                        Some(Message::NavigateBack)
+                    } else {
+                        Some(Message::Char('v'))
                     }
                 }
                 (KeyCode::Up, _) if is_key_press => Some(Message::SelectPrev),
@@ -6104,6 +6963,8 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
                                             model.handle_environment_mouse(mouse)
                                         }
                                         Screen::Logs => model.handle_logs_mouse(mouse),
+                                        // SPEC-1ea18899: GitView mouse handling (FR-007)
+                                        Screen::GitView => model.handle_gitview_mouse(mouse),
                                         _ => {}
                                     }
                                 }
@@ -6131,7 +6992,9 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
     // Get pending agent launch before cleanup
     let pending_launch = model.pending_agent_launch.take();
 
-    auto_cleanup_orphans_on_exit(&model.repo_root, pending_launch.is_some());
+    // SPEC-a70a1ece: Use bare repo path for worktree operations in bare projects
+    let cleanup_path = model.bare_repo_path.as_ref().unwrap_or(&model.repo_root);
+    auto_cleanup_orphans_on_exit(cleanup_path, pending_launch.is_some());
 
     // Cleanup agent panes on exit (tmux multi-mode)
     if model.tmux_mode.is_multi() && !model.agent_panes.is_empty() {
@@ -6699,6 +7562,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: false,
         }
     }
@@ -6720,19 +7584,27 @@ mod tests {
             .collect()
     }
 
+    fn footer_lines_for(model: &mut Model, width: u16) -> Vec<String> {
+        let lines = model.footer_lines(width);
+        model.sync_footer_metrics(width, lines.len());
+        lines
+    }
+
     #[test]
     fn test_branchlist_footer_and_status_bar_present_without_agents() {
         let mut model = Model::new_with_context(None);
         let branches = vec![sample_branch_with_session("feature/layout")];
         model.branch_list = BranchListState::new().with_branches(branches);
+        // Force BranchList screen (normal repos now show migration dialog by default)
+        model.screen = Screen::BranchList;
 
         let height = 24;
         let lines = render_model_lines(&mut model, 80, height);
-        let footer_line = &lines[(height - 2) as usize];
+        let footer_text = footer_lines_for(&mut model, 80).join(" ");
         let status_line = &lines[(height - 1) as usize];
 
         assert!(
-            footer_line.contains("[r] Refresh"),
+            footer_text.contains("[r] Refresh"),
             "Footer help should be visible on BranchList"
         );
         assert!(
@@ -6789,11 +7661,11 @@ mod tests {
         let width = 120;
         let height = 24;
         let lines = render_model_lines(&mut model, width, height);
-        let footer_line = &lines[(height - 2) as usize];
+        let footer_text = footer_lines_for(&mut model, width).join(" ");
         let instruction_key = "[Left/Right] Category";
 
         assert!(
-            footer_line.contains(instruction_key),
+            footer_text.contains(instruction_key),
             "Settings footer help should include category navigation"
         );
 
@@ -6805,6 +7677,191 @@ mod tests {
             occurrences, 1,
             "Settings instructions should appear once in the footer help"
         );
+    }
+
+    #[test]
+    fn test_branchlist_footer_includes_all_shortcuts() {
+        let mut model = Model::new_with_context(None);
+        let branches = vec![sample_branch_with_session("feature/shortcuts")];
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.screen = Screen::BranchList;
+
+        let footer_text = footer_lines_for(&mut model, 140).join(" ");
+        let expected = [
+            "[Up/Down] Move",
+            "[PgUp/PgDn] Page",
+            "[Home/End] Top/Bottom",
+            "[Enter] Open/Focus",
+            "[Space] Select",
+            "[r] Refresh",
+            "[c] Cleanup",
+            "[l] Logs",
+            "[s] Sort",
+            "[p] Environment",
+            "[f,/] Filter",
+            "[m] Mode",
+            "[Tab] Agent",
+            "[v] GitView",
+            "[u] Hooks",
+            "[?/h] Help",
+            "[Ctrl+C] Quit",
+        ];
+
+        for key in expected {
+            assert!(
+                footer_text.contains(key),
+                "BranchList footer should include {}",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn test_branchlist_filter_footer_includes_controls() {
+        let mut model = Model::new_with_context(None);
+        let branches = vec![sample_branch_with_session("feature/filter")];
+        let mut state = BranchListState::new().with_branches(branches);
+        state.filter_mode = true;
+        model.branch_list = state;
+        model.screen = Screen::BranchList;
+
+        let footer_text = footer_lines_for(&mut model, 120).join(" ");
+        let expected = [
+            "[Esc] Exit filter",
+            "[Enter] Apply",
+            "[Backspace] Delete",
+            "[Up/Down] Move",
+            "[PgUp/PgDn] Page",
+            "[Home/End] Top/Bottom",
+            "Type to search",
+        ];
+
+        for key in expected {
+            assert!(
+                footer_text.contains(key),
+                "Filter-mode footer should include {}",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn test_logs_footer_includes_paging_shortcuts() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Logs;
+
+        let footer_text = footer_lines_for(&mut model, 120).join(" ");
+        let expected = ["[PgUp/PgDn] Page", "[Home/End] Top/Bottom"];
+
+        for key in expected {
+            assert!(
+                footer_text.contains(key),
+                "Logs footer should include {}",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn test_help_footer_includes_paging_shortcuts() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Help;
+
+        let footer_text = footer_lines_for(&mut model, 120).join(" ");
+        assert!(
+            footer_text.contains("[PgUp/PgDn] Page"),
+            "Help footer should include page navigation"
+        );
+    }
+
+    #[test]
+    fn test_error_footer_includes_actions() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Error;
+
+        let footer_text = footer_lines_for(&mut model, 120).join(" ");
+        let expected = [
+            "[Enter] Close",
+            "[Esc] Close",
+            "[Up/Down] Scroll",
+            "[l] Logs",
+            "[c] Copy",
+        ];
+
+        for key in expected {
+            assert!(
+                footer_text.contains(key),
+                "Error footer should include {}",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn test_footer_scroll_disabled_when_single_line() {
+        let mut model = Model::new_with_context(None);
+        let branches = vec![sample_branch_with_session("feature/scroll")];
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.screen = Screen::BranchList;
+
+        let lines = footer_lines_for(&mut model, 1000);
+        assert_eq!(lines.len(), 1, "Footer should fit in one line");
+
+        for _ in 0..10 {
+            model.update(Message::Tick);
+        }
+
+        assert_eq!(model.footer_scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_footer_scroll_advances_and_reverses() {
+        let mut model = Model::new_with_context(None);
+        let branches = vec![sample_branch_with_session("feature/scroll")];
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.screen = Screen::BranchList;
+
+        let lines = footer_lines_for(&mut model, 40);
+        assert!(lines.len() > 1, "Footer should overflow for scrolling");
+        let max_offset = lines.len().saturating_sub(1);
+
+        let advance_ticks = FOOTER_SCROLL_TICKS_PER_LINE as usize * max_offset.max(1);
+        for _ in 0..advance_ticks {
+            model.update(Message::Tick);
+        }
+
+        assert_eq!(model.footer_scroll_offset, max_offset);
+        assert_eq!(model.footer_scroll_pause, FOOTER_SCROLL_PAUSE_TICKS);
+
+        for _ in 0..FOOTER_SCROLL_PAUSE_TICKS {
+            model.update(Message::Tick);
+            assert_eq!(model.footer_scroll_offset, max_offset);
+        }
+
+        for _ in 0..FOOTER_SCROLL_TICKS_PER_LINE {
+            model.update(Message::Tick);
+        }
+
+        assert_eq!(model.footer_scroll_offset, max_offset.saturating_sub(1));
+    }
+
+    #[test]
+    fn test_footer_scroll_resets_on_navigation() {
+        let mut model = Model::new_with_context(None);
+        let branches = vec![sample_branch_with_session("feature/scroll")];
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.screen = Screen::BranchList;
+
+        let lines = footer_lines_for(&mut model, 40);
+        assert!(lines.len() > 1, "Footer should overflow for scrolling");
+
+        for _ in 0..FOOTER_SCROLL_TICKS_PER_LINE {
+            model.update(Message::Tick);
+        }
+        assert!(model.footer_scroll_offset > 0);
+
+        model.update(Message::NavigateTo(Screen::Logs));
+        assert_eq!(model.footer_scroll_offset, 0);
     }
 
     #[test]
@@ -6931,6 +7988,26 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
         let msg = model.handle_key_event(key);
         assert!(matches!(msg, Some(Message::Char('f'))));
+
+        let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
+        let msg = model.handle_key_event(key);
+        assert!(matches!(msg, Some(Message::Char('s'))));
+    }
+
+    #[test]
+    fn test_branchlist_s_key_cycles_sort_mode() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+        let branches = vec![sample_branch_with_session("feature/sort")];
+        model.branch_list = BranchListState::new().with_branches(branches);
+
+        let initial = model.branch_list.sort_mode;
+        let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
+        let msg = model.handle_key_event(key);
+        assert!(matches!(msg, Some(Message::CycleSortMode)));
+
+        model.update(Message::CycleSortMode);
+        assert_ne!(model.branch_list.sort_mode, initial);
     }
 
     #[test]
@@ -7066,6 +8143,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -7091,6 +8169,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
@@ -7131,6 +8210,89 @@ mod tests {
                 .map(|branch| branch.name.as_str()),
             Some("feature/c")
         );
+    }
+
+    #[test]
+    fn test_refresh_data_keeps_cleanup_state() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let branches = vec![
+            sample_branch_with_session("feature/a"),
+            sample_branch_with_session("feature/b"),
+        ];
+
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.branch_list.start_cleanup_progress(2);
+        model
+            .branch_list
+            .set_cleanup_target_branches(&["feature/b".to_string()]);
+        model
+            .branch_list
+            .set_cleanup_active_branch(Some("feature/b".to_string()));
+        model.branch_list.increment_cleanup_progress();
+
+        model.update(Message::RefreshData);
+
+        assert!(model.branch_list.cleanup_in_progress());
+        assert_eq!(model.branch_list.cleanup_progress_total, 2);
+        assert_eq!(model.branch_list.cleanup_progress_done, 1);
+        assert_eq!(model.branch_list.cleanup_active_branch(), Some("feature/b"));
+    }
+
+    #[test]
+    fn test_branch_list_update_preserves_cleanup_targets() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let branches = vec![
+            sample_branch_with_session("feature/a"),
+            sample_branch_with_session("feature/b"),
+        ];
+
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.branch_list.start_cleanup_progress(2);
+        model
+            .branch_list
+            .set_cleanup_target_branches(&["feature/b".to_string()]);
+        model
+            .branch_list
+            .set_cleanup_active_branch(Some("feature/b".to_string()));
+        model.branch_list.increment_cleanup_progress();
+
+        let (tx, rx) = mpsc::channel();
+        model.branch_list_rx = Some(rx);
+
+        let update = BranchListUpdate {
+            branches: vec![
+                sample_branch_with_session("feature/a"),
+                sample_branch_with_session("feature/b"),
+            ],
+            branch_names: Vec::new(),
+            worktree_targets: Vec::new(),
+            safety_targets: Vec::new(),
+            base_branches: Vec::new(),
+            base_branch: "main".to_string(),
+            base_branch_exists: true,
+            total_count: 2,
+            active_count: 2,
+        };
+        tx.send(update).unwrap();
+
+        model.apply_branch_list_updates();
+
+        assert!(model.branch_list.cleanup_in_progress());
+        assert_eq!(model.branch_list.cleanup_progress_total, 2);
+        assert_eq!(model.branch_list.cleanup_progress_done, 1);
+        assert_eq!(model.branch_list.cleanup_active_branch(), Some("feature/b"));
+
+        let target_index = model
+            .branch_list
+            .filtered_indices
+            .iter()
+            .position(|&idx| model.branch_list.branches[idx].name == "feature/b")
+            .expect("cleanup branch index");
+        assert!(model.branch_list.is_cleanup_target_index(target_index));
     }
 
     #[test]
@@ -7294,6 +8456,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -7319,6 +8482,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];

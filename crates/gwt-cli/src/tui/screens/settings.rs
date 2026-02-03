@@ -862,8 +862,7 @@ impl SettingsState {
                     if self.env_state.edit_mode {
                         "[Tab] Switch | [Enter] Confirm | [Esc] Cancel".to_string()
                     } else {
-                        "[Enter] Edit | [N] New | [D] Disable | [R] Reset | [S] Save | [Esc] Back"
-                            .to_string()
+                        "[Enter] Edit | [N] New | [D] Disable | [R] Reset | [Esc] Back".to_string()
                     }
                 }
             }
@@ -1011,23 +1010,35 @@ impl SettingsState {
         self.env_state = EnvironmentState::default();
     }
 
-    /// Save env edit state back to profile (SPEC-dafff079)
-    pub fn save_env_to_profile(&mut self) {
-        if let ProfileMode::EnvEdit(profile_name) = &self.profile_mode {
-            if let Some(ref mut config) = self.profiles_config {
-                if let Some(profile) = config.profiles.get_mut(profile_name) {
-                    // Save profile env vars from EnvironmentState
-                    profile.env = self
-                        .env_state
-                        .variables
-                        .iter()
-                        .map(|v| (v.key.clone(), v.value.clone()))
-                        .collect();
-                    // Save disabled keys
-                    profile.disabled_env = self.env_state.disabled_keys.clone();
-                }
-            }
-        }
+    /// Persist env edit state to profile and save to disk (SPEC-dafff079 FR-021)
+    pub fn persist_env_edit(&mut self) -> Result<(), &'static str> {
+        let profile_name = match &self.profile_mode {
+            ProfileMode::EnvEdit(name) => name.clone(),
+            _ => return Err("Not in environment edit mode"),
+        };
+
+        let config = self
+            .profiles_config
+            .as_mut()
+            .ok_or("Profiles config not loaded")?;
+
+        let profile = config
+            .profiles
+            .get_mut(&profile_name)
+            .ok_or("Profile not found")?;
+
+        // Save profile env vars from EnvironmentState
+        profile.env = self
+            .env_state
+            .variables
+            .iter()
+            .map(|v| (v.key.clone(), v.value.clone()))
+            .collect();
+        // Save disabled keys
+        profile.disabled_env = self.env_state.disabled_keys.clone();
+
+        config.save().map_err(|_| "Failed to save profiles")?;
+        Ok(())
     }
 
     /// Save profile from form
@@ -1078,28 +1089,7 @@ impl SettingsState {
         Ok(())
     }
 
-    /// Save environment variables from edit state (SPEC-dafff079)
-    pub fn save_profile_env(&mut self) -> bool {
-        if let ProfileMode::EnvEdit(ref name) = self.profile_mode {
-            let name = name.clone();
-            if let Some(ref mut config) = self.profiles_config {
-                if let Some(profile) = config.profiles.get_mut(&name) {
-                    // Save profile env vars from EnvironmentState
-                    profile.env = self
-                        .env_state
-                        .variables
-                        .iter()
-                        .map(|v| (v.key.clone(), v.value.clone()))
-                        .collect();
-                    // Save disabled keys
-                    profile.disabled_env = self.env_state.disabled_keys.clone();
-                    self.cancel_profile_mode();
-                    return true;
-                }
-            }
-        }
-        false
-    }
+    // save_profile_env removed in favor of persist_env_edit auto-save flow
 
     /// Delete selected profile
     pub fn delete_profile(&mut self) -> bool {
@@ -2034,6 +2024,11 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::collections::HashMap;
+    use std::ffi::OsString;
+    use std::sync::Mutex;
+    use tempfile::TempDir;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_category_navigation() {
@@ -2204,12 +2199,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_persist_env_edit_saves_profiles() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new().expect("temp dir");
+        let prev_home = std::env::var_os("HOME");
+
+        struct HomeGuard(Option<OsString>);
+        impl Drop for HomeGuard {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var("HOME", value),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+
+        std::env::set_var("HOME", temp.path());
+        let _guard = HomeGuard(prev_home);
+
+        let mut config = ProfilesConfig::default();
+        let mut dev = Profile::new("dev");
+        dev.env.insert("MY_VAR".to_string(), "old".to_string());
+        config.profiles.insert("dev".to_string(), dev);
+        config.save().expect("save initial config");
+
+        let mut state = SettingsState::new();
+        state.profiles_config = Some(config);
+        state.profile_mode = ProfileMode::EnvEdit("dev".to_string());
+        state.env_state = EnvironmentState::new()
+            .with_variables(vec![EnvItem {
+                key: "MY_VAR".to_string(),
+                value: "new".to_string(),
+                is_secret: false,
+            }])
+            .with_hide_ai(true);
+        state.env_state.selected = 0;
+
+        assert!(state.persist_env_edit().is_ok());
+        assert!(matches!(state.profile_mode, ProfileMode::EnvEdit(_)));
+
+        let loaded = ProfilesConfig::load().expect("load updated config");
+        let env = &loaded.profiles.get("dev").unwrap().env;
+        assert_eq!(env.get("MY_VAR"), Some(&"new".to_string()));
+    }
+
     /// SPEC-dafff079 FR-031-034: Help text includes R for reset and D for disable
     #[test]
     fn test_env_edit_instructions_include_reset_and_disable() {
         // The instruction for EnvEdit mode when not editing
-        let instructions =
-            "[Enter] Edit | [N] New | [D] Disable | [R] Reset | [S] Save | [Esc] Back";
+        let instructions = "[Enter] Edit | [N] New | [D] Disable | [R] Reset | [Esc] Back";
         assert!(
             instructions.contains("[D] Disable"),
             "Instructions should show D for Disable"

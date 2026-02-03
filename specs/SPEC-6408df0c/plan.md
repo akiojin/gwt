@@ -5,7 +5,7 @@
 
 ## 概要
 
-Huskyのpre-pushフックでCIと同等のLint（clippy、fmt、markdownlint）を実行し、`bunx husky` で自動セットアップできるようにする。Lint失敗はpushを止め、英語で理由を表示する。フック内容は自動テストで検証する。
+Huskyのpre-pushフックでCIと同等のLint（clippy、fmt、markdownlint）を実行し、`bunx husky` で自動セットアップできるようにする。commit-msgは`bunx --package @commitlint/cli`を使って依存が無い場合でも自動取得で検証する。Lint失敗はpushを止め、英語で理由を表示する。フック内容は自動テストで検証する。
 
 ## 技術コンテキスト
 
@@ -99,7 +99,8 @@ scripts/
 
 1. **P1**: pre-pushでCI同等Lint
 2. **P2**: Husky自動セットアップ
-3. **P3**: 英語エラーメッセージ
+3. **P2**: commit-msgでcommitlint自動取得
+4. **P3**: 英語エラーメッセージ
 
 ### 独立したデリバリー
 
@@ -128,6 +129,8 @@ scripts/
 
 1. **Husky導入失敗**: prepare/postinstall実行環境差
    - **緩和策**: `bunx husky` 前提でインストールを統一
+2. **node_modules未配置**: commitlintが見つからず失敗
+   - **緩和策**: commit-msgで`bunx --package @commitlint/cli`を使用
 
 ## 次のステップ
 

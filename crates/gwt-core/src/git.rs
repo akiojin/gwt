@@ -2,16 +2,17 @@
 //!
 //! Provides Git repository operations using gitoxide (gix) with fallback to external git commands.
 
-mod backend;
 mod branch;
+mod clone;
 mod commit;
 mod issue;
 mod pullrequest;
 mod remote;
 mod repository;
+mod submodule;
 
-pub use backend::GitBackend;
 pub use branch::{Branch, DivergenceStatus};
+pub use clone::{clone_bare, extract_repo_name, CloneConfig};
 pub use commit::{
     BranchMeta, BranchSummary, ChangeStats, CommitEntry, LoadingState, SectionErrors,
 };
@@ -21,4 +22,9 @@ pub use issue::{
 };
 pub use pullrequest::{PrCache, PullRequest};
 pub use remote::Remote;
-pub use repository::{get_main_repo_root, Repository, WorktreeInfo};
+pub use repository::{
+    detect_repo_type, find_bare_repo_in_dir, get_header_context, get_main_repo_root,
+    is_bare_repository, is_empty_dir, is_git_repo, is_inside_worktree, HeaderContext, RepoType,
+    Repository, WorktreeInfo,
+};
+pub use submodule::{has_submodules, init_submodules, list_submodules};
