@@ -57,20 +57,27 @@ const PANEL_PADDING_X: u16 = 1;
 /// Get branch name type for sorting
 fn get_branch_name_type(name: &str) -> BranchNameType {
     let lower = name.to_lowercase();
-    // Strip remote prefix for comparison
-    let name_part = lower.split('/').next_back().unwrap_or(&lower);
+    // Strip only the "remotes/<remote>/" prefix for comparison
+    let short_name = if let Some(stripped) = lower.strip_prefix("remotes/") {
+        stripped
+            .split_once('/')
+            .map(|(_, rest)| rest)
+            .unwrap_or(stripped)
+    } else {
+        lower.as_str()
+    };
 
-    if name_part == "main" || name_part == "master" {
+    if short_name == "main" || short_name == "master" {
         BranchNameType::Main
-    } else if name_part == "develop" || name_part == "dev" {
+    } else if short_name == "develop" || short_name == "dev" {
         BranchNameType::Develop
-    } else if lower.contains("feature/") {
+    } else if short_name.starts_with("feature/") {
         BranchNameType::Feature
-    } else if lower.contains("bugfix/") || lower.contains("bug/") {
+    } else if short_name.starts_with("bugfix/") || short_name.starts_with("bug/") {
         BranchNameType::Bugfix
-    } else if lower.contains("hotfix/") {
+    } else if short_name.starts_with("hotfix/") {
         BranchNameType::Hotfix
-    } else if lower.contains("release/") {
+    } else if short_name.starts_with("release/") {
         BranchNameType::Release
     } else {
         BranchNameType::Other
@@ -2661,6 +2668,14 @@ mod tests {
                 "release/one",
                 "chore/one",
             ]
+        );
+    }
+
+    #[test]
+    fn test_branch_name_type_ignores_suffix_match() {
+        assert_eq!(
+            get_branch_name_type("feature/main"),
+            BranchNameType::Feature
         );
     }
 

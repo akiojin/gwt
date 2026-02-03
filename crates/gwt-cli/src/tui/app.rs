@@ -4627,6 +4627,7 @@ impl Model {
             Message::CycleSortMode => {
                 if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
                     self.branch_list.cycle_sort_mode();
+                    self.refresh_branch_summary();
                 }
             }
             Message::ToggleSelection | Message::Space => {
