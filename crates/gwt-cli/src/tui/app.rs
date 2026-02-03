@@ -2069,12 +2069,20 @@ impl Model {
                         .iter()
                         .find(|b| b.name == self.git_view.branch_name)
                     {
-                        self.git_view.update_pr_info(
-                            branch.pr_number,
-                            branch.pr_title.clone(),
-                            branch.pr_url.clone(),
-                            branch.pr_state.clone(),
-                        );
+                        let branch_has_pr = branch.pr_number.is_some()
+                            || branch.pr_title.is_some()
+                            || branch.pr_state.is_some();
+                        let git_view_has_pr = self.git_view.pr_number.is_some()
+                            || self.git_view.pr_title.is_some()
+                            || self.git_view.pr_state.is_some();
+                        if branch_has_pr || !git_view_has_pr {
+                            self.git_view.update_pr_info(
+                                branch.pr_number,
+                                branch.pr_title.clone(),
+                                branch.pr_url.clone(),
+                                branch.pr_state.clone(),
+                            );
+                        }
                     }
                 }
                 self.pr_title_rx = None;
