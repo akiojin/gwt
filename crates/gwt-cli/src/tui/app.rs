@@ -1195,24 +1195,17 @@ impl Model {
             Ok(update) => {
                 if let Some(info) = update.info {
                     let mut map = HashMap::new();
-                    map.insert(update.branch.clone(), info);
+                    map.insert(update.branch.clone(), info.clone());
                     self.branch_list.apply_pr_info(&map);
                     if matches!(self.screen, Screen::GitView)
                         && self.git_view.branch_name == update.branch
                     {
-                        if let Some(branch) = self
-                            .branch_list
-                            .branches
-                            .iter()
-                            .find(|b| b.name == update.branch)
-                        {
-                            self.git_view.update_pr_info(
-                                branch.pr_number,
-                                branch.pr_title.clone(),
-                                branch.pr_url.clone(),
-                                branch.pr_state.clone(),
-                            );
-                        }
+                        self.git_view.update_pr_info(
+                            Some(info.number),
+                            Some(info.title.clone()),
+                            info.url.clone(),
+                            Some(info.state.clone()),
+                        );
                     }
                 }
                 self.git_view_pr_rx = None;
