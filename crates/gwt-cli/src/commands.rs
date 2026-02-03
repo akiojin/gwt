@@ -193,6 +193,8 @@ fn cmd_switch(repo_root: &PathBuf, branch: &str, new_window: bool) -> Result<(),
         })?;
 
     if new_window {
+        let mut opened = false;
+
         // Open in new terminal window (platform specific)
         #[cfg(target_os = "macos")]
         {
@@ -202,6 +204,7 @@ fn cmd_switch(repo_root: &PathBuf, branch: &str, new_window: bool) -> Result<(),
             std::process::Command::new("open")
                 .args(["-a", "Terminal", path_str])
                 .spawn()?;
+            opened = true;
         }
         #[cfg(target_os = "linux")]
         {
@@ -218,11 +221,19 @@ fn cmd_switch(repo_root: &PathBuf, branch: &str, new_window: bool) -> Result<(),
                         .arg("--working-directory")
                         .arg(&wt.path)
                         .spawn()?;
+                    opened = true;
                     break;
                 }
             }
         }
-        println!("Opened new terminal in: {}", wt.path.display());
+
+        if opened {
+            println!("Opened new terminal in: {}", wt.path.display());
+        } else {
+            println!("No supported terminal found.");
+            println!("cd {}", wt.path.display());
+            println!("\nRun the above command to switch to the worktree.");
+        }
     } else {
         println!("cd {}", wt.path.display());
         println!("\nRun the above command to switch to the worktree.");

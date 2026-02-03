@@ -98,7 +98,7 @@ GET /api/sessions
 ## WebSocket
 
 ```
-ws://localhost:3000/ws/terminal
+ws://127.0.0.1:3000/ws/terminal
 ```
 
 ### クライアント → サーバー

@@ -428,7 +428,10 @@ fn parse_env_bool(value: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_default_settings() {
@@ -441,6 +444,7 @@ mod tests {
 
     #[test]
     fn test_load_auto_migrates_json() {
+        let _env_lock = ENV_MUTEX.lock().unwrap();
         let temp = TempDir::new().unwrap();
         let json_path = temp.path().join(".gwt.json");
         let toml_path = temp.path().join(".gwt.toml");
@@ -458,6 +462,7 @@ mod tests {
 
     #[test]
     fn test_save_and_load() {
+        let _env_lock = ENV_MUTEX.lock().unwrap();
         let temp = TempDir::new().unwrap();
         let config_path = temp.path().join(".gwt.toml");
 
@@ -491,6 +496,7 @@ mod tests {
 
     #[test]
     fn test_env_override() {
+        let _env_lock = ENV_MUTEX.lock().unwrap();
         let temp = TempDir::new().unwrap();
 
         // Set environment variable
@@ -506,6 +512,7 @@ mod tests {
 
     #[test]
     fn test_env_override_auto_install_deps() {
+        let _env_lock = ENV_MUTEX.lock().unwrap();
         let temp = TempDir::new().unwrap();
 
         std::env::set_var("GWT_AGENT_AUTO_INSTALL_DEPS", "true");
@@ -517,6 +524,7 @@ mod tests {
 
     #[test]
     fn test_env_override_port() {
+        let _env_lock = ENV_MUTEX.lock().unwrap();
         let temp = TempDir::new().unwrap();
 
         std::env::set_var("PORT", "4567");
@@ -547,7 +555,8 @@ mod tests {
 
     #[test]
     fn test_new_global_config_priority() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let _env_lock = ENV_MUTEX.lock().unwrap();
+        let _home_lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
         let _env = crate::config::TestEnvGuard::new(temp.path());
 
@@ -574,7 +583,8 @@ default_base_branch = "new-global"
 
     #[test]
     fn test_legacy_global_config_fallback() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let _env_lock = ENV_MUTEX.lock().unwrap();
+        let _home_lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
         let _env = crate::config::TestEnvGuard::with_xdg(temp.path(), &temp.path().join(".config"));
 
