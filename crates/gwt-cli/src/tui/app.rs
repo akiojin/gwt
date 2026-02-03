@@ -748,6 +748,7 @@ impl Model {
         let mut branch_list = BranchListState::new();
         branch_list.active_profile = self.profiles_config.active.clone();
         branch_list.ai_enabled = self.active_ai_enabled();
+        branch_list.session_summary_enabled = self.active_session_summary_enabled();
         branch_list.working_directory = Some(self.repo_root.display().to_string());
         branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
         branch_list.set_loading(true);
@@ -1046,6 +1047,7 @@ impl Model {
 
     fn refresh_branch_summary(&mut self) {
         self.branch_list.ai_enabled = self.active_ai_enabled();
+        self.branch_list.session_summary_enabled = self.active_session_summary_enabled();
         if let Some(request) = self.branch_list.prepare_branch_summary(&self.repo_root) {
             self.spawn_branch_summary_fetch(request);
         }
@@ -1145,7 +1147,7 @@ impl Model {
     }
 
     fn maybe_request_session_summary_for_selected(&mut self, force: bool) {
-        if !self.branch_list.ai_enabled {
+        if !self.branch_list.session_summary_enabled {
             return;
         }
 
@@ -1509,7 +1511,7 @@ impl Model {
     }
 
     fn poll_session_summary_if_needed(&mut self) {
-        if !self.branch_list.ai_enabled {
+        if !self.branch_list.session_summary_enabled {
             return;
         }
 
@@ -1700,6 +1702,7 @@ impl Model {
                 let mut branch_list = BranchListState::new().with_branches(update.branches);
                 branch_list.active_profile = self.profiles_config.active.clone();
                 branch_list.ai_enabled = self.active_ai_enabled();
+                branch_list.session_summary_enabled = self.active_session_summary_enabled();
                 branch_list.set_session_cache(session_cache);
                 branch_list.set_session_inflight(session_inflight);
                 branch_list.set_session_missing(session_missing);
@@ -2843,6 +2846,7 @@ impl Model {
         self.profiles = ProfilesState::new().with_profiles(profiles);
         self.branch_list.active_profile = self.profiles_config.active.clone();
         self.branch_list.ai_enabled = self.active_ai_enabled();
+        self.branch_list.session_summary_enabled = self.active_session_summary_enabled();
     }
 
     fn save_profiles(&mut self) {
@@ -2880,6 +2884,19 @@ impl Model {
             .unwrap_or(false)
     }
 
+    fn active_session_summary_enabled(&self) -> bool {
+        if let Some(profile) = self.profiles_config.active_profile() {
+            if let Some(settings) = profile.ai.as_ref() {
+                return settings.is_summary_enabled();
+            }
+        }
+        self.profiles_config
+            .default_ai
+            .as_ref()
+            .map(|settings| settings.is_summary_enabled())
+            .unwrap_or(false)
+    }
+
     fn active_env_overrides(&self) -> Vec<(String, String)> {
         self.profiles_config
             .active_profile()
@@ -2909,7 +2926,7 @@ impl Model {
     }
 
     fn open_environment_editor(&mut self, profile_name: &str) {
-        let (vars, disabled_keys, ai_enabled, ai_endpoint, ai_api_key, ai_model) = self
+        let (vars, disabled_keys, ai_enabled, ai_endpoint, ai_api_key, ai_model, ai_summary_enabled) = self
             .profiles_config
             .profiles
             .get(profile_name)
@@ -2924,16 +2941,24 @@ impl Model {
                     })
                     .collect();
                 items.sort_by(|a, b| a.key.cmp(&b.key));
-                let (ai_enabled, ai_endpoint, ai_api_key, ai_model) = match &profile.ai {
+                let (ai_enabled, ai_endpoint, ai_api_key, ai_model, ai_summary_enabled) =
+                    match &profile.ai {
                     Some(ai) => (
                         true,
                         ai.endpoint.clone(),
                         ai.api_key.clone(),
                         ai.model.clone(),
+                        ai.summary_enabled,
                     ),
                     None => {
                         let defaults = AISettings::default();
-                        (false, defaults.endpoint, String::new(), defaults.model)
+                        (
+                            false,
+                            defaults.endpoint,
+                            String::new(),
+                            defaults.model,
+                            true,
+                        )
                     }
                 };
                 (
@@ -2943,6 +2968,7 @@ impl Model {
                     ai_endpoint,
                     ai_api_key,
                     ai_model,
+                    ai_summary_enabled,
                 )
             })
             .unwrap_or_else(|| {
@@ -2954,6 +2980,7 @@ impl Model {
                     defaults.endpoint,
                     String::new(),
                     defaults.model,
+                    true,
                 )
             });
 
@@ -2961,7 +2988,13 @@ impl Model {
             .with_profile(profile_name)
             .with_variables(vars)
             .with_disabled_keys(disabled_keys)
-            .with_ai_settings(ai_enabled, ai_endpoint, ai_api_key, ai_model)
+            .with_ai_settings(
+                ai_enabled,
+                ai_endpoint,
+                ai_api_key,
+                ai_model,
+                ai_summary_enabled,
+            )
             .with_os_variables(collect_os_env());
         self.environment.selected = 3;
         self.environment.refresh_selection();
@@ -2973,13 +3006,14 @@ impl Model {
         // FR-100: Use AI settings wizard for default AI settings
         if let Some(ai) = &self.profiles_config.default_ai {
             // Edit existing settings
-            self.ai_wizard.open_edit(
-                true, // is_default_ai
-                None, // no profile name
-                &ai.endpoint,
-                &ai.api_key,
-                &ai.model,
-            );
+                self.ai_wizard.open_edit(
+                    true, // is_default_ai
+                    None, // no profile name
+                    &ai.endpoint,
+                    &ai.api_key,
+                    &ai.model,
+                    ai.summary_enabled,
+                );
         } else {
             // Create new settings
             self.ai_wizard.open_new(true, None);
@@ -3000,6 +3034,7 @@ impl Model {
                     &ai.endpoint,
                     &ai.api_key,
                     &ai.model,
+                    ai.summary_enabled,
                 );
             } else {
                 // Create new settings
@@ -3231,6 +3266,7 @@ impl Model {
                         &ai.endpoint,
                         &ai.api_key,
                         &ai.model,
+                        ai.summary_enabled,
                     );
                 } else {
                     // Create new settings
@@ -3391,6 +3427,7 @@ impl Model {
             endpoint: self.ai_wizard.endpoint.trim().to_string(),
             api_key: self.ai_wizard.api_key.trim().to_string(),
             model,
+            summary_enabled: self.ai_wizard.summary_enabled,
         };
 
         if self.ai_wizard.is_default_ai {
@@ -3431,6 +3468,7 @@ impl Model {
                         endpoint: self.environment.ai_endpoint.clone(),
                         api_key: self.environment.ai_api_key.clone(),
                         model: self.environment.ai_model.clone(),
+                        summary_enabled: self.environment.ai_summary_enabled,
                     });
                 }
             } else {
@@ -3468,6 +3506,7 @@ impl Model {
                     endpoint: self.environment.ai_endpoint.clone(),
                     api_key: self.environment.ai_api_key.clone(),
                     model: self.environment.ai_model.clone(),
+                    summary_enabled: self.environment.ai_summary_enabled,
                 });
             }
         } else {
@@ -3963,8 +4002,14 @@ impl Model {
                     } else if self.ai_wizard.is_text_input() {
                         // Text input mode: insert character (including 'd')
                         self.ai_wizard.insert_char(c);
-                    } else if c == 'd' || c == 'D' {
-                        // Show delete confirmation (only in edit mode, non-text-input steps)
+                    } else if matches!(self.ai_wizard.step, super::screens::ai_wizard::AIWizardStep::ModelSelect)
+                        && (c == 't' || c == 'T')
+                    {
+                        self.ai_wizard.toggle_summary_enabled();
+                    } else if matches!(self.ai_wizard.step, super::screens::ai_wizard::AIWizardStep::ModelSelect)
+                        && (c == 'c' || c == 'C' || c == 'd' || c == 'D')
+                    {
+                        // Show clear confirmation (only in edit mode, non-text-input steps)
                         if self.ai_wizard.is_edit {
                             self.ai_wizard.show_delete();
                         }
@@ -5605,7 +5650,7 @@ impl Model {
 
         // Wizard has priority when visible
         if self.wizard.visible {
-            match key.code {
+            return match key.code {
                 KeyCode::Esc => Some(Message::WizardBack),
                 KeyCode::Enter if is_key_press => Some(Message::WizardConfirm),
                 KeyCode::Up if is_key_press => Some(Message::WizardPrev),
@@ -5629,8 +5674,38 @@ impl Model {
                     None
                 }
                 _ => None,
+            };
+        }
+
+        if matches!(self.screen, Screen::AISettingsWizard)
+            && !self.ai_wizard.is_text_input()
+            && is_key_press
+        {
+            use super::screens::ai_wizard::AIWizardStep;
+
+            match key.code {
+                KeyCode::Char('t') | KeyCode::Char('T')
+                    if matches!(self.ai_wizard.step, AIWizardStep::ModelSelect) =>
+                {
+                    self.ai_wizard.toggle_summary_enabled();
+                    return None;
+                }
+                KeyCode::Char('c')
+                | KeyCode::Char('C')
+                | KeyCode::Char('d')
+                | KeyCode::Char('D')
+                    if matches!(self.ai_wizard.step, AIWizardStep::ModelSelect) =>
+                {
+                    if self.ai_wizard.is_edit {
+                        self.ai_wizard.show_delete();
+                    }
+                    return None;
+                }
+                _ => {}
             }
-        } else if self.text_input_active() {
+        }
+
+        if self.text_input_active() {
             self.handle_text_input_key(key, is_key_press)
         } else {
             // Normal key handling
@@ -6368,7 +6443,7 @@ mod tests {
     use crate::tui::screens::wizard::WizardStep;
     use crate::tui::screens::{BranchItem, BranchListState, BranchType};
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-    use gwt_core::config::Settings;
+    use gwt_core::config::{AISettings, Profile, ProfilesConfig, Settings};
     use gwt_core::git::Branch;
     use gwt_core::git::BranchSummary;
     use gwt_core::git::DivergenceStatus;
@@ -7025,6 +7100,7 @@ mod tests {
         let item = sample_branch_with_session("feature/poll");
         model.branch_list = BranchListState::new().with_branches(vec![item]);
         model.branch_list.ai_enabled = true;
+        model.branch_list.session_summary_enabled = true;
 
         let branch_name = model
             .branch_list
@@ -7042,6 +7118,38 @@ mod tests {
 
         assert!(model.session_poll_deferred);
         assert_eq!(model.last_session_poll, Some(previous));
+    }
+
+    #[test]
+    fn test_active_session_summary_enabled_prefers_profile() {
+        let mut model = Model::new_with_context(None);
+        let mut config = ProfilesConfig::default();
+        let mut profile = Profile::new("dev");
+        profile.ai = Some(AISettings {
+            endpoint: "https://api.example.com/v1".to_string(),
+            api_key: "".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            summary_enabled: false,
+        });
+        config.profiles.insert("dev".to_string(), profile);
+        config.active = Some("dev".to_string());
+        config.default_ai = Some(AISettings {
+            endpoint: "https://api.example.com/v1".to_string(),
+            api_key: "".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            summary_enabled: true,
+        });
+        model.profiles_config = config;
+
+        assert!(!model.active_session_summary_enabled());
+
+        if let Some(profile) = model.profiles_config.profiles.get_mut("dev") {
+            if let Some(ai) = profile.ai.as_mut() {
+                ai.summary_enabled = true;
+            }
+        }
+
+        assert!(model.active_session_summary_enabled());
     }
 
     // FR-020: Tab cycles BranchList → AgentMode → Settings → BranchList

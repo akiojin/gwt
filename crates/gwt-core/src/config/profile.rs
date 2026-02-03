@@ -74,6 +74,9 @@ pub struct AISettings {
     /// Model name
     #[serde(default = "default_model")]
     pub model: String,
+    /// Session summary enabled
+    #[serde(default = "default_summary_enabled")]
+    pub summary_enabled: bool,
 }
 
 /// Resolved AI settings with defaults and environment fallbacks applied
@@ -100,6 +103,11 @@ impl AISettings {
         let model = self.model.trim();
         !endpoint.is_empty() && !model.is_empty()
     }
+
+    /// Check if session summary is enabled (requires valid AI settings)
+    pub fn is_summary_enabled(&self) -> bool {
+        self.is_enabled() && self.summary_enabled
+    }
 }
 
 fn default_endpoint() -> String {
@@ -108,6 +116,10 @@ fn default_endpoint() -> String {
 
 fn default_model() -> String {
     String::new() // No default - must be selected via wizard
+}
+
+fn default_summary_enabled() -> bool {
+    true
 }
 
 /// Profiles configuration stored on disk
@@ -273,6 +285,7 @@ mod tests {
         assert_eq!(resolved.endpoint, "");
         assert_eq!(resolved.model, "");
         assert_eq!(resolved.api_key, "");
+        assert!(!settings.summary_enabled);
     }
 
     #[test]
@@ -284,6 +297,7 @@ mod tests {
         assert_eq!(resolved.endpoint, "https://api.openai.com/v1"); // serde default
         assert_eq!(resolved.model, ""); // No default model
         assert_eq!(resolved.api_key, "");
+        assert!(settings.summary_enabled);
     }
 
     #[test]
@@ -293,6 +307,7 @@ mod tests {
             endpoint: "".to_string(),
             api_key: "".to_string(),
             model: "".to_string(),
+            summary_enabled: true,
         };
         let resolved = settings.resolved();
         // Should return empty strings, not environment variable values
@@ -307,6 +322,7 @@ mod tests {
             endpoint: "http://localhost:11434/v1".to_string(),
             api_key: "".to_string(),
             model: "llama3.2".to_string(),
+            summary_enabled: true,
         };
         assert!(settings.is_enabled());
     }
@@ -317,6 +333,7 @@ mod tests {
             endpoint: "https://api.example.com/v1".to_string(),
             api_key: "".to_string(),
             model: "gpt-4o-mini".to_string(),
+            summary_enabled: true,
         };
         assert!(settings.is_enabled());
     }
@@ -327,6 +344,7 @@ mod tests {
             endpoint: "".to_string(),
             api_key: "key".to_string(),
             model: "gpt-4o-mini".to_string(),
+            summary_enabled: true,
         };
         assert!(!missing_endpoint.is_enabled());
 
@@ -334,8 +352,28 @@ mod tests {
             endpoint: "https://api.example.com/v1".to_string(),
             api_key: "key".to_string(),
             model: "".to_string(),
+            summary_enabled: true,
         };
         assert!(!missing_model.is_enabled());
+    }
+
+    #[test]
+    fn test_ai_settings_summary_enabled_gate() {
+        let disabled = AISettings {
+            endpoint: "https://api.example.com/v1".to_string(),
+            api_key: "key".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            summary_enabled: false,
+        };
+        assert!(!disabled.is_summary_enabled());
+
+        let enabled = AISettings {
+            endpoint: "https://api.example.com/v1".to_string(),
+            api_key: "key".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            summary_enabled: true,
+        };
+        assert!(enabled.is_summary_enabled());
     }
 
     #[test]

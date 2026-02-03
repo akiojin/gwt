@@ -58,6 +58,8 @@ pub struct AIWizardState {
     pub selected_model: String,
     /// Scroll offset for model list
     pub model_scroll_offset: usize,
+    /// Session summary enabled
+    pub summary_enabled: bool,
 
     // Status
     /// Error message (if any)
@@ -86,6 +88,7 @@ impl AIWizardState {
         self.is_edit = false;
         self.is_default_ai = is_default_ai;
         self.profile_name = profile_name;
+        self.summary_enabled = true;
         // FR-105: Default endpoint
         self.endpoint = "https://api.openai.com/v1".to_string();
         self.endpoint_cursor = self.endpoint.len();
@@ -100,6 +103,7 @@ impl AIWizardState {
         endpoint: &str,
         api_key: &str,
         model: &str,
+        summary_enabled: bool,
     ) {
         self.reset();
         self.visible = true;
@@ -111,6 +115,7 @@ impl AIWizardState {
         self.api_key = api_key.to_string();
         self.api_key_cursor = self.api_key.len();
         self.selected_model = model.to_string();
+        self.summary_enabled = summary_enabled;
         self.step = AIWizardStep::Endpoint;
     }
 
@@ -134,6 +139,7 @@ impl AIWizardState {
         self.model_index = 0;
         self.selected_model.clear();
         self.model_scroll_offset = 0;
+        self.summary_enabled = true;
         self.error = None;
         self.loading_message = None;
         self.show_delete_confirm = false;
@@ -355,6 +361,11 @@ impl AIWizardState {
         self.show_delete_confirm = false;
     }
 
+    /// Toggle session summary enabled
+    pub fn toggle_summary_enabled(&mut self) {
+        self.summary_enabled = !self.summary_enabled;
+    }
+
     /// Get wizard title
     pub fn title(&self) -> &'static str {
         if self.is_edit {
@@ -465,7 +476,7 @@ pub fn render_ai_wizard(state: &mut AIWizardState, frame: &mut Frame, area: Rect
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2), // Target + step header
+            Constraint::Length(3), // Target + step header + summary toggle
             Constraint::Length(1), // Separator
             Constraint::Min(5),    // Content
             Constraint::Length(2), // Footer/actions
@@ -473,6 +484,12 @@ pub fn render_ai_wizard(state: &mut AIWizardState, frame: &mut Frame, area: Rect
         .split(inner);
 
     // Header: target and step
+    let summary_value = if state.summary_enabled { "On" } else { "Off" };
+    let summary_style = if state.summary_enabled {
+        Style::default().fg(Color::Green)
+    } else {
+        Style::default().fg(Color::Yellow)
+    };
     let header = Paragraph::new(vec![
         Line::from(vec![
             Span::styled("Target: ", Style::default().fg(Color::DarkGray)),
@@ -482,6 +499,10 @@ pub fn render_ai_wizard(state: &mut AIWizardState, frame: &mut Frame, area: Rect
             state.step_title(),
             Style::default().fg(Color::Yellow),
         )]),
+        Line::from(vec![
+            Span::styled("Session summary: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(summary_value, summary_style),
+        ]),
     ]);
     frame.render_widget(header, chunks[0]);
 
@@ -502,15 +523,15 @@ pub fn render_ai_wizard(state: &mut AIWizardState, frame: &mut Frame, area: Rect
     // Footer/actions
     let actions = match state.step {
         AIWizardStep::Endpoint => "[Enter] Next | [Esc] Cancel",
-        AIWizardStep::ApiKey => {
+        AIWizardStep::ApiKey => "[Enter] Connect | [Esc] Back",
+        AIWizardStep::FetchingModels => "Connecting to API...",
+        AIWizardStep::ModelSelect => {
             if state.is_edit {
-                "[Enter] Connect | [Esc] Back | [d] Delete"
+                "[Enter] Save | [Esc] Back | [Up/Down] Select | [t] Toggle Summary | [c] Clear"
             } else {
-                "[Enter] Connect | [Esc] Back"
+                "[Enter] Save | [Esc] Back | [Up/Down] Select | [t] Toggle Summary"
             }
         }
-        AIWizardStep::FetchingModels => "Connecting to API...",
-        AIWizardStep::ModelSelect => "[Enter] Save | [Esc] Back | [Up/Down] Select",
     };
     let footer = Paragraph::new(actions)
         .style(Style::default().fg(Color::DarkGray))
@@ -754,7 +775,7 @@ fn render_delete_confirm(frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, popup_area);
 
     let block = Block::default()
-        .title(" Delete AI Settings ")
+        .title(" Clear AI Settings ")
         .title_style(Style::default().fg(Color::Red).bold())
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Red));
@@ -764,7 +785,7 @@ fn render_delete_confirm(frame: &mut Frame, area: Rect) {
 
     let content = Paragraph::new(vec![
         Line::from(""),
-        Line::from("Are you sure you want to delete"),
+        Line::from("Are you sure you want to clear"),
         Line::from("AI settings?"),
         Line::from(""),
         Line::from(vec![
@@ -788,6 +809,7 @@ mod tests {
         state.open_new(true, None);
         assert_eq!(state.step, AIWizardStep::Endpoint);
         assert!(!state.endpoint.is_empty()); // Default endpoint
+        assert!(state.summary_enabled);
 
         // Cannot advance with empty endpoint
         state.endpoint.clear();
@@ -927,6 +949,7 @@ mod tests {
             "http://localhost:11434/v1",
             "my-key",
             "llama3.2",
+            false,
         );
 
         assert!(state.is_edit);
@@ -934,6 +957,20 @@ mod tests {
         assert_eq!(state.endpoint, "http://localhost:11434/v1");
         assert_eq!(state.api_key, "my-key");
         assert_eq!(state.selected_model, "llama3.2");
+        assert!(!state.summary_enabled);
+    }
+
+    #[test]
+    fn test_wizard_toggle_summary_enabled() {
+        let mut state = AIWizardState::new();
+        state.open_new(true, None);
+        assert!(state.summary_enabled);
+
+        state.toggle_summary_enabled();
+        assert!(!state.summary_enabled);
+
+        state.toggle_summary_enabled();
+        assert!(state.summary_enabled);
     }
 
     #[test]
