@@ -683,6 +683,11 @@
   - **FR-093a**: エージェントが0件の場合でもステータスバーを非表示にしては**ならず**、`Agents: none` のような表示で1行を維持しなければならない
   - **FR-093b**: waiting_input が1件以上の場合、waiting部分を黄色で強調表示しなければならない（SPEC-861d8cdf FR-104cと整合）
 - **FR-094**: システムは、ステータスバーの直上にフッターヘルプを表示し、キーバインドを短い英語ラベルと区切り記号でコンパクトに示さ**なければならない**（例: `r Refresh | c Cleanup | l Logs`）
+- **FR-094a**: システムは、フッターヘルプに画面/モードごとに有効なショートカットを省略せず表示し**なければならない**
+- **FR-094b**: システムは、表示幅に収まらない場合にフッターヘルプを必要な行数へ折り返し、ショートカットの欠落を発生させては**ならない**（2行以上も許容）
+- **FR-094c**: システムは、フッターヘルプを**1行固定**で表示し、ショートカットが収まらない場合は**縦スクロール**で表示しなければ**ならない**
+- **FR-094d**: システムは、フッターヘルプの縦スクロールを**0.5秒/行**で進行させ、上下端で**1秒停止**しなければ**ならない**
+- **FR-094e**: システムは、フッターヘルプが表示領域に収まる場合、スクロールを行っては**ならない**
 - **FR-095**: システムは、グローバルなステータスメッセージ（起動進捗・完了通知・警告等）をステータスバーにのみ表示し、Details/Sessionの両方へ重複表示しては**ならない**
 - **FR-096**: システムは、起動進捗表示（例: `Launching ...`）をコンテンツ上部の専用行としては表示せず、ステータスバーへ統合**しなければならない**
 - **FR-097**: システムは、Branches/Details/Session各パネルおよびポップアップの枠線色・タイトルスタイル・左右余白を統一し、枠線が無い/余白が無い状態を許容しては**ならない**
@@ -694,6 +699,41 @@
   - **FR-097f**: システムは、Settings画面のカテゴリタブおよび各パネル（一覧/説明/フォーム/確認/AI/環境変数）の枠線色とタイトルスタイルを他画面と同じ規約（例: 枠線=白、タイトル=シアン太字、前後スペースあり）に統一しなければならない
 - **FR-098**: システムは、ステータスバーとフッターヘルプの高さを常に確保し、クリーンアップ・起動・ローディング中でも最下部の情報が消えないレイアウトを維持**しなければならない**
 - **FR-099**: システムは、行頭アイコンやスピナーに非ASCII文字を使用してもよいが、表示幅が1セルであることを保証し、1セルにならない文字はASCIIへフォールバック**しなければならない**
+
+##### フッターヘルプ表示一覧（ショートカット網羅）
+
+各画面/モードのフッターヘルプは、以下のショートカットを**すべて**含めること（条件付きのものは条件を満たす場合のみ表示）。
+フッターヘルプは1行固定で、収まらない場合は縦スクロールで全項目を表示する。
+
+- **Branch List（通常）**: `Up/Down` 移動、`PgUp/PgDn` ページ、`Home/End` 先頭/末尾、`Enter` Open/Focus、`Space` Select、`r` Refresh、`c` Cleanup、`l` Logs、`s` Settings、`p` Environment、`f`/`/` Filter、`m` Mode、`Tab` Agent、`v` GitView、`u` Hooks、`?`/`h` Help、`Ctrl+C` Quit
+  - 条件付き: 選択中ブランチに実行中エージェントがある場合は `d` Terminate を追加、フィルター文字列が存在するかアクティブペインがある場合は `Esc` Clear/Hide を追加
+- **Branch List（Filter Mode）**: `Esc` Exit filter、`Enter` Apply、`Backspace` Delete、`Up/Down` Move、`PgUp/PgDn` Page、`Home/End` Top/Bottom、`Type` to search
+- **Agent Screen**: `Enter` Send（AI設定未完了時は Configure AI）、`Tab` Settings、`Esc` Back
+- **Worktree Create**:
+  - BranchName: `Enter` Next、`Esc` Back
+  - BaseBranch: `Up/Down` Select、`Enter` Next、`Esc` Back
+  - Confirm: `Enter` Create、`Esc` Back
+- **Settings**: 画面内の状態に応じて `Left/Right` Category、`Up/Down` Select、`Tab` Screen、`Enter` 決定、`Esc` Back など、操作に必要なショートカットを省略せず表示
+- **Logs**: `Up/Down` Navigate、`PgUp/PgDn` Page、`Home/End` Top/Bottom、`Enter` Detail、`c` Copy、`f` Filter、`/` Search、`Esc` Back
+- **Help**: `Up/Down` Scroll、`PgUp/PgDn` Page、`Esc` Back
+- **Profiles**:
+  - List: `Up/Down` Select、`Space` Activate、`Enter` Edit、`n` New、`d` Delete、`Esc` Back
+  - Create: `Enter` Save、`Esc` Cancel
+- **Environment**:
+  - List: `Up/Down` Select、`PgUp/PgDn` Page、`Home/End` Top/Bottom、`Enter` Edit、`n` New、`d` Delete/Disable、`r` Reset、`Esc` Back
+  - Edit: `Enter` Save/Confirm、`Tab` Switch、`Esc` Cancel
+- **Confirm**: `Left/Right` Select、`Enter` Confirm、`Esc` Cancel
+- **Error Popup**: `Enter` Close、`Esc` Close、`Up/Down` Scroll、`l` Logs、`c` Copy
+- **GitView**: `Up/Down` Navigate、`Space` Expand、`Enter` Open PR、`v`/`Esc` Back
+- **Clone Wizard**:
+  - UrlInput: `Enter` Continue、`Esc` Quit
+  - TypeSelect: `Up/Down` Select、`Enter` Clone、`Backspace` Back、`Esc` Quit
+  - Complete: `Enter` Continue
+  - Failed: `Backspace` Try again、`Esc` Quit
+- **Migration Dialog**:
+  - Confirmation: `Left/Right` Select、`Enter` Confirm
+  - Completed: `Enter` Continue
+  - Failed: `Enter` Exit
 
 ### 主要エンティティ
 
