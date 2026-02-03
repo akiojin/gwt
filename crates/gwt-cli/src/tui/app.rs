@@ -56,6 +56,9 @@ const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const SESSION_SUMMARY_QUIET_PERIOD: Duration = Duration::from_secs(5);
 const FAST_EXIT_THRESHOLD_SECS: u64 = 2;
 const AGENT_SYSTEM_PROMPT: &str = "You are the master agent. Analyze tasks and propose a plan.";
+const FOOTER_VISIBLE_HEIGHT: usize = 1;
+const FOOTER_SCROLL_TICKS_PER_LINE: u16 = 2; // 0.5s per line (tick = 250ms)
+const FOOTER_SCROLL_PAUSE_TICKS: u16 = 4; // 1s pause at ends
 
 use super::screens::branch_list::{
     BranchSummaryRequest, BranchSummaryUpdate, PrInfo, WorktreeStatus,
@@ -449,6 +452,18 @@ pub struct Model {
     status_message: Option<String>,
     /// Status message timestamp (for auto-clear)
     status_message_time: Option<Instant>,
+    /// Footer scroll offset (top line index)
+    footer_scroll_offset: usize,
+    /// Footer scroll direction (1 = down, -1 = up)
+    footer_scroll_dir: i8,
+    /// Footer scroll tick counter
+    footer_scroll_tick: u16,
+    /// Footer scroll pause counter at ends
+    footer_scroll_pause: u16,
+    /// Footer line count (last computed)
+    footer_line_count: usize,
+    /// Footer width (last computed)
+    footer_last_width: u16,
     /// Launch progress message (not auto-cleared)
     launch_status: Option<String>,
     /// Launch preparation update receiver
@@ -693,6 +708,12 @@ impl Model {
             ai_wizard: AIWizardState::new(),
             status_message: None,
             status_message_time: None,
+            footer_scroll_offset: 0,
+            footer_scroll_dir: 1,
+            footer_scroll_tick: 0,
+            footer_scroll_pause: 0,
+            footer_line_count: 0,
+            footer_last_width: 0,
             launch_status: None,
             launch_rx: None,
             launch_in_progress: false,
@@ -3805,6 +3826,7 @@ impl Model {
                 self.screen_stack.push(self.screen.clone());
                 self.screen = screen;
                 self.status_message = None;
+                self.reset_footer_scroll();
             }
             Message::NavigateBack => {
                 // Check if we're in filter mode first
@@ -3875,6 +3897,7 @@ impl Model {
                     }
                 }
                 self.status_message = None;
+                self.reset_footer_scroll();
             }
             Message::Tick => {
                 // Reset Ctrl+C counter after timeout
@@ -3892,6 +3915,7 @@ impl Model {
                 }
                 // Update spinner animation
                 self.branch_list.tick_spinner();
+                self.update_footer_scroll();
                 self.apply_branch_list_updates();
                 self.apply_branch_summary_updates();
                 self.apply_pr_title_updates();
@@ -5545,13 +5569,20 @@ impl Model {
 
         // Footer help sits above the status bar.
         let needs_footer = !matches!(base_screen, Screen::AISettingsWizard);
+        let full_footer_lines = if needs_footer {
+            let lines = self.footer_lines(frame.area().width);
+            self.sync_footer_metrics(frame.area().width, lines.len());
+            lines
+        } else {
+            Vec::new()
+        };
         let footer_lines = if needs_footer {
-            self.footer_lines(frame.area().width)
+            self.footer_visible_lines(&full_footer_lines, FOOTER_VISIBLE_HEIGHT)
         } else {
             Vec::new()
         };
         let footer_height = if needs_footer {
-            footer_lines.len() as u16
+            FOOTER_VISIBLE_HEIGHT as u16
         } else {
             0
         };
@@ -5838,6 +5869,35 @@ impl Model {
         Self::wrap_footer_items(&items, width as usize)
     }
 
+    fn sync_footer_metrics(&mut self, width: u16, line_count: usize) {
+        let width_changed = self.footer_last_width != width;
+        let count_changed = self.footer_line_count != line_count;
+
+        self.footer_last_width = width;
+        self.footer_line_count = line_count;
+
+        if width_changed || count_changed {
+            self.reset_footer_scroll();
+            return;
+        }
+
+        let max_offset = self.footer_line_count.saturating_sub(FOOTER_VISIBLE_HEIGHT);
+        if self.footer_scroll_offset > max_offset {
+            self.footer_scroll_offset = max_offset;
+        }
+    }
+
+    fn footer_visible_lines(&self, full_lines: &[String], height: usize) -> Vec<String> {
+        if full_lines.is_empty() || height == 0 {
+            return Vec::new();
+        }
+
+        let max_offset = full_lines.len().saturating_sub(height);
+        let offset = self.footer_scroll_offset.min(max_offset);
+        let end = (offset + height).min(full_lines.len());
+        full_lines[offset..end].to_vec()
+    }
+
     fn footer_items(&self) -> Vec<String> {
         match self.screen {
             Screen::BranchList => {
@@ -6087,6 +6147,54 @@ impl Model {
             .map(|segment| segment.trim().to_string())
             .filter(|segment| !segment.is_empty())
             .collect()
+    }
+
+    fn reset_footer_scroll(&mut self) {
+        self.footer_scroll_offset = 0;
+        self.footer_scroll_dir = 1;
+        self.footer_scroll_tick = 0;
+        self.footer_scroll_pause = 0;
+    }
+
+    fn update_footer_scroll(&mut self) {
+        if self.footer_line_count <= FOOTER_VISIBLE_HEIGHT {
+            self.reset_footer_scroll();
+            return;
+        }
+
+        if self.footer_scroll_pause > 0 {
+            self.footer_scroll_pause -= 1;
+            return;
+        }
+
+        self.footer_scroll_tick = self.footer_scroll_tick.saturating_add(1);
+        if self.footer_scroll_tick < FOOTER_SCROLL_TICKS_PER_LINE {
+            return;
+        }
+        self.footer_scroll_tick = 0;
+
+        let max_offset = self.footer_line_count.saturating_sub(FOOTER_VISIBLE_HEIGHT);
+        if self.footer_scroll_dir >= 0 {
+            if self.footer_scroll_offset < max_offset {
+                self.footer_scroll_offset += 1;
+                if self.footer_scroll_offset >= max_offset {
+                    self.footer_scroll_dir = -1;
+                    self.footer_scroll_pause = FOOTER_SCROLL_PAUSE_TICKS;
+                }
+            } else {
+                self.footer_scroll_dir = -1;
+                self.footer_scroll_pause = FOOTER_SCROLL_PAUSE_TICKS;
+            }
+        } else if self.footer_scroll_offset > 0 {
+            self.footer_scroll_offset -= 1;
+            if self.footer_scroll_offset == 0 {
+                self.footer_scroll_dir = 1;
+                self.footer_scroll_pause = FOOTER_SCROLL_PAUSE_TICKS;
+            }
+        } else {
+            self.footer_scroll_dir = 1;
+            self.footer_scroll_pause = FOOTER_SCROLL_PAUSE_TICKS;
+        }
     }
 
     fn view_footer(&self, frame: &mut Frame, area: Rect, lines: &[String]) {
@@ -7209,8 +7317,10 @@ mod tests {
             .collect()
     }
 
-    fn footer_lines_for(model: &Model, width: u16) -> Vec<String> {
-        model.footer_lines(width)
+    fn footer_lines_for(model: &mut Model, width: u16) -> Vec<String> {
+        let lines = model.footer_lines(width);
+        model.sync_footer_metrics(width, lines.len());
+        lines
     }
 
     #[test]
@@ -7223,7 +7333,7 @@ mod tests {
 
         let height = 24;
         let lines = render_model_lines(&mut model, 80, height);
-        let footer_text = footer_lines_for(&model, 80).join(" ");
+        let footer_text = footer_lines_for(&mut model, 80).join(" ");
         let status_line = &lines[(height - 1) as usize];
 
         assert!(
@@ -7284,7 +7394,7 @@ mod tests {
         let width = 120;
         let height = 24;
         let lines = render_model_lines(&mut model, width, height);
-        let footer_text = footer_lines_for(&model, width).join(" ");
+        let footer_text = footer_lines_for(&mut model, width).join(" ");
         let instruction_key = "[Left/Right] Category";
 
         assert!(
@@ -7309,7 +7419,7 @@ mod tests {
         model.branch_list = BranchListState::new().with_branches(branches);
         model.screen = Screen::BranchList;
 
-        let footer_text = footer_lines_for(&model, 140).join(" ");
+        let footer_text = footer_lines_for(&mut model, 140).join(" ");
         let expected = [
             "[Up/Down] Move",
             "[PgUp/PgDn] Page",
@@ -7348,7 +7458,7 @@ mod tests {
         model.branch_list = state;
         model.screen = Screen::BranchList;
 
-        let footer_text = footer_lines_for(&model, 120).join(" ");
+        let footer_text = footer_lines_for(&mut model, 120).join(" ");
         let expected = [
             "[Esc] Exit filter",
             "[Enter] Apply",
@@ -7373,7 +7483,7 @@ mod tests {
         let mut model = Model::new_with_context(None);
         model.screen = Screen::Logs;
 
-        let footer_text = footer_lines_for(&model, 120).join(" ");
+        let footer_text = footer_lines_for(&mut model, 120).join(" ");
         let expected = ["[PgUp/PgDn] Page", "[Home/End] Top/Bottom"];
 
         for key in expected {
@@ -7390,7 +7500,7 @@ mod tests {
         let mut model = Model::new_with_context(None);
         model.screen = Screen::Help;
 
-        let footer_text = footer_lines_for(&model, 120).join(" ");
+        let footer_text = footer_lines_for(&mut model, 120).join(" ");
         assert!(
             footer_text.contains("[PgUp/PgDn] Page"),
             "Help footer should include page navigation"
@@ -7402,7 +7512,7 @@ mod tests {
         let mut model = Model::new_with_context(None);
         model.screen = Screen::Error;
 
-        let footer_text = footer_lines_for(&model, 120).join(" ");
+        let footer_text = footer_lines_for(&mut model, 120).join(" ");
         let expected = [
             "[Enter] Close",
             "[Esc] Close",
@@ -7418,6 +7528,73 @@ mod tests {
                 key
             );
         }
+    }
+
+    #[test]
+    fn test_footer_scroll_disabled_when_single_line() {
+        let mut model = Model::new_with_context(None);
+        let branches = vec![sample_branch_with_session("feature/scroll")];
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.screen = Screen::BranchList;
+
+        let lines = footer_lines_for(&mut model, 1000);
+        assert_eq!(lines.len(), 1, "Footer should fit in one line");
+
+        for _ in 0..10 {
+            model.update(Message::Tick);
+        }
+
+        assert_eq!(model.footer_scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_footer_scroll_advances_and_reverses() {
+        let mut model = Model::new_with_context(None);
+        let branches = vec![sample_branch_with_session("feature/scroll")];
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.screen = Screen::BranchList;
+
+        let lines = footer_lines_for(&mut model, 40);
+        assert!(lines.len() > 1, "Footer should overflow for scrolling");
+        let max_offset = lines.len().saturating_sub(1);
+
+        let advance_ticks = FOOTER_SCROLL_TICKS_PER_LINE as usize * max_offset.max(1);
+        for _ in 0..advance_ticks {
+            model.update(Message::Tick);
+        }
+
+        assert_eq!(model.footer_scroll_offset, max_offset);
+        assert_eq!(model.footer_scroll_pause, FOOTER_SCROLL_PAUSE_TICKS);
+
+        for _ in 0..FOOTER_SCROLL_PAUSE_TICKS {
+            model.update(Message::Tick);
+            assert_eq!(model.footer_scroll_offset, max_offset);
+        }
+
+        for _ in 0..FOOTER_SCROLL_TICKS_PER_LINE {
+            model.update(Message::Tick);
+        }
+
+        assert_eq!(model.footer_scroll_offset, max_offset.saturating_sub(1));
+    }
+
+    #[test]
+    fn test_footer_scroll_resets_on_navigation() {
+        let mut model = Model::new_with_context(None);
+        let branches = vec![sample_branch_with_session("feature/scroll")];
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.screen = Screen::BranchList;
+
+        let lines = footer_lines_for(&mut model, 40);
+        assert!(lines.len() > 1, "Footer should overflow for scrolling");
+
+        for _ in 0..FOOTER_SCROLL_TICKS_PER_LINE {
+            model.update(Message::Tick);
+        }
+        assert!(model.footer_scroll_offset > 0);
+
+        model.update(Message::NavigateTo(Screen::Logs));
+        assert_eq!(model.footer_scroll_offset, 0);
     }
 
     #[test]
