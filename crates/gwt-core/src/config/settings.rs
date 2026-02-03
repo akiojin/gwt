@@ -72,7 +72,7 @@ pub struct WebSettings {
 impl Default for WebSettings {
     fn default() -> Self {
         Self {
-            port: 8080,
+            port: 3000,
             address: "127.0.0.1".to_string(),
             cors: true,
         }
@@ -156,6 +156,12 @@ impl Settings {
         if let Ok(value) = std::env::var("GWT_AGENT_AUTO_INSTALL_DEPS") {
             if let Some(parsed) = parse_env_bool(&value) {
                 settings.agent.auto_install_deps = parsed;
+            }
+        }
+
+        if let Ok(value) = std::env::var("PORT") {
+            if let Ok(parsed) = value.trim().parse::<u16>() {
+                settings.web.port = parsed;
             }
         }
 
@@ -430,7 +436,7 @@ mod tests {
         assert!(!settings.protected_branches.is_empty());
         assert!(settings.protected_branches.contains(&"main".to_string()));
         assert!(!settings.debug);
-        assert_eq!(settings.web.port, 8080);
+        assert_eq!(settings.web.port, 3000);
     }
 
     #[test]
@@ -507,6 +513,17 @@ mod tests {
         std::env::remove_var("GWT_AGENT_AUTO_INSTALL_DEPS");
 
         assert!(settings.agent.auto_install_deps);
+    }
+
+    #[test]
+    fn test_env_override_port() {
+        let temp = TempDir::new().unwrap();
+
+        std::env::set_var("PORT", "4567");
+        let settings = Settings::load(temp.path()).unwrap();
+        std::env::remove_var("PORT");
+
+        assert_eq!(settings.web.port, 4567);
     }
 
     #[test]
