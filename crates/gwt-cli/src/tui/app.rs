@@ -593,6 +593,8 @@ pub enum Message {
     ToggleFilterMode,
     /// Cycle view mode (All/Local/Remote)
     CycleViewMode,
+    /// Cycle sort mode (Default/Name/Updated)
+    CycleSortMode,
     /// Toggle branch selection
     ToggleSelection,
     /// Space key for selection
@@ -888,6 +890,7 @@ impl Model {
 
     fn start_branch_list_refresh(&mut self, settings: gwt_core::config::Settings) {
         let cleanup_snapshot = self.branch_list.cleanup_snapshot();
+        let sort_mode = self.branch_list.sort_mode;
         self.pr_title_rx = None;
         self.safety_rx = None;
         self.worktree_status_rx = None;
@@ -896,6 +899,7 @@ impl Model {
         self.active_count = 0;
 
         let mut branch_list = BranchListState::new();
+        branch_list.sort_mode = sort_mode;
         branch_list.active_profile = self.profiles_config.active.clone();
         branch_list.ai_enabled = self.active_ai_enabled();
         branch_list.working_directory = Some(self.repo_root.display().to_string());
@@ -1945,7 +1949,10 @@ impl Model {
                 let session_inflight = self.branch_list.clone_session_inflight();
                 let session_missing = self.branch_list.clone_session_missing();
                 let session_warnings = self.branch_list.clone_session_warnings();
-                let mut branch_list = BranchListState::new().with_branches(update.branches);
+                let sort_mode = self.branch_list.sort_mode;
+                let mut branch_list = BranchListState::new();
+                branch_list.sort_mode = sort_mode;
+                let mut branch_list = branch_list.with_branches(update.branches);
                 branch_list.active_profile = self.profiles_config.active.clone();
                 branch_list.ai_enabled = self.active_ai_enabled();
                 branch_list.set_session_cache(session_cache);
@@ -4592,6 +4599,11 @@ impl Model {
                     self.refresh_branch_summary();
                 }
             }
+            Message::CycleSortMode => {
+                if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
+                    self.branch_list.cycle_sort_mode();
+                }
+            }
             Message::ToggleSelection | Message::Space => {
                 if matches!(self.screen, Screen::BranchList) {
                     // FR-029b-e: Check if branch is unsafe before selecting
@@ -5785,6 +5797,14 @@ impl Model {
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD),
                 ),
+                Span::raw(" "),
+                Span::styled("Sort(s):", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    self.branch_list.sort_mode.label(),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
             ];
             frame.render_widget(Paragraph::new(Line::from(mode_spans)), inner_chunks[3]);
         } else {
@@ -5840,7 +5860,7 @@ impl Model {
                 if self.branch_list.filter_mode {
                     "[Esc] Exit filter | Type to search".to_string()
                 } else {
-                    "[r] Refresh | [c] Cleanup | [l] Logs".to_string()
+                    "[r] Refresh | [s] Sort | [c] Cleanup | [l] Logs".to_string()
                 }
             }
             Screen::AgentMode => {
@@ -6150,7 +6170,7 @@ impl Model {
                 (KeyCode::Char('s'), KeyModifiers::NONE) => {
                     // In filter mode, 's' goes to filter input
                     if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
-                        Some(Message::NavigateTo(Screen::Settings))
+                        Some(Message::CycleSortMode)
                     } else {
                         Some(Message::Char('s'))
                     }
@@ -7060,6 +7080,22 @@ mod tests {
     }
 
     #[test]
+    fn test_branchlist_footer_includes_sort_keybind() {
+        let mut model = Model::new_with_context(None);
+        let branches = vec![sample_branch_with_session("feature/layout")];
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.screen = Screen::BranchList;
+
+        let height = 24;
+        let lines = render_model_lines(&mut model, 80, height);
+        let footer_line = &lines[(height - 2) as usize];
+        assert!(
+            footer_line.contains("[s] Sort"),
+            "Footer help should include sort keybind on BranchList"
+        );
+    }
+
+    #[test]
     fn test_logs_screen_renders_header_working_directory() {
         let mut model = Model::new_with_context(None);
         model.screen = Screen::Logs;
@@ -7249,6 +7285,26 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
         let msg = model.handle_key_event(key);
         assert!(matches!(msg, Some(Message::Char('f'))));
+
+        let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
+        let msg = model.handle_key_event(key);
+        assert!(matches!(msg, Some(Message::Char('s'))));
+    }
+
+    #[test]
+    fn test_branchlist_s_key_cycles_sort_mode() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+        let branches = vec![sample_branch_with_session("feature/sort")];
+        model.branch_list = BranchListState::new().with_branches(branches);
+
+        let initial = model.branch_list.sort_mode;
+        let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
+        let msg = model.handle_key_event(key);
+        assert!(matches!(msg, Some(Message::CycleSortMode)));
+
+        model.update(Message::CycleSortMode);
+        assert_ne!(model.branch_list.sort_mode, initial);
     }
 
     #[test]
