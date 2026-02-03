@@ -174,6 +174,20 @@
 - [x] **T9910** [P] [共通] `specs/SPEC-d2f4762a/plan.md` にフッターのEnter表記削除を追記
 - [x] **T9911** [実装] ブランチ一覧のフッター表示から Enter 表記を削除（`crates/gwt-cli/src/tui/app.rs`, `crates/gwt-cli/src/tui/screens/branch_list.rs`）
 
+## 追加作業: フッターヘルプのショートカット網羅 (2026-02-03)
+
+- [x] **T9963** [P] [共通] `specs/SPEC-d2f4762a/spec.md` にフッターヘルプのショートカット網羅要件と表示一覧を追記
+- [x] **T9964** [P] [共通] `specs/SPEC-d2f4762a/plan.md` にフッターヘルプの網羅・可変行数方針を追記
+- [x] **T9965** [Test] `crates/gwt-cli/src/tui/app.rs` にフッターヘルプの網羅性テストを追加
+- [x] **T9966** [実装] `crates/gwt-cli/src/tui/app.rs` のフッターヘルプ生成を更新し、ショートカットを全表示する
+
+## 追加作業: フッターヘルプの縦スクロール化 (2026-02-03)
+
+- [x] **T9967** [P] [共通] `specs/SPEC-d2f4762a/spec.md` にフッターヘルプの縦スクロール要件（1行固定/速度/停止/Overflow時のみ）を追記
+- [x] **T9968** [P] [共通] `specs/SPEC-d2f4762a/plan.md` にフッターヘルプの縦スクロール方針を追記
+- [x] **T9969** [Test] `crates/gwt-cli/src/tui/app.rs` にフッターヘルプ縦スクロールのテストを追加
+- [x] **T9970** [実装] `crates/gwt-cli/src/tui/app.rs` にフッターヘルプの縦スクロールを実装（Overflow時のみ）
+
 ## 追加作業: 安全判定の即時確定と未マージ判定の高速化 (2026-01-13)
 
 - [x] **T9912** [P] [共通] `specs/SPEC-d2f4762a/spec.md` に未コミット/未プッシュの即時確定と未マージ判定の要件を追記
