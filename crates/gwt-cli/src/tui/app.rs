@@ -45,7 +45,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -3006,13 +3006,37 @@ impl Model {
         }
 
         let mut last_error: Option<std::io::Error> = None;
+        let mut try_open = |cmd: &str, args: &[&str]| -> bool {
+            match Command::new(cmd)
+                .args(args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+            {
+                Ok(output) => {
+                    if output.status.success() {
+                        return true;
+                    }
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let message = stderr.trim();
+                    let message = if message.is_empty() {
+                        format!("{} exited with status {}", cmd, output.status)
+                    } else {
+                        message.to_string()
+                    };
+                    last_error = Some(std::io::Error::new(std::io::ErrorKind::Other, message));
+                    false
+                }
+                Err(err) => {
+                    last_error = Some(err);
+                    false
+                }
+            }
+        };
         #[cfg(target_os = "macos")]
         {
-            match std::process::Command::new("open").arg(url).spawn() {
-                Ok(_) => return,
-                Err(err) => {
-                    last_error.replace(err);
-                }
+            if try_open("open", &[url]) {
+                return;
             }
         }
 
@@ -3024,35 +3048,20 @@ impl Model {
                 ("x-www-browser", vec![url]),
             ];
             for (cmd, args) in candidates {
-                match std::process::Command::new(cmd).args(args).spawn() {
-                    Ok(_) => return,
-                    Err(err) => {
-                        last_error.replace(err);
-                    }
+                if try_open(cmd, &args) {
+                    return;
                 }
             }
         }
 
         #[cfg(target_os = "windows")]
         {
-            match std::process::Command::new("cmd")
-                .args(["/C", "start", "", url])
-                .spawn()
-            {
-                Ok(_) => return,
-                Err(err) => {
-                    last_error.replace(err);
-                }
+            if try_open("cmd", &["/C", "start", "", url]) {
+                return;
             }
 
-            match std::process::Command::new("powershell")
-                .args(["-NoProfile", "-Command", "Start-Process", url])
-                .spawn()
-            {
-                Ok(_) => return,
-                Err(err) => {
-                    last_error.replace(err);
-                }
+            if try_open("powershell", &["-NoProfile", "-Command", "Start-Process", url]) {
+                return;
             }
         }
 
