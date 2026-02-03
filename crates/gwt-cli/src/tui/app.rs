@@ -1076,7 +1076,10 @@ impl Model {
             return;
         }
 
-        let repo_root = self.repo_root.clone();
+        let repo_root = self
+            .bare_repo_path
+            .clone()
+            .unwrap_or_else(|| self.repo_root.clone());
         let (tx, rx) = mpsc::channel();
         self.pr_title_rx = Some(rx);
 
@@ -1144,7 +1147,10 @@ impl Model {
     fn spawn_git_view_pr_fetch(&mut self, branch: &str) {
         let branch = branch.to_string();
         let lookup = normalize_branch_name(&branch);
-        let repo_root = self.repo_root.clone();
+        let repo_root = self
+            .bare_repo_path
+            .clone()
+            .unwrap_or_else(|| self.repo_root.clone());
         let (tx, rx) = mpsc::channel();
         self.git_view_pr_rx = Some(rx);
 
