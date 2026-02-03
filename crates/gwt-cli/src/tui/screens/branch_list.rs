@@ -167,6 +167,8 @@ pub struct BranchItem {
     pub pr_number: Option<u64>,
     /// PR URL for latest PR (if any)
     pub pr_url: Option<String>,
+    /// PR state for latest PR (if any)
+    pub pr_state: Option<String>,
     /// FR-085: Whether the upstream branch has been deleted (gone)
     pub is_gone: bool,
 }
@@ -177,6 +179,7 @@ pub struct PrInfo {
     pub title: String,
     pub number: u64,
     pub url: Option<String>,
+    pub state: String,
 }
 
 #[derive(Debug, Clone)]
@@ -257,7 +260,8 @@ impl BranchItem {
             is_selected: false,
             pr_title: None,
             pr_number: None,
-            pr_url: None,            // FR-016: Will be populated from PrCache
+            pr_url: None, // FR-016: Will be populated from PrCache
+            pr_state: None,
             is_gone: branch.is_gone, // FR-085: Populate gone status from Branch
         };
         item.update_safety_status();
@@ -313,6 +317,7 @@ impl BranchItem {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: branch.is_gone, // FR-085: Populate gone status from Branch
         };
         item.update_safety_status();
@@ -957,6 +962,7 @@ impl BranchListState {
                 item.pr_title = Some(pr.title.clone());
                 item.pr_number = Some(pr.number);
                 item.pr_url = pr.url.clone();
+                item.pr_state = Some(pr.state.clone());
             }
         }
 
@@ -2536,6 +2542,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: false,
         }
     }
@@ -2807,6 +2814,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -2832,6 +2840,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
@@ -2972,6 +2981,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: false,
         }];
 
@@ -3020,6 +3030,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: false,
         }];
 
@@ -3077,6 +3088,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -3102,6 +3114,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
@@ -3189,6 +3202,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: false,
         }];
 
@@ -3245,6 +3259,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: false,
         }];
 
@@ -3371,6 +3386,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -3396,6 +3412,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
@@ -3440,6 +3457,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -3465,6 +3483,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
@@ -3509,6 +3528,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -3534,6 +3554,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
@@ -3549,6 +3570,7 @@ mod tests {
                 title: "Cool PR".to_string(),
                 number: 123,
                 url: Some("https://github.com/example/repo/pull/123".to_string()),
+                state: "OPEN".to_string(),
             },
         );
         state.apply_pr_info(&info);
@@ -3556,6 +3578,7 @@ mod tests {
         let filtered = state.filtered_branches();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "feature/one");
+        assert_eq!(filtered[0].pr_state.as_deref(), Some("OPEN"));
     }
 
     #[test]
@@ -3583,6 +3606,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: false,
         };
 
@@ -3637,6 +3661,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -3662,6 +3687,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
@@ -3715,6 +3741,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -3740,6 +3767,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -3765,6 +3793,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];

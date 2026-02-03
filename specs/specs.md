@@ -1,13 +1,14 @@
 <!-- markdownlint-disable MD013 -->
 # 仕様一覧
 
-**最終更新**: 2026-02-02
+**最終更新**: 2026-02-03
 
 このファイルは `.specify/scripts/bash/update-specs-index.sh` により自動生成されました。
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
-| [SPEC-1ea18899](SPEC-1ea18899/spec.md) | 機能仕様: [機能名] | [日付] |
+| [SPEC-92053c0d](SPEC-92053c0d/spec.md) | 機能仕様: commitlint を npm ci 無しで実行可能にする | 2026-02-03 |
+| [SPEC-d2f4762a](SPEC-d2f4762a/spec.md) | 機能仕様: ブランチ選択画面（Branch Selection Screen） | 2025-11-18 |
 | [SPEC-fdebd681](SPEC-fdebd681/spec.md) | Codex collaboration_modes Support | - |
 | [SPEC-f8dab6e2](SPEC-f8dab6e2/spec.md) | 機能仕様: Claude Code プラグインマーケットプレイス自動登録 | 2026-01-30 |
 | [SPEC-f59c553d](SPEC-f59c553d/spec.md) | 機能仕様: npm postinstall ダウンロード安定化 | 2026-01-26 |
@@ -15,7 +16,6 @@
 | [SPEC-e66acf66](SPEC-e66acf66/spec.md) | 機能仕様: エラーポップアップ・ログ出力システム | 2026-01-22 |
 | [SPEC-e4798383](SPEC-e4798383/spec.md) | 機能仕様: GitHub Issue連携によるブランチ作成 | 2025-01-25 |
 | [SPEC-dafff079](SPEC-dafff079/spec.md) | 機能仕様: 環境変数プロファイル機能 | 2025-12-15 |
-| [SPEC-d2f4762a](SPEC-d2f4762a/spec.md) | 機能仕様: ブランチ選択画面（Branch Selection Screen） | 2025-11-18 |
 | [SPEC-d27be71b](SPEC-d27be71b/spec.md) | SPEC-d27be71b: Ink.js から OpenTUI への移行 | 2026-01-04 |
 | [SPEC-c8e7a5b2](SPEC-c8e7a5b2/spec.md) | 機能仕様: CLI起動時Web UIサーバー自動起動 | 2025-12-12 |
 | [SPEC-c1d5bad7](SPEC-c1d5bad7/spec.md) | ログ一覧・詳細表示・クリップボードコピー機能 | 2025-12-25 |
@@ -24,6 +24,7 @@
 | [SPEC-b7bde3ff](SPEC-b7bde3ff/spec.md) | 機能仕様: tmuxマルチモードサポート | 2026-01-18 |
 | [SPEC-b0b1b0b1](SPEC-b0b1b0b1/spec.md) | 機能仕様: AIツール終了時の未コミット警告と未プッシュ確認 | 2025-12-20 |
 | [SPEC-a70a1ece](SPEC-a70a1ece/spec.md) | 機能仕様: bareリポジトリ対応とヘッダーブランチ表示 | 2026-02-01 |
+| [SPEC-a3f4c9df](SPEC-a3f4c9df/spec.md) | 機能仕様: 設定ファイル統合・整理 | 2026-02-02 |
 | [SPEC-a0d7334d](SPEC-a0d7334d/spec.md) | 機能仕様: Dependabot PR の向き先を develop に固定 | 2025-12-22 |
 | [SPEC-96e694b4](SPEC-96e694b4/spec.md) | 機能仕様: Codex CLI gpt-5.2-codex 対応 | 2025-12-18 |
 | [SPEC-925c010b](SPEC-925c010b/spec.md) | 機能仕様: Docker Compose の Playwright noVNC を arm64 で起動可能にする | 2026-01-17 |
@@ -43,6 +44,7 @@
 | [SPEC-2ca73d7d](SPEC-2ca73d7d/spec.md) | 機能仕様: エージェント履歴の永続化 | 2026-01-22 |
 | [SPEC-29e16bd0](SPEC-29e16bd0/spec.md) | 機能仕様: tools.json スキーママイグレーション | 2026-01-04 |
 | [SPEC-1f56fd80](SPEC-1f56fd80/spec.md) | 機能仕様: Web UI システムトレイ統合 | 2025-12-12 |
+| [SPEC-1ea18899](SPEC-1ea18899/spec.md) | 機能仕様: GitView画面 | 2026-02-02 |
 | [SPEC-1defd8fd](SPEC-1defd8fd/spec.md) | 機能仕様: bugfixブランチタイプのサポート追加 | 2025-01-18 |
 | [SPEC-1d62511e](SPEC-1d62511e/spec.md) | SPEC-1d62511e: TypeScript/Bun から Rust への完全移行 | 2026-01-11 |
 | [SPEC-067a8026](SPEC-067a8026/spec.md) | 機能仕様: LLMベースリリースワークフロー | 2026-01-21 |
