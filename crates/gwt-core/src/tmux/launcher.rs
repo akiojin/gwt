@@ -9,7 +9,9 @@ use std::time::SystemTime;
 
 use super::error::{TmuxError, TmuxResult};
 use super::pane::{enable_mouse, select_pane, AgentPane, SplitDirection};
-use tracing::debug;
+use tracing::{debug, info, warn};
+
+use crate::docker::{detect_docker_files, DockerFileType, DockerManager};
 
 /// Configuration for launching an agent in a tmux pane
 #[derive(Debug, Clone)]
@@ -511,6 +513,231 @@ pub fn validate_working_dir(path: &Path) -> TmuxResult<()> {
     Ok(())
 }
 
+// ============================================================================
+// Docker Integration (SPEC-f5f5657e)
+// ============================================================================
+
+/// Configuration for Docker-aware agent launch
+#[derive(Debug, Clone)]
+pub struct DockerLaunchConfig {
+    /// Path to the worktree directory
+    pub worktree_path: String,
+    /// Name of the worktree (used for container naming)
+    pub worktree_name: String,
+    /// The agent command to execute
+    pub command: String,
+    /// Command arguments
+    pub args: Vec<String>,
+    /// Optional service name (for multi-service compose files)
+    pub service: Option<String>,
+}
+
+/// Result of Docker-aware launch
+#[derive(Debug)]
+pub struct DockerLaunchResult {
+    /// Whether Docker was used
+    pub used_docker: bool,
+    /// Docker file type if Docker was used
+    pub docker_file_type: Option<DockerFileType>,
+    /// Container name if Docker was used
+    pub container_name: Option<String>,
+    /// The DockerManager for cleanup (if Docker was used)
+    pub manager: Option<DockerManager>,
+}
+
+impl DockerLaunchResult {
+    /// Create a result for non-Docker launch
+    pub fn host_launch() -> Self {
+        Self {
+            used_docker: false,
+            docker_file_type: None,
+            container_name: None,
+            manager: None,
+        }
+    }
+
+    /// Create a result for Docker launch
+    pub fn docker_launch(docker_file_type: DockerFileType, manager: DockerManager) -> Self {
+        Self {
+            used_docker: true,
+            docker_file_type: Some(docker_file_type),
+            container_name: Some(manager.container_name().to_string()),
+            manager: Some(manager),
+        }
+    }
+}
+
+/// Check if Docker environment is available for a worktree
+///
+/// Returns the detected Docker file type if Docker files are found.
+pub fn detect_docker_environment(worktree_path: &Path) -> Option<DockerFileType> {
+    detect_docker_files(worktree_path)
+}
+
+/// Build a command string for executing an agent inside a Docker container
+///
+/// Generates a command that:
+/// 1. Starts the Docker container (docker compose up -d)
+/// 2. Executes the agent inside the container (docker compose exec)
+/// 3. Stops the container when the agent exits (docker compose down)
+pub fn build_docker_agent_command(
+    worktree_path: &Path,
+    worktree_name: &str,
+    command: &str,
+    args: &[String],
+    service: Option<&str>,
+) -> String {
+    let container_name = DockerManager::generate_container_name(worktree_name);
+    let service_name = service.unwrap_or("app"); // Default service name
+
+    // Build the full command that:
+    // 1. Starts container
+    // 2. Runs agent in container
+    // 3. Stops container when done (even on error)
+    let args_str = if args.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", args.join(" "))
+    };
+
+    let working_dir = worktree_path.to_string_lossy();
+
+    format!(
+        r#"cd '{}' && \
+COMPOSE_PROJECT_NAME='{}' docker compose up -d && \
+trap 'COMPOSE_PROJECT_NAME="{}" docker compose down' EXIT && \
+COMPOSE_PROJECT_NAME='{}' docker compose exec -T {} {}{}"#,
+        working_dir,
+        container_name,
+        container_name,
+        container_name,
+        service_name,
+        command,
+        args_str
+    )
+}
+
+/// Launch an agent with Docker support
+///
+/// Detects Docker files in the worktree and:
+/// - If found: Starts container and launches agent inside it
+/// - If not found: Falls back to host execution
+///
+/// Returns information about the launch for cleanup purposes.
+pub fn prepare_docker_launch(
+    worktree_path: &Path,
+    worktree_name: &str,
+) -> TmuxResult<DockerLaunchResult> {
+    // Check for Docker files
+    let docker_file_type = match detect_docker_files(worktree_path) {
+        Some(dtype) => dtype,
+        None => {
+            debug!(
+                category = "docker",
+                worktree = %worktree_path.display(),
+                "No Docker files detected, using host execution"
+            );
+            return Ok(DockerLaunchResult::host_launch());
+        }
+    };
+
+    info!(
+        category = "docker",
+        worktree = %worktree_path.display(),
+        docker_type = ?docker_file_type,
+        "Docker files detected"
+    );
+
+    // Create DockerManager
+    let manager = DockerManager::new(worktree_path, worktree_name, docker_file_type.clone());
+
+    debug!(
+        category = "docker",
+        container = %manager.container_name(),
+        "Created DockerManager for worktree"
+    );
+
+    Ok(DockerLaunchResult::docker_launch(docker_file_type, manager))
+}
+
+/// Launch an agent in a pane with Docker support
+///
+/// This is the main entry point for Docker-aware agent launching.
+/// If Docker files are detected, the agent is launched inside a container.
+/// Otherwise, falls back to normal host execution.
+pub fn launch_in_pane_with_docker(
+    target_pane: &str,
+    worktree_path: &Path,
+    worktree_name: &str,
+    command: &str,
+    args: &[String],
+    service: Option<&str>,
+) -> TmuxResult<(String, DockerLaunchResult)> {
+    // Prepare Docker launch (detect files, create manager)
+    let docker_result = prepare_docker_launch(worktree_path, worktree_name)?;
+
+    let full_command = if docker_result.used_docker {
+        // Build Docker-wrapped command
+        build_docker_agent_command(worktree_path, worktree_name, command, args, service)
+    } else {
+        // Build host command
+        if args.is_empty() {
+            command.to_string()
+        } else {
+            format!("{} {}", command, args.join(" "))
+        }
+    };
+
+    // Launch in tmux pane
+    let pane_id = launch_in_pane(
+        target_pane,
+        &worktree_path.to_string_lossy(),
+        &full_command,
+    )?;
+
+    if docker_result.used_docker {
+        info!(
+            category = "docker",
+            pane_id = %pane_id,
+            container = docker_result.container_name.as_deref().unwrap_or("unknown"),
+            "Agent launched in Docker container"
+        );
+    } else {
+        debug!(
+            category = "docker",
+            pane_id = %pane_id,
+            "Agent launched on host (no Docker)"
+        );
+    }
+
+    Ok((pane_id, docker_result))
+}
+
+/// Cleanup Docker resources after agent terminates
+///
+/// This should be called when the agent pane is closed.
+/// The trap in the command should handle cleanup, but this provides
+/// a fallback mechanism.
+pub fn cleanup_docker(result: &DockerLaunchResult) {
+    if let Some(ref manager) = result.manager {
+        if manager.is_running() {
+            info!(
+                category = "docker",
+                container = %manager.container_name(),
+                "Cleaning up Docker container"
+            );
+            if let Err(e) = manager.stop() {
+                warn!(
+                    category = "docker",
+                    container = %manager.container_name(),
+                    error = %e,
+                    "Failed to stop Docker container during cleanup"
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -725,5 +952,101 @@ mod tests {
                 key
             );
         }
+    }
+
+    // Docker integration tests (SPEC-f5f5657e)
+
+    #[test]
+    fn test_docker_launch_result_host() {
+        let result = DockerLaunchResult::host_launch();
+        assert!(!result.used_docker);
+        assert!(result.docker_file_type.is_none());
+        assert!(result.container_name.is_none());
+        assert!(result.manager.is_none());
+    }
+
+    #[test]
+    fn test_build_docker_agent_command() {
+        use std::path::PathBuf;
+
+        let worktree_path = PathBuf::from("/tmp/my-worktree");
+        let cmd = build_docker_agent_command(
+            &worktree_path,
+            "my-worktree",
+            "claude",
+            &[],
+            None,
+        );
+
+        // Verify command structure
+        assert!(cmd.contains("docker compose up -d"));
+        assert!(cmd.contains("docker compose down"));
+        assert!(cmd.contains("docker compose exec"));
+        assert!(cmd.contains("COMPOSE_PROJECT_NAME='gwt-my-worktree'"));
+        assert!(cmd.contains("claude"));
+    }
+
+    #[test]
+    fn test_build_docker_agent_command_with_args() {
+        use std::path::PathBuf;
+
+        let worktree_path = PathBuf::from("/tmp/my-worktree");
+        let args = vec!["--model".to_string(), "opus".to_string()];
+        let cmd = build_docker_agent_command(
+            &worktree_path,
+            "my-worktree",
+            "claude",
+            &args,
+            Some("web"),
+        );
+
+        assert!(cmd.contains("claude --model opus"));
+        assert!(cmd.contains("exec -T web"));
+    }
+
+    #[test]
+    fn test_detect_docker_environment_no_docker() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let result = detect_docker_environment(temp_dir.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_detect_docker_environment_with_compose() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(temp_dir.path().join("docker-compose.yml"), "version: '3'").unwrap();
+
+        let result = detect_docker_environment(temp_dir.path());
+        assert!(result.is_some());
+        assert!(result.unwrap().is_compose());
+    }
+
+    #[test]
+    fn test_prepare_docker_launch_no_docker() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let result = prepare_docker_launch(temp_dir.path(), "test-worktree").unwrap();
+
+        assert!(!result.used_docker);
+        assert!(result.manager.is_none());
+    }
+
+    #[test]
+    fn test_prepare_docker_launch_with_compose() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(temp_dir.path().join("docker-compose.yml"), "version: '3'").unwrap();
+
+        let result = prepare_docker_launch(temp_dir.path(), "test-worktree").unwrap();
+
+        assert!(result.used_docker);
+        assert!(result.manager.is_some());
+        assert_eq!(result.container_name, Some("gwt-test-worktree".to_string()));
     }
 }
