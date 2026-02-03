@@ -174,7 +174,6 @@ fn cleanup_startup_logs(repo_root: &Path, settings: &Settings) -> Result<usize, 
     gwt_core::logging::cleanup_old_logs(&log_dir, settings.log_retention_days)
 }
 
-
 /// Map hook event name to AgentStatus (SPEC-861d8cdf T-101)
 ///
 /// Event mappings:

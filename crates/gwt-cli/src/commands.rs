@@ -28,7 +28,9 @@ pub fn handle_command(
         Commands::Switch { branch, new_window } => cmd_switch(repo_root, &branch, new_window),
         Commands::Clean { dry_run, prune } => cmd_clean(repo_root, dry_run, prune),
         Commands::Logs { limit, follow } => cmd_logs(repo_root, settings, limit, follow),
-        Commands::Serve { port, address } => cmd_serve(repo_root, settings, port, address.as_deref()),
+        Commands::Serve { port, address } => {
+            cmd_serve(repo_root, settings, port, address.as_deref())
+        }
         Commands::Init { url, force, full } => cmd_init(repo_root, url.as_deref(), force, full),
         Commands::Lock { target, reason } => cmd_lock(repo_root, &target, reason.as_deref()),
         Commands::Unlock { target } => cmd_unlock(repo_root, &target),
@@ -75,8 +77,8 @@ fn cmd_list(repo_root: &PathBuf, format: OutputFormat) -> Result<(), GwtError> {
                     })
                 })
                 .collect::<Vec<_>>());
-            let output =
-                serde_json::to_string_pretty(&json).map_err(|e| GwtError::Internal(e.to_string()))?;
+            let output = serde_json::to_string_pretty(&json)
+                .map_err(|e| GwtError::Internal(e.to_string()))?;
             println!("{}", output);
         }
         OutputFormat::Simple => {

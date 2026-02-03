@@ -93,34 +93,28 @@ impl Model {
             return;
         };
 
-        loop {
-            match rx.try_recv() {
-                Ok(update) => {
-                    if !self.ai_wizard.visible {
-                        break;
-                    }
-                    match update.result {
-                        Ok(models) => {
-                            if let Err(err) = self.ai_wizard.apply_models(models) {
-                                self.ai_wizard.fetch_failed(&err);
-                            } else {
-                                self.ai_wizard.fetch_complete();
-                            }
-                        }
-                        Err(err) => {
+        match rx.try_recv() {
+            Ok(update) => {
+                if !self.ai_wizard.visible {
+                    return;
+                }
+                match update.result {
+                    Ok(models) => {
+                        if let Err(err) = self.ai_wizard.apply_models(models) {
                             self.ai_wizard.fetch_failed(&err);
+                        } else {
+                            self.ai_wizard.fetch_complete();
                         }
                     }
-                    break;
-                }
-                Err(TryRecvError::Empty) => {
-                    self.ai_wizard_rx = Some(rx);
-                    break;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    break;
+                    Err(err) => {
+                        self.ai_wizard.fetch_failed(&err);
+                    }
                 }
             }
+            Err(TryRecvError::Empty) => {
+                self.ai_wizard_rx = Some(rx);
+            }
+            Err(TryRecvError::Disconnected) => {}
         }
     }
 

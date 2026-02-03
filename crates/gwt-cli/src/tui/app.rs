@@ -18,8 +18,8 @@ use crossterm::{
 };
 use gwt_core::agent::codex::supports_collaboration_modes;
 use gwt_core::ai::{
-    summarize_session, AIClient, AIError, AgentHistoryStore, AgentType, ChatMessage, ModelInfo,
-    ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, OpenCodeSessionParser,
+    summarize_session, AIClient, AIError, AgentHistoryStore, AgentType, ChatMessage,
+    ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, ModelInfo, OpenCodeSessionParser,
     SessionParseError, SessionParser,
 };
 use gwt_core::config::get_branch_tool_history;
