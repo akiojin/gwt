@@ -970,7 +970,7 @@ fn build_compose_agent_command(
     };
     let up_step = if build || force_recreate {
         format!(
-            "{}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ status=$?; echo \"[gwt] docker compose up failed (status=$status).\"; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $status; }} && \\",
+            "{}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ exit_status=$?; echo \"[gwt] docker compose up failed (status=$exit_status).\"; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $exit_status; }}",
             compose_args_debug,
             compose_env_prefix,
             container_name,
@@ -997,7 +997,7 @@ fn build_compose_agent_command(
             "Compose up will use --no-recreate when starting stopped containers"
         );
         format!(
-            "{}if docker ps -q --filter label=com.docker.compose.project={} | grep -q .; then echo \"[gwt] docker compose up skipped (already running).\"; else {}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ status=$?; echo \"[gwt] docker compose up failed (status=$status).\"; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $status; }}; fi && \\",
+            "{}if docker ps -q --filter label=com.docker.compose.project={} | grep -q .; then echo \"[gwt] docker compose up skipped (already running).\"; else {}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ exit_status=$?; echo \"[gwt] docker compose up failed (status=$exit_status).\"; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $exit_status; }}; fi",
             compose_args_debug,
             container_name,
             compose_args_debug,
@@ -1017,8 +1017,8 @@ fn build_compose_agent_command(
     };
     format!(
         r#"cd {} && \
-{} \
-{}{}COMPOSE_PROJECT_NAME={} docker compose{} exec{} {} {} || {{ status=$?; echo "[gwt] docker compose exec failed (status=$status)."; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $status; }}"#,
+{} && \
+{}{}COMPOSE_PROJECT_NAME={} docker compose{} exec{} {} {} || {{ exit_status=$?; echo "[gwt] docker compose exec failed (status=$exit_status)."; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $exit_status; }}"#,
         working_dir,
         up_step,
         stop_trap,
