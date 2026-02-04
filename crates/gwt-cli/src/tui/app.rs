@@ -29,7 +29,7 @@ use gwt_core::config::{
     setup_gwt_plugin, AISettings, CustomCodingAgent, Profile, ProfilesConfig, ResolvedAISettings,
     ToolSessionEntry,
 };
-use gwt_core::docker::DockerManager;
+use gwt_core::docker::{ContainerStatus, DockerManager};
 use gwt_core::error::GwtError;
 use gwt_core::git::{
     detect_repo_type, get_header_context, Branch, PrCache, Remote, RepoType, Repository,
@@ -5431,7 +5431,7 @@ impl Model {
         force_host: bool,
         keep_launch_status: bool,
     ) {
-        if force_host || launcher::detect_docker_environment(&plan.config.worktree_path).is_none() {
+        if force_host {
             self.launch_plan_in_tmux(
                 plan,
                 service,
@@ -5439,6 +5439,38 @@ impl Model {
                 keep_launch_status,
                 false,
                 false,
+                false,
+            );
+            return;
+        }
+
+        let docker_file_type = match launcher::detect_docker_environment(&plan.config.worktree_path) {
+            Some(dtype) => dtype,
+            None => {
+                self.launch_plan_in_tmux(
+                    plan,
+                    service,
+                    force_host,
+                    keep_launch_status,
+                    false,
+                    false,
+                    false,
+                );
+                return;
+            }
+        };
+        let manager = DockerManager::new(
+            &plan.config.worktree_path,
+            &plan.config.branch_name,
+            docker_file_type,
+        );
+        let status = manager.get_status();
+        if !Self::should_prompt_recreate(status) {
+            self.maybe_request_build_selection(
+                plan,
+                service,
+                force_host,
+                keep_launch_status,
                 false,
             );
             return;
@@ -5464,6 +5496,10 @@ impl Model {
         };
         self.screen_stack.push(self.screen.clone());
         self.screen = Screen::Confirm;
+    }
+
+    fn should_prompt_recreate(status: ContainerStatus) -> bool {
+        status.exists()
     }
 
     fn maybe_request_build_selection(
@@ -9046,5 +9082,12 @@ mod tests {
         let keybinds = model.get_footer_keybinds();
         assert!(keybinds.contains("Skip"));
         assert!(keybinds.contains("Cancel"));
+    }
+
+    #[test]
+    fn test_should_prompt_recreate() {
+        assert!(Model::should_prompt_recreate(ContainerStatus::Running));
+        assert!(Model::should_prompt_recreate(ContainerStatus::Stopped));
+        assert!(!Model::should_prompt_recreate(ContainerStatus::NotFound));
     }
 }
