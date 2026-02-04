@@ -180,7 +180,6 @@ pub struct QuickStartDockerSettings {
     pub service: Option<String>,
     pub force_host: Option<bool>,
     pub recreate: Option<bool>,
-    pub build: Option<bool>,
     pub keep: Option<bool>,
 }
 
@@ -189,7 +188,6 @@ impl QuickStartDockerSettings {
         let has_any = entry.docker_service.is_some()
             || entry.docker_force_host.is_some()
             || entry.docker_recreate.is_some()
-            || entry.docker_build.is_some()
             || entry.docker_keep.is_some();
         if !has_any {
             return None;
@@ -198,7 +196,6 @@ impl QuickStartDockerSettings {
             service: entry.docker_service.clone(),
             force_host: entry.docker_force_host,
             recreate: entry.docker_recreate,
-            build: entry.docker_build,
             keep: entry.docker_keep,
         })
     }
@@ -3882,7 +3879,7 @@ mod tests {
             docker_service: Some("gwt".to_string()),
             docker_force_host: Some(false),
             docker_recreate: Some(true),
-            docker_build: Some(false),
+            docker_build: None,
             docker_keep: Some(true),
         }];
         state.open_for_branch("feature/test", history, None);
@@ -3897,8 +3894,29 @@ mod tests {
         assert_eq!(docker.service.as_deref(), Some("gwt"));
         assert_eq!(docker.force_host, Some(false));
         assert_eq!(docker.recreate, Some(true));
-        assert_eq!(docker.build, Some(false));
         assert_eq!(docker.keep, Some(true));
+    }
+
+    #[test]
+    fn test_quick_start_docker_settings_ignore_build_only() {
+        let entry = QuickStartEntry {
+            tool_id: "claude-code".to_string(),
+            tool_label: "Claude Code".to_string(),
+            model: None,
+            reasoning_level: None,
+            version: None,
+            session_id: None,
+            skip_permissions: None,
+            collaboration_modes: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: Some(true),
+            docker_keep: None,
+        };
+
+        let settings = QuickStartDockerSettings::from_entry(&entry);
+        assert!(settings.is_none());
     }
 
     #[test]

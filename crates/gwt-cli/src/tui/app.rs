@@ -604,6 +604,7 @@ struct PendingBuildSelect {
     service: Option<String>,
     force_host: bool,
     force_recreate: bool,
+    quick_start_keep: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -2472,7 +2473,7 @@ impl Model {
                 docker_service: last_entry.and_then(|entry| entry.docker_service.clone()),
                 docker_force_host: last_entry.and_then(|entry| entry.docker_force_host),
                 docker_recreate: last_entry.and_then(|entry| entry.docker_recreate),
-                docker_build: last_entry.and_then(|entry| entry.docker_build),
+                docker_build: None,
                 docker_keep: last_entry.and_then(|entry| entry.docker_keep),
                 timestamp: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -2716,7 +2717,7 @@ impl Model {
                 docker_service: entry.docker_service,
                 docker_force_host: entry.docker_force_host,
                 docker_recreate: entry.docker_recreate,
-                docker_build: entry.docker_build,
+                docker_build: None,
                 docker_keep: entry.docker_keep,
             })
             .collect();
@@ -2950,6 +2951,7 @@ impl Model {
                 pending.force_host,
                 keep_launch_status,
                 force_recreate,
+                None,
             );
             if let Some(prev_screen) = self.screen_stack.pop() {
                 self.screen = prev_screen;
@@ -2968,6 +2970,7 @@ impl Model {
                 keep_launch_status,
                 build,
                 pending.force_recreate,
+                pending.quick_start_keep,
             );
             if let Some(prev_screen) = self.screen_stack.pop() {
                 self.screen = prev_screen;
@@ -5001,7 +5004,7 @@ impl Model {
                             docker_service: entry.docker_service,
                             docker_force_host: entry.docker_force_host,
                             docker_recreate: entry.docker_recreate,
-                            docker_build: entry.docker_build,
+                            docker_build: None,
                             docker_keep: entry.docker_keep,
                         })
                         .collect();
@@ -5430,20 +5433,17 @@ impl Model {
             None
         };
 
-        let (Some(force_recreate), Some(build), Some(keep)) =
-            (quick_start.recreate, quick_start.build, quick_start.keep)
-        else {
+        let (Some(force_recreate), Some(keep)) = (quick_start.recreate, quick_start.keep) else {
             return false;
         };
 
-        self.launch_plan_in_tmux(
+        self.maybe_request_build_selection(
             plan,
             service.as_deref(),
             false,
             keep_launch_status,
-            build,
             force_recreate,
-            !keep,
+            Some(keep),
         );
         true
     }
@@ -5569,6 +5569,7 @@ impl Model {
                 force_host,
                 keep_launch_status,
                 false,
+                None,
             );
             return;
         }
@@ -5587,7 +5588,7 @@ impl Model {
             ],
             confirm_label: "Recreate".to_string(),
             cancel_label: "Reuse".to_string(),
-            selected_confirm: false,
+            selected_confirm: manager.needs_rebuild(),
             is_dangerous: false,
             ..Default::default()
         };
@@ -5606,6 +5607,7 @@ impl Model {
         force_host: bool,
         keep_launch_status: bool,
         force_recreate: bool,
+        quick_start_keep: Option<bool>,
     ) {
         if force_host || launcher::detect_docker_environment(&plan.config.worktree_path).is_none() {
             self.launch_plan_in_tmux(
@@ -5620,11 +5622,47 @@ impl Model {
             return;
         }
 
+        let docker_file_type = match launcher::detect_docker_environment(&plan.config.worktree_path)
+        {
+            Some(dtype) => dtype,
+            None => {
+                self.launch_plan_in_tmux(
+                    plan,
+                    service,
+                    force_host,
+                    keep_launch_status,
+                    false,
+                    force_recreate,
+                    false,
+                );
+                return;
+            }
+        };
+
+        let manager = DockerManager::new(
+            &plan.config.worktree_path,
+            &plan.config.branch_name,
+            docker_file_type,
+        );
+        if !manager.needs_rebuild() {
+            self.maybe_request_cleanup_selection(
+                plan,
+                service,
+                force_host,
+                keep_launch_status,
+                false,
+                force_recreate,
+                quick_start_keep,
+            );
+            return;
+        }
+
         self.pending_build_select = Some(PendingBuildSelect {
             plan: plan.clone(),
             service: service.map(|s| s.to_string()),
             force_host,
             force_recreate,
+            quick_start_keep,
         });
         self.confirm = ConfirmState {
             title: "Docker Build".to_string(),
@@ -5651,7 +5689,20 @@ impl Model {
         keep_launch_status: bool,
         build: bool,
         force_recreate: bool,
+        quick_start_keep: Option<bool>,
     ) {
+        if let Some(keep) = quick_start_keep {
+            self.launch_plan_in_tmux(
+                plan,
+                service,
+                force_host,
+                keep_launch_status,
+                build,
+                force_recreate,
+                !keep,
+            );
+            return;
+        }
         if force_host || launcher::detect_docker_environment(&plan.config.worktree_path).is_none() {
             self.launch_plan_in_tmux(
                 plan,
@@ -5944,21 +5995,20 @@ impl Model {
         self.pane_list.update_panes(panes);
 
         let docker_env = launcher::detect_docker_environment(&plan.config.worktree_path);
-        let (docker_service, docker_force_host, docker_recreate, docker_build, docker_keep) =
+        let (docker_service, docker_force_host, docker_recreate, docker_keep) =
             if docker_env.is_some() {
                 if force_host {
-                    (None, Some(true), None, None, None)
+                    (None, Some(true), None, None)
                 } else {
                     (
                         service.map(|value| value.to_string()),
                         Some(false),
                         Some(force_recreate),
-                        Some(build),
                         Some(!stop_on_exit),
                     )
                 }
             } else {
-                (None, None, None, None, None)
+                (None, None, None, None)
             };
 
         // FR-071: Save session entry for tmux mode
@@ -5977,7 +6027,7 @@ impl Model {
             docker_service,
             docker_force_host,
             docker_recreate,
-            docker_build,
+            docker_build: None,
             docker_keep,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

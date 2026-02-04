@@ -213,12 +213,33 @@
 - [ ] Quick Start履歴からDocker選択情報を復元
 - [ ] Dockerウィザードの各確認をQuick Start設定がある場合はスキップ
 - [ ] サービス不一致時はサービス選択へフォールバック
+- [ ] Build/No BuildはQuick Startでは保存・復元しない
 
 **受け入れ基準**:
 
 - 同一ブランチのQuick StartでDocker設定が復元される
 - Dockerウィザードが表示されずに起動できる
 - テスト（T-401〜T-403）が通る
+
+---
+
+### TASK-011: Build確認の条件化とRecreateデフォルト調整
+
+**ステータス**: 未着手
+**優先度**: P1
+**依存**: TASK-006, TASK-007
+
+**内容**:
+
+- [ ] Dockerfile/compose変更検知時のみBuild/No Buildを表示
+- [ ] Build確認時のデフォルトをNo Buildにする
+- [ ] Buildが必要な場合はRecreateのデフォルトを推奨にする
+
+**受け入れ基準**:
+
+- 変更なしではBuild確認が表示されない
+- 変更ありではBuild確認が表示される
+- Buildが必要な場合にRecreateがデフォルトになる
 
 ## Phase 4: TUI統合
 

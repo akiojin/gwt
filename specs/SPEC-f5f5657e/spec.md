@@ -25,14 +25,14 @@
 6. **前提条件** 複数サービスのcompose、**操作** サービス選択画面を表示、**期待結果** `HostOS` と `Docker:{service}` が同一リストに表示され、カーソルの背景反転は1行全体に適用される
 7. **前提条件** Docker起動が必要、**操作** 起動時にビルド確認を行い「No Build」を選択、**期待結果** `docker compose up` は `--no-build` を使用する
 8. **前提条件** Docker起動が必要、**操作** 起動時にビルド確認を行い「Build」を選択、**期待結果** `docker compose up` は `--build` を使用する
-9. **前提条件** Docker起動が必要、**操作** 起動時にRecreate/Reuse確認を行い「Reuse」を選択、**期待結果** `docker compose up` は `--force-recreate` を付与しない
-10. **前提条件** Docker起動が必要、**操作** 起動時にRecreate/Reuse確認を行い「Recreate」を選択、**期待結果** `docker compose up` は `--force-recreate` を使用する
-11. **前提条件** ホストにCodexのauth.jsonが存在、**操作** Dockerコンテナ起動、**期待結果** コンテナ内のCodex認証情報がホストのauth.jsonに同期される
-12. **前提条件** Docker起動が必要、**操作** 起動時にKeep/Stop確認を行い「Keep」を選択、**期待結果** `docker compose down` は実行されない
-13. **前提条件** Docker起動が必要、**操作** 起動時にKeep/Stop確認を行い「Stop」を選択、**期待結果** `docker compose down` が実行される
-14. **前提条件** Dockerコンテナが存在しない、**操作** エージェント起動、**期待結果** Recreate/Reuseの確認は表示されない
-15. **前提条件** 同一ブランチでQuick Start履歴が存在、**操作** Quick Startで「Resume/Start new」を選択、**期待結果** 以前選択したHostOS/Dockerサービス・Recreate/Reuse・Build/No Build・Keep/Stopが復元され、Dockerウィザードは表示されない
-9. **前提条件** ホストにCodexのauth.jsonが存在、**操作** Dockerコンテナ起動、**期待結果** コンテナ内のCodex認証情報がホストのauth.jsonに同期される
+9. **前提条件** Dockerfile/compose変更なし、**操作** エージェント起動、**期待結果** Build/No Buildの確認は表示されず `--no-build` が使用される
+10. **前提条件** Docker起動が必要、**操作** 起動時にRecreate/Reuse確認を行い「Reuse」を選択、**期待結果** `docker compose up` は `--force-recreate` を付与しない
+11. **前提条件** Docker起動が必要、**操作** 起動時にRecreate/Reuse確認を行い「Recreate」を選択、**期待結果** `docker compose up` は `--force-recreate` を使用する
+12. **前提条件** ホストにCodexのauth.jsonが存在、**操作** Dockerコンテナ起動、**期待結果** コンテナ内のCodex認証情報がホストのauth.jsonに同期される
+13. **前提条件** Docker起動が必要、**操作** 起動時にKeep/Stop確認を行い「Keep」を選択、**期待結果** `docker compose down` は実行されない
+14. **前提条件** Docker起動が必要、**操作** 起動時にKeep/Stop確認を行い「Stop」を選択、**期待結果** `docker compose down` が実行される
+15. **前提条件** Dockerコンテナが存在しない、**操作** エージェント起動、**期待結果** Recreate/Reuseの確認は表示されない
+16. **前提条件** 同一ブランチでQuick Start履歴が存在、**操作** Quick Startで「Resume/Start new」を選択、**期待結果** 以前選択したHostOS/Dockerサービス・Recreate/Reuse・Keep/Stopが復元され、Dockerウィザードは表示されない
 
 ---
 
@@ -138,11 +138,11 @@ Dockerデーモンが起動していない場合、gwtが自動起動を試み�
 - worktree名に特殊文字が含まれる場合、どうなるか？→ コンテナ名は英数字とハイフンのみに正規化（gwt-{sanitized_name}）
 - 既存コンテナが古いイメージで起動中の場合、どうなるか？→ Dockerfileの更新を検知して再ビルド・再作成
 - 複数サービスでホスト起動を選択した場合、どうなるか？→ docker composeを実行せずホストで起動する
-- Codex認証ファイルがコンテナ側で新しくてもホスト側と内容が異なる場合、どうなるか？→ ホストのauth.jsonを優先して同期する
 - Dockerコンテナが未作成の状態ではどうなるか？→ Recreate/Reuseの確認を省略する
 - Codex認証ファイルがコンテナ側で新しくてもホスト側と内容が異なる場合、どうなるか？→ ホストのauth.jsonを優先して同期する
 - Quick StartのDocker設定があるがDockerファイルが見つからない場合はどうなるか？→ Docker設定を無視してホストで起動する
 - Quick StartでHostOSを選んだ履歴がある場合はどうなるか？→ Dockerウィザードを表示せずホストで起動する
+- Dockerfile/compose変更が検出された場合はどうなるか？→ Build/No Build確認を表示し、Build時はRecreateが推奨選択となる
 
 ## 詳細仕様
 
@@ -181,11 +181,13 @@ gwtのcompose定義では`PORT`（デフォルト3000）を使用し、`GWT_PORT
 - 環境変数の継承はホストの環境変数をそのまま使用
 - worktreeの.gitが参照するgitdirはコンテナ内から参照できる必要がある（HOST_GIT_COMMON_DIRをバインド）
 - Docker起動前に「Build/No Build」を選択するUIを表示し、デフォルトはNo Build
+- Docker起動前に「Build/No Build」を選択するUIを表示するが、Dockerfile/compose変更が検出された場合のみ表示しデフォルトはNo Build
 - Docker起動前に「Recreate/Reuse」を選択するUIを表示し、デフォルトはReuse
 - Docker起動前に「Keep/Stop」を選択するUIを表示し、デフォルトはKeep
 - コンテナのHOMEはホストから引き継がず、コンテナ側のデフォルトに従う
-- Quick Start履歴にDocker選択情報（HostOS/Dockerサービス、Recreate/Reuse、Build/No Build、Keep/Stop）がある場合はそれを適用し、Dockerウィザードは表示しない
+- Quick Start履歴にDocker選択情報（HostOS/Dockerサービス、Recreate/Reuse、Keep/Stop）がある場合はそれを適用し、Dockerウィザードは表示しない
 - Quick Start履歴のDockerサービスが現在のcomposeに存在しない場合はサービス選択にフォールバックする
+- Build/No BuildはQuick Startでは保存・復元しない
 
 ### TUI進捗表示
 

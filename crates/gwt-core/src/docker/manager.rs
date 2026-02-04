@@ -3,6 +3,7 @@
 //! Manages Docker containers for worktrees, including startup, shutdown,
 //! and executing commands inside containers.
 
+use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -668,26 +669,44 @@ impl DockerManager {
             Err(_) => return false,
         };
 
-        match (modified, self.last_build_time) {
-            (Some(mod_time), Some(build_time)) => {
-                let needs = mod_time > build_time;
-                debug!(
-                    category = "docker",
-                    needs_rebuild = needs,
-                    "Checked rebuild status"
-                );
-                needs
-            }
-            (Some(_), None) => {
-                // No previous build time recorded, might need rebuild
-                debug!(
-                    category = "docker",
-                    "No previous build time, rebuild may be needed"
-                );
-                true
-            }
+        let last_build_time = self
+            .last_build_time
+            .or_else(|| self.container_created_time());
+        let needs = Self::should_prompt_build(modified, last_build_time);
+        debug!(
+            category = "docker",
+            needs_rebuild = needs,
+            "Checked rebuild status"
+        );
+        needs
+    }
+
+    fn should_prompt_build(
+        modified: Option<SystemTime>,
+        last_build_time: Option<SystemTime>,
+    ) -> bool {
+        match (modified, last_build_time) {
+            (Some(mod_time), Some(build_time)) => mod_time > build_time,
+            (Some(_), None) => true,
             _ => false,
         }
+    }
+
+    fn container_created_time(&self) -> Option<SystemTime> {
+        let container_id = self.get_container_id()?;
+        let output = Command::new("docker")
+            .args(["inspect", "-f", "{{.Created}}", &container_id])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let created_raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if created_raw.is_empty() {
+            return None;
+        }
+        let parsed = DateTime::parse_from_rfc3339(&created_raw).ok()?;
+        Some(parsed.with_timezone(&Utc).into())
     }
 
     /// Rebuild the Docker image
@@ -827,6 +846,7 @@ impl DockerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, SystemTime};
 
     // T-202: Container name generation test
     #[test]
@@ -907,6 +927,41 @@ mod tests {
     fn test_is_retryable_error_timeout() {
         let error = GwtError::DockerTimeout;
         assert!(is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_should_prompt_build_when_modified_after_build() {
+        let now = SystemTime::now();
+        let build_time = now - Duration::from_secs(30);
+        let modified = now;
+        assert!(DockerManager::should_prompt_build(
+            Some(modified),
+            Some(build_time)
+        ));
+    }
+
+    #[test]
+    fn test_should_prompt_build_when_modified_before_build() {
+        let now = SystemTime::now();
+        let build_time = now;
+        let modified = now - Duration::from_secs(30);
+        assert!(!DockerManager::should_prompt_build(
+            Some(modified),
+            Some(build_time)
+        ));
+    }
+
+    #[test]
+    fn test_should_prompt_build_without_build_time() {
+        let now = SystemTime::now();
+        assert!(DockerManager::should_prompt_build(Some(now), None));
+    }
+
+    #[test]
+    fn test_should_prompt_build_without_modified_time() {
+        let now = SystemTime::now();
+        assert!(!DockerManager::should_prompt_build(None, Some(now)));
+        assert!(!DockerManager::should_prompt_build(None, None));
     }
 
     #[test]
