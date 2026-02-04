@@ -58,8 +58,8 @@ const SESSION_SUMMARY_QUIET_PERIOD: Duration = Duration::from_secs(5);
 const FAST_EXIT_THRESHOLD_SECS: u64 = 2;
 const AGENT_SYSTEM_PROMPT: &str = "You are the master agent. Analyze tasks and propose a plan.";
 const FOOTER_VISIBLE_HEIGHT: usize = 1;
-const FOOTER_SCROLL_TICKS_PER_LINE: u16 = 2; // 0.5s per line (tick = 250ms)
-const FOOTER_SCROLL_PAUSE_TICKS: u16 = 4; // 1s pause at ends
+const FOOTER_SCROLL_TICKS_PER_LINE: u16 = 12; // 3.0s per line (tick = 250ms)
+const FOOTER_SCROLL_PAUSE_TICKS: u16 = 0; // no pause at ends
 
 use super::screens::branch_list::{
     BranchSummaryRequest, BranchSummaryUpdate, PrInfo, WorktreeStatus,
@@ -1006,6 +1006,7 @@ impl Model {
         branch_list.sort_mode = sort_mode;
         branch_list.active_profile = self.profiles_config.active.clone();
         branch_list.ai_enabled = self.active_ai_enabled();
+        branch_list.session_summary_enabled = self.active_session_summary_enabled();
         branch_list.working_directory = Some(self.repo_root.display().to_string());
         branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
         branch_list.set_loading(true);
@@ -1448,6 +1449,7 @@ impl Model {
 
     fn refresh_branch_summary(&mut self) {
         self.branch_list.ai_enabled = self.active_ai_enabled();
+        self.branch_list.session_summary_enabled = self.active_session_summary_enabled();
         if let Some(request) = self.branch_list.prepare_branch_summary(&self.repo_root) {
             self.spawn_branch_summary_fetch(request);
         }
@@ -1547,7 +1549,7 @@ impl Model {
     }
 
     fn maybe_request_session_summary_for_selected(&mut self, force: bool) {
-        if !self.branch_list.ai_enabled {
+        if !self.branch_list.session_summary_enabled {
             return;
         }
 
@@ -1916,7 +1918,7 @@ impl Model {
     }
 
     fn poll_session_summary_if_needed(&mut self) {
-        if !self.branch_list.ai_enabled {
+        if !self.branch_list.session_summary_enabled {
             return;
         }
 
@@ -2112,6 +2114,7 @@ impl Model {
                 let mut branch_list = branch_list.with_branches(update.branches);
                 branch_list.active_profile = self.profiles_config.active.clone();
                 branch_list.ai_enabled = self.active_ai_enabled();
+                branch_list.session_summary_enabled = self.active_session_summary_enabled();
                 branch_list.set_session_cache(session_cache);
                 branch_list.set_session_inflight(session_inflight);
                 branch_list.set_session_missing(session_missing);
@@ -3389,6 +3392,7 @@ impl Model {
         self.profiles = ProfilesState::new().with_profiles(profiles);
         self.branch_list.active_profile = self.profiles_config.active.clone();
         self.branch_list.ai_enabled = self.active_ai_enabled();
+        self.branch_list.session_summary_enabled = self.active_session_summary_enabled();
     }
 
     fn save_profiles(&mut self) {
@@ -3426,6 +3430,19 @@ impl Model {
             .unwrap_or(false)
     }
 
+    fn active_session_summary_enabled(&self) -> bool {
+        if let Some(profile) = self.profiles_config.active_profile() {
+            if let Some(settings) = profile.ai.as_ref() {
+                return settings.is_summary_enabled();
+            }
+        }
+        self.profiles_config
+            .default_ai
+            .as_ref()
+            .map(|settings| settings.is_summary_enabled())
+            .unwrap_or(false)
+    }
+
     fn active_env_overrides(&self) -> Vec<(String, String)> {
         self.profiles_config
             .active_profile()
@@ -3455,7 +3472,15 @@ impl Model {
     }
 
     fn open_environment_editor(&mut self, profile_name: &str) {
-        let (vars, disabled_keys, ai_enabled, ai_endpoint, ai_api_key, ai_model) = self
+        let (
+            vars,
+            disabled_keys,
+            ai_enabled,
+            ai_endpoint,
+            ai_api_key,
+            ai_model,
+            ai_summary_enabled,
+        ) = self
             .profiles_config
             .profiles
             .get(profile_name)
@@ -3470,18 +3495,26 @@ impl Model {
                     })
                     .collect();
                 items.sort_by(|a, b| a.key.cmp(&b.key));
-                let (ai_enabled, ai_endpoint, ai_api_key, ai_model) = match &profile.ai {
-                    Some(ai) => (
-                        true,
-                        ai.endpoint.clone(),
-                        ai.api_key.clone(),
-                        ai.model.clone(),
-                    ),
-                    None => {
-                        let defaults = AISettings::default();
-                        (false, defaults.endpoint, String::new(), defaults.model)
-                    }
-                };
+                let (ai_enabled, ai_endpoint, ai_api_key, ai_model, ai_summary_enabled) =
+                    match &profile.ai {
+                        Some(ai) => (
+                            true,
+                            ai.endpoint.clone(),
+                            ai.api_key.clone(),
+                            ai.model.clone(),
+                            ai.summary_enabled,
+                        ),
+                        None => {
+                            let defaults = AISettings::default();
+                            (
+                                false,
+                                defaults.endpoint,
+                                String::new(),
+                                defaults.model,
+                                true,
+                            )
+                        }
+                    };
                 (
                     items,
                     profile.disabled_env.clone(),
@@ -3489,6 +3522,7 @@ impl Model {
                     ai_endpoint,
                     ai_api_key,
                     ai_model,
+                    ai_summary_enabled,
                 )
             })
             .unwrap_or_else(|| {
@@ -3500,6 +3534,7 @@ impl Model {
                     defaults.endpoint,
                     String::new(),
                     defaults.model,
+                    true,
                 )
             });
 
@@ -3507,7 +3542,13 @@ impl Model {
             .with_profile(profile_name)
             .with_variables(vars)
             .with_disabled_keys(disabled_keys)
-            .with_ai_settings(ai_enabled, ai_endpoint, ai_api_key, ai_model)
+            .with_ai_settings(
+                ai_enabled,
+                ai_endpoint,
+                ai_api_key,
+                ai_model,
+                ai_summary_enabled,
+            )
             .with_os_variables(collect_os_env());
         self.environment.selected = 3;
         self.environment.refresh_selection();
@@ -3525,6 +3566,7 @@ impl Model {
                 &ai.endpoint,
                 &ai.api_key,
                 &ai.model,
+                ai.summary_enabled,
             );
         } else {
             // Create new settings
@@ -3546,6 +3588,7 @@ impl Model {
                     &ai.endpoint,
                     &ai.api_key,
                     &ai.model,
+                    ai.summary_enabled,
                 );
             } else {
                 // Create new settings
@@ -3731,6 +3774,13 @@ impl Model {
                 }
             }
             SettingsCategory::AISettings => {
+                if self.settings.is_ai_clear_mode() {
+                    if self.settings.ai_clear_confirm {
+                        self.clear_default_ai_settings();
+                    }
+                    self.settings.cancel_ai_clear_confirm();
+                    return;
+                }
                 // Enter: open AI Settings Wizard
                 // Check if default_ai exists in profiles_config
                 if let Some(ai) = &self.profiles_config.default_ai {
@@ -3741,6 +3791,7 @@ impl Model {
                         &ai.endpoint,
                         &ai.api_key,
                         &ai.model,
+                        ai.summary_enabled,
                     );
                 } else {
                     // Create new settings
@@ -3870,6 +3921,25 @@ impl Model {
                     }
                 }
             }
+            SettingsCategory::AISettings => {
+                if self.settings.is_ai_clear_mode() {
+                    return;
+                }
+                match c {
+                    't' | 'T' => {
+                        self.toggle_default_ai_summary();
+                    }
+                    'c' | 'C' => {
+                        if self.profiles_config.default_ai.is_some() {
+                            self.settings.enter_ai_clear_confirm();
+                        } else {
+                            self.status_message = Some("No AI settings configured.".to_string());
+                            self.status_message_time = Some(Instant::now());
+                        }
+                    }
+                    _ => {}
+                }
+            }
             _ => {
                 // Other categories don't handle char input
             }
@@ -3884,6 +3954,27 @@ impl Model {
         }
     }
 
+    fn toggle_default_ai_summary(&mut self) {
+        if let Some(ai) = self.profiles_config.default_ai.as_mut() {
+            ai.summary_enabled = !ai.summary_enabled;
+            self.save_profiles();
+            self.settings.load_profiles_config();
+        } else {
+            self.status_message = Some("No AI settings configured.".to_string());
+            self.status_message_time = Some(Instant::now());
+        }
+    }
+
+    fn clear_default_ai_settings(&mut self) {
+        if self.profiles_config.default_ai.is_none() {
+            self.status_message = Some("No AI settings configured.".to_string());
+            self.status_message_time = Some(Instant::now());
+            return;
+        }
+        self.profiles_config.default_ai = None;
+        self.save_profiles();
+        self.settings.load_profiles_config();
+    }
     fn persist_environment(&mut self) {
         if self.environment.is_ai_only() {
             if self.environment.ai_enabled {
@@ -3895,6 +3986,7 @@ impl Model {
                         endpoint: self.environment.ai_endpoint.clone(),
                         api_key: self.environment.ai_api_key.clone(),
                         model: self.environment.ai_model.clone(),
+                        summary_enabled: self.environment.ai_summary_enabled,
                     });
                 }
             } else {
@@ -3932,6 +4024,7 @@ impl Model {
                     endpoint: self.environment.ai_endpoint.clone(),
                     api_key: self.environment.ai_api_key.clone(),
                     model: self.environment.ai_model.clone(),
+                    summary_enabled: self.environment.ai_summary_enabled,
                 });
             }
         } else {
@@ -4156,7 +4249,9 @@ impl Model {
                 // SPEC-71f2742d US3: Cancel form/delete mode in Settings
                 } else if matches!(self.screen, Screen::Settings) {
                     // Check Profile modes first
-                    if self.settings.is_profile_form_mode()
+                    if self.settings.is_ai_clear_mode() {
+                        self.settings.cancel_ai_clear_confirm();
+                    } else if self.settings.is_profile_form_mode()
                         || self.settings.is_profile_delete_mode()
                     {
                         self.settings.cancel_profile_mode();
@@ -4631,8 +4726,18 @@ impl Model {
                     } else if self.ai_wizard.is_text_input() {
                         // Text input mode: insert character (including 'd')
                         self.ai_wizard.insert_char(c);
-                    } else if c == 'd' || c == 'D' {
-                        // Show delete confirmation (only in edit mode, non-text-input steps)
+                    } else if matches!(
+                        self.ai_wizard.step,
+                        super::screens::ai_wizard::AIWizardStep::ModelSelect
+                    ) && (c == 't' || c == 'T')
+                    {
+                        self.ai_wizard.toggle_summary_enabled();
+                    } else if matches!(
+                        self.ai_wizard.step,
+                        super::screens::ai_wizard::AIWizardStep::ModelSelect
+                    ) && (c == 'c' || c == 'C' || c == 'd' || c == 'D')
+                    {
+                        // Show clear confirmation (only in edit mode, non-text-input steps)
                         if self.ai_wizard.is_edit {
                             self.ai_wizard.show_delete();
                         }
@@ -4726,19 +4831,24 @@ impl Model {
                     self.confirm.toggle_selection();
                 // SPEC-71f2742d US3: Settings delete confirmation toggle (CustomAgents or Profile)
                 } else if matches!(self.screen, Screen::Settings)
-                    && (self.settings.is_delete_mode() || self.settings.is_profile_delete_mode())
+                    && (self.settings.is_delete_mode()
+                        || self.settings.is_profile_delete_mode()
+                        || self.settings.is_ai_clear_mode())
                 {
                     if self.settings.is_profile_delete_mode() {
                         self.settings.profile_delete_confirm =
                             !self.settings.profile_delete_confirm;
-                    } else {
+                    } else if self.settings.is_delete_mode() {
                         self.settings.delete_confirm = !self.settings.delete_confirm;
+                    } else {
+                        self.settings.ai_clear_confirm = !self.settings.ai_clear_confirm;
                     }
                 // SPEC-71f2742d US4: Settings category navigation with Left/Right
                 } else if matches!(self.screen, Screen::Settings)
                     && !self.settings.is_form_mode()
                     && !self.settings.is_delete_mode()
                     && !self.settings.is_profile_delete_mode()
+                    && !self.settings.is_ai_clear_mode()
                     && !self.settings.is_env_edit_mode()
                 {
                     self.settings.prev_category();
@@ -4767,19 +4877,24 @@ impl Model {
                     self.confirm.toggle_selection();
                 // SPEC-71f2742d US3: Settings delete confirmation toggle (CustomAgents or Profile)
                 } else if matches!(self.screen, Screen::Settings)
-                    && (self.settings.is_delete_mode() || self.settings.is_profile_delete_mode())
+                    && (self.settings.is_delete_mode()
+                        || self.settings.is_profile_delete_mode()
+                        || self.settings.is_ai_clear_mode())
                 {
                     if self.settings.is_profile_delete_mode() {
                         self.settings.profile_delete_confirm =
                             !self.settings.profile_delete_confirm;
-                    } else {
+                    } else if self.settings.is_delete_mode() {
                         self.settings.delete_confirm = !self.settings.delete_confirm;
+                    } else {
+                        self.settings.ai_clear_confirm = !self.settings.ai_clear_confirm;
                     }
                 // SPEC-71f2742d US4: Settings category navigation with Left/Right
                 } else if matches!(self.screen, Screen::Settings)
                     && !self.settings.is_form_mode()
                     && !self.settings.is_delete_mode()
                     && !self.settings.is_profile_delete_mode()
+                    && !self.settings.is_ai_clear_mode()
                     && !self.settings.is_env_edit_mode()
                 {
                     self.settings.next_category();
@@ -7276,7 +7391,7 @@ impl Model {
 
         // Wizard has priority when visible
         if self.wizard.visible {
-            match key.code {
+            return match key.code {
                 KeyCode::Esc => Some(Message::WizardBack),
                 KeyCode::Enter if is_key_press => Some(Message::WizardConfirm),
                 KeyCode::Up if is_key_press => Some(Message::WizardPrev),
@@ -7300,8 +7415,38 @@ impl Model {
                     None
                 }
                 _ => None,
+            };
+        }
+
+        if matches!(self.screen, Screen::AISettingsWizard)
+            && !self.ai_wizard.is_text_input()
+            && is_key_press
+        {
+            use super::screens::ai_wizard::AIWizardStep;
+
+            match key.code {
+                KeyCode::Char('t') | KeyCode::Char('T')
+                    if matches!(self.ai_wizard.step, AIWizardStep::ModelSelect) =>
+                {
+                    self.ai_wizard.toggle_summary_enabled();
+                    return None;
+                }
+                KeyCode::Char('c')
+                | KeyCode::Char('C')
+                | KeyCode::Char('d')
+                | KeyCode::Char('D')
+                    if matches!(self.ai_wizard.step, AIWizardStep::ModelSelect) =>
+                {
+                    if self.ai_wizard.is_edit {
+                        self.ai_wizard.show_delete();
+                    }
+                    return None;
+                }
+                _ => {}
             }
-        } else if self.text_input_active() {
+        }
+
+        if self.text_input_active() {
             self.handle_text_input_key(key, is_key_press)
         } else {
             // Normal key handling
@@ -8084,7 +8229,7 @@ mod tests {
     use crate::tui::screens::wizard::WizardStep;
     use crate::tui::screens::{BranchItem, BranchListState, BranchType};
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-    use gwt_core::config::Settings;
+    use gwt_core::config::{AISettings, Profile, ProfilesConfig, Settings};
     use gwt_core::git::Branch;
     use gwt_core::git::BranchSummary;
     use gwt_core::git::DivergenceStatus;
@@ -8568,12 +8713,7 @@ mod tests {
         }
 
         assert_eq!(model.footer_scroll_offset, max_offset);
-        assert_eq!(model.footer_scroll_pause, FOOTER_SCROLL_PAUSE_TICKS);
-
-        for _ in 0..FOOTER_SCROLL_PAUSE_TICKS {
-            model.update(Message::Tick);
-            assert_eq!(model.footer_scroll_offset, max_offset);
-        }
+        assert_eq!(model.footer_scroll_pause, 0);
 
         for _ in 0..FOOTER_SCROLL_TICKS_PER_LINE {
             model.update(Message::Tick);
@@ -9072,6 +9212,7 @@ mod tests {
         let item = sample_branch_with_session("feature/poll");
         model.branch_list = BranchListState::new().with_branches(vec![item]);
         model.branch_list.ai_enabled = true;
+        model.branch_list.session_summary_enabled = true;
 
         let branch_name = model
             .branch_list
@@ -9089,6 +9230,38 @@ mod tests {
 
         assert!(model.session_poll_deferred);
         assert_eq!(model.last_session_poll, Some(previous));
+    }
+
+    #[test]
+    fn test_active_session_summary_enabled_prefers_profile() {
+        let mut model = Model::new_with_context(None);
+        let mut config = ProfilesConfig::default();
+        let mut profile = Profile::new("dev");
+        profile.ai = Some(AISettings {
+            endpoint: "https://api.example.com/v1".to_string(),
+            api_key: "".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            summary_enabled: false,
+        });
+        config.profiles.insert("dev".to_string(), profile);
+        config.active = Some("dev".to_string());
+        config.default_ai = Some(AISettings {
+            endpoint: "https://api.example.com/v1".to_string(),
+            api_key: "".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            summary_enabled: true,
+        });
+        model.profiles_config = config;
+
+        assert!(!model.active_session_summary_enabled());
+
+        if let Some(profile) = model.profiles_config.profiles.get_mut("dev") {
+            if let Some(ai) = profile.ai.as_mut() {
+                ai.summary_enabled = true;
+            }
+        }
+
+        assert!(model.active_session_summary_enabled());
     }
 
     // FR-020: Tab cycles BranchList → AgentMode → Settings → BranchList
