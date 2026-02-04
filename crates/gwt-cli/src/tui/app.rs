@@ -57,7 +57,7 @@ const SESSION_SUMMARY_QUIET_PERIOD: Duration = Duration::from_secs(5);
 const FAST_EXIT_THRESHOLD_SECS: u64 = 2;
 const AGENT_SYSTEM_PROMPT: &str = "You are the master agent. Analyze tasks and propose a plan.";
 const FOOTER_VISIBLE_HEIGHT: usize = 1;
-const FOOTER_SCROLL_TICKS_PER_LINE: u16 = 8; // 2.0s per line (tick = 250ms)
+const FOOTER_SCROLL_TICKS_PER_LINE: u16 = 12; // 3.0s per line (tick = 250ms)
 const FOOTER_SCROLL_PAUSE_TICKS: u16 = 0; // no pause at ends
 
 use super::screens::branch_list::{
