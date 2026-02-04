@@ -1,8 +1,8 @@
 ---
-description: "npm postinstall ダウンロード安定化の実装タスク"
+description: "npm postinstall + bunxオンデマンド取得 ダウンロード安定化の実装タスク"
 ---
 
-# タスク: npm postinstall ダウンロード安定化
+# タスク: npm postinstall + bunxオンデマンド取得 ダウンロード安定化
 
 **入力**: `/specs/SPEC-f59c553d/`
 **前提条件**: plan.md / spec.md / research.md / data-model.md / quickstart.md
@@ -26,7 +26,25 @@ description: "npm postinstall ダウンロード安定化の実装タスク"
 
 **✅ MVP1チェックポイント**: US1完了で初回取得の成功率が改善される
 
-## フェーズ2: ユーザーストーリー2 - 失敗時の英語ガイダンス (優先度: P2)
+## フェーズ2: ユーザーストーリー2 - bunxオンデマンド取得のバージョン固定 (優先度: P1)
+
+**ストーリー**: bunx実行時に指定バージョンのアセットを確実に取得する
+
+**価値**: バージョン不整合を防ぎ、再現性を担保する
+
+### 実装
+
+- [ ] **T201** [US2] `scripts/release-download.js` を追加し、URL生成/バージョン取得/プラットフォーム解決を共通化
+- [ ] **T202** [US2] `scripts/postinstall.js` を共通モジュール参照に更新
+- [ ] **T203** [US2] `bin/gwt.js` のオンデマンド取得をタグURL固定に更新（`latest` へはフォールバックしない）
+
+### テスト
+
+- [ ] **T204** [P] [US2] `scripts/postinstall.test.js` にbunxオンデマンド用のURL生成テストを追加
+
+**✅ MVP2チェックポイント**: US2完了でbunxオンデマンド取得が指定バージョンを尊重する
+
+## フェーズ3: ユーザーストーリー3 - 失敗時の英語ガイダンス (優先度: P2)
 
 **ストーリー**: 失敗時に英語の復旧ガイドを表示する
 
@@ -34,13 +52,13 @@ description: "npm postinstall ダウンロード安定化の実装タスク"
 
 ### 実装
 
-- [ ] **T201** [US2] `scripts/postinstall.js` のエラーメッセージをバージョン付きURL案内に更新（`latest` へはフォールバックしない）
+- [ ] **T301** [US3] `scripts/postinstall.js` のエラーメッセージをバージョン付きURL案内に更新（`latest` へはフォールバックしない）
 
 ### テスト
 
-- [ ] **T202** [P] [US2] `scripts/postinstall.test.js` に失敗時メッセージ検証を追加
+- [ ] **T302** [P] [US3] `scripts/postinstall.test.js` に失敗時メッセージ検証を追加
 
-## フェーズ3: 統合とポリッシュ
+## フェーズ4: 統合とポリッシュ
 
 ### 統合
 
