@@ -4239,10 +4239,13 @@ impl Model {
                     self.pending_unsafe_selection = None;
                     self.pending_cleanup_branches.clear();
                     self.pending_hook_setup = false;
+                    self.pending_plugin_setup = false;
+                    self.pending_plugin_setup_launch = None;
                     self.pending_docker_host_launch = None;
                     self.pending_build_select = None;
                     self.pending_recreate_select = None;
                     self.pending_cleanup_select = None;
+                    self.launch_status = None;
                     if let Some(prev_screen) = self.screen_stack.pop() {
                         self.screen = prev_screen;
                     }
@@ -8467,6 +8470,38 @@ mod tests {
         branch
     }
 
+    fn sample_launch_plan() -> LaunchPlan {
+        let config = AgentLaunchConfig {
+            repo_root: PathBuf::from("/tmp/repo"),
+            worktree_path: PathBuf::from("/tmp/worktree"),
+            branch_name: "feature/test".to_string(),
+            agent: CodingAgent::ClaudeCode,
+            custom_agent: None,
+            model: None,
+            reasoning_level: None,
+            version: "latest".to_string(),
+            execution_mode: ExecutionMode::Continue,
+            session_id: None,
+            skip_permissions: false,
+            env: Vec::new(),
+            env_remove: Vec::new(),
+            auto_install_deps: false,
+            collaboration_modes: false,
+        };
+
+        LaunchPlan {
+            config,
+            executable: "claude".to_string(),
+            command_args: Vec::new(),
+            log_lines: Vec::new(),
+            session_warning: None,
+            selected_version: "latest".to_string(),
+            install_plan: InstallPlan::None,
+            env: Vec::new(),
+            repo_root: PathBuf::from("/tmp/repo"),
+        }
+    }
+
     fn render_model_lines(model: &mut Model, width: u16, height: u16) -> Vec<String> {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("terminal init");
@@ -8840,6 +8875,23 @@ mod tests {
 
         let expected = LaunchProgress::BuildingCommand.message();
         assert_eq!(model.launch_status.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn test_confirm_cancel_clears_plugin_setup_state() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Confirm;
+        model.screen_stack.push(Screen::BranchList);
+        model.pending_plugin_setup = true;
+        model.pending_plugin_setup_launch = Some(sample_launch_plan());
+        model.launch_status = Some("Launching...".to_string());
+
+        model.update(Message::NavigateBack);
+
+        assert!(!model.pending_plugin_setup);
+        assert!(model.pending_plugin_setup_launch.is_none());
+        assert!(model.launch_status.is_none());
+        assert!(matches!(model.screen, Screen::BranchList));
     }
 
     #[test]
