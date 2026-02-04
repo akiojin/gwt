@@ -103,6 +103,13 @@ fn detect_git_common_dir(worktree_path: &Path) -> Option<PathBuf> {
     let content = fs::read_to_string(&git_path).ok()?;
     let gitdir = content.strip_prefix("gitdir: ")?.trim();
     let gitdir_path = PathBuf::from(gitdir);
+    let base_dir = git_path.parent().unwrap_or(worktree_path);
+    let gitdir_path = if gitdir_path.is_absolute() {
+        gitdir_path
+    } else {
+        base_dir.join(gitdir_path)
+    };
+    let gitdir_path = gitdir_path.canonicalize().unwrap_or(gitdir_path);
     if let Some(common_dir) = gitdir_path
         .components()
         .position(|c| c.as_os_str() == "worktrees")
@@ -154,7 +161,14 @@ fn detect_git_dir(worktree_path: &Path) -> Option<PathBuf> {
     }
     let content = fs::read_to_string(&git_path).ok()?;
     let gitdir = content.strip_prefix("gitdir: ")?.trim();
-    Some(PathBuf::from(gitdir))
+    let gitdir_path = PathBuf::from(gitdir);
+    let base_dir = git_path.parent().unwrap_or(worktree_path);
+    let gitdir_path = if gitdir_path.is_absolute() {
+        gitdir_path
+    } else {
+        base_dir.join(gitdir_path)
+    };
+    Some(gitdir_path.canonicalize().unwrap_or(gitdir_path))
 }
 
 /// Environment variable prefixes to pass through to containers
@@ -293,7 +307,7 @@ impl DockerManager {
         let sanitized: String = worktree_name
             .chars()
             .map(|c| {
-                if c.is_alphanumeric() || c == '-' || c == '_' {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
                     c.to_ascii_lowercase()
                 } else {
                     '-'
@@ -1077,8 +1091,42 @@ services:
         std::fs::create_dir_all(&gitdir).unwrap();
         std::fs::write(&git_file, format!("gitdir: {}\n", gitdir.to_string_lossy())).unwrap();
 
-        let common = detect_git_common_dir(&worktree).unwrap();
-        assert_eq!(common, temp.path().join("repo.git"));
+        let common = detect_git_common_dir(&worktree)
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let expected = temp.path().join("repo.git").canonicalize().unwrap();
+        assert_eq!(common, expected);
+    }
+
+    #[test]
+    fn test_detect_git_common_dir_from_relative_gitfile() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let worktree = temp.path().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let git_file = worktree.join(".git");
+        let gitdir = temp
+            .path()
+            .join("repo.git")
+            .join("worktrees")
+            .join("worktree");
+        std::fs::create_dir_all(&gitdir).unwrap();
+        let gitdir_rel = PathBuf::from("../repo.git/worktrees/worktree");
+        std::fs::write(&git_file, format!("gitdir: {}\n", gitdir_rel.display())).unwrap();
+
+        let common = detect_git_common_dir(&worktree)
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let expected = temp.path().join("repo.git").canonicalize().unwrap();
+        let normalize_private = |path: &Path| {
+            if let Ok(stripped) = path.strip_prefix("/private") {
+                PathBuf::from("/").join(stripped)
+            } else {
+                path.to_path_buf()
+            }
+        };
+        assert_eq!(normalize_private(&common), normalize_private(&expected));
     }
 
     #[test]

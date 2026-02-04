@@ -8083,29 +8083,28 @@ fn build_shell_command(command: &str, args: &[String]) -> String {
 }
 
 fn normalize_container_executable(executable: &str) -> String {
-    if executable.contains('\\') {
-        if let Some(name) = executable.rsplit('\\').next() {
+    let is_windows_drive_abs = executable.len() > 2
+        && executable.as_bytes()[1] == b':'
+        && (executable.as_bytes()[2] == b'\\' || executable.as_bytes()[2] == b'/');
+    let is_unc_path = executable.starts_with("\\\\");
+
+    if is_windows_drive_abs || is_unc_path {
+        if let Some(name) = executable.rsplit(&['\\', '/'][..]).next() {
             if !name.is_empty() {
                 return name.to_string();
             }
         }
     }
-    if executable.contains('/') {
-        if let Some(name) = executable.rsplit('/').next() {
-            if !name.is_empty() {
-                return name.to_string();
-            }
-        }
-    }
+
     let path = Path::new(executable);
-    let looks_like_path = path.is_absolute() || path.components().count() > 1;
-    if looks_like_path {
+    if path.is_absolute() {
         if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
             if !name.is_empty() {
                 return name.to_string();
             }
         }
     }
+
     executable.to_string()
 }
 
@@ -8768,6 +8767,14 @@ mod tests {
             "codex.exe"
         );
         assert_eq!(normalize_container_executable("codex"), "codex");
+        assert_eq!(
+            normalize_container_executable("./scripts/agent.sh"),
+            "./scripts/agent.sh"
+        );
+        assert_eq!(
+            normalize_container_executable("scripts\\agent.exe"),
+            "scripts\\agent.exe"
+        );
     }
 
     #[test]

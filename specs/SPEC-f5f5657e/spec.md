@@ -196,17 +196,14 @@ gwtのcompose定義では`PORT`（デフォルト3000）を使用し、`GWT_PORT
 
 ### TUI進捗表示
 
-Docker起動中はスピナーとステータスメッセージを表示:
+Docker起動中はスピナーとステータスメッセージを表示する。表示例:
 
-```
-[/] Starting Docker container...
-    Building image: gwt-feature-auth
-[/] Starting Docker container...
-    Waiting for services to be ready
-[*] Docker container ready
-    Container: gwt-feature-auth
-    Services: app (8080), db (5432)
-```
+- `[/]` スピナー + `Starting Docker container...`
+- `Building image: gwt-feature-auth`
+- `Waiting for services to be ready`
+- `[*]` 完了表示 + `Docker container ready`
+- `Container: gwt-feature-auth`
+- `Services: app (8080), db (5432)`
 
 ### ログ保存
 
