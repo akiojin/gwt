@@ -5416,7 +5416,7 @@ impl Model {
             let manager = DockerManager::new(
                 &plan.config.worktree_path,
                 &plan.config.branch_name,
-                docker_file_type,
+                docker_file_type.clone(),
             );
             let services = match manager.list_services() {
                 Ok(services) if !services.is_empty() => services,
@@ -5464,6 +5464,23 @@ impl Model {
             );
             return false;
         };
+
+        let needs_rebuild = {
+            let manager = DockerManager::new(
+                &plan.config.worktree_path,
+                &plan.config.branch_name,
+                docker_file_type,
+            );
+            manager.needs_rebuild()
+        };
+        let force_recreate = Self::quick_start_recreate_allowed(needs_rebuild, force_recreate);
+        info!(
+            category = "docker",
+            branch = %plan.config.branch_name,
+            needs_rebuild = needs_rebuild,
+            force_recreate = force_recreate,
+            "Quick Start recreate decision"
+        );
 
         info!(
             category = "docker",
@@ -5650,6 +5667,10 @@ impl Model {
 
     fn default_recreate_selected(needs_rebuild: bool) -> bool {
         needs_rebuild
+    }
+
+    fn quick_start_recreate_allowed(needs_rebuild: bool, requested: bool) -> bool {
+        needs_rebuild && requested
     }
 
     fn maybe_request_build_selection(
@@ -8163,6 +8184,14 @@ mod tests {
     fn test_default_recreate_selected_for_rebuild() {
         assert!(Model::default_recreate_selected(true));
         assert!(!Model::default_recreate_selected(false));
+    }
+
+    #[test]
+    fn test_quick_start_recreate_allowed_requires_change() {
+        assert!(!Model::quick_start_recreate_allowed(false, true));
+        assert!(!Model::quick_start_recreate_allowed(false, false));
+        assert!(Model::quick_start_recreate_allowed(true, true));
+        assert!(!Model::quick_start_recreate_allowed(true, false));
     }
 
     #[test]

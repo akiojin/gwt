@@ -188,6 +188,7 @@ gwtのcompose定義では`PORT`（デフォルト3000）を使用し、`GWT_PORT
 - Quick Start履歴にDocker選択情報（HostOS/Dockerサービス、Recreate/Reuse、Keep/Stop）がある場合はそれを適用し、Dockerウィザードは表示しない
 - Quick Start履歴のDockerサービスが現在のcomposeに存在しない場合はサービス選択にフォールバックする
 - Build/No BuildはQuick Startでは保存・復元しない
+- Quick StartではDockerfile/compose変更が検出されない限りRecreateは強制せずReuseで起動する
 
 ### TUI進捗表示
 

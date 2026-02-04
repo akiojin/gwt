@@ -235,6 +235,7 @@
 - [ ] Build確認時のデフォルトをNo Buildにする
 - [ ] Buildが必要な場合はRecreateのデフォルトを推奨にする
 - [ ] Docker自動判定理由をINFOログに出力する
+- [ ] Quick Startでは変更検知がない限りRecreateを適用しない
 
 **受け入れ基準**:
 
@@ -242,6 +243,7 @@
 - 変更ありではBuild確認が表示される
 - Buildが必要な場合にRecreateがデフォルトになる
 - 判定理由のログが`~/.gwt/logs/`に出力される
+- Quick Startで変更検知がない場合はReuseになる
 
 ## Phase 4: TUI統合
 
