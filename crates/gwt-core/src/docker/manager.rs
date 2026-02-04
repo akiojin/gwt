@@ -171,6 +171,16 @@ fn detect_git_dir(worktree_path: &Path) -> Option<PathBuf> {
     Some(gitdir_path.canonicalize().unwrap_or(gitdir_path))
 }
 
+fn resolve_compose_status(running_output: &str, all_output: &str) -> ContainerStatus {
+    if !running_output.trim().is_empty() {
+        return ContainerStatus::Running;
+    }
+    if !all_output.trim().is_empty() {
+        return ContainerStatus::Stopped;
+    }
+    ContainerStatus::NotFound
+}
+
 /// Environment variable prefixes to pass through to containers
 const ENV_PASSTHROUGH_PREFIXES: &[&str] = &[
     "ANTHROPIC_",
@@ -382,26 +392,39 @@ impl DockerManager {
 
     /// Get the status of the container
     pub fn get_status(&self) -> ContainerStatus {
-        // Check if container is running using docker compose ps
-        let output = Command::new("docker")
-            .args(["compose", "ps", "--format", "json"])
+        let running_output = Command::new("docker")
+            .args(["compose", "ps", "-q"])
             .current_dir(&self.worktree_path)
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
             .output();
 
-        match output {
-            Ok(out) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                if stdout.trim().is_empty() {
-                    ContainerStatus::NotFound
-                } else if stdout.contains("\"running\"") || stdout.contains("\"Running\"") {
-                    ContainerStatus::Running
-                } else {
-                    ContainerStatus::Stopped
-                }
+        let all_output = Command::new("docker")
+            .args(["compose", "ps", "-a", "-q"])
+            .current_dir(&self.worktree_path)
+            .env("COMPOSE_PROJECT_NAME", &self.container_name)
+            .output();
+
+        let status = match (running_output, all_output) {
+            (Ok(running), Ok(all)) if running.status.success() && all.status.success() => {
+                let running_stdout = String::from_utf8_lossy(&running.stdout);
+                let all_stdout = String::from_utf8_lossy(&all.stdout);
+                resolve_compose_status(&running_stdout, &all_stdout)
+            }
+            (Ok(running), _) if running.status.success() => {
+                let running_stdout = String::from_utf8_lossy(&running.stdout);
+                resolve_compose_status(&running_stdout, "")
             }
             _ => ContainerStatus::NotFound,
-        }
+        };
+
+        info!(
+            category = "docker",
+            container = %self.container_name,
+            status = ?status,
+            "Resolved docker compose container status"
+        );
+
+        status
     }
 
     /// Start the Docker container
@@ -892,6 +915,24 @@ mod tests {
     fn test_generate_container_name_special_chars() {
         let name = DockerManager::generate_container_name("test@#$%worktree");
         assert_eq!(name, "gwt-test-worktree");
+    }
+
+    #[test]
+    fn test_resolve_compose_status_running() {
+        let status = resolve_compose_status("abc123\n", "");
+        assert_eq!(status, ContainerStatus::Running);
+    }
+
+    #[test]
+    fn test_resolve_compose_status_stopped() {
+        let status = resolve_compose_status("", "abc123\n");
+        assert_eq!(status, ContainerStatus::Stopped);
+    }
+
+    #[test]
+    fn test_resolve_compose_status_not_found() {
+        let status = resolve_compose_status("", "");
+        assert_eq!(status, ContainerStatus::NotFound);
     }
 
     #[test]

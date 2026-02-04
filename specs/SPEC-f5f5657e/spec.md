@@ -213,6 +213,8 @@ Docker起動中はスピナーとステータスメッセージを表示する�
 - tracingクレートを使用してカテゴリ`docker`で出力
 - 別途Dockerログファイルは作成しない
 - Dockerの自動判定理由（Build/No Buildの提示有無、Recreateデフォルトの理由）はINFOで出力する
+- 起動前の判定結果（Running/Stopped/NotFound、サービス名、compose argsの有無）をINFOで出力する
+- 実際の起動処理（compose upの実行/スキップ、スキップ理由、build/recreate/keepの選択）をINFOで出力する
 
 ### エージェント起動フロー
 

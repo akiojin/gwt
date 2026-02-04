@@ -5732,6 +5732,12 @@ impl Model {
             docker_file_type,
         );
         let status = manager.get_status();
+        info!(
+            category = "docker",
+            branch = %plan.config.branch_name,
+            status = ?status,
+            "Detected docker container status for recreate prompt"
+        );
         if !Self::should_prompt_recreate(&status) {
             info!(
                 category = "docker",
@@ -5762,6 +5768,12 @@ impl Model {
             service: service.map(|s| s.to_string()),
             force_host,
         });
+        info!(
+            category = "docker",
+            branch = %plan.config.branch_name,
+            default_recreate = Self::default_recreate_selected(needs_rebuild),
+            "Showing docker recreate prompt"
+        );
         self.confirm = ConfirmState {
             title: "Docker Recreate".to_string(),
             message: "Recreate containers before launch?".to_string(),

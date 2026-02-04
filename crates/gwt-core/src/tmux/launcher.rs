@@ -983,6 +983,13 @@ fn build_compose_agent_command(
         String::new()
     };
     let up_step = if build || force_recreate {
+        info!(
+            category = "docker",
+            container = %container_name,
+            build = build,
+            force_recreate = force_recreate,
+            "Compose up will run (build/recreate requested)"
+        );
         format!(
             "{}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ exit_status=$?; echo \"[gwt] docker compose up failed (status=$exit_status).\"; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $exit_status; }}",
             compose_args_debug,
@@ -1408,6 +1415,9 @@ pub fn launch_in_pane_with_docker(
             container = %docker_result.container_name.as_deref().unwrap_or("unknown"),
             service = %resolved_service.as_deref().unwrap_or(""),
             passthrough_envs = env_vars.len(),
+            build = build,
+            force_recreate = force_recreate,
+            stop_on_exit = stop_on_exit,
             "Preparing Docker launch command"
         );
 
