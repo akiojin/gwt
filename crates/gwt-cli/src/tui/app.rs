@@ -4137,6 +4137,7 @@ impl Model {
                 } else if matches!(self.screen, Screen::ServiceSelect) {
                     // Cancel service selection
                     self.pending_service_select = None;
+                    self.launch_status = None;
                     if let Some(prev_screen) = self.screen_stack.pop() {
                         self.screen = prev_screen;
                     }
@@ -5567,6 +5568,7 @@ impl Model {
         let container_name = DockerManager::generate_container_name(&plan.config.branch_name);
         self.service_select
             .set_container_info(&container_name, &plan.config.branch_name);
+        self.last_mouse_click = None;
         self.screen_stack.push(self.screen.clone());
         self.screen = Screen::ServiceSelect;
 

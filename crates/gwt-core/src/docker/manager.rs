@@ -846,6 +846,7 @@ impl DockerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::time::{Duration, SystemTime};
 
     // T-202: Container name generation test
@@ -1037,6 +1038,7 @@ services:
     }
 
     #[test]
+    #[serial]
     fn test_collect_passthrough_env_excludes_git_internals() {
         let path = PathBuf::from("/tmp/worktree");
         let docker_type = DockerFileType::Compose(PathBuf::from("docker-compose.yml"));

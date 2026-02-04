@@ -33,9 +33,9 @@
 14. **前提条件** Docker起動が必要、**操作** 起動時にKeep/Stop確認を行い「Stop」を選択、**期待結果** `docker compose down` が実行される
 15. **前提条件** Dockerコンテナが存在しない、**操作** エージェント起動、**期待結果** Recreate/Reuseの確認は表示されない
 16. **前提条件** Dockerコンテナが起動中、**操作** エージェント起動、**期待結果** Recreate/Reuseの確認は表示されない（自動でReuse扱い）
-16. **前提条件** 同一ブランチでQuick Start履歴が存在、**操作** Quick Startで「Resume/Start new」を選択、**期待結果** 以前選択したHostOS/Dockerサービス・Recreate/Reuse・Keep/Stopが復元され、Dockerウィザードは表示されない
-17. **前提条件** 既にコンテナが起動中、**操作** Reuse/Keepで起動、**期待結果** `docker compose up` を実行せず `docker compose exec` でエージェントが起動する
-18. **前提条件** 起動中判定のコマンドが生成される、**操作** Reuse/Keepで起動、**期待結果** `if docker ps -q --filter label=com.docker.compose.project=... | grep -q .; then ... fi` の形式で判定する
+17. **前提条件** 同一ブランチでQuick Start履歴が存在、**操作** Quick Startで「Resume/Start new」を選択、**期待結果** 以前選択したHostOS/Dockerサービス・Recreate/Reuse・Keep/Stopが復元され、Dockerウィザードは表示されない
+18. **前提条件** 既にコンテナが起動中、**操作** Reuse/Keepで起動、**期待結果** `docker compose up` を実行せず `docker compose exec` でエージェントが起動する
+19. **前提条件** 起動中判定のコマンドが生成される、**操作** Reuse/Keepで起動、**期待結果** `if COMPOSE_PROJECT_NAME=... docker compose ... ps -q {service} | grep -q .; then ... fi` の形式で判定する
 
 ---
 
@@ -184,7 +184,6 @@ gwtのcompose定義では`PORT`（デフォルト3000）を使用し、`GWT_PORT
 - ポート設定はdocker-compose.ymlに従う
 - 環境変数の継承はホストの環境変数をそのまま使用
 - worktreeの.gitが参照するgitdirはコンテナ内から参照できる必要がある（HOST_GIT_COMMON_DIRをバインド）
-- Docker起動前に「Build/No Build」を選択するUIを表示し、デフォルトはNo Build
 - Docker起動前に「Build/No Build」を選択するUIを表示するが、Dockerfile/compose変更が検出された場合のみ表示しデフォルトはNo Build
 - Docker起動前に「Recreate/Reuse」を選択するUIを表示し、デフォルトはReuse
 - ただしDockerコンテナが起動中の場合はRecreate/Reuseの確認を表示しない

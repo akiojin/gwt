@@ -901,6 +901,7 @@ fn build_compose_agent_command(
     worktree_path: &Path,
     container_name: &str,
     compose_args: &[String],
+    compose_override: Option<&Path>,
     command: &str,
     args: &[String],
     service: &str,
@@ -929,6 +930,19 @@ fn build_compose_agent_command(
         )
     };
     let service_name = shell_escape(service);
+    let running_check = if service.is_empty() {
+        format!(
+            "{}COMPOSE_PROJECT_NAME={} docker compose{} ps -q",
+            compose_env_prefix, container_name, compose_args_str
+        )
+    } else {
+        format!(
+            "{}COMPOSE_PROJECT_NAME={} docker compose{} ps -q {}",
+            compose_env_prefix, container_name, compose_args_str, service_name
+        )
+    };
+    let cleanup_override = compose_override
+        .map(|path| format!("rm -f {}", shell_escape(path.to_string_lossy().as_ref())));
 
     let up_target = if service.is_empty() {
         String::new()
@@ -997,9 +1011,9 @@ fn build_compose_agent_command(
             "Compose up will use --no-recreate when starting stopped containers"
         );
         format!(
-            "{}if docker ps -q --filter label=com.docker.compose.project={} | grep -q .; then echo \"[gwt] docker compose up skipped (already running).\"; else {}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ exit_status=$?; echo \"[gwt] docker compose up failed (status=$exit_status).\"; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $exit_status; }}; fi",
+            "{}if {} | grep -q .; then echo \"[gwt] docker compose up skipped (already running).\"; else {}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ exit_status=$?; echo \"[gwt] docker compose up failed (status=$exit_status).\"; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $exit_status; }}; fi",
             compose_args_debug,
-            container_name,
+            running_check,
             compose_args_debug,
             compose_env_prefix,
             container_name,
@@ -1015,10 +1029,18 @@ fn build_compose_agent_command(
             compose_args_str
         )
     };
+    let cleanup_step = cleanup_override
+        .as_ref()
+        .map(|cmd| format!("{}; ", cmd))
+        .unwrap_or_default();
+    let cleanup_tail = cleanup_override
+        .as_ref()
+        .map(|cmd| format!("; {}", cmd))
+        .unwrap_or_default();
     format!(
         r#"cd {} && \
 {} && \
-{}{}COMPOSE_PROJECT_NAME={} docker compose{} exec{} {} {} || {{ exit_status=$?; echo "[gwt] docker compose exec failed (status=$exit_status)."; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $exit_status; }}"#,
+{}{}COMPOSE_PROJECT_NAME={} docker compose{} exec{} {} {} || {{ exit_status=$?; echo "[gwt] docker compose exec failed (status=$exit_status)."; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; {}exit $exit_status; }}{}"#,
         working_dir,
         up_step,
         stop_trap,
@@ -1033,7 +1055,9 @@ fn build_compose_agent_command(
         compose_args_str,
         compose_env_prefix,
         container_name,
-        compose_args_str
+        compose_args_str,
+        cleanup_step,
+        cleanup_tail
     )
 }
 
@@ -1134,6 +1158,7 @@ pub fn build_docker_agent_command(
         DockerFileType::Compose(_) => {
             let service_name = service.unwrap_or("app");
             let mut compose_args = Vec::new();
+            let mut compose_override: Option<PathBuf> = None;
             if let DockerFileType::Compose(compose_path) = docker_file_type {
                 if compose_path.exists() {
                     if let Some(override_path) =
@@ -1145,6 +1170,7 @@ pub fn build_docker_agent_command(
                             override_path = %override_path.display(),
                             "Generated compose override for ports"
                         );
+                        compose_override = Some(override_path.clone());
                         compose_args.push("-f".to_string());
                         compose_args.push(compose_path.to_string_lossy().to_string());
                         compose_args.push("-f".to_string());
@@ -1156,6 +1182,7 @@ pub fn build_docker_agent_command(
                 worktree_path,
                 &container_name,
                 &compose_args,
+                compose_override.as_deref(),
                 command,
                 args,
                 service_name,
@@ -1193,6 +1220,7 @@ pub fn build_docker_agent_command(
 
             if config.uses_compose() {
                 let mut compose_args = config.to_compose_args(devcontainer_dir);
+                let mut compose_override: Option<PathBuf> = None;
                 if let Some(first) = config
                     .docker_compose_file
                     .as_ref()
@@ -1209,6 +1237,7 @@ pub fn build_docker_agent_command(
                                 override_path = %override_path.display(),
                                 "Generated compose override for ports"
                             );
+                            compose_override = Some(override_path.clone());
                             compose_args.push("-f".to_string());
                             compose_args.push(override_path.to_string_lossy().to_string());
                         }
@@ -1220,6 +1249,7 @@ pub fn build_docker_agent_command(
                     worktree_path,
                     &container_name,
                     &compose_args,
+                    compose_override.as_deref(),
                     command,
                     args,
                     service_name,
@@ -1713,9 +1743,8 @@ mod tests {
 
         // Verify command structure
         assert!(cmd.contains("docker compose up -d"));
-        assert!(cmd.contains(
-            "if docker ps -q --filter label=com.docker.compose.project=gwt-my-worktree"
-        ));
+        assert!(cmd.contains("COMPOSE_PROJECT_NAME=gwt-my-worktree docker compose"));
+        assert!(cmd.contains("docker compose ps -q"));
         assert!(cmd.contains("docker compose up skipped"));
         assert!(cmd.contains("--no-build"));
         assert!(cmd.contains("--no-recreate"));
