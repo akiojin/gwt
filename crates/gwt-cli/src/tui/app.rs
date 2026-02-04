@@ -515,6 +515,8 @@ pub struct Model {
     pending_build_select: Option<PendingBuildSelect>,
     /// Pending launch plan for Docker recreate selection
     pending_recreate_select: Option<PendingRecreateSelect>,
+    /// Pending launch plan for Docker cleanup selection
+    pending_cleanup_select: Option<PendingCleanupSelect>,
     /// Pending launch plan for Docker host fallback confirmation
     pending_docker_host_launch: Option<LaunchPlan>,
     /// Branch list update receiver
@@ -607,6 +609,15 @@ struct PendingRecreateSelect {
     plan: LaunchPlan,
     service: Option<String>,
     force_host: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PendingCleanupSelect {
+    plan: LaunchPlan,
+    service: Option<String>,
+    force_host: bool,
+    force_recreate: bool,
+    build: bool,
 }
 
 enum ServiceSelectionDecision {
@@ -789,6 +800,7 @@ impl Model {
             pending_service_select: None,
             pending_build_select: None,
             pending_recreate_select: None,
+            pending_cleanup_select: None,
             pending_docker_host_launch: None,
             branch_list_rx: None,
             branch_summary_rx: None,
@@ -2888,6 +2900,25 @@ impl Model {
     }
 
     fn handle_confirm_action(&mut self) {
+        if let Some(pending) = self.pending_cleanup_select.take() {
+            let stop_on_exit = self.confirm.is_confirmed();
+            let keep_launch_status =
+                matches!(pending.plan.install_plan, InstallPlan::Install { .. });
+            self.launch_plan_in_tmux(
+                &pending.plan,
+                pending.service.as_deref(),
+                pending.force_host,
+                keep_launch_status,
+                pending.build,
+                pending.force_recreate,
+                stop_on_exit,
+            );
+            if let Some(prev_screen) = self.screen_stack.pop() {
+                self.screen = prev_screen;
+            }
+            return;
+        }
+
         if let Some(pending) = self.pending_recreate_select.take() {
             let force_recreate = self.confirm.is_confirmed();
             let keep_launch_status =
@@ -2909,7 +2940,7 @@ impl Model {
             let build = self.confirm.is_confirmed();
             let keep_launch_status =
                 matches!(pending.plan.install_plan, InstallPlan::Install { .. });
-            self.launch_plan_in_tmux(
+            self.maybe_request_cleanup_selection(
                 &pending.plan,
                 pending.service.as_deref(),
                 pending.force_host,
@@ -2954,7 +2985,15 @@ impl Model {
             }
             if let Some(plan) = self.pending_docker_host_launch.take() {
                 let keep_launch_status = matches!(plan.install_plan, InstallPlan::Install { .. });
-                self.launch_plan_in_tmux(&plan, None, true, keep_launch_status, false, false);
+                self.launch_plan_in_tmux(
+                    &plan,
+                    None,
+                    true,
+                    keep_launch_status,
+                    false,
+                    false,
+                    false,
+                );
             }
         }
 
@@ -4085,6 +4124,7 @@ impl Model {
                     self.pending_docker_host_launch = None;
                     self.pending_build_select = None;
                     self.pending_recreate_select = None;
+                    self.pending_cleanup_select = None;
                     if let Some(prev_screen) = self.screen_stack.pop() {
                         self.screen = prev_screen;
                     }
@@ -5392,7 +5432,15 @@ impl Model {
         keep_launch_status: bool,
     ) {
         if force_host || launcher::detect_docker_environment(&plan.config.worktree_path).is_none() {
-            self.launch_plan_in_tmux(plan, service, force_host, keep_launch_status, false, false);
+            self.launch_plan_in_tmux(
+                plan,
+                service,
+                force_host,
+                keep_launch_status,
+                false,
+                false,
+                false,
+            );
             return;
         }
 
@@ -5434,6 +5482,7 @@ impl Model {
                 keep_launch_status,
                 false,
                 force_recreate,
+                false,
             );
             return;
         }
@@ -5461,7 +5510,7 @@ impl Model {
         self.screen = Screen::Confirm;
     }
 
-    fn launch_plan_in_tmux(
+    fn maybe_request_cleanup_selection(
         &mut self,
         plan: &LaunchPlan,
         service: Option<&str>,
@@ -5470,7 +5519,61 @@ impl Model {
         build: bool,
         force_recreate: bool,
     ) {
-        match self.launch_plan_in_pane_with_service(plan, service, force_host, build, force_recreate) {
+        if force_host || launcher::detect_docker_environment(&plan.config.worktree_path).is_none() {
+            self.launch_plan_in_tmux(
+                plan,
+                service,
+                force_host,
+                keep_launch_status,
+                build,
+                force_recreate,
+                false,
+            );
+            return;
+        }
+
+        self.pending_cleanup_select = Some(PendingCleanupSelect {
+            plan: plan.clone(),
+            service: service.map(|s| s.to_string()),
+            force_host,
+            force_recreate,
+            build,
+        });
+        self.confirm = ConfirmState {
+            title: "Docker Cleanup".to_string(),
+            message: "Stop containers when agent exits?".to_string(),
+            details: vec![
+                "Keep will keep containers running.".to_string(),
+                "Stop will run docker compose down.".to_string(),
+            ],
+            confirm_label: "Stop".to_string(),
+            cancel_label: "Keep".to_string(),
+            selected_confirm: false,
+            is_dangerous: false,
+            ..Default::default()
+        };
+        self.screen_stack.push(self.screen.clone());
+        self.screen = Screen::Confirm;
+    }
+
+    fn launch_plan_in_tmux(
+        &mut self,
+        plan: &LaunchPlan,
+        service: Option<&str>,
+        force_host: bool,
+        keep_launch_status: bool,
+        build: bool,
+        force_recreate: bool,
+        stop_on_exit: bool,
+    ) {
+        match self.launch_plan_in_pane_with_service(
+            plan,
+            service,
+            force_host,
+            build,
+            force_recreate,
+            stop_on_exit,
+        ) {
             Ok(_) => {
                 if !keep_launch_status {
                     self.launch_status = None;
@@ -5561,7 +5664,15 @@ impl Model {
             self.screen = prev_screen;
         }
         let keep_launch_status = matches!(pending.plan.install_plan, InstallPlan::Install { .. });
-        self.launch_plan_in_tmux(&pending.plan, None, true, keep_launch_status, false, false);
+        self.launch_plan_in_tmux(
+            &pending.plan,
+            None,
+            true,
+            keep_launch_status,
+            false,
+            false,
+            false,
+        );
     }
 
     /// Launch an agent in a tmux pane (multi mode)
@@ -5579,6 +5690,7 @@ impl Model {
         force_host: bool,
         build: bool,
         force_recreate: bool,
+        stop_on_exit: bool,
     ) -> Result<String, String> {
         // FR-010: One Branch One Pane constraint
         // Check if an agent is already running on this branch
@@ -5665,6 +5777,7 @@ impl Model {
                 service,
                 build,
                 force_recreate,
+                stop_on_exit,
             )
             .map_err(|e| e.to_string())?;
             pane_id

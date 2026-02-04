@@ -466,7 +466,7 @@ TASK-006 ─> TASK-010 (進捗画面) ─> TASK-011 (サービス選択) ─> TA
 | Phase 6 | TASK-014〜015 | 小 |
 | 統合 | TASK-016〜018 | 中 |
 
-## 合計タスク数: 22
+## 合計タスク数: 23
 
 ---
 
@@ -562,3 +562,23 @@ TASK-006 ─> TASK-010 (進捗画面) ─> TASK-011 (サービス選択) ─> TA
 - 起動毎にRecreate/Reuseの選択ダイアログが表示される
 - Reuse選択で`--force-recreate`が付与されない
 - Recreate選択で`--force-recreate`が付与される
+
+---
+
+### TASK-026: 起動時のKeep/Stop選択ダイアログ
+
+**ステータス**: 未着手 ⬜
+**優先度**: P1
+**依存**: TASK-021
+
+**内容**:
+
+- [ ] Docker起動時にKeep/Stopを選択するUIを表示
+- [ ] デフォルト選択を「Keep」にする
+- [ ] Stop選択時のみ`docker compose down`を実行する
+
+**受け入れ基準**:
+
+- 起動毎にKeep/Stopの選択ダイアログが表示される
+- Keep選択で`docker compose down`が実行されない
+- Stop選択で`docker compose down`が実行される

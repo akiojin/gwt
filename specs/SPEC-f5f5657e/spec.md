@@ -28,6 +28,8 @@
 9. **前提条件** Docker起動が必要、**操作** 起動時にRecreate/Reuse確認を行い「Reuse」を選択、**期待結果** `docker compose up` は `--force-recreate` を付与しない
 10. **前提条件** Docker起動が必要、**操作** 起動時にRecreate/Reuse確認を行い「Recreate」を選択、**期待結果** `docker compose up` は `--force-recreate` を使用する
 11. **前提条件** ホストにCodexのauth.jsonが存在、**操作** Dockerコンテナ起動、**期待結果** コンテナ内のCodex認証情報がホストのauth.jsonに同期される
+12. **前提条件** Docker起動が必要、**操作** 起動時にKeep/Stop確認を行い「Keep」を選択、**期待結果** `docker compose down` は実行されない
+13. **前提条件** Docker起動が必要、**操作** 起動時にKeep/Stop確認を行い「Stop」を選択、**期待結果** `docker compose down` が実行される
 9. **前提条件** ホストにCodexのauth.jsonが存在、**操作** Dockerコンテナ起動、**期待結果** コンテナ内のCodex認証情報がホストのauth.jsonに同期される
 
 ---
@@ -175,6 +177,8 @@ gwtのcompose定義では`PORT`（デフォルト3000）を使用し、`GWT_PORT
 - worktreeの.gitが参照するgitdirはコンテナ内から参照できる必要がある（HOST_GIT_COMMON_DIRをバインド）
 - Docker起動前に「Build/No Build」を選択するUIを表示し、デフォルトはNo Build
 - Docker起動前に「Recreate/Reuse」を選択するUIを表示し、デフォルトはReuse
+- Docker起動前に「Keep/Stop」を選択するUIを表示し、デフォルトはKeep
+- コンテナのHOMEはホストから引き継がず、コンテナ側のデフォルトに従う
 
 ### TUI進捗表示
 
@@ -214,9 +218,10 @@ Docker起動中はスピナーとステータスメッセージを表示:
    │  c. 複数サービス → TUIで毎回選択（HostOS/Docker:{service}）
    │  d. 再作成確認 → Recreate/Reuseを選択（デフォルトReuse）
    │  e. ビルド確認 → Build/No Buildを選択（デフォルトNo Build）
-   │  f. ポート競合確認 → 動的割り当て
-   │  g. docker compose up -d (--build or --no-build, --force-recreate optional)
-   │  h. コンテナ内でエージェント起動
+   │  f. 終了時処理確認 → Keep/Stopを選択（デフォルトKeep）
+   │  g. ポート競合確認 → 動的割り当て
+   │  h. docker compose up -d (--build or --no-build, --force-recreate optional)
+   │  i. コンテナ内でエージェント起動
    │     docker exec -it {container} {agent_command}
    │  h. エージェント終了 → docker compose down
    │

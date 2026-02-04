@@ -907,6 +907,7 @@ fn build_compose_agent_command(
     env_flags: &str,
     build: bool,
     force_recreate: bool,
+    stop_on_exit: bool,
 ) -> String {
     let command_escaped = shell_escape(command);
     let args_str = if args.is_empty() {
@@ -952,11 +953,18 @@ fn build_compose_agent_command(
         exec_script = format!("{}; {}", sync_script, exec_script);
     }
     let exec_shell = format!("sh -lc {}", shell_escape(&exec_script));
+    let stop_trap = if stop_on_exit {
+        format!(
+            "trap \"{}COMPOSE_PROJECT_NAME='{}' docker compose{} down\" EXIT && \\\n",
+            compose_env_prefix, container_name, compose_args_str
+        )
+    } else {
+        String::new()
+    };
     format!(
         r#"cd {} && \
 {}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ status=$?; echo "[gwt] docker compose up failed (status=$status)."; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $status; }} && \
-trap "{}COMPOSE_PROJECT_NAME='{}' docker compose{} down" EXIT && \
-{}COMPOSE_PROJECT_NAME={} docker compose{} exec{} {} {} || {{ status=$?; echo "[gwt] docker compose exec failed (status=$status)."; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $status; }}"#,
+{}{}COMPOSE_PROJECT_NAME={} docker compose{} exec{} {} {} || {{ status=$?; echo "[gwt] docker compose exec failed (status=$status)."; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $status; }}"#,
         working_dir,
         compose_args_debug,
         compose_env_prefix,
@@ -971,9 +979,7 @@ trap "{}COMPOSE_PROJECT_NAME='{}' docker compose{} down" EXIT && \
         compose_env_prefix,
         container_name,
         compose_args_str,
-        compose_env_prefix,
-        container_name,
-        compose_args_str,
+        stop_trap,
         compose_env_prefix,
         container_name,
         compose_args_str,
@@ -1076,6 +1082,7 @@ pub fn build_docker_agent_command(
     env_vars: &HashMap<String, String>,
     build: bool,
     force_recreate: bool,
+    stop_on_exit: bool,
 ) -> TmuxResult<String> {
     let container_name = DockerManager::generate_container_name(worktree_name);
     let env_flags = build_docker_env_flags(env_vars);
@@ -1114,6 +1121,7 @@ pub fn build_docker_agent_command(
                 &env_flags,
                 build,
                 force_recreate,
+                stop_on_exit,
             ))
         }
         DockerFileType::Dockerfile(dockerfile_path) => {
@@ -1177,6 +1185,7 @@ pub fn build_docker_agent_command(
                     &env_flags,
                     build,
                     force_recreate,
+                    stop_on_exit,
                 ))
             } else if config.uses_dockerfile() {
                 let dockerfile_rel =
@@ -1300,6 +1309,7 @@ pub fn launch_in_pane_with_docker(
     service: Option<&str>,
     build: bool,
     force_recreate: bool,
+    stop_on_exit: bool,
 ) -> TmuxResult<(String, DockerLaunchResult)> {
     // Prepare Docker launch (detect files, create manager)
     let mut docker_result = prepare_docker_launch(worktree_path, worktree_name)?;
@@ -1342,6 +1352,7 @@ pub fn launch_in_pane_with_docker(
             &env_vars,
             build,
             force_recreate,
+            stop_on_exit,
         ) {
             Ok(cmd) => cmd,
             Err(e) => {
@@ -1654,6 +1665,7 @@ mod tests {
             &env_vars,
             false,
             false,
+            true,
         );
         let cmd = cmd.unwrap();
 
@@ -1683,6 +1695,7 @@ mod tests {
             &env_vars,
             true,
             false,
+            false,
         )
         .unwrap();
 
@@ -1707,10 +1720,59 @@ mod tests {
             &env_vars,
             false,
             true,
+            false,
         )
         .unwrap();
 
         assert!(cmd.contains("--force-recreate"));
+    }
+
+    #[test]
+    fn test_build_docker_agent_command_stop_on_exit() {
+        use std::path::PathBuf;
+
+        let worktree_path = PathBuf::from("/tmp/my-worktree");
+        let docker_type = DockerFileType::Compose(PathBuf::from("docker-compose.yml"));
+        let env_vars = HashMap::new();
+        let cmd = build_docker_agent_command(
+            &worktree_path,
+            "my-worktree",
+            &docker_type,
+            "claude",
+            &[],
+            None,
+            &env_vars,
+            false,
+            false,
+            true,
+        )
+        .unwrap();
+
+        assert!(cmd.contains("docker compose down"));
+    }
+
+    #[test]
+    fn test_build_docker_agent_command_keep_on_exit() {
+        use std::path::PathBuf;
+
+        let worktree_path = PathBuf::from("/tmp/my-worktree");
+        let docker_type = DockerFileType::Compose(PathBuf::from("docker-compose.yml"));
+        let env_vars = HashMap::new();
+        let cmd = build_docker_agent_command(
+            &worktree_path,
+            "my-worktree",
+            &docker_type,
+            "claude",
+            &[],
+            None,
+            &env_vars,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert!(!cmd.contains("docker compose down"));
     }
 
     #[test]
@@ -1729,6 +1791,7 @@ mod tests {
             &args,
             Some("web"),
             &env_vars,
+            false,
             false,
             false,
         );
@@ -1759,6 +1822,7 @@ mod tests {
             &env_vars,
             false,
             false,
+            false,
         )
         .unwrap();
 
@@ -1781,6 +1845,7 @@ mod tests {
             &[],
             None,
             &env_vars,
+            false,
             false,
             false,
         )
@@ -1809,6 +1874,7 @@ mod tests {
             &env_vars,
             false,
             false,
+            false,
         )
         .unwrap();
 
@@ -1831,6 +1897,7 @@ mod tests {
             &[],
             None,
             &env_vars,
+            false,
             false,
             false,
         )
@@ -1869,6 +1936,7 @@ mod tests {
             &[],
             None,
             &env_vars,
+            false,
             false,
             false,
         )

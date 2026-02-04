@@ -155,7 +155,6 @@ const ENV_PASSTHROUGH_PREFIXES: &[&str] = &[
     "GITHUB_",
     "GIT_",
     "SSH_AUTH_SOCK",
-    "HOME",
     "USER",
     "SHELL",
 ];
@@ -978,15 +977,23 @@ services:
         let docker_type = DockerFileType::Compose(PathBuf::from("docker-compose.yml"));
         let manager = DockerManager::new(&path, "worktree", docker_type);
 
+        let prev_home = std::env::var("HOME").ok();
         std::env::set_var("GIT_DIR", "/tmp/gitdir");
         std::env::set_var("GIT_WORK_TREE", "/tmp/worktree");
+        std::env::set_var("HOME", "/Users/example");
 
         let envs = manager.collect_passthrough_env();
         assert!(!envs.contains_key("GIT_DIR"));
         assert!(!envs.contains_key("GIT_WORK_TREE"));
+        assert!(!envs.contains_key("HOME"));
 
         std::env::remove_var("GIT_DIR");
         std::env::remove_var("GIT_WORK_TREE");
+        if let Some(prev) = prev_home {
+            std::env::set_var("HOME", prev);
+        } else {
+            std::env::remove_var("HOME");
+        }
     }
 
     #[test]
