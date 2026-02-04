@@ -234,12 +234,14 @@
 - [ ] Dockerfile/compose変更検知時のみBuild/No Buildを表示
 - [ ] Build確認時のデフォルトをNo Buildにする
 - [ ] Buildが必要な場合はRecreateのデフォルトを推奨にする
+- [ ] Docker自動判定理由をINFOログに出力する
 
 **受け入れ基準**:
 
 - 変更なしではBuild確認が表示されない
 - 変更ありではBuild確認が表示される
 - Buildが必要な場合にRecreateがデフォルトになる
+- 判定理由のログが`~/.gwt/logs/`に出力される
 
 ## Phase 4: TUI統合
 

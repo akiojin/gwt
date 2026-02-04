@@ -210,6 +210,7 @@ Docker起動中はスピナーとステータスメッセージを表示:
 - Docker関連のログは既存のgwtログファイルに出力
 - tracingクレートを使用してカテゴリ`docker`で出力
 - 別途Dockerログファイルは作成しない
+- Dockerの自動判定理由（Build/No Buildの提示有無、Recreateデフォルトの理由）はINFOで出力する
 
 ### エージェント起動フロー
 

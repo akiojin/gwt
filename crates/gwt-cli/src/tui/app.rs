@@ -5397,6 +5397,11 @@ impl Model {
         keep_launch_status: bool,
     ) -> bool {
         if quick_start.force_host.unwrap_or(false) {
+            info!(
+                category = "docker",
+                branch = %plan.config.branch_name,
+                "Quick Start docker settings: force host"
+            );
             self.launch_plan_in_tmux(plan, None, true, keep_launch_status, false, false, false);
             return true;
         }
@@ -5415,7 +5420,14 @@ impl Model {
             );
             let services = match manager.list_services() {
                 Ok(services) if !services.is_empty() => services,
-                _ => return false,
+                _ => {
+                    info!(
+                        category = "docker",
+                        branch = %plan.config.branch_name,
+                        "Quick Start docker settings: service list unavailable"
+                    );
+                    return false;
+                }
             };
 
             if services.len() == 1 {
@@ -5424,9 +5436,20 @@ impl Model {
                 if services.contains(selected) {
                     Some(selected.clone())
                 } else {
+                    info!(
+                        category = "docker",
+                        branch = %plan.config.branch_name,
+                        requested = %selected,
+                        "Quick Start docker settings: service not found; fallback to wizard"
+                    );
                     return false;
                 }
             } else {
+                info!(
+                    category = "docker",
+                    branch = %plan.config.branch_name,
+                    "Quick Start docker settings missing service; fallback to wizard"
+                );
                 return false;
             }
         } else {
@@ -5434,9 +5457,22 @@ impl Model {
         };
 
         let (Some(force_recreate), Some(keep)) = (quick_start.recreate, quick_start.keep) else {
+            info!(
+                category = "docker",
+                branch = %plan.config.branch_name,
+                "Quick Start docker settings incomplete; fallback to wizard"
+            );
             return false;
         };
 
+        info!(
+            category = "docker",
+            branch = %plan.config.branch_name,
+            service = %service.clone().unwrap_or_default(),
+            force_recreate = force_recreate,
+            keep = keep,
+            "Applying Quick Start docker settings"
+        );
         self.maybe_request_build_selection(
             plan,
             service.as_deref(),
@@ -5563,6 +5599,11 @@ impl Model {
         );
         let status = manager.get_status();
         if !Self::should_prompt_recreate(status) {
+            info!(
+                category = "docker",
+                branch = %plan.config.branch_name,
+                "Skipping docker recreate prompt (container not found)"
+            );
             self.maybe_request_build_selection(
                 plan,
                 service,
@@ -5573,6 +5614,13 @@ impl Model {
             );
             return;
         }
+        let needs_rebuild = manager.needs_rebuild();
+        info!(
+            category = "docker",
+            branch = %plan.config.branch_name,
+            needs_rebuild = needs_rebuild,
+            "Checked docker rebuild status for recreate default"
+        );
 
         self.pending_recreate_select = Some(PendingRecreateSelect {
             plan: plan.clone(),
@@ -5588,7 +5636,7 @@ impl Model {
             ],
             confirm_label: "Recreate".to_string(),
             cancel_label: "Reuse".to_string(),
-            selected_confirm: manager.needs_rebuild(),
+            selected_confirm: Self::default_recreate_selected(needs_rebuild),
             is_dangerous: false,
             ..Default::default()
         };
@@ -5598,6 +5646,10 @@ impl Model {
 
     fn should_prompt_recreate(status: ContainerStatus) -> bool {
         status.exists()
+    }
+
+    fn default_recreate_selected(needs_rebuild: bool) -> bool {
+        needs_rebuild
     }
 
     fn maybe_request_build_selection(
@@ -5644,7 +5696,19 @@ impl Model {
             &plan.config.branch_name,
             docker_file_type,
         );
-        if !manager.needs_rebuild() {
+        let needs_rebuild = manager.needs_rebuild();
+        info!(
+            category = "docker",
+            branch = %plan.config.branch_name,
+            needs_rebuild = needs_rebuild,
+            "Checked docker build prompt requirement"
+        );
+        if !needs_rebuild {
+            info!(
+                category = "docker",
+                branch = %plan.config.branch_name,
+                "Skipping docker build prompt (no changes detected)"
+            );
             self.maybe_request_cleanup_selection(
                 plan,
                 service,
@@ -5664,6 +5728,11 @@ impl Model {
             force_recreate,
             quick_start_keep,
         });
+        info!(
+            category = "docker",
+            branch = %plan.config.branch_name,
+            "Showing docker build prompt"
+        );
         self.confirm = ConfirmState {
             title: "Docker Build".to_string(),
             message: "Build Docker image before launch?".to_string(),
@@ -5692,6 +5761,12 @@ impl Model {
         quick_start_keep: Option<bool>,
     ) {
         if let Some(keep) = quick_start_keep {
+            info!(
+                category = "docker",
+                branch = %plan.config.branch_name,
+                keep = keep,
+                "Quick Start docker keep setting applied"
+            );
             self.launch_plan_in_tmux(
                 plan,
                 service,
@@ -5704,6 +5779,11 @@ impl Model {
             return;
         }
         if force_host || launcher::detect_docker_environment(&plan.config.worktree_path).is_none() {
+            info!(
+                category = "docker",
+                branch = %plan.config.branch_name,
+                "Skipping docker cleanup prompt (host launch)"
+            );
             self.launch_plan_in_tmux(
                 plan,
                 service,
@@ -5723,6 +5803,11 @@ impl Model {
             force_recreate,
             build,
         });
+        info!(
+            category = "docker",
+            branch = %plan.config.branch_name,
+            "Showing docker cleanup prompt"
+        );
         self.confirm = ConfirmState {
             title: "Docker Cleanup".to_string(),
             message: "Stop containers when agent exits?".to_string(),
@@ -8072,6 +8157,12 @@ mod tests {
             docker_keep: None,
             timestamp: 0,
         }
+    }
+
+    #[test]
+    fn test_default_recreate_selected_for_rebuild() {
+        assert!(Model::default_recreate_selected(true));
+        assert!(!Model::default_recreate_selected(false));
     }
 
     #[test]
