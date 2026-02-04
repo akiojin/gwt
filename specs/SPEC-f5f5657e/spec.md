@@ -33,6 +33,7 @@
 14. **前提条件** Docker起動が必要、**操作** 起動時にKeep/Stop確認を行い「Stop」を選択、**期待結果** `docker compose down` が実行される
 15. **前提条件** Dockerコンテナが存在しない、**操作** エージェント起動、**期待結果** Recreate/Reuseの確認は表示されない
 16. **前提条件** 同一ブランチでQuick Start履歴が存在、**操作** Quick Startで「Resume/Start new」を選択、**期待結果** 以前選択したHostOS/Dockerサービス・Recreate/Reuse・Keep/Stopが復元され、Dockerウィザードは表示されない
+17. **前提条件** 既にコンテナが起動中、**操作** Reuse/Keepで起動、**期待結果** `docker compose up` を実行せず `docker compose exec` でエージェントが起動する
 
 ---
 

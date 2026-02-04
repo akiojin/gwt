@@ -966,24 +966,56 @@ fn build_compose_agent_command(
     } else {
         String::new()
     };
+    let up_step = if build || force_recreate {
+        format!(
+            "{}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ status=$?; echo \"[gwt] docker compose up failed (status=$status).\"; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $status; }} && \\",
+            compose_args_debug,
+            compose_env_prefix,
+            container_name,
+            compose_args_str,
+            up_target,
+            build_flag,
+            recreate_flag,
+            compose_env_prefix,
+            container_name,
+            compose_args_str,
+            compose_env_prefix,
+            container_name,
+            compose_args_str
+        )
+    } else {
+        info!(
+            category = "docker",
+            container = %container_name,
+            "Compose up will be skipped when container is already running"
+        );
+        format!(
+            "{}{}COMPOSE_PROJECT_NAME={} docker compose{} ps -q | grep -q .; then echo \"[gwt] docker compose up skipped (already running).\"; else {}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ status=$?; echo \"[gwt] docker compose up failed (status=$status).\"; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $status; }}; fi && \\",
+            compose_args_debug,
+            compose_env_prefix,
+            container_name,
+            compose_args_str,
+            compose_args_debug,
+            compose_env_prefix,
+            container_name,
+            compose_args_str,
+            up_target,
+            build_flag,
+            recreate_flag,
+            compose_env_prefix,
+            container_name,
+            compose_args_str,
+            compose_env_prefix,
+            container_name,
+            compose_args_str
+        )
+    };
     format!(
         r#"cd {} && \
-{}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ status=$?; echo "[gwt] docker compose up failed (status=$status)."; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $status; }} && \
+{} \
 {}{}COMPOSE_PROJECT_NAME={} docker compose{} exec{} {} {} || {{ status=$?; echo "[gwt] docker compose exec failed (status=$status)."; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $status; }}"#,
         working_dir,
-        compose_args_debug,
-        compose_env_prefix,
-        container_name,
-        compose_args_str,
-        up_target,
-        build_flag,
-        recreate_flag,
-        compose_env_prefix,
-        container_name,
-        compose_args_str,
-        compose_env_prefix,
-        container_name,
-        compose_args_str,
+        up_step,
         stop_trap,
         compose_env_prefix,
         container_name,
@@ -1676,6 +1708,8 @@ mod tests {
 
         // Verify command structure
         assert!(cmd.contains("docker compose up -d"));
+        assert!(cmd.contains("docker compose ps -q"));
+        assert!(cmd.contains("docker compose up skipped"));
         assert!(cmd.contains("--no-build"));
         assert!(cmd.contains("docker compose down"));
         assert!(cmd.contains("docker compose exec"));

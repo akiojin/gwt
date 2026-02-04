@@ -236,6 +236,7 @@
 - [ ] Buildが必要な場合はRecreateのデフォルトを推奨にする
 - [ ] Docker自動判定理由をINFOログに出力する
 - [ ] Quick Startでは変更検知がない限りRecreateを適用しない
+- [ ] 既に起動中のコンテナでは`docker compose up`をスキップする
 
 **受け入れ基準**:
 
@@ -244,6 +245,7 @@
 - Buildが必要な場合にRecreateがデフォルトになる
 - 判定理由のログが`~/.gwt/logs/`に出力される
 - Quick Startで変更検知がない場合はReuseになる
+- 起動中のコンテナでは`docker compose up`が実行されない
 
 ## Phase 4: TUI統合
 
