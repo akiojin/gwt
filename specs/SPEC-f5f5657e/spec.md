@@ -35,6 +35,7 @@
 16. **前提条件** Dockerコンテナが起動中、**操作** エージェント起動、**期待結果** Recreate/Reuseの確認は表示されない（自動でReuse扱い）
 16. **前提条件** 同一ブランチでQuick Start履歴が存在、**操作** Quick Startで「Resume/Start new」を選択、**期待結果** 以前選択したHostOS/Dockerサービス・Recreate/Reuse・Keep/Stopが復元され、Dockerウィザードは表示されない
 17. **前提条件** 既にコンテナが起動中、**操作** Reuse/Keepで起動、**期待結果** `docker compose up` を実行せず `docker compose exec` でエージェントが起動する
+18. **前提条件** 起動中判定のコマンドが生成される、**操作** Reuse/Keepで起動、**期待結果** `if docker ps -q --filter label=com.docker.compose.project=... | grep -q .; then ... fi` の形式で判定する
 
 ---
 

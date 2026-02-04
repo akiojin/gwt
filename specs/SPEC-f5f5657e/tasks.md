@@ -238,6 +238,7 @@
 - [ ] Quick Startでは変更検知がない限りRecreateを適用しない
 - [ ] 既に起動中のコンテナでは`docker compose up`をスキップする
 - [ ] 既に起動中のコンテナではRecreate/Reuseの確認を表示しない
+- [ ] 起動中判定のシェルを`if docker ps ...; then`形式で生成する
 
 **受け入れ基準**:
 

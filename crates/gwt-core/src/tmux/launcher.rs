@@ -997,7 +997,7 @@ fn build_compose_agent_command(
             "Compose up will use --no-recreate when starting stopped containers"
         );
         format!(
-            "{}docker ps -q --filter label=com.docker.compose.project={} | grep -q .; then echo \"[gwt] docker compose up skipped (already running).\"; else {}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ status=$?; echo \"[gwt] docker compose up failed (status=$status).\"; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $status; }}; fi && \\",
+            "{}if docker ps -q --filter label=com.docker.compose.project={} | grep -q .; then echo \"[gwt] docker compose up skipped (already running).\"; else {}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ status=$?; echo \"[gwt] docker compose up failed (status=$status).\"; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $status; }}; fi && \\",
             compose_args_debug,
             container_name,
             compose_args_debug,
@@ -1713,7 +1713,9 @@ mod tests {
 
         // Verify command structure
         assert!(cmd.contains("docker compose up -d"));
-        assert!(cmd.contains("docker ps -q --filter label=com.docker.compose.project=gwt-my-worktree"));
+        assert!(cmd.contains(
+            "if docker ps -q --filter label=com.docker.compose.project=gwt-my-worktree"
+        ));
         assert!(cmd.contains("docker compose up skipped"));
         assert!(cmd.contains("--no-build"));
         assert!(cmd.contains("--no-recreate"));
