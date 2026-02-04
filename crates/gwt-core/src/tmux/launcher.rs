@@ -1797,7 +1797,7 @@ mod tests {
         let worktree_path = PathBuf::from("/tmp/my-worktree");
         let docker_type = DockerFileType::Compose(PathBuf::from("docker-compose.yml"));
         let mut env_vars = HashMap::new();
-        env_vars.insert("GWT_PORT".to_string(), "6401".to_string());
+        env_vars.insert("PORT".to_string(), "6401".to_string());
 
         let cmd = build_docker_agent_command(
             &worktree_path,
@@ -1812,7 +1812,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(cmd.contains("GWT_PORT='6401' COMPOSE_PROJECT_NAME=gwt-my-worktree"));
+        assert!(cmd.contains("PORT='6401' COMPOSE_PROJECT_NAME=gwt-my-worktree"));
     }
 
     #[test]

@@ -958,7 +958,7 @@ mod tests {
 services:
   app:
     ports:
-      - "${GWT_PORT:-6400}:6400"
+      - "${PORT:-3000}:3000"
       - "127.0.0.1:${LOCAL_PORT:-8080}:8080"
   worker:
     ports:
@@ -967,7 +967,7 @@ services:
 "#;
 
         let envs = extract_port_envs_from_compose(content);
-        assert!(envs.contains(&("GWT_PORT".to_string(), 6400)));
+        assert!(envs.contains(&("PORT".to_string(), 3000)));
         assert!(envs.contains(&("LOCAL_PORT".to_string(), 8080)));
         assert!(envs.contains(&("PUBLISHED_PORT".to_string(), 3000)));
     }
