@@ -31,6 +31,7 @@
 12. **前提条件** Docker起動が必要、**操作** 起動時にKeep/Stop確認を行い「Keep」を選択、**期待結果** `docker compose down` は実行されない
 13. **前提条件** Docker起動が必要、**操作** 起動時にKeep/Stop確認を行い「Stop」を選択、**期待結果** `docker compose down` が実行される
 14. **前提条件** Dockerコンテナが存在しない、**操作** エージェント起動、**期待結果** Recreate/Reuseの確認は表示されない
+15. **前提条件** 同一ブランチでQuick Start履歴が存在、**操作** Quick Startで「Resume/Start new」を選択、**期待結果** 以前選択したHostOS/Dockerサービス・Recreate/Reuse・Build/No Build・Keep/Stopが復元され、Dockerウィザードは表示されない
 9. **前提条件** ホストにCodexのauth.jsonが存在、**操作** Dockerコンテナ起動、**期待結果** コンテナ内のCodex認証情報がホストのauth.jsonに同期される
 
 ---
@@ -140,6 +141,8 @@ Dockerデーモンが起動していない場合、gwtが自動起動を試み�
 - Codex認証ファイルがコンテナ側で新しくてもホスト側と内容が異なる場合、どうなるか？→ ホストのauth.jsonを優先して同期する
 - Dockerコンテナが未作成の状態ではどうなるか？→ Recreate/Reuseの確認を省略する
 - Codex認証ファイルがコンテナ側で新しくてもホスト側と内容が異なる場合、どうなるか？→ ホストのauth.jsonを優先して同期する
+- Quick StartのDocker設定があるがDockerファイルが見つからない場合はどうなるか？→ Docker設定を無視してホストで起動する
+- Quick StartでHostOSを選んだ履歴がある場合はどうなるか？→ Dockerウィザードを表示せずホストで起動する
 
 ## 詳細仕様
 
@@ -181,6 +184,8 @@ gwtのcompose定義では`PORT`（デフォルト3000）を使用し、`GWT_PORT
 - Docker起動前に「Recreate/Reuse」を選択するUIを表示し、デフォルトはReuse
 - Docker起動前に「Keep/Stop」を選択するUIを表示し、デフォルトはKeep
 - コンテナのHOMEはホストから引き継がず、コンテナ側のデフォルトに従う
+- Quick Start履歴にDocker選択情報（HostOS/Dockerサービス、Recreate/Reuse、Build/No Build、Keep/Stop）がある場合はそれを適用し、Dockerウィザードは表示しない
+- Quick Start履歴のDockerサービスが現在のcomposeに存在しない場合はサービス選択にフォールバックする
 
 ### TUI進捗表示
 

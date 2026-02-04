@@ -79,7 +79,12 @@ fn parse_port_env_default(value: &str) -> Option<(String, u16)> {
 
 fn detect_git_common_dir(worktree_path: &Path) -> Option<PathBuf> {
     if let Ok(output) = std::process::Command::new("git")
-        .args(["-C", &worktree_path.to_string_lossy(), "rev-parse", "--git-common-dir"])
+        .args([
+            "-C",
+            &worktree_path.to_string_lossy(),
+            "rev-parse",
+            "--git-common-dir",
+        ])
         .output()
     {
         if output.status.success() {
@@ -126,7 +131,12 @@ fn detect_git_common_dir(worktree_path: &Path) -> Option<PathBuf> {
 
 fn detect_git_dir(worktree_path: &Path) -> Option<PathBuf> {
     if let Ok(output) = std::process::Command::new("git")
-        .args(["-C", &worktree_path.to_string_lossy(), "rev-parse", "--git-dir"])
+        .args([
+            "-C",
+            &worktree_path.to_string_lossy(),
+            "rev-parse",
+            "--git-dir",
+        ])
         .output()
     {
         if output.status.success() {

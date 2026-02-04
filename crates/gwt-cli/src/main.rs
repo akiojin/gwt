@@ -312,6 +312,11 @@ impl SessionUpdateContext {
             skip_permissions: Some(self.skip_permissions),
             tool_version: Some(self.version.clone()),
             collaboration_modes: Some(self.collaboration_modes),
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
             timestamp: Utc::now().timestamp_millis(),
         }
     }
@@ -877,6 +882,11 @@ fn execute_launch_plan(plan: LaunchPlan) -> Result<AgentExitKind, GwtError> {
         skip_permissions: Some(config.skip_permissions),
         tool_version: Some(selected_version.clone()),
         collaboration_modes: Some(config.collaboration_modes),
+        docker_service: None,
+        docker_force_host: None,
+        docker_recreate: None,
+        docker_build: None,
+        docker_keep: None,
         timestamp: Utc::now().timestamp_millis(),
     };
     if let Err(e) = save_session_entry(&config.worktree_path, session_entry) {
@@ -956,6 +966,11 @@ fn execute_launch_plan(plan: LaunchPlan) -> Result<AgentExitKind, GwtError> {
             skip_permissions: Some(config.skip_permissions),
             tool_version: Some(selected_version.clone()),
             collaboration_modes: Some(config.collaboration_modes),
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
             timestamp: Utc::now().timestamp_millis(),
         };
         if let Err(e) = save_session_entry(&config.worktree_path, entry) {

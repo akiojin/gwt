@@ -199,6 +199,27 @@
 
 ---
 
+## Phase 4: Quick Start Docker設定復元
+
+### TASK-010: Quick StartでDocker選択情報を復元
+
+**ステータス**: 未着手
+**優先度**: P1
+**依存**: TASK-006, TASK-007
+
+**内容**:
+
+- [ ] ToolSessionEntryにDocker選択情報（HostOS/Dockerサービス、Recreate/Reuse、Build/No Build、Keep/Stop）を保存
+- [ ] Quick Start履歴からDocker選択情報を復元
+- [ ] Dockerウィザードの各確認をQuick Start設定がある場合はスキップ
+- [ ] サービス不一致時はサービス選択へフォールバック
+
+**受け入れ基準**:
+
+- 同一ブランチのQuick StartでDocker設定が復元される
+- Dockerウィザードが表示されずに起動できる
+- テスト（T-401〜T-403）が通る
+
 ## Phase 4: TUI統合
 
 ### TASK-010: Docker進捗表示画面実装

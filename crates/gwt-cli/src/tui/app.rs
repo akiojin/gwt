@@ -77,8 +77,8 @@ use super::screens::{
     BranchItem, BranchListState, BranchType, CloneWizardState, CloneWizardStep, CodingAgent,
     ConfirmState, EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, GitViewCache,
     GitViewState, HelpState, LogsState, MigrationDialogPhase, MigrationDialogState, ProfilesState,
-    QuickStartEntry, ReasoningLevel, ServiceSelectState, SettingsState, WizardConfirmResult,
-    WizardState, WizardStep, WorktreeCreateState,
+    QuickStartDockerSettings, QuickStartEntry, ReasoningLevel, ServiceSelectState, SettingsState,
+    WizardConfirmResult, WizardState, WizardStep, WorktreeCreateState,
 };
 // log_gwt_error is available for use when GwtError types are available
 
@@ -519,6 +519,8 @@ pub struct Model {
     pending_cleanup_select: Option<PendingCleanupSelect>,
     /// Pending launch plan for Docker host fallback confirmation
     pending_docker_host_launch: Option<LaunchPlan>,
+    /// Pending Quick Start Docker settings (applied at launch)
+    pending_quick_start_docker: Option<QuickStartDockerSettings>,
     /// Branch list update receiver
     branch_list_rx: Option<Receiver<BranchListUpdate>>,
     /// Branch summary update receiver
@@ -621,7 +623,10 @@ struct PendingCleanupSelect {
 }
 
 enum ServiceSelectionDecision {
-    Proceed { service: Option<String>, force_host: bool },
+    Proceed {
+        service: Option<String>,
+        force_host: bool,
+    },
     AwaitSelection,
 }
 
@@ -802,6 +807,7 @@ impl Model {
             pending_recreate_select: None,
             pending_cleanup_select: None,
             pending_docker_host_launch: None,
+            pending_quick_start_docker: None,
             branch_list_rx: None,
             branch_summary_rx: None,
             pr_title_rx: None,
@@ -1655,6 +1661,11 @@ impl Model {
             skip_permissions: None,
             tool_version,
             collaboration_modes,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
             timestamp: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
@@ -2458,6 +2469,11 @@ impl Model {
                 skip_permissions: last_entry.and_then(|entry| entry.skip_permissions),
                 tool_version: last_entry.and_then(|entry| entry.tool_version.clone()),
                 collaboration_modes: last_entry.and_then(|entry| entry.collaboration_modes),
+                docker_service: last_entry.and_then(|entry| entry.docker_service.clone()),
+                docker_force_host: last_entry.and_then(|entry| entry.docker_force_host),
+                docker_recreate: last_entry.and_then(|entry| entry.docker_recreate),
+                docker_build: last_entry.and_then(|entry| entry.docker_build),
+                docker_keep: last_entry.and_then(|entry| entry.docker_keep),
                 timestamp: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as i64)
@@ -2697,6 +2713,11 @@ impl Model {
                 session_id: entry.session_id,
                 skip_permissions: entry.skip_permissions,
                 collaboration_modes: entry.collaboration_modes,
+                docker_service: entry.docker_service,
+                docker_force_host: entry.docker_force_host,
+                docker_recreate: entry.docker_recreate,
+                docker_build: entry.docker_build,
+                docker_keep: entry.docker_keep,
             })
             .collect();
         self.wizard
@@ -4977,6 +4998,11 @@ impl Model {
                             session_id: entry.session_id,
                             skip_permissions: entry.skip_permissions,
                             collaboration_modes: entry.collaboration_modes,
+                            docker_service: entry.docker_service,
+                            docker_force_host: entry.docker_force_host,
+                            docker_recreate: entry.docker_recreate,
+                            docker_build: entry.docker_build,
+                            docker_keep: entry.docker_keep,
                         })
                         .collect();
                     self.wizard
@@ -5117,6 +5143,7 @@ impl Model {
             selected_issue: self.wizard.selected_issue.clone(),
         };
 
+        self.pending_quick_start_docker = self.wizard.quick_start_docker.clone();
         self.start_launch_preparation(request);
 
         // Close wizard immediately so user can see launch progress in branch list
@@ -5323,6 +5350,11 @@ impl Model {
         let keep_launch_status = matches!(plan.install_plan, InstallPlan::Install { .. });
 
         if self.tmux_mode.is_multi() && self.gwt_pane_id.is_some() {
+            if let Some(quick_start) = self.pending_quick_start_docker.take() {
+                if self.try_apply_quick_start_docker(&plan, quick_start, keep_launch_status) {
+                    return;
+                }
+            }
             let decision = match self.prepare_docker_service_selection(&plan) {
                 Ok(decision) => decision,
                 Err(e) => {
@@ -5337,7 +5369,10 @@ impl Model {
                 ServiceSelectionDecision::AwaitSelection => {
                     return;
                 }
-                ServiceSelectionDecision::Proceed { service, force_host } => {
+                ServiceSelectionDecision::Proceed {
+                    service,
+                    force_host,
+                } => {
                     self.maybe_request_recreate_selection(
                         &plan,
                         service.as_deref(),
@@ -5350,6 +5385,67 @@ impl Model {
             self.pending_agent_launch = Some(plan);
             self.should_quit = true;
         }
+    }
+
+    fn try_apply_quick_start_docker(
+        &mut self,
+        plan: &LaunchPlan,
+        quick_start: QuickStartDockerSettings,
+        keep_launch_status: bool,
+    ) -> bool {
+        if quick_start.force_host.unwrap_or(false) {
+            self.launch_plan_in_tmux(plan, None, true, keep_launch_status, false, false, false);
+            return true;
+        }
+
+        let docker_file_type = match launcher::detect_docker_environment(&plan.config.worktree_path)
+        {
+            Some(dtype) => dtype,
+            None => return false,
+        };
+
+        let service = if docker_file_type.is_compose() {
+            let manager = DockerManager::new(
+                &plan.config.worktree_path,
+                &plan.config.branch_name,
+                docker_file_type,
+            );
+            let services = match manager.list_services() {
+                Ok(services) if !services.is_empty() => services,
+                _ => return false,
+            };
+
+            if services.len() == 1 {
+                Some(services[0].clone())
+            } else if let Some(selected) = quick_start.service.as_ref() {
+                if services.contains(selected) {
+                    Some(selected.clone())
+                } else {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        } else {
+            None
+        };
+
+        let (Some(force_recreate), Some(build), Some(keep)) =
+            (quick_start.recreate, quick_start.build, quick_start.keep)
+        else {
+            return false;
+        };
+
+        self.launch_plan_in_tmux(
+            plan,
+            service.as_deref(),
+            false,
+            keep_launch_status,
+            build,
+            force_recreate,
+            !keep,
+        );
+        true
     }
 
     fn prepare_docker_service_selection(
@@ -5444,7 +5540,8 @@ impl Model {
             return;
         }
 
-        let docker_file_type = match launcher::detect_docker_environment(&plan.config.worktree_path) {
+        let docker_file_type = match launcher::detect_docker_environment(&plan.config.worktree_path)
+        {
             Some(dtype) => dtype,
             None => {
                 self.launch_plan_in_tmux(
@@ -5846,6 +5943,24 @@ impl Model {
         panes.push(agent_pane);
         self.pane_list.update_panes(panes);
 
+        let docker_env = launcher::detect_docker_environment(&plan.config.worktree_path);
+        let (docker_service, docker_force_host, docker_recreate, docker_build, docker_keep) =
+            if docker_env.is_some() {
+                if force_host {
+                    (None, Some(true), None, None, None)
+                } else {
+                    (
+                        service.map(|value| value.to_string()),
+                        Some(false),
+                        Some(force_recreate),
+                        Some(build),
+                        Some(!stop_on_exit),
+                    )
+                }
+            } else {
+                (None, None, None, None, None)
+            };
+
         // FR-071: Save session entry for tmux mode
         let session_entry = ToolSessionEntry {
             branch: plan.config.branch_name.clone(),
@@ -5859,6 +5974,11 @@ impl Model {
             skip_permissions: Some(plan.config.skip_permissions),
             tool_version: Some(plan.selected_version.clone()),
             collaboration_modes: Some(plan.config.collaboration_modes),
+            docker_service,
+            docker_force_host,
+            docker_recreate,
+            docker_build,
+            docker_keep,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
@@ -7895,6 +8015,11 @@ mod tests {
             skip_permissions: None,
             tool_version: None,
             collaboration_modes: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
             timestamp: 0,
         }
     }
@@ -8321,8 +8446,14 @@ mod tests {
 
     #[test]
     fn test_normalize_container_executable_strips_path() {
-        assert_eq!(normalize_container_executable("/usr/local/bin/bunx"), "bunx");
-        assert_eq!(normalize_container_executable("C:\\tools\\codex.exe"), "codex.exe");
+        assert_eq!(
+            normalize_container_executable("/usr/local/bin/bunx"),
+            "bunx"
+        );
+        assert_eq!(
+            normalize_container_executable("C:\\tools\\codex.exe"),
+            "codex.exe"
+        );
         assert_eq!(normalize_container_executable("codex"), "codex");
     }
 

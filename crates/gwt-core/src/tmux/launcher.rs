@@ -4,10 +4,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::error::{TmuxError, TmuxResult};
 use super::pane::{enable_mouse, select_pane, AgentPane, SplitDirection};
@@ -729,9 +729,11 @@ fn rewrite_ports_value(
                         let new_port = if docker_ports.contains(&host_port)
                             || PortAllocator::is_port_in_use(host_port)
                         {
-                            allocate_free_port(allocator, host_port, used_ports).unwrap_or(host_port)
+                            allocate_free_port(allocator, host_port, used_ports)
+                                .unwrap_or(host_port)
                         } else if used_ports.contains(&host_port) {
-                            allocate_free_port(allocator, host_port, used_ports).unwrap_or(host_port)
+                            allocate_free_port(allocator, host_port, used_ports)
+                                .unwrap_or(host_port)
                         } else {
                             used_ports.insert(host_port);
                             host_port
@@ -761,14 +763,19 @@ fn rewrite_ports_value(
                 let mut new_map = map.clone();
                 let published = map.get(&Value::String("published".to_string()));
                 let target = map.get(&Value::String("target".to_string()));
-                if let (Some(Value::Number(published)), Some(Value::Number(_target))) = (published, target) {
-                    if let Some(host_port) = published.as_u64().and_then(|p| u16::try_from(p).ok()) {
+                if let (Some(Value::Number(published)), Some(Value::Number(_target))) =
+                    (published, target)
+                {
+                    if let Some(host_port) = published.as_u64().and_then(|p| u16::try_from(p).ok())
+                    {
                         let new_port = if docker_ports.contains(&host_port)
                             || PortAllocator::is_port_in_use(host_port)
                         {
-                            allocate_free_port(allocator, host_port, used_ports).unwrap_or(host_port)
+                            allocate_free_port(allocator, host_port, used_ports)
+                                .unwrap_or(host_port)
                         } else if used_ports.contains(&host_port) {
-                            allocate_free_port(allocator, host_port, used_ports).unwrap_or(host_port)
+                            allocate_free_port(allocator, host_port, used_ports)
+                                .unwrap_or(host_port)
                         } else {
                             used_ports.insert(host_port);
                             host_port
@@ -809,10 +816,7 @@ fn maybe_write_compose_override(
         reason: format!("Failed to parse compose file: {}", e),
     })?;
 
-    let Some(services) = doc
-        .get("services")
-        .and_then(|v| v.as_mapping())
-    else {
+    let Some(services) = doc.get("services").and_then(|v| v.as_mapping()) else {
         return Ok(None);
     };
 
@@ -831,12 +835,9 @@ fn maybe_write_compose_override(
         let mut service_override = Mapping::new();
 
         if let Some(ports_val) = service_map.get(&Value::String("ports".to_string())) {
-            if let Some((rewritten_ports, changed)) = rewrite_ports_value(
-                ports_val,
-                &allocator,
-                &mut used_ports,
-                &docker_ports,
-            ) {
+            if let Some((rewritten_ports, changed)) =
+                rewrite_ports_value(ports_val, &allocator, &mut used_ports, &docker_ports)
+            {
                 if changed {
                     changed_any = true;
                 }
@@ -936,7 +937,11 @@ fn build_compose_agent_command(
     };
 
     let build_flag = if build { " --build" } else { " --no-build" };
-    let recreate_flag = if force_recreate { " --force-recreate" } else { "" };
+    let recreate_flag = if force_recreate {
+        " --force-recreate"
+    } else {
+        ""
+    };
     let mut exec_script = format!("exec {}{}", command_escaped, args_str);
     if command.to_lowercase().contains("codex") {
         let sync_script = concat!(
