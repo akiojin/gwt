@@ -32,6 +32,7 @@
 13. **前提条件** Docker起動が必要、**操作** 起動時にKeep/Stop確認を行い「Keep」を選択、**期待結果** `docker compose down` は実行されない
 14. **前提条件** Docker起動が必要、**操作** 起動時にKeep/Stop確認を行い「Stop」を選択、**期待結果** `docker compose down` が実行される
 15. **前提条件** Dockerコンテナが存在しない、**操作** エージェント起動、**期待結果** Recreate/Reuseの確認は表示されない
+16. **前提条件** Dockerコンテナが起動中、**操作** エージェント起動、**期待結果** Recreate/Reuseの確認は表示されない（自動でReuse扱い）
 16. **前提条件** 同一ブランチでQuick Start履歴が存在、**操作** Quick Startで「Resume/Start new」を選択、**期待結果** 以前選択したHostOS/Dockerサービス・Recreate/Reuse・Keep/Stopが復元され、Dockerウィザードは表示されない
 17. **前提条件** 既にコンテナが起動中、**操作** Reuse/Keepで起動、**期待結果** `docker compose up` を実行せず `docker compose exec` でエージェントが起動する
 
@@ -140,6 +141,7 @@ Dockerデーモンが起動していない場合、gwtが自動起動を試み�
 - 既存コンテナが古いイメージで起動中の場合、どうなるか？→ Dockerfileの更新を検知して再ビルド・再作成
 - 複数サービスでホスト起動を選択した場合、どうなるか？→ docker composeを実行せずホストで起動する
 - Dockerコンテナが未作成の状態ではどうなるか？→ Recreate/Reuseの確認を省略する
+- Dockerコンテナが起動中の場合はどうなるか？→ Recreate/Reuseの確認を省略し、Reuse相当で続行する
 - Codex認証ファイルがコンテナ側で新しくてもホスト側と内容が異なる場合、どうなるか？→ ホストのauth.jsonを優先して同期する
 - Quick StartのDocker設定があるがDockerファイルが見つからない場合はどうなるか？→ Docker設定を無視してホストで起動する
 - Quick StartでHostOSを選んだ履歴がある場合はどうなるか？→ Dockerウィザードを表示せずホストで起動する
@@ -184,6 +186,7 @@ gwtのcompose定義では`PORT`（デフォルト3000）を使用し、`GWT_PORT
 - Docker起動前に「Build/No Build」を選択するUIを表示し、デフォルトはNo Build
 - Docker起動前に「Build/No Build」を選択するUIを表示するが、Dockerfile/compose変更が検出された場合のみ表示しデフォルトはNo Build
 - Docker起動前に「Recreate/Reuse」を選択するUIを表示し、デフォルトはReuse
+- ただしDockerコンテナが起動中の場合はRecreate/Reuseの確認を表示しない
 - Docker起動前に「Keep/Stop」を選択するUIを表示し、デフォルトはKeep
 - コンテナのHOMEはホストから引き継がず、コンテナ側のデフォルトに従う
 - Quick Start履歴にDocker選択情報（HostOS/Dockerサービス、Recreate/Reuse、Keep/Stop）がある場合はそれを適用し、Dockerウィザードは表示しない

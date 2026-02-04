@@ -5619,7 +5619,8 @@ impl Model {
             info!(
                 category = "docker",
                 branch = %plan.config.branch_name,
-                "Skipping docker recreate prompt (container not found)"
+                status = ?status,
+                "Skipping docker recreate prompt (container not eligible)"
             );
             self.maybe_request_build_selection(
                 plan,
@@ -5662,7 +5663,7 @@ impl Model {
     }
 
     fn should_prompt_recreate(status: ContainerStatus) -> bool {
-        status.exists()
+        matches!(status, ContainerStatus::Stopped)
     }
 
     fn default_recreate_selected(needs_rebuild: bool) -> bool {
@@ -9387,7 +9388,7 @@ mod tests {
 
     #[test]
     fn test_should_prompt_recreate() {
-        assert!(Model::should_prompt_recreate(ContainerStatus::Running));
+        assert!(!Model::should_prompt_recreate(ContainerStatus::Running));
         assert!(Model::should_prompt_recreate(ContainerStatus::Stopped));
         assert!(!Model::should_prompt_recreate(ContainerStatus::NotFound));
     }

@@ -237,6 +237,7 @@
 - [ ] Docker自動判定理由をINFOログに出力する
 - [ ] Quick Startでは変更検知がない限りRecreateを適用しない
 - [ ] 既に起動中のコンテナでは`docker compose up`をスキップする
+- [ ] 既に起動中のコンテナではRecreate/Reuseの確認を表示しない
 
 **受け入れ基準**:
 
