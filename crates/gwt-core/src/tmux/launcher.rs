@@ -939,6 +939,8 @@ fn build_compose_agent_command(
     let build_flag = if build { " --build" } else { " --no-build" };
     let recreate_flag = if force_recreate {
         " --force-recreate"
+    } else if !build {
+        " --no-recreate"
     } else {
         ""
     };
@@ -988,6 +990,11 @@ fn build_compose_agent_command(
             category = "docker",
             container = %container_name,
             "Compose up will be skipped when container is already running"
+        );
+        info!(
+            category = "docker",
+            container = %container_name,
+            "Compose up will use --no-recreate"
         );
         format!(
             "{}{}COMPOSE_PROJECT_NAME={} docker compose{} ps -q | grep -q .; then echo \"[gwt] docker compose up skipped (already running).\"; else {}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ status=$?; echo \"[gwt] docker compose up failed (status=$status).\"; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $status; }}; fi && \\",
@@ -1711,6 +1718,7 @@ mod tests {
         assert!(cmd.contains("docker compose ps -q"));
         assert!(cmd.contains("docker compose up skipped"));
         assert!(cmd.contains("--no-build"));
+        assert!(cmd.contains("--no-recreate"));
         assert!(cmd.contains("docker compose down"));
         assert!(cmd.contains("docker compose exec"));
         assert!(cmd.contains("COMPOSE_PROJECT_NAME=gwt-my-worktree"));
