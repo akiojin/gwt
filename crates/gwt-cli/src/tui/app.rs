@@ -57,8 +57,8 @@ const SESSION_SUMMARY_QUIET_PERIOD: Duration = Duration::from_secs(5);
 const FAST_EXIT_THRESHOLD_SECS: u64 = 2;
 const AGENT_SYSTEM_PROMPT: &str = "You are the master agent. Analyze tasks and propose a plan.";
 const FOOTER_VISIBLE_HEIGHT: usize = 1;
-const FOOTER_SCROLL_TICKS_PER_LINE: u16 = 2; // 0.5s per line (tick = 250ms)
-const FOOTER_SCROLL_PAUSE_TICKS: u16 = 4; // 1s pause at ends
+const FOOTER_SCROLL_TICKS_PER_LINE: u16 = 8; // 2.0s per line (tick = 250ms)
+const FOOTER_SCROLL_PAUSE_TICKS: u16 = 0; // no pause at ends
 
 use super::screens::branch_list::{
     BranchSummaryRequest, BranchSummaryUpdate, PrInfo, WorktreeStatus,
@@ -7843,12 +7843,7 @@ mod tests {
         }
 
         assert_eq!(model.footer_scroll_offset, max_offset);
-        assert_eq!(model.footer_scroll_pause, FOOTER_SCROLL_PAUSE_TICKS);
-
-        for _ in 0..FOOTER_SCROLL_PAUSE_TICKS {
-            model.update(Message::Tick);
-            assert_eq!(model.footer_scroll_offset, max_offset);
-        }
+        assert_eq!(model.footer_scroll_pause, 0);
 
         for _ in 0..FOOTER_SCROLL_TICKS_PER_LINE {
             model.update(Message::Tick);
