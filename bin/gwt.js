@@ -12,60 +12,18 @@ import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync, createWriteStream, mkdirSync, chmodSync, unlinkSync } from 'fs';
 import { get } from 'https';
+import {
+  REPO,
+  getPlatformArtifact,
+  getSupportedPlatformKeys,
+  getVersionedDownloadUrl,
+} from '../scripts/release-download.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const REPO = 'akiojin/gwt';
 const BIN_NAME = process.platform === 'win32' ? 'gwt.exe' : 'gwt';
 const BIN_PATH = join(__dirname, BIN_NAME);
-
-function getPlatformArtifact() {
-  const platform = process.platform;
-  const arch = process.arch;
-
-  const mapping = {
-    'darwin-x64': 'gwt-macos-x86_64',
-    'darwin-arm64': 'gwt-macos-aarch64',
-    'linux-x64': 'gwt-linux-x86_64',
-    'linux-arm64': 'gwt-linux-aarch64',
-    'win32-x64': 'gwt-windows-x86_64.exe',
-  };
-
-  const key = `${platform}-${arch}`;
-  return mapping[key];
-}
-
-async function getLatestReleaseUrl(artifact) {
-  return new Promise((resolve, reject) => {
-    const options = {
-      hostname: 'api.github.com',
-      path: `/repos/${REPO}/releases/latest`,
-      headers: {
-        'User-Agent': 'gwt-wrapper',
-        'Accept': 'application/vnd.github.v3+json',
-      },
-    };
-
-    get(options, (res) => {
-      let data = '';
-      res.on('data', (chunk) => data += chunk);
-      res.on('end', () => {
-        try {
-          const release = JSON.parse(data);
-          const asset = release.assets?.find(a => a.name === artifact);
-          if (asset) {
-            resolve(asset.browser_download_url);
-          } else {
-            resolve(`https://github.com/${REPO}/releases/latest/download/${artifact}`);
-          }
-        } catch {
-          resolve(`https://github.com/${REPO}/releases/latest/download/${artifact}`);
-        }
-      });
-    }).on('error', reject);
-  });
-}
 
 async function downloadFile(url, dest) {
   return new Promise((resolve, reject) => {
@@ -98,20 +56,17 @@ async function downloadFile(url, dest) {
   });
 }
 
-async function downloadBinary() {
+function requirePlatformArtifact() {
   const artifact = getPlatformArtifact();
-
   if (!artifact) {
     console.error(`Unsupported platform: ${process.platform}-${process.arch}`);
-    console.error('Supported platforms: darwin-x64, darwin-arm64, linux-x64, linux-arm64, win32-x64');
+    console.error(`Supported platforms: ${getSupportedPlatformKeys().join(', ')}`);
     process.exit(1);
   }
+  return artifact;
+}
 
-  console.log(`Downloading gwt binary for ${process.platform}-${process.arch}...`);
-
-  const url = await getLatestReleaseUrl(artifact);
-  console.log(`Downloading from: ${url}`);
-
+async function downloadBinary(url) {
   if (!existsSync(__dirname)) {
     mkdirSync(__dirname, { recursive: true });
   }
@@ -148,12 +103,21 @@ function runBinary() {
 
 async function main() {
   if (!existsSync(BIN_PATH)) {
+    const artifact = requirePlatformArtifact();
+    let versionedUrl = null;
     try {
-      await downloadBinary();
+      const resolved = getVersionedDownloadUrl(artifact);
+      versionedUrl = resolved.url;
+      console.log(`Downloading gwt binary for ${process.platform}-${process.arch}...`);
+      console.log(`Downloading from: ${versionedUrl}`);
+      await downloadBinary(versionedUrl);
     } catch (error) {
       console.error('Failed to download gwt binary:', error.message);
       console.error('');
       console.error('You can manually download the binary from:');
+      if (versionedUrl) {
+        console.error(versionedUrl);
+      }
       console.error(`https://github.com/${REPO}/releases`);
       console.error('');
       console.error('Or build from source with: cargo build --release');

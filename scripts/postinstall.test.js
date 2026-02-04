@@ -9,6 +9,10 @@ import {
   isRetryableError,
   isRetryableStatus,
 } from './postinstall.js';
+import {
+  getPackageVersion,
+  getVersionedDownloadUrl,
+} from './release-download.js';
 
 test('buildReleaseDownloadUrl uses version tag', () => {
   const url = buildReleaseDownloadUrl('6.17.0', 'gwt-linux-x86_64');
@@ -54,4 +58,14 @@ test('formatFailureGuidance includes versioned URL and release page', () => {
   );
   assert.equal(guidance.releasePageUrl, 'https://github.com/akiojin/gwt/releases');
   assert.equal(guidance.buildCommand, 'cargo build --release');
+});
+
+test('getVersionedDownloadUrl uses package.json version', () => {
+  const version = getPackageVersion();
+  const result = getVersionedDownloadUrl('gwt-linux-x86_64');
+  assert.equal(result.version, version);
+  assert.equal(
+    result.url,
+    `https://github.com/akiojin/gwt/releases/download/v${version}/gwt-linux-x86_64`,
+  );
 });

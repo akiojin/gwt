@@ -10,16 +10,21 @@ import {
   mkdirSync,
   chmodSync,
   unlinkSync,
-  readFileSync,
 } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { get } from 'https';
+import {
+  REPO,
+  buildReleaseDownloadUrl,
+  getPackageVersion,
+  getPlatformArtifact,
+  getSupportedPlatformKeys,
+} from './release-download.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const REPO = 'akiojin/gwt';
 const BIN_DIR = join(__dirname, '..', 'bin');
 const BIN_NAME = process.platform === 'win32' ? 'gwt.exe' : 'gwt';
 const BIN_PATH = join(BIN_DIR, BIN_NAME);
@@ -33,41 +38,14 @@ const RETRY_CONFIG = {
 
 const MAX_REDIRECTS = 5;
 
-function getPlatformArtifact() {
-  const platform = process.platform;
-  const arch = process.arch;
-
-  const mapping = {
-    'darwin-x64': 'gwt-macos-x86_64',
-    'darwin-arm64': 'gwt-macos-aarch64',
-    'linux-x64': 'gwt-linux-x86_64',
-    'linux-arm64': 'gwt-linux-aarch64',
-    'win32-x64': 'gwt-windows-x86_64.exe',
-  };
-
-  const key = `${platform}-${arch}`;
-  const artifact = mapping[key];
-
+function requirePlatformArtifact() {
+  const artifact = getPlatformArtifact();
   if (!artifact) {
-    console.error(`Unsupported platform: ${platform}-${arch}`);
-    console.error('Supported platforms: darwin-x64, darwin-arm64, linux-x64, linux-arm64, win32-x64');
+    console.error(`Unsupported platform: ${process.platform}-${process.arch}`);
+    console.error(`Supported platforms: ${getSupportedPlatformKeys().join(', ')}`);
     process.exit(1);
   }
-
   return artifact;
-}
-
-function getPackageVersion() {
-  const packagePath = join(__dirname, '..', 'package.json');
-  const pkg = JSON.parse(readFileSync(packagePath, 'utf8'));
-  if (!pkg.version) {
-    throw new Error('package.json does not contain a version field');
-  }
-  return pkg.version;
-}
-
-function buildReleaseDownloadUrl(version, artifact) {
-  return `https://github.com/${REPO}/releases/download/v${version}/${artifact}`;
 }
 
 function getRetryDelayMs(attempt, config = RETRY_CONFIG) {
@@ -226,7 +204,7 @@ async function main() {
     return;
   }
 
-  const artifact = getPlatformArtifact();
+  const artifact = requirePlatformArtifact();
   let version = 'unknown';
   console.log(`Downloading gwt binary for ${process.platform}-${process.arch}...`);
 
