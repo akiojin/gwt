@@ -483,26 +483,20 @@
 
 ## タスク依存関係
 
-```text
-TASK-001 (基盤)
-    ├─> TASK-002 (Detector) ─┬─> TASK-005 (Manager基本) ─> TASK-006 (起動停止) ─┬─> TASK-007 (再利用)
-    │                        │                                                   ├─> TASK-008 (コンテナ内実行)
-    │                        └─> TASK-015 (devcontainer)                         └─> TASK-017 (リトライ)
-    │                                                                                      │
-    ├─> TASK-003 (Command) ─> TASK-005                                                     │
-    │                                                                                      │
-    ├─> TASK-004 (Container) ─> TASK-005                                                   │
-    │                                                                                      │
-    ├─> TASK-009 (Port)                                                                    │
-    │                                                                                      │
-    └─> TASK-016 (Error) ─> TASK-017                                                       │
-                                                                                           │
-TASK-006 ─> TASK-012 (進捗画面) ─> TASK-013 (サービス選択) ─> TASK-014 (TUI統合)             │
-                                                                        │                 │
-                                                                        └─────────────────┴─> TASK-018 (統合)
-                                                                                                  │
-                                                                        TASK-018 ─> TASK-019 (クリーンアップ) ─> TASK-020 (統合テスト)
-```
+タスク依存関係（概要）:
+
+- TASK-001 (基盤)
+- TASK-002 (Detector) → TASK-005 (Manager基本) → TASK-006 (起動停止)
+- TASK-006 (起動停止) → TASK-007 (再利用)
+- TASK-006 (起動停止) → TASK-008 (コンテナ内実行)
+- TASK-006 (起動停止) → TASK-017 (リトライ)
+- TASK-002 (Detector) → TASK-015 (devcontainer)
+- TASK-003 (Command) → TASK-005 (Manager基本)
+- TASK-004 (Container) → TASK-005 (Manager基本)
+- TASK-009 (Port)
+- TASK-016 (Error) → TASK-017 (リトライ)
+- TASK-006 (起動停止) → TASK-012 (進捗画面) → TASK-013 (サービス選択) → TASK-014 (TUI統合) → TASK-018 (統合)
+- TASK-018 (統合) → TASK-019 (クリーンアップ) → TASK-020 (統合テスト)
 
 ## 見積もり
 
