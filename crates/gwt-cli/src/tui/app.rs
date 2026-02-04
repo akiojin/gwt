@@ -5615,7 +5615,7 @@ impl Model {
             docker_file_type,
         );
         let status = manager.get_status();
-        if !Self::should_prompt_recreate(status) {
+        if !Self::should_prompt_recreate(&status) {
             info!(
                 category = "docker",
                 branch = %plan.config.branch_name,
@@ -5662,7 +5662,7 @@ impl Model {
         self.screen = Screen::Confirm;
     }
 
-    fn should_prompt_recreate(status: ContainerStatus) -> bool {
+    fn should_prompt_recreate(status: &ContainerStatus) -> bool {
         matches!(status, ContainerStatus::Stopped)
     }
 
@@ -9388,8 +9388,8 @@ mod tests {
 
     #[test]
     fn test_should_prompt_recreate() {
-        assert!(!Model::should_prompt_recreate(ContainerStatus::Running));
-        assert!(Model::should_prompt_recreate(ContainerStatus::Stopped));
-        assert!(!Model::should_prompt_recreate(ContainerStatus::NotFound));
+        assert!(!Model::should_prompt_recreate(&ContainerStatus::Running));
+        assert!(Model::should_prompt_recreate(&ContainerStatus::Stopped));
+        assert!(!Model::should_prompt_recreate(&ContainerStatus::NotFound));
     }
 }
