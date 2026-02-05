@@ -4231,6 +4231,7 @@ impl Model {
                     // Cancel service selection
                     self.pending_service_select = None;
                     self.launch_status = None;
+                    self.last_mouse_click = None;
                     if let Some(prev_screen) = self.screen_stack.pop() {
                         self.screen = prev_screen;
                     }
@@ -6070,6 +6071,7 @@ impl Model {
         if let Some(prev_screen) = self.screen_stack.pop() {
             self.screen = prev_screen;
         }
+        self.last_mouse_click = None;
         let keep_launch_status = matches!(pending.plan.install_plan, InstallPlan::Install { .. });
         self.maybe_request_recreate_selection(
             &pending.plan,
@@ -6086,6 +6088,7 @@ impl Model {
         if let Some(prev_screen) = self.screen_stack.pop() {
             self.screen = prev_screen;
         }
+        self.last_mouse_click = None;
         let keep_launch_status = matches!(pending.plan.install_plan, InstallPlan::Install { .. });
         self.launch_plan_in_tmux(
             &pending.plan,
@@ -8502,6 +8505,13 @@ mod tests {
         }
     }
 
+    fn sample_mouse_click() -> MouseClick {
+        MouseClick {
+            index: 0,
+            at: Instant::now(),
+        }
+    }
+
     fn render_model_lines(model: &mut Model, width: u16, height: u16) -> Vec<String> {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("terminal init");
@@ -8891,6 +8901,58 @@ mod tests {
         assert!(!model.pending_plugin_setup);
         assert!(model.pending_plugin_setup_launch.is_none());
         assert!(model.launch_status.is_none());
+        assert!(matches!(model.screen, Screen::BranchList));
+    }
+
+    #[test]
+    fn test_service_select_cancel_clears_double_click_state() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::ServiceSelect;
+        model.screen_stack.push(Screen::BranchList);
+        model.pending_service_select = Some(PendingServiceSelect {
+            plan: sample_launch_plan(),
+            services: vec!["app".to_string()],
+        });
+        model.last_mouse_click = Some(sample_mouse_click());
+
+        model.update(Message::NavigateBack);
+
+        assert!(model.last_mouse_click.is_none());
+        assert!(matches!(model.screen, Screen::BranchList));
+    }
+
+    #[test]
+    fn test_service_select_confirm_clears_double_click_state() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::ServiceSelect;
+        model.screen_stack.push(Screen::BranchList);
+        model.pending_service_select = Some(PendingServiceSelect {
+            plan: sample_launch_plan(),
+            services: vec!["app".to_string()],
+        });
+        model.service_select = ServiceSelectState::with_services(vec!["app".to_string()]);
+        model.last_mouse_click = Some(sample_mouse_click());
+
+        model.handle_service_select_confirm();
+
+        assert!(model.last_mouse_click.is_none());
+        assert!(matches!(model.screen, Screen::BranchList));
+    }
+
+    #[test]
+    fn test_service_select_skip_clears_double_click_state() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::ServiceSelect;
+        model.screen_stack.push(Screen::BranchList);
+        model.pending_service_select = Some(PendingServiceSelect {
+            plan: sample_launch_plan(),
+            services: vec!["app".to_string()],
+        });
+        model.last_mouse_click = Some(sample_mouse_click());
+
+        model.handle_service_select_skip();
+
+        assert!(model.last_mouse_click.is_none());
         assert!(matches!(model.screen, Screen::BranchList));
     }
 
