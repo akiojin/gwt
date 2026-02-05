@@ -5489,9 +5489,7 @@ impl Model {
             };
 
             match decision {
-                ServiceSelectionDecision::AwaitSelection => {
-                    return;
-                }
+                ServiceSelectionDecision::AwaitSelection => {}
                 ServiceSelectionDecision::Proceed {
                     service,
                     force_host,
@@ -5906,6 +5904,7 @@ impl Model {
         self.screen = Screen::Confirm;
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn maybe_request_cleanup_selection(
         &mut self,
         plan: &LaunchPlan,
@@ -5981,6 +5980,7 @@ impl Model {
         self.screen = Screen::Confirm;
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn launch_plan_in_tmux(
         &mut self,
         plan: &LaunchPlan,

@@ -1688,7 +1688,7 @@ fn apply_pty_wrapper(executable: &str, args: &[String]) -> (String, Vec<String>)
         wrapped_args.push("/dev/null".to_string());
         wrapped_args.push(executable.to_string());
         wrapped_args.extend(args.iter().cloned());
-        return ("script".to_string(), wrapped_args);
+        ("script".to_string(), wrapped_args)
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -2173,7 +2173,7 @@ mod tests {
         #[cfg(target_os = "macos")]
         {
             assert_eq!(exe, "script");
-            assert_eq!(wrapped.get(0).map(String::as_str), Some("-q"));
+            assert_eq!(wrapped.first().map(String::as_str), Some("-q"));
             assert_eq!(wrapped.get(1).map(String::as_str), Some("/dev/null"));
             assert_eq!(wrapped.get(2).map(String::as_str), Some("codex"));
             assert_eq!(wrapped[3..], args[..]);
