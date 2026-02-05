@@ -122,10 +122,16 @@ def main() -> int:
     if checks is None:
         return 1
 
-    failing = [c for c in checks if is_failing(c)]
-
     results = []
     has_blocking = False
+
+    checks_summary = build_checks_summary(checks)
+    if checks_summary:
+        results.append(checks_summary)
+        if checks_summary.get("failingCount", 0) > 0:
+            has_blocking = True
+
+    failing = [c for c in checks if is_failing(c)]
     if merge_conflict:
         results.append(merge_conflict)
         has_blocking = True
@@ -551,6 +557,38 @@ def is_failing(check: dict[str, Any]) -> bool:
     return bucket in FAILURE_BUCKETS
 
 
+def build_checks_summary(checks: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not checks:
+        return None
+
+    failing_checks = []
+    for check in checks:
+        name = check.get("name") or ""
+        state = normalize_field(check.get("state") or check.get("status"))
+        bucket = normalize_field(check.get("bucket"))
+        workflow = check.get("workflow") or ""
+        link = check.get("detailsUrl") or check.get("link") or ""
+        is_failure = is_failing(check) or (state and state not in {"success", "neutral"})
+        if is_failure:
+            failing_checks.append(
+                {
+                    "name": name,
+                    "state": state,
+                    "bucket": bucket,
+                    "workflow": workflow,
+                    "detailsUrl": link,
+                }
+            )
+
+    return {
+        "name": "Checks summary",
+        "status": "summary",
+        "totalCount": len(checks),
+        "failingCount": len(failing_checks),
+        "failingChecks": failing_checks,
+    }
+
+
 def analyze_check(
     check: dict[str, Any],
     repo_root: Path,
@@ -814,6 +852,9 @@ def render_results(pr_number: str, results: Iterable[dict[str, Any]]) -> None:
         if str(status).startswith("review"):
             render_review_result(result)
             continue
+        if str(status).startswith("summary"):
+            render_checks_summary(result)
+            continue
 
         run_meta = result.get("run", {})
         if run_meta:
@@ -884,6 +925,34 @@ def render_review_result(result: dict[str, Any]) -> None:
         print("Issue comments:")
         for comment in issue_comments:
             print(f"  - {format_comment_line(comment, include_path=False)}")
+
+
+def render_checks_summary(result: dict[str, Any]) -> None:
+    total = result.get("totalCount", 0)
+    failing = result.get("failingCount", 0)
+    print(f"Checks: {failing} failing / {total} total")
+    failing_checks = result.get("failingChecks", []) or []
+    if not failing_checks:
+        print("No failing checks detected.")
+        return
+    print("Failing checks:")
+    for check in failing_checks:
+        name = check.get("name", "")
+        state = check.get("state", "")
+        bucket = check.get("bucket", "")
+        workflow = check.get("workflow", "")
+        details = check.get("detailsUrl", "")
+        detail_bits = []
+        if workflow:
+            detail_bits.append(f"workflow={workflow}")
+        if state:
+            detail_bits.append(f"state={state}")
+        if bucket:
+            detail_bits.append(f"bucket={bucket}")
+        suffix = f" ({', '.join(detail_bits)})" if detail_bits else ""
+        print(f"  - {name}{suffix}")
+        if details:
+            print(f"    Details: {details}")
 
 
 def format_review_line(review: dict[str, Any]) -> str:

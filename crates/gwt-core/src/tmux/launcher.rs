@@ -726,12 +726,10 @@ fn rewrite_ports_value(
                 if let Some((ip, host_part, container_part)) = parse_port_parts(port_value) {
                     let (container_port, proto) = split_container_port(container_part);
                     if let Ok(host_port) = host_part.parse::<u16>() {
-                        let new_port = if docker_ports.contains(&host_port)
+                        let needs_allocate = docker_ports.contains(&host_port)
                             || PortAllocator::is_port_in_use(host_port)
-                        {
-                            allocate_free_port(allocator, host_port, used_ports)
-                                .unwrap_or(host_port)
-                        } else if used_ports.contains(&host_port) {
+                            || used_ports.contains(&host_port);
+                        let new_port = if needs_allocate {
                             allocate_free_port(allocator, host_port, used_ports)
                                 .unwrap_or(host_port)
                         } else {
@@ -761,19 +759,17 @@ fn rewrite_ports_value(
             }
             Value::Mapping(map) => {
                 let mut new_map = map.clone();
-                let published = map.get(&Value::String("published".to_string()));
-                let target = map.get(&Value::String("target".to_string()));
+                let published = map.get(Value::String("published".to_string()));
+                let target = map.get(Value::String("target".to_string()));
                 if let (Some(Value::Number(published)), Some(Value::Number(_target))) =
                     (published, target)
                 {
                     if let Some(host_port) = published.as_u64().and_then(|p| u16::try_from(p).ok())
                     {
-                        let new_port = if docker_ports.contains(&host_port)
+                        let needs_allocate = docker_ports.contains(&host_port)
                             || PortAllocator::is_port_in_use(host_port)
-                        {
-                            allocate_free_port(allocator, host_port, used_ports)
-                                .unwrap_or(host_port)
-                        } else if used_ports.contains(&host_port) {
+                            || used_ports.contains(&host_port);
+                        let new_port = if needs_allocate {
                             allocate_free_port(allocator, host_port, used_ports)
                                 .unwrap_or(host_port)
                         } else {
@@ -834,7 +830,7 @@ fn maybe_write_compose_override(
         };
         let mut service_override = Mapping::new();
 
-        if let Some(ports_val) = service_map.get(&Value::String("ports".to_string())) {
+        if let Some(ports_val) = service_map.get(Value::String("ports".to_string())) {
             if let Some((rewritten_ports, changed)) =
                 rewrite_ports_value(ports_val, &allocator, &mut used_ports, &docker_ports)
             {
@@ -897,6 +893,7 @@ fn maybe_write_compose_override(
     Ok(Some(override_path))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_compose_agent_command(
     worktree_path: &Path,
     container_name: &str,
@@ -1068,6 +1065,7 @@ fn build_compose_agent_command(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_docker_run_agent_command(
     worktree_path: &Path,
     container_name: &str,
@@ -1145,6 +1143,7 @@ fn build_docker_run_agent_command(
 /// 1. Starts the Docker container (compose or docker run)
 /// 2. Executes the agent inside the container
 /// 3. Stops the container when the agent exits
+#[allow(clippy::too_many_arguments)]
 pub fn build_docker_agent_command(
     worktree_path: &Path,
     worktree_name: &str,
@@ -1379,6 +1378,7 @@ pub fn prepare_docker_launch(
 /// This is the main entry point for Docker-aware agent launching.
 /// If Docker files are detected, the agent is launched inside a container.
 /// Otherwise, falls back to normal host execution.
+#[allow(clippy::too_many_arguments)]
 pub fn launch_in_pane_with_docker(
     target_pane: &str,
     worktree_path: &Path,

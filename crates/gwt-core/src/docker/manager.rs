@@ -32,7 +32,7 @@ fn extract_port_envs_from_compose(content: &str) -> Vec<(String, u16)> {
         let Some(service_map) = service.as_mapping() else {
             continue;
         };
-        let Some(ports) = service_map.get(&Value::String("ports".to_string())) else {
+        let Some(ports) = service_map.get(Value::String("ports".to_string())) else {
             continue;
         };
 
@@ -47,7 +47,7 @@ fn extract_port_envs_from_compose(content: &str) -> Vec<(String, u16)> {
                         }
                         Value::Mapping(map) => {
                             if let Some(Value::String(published)) =
-                                map.get(&Value::String("published".to_string()))
+                                map.get(Value::String("published".to_string()))
                             {
                                 if let Some((name, port)) = parse_port_env_default(published) {
                                     results.push((name, port));

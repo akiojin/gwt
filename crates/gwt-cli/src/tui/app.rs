@@ -5687,6 +5687,7 @@ impl Model {
         let container_name = DockerManager::generate_container_name(&plan.config.branch_name);
         self.service_select
             .set_container_info(&container_name, &plan.config.branch_name);
+        self.launch_status = None;
         self.last_mouse_click = None;
         self.screen_stack.push(self.screen.clone());
         self.screen = Screen::ServiceSelect;

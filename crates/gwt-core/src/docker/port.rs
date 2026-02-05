@@ -107,20 +107,14 @@ impl PortAllocator {
             // Start searching from the base port, but skip already allocated ports
             let mut current_port = *base_port;
 
-            loop {
-                if let Some(port) = self.find_available_port(current_port) {
-                    if !used_ports.contains(&port) {
-                        allocated.insert(env_name.to_string(), port);
-                        used_ports.push(port);
-                        break;
-                    } else {
-                        // Port was allocated in this batch, try next
-                        current_port = port + 1;
-                    }
-                } else {
-                    // No more ports available
+            while let Some(port) = self.find_available_port(current_port) {
+                if !used_ports.contains(&port) {
+                    allocated.insert(env_name.to_string(), port);
+                    used_ports.push(port);
                     break;
                 }
+                // Port was allocated in this batch, try next
+                current_port = port + 1;
             }
         }
 
@@ -190,7 +184,7 @@ mod tests {
         let port = allocator.find_available_port(30000);
         assert!(port.is_some());
         let port = port.unwrap();
-        assert!(port >= 30000 && port <= 30100);
+        assert!((30000..=30100).contains(&port));
     }
 
     // T-304: Multiple port allocation test

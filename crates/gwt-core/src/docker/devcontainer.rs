@@ -4,6 +4,7 @@
 //! to docker-compose compatible configurations.
 
 use serde::Deserialize;
+use std::fmt;
 use std::path::Path;
 use tracing::debug;
 
@@ -71,19 +72,20 @@ pub enum StringOrArray {
 }
 
 impl StringOrArray {
-    /// Convert to a single string (joins array with space)
-    pub fn to_string(&self) -> String {
-        match self {
-            StringOrArray::String(s) => s.clone(),
-            StringOrArray::Array(arr) => arr.join(" "),
-        }
-    }
-
     /// Convert to vector of strings
     pub fn to_vec(&self) -> Vec<String> {
         match self {
             StringOrArray::String(s) => vec![s.clone()],
             StringOrArray::Array(arr) => arr.clone(),
+        }
+    }
+}
+
+impl fmt::Display for StringOrArray {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StringOrArray::String(s) => write!(f, "{}", s),
+            StringOrArray::Array(arr) => write!(f, "{}", arr.join(" ")),
         }
     }
 }
