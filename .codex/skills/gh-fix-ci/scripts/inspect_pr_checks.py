@@ -570,7 +570,7 @@ def build_checks_summary(checks: list[dict[str, Any]]) -> dict[str, Any] | None:
         bucket = normalize_field(check.get("bucket"))
         workflow = check.get("workflow") or ""
         link = check.get("detailsUrl") or check.get("link") or ""
-        is_failure = is_failing(check) or (state and state not in {"success", "neutral"})
+        is_failure = is_failing(check)
         if is_failure:
             failing_checks.append(
                 {
