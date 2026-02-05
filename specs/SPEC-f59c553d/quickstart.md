@@ -1,4 +1,4 @@
-# クイックスタート: npm postinstall ダウンロード安定化
+# クイックスタート: npm postinstall + bunxオンデマンド取得のダウンロード安定化
 
 ## テスト
 
@@ -12,4 +12,8 @@ node --test scripts/postinstall.test.js
 node scripts/postinstall.js
 ```
 
-> 注意: 実環境のネットワークに依存するため、テストはネットワークをモックする。
+```bash
+node bin/gwt.js --version
+```
+
+> 注意: 手動確認は実環境のネットワークに依存する。

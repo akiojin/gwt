@@ -29,6 +29,7 @@ use gwt_core::config::{
     setup_gwt_plugin, AISettings, CustomCodingAgent, Profile, ProfilesConfig, ResolvedAISettings,
     ToolSessionEntry,
 };
+use gwt_core::docker::{ContainerStatus, DockerManager};
 use gwt_core::error::GwtError;
 use gwt_core::git::{
     detect_repo_type, get_header_context, Branch, PrCache, Remote, RepoType, Repository,
@@ -57,8 +58,8 @@ const SESSION_SUMMARY_QUIET_PERIOD: Duration = Duration::from_secs(5);
 const FAST_EXIT_THRESHOLD_SECS: u64 = 2;
 const AGENT_SYSTEM_PROMPT: &str = "You are the master agent. Analyze tasks and propose a plan.";
 const FOOTER_VISIBLE_HEIGHT: usize = 1;
-const FOOTER_SCROLL_TICKS_PER_LINE: u16 = 2; // 0.5s per line (tick = 250ms)
-const FOOTER_SCROLL_PAUSE_TICKS: u16 = 4; // 1s pause at ends
+const FOOTER_SCROLL_TICKS_PER_LINE: u16 = 12; // 3.0s per line (tick = 250ms)
+const FOOTER_SCROLL_PAUSE_TICKS: u16 = 0; // no pause at ends
 
 use super::screens::branch_list::{
     BranchSummaryRequest, BranchSummaryUpdate, PrInfo, WorktreeStatus,
@@ -71,13 +72,13 @@ use super::screens::worktree_create::WorktreeCreateStep;
 use super::screens::{
     collect_os_env, render_agent_mode, render_ai_wizard, render_branch_list, render_clone_wizard,
     render_confirm, render_environment, render_error_with_queue, render_git_view, render_help,
-    render_logs, render_migration_dialog, render_profiles, render_settings, render_wizard,
-    render_worktree_create, AIWizardState, AgentMessage, AgentModeState, AgentRole, BranchItem,
-    BranchListState, BranchType, CloneWizardState, CloneWizardStep, CodingAgent, ConfirmState,
-    EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, GitViewCache, GitViewState, HelpState,
-    LogsState, MigrationDialogPhase, MigrationDialogState, ProfilesState, QuickStartEntry,
-    ReasoningLevel, SettingsState, WizardConfirmResult, WizardState, WizardStep,
-    WorktreeCreateState,
+    render_logs, render_migration_dialog, render_profiles, render_service_select, render_settings,
+    render_wizard, render_worktree_create, AIWizardState, AgentMessage, AgentModeState, AgentRole,
+    BranchItem, BranchListState, BranchType, CloneWizardState, CloneWizardStep, CodingAgent,
+    ConfirmState, EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, GitViewCache,
+    GitViewState, HelpState, LogsState, MigrationDialogPhase, MigrationDialogState, ProfilesState,
+    QuickStartDockerSettings, QuickStartEntry, ReasoningLevel, ServiceSelectState, SettingsState,
+    WizardConfirmResult, WizardState, WizardStep, WorktreeCreateState,
 };
 // log_gwt_error is available for use when GwtError types are available
 
@@ -460,6 +461,8 @@ pub struct Model {
     profiles_config: ProfilesConfig,
     /// Environment variables state
     environment: EnvironmentState,
+    /// Docker service selection state
+    service_select: ServiceSelectState,
     /// Wizard popup state
     wizard: WizardState,
     /// AI settings wizard state (FR-100)
@@ -506,6 +509,18 @@ pub struct Model {
     pending_plugin_setup: bool,
     /// Pending launch plan for plugin setup (SPEC-f8dab6e2 T-110)
     pending_plugin_setup_launch: Option<LaunchPlan>,
+    /// Pending launch plan for Docker service selection
+    pending_service_select: Option<PendingServiceSelect>,
+    /// Pending launch plan for Docker build selection
+    pending_build_select: Option<PendingBuildSelect>,
+    /// Pending launch plan for Docker recreate selection
+    pending_recreate_select: Option<PendingRecreateSelect>,
+    /// Pending launch plan for Docker cleanup selection
+    pending_cleanup_select: Option<PendingCleanupSelect>,
+    /// Pending launch plan for Docker host fallback confirmation
+    pending_docker_host_launch: Option<LaunchPlan>,
+    /// Pending Quick Start Docker settings (applied at launch)
+    pending_quick_start_docker: Option<QuickStartDockerSettings>,
     /// Branch list update receiver
     branch_list_rx: Option<Receiver<BranchListUpdate>>,
     /// Branch summary update receiver
@@ -577,6 +592,45 @@ pub struct Model {
     git_view_pr_rx: Option<Receiver<GitViewPrUpdate>>,
 }
 
+#[derive(Debug, Clone)]
+struct PendingServiceSelect {
+    plan: LaunchPlan,
+    services: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingBuildSelect {
+    plan: LaunchPlan,
+    service: Option<String>,
+    force_host: bool,
+    force_recreate: bool,
+    quick_start_keep: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingRecreateSelect {
+    plan: LaunchPlan,
+    service: Option<String>,
+    force_host: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PendingCleanupSelect {
+    plan: LaunchPlan,
+    service: Option<String>,
+    force_host: bool,
+    force_recreate: bool,
+    build: bool,
+}
+
+enum ServiceSelectionDecision {
+    Proceed {
+        service: Option<String>,
+        force_host: bool,
+    },
+    AwaitSelection,
+}
+
 /// Screen types
 #[derive(Clone, Debug)]
 pub enum Screen {
@@ -590,6 +644,7 @@ pub enum Screen {
     Error,
     Profiles,
     Environment,
+    ServiceSelect,
     /// AI settings wizard (FR-100)
     AISettingsWizard,
     /// Clone wizard for empty/non-repo directories (SPEC-a70a1ece US3)
@@ -724,6 +779,7 @@ impl Model {
             profiles: ProfilesState::new(),
             profiles_config: ProfilesConfig::default(),
             environment: EnvironmentState::new(),
+            service_select: ServiceSelectState::new(),
             wizard: WizardState::new(),
             ai_wizard: AIWizardState::new(),
             status_message: None,
@@ -747,6 +803,12 @@ impl Model {
             pending_hook_setup: false,
             pending_plugin_setup: false,
             pending_plugin_setup_launch: None,
+            pending_service_select: None,
+            pending_build_select: None,
+            pending_recreate_select: None,
+            pending_cleanup_select: None,
+            pending_docker_host_launch: None,
+            pending_quick_start_docker: None,
             branch_list_rx: None,
             branch_summary_rx: None,
             pr_title_rx: None,
@@ -1602,6 +1664,11 @@ impl Model {
             skip_permissions: None,
             tool_version,
             collaboration_modes,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
             timestamp: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
@@ -2406,6 +2473,11 @@ impl Model {
                 skip_permissions: last_entry.and_then(|entry| entry.skip_permissions),
                 tool_version: last_entry.and_then(|entry| entry.tool_version.clone()),
                 collaboration_modes: last_entry.and_then(|entry| entry.collaboration_modes),
+                docker_service: last_entry.and_then(|entry| entry.docker_service.clone()),
+                docker_force_host: last_entry.and_then(|entry| entry.docker_force_host),
+                docker_recreate: last_entry.and_then(|entry| entry.docker_recreate),
+                docker_build: None,
+                docker_keep: last_entry.and_then(|entry| entry.docker_keep),
                 timestamp: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as i64)
@@ -2645,6 +2717,11 @@ impl Model {
                 session_id: entry.session_id,
                 skip_permissions: entry.skip_permissions,
                 collaboration_modes: entry.collaboration_modes,
+                docker_service: entry.docker_service,
+                docker_force_host: entry.docker_force_host,
+                docker_recreate: entry.docker_recreate,
+                docker_build: None,
+                docker_keep: entry.docker_keep,
             })
             .collect();
         self.wizard
@@ -2820,7 +2897,90 @@ impl Model {
         }
     }
 
+    fn handle_service_select_mouse(&mut self, mouse: MouseEvent) {
+        if !matches!(self.screen, Screen::ServiceSelect) {
+            return;
+        }
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+
+        if !self.service_select.handle_click(mouse.column, mouse.row) {
+            self.last_mouse_click = None;
+            return;
+        }
+
+        let index = self.service_select.selected;
+        let now = Instant::now();
+        let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
+            last.index == index && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
+        });
+
+        if is_double_click {
+            self.last_mouse_click = None;
+            self.handle_service_select_confirm();
+        } else {
+            self.last_mouse_click = Some(MouseClick { index, at: now });
+        }
+    }
+
     fn handle_confirm_action(&mut self) {
+        if let Some(pending) = self.pending_cleanup_select.take() {
+            let stop_on_exit = self.confirm.is_confirmed();
+            let keep_launch_status =
+                matches!(pending.plan.install_plan, InstallPlan::Install { .. });
+            self.launch_plan_in_tmux(
+                &pending.plan,
+                pending.service.as_deref(),
+                pending.force_host,
+                keep_launch_status,
+                pending.build,
+                pending.force_recreate,
+                stop_on_exit,
+            );
+            if let Some(prev_screen) = self.screen_stack.pop() {
+                self.screen = prev_screen;
+            }
+            return;
+        }
+
+        if let Some(pending) = self.pending_recreate_select.take() {
+            let force_recreate = self.confirm.is_confirmed();
+            let keep_launch_status =
+                matches!(pending.plan.install_plan, InstallPlan::Install { .. });
+            self.maybe_request_build_selection(
+                &pending.plan,
+                pending.service.as_deref(),
+                pending.force_host,
+                keep_launch_status,
+                force_recreate,
+                None,
+            );
+            if let Some(prev_screen) = self.screen_stack.pop() {
+                self.screen = prev_screen;
+            }
+            return;
+        }
+
+        if let Some(pending) = self.pending_build_select.take() {
+            let build = self.confirm.is_confirmed();
+            let keep_launch_status =
+                matches!(pending.plan.install_plan, InstallPlan::Install { .. });
+            self.maybe_request_cleanup_selection(
+                &pending.plan,
+                pending.service.as_deref(),
+                pending.force_host,
+                keep_launch_status,
+                build,
+                pending.force_recreate,
+                pending.quick_start_keep,
+            );
+            if let Some(prev_screen) = self.screen_stack.pop() {
+                self.screen = prev_screen;
+            }
+            return;
+        }
+
         if self.confirm.is_confirmed() {
             // FR-029d: Handle unsafe branch selection confirmation
             if let Some(branch_name) = self.pending_unsafe_selection.take() {
@@ -2850,6 +3010,18 @@ impl Model {
                     debug!(category = "tui", error = %e, "Failed to setup gwt plugin");
                 }
             }
+            if let Some(plan) = self.pending_docker_host_launch.take() {
+                let keep_launch_status = matches!(plan.install_plan, InstallPlan::Install { .. });
+                self.launch_plan_in_tmux(
+                    &plan,
+                    None,
+                    true,
+                    keep_launch_status,
+                    false,
+                    false,
+                    false,
+                );
+            }
         }
 
         // SPEC-f8dab6e2: Continue agent launch after plugin setup confirmation
@@ -2861,6 +3033,7 @@ impl Model {
         self.pending_cleanup_branches.clear();
         self.pending_hook_setup = false;
         self.pending_plugin_setup = false;
+        self.pending_docker_host_launch = None;
         if let Some(prev_screen) = self.screen_stack.pop() {
             self.screen = prev_screen;
         }
@@ -4054,11 +4227,26 @@ impl Model {
                 } else if matches!(self.screen, Screen::Logs) && self.logs.is_detail_shown() {
                     // Close log detail view
                     self.logs.close_detail();
+                } else if matches!(self.screen, Screen::ServiceSelect) {
+                    // Cancel service selection
+                    self.pending_service_select = None;
+                    self.launch_status = None;
+                    self.last_mouse_click = None;
+                    if let Some(prev_screen) = self.screen_stack.pop() {
+                        self.screen = prev_screen;
+                    }
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029d: Cancel confirm dialog without executing action
                     self.pending_unsafe_selection = None;
                     self.pending_cleanup_branches.clear();
                     self.pending_hook_setup = false;
+                    self.pending_plugin_setup = false;
+                    self.pending_plugin_setup_launch = None;
+                    self.pending_docker_host_launch = None;
+                    self.pending_build_select = None;
+                    self.pending_recreate_select = None;
+                    self.pending_cleanup_select = None;
+                    self.launch_status = None;
                     if let Some(prev_screen) = self.screen_stack.pop() {
                         self.screen = prev_screen;
                     }
@@ -4215,6 +4403,7 @@ impl Model {
                 }
                 Screen::Profiles => self.profiles.select_next(),
                 Screen::Environment => self.environment.select_next(),
+                Screen::ServiceSelect => self.service_select.select_next(),
                 Screen::AISettingsWizard => self.ai_wizard.select_next_model(),
                 Screen::CloneWizard => self.clone_wizard.down(),
                 Screen::MigrationDialog => self.migration_dialog.toggle_selection(),
@@ -4240,6 +4429,7 @@ impl Model {
                 }
                 Screen::Profiles => self.profiles.select_prev(),
                 Screen::Environment => self.environment.select_prev(),
+                Screen::ServiceSelect => self.service_select.select_previous(),
                 Screen::AISettingsWizard => self.ai_wizard.select_prev_model(),
                 Screen::CloneWizard => self.clone_wizard.up(),
                 Screen::MigrationDialog => self.migration_dialog.toggle_selection(),
@@ -4324,6 +4514,9 @@ impl Model {
                 }
                 Screen::Confirm => {
                     self.handle_confirm_action();
+                }
+                Screen::ServiceSelect => {
+                    self.handle_service_select_confirm();
                 }
                 Screen::Profiles => {
                     if self.profiles.create_mode {
@@ -4498,7 +4691,11 @@ impl Model {
                 }
             },
             Message::Char(c) => {
-                if matches!(self.screen, Screen::CloneWizard)
+                if matches!(self.screen, Screen::ServiceSelect) {
+                    if c == 's' || c == 'S' {
+                        self.handle_service_select_skip();
+                    }
+                } else if matches!(self.screen, Screen::CloneWizard)
                     && self.clone_wizard.step == CloneWizardStep::UrlInput
                 {
                     self.clone_wizard.handle_char(c);
@@ -4924,6 +5121,11 @@ impl Model {
                             session_id: entry.session_id,
                             skip_permissions: entry.skip_permissions,
                             collaboration_modes: entry.collaboration_modes,
+                            docker_service: entry.docker_service,
+                            docker_force_host: entry.docker_force_host,
+                            docker_recreate: entry.docker_recreate,
+                            docker_build: None,
+                            docker_keep: entry.docker_keep,
                         })
                         .collect();
                     self.wizard
@@ -5064,6 +5266,7 @@ impl Model {
             selected_issue: self.wizard.selected_issue.clone(),
         };
 
+        self.pending_quick_start_docker = self.wizard.quick_start_docker.clone();
         self.start_launch_preparation(request);
 
         // Close wizard immediately so user can see launch progress in branch list
@@ -5270,70 +5473,633 @@ impl Model {
         let keep_launch_status = matches!(plan.install_plan, InstallPlan::Install { .. });
 
         if self.tmux_mode.is_multi() && self.gwt_pane_id.is_some() {
-            match self.launch_plan_in_pane(&plan) {
-                Ok(_) => {
-                    if !keep_launch_status {
-                        self.launch_status = None;
-                    }
-                    // FR-088: Record agent usage to history
-                    let agent_id = plan.config.agent.id();
-                    let agent_label =
-                        format!("{}@{}", plan.config.agent.label(), plan.selected_version);
-                    if let Err(e) = self.agent_history.record(
-                        &self.repo_root,
-                        &plan.config.branch_name,
-                        agent_id,
-                        &agent_label,
-                    ) {
-                        warn!(category = "tui", "Failed to record agent history: {}", e);
-                    }
-                    if let Err(e) = self.agent_history.save() {
-                        warn!(category = "tui", "Failed to save agent history: {}", e);
-                    }
-                    // Update branch list item directly to reflect agent usage immediately
-                    // (refresh_data() is not called after agent launch for optimization)
-                    let branch_name_for_lookup =
-                        normalize_branch_name_for_history(&plan.config.branch_name);
-                    for item in &mut self.branch_list.branches {
-                        let item_lookup = normalize_branch_name_for_history(&item.name);
-                        if item_lookup == branch_name_for_lookup {
-                            item.last_tool_usage = Some(agent_label.clone());
-                            item.last_tool_id = Some(agent_id.to_string());
-                            break;
-                        }
-                    }
-                    let launch_message = if let Some(warning) = plan.session_warning.as_ref() {
-                        format!(
-                            "Agent launched in tmux pane for {}. {}",
-                            plan.config.branch_name, warning
-                        )
-                    } else {
-                        format!(
-                            "Agent launched in tmux pane for {}",
-                            plan.config.branch_name
-                        )
-                    };
-                    self.status_message = Some(launch_message);
-                    self.status_message_time = Some(Instant::now());
-                    self.wizard.visible = false;
-                    self.screen = Screen::BranchList;
+            if let Some(quick_start) = self.pending_quick_start_docker.take() {
+                if self.try_apply_quick_start_docker(&plan, quick_start, keep_launch_status) {
+                    return;
                 }
+            }
+            let decision = match self.prepare_docker_service_selection(&plan) {
+                Ok(decision) => decision,
                 Err(e) => {
                     self.launch_status = None;
-                    gwt_core::logging::log_error_message(
-                        "E4002",
-                        "agent",
-                        &format!("Failed to launch: {}", e),
-                        None,
-                    );
-                    self.status_message = Some(format!("Failed to launch: {}", e));
+                    self.status_message = Some(format!("Failed to inspect docker services: {}", e));
                     self.status_message_time = Some(Instant::now());
+                    return;
+                }
+            };
+
+            match decision {
+                ServiceSelectionDecision::AwaitSelection => {}
+                ServiceSelectionDecision::Proceed {
+                    service,
+                    force_host,
+                } => {
+                    self.maybe_request_recreate_selection(
+                        &plan,
+                        service.as_deref(),
+                        force_host,
+                        keep_launch_status,
+                    );
                 }
             }
         } else {
             self.pending_agent_launch = Some(plan);
             self.should_quit = true;
         }
+    }
+
+    fn try_apply_quick_start_docker(
+        &mut self,
+        plan: &LaunchPlan,
+        quick_start: QuickStartDockerSettings,
+        keep_launch_status: bool,
+    ) -> bool {
+        if quick_start.force_host.unwrap_or(false) {
+            info!(
+                category = "docker",
+                branch = %plan.config.branch_name,
+                "Quick Start docker settings: force host"
+            );
+            self.launch_plan_in_tmux(plan, None, true, keep_launch_status, false, false, false);
+            return true;
+        }
+
+        let docker_file_type = match launcher::detect_docker_environment(&plan.config.worktree_path)
+        {
+            Some(dtype) => dtype,
+            None => return false,
+        };
+
+        let service = if docker_file_type.is_compose() {
+            let manager = DockerManager::new(
+                &plan.config.worktree_path,
+                &plan.config.branch_name,
+                docker_file_type.clone(),
+            );
+            let services = match manager.list_services() {
+                Ok(services) if !services.is_empty() => services,
+                _ => {
+                    info!(
+                        category = "docker",
+                        branch = %plan.config.branch_name,
+                        "Quick Start docker settings: service list unavailable"
+                    );
+                    return false;
+                }
+            };
+
+            if services.len() == 1 {
+                Some(services[0].clone())
+            } else if let Some(selected) = quick_start.service.as_ref() {
+                if services.contains(selected) {
+                    Some(selected.clone())
+                } else {
+                    info!(
+                        category = "docker",
+                        branch = %plan.config.branch_name,
+                        requested = %selected,
+                        "Quick Start docker settings: service not found; fallback to wizard"
+                    );
+                    return false;
+                }
+            } else {
+                info!(
+                    category = "docker",
+                    branch = %plan.config.branch_name,
+                    "Quick Start docker settings missing service; fallback to wizard"
+                );
+                return false;
+            }
+        } else {
+            None
+        };
+
+        let (Some(force_recreate), Some(keep)) = (quick_start.recreate, quick_start.keep) else {
+            info!(
+                category = "docker",
+                branch = %plan.config.branch_name,
+                "Quick Start docker settings incomplete; fallback to wizard"
+            );
+            return false;
+        };
+
+        let needs_rebuild = {
+            let manager = DockerManager::new(
+                &plan.config.worktree_path,
+                &plan.config.branch_name,
+                docker_file_type,
+            );
+            manager.needs_rebuild()
+        };
+        let force_recreate = Self::quick_start_recreate_allowed(needs_rebuild, force_recreate);
+        info!(
+            category = "docker",
+            branch = %plan.config.branch_name,
+            needs_rebuild = needs_rebuild,
+            force_recreate = force_recreate,
+            "Quick Start recreate decision"
+        );
+
+        info!(
+            category = "docker",
+            branch = %plan.config.branch_name,
+            service = %service.clone().unwrap_or_default(),
+            force_recreate = force_recreate,
+            keep = keep,
+            "Applying Quick Start docker settings"
+        );
+        self.maybe_request_build_selection(
+            plan,
+            service.as_deref(),
+            false,
+            keep_launch_status,
+            force_recreate,
+            Some(keep),
+        );
+        true
+    }
+
+    fn prepare_docker_service_selection(
+        &mut self,
+        plan: &LaunchPlan,
+    ) -> Result<ServiceSelectionDecision, String> {
+        let docker_file_type = match launcher::detect_docker_environment(&plan.config.worktree_path)
+        {
+            Some(dtype) => dtype,
+            None => {
+                return Ok(ServiceSelectionDecision::Proceed {
+                    service: None,
+                    force_host: false,
+                })
+            }
+        };
+
+        if !docker_file_type.is_compose() {
+            return Ok(ServiceSelectionDecision::Proceed {
+                service: None,
+                force_host: false,
+            });
+        }
+
+        let manager = DockerManager::new(
+            &plan.config.worktree_path,
+            &plan.config.branch_name,
+            docker_file_type,
+        );
+
+        let services = match manager.list_services() {
+            Ok(services) if !services.is_empty() => services,
+            Ok(_) | Err(_) => {
+                self.pending_docker_host_launch = Some(plan.clone());
+                self.confirm = ConfirmState {
+                    title: "Docker Services Unavailable".to_string(),
+                    message: "Could not read docker compose services. Launch on host?".to_string(),
+                    details: vec![
+                        "Service selection is required when multiple services exist.".to_string(),
+                        "If you continue, the agent will run on the host.".to_string(),
+                    ],
+                    confirm_label: "Launch".to_string(),
+                    cancel_label: "Cancel".to_string(),
+                    selected_confirm: false,
+                    is_dangerous: false,
+                    ..Default::default()
+                };
+                self.screen_stack.push(self.screen.clone());
+                self.screen = Screen::Confirm;
+                return Ok(ServiceSelectionDecision::AwaitSelection);
+            }
+        };
+
+        if services.len() == 1 {
+            return Ok(ServiceSelectionDecision::Proceed {
+                service: Some(services[0].clone()),
+                force_host: false,
+            });
+        }
+
+        self.pending_service_select = Some(PendingServiceSelect {
+            plan: plan.clone(),
+            services: services.clone(),
+        });
+        self.service_select = ServiceSelectState::with_services(services);
+        let container_name = DockerManager::generate_container_name(&plan.config.branch_name);
+        self.service_select
+            .set_container_info(&container_name, &plan.config.branch_name);
+        self.launch_status = None;
+        self.last_mouse_click = None;
+        self.screen_stack.push(self.screen.clone());
+        self.screen = Screen::ServiceSelect;
+
+        Ok(ServiceSelectionDecision::AwaitSelection)
+    }
+
+    fn maybe_request_recreate_selection(
+        &mut self,
+        plan: &LaunchPlan,
+        service: Option<&str>,
+        force_host: bool,
+        keep_launch_status: bool,
+    ) {
+        if force_host {
+            self.launch_plan_in_tmux(
+                plan,
+                service,
+                force_host,
+                keep_launch_status,
+                false,
+                false,
+                false,
+            );
+            return;
+        }
+
+        let docker_file_type = match launcher::detect_docker_environment(&plan.config.worktree_path)
+        {
+            Some(dtype) => dtype,
+            None => {
+                self.launch_plan_in_tmux(
+                    plan,
+                    service,
+                    force_host,
+                    keep_launch_status,
+                    false,
+                    false,
+                    false,
+                );
+                return;
+            }
+        };
+        let manager = DockerManager::new(
+            &plan.config.worktree_path,
+            &plan.config.branch_name,
+            docker_file_type,
+        );
+        let status = manager.get_status();
+        info!(
+            category = "docker",
+            branch = %plan.config.branch_name,
+            status = ?status,
+            "Detected docker container status for recreate prompt"
+        );
+        if !Self::should_prompt_recreate(&status) {
+            info!(
+                category = "docker",
+                branch = %plan.config.branch_name,
+                status = ?status,
+                "Skipping docker recreate prompt (container not eligible)"
+            );
+            self.maybe_request_build_selection(
+                plan,
+                service,
+                force_host,
+                keep_launch_status,
+                false,
+                None,
+            );
+            return;
+        }
+        let needs_rebuild = manager.needs_rebuild();
+        info!(
+            category = "docker",
+            branch = %plan.config.branch_name,
+            needs_rebuild = needs_rebuild,
+            "Checked docker rebuild status for recreate default"
+        );
+
+        self.pending_recreate_select = Some(PendingRecreateSelect {
+            plan: plan.clone(),
+            service: service.map(|s| s.to_string()),
+            force_host,
+        });
+        info!(
+            category = "docker",
+            branch = %plan.config.branch_name,
+            default_recreate = Self::default_recreate_selected(needs_rebuild),
+            "Showing docker recreate prompt"
+        );
+        self.confirm = ConfirmState {
+            title: "Docker Recreate".to_string(),
+            message: "Recreate containers before launch?".to_string(),
+            details: vec![
+                "Reuse keeps existing containers.".to_string(),
+                "Recreate will rerun entrypoint.".to_string(),
+            ],
+            confirm_label: "Recreate".to_string(),
+            cancel_label: "Reuse".to_string(),
+            selected_confirm: Self::default_recreate_selected(needs_rebuild),
+            is_dangerous: false,
+            ..Default::default()
+        };
+        self.screen_stack.push(self.screen.clone());
+        self.screen = Screen::Confirm;
+    }
+
+    fn should_prompt_recreate(status: &ContainerStatus) -> bool {
+        matches!(status, ContainerStatus::Stopped)
+    }
+
+    fn default_recreate_selected(needs_rebuild: bool) -> bool {
+        needs_rebuild
+    }
+
+    fn quick_start_recreate_allowed(needs_rebuild: bool, requested: bool) -> bool {
+        needs_rebuild && requested
+    }
+
+    fn maybe_request_build_selection(
+        &mut self,
+        plan: &LaunchPlan,
+        service: Option<&str>,
+        force_host: bool,
+        keep_launch_status: bool,
+        force_recreate: bool,
+        quick_start_keep: Option<bool>,
+    ) {
+        if force_host || launcher::detect_docker_environment(&plan.config.worktree_path).is_none() {
+            self.launch_plan_in_tmux(
+                plan,
+                service,
+                force_host,
+                keep_launch_status,
+                false,
+                force_recreate,
+                false,
+            );
+            return;
+        }
+
+        let docker_file_type = match launcher::detect_docker_environment(&plan.config.worktree_path)
+        {
+            Some(dtype) => dtype,
+            None => {
+                self.launch_plan_in_tmux(
+                    plan,
+                    service,
+                    force_host,
+                    keep_launch_status,
+                    false,
+                    force_recreate,
+                    false,
+                );
+                return;
+            }
+        };
+
+        let manager = DockerManager::new(
+            &plan.config.worktree_path,
+            &plan.config.branch_name,
+            docker_file_type,
+        );
+        let needs_rebuild = manager.needs_rebuild();
+        info!(
+            category = "docker",
+            branch = %plan.config.branch_name,
+            needs_rebuild = needs_rebuild,
+            "Checked docker build prompt requirement"
+        );
+        if !needs_rebuild {
+            info!(
+                category = "docker",
+                branch = %plan.config.branch_name,
+                "Skipping docker build prompt (no changes detected)"
+            );
+            self.maybe_request_cleanup_selection(
+                plan,
+                service,
+                force_host,
+                keep_launch_status,
+                false,
+                force_recreate,
+                quick_start_keep,
+            );
+            return;
+        }
+
+        self.pending_build_select = Some(PendingBuildSelect {
+            plan: plan.clone(),
+            service: service.map(|s| s.to_string()),
+            force_host,
+            force_recreate,
+            quick_start_keep,
+        });
+        info!(
+            category = "docker",
+            branch = %plan.config.branch_name,
+            "Showing docker build prompt"
+        );
+        self.confirm = ConfirmState {
+            title: "Docker Build".to_string(),
+            message: "Build Docker image before launch?".to_string(),
+            details: vec![
+                "No Build will skip image rebuild.".to_string(),
+                "Build will run docker compose build.".to_string(),
+            ],
+            confirm_label: "Build".to_string(),
+            cancel_label: "No Build".to_string(),
+            selected_confirm: false,
+            is_dangerous: false,
+            ..Default::default()
+        };
+        self.screen_stack.push(self.screen.clone());
+        self.screen = Screen::Confirm;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn maybe_request_cleanup_selection(
+        &mut self,
+        plan: &LaunchPlan,
+        service: Option<&str>,
+        force_host: bool,
+        keep_launch_status: bool,
+        build: bool,
+        force_recreate: bool,
+        quick_start_keep: Option<bool>,
+    ) {
+        if let Some(keep) = quick_start_keep {
+            info!(
+                category = "docker",
+                branch = %plan.config.branch_name,
+                keep = keep,
+                "Quick Start docker keep setting applied"
+            );
+            self.launch_plan_in_tmux(
+                plan,
+                service,
+                force_host,
+                keep_launch_status,
+                build,
+                force_recreate,
+                !keep,
+            );
+            return;
+        }
+        if force_host || launcher::detect_docker_environment(&plan.config.worktree_path).is_none() {
+            info!(
+                category = "docker",
+                branch = %plan.config.branch_name,
+                "Skipping docker cleanup prompt (host launch)"
+            );
+            self.launch_plan_in_tmux(
+                plan,
+                service,
+                force_host,
+                keep_launch_status,
+                build,
+                force_recreate,
+                false,
+            );
+            return;
+        }
+
+        self.pending_cleanup_select = Some(PendingCleanupSelect {
+            plan: plan.clone(),
+            service: service.map(|s| s.to_string()),
+            force_host,
+            force_recreate,
+            build,
+        });
+        info!(
+            category = "docker",
+            branch = %plan.config.branch_name,
+            "Showing docker cleanup prompt"
+        );
+        self.confirm = ConfirmState {
+            title: "Docker Cleanup".to_string(),
+            message: "Stop containers when agent exits?".to_string(),
+            details: vec![
+                "Keep will keep containers running.".to_string(),
+                "Stop will run docker compose down.".to_string(),
+            ],
+            confirm_label: "Stop".to_string(),
+            cancel_label: "Keep".to_string(),
+            selected_confirm: false,
+            is_dangerous: false,
+            ..Default::default()
+        };
+        self.screen_stack.push(self.screen.clone());
+        self.screen = Screen::Confirm;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_plan_in_tmux(
+        &mut self,
+        plan: &LaunchPlan,
+        service: Option<&str>,
+        force_host: bool,
+        keep_launch_status: bool,
+        build: bool,
+        force_recreate: bool,
+        stop_on_exit: bool,
+    ) {
+        match self.launch_plan_in_pane_with_service(
+            plan,
+            service,
+            force_host,
+            build,
+            force_recreate,
+            stop_on_exit,
+        ) {
+            Ok(_) => {
+                if !keep_launch_status {
+                    self.launch_status = None;
+                }
+                // FR-088: Record agent usage to history
+                let agent_id = plan.config.agent.id();
+                let agent_label =
+                    format!("{}@{}", plan.config.agent.label(), plan.selected_version);
+                if let Err(e) = self.agent_history.record(
+                    &self.repo_root,
+                    &plan.config.branch_name,
+                    agent_id,
+                    &agent_label,
+                ) {
+                    warn!(category = "tui", "Failed to record agent history: {}", e);
+                }
+                if let Err(e) = self.agent_history.save() {
+                    warn!(category = "tui", "Failed to save agent history: {}", e);
+                }
+
+                // Update branch list item directly to reflect agent usage immediately
+                // (refresh_data() is not called after agent launch for optimization)
+                let branch_name_for_lookup =
+                    normalize_branch_name_for_history(&plan.config.branch_name);
+                for item in &mut self.branch_list.branches {
+                    let item_lookup = normalize_branch_name_for_history(&item.name);
+                    if item_lookup == branch_name_for_lookup {
+                        item.last_tool_usage = Some(agent_label.clone());
+                        item.last_tool_id = Some(agent_id.to_string());
+                        break;
+                    }
+                }
+                let launch_message = if let Some(warning) = plan.session_warning.as_ref() {
+                    format!(
+                        "Agent launched in tmux pane for {}. {}",
+                        plan.config.branch_name, warning
+                    )
+                } else {
+                    format!(
+                        "Agent launched in tmux pane for {}",
+                        plan.config.branch_name
+                    )
+                };
+                self.status_message = Some(launch_message);
+                self.status_message_time = Some(Instant::now());
+                self.wizard.visible = false;
+                self.screen = Screen::BranchList;
+            }
+            Err(e) => {
+                self.launch_status = None;
+                gwt_core::logging::log_error_message(
+                    "E4002",
+                    "agent",
+                    &format!("Failed to launch: {}", e),
+                    None,
+                );
+                self.status_message = Some(format!("Failed to launch: {}", e));
+                self.status_message_time = Some(Instant::now());
+            }
+        }
+    }
+
+    fn handle_service_select_confirm(&mut self) {
+        let Some(pending) = self.pending_service_select.take() else {
+            return;
+        };
+        let (service, force_host) = {
+            let (service, force_host) = self.service_select.selected_target();
+            (service.map(|s| s.to_string()), force_host)
+        };
+        if let Some(prev_screen) = self.screen_stack.pop() {
+            self.screen = prev_screen;
+        }
+        self.last_mouse_click = None;
+        let keep_launch_status = matches!(pending.plan.install_plan, InstallPlan::Install { .. });
+        self.maybe_request_recreate_selection(
+            &pending.plan,
+            service.as_deref(),
+            force_host,
+            keep_launch_status,
+        );
+    }
+
+    fn handle_service_select_skip(&mut self) {
+        let Some(pending) = self.pending_service_select.take() else {
+            return;
+        };
+        if let Some(prev_screen) = self.screen_stack.pop() {
+            self.screen = prev_screen;
+        }
+        self.last_mouse_click = None;
+        let keep_launch_status = matches!(pending.plan.install_plan, InstallPlan::Install { .. });
+        self.launch_plan_in_tmux(
+            &pending.plan,
+            None,
+            true,
+            keep_launch_status,
+            false,
+            false,
+            false,
+        );
     }
 
     /// Launch an agent in a tmux pane (multi mode)
@@ -5344,7 +6110,15 @@ impl Model {
     /// - When a column reaches 3 panes, a new column is added to the right
     ///
     /// Uses the same argument building logic as single mode (main.rs)
-    fn launch_plan_in_pane(&mut self, plan: &LaunchPlan) -> Result<String, String> {
+    fn launch_plan_in_pane_with_service(
+        &mut self,
+        plan: &LaunchPlan,
+        service: Option<&str>,
+        force_host: bool,
+        build: bool,
+        force_recreate: bool,
+        stop_on_exit: bool,
+    ) -> Result<String, String> {
         // FR-010: One Branch One Pane constraint
         // Check if an agent is already running on this branch
         if self
@@ -5364,6 +6138,17 @@ impl Model {
         self.hide_active_agent_pane();
 
         let working_dir = plan.config.worktree_path.to_string_lossy().to_string();
+        let use_docker = !force_host
+            && launcher::detect_docker_environment(&plan.config.worktree_path).is_some();
+        info!(
+            category = "tui",
+            branch = %plan.config.branch_name,
+            worktree = %plan.config.worktree_path.display(),
+            use_docker = use_docker,
+            service = service.unwrap_or(""),
+            executable = %plan.executable,
+            "Prepared launch plan"
+        );
 
         // Build environment variables (same as single mode)
         let env_vars = plan.env.clone();
@@ -5376,7 +6161,12 @@ impl Model {
             _ => None,
         };
 
-        let agent_cmd = build_shell_command(&plan.executable, &plan.command_args);
+        let executable = if use_docker {
+            normalize_container_executable(&plan.executable)
+        } else {
+            plan.executable.clone()
+        };
+        let agent_cmd = build_shell_command(&executable, &plan.command_args);
         let full_cmd = if let Some(install_cmd) = install_cmd {
             format!("{} && {}", install_cmd, agent_cmd)
         } else {
@@ -5403,8 +6193,24 @@ impl Model {
             .gwt_pane_id
             .as_ref()
             .ok_or_else(|| "No gwt pane ID available".to_string())?;
-        let pane_id =
-            launcher::launch_in_pane(target, &working_dir, &command).map_err(|e| e.to_string())?;
+        let pane_id = if use_docker {
+            let docker_args = vec!["-lc".to_string(), command.clone()];
+            let (pane_id, _docker_result) = launcher::launch_in_pane_with_docker(
+                target,
+                &plan.config.worktree_path,
+                &plan.config.branch_name,
+                "sh",
+                &docker_args,
+                service,
+                build,
+                force_recreate,
+                stop_on_exit,
+            )
+            .map_err(|e| e.to_string())?;
+            pane_id
+        } else {
+            launcher::launch_in_pane(target, &working_dir, &command).map_err(|e| e.to_string())?
+        };
 
         // Focus the new pane (FR-022)
         if let Err(e) = gwt_core::tmux::pane::select_pane(&pane_id) {
@@ -5431,6 +6237,23 @@ impl Model {
         panes.push(agent_pane);
         self.pane_list.update_panes(panes);
 
+        let docker_env = launcher::detect_docker_environment(&plan.config.worktree_path);
+        let (docker_service, docker_force_host, docker_recreate, docker_keep) =
+            if docker_env.is_some() {
+                if force_host {
+                    (None, Some(true), None, None)
+                } else {
+                    (
+                        service.map(|value| value.to_string()),
+                        Some(false),
+                        Some(force_recreate),
+                        Some(!stop_on_exit),
+                    )
+                }
+            } else {
+                (None, None, None, None)
+            };
+
         // FR-071: Save session entry for tmux mode
         let session_entry = ToolSessionEntry {
             branch: plan.config.branch_name.clone(),
@@ -5444,6 +6267,11 @@ impl Model {
             skip_permissions: Some(plan.config.skip_permissions),
             tool_version: Some(plan.selected_version.clone()),
             collaboration_modes: Some(plan.config.collaboration_modes),
+            docker_service,
+            docker_force_host,
+            docker_recreate,
+            docker_build: None,
+            docker_keep,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
@@ -5873,6 +6701,9 @@ impl Model {
             Screen::Error => render_error_with_queue(&self.error_queue, frame, chunks[1]),
             Screen::Profiles => render_profiles(&mut self.profiles, frame, chunks[1]),
             Screen::Environment => render_environment(&mut self.environment, frame, chunks[1]),
+            Screen::ServiceSelect => {
+                render_service_select(&mut self.service_select, frame, chunks[1])
+            }
             Screen::AISettingsWizard => render_ai_wizard(&mut self.ai_wizard, frame, chunks[1]),
             Screen::CloneWizard => render_clone_wizard(&self.clone_wizard, frame, chunks[1]),
             Screen::MigrationDialog => {
@@ -5937,6 +6768,7 @@ impl Model {
             Screen::Error => "Errors",
             Screen::Profiles => "Profiles",
             Screen::Environment => "Environment",
+            Screen::ServiceSelect => "Service Select",
             Screen::AISettingsWizard => "AI Settings",
             Screen::CloneWizard => "Clone Repository",
             Screen::MigrationDialog => "Migration Required",
@@ -6296,6 +7128,9 @@ impl Model {
                     ]
                 }
             }
+            Screen::ServiceSelect => {
+                vec!["[Up/Down] Select | [Enter] Launch | [s] Skip | [Esc] Cancel".to_string()]
+            }
             Screen::AISettingsWizard => {
                 if self.ai_wizard.show_delete_confirm {
                     vec![
@@ -6344,6 +7179,11 @@ impl Model {
                 Self::keybind_item("v/Esc", "Back"),
             ],
         }
+    }
+
+    #[cfg(test)]
+    fn get_footer_keybinds(&self) -> String {
+        self.footer_items().join(" ")
     }
 
     fn wrap_footer_items(items: &[String], width: usize) -> Vec<String> {
@@ -6977,6 +7817,9 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
                                         Screen::Logs => model.handle_logs_mouse(mouse),
                                         // SPEC-1ea18899: GitView mouse handling (FR-007)
                                         Screen::GitView => model.handle_gitview_mouse(mouse),
+                                        Screen::ServiceSelect => {
+                                            model.handle_service_select_mouse(mouse)
+                                        }
                                         _ => {}
                                     }
                                 }
@@ -7258,6 +8101,32 @@ fn build_shell_command(command: &str, args: &[String]) -> String {
     cmd_parts.join(" ")
 }
 
+fn normalize_container_executable(executable: &str) -> String {
+    let is_windows_drive_abs = executable.len() > 2
+        && executable.as_bytes()[1] == b':'
+        && (executable.as_bytes()[2] == b'\\' || executable.as_bytes()[2] == b'/');
+    let is_unc_path = executable.starts_with("\\\\");
+
+    if is_windows_drive_abs || is_unc_path {
+        if let Some(name) = executable.rsplit(&['\\', '/'][..]).next() {
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+    }
+
+    let path = Path::new(executable);
+    if path.is_absolute() {
+        if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+    }
+
+    executable.to_string()
+}
+
 fn wrap_tmux_command_for_fast_exit(command: &str) -> String {
     format!(
         "start=$(date +%s); {} ; exit_status=$?; end=$(date +%s); if [ $exit_status -ne 0 ] || [ $((end-start)) -lt {} ]; then echo; echo \"[gwt] Agent exited immediately (status=$exit_status).\"; echo \"[gwt] Press Enter to close this pane.\"; read -r _; fi; exit $exit_status",
@@ -7468,8 +8337,27 @@ mod tests {
             skip_permissions: None,
             tool_version: None,
             collaboration_modes: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
             timestamp: 0,
         }
+    }
+
+    #[test]
+    fn test_default_recreate_selected_for_rebuild() {
+        assert!(Model::default_recreate_selected(true));
+        assert!(!Model::default_recreate_selected(false));
+    }
+
+    #[test]
+    fn test_quick_start_recreate_allowed_requires_change() {
+        assert!(!Model::quick_start_recreate_allowed(false, true));
+        assert!(!Model::quick_start_recreate_allowed(false, false));
+        assert!(Model::quick_start_recreate_allowed(true, true));
+        assert!(!Model::quick_start_recreate_allowed(true, false));
     }
 
     #[test]
@@ -7584,6 +8472,45 @@ mod tests {
         branch.last_tool_usage = Some(usage.to_string());
         branch.last_tool_id = tool_id.map(|id| id.to_string());
         branch
+    }
+
+    fn sample_launch_plan() -> LaunchPlan {
+        let config = AgentLaunchConfig {
+            repo_root: PathBuf::from("/tmp/repo"),
+            worktree_path: PathBuf::from("/tmp/worktree"),
+            branch_name: "feature/test".to_string(),
+            agent: CodingAgent::ClaudeCode,
+            custom_agent: None,
+            model: None,
+            reasoning_level: None,
+            version: "latest".to_string(),
+            execution_mode: ExecutionMode::Continue,
+            session_id: None,
+            skip_permissions: false,
+            env: Vec::new(),
+            env_remove: Vec::new(),
+            auto_install_deps: false,
+            collaboration_modes: false,
+        };
+
+        LaunchPlan {
+            config,
+            executable: "claude".to_string(),
+            command_args: Vec::new(),
+            log_lines: Vec::new(),
+            session_warning: None,
+            selected_version: "latest".to_string(),
+            install_plan: InstallPlan::None,
+            env: Vec::new(),
+            repo_root: PathBuf::from("/tmp/repo"),
+        }
+    }
+
+    fn sample_mouse_click() -> MouseClick {
+        MouseClick {
+            index: 0,
+            at: Instant::now(),
+        }
     }
 
     fn render_model_lines(model: &mut Model, width: u16, height: u16) -> Vec<String> {
@@ -7843,12 +8770,7 @@ mod tests {
         }
 
         assert_eq!(model.footer_scroll_offset, max_offset);
-        assert_eq!(model.footer_scroll_pause, FOOTER_SCROLL_PAUSE_TICKS);
-
-        for _ in 0..FOOTER_SCROLL_PAUSE_TICKS {
-            model.update(Message::Tick);
-            assert_eq!(model.footer_scroll_offset, max_offset);
-        }
+        assert_eq!(model.footer_scroll_pause, 0);
 
         for _ in 0..FOOTER_SCROLL_TICKS_PER_LINE {
             model.update(Message::Tick);
@@ -7890,6 +8812,27 @@ mod tests {
         assert!(wrapped.contains("status=$exit_status"));
         assert!(wrapped.contains("exit $exit_status"));
         assert!(!wrapped.contains("; status=$?;"));
+    }
+
+    #[test]
+    fn test_normalize_container_executable_strips_path() {
+        assert_eq!(
+            normalize_container_executable("/usr/local/bin/bunx"),
+            "bunx"
+        );
+        assert_eq!(
+            normalize_container_executable("C:\\tools\\codex.exe"),
+            "codex.exe"
+        );
+        assert_eq!(normalize_container_executable("codex"), "codex");
+        assert_eq!(
+            normalize_container_executable("./scripts/agent.sh"),
+            "./scripts/agent.sh"
+        );
+        assert_eq!(
+            normalize_container_executable("scripts\\agent.exe"),
+            "scripts\\agent.exe"
+        );
     }
 
     #[test]
@@ -7943,6 +8886,75 @@ mod tests {
 
         let expected = LaunchProgress::BuildingCommand.message();
         assert_eq!(model.launch_status.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn test_confirm_cancel_clears_plugin_setup_state() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Confirm;
+        model.screen_stack.push(Screen::BranchList);
+        model.pending_plugin_setup = true;
+        model.pending_plugin_setup_launch = Some(sample_launch_plan());
+        model.launch_status = Some("Launching...".to_string());
+
+        model.update(Message::NavigateBack);
+
+        assert!(!model.pending_plugin_setup);
+        assert!(model.pending_plugin_setup_launch.is_none());
+        assert!(model.launch_status.is_none());
+        assert!(matches!(model.screen, Screen::BranchList));
+    }
+
+    #[test]
+    fn test_service_select_cancel_clears_double_click_state() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::ServiceSelect;
+        model.screen_stack.push(Screen::BranchList);
+        model.pending_service_select = Some(PendingServiceSelect {
+            plan: sample_launch_plan(),
+            services: vec!["app".to_string()],
+        });
+        model.last_mouse_click = Some(sample_mouse_click());
+
+        model.update(Message::NavigateBack);
+
+        assert!(model.last_mouse_click.is_none());
+        assert!(matches!(model.screen, Screen::BranchList));
+    }
+
+    #[test]
+    fn test_service_select_confirm_clears_double_click_state() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::ServiceSelect;
+        model.screen_stack.push(Screen::BranchList);
+        model.pending_service_select = Some(PendingServiceSelect {
+            plan: sample_launch_plan(),
+            services: vec!["app".to_string()],
+        });
+        model.service_select = ServiceSelectState::with_services(vec!["app".to_string()]);
+        model.last_mouse_click = Some(sample_mouse_click());
+
+        model.handle_service_select_confirm();
+
+        assert!(model.last_mouse_click.is_none());
+        assert!(matches!(model.screen, Screen::BranchList));
+    }
+
+    #[test]
+    fn test_service_select_skip_clears_double_click_state() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::ServiceSelect;
+        model.screen_stack.push(Screen::BranchList);
+        model.pending_service_select = Some(PendingServiceSelect {
+            plan: sample_launch_plan(),
+            services: vec!["app".to_string()],
+        });
+        model.last_mouse_click = Some(sample_mouse_click());
+
+        model.handle_service_select_skip();
+
+        assert!(model.last_mouse_click.is_none());
+        assert!(matches!(model.screen, Screen::BranchList));
     }
 
     #[test]
@@ -8672,5 +9684,21 @@ mod tests {
 
         assert_eq!(model.branch_list.selected, 0);
         assert!(!model.wizard.visible);
+    }
+
+    #[test]
+    fn test_service_select_footer_keybinds() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::ServiceSelect;
+        let keybinds = model.get_footer_keybinds();
+        assert!(keybinds.contains("Skip"));
+        assert!(keybinds.contains("Cancel"));
+    }
+
+    #[test]
+    fn test_should_prompt_recreate() {
+        assert!(!Model::should_prompt_recreate(&ContainerStatus::Running));
+        assert!(Model::should_prompt_recreate(&ContainerStatus::Stopped));
+        assert!(!Model::should_prompt_recreate(&ContainerStatus::NotFound));
     }
 }
