@@ -1060,27 +1060,12 @@ impl Model {
                 Branch::list_remote(git_path).unwrap_or_default()
             };
 
-            let local_branch_names: HashSet<String> =
-                branches.iter().map(|b| b.name.clone()).collect();
-            let mut remote_only_branches = Vec::new();
+            let mut remote_display_branches = Vec::new();
             for mut branch in remote_branches {
-                let short_name = if repo_type == RepoType::Bare {
-                    // For bare repos, branch name doesn't have origin/ prefix
-                    branch.name.as_str()
-                } else {
-                    branch
-                        .name
-                        .split_once('/')
-                        .map(|(_, name)| name)
-                        .unwrap_or(branch.name.as_str())
-                };
-                if local_branch_names.contains(short_name) {
-                    continue;
-                }
-                if repo_type != RepoType::Bare {
+                if repo_type != RepoType::Bare && !branch.name.starts_with("remotes/") {
                     branch.name = format!("remotes/{}", branch.name);
                 }
-                remote_only_branches.push(branch);
+                remote_display_branches.push(branch);
             }
             let worktree_targets: Vec<WorktreeStatusTarget> = worktrees
                 .iter()
@@ -1122,7 +1107,7 @@ impl Model {
                     item
                 })
                 .collect();
-            branch_items.extend(remote_only_branches.iter().map(|b| {
+            branch_items.extend(remote_display_branches.iter().map(|b| {
                 let mut item = BranchItem::from_branch_minimal(b, &worktrees);
                 // SPEC-a70a1ece FR-171: For bare repos, branches without worktrees are Remote
                 if repo_type == RepoType::Bare {
@@ -8256,6 +8241,7 @@ mod tests {
     use std::collections::HashMap;
     use std::process::Command;
     use std::sync::mpsc;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn run_git(dir: &Path, args: &[&str]) {
@@ -8306,6 +8292,19 @@ mod tests {
         run_git(repo.path(), &["branch", "-D", "main"]);
         run_git(repo.path(), &["fetch", "origin"]);
         run_git(repo.path(), &["remote", "set-head", "origin", "-a"]);
+
+        (repo, origin)
+    }
+
+    fn create_repo_with_local_and_remote_main() -> (TempDir, TempDir) {
+        let origin = TempDir::new().unwrap();
+        run_git(origin.path(), &["init", "--bare", "-b", "main"]);
+
+        let repo = create_test_repo_with_branch("main");
+        let origin_path = origin.path().to_string_lossy().to_string();
+        run_git(repo.path(), &["remote", "add", "origin", &origin_path]);
+        run_git(repo.path(), &["push", "-u", "origin", "main"]);
+        run_git(repo.path(), &["fetch", "origin"]);
 
         (repo, origin)
     }
@@ -8436,6 +8435,34 @@ mod tests {
 
         assert_eq!(item.last_tool_usage.as_deref(), Some("Codex@latest"));
         assert_eq!(item.last_tool_id.as_deref(), Some("codex-cli"));
+    }
+
+    #[test]
+    fn test_branch_list_refresh_includes_remote_branch_with_local_counterpart() {
+        let (repo, _origin) = create_repo_with_local_and_remote_main();
+        let context = TuiEntryContext {
+            status_message: None,
+            error_message: None,
+            repo_root: Some(repo.path().to_path_buf()),
+        };
+        let mut model = Model::new_with_context(Some(context));
+        model.repo_root = repo.path().to_path_buf();
+        model.repo_type = RepoType::Normal;
+        model.bare_repo_path = None;
+
+        model.start_branch_list_refresh(Settings::default());
+        let rx = model.branch_list_rx.take().expect("branch_list_rx");
+        let update = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("branch list update");
+
+        assert!(
+            update
+                .branches
+                .iter()
+                .any(|b| b.name == "remotes/origin/main" && b.branch_type == BranchType::Remote),
+            "remote branch should be included even when local counterpart exists"
+        );
     }
 
     fn sample_branch_with_session(name: &str) -> BranchItem {
