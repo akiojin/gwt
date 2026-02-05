@@ -172,6 +172,11 @@ mod tests {
             skip_permissions: Some(true),
             tool_version: Some("latest".to_string()),
             collaboration_modes: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
             timestamp: 1_700_000_000_000,
         };
         save_session_entry(repo.path(), entry).unwrap();

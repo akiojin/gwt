@@ -5,6 +5,7 @@ pub mod ai_wizard;
 pub mod branch_list;
 pub mod clone_wizard;
 pub mod confirm;
+pub mod docker_progress;
 pub mod environment;
 pub mod error;
 pub mod git_view;
@@ -13,6 +14,7 @@ pub mod logs;
 pub mod migration_dialog;
 pub mod pane_list;
 pub mod profiles;
+pub mod service_select;
 pub mod settings;
 pub mod split_layout;
 pub mod wizard;
@@ -32,7 +34,10 @@ pub use migration_dialog::{render_migration_dialog, MigrationDialogPhase, Migrat
 pub use profiles::{render_profiles, ProfilesState};
 pub use settings::{render_settings, SettingsState};
 pub use wizard::{
-    render_wizard, CodingAgent, ExecutionMode, QuickStartEntry, ReasoningLevel,
-    WizardConfirmResult, WizardState, WizardStep,
+    render_wizard, CodingAgent, ExecutionMode, QuickStartDockerSettings, QuickStartEntry,
+    ReasoningLevel, WizardConfirmResult, WizardState, WizardStep,
 };
 pub use worktree_create::{render_worktree_create, WorktreeCreateState};
+
+// Docker integration screens (SPEC-f5f5657e)
+pub use service_select::{render_service_select, ServiceSelectState};

@@ -162,6 +162,43 @@ pub struct QuickStartEntry {
     pub skip_permissions: Option<bool>,
     /// collaboration_modes setting (Codex v0.91.0+, SPEC-fdebd681)
     pub collaboration_modes: Option<bool>,
+    /// Docker service name (compose) for Quick Start
+    pub docker_service: Option<String>,
+    /// Force host launch (skip docker) for Quick Start
+    pub docker_force_host: Option<bool>,
+    /// Recreate containers before launch for Quick Start
+    pub docker_recreate: Option<bool>,
+    /// Build docker images before launch for Quick Start
+    pub docker_build: Option<bool>,
+    /// Keep containers running after agent exit for Quick Start
+    pub docker_keep: Option<bool>,
+}
+
+/// Quick Start Docker settings
+#[derive(Debug, Clone)]
+pub struct QuickStartDockerSettings {
+    pub service: Option<String>,
+    pub force_host: Option<bool>,
+    pub recreate: Option<bool>,
+    pub keep: Option<bool>,
+}
+
+impl QuickStartDockerSettings {
+    fn from_entry(entry: &QuickStartEntry) -> Option<Self> {
+        let has_any = entry.docker_service.is_some()
+            || entry.docker_force_host.is_some()
+            || entry.docker_recreate.is_some()
+            || entry.docker_keep.is_some();
+        if !has_any {
+            return None;
+        }
+        Some(Self {
+            service: entry.docker_service.clone(),
+            force_host: entry.docker_force_host,
+            recreate: entry.docker_recreate,
+            keep: entry.docker_keep,
+        })
+    }
 }
 
 /// Source agent for session conversion
@@ -788,6 +825,8 @@ pub struct WizardState {
     pub quick_start_index: usize,
     /// Whether Quick Start should be shown (has previous history)
     pub has_quick_start: bool,
+    /// Quick Start Docker settings (if available)
+    pub quick_start_docker: Option<QuickStartDockerSettings>,
     // Running agent context
     /// Whether an agent is already running for this branch
     pub has_running_agent: bool,
@@ -916,6 +955,7 @@ impl WizardState {
         self.quick_start_index = 0;
         self.has_running_agent = false;
         self.running_agent_pane_idx = None;
+        self.quick_start_docker = None;
         // Load all agents (builtin + custom)
         self.all_agents = get_all_agents(&self.installed_cache);
         self.selected_agent_entry = self.all_agents.first().cloned();
@@ -1076,6 +1116,7 @@ impl WizardState {
 
             // Set skip permissions
             self.skip_permissions = entry.skip_permissions.unwrap_or(false);
+            self.quick_start_docker = QuickStartDockerSettings::from_entry(entry);
 
             // Set execution mode based on action
             self.execution_mode = match action {
@@ -3520,6 +3561,11 @@ mod tests {
             session_id: Some("abc123".to_string()),
             skip_permissions: None,
             collaboration_modes: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
         }];
         state.open_for_branch("feature/test", history, None);
         assert!(state.visible);
@@ -3751,6 +3797,11 @@ mod tests {
             session_id: Some("abc123".to_string()),
             skip_permissions: Some(true),
             collaboration_modes: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
         }];
         state.open_for_branch("feature/test", history, None);
 
@@ -3786,6 +3837,11 @@ mod tests {
             session_id: Some("xyz789".to_string()),
             skip_permissions: Some(false),
             collaboration_modes: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
         }];
         state.open_for_branch("feature/test", history, None);
 
@@ -3809,6 +3865,61 @@ mod tests {
     }
 
     #[test]
+    fn test_quick_start_restores_docker_settings() {
+        let mut state = WizardState::new();
+        let history = vec![QuickStartEntry {
+            tool_id: "claude-code".to_string(),
+            tool_label: "Claude Code".to_string(),
+            model: Some("sonnet".to_string()),
+            reasoning_level: None,
+            version: Some("1.0.0".to_string()),
+            session_id: None,
+            skip_permissions: Some(false),
+            collaboration_modes: None,
+            docker_service: Some("gwt".to_string()),
+            docker_force_host: Some(false),
+            docker_recreate: Some(true),
+            docker_build: None,
+            docker_keep: Some(true),
+        }];
+        state.open_for_branch("feature/test", history, None);
+        assert_eq!(state.step, WizardStep::QuickStart);
+
+        state.quick_start_index = 0;
+        let result = state.confirm();
+
+        assert_eq!(result, WizardConfirmResult::Complete);
+        assert!(state.quick_start_docker.is_some());
+        let docker = state.quick_start_docker.as_ref().unwrap();
+        assert_eq!(docker.service.as_deref(), Some("gwt"));
+        assert_eq!(docker.force_host, Some(false));
+        assert_eq!(docker.recreate, Some(true));
+        assert_eq!(docker.keep, Some(true));
+    }
+
+    #[test]
+    fn test_quick_start_docker_settings_ignore_build_only() {
+        let entry = QuickStartEntry {
+            tool_id: "claude-code".to_string(),
+            tool_label: "Claude Code".to_string(),
+            model: None,
+            reasoning_level: None,
+            version: None,
+            session_id: None,
+            skip_permissions: None,
+            collaboration_modes: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: Some(true),
+            docker_keep: None,
+        };
+
+        let settings = QuickStartDockerSettings::from_entry(&entry);
+        assert!(settings.is_none());
+    }
+
+    #[test]
     fn test_quick_start_auto_enables_collaboration_modes_for_codex_091() {
         let mut state = WizardState::new();
         let history = vec![QuickStartEntry {
@@ -3820,6 +3931,11 @@ mod tests {
             session_id: None,
             skip_permissions: Some(false),
             collaboration_modes: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
         }];
         state.open_for_branch("feature/test", history, None);
         assert_eq!(state.step, WizardStep::QuickStart);
@@ -3845,6 +3961,11 @@ mod tests {
             session_id: Some("abc123".to_string()),
             skip_permissions: None,
             collaboration_modes: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
         }];
         state.open_for_branch("feature/test", history, None);
 
@@ -3880,6 +4001,11 @@ mod tests {
             session_id: Some("session-123".to_string()),
             skip_permissions: Some(true),
             collaboration_modes: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
         }];
         state.open_for_branch("feature/custom", history, None);
 
@@ -3941,6 +4067,11 @@ mod tests {
             session_id: None,
             skip_permissions: None,
             collaboration_modes: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
         }];
         state.open_for_branch("feature/overwrite", history, None);
 
