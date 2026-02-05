@@ -1,6 +1,15 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [6.27.2] - 2026-02-05
+
+### Bug Fixes
+
+- Stabilize docker reuse/keep flow (#880)
+- Bunxオンデマンド取得のバージョン固定 (#881)
+- Slow footer shortcut scroll (#879)
+- **ci:** Use macos-13 for x86_64-apple-darwin native build
+
 ## [6.27.1] - 2026-02-03
 
 ### Bug Fixes
