@@ -128,6 +128,37 @@ fn normalize_branch_name_for_history(branch_name: &str) -> Cow<'_, str> {
     Cow::Borrowed(branch_name)
 }
 
+fn resolve_existing_worktree_path(
+    branch_name: &str,
+    branches: &[BranchItem],
+    create_new_branch: bool,
+) -> Option<PathBuf> {
+    if create_new_branch {
+        return None;
+    }
+
+    let normalized = normalize_branch_name_for_history(branch_name);
+    let find_path = |name: &str| {
+        branches
+            .iter()
+            .find(|item| {
+                item.name == name
+                    && item.has_worktree
+                    && item.worktree_status == WorktreeStatus::Active
+            })
+            .and_then(|item| item.worktree_path.as_ref())
+            .map(PathBuf::from)
+    };
+
+    find_path(branch_name).or_else(|| {
+        if normalized.as_ref() != branch_name {
+            find_path(normalized.as_ref())
+        } else {
+            None
+        }
+    })
+}
+
 fn apply_last_tool_usage(
     item: &mut BranchItem,
     repo_root: &Path,
@@ -5224,21 +5255,11 @@ impl Model {
         } else {
             None
         };
-        let existing_worktree_path = if self.worktree_create.create_new_branch {
-            None
-        } else {
-            self.branch_list
-                .branches
-                .iter()
-                .find(|item| item.name == branch)
-                .and_then(|item| {
-                    if item.has_worktree && item.worktree_status == WorktreeStatus::Active {
-                        item.worktree_path.as_ref().map(PathBuf::from)
-                    } else {
-                        None
-                    }
-                })
-        };
+        let existing_worktree_path = resolve_existing_worktree_path(
+            &branch,
+            &self.branch_list.branches,
+            self.worktree_create.create_new_branch,
+        );
 
         let auto_install_deps = self
             .settings
@@ -5338,32 +5359,26 @@ impl Model {
 
             // Step 2: Validate branch (lightweight)
             step(ProgressStepKind::ValidateBranch, StepStatus::Running);
-            let existing_wt = manager
-                .list_basic()
-                .ok()
-                .and_then(|worktrees| {
-                    if let Some(ref path) = request.existing_worktree_path {
-                        worktrees
-                            .iter()
-                            .find(|wt| wt.path == *path)
-                            .cloned()
-                            .or_else(|| {
-                                worktrees
-                                    .iter()
-                                    .find(|wt| {
-                                        wt.branch.as_deref() == Some(request.branch_name.as_str())
-                                    })
-                                    .cloned()
-                            })
-                    } else {
-                        worktrees
-                            .iter()
-                            .find(|wt| {
-                                wt.branch.as_deref() == Some(request.branch_name.as_str())
-                            })
-                            .cloned()
-                    }
-                });
+            let normalized_branch = normalize_branch_name_for_history(&request.branch_name);
+            let existing_wt = manager.list_basic().ok().and_then(|worktrees| {
+                if let Some(ref path) = request.existing_worktree_path {
+                    worktrees
+                        .iter()
+                        .find(|wt| wt.path == *path)
+                        .cloned()
+                        .or_else(|| {
+                            worktrees
+                                .iter()
+                                .find(|wt| wt.branch.as_deref() == Some(normalized_branch.as_ref()))
+                                .cloned()
+                        })
+                } else {
+                    worktrees
+                        .iter()
+                        .find(|wt| wt.branch.as_deref() == Some(normalized_branch.as_ref()))
+                        .cloned()
+                }
+            });
             let has_existing_wt = existing_wt.is_some();
             step(ProgressStepKind::ValidateBranch, StepStatus::Completed);
 
@@ -8530,6 +8545,22 @@ mod tests {
     fn test_normalize_branch_name_for_history_keeps_local_name() {
         let normalized = normalize_branch_name_for_history("feature/test");
         assert_eq!(normalized.as_ref(), "feature/test");
+    }
+
+    #[test]
+    fn test_resolve_existing_worktree_path_uses_normalized_remote_name() {
+        let local = sample_branch_with_session("feature/test");
+        let mut remote = local.clone();
+        remote.name = "remotes/origin/feature/test".to_string();
+        remote.branch_type = BranchType::Remote;
+        remote.has_worktree = false;
+        remote.worktree_path = None;
+        remote.worktree_status = WorktreeStatus::None;
+
+        let resolved =
+            resolve_existing_worktree_path("remotes/origin/feature/test", &[remote, local], false);
+
+        assert_eq!(resolved, Some(PathBuf::from("/tmp/worktree")));
     }
 
     #[test]
