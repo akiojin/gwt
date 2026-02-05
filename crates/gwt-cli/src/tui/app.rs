@@ -385,6 +385,8 @@ struct LaunchRequest {
     branch_name: String,
     create_new_branch: bool,
     base_branch: Option<String>,
+    /// Existing worktree path to reuse (Quick Start or known worktree)
+    existing_worktree_path: Option<PathBuf>,
     agent: CodingAgent,
     /// Custom agent configuration (SPEC-71f2742d)
     custom_agent: Option<CustomCodingAgent>,
@@ -5222,6 +5224,21 @@ impl Model {
         } else {
             None
         };
+        let existing_worktree_path = if self.worktree_create.create_new_branch {
+            None
+        } else {
+            self.branch_list
+                .branches
+                .iter()
+                .find(|item| item.name == branch)
+                .and_then(|item| {
+                    if item.has_worktree && item.worktree_status == WorktreeStatus::Active {
+                        item.worktree_path.as_ref().map(PathBuf::from)
+                    } else {
+                        None
+                    }
+                })
+        };
 
         let auto_install_deps = self
             .settings
@@ -5241,6 +5258,7 @@ impl Model {
             branch_name: branch,
             create_new_branch: self.worktree_create.create_new_branch,
             base_branch: base,
+            existing_worktree_path,
             agent: self.wizard.agent,
             custom_agent,
             model: if self.wizard.model.is_empty() {
@@ -5321,9 +5339,31 @@ impl Model {
             // Step 2: Validate branch (lightweight)
             step(ProgressStepKind::ValidateBranch, StepStatus::Running);
             let existing_wt = manager
-                .get_by_branch_basic(&request.branch_name)
+                .list_basic()
                 .ok()
-                .flatten();
+                .and_then(|worktrees| {
+                    if let Some(ref path) = request.existing_worktree_path {
+                        worktrees
+                            .iter()
+                            .find(|wt| wt.path == *path)
+                            .cloned()
+                            .or_else(|| {
+                                worktrees
+                                    .iter()
+                                    .find(|wt| {
+                                        wt.branch.as_deref() == Some(request.branch_name.as_str())
+                                    })
+                                    .cloned()
+                            })
+                    } else {
+                        worktrees
+                            .iter()
+                            .find(|wt| {
+                                wt.branch.as_deref() == Some(request.branch_name.as_str())
+                            })
+                            .cloned()
+                    }
+                });
             let has_existing_wt = existing_wt.is_some();
             step(ProgressStepKind::ValidateBranch, StepStatus::Completed);
 
@@ -8397,6 +8437,81 @@ mod tests {
 
         let after = worktree_list_output(temp.path());
         assert!(after.contains(wt_path.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn test_quick_start_reuses_existing_worktree_path_for_remote_branch_name() {
+        let repo = create_test_repo_with_branch("main");
+
+        let origin = TempDir::new().unwrap();
+        run_git(origin.path(), &["init", "--bare", "-b", "main"]);
+        let origin_path = origin.path().to_string_lossy().to_string();
+        run_git(repo.path(), &["remote", "add", "origin", &origin_path]);
+        run_git(repo.path(), &["push", "-u", "origin", "main"]);
+
+        let worktree_path = repo.path().join(".worktrees/feature-existing");
+        run_git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                worktree_path.to_string_lossy().as_ref(),
+                "-b",
+                "feature/existing",
+            ],
+        );
+        run_git(repo.path(), &["push", "-u", "origin", "feature/existing"]);
+        let worktree_path = std::fs::canonicalize(&worktree_path).unwrap_or(worktree_path);
+
+        let context = TuiEntryContext::success("".to_string()).with_repo_root(repo.path().into());
+        let mut model = Model::new_with_context(Some(context));
+
+        let request = LaunchRequest {
+            branch_name: "remotes/origin/feature/existing".to_string(),
+            create_new_branch: false,
+            base_branch: None,
+            agent: CodingAgent::ClaudeCode,
+            custom_agent: None,
+            model: None,
+            reasoning_level: None,
+            version: "latest".to_string(),
+            execution_mode: ExecutionMode::Normal,
+            session_id: None,
+            skip_permissions: false,
+            collaboration_modes: false,
+            env: Vec::new(),
+            env_remove: Vec::new(),
+            auto_install_deps: false,
+            selected_issue: None,
+            existing_worktree_path: Some(worktree_path.clone()),
+        };
+
+        model.start_launch_preparation(request);
+
+        let rx = model.launch_rx.take().expect("launch rx not set");
+        let mut worktree_ready = None;
+        let mut failure = None;
+        for _ in 0..40 {
+            match rx.recv_timeout(std::time::Duration::from_millis(250)) {
+                Ok(LaunchUpdate::WorktreeReady { path, .. }) => {
+                    worktree_ready = Some(path);
+                    break;
+                }
+                Ok(LaunchUpdate::Failed(message)) => {
+                    failure = Some(message);
+                    break;
+                }
+                Ok(_) => continue,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        if let Some(message) = failure {
+            panic!("expected WorktreeReady, got failure: {}", message);
+        }
+        let ready_path = worktree_ready.expect("expected WorktreeReady update");
+        assert_eq!(ready_path, worktree_path);
     }
 
     #[test]
