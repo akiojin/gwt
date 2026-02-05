@@ -1062,10 +1062,8 @@ impl Model {
 
             let mut remote_display_branches = Vec::new();
             for mut branch in remote_branches {
-                if repo_type != RepoType::Bare {
-                    if !branch.name.starts_with("remotes/") {
-                        branch.name = format!("remotes/{}", branch.name);
-                    }
+                if repo_type != RepoType::Bare && !branch.name.starts_with("remotes/") {
+                    branch.name = format!("remotes/{}", branch.name);
                 }
                 remote_display_branches.push(branch);
             }
