@@ -249,7 +249,7 @@
 - Quick Startで変更検知がない場合はReuseになる
 - 起動中のコンテナでは`docker compose up`が実行されない
 
-## Phase 4: TUI統合
+## Phase 5: TUI統合
 
 ### TASK-012: Docker進捗表示画面実装
 
@@ -317,7 +317,7 @@
 
 ---
 
-## Phase 5: devcontainer対応
+## Phase 6: devcontainer対応
 
 ### TASK-015: devcontainer解析実装
 
@@ -340,7 +340,7 @@
 
 ---
 
-## Phase 6: エラーハンドリング
+## Phase 7: エラーハンドリング
 
 ### TASK-016: DockerError型実装
 
@@ -505,16 +505,17 @@
 | Phase 1 | TASK-001〜002 | 小 |
 | Phase 2 | TASK-003〜008 | 中 |
 | Phase 3 | TASK-009 | 小 |
-| Phase 4 | TASK-010〜014 | 中 |
-| Phase 5 | TASK-015 | 小 |
-| Phase 6 | TASK-016〜017 | 小 |
-| 統合 | TASK-018〜020 | 中 |
+| Phase 4 | TASK-010〜011 | 中 |
+| Phase 5 | TASK-012〜014 | 中 |
+| Phase 6 | TASK-015 | 小 |
+| Phase 7 | TASK-016〜017 | 小 |
+| 統合 | TASK-018〜022 | 中 |
 
 ## 合計タスク数: 28
 
 ---
 
-## Phase 7: 追加UI改善
+## Phase 8: 追加UI改善
 
 ### TASK-023: Service SelectにHostOSを追加
 
