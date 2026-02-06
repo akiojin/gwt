@@ -120,7 +120,26 @@ impl WorktreeManager {
     /// Get a specific worktree by path
     pub fn get_by_path(&self, path: &Path) -> Result<Option<Worktree>> {
         let worktrees = self.list()?;
-        Ok(worktrees.into_iter().find(|wt| wt.path == path))
+        if worktrees.is_empty() {
+            return Ok(None);
+        }
+
+        let target = path;
+        let target_canon = std::fs::canonicalize(target).ok();
+
+        Ok(worktrees.into_iter().find(|wt| {
+            if wt.path == target {
+                return true;
+            }
+
+            // On macOS (and some temp-dir setups), git may report a canonicalized path
+            // (e.g., /private/var/...) while our callers hold a non-canonical alias
+            // (e.g., /var/...). Fall back to canonical comparison when possible.
+            match (&target_canon, std::fs::canonicalize(&wt.path).ok()) {
+                (Some(a), Some(b)) => a == &b,
+                _ => false,
+            }
+        }))
     }
 
     /// Handle existing path for worktree creation (FR-038-040)
@@ -131,7 +150,17 @@ impl WorktreeManager {
     fn handle_existing_path(&self, path: &Path) -> Result<()> {
         // Check if this path is in the git worktree list
         let git_worktrees = self.repo.list_worktrees()?;
-        let is_in_worktree_list = git_worktrees.iter().any(|info| info.path == path);
+        let target = path;
+        let target_canon = std::fs::canonicalize(target).ok();
+        let is_in_worktree_list = git_worktrees.iter().any(|info| {
+            if info.path == target {
+                return true;
+            }
+            match (&target_canon, std::fs::canonicalize(&info.path).ok()) {
+                (Some(a), Some(b)) => a == &b,
+                _ => false,
+            }
+        });
 
         if is_in_worktree_list {
             // Path exists AND is in worktree list → real worktree conflict
@@ -730,6 +759,10 @@ mod tests {
     use std::process::Command;
     use tempfile::TempDir;
 
+    fn canonicalize_or_self(path: &Path) -> PathBuf {
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+
     fn run_git_in(dir: &Path, args: &[&str]) {
         let output = Command::new("git")
             .args(args)
@@ -1058,8 +1091,10 @@ mod tests {
     }
 
     /// Create a bare test repository (SPEC-a70a1ece T406)
-    /// Returns (TempDir, PathBuf) where PathBuf is the bare repo path
-    fn create_bare_test_repo() -> (TempDir, PathBuf) {
+    /// Returns (TempDir, PathBuf, String) where:
+    /// - PathBuf is the bare repo path
+    /// - String is the default branch name (main/master depending on git config)
+    fn create_bare_test_repo() -> (TempDir, PathBuf, String) {
         let temp = TempDir::new().unwrap();
         // Create a source repo first
         let source = temp.path().join("source");
@@ -1071,6 +1106,7 @@ mod tests {
         std::fs::write(source.join("test.txt"), "hello").unwrap();
         run_git_in(&source, &["add", "."]);
         run_git_in(&source, &["commit", "-m", "initial"]);
+        let base_branch = git_stdout(&source, &["rev-parse", "--abbrev-ref", "HEAD"]);
 
         // Clone as bare
         let bare = temp.path().join("repo.git");
@@ -1090,13 +1126,13 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
 
-        (temp, bare)
+        (temp, bare, base_branch)
     }
 
     #[test]
     fn test_bare_repo_uses_sibling_location() {
         // SPEC-a70a1ece T406: Bare repository should use Sibling location
-        let (_temp, bare_path) = create_bare_test_repo();
+        let (_temp, bare_path, _base_branch) = create_bare_test_repo();
 
         let manager = WorktreeManager::new(&bare_path).unwrap();
         assert_eq!(manager.location, WorktreeLocation::Sibling);
@@ -1105,16 +1141,19 @@ mod tests {
     #[test]
     fn test_bare_repo_worktree_sibling_path() {
         // SPEC-a70a1ece T406: Worktree should be created as sibling to bare repo
-        let (temp, bare_path) = create_bare_test_repo();
+        let (temp, bare_path, base_branch) = create_bare_test_repo();
 
         let manager = WorktreeManager::new(&bare_path).unwrap();
-        // Note: bare clone from local repo may have 'master' as default branch
         let wt = manager
-            .create_new_branch("feature/test", Some("master"))
+            .create_new_branch("feature/test", Some(&base_branch))
             .unwrap();
 
         // Worktree should be at sibling path: /temp/feature/test
-        assert_eq!(wt.path, temp.path().join("feature/test"));
+        let expected_path = temp.path().join("feature/test");
+        assert_eq!(
+            canonicalize_or_self(&wt.path),
+            canonicalize_or_self(&expected_path)
+        );
         assert!(wt.path.exists());
     }
 
@@ -1122,16 +1161,19 @@ mod tests {
     fn test_bare_repo_worktree_creates_subdirectory_structure() {
         // SPEC-a70a1ece FR-152: Slash-containing branches create subdirectory structure
         // e.g., "feature/branch-name" creates feature/branch-name/ directory
-        let (temp, bare_path) = create_bare_test_repo();
+        let (temp, bare_path, base_branch) = create_bare_test_repo();
 
         let manager = WorktreeManager::new(&bare_path).unwrap();
         let wt = manager
-            .create_new_branch("feature/my-feature", Some("master"))
+            .create_new_branch("feature/my-feature", Some(&base_branch))
             .unwrap();
 
         // Verify worktree is at /temp/feature/my-feature
         let expected_path = temp.path().join("feature").join("my-feature");
-        assert_eq!(wt.path, expected_path);
+        assert_eq!(
+            canonicalize_or_self(&wt.path),
+            canonicalize_or_self(&expected_path)
+        );
 
         // Verify the feature/ subdirectory exists
         let feature_dir = temp.path().join("feature");
@@ -1169,16 +1211,19 @@ mod tests {
     #[test]
     fn test_bare_repo_worktree_bugfix_branch() {
         // SPEC-a70a1ece FR-152: Test bugfix/ prefix as well
-        let (temp, bare_path) = create_bare_test_repo();
+        let (temp, bare_path, base_branch) = create_bare_test_repo();
 
         let manager = WorktreeManager::new(&bare_path).unwrap();
         let wt = manager
-            .create_new_branch("bugfix/fix-123", Some("master"))
+            .create_new_branch("bugfix/fix-123", Some(&base_branch))
             .unwrap();
 
         // Verify worktree is at /temp/bugfix/fix-123
         let expected_path = temp.path().join("bugfix").join("fix-123");
-        assert_eq!(wt.path, expected_path);
+        assert_eq!(
+            canonicalize_or_self(&wt.path),
+            canonicalize_or_self(&expected_path)
+        );
 
         // Verify the bugfix/ subdirectory exists
         let bugfix_dir = temp.path().join("bugfix");
