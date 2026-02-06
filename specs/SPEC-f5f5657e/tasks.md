@@ -471,7 +471,7 @@
 **内容**:
 
 - [ ] HOST_GIT_COMMON_DIR を環境変数として compose に渡す
-- [ ] docker-compose.yml に gitdir の bind mount を追加
+- [ ] compose override を生成して、選択サービスに gitdir の bind mount を自動追加（docker-compose.yml の変更不要）
 - [ ] worktreeの.git（gitdir参照）をコンテナから参照可能にする
 
 **受け入れ基準**:
