@@ -648,10 +648,10 @@ impl CodingAgent {
     pub fn models(&self) -> Vec<ModelOption> {
         match self {
             CodingAgent::ClaudeCode => vec![
-                ModelOption::default_option("Default (Auto)", "Use Claude Code default behavior"),
-                ModelOption::new("opus", "Opus 4.5", "Official Opus alias for Claude Code (non-custom, matches /model option)."),
-                ModelOption::new("sonnet", "Sonnet 4.5", "Official Sonnet alias for Claude Code."),
-                ModelOption::new("haiku", "Haiku 4.5", "Official Haiku alias for Claude Code (fastest model, non-custom)."),
+                ModelOption::default_option("Default (recommended)", "Opus 4.6 - Most capable for complex work"),
+                ModelOption::new("opus", "Opus 4.6", "Most capable for complex work"),
+                ModelOption::new("sonnet", "Sonnet 4.5", "Best for everyday tasks"),
+                ModelOption::new("haiku", "Haiku 4.5", "Fastest for quick answers"),
             ],
             CodingAgent::CodexCli => vec![
                 ModelOption::default_option("Default (Auto)", "Use Codex default model")
