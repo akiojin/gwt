@@ -128,6 +128,37 @@ fn normalize_branch_name_for_history(branch_name: &str) -> Cow<'_, str> {
     Cow::Borrowed(branch_name)
 }
 
+fn resolve_existing_worktree_path(
+    branch_name: &str,
+    branches: &[BranchItem],
+    create_new_branch: bool,
+) -> Option<PathBuf> {
+    if create_new_branch {
+        return None;
+    }
+
+    let normalized = normalize_branch_name_for_history(branch_name);
+    let find_path = |name: &str| {
+        branches
+            .iter()
+            .find(|item| {
+                item.name == name
+                    && item.has_worktree
+                    && item.worktree_status == WorktreeStatus::Active
+            })
+            .and_then(|item| item.worktree_path.as_ref())
+            .map(PathBuf::from)
+    };
+
+    find_path(branch_name).or_else(|| {
+        if normalized.as_ref() != branch_name {
+            find_path(normalized.as_ref())
+        } else {
+            None
+        }
+    })
+}
+
 fn apply_last_tool_usage(
     item: &mut BranchItem,
     repo_root: &Path,
@@ -385,6 +416,8 @@ struct LaunchRequest {
     branch_name: String,
     create_new_branch: bool,
     base_branch: Option<String>,
+    /// Existing worktree path to reuse (Quick Start or known worktree)
+    existing_worktree_path: Option<PathBuf>,
     agent: CodingAgent,
     /// Custom agent configuration (SPEC-71f2742d)
     custom_agent: Option<CustomCodingAgent>,
@@ -1060,27 +1093,12 @@ impl Model {
                 Branch::list_remote(git_path).unwrap_or_default()
             };
 
-            let local_branch_names: HashSet<String> =
-                branches.iter().map(|b| b.name.clone()).collect();
-            let mut remote_only_branches = Vec::new();
+            let mut remote_display_branches = Vec::new();
             for mut branch in remote_branches {
-                let short_name = if repo_type == RepoType::Bare {
-                    // For bare repos, branch name doesn't have origin/ prefix
-                    branch.name.as_str()
-                } else {
-                    branch
-                        .name
-                        .split_once('/')
-                        .map(|(_, name)| name)
-                        .unwrap_or(branch.name.as_str())
-                };
-                if local_branch_names.contains(short_name) {
-                    continue;
-                }
-                if repo_type != RepoType::Bare {
+                if repo_type != RepoType::Bare && !branch.name.starts_with("remotes/") {
                     branch.name = format!("remotes/{}", branch.name);
                 }
-                remote_only_branches.push(branch);
+                remote_display_branches.push(branch);
             }
             let worktree_targets: Vec<WorktreeStatusTarget> = worktrees
                 .iter()
@@ -1122,7 +1140,7 @@ impl Model {
                     item
                 })
                 .collect();
-            branch_items.extend(remote_only_branches.iter().map(|b| {
+            branch_items.extend(remote_display_branches.iter().map(|b| {
                 let mut item = BranchItem::from_branch_minimal(b, &worktrees);
                 // SPEC-a70a1ece FR-171: For bare repos, branches without worktrees are Remote
                 if repo_type == RepoType::Bare {
@@ -5222,6 +5240,11 @@ impl Model {
         } else {
             None
         };
+        let existing_worktree_path = resolve_existing_worktree_path(
+            &branch,
+            &self.branch_list.branches,
+            self.worktree_create.create_new_branch,
+        );
 
         let auto_install_deps = self
             .settings
@@ -5241,6 +5264,7 @@ impl Model {
             branch_name: branch,
             create_new_branch: self.worktree_create.create_new_branch,
             base_branch: base,
+            existing_worktree_path,
             agent: self.wizard.agent,
             custom_agent,
             model: if self.wizard.model.is_empty() {
@@ -5320,10 +5344,26 @@ impl Model {
 
             // Step 2: Validate branch (lightweight)
             step(ProgressStepKind::ValidateBranch, StepStatus::Running);
-            let existing_wt = manager
-                .get_by_branch_basic(&request.branch_name)
-                .ok()
-                .flatten();
+            let normalized_branch = normalize_branch_name_for_history(&request.branch_name);
+            let existing_wt = manager.list_basic().ok().and_then(|worktrees| {
+                if let Some(ref path) = request.existing_worktree_path {
+                    worktrees
+                        .iter()
+                        .find(|wt| wt.path == *path)
+                        .cloned()
+                        .or_else(|| {
+                            worktrees
+                                .iter()
+                                .find(|wt| wt.branch.as_deref() == Some(normalized_branch.as_ref()))
+                                .cloned()
+                        })
+                } else {
+                    worktrees
+                        .iter()
+                        .find(|wt| wt.branch.as_deref() == Some(normalized_branch.as_ref()))
+                        .cloned()
+                }
+            });
             let has_existing_wt = existing_wt.is_some();
             step(ProgressStepKind::ValidateBranch, StepStatus::Completed);
 
@@ -8256,6 +8296,7 @@ mod tests {
     use std::collections::HashMap;
     use std::process::Command;
     use std::sync::mpsc;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn run_git(dir: &Path, args: &[&str]) {
@@ -8306,6 +8347,19 @@ mod tests {
         run_git(repo.path(), &["branch", "-D", "main"]);
         run_git(repo.path(), &["fetch", "origin"]);
         run_git(repo.path(), &["remote", "set-head", "origin", "-a"]);
+
+        (repo, origin)
+    }
+
+    fn create_repo_with_local_and_remote_main() -> (TempDir, TempDir) {
+        let origin = TempDir::new().unwrap();
+        run_git(origin.path(), &["init", "--bare", "-b", "main"]);
+
+        let repo = create_test_repo_with_branch("main");
+        let origin_path = origin.path().to_string_lossy().to_string();
+        run_git(repo.path(), &["remote", "add", "origin", &origin_path]);
+        run_git(repo.path(), &["push", "-u", "origin", "main"]);
+        run_git(repo.path(), &["fetch", "origin"]);
 
         (repo, origin)
     }
@@ -8400,6 +8454,81 @@ mod tests {
     }
 
     #[test]
+    fn test_quick_start_reuses_existing_worktree_path_for_remote_branch_name() {
+        let repo = create_test_repo_with_branch("main");
+
+        let origin = TempDir::new().unwrap();
+        run_git(origin.path(), &["init", "--bare", "-b", "main"]);
+        let origin_path = origin.path().to_string_lossy().to_string();
+        run_git(repo.path(), &["remote", "add", "origin", &origin_path]);
+        run_git(repo.path(), &["push", "-u", "origin", "main"]);
+
+        let worktree_path = repo.path().join(".worktrees/feature-existing");
+        run_git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                worktree_path.to_string_lossy().as_ref(),
+                "-b",
+                "feature/existing",
+            ],
+        );
+        run_git(repo.path(), &["push", "-u", "origin", "feature/existing"]);
+        let worktree_path = std::fs::canonicalize(&worktree_path).unwrap_or(worktree_path);
+
+        let context = TuiEntryContext::success("".to_string()).with_repo_root(repo.path().into());
+        let mut model = Model::new_with_context(Some(context));
+
+        let request = LaunchRequest {
+            branch_name: "remotes/origin/feature/existing".to_string(),
+            create_new_branch: false,
+            base_branch: None,
+            agent: CodingAgent::ClaudeCode,
+            custom_agent: None,
+            model: None,
+            reasoning_level: None,
+            version: "latest".to_string(),
+            execution_mode: ExecutionMode::Normal,
+            session_id: None,
+            skip_permissions: false,
+            collaboration_modes: false,
+            env: Vec::new(),
+            env_remove: Vec::new(),
+            auto_install_deps: false,
+            selected_issue: None,
+            existing_worktree_path: Some(worktree_path.clone()),
+        };
+
+        model.start_launch_preparation(request);
+
+        let rx = model.launch_rx.take().expect("launch rx not set");
+        let mut worktree_ready = None;
+        let mut failure = None;
+        for _ in 0..40 {
+            match rx.recv_timeout(std::time::Duration::from_millis(250)) {
+                Ok(LaunchUpdate::WorktreeReady { path, .. }) => {
+                    worktree_ready = Some(path);
+                    break;
+                }
+                Ok(LaunchUpdate::Failed(message)) => {
+                    failure = Some(message);
+                    break;
+                }
+                Ok(_) => continue,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        if let Some(message) = failure {
+            panic!("expected WorktreeReady, got failure: {}", message);
+        }
+        let ready_path = worktree_ready.expect("expected WorktreeReady update");
+        assert_eq!(ready_path, worktree_path);
+    }
+
+    #[test]
     fn test_background_window_name_uses_branch_name_only() {
         let branch = "feature/clean-name";
         assert_eq!(background_window_name(branch), branch);
@@ -8415,6 +8544,22 @@ mod tests {
     fn test_normalize_branch_name_for_history_keeps_local_name() {
         let normalized = normalize_branch_name_for_history("feature/test");
         assert_eq!(normalized.as_ref(), "feature/test");
+    }
+
+    #[test]
+    fn test_resolve_existing_worktree_path_uses_normalized_remote_name() {
+        let local = sample_branch_with_session("feature/test");
+        let mut remote = local.clone();
+        remote.name = "remotes/origin/feature/test".to_string();
+        remote.branch_type = BranchType::Remote;
+        remote.has_worktree = false;
+        remote.worktree_path = None;
+        remote.worktree_status = WorktreeStatus::None;
+
+        let resolved =
+            resolve_existing_worktree_path("remotes/origin/feature/test", &[remote, local], false);
+
+        assert_eq!(resolved, Some(PathBuf::from("/tmp/worktree")));
     }
 
     #[test]
@@ -8436,6 +8581,34 @@ mod tests {
 
         assert_eq!(item.last_tool_usage.as_deref(), Some("Codex@latest"));
         assert_eq!(item.last_tool_id.as_deref(), Some("codex-cli"));
+    }
+
+    #[test]
+    fn test_branch_list_refresh_includes_remote_branch_with_local_counterpart() {
+        let (repo, _origin) = create_repo_with_local_and_remote_main();
+        let context = TuiEntryContext {
+            status_message: None,
+            error_message: None,
+            repo_root: Some(repo.path().to_path_buf()),
+        };
+        let mut model = Model::new_with_context(Some(context));
+        model.repo_root = repo.path().to_path_buf();
+        model.repo_type = RepoType::Normal;
+        model.bare_repo_path = None;
+
+        model.start_branch_list_refresh(Settings::default());
+        let rx = model.branch_list_rx.take().expect("branch_list_rx");
+        let update = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("branch list update");
+
+        assert!(
+            update
+                .branches
+                .iter()
+                .any(|b| b.name == "remotes/origin/main" && b.branch_type == BranchType::Remote),
+            "remote branch should be included even when local counterpart exists"
+        );
     }
 
     fn sample_branch_with_session(name: &str) -> BranchItem {
