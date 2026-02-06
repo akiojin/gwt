@@ -99,17 +99,11 @@ pub struct AgentSettings {
 }
 
 /// Docker settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DockerSettings {
     /// Force host launch (skip docker) even when Docker files are detected
     pub force_host: bool,
-}
-
-impl Default for DockerSettings {
-    fn default() -> Self {
-        Self { force_host: false }
-    }
 }
 
 impl Settings {

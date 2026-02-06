@@ -4737,10 +4737,11 @@ impl Model {
                 }
             },
             Message::Char(c) => {
-                if matches!(self.screen, Screen::Confirm) && (c == 'h' || c == 'H') {
-                    if self.handle_docker_confirm_launch_on_host() {
-                        return;
-                    }
+                if matches!(self.screen, Screen::Confirm)
+                    && (c == 'h' || c == 'H')
+                    && self.handle_docker_confirm_launch_on_host()
+                {
+                    return;
                 }
                 if matches!(self.screen, Screen::ServiceSelect) {
                     if c == 's' || c == 'S' {
