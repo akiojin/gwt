@@ -1,6 +1,16 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+## [6.28.1] - 2026-02-06
+
+### Bug Fixes
+
+- **ci:** Remove x86_64-apple-darwin build target from release workflow
+- **ci:** Fetch tags before checking tag existence in release workflow
+- **docker:** Auto-mount git dirs for compose services (#902)
+- Add HostOS shortcut in docker confirm dialogs (#903)
+
 ## [6.28.0] - 2026-02-06
 
 ### Bug Fixes

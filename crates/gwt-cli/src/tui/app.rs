@@ -2942,6 +2942,34 @@ impl Model {
         }
     }
 
+    fn handle_docker_confirm_launch_on_host(&mut self) -> bool {
+        let plan = if let Some(pending) = self.pending_cleanup_select.take() {
+            pending.plan
+        } else if let Some(pending) = self.pending_build_select.take() {
+            pending.plan
+        } else if let Some(pending) = self.pending_recreate_select.take() {
+            pending.plan
+        } else {
+            return false;
+        };
+
+        // Ensure no stale pending prompts remain after the host override.
+        self.pending_cleanup_select = None;
+        self.pending_build_select = None;
+        self.pending_recreate_select = None;
+        self.launch_status = None;
+        self.last_mouse_click = None;
+
+        let keep_launch_status = matches!(plan.install_plan, InstallPlan::Install { .. });
+        self.launch_plan_in_tmux(&plan, None, true, keep_launch_status, false, false, false);
+
+        if let Some(prev_screen) = self.screen_stack.pop() {
+            self.screen = prev_screen;
+        }
+
+        true
+    }
+
     fn handle_confirm_action(&mut self) {
         if let Some(pending) = self.pending_cleanup_select.take() {
             let stop_on_exit = self.confirm.is_confirmed();
@@ -4709,6 +4737,12 @@ impl Model {
                 }
             },
             Message::Char(c) => {
+                if matches!(self.screen, Screen::Confirm)
+                    && (c == 'h' || c == 'H')
+                    && self.handle_docker_confirm_launch_on_host()
+                {
+                    return;
+                }
                 if matches!(self.screen, Screen::ServiceSelect) {
                     if c == 's' || c == 'S' {
                         self.handle_service_select_skip();
@@ -5548,12 +5582,30 @@ impl Model {
         }
     }
 
+    fn docker_force_host_enabled(&self) -> bool {
+        self.settings
+            .settings
+            .as_ref()
+            .map(|settings| settings.docker.force_host)
+            .unwrap_or(false)
+    }
+
     fn try_apply_quick_start_docker(
         &mut self,
         plan: &LaunchPlan,
         quick_start: QuickStartDockerSettings,
         keep_launch_status: bool,
     ) -> bool {
+        if self.docker_force_host_enabled() {
+            info!(
+                category = "docker",
+                branch = %plan.config.branch_name,
+                "Docker force_host enabled; launching on host"
+            );
+            self.launch_plan_in_tmux(plan, None, true, keep_launch_status, false, false, false);
+            return true;
+        }
+
         if quick_start.force_host.unwrap_or(false) {
             info!(
                 category = "docker",
@@ -5663,6 +5715,18 @@ impl Model {
         &mut self,
         plan: &LaunchPlan,
     ) -> Result<ServiceSelectionDecision, String> {
+        if self.docker_force_host_enabled() {
+            info!(
+                category = "docker",
+                branch = %plan.config.branch_name,
+                "Docker force_host enabled; skipping docker service selection"
+            );
+            return Ok(ServiceSelectionDecision::Proceed {
+                service: None,
+                force_host: true,
+            });
+        }
+
         let docker_file_type = match launcher::detect_docker_environment(&plan.config.worktree_path)
         {
             Some(dtype) => dtype,
@@ -5675,10 +5739,23 @@ impl Model {
         };
 
         if !docker_file_type.is_compose() {
-            return Ok(ServiceSelectionDecision::Proceed {
-                service: None,
-                force_host: false,
+            self.pending_service_select = Some(PendingServiceSelect {
+                plan: plan.clone(),
+                services: Vec::new(),
             });
+            let mut state = ServiceSelectState::with_dockerfile();
+            // Preserve existing behavior (Docker default) while allowing HostOS selection.
+            if state.items.len() > 1 {
+                state.selected = 1;
+            }
+            let container_name = DockerManager::generate_container_name(&plan.config.branch_name);
+            state.set_container_info(&container_name, &plan.config.branch_name);
+            self.service_select = state;
+            self.launch_status = None;
+            self.last_mouse_click = None;
+            self.screen_stack.push(self.screen.clone());
+            self.screen = Screen::ServiceSelect;
+            return Ok(ServiceSelectionDecision::AwaitSelection);
         }
 
         let manager = DockerManager::new(
@@ -5711,10 +5788,23 @@ impl Model {
         };
 
         if services.len() == 1 {
-            return Ok(ServiceSelectionDecision::Proceed {
-                service: Some(services[0].clone()),
-                force_host: false,
+            self.pending_service_select = Some(PendingServiceSelect {
+                plan: plan.clone(),
+                services: services.clone(),
             });
+            let mut state = ServiceSelectState::with_services(services);
+            // Preserve existing behavior (Docker default) while allowing HostOS selection.
+            if state.items.len() > 1 {
+                state.selected = 1;
+            }
+            let container_name = DockerManager::generate_container_name(&plan.config.branch_name);
+            state.set_container_info(&container_name, &plan.config.branch_name);
+            self.service_select = state;
+            self.launch_status = None;
+            self.last_mouse_click = None;
+            self.screen_stack.push(self.screen.clone());
+            self.screen = Screen::ServiceSelect;
+            return Ok(ServiceSelectionDecision::AwaitSelection);
         }
 
         self.pending_service_select = Some(PendingServiceSelect {
@@ -5823,6 +5913,7 @@ impl Model {
             details: vec![
                 "Reuse keeps existing containers.".to_string(),
                 "Recreate will rerun entrypoint.".to_string(),
+                "Press 'h' to launch on host.".to_string(),
             ],
             confirm_label: "Recreate".to_string(),
             cancel_label: "Reuse".to_string(),
@@ -5933,6 +6024,7 @@ impl Model {
             details: vec![
                 "No Build will skip image rebuild.".to_string(),
                 "Build will run docker compose build.".to_string(),
+                "Press 'h' to launch on host.".to_string(),
             ],
             confirm_label: "Build".to_string(),
             cancel_label: "No Build".to_string(),
@@ -6009,6 +6101,7 @@ impl Model {
             details: vec![
                 "Keep will keep containers running.".to_string(),
                 "Stop will run docker compose down.".to_string(),
+                "Press 'h' to launch on host.".to_string(),
             ],
             confirm_label: "Stop".to_string(),
             cancel_label: "Keep".to_string(),
@@ -7103,11 +7196,20 @@ impl Model {
                 Self::keybind_item("PgUp/PgDn", "Page"),
                 Self::keybind_item("Esc", "Back"),
             ],
-            Screen::Confirm => vec![
-                Self::keybind_item("Left/Right", "Select"),
-                Self::keybind_item("Enter", "Confirm"),
-                Self::keybind_item("Esc", "Cancel"),
-            ],
+            Screen::Confirm => {
+                let mut items = vec![
+                    Self::keybind_item("Left/Right", "Select"),
+                    Self::keybind_item("Enter", "Confirm"),
+                ];
+                if self.pending_build_select.is_some()
+                    || self.pending_recreate_select.is_some()
+                    || self.pending_cleanup_select.is_some()
+                {
+                    items.push(Self::keybind_item("h", "HostOS"));
+                }
+                items.push(Self::keybind_item("Esc", "Cancel"));
+                items
+            }
             Screen::Error => vec![
                 Self::keybind_item("Enter", "Close"),
                 Self::keybind_item("Esc", "Close"),
@@ -8599,7 +8701,8 @@ mod tests {
         model.start_branch_list_refresh(Settings::default());
         let rx = model.branch_list_rx.take().expect("branch_list_rx");
         let update = rx
-            .recv_timeout(Duration::from_secs(2))
+            // Some CI environments can be slow; avoid flaky timeouts here.
+            .recv_timeout(Duration::from_secs(10))
             .expect("branch list update");
 
         assert!(
@@ -9079,6 +9182,30 @@ mod tests {
     }
 
     #[test]
+    fn test_prepare_docker_service_selection_prompts_for_dockerfile_target() {
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(temp_dir.path().join("Dockerfile"), "FROM alpine:3.20").unwrap();
+
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let mut plan = sample_launch_plan();
+        plan.config.worktree_path = temp_dir.path().to_path_buf();
+
+        let decision = model
+            .prepare_docker_service_selection(&plan)
+            .expect("prepare_docker_service_selection");
+        assert!(matches!(decision, ServiceSelectionDecision::AwaitSelection));
+        assert!(matches!(model.screen, Screen::ServiceSelect));
+        assert!(model.pending_service_select.is_some());
+        assert_eq!(model.service_select.items.len(), 2);
+        assert_eq!(model.service_select.items[0].label, "HostOS");
+        assert_eq!(model.service_select.items[1].label, "Docker");
+        assert_eq!(model.service_select.selected, 1);
+        assert_eq!(model.screen_stack.len(), 1);
+    }
+
+    #[test]
     fn test_service_select_cancel_clears_double_click_state() {
         let mut model = Model::new_with_context(None);
         model.screen = Screen::ServiceSelect;
@@ -9128,6 +9255,72 @@ mod tests {
 
         assert!(model.last_mouse_click.is_none());
         assert!(matches!(model.screen, Screen::BranchList));
+    }
+
+    #[test]
+    fn test_docker_confirm_host_shortcut_closes_build_prompt() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Confirm;
+        model.screen_stack.push(Screen::BranchList);
+        model.pending_build_select = Some(PendingBuildSelect {
+            plan: sample_launch_plan(),
+            service: Some("app".to_string()),
+            force_host: false,
+            force_recreate: false,
+            quick_start_keep: None,
+        });
+        model.last_mouse_click = Some(sample_mouse_click());
+
+        model.update(Message::Char('h'));
+
+        assert!(model.pending_build_select.is_none());
+        assert!(model.last_mouse_click.is_none());
+        assert!(matches!(model.screen, Screen::BranchList));
+    }
+
+    #[test]
+    fn test_confirm_footer_keybinds_include_host_shortcut_when_docker_prompt_active() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Confirm;
+        model.pending_build_select = Some(PendingBuildSelect {
+            plan: sample_launch_plan(),
+            service: Some("app".to_string()),
+            force_host: false,
+            force_recreate: false,
+            quick_start_keep: None,
+        });
+
+        let keybinds = model.get_footer_keybinds();
+
+        assert!(keybinds.contains("[h] HostOS"));
+    }
+
+    #[test]
+    fn test_prepare_docker_service_selection_respects_force_host_setting() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("Dockerfile"), "FROM scratch\n").unwrap();
+
+        let mut model = Model::new_with_context(None);
+        let mut settings = Settings::default();
+        settings.docker.force_host = true;
+        model.settings = SettingsState::new().with_settings(settings);
+
+        let mut plan = sample_launch_plan();
+        plan.config.worktree_path = temp.path().to_path_buf();
+
+        let decision = model.prepare_docker_service_selection(&plan).unwrap();
+        match decision {
+            ServiceSelectionDecision::Proceed {
+                service,
+                force_host,
+            } => {
+                assert!(force_host);
+                assert!(service.is_none());
+            }
+            ServiceSelectionDecision::AwaitSelection => {
+                panic!("expected Proceed, got AwaitSelection");
+            }
+        }
     }
 
     #[test]
