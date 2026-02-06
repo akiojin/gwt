@@ -5548,12 +5548,30 @@ impl Model {
         }
     }
 
+    fn docker_force_host_enabled(&self) -> bool {
+        self.settings
+            .settings
+            .as_ref()
+            .map(|settings| settings.docker.force_host)
+            .unwrap_or(false)
+    }
+
     fn try_apply_quick_start_docker(
         &mut self,
         plan: &LaunchPlan,
         quick_start: QuickStartDockerSettings,
         keep_launch_status: bool,
     ) -> bool {
+        if self.docker_force_host_enabled() {
+            info!(
+                category = "docker",
+                branch = %plan.config.branch_name,
+                "Docker force_host enabled; launching on host"
+            );
+            self.launch_plan_in_tmux(plan, None, true, keep_launch_status, false, false, false);
+            return true;
+        }
+
         if quick_start.force_host.unwrap_or(false) {
             info!(
                 category = "docker",
@@ -5663,6 +5681,18 @@ impl Model {
         &mut self,
         plan: &LaunchPlan,
     ) -> Result<ServiceSelectionDecision, String> {
+        if self.docker_force_host_enabled() {
+            info!(
+                category = "docker",
+                branch = %plan.config.branch_name,
+                "Docker force_host enabled; skipping docker service selection"
+            );
+            return Ok(ServiceSelectionDecision::Proceed {
+                service: None,
+                force_host: true,
+            });
+        }
+
         let docker_file_type = match launcher::detect_docker_environment(&plan.config.worktree_path)
         {
             Some(dtype) => dtype,
@@ -9179,6 +9209,34 @@ mod tests {
 
         assert!(model.last_mouse_click.is_none());
         assert!(matches!(model.screen, Screen::BranchList));
+    }
+
+    #[test]
+    fn test_prepare_docker_service_selection_respects_force_host_setting() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("Dockerfile"), "FROM scratch\n").unwrap();
+
+        let mut model = Model::new_with_context(None);
+        let mut settings = Settings::default();
+        settings.docker.force_host = true;
+        model.settings = SettingsState::new().with_settings(settings);
+
+        let mut plan = sample_launch_plan();
+        plan.config.worktree_path = temp.path().to_path_buf();
+
+        let decision = model.prepare_docker_service_selection(&plan).unwrap();
+        match decision {
+            ServiceSelectionDecision::Proceed {
+                service,
+                force_host,
+            } => {
+                assert!(force_host);
+                assert!(service.is_none());
+            }
+            ServiceSelectionDecision::AwaitSelection => {
+                panic!("expected Proceed, got AwaitSelection");
+            }
+        }
     }
 
     #[test]
