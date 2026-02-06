@@ -34,6 +34,9 @@ jobs:
           echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
           echo "Version: $VERSION, Tag: $TAG_NAME"
 
+      - name: Fetch tags
+        run: git fetch --tags
+
       - name: Check if tag exists
         id: check-tag
         run: |
