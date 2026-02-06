@@ -5,6 +5,7 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
     branches:
       - main
+      - develop
 
 permissions:
   contents: write
@@ -16,8 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     if: >
       github.event.pull_request.draft == false &&
-      (startsWith(github.event.pull_request.head.ref, 'release-') ||
-       github.event.pull_request.head.ref == 'develop')
+      (github.event.pull_request.user.login == 'akiojin' ||
+       github.event.pull_request.user.login == 'dependabot[bot]')
     steps:
       - name: Enable auto-merge
         env:
@@ -25,12 +26,13 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           if [ -z "$GH_TOKEN" ]; then
             echo "PERSONAL_ACCESS_TOKEN not provided, skipping auto-merge"
             exit 0
           fi
-          if [ "$HEAD_REF" = "develop" ]; then
+          if [ "$BASE_REF" = "main" ] && [ "$HEAD_REF" = "develop" ]; then
             gh pr merge "$PR_NUMBER" --auto --merge --repo "$REPO"
           else
             gh pr merge "$PR_NUMBER" --auto --squash --repo "$REPO"
