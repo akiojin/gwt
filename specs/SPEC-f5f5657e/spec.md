@@ -187,7 +187,11 @@ gwtのcompose定義では`PORT`（デフォルト3000）を使用し、`GWT_PORT
 - エージェントコマンドは既存の.gwt/tools.tomlを使用
 - ポート設定はdocker-compose.ymlに従う
 - 環境変数の継承はホストの環境変数をそのまま使用
-- worktreeの.gitが参照するgitdirはコンテナ内から参照できる必要がある（HOST_GIT_COMMON_DIRをバインド）
+- worktreeの.gitが参照するgitdirはコンテナ内から参照できる必要がある（git worktree / bare運用を想定）
+  - docker-compose.yml側にbind mountを記載しなくても、gwtがcompose overrideを生成して必要なbind mountを自動追加する
+  - 追加対象: `HOST_GIT_COMMON_DIR`（git common dir）, `HOST_GIT_WORKTREE_DIR`（worktree gitdir）
+  - 追加先: ユーザーが選択したcomposeサービス（エージェントを起動するサービス）
+  - docker compose 実行時は上記環境変数を必ず設定して補間エラーを防ぐ（compose側で `${HOST_GIT_COMMON_DIR}` を参照していても動く）
 - Docker起動前に「Build/No Build」を選択するUIを表示するが、Dockerfile/compose変更が検出された場合のみ表示しデフォルトはNo Build
 - Docker起動前に「Recreate/Reuse」を選択するUIを表示し、デフォルトはReuse
 - ただしDockerコンテナが起動中の場合はRecreate/Reuseの確認を表示しない

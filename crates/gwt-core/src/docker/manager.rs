@@ -384,10 +384,12 @@ impl DockerManager {
 
     /// Check if the container is currently running
     pub fn is_running(&self) -> bool {
+        let env_vars = self.collect_passthrough_env();
         let output = Command::new("docker")
             .args(["compose", "ps", "-q"])
             .current_dir(&self.worktree_path)
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
+            .envs(&env_vars)
             .output();
 
         match output {
@@ -414,16 +416,19 @@ impl DockerManager {
 
     /// Get the status of the container
     pub fn get_status(&self) -> ContainerStatus {
+        let env_vars = self.collect_passthrough_env();
         let running_output = Command::new("docker")
             .args(["compose", "ps", "-q"])
             .current_dir(&self.worktree_path)
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
+            .envs(&env_vars)
             .output();
 
         let all_output = Command::new("docker")
             .args(["compose", "ps", "-a", "-q"])
             .current_dir(&self.worktree_path)
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
+            .envs(&env_vars)
             .output();
 
         let status = match (running_output, all_output) {
@@ -472,17 +477,13 @@ impl DockerManager {
         );
 
         // Run docker compose up -d
+        let env_vars = self.collect_passthrough_env();
         let mut command = Command::new("docker");
         command
             .args(["compose", "up", "-d", "--build"])
             .current_dir(&self.worktree_path)
-            .env("COMPOSE_PROJECT_NAME", &self.container_name);
-
-        if let Ok(port_envs) = self.collect_compose_port_envs() {
-            for (key, value) in port_envs {
-                command.env(key, value);
-            }
-        }
+            .env("COMPOSE_PROJECT_NAME", &self.container_name)
+            .envs(&env_vars);
 
         let output = command
             .output()
@@ -534,10 +535,12 @@ impl DockerManager {
             "Stopping Docker container"
         );
 
+        let env_vars = self.collect_passthrough_env();
         let output = Command::new("docker")
             .args(["compose", "down"])
             .current_dir(&self.worktree_path)
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
+            .envs(&env_vars)
             .output()
             .map_err(|e| GwtError::Docker(format!("Failed to run docker compose down: {}", e)))?;
 
@@ -566,10 +569,12 @@ impl DockerManager {
 
     /// Get the container ID (short form)
     fn get_container_id(&self) -> Option<String> {
+        let env_vars = self.collect_passthrough_env();
         let output = Command::new("docker")
             .args(["compose", "ps", "-q"])
             .current_dir(&self.worktree_path)
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
+            .envs(&env_vars)
             .output()
             .ok()?;
 
@@ -587,10 +592,12 @@ impl DockerManager {
 
     /// List services defined in the compose file
     fn list_services_internal(&self) -> Option<Vec<String>> {
+        let env_vars = self.collect_passthrough_env();
         let output = Command::new("docker")
             .args(["compose", "config", "--services"])
             .current_dir(&self.worktree_path)
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
+            .envs(&env_vars)
             .output()
             .ok()?;
 
@@ -765,10 +772,12 @@ impl DockerManager {
             "Rebuilding Docker image"
         );
 
+        let env_vars = self.collect_passthrough_env();
         let output = Command::new("docker")
             .args(["compose", "build"])
             .current_dir(&self.worktree_path)
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
+            .envs(&env_vars)
             .output()
             .map_err(|e| GwtError::Docker(format!("Failed to run docker compose build: {}", e)))?;
 
@@ -857,7 +866,8 @@ impl DockerManager {
         cmd.args(args);
 
         cmd.current_dir(&self.worktree_path)
-            .env("COMPOSE_PROJECT_NAME", &self.container_name);
+            .env("COMPOSE_PROJECT_NAME", &self.container_name)
+            .envs(&env_vars);
 
         let status = cmd
             .status()
