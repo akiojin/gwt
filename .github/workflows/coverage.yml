@@ -10,7 +10,7 @@ jobs:
     name: Generate Coverage Report
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: develop
       - uses: dtolnay/rust-toolchain@stable
@@ -23,7 +23,7 @@ jobs:
         run: cargo llvm-cov -p gwt-cli -p gwt-core -p gwt-web --all-features --lcov --output-path lcov.info
         timeout-minutes: 15
       - name: Upload to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           files: lcov.info
           fail_ci_if_error: false

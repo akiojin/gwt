@@ -204,6 +204,28 @@ const ENV_PASSTHROUGH_DENYLIST: &[&str] = &[
 const ENV_HOST_GIT_COMMON_DIR: &str = "HOST_GIT_COMMON_DIR";
 const ENV_HOST_GIT_WORKTREE_DIR: &str = "HOST_GIT_WORKTREE_DIR";
 
+fn filter_passthrough_env<I>(vars: I) -> HashMap<String, String>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    let mut env_vars = HashMap::new();
+
+    for (key, value) in vars {
+        for prefix in ENV_PASSTHROUGH_PREFIXES {
+            if key.starts_with(prefix) || key == *prefix {
+                env_vars.insert(key.clone(), value.clone());
+                break;
+            }
+        }
+    }
+
+    for key in ENV_PASSTHROUGH_DENYLIST {
+        env_vars.remove(*key);
+    }
+
+    env_vars
+}
+
 /// Maximum number of retry attempts for Docker operations
 const MAX_RETRY_ATTEMPTS: u32 = 3;
 
@@ -595,26 +617,7 @@ impl DockerManager {
     ///
     /// Collects variables matching predefined prefixes (API keys, Git config, etc.)
     pub fn collect_passthrough_env(&self) -> HashMap<String, String> {
-        let mut env_vars = HashMap::new();
-
-        for (key, value) in std::env::vars() {
-            for prefix in ENV_PASSTHROUGH_PREFIXES {
-                if key.starts_with(prefix) || key == *prefix {
-                    env_vars.insert(key.clone(), value.clone());
-                    break;
-                }
-            }
-        }
-
-        debug!(
-            category = "docker",
-            count = env_vars.len(),
-            "Collected environment variables for passthrough"
-        );
-
-        for key in ENV_PASSTHROUGH_DENYLIST {
-            env_vars.remove(*key);
-        }
+        let mut env_vars = filter_passthrough_env(std::env::vars());
 
         if let Some(common_dir) = detect_git_common_dir(&self.worktree_path) {
             env_vars.insert(
@@ -634,6 +637,12 @@ impl DockerManager {
                 env_vars.entry(key).or_insert(value);
             }
         }
+
+        debug!(
+            category = "docker",
+            count = env_vars.len(),
+            "Collected environment variables for passthrough"
+        );
 
         env_vars
     }
@@ -883,7 +892,6 @@ impl DockerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
     use std::time::{Duration, SystemTime};
 
     // T-202: Container name generation test
@@ -1093,29 +1101,17 @@ services:
     }
 
     #[test]
-    #[serial]
-    fn test_collect_passthrough_env_excludes_git_internals() {
-        let path = PathBuf::from("/tmp/worktree");
-        let docker_type = DockerFileType::Compose(PathBuf::from("docker-compose.yml"));
-        let manager = DockerManager::new(&path, "worktree", docker_type);
-
-        let prev_home = std::env::var("HOME").ok();
-        std::env::set_var("GIT_DIR", "/tmp/gitdir");
-        std::env::set_var("GIT_WORK_TREE", "/tmp/worktree");
-        std::env::set_var("HOME", "/Users/example");
-
-        let envs = manager.collect_passthrough_env();
+    fn test_filter_passthrough_env_excludes_git_internals() {
+        let envs = filter_passthrough_env([
+            ("GIT_DIR".to_string(), "/tmp/gitdir".to_string()),
+            ("GIT_WORK_TREE".to_string(), "/tmp/worktree".to_string()),
+            ("HOME".to_string(), "/Users/example".to_string()),
+            ("OPENAI_API_KEY".to_string(), "sk-test".to_string()),
+        ]);
         assert!(!envs.contains_key("GIT_DIR"));
         assert!(!envs.contains_key("GIT_WORK_TREE"));
         assert!(!envs.contains_key("HOME"));
-
-        std::env::remove_var("GIT_DIR");
-        std::env::remove_var("GIT_WORK_TREE");
-        if let Some(prev) = prev_home {
-            std::env::set_var("HOME", prev);
-        } else {
-            std::env::remove_var("HOME");
-        }
+        assert!(envs.contains_key("OPENAI_API_KEY"));
     }
 
     #[test]
