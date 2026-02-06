@@ -1051,7 +1051,16 @@ mod tests {
 
         let worktrees = repo.list_worktrees().unwrap();
         assert_eq!(worktrees.len(), 1);
-        assert_eq!(worktrees[0].path, temp.path());
+        // macOS temp paths may appear as /var/... while git reports /private/var/... (canonical).
+        let expected = temp
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| temp.path().to_path_buf());
+        let actual = worktrees[0]
+            .path
+            .canonicalize()
+            .unwrap_or_else(|_| worktrees[0].path.clone());
+        assert_eq!(actual, expected);
     }
 
     /// Issue #774: Repository::open should work with worktrees
