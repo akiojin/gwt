@@ -657,15 +657,18 @@ impl CodingAgent {
                 ModelOption::default_option("Default (Auto)", "Use Codex default model")
                     .with_base_levels()
                     .with_default_inference(ReasoningLevel::High),
+                ModelOption::new("gpt-5.3-codex", "gpt-5.3-codex", "Latest frontier agentic coding model.")
+                    .with_max_levels()
+                    .with_default_inference(ReasoningLevel::High),
                 ModelOption::new("gpt-5.2-codex", "gpt-5.2-codex", "Codex flagship with extra-high reasoning support.")
                     .with_max_levels()
                     .with_default_inference(ReasoningLevel::High),
                 ModelOption::new("gpt-5.1-codex-max", "gpt-5.1-codex-max", "Codex-optimized flagship for deep and fast reasoning.")
                     .with_max_levels(),
-                ModelOption::new("gpt-5.1-codex-mini", "gpt-5.1-codex-mini", "Optimized for codex. Cheaper, faster, but less capable.")
-                    .with_base_levels(),
                 ModelOption::new("gpt-5.2", "gpt-5.2", "Latest frontier model with improvements across knowledge, reasoning and coding")
                     .with_max_levels(),
+                ModelOption::new("gpt-5.1-codex-mini", "gpt-5.1-codex-mini", "Optimized for codex. Cheaper, faster, but less capable.")
+                    .with_base_levels(),
             ],
             CodingAgent::GeminiCli => vec![
                 ModelOption::default_option("Default (Auto)", "Use Gemini default model"),
@@ -3718,7 +3721,7 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_model_options_include_gpt_52_codex() {
+    fn test_codex_model_options_include_gpt_53_codex() {
         let options = CodingAgent::CodexCli.models();
         let models: Vec<&ModelOption> =
             options.iter().filter(|option| !option.is_default).collect();
@@ -3726,18 +3729,19 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                "gpt-5.3-codex",
                 "gpt-5.2-codex",
                 "gpt-5.1-codex-max",
-                "gpt-5.1-codex-mini",
                 "gpt-5.2",
+                "gpt-5.1-codex-mini",
             ]
         );
-        let gpt_52 = models
+        let gpt_53 = models
             .iter()
-            .find(|option| option.id == "gpt-5.2-codex")
-            .expect("gpt-5.2-codex option missing");
-        assert!(gpt_52.inference_levels.contains(&ReasoningLevel::XHigh));
-        assert_eq!(gpt_52.default_inference, Some(ReasoningLevel::High));
+            .find(|option| option.id == "gpt-5.3-codex")
+            .expect("gpt-5.3-codex option missing");
+        assert!(gpt_53.inference_levels.contains(&ReasoningLevel::XHigh));
+        assert_eq!(gpt_53.default_inference, Some(ReasoningLevel::High));
     }
 
     #[test]
