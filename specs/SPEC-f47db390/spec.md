@@ -78,6 +78,7 @@
 4. **表示ルール** Quick Startではツール固有の情報のみ表示する。CodexではReasoningレベルを表示するが、Claude/GeminiではReasoningを表示しない。また「Start new with previous settings」ではセッションIDを表示しない（IDは「Resume with previous settings」のみで提示する）。
 5. **ツール別保持** 同一ブランチ内で複数ツールを切り替えた場合でも、各ツールの直近設定を並列に保持・提示し、Quick Startでツールごとの「Resume/Start new」を選べること（例: Codex行とClaude行が並ぶ）。
 6. **前提条件** Quick Start画面で「前回設定で続きから/新規」を選択、**操作** Enterで確定、**期待結果** 実行モード選択/権限スキップ確認/セッション一覧は表示されず、ウィザードが閉じて起動が開始される。
+7. **前提条件** 対象ブランチに既存Worktreeがある、**操作** Quick Startで「前回設定で続きから/新規」を選択、**期待結果** Worktree作成はスキップされ、既存Worktreeが再利用される（Worktree already existsエラーは発生しない）。
 
 ---
 
