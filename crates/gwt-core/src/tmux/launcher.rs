@@ -846,7 +846,7 @@ fn maybe_write_compose_override(
             let mut volumes: Vec<Value> = service_map
                 .get(Value::String("volumes".to_string()))
                 .and_then(|v| v.as_sequence())
-                .map(|seq| seq.iter().cloned().collect())
+                .map(|seq| seq.to_vec())
                 .unwrap_or_default();
 
             let mut changed = false;
@@ -856,7 +856,7 @@ fn maybe_write_compose_override(
                     return (value.to_string(), false);
                 };
                 let tokens: Vec<&str> = mode.split(',').collect();
-                if !tokens.iter().any(|t| *t == "ro") {
+                if !tokens.contains(&"ro") {
                     return (value.to_string(), false);
                 }
                 let new_tokens: Vec<&str> = tokens.into_iter().filter(|t| *t != "ro").collect();
