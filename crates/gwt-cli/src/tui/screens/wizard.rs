@@ -648,24 +648,27 @@ impl CodingAgent {
     pub fn models(&self) -> Vec<ModelOption> {
         match self {
             CodingAgent::ClaudeCode => vec![
-                ModelOption::default_option("Default (Auto)", "Use Claude Code default behavior"),
-                ModelOption::new("opus", "Opus 4.5", "Official Opus alias for Claude Code (non-custom, matches /model option)."),
-                ModelOption::new("sonnet", "Sonnet 4.5", "Official Sonnet alias for Claude Code."),
-                ModelOption::new("haiku", "Haiku 4.5", "Official Haiku alias for Claude Code (fastest model, non-custom)."),
+                ModelOption::default_option("Default (recommended)", "Opus 4.6 - Most capable for complex work"),
+                ModelOption::new("opus", "Opus 4.6", "Most capable for complex work"),
+                ModelOption::new("sonnet", "Sonnet 4.5", "Best for everyday tasks"),
+                ModelOption::new("haiku", "Haiku 4.5", "Fastest for quick answers"),
             ],
             CodingAgent::CodexCli => vec![
                 ModelOption::default_option("Default (Auto)", "Use Codex default model")
                     .with_base_levels()
+                    .with_default_inference(ReasoningLevel::High),
+                ModelOption::new("gpt-5.3-codex", "gpt-5.3-codex", "Latest frontier agentic coding model.")
+                    .with_max_levels()
                     .with_default_inference(ReasoningLevel::High),
                 ModelOption::new("gpt-5.2-codex", "gpt-5.2-codex", "Codex flagship with extra-high reasoning support.")
                     .with_max_levels()
                     .with_default_inference(ReasoningLevel::High),
                 ModelOption::new("gpt-5.1-codex-max", "gpt-5.1-codex-max", "Codex-optimized flagship for deep and fast reasoning.")
                     .with_max_levels(),
-                ModelOption::new("gpt-5.1-codex-mini", "gpt-5.1-codex-mini", "Optimized for codex. Cheaper, faster, but less capable.")
-                    .with_base_levels(),
                 ModelOption::new("gpt-5.2", "gpt-5.2", "Latest frontier model with improvements across knowledge, reasoning and coding")
                     .with_max_levels(),
+                ModelOption::new("gpt-5.1-codex-mini", "gpt-5.1-codex-mini", "Optimized for codex. Cheaper, faster, but less capable.")
+                    .with_base_levels(),
             ],
             CodingAgent::GeminiCli => vec![
                 ModelOption::default_option("Default (Auto)", "Use Gemini default model"),
@@ -3718,7 +3721,7 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_model_options_include_gpt_52_codex() {
+    fn test_codex_model_options_include_gpt_53_codex() {
         let options = CodingAgent::CodexCli.models();
         let models: Vec<&ModelOption> =
             options.iter().filter(|option| !option.is_default).collect();
@@ -3726,18 +3729,19 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                "gpt-5.3-codex",
                 "gpt-5.2-codex",
                 "gpt-5.1-codex-max",
-                "gpt-5.1-codex-mini",
                 "gpt-5.2",
+                "gpt-5.1-codex-mini",
             ]
         );
-        let gpt_52 = models
+        let gpt_53 = models
             .iter()
-            .find(|option| option.id == "gpt-5.2-codex")
-            .expect("gpt-5.2-codex option missing");
-        assert!(gpt_52.inference_levels.contains(&ReasoningLevel::XHigh));
-        assert_eq!(gpt_52.default_inference, Some(ReasoningLevel::High));
+            .find(|option| option.id == "gpt-5.3-codex")
+            .expect("gpt-5.3-codex option missing");
+        assert!(gpt_53.inference_levels.contains(&ReasoningLevel::XHigh));
+        assert_eq!(gpt_53.default_inference, Some(ReasoningLevel::High));
     }
 
     #[test]

@@ -252,6 +252,17 @@ impl Settings {
 
     /// Get the legacy global config path (~/.config/gwt/config.toml)
     pub fn legacy_global_config_path() -> Option<PathBuf> {
+        // Prefer XDG override for deterministic behavior (especially in tests and CI).
+        // On macOS, `ProjectDirs::config_dir()` points to ~/Library/Application Support,
+        // which is a reasonable default but doesn't follow XDG semantics.
+        if let Some(xdg_config_home) = std::env::var_os("XDG_CONFIG_HOME") {
+            return Some(
+                PathBuf::from(xdg_config_home)
+                    .join("gwt")
+                    .join("config.toml"),
+            );
+        }
+
         directories::ProjectDirs::from("", "", "gwt")
             .map(|dirs| dirs.config_dir().join("config.toml"))
     }
@@ -269,6 +280,10 @@ impl Settings {
 
     /// Get the legacy global config directory (~/.config/gwt/)
     pub fn legacy_global_config_dir() -> Option<PathBuf> {
+        if let Some(xdg_config_home) = std::env::var_os("XDG_CONFIG_HOME") {
+            return Some(PathBuf::from(xdg_config_home).join("gwt"));
+        }
+
         directories::ProjectDirs::from("", "", "gwt").map(|dirs| dirs.config_dir().to_path_buf())
     }
 
