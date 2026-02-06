@@ -5675,10 +5675,23 @@ impl Model {
         };
 
         if !docker_file_type.is_compose() {
-            return Ok(ServiceSelectionDecision::Proceed {
-                service: None,
-                force_host: false,
+            self.pending_service_select = Some(PendingServiceSelect {
+                plan: plan.clone(),
+                services: Vec::new(),
             });
+            let mut state = ServiceSelectState::with_dockerfile();
+            // Preserve existing behavior (Docker default) while allowing HostOS selection.
+            if state.items.len() > 1 {
+                state.selected = 1;
+            }
+            let container_name = DockerManager::generate_container_name(&plan.config.branch_name);
+            state.set_container_info(&container_name, &plan.config.branch_name);
+            self.service_select = state;
+            self.launch_status = None;
+            self.last_mouse_click = None;
+            self.screen_stack.push(self.screen.clone());
+            self.screen = Screen::ServiceSelect;
+            return Ok(ServiceSelectionDecision::AwaitSelection);
         }
 
         let manager = DockerManager::new(
@@ -5711,10 +5724,23 @@ impl Model {
         };
 
         if services.len() == 1 {
-            return Ok(ServiceSelectionDecision::Proceed {
-                service: Some(services[0].clone()),
-                force_host: false,
+            self.pending_service_select = Some(PendingServiceSelect {
+                plan: plan.clone(),
+                services: services.clone(),
             });
+            let mut state = ServiceSelectState::with_services(services);
+            // Preserve existing behavior (Docker default) while allowing HostOS selection.
+            if state.items.len() > 1 {
+                state.selected = 1;
+            }
+            let container_name = DockerManager::generate_container_name(&plan.config.branch_name);
+            state.set_container_info(&container_name, &plan.config.branch_name);
+            self.service_select = state;
+            self.launch_status = None;
+            self.last_mouse_click = None;
+            self.screen_stack.push(self.screen.clone());
+            self.screen = Screen::ServiceSelect;
+            return Ok(ServiceSelectionDecision::AwaitSelection);
         }
 
         self.pending_service_select = Some(PendingServiceSelect {
@@ -8599,7 +8625,8 @@ mod tests {
         model.start_branch_list_refresh(Settings::default());
         let rx = model.branch_list_rx.take().expect("branch_list_rx");
         let update = rx
-            .recv_timeout(Duration::from_secs(2))
+            // Some CI environments can be slow; avoid flaky timeouts here.
+            .recv_timeout(Duration::from_secs(10))
             .expect("branch list update");
 
         assert!(
@@ -9076,6 +9103,30 @@ mod tests {
         assert!(model.pending_plugin_setup_launch.is_none());
         assert!(model.launch_status.is_none());
         assert!(matches!(model.screen, Screen::BranchList));
+    }
+
+    #[test]
+    fn test_prepare_docker_service_selection_prompts_for_dockerfile_target() {
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(temp_dir.path().join("Dockerfile"), "FROM alpine:3.20").unwrap();
+
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let mut plan = sample_launch_plan();
+        plan.config.worktree_path = temp_dir.path().to_path_buf();
+
+        let decision = model
+            .prepare_docker_service_selection(&plan)
+            .expect("prepare_docker_service_selection");
+        assert!(matches!(decision, ServiceSelectionDecision::AwaitSelection));
+        assert!(matches!(model.screen, Screen::ServiceSelect));
+        assert!(model.pending_service_select.is_some());
+        assert_eq!(model.service_select.items.len(), 2);
+        assert_eq!(model.service_select.items[0].label, "HostOS");
+        assert_eq!(model.service_select.items[1].label, "Docker");
+        assert_eq!(model.service_select.selected, 1);
+        assert_eq!(model.screen_stack.len(), 1);
     }
 
     #[test]

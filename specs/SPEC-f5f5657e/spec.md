@@ -23,25 +23,26 @@
 4. **前提条件** docker-compose.ymlが存在、**操作** エージェント終了、**期待結果** docker compose downが実行されコンテナが停止する
 5. **前提条件** 複数サービスのcompose、**操作** サービス選択画面でHostOSを選択、**期待結果** コンテナを起動せずホストでエージェントが起動する
 6. **前提条件** 複数サービスのcompose、**操作** サービス選択画面を表示、**期待結果** `HostOS` と `Docker:{service}` が同一リストに表示され、カーソルの背景反転は1行全体に適用される
-7. **前提条件** Docker起動が必要、**操作** 起動時にビルド確認を行い「No Build」を選択、**期待結果** `docker compose up` は `--no-build` を使用する
-8. **前提条件** Docker起動が必要、**操作** 起動時にビルド確認を行い「Build」を選択、**期待結果** `docker compose up` は `--build` を使用する
-9. **前提条件** Dockerfile/compose変更なし、**操作** エージェント起動、**期待結果** Build/No Buildの確認は表示されず `--no-build` が使用される
-10. **前提条件** Docker起動が必要、**操作** 起動時にRecreate/Reuse確認を行い「Reuse」を選択、**期待結果** `docker compose up` は `--force-recreate` を付与しない
-11. **前提条件** Docker起動が必要、**操作** 起動時にRecreate/Reuse確認を行い「Recreate」を選択、**期待結果** `docker compose up` は `--force-recreate` を使用する
-12. **前提条件** ホストにCodexのauth.jsonが存在、**操作** Dockerコンテナ起動、**期待結果** コンテナ内のCodex認証情報がホストのauth.jsonに同期される
-13. **前提条件** Docker起動が必要、**操作** 起動時にKeep/Stop確認を行い「Keep」を選択、**期待結果** `docker compose down` は実行されない
-14. **前提条件** Docker起動が必要、**操作** 起動時にKeep/Stop確認を行い「Stop」を選択、**期待結果** `docker compose down` が実行される
-15. **前提条件** Dockerコンテナが存在しない、**操作** エージェント起動、**期待結果** Recreate/Reuseの確認は表示されない
-16. **前提条件** Dockerコンテナが起動中、**操作** エージェント起動、**期待結果** Recreate/Reuseの確認は表示されない（自動でReuse扱い）
-17. **前提条件** 同一ブランチでQuick Start履歴が存在、**操作** Quick Startで「Resume/Start new」を選択、**期待結果** 以前選択したHostOS/Dockerサービス・Recreate/Reuse・Keep/Stopが復元され、Dockerウィザードは表示されない
-18. **前提条件** 既にコンテナが起動中、**操作** Reuse/Keepで起動、**期待結果** `docker compose up` を実行せず `docker compose exec` でエージェントが起動する
-19. **前提条件** 起動中判定のコマンドが生成される、**操作** Reuse/Keepで起動、**期待結果** `if COMPOSE_PROJECT_NAME=... docker compose ... ps -q {service} | grep -q .; then ... fi` の形式で判定する
+7. **前提条件** docker-compose.ymlに単一サービスのみが定義、**操作** サービス選択画面でHostOSを選択、**期待結果** コンテナを起動せずホストでエージェントが起動する
+8. **前提条件** Docker起動が必要、**操作** 起動時にビルド確認を行い「No Build」を選択、**期待結果** `docker compose up` は `--no-build` を使用する
+9. **前提条件** Docker起動が必要、**操作** 起動時にビルド確認を行い「Build」を選択、**期待結果** `docker compose up` は `--build` を使用する
+10. **前提条件** Dockerfile/compose変更なし、**操作** エージェント起動、**期待結果** Build/No Buildの確認は表示されず `--no-build` が使用される
+11. **前提条件** Docker起動が必要、**操作** 起動時にRecreate/Reuse確認を行い「Reuse」を選択、**期待結果** `docker compose up` は `--force-recreate` を付与しない
+12. **前提条件** Docker起動が必要、**操作** 起動時にRecreate/Reuse確認を行い「Recreate」を選択、**期待結果** `docker compose up` は `--force-recreate` を使用する
+13. **前提条件** ホストにCodexのauth.jsonが存在、**操作** Dockerコンテナ起動、**期待結果** コンテナ内のCodex認証情報がホストのauth.jsonに同期される
+14. **前提条件** Docker起動が必要、**操作** 起動時にKeep/Stop確認を行い「Keep」を選択、**期待結果** `docker compose down` は実行されない
+15. **前提条件** Docker起動が必要、**操作** 起動時にKeep/Stop確認を行い「Stop」を選択、**期待結果** `docker compose down` が実行される
+16. **前提条件** Dockerコンテナが存在しない、**操作** エージェント起動、**期待結果** Recreate/Reuseの確認は表示されない
+17. **前提条件** Dockerコンテナが起動中、**操作** エージェント起動、**期待結果** Recreate/Reuseの確認は表示されない（自動でReuse扱い）
+18. **前提条件** 同一ブランチでQuick Start履歴が存在、**操作** Quick Startで「Resume/Start new」を選択、**期待結果** 以前選択したHostOS/Dockerサービス・Recreate/Reuse・Keep/Stopが復元され、Dockerウィザードは表示されない
+19. **前提条件** 既にコンテナが起動中、**操作** Reuse/Keepで起動、**期待結果** `docker compose up` を実行せず `docker compose exec` でエージェントが起動する
+20. **前提条件** 起動中判定のコマンドが生成される、**操作** Reuse/Keepで起動、**期待結果** `if COMPOSE_PROJECT_NAME=... docker compose ... ps -q {service} | grep -q .; then ... fi` の形式で判定する
 
 ---
 
 ### ユーザーストーリー 2 - Dockerfileのみの場合のコンテナ起動 (優先度: P1)
 
-開発者がDockerfile（composeなし）を含むworktreeを選択すると、gwtが自動でdocker buildとdocker runを実行してエージェントをコンテナ内で実行する。
+開発者がDockerfile（composeなし）を含むworktreeを選択すると、gwtは `HostOS` / `Docker` の起動ターゲット選択を提示し、Dockerを選択した場合にdocker buildとdocker runを実行してエージェントをコンテナ内で実行する。
 
 **この優先度の理由**: Dockerfile単体での開発も一般的であり、compose不要な軽量プロジェクトで使用される。
 
@@ -52,6 +53,7 @@
 1. **前提条件** worktreeにDockerfileのみ存在（compose.ymlなし）、**操作** エージェント起動、**期待結果** docker buildが実行され、docker runでエージェントが起動する
 2. **前提条件** Dockerfileがあるがイメージが存在しない、**操作** エージェント起動、**期待結果** 自動でdocker buildが実行される
 3. **前提条件** Dockerfileが更新された（イメージより新しい）、**操作** エージェント起動、**期待結果** 再ビルドして新しいイメージでコンテナ起動
+4. **前提条件** worktreeにDockerfileのみ存在（compose.ymlなし）、**操作** サービス選択画面でHostOSを選択、**期待結果** コンテナを起動せずホストでエージェントが起動する
 
 ---
 
