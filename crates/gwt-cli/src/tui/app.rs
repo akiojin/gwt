@@ -2942,6 +2942,34 @@ impl Model {
         }
     }
 
+    fn handle_docker_confirm_launch_on_host(&mut self) -> bool {
+        let plan = if let Some(pending) = self.pending_cleanup_select.take() {
+            pending.plan
+        } else if let Some(pending) = self.pending_build_select.take() {
+            pending.plan
+        } else if let Some(pending) = self.pending_recreate_select.take() {
+            pending.plan
+        } else {
+            return false;
+        };
+
+        // Ensure no stale pending prompts remain after the host override.
+        self.pending_cleanup_select = None;
+        self.pending_build_select = None;
+        self.pending_recreate_select = None;
+        self.launch_status = None;
+        self.last_mouse_click = None;
+
+        let keep_launch_status = matches!(plan.install_plan, InstallPlan::Install { .. });
+        self.launch_plan_in_tmux(&plan, None, true, keep_launch_status, false, false, false);
+
+        if let Some(prev_screen) = self.screen_stack.pop() {
+            self.screen = prev_screen;
+        }
+
+        true
+    }
+
     fn handle_confirm_action(&mut self) {
         if let Some(pending) = self.pending_cleanup_select.take() {
             let stop_on_exit = self.confirm.is_confirmed();
@@ -4709,6 +4737,11 @@ impl Model {
                 }
             },
             Message::Char(c) => {
+                if matches!(self.screen, Screen::Confirm) && (c == 'h' || c == 'H') {
+                    if self.handle_docker_confirm_launch_on_host() {
+                        return;
+                    }
+                }
                 if matches!(self.screen, Screen::ServiceSelect) {
                     if c == 's' || c == 'S' {
                         self.handle_service_select_skip();
@@ -5879,6 +5912,7 @@ impl Model {
             details: vec![
                 "Reuse keeps existing containers.".to_string(),
                 "Recreate will rerun entrypoint.".to_string(),
+                "Press 'h' to launch on host.".to_string(),
             ],
             confirm_label: "Recreate".to_string(),
             cancel_label: "Reuse".to_string(),
@@ -5989,6 +6023,7 @@ impl Model {
             details: vec![
                 "No Build will skip image rebuild.".to_string(),
                 "Build will run docker compose build.".to_string(),
+                "Press 'h' to launch on host.".to_string(),
             ],
             confirm_label: "Build".to_string(),
             cancel_label: "No Build".to_string(),
@@ -6065,6 +6100,7 @@ impl Model {
             details: vec![
                 "Keep will keep containers running.".to_string(),
                 "Stop will run docker compose down.".to_string(),
+                "Press 'h' to launch on host.".to_string(),
             ],
             confirm_label: "Stop".to_string(),
             cancel_label: "Keep".to_string(),
@@ -7159,11 +7195,20 @@ impl Model {
                 Self::keybind_item("PgUp/PgDn", "Page"),
                 Self::keybind_item("Esc", "Back"),
             ],
-            Screen::Confirm => vec![
-                Self::keybind_item("Left/Right", "Select"),
-                Self::keybind_item("Enter", "Confirm"),
-                Self::keybind_item("Esc", "Cancel"),
-            ],
+            Screen::Confirm => {
+                let mut items = vec![
+                    Self::keybind_item("Left/Right", "Select"),
+                    Self::keybind_item("Enter", "Confirm"),
+                ];
+                if self.pending_build_select.is_some()
+                    || self.pending_recreate_select.is_some()
+                    || self.pending_cleanup_select.is_some()
+                {
+                    items.push(Self::keybind_item("h", "HostOS"));
+                }
+                items.push(Self::keybind_item("Esc", "Cancel"));
+                items
+            }
             Screen::Error => vec![
                 Self::keybind_item("Enter", "Close"),
                 Self::keybind_item("Esc", "Close"),
@@ -9209,6 +9254,44 @@ mod tests {
 
         assert!(model.last_mouse_click.is_none());
         assert!(matches!(model.screen, Screen::BranchList));
+    }
+
+    #[test]
+    fn test_docker_confirm_host_shortcut_closes_build_prompt() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Confirm;
+        model.screen_stack.push(Screen::BranchList);
+        model.pending_build_select = Some(PendingBuildSelect {
+            plan: sample_launch_plan(),
+            service: Some("app".to_string()),
+            force_host: false,
+            force_recreate: false,
+            quick_start_keep: None,
+        });
+        model.last_mouse_click = Some(sample_mouse_click());
+
+        model.update(Message::Char('h'));
+
+        assert!(model.pending_build_select.is_none());
+        assert!(model.last_mouse_click.is_none());
+        assert!(matches!(model.screen, Screen::BranchList));
+    }
+
+    #[test]
+    fn test_confirm_footer_keybinds_include_host_shortcut_when_docker_prompt_active() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Confirm;
+        model.pending_build_select = Some(PendingBuildSelect {
+            plan: sample_launch_plan(),
+            service: Some("app".to_string()),
+            force_host: false,
+            force_recreate: false,
+            quick_start_keep: None,
+        });
+
+        let keybinds = model.get_footer_keybinds();
+
+        assert!(keybinds.contains("[h] HostOS"));
     }
 
     #[test]

@@ -38,6 +38,7 @@
 19. **前提条件** 既にコンテナが起動中、**操作** Reuse/Keepで起動、**期待結果** `docker compose up` を実行せず `docker compose exec` でエージェントが起動する
 20. **前提条件** 起動中判定のコマンドが生成される、**操作** Reuse/Keepで起動、**期待結果** `if COMPOSE_PROJECT_NAME=... docker compose ... ps -q {service} | grep -q .; then ... fi` の形式で判定する
 21. **前提条件** worktreeにDockerファイルが存在、**操作** `docker.force_host=true`（または `GWT_DOCKER_FORCE_HOST=true`）を指定してエージェント起動、**期待結果** Docker関連の確認UI（サービス選択/Build/Recreate/Keep）は表示されずホストでエージェントが起動する
+22. **前提条件** Docker関連の確認UI（Recreate/Build/Keep）が表示されている、**操作** 確認UIで `h` を押す、**期待結果** Docker関連処理をスキップしてホストでエージェントが起動する
 
 ---
 
@@ -196,6 +197,7 @@ gwtのcompose定義では`PORT`（デフォルト3000）を使用し、`GWT_PORT
 - Quick Start履歴のDockerサービスが現在のcomposeに存在しない場合はサービス選択にフォールバックする
 - Build/No BuildはQuick Startでは保存・復元しない
 - Quick StartではDockerfile/compose変更が検出されない限りRecreateは強制せずReuseで起動する
+- Docker関連の確認UI（Recreate/Build/Keep）では `h` でホスト起動へ即時切り替えできる
 - `docker.force_host=true`（または `GWT_DOCKER_FORCE_HOST=true`）の場合、Dockerファイルの有無に関わらずホスト起動を強制し、Docker関連の確認UIは表示しない
 
 ### TUI進捗表示
