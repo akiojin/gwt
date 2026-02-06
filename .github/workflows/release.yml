@@ -86,9 +86,6 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             artifact: gwt-linux-aarch64
-          - os: macos-13
-            target: x86_64-apple-darwin
-            artifact: gwt-macos-x86_64
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: gwt-macos-aarch64
