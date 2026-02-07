@@ -3,7 +3,8 @@
 //! Manages the lifecycle of up to 4 terminal panes,
 //! including tab switching, fullscreen toggle, and batch operations.
 
-use super::pane::TerminalPane;
+use super::pane::{PaneConfig, TerminalPane};
+use super::BuiltinLaunchConfig;
 use super::TerminalError;
 
 /// Maximum number of simultaneous panes (FR-033).
@@ -126,6 +127,41 @@ impl PaneManager {
             pane.kill()?;
         }
         Ok(())
+    }
+
+    /// Launch an agent in a new terminal pane.
+    ///
+    /// Creates a `TerminalPane` from the given config and adds it to the manager.
+    /// Returns the generated pane ID, or `PaneLimitReached` if at capacity.
+    pub fn launch_agent(
+        &mut self,
+        config: BuiltinLaunchConfig,
+        rows: u16,
+        cols: u16,
+    ) -> Result<String, TerminalError> {
+        let pane_id = format!(
+            "pane-{}",
+            uuid::Uuid::new_v4()
+                .to_string()
+                .split('-')
+                .next()
+                .unwrap_or("0")
+        );
+        let pane_config = PaneConfig {
+            pane_id: pane_id.clone(),
+            command: config.command,
+            args: config.args,
+            working_dir: config.working_dir,
+            branch_name: config.branch_name,
+            agent_name: config.agent_name,
+            agent_color: config.agent_color,
+            rows,
+            cols,
+            env_vars: config.env_vars,
+        };
+        let pane = TerminalPane::new(pane_config)?;
+        self.add_pane(pane)?;
+        Ok(pane_id)
     }
 
     /// Immutable slice of all panes.
@@ -412,5 +448,98 @@ mod tests {
         let _ = mgr.kill_all();
         // Panes should still be in the manager (kill does not remove them)
         assert_eq!(mgr.pane_count(), 2);
+    }
+
+    // --- 20. launch_agent creates pane and returns pane_id ---
+
+    #[test]
+    fn test_launch_agent_success() {
+        use crate::terminal::BuiltinLaunchConfig;
+        let mut mgr = PaneManager::new();
+        let config = BuiltinLaunchConfig {
+            command: "/usr/bin/true".to_string(),
+            args: vec![],
+            working_dir: std::env::temp_dir(),
+            branch_name: "feature/test".to_string(),
+            agent_name: "test-agent".to_string(),
+            agent_color: ratatui::style::Color::Cyan,
+            env_vars: HashMap::new(),
+        };
+        let pane_id = mgr.launch_agent(config, 24, 80).unwrap();
+        assert!(!pane_id.is_empty());
+        assert!(pane_id.starts_with("pane-"));
+        assert_eq!(mgr.pane_count(), 1);
+    }
+
+    // --- 21. launch_agent 4 times, 5th returns PaneLimitReached ---
+
+    #[test]
+    fn test_launch_agent_limit_reached() {
+        use crate::terminal::BuiltinLaunchConfig;
+        let mut mgr = PaneManager::new();
+        for i in 0..4 {
+            let config = BuiltinLaunchConfig {
+                command: "/usr/bin/true".to_string(),
+                args: vec![],
+                working_dir: std::env::temp_dir(),
+                branch_name: format!("feature/test-{i}"),
+                agent_name: format!("agent-{i}"),
+                agent_color: ratatui::style::Color::Green,
+                env_vars: HashMap::new(),
+            };
+            mgr.launch_agent(config, 24, 80).unwrap();
+        }
+        assert_eq!(mgr.pane_count(), 4);
+
+        // 5th should fail
+        let config = BuiltinLaunchConfig {
+            command: "/usr/bin/true".to_string(),
+            args: vec![],
+            working_dir: std::env::temp_dir(),
+            branch_name: "feature/test-4".to_string(),
+            agent_name: "agent-4".to_string(),
+            agent_color: ratatui::style::Color::Red,
+            env_vars: HashMap::new(),
+        };
+        let result = mgr.launch_agent(config, 24, 80);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            TerminalError::PaneLimitReached { max } => assert_eq!(max, 4),
+            other => panic!("Expected PaneLimitReached, got: {other:?}"),
+        }
+    }
+
+    // --- 22. launch_agent sets active_pane to new pane ---
+
+    #[test]
+    fn test_launch_agent_sets_active_pane() {
+        use crate::terminal::BuiltinLaunchConfig;
+        let mut mgr = PaneManager::new();
+        let config1 = BuiltinLaunchConfig {
+            command: "/usr/bin/true".to_string(),
+            args: vec![],
+            working_dir: std::env::temp_dir(),
+            branch_name: "feature/a".to_string(),
+            agent_name: "agent-a".to_string(),
+            agent_color: ratatui::style::Color::Green,
+            env_vars: HashMap::new(),
+        };
+        let pane_id1 = mgr.launch_agent(config1, 24, 80).unwrap();
+
+        let config2 = BuiltinLaunchConfig {
+            command: "/usr/bin/true".to_string(),
+            args: vec![],
+            working_dir: std::env::temp_dir(),
+            branch_name: "feature/b".to_string(),
+            agent_name: "agent-b".to_string(),
+            agent_color: ratatui::style::Color::Blue,
+            env_vars: HashMap::new(),
+        };
+        let pane_id2 = mgr.launch_agent(config2, 24, 80).unwrap();
+
+        assert_ne!(pane_id1, pane_id2);
+        // Active pane should be the latest one
+        let active = mgr.active_pane().expect("should have active pane");
+        assert_eq!(active.pane_id(), pane_id2);
     }
 }

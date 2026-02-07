@@ -17,6 +17,7 @@ pub mod profiles;
 pub mod service_select;
 pub mod settings;
 pub mod split_layout;
+pub mod terminal_pane;
 pub mod wizard;
 pub mod worktree_create;
 
@@ -38,6 +39,10 @@ pub use wizard::{
     ReasoningLevel, WizardConfirmResult, WizardState, WizardStep,
 };
 pub use worktree_create::{render_worktree_create, WorktreeCreateState};
+
+// Terminal pane rendering (SPEC-1d6dd9fc)
+#[allow(unused_imports)]
+pub use terminal_pane::{render_terminal_pane, TerminalPaneView};
 
 // Docker integration screens (SPEC-f5f5657e)
 pub use service_select::{render_service_select, ServiceSelectState};
