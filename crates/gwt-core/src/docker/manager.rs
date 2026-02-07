@@ -65,6 +65,41 @@ fn extract_port_envs_from_compose(content: &str) -> Vec<(String, u16)> {
     results
 }
 
+fn parse_docker_ps_ports(output: &str) -> HashSet<u16> {
+    let mut ports = HashSet::new();
+    for line in output.lines() {
+        for segment in line.split(',') {
+            let segment = segment.trim();
+            let Some(arrow_idx) = segment.find("->") else {
+                continue;
+            };
+            let left = &segment[..arrow_idx];
+            let Some(colon_idx) = left.rfind(':') else {
+                continue;
+            };
+            let host_port = &left[colon_idx + 1..];
+            let host_port = host_port.trim_matches(']');
+            if let Ok(port) = host_port.parse::<u16>() {
+                ports.insert(port);
+            }
+        }
+    }
+    ports
+}
+
+fn docker_ports_in_use() -> HashSet<u16> {
+    let output = Command::new("docker")
+        .args(["ps", "--format", "{{.Ports}}"])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            parse_docker_ps_ports(&stdout)
+        }
+        _ => HashSet::new(),
+    }
+}
+
 fn parse_port_env_default(value: &str) -> Option<(String, u16)> {
     let start = value.find("${")?;
     let rest = &value[start + 2..];
@@ -655,6 +690,14 @@ impl DockerManager {
     }
 
     fn collect_compose_port_envs(&self) -> Result<HashMap<String, String>> {
+        let docker_ports = docker_ports_in_use();
+        self.collect_compose_port_envs_with_docker_ports(&docker_ports)
+    }
+
+    fn collect_compose_port_envs_with_docker_ports(
+        &self,
+        docker_ports: &HashSet<u16>,
+    ) -> Result<HashMap<String, String>> {
         let compose_path = match &self.docker_file_type {
             DockerFileType::Compose(path) => path,
             DockerFileType::DevContainer(_) | DockerFileType::Dockerfile(_) => {
@@ -671,35 +714,52 @@ impl DockerManager {
         let allocator = PortAllocator::new();
         let mut allocated = HashMap::new();
         let mut used_names = HashSet::new();
+        let mut used_ports = HashSet::new();
 
         for (env_name, default_port) in port_envs {
             if !used_names.insert(env_name.clone()) {
                 continue;
             }
+
+            let is_taken = |port: u16, used_ports: &HashSet<u16>| -> bool {
+                docker_ports.contains(&port)
+                    || PortAllocator::is_port_in_use(port)
+                    || used_ports.contains(&port)
+            };
+
+            let find_available = |base_port: u16, used_ports: &HashSet<u16>| -> Option<u16> {
+                let mut current = base_port;
+                loop {
+                    let port = allocator.find_available_port(current)?;
+                    if docker_ports.contains(&port) || used_ports.contains(&port) {
+                        current = port.saturating_add(1);
+                        continue;
+                    }
+                    return Some(port);
+                }
+            };
+
             if let Ok(value) = std::env::var(&env_name) {
                 if let Ok(port) = value.parse::<u16>() {
-                    if PortAllocator::is_port_in_use(port) {
-                        let next = allocator
-                            .find_available_port(port)
-                            .unwrap_or(port)
-                            .to_string();
-                        allocated.insert(env_name, next);
+                    let port = if is_taken(port, &used_ports) {
+                        find_available(port, &used_ports).unwrap_or(port)
                     } else {
-                        allocated.insert(env_name, value);
-                    }
+                        port
+                    };
+                    used_ports.insert(port);
+                    allocated.insert(env_name, port.to_string());
                 } else {
                     allocated.insert(env_name, value);
                 }
                 continue;
             }
 
-            let port = if PortAllocator::is_port_in_use(default_port) {
-                allocator
-                    .find_available_port(default_port)
-                    .unwrap_or(default_port)
+            let port = if is_taken(default_port, &used_ports) {
+                find_available(default_port, &used_ports).unwrap_or(default_port)
             } else {
                 default_port
             };
+            used_ports.insert(port);
             allocated.insert(env_name, port.to_string());
         }
 
@@ -1108,6 +1168,51 @@ services:
         assert!(envs.contains(&("PORT".to_string(), 3000)));
         assert!(envs.contains(&("LOCAL_PORT".to_string(), 8080)));
         assert!(envs.contains(&("PUBLISHED_PORT".to_string(), 3000)));
+    }
+
+    #[test]
+    fn test_collect_compose_port_envs_avoids_docker_published_ports() {
+        use std::net::TcpListener;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let compose_path = temp.path().join("docker-compose.yml");
+
+        // Pick an available port without keeping it bound, so local checks see it as free.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        std::fs::write(
+            &compose_path,
+            format!(
+                r#"
+services:
+  app:
+    ports:
+      - "${{GWT_TEST_PORT:-{base_port}}}:3000"
+"#
+            ),
+        )
+        .unwrap();
+
+        let manager =
+            DockerManager::new(temp.path(), "test", DockerFileType::Compose(compose_path));
+
+        let mut docker_ports = HashSet::new();
+        docker_ports.insert(base_port);
+
+        let envs = manager
+            .collect_compose_port_envs_with_docker_ports(&docker_ports)
+            .unwrap();
+        let allocated = envs
+            .get("GWT_TEST_PORT")
+            .expect("env var should be allocated")
+            .parse::<u16>()
+            .unwrap();
+
+        assert_ne!(allocated, base_port);
+        assert!(!docker_ports.contains(&allocated));
+        TcpListener::bind(("127.0.0.1", allocated)).unwrap();
     }
 
     #[test]

@@ -1050,7 +1050,7 @@ fn build_compose_agent_command(
             "Compose up will run (build/recreate requested)"
         );
         format!(
-            "{}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ exit_status=$?; echo \"[gwt] docker compose up failed (status=$exit_status).\"; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $exit_status; }}",
+            "{}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ exit_status=$?; echo \"[gwt] docker compose up failed (status=$exit_status).\"; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; echo \"[gwt] Press Enter to close this pane.\"; read -r _; exit $exit_status; }}",
             compose_args_debug,
             compose_env_prefix,
             container_name,
@@ -1077,7 +1077,7 @@ fn build_compose_agent_command(
             "Compose up will use --no-recreate when starting stopped containers"
         );
         format!(
-            "{}if {} | grep -q .; then echo \"[gwt] docker compose up skipped (already running).\"; else {}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ exit_status=$?; echo \"[gwt] docker compose up failed (status=$exit_status).\"; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $exit_status; }}; fi",
+            "{}if {} | grep -q .; then echo \"[gwt] docker compose up skipped (already running).\"; else {}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ exit_status=$?; echo \"[gwt] docker compose up failed (status=$exit_status).\"; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; echo \"[gwt] Press Enter to close this pane.\"; read -r _; exit $exit_status; }}; fi",
             compose_args_debug,
             running_check,
             compose_args_debug,
@@ -1106,7 +1106,7 @@ fn build_compose_agent_command(
     format!(
         r#"cd {} && \
 {} && \
-{}{}COMPOSE_PROJECT_NAME={} docker compose{} exec{} {} {} || {{ exit_status=$?; echo "[gwt] docker compose exec failed (status=$exit_status)."; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; {}exit $exit_status; }}{}"#,
+{}{}COMPOSE_PROJECT_NAME={} docker compose{} exec{} {} {} || {{ exit_status=$?; echo "[gwt] docker compose exec failed (status=$exit_status)."; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; {}echo "[gwt] Press Enter to close this pane."; read -r _; exit $exit_status; }}{}"#,
         working_dir,
         up_step,
         stop_trap,
@@ -1832,6 +1832,31 @@ mod tests {
         assert!(cmd.contains("docker compose exec"));
         assert!(cmd.contains("COMPOSE_PROJECT_NAME=gwt-my-worktree"));
         assert!(cmd.contains("claude"));
+    }
+
+    #[test]
+    fn test_build_docker_agent_command_includes_pause_prompt_on_compose_failures() {
+        use std::path::PathBuf;
+
+        let worktree_path = PathBuf::from("/tmp/my-worktree");
+        let docker_type = DockerFileType::Compose(PathBuf::from("docker-compose.yml"));
+        let env_vars = HashMap::new();
+        let cmd = build_docker_agent_command(
+            &worktree_path,
+            "my-worktree",
+            &docker_type,
+            "claude",
+            &[],
+            Some("gwt"),
+            &env_vars,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+
+        // Host-side docker compose failures should not close the pane immediately.
+        assert!(cmd.contains("Press Enter to close this pane"));
     }
 
     #[test]

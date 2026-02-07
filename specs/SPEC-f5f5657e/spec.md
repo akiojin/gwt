@@ -139,6 +139,7 @@ Dockerデーモンが起動していない場合、gwtが自動起動を試み�
 
 - Dockerfileが無効な構文の場合、どうなるか？→ ビルドエラーを表示し、ホストへのフォールバックを提案
 - docker compose upが3回連続失敗した場合、どうなるか？→ エラー表示し、ホストでの起動を提案
+- docker compose up/exec がホスト側で失敗した場合（例: ポート競合で `port is already allocated`）、どうなるか？→ 失敗理由を表示し、ペインが即時に閉じないように Enter 入力待ちにする
 - コンテナ内でエージェントがクラッシュした場合、どうなるか？→ エラーメッセージを表示してgwtを終了
 - docker-compose.ymlに複数のcomposeファイル（override等）がある場合、どうなるか？→ 標準のdocker compose挙動に従い全て読み込む
 - ホストにdockerコマンドがない場合、どうなるか？→ Docker機能を無効化し、ホストで起動
@@ -173,7 +174,7 @@ Dockerデーモンが起動していない場合、gwtが自動起動を試み�
 gwtは以下の方法でポート競合を回避:
 
 1. docker-compose.yml内の`${PORT:-8080}`形式の環境変数を検出
-2. 空きポートを自動検出
+2. 空きポートを自動検出（ローカルのポート利用状況に加え、`docker ps` の published ports も考慮）
 3. 環境変数としてコンテナに渡す
 
 設定ファイルは不要。docker-compose.ymlの設定に従う。
