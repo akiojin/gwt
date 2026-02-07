@@ -1,302 +1,125 @@
-# 技術調査: エージェントモード
+# フェーズ0: 調査結果
 
-**仕様ID**: `SPEC-ba3f610c` | **日付**: 2026-01-22
-
-## 概要
-
-エージェントモード実装に必要な技術スタックの調査結果をまとめる。
+**仕様ID**: `SPEC-ba3f610c` | **日付**: 2026-02-07
 
 ## 1. 既存コードベース分析
 
-### 1.1 AIクライアント (`gwt-core/src/ai/client.rs`)
+### 1.1 gwt-core: agent/ モジュール
 
-**現状**:
+| ファイル | 役割 | 現在の状態 | 拡張ポイント |
+|---------|------|-----------|-------------|
+| `mod.rs` | AgentManager、AgentType、detect/launch API | 実装済み | SubAgentType連携、自動モード起動フラグ追加 |
+| `master.rs` | MasterAgent（AIClient + Conversation） | 基本実装済み | イベント駆動ループ、PromptBuilder統合、Spec Kit連携 |
+| `session.rs` | AgentSession（状態・タスク・WT参照） | 基本実装済み | 永続化I/O、復元ロジック、キュー管理、base_branch等 |
+| `task.rs` | Task（状態遷移・依存関係・WT割当） | 基本実装済み | テスト検証状態、PR参照、リトライカウンタ |
+| `sub_agent.rs` | SubAgent（tmuxペイン・状態・完了検出） | 基本実装済み | 全自動モードフラグ、send-keys完了確認 |
+| `conversation.rs` | Conversation + Message（対話履歴） | 実装済み | 要約圧縮（P3） |
+| `types.rs` | SessionId / TaskId / SubAgentId（UUID v4） | 実装済み | 変更不要 |
+| `worktree.rs` | WorktreeRef（ブランチ名・パス・タスクID参照） | 実装済み | クリーンアップ用メソッド追加 |
+| `trait_agent.rs` | AgentTrait（detect/run_task/run_in_directory） | 実装済み | 全自動モード判定追加 |
+| `claude.rs` / `codex.rs` / `gemini.rs` | 各エージェント実装 | 実装済み | 全自動モード起動引数 |
 
-- `AIClient`構造体: OpenAI Responses API互換のHTTPクライアント
-- `reqwest::blocking::Client`を使用
-- `create_response()`メソッドでLLM呼び出し
-- Azure OpenAI / 標準OpenAI両対応
-- 設定: `ResolvedAISettings`から読み込み
+### 1.2 gwt-core: tmux/ モジュール
 
-**再利用可能な部分**:
+| ファイル | 役割 | 現在の状態 | 拡張ポイント |
+|---------|------|-----------|-------------|
+| `launcher.rs` | TmuxLaunchConfig + launch_agent_in_pane | 実装済み | 全自動モードフラグ対応（env/args拡張） |
+| `pane.rs` | AgentPane + ペイン操作（kill/send-keys/capture-pane） | 実装済み | send-keys完了確認、capture-paneパターン検出 |
+| `poller.rs` | PanePoller（mpsc::channel、バックグラウンドポーリング） | 実装済み | イベント駆動通知モード追加 |
+| `detector.rs` | tmux環境検出（is_inside_tmux等） | 実装済み | 変更不要 |
+| `session.rs` | tmuxセッション管理 | 実装済み | 変更不要 |
 
-- `AIClient`をそのまま使用可能
-- `ResolvedAISettings`の設定共有も可能
+### 1.3 gwt-core: ai/ モジュール
 
-**拡張が必要な部分**:
+| ファイル | 役割 | 現在の状態 | 拡張ポイント |
+|---------|------|-----------|-------------|
+| `client.rs` | AIClient（OpenAI互換API、Responses API） | 実装済み | コスト追跡（トークン数推定）、MAX_OUTPUT_TOKENS拡張 |
 
-- 会話履歴を含むマルチターン対話（新規実装）
-- ストリーミング応答（任意、P3以降）
+### 1.4 gwt-cli: TUI
 
-### 1.2 tmux制御 (`gwt-core/src/tmux/`)
+| ファイル | 役割 | 現在の状態 | 拡張ポイント |
+|---------|------|-----------|-------------|
+| `agent_mode.rs` | AgentModeState + render（チャット70/タスク30分割） | 実装済み | チャットのみUI刷新、タスクパネル削除、ステータスバー追加 |
+| `app.rs` | メインアプリループ、画面切り替え | 実装済み | Esc中断、キュー管理、Spec Kitショートカット |
 
-**現状のモジュール構成**:
+### 1.5 既存Spec Kitスクリプト（.specify/）
 
-```text
-tmux/
-├── mod.rs          # エクスポート
-├── launcher.rs     # エージェント起動
-├── pane.rs         # ペイン管理、send_keys
-├── detector.rs     # 完了検出
-├── poller.rs       # 状態ポーリング
-└── session.rs      # セッション管理
-```
+`.specify/`ディレクトリには以下が存在:
 
-**主要な関数**:
+- `.specify/memory/constitution.md` - プロジェクト原則
+- `.specify/scripts/bash/*.sh` - セットアップ・コンテキスト更新スクリプト
+- Spec Kit Skillsは`projectSettings`のスキル定義として存在（speckit.clarify, speckit.plan, speckit.tasks等）
 
-| 関数 | ファイル | 用途 |
-|------|----------|------|
-| `launch_agent_in_pane()` | launcher.rs | エージェント起動 |
-| `send_keys()` | pane.rs | キー送信 |
-| `capture_pane()` | - | 出力取得（未実装） |
-| `infer_agent_status()` | pane.rs | 状態推定 |
-| `AgentPane` | pane.rs | エージェントペイン構造体 |
-
-**再利用可能な部分**:
-
-- `launch_agent_in_pane()`: worktreeでのエージェント起動
-- `send_keys()`: プロンプト送信
-- `AgentPane`: サブエージェント状態管理
-- `infer_agent_status()`: 完了検出の一部
-
-**拡張が必要な部分**:
-
-- `capture_pane()`: tmux capture-paneラッパー（新規）
-- Claude Code Hook連携（detector.rs拡張）
-
-### 1.3 TUIアーキテクチャ (`gwt-cli/src/tui/`)
-
-**現状**:
-
-- Elm Architecture: `Model`/`Msg`/`update`/`view`パターン
-- `ratatui 0.29` + `crossterm 0.28`
-- 複数画面: branch_list, wizard, settings, profiles, etc.
-- キーバインド: `event.rs`で定義
-
-**画面追加パターン**:
-
-1. `screens/agent_mode.rs`を新規作成
-2. `screens/mod.rs`でエクスポート追加
-3. `app.rs`にモード切り替えロジック追加
-
-**参考になる既存画面**:
-
-- `wizard.rs`: 複数ステップのUI
-- `ai_wizard.rs`: AI関連のUI
-
-### 1.4 セッション管理 (`gwt-core/src/config/`)
-
-**現状**:
-
-- `ToolSessionEntry`: セッション情報の構造体
-- JSON形式でファイル保存
-- `save_session_entry()`: 保存関数
-
-**再利用可能な部分**:
-
-- JSON永続化パターン
-- ファイルパス管理
-
-**新規実装が必要な部分**:
-
-- エージェントモード専用のセッション構造体
-- `~/.gwt/sessions/`ディレクトリ管理
+これらのプロンプト構造をLLMテンプレートとしてRustバイナリに内蔵する。
 
 ## 2. 技術的決定
 
-### 2.1 マスターエージェント実装
+### 2.1 イベント駆動ループ
 
-**決定**: 既存`AIClient`を使用
+- **選定**: `std::sync::mpsc::channel`（既存のPanePollerパターンを踏襲）
+- **理由**: 既にPollerがmpscで実装されており、パターンの一貫性を維持できる。外部ランタイム（tokio等）不要。
+- **イベント型**: `OrchestratorEvent` enum（SubAgentCompleted / SubAgentFailed / UserInput / TimerTick / SessionStart）
 
-**理由**:
+### 2.2 セッション永続化
 
-- 追加の依存関係不要
-- API設定の共有が容易
-- 既にテスト済み
+- **選定**: serde_json + atomic file write
+- **保存先**: `~/.gwt/sessions/{session_id}.json`
+- **書込方式**: 一時ファイル（`.tmp`接尾辞）→ atomic rename。既存のログファイルパターン流用。
+- **パーミッション**: ファイル0600、ディレクトリ0700
 
-**実装方針**:
+### 2.3 Spec Kit LLMプロンプト
 
-```rust
-// gwt-core/src/agent/master.rs
-pub struct MasterAgent {
-    client: AIClient,
-    conversation: Conversation,
-    system_prompt: String,
-}
+- **選定**: `include_str!`マクロでコンパイル時埋め込み
+- **理由**: バイナリ配布のため外部ファイル依存を排除。テンプレート更新はリリースに同期。
+- **テンプレート形式**: マークダウン形式のプロンプト（変数プレースホルダー`{{variable}}`使用）
 
-impl MasterAgent {
-    pub fn chat(&mut self, user_message: &str) -> Result<String, AgentError>;
-    pub fn plan_tasks(&mut self, request: &str) -> Result<Vec<Task>, AgentError>;
-}
-```
+### 2.4 リポジトリディープスキャン
 
-### 2.2 会話履歴管理
+- **実装**: `git ls-tree -r --name-only HEAD` + 選択的ファイル読み取り
+- **スキャン対象**:
+  - `CLAUDE.md` / `.claude/` → プロジェクト規約
+  - `Cargo.toml` / `package.json` → 依存関係・ビルドシステム
+  - `src/` or `crates/` のモジュール構成（ディレクトリツリー）
+  - `specs/` → 既存スペック一覧
+- **キャッシュ**: セッション単位でメモリキャッシュ（1回スキャン）
 
-**決定**: serde_json + ファイル永続化
+### 2.5 完了検出方式
 
-**理由**:
+| エージェント | 主方式 | フォールバック |
+|-------------|-------|-------------|
+| Claude Code | Hook Stop（ファイルシグナル） | tmux複合方式 |
+| Codex | プロセス終了監視 | 出力パターン (`GWT_TASK_DONE`) |
+| Gemini | プロセス終了監視 | 出力パターン (`GWT_TASK_DONE`) |
+| Other | 出力パターン | send-keys確認クエリ |
 
-- 既存パターンとの整合性
-- シンプルな実装
-- 人間が読める形式
+### 2.6 全自動モード起動フラグ
 
-**データ形式**:
-
-```json
-{
-  "session_id": "uuid",
-  "created_at": "ISO8601",
-  "messages": [
-    {"role": "user", "content": "..."},
-    {"role": "assistant", "content": "..."}
-  ],
-  "tasks": [...]
-}
-```
-
-### 2.3 タスク分割
-
-**決定**: LLMプロンプトエンジニアリング
-
-**理由**:
-
-- 追加ライブラリ不要
-- 柔軟性が高い
-- LLMの判断に任せる仕様と合致
-
-**プロンプト設計**:
-
-```text
-You are a task planning assistant. Given a user request, break it down into:
-1. Independent sub-tasks that can be executed in parallel
-2. Dependent sub-tasks that must be executed sequentially
-
-Output format (JSON):
-{
-  "tasks": [
-    {
-      "id": "task-1",
-      "name": "...",
-      "description": "...",
-      "dependencies": [],
-      "worktree_strategy": "new" | "shared"
-    }
-  ]
-}
-```
-
-### 2.4 完了検出
-
-**決定**: Claude Code Hook + tmux複合方式
-
-**Claude Code完了検出**:
-
-- Claude Code Hookの`Stop`イベントを監視
-- 既存の`detector.rs`を拡張
-
-**他エージェント完了検出（複合方式）**:
-
-1. **プロセス終了**: `pane_dead`または`is_process_running()`
-2. **出力パターン**: `capture-pane`で特定パターン検出
-3. **アクティビティ監視**: 60秒間出力なしで停止と判定
-
-**実装**:
-
-```rust
-pub enum CompletionSource {
-    Hook,           // Claude Code Hook経由
-    ProcessExit,    // プロセス終了
-    OutputPattern,  // 出力パターン一致
-    IdleTimeout,    // アイドルタイムアウト
-}
-
-pub fn detect_completion(agent: &SubAgent) -> Option<CompletionSource>;
-```
-
-### 2.5 サブエージェント指示
-
-**決定**: `tmux send-keys`でプロンプト送信
-
-**理由**:
-
-- 既存の`send_keys()`関数を再利用
-- 任意のエージェントに対応可能
-
-**指示フォーマット**:
-
-```text
-{task_description}
-
-When you have completed this task, please type 'q' to exit.
-```
+| エージェント | フラグ |
+|-------------|------|
+| Claude Code | `--dangerously-skip-permissions` |
+| Codex | `--full-auto` |
+| Gemini | `--sandbox`（利用可能な場合） |
 
 ## 3. 制約と依存関係
 
-### 3.1 tmux要件
+### 3.1 ハード依存
 
-- **最小バージョン**: tmux 3.0+（`-e`オプション使用）
-- **検出方法**: `tmux -V`コマンドで確認
-- **エラー処理**: tmux未検出時はエージェントモード無効化
+- **tmux 3.0+**: `send-keys`, `capture-pane`, `list-panes`, `split-window` コマンドが必要
+- **OpenAI互換API**: 既存AIClientを共有。`Responses API`形式で通信
+- **gh CLI**: PR作成に必要（未インストール時はPR作成をスキップ、ユーザーに通知）
 
-### 3.2 Claude Code Hook連携
+### 3.2 ソフト依存
 
-**Hook設定ファイル**: `~/.claude/settings.json`
+- Claude Code: Hook機能（Stop）がHook APIの変更リスクあり → tmux複合方式をフォールバック
+- サブエージェント: 少なくとも1つのコーディングエージェント（Claude Code / Codex / Gemini）がインストール済み
 
-```json
-{
-  "hooks": {
-    "Stop": [
-      {
-        "type": "command",
-        "command": "gwt hook-notify stop $SESSION_ID"
-      }
-    ]
-  }
-}
-```
+### 3.3 パフォーマンス制約
 
-**gwt側の実装**:
-
-- `gwt hook-notify`サブコマンド追加
-- Unix socket / ファイル通知で完了を伝達
-
-### 3.3 既存AI要約機能との統合
-
-**共有する設定**:
-
-- `ai.endpoint`: API エンドポイント
-- `ai.model`: モデル名
-- `ai.api_key`: APIキー（環境変数経由）
-
-**独立する設定**:
-
-- `agent.system_prompt`: マスターエージェント用システムプロンプト
-- `agent.session_dir`: セッション保存ディレクトリ
+- モード切り替え: 1秒以内（TUI状態遷移のみ）
+- LLM初回応答: 5秒以内（API応答時間依存）
+- 完了検出: 10秒以内（ポーリング間隔1秒）
+- セッション永続化: 状態変更から1秒以内
 
 ## 4. 未解決事項
 
-### 4.1 エッジケースの対処
-
-| ケース | 対処方針 |
-|--------|----------|
-| tmux切断時の復旧 | セッション永続化から復元、実行中タスクは再起動 |
-| 同一ファイル同時編集 | コンフリクト検出はマージ時（PR作成時）に実施 |
-| LLMタイムアウト | リトライ3回、失敗時はユーザーに通知 |
-| 削除されたworktree参照 | セッション復元時にworktree存在確認、なければスキップ |
-
-### 4.2 将来の拡張
-
-- ストリーミング応答（P3以降）
-- 並列タスク数の制限設定（必要に応じて）
-- サブエージェント種別の自動検出
-
-## 5. 結論
-
-既存のコードベースを最大限活用し、以下の方針で実装を進める:
-
-1. **AIClient再利用**: 新規HTTPクライアント実装は不要
-2. **tmux制御拡張**: `capture_pane`追加とHook連携のみ
-3. **TUI画面追加**: 既存パターンに従って`agent_mode.rs`を新規作成
-4. **セッション永続化**: JSON形式で`~/.gwt/sessions/`に保存
-
-技術的なリスクは限定的であり、既存の実績あるコンポーネントを活用することで、安定した実装が可能。
+なし（インタビュー14ラウンドですべて解消済み）

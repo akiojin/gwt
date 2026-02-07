@@ -27,6 +27,21 @@ pub struct AgentSession {
     pub tasks: Vec<Task>,
     pub worktrees: Vec<WorktreeRef>,
     pub repository_path: PathBuf,
+    /// Base branch from which agent worktrees are created
+    #[serde(default)]
+    pub base_branch: Option<String>,
+    /// Associated Spec Kit artifact ID
+    #[serde(default)]
+    pub spec_id: Option<String>,
+    /// Position in the session queue (0 = active)
+    #[serde(default)]
+    pub queue_position: u32,
+    /// Total LLM API calls made in this session
+    #[serde(default)]
+    pub llm_call_count: u64,
+    /// Estimated total tokens consumed
+    #[serde(default)]
+    pub estimated_tokens: u64,
 }
 
 impl AgentSession {
@@ -41,6 +56,11 @@ impl AgentSession {
             tasks: Vec::new(),
             worktrees: Vec::new(),
             repository_path,
+            base_branch: None,
+            spec_id: None,
+            queue_position: 0,
+            llm_call_count: 0,
+            estimated_tokens: 0,
         }
     }
 

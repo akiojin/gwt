@@ -17,6 +17,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use gwt_core::agent::codex::supports_collaboration_modes;
+use gwt_core::agent::{OrchestratorEvent, OrchestratorMessage, SessionStatus, SessionStore};
 use gwt_core::ai::{
     summarize_session, AIClient, AIError, AgentHistoryStore, AgentType, ChatMessage,
     ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, ModelInfo, OpenCodeSessionParser,
@@ -74,13 +75,14 @@ use super::screens::{
     collect_os_env, render_agent_mode, render_ai_wizard, render_branch_list, render_clone_wizard,
     render_confirm, render_environment, render_error_with_queue, render_git_view, render_help,
     render_logs, render_migration_dialog, render_port_select, render_profiles,
-    render_service_select, render_settings, render_wizard, render_worktree_create, AIWizardState,
-    AgentMessage, AgentModeState, AgentRole, BranchItem, BranchListState, BranchType,
-    CloneWizardState, CloneWizardStep, CodingAgent, ConfirmState, EnvironmentState, ErrorQueue,
-    ErrorState, ExecutionMode, GitViewCache, GitViewState, HelpState, LogsState,
-    MigrationDialogPhase, MigrationDialogState, PortSelectState, ProfilesState,
-    QuickStartDockerSettings, QuickStartEntry, ReasoningLevel, ServiceSelectState, SettingsState,
-    WizardConfirmResult, WizardState, WizardStep, WorktreeCreateState,
+    render_service_select, render_session_selector, render_settings, render_speckit_wizard,
+    render_wizard, render_worktree_create, AIWizardState, AgentMessage, AgentModeState, AgentRole,
+    BranchItem, BranchListState, BranchType, CloneWizardState, CloneWizardStep, CodingAgent,
+    ConfirmState, EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, GitViewCache,
+    GitViewState, HelpState, LogsState, MigrationDialogPhase, MigrationDialogState,
+    PortSelectState, ProfilesState, QuickStartDockerSettings, QuickStartEntry, ReasoningLevel,
+    ServiceSelectState, SettingsState, SpecKitWizardState, WizardConfirmResult, WizardState,
+    WizardStep, WorktreeCreateState,
 };
 // log_gwt_error is available for use when GwtError types are available
 
@@ -504,6 +506,8 @@ pub struct Model {
     wizard: WizardState,
     /// AI settings wizard state (FR-100)
     ai_wizard: AIWizardState,
+    /// Spec Kit wizard state (FR-019)
+    speckit_wizard: SpecKitWizardState,
     /// Status message
     status_message: Option<String>,
     /// Status message timestamp (for auto-clear)
@@ -580,6 +584,10 @@ pub struct Model {
     agent_mode_tx: Option<Sender<AgentModeUpdate>>,
     /// Agent mode update receiver
     agent_mode_rx: Option<Receiver<AgentModeUpdate>>,
+    /// Orchestrator event sender (for sending user input to orchestrator)
+    orchestrator_event_tx: Option<Sender<OrchestratorEvent>>,
+    /// Orchestrator message receiver (for receiving chat/status from orchestrator)
+    orchestrator_message_rx: Option<Receiver<OrchestratorMessage>>,
     /// AI wizard model fetch receiver
     ai_wizard_rx: Option<Receiver<AiWizardUpdate>>,
     /// Tmux mode (Single or Multi)
@@ -697,6 +705,8 @@ pub enum Screen {
     PortSelect,
     /// AI settings wizard (FR-100)
     AISettingsWizard,
+    /// Spec Kit wizard (FR-019)
+    SpecKitWizard,
     /// Clone wizard for empty/non-repo directories (SPEC-a70a1ece US3)
     CloneWizard,
     /// Migration dialog for .worktrees/ method conversion (SPEC-a70a1ece US7)
@@ -760,6 +770,8 @@ pub enum Message {
     ExecuteAgentTermination,
     /// FR-102g: Manually re-register Claude Code hooks (u key)
     ReregisterHooks,
+    /// FR-019: Open Spec Kit wizard
+    OpenSpecKitWizard,
 }
 
 impl Model {
@@ -833,6 +845,7 @@ impl Model {
             port_select: PortSelectState::default(),
             wizard: WizardState::new(),
             ai_wizard: AIWizardState::new(),
+            speckit_wizard: SpecKitWizardState::new(),
             status_message: None,
             status_message_time: None,
             footer_scroll_offset: 0,
@@ -871,6 +884,8 @@ impl Model {
             session_summary_rx: None,
             agent_mode_tx: Some(agent_mode_tx),
             agent_mode_rx: Some(agent_mode_rx),
+            orchestrator_event_tx: None,
+            orchestrator_message_rx: None,
             ai_wizard_rx: None,
             tmux_mode: TmuxMode::detect(),
             tmux_session: None,
@@ -1497,6 +1512,48 @@ impl Model {
         self.update_agent_mode_ai_status();
         self.agent_mode.last_error = None;
         self.screen = Screen::AgentMode;
+
+        // Check for incomplete sessions
+        let store = SessionStore::new();
+        if let Ok(sessions) = store.list_sessions() {
+            let incomplete: Vec<_> = sessions
+                .into_iter()
+                .filter(|s| s.status != SessionStatus::Completed)
+                .collect();
+            if !incomplete.is_empty() {
+                self.agent_mode.pending_sessions = incomplete;
+                self.agent_mode.session_selector_index = 0;
+                self.agent_mode.show_session_selector = true;
+            }
+        }
+
+        // Initialize orchestrator if not already active
+        if self.orchestrator_event_tx.is_none() {
+            self.init_orchestrator();
+        }
+    }
+
+    /// Initialize the orchestrator loop in a background thread
+    fn init_orchestrator(&mut self) {
+        use gwt_core::agent::OrchestratorLoop;
+
+        let (msg_tx, msg_rx) = mpsc::channel();
+        let (mut orchestrator, event_tx) = OrchestratorLoop::new(msg_tx);
+
+        self.orchestrator_event_tx = Some(event_tx);
+        self.orchestrator_message_rx = Some(msg_rx);
+
+        // Spawn orchestrator loop in background thread
+        let settings = self.active_ai_settings();
+        thread::spawn(move || {
+            use gwt_core::agent::MasterAgent;
+
+            if let Some(settings) = settings {
+                if let Ok(mut master) = MasterAgent::new(settings) {
+                    orchestrator.run_loop(&mut master);
+                }
+            }
+        });
     }
 
     fn update_agent_mode_ai_status(&mut self) {
@@ -1948,6 +2005,73 @@ impl Model {
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.agent_mode_rx = None;
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Apply orchestrator messages to the agent mode state (T049)
+    fn apply_orchestrator_messages(&mut self) {
+        let Some(rx) = &self.orchestrator_message_rx else {
+            return;
+        };
+
+        loop {
+            match rx.try_recv() {
+                Ok(msg) => match msg {
+                    OrchestratorMessage::ChatMessage { role, content } => {
+                        let agent_role = match role.as_str() {
+                            "user" => AgentRole::User,
+                            "assistant" => AgentRole::Assistant,
+                            _ => AgentRole::System,
+                        };
+                        self.agent_mode.messages.push(AgentMessage {
+                            role: agent_role,
+                            content,
+                        });
+                        self.agent_mode.set_waiting(false);
+                    }
+                    OrchestratorMessage::StatusUpdate {
+                        session_name,
+                        llm_call_count,
+                        estimated_tokens,
+                    } => {
+                        self.agent_mode.session_name = session_name;
+                        self.agent_mode.llm_call_count = llm_call_count;
+                        self.agent_mode.estimated_tokens = estimated_tokens;
+                    }
+                    OrchestratorMessage::PlanForApproval {
+                        spec_content,
+                        plan_content,
+                        tasks_content,
+                    } => {
+                        // Show plan in chat for approval
+                        let summary = format!(
+                            "## Plan for Approval\n\n### Spec\n{}\n\n### Plan\n{}\n\n### Tasks\n{}\n\nType 'y' to approve or provide feedback.",
+                            spec_content, plan_content, tasks_content
+                        );
+                        self.agent_mode.messages.push(AgentMessage {
+                            role: AgentRole::System,
+                            content: summary,
+                        });
+                        self.agent_mode.set_waiting(false);
+                    }
+                    OrchestratorMessage::SessionCompleted => {
+                        self.agent_mode.messages.push(AgentMessage {
+                            role: AgentRole::System,
+                            content: "Session completed.".to_string(),
+                        });
+                        self.agent_mode.set_waiting(false);
+                    }
+                    OrchestratorMessage::Error(err) => {
+                        self.agent_mode.last_error = Some(err);
+                        self.agent_mode.set_waiting(false);
+                    }
+                },
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.orchestrator_message_rx = None;
                     break;
                 }
             }
@@ -4344,6 +4468,12 @@ impl Model {
                     if let Some(prev_screen) = self.screen_stack.pop() {
                         self.screen = prev_screen;
                     }
+                } else if matches!(self.screen, Screen::SpecKitWizard) {
+                    // Close Spec Kit wizard
+                    self.speckit_wizard.close();
+                    if let Some(prev_screen) = self.screen_stack.pop() {
+                        self.screen = prev_screen;
+                    }
                 // SPEC-71f2742d US3: Cancel form/delete mode in Settings
                 } else if matches!(self.screen, Screen::Settings) {
                     // Check Profile modes first
@@ -4426,6 +4556,7 @@ impl Model {
                 }
                 self.apply_session_summary_updates();
                 self.apply_agent_mode_updates();
+                self.apply_orchestrator_messages();
                 self.apply_ai_wizard_updates();
                 self.poll_session_summary_if_needed();
                 // SPEC-1ea18899: Apply GitView cache updates
@@ -4485,7 +4616,15 @@ impl Model {
                     // SPEC-4b893dae: Update branch summary on selection change
                     self.refresh_branch_summary();
                 }
-                Screen::AgentMode => {}
+                Screen::AgentMode => {
+                    if self.agent_mode.show_session_selector
+                        && !self.agent_mode.pending_sessions.is_empty()
+                    {
+                        let len = self.agent_mode.pending_sessions.len();
+                        self.agent_mode.session_selector_index =
+                            (self.agent_mode.session_selector_index + 1).min(len - 1);
+                    }
+                }
                 Screen::WorktreeCreate => self.worktree_create.select_next_base(),
                 Screen::Settings => self.settings.select_next(),
                 Screen::Logs => self.logs.select_next(),
@@ -4504,6 +4643,7 @@ impl Model {
                     }
                 }
                 Screen::AISettingsWizard => self.ai_wizard.select_next_model(),
+                Screen::SpecKitWizard => {}
                 Screen::CloneWizard => self.clone_wizard.down(),
                 Screen::MigrationDialog => self.migration_dialog.toggle_selection(),
                 Screen::Confirm => {}
@@ -4516,7 +4656,12 @@ impl Model {
                     // SPEC-4b893dae: Update branch summary on selection change
                     self.refresh_branch_summary();
                 }
-                Screen::AgentMode => {}
+                Screen::AgentMode => {
+                    if self.agent_mode.show_session_selector {
+                        self.agent_mode.session_selector_index =
+                            self.agent_mode.session_selector_index.saturating_sub(1);
+                    }
+                }
                 Screen::WorktreeCreate => self.worktree_create.select_prev_base(),
                 Screen::Settings => self.settings.select_prev(),
                 Screen::Logs => self.logs.select_prev(),
@@ -4535,6 +4680,7 @@ impl Model {
                     }
                 }
                 Screen::AISettingsWizard => self.ai_wizard.select_prev_model(),
+                Screen::SpecKitWizard => {}
                 Screen::CloneWizard => self.clone_wizard.up(),
                 Screen::MigrationDialog => self.migration_dialog.toggle_selection(),
                 Screen::Confirm => {}
@@ -4591,7 +4737,19 @@ impl Model {
                     }
                 }
                 Screen::AgentMode => {
-                    if !self.agent_mode.ai_ready {
+                    if self.agent_mode.show_session_selector {
+                        // Resume selected session
+                        if let Some(selected) = self
+                            .agent_mode
+                            .pending_sessions
+                            .get(self.agent_mode.session_selector_index)
+                        {
+                            let session_id = selected.session_id.clone();
+                            self.agent_mode.session_name = Some(session_id.0.clone());
+                            self.agent_mode.show_session_selector = false;
+                            self.agent_mode.pending_sessions.clear();
+                        }
+                    } else if !self.agent_mode.ai_ready {
                         self.open_ai_settings_for_agent_mode();
                     } else if self.agent_mode.is_waiting {
                         // Ignore input while waiting for response
@@ -4599,13 +4757,20 @@ impl Model {
                         let content = self.agent_mode.input.trim().to_string();
                         self.agent_mode.messages.push(AgentMessage {
                             role: AgentRole::User,
-                            content,
+                            content: content.clone(),
                         });
                         self.agent_mode.clear_input();
                         self.agent_mode.last_error = None;
                         self.agent_mode.set_waiting(true);
-                        let messages = self.agent_mode.messages.clone();
-                        self.spawn_agent_mode_request(messages);
+
+                        // Send to orchestrator if available (T048)
+                        if let Some(tx) = &self.orchestrator_event_tx {
+                            let _ = tx.send(OrchestratorEvent::UserInput { content });
+                        } else {
+                            // Fallback to direct LLM call
+                            let messages = self.agent_mode.messages.clone();
+                            self.spawn_agent_mode_request(messages);
+                        }
                     }
                 }
                 Screen::WorktreeCreate => {
@@ -4716,6 +4881,27 @@ impl Model {
                 }
                 Screen::AISettingsWizard => {
                     self.handle_ai_wizard_enter();
+                }
+                Screen::SpecKitWizard => {
+                    if self.speckit_wizard.step
+                        == super::screens::speckit_wizard::SpecKitWizardStep::Clarify
+                    {
+                        if self.speckit_wizard.input.trim().is_empty() {
+                            self.speckit_wizard
+                                .set_error("Please enter a feature description.");
+                        } else {
+                            self.speckit_wizard.next_step();
+                            self.speckit_wizard
+                                .set_processing("Generating specification...");
+                        }
+                    } else if self.speckit_wizard.step
+                        == super::screens::speckit_wizard::SpecKitWizardStep::Done
+                    {
+                        self.speckit_wizard.close();
+                        if let Some(prev_screen) = self.screen_stack.pop() {
+                            self.screen = prev_screen;
+                        }
+                    }
                 }
                 // SPEC-71f2742d US3: Settings screen Enter handling
                 Screen::Settings => {
@@ -4837,6 +5023,33 @@ impl Model {
                 } else if matches!(self.screen, Screen::Logs) && self.logs.is_searching {
                     // Log search mode - add character to search
                     self.logs.search.push(c);
+                } else if matches!(self.screen, Screen::AgentMode)
+                    && self.agent_mode.show_session_selector
+                {
+                    match c {
+                        'd' | 'D' => {
+                            // Discard selected session
+                            if !self.agent_mode.pending_sessions.is_empty() {
+                                self.agent_mode
+                                    .pending_sessions
+                                    .remove(self.agent_mode.session_selector_index);
+                                if self.agent_mode.pending_sessions.is_empty() {
+                                    self.agent_mode.show_session_selector = false;
+                                } else {
+                                    let len = self.agent_mode.pending_sessions.len();
+                                    if self.agent_mode.session_selector_index >= len {
+                                        self.agent_mode.session_selector_index = len - 1;
+                                    }
+                                }
+                            }
+                        }
+                        'n' | 'N' => {
+                            // New session - dismiss selector
+                            self.agent_mode.show_session_selector = false;
+                            self.agent_mode.pending_sessions.clear();
+                        }
+                        _ => {}
+                    }
                 } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
                     self.agent_mode.insert_char(c);
                 // SPEC-71f2742d US3: Settings screen character input
@@ -4869,6 +5082,14 @@ impl Model {
                             self.ai_wizard.show_delete();
                         }
                     }
+                } else if matches!(self.screen, Screen::SpecKitWizard)
+                    && self.speckit_wizard.step
+                        == super::screens::speckit_wizard::SpecKitWizardStep::Clarify
+                {
+                    self.speckit_wizard
+                        .input
+                        .insert(self.speckit_wizard.input_cursor, c);
+                    self.speckit_wizard.input_cursor += 1;
                 } else if matches!(self.screen, Screen::Error) {
                     // Error screen shortcuts
                     match c {
@@ -4943,6 +5164,15 @@ impl Model {
                     && self.ai_wizard.is_text_input()
                 {
                     self.ai_wizard.delete_char();
+                } else if matches!(self.screen, Screen::SpecKitWizard)
+                    && self.speckit_wizard.step
+                        == super::screens::speckit_wizard::SpecKitWizardStep::Clarify
+                    && self.speckit_wizard.input_cursor > 0
+                {
+                    self.speckit_wizard.input_cursor -= 1;
+                    self.speckit_wizard
+                        .input
+                        .remove(self.speckit_wizard.input_cursor);
                 }
             }
             Message::CursorLeft => {
@@ -4993,6 +5223,10 @@ impl Model {
                     self.ai_wizard.cursor_left();
                 } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
                     self.agent_mode.cursor_left();
+                } else if matches!(self.screen, Screen::SpecKitWizard)
+                    && self.speckit_wizard.input_cursor > 0
+                {
+                    self.speckit_wizard.input_cursor -= 1;
                 }
             }
             Message::CursorRight => {
@@ -5043,6 +5277,10 @@ impl Model {
                     self.ai_wizard.cursor_right();
                 } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
                     self.agent_mode.cursor_right();
+                } else if matches!(self.screen, Screen::SpecKitWizard)
+                    && self.speckit_wizard.input_cursor < self.speckit_wizard.input.len()
+                {
+                    self.speckit_wizard.input_cursor += 1;
                 }
             }
             Message::RefreshData => {
@@ -5131,6 +5369,11 @@ impl Model {
                     self.status_message = Some("Could not find Claude settings path.".to_string());
                     self.status_message_time = Some(Instant::now());
                 }
+            }
+            Message::OpenSpecKitWizard => {
+                self.speckit_wizard.open();
+                self.screen_stack.push(self.screen.clone());
+                self.screen = Screen::SpecKitWizard;
             }
             // FR-020 SPEC-71f2742d: Tab cycles BranchList → AgentMode → Settings → BranchList
             Message::Tab => match self.screen {
@@ -7131,7 +7374,24 @@ impl Model {
                 render_worktree_create(&self.worktree_create, frame, chunks[1])
             }
             Screen::AgentMode => {
-                render_agent_mode(&self.agent_mode, frame, chunks[1], None);
+                if self.agent_mode.show_session_selector {
+                    render_session_selector(
+                        &self.agent_mode.pending_sessions,
+                        self.agent_mode.session_selector_index,
+                        frame,
+                        chunks[1],
+                    );
+                } else {
+                    let status_message = self
+                        .active_status_message()
+                        .map(|message| message.to_string());
+                    render_agent_mode(
+                        &self.agent_mode,
+                        frame,
+                        chunks[1],
+                        status_message.as_deref(),
+                    );
+                }
             }
             Screen::Settings => render_settings(&self.settings, frame, chunks[1]),
             Screen::Logs => render_logs(&mut self.logs, frame, chunks[1]),
@@ -7143,6 +7403,9 @@ impl Model {
                 render_service_select(&mut self.service_select, frame, chunks[1])
             }
             Screen::AISettingsWizard => render_ai_wizard(&mut self.ai_wizard, frame, chunks[1]),
+            Screen::SpecKitWizard => {
+                render_speckit_wizard(frame, chunks[1], &self.speckit_wizard);
+            }
             Screen::CloneWizard => render_clone_wizard(&self.clone_wizard, frame, chunks[1]),
             Screen::MigrationDialog => {
                 render_migration_dialog(&mut self.migration_dialog, frame, chunks[1])
@@ -7219,6 +7482,7 @@ impl Model {
             Screen::ServiceSelect => "Service Select",
             Screen::PortSelect => "Port Select",
             Screen::AISettingsWizard => "AI Settings",
+            Screen::SpecKitWizard => "Spec Kit",
             Screen::CloneWizard => "Clone Repository",
             Screen::MigrationDialog => "Migration Required",
             Screen::GitView => "Git View",
@@ -7470,16 +7734,25 @@ impl Model {
                 }
             }
             Screen::AgentMode => {
-                let enter_label = if self.agent_mode.ai_ready {
-                    "Send"
+                if self.agent_mode.show_session_selector {
+                    vec![
+                        Self::keybind_item("Enter", "Resume"),
+                        Self::keybind_item("d", "Discard"),
+                        Self::keybind_item("n", "New session"),
+                        Self::keybind_item("Tab", "Back"),
+                    ]
                 } else {
-                    "Configure AI"
-                };
-                vec![
-                    Self::keybind_item("Enter", enter_label),
-                    Self::keybind_item("Tab", "Settings"),
-                    Self::keybind_item("Esc", "Back"),
-                ]
+                    let enter_label = if self.agent_mode.ai_ready {
+                        "Send"
+                    } else {
+                        "Configure AI"
+                    };
+                    vec![
+                        Self::keybind_item("Enter", enter_label),
+                        Self::keybind_item("Tab", "Settings"),
+                        Self::keybind_item("Esc", "Back"),
+                    ]
+                }
             }
             Screen::WorktreeCreate => match self.worktree_create.step {
                 WorktreeCreateStep::BranchName => vec![
@@ -7607,6 +7880,10 @@ impl Model {
                     vec![self.ai_wizard.step_title().to_string()]
                 }
             }
+            Screen::SpecKitWizard => vec![
+                Self::keybind_item("Enter", "Next"),
+                Self::keybind_item("Esc", "Cancel"),
+            ],
             Screen::CloneWizard => match self.clone_wizard.step {
                 CloneWizardStep::UrlInput => vec![
                     Self::keybind_item("Enter", "Continue"),
@@ -7950,11 +8227,21 @@ impl Model {
                 }
                 (KeyCode::Esc, _) => {
                     // FR-095: ESC key behavior:
+                    // - In AgentMode: send InterruptRequested to orchestrator
                     // - In filter mode: exit filter mode (handled by NavigateBack)
                     // - In BranchList with filter query: clear query
                     // - In BranchList with active agent pane: hide the pane
                     // - Otherwise: navigate back (but NOT quit from main screen)
-                    if matches!(self.screen, Screen::BranchList) {
+                    if matches!(self.screen, Screen::AgentMode) {
+                        if let Some(tx) = &self.orchestrator_event_tx {
+                            let _ = tx.send(OrchestratorEvent::InterruptRequested);
+                        }
+                        self.agent_mode.messages.push(AgentMessage {
+                            role: AgentRole::System,
+                            content: "Interrupting session...".to_string(),
+                        });
+                        None
+                    } else if matches!(self.screen, Screen::BranchList) {
                         if self.branch_list.filter_mode {
                             // Exit filter mode (clear query if any, then exit mode)
                             Some(Message::NavigateBack)
@@ -8018,6 +8305,14 @@ impl Model {
                         Some(Message::CycleSortMode)
                     } else {
                         Some(Message::Char('s'))
+                    }
+                }
+                (KeyCode::Char('S'), KeyModifiers::SHIFT) => {
+                    // FR-019: Shift+S opens Spec Kit wizard from branch list
+                    if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
+                        Some(Message::OpenSpecKitWizard)
+                    } else {
+                        Some(Message::Char('S'))
                     }
                 }
                 (KeyCode::Char('r'), KeyModifiers::NONE) => {

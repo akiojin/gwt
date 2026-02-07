@@ -41,6 +41,9 @@ pub struct SubAgent {
     pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
     pub completion_source: Option<CompletionSource>,
+    /// Auto-mode flag used when launching (e.g., "--dangerously-skip-permissions")
+    #[serde(default)]
+    pub auto_mode_flag: Option<String>,
 }
 
 impl SubAgent {
@@ -54,6 +57,7 @@ impl SubAgent {
             started_at: Utc::now(),
             completed_at: None,
             completion_source: None,
+            auto_mode_flag: None,
         }
     }
 }

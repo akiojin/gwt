@@ -1,219 +1,168 @@
-# クイックスタート: エージェントモード開発
+# クイックスタートガイド
 
-**仕様ID**: `SPEC-ba3f610c` | **日付**: 2026-01-22
+**仕様ID**: `SPEC-ba3f610c` | **日付**: 2026-02-07
 
-## 前提条件
+## 開発環境セットアップ
 
-- Rust stable (1.75+)
+### 前提条件
+
+- Rust stable (2021 Edition)
 - tmux 3.0+
-- Claude Code または他のコーディングエージェント（テスト用）
+- 少なくとも1つのコーディングエージェント（Claude Code / Codex / Gemini）
+- gh CLI（PR作成機能を使用する場合）
 
-## セットアップ
-
-### 1. リポジトリのクローン
+### ビルドと実行
 
 ```bash
-git clone https://github.com/akiojin/gwt.git
-cd gwt
+# ビルド
+cargo build --release
+
+# テスト実行
+cargo test
+
+# Lint
+cargo clippy --all-targets --all-features -- -D warnings
+
+# フォーマット
+cargo fmt
+
+# 実行（tmux内で）
+tmux
+./target/release/gwt
 ```
 
-### 2. ビルド
+### エージェントモードの起動
+
+1. tmuxセッション内で`gwt`を起動
+2. `Tab`キーでエージェントモードに切り替え
+3. チャット入力欄に機能要求を自然言語で入力
+4. マスターエージェントがSpec Kitワークフローを自動実行
+5. 計画を確認し、承認（Enter or "y"）
+
+## テスト実行手順
+
+### ユニットテスト
+
+```bash
+# 全テスト
+cargo test
+
+# agent モジュールのみ
+cargo test --lib agent
+
+# 特定テスト
+cargo test test_orchestrator_event_handling
+```
+
+### テスト対象モジュール
+
+| モジュール | テスト内容 |
+|-----------|----------|
+| `agent::orchestrator` | イベント駆動ループの状態遷移 |
+| `agent::scanner` | リポジトリスキャンのファイル検出 |
+| `agent::prompt_builder` | プロンプト生成のテンプレート埋め込み |
+| `agent::session_store` | JSON永続化・復元・atomic write |
+| `speckit::*` | テンプレート読込・変数置換・成果物生成 |
+| `tui::screens::agent_mode` | AgentModeState の状態遷移 |
+
+### 統合テスト（手動）
+
+tmux環境でのE2Eテストは自動化が困難なため、以下の手動テスト手順を使用:
+
+1. tmux内でgwtを起動
+2. エージェントモードに切り替え
+3. テスト用タスクを入力（例: "Create hello.txt"）
+4. 計画が提示されることを確認
+5. 承認してサブエージェントが起動することを確認
+6. タスク完了後にPRが作成されることを確認
+7. クリーンアップ（WT削除・ブランチ削除）を確認
+
+## Spec Kitテンプレートの編集方法
+
+### テンプレートファイルの場所
+
+```text
+crates/gwt-core/src/speckit/templates/
+├── specify.md    # 仕様策定プロンプト
+├── plan.md       # 計画策定プロンプト
+├── tasks.md      # タスク生成プロンプト
+├── clarify.md    # 曖昧さ解消プロンプト
+└── analyze.md    # 整合性分析プロンプト
+```
+
+### テンプレート変数
+
+テンプレート内では`{{variable}}`形式の変数プレースホルダーを使用:
+
+| 変数 | 説明 |
+|-----|------|
+| `{{user_request}}` | ユーザーの機能要求（自然言語） |
+| `{{repository_context}}` | リポジトリスキャン結果 |
+| `{{claude_md}}` | CLAUDE.md内容 |
+| `{{existing_specs}}` | 既存スペック一覧 |
+| `{{spec_content}}` | 生成されたspec.md内容 |
+| `{{plan_content}}` | 生成されたplan.md内容 |
+| `{{directory_tree}}` | ディレクトリ構造 |
+
+### 編集後の反映
+
+テンプレートは`include_str!`でコンパイル時に埋め込まれるため、変更後は再ビルドが必要:
 
 ```bash
 cargo build --release
 ```
 
-### 3. AI設定
+## ディレクトリ構成
 
-既存のAI要約機能と同じ設定を使用します。
-
-```bash
-# 設定ファイルの場所
-~/.gwt/config.toml
-
-# または環境変数
-export OPENAI_API_KEY="your-api-key"
-```
-
-## 開発ワークフロー
-
-### 新規モジュールの追加
-
-1. `gwt-core/src/agent/`にファイルを追加
-2. `gwt-core/src/agent/mod.rs`でエクスポート
-3. `gwt-core/src/lib.rs`でモジュールを公開
-
-```rust
-// gwt-core/src/lib.rs
-pub mod agent;
-
-// gwt-core/src/agent/mod.rs
-pub mod master;
-pub mod task;
-pub mod session;
-pub mod orchestrator;
-
-pub use master::MasterAgent;
-pub use task::{Task, TaskId, TaskStatus};
-pub use session::AgentSession;
-```
-
-### TUI画面の追加
-
-1. `gwt-cli/src/tui/screens/agent_mode.rs`を作成
-2. `gwt-cli/src/tui/screens/mod.rs`でエクスポート
-3. `gwt-cli/src/tui/app.rs`にモード切り替えロジックを追加
-
-```rust
-// screens/mod.rs
-pub mod agent_mode;
-pub use agent_mode::{render_agent_mode, AgentModeState};
-
-// app.rs - キーハンドリング
-KeyCode::Tab => {
-    // Toggle agent mode
-    self.toggle_agent_mode();
-}
-```
-
-## テスト実行
-
-### 全テスト
-
-```bash
-cargo test
-```
-
-### 特定モジュールのテスト
-
-```bash
-# agentモジュール
-cargo test -p gwt-core agent::
-
-# TUIテスト
-cargo test -p gwt-cli
-```
-
-### 統合テスト
-
-```bash
-cargo test --test integration
-```
-
-## Lint & フォーマット
-
-```bash
-# フォーマット
-cargo fmt
-
-# Lint
-cargo clippy --all-targets --all-features -- -D warnings
-```
-
-## デバッグ
-
-### ログ出力
-
-```bash
-# 環境変数でログレベルを設定
-RUST_LOG=debug cargo run
-
-# 特定モジュールのログ
-RUST_LOG=gwt_core::agent=trace cargo run
-```
-
-### tmuxデバッグ
-
-```bash
-# ペイン一覧
-tmux list-panes -a
-
-# ペイン出力をキャプチャ
-tmux capture-pane -p -t %1
-```
-
-## ディレクトリ構造
+### 新規作成ファイル
 
 ```text
-crates/
-├── gwt-cli/
-│   └── src/
-│       └── tui/
-│           ├── app.rs              # メインアプリ
-│           └── screens/
-│               ├── mod.rs
-│               └── agent_mode.rs   # 新規
-└── gwt-core/
-    └── src/
-        ├── agent/                  # 新規モジュール
-        │   ├── mod.rs
-        │   ├── master.rs           # マスターエージェント
-        │   ├── task.rs             # タスク管理
-        │   ├── session.rs          # セッション永続化
-        │   └── orchestrator.rs     # オーケストレーション
-        ├── ai/
-        │   └── client.rs           # 既存（再利用）
-        └── tmux/
-            └── pane.rs             # 既存（拡張）
+crates/gwt-core/src/
+├── agent/
+│   ├── orchestrator.rs     # OrchestratorLoop（イベント駆動コア）
+│   ├── scanner.rs          # RepositoryScanner（ディープスキャン）
+│   ├── prompt_builder.rs   # PromptBuilder（アダプティブプロンプト生成）
+│   └── session_store.rs    # SessionStore（永続化・復元）
+└── speckit/
+    ├── mod.rs              # Spec Kit内蔵モジュール
+    ├── templates.rs        # LLMプロンプトテンプレート（include_str!）
+    ├── specify.rs          # 仕様策定ロジック
+    ├── plan.rs             # 計画策定ロジック
+    ├── tasks.rs            # タスク生成ロジック
+    ├── clarify.rs          # 曖昧さ解消ロジック
+    ├── analyze.rs          # 整合性分析ロジック
+    └── templates/
+        ├── specify.md      # 仕様策定プロンプトテンプレート
+        ├── plan.md         # 計画策定プロンプトテンプレート
+        ├── tasks.md        # タスク生成プロンプトテンプレート
+        ├── clarify.md      # 曖昧さ解消プロンプトテンプレート
+        └── analyze.md      # 整合性分析プロンプトテンプレート
 ```
 
-## よくある操作
+### 変更対象ファイル
 
-### セッションファイルの確認
+```text
+crates/gwt-core/src/
+├── agent/
+│   ├── mod.rs              # orchestrator等のpub mod追加
+│   ├── master.rs           # イベント駆動ループ統合
+│   ├── session.rs          # base_branch等のフィールド追加
+│   ├── task.rs             # test_status等のフィールド追加
+│   └── sub_agent.rs        # auto_mode_flagフィールド追加
+├── tmux/
+│   ├── launcher.rs         # 全自動モードフラグ対応
+│   ├── pane.rs             # send-keys完了確認
+│   └── poller.rs           # イベント駆動通知
+├── ai/
+│   └── client.rs           # コスト追跡、MAX_OUTPUT_TOKENS拡張
+└── lib.rs                  # pub mod speckit 追加
 
-```bash
-# セッション一覧
-ls ~/.gwt/sessions/
-
-# セッション内容
-cat ~/.gwt/sessions/<session-id>.json | jq .
-```
-
-### Worktreeの確認
-
-```bash
-# gwtが作成したworktree一覧
-git worktree list | grep agent/
-```
-
-### Claude Code Hook設定の確認
-
-```bash
-# Hook設定ファイル
-cat ~/.claude/settings.json | jq .hooks
-```
-
-## トラブルシューティング
-
-### tmuxが見つからない
-
-```bash
-# インストール
-# macOS
-brew install tmux
-
-# Ubuntu/Debian
-sudo apt install tmux
-```
-
-### AI APIエラー
-
-```bash
-# API設定を確認
-gwt config show
-
-# 環境変数を確認
-echo $OPENAI_API_KEY
-```
-
-### ペインが作成されない
-
-```bash
-# tmuxセッション内で実行しているか確認
-echo $TMUX
-
-# tmuxを起動
-tmux new-session -s gwt
+crates/gwt-cli/src/tui/
+├── screens/
+│   ├── agent_mode.rs       # チャットのみUI、ステータスバー
+│   └── speckit_wizard.rs   # 【新規】ブランチモード用Spec Kitウィザード
+├── screens/mod.rs          # speckit_wizard追加
+└── app.rs                  # Esc中断、キュー管理
 ```
 
 ## 関連ドキュメント

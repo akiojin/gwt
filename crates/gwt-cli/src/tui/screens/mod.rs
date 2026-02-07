@@ -17,11 +17,14 @@ pub mod port_select;
 pub mod profiles;
 pub mod service_select;
 pub mod settings;
+pub mod speckit_wizard;
 pub mod split_layout;
 pub mod wizard;
 pub mod worktree_create;
 
-pub use agent_mode::{render_agent_mode, AgentMessage, AgentModeState, AgentRole};
+pub use agent_mode::{
+    render_agent_mode, render_session_selector, AgentMessage, AgentModeState, AgentRole,
+};
 pub use ai_wizard::{render_ai_wizard, AIWizardState};
 pub use branch_list::{render_branch_list, BranchItem, BranchListState, BranchType};
 pub use clone_wizard::{render_clone_wizard, CloneWizardState, CloneWizardStep};
@@ -35,6 +38,7 @@ pub use migration_dialog::{render_migration_dialog, MigrationDialogPhase, Migrat
 pub use port_select::{render_port_select, PortSelectState};
 pub use profiles::{render_profiles, ProfilesState};
 pub use settings::{render_settings, SettingsState};
+pub use speckit_wizard::{render_speckit_wizard, SpecKitWizardState};
 pub use wizard::{
     render_wizard, CodingAgent, ExecutionMode, QuickStartDockerSettings, QuickStartEntry,
     ReasoningLevel, WizardConfirmResult, WizardState, WizardStep,
