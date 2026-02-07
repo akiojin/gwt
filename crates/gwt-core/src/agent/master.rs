@@ -2,6 +2,7 @@
 
 use crate::ai::{AIClient, AIError, ChatMessage};
 use crate::config::ResolvedAISettings;
+use tracing;
 
 use super::conversation::{Conversation, MessageRole};
 
@@ -35,6 +36,11 @@ impl MasterAgent {
         self.system_prompt = prompt.into();
     }
 
+    /// Returns the cumulative estimated token count across all LLM calls
+    pub fn estimated_tokens(&self) -> u64 {
+        self.client.cumulative_tokens()
+    }
+
     pub fn send_message(&mut self, user_message: &str) -> Result<String, AIError> {
         self.conversation
             .push(MessageRole::User, user_message.to_string());
@@ -59,7 +65,26 @@ impl MasterAgent {
             });
         }
 
-        let response = self.client.create_response(messages)?;
+        let response = match self.client.create_response(messages) {
+            Ok(resp) => {
+                tracing::info!(
+                    category = "agent.master.llm",
+                    prompt_len = user_message.len(),
+                    response_len = resp.len(),
+                    "LLM call completed"
+                );
+                resp
+            }
+            Err(err) => {
+                tracing::warn!(
+                    category = "agent.master.llm",
+                    prompt_len = user_message.len(),
+                    error = %err,
+                    "LLM call failed"
+                );
+                return Err(err);
+            }
+        };
         self.conversation
             .push(MessageRole::Assistant, response.clone());
         Ok(response)
@@ -176,4 +201,55 @@ fn try_parse_task_json(text: &str) -> Option<Vec<ParsedTask>> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_settings() -> ResolvedAISettings {
+        ResolvedAISettings {
+            endpoint: "https://api.openai.com/v1".to_string(),
+            api_key: "test-key".to_string(),
+            model: "gpt-4o-mini".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_estimated_tokens_initial_zero() {
+        let agent = MasterAgent::new(make_settings()).unwrap();
+        assert_eq!(agent.estimated_tokens(), 0);
+    }
+
+    #[test]
+    fn test_try_parse_task_json_direct() {
+        let json = r#"[{"name":"task1","description":"desc1"}]"#;
+        let tasks = try_parse_task_json(json).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].name, "task1");
+    }
+
+    #[test]
+    fn test_try_parse_task_json_code_block() {
+        let text = "```json\n[{\"name\":\"task1\",\"description\":\"desc1\"}]\n```";
+        let tasks = try_parse_task_json(text).unwrap();
+        assert_eq!(tasks.len(), 1);
+    }
+
+    #[test]
+    fn test_try_parse_task_json_invalid() {
+        assert!(try_parse_task_json("not json").is_none());
+    }
+
+    #[test]
+    fn test_try_parse_task_json_empty_array() {
+        assert!(try_parse_task_json("[]").is_none());
+    }
+
+    #[test]
+    fn test_set_system_prompt() {
+        let mut agent = MasterAgent::new(make_settings()).unwrap();
+        agent.set_system_prompt("Custom prompt");
+        assert_eq!(agent.system_prompt, "Custom prompt");
+    }
 }

@@ -12,6 +12,7 @@ pub mod orchestrator;
 pub mod prompt_builder;
 pub mod scanner;
 pub mod session;
+pub mod session_store;
 pub mod sub_agent;
 pub mod task;
 pub mod trait_agent;
@@ -27,6 +28,7 @@ pub use orchestrator::{OrchestratorEvent, OrchestratorLoop, OrchestratorMessage}
 pub use prompt_builder::PromptBuilder;
 pub use scanner::{BuildSystem, RepositoryScanResult, RepositoryScanner};
 pub use session::{AgentSession, SessionStatus};
+pub use session_store::{SessionStore, SessionStoreError, SessionSummary};
 pub use sub_agent::{CompletionSource, SubAgent, SubAgentStatus, SubAgentType};
 pub use task::{
     PullRequestRef, Task, TaskResult as AgentTaskResult, TaskStatus, TestStatus, TestVerification,

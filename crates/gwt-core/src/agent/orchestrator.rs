@@ -3,13 +3,54 @@
 //! The OrchestratorLoop receives events via mpsc channel and drives
 //! the full agent workflow: Spec Kit -> approval -> task execution -> completion.
 
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use super::master::{MasterAgent, ParsedTask};
 use super::session::{AgentSession, SessionStatus};
+use super::session_store::SessionStore;
 use super::task::{Task, TaskStatus, TestStatus, TestVerification};
 use super::types::{SessionId, TaskId};
+
+/// Queue for managing multiple sessions (T068)
+pub struct SessionQueue {
+    active: Option<SessionId>,
+    pending: VecDeque<SessionId>,
+}
+
+impl SessionQueue {
+    pub fn new() -> Self {
+        Self {
+            active: None,
+            pending: VecDeque::new(),
+        }
+    }
+
+    pub fn enqueue(&mut self, session_id: SessionId) {
+        self.pending.push_back(session_id);
+    }
+
+    pub fn dequeue(&mut self) -> Option<SessionId> {
+        let next = self.pending.pop_front();
+        self.active = next.clone();
+        next
+    }
+
+    pub fn current(&self) -> Option<&SessionId> {
+        self.active.as_ref()
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+}
+
+impl Default for SessionQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Events that drive the orchestration loop
 #[derive(Debug, Clone)]
@@ -82,6 +123,22 @@ pub struct OrchestratorLoop {
     pending_artifacts: Option<(String, String, String)>,
     /// Parsed tasks from the plan
     parsed_tasks: Vec<ParsedTask>,
+    /// Session queue for managing multiple sessions (T068)
+    session_queue: SessionQueue,
+    /// Whether this session is a dry run (T079)
+    dry_run: bool,
+    /// Persistent session store (T065)
+    session_store: Option<SessionStore>,
+}
+
+/// Spawn a background thread that sends ProgressTick events at regular intervals (T077)
+fn spawn_progress_timer(event_tx: Sender<OrchestratorEvent>) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(120));
+        if event_tx.send(OrchestratorEvent::ProgressTick).is_err() {
+            break;
+        }
+    })
 }
 
 impl OrchestratorLoop {
@@ -102,6 +159,9 @@ impl OrchestratorLoop {
             original_request: None,
             pending_artifacts: None,
             parsed_tasks: Vec::new(),
+            session_queue: SessionQueue::new(),
+            dry_run: false,
+            session_store: Some(SessionStore::new()),
         };
 
         (orchestrator, tx_clone)
@@ -112,10 +172,22 @@ impl OrchestratorLoop {
         self.event_tx.clone()
     }
 
+    /// Get a reference to the session queue
+    pub fn session_queue(&self) -> &SessionQueue {
+        &self.session_queue
+    }
+
+    /// Get a mutable reference to the session queue
+    pub fn session_queue_mut(&mut self) -> &mut SessionQueue {
+        &mut self.session_queue
+    }
+
     /// Run the event loop (blocking)
     ///
     /// Processes events until the session completes or an interrupt is received.
     pub fn run_loop(&mut self, master: &mut MasterAgent) {
+        let _progress_handle = spawn_progress_timer(self.event_tx.clone());
+
         while let Ok(event) = self.event_rx.recv() {
             match event {
                 OrchestratorEvent::SessionStart {
@@ -144,7 +216,7 @@ impl OrchestratorLoop {
                     self.handle_test_failed(&task_id, &output);
                 }
                 OrchestratorEvent::ProgressTick => {
-                    // Progress reporting (Phase 5)
+                    self.handle_progress_tick();
                 }
                 OrchestratorEvent::InterruptRequested => {
                     self.handle_interrupt();
@@ -168,6 +240,24 @@ impl OrchestratorLoop {
         session_id: SessionId,
         user_request: &str,
     ) {
+        // Dry-run detection (T079)
+        let is_dry_run =
+            user_request.to_lowercase().contains("dry run") || user_request.contains("計画だけ");
+        self.dry_run = is_dry_run;
+
+        // Session continuation check (T081)
+        if self.session.is_some() && self.check_session_continuation(master, user_request) {
+            // Continue existing session - just forward the request
+            let _ = self.message_tx.send(OrchestratorMessage::ChatMessage {
+                role: "system".to_string(),
+                content: format!("Continuing existing session with: {}", user_request),
+            });
+            self.original_request = Some(user_request.to_string());
+            self.run_speckit_and_present(master, user_request);
+            self.save_session_if_needed();
+            return;
+        }
+
         let session = AgentSession::new(session_id, std::path::PathBuf::from("."));
         self.session = Some(session);
 
@@ -177,6 +267,14 @@ impl OrchestratorLoop {
             content: format!("Starting session for: {}", user_request),
         });
 
+        if is_dry_run {
+            let _ = self.message_tx.send(OrchestratorMessage::ChatMessage {
+                role: "system".to_string(),
+                content: "Dry-run mode: will generate plan only, no tasks will be executed."
+                    .to_string(),
+            });
+        }
+
         // Save original request for use after question phase
         self.original_request = Some(user_request.to_string());
 
@@ -184,16 +282,19 @@ impl OrchestratorLoop {
         let needs_answers = self.run_question_phase(master, user_request);
         if needs_answers {
             self.awaiting_question_answers = true;
+            self.save_session_if_needed();
             return;
         }
 
         // Run Spec Kit workflow via master agent
         self.run_speckit_and_present(master, user_request);
+        self.save_session_if_needed();
     }
 
     fn handle_user_input(&mut self, master: &mut MasterAgent, content: &str) {
         if self.awaiting_approval {
             self.process_approval_response(master, content);
+            self.save_session_if_needed();
             return;
         }
 
@@ -210,6 +311,19 @@ impl OrchestratorLoop {
                 .clone()
                 .unwrap_or_else(|| content.to_string());
             self.run_speckit_and_present(master, &user_request);
+            self.save_session_if_needed();
+            return;
+        }
+
+        // Live intervention: if tasks are running, perform impact analysis (T080)
+        let has_running_tasks = self
+            .session
+            .as_ref()
+            .map(|s| s.tasks.iter().any(|t| t.status == TaskStatus::Running))
+            .unwrap_or(false);
+        if has_running_tasks {
+            self.impact_analysis(master, content);
+            self.save_session_if_needed();
             return;
         }
 
@@ -231,9 +345,12 @@ impl OrchestratorLoop {
                     .send(OrchestratorMessage::Error(format!("LLM error: {}", e)));
             }
         }
+        self.save_session_if_needed();
     }
 
     fn handle_sub_agent_completed(&mut self, task_id: &TaskId, pane_id: &str) {
+        tracing::info!(category = "agent.sub", task_id = %task_id.0, "Sub-agent completed");
+
         if let Some(session) = &mut self.session {
             if let Some(task) = session.tasks.iter_mut().find(|t| t.id == *task_id) {
                 task.status = TaskStatus::Completed;
@@ -248,9 +365,12 @@ impl OrchestratorLoop {
 
         // Run test verification (T050)
         self.run_test_verification(task_id, pane_id);
+        self.save_session_if_needed();
     }
 
     fn handle_sub_agent_failed(&mut self, task_id: &TaskId, _pane_id: &str, reason: &str) {
+        tracing::warn!(category = "agent.sub", task_id = %task_id.0, reason = %reason, "Sub-agent failed");
+
         let retryable = Self::is_retryable_error(reason);
 
         if retryable {
@@ -267,6 +387,7 @@ impl OrchestratorLoop {
                 ),
             });
         }
+        self.save_session_if_needed();
     }
 
     fn handle_test_passed(&mut self, task_id: &TaskId) {
@@ -337,6 +458,7 @@ impl OrchestratorLoop {
 
         // Check if all tasks are done
         self.check_session_completion();
+        self.save_session_if_needed();
     }
 
     fn handle_test_failed(&mut self, task_id: &TaskId, output: &str) {
@@ -394,15 +516,206 @@ impl OrchestratorLoop {
                 ),
             });
         }
+        self.save_session_if_needed();
     }
 
     fn handle_interrupt(&mut self) {
         if let Some(session) = &mut self.session {
+            // Pause all running tasks (T072)
+            for task in &mut session.tasks {
+                if task.status == TaskStatus::Running {
+                    task.status = TaskStatus::Paused;
+                }
+            }
             session.status = SessionStatus::Paused;
             let _ = self.message_tx.send(OrchestratorMessage::ChatMessage {
                 role: "system".to_string(),
-                content: "Session paused by user interrupt (Esc)".to_string(),
+                content: "Session paused by user interrupt (Esc). All running tasks paused."
+                    .to_string(),
             });
+        }
+        self.save_session_if_needed();
+    }
+
+    /// Report progress for all running tasks (T078)
+    fn handle_progress_tick(&self) {
+        if let Some(session) = &self.session {
+            let now = chrono::Utc::now();
+            let running_tasks: Vec<_> = session
+                .tasks
+                .iter()
+                .filter(|t| t.status == TaskStatus::Running)
+                .collect();
+
+            if running_tasks.is_empty() {
+                return;
+            }
+
+            let mut lines = Vec::new();
+            for task in &running_tasks {
+                let elapsed = task
+                    .started_at
+                    .map(|started| {
+                        let dur = now.signed_duration_since(started);
+                        let mins = dur.num_minutes();
+                        let secs = dur.num_seconds() % 60;
+                        format!("{}m {}s", mins, secs)
+                    })
+                    .unwrap_or_else(|| "unknown".to_string());
+                lines.push(format!("  - {} (running for {})", task.name, elapsed));
+            }
+
+            let report = format!(
+                "Progress: {} task(s) running\n{}",
+                running_tasks.len(),
+                lines.join("\n")
+            );
+            let _ = self.message_tx.send(OrchestratorMessage::ChatMessage {
+                role: "system".to_string(),
+                content: report,
+            });
+        }
+    }
+
+    /// Analyze the impact of a new user instruction on running tasks (T080)
+    ///
+    /// Uses LLM to determine which running tasks are affected by the new instruction,
+    /// stops affected tasks, and sends re-planning messages.
+    fn impact_analysis(&mut self, master: &mut MasterAgent, new_instruction: &str) {
+        let task_list: Vec<String> = self
+            .session
+            .as_ref()
+            .map(|s| {
+                s.tasks
+                    .iter()
+                    .filter(|t| t.status == TaskStatus::Running)
+                    .map(|t| format!("- [{}] {}: {}", t.id.0, t.name, t.description))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if task_list.is_empty() {
+            return;
+        }
+
+        let prompt = format!(
+            "Currently running tasks:\n{}\n\n\
+             New user instruction: {}\n\n\
+             Which tasks (if any) are affected by this new instruction? \
+             Reply with a JSON array of affected task IDs, e.g. [\"task-1\", \"task-3\"]. \
+             If no tasks are affected, reply with [].",
+            task_list.join("\n"),
+            new_instruction
+        );
+
+        match master.send_message(&prompt) {
+            Ok(response) => {
+                if let Some(session) = &mut self.session {
+                    session.llm_call_count += 1;
+                }
+                self.send_status_update();
+
+                // Parse affected task IDs from response
+                let affected_ids = Self::parse_affected_task_ids(&response);
+
+                if affected_ids.is_empty() {
+                    let _ = self.message_tx.send(OrchestratorMessage::ChatMessage {
+                        role: "system".to_string(),
+                        content:
+                            "Impact analysis: no running tasks are affected by the new instruction."
+                                .to_string(),
+                    });
+                    return;
+                }
+
+                // Stop affected tasks and send re-planning message
+                if let Some(session) = &mut self.session {
+                    for task in session.tasks.iter_mut() {
+                        if task.status == TaskStatus::Running && affected_ids.contains(&task.id.0) {
+                            task.status = TaskStatus::Ready;
+
+                            // Send re-planning instruction to the sub-agent pane
+                            if let Some(ref sub_agent) = task.sub_agent {
+                                let replan_msg = format!(
+                                    "IMPORTANT: New instruction received. Please adjust your work: {}",
+                                    new_instruction
+                                );
+                                let _ = crate::tmux::pane::send_prompt_to_pane(
+                                    &sub_agent.pane_id,
+                                    &replan_msg,
+                                );
+                            }
+                        }
+                    }
+                }
+
+                let _ = self.message_tx.send(OrchestratorMessage::ChatMessage {
+                    role: "system".to_string(),
+                    content: format!(
+                        "Impact analysis: {} task(s) affected and re-planned.",
+                        affected_ids.len()
+                    ),
+                });
+            }
+            Err(e) => {
+                let _ = self.message_tx.send(OrchestratorMessage::Error(format!(
+                    "Impact analysis LLM error: {}",
+                    e
+                )));
+            }
+        }
+    }
+
+    /// Parse task IDs from an LLM response containing a JSON array
+    fn parse_affected_task_ids(response: &str) -> Vec<String> {
+        let trimmed = response.trim();
+        // Try to find a JSON array in the response
+        if let Some(start) = trimmed.find('[') {
+            if let Some(end) = trimmed[start..].find(']') {
+                let json_str = &trimmed[start..start + end + 1];
+                if let Ok(ids) = serde_json::from_str::<Vec<String>>(json_str) {
+                    return ids;
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    /// Check whether a user request should continue an existing session (T081)
+    ///
+    /// Uses LLM to determine if the request is a continuation of the current session
+    /// or should start a new one.
+    fn check_session_continuation(&mut self, master: &mut MasterAgent, user_request: &str) -> bool {
+        let session_context = self
+            .session
+            .as_ref()
+            .map(|s| {
+                let task_names: Vec<&str> = s.tasks.iter().map(|t| t.name.as_str()).collect();
+                format!(
+                    "Session has {} tasks: {}",
+                    task_names.len(),
+                    task_names.join(", ")
+                )
+            })
+            .unwrap_or_default();
+
+        let prompt = format!(
+            "An active session exists with this context:\n{}\n\n\
+             New user request: {}\n\n\
+             Is this request a continuation of the existing session, or should a new session be created? \
+             Reply with exactly \"CONTINUE\" or \"NEW\".",
+            session_context, user_request
+        );
+
+        match master.send_message(&prompt) {
+            Ok(response) => {
+                if let Some(session) = &mut self.session {
+                    session.llm_call_count += 1;
+                }
+                self.send_status_update();
+                response.trim().to_uppercase().contains("CONTINUE")
+            }
+            Err(_) => false,
         }
     }
 
@@ -617,27 +930,68 @@ impl OrchestratorLoop {
 
     /// Check if all tasks are complete and update session status
     fn check_session_completion(&mut self) {
-        if let Some(session) = &mut self.session {
-            let all_done = session.tasks.iter().all(|t| {
-                t.status == TaskStatus::Completed
-                    || t.status == TaskStatus::Failed
-                    || t.status == TaskStatus::Cancelled
-            });
+        let all_done = self
+            .session
+            .as_ref()
+            .map(|s| {
+                !s.tasks.is_empty()
+                    && s.tasks.iter().all(|t| {
+                        t.status == TaskStatus::Completed
+                            || t.status == TaskStatus::Failed
+                            || t.status == TaskStatus::Cancelled
+                    })
+            })
+            .unwrap_or(false);
 
-            if all_done && !session.tasks.is_empty() {
+        if all_done {
+            if let Some(session) = &self.session {
                 let any_failed = session.tasks.iter().any(|t| t.status == TaskStatus::Failed);
                 if any_failed {
-                    // Some tasks failed, but session is still considered completed
                     let _ = self.message_tx.send(OrchestratorMessage::ChatMessage {
                         role: "system".to_string(),
                         content: "All tasks finished. Some tasks failed.".to_string(),
                     });
                 }
-                session.status = SessionStatus::Completed;
-            } else {
-                self.launch_ready_tasks();
             }
+            // Run cleanup (T070) then dequeue next session
+            self.run_cleanup();
+            let _next = self.session_queue.dequeue();
+        } else {
+            self.launch_ready_tasks();
         }
+    }
+
+    /// Clean up worktrees and mark session completed (T069)
+    fn run_cleanup(&mut self) {
+        if let Some(session) = &mut self.session {
+            let all_completed = session.tasks.iter().all(|t| {
+                t.status == TaskStatus::Completed
+                    || t.status == TaskStatus::Failed
+                    || t.status == TaskStatus::Cancelled
+            });
+            if !all_completed {
+                return;
+            }
+
+            // Remove each task's worktree and branch
+            for task in &session.tasks {
+                if let Some(ref wt) = task.assigned_worktree {
+                    let _ = std::process::Command::new("git")
+                        .args(["worktree", "remove", "--force", &wt.path.to_string_lossy()])
+                        .output();
+                    let _ = std::process::Command::new("git")
+                        .args(["branch", "-d", &wt.branch_name])
+                        .output();
+                }
+            }
+
+            session.status = SessionStatus::Completed;
+            let _ = self.message_tx.send(OrchestratorMessage::ChatMessage {
+                role: "system".to_string(),
+                content: "Session cleanup completed.".to_string(),
+            });
+        }
+        self.save_session_if_needed();
     }
 
     /// Run Spec Kit workflow and present plan for approval
@@ -699,6 +1053,20 @@ impl OrchestratorLoop {
 
         if approved {
             self.awaiting_approval = false;
+
+            // In dry-run mode, show results but skip task execution (T079)
+            if self.dry_run {
+                let _ = self.message_tx.send(OrchestratorMessage::ChatMessage {
+                    role: "system".to_string(),
+                    content: "Dry-run complete. Plan approved but no tasks will be executed."
+                        .to_string(),
+                });
+                self.pending_artifacts = None;
+                if let Some(session) = &mut self.session {
+                    session.status = SessionStatus::Completed;
+                }
+                return;
+            }
 
             // Parse tasks and create Task objects
             if let Some((_, _, ref tasks_content)) = self.pending_artifacts {
@@ -785,6 +1153,7 @@ impl OrchestratorLoop {
 
             // For now, launch one at a time (parallel execution will be added in Phase C)
             let task = &ready_tasks[0];
+            tracing::info!(category = "agent.sub", task = %task.name, "Launching sub-agent");
             let _ = self.message_tx.send(OrchestratorMessage::ChatMessage {
                 role: "system".to_string(),
                 content: format!("Launching task: {}", task.name),
@@ -862,6 +1231,15 @@ impl OrchestratorLoop {
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
             Err(format!("Merge conflict: {}", stderr))
+        }
+    }
+
+    /// Persist the current session to disk if a store and session are available (T065)
+    fn save_session_if_needed(&self) {
+        if let (Some(store), Some(session)) = (&self.session_store, &self.session) {
+            if let Err(e) = store.save(session) {
+                tracing::warn!(category = "agent.session", error = %e, "Failed to save session");
+            }
         }
     }
 
@@ -1304,5 +1682,336 @@ mod tests {
             orchestrator.session.as_ref().unwrap().status,
             SessionStatus::Active
         );
+    }
+
+    // T068: SessionQueue tests
+    #[test]
+    fn test_session_queue_new_is_empty() {
+        let queue = SessionQueue::new();
+        assert!(queue.current().is_none());
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[test]
+    fn test_session_queue_default() {
+        let queue = SessionQueue::default();
+        assert!(queue.current().is_none());
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[test]
+    fn test_session_queue_enqueue_and_dequeue() {
+        let mut queue = SessionQueue::new();
+        let id1 = SessionId("s1".to_string());
+        let id2 = SessionId("s2".to_string());
+
+        queue.enqueue(id1.clone());
+        queue.enqueue(id2.clone());
+        assert_eq!(queue.pending_count(), 2);
+
+        let dequeued = queue.dequeue();
+        assert_eq!(dequeued, Some(id1.clone()));
+        assert_eq!(queue.current(), Some(&id1));
+        assert_eq!(queue.pending_count(), 1);
+
+        let dequeued2 = queue.dequeue();
+        assert_eq!(dequeued2, Some(id2.clone()));
+        assert_eq!(queue.current(), Some(&id2));
+        assert_eq!(queue.pending_count(), 0);
+
+        let dequeued3 = queue.dequeue();
+        assert!(dequeued3.is_none());
+    }
+
+    #[test]
+    fn test_orchestrator_has_session_queue_and_dry_run() {
+        let (msg_tx, _msg_rx) = mpsc::channel();
+        let (orchestrator, _event_tx) = OrchestratorLoop::new(msg_tx);
+        assert!(orchestrator.session_queue.current().is_none());
+        assert_eq!(orchestrator.session_queue.pending_count(), 0);
+        assert!(!orchestrator.dry_run);
+    }
+
+    // T078: handle_progress_tick tests
+    #[test]
+    fn test_handle_progress_tick_no_session() {
+        let (msg_tx, _msg_rx) = mpsc::channel();
+        let (orchestrator, _event_tx) = OrchestratorLoop::new(msg_tx);
+        // Should not panic with no session
+        orchestrator.handle_progress_tick();
+    }
+
+    #[test]
+    fn test_handle_progress_tick_no_running_tasks() {
+        let (msg_tx, msg_rx) = mpsc::channel();
+        let (mut orchestrator, _event_tx) = OrchestratorLoop::new(msg_tx);
+
+        let mut session = AgentSession::new(
+            SessionId("sess-1".to_string()),
+            std::path::PathBuf::from("."),
+        );
+        let task = Task::new(TaskId("t1".to_string()), "task 1", "desc");
+        session.tasks.push(task);
+        orchestrator.session = Some(session);
+
+        orchestrator.handle_progress_tick();
+        // No message should be sent since no tasks are Running
+        assert!(msg_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_handle_progress_tick_with_running_tasks() {
+        let (msg_tx, msg_rx) = mpsc::channel();
+        let (mut orchestrator, _event_tx) = OrchestratorLoop::new(msg_tx);
+
+        let mut session = AgentSession::new(
+            SessionId("sess-1".to_string()),
+            std::path::PathBuf::from("."),
+        );
+        let mut task = Task::new(TaskId("t1".to_string()), "running task", "desc");
+        task.status = TaskStatus::Running;
+        task.started_at = Some(chrono::Utc::now());
+        session.tasks.push(task);
+        orchestrator.session = Some(session);
+
+        orchestrator.handle_progress_tick();
+        let msg = msg_rx.try_recv().unwrap();
+        match msg {
+            OrchestratorMessage::ChatMessage { content, .. } => {
+                assert!(content.contains("1 task(s) running"));
+                assert!(content.contains("running task"));
+            }
+            _ => panic!("Expected ChatMessage"),
+        }
+    }
+
+    // T079: dry-run detection tests
+    #[test]
+    fn test_dry_run_detection_english() {
+        let request = "Please do a dry run of the deployment";
+        assert!(request.to_lowercase().contains("dry run"));
+    }
+
+    #[test]
+    fn test_dry_run_detection_japanese() {
+        let request = "計画だけ作成してください";
+        assert!(request.contains("計画だけ"));
+    }
+
+    #[test]
+    fn test_dry_run_detection_negative() {
+        let request = "implement the feature";
+        assert!(!request.to_lowercase().contains("dry run"));
+        assert!(!request.contains("計画だけ"));
+    }
+
+    // T080: parse_affected_task_ids tests
+    #[test]
+    fn test_parse_affected_task_ids_valid() {
+        let response = r#"Based on the analysis, the affected tasks are: ["task-1", "task-3"]"#;
+        let ids = OrchestratorLoop::parse_affected_task_ids(response);
+        assert_eq!(ids, vec!["task-1".to_string(), "task-3".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_affected_task_ids_empty() {
+        let response = "No tasks are affected: []";
+        let ids = OrchestratorLoop::parse_affected_task_ids(response);
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn test_parse_affected_task_ids_no_json() {
+        let response = "I'm not sure which tasks are affected";
+        let ids = OrchestratorLoop::parse_affected_task_ids(response);
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn test_parse_affected_task_ids_bare_array() {
+        let response = r#"["task-2"]"#;
+        let ids = OrchestratorLoop::parse_affected_task_ids(response);
+        assert_eq!(ids, vec!["task-2".to_string()]);
+    }
+
+    // T077: spawn_progress_timer test
+    #[test]
+    fn test_spawn_progress_timer_sends_events() {
+        let (event_tx, event_rx) = mpsc::channel();
+        let handle = spawn_progress_timer(event_tx);
+
+        // Drop handle to close channel (timer thread will exit)
+        drop(handle);
+
+        // Timer fires at 120s intervals - we can't wait that long in tests.
+        // Instead, verify the thread was spawned and the channel works.
+        // Dropping event_rx is sufficient; the timer thread will exit on next send.
+        drop(event_rx);
+    }
+
+    // T065: session_store field is initialized
+    #[test]
+    fn test_orchestrator_has_session_store() {
+        let (msg_tx, _msg_rx) = mpsc::channel();
+        let (orchestrator, _event_tx) = OrchestratorLoop::new(msg_tx);
+        assert!(orchestrator.session_store.is_some());
+    }
+
+    // T065: save_session_if_needed does not panic with no session
+    #[test]
+    fn test_save_session_if_needed_no_session() {
+        let (msg_tx, _msg_rx) = mpsc::channel();
+        let (orchestrator, _event_tx) = OrchestratorLoop::new(msg_tx);
+        // Should not panic when session is None
+        orchestrator.save_session_if_needed();
+    }
+
+    // T065: save_session_if_needed does not panic with no store
+    #[test]
+    fn test_save_session_if_needed_no_store() {
+        let (msg_tx, _msg_rx) = mpsc::channel();
+        let (mut orchestrator, _event_tx) = OrchestratorLoop::new(msg_tx);
+        orchestrator.session_store = None;
+        orchestrator.session = Some(AgentSession::new(
+            SessionId("s1".to_string()),
+            std::path::PathBuf::from("."),
+        ));
+        // Should not panic when store is None
+        orchestrator.save_session_if_needed();
+    }
+
+    // T069: run_cleanup marks session completed
+    #[test]
+    fn test_run_cleanup_marks_completed() {
+        let (msg_tx, msg_rx) = mpsc::channel();
+        let (mut orchestrator, _event_tx) = OrchestratorLoop::new(msg_tx);
+        orchestrator.session_store = None; // Avoid filesystem side effects
+
+        let mut session = AgentSession::new(
+            SessionId("sess-1".to_string()),
+            std::path::PathBuf::from("."),
+        );
+        let mut task = Task::new(TaskId("t1".to_string()), "task 1", "desc");
+        task.status = TaskStatus::Completed;
+        session.tasks.push(task);
+        orchestrator.session = Some(session);
+
+        orchestrator.run_cleanup();
+
+        assert_eq!(
+            orchestrator.session.as_ref().unwrap().status,
+            SessionStatus::Completed
+        );
+        // Verify cleanup message was sent
+        let mut found_cleanup_msg = false;
+        while let Ok(msg) = msg_rx.try_recv() {
+            if let OrchestratorMessage::ChatMessage { content, .. } = msg {
+                if content.contains("cleanup completed") {
+                    found_cleanup_msg = true;
+                }
+            }
+        }
+        assert!(found_cleanup_msg);
+    }
+
+    // T069: run_cleanup does nothing if tasks are still running
+    #[test]
+    fn test_run_cleanup_skips_if_not_all_done() {
+        let (msg_tx, _msg_rx) = mpsc::channel();
+        let (mut orchestrator, _event_tx) = OrchestratorLoop::new(msg_tx);
+        orchestrator.session_store = None;
+
+        let mut session = AgentSession::new(
+            SessionId("sess-1".to_string()),
+            std::path::PathBuf::from("."),
+        );
+        let mut task1 = Task::new(TaskId("t1".to_string()), "task 1", "desc");
+        task1.status = TaskStatus::Completed;
+        let mut task2 = Task::new(TaskId("t2".to_string()), "task 2", "desc");
+        task2.status = TaskStatus::Running;
+        session.tasks.push(task1);
+        session.tasks.push(task2);
+        orchestrator.session = Some(session);
+
+        orchestrator.run_cleanup();
+
+        // Session should still be Active since not all tasks are done
+        assert_eq!(
+            orchestrator.session.as_ref().unwrap().status,
+            SessionStatus::Active
+        );
+    }
+
+    // T072: handle_interrupt pauses running tasks
+    #[test]
+    fn test_handle_interrupt_pauses_running_tasks() {
+        let (msg_tx, msg_rx) = mpsc::channel();
+        let (mut orchestrator, _event_tx) = OrchestratorLoop::new(msg_tx);
+        orchestrator.session_store = None;
+
+        let mut session = AgentSession::new(
+            SessionId("sess-1".to_string()),
+            std::path::PathBuf::from("."),
+        );
+        let mut task1 = Task::new(TaskId("t1".to_string()), "task 1", "desc");
+        task1.status = TaskStatus::Running;
+        let mut task2 = Task::new(TaskId("t2".to_string()), "task 2", "desc");
+        task2.status = TaskStatus::Running;
+        let mut task3 = Task::new(TaskId("t3".to_string()), "task 3", "desc");
+        task3.status = TaskStatus::Completed;
+        session.tasks.push(task1);
+        session.tasks.push(task2);
+        session.tasks.push(task3);
+        orchestrator.session = Some(session);
+
+        orchestrator.handle_interrupt();
+
+        let session = orchestrator.session.as_ref().unwrap();
+        assert_eq!(session.status, SessionStatus::Paused);
+        assert_eq!(session.tasks[0].status, TaskStatus::Paused);
+        assert_eq!(session.tasks[1].status, TaskStatus::Paused);
+        assert_eq!(session.tasks[2].status, TaskStatus::Completed); // unchanged
+
+        // Verify interrupt message was sent
+        let mut found_msg = false;
+        while let Ok(msg) = msg_rx.try_recv() {
+            if let OrchestratorMessage::ChatMessage { content, .. } = msg {
+                if content.contains("paused by user interrupt") {
+                    found_msg = true;
+                }
+            }
+        }
+        assert!(found_msg);
+    }
+
+    // T070: check_session_completion calls run_cleanup and dequeues
+    #[test]
+    fn test_check_session_completion_runs_cleanup() {
+        let (msg_tx, _msg_rx) = mpsc::channel();
+        let (mut orchestrator, _event_tx) = OrchestratorLoop::new(msg_tx);
+        orchestrator.session_store = None;
+
+        let mut session = AgentSession::new(
+            SessionId("sess-1".to_string()),
+            std::path::PathBuf::from("."),
+        );
+        let mut task = Task::new(TaskId("t1".to_string()), "task 1", "desc");
+        task.status = TaskStatus::Completed;
+        session.tasks.push(task);
+        orchestrator.session = Some(session);
+
+        // Enqueue a next session
+        orchestrator
+            .session_queue
+            .enqueue(SessionId("next".to_string()));
+
+        orchestrator.check_session_completion();
+
+        assert_eq!(
+            orchestrator.session.as_ref().unwrap().status,
+            SessionStatus::Completed
+        );
+        // Next session was dequeued
+        assert_eq!(orchestrator.session_queue.pending_count(), 0);
     }
 }

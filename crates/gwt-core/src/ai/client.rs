@@ -68,7 +68,12 @@ struct ResponsesResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct UsageInfo {
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    completion_tokens: u64,
     #[serde(default)]
     total_tokens: u64,
 }

@@ -212,62 +212,62 @@ US4 (完了検出) ────────────┘
 
 ### セッション永続化 (FR-010, FR-011)
 
-- [ ] **T059** [P] [US7] `crates/gwt-core/src/agent/session_store.rs` を新規作成し、SessionStore構造体を定義。sessions_dir関数で `~/.gwt/sessions/` パスを取得、ディレクトリ0700で自動作成
-- [ ] **T060** [US7] T059の後に `crates/gwt-core/src/agent/session_store.rs` にsave関数を実装（serde_json::to_string_pretty→一時ファイル書出→atomic rename、パーミッション0600）
-- [ ] **T061** [US7] T060の後に `crates/gwt-core/src/agent/session_store.rs` にload関数を実装（JSON読込→AgentSessionへデシリアライズ、破損時は`.broken`にリネームして退避）
-- [ ] **T062** [US7] T061の後に `crates/gwt-core/src/agent/session_store.rs` にlist_sessions関数を実装（sessions/ディレクトリの全JSONファイルからSessionId+status+updated_atを一覧取得）
-- [ ] **T063** [US7] T062の後に `crates/gwt-core/src/agent/session_store.rs` にvalidate_session関数を実装（各worktreeのパス存在確認、欠落タスクをFailed/Pausedに設定）
-- [ ] **T064** [US7] T063の後に `crates/gwt-core/src/agent/mod.rs` に `pub mod session_store;` を追加しSessionStoreをエクスポート
+- [x] **T059** [P] [US7] `crates/gwt-core/src/agent/session_store.rs` を新規作成し、SessionStore構造体を定義。sessions_dir関数で `~/.gwt/sessions/` パスを取得、ディレクトリ0700で自動作成
+- [x] **T060** [US7] T059の後に `crates/gwt-core/src/agent/session_store.rs` にsave関数を実装（serde_json::to_string_pretty→一時ファイル書出→atomic rename、パーミッション0600）
+- [x] **T061** [US7] T060の後に `crates/gwt-core/src/agent/session_store.rs` にload関数を実装（JSON読込→AgentSessionへデシリアライズ、破損時は`.broken`にリネームして退避）
+- [x] **T062** [US7] T061の後に `crates/gwt-core/src/agent/session_store.rs` にlist_sessions関数を実装（sessions/ディレクトリの全JSONファイルからSessionId+status+updated_atを一覧取得）
+- [x] **T063** [US7] T062の後に `crates/gwt-core/src/agent/session_store.rs` にvalidate_session関数を実装（各worktreeのパス存在確認、欠落タスクをFailed/Pausedに設定）
+- [x] **T064** [US7] T063の後に `crates/gwt-core/src/agent/mod.rs` に `pub mod session_store;` を追加しSessionStoreをエクスポート
 
 ### セッション永続化トリガー
 
-- [ ] **T065** [US7] T064の後に `crates/gwt-core/src/agent/orchestrator.rs` のrun_loop内の各イベントハンドラ末尾にSessionStore::save呼び出しを追加（会話追加・タスク状態変更・WT作成/削除・サブエージェント状態変更時）
+- [x] **T065** [US7] T064の後に `crates/gwt-core/src/agent/orchestrator.rs` のrun_loop内の各イベントハンドラ末尾にSessionStore::save呼び出しを追加（会話追加・タスク状態変更・WT作成/削除・サブエージェント状態変更時）
 
 ### セッション復元UI
 
-- [ ] **T066** [US7] T064の後に `crates/gwt-cli/src/tui/screens/agent_mode.rs` にrender_session_selector関数を追加（未完了セッション一覧表示、再開/破棄選択UI）
-- [ ] **T067** [US7] T066の後に `crates/gwt-cli/src/tui/app.rs` にエージェントモード初期化時にSessionStore::list_sessions呼び出しを追加、未完了セッション存在時にセッション選択画面を表示
+- [x] **T066** [US7] T064の後に `crates/gwt-cli/src/tui/screens/agent_mode.rs` にrender_session_selector関数を追加（未完了セッション一覧表示、再開/破棄選択UI）
+- [x] **T067** [US7] T066の後に `crates/gwt-cli/src/tui/app.rs` にエージェントモード初期化時にSessionStore::list_sessions呼び出しを追加、未完了セッション存在時にセッション選択画面を表示
 
 ### セッションキュー (FR-014)
 
-- [ ] **T068** [P] [共通] `crates/gwt-core/src/agent/orchestrator.rs` にSessionQueue構造体を追加（active: Option&lt;SessionId&gt;, pending: VecDeque&lt;SessionId&gt;）。enqueue / dequeue / current関数を実装
+- [x] **T068** [P] [共通] `crates/gwt-core/src/agent/orchestrator.rs` にSessionQueue構造体を追加（active: Option&lt;SessionId&gt;, pending: VecDeque&lt;SessionId&gt;）。enqueue / dequeue / current関数を実装
 
 ### セッション完了+クリーンアップ (セッション完了とクリーンアップ仕様)
 
-- [ ] **T069** [US7] T065の後に `crates/gwt-core/src/agent/orchestrator.rs` にrun_cleanup関数を追加（全タスクCompleted確認→各WTの未コミット確認→`git worktree remove`→`git branch -d`→リモートブランチ削除→セッションCompleted）
-- [ ] **T070** [US7] T069の後に `crates/gwt-core/src/agent/orchestrator.rs` のrun_loopにセッション完了判定ロジックを追加（全タスクCompleted + クリーンアップ完了でキュー次セッション開始）
+- [x] **T069** [US7] T065の後に `crates/gwt-core/src/agent/orchestrator.rs` にrun_cleanup関数を追加（全タスクCompleted確認→各WTの未コミット確認→`git worktree remove`→`git branch -d`→リモートブランチ削除→セッションCompleted）
+- [x] **T070** [US7] T069の後に `crates/gwt-core/src/agent/orchestrator.rs` のrun_loopにセッション完了判定ロジックを追加（全タスクCompleted + クリーンアップ完了でキュー次セッション開始）
 
 ### Esc中断 (FR-024)
 
-- [ ] **T071** [US1] T048の後に `crates/gwt-cli/src/tui/app.rs` のキーハンドラにEscキーでInterruptRequestedイベント送信を追加
-- [ ] **T072** [US1] T071の後に `crates/gwt-core/src/agent/orchestrator.rs` のrun_loopにInterruptRequestedイベントハンドラを追加（全サブエージェントにSIGTERM→5秒待機→Paused永続化→チャット通知）
+- [x] **T071** [US1] T048の後に `crates/gwt-cli/src/tui/app.rs` のキーハンドラにEscキーでInterruptRequestedイベント送信を追加
+- [x] **T072** [US1] T071の後に `crates/gwt-core/src/agent/orchestrator.rs` のrun_loopにInterruptRequestedイベントハンドラを追加（全サブエージェントにSIGTERM→5秒待機→Paused永続化→チャット通知）
 
 ### コスト可視化 (FR-015)
 
-- [ ] **T073** [P] [共通] `crates/gwt-core/src/ai/client.rs` のcreate_response戻り値にusage情報（prompt_tokens, completion_tokens）の取得を追加。AIClientにcumulative_tokensフィールドを追加
-- [ ] **T074** [共通] T073の後に `crates/gwt-core/src/agent/master.rs` のsend_message内でAIClient::cumulative_tokensをAgentSession::estimated_tokensに反映
+- [x] **T073** [P] [共通] `crates/gwt-core/src/ai/client.rs` のcreate_response戻り値にusage情報（prompt_tokens, completion_tokens）の取得を追加。AIClientにcumulative_tokensフィールドを追加
+- [x] **T074** [共通] T073の後に `crates/gwt-core/src/agent/master.rs` のsend_message内でAIClient::cumulative_tokensをAgentSession::estimated_tokensに反映
 
 ### ログ記録 (FR-025)
 
-- [ ] **T075** [P] [共通] `crates/gwt-core/src/agent/master.rs` のsend_message内にtracing::info!マクロでLLMコール記録を追加（カテゴリ: `agent.master.llm`、プロンプト長+レスポンス長を記録）
-- [ ] **T076** [共通] T075の後に `crates/gwt-core/src/agent/orchestrator.rs` のサブエージェント起動/完了/失敗箇所にtracing::info!マクロでイベント記録を追加（カテゴリ: `agent.sub`）
+- [x] **T075** [P] [共通] `crates/gwt-core/src/agent/master.rs` のsend_message内にtracing::info!マクロでLLMコール記録を追加（カテゴリ: `agent.master.llm`、プロンプト長+レスポンス長を記録）
+- [x] **T076** [共通] T075の後に `crates/gwt-core/src/agent/orchestrator.rs` のサブエージェント起動/完了/失敗箇所にtracing::info!マクロでイベント記録を追加（カテゴリ: `agent.sub`）
 
 ### 定期進捗報告 (FR-023)
 
-- [ ] **T077** [共通] T039の後に `crates/gwt-core/src/agent/orchestrator.rs` にspawn_progress_timer関数を追加（2分間隔でProgressTickイベントを送信するスレッド）
-- [ ] **T078** [共通] T077の後に `crates/gwt-core/src/agent/orchestrator.rs` のrun_loopにProgressTickイベントハンドラを追加（tmux list-panes + capture-paneで各タスク状態・実行時間・最近の出力要約をチャットメッセージとして報告。LLMコールなし）
+- [x] **T077** [共通] T039の後に `crates/gwt-core/src/agent/orchestrator.rs` にspawn_progress_timer関数を追加（2分間隔でProgressTickイベントを送信するスレッド）
+- [x] **T078** [共通] T077の後に `crates/gwt-core/src/agent/orchestrator.rs` のrun_loopにProgressTickイベントハンドラを追加（tmux list-panes + capture-paneで各タスク状態・実行時間・最近の出力要約をチャットメッセージとして報告。LLMコールなし）
 
 ### ドライランモード (FR-020)
 
-- [ ] **T079** [共通] T043の後に `crates/gwt-core/src/agent/orchestrator.rs` のrun_loopにドライラン判定を追加（ユーザーメッセージに「計画だけ」「dry run」等を検出→仕様+計画+タスクを生成して提示、実行には進まない。後から「実行して」で通常フローに移行）
+- [x] **T079** [共通] T043の後に `crates/gwt-core/src/agent/orchestrator.rs` のrun_loopにドライラン判定を追加（ユーザーメッセージに「計画だけ」「dry run」等を検出→仕様+計画+タスクを生成して提示、実行には進まない。後から「実行して」で通常フローに移行）
 
 ### ライブ介入 (FR-002c)
 
-- [ ] **T080** [共通] T041の後に `crates/gwt-core/src/agent/orchestrator.rs` のUserInputハンドラにimpact_analysis関数呼び出しを追加（LLMに現在のタスク一覧+新しい指示を渡し、影響タスクを判定→影響タスクのみ停止→再計画）
+- [x] **T080** [共通] T041の後に `crates/gwt-core/src/agent/orchestrator.rs` のUserInputハンドラにimpact_analysis関数呼び出しを追加（LLMに現在のタスク一覧+新しい指示を渡し、影響タスクを判定→影響タスクのみ停止→再計画）
 
 ### セッション継続判断 (FR-021)
 
-- [ ] **T081** [共通] T040の後に `crates/gwt-core/src/agent/orchestrator.rs` のSessionStartハンドラに完了済みセッション関連判定を追加（LLMに既存spec/planと新しいリクエストを渡し、「続き」なら既存セッション拡張、「新規」なら新セッション作成）
+- [x] **T081** [共通] T040の後に `crates/gwt-core/src/agent/orchestrator.rs` のSessionStartハンドラに完了済みセッション関連判定を追加（LLMに既存spec/planと新しいリクエストを渡し、「続き」なら既存セッション拡張、「新規」なら新セッション作成）
 
 **✅ P2完了チェックポイント**: 本番品質のエージェントモード（永続化・中断・復元・コスト・ログ・報告・ドライラン・介入・キュー）
 

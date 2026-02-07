@@ -11,7 +11,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use gwt_core::agent::{OrchestratorEvent, OrchestratorMessage};
+use gwt_core::agent::{OrchestratorEvent, OrchestratorMessage, SessionStatus, SessionStore};
 use gwt_core::ai::{
     summarize_session, AIClient, AIError, AgentHistoryStore, AgentType, ChatMessage,
     ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, OpenCodeSessionParser,
@@ -56,11 +56,11 @@ use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
 use super::screens::{
     collect_os_env, render_agent_mode, render_ai_wizard, render_branch_list, render_confirm,
     render_environment, render_error_with_queue, render_help, render_logs, render_profiles,
-    render_settings, render_wizard, render_worktree_create, AIWizardState, AgentMessage,
-    AgentModeState, AgentRole, BranchItem, BranchListState, BranchType, CodingAgent, ConfirmState,
-    EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, HelpState, LogsState, ProfilesState,
-    QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult, WizardState,
-    WorktreeCreateState,
+    render_session_selector, render_settings, render_wizard, render_worktree_create, AIWizardState,
+    AgentMessage, AgentModeState, AgentRole, BranchItem, BranchListState, BranchType, CodingAgent,
+    ConfirmState, EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, HelpState, LogsState,
+    ProfilesState, QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult,
+    WizardState, WorktreeCreateState,
 };
 // log_gwt_error is available for use when GwtError types are available
 
@@ -968,6 +968,20 @@ impl Model {
         self.update_agent_mode_ai_status();
         self.agent_mode.last_error = None;
         self.screen = Screen::AgentMode;
+
+        // Check for incomplete sessions
+        let store = SessionStore::new();
+        if let Ok(sessions) = store.list_sessions() {
+            let incomplete: Vec<_> = sessions
+                .into_iter()
+                .filter(|s| s.status != SessionStatus::Completed)
+                .collect();
+            if !incomplete.is_empty() {
+                self.agent_mode.pending_sessions = incomplete;
+                self.agent_mode.session_selector_index = 0;
+                self.agent_mode.show_session_selector = true;
+            }
+        }
 
         // Initialize orchestrator if not already active
         if self.orchestrator_event_tx.is_none() {
@@ -3253,7 +3267,15 @@ impl Model {
                     // SPEC-4b893dae: Update branch summary on selection change
                     self.refresh_branch_summary();
                 }
-                Screen::AgentMode => {}
+                Screen::AgentMode => {
+                    if self.agent_mode.show_session_selector
+                        && !self.agent_mode.pending_sessions.is_empty()
+                    {
+                        let len = self.agent_mode.pending_sessions.len();
+                        self.agent_mode.session_selector_index =
+                            (self.agent_mode.session_selector_index + 1).min(len - 1);
+                    }
+                }
                 Screen::WorktreeCreate => self.worktree_create.select_next_base(),
                 Screen::Settings => self.settings.select_next(),
                 Screen::Logs => self.logs.select_next(),
@@ -3274,7 +3296,12 @@ impl Model {
                     // SPEC-4b893dae: Update branch summary on selection change
                     self.refresh_branch_summary();
                 }
-                Screen::AgentMode => {}
+                Screen::AgentMode => {
+                    if self.agent_mode.show_session_selector {
+                        self.agent_mode.session_selector_index =
+                            self.agent_mode.session_selector_index.saturating_sub(1);
+                    }
+                }
                 Screen::WorktreeCreate => self.worktree_create.select_prev_base(),
                 Screen::Settings => self.settings.select_prev(),
                 Screen::Logs => self.logs.select_prev(),
@@ -3339,7 +3366,19 @@ impl Model {
                     }
                 }
                 Screen::AgentMode => {
-                    if !self.agent_mode.ai_ready {
+                    if self.agent_mode.show_session_selector {
+                        // Resume selected session
+                        if let Some(selected) = self
+                            .agent_mode
+                            .pending_sessions
+                            .get(self.agent_mode.session_selector_index)
+                        {
+                            let session_id = selected.session_id.clone();
+                            self.agent_mode.session_name = Some(session_id.0.clone());
+                            self.agent_mode.show_session_selector = false;
+                            self.agent_mode.pending_sessions.clear();
+                        }
+                    } else if !self.agent_mode.ai_ready {
                         self.open_ai_settings_for_agent_mode();
                     } else if self.agent_mode.is_waiting {
                         // Ignore input while waiting for response
@@ -3484,6 +3523,33 @@ impl Model {
                 } else if matches!(self.screen, Screen::Logs) && self.logs.is_searching {
                     // Log search mode - add character to search
                     self.logs.search.push(c);
+                } else if matches!(self.screen, Screen::AgentMode)
+                    && self.agent_mode.show_session_selector
+                {
+                    match c {
+                        'd' | 'D' => {
+                            // Discard selected session
+                            if !self.agent_mode.pending_sessions.is_empty() {
+                                self.agent_mode
+                                    .pending_sessions
+                                    .remove(self.agent_mode.session_selector_index);
+                                if self.agent_mode.pending_sessions.is_empty() {
+                                    self.agent_mode.show_session_selector = false;
+                                } else {
+                                    let len = self.agent_mode.pending_sessions.len();
+                                    if self.agent_mode.session_selector_index >= len {
+                                        self.agent_mode.session_selector_index = len - 1;
+                                    }
+                                }
+                            }
+                        }
+                        'n' | 'N' => {
+                            // New session - dismiss selector
+                            self.agent_mode.show_session_selector = false;
+                            self.agent_mode.pending_sessions.clear();
+                        }
+                        _ => {}
+                    }
                 } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
                     self.agent_mode.insert_char(c);
                 } else if matches!(self.screen, Screen::AISettingsWizard) {
@@ -4555,15 +4621,24 @@ impl Model {
                 render_worktree_create(&self.worktree_create, frame, chunks[1])
             }
             Screen::AgentMode => {
-                let status_message = self
-                    .active_status_message()
-                    .map(|message| message.to_string());
-                render_agent_mode(
-                    &self.agent_mode,
-                    frame,
-                    chunks[1],
-                    status_message.as_deref(),
-                );
+                if self.agent_mode.show_session_selector {
+                    render_session_selector(
+                        &self.agent_mode.pending_sessions,
+                        self.agent_mode.session_selector_index,
+                        frame,
+                        chunks[1],
+                    );
+                } else {
+                    let status_message = self
+                        .active_status_message()
+                        .map(|message| message.to_string());
+                    render_agent_mode(
+                        &self.agent_mode,
+                        frame,
+                        chunks[1],
+                        status_message.as_deref(),
+                    );
+                }
             }
             Screen::Settings => render_settings(&self.settings, frame, chunks[1]),
             Screen::Logs => render_logs(&mut self.logs, frame, chunks[1]),
@@ -4734,7 +4809,9 @@ impl Model {
                 }
             }
             Screen::AgentMode => {
-                if self.agent_mode.ai_ready {
+                if self.agent_mode.show_session_selector {
+                    "[Enter] Resume | [d] Discard | [n] New session | [Tab] Back"
+                } else if self.agent_mode.ai_ready {
                     "[Enter] Send | [Tab] Back"
                 } else {
                     "[Enter] Configure AI | [Tab] Back"
@@ -4904,11 +4981,21 @@ impl Model {
                 }
                 (KeyCode::Esc, _) => {
                     // FR-095: ESC key behavior:
+                    // - In AgentMode: send InterruptRequested to orchestrator
                     // - In filter mode: exit filter mode (handled by NavigateBack)
                     // - In BranchList with filter query: clear query
                     // - In BranchList with active agent pane: hide the pane
                     // - Otherwise: navigate back (but NOT quit from main screen)
-                    if matches!(self.screen, Screen::BranchList) {
+                    if matches!(self.screen, Screen::AgentMode) {
+                        if let Some(tx) = &self.orchestrator_event_tx {
+                            let _ = tx.send(OrchestratorEvent::InterruptRequested);
+                        }
+                        self.agent_mode.messages.push(AgentMessage {
+                            role: AgentRole::System,
+                            content: "Interrupting session...".to_string(),
+                        });
+                        None
+                    } else if matches!(self.screen, Screen::BranchList) {
                         if self.branch_list.filter_mode {
                             // Exit filter mode (clear query if any, then exit mode)
                             Some(Message::NavigateBack)
