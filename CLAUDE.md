@@ -121,6 +121,8 @@
 - ファイル（gwt.jsonl.YYYY-MM-DD） (SPEC-e66acf66)
 - Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, reqwest (blocking), serde_json, chrono, tracing (SPEC-ba3f610c)
 - ファイルシステム (`~/.gwt/sessions/` - JSON形式) (SPEC-ba3f610c)
+- Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, reqwest (blocking), serde_json, chrono, tracing, tracing-appender, uuid (SPEC-ba3f610c)
+- ファイルシステム（`~/.gwt/sessions/` JSON形式、`specs/SPEC-XXXXXXXX/` Spec Kit成果物） (SPEC-ba3f610c)
 
 - Rust (Stable) + Ratatui TUI フレームワーク
 - ファイル/ローカル Git メタデータ（DB なし）
@@ -140,6 +142,6 @@
 ```
 
 ## 最近の変更
+- SPEC-ba3f610c: 追加: Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, reqwest (blocking), serde_json, chrono, tracing, tracing-appender, uuid
 - SPEC-ba3f610c: 追加: Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, reqwest (blocking), serde_json, chrono, tracing
 - SPEC-e66acf66: 追加: Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, tracing, tracing-appender, serde_json, chrono, cli-clipboard
-- SPEC-4b893dae: 追加: Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, reqwest (blocking), serde_json, chrono
