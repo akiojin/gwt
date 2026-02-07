@@ -66,6 +66,7 @@ rust-embed = "8"
 tokio-tungstenite = "0.28"
 futures-util = "0.3"
 portable-pty = "0.9"
+vt100 = "0.16"
 
 # Leptos (WASM frontend)
 leptos = { version = "0.7", features = ["csr"] }

@@ -270,9 +270,34 @@ PTYでエージェント起動時に設定:
 - **FR-002**: 各ターミナルペインは独立したPTY（擬似端末）を持た**なければならない**
 - **FR-003**: VT100エミュレータはANSIカラー（256色+TrueColor）、カーソル制御、画面クリア、スクロール領域を処理**しなければならない**
 - **FR-004**: vim/nano/htop等のフルスクリーンTUIアプリケーションがペイン内で正常動作**しなければならない**
-- **FR-005**: VT100エミュレーション用のRust crateは実装フェーズで比較検証し選定**すること**（候補: alacritty_terminal, vt100, 自前実装）
+- **FR-005**: VT100エミュレーション用のRust crateとして`vt100` (v0.16.2) を使用**すること**。PTY管理には`portable-pty` (v0.9.0) を使用**すること**
 - **FR-006**: BEL文字（\x07）はホストターミナルにそのまま転送**しなければならない**
 - **FR-007**: マウスイベント（vim等のマウスサポート）はVT100エミュレータが処理**しなければならない**
+
+#### 技術選定結果
+
+##### VT100エミュレーション: `vt100` crate v0.16.2
+
+**選定理由**:
+
+1. ratatui APIとの直接マッピング: `screen.cell(row,col)` → ratatui `Buffer` に1:1変換
+2. カラー互換: `Color::Default`/`Idx(u8)`/`Rgb(r,g,b)` → ratatui `Color::Reset`/`Indexed(u8)`/`Rgb(r,g,b)`
+3. BEL検出: `Callbacks` traitで `audible_bell()` コールバック対応
+4. マウスサポート: `mouse_protocol_mode()`, `mouse_protocol_encoding()`
+5. 軽量依存: vte, unicode-width, itoa の3つのみ
+6. イベントループなし: 同期的に`process()`呼び出し → ratatuiのcrosstermイベント処理と競合しない
+7. コミュニティ実証: tui-term（ratatui公式ターミナルWidget v0.3.1）がvt100を採用
+
+**不採用: `alacritty_terminal`** — 内蔵イベントループがratatuiと競合、独自カラー型（非互換）、依存12+個（parking_lot, polling等）、スタンドアロン端末設計であり組み込み用途に不向き
+
+##### PTY管理: `portable-pty` crate v0.9.0
+
+**選定理由**:
+
+1. wezterm作者による成熟したクロスプラットフォーム対応（macOS/Linux/Windows）
+2. `resize()`でSIGWINCH自動送信
+3. `try_clone_reader()` + `take_writer()`でスレッド安全I/O
+4. `CommandBuilder`で環境変数・作業ディレクトリ設定対応
 
 #### PTY管理
 
@@ -415,7 +440,7 @@ PTYでエージェント起動時に設定:
 
 - 既存のgwt-core/gwt-cliモジュール分担に従う
 - ratatui 0.30フレームワーク上でターミナル描画を実装する
-- PTY操作にはOS固有APIを使用する（Linux: openpty, macOS: posix_openpt）またはportable-pty crate
+- PTY操作には`portable-pty` crate (v0.9.0) を使用する
 - 外部ターミナルマルチプレクサ（tmux/zellij）に依存しない
 - CLIのユーザー向け出力は英語のみ
 - 汎用マルチプレクサではなくgwt特化型ペイン設計
@@ -461,8 +486,8 @@ PTYでエージェント起動時に設定:
 - **ratatui 0.30**: TUIフレームワーク
 - **crossterm 0.29**: ターミナル制御
 - **arboard**: クリップボードアクセス
-- **portable-pty** or OS固有API: PTY管理
-- **VT100 crate** (TBD): ターミナルエミュレーション
+- **portable-pty 0.9.0**: PTY管理（クロスプラットフォーム）
+- **vt100 0.16.2**: VT100ターミナルエミュレーション
 - **tokio**: 非同期PTY I/O
 
 ## 参考資料 *(該当する場合)*

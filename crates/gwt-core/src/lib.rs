@@ -14,6 +14,7 @@ pub mod git;
 pub mod lock;
 pub mod logging;
 pub mod migration;
+pub mod terminal;
 pub mod tmux;
 pub mod worktree;
 
