@@ -579,6 +579,21 @@ pub fn detect_docker_environment(worktree_path: &Path) -> Option<DockerFileType>
     detect_docker_files(worktree_path)
 }
 
+fn merge_env_overrides(
+    base: &HashMap<String, String>,
+    overrides: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    if overrides.is_empty() {
+        return base.clone();
+    }
+
+    let mut merged = base.clone();
+    for (key, value) in overrides {
+        merged.insert(key.clone(), value.clone());
+    }
+    merged
+}
+
 fn build_docker_env_flags(env_vars: &HashMap<String, String>) -> String {
     if env_vars.is_empty() {
         return String::new();
@@ -1456,6 +1471,7 @@ pub fn launch_in_pane_with_docker(
     command: &str,
     args: &[String],
     service: Option<&str>,
+    env_overrides: Option<&HashMap<String, String>>,
     build: bool,
     force_recreate: bool,
     stop_on_exit: bool,
@@ -1469,6 +1485,11 @@ pub fn launch_in_pane_with_docker(
             .as_ref()
             .map(|manager| manager.collect_passthrough_env())
             .unwrap_or_default();
+        let env_vars = if let Some(overrides) = env_overrides {
+            merge_env_overrides(&env_vars, overrides)
+        } else {
+            env_vars
+        };
         let mut resolved_service: Option<String> = service.map(|s| s.to_string());
         if resolved_service.is_none() {
             if let Some(manager) = docker_result.manager.as_ref() {
@@ -1857,6 +1878,22 @@ mod tests {
 
         // Host-side docker compose failures should not close the pane immediately.
         assert!(cmd.contains("Press Enter to close this pane"));
+    }
+
+    #[test]
+    fn test_merge_env_overrides_take_precedence() {
+        let mut base = HashMap::new();
+        base.insert("PORT".to_string(), "3000".to_string());
+        base.insert("FOO".to_string(), "base".to_string());
+
+        let mut overrides = HashMap::new();
+        overrides.insert("PORT".to_string(), "10000".to_string());
+        overrides.insert("BAR".to_string(), "override".to_string());
+
+        let merged = merge_env_overrides(&base, &overrides);
+        assert_eq!(merged.get("PORT"), Some(&"10000".to_string()));
+        assert_eq!(merged.get("FOO"), Some(&"base".to_string()));
+        assert_eq!(merged.get("BAR"), Some(&"override".to_string()));
     }
 
     #[test]

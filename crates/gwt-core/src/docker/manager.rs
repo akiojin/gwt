@@ -18,6 +18,13 @@ use crate::{GwtError, Result};
 use serde_yaml::Value;
 
 fn extract_port_envs_from_compose(content: &str) -> Vec<(String, u16)> {
+    extract_port_envs_from_compose_filtered(content, None)
+}
+
+fn extract_port_envs_from_compose_filtered(
+    content: &str,
+    service_filter: Option<&str>,
+) -> Vec<(String, u16)> {
     let Ok(value) = serde_yaml::from_str::<Value>(content) else {
         return Vec::new();
     };
@@ -28,7 +35,13 @@ fn extract_port_envs_from_compose(content: &str) -> Vec<(String, u16)> {
 
     let mut results = Vec::new();
 
-    for service in services.values() {
+    for (service_name, service) in services {
+        if let Some(filter) = service_filter {
+            if service_name.as_str().is_none_or(|name| name != filter) {
+                continue;
+            }
+        }
+
         let Some(service_map) = service.as_mapping() else {
             continue;
         };
@@ -655,6 +668,34 @@ impl DockerManager {
             .ok_or_else(|| GwtError::Docker("Failed to list docker compose services".to_string()))
     }
 
+    /// Extract `${NAME:-PORT}` defaults from compose `ports:` entries.
+    ///
+    /// When `service` is provided, only that service is inspected.
+    pub fn compose_port_env_defaults(&self, service: Option<&str>) -> Result<Vec<(String, u16)>> {
+        let compose_path = match &self.docker_file_type {
+            DockerFileType::Compose(path) => path,
+            DockerFileType::DevContainer(_) | DockerFileType::Dockerfile(_) => {
+                return Ok(Vec::new())
+            }
+        };
+
+        let content = fs::read_to_string(compose_path)?;
+        let defaults = extract_port_envs_from_compose_filtered(&content, service);
+        let mut seen = HashSet::new();
+        let mut unique = Vec::new();
+        for (name, port) in defaults {
+            if seen.insert(name.clone()) {
+                unique.push((name, port));
+            }
+        }
+        Ok(unique)
+    }
+
+    /// Ports published by running Docker containers on the host.
+    pub fn published_ports_in_use() -> HashSet<u16> {
+        docker_ports_in_use()
+    }
+
     /// Collect environment variables to pass through to the container
     ///
     /// Collects variables matching predefined prefixes (API keys, Git config, etc.)
@@ -1168,6 +1209,35 @@ services:
         assert!(envs.contains(&("PORT".to_string(), 3000)));
         assert!(envs.contains(&("LOCAL_PORT".to_string(), 8080)));
         assert!(envs.contains(&("PUBLISHED_PORT".to_string(), 3000)));
+    }
+
+    #[test]
+    fn test_compose_port_env_defaults_filters_by_service() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let compose_path = temp.path().join("docker-compose.yml");
+        std::fs::write(
+            &compose_path,
+            r#"
+services:
+  app:
+    ports:
+      - "${PORT:-3000}:3000"
+  other:
+    ports:
+      - "${OTHER_PORT:-4000}:4000"
+"#,
+        )
+        .unwrap();
+
+        let manager =
+            DockerManager::new(temp.path(), "test", DockerFileType::Compose(compose_path));
+
+        let app_envs = manager.compose_port_env_defaults(Some("app")).unwrap();
+        assert_eq!(app_envs, vec![("PORT".to_string(), 3000)]);
+
+        let all_envs = manager.compose_port_env_defaults(None).unwrap();
+        assert!(all_envs.contains(&("PORT".to_string(), 3000)));
+        assert!(all_envs.contains(&("OTHER_PORT".to_string(), 4000)));
     }
 
     #[test]

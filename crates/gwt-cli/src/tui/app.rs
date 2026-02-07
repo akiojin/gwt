@@ -29,6 +29,7 @@ use gwt_core::config::{
     setup_gwt_plugin, AISettings, CustomCodingAgent, Profile, ProfilesConfig, ResolvedAISettings,
     ToolSessionEntry,
 };
+use gwt_core::docker::port::PortAllocator;
 use gwt_core::docker::{ContainerStatus, DockerManager};
 use gwt_core::error::GwtError;
 use gwt_core::git::{
@@ -72,11 +73,12 @@ use super::screens::worktree_create::WorktreeCreateStep;
 use super::screens::{
     collect_os_env, render_agent_mode, render_ai_wizard, render_branch_list, render_clone_wizard,
     render_confirm, render_environment, render_error_with_queue, render_git_view, render_help,
-    render_logs, render_migration_dialog, render_profiles, render_service_select, render_settings,
-    render_wizard, render_worktree_create, AIWizardState, AgentMessage, AgentModeState, AgentRole,
-    BranchItem, BranchListState, BranchType, CloneWizardState, CloneWizardStep, CodingAgent,
-    ConfirmState, EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, GitViewCache,
-    GitViewState, HelpState, LogsState, MigrationDialogPhase, MigrationDialogState, ProfilesState,
+    render_logs, render_migration_dialog, render_port_select, render_profiles,
+    render_service_select, render_settings, render_wizard, render_worktree_create, AIWizardState,
+    AgentMessage, AgentModeState, AgentRole, BranchItem, BranchListState, BranchType,
+    CloneWizardState, CloneWizardStep, CodingAgent, ConfirmState, EnvironmentState, ErrorQueue,
+    ErrorState, ExecutionMode, GitViewCache, GitViewState, HelpState, LogsState,
+    MigrationDialogPhase, MigrationDialogState, PortSelectState, ProfilesState,
     QuickStartDockerSettings, QuickStartEntry, ReasoningLevel, ServiceSelectState, SettingsState,
     WizardConfirmResult, WizardState, WizardStep, WorktreeCreateState,
 };
@@ -496,6 +498,8 @@ pub struct Model {
     environment: EnvironmentState,
     /// Docker service selection state
     service_select: ServiceSelectState,
+    /// Docker port conflict resolution state
+    port_select: PortSelectState,
     /// Wizard popup state
     wizard: WizardState,
     /// AI settings wizard state (FR-100)
@@ -550,6 +554,8 @@ pub struct Model {
     pending_recreate_select: Option<PendingRecreateSelect>,
     /// Pending launch plan for Docker cleanup selection
     pending_cleanup_select: Option<PendingCleanupSelect>,
+    /// Pending launch plan for Docker port selection
+    pending_port_select: Option<PendingPortSelect>,
     /// Pending launch plan for Docker host fallback confirmation
     pending_docker_host_launch: Option<LaunchPlan>,
     /// Pending Quick Start Docker settings (applied at launch)
@@ -656,6 +662,16 @@ struct PendingCleanupSelect {
     build: bool,
 }
 
+#[derive(Debug, Clone)]
+struct PendingPortSelect {
+    plan: LaunchPlan,
+    service: Option<String>,
+    force_host: bool,
+    build: bool,
+    force_recreate: bool,
+    stop_on_exit: bool,
+}
+
 enum ServiceSelectionDecision {
     Proceed {
         service: Option<String>,
@@ -678,6 +694,7 @@ pub enum Screen {
     Profiles,
     Environment,
     ServiceSelect,
+    PortSelect,
     /// AI settings wizard (FR-100)
     AISettingsWizard,
     /// Clone wizard for empty/non-repo directories (SPEC-a70a1ece US3)
@@ -813,6 +830,7 @@ impl Model {
             profiles_config: ProfilesConfig::default(),
             environment: EnvironmentState::new(),
             service_select: ServiceSelectState::new(),
+            port_select: PortSelectState::default(),
             wizard: WizardState::new(),
             ai_wizard: AIWizardState::new(),
             status_message: None,
@@ -840,6 +858,7 @@ impl Model {
             pending_build_select: None,
             pending_recreate_select: None,
             pending_cleanup_select: None,
+            pending_port_select: None,
             pending_docker_host_launch: None,
             pending_quick_start_docker: None,
             branch_list_rx: None,
@@ -2961,7 +2980,16 @@ impl Model {
         self.last_mouse_click = None;
 
         let keep_launch_status = matches!(plan.install_plan, InstallPlan::Install { .. });
-        self.launch_plan_in_tmux(&plan, None, true, keep_launch_status, false, false, false);
+        self.launch_plan_in_tmux(
+            &plan,
+            None,
+            true,
+            keep_launch_status,
+            None,
+            false,
+            false,
+            false,
+        );
 
         if let Some(prev_screen) = self.screen_stack.pop() {
             self.screen = prev_screen;
@@ -2971,11 +2999,11 @@ impl Model {
     }
 
     fn handle_confirm_action(&mut self) {
-        if let Some(pending) = self.pending_cleanup_select.take() {
+        if let Some(pending) = self.pending_cleanup_select.clone() {
             let stop_on_exit = self.confirm.is_confirmed();
             let keep_launch_status =
                 matches!(pending.plan.install_plan, InstallPlan::Install { .. });
-            self.launch_plan_in_tmux(
+            if self.maybe_request_port_selection(
                 &pending.plan,
                 pending.service.as_deref(),
                 pending.force_host,
@@ -2983,7 +3011,13 @@ impl Model {
                 pending.build,
                 pending.force_recreate,
                 stop_on_exit,
-            );
+            ) {
+                // Port selection is shown. Keep the cleanup prompt state so users can go back.
+                return;
+            }
+
+            // Launch started without port selection; clear pending state and close prompt.
+            self.pending_cleanup_select = None;
             if let Some(prev_screen) = self.screen_stack.pop() {
                 self.screen = prev_screen;
             }
@@ -3063,6 +3097,7 @@ impl Model {
                     None,
                     true,
                     keep_launch_status,
+                    None,
                     false,
                     false,
                     false,
@@ -4281,6 +4316,18 @@ impl Model {
                     if let Some(prev_screen) = self.screen_stack.pop() {
                         self.screen = prev_screen;
                     }
+                } else if matches!(self.screen, Screen::PortSelect) {
+                    // Cancel port selection (or close custom input)
+                    if self.port_select.custom_input.is_some() {
+                        self.port_select.cancel_custom_input();
+                    } else {
+                        self.pending_port_select = None;
+                        self.launch_status = None;
+                        self.last_mouse_click = None;
+                        if let Some(prev_screen) = self.screen_stack.pop() {
+                            self.screen = prev_screen;
+                        }
+                    }
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029d: Cancel confirm dialog without executing action
                     self.pending_unsafe_selection = None;
@@ -4292,6 +4339,7 @@ impl Model {
                     self.pending_build_select = None;
                     self.pending_recreate_select = None;
                     self.pending_cleanup_select = None;
+                    self.pending_port_select = None;
                     self.launch_status = None;
                     if let Some(prev_screen) = self.screen_stack.pop() {
                         self.screen = prev_screen;
@@ -4450,6 +4498,11 @@ impl Model {
                 Screen::Profiles => self.profiles.select_next(),
                 Screen::Environment => self.environment.select_next(),
                 Screen::ServiceSelect => self.service_select.select_next(),
+                Screen::PortSelect => {
+                    if self.port_select.custom_input.is_none() {
+                        self.port_select.select_next();
+                    }
+                }
                 Screen::AISettingsWizard => self.ai_wizard.select_next_model(),
                 Screen::CloneWizard => self.clone_wizard.down(),
                 Screen::MigrationDialog => self.migration_dialog.toggle_selection(),
@@ -4476,6 +4529,11 @@ impl Model {
                 Screen::Profiles => self.profiles.select_prev(),
                 Screen::Environment => self.environment.select_prev(),
                 Screen::ServiceSelect => self.service_select.select_previous(),
+                Screen::PortSelect => {
+                    if self.port_select.custom_input.is_none() {
+                        self.port_select.select_previous();
+                    }
+                }
                 Screen::AISettingsWizard => self.ai_wizard.select_prev_model(),
                 Screen::CloneWizard => self.clone_wizard.up(),
                 Screen::MigrationDialog => self.migration_dialog.toggle_selection(),
@@ -4563,6 +4621,9 @@ impl Model {
                 }
                 Screen::ServiceSelect => {
                     self.handle_service_select_confirm();
+                }
+                Screen::PortSelect => {
+                    self.handle_port_select_confirm();
                 }
                 Screen::Profiles => {
                     if self.profiles.create_mode {
@@ -4747,6 +4808,16 @@ impl Model {
                     if c == 's' || c == 'S' {
                         self.handle_service_select_skip();
                     }
+                } else if matches!(self.screen, Screen::PortSelect) {
+                    if self.port_select.custom_input.is_some() {
+                        if c.is_ascii_digit() {
+                            self.port_select.insert_custom_char(c);
+                        }
+                    } else if c == 'c' || c == 'C' {
+                        self.port_select.open_custom_input();
+                    } else if c == 'a' || c == 'A' {
+                        self.port_select.reset_selected_to_suggested();
+                    }
                 } else if matches!(self.screen, Screen::CloneWizard)
                     && self.clone_wizard.step == CloneWizardStep::UrlInput
                 {
@@ -4850,6 +4921,10 @@ impl Model {
                     self.profiles.delete_char();
                 } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.delete_char();
+                } else if matches!(self.screen, Screen::PortSelect)
+                    && self.port_select.custom_input.is_some()
+                {
+                    self.port_select.backspace_custom();
                 } else if matches!(self.screen, Screen::Logs) && self.logs.is_searching {
                     // Log search mode - delete character
                     self.logs.search.pop();
@@ -4877,6 +4952,10 @@ impl Model {
                     self.profiles.cursor_left();
                 } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.cursor_left();
+                } else if matches!(self.screen, Screen::PortSelect)
+                    && self.port_select.custom_input.is_none()
+                {
+                    self.port_select.cycle_candidate_prev();
                 } else if matches!(self.screen, Screen::Settings)
                     && self.settings.is_env_edit_mode()
                     && self.settings.env_state.edit_mode
@@ -4923,6 +5002,10 @@ impl Model {
                     self.profiles.cursor_right();
                 } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.cursor_right();
+                } else if matches!(self.screen, Screen::PortSelect)
+                    && self.port_select.custom_input.is_none()
+                {
+                    self.port_select.cycle_candidate_next();
                 } else if matches!(self.screen, Screen::Settings)
                     && self.settings.is_env_edit_mode()
                     && self.settings.env_state.edit_mode
@@ -5602,7 +5685,16 @@ impl Model {
                 branch = %plan.config.branch_name,
                 "Docker force_host enabled; launching on host"
             );
-            self.launch_plan_in_tmux(plan, None, true, keep_launch_status, false, false, false);
+            self.launch_plan_in_tmux(
+                plan,
+                None,
+                true,
+                keep_launch_status,
+                None,
+                false,
+                false,
+                false,
+            );
             return true;
         }
 
@@ -5612,7 +5704,16 @@ impl Model {
                 branch = %plan.config.branch_name,
                 "Quick Start docker settings: force host"
             );
-            self.launch_plan_in_tmux(plan, None, true, keep_launch_status, false, false, false);
+            self.launch_plan_in_tmux(
+                plan,
+                None,
+                true,
+                keep_launch_status,
+                None,
+                false,
+                false,
+                false,
+            );
             return true;
         }
 
@@ -5836,6 +5937,7 @@ impl Model {
                 service,
                 force_host,
                 keep_launch_status,
+                None,
                 false,
                 false,
                 false,
@@ -5852,6 +5954,7 @@ impl Model {
                     service,
                     force_host,
                     keep_launch_status,
+                    None,
                     false,
                     false,
                     false,
@@ -5952,6 +6055,7 @@ impl Model {
                 service,
                 force_host,
                 keep_launch_status,
+                None,
                 false,
                 force_recreate,
                 false,
@@ -5968,6 +6072,7 @@ impl Model {
                     service,
                     force_host,
                     keep_launch_status,
+                    None,
                     false,
                     force_recreate,
                     false,
@@ -6054,7 +6159,7 @@ impl Model {
                 keep = keep,
                 "Quick Start docker keep setting applied"
             );
-            self.launch_plan_in_tmux(
+            self.maybe_request_port_selection(
                 plan,
                 service,
                 force_host,
@@ -6076,6 +6181,7 @@ impl Model {
                 service,
                 force_host,
                 keep_launch_status,
+                None,
                 build,
                 force_recreate,
                 false,
@@ -6114,7 +6220,7 @@ impl Model {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn launch_plan_in_tmux(
+    fn maybe_request_port_selection(
         &mut self,
         plan: &LaunchPlan,
         service: Option<&str>,
@@ -6123,11 +6229,141 @@ impl Model {
         build: bool,
         force_recreate: bool,
         stop_on_exit: bool,
+    ) -> bool {
+        if force_host || launcher::detect_docker_environment(&plan.config.worktree_path).is_none() {
+            self.launch_plan_in_tmux(
+                plan,
+                service,
+                force_host,
+                keep_launch_status,
+                None,
+                build,
+                force_recreate,
+                stop_on_exit,
+            );
+            return false;
+        }
+
+        let docker_file_type = match launcher::detect_docker_environment(&plan.config.worktree_path)
+        {
+            Some(dtype) => dtype,
+            None => {
+                self.launch_plan_in_tmux(
+                    plan,
+                    service,
+                    force_host,
+                    keep_launch_status,
+                    None,
+                    build,
+                    force_recreate,
+                    stop_on_exit,
+                );
+                return false;
+            }
+        };
+
+        if !docker_file_type.is_compose() {
+            self.launch_plan_in_tmux(
+                plan,
+                service,
+                force_host,
+                keep_launch_status,
+                None,
+                build,
+                force_recreate,
+                stop_on_exit,
+            );
+            return false;
+        }
+
+        let manager = DockerManager::new(
+            &plan.config.worktree_path,
+            &plan.config.branch_name,
+            docker_file_type,
+        );
+        let defaults = manager
+            .compose_port_env_defaults(service)
+            .unwrap_or_default();
+        if defaults.is_empty() {
+            self.launch_plan_in_tmux(
+                plan,
+                service,
+                force_host,
+                keep_launch_status,
+                None,
+                build,
+                force_recreate,
+                stop_on_exit,
+            );
+            return false;
+        }
+
+        let docker_ports = DockerManager::published_ports_in_use();
+        let mut conflicts = Vec::new();
+
+        for (env_name, default_port) in defaults {
+            let current = std::env::var(&env_name)
+                .ok()
+                .and_then(|v| v.parse::<u16>().ok())
+                .unwrap_or(default_port);
+            let taken = docker_ports.contains(&current) || PortAllocator::is_port_in_use(current);
+            if taken {
+                conflicts.push((env_name, default_port, current));
+            }
+        }
+
+        if conflicts.is_empty() {
+            self.launch_plan_in_tmux(
+                plan,
+                service,
+                force_host,
+                keep_launch_status,
+                None,
+                build,
+                force_recreate,
+                stop_on_exit,
+            );
+            return false;
+        }
+
+        let container_name = DockerManager::generate_container_name(&plan.config.branch_name);
+        self.port_select = PortSelectState::from_conflicts(conflicts, &docker_ports, |port| {
+            docker_ports.contains(&port) || PortAllocator::is_port_in_use(port)
+        });
+        self.port_select
+            .set_context(&container_name, &plan.config.branch_name, service);
+        self.pending_port_select = Some(PendingPortSelect {
+            plan: plan.clone(),
+            service: service.map(|s| s.to_string()),
+            force_host,
+            build,
+            force_recreate,
+            stop_on_exit,
+        });
+        self.launch_status = None;
+        self.last_mouse_click = None;
+        self.screen_stack.push(self.screen.clone());
+        self.screen = Screen::PortSelect;
+        true
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_plan_in_tmux(
+        &mut self,
+        plan: &LaunchPlan,
+        service: Option<&str>,
+        force_host: bool,
+        keep_launch_status: bool,
+        docker_env_overrides: Option<&HashMap<String, String>>,
+        build: bool,
+        force_recreate: bool,
+        stop_on_exit: bool,
     ) {
         match self.launch_plan_in_pane_with_service(
             plan,
             service,
             force_host,
+            docker_env_overrides,
             build,
             force_recreate,
             stop_on_exit,
@@ -6229,9 +6465,54 @@ impl Model {
             None,
             true,
             keep_launch_status,
+            None,
             false,
             false,
             false,
+        );
+    }
+
+    fn handle_port_select_confirm(&mut self) {
+        let Some(pending) = self.pending_port_select.clone() else {
+            return;
+        };
+
+        let docker_ports = DockerManager::published_ports_in_use();
+        let is_taken =
+            |port: u16| docker_ports.contains(&port) || PortAllocator::is_port_in_use(port);
+
+        // Custom input confirmation
+        if self.port_select.custom_input.is_some() {
+            if let Err(message) = self.port_select.apply_custom_port(|port| is_taken(port)) {
+                self.port_select.error = Some(message);
+            }
+            return;
+        }
+
+        if let Err(message) = self.port_select.validate_selected_ports(|port| {
+            is_taken(port) || self.port_select.is_port_selected_elsewhere(port)
+        }) {
+            self.port_select.error = Some(message);
+            return;
+        }
+
+        let overrides = self.port_select.build_env_overrides();
+        self.pending_port_select = None;
+        self.pending_cleanup_select = None;
+        self.launch_status = None;
+        self.last_mouse_click = None;
+        self.screen_stack.clear();
+
+        let keep_launch_status = matches!(pending.plan.install_plan, InstallPlan::Install { .. });
+        self.launch_plan_in_tmux(
+            &pending.plan,
+            pending.service.as_deref(),
+            pending.force_host,
+            keep_launch_status,
+            Some(&overrides),
+            pending.build,
+            pending.force_recreate,
+            pending.stop_on_exit,
         );
     }
 
@@ -6248,6 +6529,7 @@ impl Model {
         plan: &LaunchPlan,
         service: Option<&str>,
         force_host: bool,
+        docker_env_overrides: Option<&HashMap<String, String>>,
         build: bool,
         force_recreate: bool,
         stop_on_exit: bool,
@@ -6335,6 +6617,7 @@ impl Model {
                 "sh",
                 &docker_args,
                 service,
+                docker_env_overrides,
                 build,
                 force_recreate,
                 stop_on_exit,
@@ -6755,13 +7038,34 @@ impl Model {
 
     /// View function (Elm Architecture)
     pub fn view(&mut self, frame: &mut Frame) {
-        let base_screen = if matches!(self.screen, Screen::Confirm) {
-            self.screen_stack
+        let base_screen = match self.screen {
+            Screen::Confirm => self
+                .screen_stack
                 .last()
                 .cloned()
-                .unwrap_or(Screen::BranchList)
-        } else {
-            self.screen.clone()
+                .unwrap_or(Screen::BranchList),
+            Screen::PortSelect => {
+                // If PortSelect is opened from Confirm, keep rendering the underlying content
+                // behind Confirm so users still have context.
+                if self
+                    .screen_stack
+                    .last()
+                    .is_some_and(|s| matches!(s, Screen::Confirm))
+                {
+                    self.screen_stack
+                        .iter()
+                        .rev()
+                        .nth(1)
+                        .cloned()
+                        .unwrap_or(Screen::BranchList)
+                } else {
+                    self.screen_stack
+                        .last()
+                        .cloned()
+                        .unwrap_or(Screen::BranchList)
+                }
+            }
+            _ => self.screen.clone(),
         };
 
         // Keep a consistent header across major screens.
@@ -6846,10 +7150,20 @@ impl Model {
                 render_git_view(&mut self.git_view, frame, chunks[1]);
             }
             Screen::Confirm => {}
+            Screen::PortSelect => {}
         }
 
-        if matches!(self.screen, Screen::Confirm) {
+        if matches!(self.screen, Screen::Confirm)
+            || (matches!(self.screen, Screen::PortSelect)
+                && self
+                    .screen_stack
+                    .last()
+                    .is_some_and(|s| matches!(s, Screen::Confirm)))
+        {
             render_confirm(&mut self.confirm, frame, chunks[1]);
+        }
+        if matches!(self.screen, Screen::PortSelect) {
+            render_port_select(&mut self.port_select, frame, chunks[1]);
         }
 
         // Footer help
@@ -6902,6 +7216,7 @@ impl Model {
             Screen::Profiles => "Profiles",
             Screen::Environment => "Environment",
             Screen::ServiceSelect => "Service Select",
+            Screen::PortSelect => "Port Select",
             Screen::AISettingsWizard => "AI Settings",
             Screen::CloneWizard => "Clone Repository",
             Screen::MigrationDialog => "Migration Required",
@@ -7273,6 +7588,14 @@ impl Model {
             Screen::ServiceSelect => {
                 vec!["[Up/Down] Select | [Enter] Launch | [s] Skip | [Esc] Cancel".to_string()]
             }
+            Screen::PortSelect => vec![
+                Self::keybind_item("Up/Down", "Select"),
+                Self::keybind_item("Left/Right", "Change"),
+                Self::keybind_item("c", "Custom"),
+                Self::keybind_item("a", "Auto"),
+                Self::keybind_item("Enter", "Continue"),
+                Self::keybind_item("Esc", "Cancel"),
+            ],
             Screen::AISettingsWizard => {
                 if self.ai_wizard.show_delete_confirm {
                     vec![
