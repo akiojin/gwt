@@ -18,12 +18,13 @@ jobs:
     if: |
       github.event_name == 'workflow_dispatch' ||
       startsWith(github.event.head_commit.message, 'chore(release):') ||
-      contains(github.event.head_commit.message, 'from akiojin/release/')
+      contains(github.event.head_commit.message, 'from akiojin/release/') ||
+      contains(github.event.head_commit.message, 'from akiojin/develop')
     outputs:
       tag_name: ${{ steps.tag.outputs.tag_name }}
       version: ${{ steps.tag.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Get version from Cargo.toml
         id: tag
@@ -33,6 +34,9 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
           echo "Version: $VERSION, Tag: $TAG_NAME"
+
+      - name: Fetch tags
+        run: git fetch --tags
 
       - name: Check if tag exists
         id: check-tag
@@ -86,9 +90,6 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             artifact: gwt-linux-aarch64
-          - os: macos-13
-            target: x86_64-apple-darwin
-            artifact: gwt-macos-x86_64
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: gwt-macos-aarch64
@@ -96,7 +97,7 @@ jobs:
             target: x86_64-pc-windows-msvc
             artifact: gwt-windows-x86_64.exe
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -120,7 +121,7 @@ jobs:
         run: |
           copy target\${{ matrix.target }}\release\gwt.exe ${{ matrix.artifact }}
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
@@ -130,8 +131,8 @@ jobs:
     needs: [create-tag, build-binaries]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
         with:
           path: artifacts
       - name: Display artifacts
@@ -151,8 +152,8 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'

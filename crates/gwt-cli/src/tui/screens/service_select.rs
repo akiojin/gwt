@@ -1,7 +1,9 @@
 //! Service Selection Screen (SPEC-f5f5657e)
 //!
-//! Allows users to select which Docker service to use when multiple services
-//! are defined in a docker-compose.yml file.
+//! Allows users to select the launch target when Docker is detected:
+//! - HostOS
+//! - Docker (Dockerfile / single-service compose)
+//! - Docker:{service} (multi-service compose)
 
 use ratatui::{prelude::*, widgets::*};
 
@@ -64,6 +66,30 @@ impl ServiceSelectState {
                 is_host: false,
             });
         }
+        Self {
+            items,
+            selected: 0,
+            container_name: String::new(),
+            worktree_name: String::new(),
+            popup_area: None,
+            item_areas: Vec::new(),
+        }
+    }
+
+    /// Create a ServiceSelectState for Dockerfile (non-compose) environments
+    pub fn with_dockerfile() -> Self {
+        let items = vec![
+            ServiceSelectItem {
+                label: "HostOS".to_string(),
+                service: None,
+                is_host: true,
+            },
+            ServiceSelectItem {
+                label: "Docker".to_string(),
+                service: None,
+                is_host: false,
+            },
+        ];
         Self {
             items,
             selected: 0,
@@ -295,6 +321,25 @@ mod tests {
         let state = ServiceSelectState::with_services(services);
         assert_eq!(state.items.len(), 2);
         assert_eq!(state.selected_target(), (None, true));
+    }
+
+    #[test]
+    fn test_service_select_state_with_dockerfile() {
+        let state = ServiceSelectState::with_dockerfile();
+        assert_eq!(state.items.len(), 2);
+        assert_eq!(state.items[0].label, "HostOS");
+        assert_eq!(state.items[1].label, "Docker");
+        assert_eq!(state.selected_target(), (None, true));
+        assert!(!state.items[1].is_host);
+        assert!(state.items[1].service.is_none());
+    }
+
+    #[test]
+    fn test_service_select_target_host_and_dockerfile() {
+        let mut state = ServiceSelectState::with_dockerfile();
+        assert_eq!(state.selected_target(), (None, true));
+        state.select_next();
+        assert_eq!(state.selected_target(), (None, false));
     }
 
     #[test]

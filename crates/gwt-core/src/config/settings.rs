@@ -36,6 +36,8 @@ pub struct Settings {
     pub web: WebSettings,
     /// Agent settings
     pub agent: AgentSettings,
+    /// Docker settings
+    pub docker: DockerSettings,
 }
 
 impl Default for Settings {
@@ -53,6 +55,7 @@ impl Default for Settings {
             log_retention_days: 7,
             web: WebSettings::default(),
             agent: AgentSettings::default(),
+            docker: DockerSettings::default(),
         }
     }
 }
@@ -93,6 +96,14 @@ pub struct AgentSettings {
     pub gemini_path: Option<PathBuf>,
     /// Auto install dependencies before launching agent
     pub auto_install_deps: bool,
+}
+
+/// Docker settings
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DockerSettings {
+    /// Force host launch (skip docker) even when Docker files are detected
+    pub force_host: bool,
 }
 
 impl Settings {
@@ -156,6 +167,12 @@ impl Settings {
         if let Ok(value) = std::env::var("GWT_AGENT_AUTO_INSTALL_DEPS") {
             if let Some(parsed) = parse_env_bool(&value) {
                 settings.agent.auto_install_deps = parsed;
+            }
+        }
+
+        if let Ok(value) = std::env::var("GWT_DOCKER_FORCE_HOST") {
+            if let Some(parsed) = parse_env_bool(&value) {
+                settings.docker.force_host = parsed;
             }
         }
 
@@ -252,6 +269,17 @@ impl Settings {
 
     /// Get the legacy global config path (~/.config/gwt/config.toml)
     pub fn legacy_global_config_path() -> Option<PathBuf> {
+        // Prefer XDG override for deterministic behavior (especially in tests and CI).
+        // On macOS, `ProjectDirs::config_dir()` points to ~/Library/Application Support,
+        // which is a reasonable default but doesn't follow XDG semantics.
+        if let Some(xdg_config_home) = std::env::var_os("XDG_CONFIG_HOME") {
+            return Some(
+                PathBuf::from(xdg_config_home)
+                    .join("gwt")
+                    .join("config.toml"),
+            );
+        }
+
         directories::ProjectDirs::from("", "", "gwt")
             .map(|dirs| dirs.config_dir().join("config.toml"))
     }
@@ -269,6 +297,10 @@ impl Settings {
 
     /// Get the legacy global config directory (~/.config/gwt/)
     pub fn legacy_global_config_dir() -> Option<PathBuf> {
+        if let Some(xdg_config_home) = std::env::var_os("XDG_CONFIG_HOME") {
+            return Some(PathBuf::from(xdg_config_home).join("gwt"));
+        }
+
         directories::ProjectDirs::from("", "", "gwt").map(|dirs| dirs.config_dir().to_path_buf())
     }
 
@@ -502,6 +534,17 @@ mod tests {
         std::env::remove_var("GWT_DEBUG");
 
         assert!(settings.debug);
+    }
+
+    #[test]
+    fn test_env_override_docker_force_host_accepts_numeric_bool() {
+        let temp = TempDir::new().unwrap();
+
+        std::env::set_var("GWT_DOCKER_FORCE_HOST", "1");
+        let settings = Settings::load(temp.path()).unwrap();
+        std::env::remove_var("GWT_DOCKER_FORCE_HOST");
+
+        assert!(settings.docker.force_host);
     }
 
     #[test]

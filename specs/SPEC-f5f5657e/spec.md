@@ -23,25 +23,28 @@
 4. **前提条件** docker-compose.ymlが存在、**操作** エージェント終了、**期待結果** docker compose downが実行されコンテナが停止する
 5. **前提条件** 複数サービスのcompose、**操作** サービス選択画面でHostOSを選択、**期待結果** コンテナを起動せずホストでエージェントが起動する
 6. **前提条件** 複数サービスのcompose、**操作** サービス選択画面を表示、**期待結果** `HostOS` と `Docker:{service}` が同一リストに表示され、カーソルの背景反転は1行全体に適用される
-7. **前提条件** Docker起動が必要、**操作** 起動時にビルド確認を行い「No Build」を選択、**期待結果** `docker compose up` は `--no-build` を使用する
-8. **前提条件** Docker起動が必要、**操作** 起動時にビルド確認を行い「Build」を選択、**期待結果** `docker compose up` は `--build` を使用する
-9. **前提条件** Dockerfile/compose変更なし、**操作** エージェント起動、**期待結果** Build/No Buildの確認は表示されず `--no-build` が使用される
-10. **前提条件** Docker起動が必要、**操作** 起動時にRecreate/Reuse確認を行い「Reuse」を選択、**期待結果** `docker compose up` は `--force-recreate` を付与しない
-11. **前提条件** Docker起動が必要、**操作** 起動時にRecreate/Reuse確認を行い「Recreate」を選択、**期待結果** `docker compose up` は `--force-recreate` を使用する
-12. **前提条件** ホストにCodexのauth.jsonが存在、**操作** Dockerコンテナ起動、**期待結果** コンテナ内のCodex認証情報がホストのauth.jsonに同期される
-13. **前提条件** Docker起動が必要、**操作** 起動時にKeep/Stop確認を行い「Keep」を選択、**期待結果** `docker compose down` は実行されない
-14. **前提条件** Docker起動が必要、**操作** 起動時にKeep/Stop確認を行い「Stop」を選択、**期待結果** `docker compose down` が実行される
-15. **前提条件** Dockerコンテナが存在しない、**操作** エージェント起動、**期待結果** Recreate/Reuseの確認は表示されない
-16. **前提条件** Dockerコンテナが起動中、**操作** エージェント起動、**期待結果** Recreate/Reuseの確認は表示されない（自動でReuse扱い）
-17. **前提条件** 同一ブランチでQuick Start履歴が存在、**操作** Quick Startで「Resume/Start new」を選択、**期待結果** 以前選択したHostOS/Dockerサービス・Recreate/Reuse・Keep/Stopが復元され、Dockerウィザードは表示されない
-18. **前提条件** 既にコンテナが起動中、**操作** Reuse/Keepで起動、**期待結果** `docker compose up` を実行せず `docker compose exec` でエージェントが起動する
-19. **前提条件** 起動中判定のコマンドが生成される、**操作** Reuse/Keepで起動、**期待結果** `if COMPOSE_PROJECT_NAME=... docker compose ... ps -q {service} | grep -q .; then ... fi` の形式で判定する
+7. **前提条件** docker-compose.ymlに単一サービスのみが定義、**操作** サービス選択画面でHostOSを選択、**期待結果** コンテナを起動せずホストでエージェントが起動する
+8. **前提条件** Docker起動が必要、**操作** 起動時にビルド確認を行い「No Build」を選択、**期待結果** `docker compose up` は `--no-build` を使用する
+9. **前提条件** Docker起動が必要、**操作** 起動時にビルド確認を行い「Build」を選択、**期待結果** `docker compose up` は `--build` を使用する
+10. **前提条件** Dockerfile/compose変更なし、**操作** エージェント起動、**期待結果** Build/No Buildの確認は表示されず `--no-build` が使用される
+11. **前提条件** Docker起動が必要、**操作** 起動時にRecreate/Reuse確認を行い「Reuse」を選択、**期待結果** `docker compose up` は `--force-recreate` を付与しない
+12. **前提条件** Docker起動が必要、**操作** 起動時にRecreate/Reuse確認を行い「Recreate」を選択、**期待結果** `docker compose up` は `--force-recreate` を使用する
+13. **前提条件** ホストにCodexのauth.jsonが存在、**操作** Dockerコンテナ起動、**期待結果** コンテナ内のCodex認証情報がホストのauth.jsonに同期される
+14. **前提条件** Docker起動が必要、**操作** 起動時にKeep/Stop確認を行い「Keep」を選択、**期待結果** `docker compose down` は実行されない
+15. **前提条件** Docker起動が必要、**操作** 起動時にKeep/Stop確認を行い「Stop」を選択、**期待結果** `docker compose down` が実行される
+16. **前提条件** Dockerコンテナが存在しない、**操作** エージェント起動、**期待結果** Recreate/Reuseの確認は表示されない
+17. **前提条件** Dockerコンテナが起動中、**操作** エージェント起動、**期待結果** Recreate/Reuseの確認は表示されない（自動でReuse扱い）
+18. **前提条件** 同一ブランチでQuick Start履歴が存在、**操作** Quick Startで「Resume/Start new」を選択、**期待結果** 以前選択したHostOS/Dockerサービス・Recreate/Reuse・Keep/Stopが復元され、Dockerウィザードは表示されない
+19. **前提条件** 既にコンテナが起動中、**操作** Reuse/Keepで起動、**期待結果** `docker compose up` を実行せず `docker compose exec` でエージェントが起動する
+20. **前提条件** 起動中判定のコマンドが生成される、**操作** Reuse/Keepで起動、**期待結果** `if COMPOSE_PROJECT_NAME=... docker compose ... ps -q {service} | grep -q .; then ... fi` の形式で判定する
+21. **前提条件** worktreeにDockerファイルが存在、**操作** `docker.force_host=true`（または `GWT_DOCKER_FORCE_HOST=true`）を指定してエージェント起動、**期待結果** Docker関連の確認UI（サービス選択/Build/Recreate/Keep）は表示されずホストでエージェントが起動する
+22. **前提条件** Docker関連の確認UI（Recreate/Build/Keep）が表示されている、**操作** 確認UIで `h` を押す、**期待結果** Docker関連処理をスキップしてホストでエージェントが起動する
 
 ---
 
 ### ユーザーストーリー 2 - Dockerfileのみの場合のコンテナ起動 (優先度: P1)
 
-開発者がDockerfile（composeなし）を含むworktreeを選択すると、gwtが自動でdocker buildとdocker runを実行してエージェントをコンテナ内で実行する。
+開発者がDockerfile（composeなし）を含むworktreeを選択すると、gwtは `HostOS` / `Docker` の起動ターゲット選択を提示し、Dockerを選択した場合にdocker buildとdocker runを実行してエージェントをコンテナ内で実行する。
 
 **この優先度の理由**: Dockerfile単体での開発も一般的であり、compose不要な軽量プロジェクトで使用される。
 
@@ -52,6 +55,7 @@
 1. **前提条件** worktreeにDockerfileのみ存在（compose.ymlなし）、**操作** エージェント起動、**期待結果** docker buildが実行され、docker runでエージェントが起動する
 2. **前提条件** Dockerfileがあるがイメージが存在しない、**操作** エージェント起動、**期待結果** 自動でdocker buildが実行される
 3. **前提条件** Dockerfileが更新された（イメージより新しい）、**操作** エージェント起動、**期待結果** 再ビルドして新しいイメージでコンテナ起動
+4. **前提条件** worktreeにDockerfileのみ存在（compose.ymlなし）、**操作** サービス選択画面でHostOSを選択、**期待結果** コンテナを起動せずホストでエージェントが起動する
 
 ---
 
@@ -83,6 +87,7 @@
 1. **前提条件** worktree-aとworktree-bの両方にdocker-compose.ymlが存在、**操作** 両方でエージェント起動、**期待結果** gwt-worktree-aとgwt-worktree-bという別々のコンテナが起動する
 2. **前提条件** 両worktreeのcompose.ymlで同じポート8080を使用、**操作** 両方でエージェント起動、**期待結果** gwtが空きポートを自動検出し、環境変数で渡して競合を回避する
 3. **前提条件** worktree-aのコンテナが起動中、**操作** worktree-bでエージェント起動、**期待結果** worktree-aに影響なく独立して起動する
+4. **前提条件** ホスト側でデフォルトポートが使用中、**操作** Dockerでエージェント起動、**期待結果** gwtがポート競合を検知して置き換えポートの選択UIを表示し、選択したポートで起動する
 
 ---
 
@@ -135,6 +140,9 @@ Dockerデーモンが起動していない場合、gwtが自動起動を試み�
 
 - Dockerfileが無効な構文の場合、どうなるか？→ ビルドエラーを表示し、ホストへのフォールバックを提案
 - docker compose upが3回連続失敗した場合、どうなるか？→ エラー表示し、ホストでの起動を提案
+- ポート競合が検知された場合、どうなるか？→ 置き換えポートをユーザーが選択できるUIを表示し、選択結果をdocker compose起動に反映する（キャンセル時はDocker設定へ戻る）
+- `docker ps` が `3000-3001` のようなポート範囲表記を返す場合、範囲を展開して使用中ポートとして扱う
+- docker compose up/exec がホスト側で失敗した場合（例: ポート競合で `port is already allocated`）、どうなるか？→ 失敗理由を表示し、ペインが即時に閉じないように Enter 入力待ちにする
 - コンテナ内でエージェントがクラッシュした場合、どうなるか？→ エラーメッセージを表示してgwtを終了
 - docker-compose.ymlに複数のcomposeファイル（override等）がある場合、どうなるか？→ 標準のdocker compose挙動に従い全て読み込む
 - ホストにdockerコマンドがない場合、どうなるか？→ Docker機能を無効化し、ホストで起動
@@ -169,7 +177,7 @@ Dockerデーモンが起動していない場合、gwtが自動起動を試み�
 gwtは以下の方法でポート競合を回避:
 
 1. docker-compose.yml内の`${PORT:-8080}`形式の環境変数を検出
-2. 空きポートを自動検出
+2. 空きポートを自動検出（ローカルのポート利用状況に加え、`docker ps` の published ports も考慮）
 3. 環境変数としてコンテナに渡す
 
 設定ファイルは不要。docker-compose.ymlの設定に従う。
@@ -183,7 +191,11 @@ gwtのcompose定義では`PORT`（デフォルト3000）を使用し、`GWT_PORT
 - エージェントコマンドは既存の.gwt/tools.tomlを使用
 - ポート設定はdocker-compose.ymlに従う
 - 環境変数の継承はホストの環境変数をそのまま使用
-- worktreeの.gitが参照するgitdirはコンテナ内から参照できる必要がある（HOST_GIT_COMMON_DIRをバインド）
+- worktreeの.gitが参照するgitdirはコンテナ内から参照できる必要がある（git worktree / bare運用を想定）
+  - docker-compose.yml側にbind mountを記載しなくても、gwtがcompose overrideを生成して必要なbind mountを自動追加する
+  - 追加対象: `HOST_GIT_COMMON_DIR`（git common dir）, `HOST_GIT_WORKTREE_DIR`（worktree gitdir）
+  - 追加先: ユーザーが選択したcomposeサービス（エージェントを起動するサービス）
+  - docker compose 実行時は上記環境変数を必ず設定して補間エラーを防ぐ（compose側で `${HOST_GIT_COMMON_DIR}` を参照していても動く）
 - Docker起動前に「Build/No Build」を選択するUIを表示するが、Dockerfile/compose変更が検出された場合のみ表示しデフォルトはNo Build
 - Docker起動前に「Recreate/Reuse」を選択するUIを表示し、デフォルトはReuse
 - ただしDockerコンテナが起動中の場合はRecreate/Reuseの確認を表示しない
@@ -193,6 +205,8 @@ gwtのcompose定義では`PORT`（デフォルト3000）を使用し、`GWT_PORT
 - Quick Start履歴のDockerサービスが現在のcomposeに存在しない場合はサービス選択にフォールバックする
 - Build/No BuildはQuick Startでは保存・復元しない
 - Quick StartではDockerfile/compose変更が検出されない限りRecreateは強制せずReuseで起動する
+- Docker関連の確認UI（Recreate/Build/Keep）では `h` でホスト起動へ即時切り替えできる
+- `docker.force_host=true`（または `GWT_DOCKER_FORCE_HOST=true`）の場合、Dockerファイルの有無に関わらずホスト起動を強制し、Docker関連の確認UIは表示しない
 
 ### TUI進捗表示
 

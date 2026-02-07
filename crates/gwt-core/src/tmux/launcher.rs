@@ -615,6 +615,21 @@ pub fn detect_docker_environment(worktree_path: &Path) -> Option<DockerFileType>
     detect_docker_files(worktree_path)
 }
 
+fn merge_env_overrides(
+    base: &HashMap<String, String>,
+    overrides: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    if overrides.is_empty() {
+        return base.clone();
+    }
+
+    let mut merged = base.clone();
+    for (key, value) in overrides {
+        merged.insert(key.clone(), value.clone());
+    }
+    merged
+}
+
 fn build_docker_env_flags(env_vars: &HashMap<String, String>) -> String {
     if env_vars.is_empty() {
         return String::new();
@@ -837,6 +852,7 @@ fn rewrite_ports_value(
 fn maybe_write_compose_override(
     compose_path: &Path,
     container_name: &str,
+    target_service: &str,
     env_vars: &HashMap<String, String>,
 ) -> TmuxResult<Option<PathBuf>> {
     let content = fs::read_to_string(compose_path).map_err(|e| TmuxError::CommandFailed {
@@ -877,19 +893,80 @@ fn maybe_write_compose_override(
             }
         }
 
-        if service_name.as_str().is_some_and(|s| s == "gwt") {
-            let mut volumes = Vec::new();
+        if service_name.as_str().is_some_and(|s| s == target_service) {
+            let mut volumes: Vec<Value> = service_map
+                .get(Value::String("volumes".to_string()))
+                .and_then(|v| v.as_sequence())
+                .map(|seq| seq.to_vec())
+                .unwrap_or_default();
+
+            let mut changed = false;
+
+            let remove_ro_flag = |value: &str| -> (String, bool) {
+                let Some((prefix, mode)) = value.rsplit_once(':') else {
+                    return (value.to_string(), false);
+                };
+                let tokens: Vec<&str> = mode.split(',').collect();
+                if !tokens.contains(&"ro") {
+                    return (value.to_string(), false);
+                }
+                let new_tokens: Vec<&str> = tokens.into_iter().filter(|t| *t != "ro").collect();
+                if new_tokens.is_empty() {
+                    return (prefix.to_string(), true);
+                }
+                (format!("{}:{}", prefix, new_tokens.join(",")), true)
+            };
+
+            let mut common_present = false;
+            let mut worktree_present = false;
+
+            for entry in &mut volumes {
+                let s = match entry.as_str() {
+                    Some(s) => s.to_string(),
+                    None => continue,
+                };
+
+                if let Some(common) = host_git_common.as_ref() {
+                    if s.contains("HOST_GIT_COMMON_DIR") || s.contains(common) {
+                        common_present = true;
+                        let (rewritten, did_change) = remove_ro_flag(&s);
+                        if did_change {
+                            *entry = Value::String(rewritten);
+                            changed = true;
+                        }
+                    }
+                }
+                if let Some(worktree) = host_git_worktree.as_ref() {
+                    if s.contains("HOST_GIT_WORKTREE_DIR") || s.contains(worktree) {
+                        worktree_present = true;
+                        let (rewritten, did_change) = remove_ro_flag(&s);
+                        if did_change {
+                            *entry = Value::String(rewritten);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+
             if let Some(common) = host_git_common.as_ref() {
-                volumes.push(Value::String(format!("{}:{}", common, common)));
+                if !common_present {
+                    volumes.push(Value::String(format!("{}:{}", common, common)));
+                    changed = true;
+                }
             }
             if let Some(worktree) = host_git_worktree.as_ref() {
-                volumes.push(Value::String(format!("{}:{}", worktree, worktree)));
+                if !worktree_present {
+                    volumes.push(Value::String(format!("{}:{}", worktree, worktree)));
+                    changed = true;
+                }
             }
-            if !volumes.is_empty() {
-                service_override.insert(
-                    Value::String("volumes".to_string()),
-                    Value::Sequence(volumes),
-                );
+
+            if changed {
+                let tagged = Value::Tagged(Box::new(TaggedValue {
+                    tag: Tag::new("!override"),
+                    value: Value::Sequence(volumes),
+                }));
+                service_override.insert(Value::String("volumes".to_string()), tagged);
                 changed_any = true;
             }
         }
@@ -1024,7 +1101,7 @@ fn build_compose_agent_command(
             "Compose up will run (build/recreate requested)"
         );
         format!(
-            "{}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ exit_status=$?; echo \"[gwt] docker compose up failed (status=$exit_status).\"; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $exit_status; }}",
+            "{}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ exit_status=$?; echo \"[gwt] docker compose up failed (status=$exit_status).\"; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; echo \"[gwt] Press Enter to close this pane.\"; read -r _; exit $exit_status; }}",
             compose_args_debug,
             compose_env_prefix,
             container_name,
@@ -1051,7 +1128,7 @@ fn build_compose_agent_command(
             "Compose up will use --no-recreate when starting stopped containers"
         );
         format!(
-            "{}if {} | grep -q .; then echo \"[gwt] docker compose up skipped (already running).\"; else {}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ exit_status=$?; echo \"[gwt] docker compose up failed (status=$exit_status).\"; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $exit_status; }}; fi",
+            "{}if {} | grep -q .; then echo \"[gwt] docker compose up skipped (already running).\"; else {}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ exit_status=$?; echo \"[gwt] docker compose up failed (status=$exit_status).\"; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; echo \"[gwt] Press Enter to close this pane.\"; read -r _; exit $exit_status; }}; fi",
             compose_args_debug,
             running_check,
             compose_args_debug,
@@ -1080,7 +1157,7 @@ fn build_compose_agent_command(
     format!(
         r#"cd {} && \
 {} && \
-{}{}COMPOSE_PROJECT_NAME={} docker compose{} exec{} {} {} || {{ exit_status=$?; echo "[gwt] docker compose exec failed (status=$exit_status)."; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; {}exit $exit_status; }}{}"#,
+{}{}COMPOSE_PROJECT_NAME={} docker compose{} exec{} {} {} || {{ exit_status=$?; echo "[gwt] docker compose exec failed (status=$exit_status)."; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; {}echo "[gwt] Press Enter to close this pane."; read -r _; exit $exit_status; }}{}"#,
         working_dir,
         up_step,
         stop_trap,
@@ -1203,9 +1280,12 @@ pub fn build_docker_agent_command(
             let mut compose_override: Option<PathBuf> = None;
             if let DockerFileType::Compose(compose_path) = docker_file_type {
                 if compose_path.exists() {
-                    if let Some(override_path) =
-                        maybe_write_compose_override(compose_path, &container_name, env_vars)?
-                    {
+                    if let Some(override_path) = maybe_write_compose_override(
+                        compose_path,
+                        &container_name,
+                        service_name,
+                        env_vars,
+                    )? {
                         info!(
                             category = "docker",
                             container = %container_name,
@@ -1270,9 +1350,14 @@ pub fn build_docker_agent_command(
                 {
                     let compose_path = devcontainer_dir.join(first);
                     if compose_path.exists() {
-                        if let Some(override_path) =
-                            maybe_write_compose_override(&compose_path, &container_name, env_vars)?
-                        {
+                        let service_name =
+                            service.or_else(|| config.get_service()).unwrap_or("app");
+                        if let Some(override_path) = maybe_write_compose_override(
+                            &compose_path,
+                            &container_name,
+                            service_name,
+                            env_vars,
+                        )? {
                             info!(
                                 category = "docker",
                                 container = %container_name,
@@ -1422,6 +1507,7 @@ pub fn launch_in_pane_with_docker(
     command: &str,
     args: &[String],
     service: Option<&str>,
+    env_overrides: Option<&HashMap<String, String>>,
     build: bool,
     force_recreate: bool,
     stop_on_exit: bool,
@@ -1435,6 +1521,11 @@ pub fn launch_in_pane_with_docker(
             .as_ref()
             .map(|manager| manager.collect_passthrough_env())
             .unwrap_or_default();
+        let env_vars = if let Some(overrides) = env_overrides {
+            merge_env_overrides(&env_vars, overrides)
+        } else {
+            env_vars
+        };
         let mut resolved_service: Option<String> = service.map(|s| s.to_string());
         if resolved_service.is_none() {
             if let Some(manager) = docker_result.manager.as_ref() {
@@ -1801,6 +1892,47 @@ mod tests {
     }
 
     #[test]
+    fn test_build_docker_agent_command_includes_pause_prompt_on_compose_failures() {
+        use std::path::PathBuf;
+
+        let worktree_path = PathBuf::from("/tmp/my-worktree");
+        let docker_type = DockerFileType::Compose(PathBuf::from("docker-compose.yml"));
+        let env_vars = HashMap::new();
+        let cmd = build_docker_agent_command(
+            &worktree_path,
+            "my-worktree",
+            &docker_type,
+            "claude",
+            &[],
+            Some("gwt"),
+            &env_vars,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+
+        // Host-side docker compose failures should not close the pane immediately.
+        assert!(cmd.contains("Press Enter to close this pane"));
+    }
+
+    #[test]
+    fn test_merge_env_overrides_take_precedence() {
+        let mut base = HashMap::new();
+        base.insert("PORT".to_string(), "3000".to_string());
+        base.insert("FOO".to_string(), "base".to_string());
+
+        let mut overrides = HashMap::new();
+        overrides.insert("PORT".to_string(), "10000".to_string());
+        overrides.insert("BAR".to_string(), "override".to_string());
+
+        let merged = merge_env_overrides(&base, &overrides);
+        assert_eq!(merged.get("PORT"), Some(&"10000".to_string()));
+        assert_eq!(merged.get("FOO"), Some(&"base".to_string()));
+        assert_eq!(merged.get("BAR"), Some(&"override".to_string()));
+    }
+
+    #[test]
     fn test_build_docker_agent_command_build_flag() {
         use std::path::PathBuf;
 
@@ -2113,5 +2245,88 @@ mod tests {
         assert!(result.used_docker);
         assert!(result.manager.is_some());
         assert_eq!(result.container_name, Some("gwt-test-worktree".to_string()));
+    }
+
+    #[test]
+    fn test_maybe_write_compose_override_injects_git_mounts_for_target_service() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let compose_path = temp_dir.path().join("docker-compose.yml");
+        std::fs::write(
+            &compose_path,
+            r#"
+services:
+  app:
+    image: alpine:latest
+    volumes:
+      - .:/workspace
+  db:
+    image: postgres:16
+"#,
+        )
+        .unwrap();
+
+        let mut env_vars = HashMap::new();
+        env_vars.insert(
+            "HOST_GIT_COMMON_DIR".to_string(),
+            "/tmp/git-common".to_string(),
+        );
+        env_vars.insert(
+            "HOST_GIT_WORKTREE_DIR".to_string(),
+            "/tmp/git-worktree".to_string(),
+        );
+
+        let override_path =
+            maybe_write_compose_override(&compose_path, "gwt-test", "app", &env_vars)
+                .unwrap()
+                .expect("override should be generated");
+        let content = std::fs::read_to_string(&override_path).unwrap();
+        std::fs::remove_file(&override_path).unwrap();
+
+        assert!(content.contains("services:"));
+        assert!(content.contains("app:"));
+        assert!(content.contains("volumes:"));
+        assert!(content.contains("!override"));
+        assert!(content.contains("/tmp/git-common:/tmp/git-common"));
+        assert!(content.contains("/tmp/git-worktree:/tmp/git-worktree"));
+        // Preserve existing volumes while injecting git mounts.
+        assert!(content.contains(".:/workspace"));
+        // Do not inject git mounts into non-target services.
+        assert!(!content.contains("db:\n  volumes:"));
+    }
+
+    #[test]
+    fn test_maybe_write_compose_override_skips_when_git_mounts_already_present() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let compose_path = temp_dir.path().join("docker-compose.yml");
+        std::fs::write(
+            &compose_path,
+            r#"
+services:
+  app:
+    image: alpine:latest
+    volumes:
+      - ${HOST_GIT_COMMON_DIR}:${HOST_GIT_COMMON_DIR}
+      - ${HOST_GIT_WORKTREE_DIR}:${HOST_GIT_WORKTREE_DIR}
+"#,
+        )
+        .unwrap();
+
+        let mut env_vars = HashMap::new();
+        env_vars.insert(
+            "HOST_GIT_COMMON_DIR".to_string(),
+            "/tmp/git-common".to_string(),
+        );
+        env_vars.insert(
+            "HOST_GIT_WORKTREE_DIR".to_string(),
+            "/tmp/git-worktree".to_string(),
+        );
+
+        let override_path =
+            maybe_write_compose_override(&compose_path, "gwt-test", "app", &env_vars).unwrap();
+        assert!(override_path.is_none());
     }
 }

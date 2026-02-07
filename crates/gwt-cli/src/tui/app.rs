@@ -30,6 +30,7 @@ use gwt_core::config::{
     setup_gwt_plugin, AISettings, CustomCodingAgent, Profile, ProfilesConfig, ResolvedAISettings,
     ToolSessionEntry,
 };
+use gwt_core::docker::port::PortAllocator;
 use gwt_core::docker::{ContainerStatus, DockerManager};
 use gwt_core::error::GwtError;
 use gwt_core::git::{
@@ -73,14 +74,15 @@ use super::screens::worktree_create::WorktreeCreateStep;
 use super::screens::{
     collect_os_env, render_agent_mode, render_ai_wizard, render_branch_list, render_clone_wizard,
     render_confirm, render_environment, render_error_with_queue, render_git_view, render_help,
-    render_logs, render_migration_dialog, render_profiles, render_service_select,
-    render_session_selector, render_settings, render_speckit_wizard, render_wizard,
-    render_worktree_create, AIWizardState, AgentMessage, AgentModeState, AgentRole, BranchItem,
-    BranchListState, BranchType, CloneWizardState, CloneWizardStep, CodingAgent, ConfirmState,
-    EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, GitViewCache, GitViewState, HelpState,
-    LogsState, MigrationDialogPhase, MigrationDialogState, ProfilesState, QuickStartDockerSettings,
-    QuickStartEntry, ReasoningLevel, ServiceSelectState, SettingsState, SpecKitWizardState,
-    WizardConfirmResult, WizardState, WizardStep, WorktreeCreateState,
+    render_logs, render_migration_dialog, render_port_select, render_profiles,
+    render_service_select, render_session_selector, render_settings, render_speckit_wizard,
+    render_wizard, render_worktree_create, AIWizardState, AgentMessage, AgentModeState, AgentRole,
+    BranchItem, BranchListState, BranchType, CloneWizardState, CloneWizardStep, CodingAgent,
+    ConfirmState, EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, GitViewCache,
+    GitViewState, HelpState, LogsState, MigrationDialogPhase, MigrationDialogState,
+    PortSelectState, ProfilesState, QuickStartDockerSettings, QuickStartEntry, ReasoningLevel,
+    ServiceSelectState, SettingsState, SpecKitWizardState, WizardConfirmResult, WizardState,
+    WizardStep, WorktreeCreateState,
 };
 // log_gwt_error is available for use when GwtError types are available
 
@@ -128,6 +130,37 @@ fn normalize_branch_name_for_history(branch_name: &str) -> Cow<'_, str> {
         return Cow::Owned(stripped.to_string());
     }
     Cow::Borrowed(branch_name)
+}
+
+fn resolve_existing_worktree_path(
+    branch_name: &str,
+    branches: &[BranchItem],
+    create_new_branch: bool,
+) -> Option<PathBuf> {
+    if create_new_branch {
+        return None;
+    }
+
+    let normalized = normalize_branch_name_for_history(branch_name);
+    let find_path = |name: &str| {
+        branches
+            .iter()
+            .find(|item| {
+                item.name == name
+                    && item.has_worktree
+                    && item.worktree_status == WorktreeStatus::Active
+            })
+            .and_then(|item| item.worktree_path.as_ref())
+            .map(PathBuf::from)
+    };
+
+    find_path(branch_name).or_else(|| {
+        if normalized.as_ref() != branch_name {
+            find_path(normalized.as_ref())
+        } else {
+            None
+        }
+    })
 }
 
 fn apply_last_tool_usage(
@@ -387,6 +420,8 @@ struct LaunchRequest {
     branch_name: String,
     create_new_branch: bool,
     base_branch: Option<String>,
+    /// Existing worktree path to reuse (Quick Start or known worktree)
+    existing_worktree_path: Option<PathBuf>,
     agent: CodingAgent,
     /// Custom agent configuration (SPEC-71f2742d)
     custom_agent: Option<CustomCodingAgent>,
@@ -465,6 +500,8 @@ pub struct Model {
     environment: EnvironmentState,
     /// Docker service selection state
     service_select: ServiceSelectState,
+    /// Docker port conflict resolution state
+    port_select: PortSelectState,
     /// Wizard popup state
     wizard: WizardState,
     /// AI settings wizard state (FR-100)
@@ -521,6 +558,8 @@ pub struct Model {
     pending_recreate_select: Option<PendingRecreateSelect>,
     /// Pending launch plan for Docker cleanup selection
     pending_cleanup_select: Option<PendingCleanupSelect>,
+    /// Pending launch plan for Docker port selection
+    pending_port_select: Option<PendingPortSelect>,
     /// Pending launch plan for Docker host fallback confirmation
     pending_docker_host_launch: Option<LaunchPlan>,
     /// Pending Quick Start Docker settings (applied at launch)
@@ -631,6 +670,16 @@ struct PendingCleanupSelect {
     build: bool,
 }
 
+#[derive(Debug, Clone)]
+struct PendingPortSelect {
+    plan: LaunchPlan,
+    service: Option<String>,
+    force_host: bool,
+    build: bool,
+    force_recreate: bool,
+    stop_on_exit: bool,
+}
+
 enum ServiceSelectionDecision {
     Proceed {
         service: Option<String>,
@@ -653,6 +702,7 @@ pub enum Screen {
     Profiles,
     Environment,
     ServiceSelect,
+    PortSelect,
     /// AI settings wizard (FR-100)
     AISettingsWizard,
     /// Spec Kit wizard (FR-019)
@@ -792,6 +842,7 @@ impl Model {
             profiles_config: ProfilesConfig::default(),
             environment: EnvironmentState::new(),
             service_select: ServiceSelectState::new(),
+            port_select: PortSelectState::default(),
             wizard: WizardState::new(),
             ai_wizard: AIWizardState::new(),
             speckit_wizard: SpecKitWizardState::new(),
@@ -820,6 +871,7 @@ impl Model {
             pending_build_select: None,
             pending_recreate_select: None,
             pending_cleanup_select: None,
+            pending_port_select: None,
             pending_docker_host_launch: None,
             pending_quick_start_docker: None,
             branch_list_rx: None,
@@ -1075,27 +1127,12 @@ impl Model {
                 Branch::list_remote(git_path).unwrap_or_default()
             };
 
-            let local_branch_names: HashSet<String> =
-                branches.iter().map(|b| b.name.clone()).collect();
-            let mut remote_only_branches = Vec::new();
+            let mut remote_display_branches = Vec::new();
             for mut branch in remote_branches {
-                let short_name = if repo_type == RepoType::Bare {
-                    // For bare repos, branch name doesn't have origin/ prefix
-                    branch.name.as_str()
-                } else {
-                    branch
-                        .name
-                        .split_once('/')
-                        .map(|(_, name)| name)
-                        .unwrap_or(branch.name.as_str())
-                };
-                if local_branch_names.contains(short_name) {
-                    continue;
-                }
-                if repo_type != RepoType::Bare {
+                if repo_type != RepoType::Bare && !branch.name.starts_with("remotes/") {
                     branch.name = format!("remotes/{}", branch.name);
                 }
-                remote_only_branches.push(branch);
+                remote_display_branches.push(branch);
             }
             let worktree_targets: Vec<WorktreeStatusTarget> = worktrees
                 .iter()
@@ -1137,7 +1174,7 @@ impl Model {
                     item
                 })
                 .collect();
-            branch_items.extend(remote_only_branches.iter().map(|b| {
+            branch_items.extend(remote_display_branches.iter().map(|b| {
                 let mut item = BranchItem::from_branch_minimal(b, &worktrees);
                 // SPEC-a70a1ece FR-171: For bare repos, branches without worktrees are Remote
                 if repo_type == RepoType::Bare {
@@ -3048,12 +3085,49 @@ impl Model {
         }
     }
 
+    fn handle_docker_confirm_launch_on_host(&mut self) -> bool {
+        let plan = if let Some(pending) = self.pending_cleanup_select.take() {
+            pending.plan
+        } else if let Some(pending) = self.pending_build_select.take() {
+            pending.plan
+        } else if let Some(pending) = self.pending_recreate_select.take() {
+            pending.plan
+        } else {
+            return false;
+        };
+
+        // Ensure no stale pending prompts remain after the host override.
+        self.pending_cleanup_select = None;
+        self.pending_build_select = None;
+        self.pending_recreate_select = None;
+        self.launch_status = None;
+        self.last_mouse_click = None;
+
+        let keep_launch_status = matches!(plan.install_plan, InstallPlan::Install { .. });
+        self.launch_plan_in_tmux(
+            &plan,
+            None,
+            true,
+            keep_launch_status,
+            None,
+            false,
+            false,
+            false,
+        );
+
+        if let Some(prev_screen) = self.screen_stack.pop() {
+            self.screen = prev_screen;
+        }
+
+        true
+    }
+
     fn handle_confirm_action(&mut self) {
-        if let Some(pending) = self.pending_cleanup_select.take() {
+        if let Some(pending) = self.pending_cleanup_select.clone() {
             let stop_on_exit = self.confirm.is_confirmed();
             let keep_launch_status =
                 matches!(pending.plan.install_plan, InstallPlan::Install { .. });
-            self.launch_plan_in_tmux(
+            if self.maybe_request_port_selection(
                 &pending.plan,
                 pending.service.as_deref(),
                 pending.force_host,
@@ -3061,7 +3135,13 @@ impl Model {
                 pending.build,
                 pending.force_recreate,
                 stop_on_exit,
-            );
+            ) {
+                // Port selection is shown. Keep the cleanup prompt state so users can go back.
+                return;
+            }
+
+            // Launch started without port selection; clear pending state and close prompt.
+            self.pending_cleanup_select = None;
             if let Some(prev_screen) = self.screen_stack.pop() {
                 self.screen = prev_screen;
             }
@@ -3141,6 +3221,7 @@ impl Model {
                     None,
                     true,
                     keep_launch_status,
+                    None,
                     false,
                     false,
                     false,
@@ -4359,6 +4440,18 @@ impl Model {
                     if let Some(prev_screen) = self.screen_stack.pop() {
                         self.screen = prev_screen;
                     }
+                } else if matches!(self.screen, Screen::PortSelect) {
+                    // Cancel port selection (or close custom input)
+                    if self.port_select.custom_input.is_some() {
+                        self.port_select.cancel_custom_input();
+                    } else {
+                        self.pending_port_select = None;
+                        self.launch_status = None;
+                        self.last_mouse_click = None;
+                        if let Some(prev_screen) = self.screen_stack.pop() {
+                            self.screen = prev_screen;
+                        }
+                    }
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029d: Cancel confirm dialog without executing action
                     self.pending_unsafe_selection = None;
@@ -4370,6 +4463,7 @@ impl Model {
                     self.pending_build_select = None;
                     self.pending_recreate_select = None;
                     self.pending_cleanup_select = None;
+                    self.pending_port_select = None;
                     self.launch_status = None;
                     if let Some(prev_screen) = self.screen_stack.pop() {
                         self.screen = prev_screen;
@@ -4543,6 +4637,11 @@ impl Model {
                 Screen::Profiles => self.profiles.select_next(),
                 Screen::Environment => self.environment.select_next(),
                 Screen::ServiceSelect => self.service_select.select_next(),
+                Screen::PortSelect => {
+                    if self.port_select.custom_input.is_none() {
+                        self.port_select.select_next();
+                    }
+                }
                 Screen::AISettingsWizard => self.ai_wizard.select_next_model(),
                 Screen::SpecKitWizard => {}
                 Screen::CloneWizard => self.clone_wizard.down(),
@@ -4575,6 +4674,11 @@ impl Model {
                 Screen::Profiles => self.profiles.select_prev(),
                 Screen::Environment => self.environment.select_prev(),
                 Screen::ServiceSelect => self.service_select.select_previous(),
+                Screen::PortSelect => {
+                    if self.port_select.custom_input.is_none() {
+                        self.port_select.select_previous();
+                    }
+                }
                 Screen::AISettingsWizard => self.ai_wizard.select_prev_model(),
                 Screen::SpecKitWizard => {}
                 Screen::CloneWizard => self.clone_wizard.up(),
@@ -4682,6 +4786,9 @@ impl Model {
                 }
                 Screen::ServiceSelect => {
                     self.handle_service_select_confirm();
+                }
+                Screen::PortSelect => {
+                    self.handle_port_select_confirm();
                 }
                 Screen::Profiles => {
                     if self.profiles.create_mode {
@@ -4877,9 +4984,25 @@ impl Model {
                 }
             },
             Message::Char(c) => {
+                if matches!(self.screen, Screen::Confirm)
+                    && (c == 'h' || c == 'H')
+                    && self.handle_docker_confirm_launch_on_host()
+                {
+                    return;
+                }
                 if matches!(self.screen, Screen::ServiceSelect) {
                     if c == 's' || c == 'S' {
                         self.handle_service_select_skip();
+                    }
+                } else if matches!(self.screen, Screen::PortSelect) {
+                    if self.port_select.custom_input.is_some() {
+                        if c.is_ascii_digit() {
+                            self.port_select.insert_custom_char(c);
+                        }
+                    } else if c == 'c' || c == 'C' {
+                        self.port_select.open_custom_input();
+                    } else if c == 'a' || c == 'A' {
+                        self.port_select.reset_selected_to_suggested();
                     }
                 } else if matches!(self.screen, Screen::CloneWizard)
                     && self.clone_wizard.step == CloneWizardStep::UrlInput
@@ -5019,6 +5142,10 @@ impl Model {
                     self.profiles.delete_char();
                 } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.delete_char();
+                } else if matches!(self.screen, Screen::PortSelect)
+                    && self.port_select.custom_input.is_some()
+                {
+                    self.port_select.backspace_custom();
                 } else if matches!(self.screen, Screen::Logs) && self.logs.is_searching {
                     // Log search mode - delete character
                     self.logs.search.pop();
@@ -5055,6 +5182,10 @@ impl Model {
                     self.profiles.cursor_left();
                 } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.cursor_left();
+                } else if matches!(self.screen, Screen::PortSelect)
+                    && self.port_select.custom_input.is_none()
+                {
+                    self.port_select.cycle_candidate_prev();
                 } else if matches!(self.screen, Screen::Settings)
                     && self.settings.is_env_edit_mode()
                     && self.settings.env_state.edit_mode
@@ -5105,6 +5236,10 @@ impl Model {
                     self.profiles.cursor_right();
                 } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.cursor_right();
+                } else if matches!(self.screen, Screen::PortSelect)
+                    && self.port_select.custom_input.is_none()
+                {
+                    self.port_select.cycle_candidate_next();
                 } else if matches!(self.screen, Screen::Settings)
                     && self.settings.is_env_edit_mode()
                     && self.settings.env_state.edit_mode
@@ -5465,6 +5600,11 @@ impl Model {
         } else {
             None
         };
+        let existing_worktree_path = resolve_existing_worktree_path(
+            &branch,
+            &self.branch_list.branches,
+            self.worktree_create.create_new_branch,
+        );
 
         let auto_install_deps = self
             .settings
@@ -5484,6 +5624,7 @@ impl Model {
             branch_name: branch,
             create_new_branch: self.worktree_create.create_new_branch,
             base_branch: base,
+            existing_worktree_path,
             agent: self.wizard.agent,
             custom_agent,
             model: if self.wizard.model.is_empty() {
@@ -5563,10 +5704,26 @@ impl Model {
 
             // Step 2: Validate branch (lightweight)
             step(ProgressStepKind::ValidateBranch, StepStatus::Running);
-            let existing_wt = manager
-                .get_by_branch_basic(&request.branch_name)
-                .ok()
-                .flatten();
+            let normalized_branch = normalize_branch_name_for_history(&request.branch_name);
+            let existing_wt = manager.list_basic().ok().and_then(|worktrees| {
+                if let Some(ref path) = request.existing_worktree_path {
+                    worktrees
+                        .iter()
+                        .find(|wt| wt.path == *path)
+                        .cloned()
+                        .or_else(|| {
+                            worktrees
+                                .iter()
+                                .find(|wt| wt.branch.as_deref() == Some(normalized_branch.as_ref()))
+                                .cloned()
+                        })
+                } else {
+                    worktrees
+                        .iter()
+                        .find(|wt| wt.branch.as_deref() == Some(normalized_branch.as_ref()))
+                        .cloned()
+                }
+            });
             let has_existing_wt = existing_wt.is_some();
             step(ProgressStepKind::ValidateBranch, StepStatus::Completed);
 
@@ -5751,19 +5908,55 @@ impl Model {
         }
     }
 
+    fn docker_force_host_enabled(&self) -> bool {
+        self.settings
+            .settings
+            .as_ref()
+            .map(|settings| settings.docker.force_host)
+            .unwrap_or(false)
+    }
+
     fn try_apply_quick_start_docker(
         &mut self,
         plan: &LaunchPlan,
         quick_start: QuickStartDockerSettings,
         keep_launch_status: bool,
     ) -> bool {
+        if self.docker_force_host_enabled() {
+            info!(
+                category = "docker",
+                branch = %plan.config.branch_name,
+                "Docker force_host enabled; launching on host"
+            );
+            self.launch_plan_in_tmux(
+                plan,
+                None,
+                true,
+                keep_launch_status,
+                None,
+                false,
+                false,
+                false,
+            );
+            return true;
+        }
+
         if quick_start.force_host.unwrap_or(false) {
             info!(
                 category = "docker",
                 branch = %plan.config.branch_name,
                 "Quick Start docker settings: force host"
             );
-            self.launch_plan_in_tmux(plan, None, true, keep_launch_status, false, false, false);
+            self.launch_plan_in_tmux(
+                plan,
+                None,
+                true,
+                keep_launch_status,
+                None,
+                false,
+                false,
+                false,
+            );
             return true;
         }
 
@@ -5866,6 +6059,18 @@ impl Model {
         &mut self,
         plan: &LaunchPlan,
     ) -> Result<ServiceSelectionDecision, String> {
+        if self.docker_force_host_enabled() {
+            info!(
+                category = "docker",
+                branch = %plan.config.branch_name,
+                "Docker force_host enabled; skipping docker service selection"
+            );
+            return Ok(ServiceSelectionDecision::Proceed {
+                service: None,
+                force_host: true,
+            });
+        }
+
         let docker_file_type = match launcher::detect_docker_environment(&plan.config.worktree_path)
         {
             Some(dtype) => dtype,
@@ -5878,10 +6083,23 @@ impl Model {
         };
 
         if !docker_file_type.is_compose() {
-            return Ok(ServiceSelectionDecision::Proceed {
-                service: None,
-                force_host: false,
+            self.pending_service_select = Some(PendingServiceSelect {
+                plan: plan.clone(),
+                services: Vec::new(),
             });
+            let mut state = ServiceSelectState::with_dockerfile();
+            // Preserve existing behavior (Docker default) while allowing HostOS selection.
+            if state.items.len() > 1 {
+                state.selected = 1;
+            }
+            let container_name = DockerManager::generate_container_name(&plan.config.branch_name);
+            state.set_container_info(&container_name, &plan.config.branch_name);
+            self.service_select = state;
+            self.launch_status = None;
+            self.last_mouse_click = None;
+            self.screen_stack.push(self.screen.clone());
+            self.screen = Screen::ServiceSelect;
+            return Ok(ServiceSelectionDecision::AwaitSelection);
         }
 
         let manager = DockerManager::new(
@@ -5914,10 +6132,23 @@ impl Model {
         };
 
         if services.len() == 1 {
-            return Ok(ServiceSelectionDecision::Proceed {
-                service: Some(services[0].clone()),
-                force_host: false,
+            self.pending_service_select = Some(PendingServiceSelect {
+                plan: plan.clone(),
+                services: services.clone(),
             });
+            let mut state = ServiceSelectState::with_services(services);
+            // Preserve existing behavior (Docker default) while allowing HostOS selection.
+            if state.items.len() > 1 {
+                state.selected = 1;
+            }
+            let container_name = DockerManager::generate_container_name(&plan.config.branch_name);
+            state.set_container_info(&container_name, &plan.config.branch_name);
+            self.service_select = state;
+            self.launch_status = None;
+            self.last_mouse_click = None;
+            self.screen_stack.push(self.screen.clone());
+            self.screen = Screen::ServiceSelect;
+            return Ok(ServiceSelectionDecision::AwaitSelection);
         }
 
         self.pending_service_select = Some(PendingServiceSelect {
@@ -5949,6 +6180,7 @@ impl Model {
                 service,
                 force_host,
                 keep_launch_status,
+                None,
                 false,
                 false,
                 false,
@@ -5965,6 +6197,7 @@ impl Model {
                     service,
                     force_host,
                     keep_launch_status,
+                    None,
                     false,
                     false,
                     false,
@@ -6026,6 +6259,7 @@ impl Model {
             details: vec![
                 "Reuse keeps existing containers.".to_string(),
                 "Recreate will rerun entrypoint.".to_string(),
+                "Press 'h' to launch on host.".to_string(),
             ],
             confirm_label: "Recreate".to_string(),
             cancel_label: "Reuse".to_string(),
@@ -6064,6 +6298,7 @@ impl Model {
                 service,
                 force_host,
                 keep_launch_status,
+                None,
                 false,
                 force_recreate,
                 false,
@@ -6080,6 +6315,7 @@ impl Model {
                     service,
                     force_host,
                     keep_launch_status,
+                    None,
                     false,
                     force_recreate,
                     false,
@@ -6136,6 +6372,7 @@ impl Model {
             details: vec![
                 "No Build will skip image rebuild.".to_string(),
                 "Build will run docker compose build.".to_string(),
+                "Press 'h' to launch on host.".to_string(),
             ],
             confirm_label: "Build".to_string(),
             cancel_label: "No Build".to_string(),
@@ -6165,7 +6402,7 @@ impl Model {
                 keep = keep,
                 "Quick Start docker keep setting applied"
             );
-            self.launch_plan_in_tmux(
+            self.maybe_request_port_selection(
                 plan,
                 service,
                 force_host,
@@ -6187,6 +6424,7 @@ impl Model {
                 service,
                 force_host,
                 keep_launch_status,
+                None,
                 build,
                 force_recreate,
                 false,
@@ -6212,6 +6450,7 @@ impl Model {
             details: vec![
                 "Keep will keep containers running.".to_string(),
                 "Stop will run docker compose down.".to_string(),
+                "Press 'h' to launch on host.".to_string(),
             ],
             confirm_label: "Stop".to_string(),
             cancel_label: "Keep".to_string(),
@@ -6224,7 +6463,7 @@ impl Model {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn launch_plan_in_tmux(
+    fn maybe_request_port_selection(
         &mut self,
         plan: &LaunchPlan,
         service: Option<&str>,
@@ -6233,11 +6472,141 @@ impl Model {
         build: bool,
         force_recreate: bool,
         stop_on_exit: bool,
+    ) -> bool {
+        if force_host || launcher::detect_docker_environment(&plan.config.worktree_path).is_none() {
+            self.launch_plan_in_tmux(
+                plan,
+                service,
+                force_host,
+                keep_launch_status,
+                None,
+                build,
+                force_recreate,
+                stop_on_exit,
+            );
+            return false;
+        }
+
+        let docker_file_type = match launcher::detect_docker_environment(&plan.config.worktree_path)
+        {
+            Some(dtype) => dtype,
+            None => {
+                self.launch_plan_in_tmux(
+                    plan,
+                    service,
+                    force_host,
+                    keep_launch_status,
+                    None,
+                    build,
+                    force_recreate,
+                    stop_on_exit,
+                );
+                return false;
+            }
+        };
+
+        if !docker_file_type.is_compose() {
+            self.launch_plan_in_tmux(
+                plan,
+                service,
+                force_host,
+                keep_launch_status,
+                None,
+                build,
+                force_recreate,
+                stop_on_exit,
+            );
+            return false;
+        }
+
+        let manager = DockerManager::new(
+            &plan.config.worktree_path,
+            &plan.config.branch_name,
+            docker_file_type,
+        );
+        let defaults = manager
+            .compose_port_env_defaults(service)
+            .unwrap_or_default();
+        if defaults.is_empty() {
+            self.launch_plan_in_tmux(
+                plan,
+                service,
+                force_host,
+                keep_launch_status,
+                None,
+                build,
+                force_recreate,
+                stop_on_exit,
+            );
+            return false;
+        }
+
+        let docker_ports = DockerManager::published_ports_in_use();
+        let mut conflicts = Vec::new();
+
+        for (env_name, default_port) in defaults {
+            let current = std::env::var(&env_name)
+                .ok()
+                .and_then(|v| v.parse::<u16>().ok())
+                .unwrap_or(default_port);
+            let taken = docker_ports.contains(&current) || PortAllocator::is_port_in_use(current);
+            if taken {
+                conflicts.push((env_name, default_port, current));
+            }
+        }
+
+        if conflicts.is_empty() {
+            self.launch_plan_in_tmux(
+                plan,
+                service,
+                force_host,
+                keep_launch_status,
+                None,
+                build,
+                force_recreate,
+                stop_on_exit,
+            );
+            return false;
+        }
+
+        let container_name = DockerManager::generate_container_name(&plan.config.branch_name);
+        self.port_select = PortSelectState::from_conflicts(conflicts, &docker_ports, |port| {
+            docker_ports.contains(&port) || PortAllocator::is_port_in_use(port)
+        });
+        self.port_select
+            .set_context(&container_name, &plan.config.branch_name, service);
+        self.pending_port_select = Some(PendingPortSelect {
+            plan: plan.clone(),
+            service: service.map(|s| s.to_string()),
+            force_host,
+            build,
+            force_recreate,
+            stop_on_exit,
+        });
+        self.launch_status = None;
+        self.last_mouse_click = None;
+        self.screen_stack.push(self.screen.clone());
+        self.screen = Screen::PortSelect;
+        true
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_plan_in_tmux(
+        &mut self,
+        plan: &LaunchPlan,
+        service: Option<&str>,
+        force_host: bool,
+        keep_launch_status: bool,
+        docker_env_overrides: Option<&HashMap<String, String>>,
+        build: bool,
+        force_recreate: bool,
+        stop_on_exit: bool,
     ) {
         match self.launch_plan_in_pane_with_service(
             plan,
             service,
             force_host,
+            docker_env_overrides,
             build,
             force_recreate,
             stop_on_exit,
@@ -6339,9 +6708,54 @@ impl Model {
             None,
             true,
             keep_launch_status,
+            None,
             false,
             false,
             false,
+        );
+    }
+
+    fn handle_port_select_confirm(&mut self) {
+        let Some(pending) = self.pending_port_select.clone() else {
+            return;
+        };
+
+        let docker_ports = DockerManager::published_ports_in_use();
+        let is_taken =
+            |port: u16| docker_ports.contains(&port) || PortAllocator::is_port_in_use(port);
+
+        // Custom input confirmation
+        if self.port_select.custom_input.is_some() {
+            if let Err(message) = self.port_select.apply_custom_port(is_taken) {
+                self.port_select.error = Some(message);
+            }
+            return;
+        }
+
+        if let Err(message) = self.port_select.validate_selected_ports(|port| {
+            is_taken(port) || self.port_select.is_port_selected_elsewhere(port)
+        }) {
+            self.port_select.error = Some(message);
+            return;
+        }
+
+        let overrides = self.port_select.build_env_overrides();
+        self.pending_port_select = None;
+        self.pending_cleanup_select = None;
+        self.launch_status = None;
+        self.last_mouse_click = None;
+        self.screen_stack.clear();
+
+        let keep_launch_status = matches!(pending.plan.install_plan, InstallPlan::Install { .. });
+        self.launch_plan_in_tmux(
+            &pending.plan,
+            pending.service.as_deref(),
+            pending.force_host,
+            keep_launch_status,
+            Some(&overrides),
+            pending.build,
+            pending.force_recreate,
+            pending.stop_on_exit,
         );
     }
 
@@ -6353,11 +6767,13 @@ impl Model {
     /// - When a column reaches 3 panes, a new column is added to the right
     ///
     /// Uses the same argument building logic as single mode (main.rs)
+    #[allow(clippy::too_many_arguments)]
     fn launch_plan_in_pane_with_service(
         &mut self,
         plan: &LaunchPlan,
         service: Option<&str>,
         force_host: bool,
+        docker_env_overrides: Option<&HashMap<String, String>>,
         build: bool,
         force_recreate: bool,
         stop_on_exit: bool,
@@ -6445,6 +6861,7 @@ impl Model {
                 "sh",
                 &docker_args,
                 service,
+                docker_env_overrides,
                 build,
                 force_recreate,
                 stop_on_exit,
@@ -6865,13 +7282,34 @@ impl Model {
 
     /// View function (Elm Architecture)
     pub fn view(&mut self, frame: &mut Frame) {
-        let base_screen = if matches!(self.screen, Screen::Confirm) {
-            self.screen_stack
+        let base_screen = match self.screen {
+            Screen::Confirm => self
+                .screen_stack
                 .last()
                 .cloned()
-                .unwrap_or(Screen::BranchList)
-        } else {
-            self.screen.clone()
+                .unwrap_or(Screen::BranchList),
+            Screen::PortSelect => {
+                // If PortSelect is opened from Confirm, keep rendering the underlying content
+                // behind Confirm so users still have context.
+                if self
+                    .screen_stack
+                    .last()
+                    .is_some_and(|s| matches!(s, Screen::Confirm))
+                {
+                    self.screen_stack
+                        .iter()
+                        .rev()
+                        .nth(1)
+                        .cloned()
+                        .unwrap_or(Screen::BranchList)
+                } else {
+                    self.screen_stack
+                        .last()
+                        .cloned()
+                        .unwrap_or(Screen::BranchList)
+                }
+            }
+            _ => self.screen.clone(),
         };
 
         // Keep a consistent header across major screens.
@@ -6976,10 +7414,20 @@ impl Model {
                 render_git_view(&mut self.git_view, frame, chunks[1]);
             }
             Screen::Confirm => {}
+            Screen::PortSelect => {}
         }
 
-        if matches!(self.screen, Screen::Confirm) {
+        if matches!(self.screen, Screen::Confirm)
+            || (matches!(self.screen, Screen::PortSelect)
+                && self
+                    .screen_stack
+                    .last()
+                    .is_some_and(|s| matches!(s, Screen::Confirm)))
+        {
             render_confirm(&mut self.confirm, frame, chunks[1]);
+        }
+        if matches!(self.screen, Screen::PortSelect) {
+            render_port_select(&mut self.port_select, frame, chunks[1]);
         }
 
         // Footer help
@@ -7032,6 +7480,7 @@ impl Model {
             Screen::Profiles => "Profiles",
             Screen::Environment => "Environment",
             Screen::ServiceSelect => "Service Select",
+            Screen::PortSelect => "Port Select",
             Screen::AISettingsWizard => "AI Settings",
             Screen::SpecKitWizard => "Spec Kit",
             Screen::CloneWizard => "Clone Repository",
@@ -7336,11 +7785,20 @@ impl Model {
                 Self::keybind_item("PgUp/PgDn", "Page"),
                 Self::keybind_item("Esc", "Back"),
             ],
-            Screen::Confirm => vec![
-                Self::keybind_item("Left/Right", "Select"),
-                Self::keybind_item("Enter", "Confirm"),
-                Self::keybind_item("Esc", "Cancel"),
-            ],
+            Screen::Confirm => {
+                let mut items = vec![
+                    Self::keybind_item("Left/Right", "Select"),
+                    Self::keybind_item("Enter", "Confirm"),
+                ];
+                if self.pending_build_select.is_some()
+                    || self.pending_recreate_select.is_some()
+                    || self.pending_cleanup_select.is_some()
+                {
+                    items.push(Self::keybind_item("h", "HostOS"));
+                }
+                items.push(Self::keybind_item("Esc", "Cancel"));
+                items
+            }
             Screen::Error => vec![
                 Self::keybind_item("Enter", "Close"),
                 Self::keybind_item("Esc", "Close"),
@@ -7404,6 +7862,14 @@ impl Model {
             Screen::ServiceSelect => {
                 vec!["[Up/Down] Select | [Enter] Launch | [s] Skip | [Esc] Cancel".to_string()]
             }
+            Screen::PortSelect => vec![
+                Self::keybind_item("Up/Down", "Select"),
+                Self::keybind_item("Left/Right", "Change"),
+                Self::keybind_item("c", "Custom"),
+                Self::keybind_item("a", "Auto"),
+                Self::keybind_item("Enter", "Continue"),
+                Self::keybind_item("Esc", "Cancel"),
+            ],
             Screen::AISettingsWizard => {
                 if self.ai_wizard.show_delete_confirm {
                     vec![
@@ -8551,6 +9017,7 @@ mod tests {
     use std::collections::HashMap;
     use std::process::Command;
     use std::sync::mpsc;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn run_git(dir: &Path, args: &[&str]) {
@@ -8601,6 +9068,19 @@ mod tests {
         run_git(repo.path(), &["branch", "-D", "main"]);
         run_git(repo.path(), &["fetch", "origin"]);
         run_git(repo.path(), &["remote", "set-head", "origin", "-a"]);
+
+        (repo, origin)
+    }
+
+    fn create_repo_with_local_and_remote_main() -> (TempDir, TempDir) {
+        let origin = TempDir::new().unwrap();
+        run_git(origin.path(), &["init", "--bare", "-b", "main"]);
+
+        let repo = create_test_repo_with_branch("main");
+        let origin_path = origin.path().to_string_lossy().to_string();
+        run_git(repo.path(), &["remote", "add", "origin", &origin_path]);
+        run_git(repo.path(), &["push", "-u", "origin", "main"]);
+        run_git(repo.path(), &["fetch", "origin"]);
 
         (repo, origin)
     }
@@ -8695,6 +9175,81 @@ mod tests {
     }
 
     #[test]
+    fn test_quick_start_reuses_existing_worktree_path_for_remote_branch_name() {
+        let repo = create_test_repo_with_branch("main");
+
+        let origin = TempDir::new().unwrap();
+        run_git(origin.path(), &["init", "--bare", "-b", "main"]);
+        let origin_path = origin.path().to_string_lossy().to_string();
+        run_git(repo.path(), &["remote", "add", "origin", &origin_path]);
+        run_git(repo.path(), &["push", "-u", "origin", "main"]);
+
+        let worktree_path = repo.path().join(".worktrees/feature-existing");
+        run_git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                worktree_path.to_string_lossy().as_ref(),
+                "-b",
+                "feature/existing",
+            ],
+        );
+        run_git(repo.path(), &["push", "-u", "origin", "feature/existing"]);
+        let worktree_path = std::fs::canonicalize(&worktree_path).unwrap_or(worktree_path);
+
+        let context = TuiEntryContext::success("".to_string()).with_repo_root(repo.path().into());
+        let mut model = Model::new_with_context(Some(context));
+
+        let request = LaunchRequest {
+            branch_name: "remotes/origin/feature/existing".to_string(),
+            create_new_branch: false,
+            base_branch: None,
+            agent: CodingAgent::ClaudeCode,
+            custom_agent: None,
+            model: None,
+            reasoning_level: None,
+            version: "latest".to_string(),
+            execution_mode: ExecutionMode::Normal,
+            session_id: None,
+            skip_permissions: false,
+            collaboration_modes: false,
+            env: Vec::new(),
+            env_remove: Vec::new(),
+            auto_install_deps: false,
+            selected_issue: None,
+            existing_worktree_path: Some(worktree_path.clone()),
+        };
+
+        model.start_launch_preparation(request);
+
+        let rx = model.launch_rx.take().expect("launch rx not set");
+        let mut worktree_ready = None;
+        let mut failure = None;
+        for _ in 0..40 {
+            match rx.recv_timeout(std::time::Duration::from_millis(250)) {
+                Ok(LaunchUpdate::WorktreeReady { path, .. }) => {
+                    worktree_ready = Some(path);
+                    break;
+                }
+                Ok(LaunchUpdate::Failed(message)) => {
+                    failure = Some(message);
+                    break;
+                }
+                Ok(_) => continue,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        if let Some(message) = failure {
+            panic!("expected WorktreeReady, got failure: {}", message);
+        }
+        let ready_path = worktree_ready.expect("expected WorktreeReady update");
+        assert_eq!(ready_path, worktree_path);
+    }
+
+    #[test]
     fn test_background_window_name_uses_branch_name_only() {
         let branch = "feature/clean-name";
         assert_eq!(background_window_name(branch), branch);
@@ -8710,6 +9265,22 @@ mod tests {
     fn test_normalize_branch_name_for_history_keeps_local_name() {
         let normalized = normalize_branch_name_for_history("feature/test");
         assert_eq!(normalized.as_ref(), "feature/test");
+    }
+
+    #[test]
+    fn test_resolve_existing_worktree_path_uses_normalized_remote_name() {
+        let local = sample_branch_with_session("feature/test");
+        let mut remote = local.clone();
+        remote.name = "remotes/origin/feature/test".to_string();
+        remote.branch_type = BranchType::Remote;
+        remote.has_worktree = false;
+        remote.worktree_path = None;
+        remote.worktree_status = WorktreeStatus::None;
+
+        let resolved =
+            resolve_existing_worktree_path("remotes/origin/feature/test", &[remote, local], false);
+
+        assert_eq!(resolved, Some(PathBuf::from("/tmp/worktree")));
     }
 
     #[test]
@@ -8731,6 +9302,35 @@ mod tests {
 
         assert_eq!(item.last_tool_usage.as_deref(), Some("Codex@latest"));
         assert_eq!(item.last_tool_id.as_deref(), Some("codex-cli"));
+    }
+
+    #[test]
+    fn test_branch_list_refresh_includes_remote_branch_with_local_counterpart() {
+        let (repo, _origin) = create_repo_with_local_and_remote_main();
+        let context = TuiEntryContext {
+            status_message: None,
+            error_message: None,
+            repo_root: Some(repo.path().to_path_buf()),
+        };
+        let mut model = Model::new_with_context(Some(context));
+        model.repo_root = repo.path().to_path_buf();
+        model.repo_type = RepoType::Normal;
+        model.bare_repo_path = None;
+
+        model.start_branch_list_refresh(Settings::default());
+        let rx = model.branch_list_rx.take().expect("branch_list_rx");
+        let update = rx
+            // Some CI environments can be slow; avoid flaky timeouts here.
+            .recv_timeout(Duration::from_secs(10))
+            .expect("branch list update");
+
+        assert!(
+            update
+                .branches
+                .iter()
+                .any(|b| b.name == "remotes/origin/main" && b.branch_type == BranchType::Remote),
+            "remote branch should be included even when local counterpart exists"
+        );
     }
 
     fn sample_branch_with_session(name: &str) -> BranchItem {
@@ -9201,6 +9801,30 @@ mod tests {
     }
 
     #[test]
+    fn test_prepare_docker_service_selection_prompts_for_dockerfile_target() {
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(temp_dir.path().join("Dockerfile"), "FROM alpine:3.20").unwrap();
+
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let mut plan = sample_launch_plan();
+        plan.config.worktree_path = temp_dir.path().to_path_buf();
+
+        let decision = model
+            .prepare_docker_service_selection(&plan)
+            .expect("prepare_docker_service_selection");
+        assert!(matches!(decision, ServiceSelectionDecision::AwaitSelection));
+        assert!(matches!(model.screen, Screen::ServiceSelect));
+        assert!(model.pending_service_select.is_some());
+        assert_eq!(model.service_select.items.len(), 2);
+        assert_eq!(model.service_select.items[0].label, "HostOS");
+        assert_eq!(model.service_select.items[1].label, "Docker");
+        assert_eq!(model.service_select.selected, 1);
+        assert_eq!(model.screen_stack.len(), 1);
+    }
+
+    #[test]
     fn test_service_select_cancel_clears_double_click_state() {
         let mut model = Model::new_with_context(None);
         model.screen = Screen::ServiceSelect;
@@ -9250,6 +9874,72 @@ mod tests {
 
         assert!(model.last_mouse_click.is_none());
         assert!(matches!(model.screen, Screen::BranchList));
+    }
+
+    #[test]
+    fn test_docker_confirm_host_shortcut_closes_build_prompt() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Confirm;
+        model.screen_stack.push(Screen::BranchList);
+        model.pending_build_select = Some(PendingBuildSelect {
+            plan: sample_launch_plan(),
+            service: Some("app".to_string()),
+            force_host: false,
+            force_recreate: false,
+            quick_start_keep: None,
+        });
+        model.last_mouse_click = Some(sample_mouse_click());
+
+        model.update(Message::Char('h'));
+
+        assert!(model.pending_build_select.is_none());
+        assert!(model.last_mouse_click.is_none());
+        assert!(matches!(model.screen, Screen::BranchList));
+    }
+
+    #[test]
+    fn test_confirm_footer_keybinds_include_host_shortcut_when_docker_prompt_active() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Confirm;
+        model.pending_build_select = Some(PendingBuildSelect {
+            plan: sample_launch_plan(),
+            service: Some("app".to_string()),
+            force_host: false,
+            force_recreate: false,
+            quick_start_keep: None,
+        });
+
+        let keybinds = model.get_footer_keybinds();
+
+        assert!(keybinds.contains("[h] HostOS"));
+    }
+
+    #[test]
+    fn test_prepare_docker_service_selection_respects_force_host_setting() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("Dockerfile"), "FROM scratch\n").unwrap();
+
+        let mut model = Model::new_with_context(None);
+        let mut settings = Settings::default();
+        settings.docker.force_host = true;
+        model.settings = SettingsState::new().with_settings(settings);
+
+        let mut plan = sample_launch_plan();
+        plan.config.worktree_path = temp.path().to_path_buf();
+
+        let decision = model.prepare_docker_service_selection(&plan).unwrap();
+        match decision {
+            ServiceSelectionDecision::Proceed {
+                service,
+                force_host,
+            } => {
+                assert!(force_host);
+                assert!(service.is_none());
+            }
+            ServiceSelectionDecision::AwaitSelection => {
+                panic!("expected Proceed, got AwaitSelection");
+            }
+        }
     }
 
     #[test]
