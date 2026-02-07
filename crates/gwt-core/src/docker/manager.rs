@@ -92,7 +92,18 @@ fn parse_docker_ps_ports(output: &str) -> HashSet<u16> {
             };
             let host_port = &left[colon_idx + 1..];
             let host_port = host_port.trim_matches(']');
-            if let Ok(port) = host_port.parse::<u16>() {
+            if let Some((start, end)) = host_port.split_once('-') {
+                if let (Ok(start), Ok(end)) = (start.parse::<u16>(), end.parse::<u16>()) {
+                    let (start, end) = if start <= end {
+                        (start, end)
+                    } else {
+                        (end, start)
+                    };
+                    for port in start..=end {
+                        ports.insert(port);
+                    }
+                }
+            } else if let Ok(port) = host_port.parse::<u16>() {
                 ports.insert(port);
             }
         }
@@ -1052,6 +1063,15 @@ mod tests {
     fn test_resolve_compose_status_not_found() {
         let status = resolve_compose_status("", "");
         assert_eq!(status, ContainerStatus::NotFound);
+    }
+
+    #[test]
+    fn test_parse_docker_ps_ports_parses_port_ranges() {
+        let output = "0.0.0.0:3000-3002->3000-3002/tcp, [::]:3000-3002->3000-3002/tcp\n";
+        let ports = parse_docker_ps_ports(output);
+        assert!(ports.contains(&3000));
+        assert!(ports.contains(&3001));
+        assert!(ports.contains(&3002));
     }
 
     #[test]
