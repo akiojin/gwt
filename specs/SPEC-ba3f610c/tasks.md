@@ -180,27 +180,27 @@ US4 (完了検出) ────────────┘
 
 ### テスト検証 (FR-008a, 成果物検証仕様)
 
-- [ ] **T050** [US5] T042の後に `crates/gwt-core/src/agent/orchestrator.rs` にrun_test_verification関数を追加（サブエージェントにテストコマンド実行を指示、結果をcapture-paneで取得、パス/失敗でTestPassed/TestFailedイベント送信）
-- [ ] **T051** [US5] T050の後に `crates/gwt-core/src/agent/orchestrator.rs` のrun_loopにTestPassedイベントハンドラを追加（PR作成フェーズに移行）
-- [ ] **T052** [US5] T050の後に `crates/gwt-core/src/agent/orchestrator.rs` のrun_loopにTestFailedイベントハンドラを追加（retry_count < 3ならサブエージェントに修正指示、3回目はFailed + ユーザー通知）
+- [x] **T050** [US5] T042の後に `crates/gwt-core/src/agent/orchestrator.rs` にrun_test_verification関数を追加（サブエージェントにテストコマンド実行を指示、結果をcapture-paneで取得、パス/失敗でTestPassed/TestFailedイベント送信）
+- [x] **T051** [US5] T050の後に `crates/gwt-core/src/agent/orchestrator.rs` のrun_loopにTestPassedイベントハンドラを追加（PR作成フェーズに移行）
+- [x] **T052** [US5] T050の後に `crates/gwt-core/src/agent/orchestrator.rs` のrun_loopにTestFailedイベントハンドラを追加（retry_count < 3ならサブエージェントに修正指示、3回目はFailed + ユーザー通知）
 
 ### PR作成 (FR-008, PR作成と統合条件仕様)
 
-- [ ] **T053** [P] [US5] `crates/gwt-core/src/agent/orchestrator.rs` にcreate_pull_request関数を追加（git diff取得→LLMでConventional Commits準拠タイトル+詳細本文生成→`gh pr create`実行）
-- [ ] **T054** [US5] T053の後に `crates/gwt-core/src/agent/orchestrator.rs` にcheck_pr_prerequisites関数を追加（worktreeクリーン確認、差分存在確認、gh認証確認）
+- [x] **T053** [P] [US5] `crates/gwt-core/src/agent/orchestrator.rs` にcreate_pull_request関数を追加（git diff取得→LLMでConventional Commits準拠タイトル+詳細本文生成→`gh pr create`実行）
+- [x] **T054** [US5] T053の後に `crates/gwt-core/src/agent/orchestrator.rs` にcheck_pr_prerequisites関数を追加（worktreeクリーン確認、差分存在確認、gh認証確認）
 
 ### コンフリクト解決 (FR-009)
 
-- [ ] **T055** [US5] T053の後に `crates/gwt-core/src/agent/orchestrator.rs` にhandle_merge_conflict関数を追加（コンフリクト検出時にサブエージェントにsend-keysで解決指示を送信）
+- [x] **T055** [US5] T053の後に `crates/gwt-core/src/agent/orchestrator.rs` にhandle_merge_conflict関数を追加（コンフリクト検出時にサブエージェントにsend-keysで解決指示を送信）
 
 ### 失敗ハンドリング (US6)
 
-- [ ] **T056** [US6] T042の後に `crates/gwt-core/src/agent/orchestrator.rs` のrun_loopにSubAgentFailedイベントハンドラを追加（LLMで対応策判定: リトライ/代替/ユーザー相談）
-- [ ] **T057** [US6] T056の後に `crates/gwt-core/src/agent/orchestrator.rs` にretry_task関数を追加（同一WTでサブエージェント再起動）
+- [x] **T056** [US6] T042の後に `crates/gwt-core/src/agent/orchestrator.rs` のrun_loopにSubAgentFailedイベントハンドラを追加（LLMで対応策判定: リトライ/代替/ユーザー相談）
+- [x] **T057** [US6] T056の後に `crates/gwt-core/src/agent/orchestrator.rs` にretry_task関数を追加（同一WTでサブエージェント再起動）
 
 ### LLM障害時の挙動 (マスターエージェントLLM障害時の挙動仕様)
 
-- [ ] **T058** [P] [US6] `crates/gwt-core/src/ai/client.rs` にエクスポネンシャルバックオフリトライロジックを追加（RateLimited / ServerError時に最大5回リトライ、間隔: 1s→2s→4s→8s→16s）
+- [x] **T058** [P] [US6] `crates/gwt-core/src/ai/client.rs` にエクスポネンシャルバックオフリトライロジックを追加（RateLimited / ServerError時に最大5回リトライ、間隔: 1s→2s→4s→8s→16s）
 
 **✅ P2品質チェックポイント**: テスト検証・PR作成・失敗回復が動作
 
