@@ -163,10 +163,7 @@ mod tests {
         // BEL character
         emu.process(b"\x07");
         assert!(emu.take_bell(), "bell should be pending after BEL");
-        assert!(
-            !emu.take_bell(),
-            "bell should be cleared after take_bell()"
-        );
+        assert!(!emu.take_bell(), "bell should be cleared after take_bell()");
     }
 
     #[test]
@@ -263,7 +260,10 @@ mod tests {
     fn test_bell_multiple_times() {
         let mut emu = TerminalEmulator::new(24, 80);
         emu.process(b"\x07\x07\x07");
-        assert!(emu.take_bell(), "bell should be pending after multiple BELs");
+        assert!(
+            emu.take_bell(),
+            "bell should be pending after multiple BELs"
+        );
         assert!(!emu.take_bell(), "bell should be cleared after take");
     }
 }

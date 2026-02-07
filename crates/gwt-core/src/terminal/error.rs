@@ -40,7 +40,10 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(msg.contains("[E7001]"), "Expected E7001 in: {msg}");
-        assert!(msg.contains("no pty available"), "Expected reason in: {msg}");
+        assert!(
+            msg.contains("no pty available"),
+            "Expected reason in: {msg}"
+        );
     }
 
     #[test]
@@ -60,10 +63,7 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(msg.contains("[E7003]"), "Expected E7003 in: {msg}");
-        assert!(
-            msg.contains("invalid escape"),
-            "Expected details in: {msg}"
-        );
+        assert!(msg.contains("invalid escape"), "Expected details in: {msg}");
     }
 
     #[test]
@@ -83,10 +83,7 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(msg.contains("[E7005]"), "Expected E7005 in: {msg}");
-        assert!(
-            msg.contains("channel closed"),
-            "Expected details in: {msg}"
-        );
+        assert!(msg.contains("channel closed"), "Expected details in: {msg}");
     }
 
     #[test]

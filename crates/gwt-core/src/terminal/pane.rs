@@ -101,9 +101,11 @@ impl TerminalPane {
     /// Write input data to the PTY.
     pub fn write_input(&mut self, data: &[u8]) -> Result<(), TerminalError> {
         if let Some(ref mut writer) = self.writer {
-            writer.write_all(data).map_err(|e| TerminalError::PtyIoError {
-                details: e.to_string(),
-            })?;
+            writer
+                .write_all(data)
+                .map_err(|e| TerminalError::PtyIoError {
+                    details: e.to_string(),
+                })?;
             writer.flush().map_err(|e| TerminalError::PtyIoError {
                 details: e.to_string(),
             })?;
@@ -270,10 +272,11 @@ mod tests {
         let mut pane = TerminalPane::new(config).expect("Failed to create pane");
 
         let reader = pane.take_reader().expect("Failed to get reader");
-        let output = read_with_timeout(reader, Duration::from_secs(5))
-            .expect("Failed to read output");
+        let output =
+            read_with_timeout(reader, Duration::from_secs(5)).expect("Failed to read output");
 
-        pane.process_bytes(&output).expect("Failed to process bytes");
+        pane.process_bytes(&output)
+            .expect("Failed to process bytes");
 
         let cell = pane.screen().cell(0, 0).expect("cell(0,0) should exist");
         assert_eq!(cell.contents(), "h", "Expected 'h' at (0,0)");
@@ -289,10 +292,11 @@ mod tests {
 
         pane.write_input(b"test\n").expect("Failed to write input");
 
-        let output = read_with_timeout(reader, Duration::from_secs(5))
-            .expect("Failed to read output");
+        let output =
+            read_with_timeout(reader, Duration::from_secs(5)).expect("Failed to read output");
 
-        pane.process_bytes(&output).expect("Failed to process bytes");
+        pane.process_bytes(&output)
+            .expect("Failed to process bytes");
 
         let output_str = String::from_utf8_lossy(&output);
         assert!(

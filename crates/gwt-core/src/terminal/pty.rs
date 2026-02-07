@@ -117,11 +117,9 @@ impl PtyHandle {
 
     /// Kill the child process.
     pub fn kill(&mut self) -> Result<(), TerminalError> {
-        self.child
-            .kill()
-            .map_err(|e| TerminalError::PtyIoError {
-                details: e.to_string(),
-            })
+        self.child.kill().map_err(|e| TerminalError::PtyIoError {
+            details: e.to_string(),
+        })
     }
 }
 
@@ -192,8 +190,8 @@ mod tests {
         let handle = PtyHandle::new(config).expect("Failed to create PTY");
         let reader = handle.take_reader().expect("Failed to get reader");
 
-        let output = read_with_timeout(reader, Duration::from_secs(5))
-            .expect("Failed to read PTY output");
+        let output =
+            read_with_timeout(reader, Duration::from_secs(5)).expect("Failed to read PTY output");
 
         assert!(
             output.contains("hello"),
@@ -220,8 +218,8 @@ mod tests {
         let handle = PtyHandle::new(config).expect("Failed to create PTY");
         let reader = handle.take_reader().expect("Failed to get reader");
 
-        let output = read_with_timeout(reader, Duration::from_secs(5))
-            .expect("Failed to read PTY output");
+        let output =
+            read_with_timeout(reader, Duration::from_secs(5)).expect("Failed to read PTY output");
 
         assert!(
             output.contains("GWT_PANE_ID=pane-42"),

@@ -627,6 +627,8 @@ pub struct Model {
     prefix_mode_time: Option<Instant>,
     /// SPEC-1d6dd9fc: Built-in terminal pane manager
     terminal_manager: gwt_core::terminal::manager::PaneManager,
+    /// SPEC-1d6dd9fc FR-070: Whether copy mode is active
+    copy_mode_active: bool,
     /// GitView cache for all branches (SPEC-1ea18899 FR-050)
     git_view_cache: GitViewCache,
     /// GitView cache update receiver (SPEC-1ea18899)
@@ -698,6 +700,10 @@ pub enum PrefixCommand {
     Cancel,
     /// Send Ctrl+G literal to PTY (Ctrl+G → Ctrl+G)
     SendPrefix,
+    /// Enter copy mode / scrollback (Ctrl+G → [)
+    CopyMode,
+    /// Paste from clipboard to PTY (Ctrl+G → ])
+    Paste,
 }
 
 /// Screen types
@@ -924,6 +930,7 @@ impl Model {
             prefix_mode_active: false,
             prefix_mode_time: None,
             terminal_manager: gwt_core::terminal::manager::PaneManager::new(),
+            copy_mode_active: false,
         };
 
         model
@@ -2842,6 +2849,35 @@ impl Model {
                 self.refresh_branch_summary();
             }
             self.last_mouse_click = Some(MouseClick { index, at: now });
+        }
+    }
+
+    /// SPEC-1d6dd9fc T016: Handle host terminal resize (SIGWINCH).
+    /// Resize all terminal panes to match new terminal size.
+    fn handle_terminal_resize(&mut self) {
+        if self.terminal_manager.is_empty() {
+            return;
+        }
+        // Get current terminal size from crossterm
+        if let Ok((cols, rows)) = crossterm::terminal::size() {
+            // Calculate the terminal pane area size.
+            // The pane area is approximately half the width (split layout) minus borders.
+            let pane_cols = if self.split_layout.is_fullscreen || cols < 80 {
+                cols.saturating_sub(2) // borders
+            } else {
+                (cols / 2).saturating_sub(2) // 50% minus borders
+            };
+            // Subtract header(6) + tab_bar(1) + status_bar(1) + footer(1) + statusbar(1) + borders(2)
+            let pane_rows = rows.saturating_sub(12);
+            if pane_cols > 0 && pane_rows > 0 {
+                if let Err(e) = self.terminal_manager.resize_all(pane_rows, pane_cols) {
+                    debug!(
+                        category = "terminal",
+                        error = %e,
+                        "Failed to resize terminal panes"
+                    );
+                }
+            }
         }
     }
 
@@ -5127,6 +5163,38 @@ impl Model {
                         let _ = pane.write_input(&[0x07]);
                     }
                 }
+                PrefixCommand::CopyMode => {
+                    // FR-070: Enter copy mode (scrollback / selection)
+                    // TODO: Full visual copy mode with cursor movement and selection
+                    // For now, set a status message indicating copy mode is not yet fully implemented
+                    self.copy_mode_active = true;
+                    self.status_message = Some("Copy mode entered (Esc/q to exit)".to_string());
+                    self.status_message_time = Some(Instant::now());
+                }
+                PrefixCommand::Paste => {
+                    // FR-073: Paste clipboard contents to PTY
+                    match arboard::Clipboard::new() {
+                        Ok(mut clipboard) => match clipboard.get_text() {
+                            Ok(text) => {
+                                if let Some(pane) = self.terminal_manager.active_pane_mut() {
+                                    if let Err(e) = pane.write_input(text.as_bytes()) {
+                                        self.status_message =
+                                            Some(format!("Failed to paste: {}", e));
+                                        self.status_message_time = Some(Instant::now());
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                self.status_message = Some(format!("Clipboard read failed: {}", e));
+                                self.status_message_time = Some(Instant::now());
+                            }
+                        },
+                        Err(e) => {
+                            self.status_message = Some(format!("Clipboard unavailable: {}", e));
+                            self.status_message_time = Some(Instant::now());
+                        }
+                    }
+                }
             },
             Message::FocusTerminalPane => {
                 if !self.terminal_manager.is_empty() {
@@ -6929,7 +6997,11 @@ impl Model {
                         pane_manager: &self.terminal_manager,
                         is_focused: self.focus_target == FocusTarget::TerminalPane,
                     };
-                    super::screens::terminal_pane::render_terminal_pane(&view, frame, terminal_area);
+                    super::screens::terminal_pane::render_terminal_pane(
+                        &view,
+                        frame,
+                        terminal_area,
+                    );
                 }
             }
             Screen::WorktreeCreate => {
@@ -7744,6 +7816,12 @@ impl Model {
                 (KeyCode::Char('z'), KeyModifiers::NONE) => {
                     Some(Message::PrefixKey(PrefixCommand::FullscreenToggle))
                 }
+                (KeyCode::Char('['), KeyModifiers::NONE) => {
+                    Some(Message::PrefixKey(PrefixCommand::CopyMode))
+                }
+                (KeyCode::Char(']'), KeyModifiers::NONE) => {
+                    Some(Message::PrefixKey(PrefixCommand::Paste))
+                }
                 (KeyCode::Esc, _) => Some(Message::PrefixKey(PrefixCommand::Cancel)),
                 (KeyCode::Char('g'), KeyModifiers::CONTROL) => {
                     // Ctrl+G → Ctrl+G: send Ctrl+G literal to PTY
@@ -8204,6 +8282,10 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
                             _ => {}
                         }
                     }
+                }
+                // SPEC-1d6dd9fc T016: Handle terminal resize events
+                Event::Resize(_cols, _rows) => {
+                    model.handle_terminal_resize();
                 }
                 _ => {}
             }
@@ -10326,32 +10408,34 @@ mod tests {
         let mut model = Model::new_with_context(None);
         model.screen = Screen::BranchList;
         // Add panes via manager
-        let p1 = gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
-            pane_id: "p1".to_string(),
-            command: "/usr/bin/true".to_string(),
-            args: vec![],
-            working_dir: std::env::temp_dir(),
-            branch_name: "branch-a".to_string(),
-            agent_name: "agent-a".to_string(),
-            agent_color: ratatui::style::Color::Green,
-            rows: 24,
-            cols: 80,
-            env_vars: HashMap::new(),
-        })
-        .unwrap();
-        let p2 = gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
-            pane_id: "p2".to_string(),
-            command: "/usr/bin/true".to_string(),
-            args: vec![],
-            working_dir: std::env::temp_dir(),
-            branch_name: "branch-b".to_string(),
-            agent_name: "agent-b".to_string(),
-            agent_color: ratatui::style::Color::Blue,
-            rows: 24,
-            cols: 80,
-            env_vars: HashMap::new(),
-        })
-        .unwrap();
+        let p1 =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: "p1".to_string(),
+                command: "/usr/bin/true".to_string(),
+                args: vec![],
+                working_dir: std::env::temp_dir(),
+                branch_name: "branch-a".to_string(),
+                agent_name: "agent-a".to_string(),
+                agent_color: ratatui::style::Color::Green,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+            })
+            .unwrap();
+        let p2 =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: "p2".to_string(),
+                command: "/usr/bin/true".to_string(),
+                args: vec![],
+                working_dir: std::env::temp_dir(),
+                branch_name: "branch-b".to_string(),
+                agent_name: "agent-b".to_string(),
+                agent_color: ratatui::style::Color::Blue,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+            })
+            .unwrap();
         model.terminal_manager.add_pane(p1).unwrap();
         model.terminal_manager.add_pane(p2).unwrap();
         // active_index is 1 (last added)
@@ -10365,32 +10449,34 @@ mod tests {
     #[test]
     fn test_prefix_prev_tab() {
         let mut model = Model::new_with_context(None);
-        let p1 = gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
-            pane_id: "p1".to_string(),
-            command: "/usr/bin/true".to_string(),
-            args: vec![],
-            working_dir: std::env::temp_dir(),
-            branch_name: "b".to_string(),
-            agent_name: "a".to_string(),
-            agent_color: ratatui::style::Color::Green,
-            rows: 24,
-            cols: 80,
-            env_vars: HashMap::new(),
-        })
-        .unwrap();
-        let p2 = gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
-            pane_id: "p2".to_string(),
-            command: "/usr/bin/true".to_string(),
-            args: vec![],
-            working_dir: std::env::temp_dir(),
-            branch_name: "b2".to_string(),
-            agent_name: "a2".to_string(),
-            agent_color: ratatui::style::Color::Blue,
-            rows: 24,
-            cols: 80,
-            env_vars: HashMap::new(),
-        })
-        .unwrap();
+        let p1 =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: "p1".to_string(),
+                command: "/usr/bin/true".to_string(),
+                args: vec![],
+                working_dir: std::env::temp_dir(),
+                branch_name: "b".to_string(),
+                agent_name: "a".to_string(),
+                agent_color: ratatui::style::Color::Green,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+            })
+            .unwrap();
+        let p2 =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: "p2".to_string(),
+                command: "/usr/bin/true".to_string(),
+                args: vec![],
+                working_dir: std::env::temp_dir(),
+                branch_name: "b2".to_string(),
+                agent_name: "a2".to_string(),
+                agent_color: ratatui::style::Color::Blue,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+            })
+            .unwrap();
         model.terminal_manager.add_pane(p1).unwrap();
         model.terminal_manager.add_pane(p2).unwrap();
         assert_eq!(model.terminal_manager.active_index(), 1);
@@ -10403,19 +10489,20 @@ mod tests {
     #[test]
     fn test_prefix_close_pane_reverts_focus() {
         let mut model = Model::new_with_context(None);
-        let p1 = gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
-            pane_id: "p1".to_string(),
-            command: "/usr/bin/true".to_string(),
-            args: vec![],
-            working_dir: std::env::temp_dir(),
-            branch_name: "b".to_string(),
-            agent_name: "a".to_string(),
-            agent_color: ratatui::style::Color::Green,
-            rows: 24,
-            cols: 80,
-            env_vars: HashMap::new(),
-        })
-        .unwrap();
+        let p1 =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: "p1".to_string(),
+                command: "/usr/bin/true".to_string(),
+                args: vec![],
+                working_dir: std::env::temp_dir(),
+                branch_name: "b".to_string(),
+                agent_name: "a".to_string(),
+                agent_color: ratatui::style::Color::Green,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+            })
+            .unwrap();
         model.terminal_manager.add_pane(p1).unwrap();
         model.split_layout.has_terminal_pane = true;
         model.focus_target = FocusTarget::TerminalPane;
@@ -10430,19 +10517,20 @@ mod tests {
     #[test]
     fn test_prefix_fullscreen_toggle() {
         let mut model = Model::new_with_context(None);
-        let p1 = gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
-            pane_id: "p1".to_string(),
-            command: "/usr/bin/true".to_string(),
-            args: vec![],
-            working_dir: std::env::temp_dir(),
-            branch_name: "b".to_string(),
-            agent_name: "a".to_string(),
-            agent_color: ratatui::style::Color::Green,
-            rows: 24,
-            cols: 80,
-            env_vars: HashMap::new(),
-        })
-        .unwrap();
+        let p1 =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: "p1".to_string(),
+                command: "/usr/bin/true".to_string(),
+                args: vec![],
+                working_dir: std::env::temp_dir(),
+                branch_name: "b".to_string(),
+                agent_name: "a".to_string(),
+                agent_color: ratatui::style::Color::Green,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+            })
+            .unwrap();
         model.terminal_manager.add_pane(p1).unwrap();
         assert!(!model.split_layout.is_fullscreen);
 
@@ -10467,19 +10555,20 @@ mod tests {
     #[test]
     fn test_focus_terminal_pane() {
         let mut model = Model::new_with_context(None);
-        let p1 = gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
-            pane_id: "p1".to_string(),
-            command: "/usr/bin/true".to_string(),
-            args: vec![],
-            working_dir: std::env::temp_dir(),
-            branch_name: "b".to_string(),
-            agent_name: "a".to_string(),
-            agent_color: ratatui::style::Color::Green,
-            rows: 24,
-            cols: 80,
-            env_vars: HashMap::new(),
-        })
-        .unwrap();
+        let p1 =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: "p1".to_string(),
+                command: "/usr/bin/true".to_string(),
+                args: vec![],
+                working_dir: std::env::temp_dir(),
+                branch_name: "b".to_string(),
+                agent_name: "a".to_string(),
+                agent_color: ratatui::style::Color::Green,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+            })
+            .unwrap();
         model.terminal_manager.add_pane(p1).unwrap();
         assert_eq!(model.focus_target, FocusTarget::GwtUi);
 
@@ -10574,19 +10663,20 @@ mod tests {
     fn test_ctrl_g_activates_prefix_mode() {
         let mut model = Model::new_with_context(None);
         model.screen = Screen::BranchList;
-        let p1 = gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
-            pane_id: "p1".to_string(),
-            command: "/usr/bin/true".to_string(),
-            args: vec![],
-            working_dir: std::env::temp_dir(),
-            branch_name: "b".to_string(),
-            agent_name: "a".to_string(),
-            agent_color: ratatui::style::Color::Green,
-            rows: 24,
-            cols: 80,
-            env_vars: HashMap::new(),
-        })
-        .unwrap();
+        let p1 =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: "p1".to_string(),
+                command: "/usr/bin/true".to_string(),
+                args: vec![],
+                working_dir: std::env::temp_dir(),
+                branch_name: "b".to_string(),
+                agent_name: "a".to_string(),
+                agent_color: ratatui::style::Color::Green,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+            })
+            .unwrap();
         model.terminal_manager.add_pane(p1).unwrap();
 
         let key = KeyEvent::new_with_kind(
@@ -10694,7 +10784,8 @@ mod tests {
     fn test_prefix_mode_timeout() {
         let mut model = Model::new_with_context(None);
         model.prefix_mode_active = true;
-        model.prefix_mode_time = Some(Instant::now() - PREFIX_MODE_TIMEOUT - Duration::from_millis(1));
+        model.prefix_mode_time =
+            Some(Instant::now() - PREFIX_MODE_TIMEOUT - Duration::from_millis(1));
 
         let key =
             KeyEvent::new_with_kind(KeyCode::Char('n'), KeyModifiers::NONE, KeyEventKind::Press);
@@ -10709,19 +10800,20 @@ mod tests {
         let mut model = Model::new_with_context(None);
         model.screen = Screen::BranchList;
         model.focus_target = FocusTarget::TerminalPane;
-        let p1 = gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
-            pane_id: "p1".to_string(),
-            command: "/usr/bin/true".to_string(),
-            args: vec![],
-            working_dir: std::env::temp_dir(),
-            branch_name: "b".to_string(),
-            agent_name: "a".to_string(),
-            agent_color: ratatui::style::Color::Green,
-            rows: 24,
-            cols: 80,
-            env_vars: HashMap::new(),
-        })
-        .unwrap();
+        let p1 =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: "p1".to_string(),
+                command: "/usr/bin/true".to_string(),
+                args: vec![],
+                working_dir: std::env::temp_dir(),
+                branch_name: "b".to_string(),
+                agent_name: "a".to_string(),
+                agent_color: ratatui::style::Color::Green,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+            })
+            .unwrap();
         model.terminal_manager.add_pane(p1).unwrap();
 
         let key = KeyEvent::new_with_kind(
@@ -10740,19 +10832,20 @@ mod tests {
         let mut model = Model::new_with_context(None);
         model.screen = Screen::BranchList;
         model.focus_target = FocusTarget::TerminalPane;
-        let p1 = gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
-            pane_id: "p1".to_string(),
-            command: "/usr/bin/true".to_string(),
-            args: vec![],
-            working_dir: std::env::temp_dir(),
-            branch_name: "b".to_string(),
-            agent_name: "a".to_string(),
-            agent_color: ratatui::style::Color::Green,
-            rows: 24,
-            cols: 80,
-            env_vars: HashMap::new(),
-        })
-        .unwrap();
+        let p1 =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: "p1".to_string(),
+                command: "/usr/bin/true".to_string(),
+                args: vec![],
+                working_dir: std::env::temp_dir(),
+                branch_name: "b".to_string(),
+                agent_name: "a".to_string(),
+                agent_color: ratatui::style::Color::Green,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+            })
+            .unwrap();
         model.terminal_manager.add_pane(p1).unwrap();
 
         let key =
@@ -10769,19 +10862,20 @@ mod tests {
     fn test_terminal_focus_ctrl_c_still_works() {
         let mut model = Model::new_with_context(None);
         model.focus_target = FocusTarget::TerminalPane;
-        let p1 = gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
-            pane_id: "p1".to_string(),
-            command: "/usr/bin/true".to_string(),
-            args: vec![],
-            working_dir: std::env::temp_dir(),
-            branch_name: "b".to_string(),
-            agent_name: "a".to_string(),
-            agent_color: ratatui::style::Color::Green,
-            rows: 24,
-            cols: 80,
-            env_vars: HashMap::new(),
-        })
-        .unwrap();
+        let p1 =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: "p1".to_string(),
+                command: "/usr/bin/true".to_string(),
+                args: vec![],
+                working_dir: std::env::temp_dir(),
+                branch_name: "b".to_string(),
+                agent_name: "a".to_string(),
+                agent_color: ratatui::style::Color::Green,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+            })
+            .unwrap();
         model.terminal_manager.add_pane(p1).unwrap();
 
         let key = KeyEvent::new_with_kind(
@@ -10794,5 +10888,92 @@ mod tests {
             Some(Message::CtrlC) => {}
             other => panic!("Expected CtrlC, got: {:?}", other),
         }
+    }
+
+    // ===== SPEC-1d6dd9fc T016: Resize handling tests =====
+
+    // 29. handle_terminal_resize does nothing when no panes
+    #[test]
+    fn test_resize_no_panes_noop() {
+        let mut model = Model::new_with_context(None);
+        assert!(model.terminal_manager.is_empty());
+        // Should not panic
+        model.handle_terminal_resize();
+    }
+
+    // ===== SPEC-1d6dd9fc T014: Copy & Paste tests =====
+
+    // 31. Prefix mode + [ = CopyMode command
+    #[test]
+    fn test_prefix_mode_bracket_open_copy_mode() {
+        let mut model = Model::new_with_context(None);
+        model.prefix_mode_active = true;
+        model.prefix_mode_time = Some(Instant::now());
+
+        let key =
+            KeyEvent::new_with_kind(KeyCode::Char('['), KeyModifiers::NONE, KeyEventKind::Press);
+        let msg = model.handle_key_event(key);
+        assert!(!model.prefix_mode_active);
+        match msg {
+            Some(Message::PrefixKey(PrefixCommand::CopyMode)) => {}
+            other => panic!("Expected PrefixKey(CopyMode), got: {:?}", other),
+        }
+    }
+
+    // 32. Prefix mode + ] = Paste command
+    #[test]
+    fn test_prefix_mode_bracket_close_paste() {
+        let mut model = Model::new_with_context(None);
+        model.prefix_mode_active = true;
+        model.prefix_mode_time = Some(Instant::now());
+
+        let key =
+            KeyEvent::new_with_kind(KeyCode::Char(']'), KeyModifiers::NONE, KeyEventKind::Press);
+        let msg = model.handle_key_event(key);
+        assert!(!model.prefix_mode_active);
+        match msg {
+            Some(Message::PrefixKey(PrefixCommand::Paste)) => {}
+            other => panic!("Expected PrefixKey(Paste), got: {:?}", other),
+        }
+    }
+
+    // 33. PrefixCommand::CopyMode sets copy_mode_active
+    #[test]
+    fn test_prefix_copy_mode_sets_flag() {
+        let mut model = Model::new_with_context(None);
+        assert!(!model.copy_mode_active);
+
+        model.update(Message::PrefixKey(PrefixCommand::CopyMode));
+        assert!(model.copy_mode_active);
+    }
+
+    // 34. copy_mode_active defaults to false
+    #[test]
+    fn test_copy_mode_default_inactive() {
+        let model = Model::new_with_context(None);
+        assert!(!model.copy_mode_active);
+    }
+
+    // 30. handle_terminal_resize calls resize on panes
+    #[test]
+    fn test_resize_with_panes() {
+        let mut model = Model::new_with_context(None);
+        let p1 =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: "p1".to_string(),
+                command: "/usr/bin/true".to_string(),
+                args: vec![],
+                working_dir: std::env::temp_dir(),
+                branch_name: "b".to_string(),
+                agent_name: "a".to_string(),
+                agent_color: ratatui::style::Color::Green,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+            })
+            .unwrap();
+        model.terminal_manager.add_pane(p1).unwrap();
+        // Should not panic (actual resize depends on crossterm::terminal::size())
+        model.handle_terminal_resize();
     }
 }

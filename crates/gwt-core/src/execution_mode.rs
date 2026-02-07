@@ -148,14 +148,12 @@ mod tests {
     fn test_terminal_mode_serialize_deserialize() {
         let builtin = TerminalMode::Builtin;
         let json = serde_json::to_string(&builtin).expect("serialize Builtin");
-        let deserialized: TerminalMode =
-            serde_json::from_str(&json).expect("deserialize Builtin");
+        let deserialized: TerminalMode = serde_json::from_str(&json).expect("deserialize Builtin");
         assert_eq!(deserialized, TerminalMode::Builtin);
 
         let tmux = TerminalMode::Tmux;
         let json = serde_json::to_string(&tmux).expect("serialize Tmux");
-        let deserialized: TerminalMode =
-            serde_json::from_str(&json).expect("deserialize Tmux");
+        let deserialized: TerminalMode = serde_json::from_str(&json).expect("deserialize Tmux");
         assert_eq!(deserialized, TerminalMode::Tmux);
     }
 

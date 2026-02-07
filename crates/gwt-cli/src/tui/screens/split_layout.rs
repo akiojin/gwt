@@ -61,11 +61,8 @@ pub fn calculate_split_layout(area: Rect, state: &SplitLayoutState) -> SplitLayo
     }
 
     // 50:50 horizontal split
-    let chunks = Layout::horizontal([
-        Constraint::Percentage(50),
-        Constraint::Percentage(50),
-    ])
-    .split(area);
+    let chunks =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
 
     SplitLayoutAreas {
         branch_list: chunks[0],

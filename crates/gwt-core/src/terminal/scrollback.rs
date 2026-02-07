@@ -41,14 +41,13 @@ impl ScrollbackFile {
                 details: format!("failed to create directory: {e}"),
             })?;
         }
-        let file =
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&file_path)
-                .map_err(|e| TerminalError::ScrollbackError {
-                    details: format!("failed to open scrollback file: {e}"),
-                })?;
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file_path)
+            .map_err(|e| TerminalError::ScrollbackError {
+                details: format!("failed to open scrollback file: {e}"),
+            })?;
         let writer = BufWriter::new(file);
         Ok(Self {
             file_path,
@@ -84,10 +83,9 @@ impl ScrollbackFile {
     /// If the requested range extends beyond the file, returns only
     /// the available lines.
     pub fn read_lines(&self, start: usize, count: usize) -> Result<Vec<String>, TerminalError> {
-        let file =
-            File::open(&self.file_path).map_err(|e| TerminalError::ScrollbackError {
-                details: format!("failed to open file for reading: {e}"),
-            })?;
+        let file = File::open(&self.file_path).map_err(|e| TerminalError::ScrollbackError {
+            details: format!("failed to open file for reading: {e}"),
+        })?;
         let reader = BufReader::new(file);
         let lines: Vec<String> = reader
             .lines()
@@ -115,7 +113,10 @@ impl ScrollbackFile {
         let home = dirs::home_dir().ok_or_else(|| TerminalError::ScrollbackError {
             details: "failed to determine home directory".to_string(),
         })?;
-        let file_path = home.join(".gwt").join("terminals").join(format!("{pane_id}.log"));
+        let file_path = home
+            .join(".gwt")
+            .join("terminals")
+            .join(format!("{pane_id}.log"));
         if file_path.exists() {
             fs::remove_file(&file_path).map_err(|e| TerminalError::ScrollbackError {
                 details: format!("failed to remove file: {e}"),

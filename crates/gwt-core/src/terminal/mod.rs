@@ -1,5 +1,6 @@
 pub mod emulator;
 pub mod error;
+pub mod ipc;
 pub mod manager;
 pub mod pane;
 pub mod pty;

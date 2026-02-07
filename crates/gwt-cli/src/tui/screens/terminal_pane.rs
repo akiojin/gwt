@@ -9,6 +9,19 @@ use gwt_core::terminal::manager::PaneManager;
 use gwt_core::terminal::pane::PaneStatus;
 use ratatui::{prelude::*, widgets::*};
 
+/// State for copy mode (FR-070: scrollback / text selection).
+#[derive(Debug, Clone, Default)]
+pub struct CopyModeState {
+    /// Whether copy mode is currently active.
+    pub active: bool,
+    /// Cursor row position within the terminal buffer.
+    pub cursor_row: u16,
+    /// Cursor column position within the terminal buffer.
+    pub cursor_col: u16,
+    /// Selection start position (row, col). None if selection has not started.
+    pub selection_start: Option<(u16, u16)>,
+}
+
 /// View data for rendering a terminal pane area.
 pub struct TerminalPaneView<'a> {
     pub pane_manager: &'a PaneManager,
@@ -150,10 +163,7 @@ fn render_status_bar(manager: &PaneManager, frame: &mut Frame, area: Rect) {
     let label = status_label(status);
 
     let spans = vec![
-        Span::styled(
-            format!(" {branch}"),
-            Style::default().fg(Color::White),
-        ),
+        Span::styled(format!(" {branch}"), Style::default().fg(Color::White)),
         Span::raw(" | "),
         Span::styled(agent, Style::default().fg(agent_color)),
         Span::raw(" "),
@@ -171,8 +181,7 @@ fn render_status_bar(manager: &PaneManager, frame: &mut Frame, area: Rect) {
     ];
 
     let line = Line::from(spans);
-    let paragraph = Paragraph::new(line)
-        .style(Style::default().bg(Color::DarkGray));
+    let paragraph = Paragraph::new(line).style(Style::default().bg(Color::DarkGray));
     frame.render_widget(paragraph, area);
 }
 
@@ -268,5 +277,26 @@ mod tests {
     #[test]
     fn test_format_tab_label_third() {
         assert_eq!(format_tab_label(2, "gemini"), "3:gemini");
+    }
+
+    // --- CopyModeState tests (SPEC-1d6dd9fc FR-070) ---
+
+    #[test]
+    fn test_copy_mode_state_default_inactive() {
+        let state = CopyModeState::default();
+        assert!(!state.active);
+    }
+
+    #[test]
+    fn test_copy_mode_state_default_cursor_at_origin() {
+        let state = CopyModeState::default();
+        assert_eq!(state.cursor_row, 0);
+        assert_eq!(state.cursor_col, 0);
+    }
+
+    #[test]
+    fn test_copy_mode_state_default_no_selection() {
+        let state = CopyModeState::default();
+        assert!(state.selection_start.is_none());
     }
 }
