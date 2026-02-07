@@ -2,7 +2,12 @@
 
 #![allow(dead_code)] // TUI application components for future expansion
 
-use crate::{prepare_launch_plan, InstallPlan, LaunchPlan, LaunchProgress};
+mod ai_wizard;
+
+use super::widgets::ProgressModalState;
+use crate::{
+    prepare_launch_plan, InstallPlan, LaunchPlan, LaunchProgress, ProgressStepKind, StepStatus,
+};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -11,20 +16,25 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use gwt_core::agent::codex::supports_collaboration_modes;
 use gwt_core::agent::{OrchestratorEvent, OrchestratorMessage, SessionStatus, SessionStore};
 use gwt_core::ai::{
     summarize_session, AIClient, AIError, AgentHistoryStore, AgentType, ChatMessage,
-    ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, OpenCodeSessionParser,
+    ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, ModelInfo, OpenCodeSessionParser,
     SessionParseError, SessionParser,
 };
 use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{
-    get_claude_settings_path, is_gwt_hooks_registered, is_temporary_execution, register_gwt_hooks,
-    reregister_gwt_hooks, save_session_entry, AISettings, Profile, ProfilesConfig,
-    ResolvedAISettings, ToolSessionEntry,
+    get_claude_settings_path, is_gwt_hooks_registered, is_gwt_marketplace_registered,
+    is_temporary_execution, register_gwt_hooks, reregister_gwt_hooks, save_session_entry,
+    setup_gwt_plugin, AISettings, CustomCodingAgent, Profile, ProfilesConfig, ResolvedAISettings,
+    ToolSessionEntry,
 };
+use gwt_core::docker::{ContainerStatus, DockerManager};
 use gwt_core::error::GwtError;
-use gwt_core::git::{Branch, PrCache, Remote, Repository};
+use gwt_core::git::{
+    detect_repo_type, get_header_context, Branch, PrCache, Remote, RepoType, Repository,
+};
 use gwt_core::tmux::{
     break_pane, compute_equal_splits, get_current_session, group_panes_by_left,
     join_pane_to_target, kill_pane, launcher, list_pane_geometries, resize_pane_height,
@@ -33,9 +43,11 @@ use gwt_core::tmux::{
 use gwt_core::worktree::WorktreeManager;
 use gwt_core::TmuxMode;
 use ratatui::{prelude::*, widgets::*};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -46,22 +58,29 @@ const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const SESSION_SUMMARY_QUIET_PERIOD: Duration = Duration::from_secs(5);
 const FAST_EXIT_THRESHOLD_SECS: u64 = 2;
 const AGENT_SYSTEM_PROMPT: &str = "You are the master agent. Analyze tasks and propose a plan.";
+const FOOTER_VISIBLE_HEIGHT: usize = 1;
+const FOOTER_SCROLL_TICKS_PER_LINE: u16 = 12; // 3.0s per line (tick = 250ms)
+const FOOTER_SCROLL_PAUSE_TICKS: u16 = 0; // no pause at ends
 
 use super::screens::branch_list::{
     BranchSummaryRequest, BranchSummaryUpdate, PrInfo, WorktreeStatus,
 };
 use super::screens::environment::EditField;
+use super::screens::git_view::{build_git_view_data, build_git_view_data_no_worktree, GitViewData};
 use super::screens::pane_list::PaneListState;
 use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
+use super::screens::worktree_create::WorktreeCreateStep;
 use super::screens::{
-    collect_os_env, render_agent_mode, render_ai_wizard, render_branch_list, render_confirm,
-    render_environment, render_error_with_queue, render_help, render_logs, render_profiles,
+    collect_os_env, render_agent_mode, render_ai_wizard, render_branch_list, render_clone_wizard,
+    render_confirm, render_environment, render_error_with_queue, render_git_view, render_help,
+    render_logs, render_migration_dialog, render_profiles, render_service_select,
     render_session_selector, render_settings, render_speckit_wizard, render_wizard,
     render_worktree_create, AIWizardState, AgentMessage, AgentModeState, AgentRole, BranchItem,
-    BranchListState, BranchType, CodingAgent, ConfirmState, EnvironmentState, ErrorQueue,
-    ErrorState, ExecutionMode, HelpState, LogsState, ProfilesState, QuickStartEntry,
-    ReasoningLevel, SettingsState, SpecKitWizardState, WizardConfirmResult, WizardState,
-    WorktreeCreateState,
+    BranchListState, BranchType, CloneWizardState, CloneWizardStep, CodingAgent, ConfirmState,
+    EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, GitViewCache, GitViewState, HelpState,
+    LogsState, MigrationDialogPhase, MigrationDialogState, ProfilesState,
+    QuickStartDockerSettings, QuickStartEntry, ReasoningLevel, ServiceSelectState, SettingsState,
+    SpecKitWizardState, WizardConfirmResult, WizardState, WizardStep, WorktreeCreateState,
 };
 // log_gwt_error is available for use when GwtError types are available
 
@@ -83,8 +102,55 @@ fn resolve_orphaned_agent_name(
     }
 }
 
+fn normalize_branch_name(name: &str) -> String {
+    if let Some(stripped) = name.strip_prefix("remotes/") {
+        if let Some((_, branch)) = stripped.split_once('/') {
+            return branch.to_string();
+        }
+        return stripped.to_string();
+    }
+    name.to_string()
+}
+
 fn format_ai_error(err: AIError) -> String {
     err.to_string()
+}
+
+fn background_window_name(branch_name: &str) -> String {
+    branch_name.to_string()
+}
+
+fn normalize_branch_name_for_history(branch_name: &str) -> Cow<'_, str> {
+    if let Some(stripped) = branch_name.strip_prefix("remotes/") {
+        if let Some((_, name)) = stripped.split_once('/') {
+            return Cow::Owned(name.to_string());
+        }
+        return Cow::Owned(stripped.to_string());
+    }
+    Cow::Borrowed(branch_name)
+}
+
+fn apply_last_tool_usage(
+    item: &mut BranchItem,
+    repo_root: &Path,
+    tool_usage_map: &HashMap<String, ToolSessionEntry>,
+    agent_history: &AgentHistoryStore,
+) {
+    let lookup = normalize_branch_name_for_history(&item.name);
+    if let Some(entry) = tool_usage_map.get(lookup.as_ref()) {
+        item.last_tool_usage = Some(entry.format_tool_usage());
+        item.last_tool_id = Some(entry.tool_id.clone());
+        item.last_session_id = entry.session_id.clone();
+        let session_timestamp = entry.timestamp / 1000;
+        let git_timestamp = item.last_commit_timestamp.unwrap_or(0);
+        item.last_commit_timestamp = Some(session_timestamp.max(git_timestamp));
+        return;
+    }
+
+    if let Some(history_entry) = agent_history.get(repo_root, lookup.as_ref()) {
+        item.last_tool_usage = Some(history_entry.agent_label.clone());
+        item.last_tool_id = Some(history_entry.agent_id.clone());
+    }
 }
 
 fn session_poll_due(last_poll: Option<Instant>, now: Instant) -> bool {
@@ -125,12 +191,16 @@ fn session_parser_for_tool(tool_id: &str) -> Option<Box<dyn SessionParser>> {
 /// Configuration for launching a coding agent after TUI exits
 #[derive(Debug, Clone)]
 pub struct AgentLaunchConfig {
+    /// Repository root (bare repository path for SPEC-a70a1ece)
+    pub repo_root: PathBuf,
     /// Worktree path where agent should run
     pub worktree_path: PathBuf,
     /// Branch name
     pub branch_name: String,
-    /// Coding agent to launch
+    /// Coding agent to launch (builtin)
     pub agent: CodingAgent,
+    /// Custom agent configuration (SPEC-71f2742d)
+    pub custom_agent: Option<CustomCodingAgent>,
     /// Model to use
     pub model: Option<String>,
     /// Reasoning level (Codex only)
@@ -149,12 +219,41 @@ pub struct AgentLaunchConfig {
     pub env_remove: Vec<String>,
     /// Auto install dependencies before launching agent
     pub auto_install_deps: bool,
+    /// Enable collaboration_modes (Codex v0.91.0+, SPEC-fdebd681)
+    pub collaboration_modes: bool,
+}
+
+impl AgentLaunchConfig {
+    /// Check if this config is for a custom agent
+    pub fn is_custom(&self) -> bool {
+        self.custom_agent.is_some()
+    }
+
+    /// Get the agent ID (builtin or custom)
+    pub fn agent_id(&self) -> String {
+        if let Some(ref custom) = self.custom_agent {
+            custom.id.clone()
+        } else {
+            self.agent.id().to_string()
+        }
+    }
+
+    /// Get the display name (builtin or custom)
+    pub fn display_name(&self) -> String {
+        if let Some(ref custom) = self.custom_agent {
+            custom.display_name.clone()
+        } else {
+            self.agent.label().to_string()
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct TuiEntryContext {
     status_message: Option<String>,
     error_message: Option<String>,
+    /// Repository root for re-entry after agent termination (SPEC-a70a1ece)
+    repo_root: Option<PathBuf>,
 }
 
 impl TuiEntryContext {
@@ -162,6 +261,7 @@ impl TuiEntryContext {
         Self {
             status_message: Some(message),
             error_message: None,
+            repo_root: None,
         }
     }
 
@@ -169,6 +269,7 @@ impl TuiEntryContext {
         Self {
             status_message: Some(message),
             error_message: None,
+            repo_root: None,
         }
     }
 
@@ -176,7 +277,14 @@ impl TuiEntryContext {
         Self {
             status_message: None,
             error_message: Some(message),
+            repo_root: None,
         }
+    }
+
+    /// Set repo_root for single mode re-entry (SPEC-a70a1ece)
+    pub fn with_repo_root(mut self, repo_root: PathBuf) -> Self {
+        self.repo_root = Some(repo_root);
+        self
     }
 }
 
@@ -213,6 +321,19 @@ struct WorktreeStatusTarget {
     path: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+struct CleanupPlanItem {
+    branch: String,
+    force_remove: bool,
+}
+
+#[derive(Debug)]
+enum CleanupUpdate {
+    BranchStarted { branch: String },
+    BranchFinished { branch: String, success: bool },
+    Completed { deleted: usize, errors: Vec<String> },
+}
+
 struct SessionSummaryTask {
     branch: String,
     session_id: String,
@@ -234,6 +355,10 @@ struct AgentModeUpdate {
     error: Option<String>,
 }
 
+struct AiWizardUpdate {
+    result: Result<Vec<ModelInfo>, AIError>,
+}
+
 struct BranchListUpdate {
     branches: Vec<BranchItem>,
     branch_names: Vec<String>,
@@ -246,24 +371,56 @@ struct BranchListUpdate {
     active_count: usize,
 }
 
+/// Update for GitView cache (SPEC-1ea18899 FR-050)
+struct GitViewCacheUpdate {
+    branch: String,
+    data: GitViewData,
+}
+
+/// Update for GitView PR info (SPEC-1ea18899)
+struct GitViewPrUpdate {
+    branch: String,
+    info: Option<PrInfo>,
+}
+
 struct LaunchRequest {
     branch_name: String,
     create_new_branch: bool,
     base_branch: Option<String>,
     agent: CodingAgent,
+    /// Custom agent configuration (SPEC-71f2742d)
+    custom_agent: Option<CustomCodingAgent>,
     model: Option<String>,
     reasoning_level: Option<ReasoningLevel>,
     version: String,
     execution_mode: ExecutionMode,
     session_id: Option<String>,
     skip_permissions: bool,
+    /// Collaboration modes (Codex v0.91.0+, SPEC-fdebd681)
+    collaboration_modes: bool,
     env: Vec<(String, String)>,
     env_remove: Vec<String>,
     auto_install_deps: bool,
+    /// SPEC-e4798383 US6: Selected GitHub Issue for branch linking
+    selected_issue: Option<gwt_core::git::GitHubIssue>,
 }
 
 enum LaunchUpdate {
     Progress(LaunchProgress),
+    /// Progress step update for modal display (FR-041)
+    ProgressStep {
+        kind: ProgressStepKind,
+        status: StepStatus,
+    },
+    /// Progress step error (FR-052)
+    ProgressStepError {
+        kind: ProgressStepKind,
+        message: String,
+    },
+    WorktreeReady {
+        branch: String,
+        path: PathBuf,
+    },
     Ready(Box<LaunchPlan>),
     Failed(String),
 }
@@ -306,6 +463,8 @@ pub struct Model {
     profiles_config: ProfilesConfig,
     /// Environment variables state
     environment: EnvironmentState,
+    /// Docker service selection state
+    service_select: ServiceSelectState,
     /// Wizard popup state
     wizard: WizardState,
     /// AI settings wizard state (FR-100)
@@ -316,6 +475,18 @@ pub struct Model {
     status_message: Option<String>,
     /// Status message timestamp (for auto-clear)
     status_message_time: Option<Instant>,
+    /// Footer scroll offset (top line index)
+    footer_scroll_offset: usize,
+    /// Footer scroll direction (1 = down, -1 = up)
+    footer_scroll_dir: i8,
+    /// Footer scroll tick counter
+    footer_scroll_tick: u16,
+    /// Footer scroll pause counter at ends
+    footer_scroll_pause: u16,
+    /// Footer line count (last computed)
+    footer_line_count: usize,
+    /// Footer width (last computed)
+    footer_last_width: u16,
     /// Launch progress message (not auto-cleared)
     launch_status: Option<String>,
     /// Launch preparation update receiver
@@ -338,6 +509,22 @@ pub struct Model {
     pending_cleanup_branches: Vec<String>,
     /// Pending hook setup (SPEC-861d8cdf T-104)
     pending_hook_setup: bool,
+    /// Pending plugin setup (SPEC-f8dab6e2 T-110)
+    pending_plugin_setup: bool,
+    /// Pending launch plan for plugin setup (SPEC-f8dab6e2 T-110)
+    pending_plugin_setup_launch: Option<LaunchPlan>,
+    /// Pending launch plan for Docker service selection
+    pending_service_select: Option<PendingServiceSelect>,
+    /// Pending launch plan for Docker build selection
+    pending_build_select: Option<PendingBuildSelect>,
+    /// Pending launch plan for Docker recreate selection
+    pending_recreate_select: Option<PendingRecreateSelect>,
+    /// Pending launch plan for Docker cleanup selection
+    pending_cleanup_select: Option<PendingCleanupSelect>,
+    /// Pending launch plan for Docker host fallback confirmation
+    pending_docker_host_launch: Option<LaunchPlan>,
+    /// Pending Quick Start Docker settings (applied at launch)
+    pending_quick_start_docker: Option<QuickStartDockerSettings>,
     /// Branch list update receiver
     branch_list_rx: Option<Receiver<BranchListUpdate>>,
     /// Branch summary update receiver
@@ -348,6 +535,8 @@ pub struct Model {
     safety_rx: Option<Receiver<SafetyUpdate>>,
     /// Worktree status update receiver
     worktree_status_rx: Option<Receiver<WorktreeStatusUpdate>>,
+    /// Cleanup update receiver
+    cleanup_rx: Option<Receiver<CleanupUpdate>>,
     /// Session summary update sender
     session_summary_tx: Option<Sender<SessionSummaryUpdate>>,
     /// Session summary update receiver
@@ -360,6 +549,8 @@ pub struct Model {
     orchestrator_event_tx: Option<Sender<OrchestratorEvent>>,
     /// Orchestrator message receiver (for receiving chat/status from orchestrator)
     orchestrator_message_rx: Option<Receiver<OrchestratorMessage>>,
+    /// AI wizard model fetch receiver
+    ai_wizard_rx: Option<Receiver<AiWizardUpdate>>,
     /// Tmux mode (Single or Multi)
     tmux_mode: TmuxMode,
     /// Tmux session name (when in multi mode)
@@ -382,6 +573,70 @@ pub struct Model {
     session_poll_deferred: bool,
     /// Agent history store for persisting agent usage per branch (FR-088)
     agent_history: AgentHistoryStore,
+    /// Progress modal state for worktree preparation (FR-041)
+    progress_modal: Option<ProgressModalState>,
+    /// Startup branch name for header display (SPEC-a70a1ece FR-103)
+    /// This is fixed at startup and does not change when selecting other branches.
+    startup_branch: Option<String>,
+    /// Repository type detected at startup (SPEC-a70a1ece US2)
+    repo_type: RepoType,
+    /// Clone wizard state (SPEC-a70a1ece US3)
+    clone_wizard: CloneWizardState,
+    /// Bare repository name when inside a bare-based worktree (SPEC-a70a1ece T506)
+    bare_name: Option<String>,
+    /// Migration dialog state (SPEC-a70a1ece US7 T705-T710)
+    migration_dialog: MigrationDialogState,
+    /// Migration result receiver (for background migration)
+    migration_rx: Option<mpsc::Receiver<Result<(), gwt_core::migration::MigrationError>>>,
+    /// Path to bare repository when in bare project (SPEC-a70a1ece)
+    bare_repo_path: Option<PathBuf>,
+    /// GitView state (SPEC-1ea18899)
+    git_view: GitViewState,
+    /// GitView cache for all branches (SPEC-1ea18899 FR-050)
+    git_view_cache: GitViewCache,
+    /// GitView cache update receiver (SPEC-1ea18899)
+    git_view_cache_rx: Option<Receiver<GitViewCacheUpdate>>,
+    /// GitView PR update receiver (SPEC-1ea18899)
+    git_view_pr_rx: Option<Receiver<GitViewPrUpdate>>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingServiceSelect {
+    plan: LaunchPlan,
+    services: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingBuildSelect {
+    plan: LaunchPlan,
+    service: Option<String>,
+    force_host: bool,
+    force_recreate: bool,
+    quick_start_keep: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingRecreateSelect {
+    plan: LaunchPlan,
+    service: Option<String>,
+    force_host: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PendingCleanupSelect {
+    plan: LaunchPlan,
+    service: Option<String>,
+    force_host: bool,
+    force_recreate: bool,
+    build: bool,
+}
+
+enum ServiceSelectionDecision {
+    Proceed {
+        service: Option<String>,
+        force_host: bool,
+    },
+    AwaitSelection,
 }
 
 /// Screen types
@@ -397,10 +652,17 @@ pub enum Screen {
     Error,
     Profiles,
     Environment,
+    ServiceSelect,
     /// AI settings wizard (FR-100)
     AISettingsWizard,
     /// Spec Kit wizard (FR-019)
     SpecKitWizard,
+    /// Clone wizard for empty/non-repo directories (SPEC-a70a1ece US3)
+    CloneWizard,
+    /// Migration dialog for .worktrees/ method conversion (SPEC-a70a1ece US7)
+    MigrationDialog,
+    /// Git status view for selected branch (SPEC-1ea18899)
+    GitView,
 }
 
 /// Messages (Events in Elm Architecture)
@@ -430,6 +692,8 @@ pub enum Message {
     ToggleFilterMode,
     /// Cycle view mode (All/Local/Remote)
     CycleViewMode,
+    /// Cycle sort mode (Default/Name/Updated)
+    CycleSortMode,
     /// Toggle branch selection
     ToggleSelection,
     /// Space key for selection
@@ -446,8 +710,6 @@ pub enum Message {
     WizardConfirm,
     /// Wizard: go back or close
     WizardBack,
-    /// Repair worktrees (disabled)
-    RepairWorktrees,
     /// Copy selected log to clipboard
     CopyLogToClipboard,
     /// FR-095: Hide active agent pane (ESC key in branch list)
@@ -469,13 +731,44 @@ impl Model {
     }
 
     pub fn new_with_context(context: Option<TuiEntryContext>) -> Self {
-        let repo_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        // SPEC-a70a1ece: Use repo_root from context if available (single mode re-entry)
+        let repo_root = context
+            .as_ref()
+            .and_then(|ctx| ctx.repo_root.clone())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
         debug!(
             category = "tui",
             repo_root = %repo_root.display(),
             "Initializing TUI model"
         );
+
+        // SPEC-a70a1ece: First check if there's a *.git bare repository in the directory
+        // This takes priority because parent directory's .git might be detected otherwise
+        let (repo_type, bare_repo_path) =
+            if let Some(bare_path) = gwt_core::git::find_bare_repo_in_dir(&repo_root) {
+                debug!(
+                    category = "tui",
+                    bare_path = %bare_path.display(),
+                    "Found bare repository in directory, treating as bare project"
+                );
+                (RepoType::Bare, Some(bare_path))
+            } else {
+                (detect_repo_type(&repo_root), None)
+            };
+
+        // SPEC-a70a1ece: Capture startup context
+        // For bare projects, use the bare repo path; otherwise use repo_root
+        let (startup_branch, bare_name) = if let Some(ref bare_path) = bare_repo_path {
+            // Bare project: no startup branch, get bare name from path
+            let name = bare_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string());
+            (None, name)
+        } else {
+            let header_ctx = get_header_context(&repo_root);
+            (header_ctx.branch_name, header_ctx.bare_name)
+        };
 
         let (agent_mode_tx, agent_mode_rx) = mpsc::channel();
 
@@ -498,11 +791,18 @@ impl Model {
             profiles: ProfilesState::new(),
             profiles_config: ProfilesConfig::default(),
             environment: EnvironmentState::new(),
+            service_select: ServiceSelectState::new(),
             wizard: WizardState::new(),
             ai_wizard: AIWizardState::new(),
             speckit_wizard: SpecKitWizardState::new(),
             status_message: None,
             status_message_time: None,
+            footer_scroll_offset: 0,
+            footer_scroll_dir: 1,
+            footer_scroll_tick: 0,
+            footer_scroll_pause: 0,
+            footer_line_count: 0,
+            footer_last_width: 0,
             launch_status: None,
             launch_rx: None,
             launch_in_progress: false,
@@ -514,17 +814,27 @@ impl Model {
             pending_agent_termination: None,
             pending_cleanup_branches: Vec::new(),
             pending_hook_setup: false,
+            pending_plugin_setup: false,
+            pending_plugin_setup_launch: None,
+            pending_service_select: None,
+            pending_build_select: None,
+            pending_recreate_select: None,
+            pending_cleanup_select: None,
+            pending_docker_host_launch: None,
+            pending_quick_start_docker: None,
             branch_list_rx: None,
             branch_summary_rx: None,
             pr_title_rx: None,
             safety_rx: None,
             worktree_status_rx: None,
+            cleanup_rx: None,
             session_summary_tx: None,
             session_summary_rx: None,
             agent_mode_tx: Some(agent_mode_tx),
             agent_mode_rx: Some(agent_mode_rx),
             orchestrator_event_tx: None,
             orchestrator_message_rx: None,
+            ai_wizard_rx: None,
             tmux_mode: TmuxMode::detect(),
             tmux_session: None,
             gwt_pane_id: None,
@@ -536,6 +846,18 @@ impl Model {
             last_session_poll: None,
             session_poll_deferred: false,
             agent_history: AgentHistoryStore::load().unwrap_or_default(),
+            progress_modal: None,
+            startup_branch,
+            repo_type,
+            clone_wizard: CloneWizardState::new(),
+            bare_name,
+            migration_dialog: MigrationDialogState::default(),
+            migration_rx: None,
+            bare_repo_path,
+            git_view: GitViewState::default(),
+            git_view_cache: GitViewCache::new(),
+            git_view_cache_rx: None,
+            git_view_pr_rx: None,
         };
 
         model
@@ -593,6 +915,45 @@ impl Model {
             }
         }
 
+        // SPEC-a70a1ece T310-T311: Show clone wizard for empty/non-repo directories
+        if matches!(model.repo_type, RepoType::Empty | RepoType::NonRepo) {
+            debug!(
+                category = "tui",
+                repo_type = ?model.repo_type,
+                "Empty or non-repo directory detected, showing clone wizard"
+            );
+            model.screen = Screen::CloneWizard;
+        }
+
+        // SPEC-a70a1ece FR-200: Show migration dialog for ALL normal repositories
+        // (regardless of whether .worktrees/ exists)
+        debug!(
+            category = "tui",
+            repo_type = ?model.repo_type,
+            repo_root = %model.repo_root.display(),
+            "Checking for migration dialog eligibility"
+        );
+        if model.repo_type == RepoType::Normal {
+            debug!(
+                category = "tui",
+                repo_root = %model.repo_root.display(),
+                "Normal repository detected, showing migration dialog for bare conversion"
+            );
+            // Create migration config
+            let bare_repo_name =
+                gwt_core::migration::derive_bare_repo_name(&model.repo_root.display().to_string());
+            // SPEC-a70a1ece FR-150: target_root is the same as source_root
+            // Migration creates bare repo and worktrees INSIDE the original repo directory
+            let target_root = model.repo_root.clone();
+            let config = gwt_core::migration::MigrationConfig::new(
+                model.repo_root.clone(),
+                target_root,
+                bare_repo_name,
+            );
+            model.migration_dialog = MigrationDialogState::new(config);
+            model.screen = Screen::MigrationDialog;
+        }
+
         model
     }
 
@@ -640,11 +1001,16 @@ impl Model {
         }
 
         self.load_profiles();
+        // SPEC-1ea18899 FR-052: Clear GitView cache on refresh
+        self.git_view_cache.clear();
         self.start_branch_list_refresh(settings);
     }
 
     fn start_branch_list_refresh(&mut self, settings: gwt_core::config::Settings) {
+        let cleanup_snapshot = self.branch_list.cleanup_snapshot();
+        let sort_mode = self.branch_list.sort_mode;
         self.pr_title_rx = None;
+        self.git_view_pr_rx = None;
         self.safety_rx = None;
         self.worktree_status_rx = None;
         self.branch_list_rx = None;
@@ -652,40 +1018,83 @@ impl Model {
         self.active_count = 0;
 
         let mut branch_list = BranchListState::new();
+        branch_list.sort_mode = sort_mode;
         branch_list.active_profile = self.profiles_config.active.clone();
         branch_list.ai_enabled = self.active_ai_enabled();
+        branch_list.session_summary_enabled = self.active_session_summary_enabled();
         branch_list.working_directory = Some(self.repo_root.display().to_string());
         branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
         branch_list.set_loading(true);
+        branch_list.restore_cleanup_snapshot(&cleanup_snapshot);
         self.branch_list = branch_list;
 
         let repo_root = self.repo_root.clone();
-        let base_branch = settings.default_base_branch.clone();
+        let repo_type = self.repo_type;
+        let bare_repo_path = self.bare_repo_path.clone();
+        let configured_base_branch = settings.default_base_branch.clone();
         let agent_history = self.agent_history.clone();
         let (tx, rx) = mpsc::channel();
         self.branch_list_rx = Some(rx);
 
         thread::spawn(move || {
-            let base_branch_exists = Branch::exists(&repo_root, &base_branch).unwrap_or(false);
-            let worktrees = WorktreeManager::new(&repo_root)
+            // SPEC-a70a1ece: Use bare repo path for git commands in bare projects
+            let git_path = bare_repo_path.as_ref().unwrap_or(&repo_root);
+            let (base_branch, base_branch_exists) =
+                resolve_safety_base(git_path, &configured_base_branch);
+            let worktrees = WorktreeManager::new(git_path)
                 .ok()
                 .and_then(|manager| manager.list_basic().ok())
                 .unwrap_or_default();
-            let branches = Branch::list_basic(&repo_root).unwrap_or_default();
-            let remote_branches = Branch::list_remote(&repo_root).unwrap_or_default();
+            let all_branches = Branch::list_basic(git_path).unwrap_or_default();
+
+            // SPEC-a70a1ece FR-170/171: For bare repos, only show worktree branches as Local
+            let worktree_branch_names: HashSet<String> = worktrees
+                .iter()
+                .filter_map(|wt| wt.branch.clone())
+                .collect();
+
+            let branches: Vec<_> = if repo_type == RepoType::Bare {
+                // Bare repo: Local = only branches with worktrees
+                all_branches
+                    .into_iter()
+                    .filter(|b| worktree_branch_names.contains(&b.name))
+                    .collect()
+            } else {
+                all_branches
+            };
+
+            // SPEC-a70a1ece FR-171: For bare repos, branches without worktrees go to Remote
+            let remote_branches = if repo_type == RepoType::Bare {
+                // Get all branches and filter out ones with worktrees
+                let all_for_remote = Branch::list_basic(git_path).unwrap_or_default();
+                all_for_remote
+                    .into_iter()
+                    .filter(|b| !worktree_branch_names.contains(&b.name))
+                    .collect::<Vec<_>>()
+            } else {
+                Branch::list_remote(git_path).unwrap_or_default()
+            };
+
             let local_branch_names: HashSet<String> =
                 branches.iter().map(|b| b.name.clone()).collect();
             let mut remote_only_branches = Vec::new();
             for mut branch in remote_branches {
-                let short_name = branch
-                    .name
-                    .split_once('/')
-                    .map(|(_, name)| name)
-                    .unwrap_or(branch.name.as_str());
+                let short_name = if repo_type == RepoType::Bare {
+                    // For bare repos, branch name doesn't have origin/ prefix
+                    branch.name.as_str()
+                } else {
+                    branch
+                        .name
+                        .split_once('/')
+                        .map(|(_, name)| name)
+                        .unwrap_or(branch.name.as_str())
+                };
                 if local_branch_names.contains(short_name) {
                     continue;
                 }
-                branch.name = format!("remotes/{}", branch.name);
+                if repo_type != RepoType::Bare {
+                    branch.name = format!("remotes/{}", branch.name);
+                }
                 remote_only_branches.push(branch);
             }
             let worktree_targets: Vec<WorktreeStatusTarget> = worktrees
@@ -707,23 +1116,8 @@ impl Model {
                 .map(|b| {
                     let mut item = BranchItem::from_branch_minimal(b, &worktrees);
 
-                    // Set tool usage from TypeScript session history (FR-070)
-                    if let Some(entry) = tool_usage_map.get(&b.name) {
-                        item.last_tool_usage = Some(entry.format_tool_usage());
-                        item.last_tool_id = Some(entry.tool_id.clone());
-                        item.last_session_id = entry.session_id.clone();
-                        // FR-041: Compare git commit timestamp and session timestamp,
-                        // use the newer one
-                        let session_timestamp = entry.timestamp / 1000; // Convert ms to seconds
-                        let git_timestamp = item.last_commit_timestamp.unwrap_or(0);
-                        item.last_commit_timestamp = Some(session_timestamp.max(git_timestamp));
-                    } else if !item.has_worktree {
-                        // FR-088: Fallback to agent history for branches without worktrees
-                        if let Some(history_entry) = agent_history.get(&repo_root, &b.name) {
-                            item.last_tool_usage = Some(history_entry.agent_label.clone());
-                            item.last_tool_id = Some(history_entry.agent_id.clone());
-                        }
-                    }
+                    // Set tool usage from TypeScript session history or agent history (FR-070/088)
+                    apply_last_tool_usage(&mut item, &repo_root, &tool_usage_map, &agent_history);
 
                     // Safety check short-circuit: use immediate signals first
                     if item.branch_type == BranchType::Local {
@@ -743,11 +1137,15 @@ impl Model {
                     item
                 })
                 .collect();
-            branch_items.extend(
-                remote_only_branches
-                    .iter()
-                    .map(|b| BranchItem::from_branch_minimal(b, &worktrees)),
-            );
+            branch_items.extend(remote_only_branches.iter().map(|b| {
+                let mut item = BranchItem::from_branch_minimal(b, &worktrees);
+                // SPEC-a70a1ece FR-171: For bare repos, branches without worktrees are Remote
+                if repo_type == RepoType::Bare {
+                    item.branch_type = BranchType::Remote;
+                }
+                apply_last_tool_usage(&mut item, &repo_root, &tool_usage_map, &agent_history);
+                item
+            }));
 
             // Sort branches by timestamp for those with sessions
             branch_items.iter_mut().for_each(|item| {
@@ -782,23 +1180,16 @@ impl Model {
             return;
         }
 
-        let repo_root = self.repo_root.clone();
+        let repo_root = self
+            .bare_repo_path
+            .clone()
+            .unwrap_or_else(|| self.repo_root.clone());
         let (tx, rx) = mpsc::channel();
         self.pr_title_rx = Some(rx);
 
         thread::spawn(move || {
             let mut cache = PrCache::new();
             cache.populate(&repo_root);
-
-            let normalize_branch_name = |name: &str| {
-                if let Some(stripped) = name.strip_prefix("remotes/") {
-                    if let Some((_, branch)) = stripped.split_once('/') {
-                        return branch.to_string();
-                    }
-                    return stripped.to_string();
-                }
-                name.to_string()
-            };
 
             let mut info = HashMap::new();
             for name in branch_names {
@@ -810,6 +1201,7 @@ impl Model {
                             title: pr.title.clone(),
                             number: pr.number,
                             url: pr.url.clone(),
+                            state: pr.state.clone(),
                         },
                     );
                 }
@@ -833,6 +1225,108 @@ impl Model {
         });
     }
 
+    /// SPEC-1ea18899: Spawn background fetch for GitView data
+    fn spawn_git_view_data_fetch(&mut self, branch: &str, worktree_path: Option<&Path>) {
+        let branch = branch.to_string();
+        let worktree_path = worktree_path.map(|p| p.to_path_buf());
+        // Use bare repo path if available for branches without worktree
+        let repo_root = self
+            .bare_repo_path
+            .clone()
+            .unwrap_or_else(|| self.repo_root.clone());
+        let (tx, rx) = mpsc::channel();
+        self.git_view_cache_rx = Some(rx);
+
+        thread::spawn(move || {
+            let data = if let Some(ref wt_path) = worktree_path {
+                build_git_view_data(wt_path)
+            } else {
+                build_git_view_data_no_worktree(&repo_root, &branch)
+            };
+            let _ = tx.send(GitViewCacheUpdate { branch, data });
+        });
+    }
+
+    /// SPEC-1ea18899: Spawn background fetch for GitView PR info
+    fn spawn_git_view_pr_fetch(&mut self, branch: &str) {
+        let branch = branch.to_string();
+        let lookup = normalize_branch_name(&branch);
+        let repo_root = self
+            .bare_repo_path
+            .clone()
+            .unwrap_or_else(|| self.repo_root.clone());
+        let (tx, rx) = mpsc::channel();
+        self.git_view_pr_rx = Some(rx);
+
+        thread::spawn(move || {
+            let info = PrCache::fetch_latest_for_branch(&repo_root, &lookup).map(|pr| PrInfo {
+                title: pr.title,
+                number: pr.number,
+                url: pr.url,
+                state: pr.state,
+            });
+            let _ = tx.send(GitViewPrUpdate { branch, info });
+        });
+    }
+
+    /// SPEC-1ea18899: Apply GitView cache updates from background fetch
+    fn apply_git_view_cache_updates(&mut self) {
+        let Some(rx) = &self.git_view_cache_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(update) => {
+                // Update cache
+                self.git_view_cache
+                    .insert(update.branch.clone(), update.data.clone());
+                // If we're on GitView for this branch, update state
+                if matches!(self.screen, Screen::GitView)
+                    && self.git_view.branch_name == update.branch
+                {
+                    self.git_view.load_from_cache(&update.data);
+                }
+                self.git_view_cache_rx = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.git_view_cache_rx = None;
+            }
+        }
+    }
+
+    /// SPEC-1ea18899: Apply GitView PR updates from background fetch
+    fn apply_git_view_pr_updates(&mut self) {
+        let Some(rx) = &self.git_view_pr_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(update) => {
+                if let Some(info) = update.info {
+                    let mut map = HashMap::new();
+                    map.insert(update.branch.clone(), info.clone());
+                    self.branch_list.apply_pr_info(&map);
+                    if matches!(self.screen, Screen::GitView)
+                        && self.git_view.branch_name == update.branch
+                    {
+                        self.git_view.update_pr_info(
+                            Some(info.number),
+                            Some(info.title.clone()),
+                            info.url.clone(),
+                            Some(info.state.clone()),
+                        );
+                    }
+                }
+                self.git_view_pr_rx = None;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.git_view_pr_rx = None;
+            }
+        }
+    }
+
     fn spawn_safety_checks(
         &mut self,
         targets: Vec<SafetyCheckTarget>,
@@ -844,7 +1338,11 @@ impl Model {
             return;
         }
 
-        let repo_root = self.repo_root.clone();
+        // SPEC-a70a1ece: Use bare repo path for git commands in bare projects
+        let repo_root = self
+            .bare_repo_path
+            .clone()
+            .unwrap_or_else(|| self.repo_root.clone());
         let (tx, rx) = mpsc::channel();
         self.safety_rx = Some(rx);
 
@@ -966,6 +1464,7 @@ impl Model {
 
     fn refresh_branch_summary(&mut self) {
         self.branch_list.ai_enabled = self.active_ai_enabled();
+        self.branch_list.session_summary_enabled = self.active_session_summary_enabled();
         if let Some(request) = self.branch_list.prepare_branch_summary(&self.repo_root) {
             self.spawn_branch_summary_fetch(request);
         }
@@ -1107,7 +1606,7 @@ impl Model {
     }
 
     fn maybe_request_session_summary_for_selected(&mut self, force: bool) {
-        if !self.branch_list.ai_enabled {
+        if !self.branch_list.session_summary_enabled {
             return;
         }
 
@@ -1201,6 +1700,15 @@ impl Model {
             return;
         }
         let tool_version = Self::extract_tool_version_from_usage(branch, tool_id);
+        let collaboration_modes = if tool_id.contains("codex") {
+            match tool_version.as_deref() {
+                Some("latest") => Some(true),
+                Some(version) => Some(supports_collaboration_modes(Some(version))),
+                None => None,
+            }
+        } else {
+            None
+        };
         let entry = ToolSessionEntry {
             branch: branch.name.clone(),
             worktree_path: branch.worktree_path.clone(),
@@ -1212,6 +1720,12 @@ impl Model {
             reasoning_level: None,
             skip_permissions: None,
             tool_version,
+            collaboration_modes,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
             timestamp: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
@@ -1528,7 +2042,7 @@ impl Model {
     }
 
     fn poll_session_summary_if_needed(&mut self) {
-        if !self.branch_list.ai_enabled {
+        if !self.branch_list.session_summary_enabled {
             return;
         }
 
@@ -1625,17 +2139,18 @@ impl Model {
         };
 
         // Get worktree list synchronously for matching
-        let worktrees: Vec<(String, std::path::PathBuf)> =
-            match WorktreeManager::new(&self.repo_root) {
-                Ok(manager) => match manager.list_basic() {
-                    Ok(wts) => wts
-                        .into_iter()
-                        .filter_map(|wt| wt.branch.map(|b| (b, wt.path)))
-                        .collect(),
-                    Err(_) => return,
-                },
+        // SPEC-a70a1ece: Use bare repo path for worktree operations in bare projects
+        let git_path = self.bare_repo_path.as_ref().unwrap_or(&self.repo_root);
+        let worktrees: Vec<(String, std::path::PathBuf)> = match WorktreeManager::new(git_path) {
+            Ok(manager) => match manager.list_basic() {
+                Ok(wts) => wts
+                    .into_iter()
+                    .filter_map(|wt| wt.branch.map(|b| (b, wt.path)))
+                    .collect(),
                 Err(_) => return,
-            };
+            },
+            Err(_) => return,
+        };
 
         if worktrees.is_empty() {
             return;
@@ -1712,13 +2227,18 @@ impl Model {
 
         match rx.try_recv() {
             Ok(update) => {
+                let cleanup_snapshot = self.branch_list.cleanup_snapshot();
                 let session_cache = self.branch_list.clone_session_cache();
                 let session_inflight = self.branch_list.clone_session_inflight();
                 let session_missing = self.branch_list.clone_session_missing();
                 let session_warnings = self.branch_list.clone_session_warnings();
-                let mut branch_list = BranchListState::new().with_branches(update.branches);
+                let sort_mode = self.branch_list.sort_mode;
+                let mut branch_list = BranchListState::new();
+                branch_list.sort_mode = sort_mode;
+                let mut branch_list = branch_list.with_branches(update.branches);
                 branch_list.active_profile = self.profiles_config.active.clone();
                 branch_list.ai_enabled = self.active_ai_enabled();
+                branch_list.session_summary_enabled = self.active_session_summary_enabled();
                 branch_list.set_session_cache(session_cache);
                 branch_list.set_session_inflight(session_inflight);
                 branch_list.set_session_missing(session_missing);
@@ -1733,6 +2253,7 @@ impl Model {
                     .map(|b| b.name.clone())
                     .collect();
                 branch_list.cleanup_session_warnings(&remaining_branches);
+                branch_list.restore_cleanup_snapshot(&cleanup_snapshot);
                 self.branch_list = branch_list;
                 // SPEC-4b893dae: Update branch summary after branches are loaded
                 self.refresh_branch_summary();
@@ -1770,6 +2291,29 @@ impl Model {
         match rx.try_recv() {
             Ok(update) => {
                 self.branch_list.apply_pr_info(&update.info);
+                if matches!(self.screen, Screen::GitView) {
+                    if let Some(branch) = self
+                        .branch_list
+                        .branches
+                        .iter()
+                        .find(|b| b.name == self.git_view.branch_name)
+                    {
+                        let branch_has_pr = branch.pr_number.is_some()
+                            || branch.pr_title.is_some()
+                            || branch.pr_state.is_some();
+                        let git_view_has_pr = self.git_view.pr_number.is_some()
+                            || self.git_view.pr_title.is_some()
+                            || self.git_view.pr_state.is_some();
+                        if branch_has_pr || !git_view_has_pr {
+                            self.git_view.update_pr_info(
+                                branch.pr_number,
+                                branch.pr_title.clone(),
+                                branch.pr_url.clone(),
+                                branch.pr_state.clone(),
+                            );
+                        }
+                    }
+                }
                 self.pr_title_rx = None;
             }
             Err(TryRecvError::Empty) => {}
@@ -1797,51 +2341,92 @@ impl Model {
     }
 
     fn apply_launch_updates(&mut self) {
-        let Some(rx) = &self.launch_rx else {
-            return;
-        };
+        let refresh_after = {
+            let Some(rx) = &self.launch_rx else {
+                return;
+            };
 
-        loop {
-            match rx.try_recv() {
-                Ok(update) => match update {
-                    LaunchUpdate::Progress(progress) => {
-                        self.launch_status = Some(progress.message());
-                    }
-                    LaunchUpdate::Ready(plan) => {
-                        self.launch_in_progress = false;
-                        self.launch_rx = None;
-                        let next_status = match &plan.install_plan {
-                            InstallPlan::Install { manager } => {
-                                LaunchProgress::InstallingDependencies {
-                                    manager: manager.clone(),
-                                }
-                                .message()
+            let mut refresh_after = false;
+
+            loop {
+                match rx.try_recv() {
+                    Ok(update) => match update {
+                        LaunchUpdate::Progress(progress) => {
+                            // Only update launch_status if modal is not showing (FR-057)
+                            if self.progress_modal.is_none() {
+                                self.launch_status = Some(progress.message());
                             }
-                            _ => "Launching agent...".to_string(),
-                        };
-                        self.launch_status = Some(next_status);
-                        self.handle_launch_plan(*plan);
-                        break;
-                    }
-                    LaunchUpdate::Failed(message) => {
-                        self.launch_in_progress = false;
+                        }
+                        LaunchUpdate::ProgressStep { kind, status } => {
+                            // Update progress modal step (FR-041)
+                            if let Some(ref mut modal) = self.progress_modal {
+                                modal.update_step(kind, status);
+                                // Check if all steps are done
+                                if modal.all_done() && !modal.has_failed() {
+                                    modal.mark_completed();
+                                }
+                            }
+                        }
+                        LaunchUpdate::ProgressStepError { kind, message } => {
+                            // Set error on progress modal step (FR-052)
+                            if let Some(ref mut modal) = self.progress_modal {
+                                modal.set_step_error(kind, message);
+                            }
+                        }
+                        LaunchUpdate::WorktreeReady { branch, path } => {
+                            if self.branch_list.apply_worktree_created(&branch, &path) {
+                                self.active_count = self.branch_list.stats.worktree_count;
+                            } else {
+                                refresh_after = true;
+                            }
+                        }
+                        LaunchUpdate::Ready(plan) => {
+                            self.launch_in_progress = false;
+                            self.launch_rx = None;
+                            // FR-051: Mark progress modal as completed
+                            if let Some(ref mut modal) = self.progress_modal {
+                                modal.mark_completed();
+                            }
+                            let next_status = match &plan.install_plan {
+                                InstallPlan::Install { manager } => {
+                                    LaunchProgress::InstallingDependencies {
+                                        manager: manager.clone(),
+                                    }
+                                    .message()
+                                }
+                                _ => "Launching agent...".to_string(),
+                            };
+                            self.launch_status = Some(next_status);
+                            self.handle_launch_plan(*plan);
+                            break;
+                        }
+                        LaunchUpdate::Failed(message) => {
+                            self.launch_in_progress = false;
+                            self.launch_rx = None;
+                            self.launch_status = None;
+                            // FR-052: Show error in modal (waiting_for_key is set by set_step_error)
+                            gwt_core::logging::log_error_message("E4001", "agent", &message, None);
+                            self.worktree_create.error_message = Some(message.clone());
+                            self.status_message = Some(format!("Error: {}", message));
+                            self.status_message_time = Some(Instant::now());
+                            break;
+                        }
+                    },
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
                         self.launch_rx = None;
+                        self.launch_in_progress = false;
                         self.launch_status = None;
-                        gwt_core::logging::log_error_message("E4001", "agent", &message, None);
-                        self.worktree_create.error_message = Some(message.clone());
-                        self.status_message = Some(format!("Error: {}", message));
-                        self.status_message_time = Some(Instant::now());
                         break;
                     }
-                },
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    self.launch_rx = None;
-                    self.launch_in_progress = false;
-                    self.launch_status = None;
-                    break;
                 }
             }
+
+            refresh_after
+        };
+
+        if refresh_after {
+            self.refresh_data();
         }
     }
 
@@ -1890,6 +2475,42 @@ impl Model {
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.worktree_status_rx = None;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn apply_cleanup_updates(&mut self) {
+        let Some(rx) = &self.cleanup_rx else {
+            return;
+        };
+
+        loop {
+            match rx.try_recv() {
+                Ok(update) => match update {
+                    CleanupUpdate::BranchStarted { branch } => {
+                        self.branch_list.set_cleanup_active_branch(Some(branch));
+                    }
+                    CleanupUpdate::BranchFinished { branch, success } => {
+                        self.branch_list.increment_cleanup_progress();
+                        if success {
+                            self.branch_list.selected_branches.remove(&branch);
+                        }
+                        if self.branch_list.cleanup_active_branch() == Some(branch.as_str()) {
+                            self.branch_list.set_cleanup_active_branch(None);
+                        }
+                    }
+                    CleanupUpdate::Completed { deleted, errors } => {
+                        self.finish_cleanup(deleted, errors);
+                        self.cleanup_rx = None;
+                        break;
+                    }
+                },
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.cleanup_rx = None;
+                    self.branch_list.finish_cleanup_progress();
                     break;
                 }
             }
@@ -1975,6 +2596,12 @@ impl Model {
                 reasoning_level: last_entry.and_then(|entry| entry.reasoning_level.clone()),
                 skip_permissions: last_entry.and_then(|entry| entry.skip_permissions),
                 tool_version: last_entry.and_then(|entry| entry.tool_version.clone()),
+                collaboration_modes: last_entry.and_then(|entry| entry.collaboration_modes),
+                docker_service: last_entry.and_then(|entry| entry.docker_service.clone()),
+                docker_force_host: last_entry.and_then(|entry| entry.docker_force_host),
+                docker_recreate: last_entry.and_then(|entry| entry.docker_recreate),
+                docker_build: None,
+                docker_keep: last_entry.and_then(|entry| entry.docker_keep),
                 timestamp: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as i64)
@@ -2042,10 +2669,7 @@ impl Model {
         };
 
         // Hide the pane (break to background window)
-        let window_name = format!(
-            "gwt-agent-{}",
-            pane.branch_name.replace('/', "-").replace(' ', "_")
-        );
+        let window_name = background_window_name(&pane.branch_name);
 
         match gwt_core::tmux::hide_pane(&pane.pane_id, &window_name) {
             Ok(background_window) => {
@@ -2216,6 +2840,12 @@ impl Model {
                 version: entry.tool_version,
                 session_id: entry.session_id,
                 skip_permissions: entry.skip_permissions,
+                collaboration_modes: entry.collaboration_modes,
+                docker_service: entry.docker_service,
+                docker_force_host: entry.docker_force_host,
+                docker_recreate: entry.docker_recreate,
+                docker_build: None,
+                docker_keep: entry.docker_keep,
             })
             .collect();
         self.wizard
@@ -2246,6 +2876,11 @@ impl Model {
             return;
         };
 
+        if self.branch_list.is_cleanup_target_index(index) {
+            self.last_mouse_click = None;
+            return;
+        }
+
         let now = Instant::now();
         let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
             last.index == index && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
@@ -2265,6 +2900,26 @@ impl Model {
                 self.refresh_branch_summary();
             }
             self.last_mouse_click = Some(MouseClick { index, at: now });
+        }
+    }
+
+    fn handle_branch_list_scroll(&mut self, mouse: MouseEvent) {
+        if !matches!(self.screen, Screen::BranchList) {
+            return;
+        }
+        if self.wizard.visible || self.ai_wizard.visible {
+            return;
+        }
+        if !self
+            .branch_list
+            .session_panel_contains(mouse.column, mouse.row)
+        {
+            return;
+        }
+        match mouse.kind {
+            MouseEventKind::ScrollUp => self.branch_list.scroll_session_line_up(),
+            MouseEventKind::ScrollDown => self.branch_list.scroll_session_line_down(),
+            _ => {}
         }
     }
 
@@ -2366,7 +3021,90 @@ impl Model {
         }
     }
 
+    fn handle_service_select_mouse(&mut self, mouse: MouseEvent) {
+        if !matches!(self.screen, Screen::ServiceSelect) {
+            return;
+        }
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+
+        if !self.service_select.handle_click(mouse.column, mouse.row) {
+            self.last_mouse_click = None;
+            return;
+        }
+
+        let index = self.service_select.selected;
+        let now = Instant::now();
+        let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
+            last.index == index && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
+        });
+
+        if is_double_click {
+            self.last_mouse_click = None;
+            self.handle_service_select_confirm();
+        } else {
+            self.last_mouse_click = Some(MouseClick { index, at: now });
+        }
+    }
+
     fn handle_confirm_action(&mut self) {
+        if let Some(pending) = self.pending_cleanup_select.take() {
+            let stop_on_exit = self.confirm.is_confirmed();
+            let keep_launch_status =
+                matches!(pending.plan.install_plan, InstallPlan::Install { .. });
+            self.launch_plan_in_tmux(
+                &pending.plan,
+                pending.service.as_deref(),
+                pending.force_host,
+                keep_launch_status,
+                pending.build,
+                pending.force_recreate,
+                stop_on_exit,
+            );
+            if let Some(prev_screen) = self.screen_stack.pop() {
+                self.screen = prev_screen;
+            }
+            return;
+        }
+
+        if let Some(pending) = self.pending_recreate_select.take() {
+            let force_recreate = self.confirm.is_confirmed();
+            let keep_launch_status =
+                matches!(pending.plan.install_plan, InstallPlan::Install { .. });
+            self.maybe_request_build_selection(
+                &pending.plan,
+                pending.service.as_deref(),
+                pending.force_host,
+                keep_launch_status,
+                force_recreate,
+                None,
+            );
+            if let Some(prev_screen) = self.screen_stack.pop() {
+                self.screen = prev_screen;
+            }
+            return;
+        }
+
+        if let Some(pending) = self.pending_build_select.take() {
+            let build = self.confirm.is_confirmed();
+            let keep_launch_status =
+                matches!(pending.plan.install_plan, InstallPlan::Install { .. });
+            self.maybe_request_cleanup_selection(
+                &pending.plan,
+                pending.service.as_deref(),
+                pending.force_host,
+                keep_launch_status,
+                build,
+                pending.force_recreate,
+                pending.quick_start_keep,
+            );
+            if let Some(prev_screen) = self.screen_stack.pop() {
+                self.screen = prev_screen;
+            }
+            return;
+        }
+
         if self.confirm.is_confirmed() {
             // FR-029d: Handle unsafe branch selection confirmation
             if let Some(branch_name) = self.pending_unsafe_selection.take() {
@@ -2390,62 +3128,43 @@ impl Model {
                     }
                 }
             }
+            // SPEC-f8dab6e2 T-110: Handle plugin setup confirmation
+            if self.pending_plugin_setup {
+                if let Err(e) = setup_gwt_plugin() {
+                    debug!(category = "tui", error = %e, "Failed to setup gwt plugin");
+                }
+            }
+            if let Some(plan) = self.pending_docker_host_launch.take() {
+                let keep_launch_status = matches!(plan.install_plan, InstallPlan::Install { .. });
+                self.launch_plan_in_tmux(
+                    &plan,
+                    None,
+                    true,
+                    keep_launch_status,
+                    false,
+                    false,
+                    false,
+                );
+            }
         }
+
+        // SPEC-f8dab6e2: Continue agent launch after plugin setup confirmation
+        let pending_launch = self.pending_plugin_setup_launch.take();
+
         // Clear pending state and return to previous screen
         self.pending_unsafe_selection = None;
         self.pending_agent_termination = None;
         self.pending_cleanup_branches.clear();
         self.pending_hook_setup = false;
+        self.pending_plugin_setup = false;
+        self.pending_docker_host_launch = None;
         if let Some(prev_screen) = self.screen_stack.pop() {
             self.screen = prev_screen;
         }
-    }
 
-    fn handle_ai_wizard_mouse(&mut self, mouse: MouseEvent) {
-        if !self.ai_wizard.visible {
-            return;
-        }
-        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-            return;
-        }
-
-        // Check if clicking outside popup area - close wizard
-        if !self.ai_wizard.is_point_in_popup(mouse.column, mouse.row) {
-            self.ai_wizard.close();
-            self.last_mouse_click = None;
-            return;
-        }
-
-        // Only handle model selection step mouse clicks
-        if !matches!(
-            self.ai_wizard.step,
-            crate::tui::screens::ai_wizard::AIWizardStep::ModelSelect
-        ) {
-            return;
-        }
-
-        // Check if clicking on model list
-        if let Some(index) = self
-            .ai_wizard
-            .selection_index_from_point(mouse.column, mouse.row)
-        {
-            let now = Instant::now();
-            let is_double_click = self.last_mouse_click.as_ref().is_some_and(|last| {
-                last.index == index
-                    && now.duration_since(last.at) <= BRANCH_LIST_DOUBLE_CLICK_WINDOW
-            });
-
-            if is_double_click {
-                self.last_mouse_click = None;
-                // Double click: select model and proceed (same as Enter)
-                if self.ai_wizard.select_model_index(index) {
-                    self.handle_ai_wizard_enter();
-                }
-            } else {
-                // Single click: just select the model
-                self.ai_wizard.select_model_index(index);
-                self.last_mouse_click = Some(MouseClick { index, at: now });
-            }
+        // Continue agent launch if pending (after plugin setup dialog)
+        if let Some(plan) = pending_launch {
+            self.handle_launch_plan_internal(plan);
         }
     }
 
@@ -2557,6 +3276,30 @@ impl Model {
         }
     }
 
+    /// SPEC-1ea18899: Handle mouse events for GitView screen (FR-007)
+    fn handle_gitview_mouse(&mut self, mouse: MouseEvent) {
+        if !matches!(self.screen, Screen::GitView) {
+            return;
+        }
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+
+        // Check if click is within PR link region
+        if let Some(ref link_region) = self.git_view.pr_link_region {
+            let x = mouse.column;
+            let y = mouse.row;
+            if y == link_region.area.y
+                && x >= link_region.area.x
+                && x < link_region.area.x + link_region.area.width
+            {
+                // Click on PR link - open in browser
+                let url = link_region.url.clone();
+                self.open_url(&url);
+            }
+        }
+    }
+
     /// Handle mouse events for the error popup
     fn handle_error_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
@@ -2592,11 +3335,37 @@ impl Model {
         }
 
         let mut last_error: Option<std::io::Error> = None;
+        let mut try_open = |cmd: &str, args: &[&str]| -> bool {
+            match Command::new(cmd)
+                .args(args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+            {
+                Ok(output) => {
+                    if output.status.success() {
+                        return true;
+                    }
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let message = stderr.trim();
+                    let message = if message.is_empty() {
+                        format!("{} exited with status {}", cmd, output.status)
+                    } else {
+                        message.to_string()
+                    };
+                    last_error = Some(std::io::Error::other(message));
+                    false
+                }
+                Err(err) => {
+                    last_error = Some(err);
+                    false
+                }
+            }
+        };
         #[cfg(target_os = "macos")]
         {
-            match std::process::Command::new("open").arg(url).spawn() {
-                Ok(_) => return,
-                Err(err) => last_error = Some(err),
+            if try_open("open", &[url]) {
+                return;
             }
         }
 
@@ -2608,29 +3377,23 @@ impl Model {
                 ("x-www-browser", vec![url]),
             ];
             for (cmd, args) in candidates {
-                match std::process::Command::new(cmd).args(args).spawn() {
-                    Ok(_) => return,
-                    Err(err) => last_error = Some(err),
+                if try_open(cmd, &args) {
+                    return;
                 }
             }
         }
 
         #[cfg(target_os = "windows")]
         {
-            match std::process::Command::new("cmd")
-                .args(["/C", "start", "", url])
-                .spawn()
-            {
-                Ok(_) => return,
-                Err(err) => last_error = Some(err),
+            if try_open("cmd", &["/C", "start", "", url]) {
+                return;
             }
 
-            match std::process::Command::new("powershell")
-                .args(["-NoProfile", "-Command", "Start-Process", url])
-                .spawn()
-            {
-                Ok(_) => return,
-                Err(err) => last_error = Some(err),
+            if try_open(
+                "powershell",
+                &["-NoProfile", "-Command", "Start-Process", url],
+            ) {
+                return;
             }
         }
 
@@ -2656,7 +3419,7 @@ impl Model {
             }
         }
 
-        let err = last_error.unwrap_or_else(|| std::io::Error::from(std::io::ErrorKind::Other));
+        let err = last_error.unwrap_or_else(|| std::io::Error::other("unknown error"));
         let message = if err.kind() == std::io::ErrorKind::NotFound {
             #[cfg(target_os = "linux")]
             {
@@ -2753,6 +3516,7 @@ impl Model {
         self.profiles = ProfilesState::new().with_profiles(profiles);
         self.branch_list.active_profile = self.profiles_config.active.clone();
         self.branch_list.ai_enabled = self.active_ai_enabled();
+        self.branch_list.session_summary_enabled = self.active_session_summary_enabled();
     }
 
     fn save_profiles(&mut self) {
@@ -2790,6 +3554,19 @@ impl Model {
             .unwrap_or(false)
     }
 
+    fn active_session_summary_enabled(&self) -> bool {
+        if let Some(profile) = self.profiles_config.active_profile() {
+            if let Some(settings) = profile.ai.as_ref() {
+                return settings.is_summary_enabled();
+            }
+        }
+        self.profiles_config
+            .default_ai
+            .as_ref()
+            .map(|settings| settings.is_summary_enabled())
+            .unwrap_or(false)
+    }
+
     fn active_env_overrides(&self) -> Vec<(String, String)> {
         self.profiles_config
             .active_profile()
@@ -2819,7 +3596,15 @@ impl Model {
     }
 
     fn open_environment_editor(&mut self, profile_name: &str) {
-        let (vars, disabled_keys, ai_enabled, ai_endpoint, ai_api_key, ai_model) = self
+        let (
+            vars,
+            disabled_keys,
+            ai_enabled,
+            ai_endpoint,
+            ai_api_key,
+            ai_model,
+            ai_summary_enabled,
+        ) = self
             .profiles_config
             .profiles
             .get(profile_name)
@@ -2834,18 +3619,26 @@ impl Model {
                     })
                     .collect();
                 items.sort_by(|a, b| a.key.cmp(&b.key));
-                let (ai_enabled, ai_endpoint, ai_api_key, ai_model) = match &profile.ai {
-                    Some(ai) => (
-                        true,
-                        ai.endpoint.clone(),
-                        ai.api_key.clone(),
-                        ai.model.clone(),
-                    ),
-                    None => {
-                        let defaults = AISettings::default();
-                        (false, defaults.endpoint, String::new(), defaults.model)
-                    }
-                };
+                let (ai_enabled, ai_endpoint, ai_api_key, ai_model, ai_summary_enabled) =
+                    match &profile.ai {
+                        Some(ai) => (
+                            true,
+                            ai.endpoint.clone(),
+                            ai.api_key.clone(),
+                            ai.model.clone(),
+                            ai.summary_enabled,
+                        ),
+                        None => {
+                            let defaults = AISettings::default();
+                            (
+                                false,
+                                defaults.endpoint,
+                                String::new(),
+                                defaults.model,
+                                true,
+                            )
+                        }
+                    };
                 (
                     items,
                     profile.disabled_env.clone(),
@@ -2853,6 +3646,7 @@ impl Model {
                     ai_endpoint,
                     ai_api_key,
                     ai_model,
+                    ai_summary_enabled,
                 )
             })
             .unwrap_or_else(|| {
@@ -2864,6 +3658,7 @@ impl Model {
                     defaults.endpoint,
                     String::new(),
                     defaults.model,
+                    true,
                 )
             });
 
@@ -2871,7 +3666,13 @@ impl Model {
             .with_profile(profile_name)
             .with_variables(vars)
             .with_disabled_keys(disabled_keys)
-            .with_ai_settings(ai_enabled, ai_endpoint, ai_api_key, ai_model)
+            .with_ai_settings(
+                ai_enabled,
+                ai_endpoint,
+                ai_api_key,
+                ai_model,
+                ai_summary_enabled,
+            )
             .with_os_variables(collect_os_env());
         self.environment.selected = 3;
         self.environment.refresh_selection();
@@ -2889,6 +3690,7 @@ impl Model {
                 &ai.endpoint,
                 &ai.api_key,
                 &ai.model,
+                ai.summary_enabled,
             );
         } else {
             // Create new settings
@@ -2910,6 +3712,7 @@ impl Model {
                     &ai.endpoint,
                     &ai.api_key,
                     &ai.model,
+                    ai.summary_enabled,
                 );
             } else {
                 // Create new settings
@@ -2931,84 +3734,371 @@ impl Model {
         self.open_default_ai_editor();
     }
 
-    /// Handle Enter key in AI settings wizard
-    fn handle_ai_wizard_enter(&mut self) {
-        use super::screens::ai_wizard::AIWizardStep;
+    /// Handle Enter key in Settings screen (SPEC-71f2742d US3)
+    fn handle_settings_enter(&mut self) {
+        use super::screens::settings::{AgentFormField, CustomAgentMode, SettingsCategory};
 
-        match self.ai_wizard.step {
-            AIWizardStep::Endpoint => {
-                self.ai_wizard.next_step();
-            }
-            AIWizardStep::ApiKey => {
-                // Start fetching models
-                self.ai_wizard.step = AIWizardStep::FetchingModels;
-                self.ai_wizard.loading_message = Some("Fetching models...".to_string());
-
-                // Fetch models (blocking)
-                match self.ai_wizard.fetch_models() {
-                    Ok(()) => {
-                        self.ai_wizard.fetch_complete();
+        match self.settings.category {
+            SettingsCategory::CustomAgents => {
+                match &self.settings.custom_agent_mode {
+                    CustomAgentMode::List => {
+                        // Enter on list: add or edit
+                        if self.settings.is_add_agent_selected() {
+                            self.settings.enter_add_mode();
+                        } else if self.settings.selected_custom_agent().is_some() {
+                            self.settings.enter_edit_mode();
+                        }
                     }
-                    Err(e) => {
-                        self.ai_wizard.fetch_failed(&e);
+                    CustomAgentMode::Add | CustomAgentMode::Edit(_) => {
+                        // Enter in form: save if on last field, otherwise cycle type or next field
+                        if self.settings.agent_form.current_field == AgentFormField::Type {
+                            self.settings.agent_form.cycle_type();
+                        } else if self.settings.agent_form.current_field == AgentFormField::Command
+                        {
+                            // On last field, try to save
+                            match self.settings.save_agent() {
+                                Ok(()) => {
+                                    // Save to file
+                                    if let Some(ref config) = self.settings.tools_config {
+                                        if let Err(e) = config.save_global() {
+                                            self.settings.error_message =
+                                                Some(format!("Failed to save: {}", e));
+                                        }
+                                    }
+                                }
+                                Err(msg) => {
+                                    self.settings.error_message = Some(msg.to_string());
+                                }
+                            }
+                        } else {
+                            self.settings.agent_form.next_field();
+                        }
+                    }
+                    CustomAgentMode::ConfirmDelete(_) => {
+                        // Enter in delete confirm: execute if Yes selected
+                        if self.settings.delete_confirm {
+                            if self.settings.delete_agent() {
+                                // Save to file
+                                if let Some(ref config) = self.settings.tools_config {
+                                    if let Err(e) = config.save_global() {
+                                        self.settings.error_message =
+                                            Some(format!("Failed to save: {}", e));
+                                    }
+                                }
+                            }
+                        } else {
+                            self.settings.cancel_mode();
+                        }
                     }
                 }
             }
-            AIWizardStep::FetchingModels => {
-                // Do nothing while fetching
-            }
-            AIWizardStep::ModelSelect => {
-                // Save AI settings
-                self.save_ai_wizard_settings();
-                self.ai_wizard.close();
-                if let Some(prev_screen) = self.screen_stack.pop() {
-                    self.screen = prev_screen;
+            SettingsCategory::Environment => {
+                use super::screens::settings::ProfileMode;
+                match &self.settings.profile_mode {
+                    ProfileMode::List => {
+                        // FR-029: Enter opens environment variable edit mode
+                        if self.settings.is_add_profile_selected() {
+                            // Enter add mode for new profile
+                            self.settings.enter_profile_add_mode();
+                        } else if self.settings.selected_profile().is_some() {
+                            // Enter env edit mode for selected profile
+                            self.settings.enter_env_edit_mode();
+                        }
+                    }
+                    ProfileMode::Add | ProfileMode::Edit(_) => {
+                        // Save profile
+                        if let Err(e) = self.settings.save_profile() {
+                            self.settings.error_message = Some(e.to_string());
+                        } else {
+                            // Save to file
+                            if let Some(ref config) = self.settings.profiles_config {
+                                if let Err(e) = config.save() {
+                                    self.settings.error_message =
+                                        Some(format!("Failed to save: {}", e));
+                                } else {
+                                    self.load_profiles();
+                                }
+                            }
+                        }
+                    }
+                    ProfileMode::ConfirmDelete(_) => {
+                        // Confirm delete
+                        if self.settings.profile_delete_confirm {
+                            if self.settings.delete_profile() {
+                                // Save to file
+                                if let Some(ref config) = self.settings.profiles_config {
+                                    if let Err(e) = config.save() {
+                                        self.settings.error_message =
+                                            Some(format!("Failed to save: {}", e));
+                                    } else {
+                                        self.load_profiles();
+                                    }
+                                }
+                            }
+                        } else {
+                            self.settings.cancel_profile_mode();
+                        }
+                    }
+                    ProfileMode::EnvEdit(_) => {
+                        // Use EnvironmentState methods (SPEC-dafff079)
+                        let env_state = &mut self.settings.env_state;
+                        if env_state.edit_mode {
+                            if env_state.is_new && env_state.edit_field == EditField::Key {
+                                // New variable: Enter on key field switches to value input (FR-016)
+                                env_state.switch_field();
+                                return;
+                            }
+                            // Finish editing - validate and apply
+                            if let Some(ai_field) = env_state.editing_ai_field() {
+                                match env_state.validate_ai_value() {
+                                    Ok(value) => {
+                                        env_state.apply_ai_value(ai_field, value);
+                                        env_state.cancel_edit();
+                                        self.persist_settings_env_changes();
+                                    }
+                                    Err(msg) => {
+                                        env_state.error = Some(msg.to_string());
+                                    }
+                                }
+                            } else {
+                                match env_state.validate() {
+                                    Ok((key, value)) => {
+                                        if env_state.is_new {
+                                            // New variable: add
+                                            env_state.variables.push(
+                                                super::screens::environment::EnvItem {
+                                                    key,
+                                                    value,
+                                                    is_secret: false,
+                                                },
+                                            );
+                                        } else if let Some(index) =
+                                            env_state.selected_profile_index()
+                                        {
+                                            // Existing variable: update
+                                            if let Some(var) = env_state.variables.get_mut(index) {
+                                                var.key = key;
+                                                var.value = value;
+                                            }
+                                        }
+                                        env_state.cancel_edit();
+                                        env_state.refresh_selection();
+                                        self.persist_settings_env_changes();
+                                    }
+                                    Err(msg) => {
+                                        env_state.error = Some(msg.to_string());
+                                    }
+                                }
+                            }
+                        } else {
+                            // Start editing selected item
+                            env_state.start_edit_selected();
+                        }
+                    }
                 }
-                self.load_profiles();
+            }
+            SettingsCategory::AISettings => {
+                if self.settings.is_ai_clear_mode() {
+                    if self.settings.ai_clear_confirm {
+                        self.clear_default_ai_settings();
+                    }
+                    self.settings.cancel_ai_clear_confirm();
+                    return;
+                }
+                // Enter: open AI Settings Wizard
+                // Check if default_ai exists in profiles_config
+                if let Some(ai) = &self.profiles_config.default_ai {
+                    // Edit existing settings
+                    self.ai_wizard.open_edit(
+                        true, // is_default_ai
+                        None, // no profile name
+                        &ai.endpoint,
+                        &ai.api_key,
+                        &ai.model,
+                        ai.summary_enabled,
+                    );
+                } else {
+                    // Create new settings
+                    self.ai_wizard.open_new(true, None);
+                }
+                self.screen_stack.push(self.screen.clone());
+                self.screen = Screen::AISettingsWizard;
+            }
+            _ => {}
+        }
+    }
+
+    /// Handle character input in Settings screen (SPEC-71f2742d US3)
+    fn handle_settings_char(&mut self, c: char) {
+        use super::screens::settings::{AgentFormField, CustomAgentMode, SettingsCategory};
+
+        match self.settings.category {
+            SettingsCategory::CustomAgents => {
+                match &self.settings.custom_agent_mode {
+                    CustomAgentMode::List => {
+                        // 'd' or 'D' to enter delete mode
+                        if (c == 'd' || c == 'D') && self.settings.selected_custom_agent().is_some()
+                        {
+                            self.settings.enter_delete_mode();
+                        }
+                    }
+                    CustomAgentMode::Add | CustomAgentMode::Edit(_) => {
+                        // In form mode: insert char or cycle type
+                        if self.settings.agent_form.current_field == AgentFormField::Type {
+                            if c == ' ' {
+                                self.settings.agent_form.cycle_type();
+                            }
+                        } else {
+                            self.settings.agent_form.insert_char(c);
+                        }
+                    }
+                    CustomAgentMode::ConfirmDelete(_) => {
+                        // In delete confirm: ignore chars
+                    }
+                }
+            }
+            SettingsCategory::Environment => {
+                use super::screens::settings::ProfileMode;
+                match &self.settings.profile_mode {
+                    ProfileMode::List => {
+                        // 'd' or 'D' to enter delete mode
+                        if (c == 'd' || c == 'D') && self.settings.selected_profile().is_some() {
+                            self.settings.enter_profile_delete_mode();
+                        }
+                        // FR-030: 'e' or 'E' to enter profile edit mode (name/description)
+                        else if (c == 'e' || c == 'E')
+                            && self.settings.selected_profile().is_some()
+                        {
+                            self.settings.enter_profile_edit_mode();
+                        }
+                        // Space to toggle active profile
+                        else if c == ' ' && self.settings.selected_profile().is_some() {
+                            self.settings.toggle_active_profile();
+                            // Save to file
+                            if let Some(ref config) = self.settings.profiles_config {
+                                let _ = config.save();
+                                self.load_profiles();
+                            }
+                        }
+                    }
+                    ProfileMode::Add | ProfileMode::Edit(_) => {
+                        // Insert character in form
+                        self.settings.profile_form.insert_char(c);
+                    }
+                    ProfileMode::ConfirmDelete(_) => {
+                        // Ignore chars
+                    }
+                    ProfileMode::EnvEdit(_) => {
+                        // Use EnvironmentState methods (SPEC-dafff079)
+                        let env_state = &mut self.settings.env_state;
+                        if env_state.edit_mode {
+                            // Insert character while editing
+                            env_state.insert_char(c);
+                        } else {
+                            // Handle special keys when not editing
+                            match c {
+                                'n' | 'N' => {
+                                    // Add new variable
+                                    env_state.start_new();
+                                }
+                                'd' | 'D' => {
+                                    if env_state.selected_is_overridden() {
+                                        self.status_message = Some(
+                                            "Use 'r' to reset overridden environment variable."
+                                                .to_string(),
+                                        );
+                                        self.status_message_time = Some(Instant::now());
+                                    } else if env_state.selected_is_os_entry() {
+                                        // SPEC-dafff079 FR-020: Toggle disable for OS variables
+                                        let disabled = env_state.toggle_selected_disabled();
+                                        self.status_message = Some(if disabled {
+                                            "OS environment variable disabled.".to_string()
+                                        } else {
+                                            "OS environment variable enabled.".to_string()
+                                        });
+                                        self.status_message_time = Some(Instant::now());
+                                        self.persist_settings_env_changes();
+                                    } else if let Some(index) = env_state.selected_profile_index() {
+                                        if index < env_state.variables.len() {
+                                            env_state.variables.remove(index);
+                                            env_state.refresh_selection();
+                                            self.persist_settings_env_changes();
+                                        }
+                                    }
+                                }
+                                'r' | 'R' => {
+                                    // SPEC-dafff079 FR-019: Reset to OS value
+                                    // Delete the override (profile variable) to reveal OS value
+                                    if env_state.selected_is_overridden() {
+                                        env_state.delete_selected_override();
+                                        env_state.refresh_selection();
+                                        self.status_message = Some(
+                                            "Environment variable reset to OS value.".to_string(),
+                                        );
+                                        self.status_message_time = Some(Instant::now());
+                                        self.persist_settings_env_changes();
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            SettingsCategory::AISettings => {
+                if self.settings.is_ai_clear_mode() {
+                    return;
+                }
+                match c {
+                    't' | 'T' => {
+                        self.toggle_default_ai_summary();
+                    }
+                    'c' | 'C' => {
+                        if self.profiles_config.default_ai.is_some() {
+                            self.settings.enter_ai_clear_confirm();
+                        } else {
+                            self.status_message = Some("No AI settings configured.".to_string());
+                            self.status_message_time = Some(Instant::now());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {
+                // Other categories don't handle char input
             }
         }
     }
 
-    /// Save AI settings from wizard
-    fn save_ai_wizard_settings(&mut self) {
-        let model = self
-            .ai_wizard
-            .current_model()
-            .map(|m| m.id.clone())
-            .unwrap_or_default();
-        let settings = AISettings {
-            endpoint: self.ai_wizard.endpoint.trim().to_string(),
-            api_key: self.ai_wizard.api_key.trim().to_string(),
-            model,
-        };
-
-        if self.ai_wizard.is_default_ai {
-            self.profiles_config.default_ai = Some(settings);
-        } else if let Some(profile_name) = &self.ai_wizard.profile_name {
-            if let Some(profile) = self.profiles_config.profiles.get_mut(profile_name) {
-                profile.ai = Some(settings);
-            }
+    /// Handle Backspace in EnvEdit mode (SPEC-dafff079)
+    fn handle_settings_env_backspace(&mut self) {
+        let env_state = &mut self.settings.env_state;
+        if env_state.edit_mode {
+            env_state.delete_char();
         }
+    }
+
+    fn toggle_default_ai_summary(&mut self) {
+        if let Some(ai) = self.profiles_config.default_ai.as_mut() {
+            ai.summary_enabled = !ai.summary_enabled;
+            self.save_profiles();
+            self.settings.load_profiles_config();
+        } else {
+            self.status_message = Some("No AI settings configured.".to_string());
+            self.status_message_time = Some(Instant::now());
+        }
+    }
+
+    fn clear_default_ai_settings(&mut self) {
+        if self.profiles_config.default_ai.is_none() {
+            self.status_message = Some("No AI settings configured.".to_string());
+            self.status_message_time = Some(Instant::now());
+            return;
+        }
+        self.profiles_config.default_ai = None;
         self.save_profiles();
+        self.settings.load_profiles_config();
     }
-
-    /// Delete AI settings from wizard
-    fn delete_ai_wizard_settings(&mut self) {
-        if self.ai_wizard.is_default_ai {
-            self.profiles_config.default_ai = None;
-        } else if let Some(profile_name) = &self.ai_wizard.profile_name {
-            if let Some(profile) = self.profiles_config.profiles.get_mut(profile_name) {
-                profile.ai = None;
-            }
-        }
-        self.save_profiles();
-        self.ai_wizard.close();
-        if let Some(prev_screen) = self.screen_stack.pop() {
-            self.screen = prev_screen;
-        }
-        self.load_profiles();
-    }
-
     fn persist_environment(&mut self) {
         if self.environment.is_ai_only() {
             if self.environment.ai_enabled {
@@ -3020,6 +4110,7 @@ impl Model {
                         endpoint: self.environment.ai_endpoint.clone(),
                         api_key: self.environment.ai_api_key.clone(),
                         model: self.environment.ai_model.clone(),
+                        summary_enabled: self.environment.ai_summary_enabled,
                     });
                 }
             } else {
@@ -3057,12 +4148,26 @@ impl Model {
                     endpoint: self.environment.ai_endpoint.clone(),
                     api_key: self.environment.ai_api_key.clone(),
                     model: self.environment.ai_model.clone(),
+                    summary_enabled: self.environment.ai_summary_enabled,
                 });
             }
         } else {
             profile.ai = None;
         }
         self.save_profiles();
+    }
+
+    fn persist_settings_env_changes(&mut self) {
+        match self.settings.persist_env_edit() {
+            Ok(_) => {
+                self.load_profiles();
+            }
+            Err(message) => {
+                self.status_message =
+                    Some(format!("Failed to save environment changes: {}", message));
+                self.status_message_time = Some(Instant::now());
+            }
+        }
     }
 
     fn delete_selected_profile(&mut self) {
@@ -3189,9 +4294,47 @@ impl Model {
                 self.status_message_time = Some(Instant::now());
             }
             Message::NavigateTo(screen) => {
+                // SPEC-71f2742d US3: Load tools config when entering Settings
+                if matches!(screen, Screen::Settings) {
+                    self.settings.load_tools_config();
+                    self.settings.load_profiles_config();
+                }
+                // SPEC-1ea18899: Initialize GitViewState when entering GitView
+                if matches!(screen, Screen::GitView) {
+                    if let Some(branch) = self.branch_list.selected_branch().cloned() {
+                        let worktree_path = branch.worktree_path.clone().map(PathBuf::from);
+                        let worktree_path_for_fetch = worktree_path.clone();
+                        self.git_view = GitViewState::new(
+                            branch.name.clone(),
+                            worktree_path,
+                            branch.pr_number,
+                            branch.pr_url.clone(),
+                            branch.pr_title.clone(),
+                            branch.pr_state.clone(),
+                            branch.divergence,
+                        );
+                        let has_pr = branch.pr_number.is_some()
+                            || branch.pr_title.is_some()
+                            || branch.pr_state.is_some();
+                        if !has_pr {
+                            self.spawn_git_view_pr_fetch(&branch.name);
+                        }
+                        // Try to load from cache
+                        if let Some(cached) = self.git_view_cache.get(&branch.name) {
+                            self.git_view.load_from_cache(cached);
+                        } else {
+                            // Trigger background data fetch
+                            self.spawn_git_view_data_fetch(
+                                &branch.name,
+                                worktree_path_for_fetch.as_deref(),
+                            );
+                        }
+                    }
+                }
                 self.screen_stack.push(self.screen.clone());
                 self.screen = screen;
                 self.status_message = None;
+                self.reset_footer_scroll();
             }
             Message::NavigateBack => {
                 // Check if we're in filter mode first
@@ -3208,11 +4351,26 @@ impl Model {
                 } else if matches!(self.screen, Screen::Logs) && self.logs.is_detail_shown() {
                     // Close log detail view
                     self.logs.close_detail();
+                } else if matches!(self.screen, Screen::ServiceSelect) {
+                    // Cancel service selection
+                    self.pending_service_select = None;
+                    self.launch_status = None;
+                    self.last_mouse_click = None;
+                    if let Some(prev_screen) = self.screen_stack.pop() {
+                        self.screen = prev_screen;
+                    }
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029d: Cancel confirm dialog without executing action
                     self.pending_unsafe_selection = None;
                     self.pending_cleanup_branches.clear();
                     self.pending_hook_setup = false;
+                    self.pending_plugin_setup = false;
+                    self.pending_plugin_setup_launch = None;
+                    self.pending_docker_host_launch = None;
+                    self.pending_build_select = None;
+                    self.pending_recreate_select = None;
+                    self.pending_cleanup_select = None;
+                    self.launch_status = None;
                     if let Some(prev_screen) = self.screen_stack.pop() {
                         self.screen = prev_screen;
                     }
@@ -3222,6 +4380,30 @@ impl Model {
                     if let Some(prev_screen) = self.screen_stack.pop() {
                         self.screen = prev_screen;
                     }
+                // SPEC-71f2742d US3: Cancel form/delete mode in Settings
+                } else if matches!(self.screen, Screen::Settings) {
+                    // Check Profile modes first
+                    if self.settings.is_ai_clear_mode() {
+                        self.settings.cancel_ai_clear_confirm();
+                    } else if self.settings.is_profile_form_mode()
+                        || self.settings.is_profile_delete_mode()
+                    {
+                        self.settings.cancel_profile_mode();
+                    } else if self.settings.is_env_edit_mode() {
+                        if self.settings.env_state.edit_mode {
+                            // Cancel current env edit without leaving EnvEdit mode
+                            self.settings.env_state.cancel_edit();
+                        } else {
+                            // Exit EnvEdit mode without saving (auto-save happens on edit)
+                            self.settings.cancel_profile_mode();
+                        }
+                    } else if self.settings.is_form_mode() || self.settings.is_delete_mode() {
+                        // CustomAgents mode
+                        self.settings.cancel_mode();
+                    } else if let Some(prev_screen) = self.screen_stack.pop() {
+                        // Not in any special mode, navigate back
+                        self.screen = prev_screen;
+                    }
                 } else if matches!(self.screen, Screen::AISettingsWizard) {
                     // Go back in AI wizard or close if at first step
                     if self.ai_wizard.show_delete_confirm {
@@ -3229,6 +4411,7 @@ impl Model {
                     } else {
                         self.ai_wizard.prev_step();
                         if !self.ai_wizard.visible {
+                            self.ai_wizard_rx = None;
                             // Wizard was closed
                             if let Some(prev_screen) = self.screen_stack.pop() {
                                 self.screen = prev_screen;
@@ -3245,6 +4428,7 @@ impl Model {
                     }
                 }
                 self.status_message = None;
+                self.reset_footer_scroll();
             }
             Message::Tick => {
                 // Reset Ctrl+C counter after timeout
@@ -3262,18 +4446,75 @@ impl Model {
                 }
                 // Update spinner animation
                 self.branch_list.tick_spinner();
+                self.update_footer_scroll();
                 self.apply_branch_list_updates();
                 self.apply_branch_summary_updates();
                 self.apply_pr_title_updates();
                 self.apply_safety_updates();
                 self.apply_worktree_updates();
+                self.apply_cleanup_updates();
                 self.apply_launch_updates();
+                // FR-051: Auto-close progress modal after 2-second summary display
+                if let Some(ref modal) = self.progress_modal {
+                    if modal.completed && modal.summary_display_elapsed() && !modal.has_failed() {
+                        self.progress_modal = None;
+                    }
+                }
                 self.apply_session_summary_updates();
                 self.apply_agent_mode_updates();
                 self.apply_orchestrator_messages();
+                self.apply_ai_wizard_updates();
                 self.poll_session_summary_if_needed();
+                // SPEC-1ea18899: Apply GitView cache updates
+                self.apply_git_view_cache_updates();
+                // SPEC-1ea18899: Apply GitView PR updates
+                self.apply_git_view_pr_updates();
                 // FR-033: Update pane list every 1 second in tmux multi mode
                 self.update_pane_list();
+                // SPEC-a70a1ece: Poll clone wizard progress
+                if matches!(self.screen, Screen::CloneWizard) && self.clone_wizard.is_cloning() {
+                    self.clone_wizard.poll_clone();
+                }
+                // SPEC-a70a1ece: Poll migration progress
+                if matches!(self.screen, Screen::MigrationDialog)
+                    && matches!(
+                        self.migration_dialog.phase,
+                        MigrationDialogPhase::InProgress | MigrationDialogPhase::Validating
+                    )
+                {
+                    if let Some(ref rx) = self.migration_rx {
+                        match rx.try_recv() {
+                            Ok(Ok(())) => {
+                                self.migration_dialog.phase = MigrationDialogPhase::Completed;
+                                self.migration_rx = None;
+                                // SPEC-a70a1ece: Update repo_type to Bare after successful migration
+                                self.repo_type = RepoType::Bare;
+                                // Update bare_name and bare_repo_path from migration config
+                                if let Some(ref config) = self.migration_dialog.config {
+                                    self.bare_name = Some(config.bare_repo_name.clone());
+                                    self.bare_repo_path =
+                                        Some(self.repo_root.join(&config.bare_repo_name));
+                                }
+                                self.startup_branch = None;
+                            }
+                            Ok(Err(e)) => {
+                                self.migration_dialog.phase = MigrationDialogPhase::Failed;
+                                self.migration_dialog.error = Some(format!("{}", e));
+                                self.migration_rx = None;
+                            }
+                            Err(mpsc::TryRecvError::Empty) => {
+                                // Still running, keep polling
+                            }
+                            Err(mpsc::TryRecvError::Disconnected) => {
+                                // Thread crashed or channel closed
+                                self.migration_dialog.phase = MigrationDialogPhase::Failed;
+                                self.migration_dialog.error =
+                                    Some("Migration thread disconnected".to_string());
+                                self.migration_rx = None;
+                            }
+                        }
+                    }
+                }
             }
             Message::SelectNext => match self.screen {
                 Screen::BranchList => {
@@ -3301,9 +4542,14 @@ impl Model {
                 }
                 Screen::Profiles => self.profiles.select_next(),
                 Screen::Environment => self.environment.select_next(),
+                Screen::ServiceSelect => self.service_select.select_next(),
                 Screen::AISettingsWizard => self.ai_wizard.select_next_model(),
                 Screen::SpecKitWizard => {}
+                Screen::CloneWizard => self.clone_wizard.down(),
+                Screen::MigrationDialog => self.migration_dialog.toggle_selection(),
                 Screen::Confirm => {}
+                // SPEC-1ea18899: GitView navigation
+                Screen::GitView => self.git_view.select_next(),
             },
             Message::SelectPrev => match self.screen {
                 Screen::BranchList => {
@@ -3328,9 +4574,14 @@ impl Model {
                 }
                 Screen::Profiles => self.profiles.select_prev(),
                 Screen::Environment => self.environment.select_prev(),
+                Screen::ServiceSelect => self.service_select.select_previous(),
                 Screen::AISettingsWizard => self.ai_wizard.select_prev_model(),
                 Screen::SpecKitWizard => {}
+                Screen::CloneWizard => self.clone_wizard.up(),
+                Screen::MigrationDialog => self.migration_dialog.toggle_selection(),
                 Screen::Confirm => {}
+                // SPEC-1ea18899: GitView navigation
+                Screen::GitView => self.git_view.select_prev(),
             },
             Message::PageUp => match self.screen {
                 Screen::BranchList => {
@@ -3428,6 +4679,9 @@ impl Model {
                 }
                 Screen::Confirm => {
                     self.handle_confirm_action();
+                }
+                Screen::ServiceSelect => {
+                    self.handle_service_select_confirm();
                 }
                 Screen::Profiles => {
                     if self.profiles.create_mode {
@@ -3542,10 +4796,96 @@ impl Model {
                         }
                     }
                 }
-                _ => {}
+                // SPEC-71f2742d US3: Settings screen Enter handling
+                Screen::Settings => {
+                    self.handle_settings_enter();
+                }
+                // SPEC-a70a1ece US3: Clone wizard Enter handling
+                Screen::CloneWizard => {
+                    if self.clone_wizard.is_complete() {
+                        // Clone successful - reinitialize with new bare repo
+                        if let Some(cloned_path) = self.clone_wizard.cloned_path.take() {
+                            let msg = format!("Cloned to {}", cloned_path.display());
+                            // SPEC-a70a1ece: Change process working directory to bare repo
+                            // This ensures subsequent TUI restarts detect the correct repo type
+                            if let Err(e) = std::env::set_current_dir(&cloned_path) {
+                                debug!(
+                                    category = "tui",
+                                    error = %e,
+                                    path = %cloned_path.display(),
+                                    "Failed to change working directory to bare repo"
+                                );
+                            }
+                            self.repo_root = cloned_path;
+                            self.repo_type = RepoType::Bare;
+                            self.refresh_data();
+                            self.screen = Screen::BranchList;
+                            self.status_message = Some(msg);
+                            self.status_message_time = Some(Instant::now());
+                        }
+                    } else {
+                        self.clone_wizard.next();
+                    }
+                }
+                // SPEC-a70a1ece T709-T710: Migration dialog Enter handling
+                Screen::MigrationDialog => {
+                    if self.migration_dialog.phase == MigrationDialogPhase::Confirmation {
+                        if self.migration_dialog.selected_proceed {
+                            self.migration_dialog.accept();
+                            // Start actual migration in background
+                            if let Some(config) = self.migration_dialog.config.clone() {
+                                let (tx, rx) = mpsc::channel();
+                                self.migration_rx = Some(rx);
+                                std::thread::spawn(move || {
+                                    let result =
+                                        gwt_core::migration::execute_migration(&config, None);
+                                    let _ = tx.send(result);
+                                });
+                                self.migration_dialog.phase = MigrationDialogPhase::InProgress;
+                            } else {
+                                // No config, show error
+                                self.migration_dialog.phase = MigrationDialogPhase::Failed;
+                                self.migration_dialog.error =
+                                    Some("Migration config not available".to_string());
+                            }
+                        } else {
+                            // T710: User chose to exit - quit gwt
+                            self.migration_dialog.reject();
+                            self.should_quit = true;
+                        }
+                    } else if matches!(
+                        self.migration_dialog.phase,
+                        MigrationDialogPhase::Completed | MigrationDialogPhase::Failed
+                    ) {
+                        // Continue or exit after migration completion/failure
+                        if self.migration_dialog.is_completed() {
+                            self.screen = Screen::BranchList;
+                            self.refresh_data();
+                        } else {
+                            self.should_quit = true;
+                        }
+                    }
+                }
+                // SPEC-1ea18899: GitView Enter handling - open PR link (FR-007)
+                Screen::GitView => {
+                    // If PR link is selected (selected_index == 0 and pr_url exists), open it
+                    if self.git_view.selected_index == 0 {
+                        if let Some(url) = self.git_view.pr_url.clone() {
+                            self.open_url(&url);
+                        }
+                    }
+                }
             },
             Message::Char(c) => {
-                if matches!(self.screen, Screen::WorktreeCreate) {
+                if matches!(self.screen, Screen::ServiceSelect) {
+                    if c == 's' || c == 'S' {
+                        self.handle_service_select_skip();
+                    }
+                } else if matches!(self.screen, Screen::CloneWizard)
+                    && self.clone_wizard.step == CloneWizardStep::UrlInput
+                {
+                    self.clone_wizard.handle_char(c);
+                } else if matches!(self.screen, Screen::WorktreeCreate) {
                     self.worktree_create.insert_char(c);
                 } else if matches!(self.screen, Screen::BranchList) && self.branch_list.filter_mode
                 {
@@ -3589,6 +4929,9 @@ impl Model {
                     }
                 } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
                     self.agent_mode.insert_char(c);
+                // SPEC-71f2742d US3: Settings screen character input
+                } else if matches!(self.screen, Screen::Settings) {
+                    self.handle_settings_char(c);
                 } else if matches!(self.screen, Screen::AISettingsWizard) {
                     if self.ai_wizard.show_delete_confirm {
                         // Handle delete confirmation
@@ -3600,8 +4943,18 @@ impl Model {
                     } else if self.ai_wizard.is_text_input() {
                         // Text input mode: insert character (including 'd')
                         self.ai_wizard.insert_char(c);
-                    } else if c == 'd' || c == 'D' {
-                        // Show delete confirmation (only in edit mode, non-text-input steps)
+                    } else if matches!(
+                        self.ai_wizard.step,
+                        super::screens::ai_wizard::AIWizardStep::ModelSelect
+                    ) && (c == 't' || c == 'T')
+                    {
+                        self.ai_wizard.toggle_summary_enabled();
+                    } else if matches!(
+                        self.ai_wizard.step,
+                        super::screens::ai_wizard::AIWizardStep::ModelSelect
+                    ) && (c == 'c' || c == 'C' || c == 'd' || c == 'D')
+                    {
+                        // Show clear confirmation (only in edit mode, non-text-input steps)
                         if self.ai_wizard.is_edit {
                             self.ai_wizard.show_delete();
                         }
@@ -3650,7 +5003,13 @@ impl Model {
                 }
             }
             Message::Backspace => {
-                if matches!(self.screen, Screen::WorktreeCreate) {
+                if matches!(self.screen, Screen::CloneWizard) {
+                    if self.clone_wizard.step == CloneWizardStep::UrlInput {
+                        self.clone_wizard.handle_backspace();
+                    } else {
+                        self.clone_wizard.prev();
+                    }
+                } else if matches!(self.screen, Screen::WorktreeCreate) {
                     self.worktree_create.delete_char();
                 } else if matches!(self.screen, Screen::BranchList) && self.branch_list.filter_mode
                 {
@@ -3665,6 +5024,15 @@ impl Model {
                     self.logs.search.pop();
                 } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
                     self.agent_mode.backspace();
+                // SPEC-71f2742d US3: Settings screen backspace
+                } else if matches!(self.screen, Screen::Settings) {
+                    if self.settings.is_profile_form_mode() {
+                        self.settings.profile_form.delete_char();
+                    } else if self.settings.is_env_edit_mode() {
+                        self.handle_settings_env_backspace();
+                    } else if self.settings.is_form_mode() {
+                        self.settings.agent_form.delete_char();
+                    }
                 } else if matches!(self.screen, Screen::AISettingsWizard)
                     && self.ai_wizard.is_text_input()
                 {
@@ -3687,9 +5055,37 @@ impl Model {
                     self.profiles.cursor_left();
                 } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.cursor_left();
+                } else if matches!(self.screen, Screen::Settings)
+                    && self.settings.is_env_edit_mode()
+                    && self.settings.env_state.edit_mode
+                {
+                    self.settings.env_state.cursor_left();
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029c: Left/Right toggle selection in confirm dialog
                     self.confirm.toggle_selection();
+                // SPEC-71f2742d US3: Settings delete confirmation toggle (CustomAgents or Profile)
+                } else if matches!(self.screen, Screen::Settings)
+                    && (self.settings.is_delete_mode()
+                        || self.settings.is_profile_delete_mode()
+                        || self.settings.is_ai_clear_mode())
+                {
+                    if self.settings.is_profile_delete_mode() {
+                        self.settings.profile_delete_confirm =
+                            !self.settings.profile_delete_confirm;
+                    } else if self.settings.is_delete_mode() {
+                        self.settings.delete_confirm = !self.settings.delete_confirm;
+                    } else {
+                        self.settings.ai_clear_confirm = !self.settings.ai_clear_confirm;
+                    }
+                // SPEC-71f2742d US4: Settings category navigation with Left/Right
+                } else if matches!(self.screen, Screen::Settings)
+                    && !self.settings.is_form_mode()
+                    && !self.settings.is_delete_mode()
+                    && !self.settings.is_profile_delete_mode()
+                    && !self.settings.is_ai_clear_mode()
+                    && !self.settings.is_env_edit_mode()
+                {
+                    self.settings.prev_category();
                 } else if matches!(self.screen, Screen::AISettingsWizard)
                     && self.ai_wizard.is_text_input()
                 {
@@ -3709,9 +5105,37 @@ impl Model {
                     self.profiles.cursor_right();
                 } else if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.cursor_right();
+                } else if matches!(self.screen, Screen::Settings)
+                    && self.settings.is_env_edit_mode()
+                    && self.settings.env_state.edit_mode
+                {
+                    self.settings.env_state.cursor_right();
                 } else if matches!(self.screen, Screen::Confirm) {
                     // FR-029c: Left/Right toggle selection in confirm dialog
                     self.confirm.toggle_selection();
+                // SPEC-71f2742d US3: Settings delete confirmation toggle (CustomAgents or Profile)
+                } else if matches!(self.screen, Screen::Settings)
+                    && (self.settings.is_delete_mode()
+                        || self.settings.is_profile_delete_mode()
+                        || self.settings.is_ai_clear_mode())
+                {
+                    if self.settings.is_profile_delete_mode() {
+                        self.settings.profile_delete_confirm =
+                            !self.settings.profile_delete_confirm;
+                    } else if self.settings.is_delete_mode() {
+                        self.settings.delete_confirm = !self.settings.delete_confirm;
+                    } else {
+                        self.settings.ai_clear_confirm = !self.settings.ai_clear_confirm;
+                    }
+                // SPEC-71f2742d US4: Settings category navigation with Left/Right
+                } else if matches!(self.screen, Screen::Settings)
+                    && !self.settings.is_form_mode()
+                    && !self.settings.is_delete_mode()
+                    && !self.settings.is_profile_delete_mode()
+                    && !self.settings.is_ai_clear_mode()
+                    && !self.settings.is_env_edit_mode()
+                {
+                    self.settings.next_category();
                 } else if matches!(self.screen, Screen::AISettingsWizard)
                     && self.ai_wizard.is_text_input()
                 {
@@ -3726,10 +5150,6 @@ impl Model {
             }
             Message::RefreshData => {
                 self.refresh_data();
-            }
-            Message::RepairWorktrees => {
-                self.status_message = Some("Worktree repair is disabled.".to_string());
-                self.status_message_time = Some(Instant::now());
             }
             Message::CopyLogToClipboard => {
                 if matches!(self.screen, Screen::Logs) {
@@ -3820,15 +5240,33 @@ impl Model {
                 self.screen_stack.push(self.screen.clone());
                 self.screen = Screen::SpecKitWizard;
             }
+            // FR-020 SPEC-71f2742d: Tab cycles BranchList → AgentMode → Settings → BranchList
             Message::Tab => match self.screen {
-                Screen::Settings => self.settings.next_category(),
+                Screen::Settings => {
+                    // In profile form mode, Tab cycles profile form fields
+                    if self.settings.is_profile_form_mode() {
+                        self.settings.profile_form.next_field();
+                    } else if self.settings.is_env_edit_mode() {
+                        // Toggle between Key/Value editing (SPEC-dafff079)
+                        self.settings.env_state.switch_field();
+                    } else if self.settings.is_form_mode() {
+                        // In agent form mode, Tab cycles agent form fields
+                        self.settings.agent_form.next_field();
+                    } else {
+                        // Exit Settings and go to BranchList (FR-020)
+                        self.screen = Screen::BranchList;
+                    }
+                }
                 Screen::BranchList => {
                     if !self.branch_list.filter_mode {
                         self.enter_agent_mode();
                     }
                 }
                 Screen::AgentMode => {
-                    self.screen = Screen::BranchList;
+                    // Go to Settings (FR-020)
+                    self.settings.load_tools_config();
+                    self.settings.load_profiles_config();
+                    self.screen = Screen::Settings;
                 }
                 _ => {}
             },
@@ -3851,6 +5289,12 @@ impl Model {
                 // FR-036: 'm' key disabled in filter mode
                 if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
                     self.branch_list.cycle_view_mode();
+                    self.refresh_branch_summary();
+                }
+            }
+            Message::CycleSortMode => {
+                if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
+                    self.branch_list.cycle_sort_mode();
                     self.refresh_branch_summary();
                 }
             }
@@ -3891,6 +5335,9 @@ impl Model {
                     }
                 } else if matches!(self.screen, Screen::Profiles) && !self.profiles.create_mode {
                     self.activate_selected_profile();
+                } else if matches!(self.screen, Screen::GitView) {
+                    // SPEC-1ea18899: Toggle expand in GitView (FR-003)
+                    self.git_view.toggle_expand();
                 }
             }
             Message::OpenWizard => {
@@ -3916,6 +5363,12 @@ impl Model {
                             version: entry.tool_version,
                             session_id: entry.session_id,
                             skip_permissions: entry.skip_permissions,
+                            collaboration_modes: entry.collaboration_modes,
+                            docker_service: entry.docker_service,
+                            docker_force_host: entry.docker_force_host,
+                            docker_recreate: entry.docker_recreate,
+                            docker_build: None,
+                            docker_keep: entry.docker_keep,
                         })
                         .collect();
                     self.wizard
@@ -3941,6 +5394,12 @@ impl Model {
             }
             Message::WizardConfirm => {
                 if self.wizard.visible {
+                    // SPEC-e4798383: Check for duplicate branch before confirming IssueSelect
+                    if self.wizard.step == WizardStep::IssueSelect {
+                        self.wizard.check_issue_duplicate(&self.repo_root);
+                    }
+
+                    let prev_step = self.wizard.step;
                     match self.wizard.confirm() {
                         WizardConfirmResult::Complete => {
                             // Start worktree creation with wizard settings
@@ -3958,7 +5417,14 @@ impl Model {
                             // Create the worktree directly
                             self.create_worktree();
                         }
-                        WizardConfirmResult::Advance => {}
+                        WizardConfirmResult::Advance => {
+                            // SPEC-e4798383: Load issues when entering IssueSelect step
+                            if self.wizard.step == WizardStep::IssueSelect
+                                && prev_step != WizardStep::IssueSelect
+                            {
+                                self.wizard.load_issues(&self.repo_root);
+                            }
+                        }
                         WizardConfirmResult::FocusPane(pane_idx) => {
                             // Focus on existing agent pane (wizard already closed itself)
                             self.pane_list.selected = pane_idx;
@@ -4007,11 +5473,19 @@ impl Model {
             .map(|settings| settings.agent.auto_install_deps)
             .unwrap_or(false);
 
+        // SPEC-71f2742d: Get custom agent from selected_agent_entry
+        let custom_agent = self
+            .wizard
+            .selected_agent_entry
+            .as_ref()
+            .and_then(|e| e.custom.clone());
+
         let request = LaunchRequest {
             branch_name: branch,
             create_new_branch: self.worktree_create.create_new_branch,
             base_branch: base,
             agent: self.wizard.agent,
+            custom_agent,
             model: if self.wizard.model.is_empty() {
                 None
             } else {
@@ -4026,11 +5500,16 @@ impl Model {
             execution_mode: self.wizard.execution_mode,
             session_id: self.wizard.session_id.clone(),
             skip_permissions: self.wizard.skip_permissions,
+            // SPEC-fdebd681: Collaboration modes for Codex v0.91.0+
+            collaboration_modes: self.wizard.collaboration_modes,
             env: self.active_env_overrides(),
             env_remove: self.active_env_removals(),
             auto_install_deps,
+            // SPEC-e4798383 US6: Pass selected issue for GitHub linking
+            selected_issue: self.wizard.selected_issue.clone(),
         };
 
+        self.pending_quick_start_docker = self.wizard.quick_start_docker.clone();
         self.start_launch_preparation(request);
 
         // Close wizard immediately so user can see launch progress in branch list
@@ -4044,9 +5523,16 @@ impl Model {
         }
 
         self.launch_in_progress = true;
-        self.launch_status = Some(LaunchProgress::ResolvingWorktree.message());
+        // FR-041: Show progress modal instead of status bar
+        self.progress_modal = Some(ProgressModalState::new());
+        // Clear launch_status since modal is showing (FR-057)
+        self.launch_status = None;
 
-        let repo_root = self.repo_root.clone();
+        // SPEC-a70a1ece: Use bare repo path for worktree operations in bare projects
+        let repo_root = self
+            .bare_repo_path
+            .clone()
+            .unwrap_or_else(|| self.repo_root.clone());
         let (tx, rx) = mpsc::channel();
         self.launch_rx = Some(rx);
 
@@ -4055,37 +5541,119 @@ impl Model {
                 let _ = tx.send(update);
             };
 
-            send(LaunchUpdate::Progress(LaunchProgress::ResolvingWorktree));
+            // Helper to send progress step updates
+            let step = |kind: ProgressStepKind, status: StepStatus| {
+                let _ = tx.send(LaunchUpdate::ProgressStep { kind, status });
+            };
 
+            // Step 1: Fetch remote (initialize manager)
+            step(ProgressStepKind::FetchRemote, StepStatus::Running);
             let manager = match WorktreeManager::new(&repo_root) {
                 Ok(manager) => manager,
                 Err(e) => {
+                    let _ = tx.send(LaunchUpdate::ProgressStepError {
+                        kind: ProgressStepKind::FetchRemote,
+                        message: e.to_string(),
+                    });
                     send(LaunchUpdate::Failed(e.to_string()));
                     return;
                 }
             };
+            step(ProgressStepKind::FetchRemote, StepStatus::Completed);
 
-            let existing_wt = manager.get_by_branch(&request.branch_name).ok().flatten();
+            // Step 2: Validate branch (lightweight)
+            step(ProgressStepKind::ValidateBranch, StepStatus::Running);
+            let existing_wt = manager
+                .get_by_branch_basic(&request.branch_name)
+                .ok()
+                .flatten();
+            let has_existing_wt = existing_wt.is_some();
+            step(ProgressStepKind::ValidateBranch, StepStatus::Completed);
+
+            // Step 3: Generate path
+            step(ProgressStepKind::GeneratePath, StepStatus::Running);
+            // Path generation happens inside create_for_branch/create_new_branch
+            step(ProgressStepKind::GeneratePath, StepStatus::Completed);
+
+            // Step 4: Check conflicts (skip if existing worktree)
+            if has_existing_wt {
+                step(ProgressStepKind::CheckConflicts, StepStatus::Skipped);
+                step(ProgressStepKind::CreateWorktree, StepStatus::Skipped);
+            } else {
+                step(ProgressStepKind::CheckConflicts, StepStatus::Running);
+                step(ProgressStepKind::CheckConflicts, StepStatus::Completed);
+
+                // Step 5: Create worktree
+                step(ProgressStepKind::CreateWorktree, StepStatus::Running);
+            }
             let result = if let Some(wt) = existing_wt {
                 Ok(wt)
             } else if request.create_new_branch {
-                manager.create_new_branch(&request.branch_name, request.base_branch.as_deref())
+                // SPEC-e4798383 US6: Try GitHub Issue linking if issue is selected
+                if let Some(ref issue) = request.selected_issue {
+                    match gwt_core::git::create_linked_branch(
+                        &repo_root,
+                        issue.number,
+                        &request.branch_name,
+                    ) {
+                        Ok(()) => {
+                            // FR-019: Log success
+                            tracing::info!("Branch linked to issue #{} on GitHub", issue.number);
+                            // Branch created by gh, now create worktree for it
+                            manager.create_for_branch(&request.branch_name)
+                        }
+                        Err(e) => {
+                            // FR-017/FR-017a: Fallback to local branch creation with warning
+                            tracing::warn!("GitHub linking failed, creating local branch: {}", e);
+                            manager.create_new_branch(
+                                &request.branch_name,
+                                request.base_branch.as_deref(),
+                            )
+                        }
+                    }
+                } else {
+                    // FR-018: No issue selected, use regular local branch creation
+                    manager.create_new_branch(&request.branch_name, request.base_branch.as_deref())
+                }
             } else {
                 manager.create_for_branch(&request.branch_name)
             };
 
             let worktree = match result {
-                Ok(wt) => wt,
+                Ok(wt) => {
+                    if !has_existing_wt {
+                        step(ProgressStepKind::CreateWorktree, StepStatus::Completed);
+                    }
+                    wt
+                }
                 Err(e) => {
+                    let _ = tx.send(LaunchUpdate::ProgressStepError {
+                        kind: ProgressStepKind::CreateWorktree,
+                        message: e.to_string(),
+                    });
                     send(LaunchUpdate::Failed(e.to_string()));
                     return;
                 }
             };
 
+            let branch_name = worktree
+                .branch
+                .clone()
+                .unwrap_or_else(|| request.branch_name.clone());
+            send(LaunchUpdate::WorktreeReady {
+                branch: branch_name,
+                path: worktree.path.clone(),
+            });
+
+            // Step 6: Check dependencies
+            step(ProgressStepKind::CheckDependencies, StepStatus::Running);
+
             let config = AgentLaunchConfig {
+                repo_root: repo_root.clone(),
                 worktree_path: worktree.path.clone(),
                 branch_name: request.branch_name.clone(),
                 agent: request.agent,
+                custom_agent: request.custom_agent.clone(),
                 model: request.model.clone(),
                 reasoning_level: request.reasoning_level,
                 version: request.version.clone(),
@@ -4095,6 +5663,7 @@ impl Model {
                 env: request.env.clone(),
                 env_remove: request.env_remove.clone(),
                 auto_install_deps: request.auto_install_deps,
+                collaboration_modes: request.collaboration_modes,
             };
 
             let plan = match prepare_launch_plan(config, |progress| {
@@ -4102,18 +5671,42 @@ impl Model {
             }) {
                 Ok(plan) => plan,
                 Err(e) => {
+                    let _ = tx.send(LaunchUpdate::ProgressStepError {
+                        kind: ProgressStepKind::CheckDependencies,
+                        message: e.to_string(),
+                    });
                     send(LaunchUpdate::Failed(e.to_string()));
                     return;
                 }
             };
+
+            step(ProgressStepKind::CheckDependencies, StepStatus::Completed);
 
             send(LaunchUpdate::Ready(Box::new(plan)));
         });
     }
 
     fn handle_launch_plan(&mut self, plan: LaunchPlan) {
-        // Refresh data to reflect branch/worktree changes (FR-008b)
-        self.refresh_data();
+        // SPEC-f8dab6e2 T-110: Check if plugin setup is needed for Claude Code
+        // FR-007: Only show for Claude Code (not Codex or other agents)
+        // FR-008: Skip if marketplace is already registered
+        if plan.config.agent == CodingAgent::ClaudeCode && !is_gwt_marketplace_registered() {
+            self.pending_plugin_setup = true;
+            self.pending_plugin_setup_launch = Some(plan);
+            self.confirm = ConfirmState::plugin_setup();
+            self.screen_stack.push(self.screen.clone());
+            self.screen = Screen::Confirm;
+            return;
+        }
+
+        self.handle_launch_plan_internal(plan);
+    }
+
+    /// Internal implementation of launch plan handling (called after plugin setup confirmation)
+    fn handle_launch_plan_internal(&mut self, plan: LaunchPlan) {
+        // Note: refresh_data() removed for startup optimization - TUI exits after
+        // agent launch in single mode, and tmux mode updates status message directly.
+        // The branch list refresh is unnecessary here. (FR-008b still satisfied)
 
         if let InstallPlan::Skip { message } = &plan.install_plan {
             self.status_message = Some(message.clone());
@@ -4123,50 +5716,633 @@ impl Model {
         let keep_launch_status = matches!(plan.install_plan, InstallPlan::Install { .. });
 
         if self.tmux_mode.is_multi() && self.gwt_pane_id.is_some() {
-            match self.launch_plan_in_pane(&plan) {
-                Ok(_) => {
-                    if !keep_launch_status {
-                        self.launch_status = None;
-                    }
-                    // FR-088: Record agent usage to history
-                    let agent_id = plan.config.agent.id();
-                    let agent_label =
-                        format!("{}@{}", plan.config.agent.label(), plan.selected_version);
-                    if let Err(e) = self.agent_history.record(
-                        &self.repo_root,
-                        &plan.config.branch_name,
-                        agent_id,
-                        &agent_label,
-                    ) {
-                        warn!(category = "tui", "Failed to record agent history: {}", e);
-                    }
-                    if let Err(e) = self.agent_history.save() {
-                        warn!(category = "tui", "Failed to save agent history: {}", e);
-                    }
-                    self.status_message = Some(format!(
-                        "Agent launched in tmux pane for {}",
-                        plan.config.branch_name
-                    ));
-                    self.status_message_time = Some(Instant::now());
-                    self.wizard.visible = false;
-                    self.screen = Screen::BranchList;
+            if let Some(quick_start) = self.pending_quick_start_docker.take() {
+                if self.try_apply_quick_start_docker(&plan, quick_start, keep_launch_status) {
+                    return;
                 }
+            }
+            let decision = match self.prepare_docker_service_selection(&plan) {
+                Ok(decision) => decision,
                 Err(e) => {
                     self.launch_status = None;
-                    gwt_core::logging::log_error_message(
-                        "E4002",
-                        "agent",
-                        &format!("Failed to launch: {}", e),
-                        None,
-                    );
-                    self.status_message = Some(format!("Failed to launch: {}", e));
+                    self.status_message = Some(format!("Failed to inspect docker services: {}", e));
                     self.status_message_time = Some(Instant::now());
+                    return;
+                }
+            };
+
+            match decision {
+                ServiceSelectionDecision::AwaitSelection => {}
+                ServiceSelectionDecision::Proceed {
+                    service,
+                    force_host,
+                } => {
+                    self.maybe_request_recreate_selection(
+                        &plan,
+                        service.as_deref(),
+                        force_host,
+                        keep_launch_status,
+                    );
                 }
             }
         } else {
             self.pending_agent_launch = Some(plan);
             self.should_quit = true;
         }
+    }
+
+    fn try_apply_quick_start_docker(
+        &mut self,
+        plan: &LaunchPlan,
+        quick_start: QuickStartDockerSettings,
+        keep_launch_status: bool,
+    ) -> bool {
+        if quick_start.force_host.unwrap_or(false) {
+            info!(
+                category = "docker",
+                branch = %plan.config.branch_name,
+                "Quick Start docker settings: force host"
+            );
+            self.launch_plan_in_tmux(plan, None, true, keep_launch_status, false, false, false);
+            return true;
+        }
+
+        let docker_file_type = match launcher::detect_docker_environment(&plan.config.worktree_path)
+        {
+            Some(dtype) => dtype,
+            None => return false,
+        };
+
+        let service = if docker_file_type.is_compose() {
+            let manager = DockerManager::new(
+                &plan.config.worktree_path,
+                &plan.config.branch_name,
+                docker_file_type.clone(),
+            );
+            let services = match manager.list_services() {
+                Ok(services) if !services.is_empty() => services,
+                _ => {
+                    info!(
+                        category = "docker",
+                        branch = %plan.config.branch_name,
+                        "Quick Start docker settings: service list unavailable"
+                    );
+                    return false;
+                }
+            };
+
+            if services.len() == 1 {
+                Some(services[0].clone())
+            } else if let Some(selected) = quick_start.service.as_ref() {
+                if services.contains(selected) {
+                    Some(selected.clone())
+                } else {
+                    info!(
+                        category = "docker",
+                        branch = %plan.config.branch_name,
+                        requested = %selected,
+                        "Quick Start docker settings: service not found; fallback to wizard"
+                    );
+                    return false;
+                }
+            } else {
+                info!(
+                    category = "docker",
+                    branch = %plan.config.branch_name,
+                    "Quick Start docker settings missing service; fallback to wizard"
+                );
+                return false;
+            }
+        } else {
+            None
+        };
+
+        let (Some(force_recreate), Some(keep)) = (quick_start.recreate, quick_start.keep) else {
+            info!(
+                category = "docker",
+                branch = %plan.config.branch_name,
+                "Quick Start docker settings incomplete; fallback to wizard"
+            );
+            return false;
+        };
+
+        let needs_rebuild = {
+            let manager = DockerManager::new(
+                &plan.config.worktree_path,
+                &plan.config.branch_name,
+                docker_file_type,
+            );
+            manager.needs_rebuild()
+        };
+        let force_recreate = Self::quick_start_recreate_allowed(needs_rebuild, force_recreate);
+        info!(
+            category = "docker",
+            branch = %plan.config.branch_name,
+            needs_rebuild = needs_rebuild,
+            force_recreate = force_recreate,
+            "Quick Start recreate decision"
+        );
+
+        info!(
+            category = "docker",
+            branch = %plan.config.branch_name,
+            service = %service.clone().unwrap_or_default(),
+            force_recreate = force_recreate,
+            keep = keep,
+            "Applying Quick Start docker settings"
+        );
+        self.maybe_request_build_selection(
+            plan,
+            service.as_deref(),
+            false,
+            keep_launch_status,
+            force_recreate,
+            Some(keep),
+        );
+        true
+    }
+
+    fn prepare_docker_service_selection(
+        &mut self,
+        plan: &LaunchPlan,
+    ) -> Result<ServiceSelectionDecision, String> {
+        let docker_file_type = match launcher::detect_docker_environment(&plan.config.worktree_path)
+        {
+            Some(dtype) => dtype,
+            None => {
+                return Ok(ServiceSelectionDecision::Proceed {
+                    service: None,
+                    force_host: false,
+                })
+            }
+        };
+
+        if !docker_file_type.is_compose() {
+            return Ok(ServiceSelectionDecision::Proceed {
+                service: None,
+                force_host: false,
+            });
+        }
+
+        let manager = DockerManager::new(
+            &plan.config.worktree_path,
+            &plan.config.branch_name,
+            docker_file_type,
+        );
+
+        let services = match manager.list_services() {
+            Ok(services) if !services.is_empty() => services,
+            Ok(_) | Err(_) => {
+                self.pending_docker_host_launch = Some(plan.clone());
+                self.confirm = ConfirmState {
+                    title: "Docker Services Unavailable".to_string(),
+                    message: "Could not read docker compose services. Launch on host?".to_string(),
+                    details: vec![
+                        "Service selection is required when multiple services exist.".to_string(),
+                        "If you continue, the agent will run on the host.".to_string(),
+                    ],
+                    confirm_label: "Launch".to_string(),
+                    cancel_label: "Cancel".to_string(),
+                    selected_confirm: false,
+                    is_dangerous: false,
+                    ..Default::default()
+                };
+                self.screen_stack.push(self.screen.clone());
+                self.screen = Screen::Confirm;
+                return Ok(ServiceSelectionDecision::AwaitSelection);
+            }
+        };
+
+        if services.len() == 1 {
+            return Ok(ServiceSelectionDecision::Proceed {
+                service: Some(services[0].clone()),
+                force_host: false,
+            });
+        }
+
+        self.pending_service_select = Some(PendingServiceSelect {
+            plan: plan.clone(),
+            services: services.clone(),
+        });
+        self.service_select = ServiceSelectState::with_services(services);
+        let container_name = DockerManager::generate_container_name(&plan.config.branch_name);
+        self.service_select
+            .set_container_info(&container_name, &plan.config.branch_name);
+        self.launch_status = None;
+        self.last_mouse_click = None;
+        self.screen_stack.push(self.screen.clone());
+        self.screen = Screen::ServiceSelect;
+
+        Ok(ServiceSelectionDecision::AwaitSelection)
+    }
+
+    fn maybe_request_recreate_selection(
+        &mut self,
+        plan: &LaunchPlan,
+        service: Option<&str>,
+        force_host: bool,
+        keep_launch_status: bool,
+    ) {
+        if force_host {
+            self.launch_plan_in_tmux(
+                plan,
+                service,
+                force_host,
+                keep_launch_status,
+                false,
+                false,
+                false,
+            );
+            return;
+        }
+
+        let docker_file_type = match launcher::detect_docker_environment(&plan.config.worktree_path)
+        {
+            Some(dtype) => dtype,
+            None => {
+                self.launch_plan_in_tmux(
+                    plan,
+                    service,
+                    force_host,
+                    keep_launch_status,
+                    false,
+                    false,
+                    false,
+                );
+                return;
+            }
+        };
+        let manager = DockerManager::new(
+            &plan.config.worktree_path,
+            &plan.config.branch_name,
+            docker_file_type,
+        );
+        let status = manager.get_status();
+        info!(
+            category = "docker",
+            branch = %plan.config.branch_name,
+            status = ?status,
+            "Detected docker container status for recreate prompt"
+        );
+        if !Self::should_prompt_recreate(&status) {
+            info!(
+                category = "docker",
+                branch = %plan.config.branch_name,
+                status = ?status,
+                "Skipping docker recreate prompt (container not eligible)"
+            );
+            self.maybe_request_build_selection(
+                plan,
+                service,
+                force_host,
+                keep_launch_status,
+                false,
+                None,
+            );
+            return;
+        }
+        let needs_rebuild = manager.needs_rebuild();
+        info!(
+            category = "docker",
+            branch = %plan.config.branch_name,
+            needs_rebuild = needs_rebuild,
+            "Checked docker rebuild status for recreate default"
+        );
+
+        self.pending_recreate_select = Some(PendingRecreateSelect {
+            plan: plan.clone(),
+            service: service.map(|s| s.to_string()),
+            force_host,
+        });
+        info!(
+            category = "docker",
+            branch = %plan.config.branch_name,
+            default_recreate = Self::default_recreate_selected(needs_rebuild),
+            "Showing docker recreate prompt"
+        );
+        self.confirm = ConfirmState {
+            title: "Docker Recreate".to_string(),
+            message: "Recreate containers before launch?".to_string(),
+            details: vec![
+                "Reuse keeps existing containers.".to_string(),
+                "Recreate will rerun entrypoint.".to_string(),
+            ],
+            confirm_label: "Recreate".to_string(),
+            cancel_label: "Reuse".to_string(),
+            selected_confirm: Self::default_recreate_selected(needs_rebuild),
+            is_dangerous: false,
+            ..Default::default()
+        };
+        self.screen_stack.push(self.screen.clone());
+        self.screen = Screen::Confirm;
+    }
+
+    fn should_prompt_recreate(status: &ContainerStatus) -> bool {
+        matches!(status, ContainerStatus::Stopped)
+    }
+
+    fn default_recreate_selected(needs_rebuild: bool) -> bool {
+        needs_rebuild
+    }
+
+    fn quick_start_recreate_allowed(needs_rebuild: bool, requested: bool) -> bool {
+        needs_rebuild && requested
+    }
+
+    fn maybe_request_build_selection(
+        &mut self,
+        plan: &LaunchPlan,
+        service: Option<&str>,
+        force_host: bool,
+        keep_launch_status: bool,
+        force_recreate: bool,
+        quick_start_keep: Option<bool>,
+    ) {
+        if force_host || launcher::detect_docker_environment(&plan.config.worktree_path).is_none() {
+            self.launch_plan_in_tmux(
+                plan,
+                service,
+                force_host,
+                keep_launch_status,
+                false,
+                force_recreate,
+                false,
+            );
+            return;
+        }
+
+        let docker_file_type = match launcher::detect_docker_environment(&plan.config.worktree_path)
+        {
+            Some(dtype) => dtype,
+            None => {
+                self.launch_plan_in_tmux(
+                    plan,
+                    service,
+                    force_host,
+                    keep_launch_status,
+                    false,
+                    force_recreate,
+                    false,
+                );
+                return;
+            }
+        };
+
+        let manager = DockerManager::new(
+            &plan.config.worktree_path,
+            &plan.config.branch_name,
+            docker_file_type,
+        );
+        let needs_rebuild = manager.needs_rebuild();
+        info!(
+            category = "docker",
+            branch = %plan.config.branch_name,
+            needs_rebuild = needs_rebuild,
+            "Checked docker build prompt requirement"
+        );
+        if !needs_rebuild {
+            info!(
+                category = "docker",
+                branch = %plan.config.branch_name,
+                "Skipping docker build prompt (no changes detected)"
+            );
+            self.maybe_request_cleanup_selection(
+                plan,
+                service,
+                force_host,
+                keep_launch_status,
+                false,
+                force_recreate,
+                quick_start_keep,
+            );
+            return;
+        }
+
+        self.pending_build_select = Some(PendingBuildSelect {
+            plan: plan.clone(),
+            service: service.map(|s| s.to_string()),
+            force_host,
+            force_recreate,
+            quick_start_keep,
+        });
+        info!(
+            category = "docker",
+            branch = %plan.config.branch_name,
+            "Showing docker build prompt"
+        );
+        self.confirm = ConfirmState {
+            title: "Docker Build".to_string(),
+            message: "Build Docker image before launch?".to_string(),
+            details: vec![
+                "No Build will skip image rebuild.".to_string(),
+                "Build will run docker compose build.".to_string(),
+            ],
+            confirm_label: "Build".to_string(),
+            cancel_label: "No Build".to_string(),
+            selected_confirm: false,
+            is_dangerous: false,
+            ..Default::default()
+        };
+        self.screen_stack.push(self.screen.clone());
+        self.screen = Screen::Confirm;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn maybe_request_cleanup_selection(
+        &mut self,
+        plan: &LaunchPlan,
+        service: Option<&str>,
+        force_host: bool,
+        keep_launch_status: bool,
+        build: bool,
+        force_recreate: bool,
+        quick_start_keep: Option<bool>,
+    ) {
+        if let Some(keep) = quick_start_keep {
+            info!(
+                category = "docker",
+                branch = %plan.config.branch_name,
+                keep = keep,
+                "Quick Start docker keep setting applied"
+            );
+            self.launch_plan_in_tmux(
+                plan,
+                service,
+                force_host,
+                keep_launch_status,
+                build,
+                force_recreate,
+                !keep,
+            );
+            return;
+        }
+        if force_host || launcher::detect_docker_environment(&plan.config.worktree_path).is_none() {
+            info!(
+                category = "docker",
+                branch = %plan.config.branch_name,
+                "Skipping docker cleanup prompt (host launch)"
+            );
+            self.launch_plan_in_tmux(
+                plan,
+                service,
+                force_host,
+                keep_launch_status,
+                build,
+                force_recreate,
+                false,
+            );
+            return;
+        }
+
+        self.pending_cleanup_select = Some(PendingCleanupSelect {
+            plan: plan.clone(),
+            service: service.map(|s| s.to_string()),
+            force_host,
+            force_recreate,
+            build,
+        });
+        info!(
+            category = "docker",
+            branch = %plan.config.branch_name,
+            "Showing docker cleanup prompt"
+        );
+        self.confirm = ConfirmState {
+            title: "Docker Cleanup".to_string(),
+            message: "Stop containers when agent exits?".to_string(),
+            details: vec![
+                "Keep will keep containers running.".to_string(),
+                "Stop will run docker compose down.".to_string(),
+            ],
+            confirm_label: "Stop".to_string(),
+            cancel_label: "Keep".to_string(),
+            selected_confirm: false,
+            is_dangerous: false,
+            ..Default::default()
+        };
+        self.screen_stack.push(self.screen.clone());
+        self.screen = Screen::Confirm;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_plan_in_tmux(
+        &mut self,
+        plan: &LaunchPlan,
+        service: Option<&str>,
+        force_host: bool,
+        keep_launch_status: bool,
+        build: bool,
+        force_recreate: bool,
+        stop_on_exit: bool,
+    ) {
+        match self.launch_plan_in_pane_with_service(
+            plan,
+            service,
+            force_host,
+            build,
+            force_recreate,
+            stop_on_exit,
+        ) {
+            Ok(_) => {
+                if !keep_launch_status {
+                    self.launch_status = None;
+                }
+                // FR-088: Record agent usage to history
+                let agent_id = plan.config.agent.id();
+                let agent_label =
+                    format!("{}@{}", plan.config.agent.label(), plan.selected_version);
+                if let Err(e) = self.agent_history.record(
+                    &self.repo_root,
+                    &plan.config.branch_name,
+                    agent_id,
+                    &agent_label,
+                ) {
+                    warn!(category = "tui", "Failed to record agent history: {}", e);
+                }
+                if let Err(e) = self.agent_history.save() {
+                    warn!(category = "tui", "Failed to save agent history: {}", e);
+                }
+
+                // Update branch list item directly to reflect agent usage immediately
+                // (refresh_data() is not called after agent launch for optimization)
+                let branch_name_for_lookup =
+                    normalize_branch_name_for_history(&plan.config.branch_name);
+                for item in &mut self.branch_list.branches {
+                    let item_lookup = normalize_branch_name_for_history(&item.name);
+                    if item_lookup == branch_name_for_lookup {
+                        item.last_tool_usage = Some(agent_label.clone());
+                        item.last_tool_id = Some(agent_id.to_string());
+                        break;
+                    }
+                }
+                let launch_message = if let Some(warning) = plan.session_warning.as_ref() {
+                    format!(
+                        "Agent launched in tmux pane for {}. {}",
+                        plan.config.branch_name, warning
+                    )
+                } else {
+                    format!(
+                        "Agent launched in tmux pane for {}",
+                        plan.config.branch_name
+                    )
+                };
+                self.status_message = Some(launch_message);
+                self.status_message_time = Some(Instant::now());
+                self.wizard.visible = false;
+                self.screen = Screen::BranchList;
+            }
+            Err(e) => {
+                self.launch_status = None;
+                gwt_core::logging::log_error_message(
+                    "E4002",
+                    "agent",
+                    &format!("Failed to launch: {}", e),
+                    None,
+                );
+                self.status_message = Some(format!("Failed to launch: {}", e));
+                self.status_message_time = Some(Instant::now());
+            }
+        }
+    }
+
+    fn handle_service_select_confirm(&mut self) {
+        let Some(pending) = self.pending_service_select.take() else {
+            return;
+        };
+        let (service, force_host) = {
+            let (service, force_host) = self.service_select.selected_target();
+            (service.map(|s| s.to_string()), force_host)
+        };
+        if let Some(prev_screen) = self.screen_stack.pop() {
+            self.screen = prev_screen;
+        }
+        self.last_mouse_click = None;
+        let keep_launch_status = matches!(pending.plan.install_plan, InstallPlan::Install { .. });
+        self.maybe_request_recreate_selection(
+            &pending.plan,
+            service.as_deref(),
+            force_host,
+            keep_launch_status,
+        );
+    }
+
+    fn handle_service_select_skip(&mut self) {
+        let Some(pending) = self.pending_service_select.take() else {
+            return;
+        };
+        if let Some(prev_screen) = self.screen_stack.pop() {
+            self.screen = prev_screen;
+        }
+        self.last_mouse_click = None;
+        let keep_launch_status = matches!(pending.plan.install_plan, InstallPlan::Install { .. });
+        self.launch_plan_in_tmux(
+            &pending.plan,
+            None,
+            true,
+            keep_launch_status,
+            false,
+            false,
+            false,
+        );
     }
 
     /// Launch an agent in a tmux pane (multi mode)
@@ -4177,7 +6353,15 @@ impl Model {
     /// - When a column reaches 3 panes, a new column is added to the right
     ///
     /// Uses the same argument building logic as single mode (main.rs)
-    fn launch_plan_in_pane(&mut self, plan: &LaunchPlan) -> Result<String, String> {
+    fn launch_plan_in_pane_with_service(
+        &mut self,
+        plan: &LaunchPlan,
+        service: Option<&str>,
+        force_host: bool,
+        build: bool,
+        force_recreate: bool,
+        stop_on_exit: bool,
+    ) -> Result<String, String> {
         // FR-010: One Branch One Pane constraint
         // Check if an agent is already running on this branch
         if self
@@ -4197,6 +6381,17 @@ impl Model {
         self.hide_active_agent_pane();
 
         let working_dir = plan.config.worktree_path.to_string_lossy().to_string();
+        let use_docker = !force_host
+            && launcher::detect_docker_environment(&plan.config.worktree_path).is_some();
+        info!(
+            category = "tui",
+            branch = %plan.config.branch_name,
+            worktree = %plan.config.worktree_path.display(),
+            use_docker = use_docker,
+            service = service.unwrap_or(""),
+            executable = %plan.executable,
+            "Prepared launch plan"
+        );
 
         // Build environment variables (same as single mode)
         let env_vars = plan.env.clone();
@@ -4209,7 +6404,12 @@ impl Model {
             _ => None,
         };
 
-        let agent_cmd = build_shell_command(&plan.executable, &plan.command_args);
+        let executable = if use_docker {
+            normalize_container_executable(&plan.executable)
+        } else {
+            plan.executable.clone()
+        };
+        let agent_cmd = build_shell_command(&executable, &plan.command_args);
         let full_cmd = if let Some(install_cmd) = install_cmd {
             format!("{} && {}", install_cmd, agent_cmd)
         } else {
@@ -4236,8 +6436,24 @@ impl Model {
             .gwt_pane_id
             .as_ref()
             .ok_or_else(|| "No gwt pane ID available".to_string())?;
-        let pane_id =
-            launcher::launch_in_pane(target, &working_dir, &command).map_err(|e| e.to_string())?;
+        let pane_id = if use_docker {
+            let docker_args = vec!["-lc".to_string(), command.clone()];
+            let (pane_id, _docker_result) = launcher::launch_in_pane_with_docker(
+                target,
+                &plan.config.worktree_path,
+                &plan.config.branch_name,
+                "sh",
+                &docker_args,
+                service,
+                build,
+                force_recreate,
+                stop_on_exit,
+            )
+            .map_err(|e| e.to_string())?;
+            pane_id
+        } else {
+            launcher::launch_in_pane(target, &working_dir, &command).map_err(|e| e.to_string())?
+        };
 
         // Focus the new pane (FR-022)
         if let Err(e) = gwt_core::tmux::pane::select_pane(&pane_id) {
@@ -4264,6 +6480,23 @@ impl Model {
         panes.push(agent_pane);
         self.pane_list.update_panes(panes);
 
+        let docker_env = launcher::detect_docker_environment(&plan.config.worktree_path);
+        let (docker_service, docker_force_host, docker_recreate, docker_keep) =
+            if docker_env.is_some() {
+                if force_host {
+                    (None, Some(true), None, None)
+                } else {
+                    (
+                        service.map(|value| value.to_string()),
+                        Some(false),
+                        Some(force_recreate),
+                        Some(!stop_on_exit),
+                    )
+                }
+            } else {
+                (None, None, None, None)
+            };
+
         // FR-071: Save session entry for tmux mode
         let session_entry = ToolSessionEntry {
             branch: plan.config.branch_name.clone(),
@@ -4276,6 +6509,12 @@ impl Model {
             reasoning_level: plan.config.reasoning_level.map(|r| r.label().to_string()),
             skip_permissions: Some(plan.config.skip_permissions),
             tool_version: Some(plan.selected_version.clone()),
+            collaboration_modes: Some(plan.config.collaboration_modes),
+            docker_service,
+            docker_force_host,
+            docker_recreate,
+            docker_build: None,
+            docker_keep,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
@@ -4499,60 +6738,103 @@ impl Model {
 
     /// Execute branch cleanup (FR-010)
     fn execute_cleanup(&mut self, branches: &[String]) {
+        if branches.is_empty() {
+            return;
+        }
+        if self.branch_list.cleanup_in_progress() || self.cleanup_rx.is_some() {
+            return;
+        }
+
         debug!(
             category = "tui",
             branch_count = branches.len(),
             "Starting branch cleanup"
         );
-        let mut deleted = 0;
-        let mut errors = Vec::new();
-        let manager = WorktreeManager::new(&self.repo_root).ok();
 
-        for branch_name in branches {
-            let branch_item = self
-                .branch_list
-                .branches
-                .iter()
-                .find(|b| &b.name == branch_name);
-
-            if let (Some(manager), Some(item)) = (manager.as_ref(), branch_item) {
-                if let Some(path) = item.worktree_path.as_deref() {
-                    let force_remove = item.worktree_status == WorktreeStatus::Inaccessible
+        let cleanup_items: Vec<CleanupPlanItem> = branches
+            .iter()
+            .map(|branch_name| {
+                let branch_item = self
+                    .branch_list
+                    .branches
+                    .iter()
+                    .find(|b| &b.name == branch_name);
+                let force_remove = branch_item.is_some_and(|item| {
+                    item.worktree_status == WorktreeStatus::Inaccessible
                         || item.has_changes
-                        || WorktreeManager::is_protected(&item.name);
-                    let path_buf = PathBuf::from(path);
-                    if let Err(e) = manager.remove(&path_buf, force_remove) {
-                        errors.push(format!("{}: {}", branch_name, e));
-                        continue;
+                        || WorktreeManager::is_protected(&item.name)
+                });
+                CleanupPlanItem {
+                    branch: branch_name.clone(),
+                    force_remove,
+                }
+            })
+            .collect();
+
+        self.branch_list.start_cleanup_progress(cleanup_items.len());
+        self.branch_list.set_cleanup_target_branches(branches);
+        self.branch_list.set_cleanup_active_branch(None);
+
+        // SPEC-a70a1ece: Use bare repo path for worktree operations in bare projects
+        let repo_root = self
+            .bare_repo_path
+            .clone()
+            .unwrap_or_else(|| self.repo_root.clone());
+        let (tx, rx) = mpsc::channel();
+        self.cleanup_rx = Some(rx);
+
+        thread::spawn(move || {
+            let mut deleted = 0;
+            let mut errors = Vec::new();
+            let manager = WorktreeManager::new(&repo_root).ok();
+
+            for item in cleanup_items {
+                let _ = tx.send(CleanupUpdate::BranchStarted {
+                    branch: item.branch.clone(),
+                });
+
+                let result = if let Some(manager) = manager.as_ref() {
+                    manager.cleanup_branch(&item.branch, item.force_remove, true)
+                } else {
+                    Branch::delete(&repo_root, &item.branch, true)
+                };
+
+                match result {
+                    Ok(_) => {
+                        debug!(
+                            category = "tui",
+                            branch = %item.branch,
+                            "Branch cleanup succeeded"
+                        );
+                        deleted += 1;
+                        let _ = tx.send(CleanupUpdate::BranchFinished {
+                            branch: item.branch.clone(),
+                            success: true,
+                        });
+                    }
+                    Err(e) => {
+                        error!(
+                            category = "tui",
+                            branch = %item.branch,
+                            error = %e,
+                            "Branch cleanup failed"
+                        );
+                        errors.push(format!("{}: {}", item.branch, e));
+                        let _ = tx.send(CleanupUpdate::BranchFinished {
+                            branch: item.branch.clone(),
+                            success: false,
+                        });
                     }
                 }
             }
 
-            // Try to delete the branch
-            match Branch::delete(&self.repo_root, branch_name, true) {
-                Ok(_) => {
-                    debug!(
-                        category = "tui",
-                        branch = %branch_name,
-                        "Branch deleted successfully"
-                    );
-                    deleted += 1;
-                    // Remove from selection
-                    self.branch_list.selected_branches.remove(branch_name);
-                }
-                Err(e) => {
-                    error!(
-                        category = "tui",
-                        branch = %branch_name,
-                        error = %e,
-                        "Failed to delete branch"
-                    );
-                    errors.push(format!("{}: {}", branch_name, e));
-                }
-            }
-        }
+            let _ = tx.send(CleanupUpdate::Completed { deleted, errors });
+        });
+    }
 
-        // Show result message
+    fn finish_cleanup(&mut self, deleted: usize, errors: Vec<String>) {
+        self.branch_list.finish_cleanup_progress();
+
         if errors.is_empty() {
             info!(
                 category = "tui",
@@ -4592,95 +6874,61 @@ impl Model {
             self.screen.clone()
         };
 
-        // Profiles, Environment, and Logs screens don't need header
-        let needs_header = !matches!(
-            base_screen,
-            Screen::Profiles | Screen::Environment | Screen::Logs | Screen::AISettingsWizard
-        );
+        // Keep a consistent header across major screens.
+        let needs_header = !matches!(base_screen, Screen::AISettingsWizard);
         let header_height = if needs_header { 6 } else { 0 };
 
-        // BranchList screen doesn't need footer (shortcut legend removed)
-        let needs_footer = !matches!(base_screen, Screen::BranchList);
+        // Footer help sits above the status bar.
+        let needs_footer = !matches!(base_screen, Screen::AISettingsWizard);
+        let full_footer_lines = if needs_footer {
+            let lines = self.footer_lines(frame.area().width);
+            self.sync_footer_metrics(frame.area().width, lines.len());
+            lines
+        } else {
+            Vec::new()
+        };
+        let footer_lines = if needs_footer {
+            self.footer_visible_lines(&full_footer_lines, FOOTER_VISIBLE_HEIGHT)
+        } else {
+            Vec::new()
+        };
         let footer_height = if needs_footer {
-            // Calculate footer height dynamically based on text length
-            let keybinds = self.get_footer_keybinds();
-            let status = self.active_status_message().unwrap_or("");
-            let footer_text_len = if status.is_empty() {
-                keybinds.len() + 2 // " {} " format adds 2 spaces
-            } else {
-                keybinds.len() + status.len() + 5 // " {} | {} " format adds 5 chars
-            };
-            let inner_width = frame.area().width.saturating_sub(2) as usize; // borders
-            if footer_text_len > inner_width {
-                4
-            } else {
-                3
-            }
+            FOOTER_VISIBLE_HEIGHT as u16
         } else {
             0
         };
 
+        // Status bar is always the bottom-most line.
+        let needs_status_bar = !matches!(base_screen, Screen::AISettingsWizard);
+        let status_bar_height = if needs_status_bar { 1 } else { 0 };
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(header_height), // Header (0 for Profiles/Environment)
-                Constraint::Min(0),                // Content
-                Constraint::Length(footer_height), // Footer (0 for BranchList)
+                Constraint::Length(header_height),     // Header
+                Constraint::Min(0),                    // Content
+                Constraint::Length(footer_height),     // Footer help
+                Constraint::Length(status_bar_height), // Status bar
             ])
             .split(frame.area());
 
-        // Header (for branch list screen, render boxed header)
+        // Header
         if needs_header {
-            if matches!(base_screen, Screen::BranchList | Screen::AgentMode) {
-                self.view_boxed_header(frame, chunks[0]);
-            } else {
-                self.view_header(frame, chunks[0], &base_screen);
-            }
+            self.view_boxed_header(frame, chunks[0], &base_screen);
         }
 
         // Content
         match base_screen {
             Screen::BranchList => {
-                // Show launch status bar if launching
-                let content_area = if self.launch_in_progress {
-                    if let Some(status) = &self.launch_status {
-                        // Split content area: status bar (1 line) + rest
-                        let status_chunks = Layout::default()
-                            .direction(Direction::Vertical)
-                            .constraints([Constraint::Length(1), Constraint::Min(0)])
-                            .split(chunks[1]);
-
-                        // Render status bar with star indicator
-                        let status_line = Line::from(vec![
-                            Span::styled(
-                                " * ",
-                                Style::default()
-                                    .fg(Color::Yellow)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(status.as_str(), Style::default().fg(Color::Yellow)),
-                        ]);
-                        frame.render_widget(Paragraph::new(status_line), status_chunks[0]);
-                        status_chunks[1]
-                    } else {
-                        chunks[1]
-                    }
-                } else {
-                    chunks[1]
-                };
-
                 // Use split layout (branch list takes full area, PaneList abolished)
-                let split_areas = calculate_split_layout(content_area, &self.split_layout);
-                let status_message = self
-                    .active_status_message()
-                    .map(|message| message.to_string());
+                let split_areas = calculate_split_layout(chunks[1], &self.split_layout);
 
                 // Render branch list (always has focus now)
                 render_branch_list(
                     &mut self.branch_list,
                     frame,
                     split_areas.branch_list,
-                    status_message.as_deref(),
+                    None,
                     true, // Branch list always has focus
                 );
             }
@@ -4713,9 +6961,19 @@ impl Model {
             Screen::Error => render_error_with_queue(&self.error_queue, frame, chunks[1]),
             Screen::Profiles => render_profiles(&mut self.profiles, frame, chunks[1]),
             Screen::Environment => render_environment(&mut self.environment, frame, chunks[1]),
+            Screen::ServiceSelect => {
+                render_service_select(&mut self.service_select, frame, chunks[1])
+            }
             Screen::AISettingsWizard => render_ai_wizard(&mut self.ai_wizard, frame, chunks[1]),
             Screen::SpecKitWizard => {
                 render_speckit_wizard(frame, chunks[1], &self.speckit_wizard);
+            }
+            Screen::CloneWizard => render_clone_wizard(&self.clone_wizard, frame, chunks[1]),
+            Screen::MigrationDialog => {
+                render_migration_dialog(&mut self.migration_dialog, frame, chunks[1])
+            }
+            Screen::GitView => {
+                render_git_view(&mut self.git_view, frame, chunks[1]);
             }
             Screen::Confirm => {}
         }
@@ -4724,19 +6982,31 @@ impl Model {
             render_confirm(&mut self.confirm, frame, chunks[1]);
         }
 
-        // Footer (not for BranchList screen)
+        // Footer help
         if needs_footer {
-            self.view_footer(frame, chunks[2]);
+            self.view_footer(frame, chunks[2], &footer_lines);
+        }
+
+        // Bottom status bar
+        if needs_status_bar {
+            self.view_status_bar(frame, chunks[3], &base_screen);
         }
 
         // Wizard overlay (FR-044: popup on top of branch list)
         if self.wizard.visible {
             render_wizard(&mut self.wizard, frame, frame.area());
         }
+
+        // Progress modal overlay (FR-041: highest z-index)
+        if let Some(ref modal) = self.progress_modal {
+            use super::widgets::ProgressModal;
+            let widget = ProgressModal::new(modal);
+            frame.render_widget(widget, frame.area());
+        }
     }
 
-    /// Boxed header for branch list screen
-    fn view_boxed_header(&self, frame: &mut Frame, area: Rect) {
+    /// Boxed header shared across major screens
+    fn view_boxed_header(&self, frame: &mut Frame, area: Rect, screen: &Screen) {
         let version = env!("CARGO_PKG_VERSION");
         let offline_indicator = if self.is_offline { " [OFFLINE]" } else { "" };
         let profile = self
@@ -4750,8 +7020,26 @@ impl Model {
             .as_deref()
             .unwrap_or_else(|| self.repo_root.to_str().unwrap_or("."));
 
-        // Title for the box
-        let title = format!(" gwt - Branch Selection v{}{} ", version, offline_indicator);
+        let screen_title = match screen {
+            Screen::BranchList => "Branch Screen",
+            Screen::AgentMode => "Agent Screen",
+            Screen::WorktreeCreate => "Worktree Create",
+            Screen::Settings => "Settings",
+            Screen::Logs => "Logs",
+            Screen::Help => "Help",
+            Screen::Confirm => "Confirm",
+            Screen::Error => "Errors",
+            Screen::Profiles => "Profiles",
+            Screen::Environment => "Environment",
+            Screen::ServiceSelect => "Service Select",
+            Screen::AISettingsWizard => "AI Settings",
+            Screen::SpecKitWizard => "Spec Kit",
+            Screen::CloneWizard => "Clone Repository",
+            Screen::MigrationDialog => "Migration Required",
+            Screen::GitView => "Git View",
+        };
+
+        let title = format!(" gwt - {} v{}{} ", screen_title, version, offline_indicator);
         let header_block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
@@ -4776,12 +7064,36 @@ impl Model {
             ])
             .split(inner);
 
-        // Line 1: Working Directory
-        let working_dir_line = Line::from(vec![
+        // Line 1: Working Directory with branch name (SPEC-a70a1ece FR-103) and repo type indicator
+        let mut working_dir_spans = vec![
             Span::raw(" "),
             Span::styled("Working Directory: ", Style::default().fg(Color::DarkGray)),
             Span::raw(working_dir),
-        ]);
+        ];
+        // SPEC-a70a1ece: Show startup branch only for non-bare repos
+        if self.repo_type != RepoType::Bare {
+            if let Some(ref branch) = self.startup_branch {
+                working_dir_spans.push(Span::raw(" "));
+                working_dir_spans.push(Span::styled(
+                    format!("[{}]", branch),
+                    Style::default().fg(Color::Green),
+                ));
+            }
+        }
+        // SPEC-a70a1ece T206: Show [bare] indicator for bare repositories
+        if self.repo_type == RepoType::Bare {
+            working_dir_spans.push(Span::raw(" "));
+            working_dir_spans.push(Span::styled("[bare]", Style::default().fg(Color::Yellow)));
+        }
+        // SPEC-a70a1ece T506: Show (repo.git) for worktrees in bare-based projects
+        if let Some(ref name) = self.bare_name {
+            working_dir_spans.push(Span::raw(" "));
+            working_dir_spans.push(Span::styled(
+                format!("({})", name),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        let working_dir_line = Line::from(working_dir_spans);
         frame.render_widget(Paragraph::new(working_dir_line), inner_chunks[0]);
 
         // Line 2: Profile
@@ -4792,53 +7104,80 @@ impl Model {
         ]);
         frame.render_widget(Paragraph::new(profile_line), inner_chunks[1]);
 
-        // Line 3: Filter
-        let filtered = self.branch_list.filtered_branches();
-        let total = self.branch_list.branches.len();
-        let mut filter_spans = vec![
-            Span::raw(" "),
-            Span::styled("Filter(f): ", Style::default().fg(Color::DarkGray)),
-        ];
-        if self.branch_list.filter_mode {
-            if self.branch_list.filter.is_empty() {
+        let branch_context = matches!(screen, Screen::BranchList | Screen::AgentMode);
+        if branch_context {
+            // Line 3: Filter
+            let filtered = self.branch_list.filtered_branches();
+            let total = self.branch_list.branches.len();
+            let mut filter_spans = vec![
+                Span::raw(" "),
+                Span::styled("Filter(f): ", Style::default().fg(Color::DarkGray)),
+            ];
+            if self.branch_list.filter_mode {
+                if self.branch_list.filter.is_empty() {
+                    filter_spans.push(Span::styled(
+                        "Type to search...",
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                } else {
+                    filter_spans.push(Span::raw(&self.branch_list.filter));
+                }
+                filter_spans.push(Span::styled("|", Style::default().fg(Color::White)));
+            } else {
                 filter_spans.push(Span::styled(
-                    "Type to search...",
+                    if self.branch_list.filter.is_empty() {
+                        "(press f to filter)"
+                    } else {
+                        &self.branch_list.filter
+                    },
                     Style::default().fg(Color::DarkGray),
                 ));
-            } else {
-                filter_spans.push(Span::raw(&self.branch_list.filter));
             }
-            filter_spans.push(Span::styled("|", Style::default().fg(Color::White)));
-        } else {
-            filter_spans.push(Span::styled(
-                if self.branch_list.filter.is_empty() {
-                    "(press f to filter)"
-                } else {
-                    &self.branch_list.filter
-                },
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
-        if !self.branch_list.filter.is_empty() {
-            filter_spans.push(Span::styled(
-                format!(" (Showing {} of {})", filtered.len(), total),
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
-        frame.render_widget(Paragraph::new(Line::from(filter_spans)), inner_chunks[2]);
+            if !self.branch_list.filter.is_empty() {
+                filter_spans.push(Span::styled(
+                    format!(" (Showing {} of {})", filtered.len(), total),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            frame.render_widget(Paragraph::new(Line::from(filter_spans)), inner_chunks[2]);
 
-        // Line 4: Mode
-        let mode_spans = vec![
-            Span::raw(" "),
-            Span::styled("Mode(m):", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                self.branch_list.view_mode.label(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ];
-        frame.render_widget(Paragraph::new(Line::from(mode_spans)), inner_chunks[3]);
+            // Line 4: Mode
+            let mode_spans = vec![
+                Span::raw(" "),
+                Span::styled("Mode(m):", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    self.branch_list.view_mode.label(),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled("Sort(s):", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    self.branch_list.sort_mode.label(),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ];
+            frame.render_widget(Paragraph::new(Line::from(mode_spans)), inner_chunks[3]);
+        } else {
+            let screen_line = Line::from(vec![
+                Span::raw(" "),
+                Span::styled("Screen: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    screen_title,
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]);
+            frame.render_widget(Paragraph::new(screen_line), inner_chunks[2]);
+
+            // Clear the last line to avoid stale content when switching screens.
+            let blank = " ".repeat(inner_chunks[3].width as usize);
+            frame.render_widget(Paragraph::new(blank), inner_chunks[3]);
+        }
     }
 
     fn view_header(&self, frame: &mut Frame, area: Rect, screen: &Screen) {
@@ -4851,14 +7190,14 @@ impl Model {
             .as_deref()
             .unwrap_or("default");
 
-        // Match TypeScript format: gwt - Branch Selection v{version} | Profile(p): {name}
+        // Keep header naming consistent with boxed header labels.
         let title = match screen {
             Screen::AgentMode => format!(
-                " gwt - Agent Mode v{} | Profile(p): {} {}",
+                " gwt - Agent Screen v{} | Profile(p): {} {}",
                 version, profile, offline_indicator
             ),
             _ => format!(
-                " gwt - Branch Selection v{} | Profile(p): {} {}",
+                " gwt - Branch Screen v{} | Profile(p): {} {}",
                 version, profile, offline_indicator
             ),
         };
@@ -4869,90 +7208,383 @@ impl Model {
         frame.render_widget(header, area);
     }
 
-    fn get_footer_keybinds(&self) -> &'static str {
+    fn footer_lines(&self, width: u16) -> Vec<String> {
+        let items = self.footer_items();
+        Self::wrap_footer_items(&items, width as usize)
+    }
+
+    fn sync_footer_metrics(&mut self, width: u16, line_count: usize) {
+        let width_changed = self.footer_last_width != width;
+        let count_changed = self.footer_line_count != line_count;
+
+        self.footer_last_width = width;
+        self.footer_line_count = line_count;
+
+        if width_changed || count_changed {
+            self.reset_footer_scroll();
+            return;
+        }
+
+        let max_offset = self.footer_line_count.saturating_sub(FOOTER_VISIBLE_HEIGHT);
+        if self.footer_scroll_offset > max_offset {
+            self.footer_scroll_offset = max_offset;
+        }
+    }
+
+    fn footer_visible_lines(&self, full_lines: &[String], height: usize) -> Vec<String> {
+        if full_lines.is_empty() || height == 0 {
+            return Vec::new();
+        }
+
+        let max_offset = full_lines.len().saturating_sub(height);
+        let offset = self.footer_scroll_offset.min(max_offset);
+        let end = (offset + height).min(full_lines.len());
+        full_lines[offset..end].to_vec()
+    }
+
+    fn footer_items(&self) -> Vec<String> {
         match self.screen {
             Screen::BranchList => {
                 if self.branch_list.filter_mode {
-                    "[Esc] Exit filter | Type to search"
+                    vec![
+                        Self::keybind_item("Esc", "Exit filter"),
+                        Self::keybind_item("Enter", "Apply"),
+                        Self::keybind_item("Backspace", "Delete"),
+                        Self::keybind_item("Up/Down", "Move"),
+                        Self::keybind_item("PgUp/PgDn", "Page"),
+                        Self::keybind_item("Home/End", "Top/Bottom"),
+                        "Type to search".to_string(),
+                    ]
                 } else {
-                    "[r] Refresh | [c] Cleanup | [l] Logs"
+                    let mut items = vec![
+                        Self::keybind_item("Up/Down", "Move"),
+                        Self::keybind_item("PgUp/PgDn", "Page"),
+                        Self::keybind_item("Home/End", "Top/Bottom"),
+                        Self::keybind_item("Enter", "Open/Focus"),
+                        Self::keybind_item("Space", "Select"),
+                        Self::keybind_item("r", "Refresh"),
+                        Self::keybind_item("c", "Cleanup"),
+                        Self::keybind_item("l", "Logs"),
+                        Self::keybind_item("s", "Sort"),
+                        Self::keybind_item("p", "Environment"),
+                        Self::keybind_item("f,/", "Filter"),
+                        Self::keybind_item("m", "Mode"),
+                        Self::keybind_item("Tab", "Agent"),
+                        Self::keybind_item("v", "GitView"),
+                        Self::keybind_item("u", "Hooks"),
+                        Self::keybind_item("?/h", "Help"),
+                    ];
+                    if self.selected_branch_has_agent() {
+                        items.push(Self::keybind_item("d", "Terminate"));
+                    }
+                    if !self.branch_list.filter.is_empty() || self.has_active_agent_pane() {
+                        items.push(Self::keybind_item("Esc", "Clear/Hide"));
+                    }
+                    items.push(Self::keybind_item("Ctrl+C", "Quit"));
+                    items
                 }
             }
             Screen::AgentMode => {
                 if self.agent_mode.show_session_selector {
-                    "[Enter] Resume | [d] Discard | [n] New session | [Tab] Back"
-                } else if self.agent_mode.ai_ready {
-                    "[Enter] Send | [Tab] Back"
+                    vec![
+                        Self::keybind_item("Enter", "Resume"),
+                        Self::keybind_item("d", "Discard"),
+                        Self::keybind_item("n", "New session"),
+                        Self::keybind_item("Tab", "Back"),
+                    ]
                 } else {
-                    "[Enter] Configure AI | [Tab] Back"
+                    let enter_label = if self.agent_mode.ai_ready {
+                        "Send"
+                    } else {
+                        "Configure AI"
+                    };
+                    vec![
+                        Self::keybind_item("Enter", enter_label),
+                        Self::keybind_item("Tab", "Settings"),
+                        Self::keybind_item("Esc", "Back"),
+                    ]
                 }
             }
-            Screen::WorktreeCreate => "[Enter] Next | [Esc] Back",
-            Screen::Settings => "[Tab] Category | [Esc] Back",
-            Screen::Logs => "[Up/Down] Navigate | [Enter] Detail | [c] Copy | [f] Filter | [/] Search | [Esc] Back",
-            Screen::Help => "[Esc] Close | [Up/Down] Scroll",
-            Screen::Confirm => "[Left/Right] Select | [Enter] Confirm | [Esc] Cancel",
-            Screen::Error => "[Enter/Esc] Close | [Up/Down] Scroll",
+            Screen::WorktreeCreate => match self.worktree_create.step {
+                WorktreeCreateStep::BranchName => vec![
+                    Self::keybind_item("Enter", "Next"),
+                    Self::keybind_item("Esc", "Back"),
+                ],
+                WorktreeCreateStep::BaseBranch => vec![
+                    Self::keybind_item("Up/Down", "Select"),
+                    Self::keybind_item("Enter", "Next"),
+                    Self::keybind_item("Esc", "Back"),
+                ],
+                WorktreeCreateStep::Confirm => vec![
+                    Self::keybind_item("Enter", "Create"),
+                    Self::keybind_item("Esc", "Back"),
+                ],
+            },
+            Screen::Settings => Self::split_footer_text(&self.settings.footer_keybinds()),
+            Screen::Logs => vec![
+                Self::keybind_item("Up/Down", "Navigate"),
+                Self::keybind_item("PgUp/PgDn", "Page"),
+                Self::keybind_item("Home/End", "Top/Bottom"),
+                Self::keybind_item("Enter", "Detail"),
+                Self::keybind_item("c", "Copy"),
+                Self::keybind_item("f", "Filter"),
+                Self::keybind_item("/", "Search"),
+                Self::keybind_item("Esc", "Back"),
+            ],
+            Screen::Help => vec![
+                Self::keybind_item("Up/Down", "Scroll"),
+                Self::keybind_item("PgUp/PgDn", "Page"),
+                Self::keybind_item("Esc", "Back"),
+            ],
+            Screen::Confirm => vec![
+                Self::keybind_item("Left/Right", "Select"),
+                Self::keybind_item("Enter", "Confirm"),
+                Self::keybind_item("Esc", "Cancel"),
+            ],
+            Screen::Error => vec![
+                Self::keybind_item("Enter", "Close"),
+                Self::keybind_item("Esc", "Close"),
+                Self::keybind_item("Up/Down", "Scroll"),
+                Self::keybind_item("l", "Logs"),
+                Self::keybind_item("c", "Copy"),
+            ],
             Screen::Profiles => {
                 if self.profiles.create_mode {
-                    "[Enter] Save | [Esc] Cancel"
+                    vec![
+                        Self::keybind_item("Enter", "Save"),
+                        Self::keybind_item("Esc", "Cancel"),
+                    ]
                 } else {
-                    "[Space] Activate | [Enter] Edit AI/env | [n] New | [d] Delete | [Esc] Back"
+                    vec![
+                        Self::keybind_item("Up/Down", "Select"),
+                        Self::keybind_item("Space", "Activate"),
+                        Self::keybind_item("Enter", "Edit"),
+                        Self::keybind_item("n", "New"),
+                        Self::keybind_item("d", "Delete"),
+                        Self::keybind_item("Esc", "Back"),
+                    ]
                 }
             }
             Screen::Environment => {
                 if self.environment.is_ai_only() {
                     if self.environment.edit_mode {
-                        "[Enter] Save | [Tab] Switch | [Esc] Cancel"
+                        vec![
+                            Self::keybind_item("Enter", "Save"),
+                            Self::keybind_item("Tab", "Switch"),
+                            Self::keybind_item("Esc", "Cancel"),
+                        ]
                     } else {
-                        "[Enter] Edit | [Esc] Back"
+                        vec![
+                            Self::keybind_item("Up/Down", "Select"),
+                            Self::keybind_item("PgUp/PgDn", "Page"),
+                            Self::keybind_item("Home/End", "Top/Bottom"),
+                            Self::keybind_item("Enter", "Edit"),
+                            Self::keybind_item("Esc", "Back"),
+                        ]
                     }
                 } else if self.environment.edit_mode {
-                    "[Enter] Save | [Tab] Switch | [Esc] Cancel"
+                    vec![
+                        Self::keybind_item("Enter", "Save"),
+                        Self::keybind_item("Tab", "Switch"),
+                        Self::keybind_item("Esc", "Cancel"),
+                    ]
                 } else {
-                    "[Enter] Edit | [n] New | [d] Delete (profile)/Disable (OS) | [r] Reset (override) | [Esc] Back"
+                    vec![
+                        Self::keybind_item("Up/Down", "Select"),
+                        Self::keybind_item("PgUp/PgDn", "Page"),
+                        Self::keybind_item("Home/End", "Top/Bottom"),
+                        Self::keybind_item("Enter", "Edit"),
+                        Self::keybind_item("n", "New"),
+                        Self::keybind_item("d", "Delete/Disable"),
+                        Self::keybind_item("r", "Reset"),
+                        Self::keybind_item("Esc", "Back"),
+                    ]
                 }
+            }
+            Screen::ServiceSelect => {
+                vec!["[Up/Down] Select | [Enter] Launch | [s] Skip | [Esc] Cancel".to_string()]
             }
             Screen::AISettingsWizard => {
                 if self.ai_wizard.show_delete_confirm {
-                    "[y] Confirm Delete | [n] Cancel"
+                    vec![
+                        Self::keybind_item("y", "Confirm Delete"),
+                        Self::keybind_item("n", "Cancel"),
+                    ]
                 } else {
-                    self.ai_wizard.step_title()
+                    vec![self.ai_wizard.step_title().to_string()]
                 }
             }
-            Screen::SpecKitWizard => "[Enter] Next | [Esc] Cancel",
+            Screen::SpecKitWizard => vec![
+                Self::keybind_item("Enter", "Next"),
+                Self::keybind_item("Esc", "Cancel"),
+            ],
+            Screen::CloneWizard => match self.clone_wizard.step {
+                CloneWizardStep::UrlInput => vec![
+                    Self::keybind_item("Enter", "Continue"),
+                    Self::keybind_item("Esc", "Quit"),
+                ],
+                CloneWizardStep::TypeSelect => vec![
+                    Self::keybind_item("Up/Down", "Select"),
+                    Self::keybind_item("Enter", "Clone"),
+                    Self::keybind_item("Backspace", "Back"),
+                    Self::keybind_item("Esc", "Quit"),
+                ],
+                CloneWizardStep::Cloning => vec!["Cloning...".to_string()],
+                CloneWizardStep::Complete => vec![Self::keybind_item("Enter", "Continue")],
+                CloneWizardStep::Failed => vec![
+                    Self::keybind_item("Backspace", "Try again"),
+                    Self::keybind_item("Esc", "Quit"),
+                ],
+            },
+            Screen::MigrationDialog => match self.migration_dialog.phase {
+                MigrationDialogPhase::Confirmation => vec![
+                    Self::keybind_item("Left/Right", "Select"),
+                    Self::keybind_item("Enter", "Confirm"),
+                ],
+                MigrationDialogPhase::Validating | MigrationDialogPhase::InProgress => {
+                    vec!["Migration in progress...".to_string()]
+                }
+                MigrationDialogPhase::Completed => vec![Self::keybind_item("Enter", "Continue")],
+                MigrationDialogPhase::Failed => vec![Self::keybind_item("Enter", "Exit")],
+                MigrationDialogPhase::Exited => Vec::new(),
+            },
+            // SPEC-1ea18899: GitView footer keybinds
+            Screen::GitView => vec![
+                Self::keybind_item("Up/Down", "Navigate"),
+                Self::keybind_item("Space", "Expand"),
+                Self::keybind_item("Enter", "Open PR"),
+                Self::keybind_item("v/Esc", "Back"),
+            ],
         }
     }
 
-    fn view_footer(&self, frame: &mut Frame, area: Rect) {
-        let keybinds = self.get_footer_keybinds();
+    #[cfg(test)]
+    fn get_footer_keybinds(&self) -> String {
+        self.footer_items().join(" ")
+    }
 
-        let status = self.active_status_message().unwrap_or("");
-        let footer_text = if status.is_empty() {
-            format!(" {} ", keybinds)
+    fn wrap_footer_items(items: &[String], width: usize) -> Vec<String> {
+        if items.is_empty() {
+            return vec![String::new()];
+        }
+
+        let mut lines = Vec::new();
+        let mut current = String::new();
+
+        for item in items {
+            let segment = item.trim();
+            if segment.is_empty() {
+                continue;
+            }
+            let separator = if current.is_empty() { "" } else { " | " };
+            let next_len = current.len() + separator.len() + segment.len();
+            if !current.is_empty() && width > 0 && next_len > width {
+                lines.push(current);
+                current = segment.to_string();
+            } else {
+                if !current.is_empty() {
+                    current.push_str(" | ");
+                }
+                current.push_str(segment);
+            }
+        }
+
+        if current.is_empty() && lines.is_empty() {
+            lines.push(String::new());
+        } else if !current.is_empty() {
+            lines.push(current);
+        }
+
+        lines
+    }
+
+    fn keybind_item(keys: &str, label: &str) -> String {
+        format!("[{}] {}", keys, label)
+    }
+
+    fn split_footer_text(text: &str) -> Vec<String> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Vec::new();
+        }
+        trimmed
+            .split(" | ")
+            .map(|segment| segment.trim().to_string())
+            .filter(|segment| !segment.is_empty())
+            .collect()
+    }
+
+    fn reset_footer_scroll(&mut self) {
+        self.footer_scroll_offset = 0;
+        self.footer_scroll_dir = 1;
+        self.footer_scroll_tick = 0;
+        self.footer_scroll_pause = 0;
+    }
+
+    fn update_footer_scroll(&mut self) {
+        if self.footer_line_count <= FOOTER_VISIBLE_HEIGHT {
+            self.reset_footer_scroll();
+            return;
+        }
+
+        if self.footer_scroll_pause > 0 {
+            self.footer_scroll_pause -= 1;
+            return;
+        }
+
+        self.footer_scroll_tick = self.footer_scroll_tick.saturating_add(1);
+        if self.footer_scroll_tick < FOOTER_SCROLL_TICKS_PER_LINE {
+            return;
+        }
+        self.footer_scroll_tick = 0;
+
+        let max_offset = self.footer_line_count.saturating_sub(FOOTER_VISIBLE_HEIGHT);
+        if self.footer_scroll_dir >= 0 {
+            if self.footer_scroll_offset < max_offset {
+                self.footer_scroll_offset += 1;
+                if self.footer_scroll_offset >= max_offset {
+                    self.footer_scroll_dir = -1;
+                    self.footer_scroll_pause = FOOTER_SCROLL_PAUSE_TICKS;
+                }
+            } else {
+                self.footer_scroll_dir = -1;
+                self.footer_scroll_pause = FOOTER_SCROLL_PAUSE_TICKS;
+            }
+        } else if self.footer_scroll_offset > 0 {
+            self.footer_scroll_offset -= 1;
+            if self.footer_scroll_offset == 0 {
+                self.footer_scroll_dir = 1;
+                self.footer_scroll_pause = FOOTER_SCROLL_PAUSE_TICKS;
+            }
         } else {
-            format!(" {} | {} ", keybinds, status)
-        };
+            self.footer_scroll_dir = 1;
+            self.footer_scroll_pause = FOOTER_SCROLL_PAUSE_TICKS;
+        }
+    }
 
+    fn view_footer(&self, frame: &mut Frame, area: Rect, lines: &[String]) {
         let style = if self.ctrl_c_count > 0 {
             Style::default().fg(Color::Yellow)
         } else {
             Style::default()
         };
 
-        // Calculate if wrap is needed based on text length and available width
-        let inner_width = area.width.saturating_sub(2); // borders
-        let needs_wrap = footer_text.len() > inner_width as usize;
-
-        let mut footer = Paragraph::new(footer_text)
-            .style(style)
-            .block(Block::default().borders(Borders::ALL));
-
-        if needs_wrap {
-            footer = footer.wrap(Wrap { trim: true });
-        }
+        let text = if lines.is_empty() {
+            String::new()
+        } else {
+            lines.join("\n")
+        };
+        let footer = Paragraph::new(text).style(style);
 
         frame.render_widget(footer, area);
+    }
+
+    fn view_status_bar(&self, frame: &mut Frame, area: Rect, _screen: &Screen) {
+        let line = crate::tui::screens::branch_list::build_status_bar_line(
+            &self.branch_list,
+            self.active_status_message(),
+        );
+        frame.render_widget(Paragraph::new(line), area);
     }
 
     fn text_input_active(&self) -> bool {
@@ -4984,12 +7616,36 @@ impl Model {
             KeyCode::Tab => {
                 if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.switch_field();
+                // SPEC-71f2742d US3: Settings form field navigation
+                } else if matches!(self.screen, Screen::Settings) && self.settings.is_form_mode() {
+                    if self.settings.is_profile_form_mode() {
+                        self.settings.profile_form.next_field();
+                    } else {
+                        self.settings.agent_form.next_field();
+                    }
+                } else if matches!(self.screen, Screen::Settings)
+                    && self.settings.is_env_edit_mode()
+                {
+                    // Tab in EnvEdit mode: switch between key and value
+                    self.settings.env_state.switch_field();
                 }
                 None
             }
             KeyCode::BackTab => {
                 if matches!(self.screen, Screen::Environment) && self.environment.edit_mode {
                     self.environment.switch_field();
+                // SPEC-71f2742d US3: Settings form field navigation (reverse)
+                } else if matches!(self.screen, Screen::Settings) && self.settings.is_form_mode() {
+                    if self.settings.is_profile_form_mode() {
+                        self.settings.profile_form.prev_field();
+                    } else {
+                        self.settings.agent_form.prev_field();
+                    }
+                } else if matches!(self.screen, Screen::Settings)
+                    && self.settings.is_env_edit_mode()
+                {
+                    // BackTab in EnvEdit mode: switch between key and value
+                    self.settings.env_state.switch_field();
                 }
                 None
             }
@@ -5006,9 +7662,32 @@ impl Model {
 
     fn handle_key_event(&mut self, key: KeyEvent) -> Option<Message> {
         let is_key_press = key.kind == KeyEventKind::Press;
+
+        // FR-054: Progress modal has highest priority when visible
+        if let Some(ref mut modal) = self.progress_modal {
+            if is_key_press {
+                if modal.has_failed() && modal.waiting_for_key {
+                    // FR-052: Any key dismisses error modal
+                    self.progress_modal = None;
+                    self.launch_in_progress = false;
+                    return None;
+                } else if key.code == KeyCode::Esc && !modal.completed {
+                    // FR-054: ESC cancels preparation
+                    modal.cancellation_requested = true;
+                    self.progress_modal = None;
+                    self.launch_in_progress = false;
+                    self.launch_rx = None;
+                    // FR-055: Cleanup is handled by the background thread
+                    return None;
+                }
+            }
+            // Block all other input while modal is visible (FR-043)
+            return None;
+        }
+
         // Wizard has priority when visible
         if self.wizard.visible {
-            match key.code {
+            return match key.code {
                 KeyCode::Esc => Some(Message::WizardBack),
                 KeyCode::Enter if is_key_press => Some(Message::WizardConfirm),
                 KeyCode::Up if is_key_press => Some(Message::WizardPrev),
@@ -5032,8 +7711,38 @@ impl Model {
                     None
                 }
                 _ => None,
+            };
+        }
+
+        if matches!(self.screen, Screen::AISettingsWizard)
+            && !self.ai_wizard.is_text_input()
+            && is_key_press
+        {
+            use super::screens::ai_wizard::AIWizardStep;
+
+            match key.code {
+                KeyCode::Char('t') | KeyCode::Char('T')
+                    if matches!(self.ai_wizard.step, AIWizardStep::ModelSelect) =>
+                {
+                    self.ai_wizard.toggle_summary_enabled();
+                    return None;
+                }
+                KeyCode::Char('c')
+                | KeyCode::Char('C')
+                | KeyCode::Char('d')
+                | KeyCode::Char('D')
+                    if matches!(self.ai_wizard.step, AIWizardStep::ModelSelect) =>
+                {
+                    if self.ai_wizard.is_edit {
+                        self.ai_wizard.show_delete();
+                    }
+                    return None;
+                }
+                _ => {}
             }
-        } else if self.text_input_active() {
+        }
+
+        if self.text_input_active() {
             self.handle_text_input_key(key, is_key_press)
         } else {
             // Normal key handling
@@ -5127,7 +7836,7 @@ impl Model {
                 (KeyCode::Char('s'), KeyModifiers::NONE) => {
                     // In filter mode, 's' goes to filter input
                     if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
-                        Some(Message::NavigateTo(Screen::Settings))
+                        Some(Message::CycleSortMode)
                     } else {
                         Some(Message::Char('s'))
                     }
@@ -5246,8 +7955,12 @@ impl Model {
                 }
                 (KeyCode::Char('p'), KeyModifiers::NONE) => {
                     // In filter mode, 'p' goes to filter input
+                    // 'p' now navigates to Settings → Environment tab (SPEC-71f2742d)
                     if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
-                        Some(Message::NavigateTo(Screen::Profiles))
+                        use super::screens::settings::SettingsCategory;
+                        self.settings.category = SettingsCategory::Environment;
+                        self.settings.load_profiles_config();
+                        Some(Message::NavigateTo(Screen::Settings))
                     } else {
                         Some(Message::Char('p'))
                     }
@@ -5298,7 +8011,18 @@ impl Model {
                     if matches!(self.screen, Screen::BranchList) {
                         Some(Message::CycleViewMode)
                     } else {
-                        None
+                        Some(Message::Char('m'))
+                    }
+                }
+                // SPEC-1ea18899: 'v' opens GitView for selected branch
+                (KeyCode::Char('v'), KeyModifiers::NONE) => {
+                    if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
+                        Some(Message::NavigateTo(Screen::GitView))
+                    } else if matches!(self.screen, Screen::GitView) {
+                        // v key to go back from GitView (FR-004)
+                        Some(Message::NavigateBack)
+                    } else {
+                        Some(Message::Char('v'))
                     }
                 }
                 (KeyCode::Up, _) if is_key_press => Some(Message::SelectPrev),
@@ -5363,22 +8087,39 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
                     // Error screen handles all mouse events (click, scroll)
                     if matches!(model.screen, Screen::Error) {
                         model.handle_error_mouse(mouse);
-                    } else if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                        // Overlay priority: wizard > ai_wizard > confirm > screen-specific
-                        if model.wizard.visible {
-                            model.handle_wizard_mouse(mouse);
-                        } else if model.ai_wizard.visible {
-                            model.handle_ai_wizard_mouse(mouse);
-                        } else if matches!(model.screen, Screen::Confirm) {
-                            model.handle_confirm_mouse(mouse);
-                        } else {
-                            match model.screen {
-                                Screen::BranchList => model.handle_branch_list_mouse(mouse),
-                                Screen::Profiles => model.handle_profiles_mouse(mouse),
-                                Screen::Environment => model.handle_environment_mouse(mouse),
-                                Screen::Logs => model.handle_logs_mouse(mouse),
-                                _ => {}
+                    } else {
+                        match mouse.kind {
+                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                                if matches!(model.screen, Screen::BranchList) {
+                                    model.handle_branch_list_scroll(mouse);
+                                }
                             }
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                // Overlay priority: wizard > ai_wizard > confirm > screen-specific
+                                if model.wizard.visible {
+                                    model.handle_wizard_mouse(mouse);
+                                } else if model.ai_wizard.visible {
+                                    model.handle_ai_wizard_mouse(mouse);
+                                } else if matches!(model.screen, Screen::Confirm) {
+                                    model.handle_confirm_mouse(mouse);
+                                } else {
+                                    match model.screen {
+                                        Screen::BranchList => model.handle_branch_list_mouse(mouse),
+                                        Screen::Profiles => model.handle_profiles_mouse(mouse),
+                                        Screen::Environment => {
+                                            model.handle_environment_mouse(mouse)
+                                        }
+                                        Screen::Logs => model.handle_logs_mouse(mouse),
+                                        // SPEC-1ea18899: GitView mouse handling (FR-007)
+                                        Screen::GitView => model.handle_gitview_mouse(mouse),
+                                        Screen::ServiceSelect => {
+                                            model.handle_service_select_mouse(mouse)
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -5401,16 +8142,9 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
     // Get pending agent launch before cleanup
     let pending_launch = model.pending_agent_launch.take();
 
-    // Cleanup on exit - check for orphaned worktrees (only if not launching agent)
-    if pending_launch.is_none() {
-        if let Ok(manager) = WorktreeManager::new(&model.repo_root) {
-            let orphans = manager.detect_orphans();
-            if !orphans.is_empty() {
-                // Attempt to prune automatically
-                let _ = manager.prune();
-            }
-        }
-    }
+    // SPEC-a70a1ece: Use bare repo path for worktree operations in bare projects
+    let cleanup_path = model.bare_repo_path.as_ref().unwrap_or(&model.repo_root);
+    auto_cleanup_orphans_on_exit(cleanup_path, pending_launch.is_some());
 
     // Cleanup agent panes on exit (tmux multi-mode)
     if model.tmux_mode.is_multi() && !model.agent_panes.is_empty() {
@@ -5443,6 +8177,17 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
     Ok(pending_launch)
 }
 
+fn auto_cleanup_orphans_on_exit(repo_root: &Path, pending_launch: bool) -> usize {
+    if pending_launch {
+        return 0;
+    }
+
+    match WorktreeManager::new(repo_root) {
+        Ok(manager) => manager.auto_cleanup_orphans().unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
 fn canonical_tool_id(tool_id: &str) -> String {
     let lower = tool_id.trim().to_lowercase();
     if lower.contains("claude") {
@@ -5465,6 +8210,11 @@ fn canonical_tool_id(tool_id: &str) -> String {
 fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
     use gwt_core::agent::codex::{codex_default_args, codex_skip_permissions_flag};
 
+    // SPEC-71f2742d: Handle custom agents
+    if let Some(ref custom) = config.custom_agent {
+        return build_custom_agent_args_for_tmux(custom, config);
+    }
+
     let mut args = Vec::new();
 
     match config.agent {
@@ -5479,7 +8229,7 @@ fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
 
             // Execution mode (FR-102) - same logic as single mode
             match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume => {
+                ExecutionMode::Continue | ExecutionMode::Resume | ExecutionMode::Convert => {
                     if let Some(session_id) = &config.session_id {
                         args.push("--resume".to_string());
                         args.push(session_id.clone());
@@ -5500,7 +8250,7 @@ fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
         CodingAgent::CodexCli => {
             // Execution mode - resume subcommand must come first
             match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume => {
+                ExecutionMode::Continue | ExecutionMode::Resume | ExecutionMode::Convert => {
                     args.push("resume".to_string());
                     if let Some(session_id) = &config.session_id {
                         args.push(session_id.clone());
@@ -5528,6 +8278,7 @@ fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
                 reasoning_override,
                 None, // skills_flag_version
                 bypass_sandbox,
+                config.collaboration_modes,
             ));
 
             if let Some(flag) = skip_flag {
@@ -5545,7 +8296,7 @@ fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
 
             // Execution mode
             match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume => {
+                ExecutionMode::Continue | ExecutionMode::Resume | ExecutionMode::Convert => {
                     if let Some(session_id) = &config.session_id {
                         args.push("--resume".to_string());
                         args.push(session_id.clone());
@@ -5574,7 +8325,7 @@ fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
 
             // Execution mode
             match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume => {
+                ExecutionMode::Continue | ExecutionMode::Resume | ExecutionMode::Convert => {
                     if let Some(session_id) = &config.session_id {
                         args.push("--resume".to_string());
                         args.push(session_id.clone());
@@ -5591,6 +8342,40 @@ fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
 
     args
 }
+
+/// Build command line arguments for custom agents (SPEC-71f2742d T206)
+fn build_custom_agent_args_for_tmux(
+    custom: &CustomCodingAgent,
+    config: &AgentLaunchConfig,
+) -> Vec<String> {
+    let mut args = Vec::new();
+
+    // Add default args
+    args.extend(custom.default_args.clone());
+
+    // Add mode-specific args (T208)
+    if let Some(ref mode_args) = custom.mode_args {
+        match config.execution_mode {
+            ExecutionMode::Normal => {
+                args.extend(mode_args.normal.clone());
+            }
+            ExecutionMode::Continue => {
+                args.extend(mode_args.continue_mode.clone());
+            }
+            ExecutionMode::Resume | ExecutionMode::Convert => {
+                args.extend(mode_args.resume.clone());
+            }
+        }
+    }
+
+    // Add permission skip args if skip_permissions is true (T210)
+    if config.skip_permissions && !custom.permission_skip_args.is_empty() {
+        args.extend(custom.permission_skip_args.clone());
+    }
+
+    args
+}
+
 fn is_valid_env_name(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
@@ -5609,6 +8394,32 @@ fn build_shell_command(command: &str, args: &[String]) -> String {
     let mut cmd_parts = vec![shell_escape(command)];
     cmd_parts.extend(args.iter().map(|arg| shell_escape(arg)));
     cmd_parts.join(" ")
+}
+
+fn normalize_container_executable(executable: &str) -> String {
+    let is_windows_drive_abs = executable.len() > 2
+        && executable.as_bytes()[1] == b':'
+        && (executable.as_bytes()[2] == b'\\' || executable.as_bytes()[2] == b'/');
+    let is_unc_path = executable.starts_with("\\\\");
+
+    if is_windows_drive_abs || is_unc_path {
+        if let Some(name) = executable.rsplit(&['\\', '/'][..]).next() {
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+    }
+
+    let path = Path::new(executable);
+    if path.is_absolute() {
+        if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+    }
+
+    executable.to_string()
 }
 
 fn wrap_tmux_command_for_fast_exit(command: &str) -> String {
@@ -5651,6 +8462,48 @@ fn build_tmux_command(
     }
 }
 
+fn resolve_remote_head(repo_root: &Path, remote: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args([
+            "symbolic-ref",
+            "--quiet",
+            &format!("refs/remotes/{remote}/HEAD"),
+        ])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let ref_name = stdout.trim();
+    let ref_name = ref_name.strip_prefix("refs/remotes/")?;
+    if ref_name.ends_with("/HEAD") {
+        return None;
+    }
+    Some(ref_name.to_string())
+}
+
+fn resolve_safety_base(repo_root: &Path, base_branch: &str) -> (String, bool) {
+    if Branch::exists(repo_root, base_branch).unwrap_or(false) {
+        return (base_branch.to_string(), true);
+    }
+
+    let default_remote = Remote::default(repo_root).ok().flatten();
+    if let Some(remote) = default_remote {
+        if Branch::remote_exists(repo_root, &remote.name, base_branch).unwrap_or(false) {
+            return (format!("{}/{}", remote.name, base_branch), true);
+        }
+        if let Some(remote_head) = resolve_remote_head(repo_root, &remote.name) {
+            return (remote_head, true);
+        }
+    }
+
+    (base_branch.to_string(), false)
+}
+
 fn resolve_repo_web_url(repo_root: &Path) -> Option<String> {
     let remote = Remote::get(repo_root, "origin").ok().flatten()?;
     let slug = github_repo_slug(&remote.fetch_url)?;
@@ -5684,13 +8537,87 @@ fn github_repo_slug(url: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::tui::screens::branch_list::{SafetyStatus, WorktreeStatus};
+    use crate::tui::screens::environment::EnvItem;
+    use crate::tui::screens::settings::{ProfileMode, SettingsCategory};
     use crate::tui::screens::wizard::WizardStep;
     use crate::tui::screens::{BranchItem, BranchListState, BranchType};
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use gwt_core::config::{AISettings, Profile, ProfilesConfig, Settings};
     use gwt_core::git::Branch;
     use gwt_core::git::BranchSummary;
     use gwt_core::git::DivergenceStatus;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::collections::HashMap;
+    use std::process::Command;
     use std::sync::mpsc;
+    use tempfile::TempDir;
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git execution failed");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn create_test_repo() -> TempDir {
+        let temp = TempDir::new().unwrap();
+        run_git(temp.path(), &["init"]);
+        run_git(temp.path(), &["config", "user.email", "test@test.com"]);
+        run_git(temp.path(), &["config", "user.name", "Test"]);
+        std::fs::write(temp.path().join("test.txt"), "hello").unwrap();
+        run_git(temp.path(), &["add", "."]);
+        run_git(temp.path(), &["commit", "-m", "initial"]);
+        temp
+    }
+
+    fn create_test_repo_with_branch(branch: &str) -> TempDir {
+        let temp = TempDir::new().unwrap();
+        run_git(temp.path(), &["init", "-b", branch]);
+        run_git(temp.path(), &["config", "user.email", "test@test.com"]);
+        run_git(temp.path(), &["config", "user.name", "Test"]);
+        std::fs::write(temp.path().join("test.txt"), "hello").unwrap();
+        run_git(temp.path(), &["add", "."]);
+        run_git(temp.path(), &["commit", "-m", "initial"]);
+        temp
+    }
+
+    fn create_repo_with_remote_main_only() -> (TempDir, TempDir) {
+        let origin = TempDir::new().unwrap();
+        run_git(origin.path(), &["init", "--bare", "-b", "main"]);
+
+        let repo = create_test_repo_with_branch("main");
+        let origin_path = origin.path().to_string_lossy().to_string();
+        run_git(repo.path(), &["remote", "add", "origin", &origin_path]);
+        run_git(repo.path(), &["push", "-u", "origin", "main"]);
+        run_git(repo.path(), &["checkout", "-b", "develop"]);
+        run_git(repo.path(), &["branch", "-D", "main"]);
+        run_git(repo.path(), &["fetch", "origin"]);
+        run_git(repo.path(), &["remote", "set-head", "origin", "-a"]);
+
+        (repo, origin)
+    }
+
+    fn worktree_list_output(repo_root: &Path) -> String {
+        let output = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(repo_root)
+            .output()
+            .expect("git worktree list execution failed");
+        assert!(
+            output.status.success(),
+            "git worktree list failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).to_string()
+    }
 
     fn sample_tool_entry(tool_id: &str) -> ToolSessionEntry {
         ToolSessionEntry {
@@ -5704,8 +8631,106 @@ mod tests {
             reasoning_level: None,
             skip_permissions: None,
             tool_version: None,
+            collaboration_modes: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
             timestamp: 0,
         }
+    }
+
+    #[test]
+    fn test_default_recreate_selected_for_rebuild() {
+        assert!(Model::default_recreate_selected(true));
+        assert!(!Model::default_recreate_selected(false));
+    }
+
+    #[test]
+    fn test_quick_start_recreate_allowed_requires_change() {
+        assert!(!Model::quick_start_recreate_allowed(false, true));
+        assert!(!Model::quick_start_recreate_allowed(false, false));
+        assert!(Model::quick_start_recreate_allowed(true, true));
+        assert!(!Model::quick_start_recreate_allowed(true, false));
+    }
+
+    #[test]
+    fn test_resolve_safety_base_uses_remote_branch_when_local_missing() {
+        let (repo, _origin) = create_repo_with_remote_main_only();
+        let (base_ref, exists) = resolve_safety_base(repo.path(), "main");
+
+        assert!(exists);
+        assert_eq!(base_ref, "origin/main");
+    }
+
+    #[test]
+    fn test_resolve_safety_base_falls_back_to_remote_head() {
+        let (repo, _origin) = create_repo_with_remote_main_only();
+        let (base_ref, exists) = resolve_safety_base(repo.path(), "trunk");
+
+        assert!(exists);
+        assert_eq!(base_ref, "origin/main");
+    }
+
+    #[test]
+    fn test_auto_cleanup_orphans_on_exit_does_not_prune() {
+        let temp = create_test_repo();
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+
+        let wt = manager
+            .create_new_branch("feature/orphan-exit", None)
+            .unwrap();
+        let wt_path = wt.path.clone();
+        std::fs::remove_dir_all(&wt_path).unwrap();
+
+        let before = worktree_list_output(temp.path());
+        assert!(before.contains(wt_path.to_string_lossy().as_ref()));
+
+        let cleaned = auto_cleanup_orphans_on_exit(temp.path(), false);
+        assert_eq!(cleaned, 0);
+
+        let after = worktree_list_output(temp.path());
+        assert!(after.contains(wt_path.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn test_background_window_name_uses_branch_name_only() {
+        let branch = "feature/clean-name";
+        assert_eq!(background_window_name(branch), branch);
+    }
+
+    #[test]
+    fn test_normalize_branch_name_for_history_strips_remote_prefix() {
+        let normalized = normalize_branch_name_for_history("remotes/origin/feature/test");
+        assert_eq!(normalized.as_ref(), "feature/test");
+    }
+
+    #[test]
+    fn test_normalize_branch_name_for_history_keeps_local_name() {
+        let normalized = normalize_branch_name_for_history("feature/test");
+        assert_eq!(normalized.as_ref(), "feature/test");
+    }
+
+    #[test]
+    fn test_apply_last_tool_usage_falls_back_to_agent_history_for_remote_branch() {
+        let branch = Branch::new("remotes/origin/feature/test", "deadbeef");
+        let mut item = BranchItem::from_branch_minimal(&branch, &[]);
+        let mut history = AgentHistoryStore::new();
+        history
+            .record(
+                Path::new("/tmp/repo"),
+                "feature/test",
+                "codex-cli",
+                "Codex@latest",
+            )
+            .unwrap();
+        let tool_usage_map: HashMap<String, ToolSessionEntry> = HashMap::new();
+
+        apply_last_tool_usage(&mut item, Path::new("/tmp/repo"), &tool_usage_map, &history);
+
+        assert_eq!(item.last_tool_usage.as_deref(), Some("Codex@latest"));
+        assert_eq!(item.last_tool_id.as_deref(), Some("codex-cli"));
     }
 
     fn sample_branch_with_session(name: &str) -> BranchItem {
@@ -5732,6 +8757,7 @@ mod tests {
             pr_title: None,
             pr_number: None,
             pr_url: None,
+            pr_state: None,
             is_gone: false,
         }
     }
@@ -5741,6 +8767,330 @@ mod tests {
         branch.last_tool_usage = Some(usage.to_string());
         branch.last_tool_id = tool_id.map(|id| id.to_string());
         branch
+    }
+
+    fn sample_launch_plan() -> LaunchPlan {
+        let config = AgentLaunchConfig {
+            repo_root: PathBuf::from("/tmp/repo"),
+            worktree_path: PathBuf::from("/tmp/worktree"),
+            branch_name: "feature/test".to_string(),
+            agent: CodingAgent::ClaudeCode,
+            custom_agent: None,
+            model: None,
+            reasoning_level: None,
+            version: "latest".to_string(),
+            execution_mode: ExecutionMode::Continue,
+            session_id: None,
+            skip_permissions: false,
+            env: Vec::new(),
+            env_remove: Vec::new(),
+            auto_install_deps: false,
+            collaboration_modes: false,
+        };
+
+        LaunchPlan {
+            config,
+            executable: "claude".to_string(),
+            command_args: Vec::new(),
+            log_lines: Vec::new(),
+            session_warning: None,
+            selected_version: "latest".to_string(),
+            install_plan: InstallPlan::None,
+            env: Vec::new(),
+            repo_root: PathBuf::from("/tmp/repo"),
+        }
+    }
+
+    fn sample_mouse_click() -> MouseClick {
+        MouseClick {
+            index: 0,
+            at: Instant::now(),
+        }
+    }
+
+    fn render_model_lines(model: &mut Model, width: u16, height: u16) -> Vec<String> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal init");
+        terminal.draw(|f| model.view(f)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    fn footer_lines_for(model: &mut Model, width: u16) -> Vec<String> {
+        let lines = model.footer_lines(width);
+        model.sync_footer_metrics(width, lines.len());
+        lines
+    }
+
+    #[test]
+    fn test_branchlist_footer_and_status_bar_present_without_agents() {
+        let mut model = Model::new_with_context(None);
+        let branches = vec![sample_branch_with_session("feature/layout")];
+        model.branch_list = BranchListState::new().with_branches(branches);
+        // Force BranchList screen (normal repos now show migration dialog by default)
+        model.screen = Screen::BranchList;
+
+        let height = 24;
+        let lines = render_model_lines(&mut model, 80, height);
+        let footer_text = footer_lines_for(&mut model, 80).join(" ");
+        let status_line = &lines[(height - 1) as usize];
+
+        assert!(
+            footer_text.contains("[r] Refresh"),
+            "Footer help should be visible on BranchList"
+        );
+        assert!(
+            status_line.contains("Agents:") && status_line.contains("none"),
+            "Status bar should show Agents: none when no agents are running"
+        );
+    }
+
+    #[test]
+    fn test_logs_screen_renders_header_working_directory() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Logs;
+
+        let lines = render_model_lines(&mut model, 80, 24);
+        let has_working_dir = lines.iter().any(|line| line.contains("Working Directory:"));
+        assert!(
+            has_working_dir,
+            "Header should be present on Logs screen and include Working Directory"
+        );
+    }
+
+    #[test]
+    fn test_branch_screen_header_label() {
+        let mut model = Model::new_with_context(None);
+        let branches = vec![sample_branch_with_session("feature/branch-screen")];
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.screen = Screen::BranchList;
+
+        let lines = render_model_lines(&mut model, 80, 24);
+        assert!(
+            lines.iter().any(|line| line.contains("Branch Screen")),
+            "Header should label BranchList as Branch Screen"
+        );
+    }
+
+    #[test]
+    fn test_agent_screen_header_label() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::AgentMode;
+
+        let lines = render_model_lines(&mut model, 80, 24);
+        assert!(
+            lines.iter().any(|line| line.contains("Agent Screen")),
+            "Header should label AgentMode as Agent Screen"
+        );
+    }
+
+    #[test]
+    fn test_settings_footer_has_context_keybinds_without_duplicate_instructions() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Settings;
+        model.settings = SettingsState::new().with_settings(Settings::default());
+
+        let width = 120;
+        let height = 24;
+        let lines = render_model_lines(&mut model, width, height);
+        let footer_text = footer_lines_for(&mut model, width).join(" ");
+        let instruction_key = "[Left/Right] Category";
+
+        assert!(
+            footer_text.contains(instruction_key),
+            "Settings footer help should include category navigation"
+        );
+
+        let occurrences = lines
+            .iter()
+            .filter(|line| line.contains(instruction_key))
+            .count();
+        assert_eq!(
+            occurrences, 1,
+            "Settings instructions should appear once in the footer help"
+        );
+    }
+
+    #[test]
+    fn test_branchlist_footer_includes_all_shortcuts() {
+        let mut model = Model::new_with_context(None);
+        let branches = vec![sample_branch_with_session("feature/shortcuts")];
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.screen = Screen::BranchList;
+
+        let footer_text = footer_lines_for(&mut model, 140).join(" ");
+        let expected = [
+            "[Up/Down] Move",
+            "[PgUp/PgDn] Page",
+            "[Home/End] Top/Bottom",
+            "[Enter] Open/Focus",
+            "[Space] Select",
+            "[r] Refresh",
+            "[c] Cleanup",
+            "[l] Logs",
+            "[s] Sort",
+            "[p] Environment",
+            "[f,/] Filter",
+            "[m] Mode",
+            "[Tab] Agent",
+            "[v] GitView",
+            "[u] Hooks",
+            "[?/h] Help",
+            "[Ctrl+C] Quit",
+        ];
+
+        for key in expected {
+            assert!(
+                footer_text.contains(key),
+                "BranchList footer should include {}",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn test_branchlist_filter_footer_includes_controls() {
+        let mut model = Model::new_with_context(None);
+        let branches = vec![sample_branch_with_session("feature/filter")];
+        let mut state = BranchListState::new().with_branches(branches);
+        state.filter_mode = true;
+        model.branch_list = state;
+        model.screen = Screen::BranchList;
+
+        let footer_text = footer_lines_for(&mut model, 120).join(" ");
+        let expected = [
+            "[Esc] Exit filter",
+            "[Enter] Apply",
+            "[Backspace] Delete",
+            "[Up/Down] Move",
+            "[PgUp/PgDn] Page",
+            "[Home/End] Top/Bottom",
+            "Type to search",
+        ];
+
+        for key in expected {
+            assert!(
+                footer_text.contains(key),
+                "Filter-mode footer should include {}",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn test_logs_footer_includes_paging_shortcuts() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Logs;
+
+        let footer_text = footer_lines_for(&mut model, 120).join(" ");
+        let expected = ["[PgUp/PgDn] Page", "[Home/End] Top/Bottom"];
+
+        for key in expected {
+            assert!(
+                footer_text.contains(key),
+                "Logs footer should include {}",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn test_help_footer_includes_paging_shortcuts() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Help;
+
+        let footer_text = footer_lines_for(&mut model, 120).join(" ");
+        assert!(
+            footer_text.contains("[PgUp/PgDn] Page"),
+            "Help footer should include page navigation"
+        );
+    }
+
+    #[test]
+    fn test_error_footer_includes_actions() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Error;
+
+        let footer_text = footer_lines_for(&mut model, 120).join(" ");
+        let expected = [
+            "[Enter] Close",
+            "[Esc] Close",
+            "[Up/Down] Scroll",
+            "[l] Logs",
+            "[c] Copy",
+        ];
+
+        for key in expected {
+            assert!(
+                footer_text.contains(key),
+                "Error footer should include {}",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn test_footer_scroll_disabled_when_single_line() {
+        let mut model = Model::new_with_context(None);
+        let branches = vec![sample_branch_with_session("feature/scroll")];
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.screen = Screen::BranchList;
+
+        let lines = footer_lines_for(&mut model, 1000);
+        assert_eq!(lines.len(), 1, "Footer should fit in one line");
+
+        for _ in 0..10 {
+            model.update(Message::Tick);
+        }
+
+        assert_eq!(model.footer_scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_footer_scroll_advances_and_reverses() {
+        let mut model = Model::new_with_context(None);
+        let branches = vec![sample_branch_with_session("feature/scroll")];
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.screen = Screen::BranchList;
+
+        let lines = footer_lines_for(&mut model, 40);
+        assert!(lines.len() > 1, "Footer should overflow for scrolling");
+        let max_offset = lines.len().saturating_sub(1);
+
+        let advance_ticks = FOOTER_SCROLL_TICKS_PER_LINE as usize * max_offset.max(1);
+        for _ in 0..advance_ticks {
+            model.update(Message::Tick);
+        }
+
+        assert_eq!(model.footer_scroll_offset, max_offset);
+        assert_eq!(model.footer_scroll_pause, 0);
+
+        for _ in 0..FOOTER_SCROLL_TICKS_PER_LINE {
+            model.update(Message::Tick);
+        }
+
+        assert_eq!(model.footer_scroll_offset, max_offset.saturating_sub(1));
+    }
+
+    #[test]
+    fn test_footer_scroll_resets_on_navigation() {
+        let mut model = Model::new_with_context(None);
+        let branches = vec![sample_branch_with_session("feature/scroll")];
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.screen = Screen::BranchList;
+
+        let lines = footer_lines_for(&mut model, 40);
+        assert!(lines.len() > 1, "Footer should overflow for scrolling");
+
+        for _ in 0..FOOTER_SCROLL_TICKS_PER_LINE {
+            model.update(Message::Tick);
+        }
+        assert!(model.footer_scroll_offset > 0);
+
+        model.update(Message::NavigateTo(Screen::Logs));
+        assert_eq!(model.footer_scroll_offset, 0);
     }
 
     #[test]
@@ -5757,6 +9107,27 @@ mod tests {
         assert!(wrapped.contains("status=$exit_status"));
         assert!(wrapped.contains("exit $exit_status"));
         assert!(!wrapped.contains("; status=$?;"));
+    }
+
+    #[test]
+    fn test_normalize_container_executable_strips_path() {
+        assert_eq!(
+            normalize_container_executable("/usr/local/bin/bunx"),
+            "bunx"
+        );
+        assert_eq!(
+            normalize_container_executable("C:\\tools\\codex.exe"),
+            "codex.exe"
+        );
+        assert_eq!(normalize_container_executable("codex"), "codex");
+        assert_eq!(
+            normalize_container_executable("./scripts/agent.sh"),
+            "./scripts/agent.sh"
+        );
+        assert_eq!(
+            normalize_container_executable("scripts\\agent.exe"),
+            "scripts\\agent.exe"
+        );
     }
 
     #[test]
@@ -5810,6 +9181,75 @@ mod tests {
 
         let expected = LaunchProgress::BuildingCommand.message();
         assert_eq!(model.launch_status.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn test_confirm_cancel_clears_plugin_setup_state() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Confirm;
+        model.screen_stack.push(Screen::BranchList);
+        model.pending_plugin_setup = true;
+        model.pending_plugin_setup_launch = Some(sample_launch_plan());
+        model.launch_status = Some("Launching...".to_string());
+
+        model.update(Message::NavigateBack);
+
+        assert!(!model.pending_plugin_setup);
+        assert!(model.pending_plugin_setup_launch.is_none());
+        assert!(model.launch_status.is_none());
+        assert!(matches!(model.screen, Screen::BranchList));
+    }
+
+    #[test]
+    fn test_service_select_cancel_clears_double_click_state() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::ServiceSelect;
+        model.screen_stack.push(Screen::BranchList);
+        model.pending_service_select = Some(PendingServiceSelect {
+            plan: sample_launch_plan(),
+            services: vec!["app".to_string()],
+        });
+        model.last_mouse_click = Some(sample_mouse_click());
+
+        model.update(Message::NavigateBack);
+
+        assert!(model.last_mouse_click.is_none());
+        assert!(matches!(model.screen, Screen::BranchList));
+    }
+
+    #[test]
+    fn test_service_select_confirm_clears_double_click_state() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::ServiceSelect;
+        model.screen_stack.push(Screen::BranchList);
+        model.pending_service_select = Some(PendingServiceSelect {
+            plan: sample_launch_plan(),
+            services: vec!["app".to_string()],
+        });
+        model.service_select = ServiceSelectState::with_services(vec!["app".to_string()]);
+        model.last_mouse_click = Some(sample_mouse_click());
+
+        model.handle_service_select_confirm();
+
+        assert!(model.last_mouse_click.is_none());
+        assert!(matches!(model.screen, Screen::BranchList));
+    }
+
+    #[test]
+    fn test_service_select_skip_clears_double_click_state() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::ServiceSelect;
+        model.screen_stack.push(Screen::BranchList);
+        model.pending_service_select = Some(PendingServiceSelect {
+            plan: sample_launch_plan(),
+            services: vec!["app".to_string()],
+        });
+        model.last_mouse_click = Some(sample_mouse_click());
+
+        model.handle_service_select_skip();
+
+        assert!(model.last_mouse_click.is_none());
+        assert!(matches!(model.screen, Screen::BranchList));
     }
 
     #[test]
@@ -5867,6 +9307,26 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
         let msg = model.handle_key_event(key);
         assert!(matches!(msg, Some(Message::Char('f'))));
+
+        let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
+        let msg = model.handle_key_event(key);
+        assert!(matches!(msg, Some(Message::Char('s'))));
+    }
+
+    #[test]
+    fn test_branchlist_s_key_cycles_sort_mode() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+        let branches = vec![sample_branch_with_session("feature/sort")];
+        model.branch_list = BranchListState::new().with_branches(branches);
+
+        let initial = model.branch_list.sort_mode;
+        let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
+        let msg = model.handle_key_event(key);
+        assert!(matches!(msg, Some(Message::CycleSortMode)));
+
+        model.update(Message::CycleSortMode);
+        assert_ne!(model.branch_list.sort_mode, initial);
     }
 
     #[test]
@@ -5903,6 +9363,63 @@ mod tests {
         let msg = model.handle_text_input_key(key, true);
         assert!(msg.is_none());
         assert_eq!(model.environment.edit_field, EditField::Value);
+    }
+
+    #[test]
+    fn test_settings_env_edit_enter_switches_to_value_field() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Settings;
+        model.settings.category = SettingsCategory::Environment;
+        model.settings.profile_mode = ProfileMode::EnvEdit("dev".to_string());
+        model.settings.env_state.start_new();
+
+        assert_eq!(model.settings.env_state.edit_field, EditField::Key);
+        model.update(Message::Enter);
+        assert_eq!(model.settings.env_state.edit_field, EditField::Value);
+        assert!(model.settings.env_state.edit_mode);
+    }
+
+    #[test]
+    fn test_settings_env_edit_updates_existing_variable() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Settings;
+        model.settings.category = SettingsCategory::Environment;
+        model.settings.profile_mode = ProfileMode::EnvEdit("dev".to_string());
+        model.settings.env_state = EnvironmentState::new()
+            .with_variables(vec![EnvItem {
+                key: "MY_VAR".to_string(),
+                value: "old".to_string(),
+                is_secret: false,
+            }])
+            .with_hide_ai(true);
+        model.settings.env_state.selected = 0;
+        model.settings.env_state.start_edit_selected();
+        model.settings.env_state.edit_value = "new".to_string();
+
+        model.update(Message::Enter);
+
+        assert_eq!(model.settings.env_state.variables[0].value, "new");
+        assert!(!model.settings.env_state.edit_mode);
+    }
+
+    #[test]
+    fn test_settings_env_edit_deletes_added_variable_with_d() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::Settings;
+        model.settings.category = SettingsCategory::Environment;
+        model.settings.profile_mode = ProfileMode::EnvEdit("dev".to_string());
+        model.settings.env_state = EnvironmentState::new()
+            .with_variables(vec![EnvItem {
+                key: "MY_VAR".to_string(),
+                value: "value".to_string(),
+                is_secret: false,
+            }])
+            .with_hide_ai(true);
+        model.settings.env_state.selected = 0;
+
+        model.update(Message::Char('d'));
+
+        assert!(model.settings.env_state.variables.is_empty());
     }
 
     #[test]
@@ -5945,6 +9462,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -5970,6 +9488,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
@@ -5983,6 +9502,116 @@ mod tests {
 
         model.update(Message::SelectNext);
         assert_eq!(model.branch_list.selected, 1);
+    }
+
+    #[test]
+    fn test_cleanup_allows_navigation_and_skips_target_branch() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let branches = vec![
+            sample_branch_with_session("feature/a"),
+            sample_branch_with_session("feature/b"),
+            sample_branch_with_session("feature/c"),
+        ];
+
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.branch_list.start_cleanup_progress(3);
+        model
+            .branch_list
+            .set_cleanup_target_branches(&["feature/b".to_string()]);
+
+        model.update(Message::SelectNext);
+        assert_eq!(
+            model
+                .branch_list
+                .selected_branch()
+                .map(|branch| branch.name.as_str()),
+            Some("feature/c")
+        );
+    }
+
+    #[test]
+    fn test_refresh_data_keeps_cleanup_state() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let branches = vec![
+            sample_branch_with_session("feature/a"),
+            sample_branch_with_session("feature/b"),
+        ];
+
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.branch_list.start_cleanup_progress(2);
+        model
+            .branch_list
+            .set_cleanup_target_branches(&["feature/b".to_string()]);
+        model
+            .branch_list
+            .set_cleanup_active_branch(Some("feature/b".to_string()));
+        model.branch_list.increment_cleanup_progress();
+
+        model.update(Message::RefreshData);
+
+        assert!(model.branch_list.cleanup_in_progress());
+        assert_eq!(model.branch_list.cleanup_progress_total, 2);
+        assert_eq!(model.branch_list.cleanup_progress_done, 1);
+        assert_eq!(model.branch_list.cleanup_active_branch(), Some("feature/b"));
+    }
+
+    #[test]
+    fn test_branch_list_update_preserves_cleanup_targets() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+
+        let branches = vec![
+            sample_branch_with_session("feature/a"),
+            sample_branch_with_session("feature/b"),
+        ];
+
+        model.branch_list = BranchListState::new().with_branches(branches);
+        model.branch_list.start_cleanup_progress(2);
+        model
+            .branch_list
+            .set_cleanup_target_branches(&["feature/b".to_string()]);
+        model
+            .branch_list
+            .set_cleanup_active_branch(Some("feature/b".to_string()));
+        model.branch_list.increment_cleanup_progress();
+
+        let (tx, rx) = mpsc::channel();
+        model.branch_list_rx = Some(rx);
+
+        let update = BranchListUpdate {
+            branches: vec![
+                sample_branch_with_session("feature/a"),
+                sample_branch_with_session("feature/b"),
+            ],
+            branch_names: Vec::new(),
+            worktree_targets: Vec::new(),
+            safety_targets: Vec::new(),
+            base_branches: Vec::new(),
+            base_branch: "main".to_string(),
+            base_branch_exists: true,
+            total_count: 2,
+            active_count: 2,
+        };
+        tx.send(update).unwrap();
+
+        model.apply_branch_list_updates();
+
+        assert!(model.branch_list.cleanup_in_progress());
+        assert_eq!(model.branch_list.cleanup_progress_total, 2);
+        assert_eq!(model.branch_list.cleanup_progress_done, 1);
+        assert_eq!(model.branch_list.cleanup_active_branch(), Some("feature/b"));
+
+        let target_index = model
+            .branch_list
+            .filtered_indices
+            .iter()
+            .position(|&idx| model.branch_list.branches[idx].name == "feature/b")
+            .expect("cleanup branch index");
+        assert!(model.branch_list.is_cleanup_target_index(target_index));
     }
 
     #[test]
@@ -6012,6 +9641,7 @@ mod tests {
         let item = sample_branch_with_session("feature/poll");
         model.branch_list = BranchListState::new().with_branches(vec![item]);
         model.branch_list.ai_enabled = true;
+        model.branch_list.session_summary_enabled = true;
 
         let branch_name = model
             .branch_list
@@ -6032,13 +9662,52 @@ mod tests {
     }
 
     #[test]
-    fn test_tab_switches_between_branch_and_agent_mode() {
+    fn test_active_session_summary_enabled_prefers_profile() {
+        let mut model = Model::new_with_context(None);
+        let mut config = ProfilesConfig::default();
+        let mut profile = Profile::new("dev");
+        profile.ai = Some(AISettings {
+            endpoint: "https://api.example.com/v1".to_string(),
+            api_key: "".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            summary_enabled: false,
+        });
+        config.profiles.insert("dev".to_string(), profile);
+        config.active = Some("dev".to_string());
+        config.default_ai = Some(AISettings {
+            endpoint: "https://api.example.com/v1".to_string(),
+            api_key: "".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            summary_enabled: true,
+        });
+        model.profiles_config = config;
+
+        assert!(!model.active_session_summary_enabled());
+
+        if let Some(profile) = model.profiles_config.profiles.get_mut("dev") {
+            if let Some(ai) = profile.ai.as_mut() {
+                ai.summary_enabled = true;
+            }
+        }
+
+        assert!(model.active_session_summary_enabled());
+    }
+
+    // FR-020: Tab cycles BranchList → AgentMode → Settings → BranchList
+    #[test]
+    fn test_tab_cycles_three_screens() {
         let mut model = Model::new_with_context(None);
         model.screen = Screen::BranchList;
 
+        // BranchList → AgentMode
         model.update(Message::Tab);
         assert!(matches!(model.screen, Screen::AgentMode));
 
+        // AgentMode → Settings
+        model.update(Message::Tab);
+        assert!(matches!(model.screen, Screen::Settings));
+
+        // Settings → BranchList
         model.update(Message::Tab);
         assert!(matches!(model.screen, Screen::BranchList));
     }
@@ -6106,6 +9775,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
             BranchItem {
@@ -6131,6 +9801,7 @@ mod tests {
                 pr_title: None,
                 pr_number: None,
                 pr_url: None,
+                pr_state: None,
                 is_gone: false,
             },
         ];
@@ -6276,5 +9947,53 @@ mod tests {
         assert_eq!(model.branch_list.selected, 1);
         // Wizard should NOT open because it's a different branch
         assert!(!model.wizard.visible);
+    }
+
+    #[test]
+    fn test_mouse_click_ignores_cleanup_target_branch() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+        let branches = [
+            Branch::new("feature/one", "deadbeef"),
+            Branch::new("feature/two", "deadbeef"),
+        ];
+        let items = branches
+            .iter()
+            .map(|branch| BranchItem::from_branch(branch, &[]))
+            .collect();
+        model.branch_list = BranchListState::new().with_branches(items);
+        model.branch_list.update_list_area(Rect::new(0, 0, 20, 5));
+        model.branch_list.start_cleanup_progress(2);
+        model
+            .branch_list
+            .set_cleanup_target_branches(&["feature/two".to_string()]);
+
+        assert_eq!(model.branch_list.selected, 0);
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        model.handle_branch_list_mouse(mouse);
+
+        assert_eq!(model.branch_list.selected, 0);
+        assert!(!model.wizard.visible);
+    }
+
+    #[test]
+    fn test_service_select_footer_keybinds() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::ServiceSelect;
+        let keybinds = model.get_footer_keybinds();
+        assert!(keybinds.contains("Skip"));
+        assert!(keybinds.contains("Cancel"));
+    }
+
+    #[test]
+    fn test_should_prompt_recreate() {
+        assert!(!Model::should_prompt_recreate(&ContainerStatus::Running));
+        assert!(Model::should_prompt_recreate(&ContainerStatus::Stopped));
+        assert!(!Model::should_prompt_recreate(&ContainerStatus::NotFound));
     }
 }

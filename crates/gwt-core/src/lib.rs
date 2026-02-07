@@ -7,11 +7,13 @@
 pub mod agent;
 pub mod ai;
 pub mod config;
+pub mod docker;
 pub mod error;
 pub mod execution_mode;
 pub mod git;
 pub mod lock;
 pub mod logging;
+pub mod migration;
 pub mod speckit;
 pub mod tmux;
 pub mod worktree;

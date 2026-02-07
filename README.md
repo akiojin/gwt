@@ -86,8 +86,11 @@ cargo run -p gwt-cli
 git clone https://github.com/akiojin/gwt.git
 cd gwt
 
-# Build release binary
+# Build release binary (default: gwt-cli)
 cargo build --release
+
+# Build all workspace crates (including web/wasm)
+cargo build --workspace
 
 # The binary is at target/release/gwt
 ./target/release/gwt
@@ -128,6 +131,12 @@ gwt remove feature/old-feature
 
 # Cleanup orphaned worktrees
 gwt clean
+
+# Show logs
+gwt logs --limit 100
+
+# Follow logs
+gwt logs --follow
 ```
 
 The tool presents an interactive interface with the following options:
@@ -145,7 +154,7 @@ The tool presents an interactive interface with the following options:
 |-----|--------|
 | `Enter` | Focus existing agent pane / Show hidden pane / Open wizard |
 | `d` | Delete agent pane (with confirmation) |
-| `v` | Toggle agent pane visibility (show/hide) |
+| `v` | Open GitView (git status details for selected branch) |
 | `Space` | Select/Deselect branch |
 | `Up/Down` | Navigate branches |
 | `PageUp/PageDown` | Page navigation |
@@ -166,6 +175,20 @@ Mouse:
 |-----|--------|
 | `Esc` | Exit filter mode |
 | Type | Filter branches by name |
+
+### GitView Screen
+
+The GitView screen shows detailed git status for a branch, including files and recent commits.
+
+| Key | Action |
+|-----|--------|
+| `Up/Down` | Navigate files and commits |
+| `Space` | Expand/collapse file diff or commit details |
+| `Enter` | Open PR link in browser (when focused on header) |
+| `v` / `Esc` | Return to branch list |
+
+Mouse:
+- Click on the PR link in the header to open it in your browser.
 
 ## Status Icons Legend
 
@@ -220,7 +243,12 @@ Minimal example:
       "permissionSkipArgs": ["--yes"],
       "env": {
         "OPENAI_API_KEY": "sk-..."
-      }
+      },
+      "models": [
+        { "id": "gpt-4o", "label": "GPT-4o" },
+        { "id": "claude-3-opus", "label": "Claude 3 Opus" }
+      ],
+      "versionCommand": "aider --version"
     }
   ]
 }
@@ -231,6 +259,60 @@ Notes:
 - `type` supports `path`, `bunx`, or `command`.
 - `modeArgs` defines args per execution mode (Normal/Continue/Resume).
 - `env` is optional per-agent environment variables.
+- `models` is optional. If defined, model selection step will be shown for this agent.
+- `versionCommand` is optional. If defined, version detection will use this command instead of skipping version selection.
+
+## Bare Repository Workflow
+
+gwt supports a bare repository workflow for efficient worktree management. This approach keeps the bare repository (`.git` data) separate from worktrees, providing cleaner project organization.
+
+### Directory Structure
+
+```text
+/project/
+├── repo.git/           # Bare repository
+├── main/               # Worktree (main branch)
+├── feature-x/          # Worktree (feature/x branch)
+└── .gwt/               # gwt configuration
+    └── project.json
+```
+
+### Setting Up a Bare Repository
+
+```bash
+# Clone as bare repository
+git clone --bare https://github.com/user/repo.git repo.git
+
+# Create worktrees from bare repository
+cd repo.git
+git worktree add ../main main
+git worktree add ../feature-x feature/x
+```
+
+### Using gwt with Bare Repositories
+
+When you run gwt in a bare repository or its worktrees:
+
+| Location | Header Display |
+|----------|----------------|
+| Normal repository | `Working Directory: /path [branch]` |
+| Bare repository | `Working Directory: /path/repo.git [bare]` |
+| Worktree (normal) | `Working Directory: /path [branch]` |
+| Worktree (bare-based) | `Working Directory: /path [branch] (repo.git)` |
+
+### Migration from `.worktrees/` Method
+
+If you have an existing repository using the `.worktrees/` directory method, gwt will detect this and offer migration to the bare repository method:
+
+1. **Backup**: Creates backup in `.gwt-migration-backup/`
+2. **Create bare repo**: Creates `{repo-name}.git`
+3. **Migrate worktrees**: Moves existing worktrees to new structure
+4. **Cleanup**: Removes old `.worktrees/` directory
+5. **Configure**: Creates `.gwt/project.json`
+
+### Submodule Support
+
+When creating worktrees, gwt automatically initializes submodules if present. This ensures submodules are ready to use immediately after worktree creation.
 
 ## Advanced Workflows
 
@@ -296,8 +378,8 @@ gwt
 ├── crates/
 │   ├── gwt-cli/         # CLI entry point and TUI (Ratatui)
 │   ├── gwt-core/        # Core library (worktree management)
-│   ├── gwt-web/         # Web server (future)
-│   └── gwt-frontend/    # Web frontend (future)
+│   ├── gwt-web/         # Web server (Axum)
+│   └── gwt-frontend/    # Web frontend (Leptos CSR)
 ├── package.json         # npm distribution wrapper
 ├── bin/gwt.js           # Binary wrapper script
 ├── scripts/postinstall.js  # Binary download script

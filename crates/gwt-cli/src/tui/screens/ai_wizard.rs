@@ -56,6 +56,10 @@ pub struct AIWizardState {
     pub model_index: usize,
     /// Selected model ID
     pub selected_model: String,
+    /// Scroll offset for model list
+    pub model_scroll_offset: usize,
+    /// Session summary enabled
+    pub summary_enabled: bool,
 
     // Status
     /// Error message (if any)
@@ -84,6 +88,7 @@ impl AIWizardState {
         self.is_edit = false;
         self.is_default_ai = is_default_ai;
         self.profile_name = profile_name;
+        self.summary_enabled = true;
         // FR-105: Default endpoint
         self.endpoint = "https://api.openai.com/v1".to_string();
         self.endpoint_cursor = self.endpoint.len();
@@ -98,6 +103,7 @@ impl AIWizardState {
         endpoint: &str,
         api_key: &str,
         model: &str,
+        summary_enabled: bool,
     ) {
         self.reset();
         self.visible = true;
@@ -109,6 +115,7 @@ impl AIWizardState {
         self.api_key = api_key.to_string();
         self.api_key_cursor = self.api_key.len();
         self.selected_model = model.to_string();
+        self.summary_enabled = summary_enabled;
         self.step = AIWizardStep::Endpoint;
     }
 
@@ -131,6 +138,8 @@ impl AIWizardState {
         self.models.clear();
         self.model_index = 0;
         self.selected_model.clear();
+        self.model_scroll_offset = 0;
+        self.summary_enabled = true;
         self.error = None;
         self.loading_message = None;
         self.show_delete_confirm = false;
@@ -185,13 +194,18 @@ impl AIWizardState {
     pub fn fetch_models(&mut self) -> Result<(), AIError> {
         let client = AIClient::new_for_list_models(self.endpoint.trim(), self.api_key.trim())?;
         let models = client.list_models()?;
-        self.models = models;
-        if self.models.is_empty() {
+        self.apply_models(models)
+    }
+
+    /// Apply fetched model list to state
+    pub fn apply_models(&mut self, mut models: Vec<ModelInfo>) -> Result<(), AIError> {
+        if models.is_empty() {
             return Err(AIError::ConfigError("No models available".to_string()));
         }
 
         // Sort models by ID for consistent display
-        self.models.sort_by(|a, b| a.id.cmp(&b.id));
+        models.sort_by(|a, b| a.id.cmp(&b.id));
+        self.models = models;
 
         // If we have a previously selected model, find it in the list
         if !self.selected_model.is_empty() {
@@ -203,6 +217,7 @@ impl AIWizardState {
         } else {
             self.model_index = 0;
         }
+        self.model_scroll_offset = 0;
 
         Ok(())
     }
@@ -230,6 +245,7 @@ impl AIWizardState {
         if self.model_index < self.models.len().saturating_sub(1) {
             self.model_index += 1;
         }
+        self.ensure_model_visible(self.model_visible_height());
     }
 
     /// Select previous model in list
@@ -237,6 +253,35 @@ impl AIWizardState {
         if self.model_index > 0 {
             self.model_index -= 1;
         }
+        self.ensure_model_visible(self.model_visible_height());
+    }
+
+    /// Ensure selected model is visible within viewport
+    fn ensure_model_visible(&mut self, visible_height: usize) {
+        if self.models.is_empty() {
+            self.model_scroll_offset = 0;
+            return;
+        }
+        if visible_height == 0 {
+            return;
+        }
+
+        if self.model_index < self.model_scroll_offset {
+            self.model_scroll_offset = self.model_index;
+        } else if self.model_index >= self.model_scroll_offset + visible_height {
+            self.model_scroll_offset = self.model_index + 1 - visible_height;
+        }
+
+        let max_offset = self.models.len().saturating_sub(visible_height);
+        if self.model_scroll_offset > max_offset {
+            self.model_scroll_offset = max_offset;
+        }
+    }
+
+    fn model_visible_height(&self) -> usize {
+        self.list_inner_area
+            .map(|area| area.height as usize)
+            .unwrap_or(0)
     }
 
     // Input handling methods
@@ -321,6 +366,11 @@ impl AIWizardState {
         self.show_delete_confirm = false;
     }
 
+    /// Toggle session summary enabled
+    pub fn toggle_summary_enabled(&mut self) {
+        self.summary_enabled = !self.summary_enabled;
+    }
+
     /// Get wizard title
     pub fn title(&self) -> &'static str {
         if self.is_edit {
@@ -373,8 +423,9 @@ impl AIWizardState {
             return None;
         }
         let relative_y = y.saturating_sub(area.y) as usize;
-        if relative_y < self.models.len() {
-            Some(relative_y)
+        let index = self.model_scroll_offset.saturating_add(relative_y);
+        if index < self.models.len() {
+            Some(index)
         } else {
             None
         }
@@ -384,10 +435,68 @@ impl AIWizardState {
     pub fn select_model_index(&mut self, index: usize) -> bool {
         if index < self.models.len() {
             self.model_index = index;
+            self.ensure_model_visible(self.model_visible_height());
             true
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod flow_tests {
+    use super::*;
+
+    fn model(id: &str) -> ModelInfo {
+        ModelInfo {
+            id: id.to_string(),
+            created: 0,
+            owned_by: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_apply_models_selects_existing_model() {
+        let mut state = AIWizardState::new();
+        state.selected_model = "gpt-5".to_string();
+        let models = vec![model("gpt-4"), model("gpt-5"), model("gpt-3.5")];
+
+        state.apply_models(models).unwrap();
+
+        assert_eq!(state.models.len(), 3);
+        assert_eq!(state.models[state.model_index].id, "gpt-5");
+    }
+
+    #[test]
+    fn test_apply_models_empty_fails() {
+        let mut state = AIWizardState::new();
+        let result = state.apply_models(Vec::new());
+        assert!(matches!(result, Err(AIError::ConfigError(_))));
+    }
+
+    #[test]
+    fn test_fetch_complete_sets_step() {
+        let mut state = AIWizardState::new();
+        state.loading_message = Some("Fetching".to_string());
+        state.step = AIWizardStep::FetchingModels;
+
+        state.fetch_complete();
+
+        assert!(state.loading_message.is_none());
+        assert_eq!(state.step, AIWizardStep::ModelSelect);
+    }
+
+    #[test]
+    fn test_fetch_failed_sets_error_and_step() {
+        let mut state = AIWizardState::new();
+        state.loading_message = Some("Fetching".to_string());
+        state.step = AIWizardStep::FetchingModels;
+
+        state.fetch_failed(&AIError::ConfigError("bad".to_string()));
+
+        assert!(state.loading_message.is_none());
+        assert_eq!(state.step, AIWizardStep::ApiKey);
+        assert!(state.error.is_some());
     }
 }
 
@@ -429,7 +538,7 @@ pub fn render_ai_wizard(state: &mut AIWizardState, frame: &mut Frame, area: Rect
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2), // Target + step header
+            Constraint::Length(3), // Target + step header + summary toggle
             Constraint::Length(1), // Separator
             Constraint::Min(5),    // Content
             Constraint::Length(2), // Footer/actions
@@ -437,6 +546,12 @@ pub fn render_ai_wizard(state: &mut AIWizardState, frame: &mut Frame, area: Rect
         .split(inner);
 
     // Header: target and step
+    let summary_value = if state.summary_enabled { "On" } else { "Off" };
+    let summary_style = if state.summary_enabled {
+        Style::default().fg(Color::Green)
+    } else {
+        Style::default().fg(Color::Yellow)
+    };
     let header = Paragraph::new(vec![
         Line::from(vec![
             Span::styled("Target: ", Style::default().fg(Color::DarkGray)),
@@ -446,6 +561,10 @@ pub fn render_ai_wizard(state: &mut AIWizardState, frame: &mut Frame, area: Rect
             state.step_title(),
             Style::default().fg(Color::Yellow),
         )]),
+        Line::from(vec![
+            Span::styled("Session summary: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(summary_value, summary_style),
+        ]),
     ]);
     frame.render_widget(header, chunks[0]);
 
@@ -466,15 +585,15 @@ pub fn render_ai_wizard(state: &mut AIWizardState, frame: &mut Frame, area: Rect
     // Footer/actions
     let actions = match state.step {
         AIWizardStep::Endpoint => "[Enter] Next | [Esc] Cancel",
-        AIWizardStep::ApiKey => {
+        AIWizardStep::ApiKey => "[Enter] Connect | [Esc] Back",
+        AIWizardStep::FetchingModels => "Connecting to API...",
+        AIWizardStep::ModelSelect => {
             if state.is_edit {
-                "[Enter] Connect | [Esc] Back | [d] Delete"
+                "[Enter] Save | [Esc] Back | [Up/Down] Select | [t] Toggle Summary | [c] Clear"
             } else {
-                "[Enter] Connect | [Esc] Back"
+                "[Enter] Save | [Esc] Back | [Up/Down] Select | [t] Toggle Summary"
             }
         }
-        AIWizardStep::FetchingModels => "Connecting to API...",
-        AIWizardStep::ModelSelect => "[Enter] Save | [Esc] Back | [Up/Down] Select",
     };
     let footer = Paragraph::new(actions)
         .style(Style::default().fg(Color::DarkGray))
@@ -650,12 +769,17 @@ fn render_model_select_step(state: &mut AIWizardState, frame: &mut Frame, area: 
             .border_style(Style::default().fg(Color::DarkGray));
 
         // Record list inner area for mouse click detection
-        state.list_inner_area = Some(list_block.inner(chunks[1]));
+        let list_inner = list_block.inner(chunks[1]);
+        state.list_inner_area = Some(list_inner);
+        let visible_height = list_inner.height as usize;
+        state.ensure_model_visible(visible_height);
 
         let items: Vec<ListItem> = state
             .models
             .iter()
             .enumerate()
+            .skip(state.model_scroll_offset)
+            .take(visible_height)
             .map(|(i, model)| {
                 let style = if i == state.model_index {
                     Style::default().bg(Color::Blue).fg(Color::White)
@@ -669,6 +793,22 @@ fn render_model_select_step(state: &mut AIWizardState, frame: &mut Frame, area: 
 
         let list = List::new(items).block(list_block);
         frame.render_widget(list, chunks[1]);
+
+        if state.models.len() > visible_height && visible_height > 0 {
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("^"))
+                .end_symbol(Some("v"));
+            let mut scrollbar_state =
+                ScrollbarState::new(state.models.len()).position(state.model_index);
+            frame.render_stateful_widget(
+                scrollbar,
+                chunks[1].inner(Margin {
+                    vertical: 1,
+                    horizontal: 0,
+                }),
+                &mut scrollbar_state,
+            );
+        }
     }
 
     // Info
@@ -697,7 +837,7 @@ fn render_delete_confirm(frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, popup_area);
 
     let block = Block::default()
-        .title(" Delete AI Settings ")
+        .title(" Clear AI Settings ")
         .title_style(Style::default().fg(Color::Red).bold())
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Red));
@@ -707,7 +847,7 @@ fn render_delete_confirm(frame: &mut Frame, area: Rect) {
 
     let content = Paragraph::new(vec![
         Line::from(""),
-        Line::from("Are you sure you want to delete"),
+        Line::from("Are you sure you want to clear"),
         Line::from("AI settings?"),
         Line::from(""),
         Line::from(vec![
@@ -731,6 +871,7 @@ mod tests {
         state.open_new(true, None);
         assert_eq!(state.step, AIWizardStep::Endpoint);
         assert!(!state.endpoint.is_empty()); // Default endpoint
+        assert!(state.summary_enabled);
 
         // Cannot advance with empty endpoint
         state.endpoint.clear();
@@ -810,6 +951,58 @@ mod tests {
     }
 
     #[test]
+    fn test_model_scroll_offset_keeps_selection_visible() {
+        let mut state = AIWizardState::new();
+        state.models = (0..10)
+            .map(|i| ModelInfo {
+                id: format!("model-{}", i),
+                created: 0,
+                owned_by: "test".to_string(),
+            })
+            .collect();
+
+        state.model_index = 0;
+        state.ensure_model_visible(3);
+        assert_eq!(state.model_scroll_offset, 0);
+
+        state.model_index = 4;
+        state.ensure_model_visible(3);
+        assert_eq!(state.model_scroll_offset, 2);
+
+        state.model_index = 1;
+        state.ensure_model_visible(3);
+        assert_eq!(state.model_scroll_offset, 1);
+
+        state.model_index = 9;
+        state.ensure_model_visible(3);
+        assert_eq!(state.model_scroll_offset, 7);
+    }
+
+    #[test]
+    fn test_selection_index_from_point_respects_scroll_offset() {
+        let mut state = AIWizardState::new();
+        state.models = (0..8)
+            .map(|i| ModelInfo {
+                id: format!("model-{}", i),
+                created: 0,
+                owned_by: "test".to_string(),
+            })
+            .collect();
+        state.model_scroll_offset = 3;
+        state.list_inner_area = Some(Rect {
+            x: 10,
+            y: 5,
+            width: 20,
+            height: 3,
+        });
+
+        assert_eq!(state.selection_index_from_point(10, 5), Some(3));
+        assert_eq!(state.selection_index_from_point(10, 6), Some(4));
+        assert_eq!(state.selection_index_from_point(10, 7), Some(5));
+        assert_eq!(state.selection_index_from_point(10, 8), None);
+    }
+
+    #[test]
     fn test_wizard_edit_mode() {
         let mut state = AIWizardState::new();
         state.open_edit(
@@ -818,6 +1011,7 @@ mod tests {
             "http://localhost:11434/v1",
             "my-key",
             "llama3.2",
+            false,
         );
 
         assert!(state.is_edit);
@@ -825,6 +1019,20 @@ mod tests {
         assert_eq!(state.endpoint, "http://localhost:11434/v1");
         assert_eq!(state.api_key, "my-key");
         assert_eq!(state.selected_model, "llama3.2");
+        assert!(!state.summary_enabled);
+    }
+
+    #[test]
+    fn test_wizard_toggle_summary_enabled() {
+        let mut state = AIWizardState::new();
+        state.open_new(true, None);
+        assert!(state.summary_enabled);
+
+        state.toggle_summary_enabled();
+        assert!(!state.summary_enabled);
+
+        state.toggle_summary_enabled();
+        assert!(state.summary_enabled);
     }
 
     #[test]

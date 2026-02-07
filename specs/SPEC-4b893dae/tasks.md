@@ -1,8 +1,42 @@
 # タスク: ブランチサマリーパネル（セッション要約対応）
 
-**仕様ID**: `SPEC-4b893dae` | **日付**: 2026-01-19 | **更新日**: 2026-01-22
+**仕様ID**: `SPEC-4b893dae` | **日付**: 2026-01-19 | **更新日**: 2026-01-24
 **入力**: `specs/SPEC-4b893dae/` からの設計ドキュメント
 **前提条件**: plan.md、spec.md、data-model.md、contracts/openai-api.md、research.md、quickstart.md
+
+## 追加作業: セッション要約マウスホイールスクロール (2026-01-25)
+
+- [x] **T8954** [P] [共通] `specs/SPEC-4b893dae/spec.md` / `specs/SPEC-4b893dae/plan.md` / `specs/SPEC-4b893dae/quickstart.md` にマウスホイールスクロール要件と手順を追記
+- [x] **T8955** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` にセッション要約のスクロール領域判定とホイールスクロール処理を追加
+- [x] **T8956** [Impl] `crates/gwt-cli/src/tui/app.rs` にマウスホイールイベントのルーティングを追加
+- [x] **T8957** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にマウスホイールスクロールのユニットテストを追加
+- [x] **T8958** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
+## 追加作業: セッション要約の有効/無効切り替え (2026-02-03)
+
+- [x] **T8960** [P] [共通] `specs/SPEC-4b893dae/spec.md` / `specs/SPEC-4b893dae/plan.md` / `specs/SPEC-4b893dae/data-model.md` にセッション要約ON/OFF要件を追記
+- [ ] **T8961** [Impl] `crates/gwt-core/src/config/profile.rs` に`summary_enabled`を追加し、デフォルトを有効化
+- [ ] **T8962** [Impl] `crates/gwt-cli/src/tui/screens/ai_wizard.rs` にセッション要約ON/OFFトグルとクリア操作を追加
+- [ ] **T8963** [Impl] `crates/gwt-cli/src/tui/app.rs` にセッション要約ON/OFFの保存・判定ロジックを追加
+- [ ] **T8964** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` に無効時メッセージ表示と生成停止を追加
+- [ ] **T8965** [Test] `crates/gwt-core/src/config/profile.rs` のデフォルト値/有効判定テストを追加
+- [ ] **T8966** [Test] `crates/gwt-cli/src/tui/screens/ai_wizard.rs` のトグル状態反映テストを追加
+- [ ] **T8967** [Test] `crates/gwt-cli/src/tui/app.rs` のセッション要約ON/OFF判定テストを追加
+- [ ] **T8968** `cargo test -p gwt-core` と `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
+## 追加作業: AI設定モデル一覧スクロール (2026-01-24)
+
+- [x] **T8950** [P] [共通] `specs/SPEC-4b893dae/spec.md` / `specs/SPEC-4b893dae/plan.md` にモデル一覧スクロール要件を追記
+- [x] **T8951** [Impl] `crates/gwt-cli/src/tui/screens/ai_wizard.rs` にモデル一覧スクロールとスクロールバー表示を追加
+- [x] **T8952** [Test] `crates/gwt-cli/src/tui/screens/ai_wizard.rs` にモデル一覧スクロールのユニットテストを追加
+- [x] **T8953** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
+## 追加作業: セッション要約スクロールバー (2026-01-23)
+
+- [x] **T8940** [P] [共通] `specs/SPEC-4b893dae/spec.md` / `specs/SPEC-4b893dae/plan.md` にセッション要約スクロールバー要件を追記
+- [x] **T8941** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` にスクロール可能な場合のみスクロールバーを表示する処理を追加
+- [x] **T8942** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にセッション要約スクロールバーのレイアウト計算テストを追加
+- [x] **T8943** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
 
 ## 追加作業: セッション要約タイムアウト延長 (2026-01-22)
 
@@ -17,14 +51,14 @@
 - [x] **T8921** [Impl] `crates/gwt-cli/src/tui/components.rs` のブランチ詳細パネルで文字単位折り返しを行う
 - [x] **T8922** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` のセッション要約で文字単位折り返しを行う
 - [x] **T8923** [Test] 折り返し処理のユニットテストを追加する
-- [ ] **T8924** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+- [x] **T8924** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
 
 ## 追加作業: サマリーパネルの内側余白 (2026-01-20)
 
 - [x] **T8801** [P] [共通] `specs/SPEC-4b893dae/spec.md` / `specs/SPEC-4b893dae/plan.md` にパネル内左右余白の要件を追記
 - [x] **T8802** [Test] `crates/gwt-cli/src/tui/components.rs` のSummaryPanel描画テストを追加し、枠内余白を検証
 - [x] **T8803** [Impl] SummaryPanelとセッション要約パネルの枠内に左右余白を追加する
-- [ ] **T8804** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+- [x] **T8804** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
 
 ## 追加作業: セッション要約の途中切れ対策 (2026-01-21)
 

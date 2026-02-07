@@ -1,11 +1,19 @@
 ---
-description: developブランチからmainへのRelease PRを作成します（LLMベース）。
+description: developブランチでバージョン更新を行い、mainへのRelease PRを作成します（LLMベース）。
 tags: [project]
 ---
 
 # リリースコマンド（LLMベース）
 
-develop ブランチ上でリリース準備を行い、main への Release PR を作成します。
+develop ブランチでバージョン更新・CHANGELOG更新を行い、main への Release PR を作成します。
+
+## フロー概要
+
+```
+develop (バージョン更新・CHANGELOG更新) → main (PR)
+                                            ↓
+                                  GitHub Release & npm publish (自動)
+```
 
 ## 前提条件
 
@@ -27,42 +35,35 @@ git rev-parse --abbrev-ref HEAD
 **判定**: 結果が `develop` でなければ、以下のメッセージを表示して中断：
 > 「エラー: developブランチでのみ実行可能です。現在のブランチ: {ブランチ名}」
 
-### 2. main同期チェック
+### 2. リモート同期
 
 ```bash
 git fetch origin main develop
-git merge-base --is-ancestor origin/main origin/develop
+git pull origin develop
 ```
 
-**判定**: コマンドが失敗（exit code != 0）した場合、以下のメッセージを表示して中断：
-> 「エラー: mainとdevelopに差異があります。先にmainをdevelopにマージしてください。」
-> 「実行: `git merge origin/main`」
-
-### 3. 既存リリースコミット確認
+### 3. リリース対象コミット確認
 
 ```bash
-git log -1 --pretty=%s
-```
-
-**判定**: 結果が `chore(release):` で始まる場合、以下のメッセージを表示して中断：
-> 「エラー: 既にリリースコミットが存在します。追加の変更をコミットしてから再実行してください。」
-
-### 4. リリース対象コミット確認
-
-```bash
-git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0"
+PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
 ```
 
 上記で取得したタグから現在までのコミット数を確認:
 
 ```bash
-git rev-list {前回タグ}..HEAD --count
+# タグが存在する場合
+git rev-list {PREV_TAG}..HEAD --count
+
+# タグが存在しない場合（初回リリース）
+git rev-list --count HEAD
 ```
 
-**判定**: コミット数が 0 の場合、以下のメッセージを表示して中断：
+**判定**:
+- タグが存在しない場合: 初回リリースとして続行（全コミットがリリース対象）
+- タグが存在し、コミット数が 0 の場合、以下のメッセージを表示して中断：
 > 「エラー: リリース対象のコミットがありません。」
 
-### 5. バージョン判定
+### 4. バージョン判定
 
 ```bash
 git-cliff --bumped-version
@@ -72,54 +73,51 @@ git-cliff --bumped-version
 
 このバージョンを `NEW_VERSION` として記録（例: `6.5.2`、`v` は除去）。
 
-### 6. ファイル更新
+### 5. ファイル更新
 
 以下のファイルを更新してください：
 
-#### 6.1 ルート Cargo.toml
+#### 5.1 ルート Cargo.toml
 
 `version = "X.Y.Z"` を `version = "{NEW_VERSION}"` に更新
 
-#### 6.2 crates/配下の全 Cargo.toml
-
-以下のファイルの `version = "X.Y.Z"` を更新：
-- `crates/gwt-cli/Cargo.toml`
-- `crates/gwt-core/Cargo.toml`
-- その他 `crates/*/Cargo.toml` が存在する場合
-
-#### 6.3 package.json
+#### 5.2 package.json
 
 `"version": "X.Y.Z"` を `"version": "{NEW_VERSION}"` に更新
 
-#### 6.4 Cargo.lock
+#### 5.3 Cargo.lock
 
 ```bash
 cargo update -w
 ```
 
-#### 6.5 CHANGELOG.md
+#### 5.4 CHANGELOG.md
+
+前回リリースタグ以降の変更のみを追加してください。git-cliffが過去の変更を含める場合は、手動でv{PREV_TAG}以降の変更のみを追加してください。
 
 ```bash
 git-cliff --unreleased --tag v{NEW_VERSION} --prepend CHANGELOG.md
 ```
 
-### 7. リリースコミット作成
+**注意**: CHANGELOGに既に含まれている変更が重複しないよう確認してください。
+
+### 6. リリースコミット作成
 
 ```bash
 git add -A
 git commit -m "chore(release): v{NEW_VERSION}"
 ```
 
-### 8. developへプッシュ
+### 7. developをプッシュ
 
 ```bash
 git push origin develop
 ```
 
 **失敗時**: 最大3回リトライ。それでも失敗した場合：
-> 「エラー: pushに失敗しました。ネットワーク接続を確認し、手動で `git push origin develop` を実行してください。」
+> 「エラー: pushに失敗しました。ネットワーク接続を確認してください。」
 
-### 9. PR作成または確認
+### 8. PR作成
 
 まず既存PRを確認：
 
@@ -152,12 +150,21 @@ PR bodyには以下を含めてください：
 - `## Changes` - 主な変更点をリスト形式で
 - `## Version` - バージョン番号
 
-### 10. 完了メッセージ
+### 9. 完了メッセージ
 
 > 「リリース準備が完了しました。」
 > 「バージョン: v{NEW_VERSION}」
 > 「PR URL: {PR URL}」
-> 「PRをレビューし、問題なければmainにマージしてください。」
+> 「PRがマージされると、GitHub ReleaseとnpmへのPublishが自動実行されます。」
+
+## マージ後の自動処理
+
+PRがmainにマージされると、`.github/workflows/release.yml` が以下を自動実行：
+
+1. Git タグを作成 (`v{NEW_VERSION}`)
+2. GitHub Release を作成
+3. クロスコンパイル済みバイナリをアップロード
+4. npm へ publish
 
 ## トラブルシューティング
 

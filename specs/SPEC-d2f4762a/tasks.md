@@ -3,6 +3,81 @@
 **仕様ID**: `SPEC-d2f4762a`
 **ポリシー**: CLAUDE.md の TDD ルールに基づき、必ず RED→GREEN→リグレッションチェックの順に進める。
 
+## 追加作業: 現在ブランチのラベル表示 (2026-01-31)
+
+- [x] **T1430** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に現在ブランチの `(current)` 表示要件・方針を追記
+- [x] **T1431** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` に現在ブランチの `(current)` 表示と緑色表示を検証するテストを追加
+- [x] **T1432** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` で現在ブランチの `(current)` 描画と左側幅計算の更新を実装
+- [x] **T1433** [検証] `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
+## 追加作業: レイアウト統一とステータスバー統合 (2026-01-27)
+
+- [x] **T1400** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` / `specs/SPEC-861d8cdf/spec.md` にレイアウト統一と常時ステータスバー要件を反映
+- [x] **T1401** [Test] `crates/gwt-cli/src/tui/app.rs` に主要画面でヘッダーと下部2行（フッターヘルプ + ステータスバー）が確保されることを検証するテストを追加
+- [x] **T1402** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にステータスバーがエージェント0件でも表示され、選択数/ステータスメッセージが統合表示されることと、Details/Sessionに重複表示されないことを検証するテストを追加
+- [x] **T1403** [Impl] `crates/gwt-cli/src/tui/app.rs` でBranchListのヘッダー省略/フッター省略/起動ステータス行を廃止し、共通レイアウトへ統合する
+- [x] **T1404** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` でステータスバー統合（Agents: none/選択数/ステータスメッセージ）と下部固定レイアウト、パネルの重複表示除去、枠線/余白の統一を実装する
+- [x] **T1405** [検証] `cargo test -p gwt-cli` と `cargo clippy --all-targets --all-features -- -D warnings` を実行し、失敗がないことを確認する
+
+## 追加作業: 画面名とタイトル統一 (2026-01-27)
+
+- [x] **T1410** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に `Branch Screen` / `Agent Screen` への画面名統一と、タイトル/パネル見出し統一要件を反映
+- [x] **T1411** [Test] `crates/gwt-cli/src/tui/app.rs` にヘッダーが `Branch Screen` / `Agent Screen` を表示することを検証するテストを追加/更新
+- [x] **T1412** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にDetails/Sessionタイトルがラベルのみで、タイトル色とパディングが統一されていることを検証するテストを追加
+- [x] **T1413** [Impl] `crates/gwt-cli/src/tui/app.rs` のヘッダー画面名を `Branch Screen` / `Agent Screen` に変更し、タイトル表記の揺れを抑える
+- [x] **T1414** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` のDetails/Sessionタイトルからブランチ名を除去し、タイトル色とパディングを統一する
+- [x] **T1415** [検証] `cargo test -p gwt-cli` / `cargo clippy --all-targets --all-features -- -D warnings` / markdownlint を実行し、失敗がないことを確認する
+
+## 追加作業: Settings画面の統一 (2026-01-27)
+
+- [x] **T1420** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にSettings専用Instructions廃止とタイトル/枠線スタイル統一要件を反映
+- [x] **T1421** [Test] `crates/gwt-cli/src/tui/app.rs` にSettings画面の操作ヒントがフッターヘルプに出ることと、Instructionsが重複表示されないことを検証するテストを追加
+- [x] **T1422** [Test] `crates/gwt-cli/src/tui/screens/settings.rs` にSettingsパネルタイトルが統一規約（前後スペース + シアン太字）で構成されることを検証するテストを追加/更新
+- [x] **T1423** [Impl] `crates/gwt-cli/src/tui/app.rs` のフッターヘルプをSettings状態に応じて切り替えるよう拡張し、Settings内Instructions描画を不要にする
+- [x] **T1424** [Impl] `crates/gwt-cli/src/tui/screens/settings.rs` のInstructionsブロックを廃止し、タブ/一覧/説明/フォーム/確認/AI/環境変数のタイトル色と枠線色を統一する
+- [x] **T1425** [検証] `cargo test -p gwt-cli` / `cargo clippy --all-targets --all-features -- -D warnings` / markdownlint を実行し、失敗がないことを確認する
+
+## 追加作業: クリーンアップ中の安全アイコンスピナー表示 (2026-01-26)
+
+- [x] **T1330** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にクリーンアップ中スピナー表示と入力ロック要件を追記
+- [x] **T1331** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にクリーンアップ進捗行と削除中スピナー表示のテストを追加
+- [x] **T1332** [Test] `crates/gwt-cli/src/tui/app.rs` にクリーンアップ中の入力ロックを検証するテストを追加
+- [x] **T1333** [Impl] `crates/gwt-cli/src/tui/app.rs` でクリーンアップ処理の非同期化と入力ロック、進捗更新を実装
+- [x] **T1334** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` で削除中の安全アイコンスピナー表示と進捗行の描画を実装
+- [x] **T1335** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
+## 追加作業: ベースブランチのリモートフォールバック (2026-01-26)
+
+- [x] **T1336** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にベースブランチのリモートフォールバック要件・方針を追記
+- [x] **T1337** [Test] `crates/gwt-cli/src/tui/app.rs` にローカルにベースブランチが無い場合でもリモートブランチ/remote HEADを参照するテストを追加
+- [x] **T1338** [Impl] `crates/gwt-cli/src/tui/app.rs` にベースブランチ解決ロジック（remote/<base> → remote/HEAD）を実装し、安全判定に適用
+- [x] **T1339** [検証] `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
+## 追加作業: クリーンアップ中ブランチの選択スキップ (2026-01-26)
+
+- [x] **T1336** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` にクリーンアップ中ブランチのカーソルスキップ/クリック無効を追記
+- [x] **T1337** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にクリーンアップ中ブランチをカーソルがスキップするテストを追加
+- [x] **T1338** [Test] `crates/gwt-cli/src/tui/app.rs` にクリーンアップ中ブランチのクリックが無視されることを検証するテストを追加
+- [x] **T1339** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` でカーソル移動時にクリーンアップ中ブランチをスキップする
+- [x] **T1340** [Impl] `crates/gwt-cli/src/tui/app.rs` でクリーンアップ中ブランチのクリック選択を無効化する
+- [x] **T1341** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
+## 追加作業: エージェント起動前の軽量Worktree解決 (2026-01-26)
+
+- [x] **T1342** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に起動前ブランチ検証の軽量化要件・方針を追記
+- [x] **T1343** [Test] `crates/gwt-core/src/worktree/manager.rs` に軽量worktree検索が詳細状態チェックを行わないことを検証するテストを追加
+- [x] **T1344** [Impl] `crates/gwt-core/src/worktree/manager.rs` に軽量検索を追加し、`crates/gwt-cli/src/tui/app.rs` の起動前worktree解決で使用する
+- [x] **T1345** `cargo test -p gwt-core` を実行し、失敗がないことを確認する
+
+## 追加作業: クリーンアップ中の入力継続と対象ブランチ制限 (2026-01-27)
+
+- [x] **T1346** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に入力ロック解除と対象ブランチの選択制限を追記
+- [x] **T1347** [Test] `crates/gwt-cli/src/tui/screens/branch_list.rs` にクリーンアップ対象ブランチのスキップ選択を検証するテストを追加
+- [x] **T1348** [Test] `crates/gwt-cli/src/tui/app.rs` にクリーンアップ中もカーソル移動が継続できることを検証するテストを追加
+- [x] **T1349** [Impl] `crates/gwt-cli/src/tui/screens/branch_list.rs` でクリーンアップ対象ブランチの一覧管理とカーソルスキップを実装
+- [x] **T1350** [Impl] `crates/gwt-cli/src/tui/app.rs` でクリーンアップ中の入力ロックを解除し、対象ブランチクリックを無効化する
+- [x] **T1351** `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
+
 ## 追加作業: ブランチ詳細サマリの非同期更新 (2026-01-21)
 
 - [x] **T1323** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に詳細サマリの非同期更新要件・方針を追記
@@ -220,7 +295,7 @@
 
 ## フェーズ4: ユーザーストーリー6 - Worktree復元の無効化
 
-**ストーリー**: Worktree作成時や起動時の自動復元・修復を行わず、手動解決のみ許可する。
+**ストーリー**: Worktree作成時や起動時の自動復元を行わず、repair操作はCLI/TUIから提供しない。
 
 **価値**: 予期しない削除や修復の自動実行を防ぎ、運用の透明性を高める。
 
@@ -228,11 +303,15 @@
 
 - [x] **T301** [US6] `crates/gwt-core/src/worktree/manager.rs` の既存パス時エラー/自動クリーンアップ無効化テストを更新
 - [x] **T302** [US6] `crates/gwt-cli/src/main.rs` にrepair無効化のテストを追加
+- [x] **T305** [US6] `crates/gwt-cli/src/cli.rs` に`gwt repair`が未定義サブコマンドとして扱われるテストを追加
 
 ### 実装
 
 - [x] **T303** [US6] `crates/gwt-core/src/worktree/manager.rs` で自動復元を無効化し、既存パスはエラーにする
 - [x] **T304** [US6] `crates/gwt-cli/src/main.rs` / `crates/gwt-cli/src/tui/app.rs` / `crates/gwt-cli/src/tui/screens/branch_list.rs` で自動クリーンアップとrepair操作を無効化し、キーバインド表示を更新
+- [x] **T306** [US6] `crates/gwt-cli/src/cli.rs` から`repair`サブコマンドを削除し、`crates/gwt-cli/src/main.rs` のrepairハンドラ/テストを削除
+- [x] **T307** [US6] `crates/gwt-cli/src/tui/app.rs` のRepairWorktreesメッセージを削除
+- [x] **T308** [US6] `crates/gwt-core/src/worktree/manager.rs` と `crates/gwt-core/src/git/repository.rs` のrepair APIを削除
 
 ## フェーズ5: ユーザーストーリー8 - ブランチ選択後のウィザードポップアップ (優先度: P0)
 
@@ -616,6 +695,13 @@
 ### 検証
 
 - [ ] **T1514** [検証] `cargo test -p gwt-cli` と `cargo build --release` を実行し、失敗がないことを確認
+
+## 追加作業: 終了時の自動クリーンアップ無効化 (2026-01-25)
+
+- [x] **T1521** [P] [共通] `specs/SPEC-d2f4762a/spec.md` / `specs/SPEC-d2f4762a/plan.md` に終了時の自動クリーンアップ無効化要件・方針を追記
+- [x] **T1522** [Test] `crates/gwt-cli/src/tui/app.rs` に終了時の自動クリーンアップが実行されないことを検証するテストを追加
+- [x] **T1523** [Impl] `crates/gwt-cli/src/tui/app.rs` の終了処理で `git worktree prune` を実行しないよう修正
+- [x] **T1524** [検証] `cargo test -p gwt-cli` を実行し、失敗がないことを確認する
 
 ## タスク凡例（追加分）
 

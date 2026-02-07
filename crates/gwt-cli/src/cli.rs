@@ -94,19 +94,26 @@ pub enum Commands {
     /// Start the web UI server
     Serve {
         /// Port to listen on
-        #[arg(short, long, default_value = "3000")]
-        port: u16,
+        #[arg(short, long)]
+        port: Option<u16>,
 
         /// Bind address
-        #[arg(short, long, default_value = "127.0.0.1")]
-        address: String,
+        #[arg(short, long)]
+        address: Option<String>,
     },
 
-    /// Initialize gwt configuration
+    /// Initialize gwt by cloning a repository or creating config (SPEC-a70a1ece)
     Init {
+        /// Repository URL to clone as bare repository
+        url: Option<String>,
+
         /// Force overwrite existing config
         #[arg(short, long)]
         force: bool,
+
+        /// Full clone (disable shallow clone, default: --depth=1)
+        #[arg(long)]
+        full: bool,
     },
 
     /// Lock a worktree
@@ -123,12 +130,6 @@ pub enum Commands {
     Unlock {
         /// Branch name or path of worktree to unlock
         target: String,
-    },
-
-    /// Repair worktree metadata (disabled)
-    Repair {
-        /// Specific worktree to repair (repairs all if not specified)
-        target: Option<String>,
     },
 
     /// Manage Claude Code hooks for agent status tracking (SPEC-861d8cdf)
@@ -213,5 +214,11 @@ mod tests {
             }) => {}
             other => panic!("unexpected parse result: {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_repair_subcommand_is_removed() {
+        let err = Cli::try_parse_from(["gwt", "repair"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
     }
 }

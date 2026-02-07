@@ -1,7 +1,7 @@
 //! Agent Mode screen
 
 use gwt_core::agent::{SessionStatus, SessionSummary};
-use ratatui::{prelude::*, widgets::*};
+use ratatui::{prelude::*, style::Modifier, widgets::*};
 use unicode_width::UnicodeWidthChar;
 
 #[allow(dead_code)]
@@ -16,6 +16,12 @@ pub enum AgentRole {
 pub struct AgentMessage {
     pub role: AgentRole,
     pub content: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentTask {
+    pub title: String,
+    pub status: String,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +47,8 @@ pub struct AgentModeState {
     pub session_selector_index: usize,
     /// Whether to show session selector overlay
     pub show_session_selector: bool,
+    /// Tasks for task panel display
+    pub tasks: Vec<AgentTask>,
 }
 
 impl AgentModeState {
@@ -60,6 +68,7 @@ impl AgentModeState {
             pending_sessions: Vec::new(),
             session_selector_index: 0,
             show_session_selector: false,
+            tasks: Vec::new(),
         }
     }
 
@@ -176,8 +185,14 @@ fn render_chat_panel(
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(" Chat ");
+        .border_style(Style::default().fg(Color::White))
+        .title(" Chat ")
+        .title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .padding(Padding::new(1, 1, 0, 0));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -245,11 +260,61 @@ fn render_chat_panel(
     frame.render_widget(paragraph, inner);
 }
 
-fn render_input_panel(state: &AgentModeState, frame: &mut Frame, area: Rect) {
+#[allow(dead_code)]
+fn render_task_panel(state: &AgentModeState, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(" Input ");
+        .border_style(Style::default().fg(Color::White))
+        .title(" Tasks ")
+        .title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .padding(Padding::new(1, 1, 0, 0));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if state.tasks.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No tasks yet.".to_string(),
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        for task in &state.tasks {
+            lines.push(Line::from(vec![
+                Span::styled(task.title.clone(), Style::default().fg(Color::White)),
+                Span::raw(" ".to_string()),
+                Span::styled(
+                    format!("[{}]", task.status),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        }
+    }
+
+    let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, inner);
+}
+
+
+fn render_input_panel(state: &AgentModeState, frame: &mut Frame, area: Rect) {
+    let border_color = if state.ai_ready {
+        Color::Yellow
+    } else {
+        Color::DarkGray
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .title(" Input ")
+        .title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .padding(Padding::new(1, 1, 0, 0));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

@@ -85,7 +85,7 @@
 - **FR-004**: キーは `^[A-Z0-9_]{1,100}$`、値は 1〜500 文字までというバリデーションを即時に行い、違反時は保存ボタンを無効化しなければならない
 - **FR-005**: 値はデフォルトでマスク表示し、「表示」アクション実行時のみ一定時間（最大10秒）平文を表示する仕組みを提供しなければならない
 - **FR-006**: `PUT /api/config` は受け取ったツール配列をバリデーション後 `tools.json` に保存し、保存成功時には更新後データと `updatedAt` タイムスタンプを返さなければならない
-- **FR-007**: 保存成功後、BranchDetail のツール選択やセッション起動で最新 env が即座に反映されるよう、React Query の `config` キャッシュを更新し `useConfig` の結果を再利用しなければならない
+- **FR-007**: 保存成功後、UIは最新の設定を再取得し、ツール選択やセッション起動で最新の env が即座に反映される状態を維持しなければならない
 - **FR-008**: 保存失敗時には HTTP ステータスとともに UI で詳細メッセージを表示し、部分的な書き込みは行わずに旧データへロールバックしなければならない
 
 ### 主要エンティティ *(機能がデータを含む場合は含める)*
@@ -129,18 +129,18 @@
 
 - 保存時は値をプレーンテキストで `tools.json` に書き込むため、ファイルパーミッション（600 推奨）と OS ユーザー隔離を必須とする
 - UI ではマスク済み表示をデフォルトとし、コピー操作はユーザー明示の操作に限定する
-- ネットワーク通信での CSRF を避けるため、既存の Fastify セッションチェック or CSRF トークンを PUT リクエストに付与する
+- ネットワーク通信での CSRF を避けるため、Web サーバー側でのトークン検証や同一オリジン制約を適用する
 - ログ出力時（サーバー側）に env 値を含まないよう構造化ログで `***masked***` に置き換える
 
 ## 依存関係 *(該当する場合)*
 
-- 既存の Web サーバー (`gwt serve`) と React Router
+- 既存の Web サーバー (`gwt serve`) と Leptos Router
 - `configApi` (`GET /api/config`, `PUT /api/config`) および `src/config/tools.ts`
 - `launchCustomAITool` が参照する `CustomAITool.env` ロジック（env 連携確認が必要）
-- Spec: `SPEC-d5e56259` (Web UI) / `SPEC-30f6d724` (Custom AI Tool 定義)
+- Spec: `SPEC-1d62511e` (Web UI 概要) / `SPEC-71f2742d` (Custom AI Tool 定義)
 
 ## 参考資料 *(該当する場合)*
 
-- [SPEC-d5e56259/spec.md](../SPEC-d5e56259/spec.md) - Web UI 全体仕様
-- [SPEC-30f6d724/spec.md](../SPEC-30f6d724/spec.md) - カスタムAIツール仕様（env フィールドを含む）
+- [SPEC-1d62511e/spec.md](../SPEC-1d62511e/spec.md) - Web UI 全体仕様
+- [SPEC-71f2742d/spec.md](../SPEC-71f2742d/spec.md) - カスタムAIツール仕様（env フィールドを含む）
 - [src/config/tools.ts](../../src/config/tools.ts) - `tools.json` ロードと検証ロジック

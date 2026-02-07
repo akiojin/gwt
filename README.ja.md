@@ -125,8 +125,11 @@ cargo run -p gwt-cli
 git clone https://github.com/akiojin/gwt.git
 cd gwt
 
-# リリースバイナリをビルド
+# リリースバイナリをビルド（デフォルト: gwt-cli）
 cargo build --release
+
+# ワークスペース全体をビルド（Web/wasm含む）
+cargo build --workspace
 
 # バイナリは target/release/gwt にあります
 ./target/release/gwt
@@ -167,6 +170,12 @@ gwt remove feature/old-feature
 
 # 孤立したワークツリーをクリーンアップ
 gwt clean
+
+# ログを表示
+gwt logs --limit 100
+
+# ログをフォロー
+gwt logs --follow
 ```
 
 ツールは以下のオプションを持つ対話型インターフェースを提供します:
@@ -184,7 +193,7 @@ gwt clean
 |-----|------|
 | `Enter` | 既存エージェントペインにフォーカス / 非表示ペインを表示 / ウィザードを開く |
 | `d` | エージェントペインを削除（確認あり） |
-| `v` | エージェントペインの表示/非表示を切り替え |
+| `v` | GitViewを開く（選択中ブランチのgit状態詳細） |
 | `Space` | ブランチの選択/選択解除 |
 | `Up/Down` | ブランチ間を移動 |
 | `PageUp/PageDown` | ページ移動 |
@@ -205,6 +214,20 @@ gwt clean
 |-----|------|
 | `Esc` | フィルターモードを終了 |
 | 入力 | ブランチ名でフィルター |
+
+### GitView画面
+
+GitView画面は、選択中ブランチの詳細なgit状態（ファイル一覧、直近コミット）を表示します。
+
+| キー | 動作 |
+|-----|------|
+| `Up/Down` | ファイル・コミット間を移動 |
+| `Space` | ファイルのdiffまたはコミット詳細を展開/折りたたみ |
+| `Enter` | PRリンクをブラウザで開く（ヘッダーにフォーカス時） |
+| `v` / `Esc` | ブランチリストに戻る |
+
+マウス:
+- ヘッダーのPRリンクをクリックするとブラウザで開きます。
 
 ## ステータスアイコンの凡例
 
@@ -259,7 +282,12 @@ gwt は PATH 上のエージェントを検出し、ランチャーに表示し�
       "permissionSkipArgs": ["--yes"],
       "env": {
         "OPENAI_API_KEY": "sk-..."
-      }
+      },
+      "models": [
+        { "id": "gpt-4o", "label": "GPT-4o" },
+        { "id": "claude-3-opus", "label": "Claude 3 Opus" }
+      ],
+      "versionCommand": "aider --version"
     }
   ]
 }
@@ -270,6 +298,60 @@ gwt は PATH 上のエージェントを検出し、ランチャーに表示し�
 - `type` は `path` / `bunx` / `command` を指定します。
 - `modeArgs` で実行モード別の引数を定義します（Normal/Continue/Resume）。
 - `env` はエージェントごとの環境変数（任意）です。
+- `models` は任意です。定義するとモデル選択ステップが表示されます。
+- `versionCommand` は任意です。定義するとバージョン検出に使用されます。
+
+## Bareリポジトリワークフロー
+
+gwtは効率的なワークツリー管理のためにbareリポジトリワークフローをサポートしています。このアプローチではbareリポジトリ（`.git`データ）をワークツリーから分離し、より整理されたプロジェクト構成を提供します。
+
+### ディレクトリ構造
+
+```text
+/project/
+├── repo.git/           # Bareリポジトリ
+├── main/               # ワークツリー（mainブランチ）
+├── feature-x/          # ワークツリー（feature/xブランチ）
+└── .gwt/               # gwt設定
+    └── project.json
+```
+
+### Bareリポジトリのセットアップ
+
+```bash
+# bareリポジトリとしてクローン
+git clone --bare https://github.com/user/repo.git repo.git
+
+# bareリポジトリからワークツリーを作成
+cd repo.git
+git worktree add ../main main
+git worktree add ../feature-x feature/x
+```
+
+### Bareリポジトリでのgwt使用
+
+bareリポジトリまたはそのワークツリー内でgwtを実行した場合:
+
+| 起動場所 | ヘッダー表示 |
+|----------|-------------|
+| 通常リポジトリ | `Working Directory: /path [branch]` |
+| Bareリポジトリ | `Working Directory: /path/repo.git [bare]` |
+| ワークツリー（通常） | `Working Directory: /path [branch]` |
+| ワークツリー（bare方式） | `Working Directory: /path [branch] (repo.git)` |
+
+### `.worktrees/`方式からのマイグレーション
+
+既存の`.worktrees/`ディレクトリ方式を使用しているリポジトリがある場合、gwtはこれを検出してbareリポジトリ方式へのマイグレーションを提案します:
+
+1. **バックアップ**: `.gwt-migration-backup/`にバックアップを作成
+2. **bareリポジトリ作成**: `{repo-name}.git`を作成
+3. **ワークツリー移行**: 既存ワークツリーを新構造に移動
+4. **クリーンアップ**: 古い`.worktrees/`ディレクトリを削除
+5. **設定作成**: `.gwt/project.json`を作成
+
+### サブモジュールサポート
+
+ワークツリー作成時、gwtはサブモジュールが存在する場合は自動的に初期化します。これにより、ワークツリー作成直後からサブモジュールを使用できます。
 
 ## 高度なワークフロー
 
@@ -335,8 +417,8 @@ gwt
 ├── crates/
 │   ├── gwt-cli/         # CLIエントリポイントとTUI（Ratatui）
 │   ├── gwt-core/        # コアライブラリ（ワークツリー管理）
-│   ├── gwt-web/         # Webサーバー（将来）
-│   └── gwt-frontend/    # Webフロントエンド（将来）
+│   ├── gwt-web/         # Webサーバー（Axum）
+│   └── gwt-frontend/    # Webフロントエンド（Leptos CSR）
 ├── package.json         # npm配布用ラッパー
 ├── bin/gwt.js           # バイナリラッパースクリプト
 ├── scripts/postinstall.js  # バイナリダウンロードスクリプト

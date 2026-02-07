@@ -223,6 +223,25 @@ impl ConfirmState {
         }
     }
 
+    /// Create Claude Code plugin setup confirmation dialog (SPEC-f8dab6e2 T-109)
+    ///
+    /// Proposes to register gwt-plugins marketplace and enable worktree-protection-hooks plugin.
+    pub fn plugin_setup() -> Self {
+        Self {
+            title: "Setup Worktree Protection Plugin".to_string(),
+            message: "Enable worktree-protection-hooks plugin for Claude Code?".to_string(),
+            details: vec![
+                "This will register gwt-plugins marketplace.".to_string(),
+                "Plugin protects against dangerous operations.".to_string(),
+            ],
+            confirm_label: "Setup".to_string(),
+            cancel_label: "Skip".to_string(),
+            selected_confirm: true, // Default to Setup for better UX
+            is_dangerous: false,
+            ..Default::default()
+        }
+    }
+
     // Mouse click support methods
 
     /// Check if point is within popup area
@@ -582,5 +601,18 @@ mod tests {
         let truncated = truncate_path(long_path, 30);
         assert!(truncated.starts_with("..."));
         assert!(truncated.len() <= 30);
+    }
+
+    #[test]
+    fn test_plugin_setup() {
+        let state = ConfirmState::plugin_setup();
+
+        assert!(!state.is_dangerous);
+        assert!(state.selected_confirm); // Default to Setup for better UX
+        assert_eq!(state.confirm_label, "Setup");
+        assert_eq!(state.cancel_label, "Skip");
+        assert!(state.title.contains("Worktree Protection"));
+        assert!(state.message.contains("worktree-protection-hooks"));
+        assert!(state.details.iter().any(|d| d.contains("gwt-plugins")));
     }
 }

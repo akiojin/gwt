@@ -190,6 +190,73 @@ impl Branch {
         Ok(branches)
     }
 
+    /// List remote branches using ls-remote (for bare repositories)
+    /// SPEC-a70a1ece: Bare repositories don't have refs/remotes/, so we use ls-remote
+    pub fn list_remote_from_origin(repo_path: &Path) -> Result<Vec<Branch>> {
+        debug!(
+            category = "git",
+            repo_path = %repo_path.display(),
+            "Listing remote branches via ls-remote (bare repo)"
+        );
+
+        let output = Command::new("git")
+            .args(["ls-remote", "--heads", "origin"])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| GwtError::GitOperationFailed {
+                operation: "ls-remote".to_string(),
+                details: e.to_string(),
+            })?;
+
+        if !output.status.success() {
+            // If origin doesn't exist, return empty list
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("No such remote")
+                || stderr.contains("does not appear to be a git repository")
+            {
+                debug!(category = "git", "No origin remote configured");
+                return Ok(Vec::new());
+            }
+            return Err(GwtError::GitOperationFailed {
+                operation: "ls-remote".to_string(),
+                details: stderr.to_string(),
+            });
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut branches = Vec::new();
+
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() >= 2 {
+                let commit = &parts[0][..7.min(parts[0].len())]; // Short SHA
+                let ref_name = parts[1];
+                // Convert refs/heads/branch-name to origin/branch-name
+                if let Some(branch_name) = ref_name.strip_prefix("refs/heads/") {
+                    branches.push(Branch {
+                        name: format!("origin/{}", branch_name),
+                        is_current: false,
+                        has_remote: true,
+                        upstream: None,
+                        commit: commit.to_string(),
+                        ahead: 0,
+                        behind: 0,
+                        commit_timestamp: None, // ls-remote doesn't provide timestamp
+                        is_gone: false,
+                    });
+                }
+            }
+        }
+
+        debug!(
+            category = "git",
+            count = branches.len(),
+            "Found remote branches via ls-remote"
+        );
+
+        Ok(branches)
+    }
+
     /// Get the current branch
     pub fn current(repo_path: &Path) -> Result<Option<Branch>> {
         debug!(
@@ -490,6 +557,7 @@ impl Branch {
 
     /// Check if a branch exists remotely
     pub fn remote_exists(repo_path: &Path, remote: &str, branch: &str) -> Result<bool> {
+        // First try local refs/remotes (works for normal repos)
         let output = Command::new("git")
             .args([
                 "show-ref",
@@ -504,7 +572,31 @@ impl Branch {
                 details: e.to_string(),
             })?;
 
-        Ok(output.status.success())
+        if output.status.success() {
+            return Ok(true);
+        }
+
+        // SPEC-a70a1ece FR-124: For bare repos, check via ls-remote
+        let ls_output = Command::new("git")
+            .args(["ls-remote", "--heads", remote, branch])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| GwtError::GitOperationFailed {
+                operation: "ls-remote".to_string(),
+                details: e.to_string(),
+            })?;
+
+        if ls_output.status.success() {
+            let stdout = String::from_utf8_lossy(&ls_output.stdout);
+            // ls-remote returns lines like: <sha>\trefs/heads/<branch>
+            return Ok(stdout.lines().any(|line| {
+                line.split('\t')
+                    .nth(1)
+                    .is_some_and(|r| r == format!("refs/heads/{}", branch))
+            }));
+        }
+
+        Ok(false)
     }
 
     /// Checkout this branch

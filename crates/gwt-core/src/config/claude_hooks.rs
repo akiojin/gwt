@@ -63,6 +63,15 @@ pub fn is_temporary_execution_path(exe_path: &str) -> Option<String> {
     None
 }
 
+/// Check if a command string is a gwt hook command (FR-102j)
+///
+/// Matches both standard format ("gwt hook") and build binary format
+/// (path containing "/gwt" and " hook ").
+/// Example: "/gwt/target/release/deps/gwt-614ba193345891eb hook PreToolUse"
+fn is_gwt_hook_command(command: &str) -> bool {
+    command.contains("gwt hook") || (command.contains("/gwt") && command.contains(" hook "))
+}
+
 /// Claude Code settings.json structure (partial)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ClaudeSettings {
@@ -124,20 +133,17 @@ fn value_has_gwt_hook(value: &serde_json::Value) -> bool {
                 hooks.iter().any(|hook| {
                     hook.get("command")
                         .and_then(|c| c.as_str())
-                        .map(|s| s.contains("gwt hook"))
+                        .map(is_gwt_hook_command)
                         .unwrap_or(false)
                 })
             } else {
                 // Legacy: array of strings
-                entry
-                    .as_str()
-                    .map(|s| s.contains("gwt hook"))
-                    .unwrap_or(false)
+                entry.as_str().map(is_gwt_hook_command).unwrap_or(false)
             }
         })
     } else if let Some(cmd) = value.as_str() {
         // Legacy: single string
-        cmd.contains("gwt hook")
+        is_gwt_hook_command(cmd)
     } else {
         false
     }
@@ -281,13 +287,13 @@ fn reregister_gwt_hooks_with_exe_path(
     Ok(true)
 }
 
-/// Check if an entry is a gwt hook (new format)
+/// Check if an entry is a gwt hook (new format) (FR-102j)
 fn is_gwt_hook_entry(entry: &serde_json::Value) -> bool {
     if let Some(hooks) = entry.get("hooks").and_then(|h| h.as_array()) {
         hooks.iter().any(|hook| {
             hook.get("command")
                 .and_then(|c| c.as_str())
-                .map(|s| s.contains("gwt hook"))
+                .map(is_gwt_hook_command)
                 .unwrap_or(false)
         })
     } else {
@@ -697,5 +703,100 @@ mod tests {
         let exe_path = "/home/user/.bun/install/cache/@akiojin/gwt@1.0.0/gwt";
         let result = is_temporary_execution_path(exe_path);
         assert_eq!(result, Some(exe_path.to_string()));
+    }
+
+    // T-102-06: gwt hook detection pattern tests (FR-102j)
+
+    #[test]
+    fn test_is_gwt_hook_command_standard() {
+        // Standard format: "gwt hook <event>"
+        assert!(is_gwt_hook_command("gwt hook PreToolUse"));
+        assert!(is_gwt_hook_command("/usr/bin/gwt hook UserPromptSubmit"));
+    }
+
+    #[test]
+    fn test_is_gwt_hook_command_build_binary() {
+        // Build binary format: gwt-HASH (from cargo target directory)
+        assert!(is_gwt_hook_command(
+            "/gwt/target/release/deps/gwt-614ba193345891eb hook PreToolUse"
+        ));
+        assert!(is_gwt_hook_command(
+            "/home/user/gwt/target/debug/gwt-abc123 hook Stop"
+        ));
+    }
+
+    #[test]
+    fn test_is_gwt_hook_command_not_gwt() {
+        // Should not match non-gwt commands
+        assert!(!is_gwt_hook_command("echo hello"));
+        assert!(!is_gwt_hook_command("other-tool hook PreToolUse"));
+        // "hook" without "/gwt" path should not match
+        assert!(!is_gwt_hook_command("/some/path hook something"));
+    }
+
+    #[test]
+    fn test_is_gwt_hook_entry_standard_format() {
+        let entry = serde_json::json!({
+            "hooks": [{"type": "command", "command": "gwt hook PreToolUse"}]
+        });
+        assert!(is_gwt_hook_entry(&entry));
+    }
+
+    #[test]
+    fn test_is_gwt_hook_entry_build_binary_format() {
+        // Should detect build binary format (FR-102j)
+        let entry = serde_json::json!({
+            "hooks": [{"type": "command", "command": "/gwt/target/release/deps/gwt-614ba193345891eb hook PreToolUse"}]
+        });
+        assert!(is_gwt_hook_entry(&entry));
+    }
+
+    #[test]
+    fn test_is_gwt_hook_entry_non_gwt() {
+        let entry = serde_json::json!({
+            "hooks": [{"type": "command", "command": "echo hello"}]
+        });
+        assert!(!is_gwt_hook_entry(&entry));
+    }
+
+    #[test]
+    fn test_no_duplicate_when_registering_build_binary_path() {
+        // FR-102j: Build binary paths should be detected to prevent duplicate registration
+        let temp_dir = TempDir::new().unwrap();
+        let settings_path = temp_dir.path().join(".claude").join("settings.json");
+
+        // Register with build binary path (gwt-HASH format)
+        register_gwt_hooks_with_exe_path(
+            &settings_path,
+            "/gwt/target/release/deps/gwt-614ba193345891eb",
+        )
+        .unwrap();
+
+        // Register again with different hash - should overwrite, not duplicate
+        register_gwt_hooks_with_exe_path(
+            &settings_path,
+            "/gwt/target/release/deps/gwt-abc123def456",
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&settings_path).unwrap();
+        let settings: ClaudeSettings = serde_json::from_str(&content).unwrap();
+
+        // Count PreToolUse entries - should be exactly 1
+        let pre_tool_use = settings
+            .hooks
+            .get("PreToolUse")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            pre_tool_use.len(),
+            1,
+            "Should have exactly one entry, not duplicated"
+        );
+
+        // Verify the new hash is present, not the old one
+        assert!(!content.contains("gwt-614ba193345891eb"));
+        assert!(content.contains("gwt-abc123def456"));
     }
 }

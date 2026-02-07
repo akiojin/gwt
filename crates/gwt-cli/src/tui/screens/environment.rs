@@ -70,7 +70,7 @@ pub enum EditField {
 }
 
 /// Environment variables state
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct EnvironmentState {
     /// Environment variables
     pub variables: Vec<EnvItem>,
@@ -108,10 +108,14 @@ pub struct EnvironmentState {
     pub ai_api_key: String,
     /// AI model
     pub ai_model: String,
+    /// Session summary enabled
+    pub ai_summary_enabled: bool,
     /// AI field currently being edited
     editing_ai_field: Option<AiField>,
     /// AI-only mode (no environment variables)
     ai_only: bool,
+    /// Hide AI settings (for Settings Environment tab - SPEC-71f2742d FR-023)
+    hide_ai: bool,
 
     // Mouse click support
     /// List inner area for click detection
@@ -159,11 +163,13 @@ impl EnvironmentState {
         endpoint: String,
         api_key: String,
         model: String,
+        summary_enabled: bool,
     ) -> Self {
         self.ai_enabled = enabled;
         self.ai_endpoint = endpoint;
         self.ai_api_key = api_key;
         self.ai_model = model;
+        self.ai_summary_enabled = summary_enabled;
         self
     }
 
@@ -172,8 +178,18 @@ impl EnvironmentState {
         self
     }
 
+    /// Hide AI settings (SPEC-71f2742d FR-023: Environment only manages env vars, not AI)
+    pub fn with_hide_ai(mut self, hide_ai: bool) -> Self {
+        self.hide_ai = hide_ai;
+        self
+    }
+
     pub fn is_ai_only(&self) -> bool {
         self.ai_only
+    }
+
+    pub fn is_hide_ai(&self) -> bool {
+        self.hide_ai
     }
 
     pub fn editing_ai_field(&self) -> Option<AiField> {
@@ -228,6 +244,33 @@ impl EnvironmentState {
 
     pub fn selected_key(&self) -> Option<String> {
         self.selected_display_item().map(|item| item.key)
+    }
+
+    /// SPEC-dafff079 FR-020: Toggle disabled status for currently selected OS entry
+    pub fn toggle_selected_disabled(&mut self) -> bool {
+        if let Some(item) = self.selected_display_item() {
+            // Only allow toggling for OS entries
+            if matches!(
+                item.kind,
+                EnvDisplayKind::OsOnly | EnvDisplayKind::OsDisabled
+            ) {
+                return self.toggle_disabled_key(&item.key);
+            }
+        }
+        false
+    }
+
+    /// SPEC-dafff079 FR-019: Delete override for currently selected overridden entry
+    /// This resets the value back to the OS original
+    pub fn delete_selected_override(&mut self) {
+        if let Some(item) = self.selected_display_item() {
+            if item.kind == EnvDisplayKind::Overridden {
+                // Find and remove the profile variable that overrides
+                if let Some(pos) = self.variables.iter().position(|v| v.key == item.key) {
+                    self.variables.remove(pos);
+                }
+            }
+        }
     }
 
     /// Move selection up
@@ -527,7 +570,12 @@ impl EnvironmentState {
         if self.ai_only {
             return self.ai_display_items().len();
         }
-        let ai_count = self.ai_display_items().len();
+        // SPEC-71f2742d FR-023: hide_ai mode excludes AI settings
+        let ai_count = if self.hide_ai {
+            0
+        } else {
+            self.ai_display_items().len()
+        };
         let mut keys: HashMap<&str, ()> = HashMap::new();
         for var in &self.os_variables {
             keys.insert(var.key.as_str(), ());
@@ -547,7 +595,12 @@ impl EnvironmentState {
         if self.ai_only {
             return self.ai_display_items();
         }
-        let mut items = self.ai_display_items();
+        // SPEC-71f2742d FR-023: hide_ai mode excludes AI settings from Environment tab
+        let mut items = if self.hide_ai {
+            Vec::new()
+        } else {
+            self.ai_display_items()
+        };
         let mut os_map: HashMap<String, String> = HashMap::new();
         for var in &self.os_variables {
             os_map.insert(var.key.clone(), var.value.clone());
@@ -1031,6 +1084,7 @@ mod tests {
             "".to_string(),
             "".to_string(),
             "".to_string(),
+            true,
         );
 
         let (endpoint, _) = state.ai_display_value(AiField::Endpoint);

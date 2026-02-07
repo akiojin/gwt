@@ -15,6 +15,7 @@ const DEFAULT_CODEX_MODEL: &str = "gpt-5.2-codex";
 const DEFAULT_CODEX_REASONING: &str = "high";
 const CODEX_SKILLS_FLAG_DEPRECATED_FROM: &str = "0.80.0";
 const CODEX_SKIP_FLAG_DEPRECATED_FROM: &str = "0.80.0";
+const CODEX_COLLABORATION_MODES_MIN_VERSION: &str = "0.91.0";
 const CODEX_SKIP_FLAG_LEGACY: &str = "--yolo";
 const CODEX_SKIP_FLAG_DANGEROUS: &str = "--dangerously-bypass-approvals-and-sandbox";
 const MODEL_FLAG_PREFIX: &str = "--model=";
@@ -72,7 +73,13 @@ impl CodexAgent {
         let mut cmd = Command::new("codex");
         let version = get_command_version("codex", "--version");
         cmd.arg("--quiet")
-            .args(codex_default_args(None, None, version.as_deref(), false))
+            .args(codex_default_args(
+                None,
+                None,
+                version.as_deref(),
+                false,
+                false,
+            ))
             .arg(prompt)
             .current_dir(directory)
             .stdin(Stdio::null())
@@ -156,6 +163,20 @@ fn should_enable_codex_skills_flag(version: Option<&str>) -> bool {
     }
 }
 
+/// Check if Codex version supports collaboration_modes (SPEC-fdebd681)
+///
+/// Returns true if version is v0.91.0 or later.
+/// Note: This function accepts semantic version strings only.
+/// Special values like "latest" or "installed" must be resolved before calling.
+pub fn supports_collaboration_modes(version: Option<&str>) -> bool {
+    let parsed = parse_version(version);
+    let threshold = parse_version(Some(CODEX_COLLABORATION_MODES_MIN_VERSION));
+    match (parsed, threshold) {
+        (Some(parsed), Some(threshold)) => compare_versions(&parsed, &threshold) != Ordering::Less,
+        _ => false,
+    }
+}
+
 pub fn codex_skip_permissions_flag(version: Option<&str>) -> &'static str {
     let parsed = parse_version(version);
     let threshold = parse_version(Some(CODEX_SKIP_FLAG_DEPRECATED_FROM));
@@ -168,6 +189,42 @@ pub fn codex_skip_permissions_flag(version: Option<&str>) -> &'static str {
             }
         }
         _ => CODEX_SKIP_FLAG_DANGEROUS,
+    }
+}
+
+/// Check if version uses date-based format (0.1.YYYYMMDDNN)
+fn is_date_based_version(version: Option<&str>) -> bool {
+    let parsed = parse_version(version);
+    matches!(parsed, Some(v) if v.major == 0 && v.minor == 1 && v.patch >= 2025000000)
+}
+
+/// Get the web search arguments based on Codex CLI version
+///
+/// Returns `-c web_search=live` for date-based versions (0.1.YYYYMMDDNN format),
+/// `--enable web_search` for v0.90.0 to legacy versions,
+/// `--enable web_search_request` for versions before v0.90.0.
+/// If version is unknown or invalid, defaults to config-based (latest behavior).
+pub fn get_web_search_args(version: Option<&str>) -> Vec<String> {
+    // Date-based versions (0.1.2025XXXXXX) use config-based web_search
+    if is_date_based_version(version) {
+        return vec!["-c".to_string(), "web_search=live".to_string()];
+    }
+
+    let parsed = parse_version(version);
+    let rename_threshold = parse_version(Some("0.90.0"));
+
+    match (parsed, rename_threshold) {
+        (Some(parsed), Some(rename_thresh)) => {
+            if compare_versions(&parsed, &rename_thresh) != Ordering::Less {
+                // v0.90.0+: Use --enable web_search
+                vec!["--enable".to_string(), "web_search".to_string()]
+            } else {
+                // Before v0.90.0: Use --enable web_search_request
+                vec!["--enable".to_string(), "web_search_request".to_string()]
+            }
+        }
+        // Unknown version defaults to config-based (latest behavior)
+        _ => vec!["-c".to_string(), "web_search=live".to_string()],
     }
 }
 
@@ -197,6 +254,7 @@ pub fn codex_default_args(
     reasoning_override: Option<&str>,
     skills_flag_version: Option<&str>,
     bypass_sandbox: bool,
+    collaboration_modes: bool,
 ) -> Vec<String> {
     let model = model_override
         .map(str::trim)
@@ -207,11 +265,9 @@ pub fn codex_default_args(
         .filter(|value| !value.is_empty())
         .unwrap_or(DEFAULT_CODEX_REASONING);
 
-    let mut args = vec![
-        "--enable".to_string(),
-        "web_search_request".to_string(),
-        format!("--model={}", model),
-    ];
+    let web_search_args = get_web_search_args(skills_flag_version);
+    let mut args = vec![format!("--model={}", model)];
+    args.extend(web_search_args);
 
     if !bypass_sandbox {
         args.push("--sandbox".to_string());
@@ -243,6 +299,13 @@ pub fn codex_default_args(
 
     let enable_skills = should_enable_codex_skills_flag(skills_flag_version);
     args = with_codex_skills_flag(args, enable_skills);
+
+    // SPEC-fdebd681: Enable collaboration_modes (Plan/Execute mode switching)
+    if collaboration_modes {
+        args.push("--enable".to_string());
+        args.push("collaboration_modes".to_string());
+    }
+
     args
 }
 
@@ -354,29 +417,30 @@ mod tests {
 
     #[test]
     fn test_codex_default_args_defaults() {
-        let args = codex_default_args(None, None, None, false);
-        assert!(args.contains(&"--enable".to_string()));
-        assert!(args.contains(&"web_search_request".to_string()));
+        let args = codex_default_args(None, None, None, false, false);
+        // Unknown version defaults to config-based web_search
+        assert!(args.contains(&"-c".to_string()));
+        assert!(args.contains(&"web_search=live".to_string()));
         assert!(args.contains(&"--model=gpt-5.2-codex".to_string()));
         assert!(args.contains(&"model_reasoning_effort=high".to_string()));
     }
 
     #[test]
     fn test_codex_default_args_overrides() {
-        let args = codex_default_args(Some("gpt-5.2"), Some("xhigh"), None, false);
+        let args = codex_default_args(Some("gpt-5.2"), Some("xhigh"), None, false, false);
         assert!(args.contains(&"--model=gpt-5.2".to_string()));
         assert!(args.contains(&"model_reasoning_effort=xhigh".to_string()));
     }
 
     #[test]
     fn test_codex_skills_flag_version_gate() {
-        let args_old = codex_default_args(None, None, Some("0.79.0"), false);
+        let args_old = codex_default_args(None, None, Some("0.79.0"), false, false);
         let skills_present_old = args_old.iter().enumerate().any(|(idx, arg)| {
             arg == "--enable" && args_old.get(idx + 1).is_some_and(|v| v == "skills")
         });
         assert!(skills_present_old);
 
-        let args_new = codex_default_args(None, None, Some("0.80.0"), false);
+        let args_new = codex_default_args(None, None, Some("0.80.0"), false, false);
         let skills_present_new = args_new.iter().enumerate().any(|(idx, arg)| {
             arg == "--enable" && args_new.get(idx + 1).is_some_and(|v| v == "skills")
         });
@@ -385,9 +449,52 @@ mod tests {
 
     #[test]
     fn test_codex_default_args_bypass_sandbox() {
-        let args = codex_default_args(None, None, None, true);
+        let args = codex_default_args(None, None, None, true, false);
         assert!(!args.contains(&"--sandbox".to_string()));
         assert!(!args.contains(&"sandbox_workspace_write.network_access=true".to_string()));
+    }
+
+    #[test]
+    fn test_supports_collaboration_modes_version_gate() {
+        // v0.91.0 and later support collaboration_modes
+        assert!(supports_collaboration_modes(Some("0.91.0")));
+        assert!(supports_collaboration_modes(Some("0.91.1")));
+        assert!(supports_collaboration_modes(Some("0.92.0")));
+        assert!(supports_collaboration_modes(Some("1.0.0")));
+        assert!(supports_collaboration_modes(Some("99.99.99")));
+
+        // v0.90.x and earlier do not support collaboration_modes
+        assert!(!supports_collaboration_modes(Some("0.90.0")));
+        assert!(!supports_collaboration_modes(Some("0.90.9")));
+        assert!(!supports_collaboration_modes(Some("0.89.0")));
+
+        // Invalid or None values return false
+        assert!(!supports_collaboration_modes(None));
+        assert!(!supports_collaboration_modes(Some("invalid")));
+        assert!(!supports_collaboration_modes(Some("latest")));
+    }
+
+    #[test]
+    fn test_codex_default_args_with_collaboration_modes() {
+        // collaboration_modes=true should add --enable collaboration_modes
+        let args = codex_default_args(None, None, None, false, true);
+        let has_collab = args.iter().enumerate().any(|(idx, arg)| {
+            arg == "--enable"
+                && args
+                    .get(idx + 1)
+                    .is_some_and(|v| v == "collaboration_modes")
+        });
+        assert!(has_collab);
+
+        // collaboration_modes=false should not add the flags
+        let args_disabled = codex_default_args(None, None, None, false, false);
+        let has_collab_disabled = args_disabled.iter().enumerate().any(|(idx, arg)| {
+            arg == "--enable"
+                && args_disabled
+                    .get(idx + 1)
+                    .is_some_and(|v| v == "collaboration_modes")
+        });
+        assert!(!has_collab_disabled);
     }
 
     #[test]
@@ -410,5 +517,102 @@ mod tests {
             codex_skip_permissions_flag(Some("unknown")),
             "--dangerously-bypass-approvals-and-sandbox"
         );
+    }
+
+    #[test]
+    fn test_is_date_based_version() {
+        // Date-based versions (0.1.2025XXXXXX format)
+        assert!(is_date_based_version(Some("0.1.2025013100")));
+        assert!(is_date_based_version(Some("0.1.2025020100")));
+        assert!(is_date_based_version(Some("0.1.2026010100")));
+
+        // Traditional semver versions are not date-based
+        assert!(!is_date_based_version(Some("0.90.0")));
+        assert!(!is_date_based_version(Some("0.91.0")));
+        assert!(!is_date_based_version(Some("1.0.0")));
+        assert!(!is_date_based_version(Some("0.89.0")));
+
+        // Invalid or None
+        assert!(!is_date_based_version(None));
+        assert!(!is_date_based_version(Some("unknown")));
+    }
+
+    #[test]
+    fn test_get_web_search_args_version_gate() {
+        // Date-based versions use config-based "-c web_search=live"
+        assert_eq!(
+            get_web_search_args(Some("0.1.2025013100")),
+            vec!["-c".to_string(), "web_search=live".to_string()]
+        );
+        assert_eq!(
+            get_web_search_args(Some("0.1.2025020100")),
+            vec!["-c".to_string(), "web_search=live".to_string()]
+        );
+
+        // v0.90.0+ (traditional semver) use "--enable web_search"
+        assert_eq!(
+            get_web_search_args(Some("0.90.0")),
+            vec!["--enable".to_string(), "web_search".to_string()]
+        );
+        assert_eq!(
+            get_web_search_args(Some("0.91.0")),
+            vec!["--enable".to_string(), "web_search".to_string()]
+        );
+        assert_eq!(
+            get_web_search_args(Some("1.0.0")),
+            vec!["--enable".to_string(), "web_search".to_string()]
+        );
+
+        // v0.89.x and earlier use "--enable web_search_request"
+        assert_eq!(
+            get_web_search_args(Some("0.89.0")),
+            vec!["--enable".to_string(), "web_search_request".to_string()]
+        );
+        assert_eq!(
+            get_web_search_args(Some("0.89.9")),
+            vec!["--enable".to_string(), "web_search_request".to_string()]
+        );
+        assert_eq!(
+            get_web_search_args(Some("0.80.0")),
+            vec!["--enable".to_string(), "web_search_request".to_string()]
+        );
+
+        // Invalid or None values default to config-based (latest behavior)
+        assert_eq!(
+            get_web_search_args(None),
+            vec!["-c".to_string(), "web_search=live".to_string()]
+        );
+        assert_eq!(
+            get_web_search_args(Some("unknown")),
+            vec!["-c".to_string(), "web_search=live".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_codex_default_args_web_search_version_gate() {
+        // Date-based version should use "-c web_search=live"
+        let args_config = codex_default_args(None, None, Some("0.1.2025013100"), false, false);
+        assert!(args_config.contains(&"web_search=live".to_string()));
+        assert!(
+            !args_config.contains(&"--enable".to_string())
+                || !args_config
+                    .iter()
+                    .any(|a| a == "web_search" && !a.contains("="))
+        );
+
+        // v0.90.0 should use "--enable web_search"
+        let args_new = codex_default_args(None, None, Some("0.90.0"), false, false);
+        assert!(args_new.contains(&"web_search".to_string()));
+        assert!(!args_new.contains(&"web_search_request".to_string()));
+        assert!(!args_new.contains(&"web_search=live".to_string()));
+
+        // v0.89.x should use "--enable web_search_request"
+        let args_old = codex_default_args(None, None, Some("0.89.0"), false, false);
+        assert!(args_old.contains(&"web_search_request".to_string()));
+        assert!(!args_old.iter().any(|a| a == "web_search"));
+
+        // None (unknown version) should default to "-c web_search=live"
+        let args_default = codex_default_args(None, None, None, false, false);
+        assert!(args_default.contains(&"web_search=live".to_string()));
     }
 }

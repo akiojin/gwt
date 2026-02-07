@@ -20,7 +20,7 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Generate coverage
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+        run: cargo llvm-cov -p gwt-cli -p gwt-core -p gwt-web --all-features --lcov --output-path lcov.info
         timeout-minutes: 15
       - name: Upload to Codecov
         uses: codecov/codecov-action@v4

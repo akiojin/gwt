@@ -1,71 +1,197 @@
-# 実装計画: コーディングエージェント起動の互換性整備（起動準備の非同期化/単一パイプライン）
+# 実装計画: 進捗モーダル（ユーザーストーリー15）
 
-**仕様ID**: `SPEC-3b0ed29b` | **日付**: 2026-01-20 | **仕様書**: `specs/SPEC-3b0ed29b/spec.md`
-**概要**: Codex/Claude/Gemini/OpenCodeの起動フローにおける準備処理を非同期化し、シングル/ tmux モードで共通の起動準備パイプラインを使う。進捗はTUIのステータス表示領域へ英語で表示する。
+**仕様ID**: `SPEC-3b0ed29b` | **日付**: 2026-01-25 | **仕様書**: [spec.md](./spec.md)
+**入力**: `/specs/SPEC-3b0ed29b/spec.md` ユーザーストーリー15（FR-041, FR-044〜FR-060）
 
-## 1. 前提・対象範囲
+**スコープ**: このplan.mdはユーザーストーリー15「起動準備の進捗がセンターモーダルで見える」のみを対象とする。
 
-- Rust 実装の `gwt-cli` / `gwt-core` が対象。
-- TTYの挙動を維持し、CLI出力は英語/ASCIIのみ。
-- セッション保存やQuick Startの既存挙動を保持する。
+## 概要
 
-## 2. 成功基準との対応
+Worktree作成処理の進捗をセンターモーダルで表示する機能を実装する。現在のステータスバー表示（`launch_status`）からモーダル表示に変更し、ステップリスト形式でチェックマーク表示を行う。
 
-| 成功基準 | 計画での対応 |
-| --- | --- |
-| SC-003 | 起動失敗時のログ出力とユーザー向けメッセージを追加する |
-| SC-008 | 異常終了を検知し、成功扱いにしない |
-| SC-009 | OpenCodeのモデル選択にデフォルト/任意入力を常に提示する |
-| SC-010 | 起動開始メッセージの即時表示を追加する |
-| SC-011 | 終了復帰の待機遅延を1秒以内に抑える |
-| SC-012 | 起動準備の進捗をTUI上に即時表示し、入力が応答することを保証する |
-| SC-013 | 依存インストールを含む準備パイプラインをシングル/ tmux で統一する |
-| SC-014 | macOSのPTYラッパーが`script -q -- /dev/null`形式で生成されることをテストで確認する |
+## 技術コンテキスト
 
-## 3. アーキテクチャ方針
+**言語/バージョン**: Rust 2021 Edition (stable)
+**主要な依存関係**: ratatui 0.29, crossterm 0.28
+**ストレージ**: N/A（メモリのみ）
+**テスト**: cargo test
+**ターゲットプラットフォーム**: Linux, macOS, Windows
+**プロジェクトタイプ**: 単一CLIアプリケーション
+**パフォーマンス目標**: モーダル表示まで1秒以内
+**制約**: ASCII文字のみ（絵文字不使用）、CLIは英語のみ
 
-1. Codexの権限スキップはバージョン判定ヘルパーで `--yolo` / `--dangerously-bypass-approvals-and-sandbox` を切替する。
-2. 起動ログは整形ヘルパーで統一し、Working directory/Model/Reasoning/Mode/Skip/Args/Version/Execution method を出力する。
-3. 起動終了時は exit classification (success/interrupted/failure) を行い、TUIへの復帰コンテキストに変換する。
-4. OpenCodeモデルは固定リストに default/custom を保持し、空リストを許さない。
-5. Codexの権限スキップ時はスキップフラグが後勝ちになるように引数順を調整し、Claude Codeのスキップ時はWindows以外で`IS_SANDBOX=1`を付与する。
-6. 起動開始時は依存インストール前に英語のステータス行を出力し、空白待機を避ける。
-7. セッション更新のバックグラウンド待機は停止シグナルで即時解除できるようにする。
-8. 起動準備（Worktree解決/依存インストール/コマンド組み立て）はバックグラウンドタスクとして実行し、TUIはメッセージ受信で進捗表示を更新する。
-9. シングル/ tmux の分岐は「最終的な起動実行」だけに限定し、準備パイプラインは共通化する。
-10. macOSではPTYラッパーのオプション解釈を遮断し、`script -q -- /dev/null`形式で起動する。
+## 原則チェック
 
-## 4. 実装ステップ (ハイレベル ToDo)
+| 原則 | 状態 | 備考 |
+|-----|------|-----|
+| I. シンプルさの追求 | ✅ | 既存のLaunchProgress拡張で実現 |
+| II. テストファースト | ✅ | TDDでユニットテスト先行 |
+| III. 既存コードの尊重 | ✅ | main.rs, app.rsを改修、新規ファイル最小限 |
+| IV. 品質ゲート | ✅ | clippy, fmt, testを通過させる |
+| V. 自動化の徹底 | ✅ | Conventional Commits遵守 |
 
-1. Codex権限スキップの互換フラグ判定とユニットテストを追加する。
-2. 起動ログ整形ヘルパーを追加し、ログ出力を統一する。
-3. 終了判定の分類とエラー表示/一覧復帰を実装する。
-4. OpenCodeのモデル選択デフォルト/カスタム入力を明示し、ユニットテストで空リストを防止する。
-5. Codexデフォルトモデル/モデル選択肢を仕様に合わせ、権限スキップの引数順序と`IS_SANDBOX`付与（Windows除外）を修正する。
-6. 起動開始メッセージを依存インストール前に表示し、終了復帰の待機遅延を解消する。
-7. 起動準備パイプラインを抽出し、シングル/ tmux の両方から同じ関数を利用する。
-8. 起動準備の進捗をTUIステータス表示領域に反映する。
-9. tmux モードでも依存インストールをパイプライン内で実行する（有効時）。
-10. `cargo build --release` でビルド確認する。
-11. macOS向けPTYラッパーの引数生成を修正し、ユニットテストで保証する。
+## プロジェクト構造
 
-## 5. テスト戦略
+### ドキュメント（この機能）
 
-- ユニットテスト: 起動準備パイプラインのステップ順序、tmux/シングルで同一準備が使われること、進捗表示更新、起動開始メッセージ、終了復帰遅延の抑制。
-- ユニットテスト: Claude Codeの権限スキップ時に`IS_SANDBOX`がWindows以外でのみ付与されること。
-- ユニットテスト: macOSのPTYラッパーが`script -q -- /dev/null`形式になること。
-- ビルド検証: `cargo build --release`。
+```text
+specs/SPEC-3b0ed29b/
+├── spec.md              # 機能仕様
+├── plan.md              # このファイル
+├── research.md          # フェーズ0出力
+├── data-model.md        # フェーズ1出力
+├── quickstart.md        # フェーズ1出力
+└── tasks.md             # フェーズ2出力
+```
 
-## 6. リスクと軽減策
+### ソースコード（リポジトリルート）
 
-| リスク | 影響 | 軽減策 |
-| --- | --- | --- |
-| OSによる終了コード/シグナル差 | 異常終了の誤判定 | exit code + signal の併用判定にする |
-| Codex CLI のバージョン取得失敗 | スキップフラグ誤選択 | 判定不能時は新フラグを優先する |
-| バックグラウンド準備で競合が起きる | 二重起動/表示混乱 | 進捗を1件に限定し、同一ブランチの再起動を抑止する |
-| Windows環境でClaude Codeが`IS_SANDBOX=1`によりクラッシュする | 起動失敗 | Windowsでは`IS_SANDBOX`を付与しない |
+```text
+crates/gwt-cli/src/
+├── main.rs                      # LaunchProgress拡張、ProgressStep追加
+├── tui/
+│   ├── app.rs                   # App状態追加、モーダル描画統合
+│   └── widgets/
+│       ├── mod.rs               # モジュール追加
+│       └── progress_modal.rs    # 新規: モーダルウィジェット
+```
 
-## 7. 次のステップ
+## フェーズ0: 調査（技術スタック選定）
 
-1. `specs/SPEC-3b0ed29b/tasks.md` を更新
-2. 必要なテストを追加・実行
+**出力**: `specs/SPEC-3b0ed29b/research.md`
+
+### 調査結果
+
+#### 1. 既存のコードベース分析
+
+**現在の実装**:
+- `LaunchProgress`列挙型（main.rs:803-820）: 4つのバリアント（ResolvingWorktree, BuildingCommand, CheckingDependencies, InstallingDependencies）
+- `LaunchUpdate`列挙型（app.rs:267-271）: Progress, WorktreeReady, Ready, Failed
+- `launch_status: Option<String>`（app.rs:321）: 現在の進捗メッセージ
+- `apply_launch_updates()`（app.rs:1686-1733）: チャネル経由で更新を受信
+
+**既存パターン**:
+- バックグラウンドスレッドで処理、`mpsc::channel`でTUIに通知
+- `LaunchProgress.message()`で英語メッセージを生成
+- ステータスバーに表示（`active_status_message()`経由）
+
+#### 2. 技術的決定
+
+| 決定 | 選択 | 理由 |
+|-----|------|-----|
+| ステップ状態管理 | `ProgressStep`構造体を新規追加 | 既存の`LaunchProgress`は単一メッセージ用、複数ステップ状態が必要 |
+| モーダル描画 | `ratatui::widgets::Clear` + `Block` | 既存のポップアップパターン（help画面等）に準拠 |
+| 経過時間計測 | `std::time::Instant` | 標準ライブラリ、依存追加不要 |
+| スキップ表示 | `StepStatus::Skipped`追加 | 既存worktree再利用時のスキップ表示に必要 |
+
+#### 3. 制約と依存関係
+
+- ratatui 0.29のモーダル描画：`Clear`ウィジェットで背景クリア後、`Block`で枠描画
+- 半透明オーバーレイ：ratatuiはANSI色のみ対応、疑似半透明（暗い背景色）で代用
+- キャンセル処理：`std::process::Child::kill()`またはスレッド中断フラグ
+
+## フェーズ1: 設計（アーキテクチャと契約）
+
+### 1.1 データモデル設計
+
+**ファイル**: `data-model.md`
+
+```rust
+/// ステップの種類（FR-048）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressStepKind {
+    FetchRemote,       // 1. Fetching remote...
+    ValidateBranch,    // 2. Validating branch...
+    GeneratePath,      // 3. Generating path...
+    CheckConflicts,    // 4. Checking conflicts...
+    CreateWorktree,    // 5. Creating worktree...
+    CheckDependencies, // 6. Checking dependencies...
+}
+
+/// ステップの状態（FR-047）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepStatus {
+    Pending,    // [ ]
+    Running,    // [>]
+    Completed,  // [x]
+    Failed,     // [!]
+    Skipped,    // [skip]
+}
+
+/// 進捗ステップ（FR-049）
+#[derive(Debug, Clone)]
+pub struct ProgressStep {
+    pub kind: ProgressStepKind,
+    pub status: StepStatus,
+    pub started_at: Option<Instant>,
+    pub error_message: Option<String>,
+}
+
+/// モーダル状態
+pub struct ProgressModalState {
+    pub visible: bool,
+    pub steps: Vec<ProgressStep>,
+    pub start_time: Instant,
+    pub cancellation_requested: bool,
+}
+```
+
+### 1.2 クイックスタートガイド
+
+**ファイル**: `quickstart.md`
+
+開発者向けの実装ガイド：
+1. `ProgressStepKind`と`ProgressStep`を`main.rs`に追加
+2. `ProgressModalState`を`App`構造体に追加
+3. `progress_modal.rs`ウィジェットを作成
+4. `ui()`関数でモーダル描画を追加
+5. ESCキーハンドリングを追加
+
+### 1.3 契約/インターフェース
+
+**ファイル**: `contracts/progress_modal.rs`
+
+```rust
+impl ProgressStep {
+    pub fn new(kind: ProgressStepKind) -> Self;
+    pub fn start(&mut self);
+    pub fn complete(&mut self);
+    pub fn fail(&mut self, message: String);
+    pub fn skip(&mut self);
+    pub fn marker(&self) -> &'static str;
+    pub fn elapsed_secs(&self) -> Option<f64>;
+    pub fn should_show_elapsed(&self) -> bool; // 3秒以上
+}
+
+impl Widget for ProgressModal<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer);
+}
+```
+
+## テスト戦略
+
+- **ユニットテスト**: ProgressStep状態遷移、経過時間計算、マーカー文字列
+- **統合テスト**: モーダル表示/非表示遷移、ESCキャンセル
+- **手動テスト**: 実際のWorktree作成での動作確認
+
+## リスクと緩和策
+
+### 技術的リスク
+
+1. **モーダル描画のちらつき**
+   - **緩和策**: ratatuiのダブルバッファリングを確認、必要に応じて描画最適化
+
+2. **キャンセル時のgit操作中断**
+   - **緩和策**: キャンセルフラグでループ脱出、不完全worktreeのクリーンアップ処理
+
+### 依存関係リスク
+
+1. **既存のLaunchProgressとの互換性**
+   - **緩和策**: 段階的移行、既存バリアントを維持しつつ新しいステップ管理を追加
+
+## 次のステップ
+
+1. ✅ フェーズ0完了: 調査と技術スタック決定
+2. ✅ フェーズ1完了: 設計とアーキテクチャ定義
+3. ⏭️ `/speckit.tasks` を実行してタスクを生成
+4. ⏭️ `/speckit.implement` で実装を開始

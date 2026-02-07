@@ -4,10 +4,12 @@ use chrono::Utc;
 use clap::Parser;
 use gwt_core::agent::codex::{codex_default_args, codex_skip_permissions_flag};
 use gwt_core::agent::get_command_version;
-use gwt_core::ai::AgentHistoryStore;
-use gwt_core::config::{save_session_entry, AgentStatus, Session, Settings, ToolSessionEntry};
+use gwt_core::ai::{
+    AgentHistoryStore, AgentType as SessionAgentType, ClaudeSessionParser, CodexSessionParser,
+    GeminiSessionParser, OpenCodeSessionParser, SessionParser,
+};
+use gwt_core::config::{save_session_entry, AgentStatus, Settings, ToolSessionEntry};
 use gwt_core::error::GwtError;
-use gwt_core::worktree::WorktreeManager;
 use gwt_core::TmuxMode;
 use std::fs;
 #[cfg(unix)]
@@ -21,9 +23,10 @@ use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 mod cli;
+mod commands;
 mod tui;
 
-use cli::{Cli, Commands, HookAction, OutputFormat};
+use cli::Cli;
 use tui::{AgentLaunchConfig, CodingAgent, ExecutionMode, TuiEntryContext};
 
 fn main() {
@@ -60,6 +63,16 @@ fn run() -> Result<(), GwtError> {
         ..Default::default()
     };
     gwt_core::logging::init_logger(&log_config)?;
+    match cleanup_startup_logs(&repo_root, &settings) {
+        Ok(removed) => {
+            if removed > 0 {
+                info!(category = "logging", removed, "Removed old log files");
+            }
+        }
+        Err(err) => {
+            warn!(category = "logging", error = %err, "Failed to clean up old logs");
+        }
+    }
 
     info!(
         repo_root = %repo_root.display(),
@@ -68,7 +81,7 @@ fn run() -> Result<(), GwtError> {
     );
 
     match cli.command {
-        Some(cmd) => handle_command(cmd, &repo_root, &settings),
+        Some(cmd) => commands::handle_command(cmd, &repo_root, &settings),
         None => {
             // Interactive TUI mode - single or multi based on tmux detection
             let tmux_mode = detect_tui_tmux_mode();
@@ -84,37 +97,63 @@ fn run() -> Result<(), GwtError> {
                 match selection {
                     Some(launch_plan) => {
                         // FR-088: Record agent usage to history (single mode)
-                        let agent_id = launch_plan.config.agent.id();
-                        let agent_label = format!(
-                            "{}@{}",
-                            launch_plan.config.agent.label(),
-                            launch_plan.selected_version
-                        );
-                        let mut agent_history = AgentHistoryStore::load().unwrap_or_default();
-                        if let Err(e) = agent_history.record(
-                            &repo_root,
-                            &launch_plan.config.branch_name,
-                            agent_id,
-                            &agent_label,
-                        ) {
-                            warn!(category = "main", "Failed to record agent history: {}", e);
-                        }
-                        if let Err(e) = agent_history.save() {
-                            warn!(category = "main", "Failed to save agent history: {}", e);
-                        }
+                        // Run in background thread to avoid blocking agent startup
+                        let history_repo_root = repo_root.clone();
+                        let history_branch_name = launch_plan.config.branch_name.clone();
+                        // T603: Use custom agent ID/label when available (SPEC-71f2742d US6)
+                        let (history_agent_id, history_agent_label) = if let Some(ref custom) =
+                            launch_plan.config.custom_agent
+                        {
+                            (
+                                custom.id.clone(),
+                                format!("{}@{}", custom.display_name, launch_plan.selected_version),
+                            )
+                        } else {
+                            (
+                                launch_plan.config.agent.id().to_string(),
+                                format!(
+                                    "{}@{}",
+                                    launch_plan.config.agent.label(),
+                                    launch_plan.selected_version
+                                ),
+                            )
+                        };
+                        thread::spawn(move || {
+                            let mut agent_history = AgentHistoryStore::load().unwrap_or_default();
+                            if let Err(e) = agent_history.record(
+                                &history_repo_root,
+                                &history_branch_name,
+                                &history_agent_id,
+                                &history_agent_label,
+                            ) {
+                                warn!(category = "main", "Failed to record agent history: {}", e);
+                            }
+                            if let Err(e) = agent_history.save() {
+                                warn!(category = "main", "Failed to save agent history: {}", e);
+                            }
+                        });
+                        // SPEC-a70a1ece: Capture repo_root before launch_plan is consumed
+                        let entry_repo_root = launch_plan.repo_root.clone();
                         match execute_launch_plan(launch_plan) {
                             Ok(AgentExitKind::Success) => {
-                                entry = Some(TuiEntryContext::success(
-                                    "Session completed successfully.".to_string(),
-                                ));
+                                entry = Some(
+                                    TuiEntryContext::success(
+                                        "Session completed successfully.".to_string(),
+                                    )
+                                    .with_repo_root(entry_repo_root),
+                                );
                             }
                             Ok(AgentExitKind::Interrupted) => {
-                                entry = Some(TuiEntryContext::warning(
-                                    "Session interrupted.".to_string(),
-                                ));
+                                entry = Some(
+                                    TuiEntryContext::warning("Session interrupted.".to_string())
+                                        .with_repo_root(entry_repo_root),
+                                );
                             }
                             Err(err) => {
-                                entry = Some(TuiEntryContext::error(err.to_string()));
+                                entry = Some(
+                                    TuiEntryContext::error(err.to_string())
+                                        .with_repo_root(entry_repo_root),
+                                );
                             }
                         }
                     }
@@ -130,463 +169,9 @@ fn detect_tui_tmux_mode() -> TmuxMode {
     TmuxMode::detect()
 }
 
-fn handle_command(cmd: Commands, repo_root: &PathBuf, settings: &Settings) -> Result<(), GwtError> {
-    match cmd {
-        Commands::List { format } => cmd_list(repo_root, format),
-        Commands::Add { branch, new, base } => cmd_add(repo_root, &branch, new, base.as_deref()),
-        Commands::Remove {
-            target,
-            force,
-            delete_branch,
-        } => cmd_remove(repo_root, &target, force, delete_branch),
-        Commands::Switch { branch, new_window } => cmd_switch(repo_root, &branch, new_window),
-        Commands::Clean { dry_run, prune } => cmd_clean(repo_root, dry_run, prune),
-        Commands::Logs { limit, follow: _ } => cmd_logs(repo_root, settings, limit),
-        Commands::Serve { port, address } => cmd_serve(port, &address),
-        Commands::Init { force } => cmd_init(repo_root, force),
-        Commands::Lock { target, reason } => cmd_lock(repo_root, &target, reason.as_deref()),
-        Commands::Unlock { target } => cmd_unlock(repo_root, &target),
-        Commands::Repair { target } => cmd_repair(repo_root, target.as_deref()),
-        Commands::Hook { action } => cmd_hook(action),
-    }
-}
-
-fn cmd_list(repo_root: &PathBuf, format: OutputFormat) -> Result<(), GwtError> {
-    let manager = WorktreeManager::new(repo_root)?;
-    let worktrees = manager.list()?;
-
-    match format {
-        OutputFormat::Table => {
-            println!(
-                "{:<40} {:<30} {:<10} {:<8}",
-                "PATH", "BRANCH", "STATUS", "CHANGES"
-            );
-            println!("{}", "-".repeat(88));
-            for wt in &worktrees {
-                let branch = wt
-                    .branch
-                    .clone()
-                    .unwrap_or_else(|| "(detached)".to_string());
-                let changes = if wt.has_changes { "dirty" } else { "clean" };
-                println!(
-                    "{:<40} {:<30} {:<10} {:<8}",
-                    wt.path.display(),
-                    branch,
-                    wt.status,
-                    changes
-                );
-            }
-        }
-        OutputFormat::Json => {
-            let json = serde_json::json!(worktrees
-                .iter()
-                .map(|wt| {
-                    serde_json::json!({
-                        "path": wt.path.to_string_lossy(),
-                        "branch": wt.branch,
-                        "status": wt.status.to_string(),
-                        "has_changes": wt.has_changes,
-                        "has_unpushed": wt.has_unpushed,
-                    })
-                })
-                .collect::<Vec<_>>());
-            println!("{}", serde_json::to_string_pretty(&json).unwrap());
-        }
-        OutputFormat::Simple => {
-            for wt in &worktrees {
-                println!("{}", wt.path.display());
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn cmd_add(
-    repo_root: &PathBuf,
-    branch: &str,
-    new_branch: bool,
-    base: Option<&str>,
-) -> Result<(), GwtError> {
-    info!(
-        category = "cli",
-        command = "add",
-        branch,
-        new_branch,
-        base = base.unwrap_or("HEAD"),
-        "Executing add command"
-    );
-
-    let manager = WorktreeManager::new(repo_root)?;
-
-    let wt = if new_branch {
-        manager.create_new_branch(branch, base)?
-    } else {
-        manager.create_for_branch(branch)?
-    };
-
-    println!("Created worktree at: {}", wt.path.display());
-    println!("Branch: {}", wt.display_name());
-
-    Ok(())
-}
-
-fn cmd_remove(
-    repo_root: &PathBuf,
-    target: &str,
-    force: bool,
-    delete_branch: bool,
-) -> Result<(), GwtError> {
-    info!(
-        category = "cli",
-        command = "remove",
-        target,
-        force,
-        delete_branch,
-        "Executing remove command"
-    );
-
-    let manager = WorktreeManager::new(repo_root)?;
-
-    // Find worktree by branch name or path
-    let wt = manager
-        .get_by_branch(target)?
-        .or_else(|| {
-            let path = PathBuf::from(target);
-            manager.get_by_path(&path).ok().flatten()
-        })
-        .ok_or_else(|| GwtError::WorktreeNotFound {
-            path: PathBuf::from(target),
-        })?;
-
-    let path = wt.path.clone();
-
-    if delete_branch {
-        manager.remove_with_branch(&path, force)?;
-        println!("Removed worktree and branch: {}", target);
-    } else {
-        manager.remove(&path, force)?;
-        println!("Removed worktree: {}", path.display());
-    }
-
-    Ok(())
-}
-
-fn cmd_switch(repo_root: &PathBuf, branch: &str, new_window: bool) -> Result<(), GwtError> {
-    info!(
-        category = "cli",
-        command = "switch",
-        branch,
-        new_window,
-        "Executing switch command"
-    );
-
-    let manager = WorktreeManager::new(repo_root)?;
-
-    let wt = manager
-        .get_by_branch(branch)?
-        .ok_or_else(|| GwtError::WorktreeNotFound {
-            path: PathBuf::from(branch),
-        })?;
-
-    if new_window {
-        // Open in new terminal window (platform specific)
-        #[cfg(target_os = "macos")]
-        {
-            std::process::Command::new("open")
-                .args(["-a", "Terminal", wt.path.to_str().unwrap()])
-                .spawn()?;
-        }
-        #[cfg(target_os = "linux")]
-        {
-            // Try common terminal emulators
-            let terminals = ["gnome-terminal", "konsole", "xterm"];
-            for term in terminals {
-                if std::process::Command::new("which")
-                    .arg(term)
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false)
-                {
-                    std::process::Command::new(term)
-                        .arg("--working-directory")
-                        .arg(&wt.path)
-                        .spawn()?;
-                    break;
-                }
-            }
-        }
-        println!("Opened new terminal in: {}", wt.path.display());
-    } else {
-        println!("cd {}", wt.path.display());
-        println!("\nRun the above command to switch to the worktree.");
-    }
-
-    Ok(())
-}
-
-fn cmd_clean(repo_root: &PathBuf, dry_run: bool, prune: bool) -> Result<(), GwtError> {
-    info!(
-        category = "cli",
-        command = "clean",
-        dry_run,
-        prune,
-        "Executing clean command"
-    );
-
-    let manager = WorktreeManager::new(repo_root)?;
-
-    let orphans = manager.detect_orphans();
-
-    if orphans.is_empty() {
-        println!("No orphaned worktrees found.");
-        return Ok(());
-    }
-
-    for orphan in &orphans {
-        println!(
-            "{}: {} ({})",
-            if dry_run { "Would remove" } else { "Removing" },
-            orphan.path.display(),
-            orphan.reason
-        );
-
-        if !dry_run {
-            // Remove orphan (just metadata, path is already gone)
-            manager.prune()?;
-        }
-    }
-
-    if prune && !dry_run {
-        manager.prune()?;
-        println!("Pruned git worktree metadata.");
-    }
-
-    Ok(())
-}
-
-fn cmd_logs(repo_root: &Path, settings: &Settings, limit: usize) -> Result<(), GwtError> {
+fn cleanup_startup_logs(repo_root: &Path, settings: &Settings) -> Result<usize, GwtError> {
     let log_dir = settings.log_dir(repo_root);
-    let reader = gwt_core::logging::LogReader::new(&log_dir);
-
-    let entries = reader.read_latest(limit)?;
-
-    if entries.is_empty() {
-        println!("No log entries found.");
-        return Ok(());
-    }
-
-    for entry in entries {
-        println!("{} [{}] {}", entry.timestamp, entry.level, entry.message());
-    }
-
-    Ok(())
-}
-
-fn cmd_serve(port: u16, address: &str) -> Result<(), GwtError> {
-    println!("Starting web server on {}:{}...", address, port);
-    // TODO: Start web server (Phase 4)
-    println!("Web server is not yet implemented.");
-    Ok(())
-}
-
-fn cmd_init(repo_root: &Path, force: bool) -> Result<(), GwtError> {
-    let config_path = repo_root.join(".gwt.toml");
-
-    if config_path.exists() && !force {
-        println!("Configuration already exists at: {}", config_path.display());
-        println!("Use --force to overwrite.");
-        return Ok(());
-    }
-
-    Settings::create_default(&config_path)?;
-    println!("Created configuration at: {}", config_path.display());
-
-    Ok(())
-}
-
-fn cmd_lock(repo_root: &PathBuf, target: &str, reason: Option<&str>) -> Result<(), GwtError> {
-    info!(
-        category = "cli",
-        command = "lock",
-        target,
-        reason = reason.unwrap_or("none"),
-        "Executing lock command"
-    );
-
-    let manager = WorktreeManager::new(repo_root)?;
-
-    let wt = manager
-        .get_by_branch(target)?
-        .ok_or_else(|| GwtError::WorktreeNotFound {
-            path: PathBuf::from(target),
-        })?;
-
-    manager.lock(&wt.path, reason)?;
-    println!("Locked worktree: {}", wt.path.display());
-
-    Ok(())
-}
-
-fn cmd_unlock(repo_root: &PathBuf, target: &str) -> Result<(), GwtError> {
-    info!(
-        category = "cli",
-        command = "unlock",
-        target,
-        "Executing unlock command"
-    );
-
-    let manager = WorktreeManager::new(repo_root)?;
-
-    let wt = manager
-        .get_by_branch(target)?
-        .ok_or_else(|| GwtError::WorktreeNotFound {
-            path: PathBuf::from(target),
-        })?;
-
-    manager.unlock(&wt.path)?;
-    println!("Unlocked worktree: {}", wt.path.display());
-
-    Ok(())
-}
-
-fn cmd_repair(_repo_root: &PathBuf, _target: Option<&str>) -> Result<(), GwtError> {
-    Err(GwtError::Internal(
-        "Worktree repair is disabled.".to_string(),
-    ))
-}
-
-/// Handle Claude Code hook subcommands (SPEC-861d8cdf FR-101/T-101/T-102)
-fn cmd_hook(action: HookAction) -> Result<(), GwtError> {
-    use gwt_core::config::{
-        get_claude_settings_path, is_gwt_hooks_registered, register_gwt_hooks, unregister_gwt_hooks,
-    };
-
-    match action {
-        HookAction::Event { name } => handle_hook_event(&name),
-        HookAction::EventAlias(args) => {
-            let name = args
-                .first()
-                .ok_or_else(|| GwtError::Internal("Missing hook event name.".to_string()))?;
-            if args.len() > 1 {
-                return Err(GwtError::Internal(format!(
-                    "Unexpected hook arguments: {}",
-                    args.join(" ")
-                )));
-            }
-            handle_hook_event(name)
-        }
-        HookAction::Setup => {
-            let settings_path =
-                get_claude_settings_path().ok_or_else(|| GwtError::ConfigNotFound {
-                    path: PathBuf::from("~/.claude/settings.json"),
-                })?;
-
-            if is_gwt_hooks_registered(&settings_path) {
-                println!("gwt hooks are already registered in Claude Code settings.");
-                return Ok(());
-            }
-
-            register_gwt_hooks(&settings_path)?;
-            println!("Successfully registered gwt hooks in Claude Code settings.");
-            println!("Path: {}", settings_path.display());
-            Ok(())
-        }
-        HookAction::Uninstall => {
-            let settings_path =
-                get_claude_settings_path().ok_or_else(|| GwtError::ConfigNotFound {
-                    path: PathBuf::from("~/.claude/settings.json"),
-                })?;
-
-            if !is_gwt_hooks_registered(&settings_path) {
-                println!("gwt hooks are not registered in Claude Code settings.");
-                return Ok(());
-            }
-
-            unregister_gwt_hooks(&settings_path)?;
-            println!("Successfully removed gwt hooks from Claude Code settings.");
-            Ok(())
-        }
-        HookAction::Status => {
-            let settings_path =
-                get_claude_settings_path().ok_or_else(|| GwtError::ConfigNotFound {
-                    path: PathBuf::from("~/.claude/settings.json"),
-                })?;
-
-            if is_gwt_hooks_registered(&settings_path) {
-                println!("gwt hooks: registered");
-                println!("Path: {}", settings_path.display());
-            } else {
-                println!("gwt hooks: not registered");
-                println!("Run 'gwt hook setup' to enable agent status tracking.");
-            }
-            Ok(())
-        }
-    }
-}
-
-/// Process a hook event from Claude Code (SPEC-861d8cdf T-101)
-/// Called by Claude Code hooks via `gwt hook <name>` (or `gwt hook event <name>`)
-fn handle_hook_event(event: &str) -> Result<(), GwtError> {
-    use std::io::{self, Read};
-
-    info!(
-        category = "cli",
-        command = "hook",
-        event = event,
-        "Executing hook event command"
-    );
-
-    // Read JSON payload from stdin
-    let mut input = String::new();
-    io::stdin().read_to_string(&mut input)?;
-
-    // Parse the JSON payload
-    let payload: serde_json::Value = serde_json::from_str(&input).unwrap_or_default();
-
-    // Extract cwd from payload to determine which worktree to update
-    let cwd = payload
-        .get("cwd")
-        .and_then(|v| v.as_str())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-    debug!(
-        category = "hook",
-        event = event,
-        cwd = %cwd.display(),
-        "Processing hook event"
-    );
-
-    // Determine the new status based on the event
-    let new_status = hook_event_to_status(event, &payload);
-
-    // Load or create session for the worktree
-    let session_path = Session::session_path(&cwd);
-    let mut session = if session_path.exists() {
-        Session::load(&session_path).unwrap_or_else(|_| {
-            // Create new session if load fails
-            let branch = detect_branch_name(&cwd);
-            Session::new(&cwd, &branch)
-        })
-    } else {
-        let branch = detect_branch_name(&cwd);
-        Session::new(&cwd, &branch)
-    };
-
-    // Update the session status
-    session.update_status(new_status);
-    session.save(&session_path)?;
-
-    debug!(
-        category = "hook",
-        event = event,
-        status = ?new_status,
-        session_path = %session_path.display(),
-        "Session status updated"
-    );
-
-    Ok(())
+    gwt_core::logging::cleanup_old_logs(&log_dir, settings.log_retention_days)
 }
 
 /// Map hook event name to AgentStatus (SPEC-861d8cdf T-101)
@@ -710,6 +295,7 @@ struct SessionUpdateContext {
     mode: String,
     reasoning_level: Option<String>,
     skip_permissions: bool,
+    collaboration_modes: bool,
 }
 
 impl SessionUpdateContext {
@@ -725,6 +311,12 @@ impl SessionUpdateContext {
             reasoning_level: self.reasoning_level.clone(),
             skip_permissions: Some(self.skip_permissions),
             tool_version: Some(self.version.clone()),
+            collaboration_modes: Some(self.collaboration_modes),
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
             timestamp: Utc::now().timestamp_millis(),
         }
     }
@@ -788,10 +380,13 @@ fn emit_fast_exit_notice(duration_ms: u128, command_display: &str) {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LaunchProgress {
+    #[allow(dead_code)]
     ResolvingWorktree,
     BuildingCommand,
     CheckingDependencies,
-    InstallingDependencies { manager: String },
+    InstallingDependencies {
+        manager: String,
+    },
 }
 
 impl LaunchProgress {
@@ -804,6 +399,131 @@ impl LaunchProgress {
                 format!("Installing dependencies with {}...", manager)
             }
         }
+    }
+}
+
+/// Progress step kind for worktree preparation modal (FR-048)
+/// The 6 stages of worktree preparation process
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProgressStepKind {
+    /// 1. Fetching remote...
+    FetchRemote,
+    /// 2. Validating branch...
+    ValidateBranch,
+    /// 3. Generating path...
+    GeneratePath,
+    /// 4. Checking conflicts...
+    CheckConflicts,
+    /// 5. Creating worktree...
+    CreateWorktree,
+    /// 6. Checking dependencies...
+    CheckDependencies,
+}
+
+impl ProgressStepKind {
+    /// Returns the display message for this step kind
+    pub(crate) fn message(&self) -> &'static str {
+        match self {
+            ProgressStepKind::FetchRemote => "Fetching remote...",
+            ProgressStepKind::ValidateBranch => "Validating branch...",
+            ProgressStepKind::GeneratePath => "Generating path...",
+            ProgressStepKind::CheckConflicts => "Checking conflicts...",
+            ProgressStepKind::CreateWorktree => "Creating worktree...",
+            ProgressStepKind::CheckDependencies => "Checking dependencies...",
+        }
+    }
+
+    /// Returns all step kinds in order
+    pub(crate) fn all() -> [ProgressStepKind; 6] {
+        [
+            ProgressStepKind::FetchRemote,
+            ProgressStepKind::ValidateBranch,
+            ProgressStepKind::GeneratePath,
+            ProgressStepKind::CheckConflicts,
+            ProgressStepKind::CreateWorktree,
+            ProgressStepKind::CheckDependencies,
+        ]
+    }
+}
+
+/// Step status for progress modal (FR-047)
+/// [x] Completed, [>] Running, [ ] Pending, [!] Failed, [skip] Skipped
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum StepStatus {
+    /// [ ] - Waiting to start
+    #[default]
+    Pending,
+    /// [>] - Currently executing
+    Running,
+    /// [x] - Successfully completed
+    Completed,
+    /// [!] - Failed with error
+    Failed,
+    /// [skip] - Skipped (e.g., existing worktree reuse)
+    Skipped,
+}
+
+/// Individual progress step with timing and error info (FR-049)
+#[derive(Debug, Clone)]
+pub(crate) struct ProgressStep {
+    pub kind: ProgressStepKind,
+    pub status: StepStatus,
+    pub started_at: Option<Instant>,
+    pub error_message: Option<String>,
+}
+
+impl ProgressStep {
+    /// Create a new pending step
+    pub(crate) fn new(kind: ProgressStepKind) -> Self {
+        Self {
+            kind,
+            status: StepStatus::Pending,
+            started_at: None,
+            error_message: None,
+        }
+    }
+
+    /// Start this step (Pending -> Running)
+    pub(crate) fn start(&mut self) {
+        self.status = StepStatus::Running;
+        self.started_at = Some(Instant::now());
+    }
+
+    /// Complete this step (Running -> Completed)
+    pub(crate) fn complete(&mut self) {
+        self.status = StepStatus::Completed;
+    }
+
+    /// Mark this step as failed with an error message
+    pub(crate) fn fail(&mut self, message: String) {
+        self.status = StepStatus::Failed;
+        self.error_message = Some(message);
+    }
+
+    /// Skip this step (for existing worktree reuse)
+    pub(crate) fn skip(&mut self) {
+        self.status = StepStatus::Skipped;
+    }
+
+    /// Get the marker string for display (FR-047)
+    pub(crate) fn marker(&self) -> &'static str {
+        match self.status {
+            StepStatus::Pending => "[ ]",
+            StepStatus::Running => "[>]",
+            StepStatus::Completed => "[x]",
+            StepStatus::Failed => "[!]",
+            StepStatus::Skipped => "[skip]",
+        }
+    }
+
+    /// Get elapsed seconds since start (if started)
+    pub(crate) fn elapsed_secs(&self) -> Option<f64> {
+        self.started_at.map(|t| t.elapsed().as_secs_f64())
+    }
+
+    /// Check if elapsed time should be shown (>= 3 seconds) (FR-049)
+    pub(crate) fn should_show_elapsed(&self) -> bool {
+        self.elapsed_secs().is_some_and(|secs| secs >= 3.0)
     }
 }
 
@@ -820,9 +540,12 @@ pub(crate) struct LaunchPlan {
     pub executable: String,
     pub command_args: Vec<String>,
     pub log_lines: Vec<String>,
+    pub session_warning: Option<String>,
     pub selected_version: String,
     pub install_plan: InstallPlan,
     pub env: Vec<(String, String)>,
+    /// Repository root for single mode re-entry (SPEC-a70a1ece)
+    pub repo_root: PathBuf,
 }
 
 fn should_set_claude_sandbox_env(target_os: &str) -> bool {
@@ -917,6 +640,13 @@ pub(crate) fn prepare_launch_plan(
 ) -> Result<LaunchPlan, GwtError> {
     progress(LaunchProgress::BuildingCommand);
 
+    let (config, session_warning) = normalize_session_id_for_launch(config);
+
+    // SPEC-71f2742d: Handle custom agents (T207)
+    if config.custom_agent.is_some() {
+        return prepare_custom_agent_launch_plan(config, session_warning, progress);
+    }
+
     let env = build_launch_env(&config);
 
     let cmd_name = config.agent.command_name();
@@ -955,11 +685,7 @@ pub(crate) fn prepare_launch_plan(
     } else {
         config.version.clone()
     };
-    let version_label = if selected_version == "installed" {
-        "installed".to_string()
-    } else {
-        format!("@{}", selected_version)
-    };
+    let version_label = selected_version.clone();
 
     let execution_method = if selected_version == "installed" && using_local {
         ExecutionMethod::Installed {
@@ -980,7 +706,13 @@ pub(crate) fn prepare_launch_plan(
         }
     };
 
-    let log_lines = build_launch_log_lines(&config, &agent_args, &version_label, &execution_method);
+    let log_lines = build_launch_log_lines(
+        &config,
+        &agent_args,
+        &version_label,
+        &execution_method,
+        &env,
+    );
 
     progress(LaunchProgress::CheckingDependencies);
     let install_plan = build_install_plan(&config.worktree_path, config.auto_install_deps);
@@ -990,14 +722,111 @@ pub(crate) fn prepare_launch_plan(
         });
     }
 
+    // SPEC-a70a1ece: Capture repo_root for single mode re-entry
+    let repo_root = config.repo_root.clone();
+
     Ok(LaunchPlan {
         config,
         executable,
         command_args,
         log_lines,
+        session_warning,
         selected_version,
         install_plan,
         env,
+        repo_root,
+    })
+}
+
+/// Prepare a launch plan for a custom coding agent (SPEC-71f2742d T207)
+fn prepare_custom_agent_launch_plan(
+    config: AgentLaunchConfig,
+    session_warning: Option<String>,
+    mut progress: impl FnMut(LaunchProgress),
+) -> Result<LaunchPlan, GwtError> {
+    use gwt_core::config::AgentType;
+
+    let custom = config
+        .custom_agent
+        .as_ref()
+        .ok_or_else(|| GwtError::AgentConfigInvalid {
+            name: config.agent.label().to_string(),
+        })?;
+
+    // Build environment including custom env vars (T209)
+    let mut env = build_launch_env(&config);
+    for (key, value) in &custom.env {
+        env.push((key.clone(), value.clone()));
+    }
+
+    // Determine executable and base args based on agent type (T207)
+    let (executable, base_args) = match custom.agent_type {
+        AgentType::Command => {
+            // PATH search for command
+            match which::which(&custom.command) {
+                Ok(path) => (path.to_string_lossy().to_string(), vec![]),
+                Err(_) => {
+                    return Err(GwtError::AgentNotFound {
+                        name: custom.command.clone(),
+                    });
+                }
+            }
+        }
+        AgentType::Path => {
+            // Use absolute path directly
+            let path = std::path::Path::new(&custom.command);
+            if !path.exists() {
+                return Err(GwtError::AgentNotFound {
+                    name: custom.command.clone(),
+                });
+            }
+            (custom.command.clone(), vec![])
+        }
+        AgentType::Bunx => {
+            // Use bunx to run the command
+            get_bunx_command(&custom.command, "latest")
+        }
+    };
+
+    // Build agent-specific arguments
+    let agent_args = build_agent_args(&config);
+    let mut command_args = base_args;
+    command_args.extend(agent_args.clone());
+
+    let version_label = "custom".to_string();
+    let execution_method = ExecutionMethod::Installed {
+        command: custom.command.clone(),
+    };
+
+    let log_lines = build_launch_log_lines(
+        &config,
+        &agent_args,
+        &version_label,
+        &execution_method,
+        &env,
+    );
+
+    progress(LaunchProgress::CheckingDependencies);
+    let install_plan = build_install_plan(&config.worktree_path, config.auto_install_deps);
+    if let InstallPlan::Install { manager } = &install_plan {
+        progress(LaunchProgress::InstallingDependencies {
+            manager: manager.clone(),
+        });
+    }
+
+    // SPEC-a70a1ece: Capture repo_root for single mode re-entry
+    let repo_root = config.repo_root.clone();
+
+    Ok(LaunchPlan {
+        config,
+        executable,
+        command_args,
+        log_lines,
+        session_warning,
+        selected_version: version_label,
+        install_plan,
+        env,
+        repo_root,
     })
 }
 
@@ -1007,6 +836,7 @@ fn execute_launch_plan(plan: LaunchPlan) -> Result<AgentExitKind, GwtError> {
         executable,
         command_args,
         log_lines,
+        session_warning,
         selected_version,
         install_plan,
         env,
@@ -1014,6 +844,10 @@ fn execute_launch_plan(plan: LaunchPlan) -> Result<AgentExitKind, GwtError> {
     } = plan;
     println!("{}", build_launching_message(&config));
     println!();
+    if let Some(warning) = session_warning.as_ref() {
+        eprintln!("{}", warning);
+        eprintln!();
+    }
     if config.version == "installed" && selected_version == "latest" {
         eprintln!(
             "Note: Local '{}' not found, using bunx fallback",
@@ -1047,6 +881,12 @@ fn execute_launch_plan(plan: LaunchPlan) -> Result<AgentExitKind, GwtError> {
         reasoning_level: config.reasoning_level.map(|r| r.label().to_string()),
         skip_permissions: Some(config.skip_permissions),
         tool_version: Some(selected_version.clone()),
+        collaboration_modes: Some(config.collaboration_modes),
+        docker_service: None,
+        docker_force_host: None,
+        docker_recreate: None,
+        docker_build: None,
+        docker_keep: None,
         timestamp: Utc::now().timestamp_millis(),
     };
     if let Err(e) = save_session_entry(&config.worktree_path, session_entry) {
@@ -1094,6 +934,7 @@ fn execute_launch_plan(plan: LaunchPlan) -> Result<AgentExitKind, GwtError> {
         mode: config.execution_mode.label().to_string(),
         reasoning_level: config.reasoning_level.map(|r| r.label().to_string()),
         skip_permissions: config.skip_permissions,
+        collaboration_modes: config.collaboration_modes,
     };
     let updater = spawn_session_updater(update_context, Duration::from_secs(30));
 
@@ -1124,6 +965,12 @@ fn execute_launch_plan(plan: LaunchPlan) -> Result<AgentExitKind, GwtError> {
             reasoning_level: config.reasoning_level.map(|r| r.label().to_string()),
             skip_permissions: Some(config.skip_permissions),
             tool_version: Some(selected_version.clone()),
+            collaboration_modes: Some(config.collaboration_modes),
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
             timestamp: Utc::now().timestamp_millis(),
         };
         if let Err(e) = save_session_entry(&config.worktree_path, entry) {
@@ -1195,11 +1042,12 @@ fn execute_launch_plan(plan: LaunchPlan) -> Result<AgentExitKind, GwtError> {
 
 /// Get bunx command and base args for npm package execution
 fn get_bunx_command(npm_package: &str, version: &str) -> (String, Vec<String>) {
-    // Try bunx first, then npx as fallback
-    let bunx_path = which::which("bunx")
-        .or_else(|_| which::which("npx"))
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "bunx".to_string());
+    // Try bunx first, but avoid project-local node_modules/.bin shims.
+    let bunx_path = which::which("bunx").ok();
+    let npx_path = which::which("npx").ok();
+    let runner_path =
+        select_runner_executable(bunx_path, npx_path).unwrap_or_else(|| PathBuf::from("bunx"));
+    let runner_path_str = runner_path.to_string_lossy().to_string();
 
     let package_spec = if version == "latest" {
         format!("{}@latest", npm_package)
@@ -1207,7 +1055,52 @@ fn get_bunx_command(npm_package: &str, version: &str) -> (String, Vec<String>) {
         format!("{}@{}", npm_package, version)
     };
 
-    (bunx_path, vec![package_spec])
+    (
+        runner_path_str.clone(),
+        build_runner_args(package_spec, &runner_path_str),
+    )
+}
+
+fn select_runner_executable(
+    bunx_path: Option<PathBuf>,
+    npx_path: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(path) = bunx_path.as_ref() {
+        if !is_node_modules_bin(path) {
+            return bunx_path;
+        }
+    }
+    if npx_path.is_some() {
+        return npx_path;
+    }
+    bunx_path
+}
+
+fn is_node_modules_bin(path: &Path) -> bool {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    normalized.contains("/node_modules/.bin/")
+}
+
+fn build_runner_args(package_spec: String, runner_executable: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    if runner_requires_yes(runner_executable) {
+        args.push("--yes".to_string());
+    }
+    args.push(package_spec);
+    args
+}
+
+fn runner_requires_yes(executable: &str) -> bool {
+    std::path::Path::new(executable)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| {
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "npx" | "npx.cmd" | "npx.exe"
+            )
+        })
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1221,6 +1114,7 @@ fn execution_mode_label(mode: ExecutionMode) -> &'static str {
         ExecutionMode::Normal => "Start new session",
         ExecutionMode::Continue => "Continue session",
         ExecutionMode::Resume => "Resume session",
+        ExecutionMode::Convert => "Convert session",
     }
 }
 
@@ -1238,11 +1132,29 @@ fn extract_codex_model_reasoning(args: &[String]) -> (Option<String>, Option<Str
     (model, reasoning)
 }
 
+fn format_env_log_lines(env_vars: &[(String, String)]) -> Vec<String> {
+    if env_vars.is_empty() {
+        return vec!["Env: (none)".to_string()];
+    }
+    let mut vars: Vec<(String, String)> = env_vars
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    vars.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut lines = Vec::with_capacity(vars.len() + 1);
+    lines.push("Env:".to_string());
+    for (key, value) in vars {
+        lines.push(format!("  {}={}", key, value));
+    }
+    lines
+}
+
 fn build_launch_log_lines(
     config: &AgentLaunchConfig,
     agent_args: &[String],
     version_label: &str,
     execution_method: &ExecutionMethod,
+    env_vars: &[(String, String)],
 ) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push(format!(
@@ -1286,6 +1198,7 @@ fn build_launch_log_lines(
         agent_args.join(" ")
     };
     lines.push(format!("Args: {}", args_text));
+    lines.extend(format_env_log_lines(env_vars));
     lines.push(format!("Version: {}", version_label));
 
     match execution_method {
@@ -1314,6 +1227,70 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
+}
+
+fn session_exists_for_tool_at(home: &Path, tool_id: &str, session_id: &str) -> Option<bool> {
+    let agent = SessionAgentType::from_tool_id(tool_id)?;
+    let exists = match agent {
+        SessionAgentType::ClaudeCode => {
+            ClaudeSessionParser::new(home.to_path_buf()).session_exists(session_id)
+        }
+        SessionAgentType::CodexCli => {
+            CodexSessionParser::new(home.to_path_buf()).session_exists(session_id)
+        }
+        SessionAgentType::GeminiCli => {
+            GeminiSessionParser::new(home.to_path_buf()).session_exists(session_id)
+        }
+        SessionAgentType::OpenCode => {
+            OpenCodeSessionParser::new(home.to_path_buf()).session_exists(session_id)
+        }
+    };
+    Some(exists)
+}
+
+fn normalize_session_id_for_launch_with_home(
+    mut config: AgentLaunchConfig,
+    home: Option<PathBuf>,
+) -> (AgentLaunchConfig, Option<String>) {
+    if config.custom_agent.is_some() {
+        return (config, None);
+    }
+
+    if !matches!(
+        config.execution_mode,
+        ExecutionMode::Continue | ExecutionMode::Resume
+    ) {
+        return (config, None);
+    }
+
+    let Some(session_id) = config.session_id.clone().filter(|id| !id.trim().is_empty()) else {
+        return (config, None);
+    };
+
+    let Some(home) = home else {
+        return (config, None);
+    };
+
+    let Some(exists) = session_exists_for_tool_at(&home, config.agent.id(), &session_id) else {
+        return (config, None);
+    };
+
+    if exists {
+        return (config, None);
+    }
+
+    config.session_id = None;
+    let warning = format!(
+        "Warning: Saved session '{}' not found; falling back to default resume behavior.",
+        session_id
+    );
+    (config, Some(warning))
+}
+
+fn normalize_session_id_for_launch(
+    config: AgentLaunchConfig,
+) -> (AgentLaunchConfig, Option<String>) {
+    normalize_session_id_for_launch_with_home(config, home_dir())
 }
 
 fn encode_claude_project_path(path: &Path) -> String {
@@ -1711,7 +1688,7 @@ fn apply_pty_wrapper(executable: &str, args: &[String]) -> (String, Vec<String>)
         wrapped_args.push("/dev/null".to_string());
         wrapped_args.push(executable.to_string());
         wrapped_args.extend(args.iter().cloned());
-        return ("script".to_string(), wrapped_args);
+        ("script".to_string(), wrapped_args)
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -1722,6 +1699,11 @@ fn apply_pty_wrapper(executable: &str, args: &[String]) -> (String, Vec<String>)
 
 /// Build agent-specific command line arguments
 fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
+    // SPEC-71f2742d: Handle custom agents
+    if let Some(ref custom) = config.custom_agent {
+        return build_custom_agent_args(custom, config);
+    }
+
     let mut args = Vec::new();
 
     match config.agent {
@@ -1736,7 +1718,7 @@ fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
 
             // Execution mode (FR-102)
             match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume => {
+                ExecutionMode::Continue | ExecutionMode::Resume | ExecutionMode::Convert => {
                     if let Some(session_id) = &config.session_id {
                         args.push("--resume".to_string());
                         args.push(session_id.clone());
@@ -1757,7 +1739,7 @@ fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
         CodingAgent::CodexCli => {
             // Execution mode - resume subcommand must come first
             match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume => {
+                ExecutionMode::Continue | ExecutionMode::Resume | ExecutionMode::Convert => {
                     args.push("resume".to_string());
                     if let Some(session_id) = &config.session_id {
                         args.push(session_id.clone());
@@ -1787,6 +1769,7 @@ fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
                 reasoning_override,
                 skills_flag_version.as_deref(),
                 bypass_sandbox,
+                config.collaboration_modes,
             ));
 
             if let Some(flag) = skip_flag {
@@ -1804,7 +1787,7 @@ fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
 
             // Execution mode
             match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume => {
+                ExecutionMode::Continue | ExecutionMode::Resume | ExecutionMode::Convert => {
                     args.push("-r".to_string());
                     if let Some(session_id) = &config.session_id {
                         args.push(session_id.clone());
@@ -1832,7 +1815,7 @@ fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
             // Execution mode
             match config.execution_mode {
                 ExecutionMode::Continue => args.push("-c".to_string()),
-                ExecutionMode::Resume => {
+                ExecutionMode::Resume | ExecutionMode::Convert => {
                     if let Some(session_id) = &config.session_id {
                         args.push("-s".to_string());
                         args.push(session_id.clone());
@@ -1841,6 +1824,39 @@ fn build_agent_args(config: &AgentLaunchConfig) -> Vec<String> {
                 ExecutionMode::Normal => {}
             }
         }
+    }
+
+    args
+}
+
+/// Build command line arguments for custom agents (SPEC-71f2742d T206)
+fn build_custom_agent_args(
+    custom: &gwt_core::config::CustomCodingAgent,
+    config: &AgentLaunchConfig,
+) -> Vec<String> {
+    let mut args = Vec::new();
+
+    // Add default args
+    args.extend(custom.default_args.clone());
+
+    // Add mode-specific args (T208)
+    if let Some(ref mode_args) = custom.mode_args {
+        match config.execution_mode {
+            ExecutionMode::Normal => {
+                args.extend(mode_args.normal.clone());
+            }
+            ExecutionMode::Continue => {
+                args.extend(mode_args.continue_mode.clone());
+            }
+            ExecutionMode::Resume | ExecutionMode::Convert => {
+                args.extend(mode_args.resume.clone());
+            }
+        }
+    }
+
+    // Add permission skip args if skip_permissions is true (T210)
+    if config.skip_permissions && !custom.permission_skip_args.is_empty() {
+        args.extend(custom.permission_skip_args.clone());
     }
 
     args
@@ -1938,9 +1954,11 @@ mod tests {
 
     fn sample_config(agent: CodingAgent) -> AgentLaunchConfig {
         AgentLaunchConfig {
+            repo_root: PathBuf::from("/tmp/repo"),
             worktree_path: PathBuf::from("/tmp/worktree"),
             branch_name: "feature/test".to_string(),
             agent,
+            custom_agent: None,
             model: Some("sonnet".to_string()),
             reasoning_level: None,
             version: "latest".to_string(),
@@ -1950,6 +1968,7 @@ mod tests {
             env: Vec::new(),
             env_remove: Vec::new(),
             auto_install_deps: false,
+            collaboration_modes: false,
         }
     }
 
@@ -1964,7 +1983,32 @@ mod tests {
             mode: ExecutionMode::Continue.label().to_string(),
             reasoning_level: None,
             skip_permissions: false,
+            collaboration_modes: true,
         }
+    }
+
+    #[test]
+    fn test_cleanup_startup_logs_removes_old_logs() {
+        let temp = TempDir::new().unwrap();
+        let log_dir = temp.path().join("logs");
+        fs::create_dir_all(&log_dir).unwrap();
+        fs::write(log_dir.join("gwt.jsonl.2024-01-01"), "old").unwrap();
+
+        let settings = Settings {
+            log_dir: Some(log_dir),
+            log_retention_days: 0,
+            ..Default::default()
+        };
+
+        let removed = cleanup_startup_logs(temp.path(), &settings).unwrap();
+        assert!(removed >= 1);
+    }
+
+    #[test]
+    fn test_prepare_custom_agent_launch_plan_requires_custom_agent() {
+        let config = sample_config(CodingAgent::CodexCli);
+        let result = prepare_custom_agent_launch_plan(config, None, |_| {});
+        assert!(matches!(result, Err(GwtError::AgentConfigInvalid { .. })));
     }
 
     #[test]
@@ -1976,6 +2020,61 @@ mod tests {
     fn test_should_set_claude_sandbox_env_non_windows() {
         assert!(should_set_claude_sandbox_env("linux"));
         assert!(should_set_claude_sandbox_env("macos"));
+    }
+
+    #[test]
+    fn test_is_node_modules_bin_detects_paths() {
+        let unix_path = Path::new("/repo/node_modules/.bin/bunx");
+        let windows_path = Path::new("C:\\repo\\node_modules\\.bin\\bunx");
+        assert!(is_node_modules_bin(unix_path));
+        assert!(is_node_modules_bin(windows_path));
+    }
+
+    #[test]
+    fn test_select_runner_executable_prefers_global_bunx() {
+        let bunx = PathBuf::from("/usr/local/bin/bunx");
+        let npx = PathBuf::from("/usr/bin/npx");
+        let selected = select_runner_executable(Some(bunx.clone()), Some(npx));
+        assert_eq!(selected, Some(bunx));
+    }
+
+    #[test]
+    fn test_select_runner_executable_skips_local_bunx_prefers_npx() {
+        let bunx = PathBuf::from("/repo/node_modules/.bin/bunx");
+        let npx = PathBuf::from("/usr/bin/npx");
+        let selected = select_runner_executable(Some(bunx), Some(npx.clone()));
+        assert_eq!(selected, Some(npx));
+    }
+
+    #[test]
+    fn test_select_runner_executable_falls_back_to_local_bunx() {
+        let bunx = PathBuf::from("/repo/node_modules/.bin/bunx");
+        let selected = select_runner_executable(Some(bunx.clone()), None);
+        assert_eq!(selected, Some(bunx));
+    }
+
+    #[test]
+    fn test_runner_requires_yes_for_npx_variants() {
+        assert!(runner_requires_yes("npx"));
+        assert!(runner_requires_yes("/usr/local/bin/npx"));
+        assert!(runner_requires_yes("npx.cmd"));
+        assert!(runner_requires_yes("npx.exe"));
+        assert!(!runner_requires_yes("bunx"));
+    }
+
+    #[test]
+    fn test_build_runner_args_adds_yes_for_npx() {
+        let args = build_runner_args("@openai/codex@latest".to_string(), "npx");
+        assert_eq!(
+            args,
+            vec!["--yes".to_string(), "@openai/codex@latest".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_build_runner_args_skips_yes_for_bunx() {
+        let args = build_runner_args("@openai/codex@latest".to_string(), "bunx");
+        assert_eq!(args, vec!["@openai/codex@latest".to_string()]);
     }
 
     #[test]
@@ -2055,13 +2154,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cmd_repair_disabled() {
-        let err = cmd_repair(&PathBuf::from("/tmp"), None).unwrap_err();
-        assert!(matches!(err, GwtError::Internal(_)));
-        assert!(err.to_string().contains("Worktree repair is disabled."));
-    }
-
-    #[test]
     fn test_is_fast_exit_threshold() {
         assert!(is_fast_exit(0));
         assert!(is_fast_exit(FAST_EXIT_THRESHOLD_MS - 1));
@@ -2081,7 +2173,7 @@ mod tests {
         #[cfg(target_os = "macos")]
         {
             assert_eq!(exe, "script");
-            assert_eq!(wrapped.get(0).map(String::as_str), Some("-q"));
+            assert_eq!(wrapped.first().map(String::as_str), Some("-q"));
             assert_eq!(wrapped.get(1).map(String::as_str), Some("/dev/null"));
             assert_eq!(wrapped.get(2).map(String::as_str), Some("codex"));
             assert_eq!(wrapped[3..], args[..]);
@@ -2111,21 +2203,29 @@ mod tests {
             "-c".to_string(),
             "model_reasoning_effort=high".to_string(),
         ];
+        let env_vars = vec![
+            ("API_KEY".to_string(), "secret".to_string()),
+            ("DEBUG".to_string(), "true".to_string()),
+        ];
         let lines = build_launch_log_lines(
             &config,
             &agent_args,
-            "@latest",
+            "latest",
             &ExecutionMethod::Runner {
                 label: "bunx".to_string(),
                 package_spec: "@openai/codex@latest".to_string(),
             },
+            &env_vars,
         );
         assert!(lines.contains(&"Working directory: /tmp/worktree".to_string()));
         assert!(lines.contains(&"Model: gpt-5.2-codex".to_string()));
         assert!(lines.contains(&"Reasoning: high".to_string()));
         assert!(lines.contains(&"Mode: Continue session".to_string()));
         assert!(lines.contains(&"Skip permissions: enabled".to_string()));
-        assert!(lines.contains(&"Version: @latest".to_string()));
+        assert!(lines.contains(&"Env:".to_string()));
+        assert!(lines.contains(&"  API_KEY=secret".to_string()));
+        assert!(lines.contains(&"  DEBUG=true".to_string()));
+        assert!(lines.contains(&"Version: latest".to_string()));
         assert!(lines.contains(&"Using bunx @openai/codex@latest".to_string()));
         assert!(lines
             .iter()
@@ -2140,6 +2240,7 @@ mod tests {
             "sonnet".to_string(),
             "--dangerously-skip-permissions".to_string(),
         ];
+        let env_vars = Vec::new();
         let lines = build_launch_log_lines(
             &config,
             &agent_args,
@@ -2147,9 +2248,11 @@ mod tests {
             &ExecutionMethod::Installed {
                 command: "claude".to_string(),
             },
+            &env_vars,
         );
         assert!(lines.contains(&"Model: sonnet".to_string()));
         assert!(!lines.iter().any(|line| line.starts_with("Reasoning: ")));
+        assert!(lines.contains(&"Env: (none)".to_string()));
         assert!(lines.contains(&"Using locally installed claude".to_string()));
     }
 
@@ -2161,6 +2264,14 @@ mod tests {
         let started = Instant::now();
         updater.stop();
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_session_update_context_sets_collaboration_modes() {
+        let temp = TempDir::new().unwrap();
+        let context = sample_update_context(temp.path().to_path_buf());
+        let entry = context.to_entry();
+        assert_eq!(entry.collaboration_modes, Some(true));
     }
 
     #[test]
@@ -2322,6 +2433,41 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_session_id_for_launch_keeps_existing_session() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let sessions_dir = home.join(".codex").join("sessions").join("2026");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        fs::write(sessions_dir.join("rollout-sess-123.jsonl"), "{}").unwrap();
+
+        let mut config = sample_config(CodingAgent::CodexCli);
+        config.execution_mode = ExecutionMode::Resume;
+        config.session_id = Some("sess-123".to_string());
+
+        let (normalized, warning) =
+            normalize_session_id_for_launch_with_home(config, Some(home.to_path_buf()));
+
+        assert_eq!(normalized.session_id.as_deref(), Some("sess-123"));
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn test_normalize_session_id_for_launch_drops_missing_session() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+
+        let mut config = sample_config(CodingAgent::CodexCli);
+        config.execution_mode = ExecutionMode::Continue;
+        config.session_id = Some("missing".to_string());
+
+        let (normalized, warning) =
+            normalize_session_id_for_launch_with_home(config, Some(home.to_path_buf()));
+
+        assert!(normalized.session_id.is_none());
+        assert!(warning.is_some());
+    }
+
+    #[test]
     fn test_format_exit_code_normal() {
         assert_eq!(format_exit_code(0), "Exited with status 0");
         assert_eq!(format_exit_code(1), "Exited with status 1");
@@ -2461,5 +2607,136 @@ mod tests {
             hook_event_to_status("SessionStart", &payload),
             AgentStatus::Running
         );
+    }
+
+    // ============================================
+    // Progress Modal Tests (T001-T005)
+    // ============================================
+
+    #[test]
+    fn test_progress_step_kind_all_returns_6_steps() {
+        let all = ProgressStepKind::all();
+        assert_eq!(all.len(), 6);
+        assert_eq!(all[0], ProgressStepKind::FetchRemote);
+        assert_eq!(all[5], ProgressStepKind::CheckDependencies);
+    }
+
+    #[test]
+    fn test_progress_step_kind_messages() {
+        assert_eq!(
+            ProgressStepKind::FetchRemote.message(),
+            "Fetching remote..."
+        );
+        assert_eq!(
+            ProgressStepKind::ValidateBranch.message(),
+            "Validating branch..."
+        );
+        assert_eq!(
+            ProgressStepKind::GeneratePath.message(),
+            "Generating path..."
+        );
+        assert_eq!(
+            ProgressStepKind::CheckConflicts.message(),
+            "Checking conflicts..."
+        );
+        assert_eq!(
+            ProgressStepKind::CreateWorktree.message(),
+            "Creating worktree..."
+        );
+        assert_eq!(
+            ProgressStepKind::CheckDependencies.message(),
+            "Checking dependencies..."
+        );
+    }
+
+    #[test]
+    fn test_step_status_default_is_pending() {
+        let status: StepStatus = Default::default();
+        assert_eq!(status, StepStatus::Pending);
+    }
+
+    #[test]
+    fn test_progress_step_new_is_pending() {
+        let step = ProgressStep::new(ProgressStepKind::FetchRemote);
+        assert_eq!(step.kind, ProgressStepKind::FetchRemote);
+        assert_eq!(step.status, StepStatus::Pending);
+        assert!(step.started_at.is_none());
+        assert!(step.error_message.is_none());
+    }
+
+    #[test]
+    fn test_progress_step_start_sets_running() {
+        let mut step = ProgressStep::new(ProgressStepKind::FetchRemote);
+        step.start();
+        assert_eq!(step.status, StepStatus::Running);
+        assert!(step.started_at.is_some());
+    }
+
+    #[test]
+    fn test_progress_step_complete_sets_completed() {
+        let mut step = ProgressStep::new(ProgressStepKind::FetchRemote);
+        step.start();
+        step.complete();
+        assert_eq!(step.status, StepStatus::Completed);
+    }
+
+    #[test]
+    fn test_progress_step_fail_sets_failed_with_message() {
+        let mut step = ProgressStep::new(ProgressStepKind::FetchRemote);
+        step.start();
+        step.fail("Network error".to_string());
+        assert_eq!(step.status, StepStatus::Failed);
+        assert_eq!(step.error_message, Some("Network error".to_string()));
+    }
+
+    #[test]
+    fn test_progress_step_skip_sets_skipped() {
+        let mut step = ProgressStep::new(ProgressStepKind::FetchRemote);
+        step.skip();
+        assert_eq!(step.status, StepStatus::Skipped);
+    }
+
+    #[test]
+    fn test_progress_step_markers() {
+        let mut step = ProgressStep::new(ProgressStepKind::FetchRemote);
+        assert_eq!(step.marker(), "[ ]"); // Pending
+
+        step.start();
+        assert_eq!(step.marker(), "[>]"); // Running
+
+        step.complete();
+        assert_eq!(step.marker(), "[x]"); // Completed
+
+        let mut step2 = ProgressStep::new(ProgressStepKind::FetchRemote);
+        step2.start();
+        step2.fail("error".to_string());
+        assert_eq!(step2.marker(), "[!]"); // Failed
+
+        let mut step3 = ProgressStep::new(ProgressStepKind::FetchRemote);
+        step3.skip();
+        assert_eq!(step3.marker(), "[skip]"); // Skipped
+    }
+
+    #[test]
+    fn test_progress_step_elapsed_secs_none_if_not_started() {
+        let step = ProgressStep::new(ProgressStepKind::FetchRemote);
+        assert!(step.elapsed_secs().is_none());
+    }
+
+    #[test]
+    fn test_progress_step_elapsed_secs_some_if_started() {
+        let mut step = ProgressStep::new(ProgressStepKind::FetchRemote);
+        step.start();
+        let elapsed = step.elapsed_secs();
+        assert!(elapsed.is_some());
+        assert!(elapsed.unwrap() >= 0.0);
+    }
+
+    #[test]
+    fn test_progress_step_should_show_elapsed_false_under_3_secs() {
+        let mut step = ProgressStep::new(ProgressStepKind::FetchRemote);
+        step.start();
+        // Just started, should be under 3 seconds
+        assert!(!step.should_show_elapsed());
     }
 }

@@ -91,6 +91,15 @@ pub struct ParsedSession {
     pub total_turns: usize,
 }
 
+/// Session list entry for UI display.
+#[derive(Debug, Clone)]
+pub struct SessionListEntry {
+    pub session_id: String,
+    pub last_updated: Option<DateTime<Utc>>,
+    pub message_count: usize,
+    pub file_path: PathBuf,
+}
+
 pub trait SessionParser: Send + Sync {
     fn parse(&self, session_id: &str) -> Result<ParsedSession, SessionParseError>;
     fn agent_type(&self) -> AgentType;
@@ -99,6 +108,10 @@ pub trait SessionParser: Send + Sync {
     fn session_exists(&self, session_id: &str) -> bool {
         self.session_file_path(session_id).exists()
     }
+
+    /// List all available sessions, optionally filtered by worktree path.
+    /// Results are sorted by last_updated (newest first).
+    fn list_sessions(&self, worktree_path: Option<&Path>) -> Vec<SessionListEntry>;
 }
 
 #[derive(Debug, thiserror::Error)]
