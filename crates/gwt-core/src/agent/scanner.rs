@@ -93,9 +93,7 @@ impl RepositoryScanner {
                 // Extract unique top-level directories and files
                 let mut entries: Vec<String> = files
                     .lines()
-                    .filter_map(|line| {
-                        line.split('/').next().map(|s| s.to_string())
-                    })
+                    .filter_map(|line| line.split('/').next().map(|s| s.to_string()))
                     .collect();
                 entries.sort();
                 entries.dedup();

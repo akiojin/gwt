@@ -35,25 +35,15 @@ impl PromptBuilder {
     }
 
     /// Build a prompt for a sub-agent task
-    pub fn build_sub_agent_prompt(
-        &self,
-        task: &Task,
-        related_tasks: &[&Task],
-    ) -> String {
+    pub fn build_sub_agent_prompt(&self, task: &Task, related_tasks: &[&Task]) -> String {
         let mut sections = Vec::new();
 
         // Task instruction
-        sections.push(format!(
-            "# Task: {}\n\n{}\n",
-            task.name, task.description
-        ));
+        sections.push(format!("# Task: {}\n\n{}\n", task.name, task.description));
 
         // CLAUDE.md rules
         if let Some(claude_md) = &self.claude_md {
-            sections.push(format!(
-                "# Project Rules (CLAUDE.md)\n\n{}\n",
-                claude_md
-            ));
+            sections.push(format!("# Project Rules (CLAUDE.md)\n\n{}\n", claude_md));
         }
 
         // Completion instructions
@@ -72,10 +62,7 @@ impl PromptBuilder {
                     .map(|t| format!("- {}: {}", t.name, t.description))
                     .collect::<Vec<_>>()
                     .join("\n");
-                sections.push(format!(
-                    "# Related Tasks\n\n{}\n",
-                    related
-                ));
+                sections.push(format!("# Related Tasks\n\n{}\n", related));
             }
         }
 

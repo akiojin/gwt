@@ -105,7 +105,7 @@ pub fn render_agent_mode(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // status bar
-            Constraint::Min(3),   // chat
+            Constraint::Min(3),    // chat
             Constraint::Length(5), // input
         ])
         .split(area);
@@ -120,17 +120,12 @@ pub fn render_agent_mode(
 }
 
 fn render_status_bar(state: &AgentModeState, frame: &mut Frame, area: Rect) {
-    let session = state
-        .session_name
-        .as_deref()
-        .unwrap_or("(no session)");
+    let session = state.session_name.as_deref().unwrap_or("(no session)");
 
-    let mut parts = vec![
-        Span::styled(
-            format!(" {} ", session),
-            Style::default().fg(Color::White).bg(Color::DarkGray),
-        ),
-    ];
+    let mut parts = vec![Span::styled(
+        format!(" {} ", session),
+        Style::default().fg(Color::White).bg(Color::DarkGray),
+    )];
 
     if state.queue_count > 0 {
         parts.push(Span::styled(

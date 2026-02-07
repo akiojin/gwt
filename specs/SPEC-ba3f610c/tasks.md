@@ -137,38 +137,38 @@ US4 (完了検出) ────────────┘
 
 ### OrchestratorEvent定義
 
-- [ ] **T036** [P] [共通] `crates/gwt-core/src/agent/orchestrator.rs` を新規作成し、OrchestratorEvent enum（SessionStart / UserInput / SubAgentCompleted / SubAgentFailed / TestPassed / TestFailed / ProgressTick / InterruptRequested）を定義
-- [ ] **T037** [共通] T036の後に `crates/gwt-core/src/agent/mod.rs` に `pub mod orchestrator;` を追加しOrchestratorEventをエクスポート
+- [x] **T036** [P] [共通] `crates/gwt-core/src/agent/orchestrator.rs` を新規作成し、OrchestratorEvent enum（SessionStart / UserInput / SubAgentCompleted / SubAgentFailed / TestPassed / TestFailed / ProgressTick / InterruptRequested）を定義
+- [x] **T037** [共通] T036の後に `crates/gwt-core/src/agent/mod.rs` に `pub mod orchestrator;` を追加しOrchestratorEventをエクスポート
 
 ### イベント駆動ループ (オーケストレーションループ仕様)
 
-- [ ] **T038** [US1-4] T037の後に `crates/gwt-core/src/agent/orchestrator.rs` にOrchestratorLoop構造体を追加（mpsc::Sender&lt;OrchestratorEvent&gt; + mpsc::Receiver&lt;OrchestratorEvent&gt; を保持）
-- [ ] **T039** [US1-4] T038の後に `crates/gwt-core/src/agent/orchestrator.rs` にrun_loop関数を実装（Receiverからイベントを受信→MasterAgentでLLMコール→次アクション決定→実行のループ）
-- [ ] **T040** [US1-4] T039の後に `crates/gwt-core/src/agent/orchestrator.rs` のrun_loopにSessionStartイベントハンドラを追加（Spec Kitワークフロー→タスク生成→承認要求）
-- [ ] **T041** [US1-4] T040の後に `crates/gwt-core/src/agent/orchestrator.rs` のrun_loopにUserInputイベントハンドラを追加（承認応答 / 新規指示 / 質問回答の振り分け）
-- [ ] **T042** [US1-4] T041の後に `crates/gwt-core/src/agent/orchestrator.rs` のrun_loopにSubAgentCompletedイベントハンドラを追加（次のReady状態タスクの起動 or セッション完了判定）
+- [x] **T038** [US1-4] T037の後に `crates/gwt-core/src/agent/orchestrator.rs` にOrchestratorLoop構造体を追加（mpsc::Sender&lt;OrchestratorEvent&gt; + mpsc::Receiver&lt;OrchestratorEvent&gt; を保持）
+- [x] **T039** [US1-4] T038の後に `crates/gwt-core/src/agent/orchestrator.rs` にrun_loop関数を実装（Receiverからイベントを受信→MasterAgentでLLMコール→次アクション決定→実行のループ）
+- [x] **T040** [US1-4] T039の後に `crates/gwt-core/src/agent/orchestrator.rs` のrun_loopにSessionStartイベントハンドラを追加（Spec Kitワークフロー→タスク生成→承認要求）
+- [x] **T041** [US1-4] T040の後に `crates/gwt-core/src/agent/orchestrator.rs` のrun_loopにUserInputイベントハンドラを追加（承認応答 / 新規指示 / 質問回答の振り分け）
+- [x] **T042** [US1-4] T041の後に `crates/gwt-core/src/agent/orchestrator.rs` のrun_loopにSubAgentCompletedイベントハンドラを追加（次のReady状態タスクの起動 or セッション完了判定）
 
 ### 承認フロー (FR-002a)
 
-- [ ] **T043** [US2] T040の後に `crates/gwt-core/src/agent/orchestrator.rs` にpresent_plan_for_approval関数を追加（spec.md / plan.md / tasks.md の全文をチャットメッセージとして送信）
-- [ ] **T044** [US2] T043の後に `crates/gwt-core/src/agent/orchestrator.rs` にprocess_approval_response関数を追加（承認→WT作成+起動開始、拒否→再計画）
+- [x] **T043** [US2] T040の後に `crates/gwt-core/src/agent/orchestrator.rs` にpresent_plan_for_approval関数を追加（spec.md / plan.md / tasks.md の全文をチャットメッセージとして送信）
+- [x] **T044** [US2] T043の後に `crates/gwt-core/src/agent/orchestrator.rs` にprocess_approval_response関数を追加（承認→WT作成+起動開始、拒否→再計画）
 
 ### 質問フェーズ (ユーザーへの質問UX仕様)
 
-- [ ] **T045** [US2] T040の後に `crates/gwt-core/src/agent/orchestrator.rs` にrun_question_phase関数を追加（LLMでclarify+技術質問を統合して生成、デフォルト推奨付与）
+- [x] **T045** [US2] T040の後に `crates/gwt-core/src/agent/orchestrator.rs` にrun_question_phase関数を追加（LLMでclarify+技術質問を統合して生成、デフォルト推奨付与）
 
 ### 並列実行制御 (FR-005, サブエージェント並列実行制御仕様)
 
-- [ ] **T046** [US3] T042の後に `crates/gwt-core/src/agent/orchestrator.rs` にlaunch_ready_tasks関数を追加（Ready状態のタスクからLLM判断のmax_parallel数まで同時起動）
+- [x] **T046** [US3] T042の後に `crates/gwt-core/src/agent/orchestrator.rs` にlaunch_ready_tasks関数を追加（Ready状態のタスクからLLM判断のmax_parallel数まで同時起動）
 
 ### 依存関係Git merge (FR-009a)
 
-- [ ] **T047** [US3] T046の後に `crates/gwt-core/src/agent/orchestrator.rs` にmerge_dependency_commits関数を追加（先行タスクのコミットを後続ブランチにgit merge）
+- [x] **T047** [US3] T046の後に `crates/gwt-core/src/agent/orchestrator.rs` にmerge_dependency_commits関数を追加（先行タスクのコミットを後続ブランチにgit merge）
 
 ### TUIイベント連携
 
-- [ ] **T048** [US1] T039の後に `crates/gwt-cli/src/tui/app.rs` にOrchestratorLoopのmpsc::Sender&lt;OrchestratorEvent&gt;を保持し、ユーザーのチャット入力をUserInputイベントとして送信するロジックを追加
-- [ ] **T049** [US1] T048の後に `crates/gwt-cli/src/tui/app.rs` のイベントループにmpsc::Receiver経由でオーケストレーターからのチャットメッセージを受信してAgentModeStateに反映する処理を追加
+- [x] **T048** [US1] T039の後に `crates/gwt-cli/src/tui/app.rs` にOrchestratorLoopのmpsc::Sender&lt;OrchestratorEvent&gt;を保持し、ユーザーのチャット入力をUserInputイベントとして送信するロジックを追加
+- [x] **T049** [US1] T048の後に `crates/gwt-cli/src/tui/app.rs` のイベントループにmpsc::Receiver経由でオーケストレーターからのチャットメッセージを受信してAgentModeStateに反映する処理を追加
 
 **✅ MVP達成チェックポイント**: 複数タスクE2Eフロー（入力→質問→承認→並列実行→完了→次タスク）が動作
 

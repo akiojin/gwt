@@ -116,7 +116,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_branch_name_basic() {
-        assert_eq!(sanitize_branch_name("Add Login Feature"), "add-login-feature");
+        assert_eq!(
+            sanitize_branch_name("Add Login Feature"),
+            "add-login-feature"
+        );
     }
 
     #[test]

@@ -11,6 +11,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use gwt_core::agent::{OrchestratorEvent, OrchestratorMessage};
 use gwt_core::ai::{
     summarize_session, AIClient, AIError, AgentHistoryStore, AgentType, ChatMessage,
     ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, OpenCodeSessionParser,
@@ -352,6 +353,10 @@ pub struct Model {
     agent_mode_tx: Option<Sender<AgentModeUpdate>>,
     /// Agent mode update receiver
     agent_mode_rx: Option<Receiver<AgentModeUpdate>>,
+    /// Orchestrator event sender (for sending user input to orchestrator)
+    orchestrator_event_tx: Option<Sender<OrchestratorEvent>>,
+    /// Orchestrator message receiver (for receiving chat/status from orchestrator)
+    orchestrator_message_rx: Option<Receiver<OrchestratorMessage>>,
     /// Tmux mode (Single or Multi)
     tmux_mode: TmuxMode,
     /// Tmux session name (when in multi mode)
@@ -510,6 +515,8 @@ impl Model {
             session_summary_rx: None,
             agent_mode_tx: Some(agent_mode_tx),
             agent_mode_rx: Some(agent_mode_rx),
+            orchestrator_event_tx: None,
+            orchestrator_message_rx: None,
             tmux_mode: TmuxMode::detect(),
             tmux_session: None,
             gwt_pane_id: None,
@@ -961,6 +968,34 @@ impl Model {
         self.update_agent_mode_ai_status();
         self.agent_mode.last_error = None;
         self.screen = Screen::AgentMode;
+
+        // Initialize orchestrator if not already active
+        if self.orchestrator_event_tx.is_none() {
+            self.init_orchestrator();
+        }
+    }
+
+    /// Initialize the orchestrator loop in a background thread
+    fn init_orchestrator(&mut self) {
+        use gwt_core::agent::OrchestratorLoop;
+
+        let (msg_tx, msg_rx) = mpsc::channel();
+        let (mut orchestrator, event_tx) = OrchestratorLoop::new(msg_tx);
+
+        self.orchestrator_event_tx = Some(event_tx);
+        self.orchestrator_message_rx = Some(msg_rx);
+
+        // Spawn orchestrator loop in background thread
+        let settings = self.active_ai_settings();
+        thread::spawn(move || {
+            use gwt_core::agent::MasterAgent;
+
+            if let Some(settings) = settings {
+                if let Ok(mut master) = MasterAgent::new(settings) {
+                    orchestrator.run_loop(&mut master);
+                }
+            }
+        });
     }
 
     fn update_agent_mode_ai_status(&mut self) {
@@ -1397,6 +1432,73 @@ impl Model {
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.agent_mode_rx = None;
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Apply orchestrator messages to the agent mode state (T049)
+    fn apply_orchestrator_messages(&mut self) {
+        let Some(rx) = &self.orchestrator_message_rx else {
+            return;
+        };
+
+        loop {
+            match rx.try_recv() {
+                Ok(msg) => match msg {
+                    OrchestratorMessage::ChatMessage { role, content } => {
+                        let agent_role = match role.as_str() {
+                            "user" => AgentRole::User,
+                            "assistant" => AgentRole::Assistant,
+                            _ => AgentRole::System,
+                        };
+                        self.agent_mode.messages.push(AgentMessage {
+                            role: agent_role,
+                            content,
+                        });
+                        self.agent_mode.set_waiting(false);
+                    }
+                    OrchestratorMessage::StatusUpdate {
+                        session_name,
+                        llm_call_count,
+                        estimated_tokens,
+                    } => {
+                        self.agent_mode.session_name = session_name;
+                        self.agent_mode.llm_call_count = llm_call_count;
+                        self.agent_mode.estimated_tokens = estimated_tokens;
+                    }
+                    OrchestratorMessage::PlanForApproval {
+                        spec_content,
+                        plan_content,
+                        tasks_content,
+                    } => {
+                        // Show plan in chat for approval
+                        let summary = format!(
+                            "## Plan for Approval\n\n### Spec\n{}\n\n### Plan\n{}\n\n### Tasks\n{}\n\nType 'y' to approve or provide feedback.",
+                            spec_content, plan_content, tasks_content
+                        );
+                        self.agent_mode.messages.push(AgentMessage {
+                            role: AgentRole::System,
+                            content: summary,
+                        });
+                        self.agent_mode.set_waiting(false);
+                    }
+                    OrchestratorMessage::SessionCompleted => {
+                        self.agent_mode.messages.push(AgentMessage {
+                            role: AgentRole::System,
+                            content: "Session completed.".to_string(),
+                        });
+                        self.agent_mode.set_waiting(false);
+                    }
+                    OrchestratorMessage::Error(err) => {
+                        self.agent_mode.last_error = Some(err);
+                        self.agent_mode.set_waiting(false);
+                    }
+                },
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.orchestrator_message_rx = None;
                     break;
                 }
             }
@@ -3140,6 +3242,7 @@ impl Model {
                 self.apply_launch_updates();
                 self.apply_session_summary_updates();
                 self.apply_agent_mode_updates();
+                self.apply_orchestrator_messages();
                 self.poll_session_summary_if_needed();
                 // FR-033: Update pane list every 1 second in tmux multi mode
                 self.update_pane_list();
@@ -3244,13 +3347,20 @@ impl Model {
                         let content = self.agent_mode.input.trim().to_string();
                         self.agent_mode.messages.push(AgentMessage {
                             role: AgentRole::User,
-                            content,
+                            content: content.clone(),
                         });
                         self.agent_mode.clear_input();
                         self.agent_mode.last_error = None;
                         self.agent_mode.set_waiting(true);
-                        let messages = self.agent_mode.messages.clone();
-                        self.spawn_agent_mode_request(messages);
+
+                        // Send to orchestrator if available (T048)
+                        if let Some(tx) = &self.orchestrator_event_tx {
+                            let _ = tx.send(OrchestratorEvent::UserInput { content });
+                        } else {
+                            // Fallback to direct LLM call
+                            let messages = self.agent_mode.messages.clone();
+                            self.spawn_agent_mode_request(messages);
+                        }
                     }
                 }
                 Screen::WorktreeCreate => {
