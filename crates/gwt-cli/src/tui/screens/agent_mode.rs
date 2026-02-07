@@ -298,7 +298,6 @@ fn render_task_panel(state: &AgentModeState, frame: &mut Frame, area: Rect) {
     frame.render_widget(paragraph, inner);
 }
 
-
 fn render_input_panel(state: &AgentModeState, frame: &mut Frame, area: Rect) {
     let border_color = if state.ai_ready {
         Color::Yellow

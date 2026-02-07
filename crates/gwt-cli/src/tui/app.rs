@@ -78,9 +78,9 @@ use super::screens::{
     render_worktree_create, AIWizardState, AgentMessage, AgentModeState, AgentRole, BranchItem,
     BranchListState, BranchType, CloneWizardState, CloneWizardStep, CodingAgent, ConfirmState,
     EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, GitViewCache, GitViewState, HelpState,
-    LogsState, MigrationDialogPhase, MigrationDialogState, ProfilesState,
-    QuickStartDockerSettings, QuickStartEntry, ReasoningLevel, ServiceSelectState, SettingsState,
-    SpecKitWizardState, WizardConfirmResult, WizardState, WizardStep, WorktreeCreateState,
+    LogsState, MigrationDialogPhase, MigrationDialogState, ProfilesState, QuickStartDockerSettings,
+    QuickStartEntry, ReasoningLevel, ServiceSelectState, SettingsState, SpecKitWizardState,
+    WizardConfirmResult, WizardState, WizardStep, WorktreeCreateState,
 };
 // log_gwt_error is available for use when GwtError types are available
 
