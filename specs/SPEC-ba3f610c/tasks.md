@@ -107,25 +107,25 @@ US4 (完了検出) ────────────┘
 
 ### Spec Kit連携ワークフロー (FR-003, FR-003a)
 
-- [ ] **T026** [US2] T013の後に `crates/gwt-core/src/agent/master.rs` のMasterAgentにrun_speckit_workflow関数を追加（clarify→specify→plan→tasks の自動フロー）。リポジトリスキャン結果をSpec Kitテンプレートに渡す
-- [ ] **T027** [US2] T026の後に `crates/gwt-core/src/agent/master.rs` にparse_task_plan関数を追加（LLMレスポンスからJSON形式のタスクリストをパース、失敗時最大2回リトライ）
+- [x] **T026** [US2] T013の後に `crates/gwt-core/src/agent/master.rs` のMasterAgentにrun_speckit_workflow関数を追加（clarify→specify→plan→tasks の自動フロー）。リポジトリスキャン結果をSpec Kitテンプレートに渡す
+- [x] **T027** [US2] T026の後に `crates/gwt-core/src/agent/master.rs` にparse_task_plan関数を追加（LLMレスポンスからJSON形式のタスクリストをパース、失敗時最大2回リトライ）
 
 ### Worktree自動作成 (FR-004)
 
-- [ ] **T028** [US2] `crates/gwt-core/src/agent/worktree.rs` にsanitize_branch_name関数を追加（英小文字化、空白→ハイフン、記号除去、64文字以内、重複時に連番付与）
-- [ ] **T029** [US2] T028の後に `crates/gwt-core/src/agent/worktree.rs` にcreate_agent_worktree関数を追加（`agent/`プレフィックス付きブランチ + `.worktrees/` パスで git worktree add）
+- [x] **T028** [US2] `crates/gwt-core/src/agent/worktree.rs` にsanitize_branch_name関数を追加（英小文字化、空白→ハイフン、記号除去、64文字以内、重複時に連番付与）
+- [x] **T029** [US2] T028の後に `crates/gwt-core/src/agent/worktree.rs` にcreate_agent_worktree関数を追加（`agent/`プレフィックス付きブランチ + `.worktrees/` パスで git worktree add）
 
 ### サブエージェント起動 (FR-005, 全自動モード)
 
-- [ ] **T030** [US3] T025の後に `crates/gwt-core/src/tmux/launcher.rs` にlaunch_auto_mode_agent関数を追加（SubAgentTypeに応じて `--dangerously-skip-permissions` / `--full-auto` 等のフラグをargsに追加してlaunch_agent_in_paneを呼び出し）
-- [ ] **T031** [US3] T030の後に `crates/gwt-core/src/tmux/pane.rs` にsend_prompt_to_pane関数を追加（長いプロンプトをファイルに書き出し、`tmux load-buffer` + `tmux paste-buffer` でペインに送信）
+- [x] **T030** [US3] T025の後に `crates/gwt-core/src/tmux/launcher.rs` にlaunch_auto_mode_agent関数を追加（SubAgentTypeに応じて `--dangerously-skip-permissions` / `--full-auto` 等のフラグをargsに追加してlaunch_agent_in_paneを呼び出し）
+- [x] **T031** [US3] T030の後に `crates/gwt-core/src/tmux/pane.rs` にsend_prompt_to_pane関数を追加（長いプロンプトをファイルに書き出し、`tmux load-buffer` + `tmux paste-buffer` でペインに送信）
 
 ### 完了検出 (FR-006, FR-007)
 
-- [ ] **T032** [P] [US4] `crates/gwt-core/src/tmux/pane.rs` にcapture_pane_output関数を追加（`tmux capture-pane -p -t <pane_id>` で出力を取得）
-- [ ] **T033** [US4] T032の後に `crates/gwt-core/src/tmux/pane.rs` にdetect_completion_pattern関数を追加（capture-pane出力から `GWT_TASK_DONE` パターンを検出）
-- [ ] **T034** [US4] T033の後に `crates/gwt-core/src/tmux/pane.rs` にsend_completion_query関数を追加（`tmux send-keys` で状態確認クエリを送信、capture-paneで応答を取得）
-- [ ] **T035** [US4] T034の後に `crates/gwt-core/src/tmux/poller.rs` のPollMessageにSubAgentCompletedとSubAgentFailedバリアントを追加し、ポーリングループで完了/失敗検出をイベント送信に変換
+- [x] **T032** [P] [US4] `crates/gwt-core/src/tmux/pane.rs` にcapture_pane_output関数を追加（`tmux capture-pane -p -t <pane_id>` で出力を取得）
+- [x] **T033** [US4] T032の後に `crates/gwt-core/src/tmux/pane.rs` にdetect_completion_pattern関数を追加（capture-pane出力から `GWT_TASK_DONE` パターンを検出）
+- [x] **T034** [US4] T033の後に `crates/gwt-core/src/tmux/pane.rs` にsend_completion_query関数を追加（`tmux send-keys` で状態確認クエリを送信、capture-paneで応答を取得）
+- [x] **T035** [US4] T034の後に `crates/gwt-core/src/tmux/poller.rs` のPollMessageにSubAgentCompletedとSubAgentFailedバリアントを追加し、ポーリングループで完了/失敗検出をイベント送信に変換
 
 **✅ Phase B完了チェックポイント**: 単一タスクの自律実行（WT作成→起動→検出）が動作
 

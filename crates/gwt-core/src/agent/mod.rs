@@ -21,7 +21,7 @@ use crate::error::{GwtError, Result};
 use std::path::Path;
 
 pub use conversation::{Conversation, Message, MessageRole};
-pub use master::MasterAgent;
+pub use master::{MasterAgent, ParsedTask};
 pub use prompt_builder::PromptBuilder;
 pub use scanner::{BuildSystem, RepositoryScanner, RepositoryScanResult};
 pub use session::{AgentSession, SessionStatus};
@@ -32,7 +32,7 @@ pub use task::{
 };
 pub use trait_agent::{AgentCapabilities, AgentInfo, AgentTrait, TaskResult};
 pub use types::{SessionId, SubAgentId, TaskId};
-pub use worktree::WorktreeRef;
+pub use worktree::{create_agent_branch_name, sanitize_branch_name, worktree_path, WorktreeRef};
 
 /// Agent type enumeration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

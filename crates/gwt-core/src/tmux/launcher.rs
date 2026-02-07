@@ -492,6 +492,42 @@ fn launch_in_pane_with_split(
     Ok(pane_id)
 }
 
+/// Auto-mode flags for each sub-agent type
+pub fn auto_mode_flag(agent_type: &str) -> Option<&'static str> {
+    match agent_type {
+        "claude" => Some("--dangerously-skip-permissions"),
+        "codex" => Some("--full-auto"),
+        "gemini" => None, // Gemini CLI does not have an auto mode flag
+        _ => None,
+    }
+}
+
+/// Launch an agent in auto mode in a new tmux pane
+///
+/// Adds the appropriate auto-mode flag for the agent type and launches
+/// the agent in a new pane via `launch_in_pane`.
+pub fn launch_auto_mode_agent(
+    target_pane: &str,
+    working_dir: &str,
+    agent_command: &str,
+    agent_type: &str,
+    prompt_file: Option<&str>,
+) -> TmuxResult<String> {
+    let mut cmd = agent_command.to_string();
+
+    // Add auto-mode flag
+    if let Some(flag) = auto_mode_flag(agent_type) {
+        cmd = format!("{} {}", cmd, flag);
+    }
+
+    // Add prompt file if provided
+    if let Some(file) = prompt_file {
+        cmd = format!("{} -p \"$(cat {})\"", cmd, shell_escape(file));
+    }
+
+    launch_in_pane(target_pane, working_dir, &cmd)
+}
+
 /// Check if a directory exists and is valid for agent execution
 pub fn validate_working_dir(path: &Path) -> TmuxResult<()> {
     if !path.exists() {

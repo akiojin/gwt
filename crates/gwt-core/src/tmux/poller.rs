@@ -16,6 +16,17 @@ pub enum PollMessage {
     PanesUpdated(Vec<AgentPane>),
     /// A pane was closed
     PaneClosed(String),
+    /// A sub-agent has completed its task successfully
+    SubAgentCompleted {
+        pane_id: String,
+        task_id: Option<String>,
+    },
+    /// A sub-agent has failed
+    SubAgentFailed {
+        pane_id: String,
+        task_id: Option<String>,
+        reason: String,
+    },
     /// Polling error occurred
     Error(String),
 }
