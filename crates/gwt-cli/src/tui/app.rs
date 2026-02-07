@@ -6483,7 +6483,7 @@ impl Model {
 
         // Custom input confirmation
         if self.port_select.custom_input.is_some() {
-            if let Err(message) = self.port_select.apply_custom_port(|port| is_taken(port)) {
+            if let Err(message) = self.port_select.apply_custom_port(is_taken) {
                 self.port_select.error = Some(message);
             }
             return;
@@ -6524,6 +6524,7 @@ impl Model {
     /// - When a column reaches 3 panes, a new column is added to the right
     ///
     /// Uses the same argument building logic as single mode (main.rs)
+    #[allow(clippy::too_many_arguments)]
     fn launch_plan_in_pane_with_service(
         &mut self,
         plan: &LaunchPlan,
