@@ -312,26 +312,26 @@ US4 (完了検出) ────────────┘
 
 ### 統合テスト
 
-- [ ] **T090** [統合] `cargo test` を実行し全テストパス確認
-- [ ] **T091** [統合] `cargo clippy --all-targets --all-features -- -D warnings` を実行し全警告解消
-- [ ] **T092** [統合] `cargo fmt --check` を実行しフォーマット統一
-- [ ] **T093** [統合] `bunx markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore` を実行しMarkdown品質確認
+- [x] **T090** [統合] `cargo test` を実行し全テストパス確認
+- [x] **T091** [統合] `cargo clippy --all-targets --all-features -- -D warnings` を実行し全警告解消
+- [x] **T092** [統合] `cargo fmt --check` を実行しフォーマット統一
+- [x] **T093** [統合] `bunx markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore` を実行しMarkdown品質確認
 
 ### 成功基準検証
 
-- [ ] **T094** [統合] SC-001検証: Tabキーモード切り替えが1秒以内であることを確認
-- [ ] **T095** [統合] SC-002検証: マスターエージェント初回応答が5秒以内であることを確認
-- [ ] **T096** [統合] SC-003検証: サブエージェント完了検出が10秒以内であることを確認
+- [x] **T094** [統合] SC-001検証: Tabキーモード切り替えが1秒以内であることを確認
+- [x] **T095** [統合] SC-002検証: マスターエージェント初回応答が5秒以内であることを確認
+- [x] **T096** [統合] SC-003検証: サブエージェント完了検出が10秒以内であることを確認
 
 ### エッジケース対応
 
-- [ ] **T097** [統合] tmux切断時の復旧テスト（セッション永続化→再起動→セッション復元）
-- [ ] **T098** [統合] worktree削除時のセッション復元テスト（Failed/Paused状態への遷移確認）
+- [x] **T097** [統合] tmux切断時の復旧テスト（セッション永続化→再起動→セッション復元）
+- [x] **T098** [統合] worktree削除時のセッション復元テスト（Failed/Paused状態への遷移確認）
 
 ### ドキュメント
 
-- [ ] **T099** [P] [ドキュメント] `README.ja.md` にエージェントモードの使い方セクションを追記
-- [ ] **T100** [P] [ドキュメント] `specs/SPEC-ba3f610c/quickstart.md` を最新実装に合わせて更新
+- [x] **T099** [P] [ドキュメント] `README.ja.md` にエージェントモードの使い方セクションを追記
+- [x] **T100** [P] [ドキュメント] `specs/SPEC-ba3f610c/quickstart.md` を最新実装に合わせて更新
 
 ---
 
