@@ -298,9 +298,9 @@ US4 (完了検出) ────────────┘
 
 ### コンテキスト監視+圧縮 (FR-012)
 
-- [ ] **T087** [US8] `crates/gwt-core/src/agent/master.rs` にestimate_token_count関数を追加（メッセージ配列の文字数からトークン数を推定。英語4文字=1トークン、日本語1文字=1トークンの簡易推定）
-- [ ] **T088** [US8] T087の後に `crates/gwt-core/src/agent/master.rs` にshould_compress関数を追加（推定トークン数がmax_contextの80%超過で圧縮判定。max_context取得不可時は16kトークン想定）
-- [ ] **T089** [US8] T088の後に `crates/gwt-core/src/agent/master.rs` にcompress_context関数を追加（完了タスク+古い会話をLLMで要約、直近20メッセージは原文保持、要約をSystemメッセージとして挿入）
+- [x] **T087** [US8] `crates/gwt-core/src/agent/master.rs` にestimate_token_count関数を追加（メッセージ配列の文字数からトークン数を推定。英語4文字=1トークン、日本語1文字=1トークンの簡易推定）
+- [x] **T088** [US8] T087の後に `crates/gwt-core/src/agent/master.rs` にshould_compress関数を追加（推定トークン数がmax_contextの80%超過で圧縮判定。max_context取得不可時は16kトークン想定）
+- [x] **T089** [US8] T088の後に `crates/gwt-core/src/agent/master.rs` にcompress_context関数を追加（完了タスク+古い会話をLLMで要約、直近20メッセージは原文保持、要約をSystemメッセージとして挿入）
 
 **✅ 完全な機能**: 全ユーザーストーリー完了
 
