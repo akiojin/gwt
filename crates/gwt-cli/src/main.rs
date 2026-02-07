@@ -554,10 +554,21 @@ fn should_set_claude_sandbox_env(target_os: &str) -> bool {
 
 pub(crate) fn build_launch_env(config: &AgentLaunchConfig) -> Vec<(String, String)> {
     let mut env_vars = config.env.clone();
-    if config.skip_permissions && config.agent == CodingAgent::ClaudeCode {
-        let has_sandbox = env_vars.iter().any(|(key, _)| key == "IS_SANDBOX");
-        if !has_sandbox && should_set_claude_sandbox_env(std::env::consts::OS) {
-            env_vars.push(("IS_SANDBOX".to_string(), "1".to_string()));
+    if config.agent == CodingAgent::ClaudeCode {
+        if config.skip_permissions {
+            let has_sandbox = env_vars.iter().any(|(key, _)| key == "IS_SANDBOX");
+            if !has_sandbox && should_set_claude_sandbox_env(std::env::consts::OS) {
+                env_vars.push(("IS_SANDBOX".to_string(), "1".to_string()));
+            }
+        }
+        let has_agent_teams = env_vars
+            .iter()
+            .any(|(key, _)| key == "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS");
+        if !has_agent_teams {
+            env_vars.push((
+                "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".to_string(),
+                "1".to_string(),
+            ));
         }
     }
     env_vars
@@ -2089,6 +2100,32 @@ mod tests {
         } else {
             assert!(!has_sandbox);
         }
+    }
+
+    #[test]
+    fn test_build_launch_env_claude_sets_agent_teams() {
+        let config = sample_config(CodingAgent::ClaudeCode);
+        let env = build_launch_env(&config);
+        let has_agent_teams = env
+            .iter()
+            .any(|(key, value)| key == "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS" && value == "1");
+        assert!(
+            has_agent_teams,
+            "Claude Code launch env must include CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"
+        );
+    }
+
+    #[test]
+    fn test_build_launch_env_codex_no_agent_teams() {
+        let config = sample_config(CodingAgent::CodexCli);
+        let env = build_launch_env(&config);
+        let has_agent_teams = env
+            .iter()
+            .any(|(key, _)| key == "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS");
+        assert!(
+            !has_agent_teams,
+            "Codex launch env must not include CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"
+        );
     }
 
     #[test]
