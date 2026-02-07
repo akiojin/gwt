@@ -746,6 +746,107 @@ pub fn send_keys(pane_id: &str, keys: &str) -> TmuxResult<()> {
     Ok(())
 }
 
+/// Capture the current output of a tmux pane.
+///
+/// Uses `tmux capture-pane -p` to get the visible content of the pane.
+pub fn capture_pane_output(pane_id: &str) -> TmuxResult<String> {
+    let output = Command::new("tmux")
+        .args(["capture-pane", "-p", "-t", pane_id])
+        .output()
+        .map_err(|e| TmuxError::CommandFailed {
+            command: "capture-pane".to_string(),
+            reason: e.to_string(),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(TmuxError::CommandFailed {
+            command: "capture-pane".to_string(),
+            reason: stderr.to_string(),
+        });
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Completion marker that sub-agents output when done
+pub const COMPLETION_MARKER: &str = "GWT_TASK_DONE";
+
+/// Detect if a pane's output contains the completion marker.
+pub fn detect_completion_pattern(pane_output: &str) -> bool {
+    pane_output.contains(COMPLETION_MARKER)
+}
+
+/// Send a prompt to a pane by writing to a temporary file and using tmux load-buffer.
+///
+/// This is more reliable than send-keys for long prompts.
+pub fn send_prompt_to_pane(pane_id: &str, prompt: &str) -> TmuxResult<()> {
+    // Write prompt to a temporary file
+    let tmp_path = format!("/tmp/gwt-prompt-{}", std::process::id());
+    std::fs::write(&tmp_path, prompt).map_err(|e| TmuxError::CommandFailed {
+        command: "send_prompt_to_pane".to_string(),
+        reason: format!("Failed to write temp file: {}", e),
+    })?;
+
+    // Load buffer from file
+    let output = Command::new("tmux")
+        .args(["load-buffer", &tmp_path])
+        .output()
+        .map_err(|e| TmuxError::CommandFailed {
+            command: "load-buffer".to_string(),
+            reason: e.to_string(),
+        })?;
+
+    // Clean up temp file
+    let _ = std::fs::remove_file(&tmp_path);
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(TmuxError::CommandFailed {
+            command: "load-buffer".to_string(),
+            reason: stderr.to_string(),
+        });
+    }
+
+    // Paste buffer into the pane
+    let output = Command::new("tmux")
+        .args(["paste-buffer", "-t", pane_id])
+        .output()
+        .map_err(|e| TmuxError::CommandFailed {
+            command: "paste-buffer".to_string(),
+            reason: e.to_string(),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(TmuxError::CommandFailed {
+            command: "paste-buffer".to_string(),
+            reason: stderr.to_string(),
+        });
+    }
+
+    // Send Enter to execute
+    send_keys(pane_id, "Enter")?;
+
+    Ok(())
+}
+
+/// Send a completion query to a pane and check the response.
+///
+/// Sends a status check query via send-keys and captures the output.
+pub fn send_completion_query(pane_id: &str) -> TmuxResult<bool> {
+    // Send a query that will produce output containing the completion marker
+    send_keys(pane_id, "echo GWT_STATUS_CHECK")?;
+    send_keys(pane_id, "Enter")?;
+
+    // Wait briefly for output
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Capture and check output
+    let output = capture_pane_output(pane_id)?;
+    Ok(detect_completion_pattern(&output))
+}
+
 /// Check if exit confirmation is required based on running agents
 pub fn requires_exit_confirmation(agents: &[AgentPane]) -> bool {
     !agents.is_empty()

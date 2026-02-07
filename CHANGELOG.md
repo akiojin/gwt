@@ -1,6 +1,19 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [6.29.0] - 2026-02-07
+
+### Bug Fixes
+
+- **ci:** Trigger release on develop→main merge commits
+- Dockerポート競合時にポート選択UIを表示する (#907)
+
+### Features
+
+- ログ画面のエントリを最新順（降順）で表示 (#905)
+- Claude Code起動時にCLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1を自動設定 (#906)
+- エージェントモード実装 (SPEC-ba3f610c T001-T100) (#909)
+
 
 ## [6.28.1] - 2026-02-06
 

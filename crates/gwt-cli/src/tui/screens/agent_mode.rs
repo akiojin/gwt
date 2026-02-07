@@ -1,5 +1,6 @@
 //! Agent Mode screen
 
+use gwt_core::agent::{SessionStatus, SessionSummary};
 use ratatui::{prelude::*, style::Modifier, widgets::*};
 use unicode_width::UnicodeWidthChar;
 
@@ -18,7 +19,7 @@ pub struct AgentMessage {
 }
 
 #[derive(Debug, Clone)]
-pub struct AgentTaskSummary {
+pub struct AgentTask {
     pub title: String,
     pub status: String,
 }
@@ -28,11 +29,26 @@ pub struct AgentModeState {
     pub input: String,
     pub input_cursor: usize,
     pub messages: Vec<AgentMessage>,
-    pub tasks: Vec<AgentTaskSummary>,
     pub ai_ready: bool,
     pub ai_error: Option<String>,
     pub last_error: Option<String>,
     pub is_waiting: bool,
+    /// Session name for status bar display
+    pub session_name: Option<String>,
+    /// Number of sessions waiting in queue
+    pub queue_count: u32,
+    /// Total LLM API calls in current session
+    pub llm_call_count: u64,
+    /// Estimated total tokens consumed
+    pub estimated_tokens: u64,
+    /// Pending incomplete sessions for session selector
+    pub pending_sessions: Vec<SessionSummary>,
+    /// Selected index in session selector
+    pub session_selector_index: usize,
+    /// Whether to show session selector overlay
+    pub show_session_selector: bool,
+    /// Tasks for task panel display
+    pub tasks: Vec<AgentTask>,
 }
 
 impl AgentModeState {
@@ -41,11 +57,18 @@ impl AgentModeState {
             input: String::new(),
             input_cursor: 0,
             messages: Vec::new(),
-            tasks: Vec::new(),
             ai_ready: false,
             ai_error: None,
             last_error: None,
             is_waiting: false,
+            session_name: None,
+            queue_count: 0,
+            llm_call_count: 0,
+            estimated_tokens: 0,
+            pending_sessions: Vec::new(),
+            session_selector_index: 0,
+            show_session_selector: false,
+            tasks: Vec::new(),
         }
     }
 
@@ -99,20 +122,59 @@ pub fn render_agent_mode(
 ) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(5)])
+        .constraints([
+            Constraint::Length(1), // status bar
+            Constraint::Min(3),    // chat
+            Constraint::Length(5), // input
+        ])
         .split(area);
 
-    let main_area = outer[0];
-    let input_area = outer[1];
+    let status_area = outer[0];
+    let chat_area = outer[1];
+    let input_area = outer[2];
 
-    let main_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-        .split(main_area);
-
-    render_chat_panel(state, frame, main_chunks[0], status_message);
-    render_task_panel(state, frame, main_chunks[1]);
+    render_status_bar(state, frame, status_area);
+    render_chat_panel(state, frame, chat_area, status_message);
     render_input_panel(state, frame, input_area);
+}
+
+fn render_status_bar(state: &AgentModeState, frame: &mut Frame, area: Rect) {
+    let session = state.session_name.as_deref().unwrap_or("(no session)");
+
+    let mut parts = vec![Span::styled(
+        format!(" {} ", session),
+        Style::default().fg(Color::White).bg(Color::DarkGray),
+    )];
+
+    if state.queue_count > 0 {
+        parts.push(Span::styled(
+            format!(" Queue:{} ", state.queue_count),
+            Style::default().fg(Color::Yellow).bg(Color::DarkGray),
+        ));
+    }
+
+    if state.llm_call_count > 0 {
+        parts.push(Span::styled(
+            format!(" LLM:{} ", state.llm_call_count),
+            Style::default().fg(Color::Cyan).bg(Color::DarkGray),
+        ));
+    }
+
+    if state.estimated_tokens > 0 {
+        let tokens_display = if state.estimated_tokens >= 1000 {
+            format!("{}k", state.estimated_tokens / 1000)
+        } else {
+            state.estimated_tokens.to_string()
+        };
+        parts.push(Span::styled(
+            format!(" Tokens:{} ", tokens_display),
+            Style::default().fg(Color::Green).bg(Color::DarkGray),
+        ));
+    }
+
+    let line = Line::from(parts);
+    let bar = Paragraph::new(line).style(Style::default().bg(Color::DarkGray));
+    frame.render_widget(bar, area);
 }
 
 fn render_chat_panel(
@@ -198,6 +260,7 @@ fn render_chat_panel(
     frame.render_widget(paragraph, inner);
 }
 
+#[allow(dead_code)]
 fn render_task_panel(state: &AgentModeState, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -285,6 +348,85 @@ fn render_input_panel(state: &AgentModeState, frame: &mut Frame, area: Rect) {
             let cursor_y = inner.y + visible_line;
             frame.set_cursor_position((cursor_x, cursor_y));
         }
+    }
+}
+
+pub fn render_session_selector(
+    sessions: &[SessionSummary],
+    selected: usize,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Incomplete Sessions ");
+
+    let items: Vec<ListItem> = sessions
+        .iter()
+        .map(|s| {
+            let status_str = match s.status {
+                SessionStatus::Active => "Active",
+                SessionStatus::Paused => "Paused",
+                SessionStatus::Completed => "Done",
+                SessionStatus::Failed => "Failed",
+            };
+            let status_color = match s.status {
+                SessionStatus::Active => Color::Green,
+                SessionStatus::Paused => Color::Yellow,
+                SessionStatus::Completed => Color::DarkGray,
+                SessionStatus::Failed => Color::Red,
+            };
+            let updated = s
+                .updated_at
+                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "-".to_string());
+
+            let line = Line::from(vec![
+                Span::raw(format!("{} ", s.session_id.0)),
+                Span::styled(
+                    format!("[{}]", status_str),
+                    Style::default().fg(status_color),
+                ),
+                Span::raw(format!(" {}", updated)),
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(selected));
+
+    frame.render_stateful_widget(list, area, &mut list_state);
+
+    // Help bar at bottom
+    let help_area = Rect {
+        x: area.x,
+        y: area.y.saturating_add(area.height).saturating_sub(1),
+        width: area.width,
+        height: 1,
+    };
+    // Only render if within bounds
+    if help_area.y < area.y + area.height {
+        let help = Paragraph::new(Line::from(vec![
+            Span::styled("[Enter]", Style::default().fg(Color::Cyan)),
+            Span::raw(" Resume  "),
+            Span::styled("[d]", Style::default().fg(Color::Cyan)),
+            Span::raw(" Discard  "),
+            Span::styled("[n]", Style::default().fg(Color::Cyan)),
+            Span::raw(" New session"),
+        ]))
+        .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(help, help_area);
     }
 }
 

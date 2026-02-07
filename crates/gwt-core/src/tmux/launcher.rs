@@ -499,6 +499,42 @@ fn launch_in_pane_with_split(
     Ok(pane_id)
 }
 
+/// Auto-mode flags for each sub-agent type
+pub fn auto_mode_flag(agent_type: &str) -> Option<&'static str> {
+    match agent_type {
+        "claude" => Some("--dangerously-skip-permissions"),
+        "codex" => Some("--full-auto"),
+        "gemini" => None, // Gemini CLI does not have an auto mode flag
+        _ => None,
+    }
+}
+
+/// Launch an agent in auto mode in a new tmux pane
+///
+/// Adds the appropriate auto-mode flag for the agent type and launches
+/// the agent in a new pane via `launch_in_pane`.
+pub fn launch_auto_mode_agent(
+    target_pane: &str,
+    working_dir: &str,
+    agent_command: &str,
+    agent_type: &str,
+    prompt_file: Option<&str>,
+) -> TmuxResult<String> {
+    let mut cmd = agent_command.to_string();
+
+    // Add auto-mode flag
+    if let Some(flag) = auto_mode_flag(agent_type) {
+        cmd = format!("{} {}", cmd, flag);
+    }
+
+    // Add prompt file if provided
+    if let Some(file) = prompt_file {
+        cmd = format!("{} -p \"$(cat {})\"", cmd, shell_escape(file));
+    }
+
+    launch_in_pane(target_pane, working_dir, &cmd)
+}
+
 /// Check if a directory exists and is valid for agent execution
 pub fn validate_working_dir(path: &Path) -> TmuxResult<()> {
     if !path.exists() {
@@ -577,6 +613,21 @@ impl DockerLaunchResult {
 /// Returns the detected Docker file type if Docker files are found.
 pub fn detect_docker_environment(worktree_path: &Path) -> Option<DockerFileType> {
     detect_docker_files(worktree_path)
+}
+
+fn merge_env_overrides(
+    base: &HashMap<String, String>,
+    overrides: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    if overrides.is_empty() {
+        return base.clone();
+    }
+
+    let mut merged = base.clone();
+    for (key, value) in overrides {
+        merged.insert(key.clone(), value.clone());
+    }
+    merged
 }
 
 fn build_docker_env_flags(env_vars: &HashMap<String, String>) -> String {
@@ -1050,7 +1101,7 @@ fn build_compose_agent_command(
             "Compose up will run (build/recreate requested)"
         );
         format!(
-            "{}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ exit_status=$?; echo \"[gwt] docker compose up failed (status=$exit_status).\"; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $exit_status; }}",
+            "{}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ exit_status=$?; echo \"[gwt] docker compose up failed (status=$exit_status).\"; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; echo \"[gwt] Press Enter to close this pane.\"; read -r _; exit $exit_status; }}",
             compose_args_debug,
             compose_env_prefix,
             container_name,
@@ -1077,7 +1128,7 @@ fn build_compose_agent_command(
             "Compose up will use --no-recreate when starting stopped containers"
         );
         format!(
-            "{}if {} | grep -q .; then echo \"[gwt] docker compose up skipped (already running).\"; else {}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ exit_status=$?; echo \"[gwt] docker compose up failed (status=$exit_status).\"; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; exit $exit_status; }}; fi",
+            "{}if {} | grep -q .; then echo \"[gwt] docker compose up skipped (already running).\"; else {}{}COMPOSE_PROJECT_NAME={} docker compose{} up -d{}{}{} || {{ exit_status=$?; echo \"[gwt] docker compose up failed (status=$exit_status).\"; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; echo \"[gwt] Press Enter to close this pane.\"; read -r _; exit $exit_status; }}; fi",
             compose_args_debug,
             running_check,
             compose_args_debug,
@@ -1106,7 +1157,7 @@ fn build_compose_agent_command(
     format!(
         r#"cd {} && \
 {} && \
-{}{}COMPOSE_PROJECT_NAME={} docker compose{} exec{} {} {} || {{ exit_status=$?; echo "[gwt] docker compose exec failed (status=$exit_status)."; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; {}exit $exit_status; }}{}"#,
+{}{}COMPOSE_PROJECT_NAME={} docker compose{} exec{} {} {} || {{ exit_status=$?; echo "[gwt] docker compose exec failed (status=$exit_status)."; {}COMPOSE_PROJECT_NAME={} docker compose{} ps; {}COMPOSE_PROJECT_NAME={} docker compose{} logs --no-color --tail 200; {}echo "[gwt] Press Enter to close this pane."; read -r _; exit $exit_status; }}{}"#,
         working_dir,
         up_step,
         stop_trap,
@@ -1456,6 +1507,7 @@ pub fn launch_in_pane_with_docker(
     command: &str,
     args: &[String],
     service: Option<&str>,
+    env_overrides: Option<&HashMap<String, String>>,
     build: bool,
     force_recreate: bool,
     stop_on_exit: bool,
@@ -1469,6 +1521,11 @@ pub fn launch_in_pane_with_docker(
             .as_ref()
             .map(|manager| manager.collect_passthrough_env())
             .unwrap_or_default();
+        let env_vars = if let Some(overrides) = env_overrides {
+            merge_env_overrides(&env_vars, overrides)
+        } else {
+            env_vars
+        };
         let mut resolved_service: Option<String> = service.map(|s| s.to_string());
         if resolved_service.is_none() {
             if let Some(manager) = docker_result.manager.as_ref() {
@@ -1832,6 +1889,47 @@ mod tests {
         assert!(cmd.contains("docker compose exec"));
         assert!(cmd.contains("COMPOSE_PROJECT_NAME=gwt-my-worktree"));
         assert!(cmd.contains("claude"));
+    }
+
+    #[test]
+    fn test_build_docker_agent_command_includes_pause_prompt_on_compose_failures() {
+        use std::path::PathBuf;
+
+        let worktree_path = PathBuf::from("/tmp/my-worktree");
+        let docker_type = DockerFileType::Compose(PathBuf::from("docker-compose.yml"));
+        let env_vars = HashMap::new();
+        let cmd = build_docker_agent_command(
+            &worktree_path,
+            "my-worktree",
+            &docker_type,
+            "claude",
+            &[],
+            Some("gwt"),
+            &env_vars,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+
+        // Host-side docker compose failures should not close the pane immediately.
+        assert!(cmd.contains("Press Enter to close this pane"));
+    }
+
+    #[test]
+    fn test_merge_env_overrides_take_precedence() {
+        let mut base = HashMap::new();
+        base.insert("PORT".to_string(), "3000".to_string());
+        base.insert("FOO".to_string(), "base".to_string());
+
+        let mut overrides = HashMap::new();
+        overrides.insert("PORT".to_string(), "10000".to_string());
+        overrides.insert("BAR".to_string(), "override".to_string());
+
+        let merged = merge_env_overrides(&base, &overrides);
+        assert_eq!(merged.get("PORT"), Some(&"10000".to_string()));
+        assert_eq!(merged.get("FOO"), Some(&"base".to_string()));
+        assert_eq!(merged.get("BAR"), Some(&"override".to_string()));
     }
 
     #[test]

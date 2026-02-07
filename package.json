@@ -1,6 +1,6 @@
 {
   "name": "@akiojin/gwt",
-  "version": "6.28.1",
+  "version": "6.29.0",
   "description": "Interactive Git worktree manager with Coding Agent selection (Claude Code / Codex CLI / Gemini CLI)",
   "bin": {
     "gwt": "bin/gwt.js"
@@ -50,7 +50,7 @@
     "arm64"
   ],
   "devDependencies": {
-    "@commitlint/cli": "^20.3.1",
-    "@commitlint/config-conventional": "^20.3.1"
+    "@commitlint/cli": "^20.4.1",
+    "@commitlint/config-conventional": "^20.4.1"
   }
 }
