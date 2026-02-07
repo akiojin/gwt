@@ -59,43 +59,43 @@ US4 (完了検出) ────────────┘
 
 ### Spec Kit内蔵 (FR-017, FR-018)
 
-- [ ] **T001** [P] [共通] `crates/gwt-core/src/speckit/templates/specify.md` に仕様策定プロンプトテンプレートを作成（変数プレースホルダー `{{user_request}}` `{{repository_context}}` 等を含む）
-- [ ] **T002** [P] [共通] `crates/gwt-core/src/speckit/templates/plan.md` に計画策定プロンプトテンプレートを作成
-- [ ] **T003** [P] [共通] `crates/gwt-core/src/speckit/templates/tasks.md` にタスク生成プロンプトテンプレートを作成
-- [ ] **T004** [P] [共通] `crates/gwt-core/src/speckit/templates/clarify.md` に曖昧さ解消プロンプトテンプレートを作成
-- [ ] **T005** [P] [共通] `crates/gwt-core/src/speckit/templates/analyze.md` に整合性分析プロンプトテンプレートを作成
-- [ ] **T006** [共通] T001-T005の後に `crates/gwt-core/src/speckit/templates.rs` を新規作成し、`include_str!`マクロで全テンプレートを埋め込み、テンプレート変数置換関数 `render_template(template, vars)` を実装
-- [ ] **T007** [共通] T006の後に `crates/gwt-core/src/speckit/mod.rs` を新規作成し、SpecKitArtifact構造体の定義とpub modエクスポートを実装
-- [ ] **T008** [共通] T007の後に `crates/gwt-core/src/speckit/specify.rs` を新規作成し、LLM経由でspec.mdを生成するrun_specify関数を実装
-- [ ] **T009** [共通] T007の後に `crates/gwt-core/src/speckit/plan.rs` を新規作成し、LLM経由でplan.mdを生成するrun_plan関数を実装
-- [ ] **T010** [共通] T007の後に `crates/gwt-core/src/speckit/tasks.rs` を新規作成し、LLM経由でtasks.mdを生成するrun_tasks関数を実装
-- [ ] **T011** [共通] T007の後に `crates/gwt-core/src/speckit/clarify.rs` を新規作成し、LLM経由で質問リストを生成するrun_clarify関数を実装
-- [ ] **T012** [共通] T007の後に `crates/gwt-core/src/speckit/analyze.rs` を新規作成し、LLM経由で整合性分析を実行するrun_analyze関数を実装
-- [ ] **T013** [共通] T008-T012の後に `crates/gwt-core/src/lib.rs` に `pub mod speckit;` を追加
+- [x] **T001** [P] [共通] `crates/gwt-core/src/speckit/templates/specify.md` に仕様策定プロンプトテンプレートを作成（変数プレースホルダー `{{user_request}}` `{{repository_context}}` 等を含む）
+- [x] **T002** [P] [共通] `crates/gwt-core/src/speckit/templates/plan.md` に計画策定プロンプトテンプレートを作成
+- [x] **T003** [P] [共通] `crates/gwt-core/src/speckit/templates/tasks.md` にタスク生成プロンプトテンプレートを作成
+- [x] **T004** [P] [共通] `crates/gwt-core/src/speckit/templates/clarify.md` に曖昧さ解消プロンプトテンプレートを作成
+- [x] **T005** [P] [共通] `crates/gwt-core/src/speckit/templates/analyze.md` に整合性分析プロンプトテンプレートを作成
+- [x] **T006** [共通] T001-T005の後に `crates/gwt-core/src/speckit/templates.rs` を新規作成し、`include_str!`マクロで全テンプレートを埋め込み、テンプレート変数置換関数 `render_template(template, vars)` を実装
+- [x] **T007** [共通] T006の後に `crates/gwt-core/src/speckit/mod.rs` を新規作成し、SpecKitArtifact構造体の定義とpub modエクスポートを実装
+- [x] **T008** [共通] T007の後に `crates/gwt-core/src/speckit/specify.rs` を新規作成し、LLM経由でspec.mdを生成するrun_specify関数を実装
+- [x] **T009** [共通] T007の後に `crates/gwt-core/src/speckit/plan.rs` を新規作成し、LLM経由でplan.mdを生成するrun_plan関数を実装
+- [x] **T010** [共通] T007の後に `crates/gwt-core/src/speckit/tasks.rs` を新規作成し、LLM経由でtasks.mdを生成するrun_tasks関数を実装
+- [x] **T011** [共通] T007の後に `crates/gwt-core/src/speckit/clarify.rs` を新規作成し、LLM経由で質問リストを生成するrun_clarify関数を実装
+- [x] **T012** [共通] T007の後に `crates/gwt-core/src/speckit/analyze.rs` を新規作成し、LLM経由で整合性分析を実行するrun_analyze関数を実装
+- [x] **T013** [共通] T008-T012の後に `crates/gwt-core/src/lib.rs` に `pub mod speckit;` を追加
 
 ### リポジトリディープスキャン (FR-003)
 
-- [ ] **T014** [P] [共通] `crates/gwt-core/src/agent/scanner.rs` を新規作成し、RepositoryScanner構造体とRepositoryScanResult構造体を定義。scan関数で `git ls-tree` + CLAUDE.md + Cargo.toml/package.json + specs/ + ソースモジュール概要を収集
-- [ ] **T015** [共通] T014の後に `crates/gwt-core/src/agent/scanner.rs` にBuildSystem enumを追加し、テストコマンド自動検出（Cargo.toml→`cargo test`、package.json→`npm test`）を実装
-- [ ] **T016** [共通] T014の後に `crates/gwt-core/src/agent/mod.rs` に `pub mod scanner;` を追加しRepositoryScannerをエクスポート
+- [x] **T014** [P] [共通] `crates/gwt-core/src/agent/scanner.rs` を新規作成し、RepositoryScanner構造体とRepositoryScanResult構造体を定義。scan関数で `git ls-tree` + CLAUDE.md + Cargo.toml/package.json + specs/ + ソースモジュール概要を収集
+- [x] **T015** [共通] T014の後に `crates/gwt-core/src/agent/scanner.rs` にBuildSystem enumを追加し、テストコマンド自動検出（Cargo.toml→`cargo test`、package.json→`npm test`）を実装
+- [x] **T016** [共通] T014の後に `crates/gwt-core/src/agent/mod.rs` に `pub mod scanner;` を追加しRepositoryScannerをエクスポート
 
 ### アダプティブプロンプト生成 (FR-022)
 
-- [ ] **T017** [P] [共通] `crates/gwt-core/src/agent/prompt_builder.rs` を新規作成し、PromptBuilder構造体を定義。build_sub_agent_prompt関数でタスク指示・CLAUDE.md規約・完了指示（`q`終了 / `GWT_TASK_DONE`）を含むプロンプトを生成
-- [ ] **T018** [共通] T017の後に `crates/gwt-core/src/agent/prompt_builder.rs` にアダプティブ判断ロジックを追加（タスク複雑度に応じてディレクトリ構成・他タスク概要・技術判断結果を含めるか判定）
-- [ ] **T019** [共通] T017の後に `crates/gwt-core/src/agent/mod.rs` に `pub mod prompt_builder;` を追加しPromptBuilderをエクスポート
+- [x] **T017** [P] [共通] `crates/gwt-core/src/agent/prompt_builder.rs` を新規作成し、PromptBuilder構造体を定義。build_sub_agent_prompt関数でタスク指示・CLAUDE.md規約・完了指示（`q`終了 / `GWT_TASK_DONE`）を含むプロンプトを生成
+- [x] **T018** [共通] T017の後に `crates/gwt-core/src/agent/prompt_builder.rs` にアダプティブ判断ロジックを追加（タスク複雑度に応じてディレクトリ構成・他タスク概要・技術判断結果を含めるか判定）
+- [x] **T019** [共通] T017の後に `crates/gwt-core/src/agent/mod.rs` に `pub mod prompt_builder;` を追加しPromptBuilderをエクスポート
 
 ### エージェントモードUI刷新 (FR-001, エージェントモードUI仕様)
 
-- [ ] **T020** [US1] `crates/gwt-cli/src/tui/screens/agent_mode.rs` からタスクパネル（render_task_panel）を削除し、チャットのみの単一画面に変更。main_chunksの70/30分割レイアウトを削除
-- [ ] **T021** [US1] T020の後に `crates/gwt-cli/src/tui/screens/agent_mode.rs` にステータスバーを追加（画面上部にセッション名・キュー待機数・LLMコール数・推定トークン数を表示）
-- [ ] **T022** [US1] T021の後に `crates/gwt-cli/src/tui/screens/agent_mode.rs` のAgentModeStateにsession_name, queue_count, llm_call_count, estimated_tokensフィールドを追加
+- [x] **T020** [US1] `crates/gwt-cli/src/tui/screens/agent_mode.rs` からタスクパネル（render_task_panel）を削除し、チャットのみの単一画面に変更。main_chunksの70/30分割レイアウトを削除
+- [x] **T021** [US1] T020の後に `crates/gwt-cli/src/tui/screens/agent_mode.rs` にステータスバーを追加（画面上部にセッション名・キュー待機数・LLMコール数・推定トークン数を表示）
+- [x] **T022** [US1] T021の後に `crates/gwt-cli/src/tui/screens/agent_mode.rs` のAgentModeStateにsession_name, queue_count, llm_call_count, estimated_tokensフィールドを追加
 
 ### データモデル拡張
 
-- [ ] **T023** [P] [共通] `crates/gwt-core/src/agent/session.rs` のAgentSessionにbase_branch, spec_id, queue_position, llm_call_count, estimated_tokensフィールドを追加
-- [ ] **T024** [P] [共通] `crates/gwt-core/src/agent/task.rs` のTaskにtest_status (Option&lt;TestVerification&gt;), retry_count (u8), pull_request (Option&lt;PullRequestRef&gt;) フィールドを追加。TestVerification構造体とTestStatus enumを追加
-- [ ] **T025** [P] [共通] `crates/gwt-core/src/agent/sub_agent.rs` のSubAgentにauto_mode_flag (Option&lt;String&gt;) フィールドを追加
+- [x] **T023** [P] [共通] `crates/gwt-core/src/agent/session.rs` のAgentSessionにbase_branch, spec_id, queue_position, llm_call_count, estimated_tokensフィールドを追加
+- [x] **T024** [P] [共通] `crates/gwt-core/src/agent/task.rs` のTaskにtest_status (Option&lt;TestVerification&gt;), retry_count (u8), pull_request (Option&lt;PullRequestRef&gt;) フィールドを追加。TestVerification構造体とTestStatus enumを追加
+- [x] **T025** [P] [共通] `crates/gwt-core/src/agent/sub_agent.rs` のSubAgentにauto_mode_flag (Option&lt;String&gt;) フィールドを追加
 
 **✅ Phase A完了チェックポイント**: Spec Kit内蔵・チャットUI・ディープスキャン・プロンプトビルダーが利用可能
 

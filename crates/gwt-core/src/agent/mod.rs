@@ -8,6 +8,8 @@ pub mod codex;
 pub mod conversation;
 pub mod gemini;
 pub mod master;
+pub mod prompt_builder;
+pub mod scanner;
 pub mod session;
 pub mod sub_agent;
 pub mod task;
@@ -20,9 +22,14 @@ use std::path::Path;
 
 pub use conversation::{Conversation, Message, MessageRole};
 pub use master::MasterAgent;
+pub use prompt_builder::PromptBuilder;
+pub use scanner::{BuildSystem, RepositoryScanner, RepositoryScanResult};
 pub use session::{AgentSession, SessionStatus};
 pub use sub_agent::{CompletionSource, SubAgent, SubAgentStatus, SubAgentType};
-pub use task::{PullRequestRef, Task, TaskResult as AgentTaskResult, TaskStatus, WorktreeStrategy};
+pub use task::{
+    PullRequestRef, Task, TaskResult as AgentTaskResult, TaskStatus, TestStatus, TestVerification,
+    WorktreeStrategy,
+};
 pub use trait_agent::{AgentCapabilities, AgentInfo, AgentTrait, TaskResult};
 pub use types::{SessionId, SubAgentId, TaskId};
 pub use worktree::WorktreeRef;

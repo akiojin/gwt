@@ -18,21 +18,22 @@ pub struct AgentMessage {
 }
 
 #[derive(Debug, Clone)]
-pub struct AgentTaskSummary {
-    pub title: String,
-    pub status: String,
-}
-
-#[derive(Debug, Clone)]
 pub struct AgentModeState {
     pub input: String,
     pub input_cursor: usize,
     pub messages: Vec<AgentMessage>,
-    pub tasks: Vec<AgentTaskSummary>,
     pub ai_ready: bool,
     pub ai_error: Option<String>,
     pub last_error: Option<String>,
     pub is_waiting: bool,
+    /// Session name for status bar display
+    pub session_name: Option<String>,
+    /// Number of sessions waiting in queue
+    pub queue_count: u32,
+    /// Total LLM API calls in current session
+    pub llm_call_count: u64,
+    /// Estimated total tokens consumed
+    pub estimated_tokens: u64,
 }
 
 impl AgentModeState {
@@ -41,11 +42,14 @@ impl AgentModeState {
             input: String::new(),
             input_cursor: 0,
             messages: Vec::new(),
-            tasks: Vec::new(),
             ai_ready: false,
             ai_error: None,
             last_error: None,
             is_waiting: false,
+            session_name: None,
+            queue_count: 0,
+            llm_call_count: 0,
+            estimated_tokens: 0,
         }
     }
 
@@ -99,20 +103,64 @@ pub fn render_agent_mode(
 ) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(5)])
+        .constraints([
+            Constraint::Length(1), // status bar
+            Constraint::Min(3),   // chat
+            Constraint::Length(5), // input
+        ])
         .split(area);
 
-    let main_area = outer[0];
-    let input_area = outer[1];
+    let status_area = outer[0];
+    let chat_area = outer[1];
+    let input_area = outer[2];
 
-    let main_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-        .split(main_area);
-
-    render_chat_panel(state, frame, main_chunks[0], status_message);
-    render_task_panel(state, frame, main_chunks[1]);
+    render_status_bar(state, frame, status_area);
+    render_chat_panel(state, frame, chat_area, status_message);
     render_input_panel(state, frame, input_area);
+}
+
+fn render_status_bar(state: &AgentModeState, frame: &mut Frame, area: Rect) {
+    let session = state
+        .session_name
+        .as_deref()
+        .unwrap_or("(no session)");
+
+    let mut parts = vec![
+        Span::styled(
+            format!(" {} ", session),
+            Style::default().fg(Color::White).bg(Color::DarkGray),
+        ),
+    ];
+
+    if state.queue_count > 0 {
+        parts.push(Span::styled(
+            format!(" Queue:{} ", state.queue_count),
+            Style::default().fg(Color::Yellow).bg(Color::DarkGray),
+        ));
+    }
+
+    if state.llm_call_count > 0 {
+        parts.push(Span::styled(
+            format!(" LLM:{} ", state.llm_call_count),
+            Style::default().fg(Color::Cyan).bg(Color::DarkGray),
+        ));
+    }
+
+    if state.estimated_tokens > 0 {
+        let tokens_display = if state.estimated_tokens >= 1000 {
+            format!("{}k", state.estimated_tokens / 1000)
+        } else {
+            state.estimated_tokens.to_string()
+        };
+        parts.push(Span::styled(
+            format!(" Tokens:{} ", tokens_display),
+            Style::default().fg(Color::Green).bg(Color::DarkGray),
+        ));
+    }
+
+    let line = Line::from(parts);
+    let bar = Paragraph::new(line).style(Style::default().bg(Color::DarkGray));
+    frame.render_widget(bar, area);
 }
 
 fn render_chat_panel(
@@ -189,37 +237,6 @@ fn render_chat_panel(
     let wrapped_lines = wrap_lines(&lines, inner.width);
     let scroll = wrapped_lines.len().saturating_sub(inner.height as usize);
     let paragraph = Paragraph::new(wrapped_lines).scroll((scroll as u16, 0));
-    frame.render_widget(paragraph, inner);
-}
-
-fn render_task_panel(state: &AgentModeState, frame: &mut Frame, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(" Tasks ");
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    if state.tasks.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "No tasks yet.".to_string(),
-            Style::default().fg(Color::DarkGray),
-        )));
-    } else {
-        for task in &state.tasks {
-            lines.push(Line::from(vec![
-                Span::styled(task.title.clone(), Style::default().fg(Color::White)),
-                Span::raw(" ".to_string()),
-                Span::styled(
-                    format!("[{}]", task.status),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]));
-        }
-    }
-
-    let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner);
 }
 

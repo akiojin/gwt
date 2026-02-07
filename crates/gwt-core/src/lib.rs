@@ -12,6 +12,7 @@ pub mod execution_mode;
 pub mod git;
 pub mod lock;
 pub mod logging;
+pub mod speckit;
 pub mod tmux;
 pub mod worktree;
 
