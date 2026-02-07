@@ -18,7 +18,8 @@ jobs:
     if: |
       github.event_name == 'workflow_dispatch' ||
       startsWith(github.event.head_commit.message, 'chore(release):') ||
-      contains(github.event.head_commit.message, 'from akiojin/release/')
+      contains(github.event.head_commit.message, 'from akiojin/release/') ||
+      contains(github.event.head_commit.message, 'from akiojin/develop')
     outputs:
       tag_name: ${{ steps.tag.outputs.tag_name }}
       version: ${{ steps.tag.outputs.version }}
