@@ -10,7 +10,6 @@ use gwt_core::ai::{
 };
 use gwt_core::config::{save_session_entry, AgentStatus, Settings, ToolSessionEntry};
 use gwt_core::error::GwtError;
-use gwt_core::TmuxMode;
 use std::fs;
 #[cfg(unix)]
 use std::fs::OpenOptions;
@@ -83,14 +82,6 @@ fn run() -> Result<(), GwtError> {
     match cli.command {
         Some(cmd) => commands::handle_command(cmd, &repo_root, &settings),
         None => {
-            // Interactive TUI mode - single or multi based on tmux detection
-            let tmux_mode = detect_tui_tmux_mode();
-            debug!(
-                category = "tui",
-                mode = %tmux_mode,
-                "Detected tmux mode for TUI"
-            );
-
             let mut entry: Option<TuiEntryContext> = None;
             loop {
                 let selection = tui::run_with_context(entry.take())?;
@@ -163,10 +154,6 @@ fn run() -> Result<(), GwtError> {
             Ok(())
         }
     }
-}
-
-fn detect_tui_tmux_mode() -> TmuxMode {
-    TmuxMode::detect()
 }
 
 fn cleanup_startup_logs(repo_root: &Path, settings: &Settings) -> Result<usize, GwtError> {
@@ -1946,11 +1933,11 @@ fn describe_ntstatus(code: u32) -> Option<&'static str> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::sync::Mutex;
+
     use std::thread::sleep;
     use tempfile::TempDir;
 
-    static TMUX_ENV_MUTEX: Mutex<()> = Mutex::new(());
+
 
     fn sample_config(agent: CodingAgent) -> AgentLaunchConfig {
         AgentLaunchConfig {
@@ -2088,36 +2075,6 @@ mod tests {
             assert!(has_sandbox);
         } else {
             assert!(!has_sandbox);
-        }
-    }
-
-    #[test]
-    fn test_detect_tui_tmux_mode_single_outside_tmux() {
-        let _guard = TMUX_ENV_MUTEX.lock().unwrap();
-        let original = std::env::var("TMUX").ok();
-
-        std::env::remove_var("TMUX");
-        let mode = detect_tui_tmux_mode();
-        assert_eq!(mode, TmuxMode::Single);
-
-        if let Some(val) = original {
-            std::env::set_var("TMUX", val);
-        }
-    }
-
-    #[test]
-    fn test_detect_tui_tmux_mode_multi_inside_tmux() {
-        let _guard = TMUX_ENV_MUTEX.lock().unwrap();
-        let original = std::env::var("TMUX").ok();
-
-        std::env::set_var("TMUX", "/tmp/tmux-1000/default,12345,0");
-        let mode = detect_tui_tmux_mode();
-        assert_eq!(mode, TmuxMode::Multi);
-
-        if let Some(val) = original {
-            std::env::set_var("TMUX", val);
-        } else {
-            std::env::remove_var("TMUX");
         }
     }
 

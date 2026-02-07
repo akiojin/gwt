@@ -55,7 +55,7 @@ const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("s", "Cycle sort mode"),
             ("r", "Refresh data"),
             ("u", "Re-register Claude Code hooks"),
-            ("v", "Toggle pane visibility (tmux)"),
+            ("v", "Toggle pane visibility"),
         ],
     ),
     (

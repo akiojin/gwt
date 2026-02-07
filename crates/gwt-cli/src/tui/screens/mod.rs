@@ -12,7 +12,6 @@ pub mod git_view;
 pub mod help;
 pub mod logs;
 pub mod migration_dialog;
-pub mod pane_list;
 pub mod profiles;
 pub mod service_select;
 pub mod settings;

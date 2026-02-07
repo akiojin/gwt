@@ -4,9 +4,7 @@
 
 use crate::tui::components::LinkRegion;
 use gwt_core::ai::SessionSummaryCache;
-use gwt_core::config::AgentStatus;
 use gwt_core::git::{Branch, BranchMeta, BranchSummary, DivergenceStatus, Repository};
-use gwt_core::tmux::{AgentPane, StatusBarSummary};
 use gwt_core::worktree::Worktree;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::{prelude::*, widgets::*};
@@ -477,8 +475,8 @@ pub struct BranchListState {
     pub list_area: Option<Rect>,
     /// Cached branch list inner area (content rows)
     pub list_inner_area: Option<Rect>,
-    /// Running agents mapped by branch name (for agent info display)
-    pub running_agents: HashMap<String, AgentPane>,
+    /// Running agents mapped by branch name (reserved for builtin terminal integration)
+    pub running_agents: HashMap<String, ()>,
     /// Branch summary data for the selected branch (SPEC-4b893dae)
     pub branch_summary: Option<BranchSummary>,
     /// AI settings enabled for active profile
@@ -1018,18 +1016,9 @@ impl BranchListState {
         self.filtered_branch_at(self.selected)
     }
 
-    /// Update running agents map from pane list
-    pub fn update_running_agents(&mut self, panes: &[AgentPane]) {
-        self.running_agents.clear();
-        for pane in panes {
-            self.running_agents
-                .insert(pane.branch_name.clone(), pane.clone());
-        }
-    }
-
-    /// Get running agent for a branch
-    pub fn get_running_agent(&self, branch_name: &str) -> Option<&AgentPane> {
-        self.running_agents.get(branch_name)
+    /// Check if a branch has a running agent
+    pub fn has_running_agent(&self, branch_name: &str) -> bool {
+        self.running_agents.contains_key(branch_name)
     }
 
     /// Update filter and reset selection
@@ -1665,8 +1654,7 @@ pub fn build_status_bar_line(
     state: &BranchListState,
     status_message: Option<&str>,
 ) -> Line<'static> {
-    let agents: Vec<_> = state.running_agents.values().cloned().collect();
-    let summary = StatusBarSummary::from_agents(&agents);
+    let agent_count = state.running_agents.len();
 
     let mut spans = Vec::new();
 
@@ -1676,42 +1664,11 @@ pub fn build_status_bar_line(
         Style::default().fg(Color::DarkGray),
     ));
 
-    if summary.has_agents() {
-        // Add running count
-        if summary.running_count > 0 {
-            spans.push(Span::styled(
-                format!("{} running", summary.running_count),
-                Style::default().fg(Color::Green),
-            ));
-        }
-
-        // Add separator if needed
-        if summary.running_count > 0 && (summary.waiting_count > 0 || summary.stopped_count > 0) {
-            spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
-        }
-
-        // Add waiting count (FR-104c: highlighted in yellow)
-        if summary.waiting_count > 0 {
-            spans.push(Span::styled(
-                format!("{} waiting", summary.waiting_count),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-
-        // Add separator if needed
-        if summary.waiting_count > 0 && summary.stopped_count > 0 {
-            spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
-        }
-
-        // Add stopped count
-        if summary.stopped_count > 0 {
-            spans.push(Span::styled(
-                format!("{} stopped", summary.stopped_count),
-                Style::default().fg(Color::Red),
-            ));
-        }
+    if agent_count > 0 {
+        spans.push(Span::styled(
+            format!("{} running", agent_count),
+            Style::default().fg(Color::Green),
+        ));
     } else {
         spans.push(Span::styled("none", Style::default().fg(Color::DarkGray)));
     }
@@ -1910,7 +1867,6 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect, has_f
         .enumerate()
         .map(|(i, index)| {
             let branch = &state.branches[*index];
-            let running_agent = state.get_running_agent(&branch.name);
             let is_cleanup_active = cleanup_active_branch
                 .map(|name| name == branch.name)
                 .unwrap_or(false);
@@ -1924,7 +1880,6 @@ fn render_branches(state: &BranchListState, frame: &mut Frame, area: Rect, has_f
                 spinner_frame,
                 is_cleanup_active,
                 is_cleanup_target,
-                running_agent,
                 inner_area.width,
             )
         })
@@ -1966,7 +1921,6 @@ fn render_branch_row(
     spinner_frame: usize,
     cleanup_active: bool,
     is_cleanup_target: bool,
-    running_agent: Option<&AgentPane>,
     width: u16,
 ) -> ListItem<'static> {
     // Only show selection icons when at least one branch is selected
@@ -1999,72 +1953,8 @@ fn render_branch_row(
     let left_width =
         selection_width + safety_icon.len() + 1 + display_name.width() + current_label.width();
 
-    // Build right side (agent info) and calculate its width
-    // SPEC-861d8cdf T-103: Status-based display
-    let (right_spans, right_width): (Vec<Span>, usize) = if let Some(agent) = running_agent {
-        let agent_display = get_agent_display_name(&agent.agent_name);
-        let uptime = agent.uptime_string();
-
-        // Determine icon and color based on status (SPEC-861d8cdf T-103)
-        let (status_icon, status_color) = match agent.status {
-            AgentStatus::Running => {
-                if agent.is_background {
-                    let icon = BG_SPINNER_FRAMES[spinner_frame % BG_SPINNER_FRAMES.len()];
-                    (icon, Color::DarkGray)
-                } else {
-                    let icon = ACTIVE_SPINNER_FRAMES[spinner_frame % ACTIVE_SPINNER_FRAMES.len()];
-                    (icon, Color::Green)
-                }
-            }
-            AgentStatus::WaitingInput => {
-                // Blink effect: 500ms on/off (2 spinner frames = ~500ms with 250ms tick)
-                let should_show = (spinner_frame / 2).is_multiple_of(2);
-                if should_show {
-                    ('?', Color::Yellow)
-                } else {
-                    (' ', Color::Yellow)
-                }
-            }
-            AgentStatus::Stopped => ('#', Color::Red),
-            AgentStatus::Unknown => {
-                // Fallback to original behavior based on is_background
-                if agent.is_background {
-                    let icon = BG_SPINNER_FRAMES[spinner_frame % BG_SPINNER_FRAMES.len()];
-                    (icon, Color::DarkGray)
-                } else {
-                    let icon = ACTIVE_SPINNER_FRAMES[spinner_frame % ACTIVE_SPINNER_FRAMES.len()];
-                    (icon, Color::Green)
-                }
-            }
-        };
-
-        // Determine text color based on status
-        let text_color = match agent.status {
-            AgentStatus::Stopped => Color::Red,
-            AgentStatus::WaitingInput => Color::Yellow,
-            AgentStatus::Running if agent.is_background => Color::DarkGray,
-            _ => get_agent_color(Some(&agent.agent_name)),
-        };
-
-        let uptime_color = match agent.status {
-            AgentStatus::Stopped => Color::DarkGray,
-            AgentStatus::WaitingInput => Color::Yellow,
-            AgentStatus::Running if agent.is_background => Color::DarkGray,
-            _ => Color::Yellow,
-        };
-
-        let width = 2 + agent_display.width() + 1 + uptime.width();
-        let spans = vec![
-            Span::styled(
-                format!("{} ", status_icon),
-                Style::default().fg(status_color),
-            ),
-            Span::styled(agent_display, Style::default().fg(text_color)),
-            Span::raw(" "),
-            Span::styled(uptime, Style::default().fg(uptime_color)),
-        ];
-        (spans, width)
-    } else if let Some(tool) = &branch.last_tool_usage {
+    // Build right side (last tool usage info) and calculate its width
+    let (right_spans, right_width): (Vec<Span>, usize) = if let Some(tool) = &branch.last_tool_usage {
         // No running agent, but show last tool usage (FR-070)
         let agent_id = tool.split('@').next();
         let agent_color = get_agent_color(agent_id);

@@ -29,18 +29,12 @@ use gwt_core::config::{
     setup_gwt_plugin, AISettings, CustomCodingAgent, Profile, ProfilesConfig, ResolvedAISettings,
     ToolSessionEntry,
 };
-use gwt_core::docker::{ContainerStatus, DockerManager};
+use gwt_core::docker::{detect_docker_files, ContainerStatus, DockerManager};
 use gwt_core::error::GwtError;
 use gwt_core::git::{
     detect_repo_type, get_header_context, Branch, PrCache, Remote, RepoType, Repository,
 };
-use gwt_core::tmux::{
-    break_pane, compute_equal_splits, get_current_session, group_panes_by_left,
-    join_pane_to_target, kill_pane, launcher, list_pane_geometries, resize_pane_height,
-    resize_pane_width, AgentPane, PaneColumn, PaneGeometry, SplitDirection,
-};
 use gwt_core::worktree::WorktreeManager;
-use gwt_core::TmuxMode;
 use ratatui::{prelude::*, widgets::*};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -68,7 +62,6 @@ use super::screens::branch_list::{
 };
 use super::screens::environment::EditField;
 use super::screens::git_view::{build_git_view_data, build_git_view_data_no_worktree, GitViewData};
-use super::screens::pane_list::PaneListState;
 use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
 use super::screens::worktree_create::WorktreeCreateStep;
 use super::screens::{
@@ -84,24 +77,6 @@ use super::screens::{
 };
 // log_gwt_error is available for use when GwtError types are available
 
-fn resolve_orphaned_agent_name(
-    fallback_name: &str,
-    session_entry: Option<&ToolSessionEntry>,
-) -> String {
-    if let Some(entry) = session_entry {
-        if !entry.tool_id.trim().is_empty() {
-            return entry.tool_id.clone();
-        }
-    }
-
-    let trimmed = fallback_name.trim();
-    if trimmed.is_empty() {
-        "unknown".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
 fn normalize_branch_name(name: &str) -> String {
     if let Some(stripped) = name.strip_prefix("remotes/") {
         if let Some((_, branch)) = stripped.split_once('/') {
@@ -114,10 +89,6 @@ fn normalize_branch_name(name: &str) -> String {
 
 fn format_ai_error(err: AIError) -> String {
     err.to_string()
-}
-
-fn background_window_name(branch_name: &str) -> String {
-    branch_name.to_string()
 }
 
 fn normalize_branch_name_for_history(branch_name: &str) -> Cow<'_, str> {
@@ -578,17 +549,7 @@ pub struct Model {
     agent_mode_rx: Option<Receiver<AgentModeUpdate>>,
     /// AI wizard model fetch receiver
     ai_wizard_rx: Option<Receiver<AiWizardUpdate>>,
-    /// Tmux mode (Single or Multi)
-    tmux_mode: TmuxMode,
-    /// Tmux session name (when in multi mode)
-    tmux_session: Option<String>,
-    /// The pane ID where gwt is running (for splitting)
-    gwt_pane_id: Option<String>,
-    /// Launched agent pane IDs (visible panes only)
-    agent_panes: Vec<String>,
-    /// Pane list state for tmux multi-mode
-    pane_list: PaneListState,
-    /// Split layout state for tmux multi-mode
+    /// Split layout state for terminal pane
     split_layout: SplitLayoutState,
     /// Last time pane list was updated (for 1-second polling)
     last_pane_update: Option<Instant>,
@@ -777,8 +738,6 @@ pub enum Message {
     WizardBack,
     /// Copy selected log to clipboard
     CopyLogToClipboard,
-    /// FR-095: Hide active agent pane (ESC key in branch list)
-    HideActiveAgentPane,
     /// FR-040: Confirm agent termination (d key)
     ConfirmAgentTermination,
     /// Execute agent termination after confirmation
@@ -903,11 +862,6 @@ impl Model {
             agent_mode_tx: Some(agent_mode_tx),
             agent_mode_rx: Some(agent_mode_rx),
             ai_wizard_rx: None,
-            tmux_mode: TmuxMode::detect(),
-            tmux_session: None,
-            gwt_pane_id: None,
-            agent_panes: Vec::new(),
-            pane_list: PaneListState::new(),
             split_layout: SplitLayoutState::new(),
             last_pane_update: None,
             last_spinner_update: None,
@@ -941,26 +895,8 @@ impl Model {
         model.session_summary_tx = Some(session_tx);
         model.session_summary_rx = Some(session_rx);
 
-        // Initialize tmux session if in multi mode
-        if model.tmux_mode.is_multi() {
-            // Use the current tmux session, not a generated one
-            model.tmux_session = get_current_session();
-            // Capture the gwt pane ID for splitting
-            model.gwt_pane_id = gwt_core::tmux::get_current_pane_id();
-            debug!(
-                category = "tui",
-                mode = %model.tmux_mode,
-                session = ?model.tmux_session,
-                gwt_pane_id = ?model.gwt_pane_id,
-                "Tmux multi-mode detected"
-            );
-        }
-
         // Load initial data
         model.refresh_data();
-
-        // Reconnect to orphaned agent panes (FR-060~062)
-        model.reconnect_orphaned_panes();
 
         model.apply_entry_context(context);
 
@@ -976,7 +912,7 @@ impl Model {
 
             // SPEC-861d8cdf T-104: Check if hook setup is needed on first startup
             // FR-102i: Show warning if running from temporary execution environment
-            if model.tmux_mode.is_multi() && !is_gwt_hooks_registered(&settings_path) {
+            if !is_gwt_hooks_registered(&settings_path) {
                 model.pending_hook_setup = true;
                 model.confirm = if let Some(exe_path) = is_temporary_execution() {
                     ConfirmState::hook_setup_with_warning(&exe_path)
@@ -1632,13 +1568,7 @@ impl Model {
 
         let branch_name = branch.name.clone();
         let mut session_id = branch.last_session_id.clone();
-        let mut tool_id = branch.last_tool_id.clone();
-
-        if tool_id.is_none() {
-            if let Some(agent) = self.branch_list.get_running_agent(&branch.name) {
-                tool_id = Some(agent.agent_name.clone());
-            }
-        }
+        let tool_id = branch.last_tool_id.clone();
 
         if session_id.is_none() || self.branch_list.is_session_missing(&branch_name) {
             if let (Some(tool_id), Some(worktree_path)) =
@@ -2073,79 +2003,6 @@ impl Model {
         self.spawn_session_summaries(vec![task], settings);
     }
 
-    /// Reconnect to orphaned agent panes on startup (FR-060~062)
-    ///
-    /// This function detects panes that were running before gwt restarted
-    /// by matching their working directory to worktree paths.
-    fn reconnect_orphaned_panes(&mut self) {
-        // Only in tmux multi-mode
-        if !self.tmux_mode.is_multi() {
-            return;
-        }
-
-        let Some(session) = &self.tmux_session else {
-            return;
-        };
-
-        // Get worktree list synchronously for matching
-        // SPEC-a70a1ece: Use bare repo path for worktree operations in bare projects
-        let git_path = self.bare_repo_path.as_ref().unwrap_or(&self.repo_root);
-        let worktrees: Vec<(String, std::path::PathBuf)> = match WorktreeManager::new(git_path) {
-            Ok(manager) => match manager.list_basic() {
-                Ok(wts) => wts
-                    .into_iter()
-                    .filter_map(|wt| wt.branch.map(|b| (b, wt.path)))
-                    .collect(),
-                Err(_) => return,
-            },
-            Err(_) => return,
-        };
-
-        if worktrees.is_empty() {
-            return;
-        }
-
-        let tool_usage_map = gwt_core::config::get_last_tool_usage_map(&self.repo_root);
-
-        // Detect orphaned panes
-        let gwt_pane_id = self.gwt_pane_id.as_deref();
-        match gwt_core::tmux::detect_orphaned_panes(session, &worktrees, gwt_pane_id) {
-            Ok(mut orphaned_panes) => {
-                if !orphaned_panes.is_empty() {
-                    debug!(
-                        category = "tui",
-                        count = orphaned_panes.len(),
-                        "Reconnected to orphaned agent panes"
-                    );
-
-                    for pane in orphaned_panes.iter_mut() {
-                        let entry = tool_usage_map.get(&pane.branch_name);
-                        pane.agent_name = resolve_orphaned_agent_name(&pane.agent_name, entry);
-                    }
-
-                    for pane in orphaned_panes {
-                        // Add to agent_panes list
-                        self.agent_panes.push(pane.pane_id.clone());
-                        // Add to pane_list for display
-                        self.pane_list.panes.push(pane);
-                    }
-
-                    // Update branch_list running_agents
-                    self.branch_list
-                        .update_running_agents(&self.pane_list.panes);
-                    self.reflow_agent_layout(None);
-                }
-            }
-            Err(e) => {
-                debug!(
-                    category = "tui",
-                    error = %e,
-                    "Failed to detect orphaned panes"
-                );
-            }
-        }
-    }
-
     fn apply_entry_context(&mut self, context: Option<TuiEntryContext>) {
         if let Some(context) = context {
             if let Some(message) = context.status_message {
@@ -2466,299 +2323,6 @@ impl Model {
         }
     }
 
-    /// FR-033: Update pane list by polling tmux (1-second interval)
-    /// FR-031e: Update agent states based on pane content changes
-    fn update_pane_list(&mut self) {
-        // Only in tmux multi mode
-        if !self.tmux_mode.is_multi() {
-            return;
-        }
-
-        // Check if 1 second has passed since last update
-        let now = Instant::now();
-        let mut spinner_updated = false;
-        if self
-            .last_spinner_update
-            .map(|last| now.duration_since(last) >= Duration::from_millis(250))
-            .unwrap_or(true)
-        {
-            self.pane_list.spinner_frame = self.pane_list.spinner_frame.wrapping_add(1);
-            self.last_spinner_update = Some(now);
-            spinner_updated = true;
-        }
-
-        if let Some(last) = self.last_pane_update {
-            if now.duration_since(last) < Duration::from_secs(1) {
-                return;
-            }
-        }
-        self.last_pane_update = Some(now);
-        if !spinner_updated {
-            self.pane_list.spinner_frame = self.pane_list.spinner_frame.wrapping_add(1);
-            self.last_spinner_update = Some(now);
-        }
-
-        if self.pane_list.panes.is_empty() {
-            return;
-        }
-
-        // Get current tmux panes
-        let Some(session) = &self.tmux_session else {
-            return;
-        };
-
-        let Ok(current_panes) = gwt_core::tmux::pane::list_panes(session) else {
-            return;
-        };
-
-        // Filter out panes that no longer exist
-        let current_pane_ids: std::collections::HashSet<_> =
-            current_panes.iter().map(|p| p.pane_id.as_str()).collect();
-
-        // FR-072: Detect removed panes and update session
-        let removed_panes: Vec<AgentPane> = self
-            .pane_list
-            .panes
-            .iter()
-            .filter(|p| !current_pane_ids.contains(p.pane_id.as_str()))
-            .cloned()
-            .collect();
-
-        let last_tool_usage_map = gwt_core::config::get_last_tool_usage_map(&self.repo_root);
-        for pane in &removed_panes {
-            let last_entry = last_tool_usage_map.get(&pane.branch_name);
-            // Save session entry for terminated agent (FR-072)
-            let tool_id = last_entry
-                .map(|entry| entry.tool_id.clone())
-                .unwrap_or_else(|| pane.agent_name.clone());
-            let tool_label = last_entry
-                .map(|entry| entry.tool_label.clone())
-                .unwrap_or_else(|| crate::tui::normalize_agent_label(&pane.agent_name));
-            let session_entry = ToolSessionEntry {
-                branch: pane.branch_name.clone(),
-                worktree_path: last_entry.and_then(|entry| entry.worktree_path.clone()),
-                tool_id,
-                tool_label,
-                session_id: last_entry.and_then(|entry| entry.session_id.clone()),
-                mode: last_entry.and_then(|entry| entry.mode.clone()),
-                model: last_entry.and_then(|entry| entry.model.clone()),
-                reasoning_level: last_entry.and_then(|entry| entry.reasoning_level.clone()),
-                skip_permissions: last_entry.and_then(|entry| entry.skip_permissions),
-                tool_version: last_entry.and_then(|entry| entry.tool_version.clone()),
-                collaboration_modes: last_entry.and_then(|entry| entry.collaboration_modes),
-                docker_service: last_entry.and_then(|entry| entry.docker_service.clone()),
-                docker_force_host: last_entry.and_then(|entry| entry.docker_force_host),
-                docker_recreate: last_entry.and_then(|entry| entry.docker_recreate),
-                docker_build: None,
-                docker_keep: last_entry.and_then(|entry| entry.docker_keep),
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0),
-            };
-            if let Err(e) = save_session_entry(&self.repo_root, session_entry) {
-                debug!(
-                    category = "tui",
-                    pane_id = %pane.pane_id,
-                    error = %e,
-                    "Failed to save session entry for terminated agent"
-                );
-            }
-        }
-
-        // Update state for each remaining pane (FR-031e)
-        let mut updated_panes: Vec<_> = self
-            .pane_list
-            .panes
-            .iter()
-            .filter(|p| current_pane_ids.contains(p.pane_id.as_str()))
-            .cloned()
-            .collect();
-
-        // Also update agent_panes list
-        self.agent_panes
-            .retain(|id| current_pane_ids.contains(id.as_str()));
-
-        // Update pane list if count changed
-        if updated_panes.len() != self.pane_list.panes.len() {
-            self.pane_list.update_panes(updated_panes);
-        } else {
-            // Keep existing panes (with their is_background state)
-            std::mem::swap(&mut self.pane_list.panes, &mut updated_panes);
-        }
-
-        // Sync running_agents in branch_list with current panes
-        self.branch_list
-            .update_running_agents(&self.pane_list.panes);
-        // Update spinner frame for branch list display
-        self.branch_list.spinner_frame = self.pane_list.spinner_frame;
-        if !removed_panes.is_empty() {
-            self.reflow_agent_layout(None);
-        }
-    }
-
-    /// FR-095: Check if there is an active (visible) agent pane
-    pub fn has_active_agent_pane(&self) -> bool {
-        self.pane_list.panes.iter().any(|p| !p.is_background)
-    }
-
-    /// FR-095: Hide the active agent pane (ESC key handler)
-    /// シングルアクティブ制約: アクティブペインは最大1つなので、それを非表示にする
-    fn hide_active_agent_pane(&mut self) {
-        // Find the active pane (is_background == false)
-        let active_idx = self.pane_list.panes.iter().position(|p| !p.is_background);
-
-        let Some(idx) = active_idx else {
-            // No active pane to hide (FR-096: do nothing)
-            return;
-        };
-
-        let Some(pane) = self.pane_list.panes.get_mut(idx) else {
-            return;
-        };
-
-        // Hide the pane (break to background window)
-        let window_name = background_window_name(&pane.branch_name);
-
-        match gwt_core::tmux::hide_pane(&pane.pane_id, &window_name) {
-            Ok(background_window) => {
-                // Remove from agent_panes list
-                self.agent_panes.retain(|id| id != &pane.pane_id);
-
-                // Update pane state
-                pane.is_background = true;
-                pane.background_window = Some(background_window);
-
-                self.status_message = Some("Pane hidden".to_string());
-            }
-            Err(e) => {
-                self.status_message = Some(format!("Failed to hide pane: {}", e));
-            }
-        }
-        self.status_message_time = Some(Instant::now());
-
-        // Update branch list with new pane state
-        self.branch_list
-            .update_running_agents(&self.pane_list.panes);
-    }
-
-    /// FR-042: Terminate agent pane for the specified branch
-    fn terminate_agent_pane(&mut self, branch_name: &str) {
-        // Find the agent pane for this branch
-        let pane_to_kill = self
-            .pane_list
-            .panes
-            .iter()
-            .find(|p| p.branch_name == branch_name)
-            .cloned();
-
-        let Some(pane) = pane_to_kill else {
-            self.status_message = Some("Agent pane not found".to_string());
-            self.status_message_time = Some(Instant::now());
-            return;
-        };
-
-        // Kill the pane using tmux kill-pane
-        let pane_target = if pane.is_background {
-            // For background panes, kill the background window
-            if let Some(ref bg_window) = pane.background_window {
-                bg_window.clone()
-            } else {
-                pane.pane_id.clone()
-            }
-        } else {
-            pane.pane_id.clone()
-        };
-
-        match kill_pane(&pane_target) {
-            Ok(()) => {
-                // Remove from pane_list
-                self.pane_list
-                    .panes
-                    .retain(|p| p.branch_name != branch_name);
-                // Remove from agent_panes
-                self.agent_panes.retain(|id| id != &pane.pane_id);
-                // Update branch_list running_agents
-                self.branch_list
-                    .update_running_agents(&self.pane_list.panes);
-                self.reflow_agent_layout(None);
-
-                self.status_message = Some(format!("Agent terminated on '{}'", branch_name));
-                self.status_message_time = Some(Instant::now());
-            }
-            Err(e) => {
-                self.status_message = Some(format!("Failed to terminate: {}", e));
-                self.status_message_time = Some(Instant::now());
-            }
-        }
-    }
-
-    /// Show a hidden pane and focus it
-    ///
-    /// If the pane is already visible, just focus it.
-    /// If the pane is in background, show it first then focus.
-    fn show_and_focus_selected_pane(&mut self) {
-        let selected_idx = self.pane_list.selected;
-        let Some(pane) = self.pane_list.panes.get_mut(selected_idx) else {
-            return;
-        };
-
-        if pane.is_background {
-            // Show the pane first (join back to GWT window)
-            if pane.background_window.is_none() {
-                self.status_message = Some("No background window to restore".to_string());
-                self.status_message_time = Some(Instant::now());
-                return;
-            }
-
-            let Some(gwt_pane_id) = self.gwt_pane_id.clone() else {
-                self.status_message = Some("GWT pane ID not available".to_string());
-                self.status_message_time = Some(Instant::now());
-                return;
-            };
-
-            // FR-037: Hide any currently active pane before showing this one
-            self.hide_active_agent_pane();
-
-            // Re-fetch the pane since hide_active_agent_pane may have modified the list
-            let Some(pane) = self.pane_list.panes.get_mut(selected_idx) else {
-                return;
-            };
-            let pane_id = pane.pane_id.clone();
-            match gwt_core::tmux::show_pane(&pane_id, &gwt_pane_id) {
-                Ok(new_pane_id) => {
-                    // Update the pane ID and clear background state
-                    pane.pane_id = new_pane_id.clone();
-                    pane.is_background = false;
-                    pane.background_window = None;
-
-                    // Update agent_panes list
-                    self.agent_panes.push(new_pane_id.clone());
-
-                    self.branch_list
-                        .update_running_agents(&self.pane_list.panes);
-                    self.reflow_agent_layout(Some(&new_pane_id));
-
-                    // Focus the pane
-                    if let Err(e) = gwt_core::tmux::pane::select_pane(&new_pane_id) {
-                        self.status_message = Some(format!("Failed to focus pane: {}", e));
-                        self.status_message_time = Some(Instant::now());
-                    }
-                }
-                Err(e) => {
-                    self.status_message = Some(format!("Failed to show pane: {}", e));
-                    self.status_message_time = Some(Instant::now());
-                }
-            }
-        } else {
-            // Pane is visible, just focus it
-            if let Err(e) = gwt_core::tmux::pane::select_pane(&pane.pane_id) {
-                self.status_message = Some(format!("Failed to focus pane: {}", e));
-                self.status_message_time = Some(Instant::now());
-            }
-        }
-    }
-
     /// Handle Enter key on branch list
     /// Always opens wizard with branch action options
     /// If agent is running: "Focus agent pane" / "Create new branch from this"
@@ -2770,13 +2334,9 @@ impl Model {
         let branch_name = branch.name.clone();
 
         // Check if agent is running for this branch
-        let running_pane_idx = self
-            .pane_list
-            .panes
-            .iter()
-            .position(|p| p.branch_name == branch_name);
+        let running_pane_idx: Option<usize> = None;
 
-        // Always open wizard (pass running_pane_idx to show appropriate options)
+        // Always open wizard
         // FR-050: Load session history for Quick Start feature
         let ts_history = get_branch_tool_history(&self.repo_root, &branch_name);
         let history: Vec<QuickStartEntry> = ts_history
@@ -3459,7 +3019,7 @@ impl Model {
     fn selected_branch_has_agent(&self) -> bool {
         self.branch_list
             .selected_branch()
-            .map(|branch| self.branch_list.get_running_agent(&branch.name).is_some())
+            .map(|branch| self.branch_list.has_running_agent(&branch.name))
             .unwrap_or(false)
     }
 
@@ -4468,8 +4028,6 @@ impl Model {
                 self.apply_git_view_cache_updates();
                 // SPEC-1ea18899: Apply GitView PR updates
                 self.apply_git_view_pr_updates();
-                // FR-033: Update pane list every 1 second in tmux multi mode
-                self.update_pane_list();
                 // SPEC-a70a1ece: Poll clone wizard progress
                 if matches!(self.screen, Screen::CloneWizard) && self.clone_wizard.is_cloning() {
                     self.clone_wizard.poll_clone();
@@ -5070,13 +4628,10 @@ impl Model {
                     }
                 }
             }
-            Message::HideActiveAgentPane => {
-                self.hide_active_agent_pane();
-            }
             Message::ConfirmAgentTermination => {
                 // FR-041: Show confirmation dialog before terminating agent
                 if let Some(branch) = self.branch_list.selected_branch() {
-                    if self.branch_list.get_running_agent(&branch.name).is_some() {
+                    if self.branch_list.has_running_agent(&branch.name) {
                         self.pending_agent_termination = Some(branch.name.clone());
                         self.confirm = ConfirmState {
                             title: "Terminate Agent".to_string(),
@@ -5094,10 +4649,8 @@ impl Model {
                 }
             }
             Message::ExecuteAgentTermination => {
-                // FR-042: Execute tmux kill-pane
-                if let Some(branch_name) = self.pending_agent_termination.take() {
-                    self.terminate_agent_pane(&branch_name);
-                }
+                // FR-042: Agent termination (reserved for builtin terminal)
+                self.pending_agent_termination = None;
             }
             Message::ReregisterHooks => {
                 // FR-102g: Manually re-register Claude Code hooks
@@ -5321,11 +4874,7 @@ impl Model {
                 if let Some(branch) = self.branch_list.selected_branch() {
                     let branch_name = branch.name.clone();
                     // Check if agent is running for this branch
-                    let running_pane_idx = self
-                        .pane_list
-                        .panes
-                        .iter()
-                        .position(|p| p.branch_name == branch_name);
+                    let running_pane_idx: Option<usize> = None;
                     // FR-050: Load session history for Quick Start feature
                     let ts_history = get_branch_tool_history(&self.repo_root, &branch_name);
                     let history: Vec<QuickStartEntry> = ts_history
@@ -5400,10 +4949,8 @@ impl Model {
                                 self.wizard.load_issues(&self.repo_root);
                             }
                         }
-                        WizardConfirmResult::FocusPane(pane_idx) => {
-                            // Focus on existing agent pane (wizard already closed itself)
-                            self.pane_list.selected = pane_idx;
-                            self.show_and_focus_selected_pane();
+                        WizardConfirmResult::FocusPane(_pane_idx) => {
+                            // Focus on existing agent pane (reserved for builtin terminal)
                         }
                     }
                 }
@@ -5701,51 +5248,13 @@ impl Model {
 
     /// Internal implementation of launch plan handling (called after plugin setup confirmation)
     fn handle_launch_plan_internal(&mut self, plan: LaunchPlan) {
-        // Note: refresh_data() removed for startup optimization - TUI exits after
-        // agent launch in single mode, and tmux mode updates status message directly.
-        // The branch list refresh is unnecessary here. (FR-008b still satisfied)
-
         if let InstallPlan::Skip { message } = &plan.install_plan {
             self.status_message = Some(message.clone());
             self.status_message_time = Some(Instant::now());
         }
 
-        let keep_launch_status = matches!(plan.install_plan, InstallPlan::Install { .. });
-
-        if self.tmux_mode.is_multi() && self.gwt_pane_id.is_some() {
-            if let Some(quick_start) = self.pending_quick_start_docker.take() {
-                if self.try_apply_quick_start_docker(&plan, quick_start, keep_launch_status) {
-                    return;
-                }
-            }
-            let decision = match self.prepare_docker_service_selection(&plan) {
-                Ok(decision) => decision,
-                Err(e) => {
-                    self.launch_status = None;
-                    self.status_message = Some(format!("Failed to inspect docker services: {}", e));
-                    self.status_message_time = Some(Instant::now());
-                    return;
-                }
-            };
-
-            match decision {
-                ServiceSelectionDecision::AwaitSelection => {}
-                ServiceSelectionDecision::Proceed {
-                    service,
-                    force_host,
-                } => {
-                    self.maybe_request_recreate_selection(
-                        &plan,
-                        service.as_deref(),
-                        force_host,
-                        keep_launch_status,
-                    );
-                }
-            }
-        } else {
-            self.pending_agent_launch = Some(plan);
-            self.should_quit = true;
-        }
+        self.pending_agent_launch = Some(plan);
+        self.should_quit = true;
     }
 
     fn docker_force_host_enabled(&self) -> bool {
@@ -5782,7 +5291,7 @@ impl Model {
             return true;
         }
 
-        let docker_file_type = match launcher::detect_docker_environment(&plan.config.worktree_path)
+        let docker_file_type = match detect_docker_files(&plan.config.worktree_path)
         {
             Some(dtype) => dtype,
             None => return false,
@@ -5893,7 +5402,7 @@ impl Model {
             });
         }
 
-        let docker_file_type = match launcher::detect_docker_environment(&plan.config.worktree_path)
+        let docker_file_type = match detect_docker_files(&plan.config.worktree_path)
         {
             Some(dtype) => dtype,
             None => {
@@ -6009,7 +5518,7 @@ impl Model {
             return;
         }
 
-        let docker_file_type = match launcher::detect_docker_environment(&plan.config.worktree_path)
+        let docker_file_type = match detect_docker_files(&plan.config.worktree_path)
         {
             Some(dtype) => dtype,
             None => {
@@ -6112,7 +5621,7 @@ impl Model {
         force_recreate: bool,
         quick_start_keep: Option<bool>,
     ) {
-        if force_host || launcher::detect_docker_environment(&plan.config.worktree_path).is_none() {
+        if force_host || detect_docker_files(&plan.config.worktree_path).is_none() {
             self.launch_plan_in_tmux(
                 plan,
                 service,
@@ -6125,7 +5634,7 @@ impl Model {
             return;
         }
 
-        let docker_file_type = match launcher::detect_docker_environment(&plan.config.worktree_path)
+        let docker_file_type = match detect_docker_files(&plan.config.worktree_path)
         {
             Some(dtype) => dtype,
             None => {
@@ -6231,7 +5740,7 @@ impl Model {
             );
             return;
         }
-        if force_host || launcher::detect_docker_environment(&plan.config.worktree_path).is_none() {
+        if force_host || detect_docker_files(&plan.config.worktree_path).is_none() {
             info!(
                 category = "docker",
                 branch = %plan.config.branch_name,
@@ -6283,81 +5792,16 @@ impl Model {
     fn launch_plan_in_tmux(
         &mut self,
         plan: &LaunchPlan,
-        service: Option<&str>,
-        force_host: bool,
-        keep_launch_status: bool,
-        build: bool,
-        force_recreate: bool,
-        stop_on_exit: bool,
+        _service: Option<&str>,
+        _force_host: bool,
+        _keep_launch_status: bool,
+        _build: bool,
+        _force_recreate: bool,
+        _stop_on_exit: bool,
     ) {
-        match self.launch_plan_in_pane_with_service(
-            plan,
-            service,
-            force_host,
-            build,
-            force_recreate,
-            stop_on_exit,
-        ) {
-            Ok(_) => {
-                if !keep_launch_status {
-                    self.launch_status = None;
-                }
-                // FR-088: Record agent usage to history
-                let agent_id = plan.config.agent.id();
-                let agent_label =
-                    format!("{}@{}", plan.config.agent.label(), plan.selected_version);
-                if let Err(e) = self.agent_history.record(
-                    &self.repo_root,
-                    &plan.config.branch_name,
-                    agent_id,
-                    &agent_label,
-                ) {
-                    warn!(category = "tui", "Failed to record agent history: {}", e);
-                }
-                if let Err(e) = self.agent_history.save() {
-                    warn!(category = "tui", "Failed to save agent history: {}", e);
-                }
-
-                // Update branch list item directly to reflect agent usage immediately
-                // (refresh_data() is not called after agent launch for optimization)
-                let branch_name_for_lookup =
-                    normalize_branch_name_for_history(&plan.config.branch_name);
-                for item in &mut self.branch_list.branches {
-                    let item_lookup = normalize_branch_name_for_history(&item.name);
-                    if item_lookup == branch_name_for_lookup {
-                        item.last_tool_usage = Some(agent_label.clone());
-                        item.last_tool_id = Some(agent_id.to_string());
-                        break;
-                    }
-                }
-                let launch_message = if let Some(warning) = plan.session_warning.as_ref() {
-                    format!(
-                        "Agent launched in tmux pane for {}. {}",
-                        plan.config.branch_name, warning
-                    )
-                } else {
-                    format!(
-                        "Agent launched in tmux pane for {}",
-                        plan.config.branch_name
-                    )
-                };
-                self.status_message = Some(launch_message);
-                self.status_message_time = Some(Instant::now());
-                self.wizard.visible = false;
-                self.screen = Screen::BranchList;
-            }
-            Err(e) => {
-                self.launch_status = None;
-                gwt_core::logging::log_error_message(
-                    "E4002",
-                    "agent",
-                    &format!("Failed to launch: {}", e),
-                    None,
-                );
-                self.status_message = Some(format!("Failed to launch: {}", e));
-                self.status_message_time = Some(Instant::now());
-            }
-        }
+        // Tmux removed: fall through to single-mode agent launch
+        self.pending_agent_launch = Some(plan.clone());
+        self.should_quit = true;
     }
 
     fn handle_service_select_confirm(&mut self) {
@@ -6399,397 +5843,6 @@ impl Model {
             false,
             false,
         );
-    }
-
-    /// Launch an agent in a tmux pane (multi mode)
-    ///
-    /// Layout strategy:
-    /// - gwt is left column, agents are placed in right columns
-    /// - Each agent column stacks up to 3 panes (vertical split)
-    /// - When a column reaches 3 panes, a new column is added to the right
-    ///
-    /// Uses the same argument building logic as single mode (main.rs)
-    fn launch_plan_in_pane_with_service(
-        &mut self,
-        plan: &LaunchPlan,
-        service: Option<&str>,
-        force_host: bool,
-        build: bool,
-        force_recreate: bool,
-        stop_on_exit: bool,
-    ) -> Result<String, String> {
-        // FR-010: One Branch One Pane constraint
-        // Check if an agent is already running on this branch
-        if self
-            .pane_list
-            .panes
-            .iter()
-            .any(|p| p.branch_name == plan.config.branch_name)
-        {
-            return Err(format!(
-                "Agent already running on branch '{}'",
-                plan.config.branch_name
-            ));
-        }
-
-        // FR-036/FR-037: Single Active Pane Constraint
-        // Hide any currently active agent pane before launching new one
-        self.hide_active_agent_pane();
-
-        let working_dir = plan.config.worktree_path.to_string_lossy().to_string();
-        let use_docker = !force_host
-            && launcher::detect_docker_environment(&plan.config.worktree_path).is_some();
-        info!(
-            category = "tui",
-            branch = %plan.config.branch_name,
-            worktree = %plan.config.worktree_path.display(),
-            use_docker = use_docker,
-            service = service.unwrap_or(""),
-            executable = %plan.executable,
-            "Prepared launch plan"
-        );
-
-        // Build environment variables (same as single mode)
-        let env_vars = plan.env.clone();
-
-        let install_cmd = match &plan.install_plan {
-            InstallPlan::Install { manager } => {
-                let args = vec!["install".to_string()];
-                Some(build_shell_command(manager, &args))
-            }
-            _ => None,
-        };
-
-        let executable = if use_docker {
-            normalize_container_executable(&plan.executable)
-        } else {
-            plan.executable.clone()
-        };
-        let agent_cmd = build_shell_command(&executable, &plan.command_args);
-        let full_cmd = if let Some(install_cmd) = install_cmd {
-            format!("{} && {}", install_cmd, agent_cmd)
-        } else {
-            agent_cmd
-        };
-
-        // Build the full command string
-        let command = build_tmux_command(&env_vars, &plan.config.env_remove, &full_cmd);
-        let command = wrap_tmux_command_for_fast_exit(&command);
-
-        debug!(
-            category = "tui",
-            gwt_pane_id = ?self.gwt_pane_id,
-            working_dir = %working_dir,
-            command = %command,
-            agent_pane_count = self.agent_panes.len(),
-            "Launching agent in tmux pane"
-        );
-
-        // FR-036: Single Active Pane Constraint
-        // hide_active_agent_pane() was called above, so there are no visible agent panes.
-        // Always split to the right of gwt pane.
-        let target = self
-            .gwt_pane_id
-            .as_ref()
-            .ok_or_else(|| "No gwt pane ID available".to_string())?;
-        let pane_id = if use_docker {
-            let docker_args = vec!["-lc".to_string(), command.clone()];
-            let (pane_id, _docker_result) = launcher::launch_in_pane_with_docker(
-                target,
-                &plan.config.worktree_path,
-                &plan.config.branch_name,
-                "sh",
-                &docker_args,
-                service,
-                build,
-                force_recreate,
-                stop_on_exit,
-            )
-            .map_err(|e| e.to_string())?;
-            pane_id
-        } else {
-            launcher::launch_in_pane(target, &working_dir, &command).map_err(|e| e.to_string())?
-        };
-
-        // Focus the new pane (FR-022)
-        if let Err(e) = gwt_core::tmux::pane::select_pane(&pane_id) {
-            debug!(
-                category = "tui",
-                pane_id = %pane_id,
-                error = %e,
-                "Failed to focus new pane"
-            );
-        }
-
-        // Track the new pane
-        self.agent_panes.push(pane_id.clone());
-
-        // Add to pane list for display
-        let agent_pane = AgentPane::new(
-            pane_id.clone(),
-            plan.config.branch_name.clone(),
-            plan.config.agent.label().to_string(),
-            SystemTime::now(),
-            0, // PID is not tracked by simple launcher
-        );
-        let mut panes = self.pane_list.panes.clone();
-        panes.push(agent_pane);
-        self.pane_list.update_panes(panes);
-
-        let docker_env = launcher::detect_docker_environment(&plan.config.worktree_path);
-        let (docker_service, docker_force_host, docker_recreate, docker_keep) =
-            if docker_env.is_some() {
-                if force_host {
-                    (None, Some(true), None, None)
-                } else {
-                    (
-                        service.map(|value| value.to_string()),
-                        Some(false),
-                        Some(force_recreate),
-                        Some(!stop_on_exit),
-                    )
-                }
-            } else {
-                (None, None, None, None)
-            };
-
-        // FR-071: Save session entry for tmux mode
-        let session_entry = ToolSessionEntry {
-            branch: plan.config.branch_name.clone(),
-            worktree_path: Some(working_dir),
-            tool_id: plan.config.agent.id().to_string(),
-            tool_label: plan.config.agent.label().to_string(),
-            session_id: plan.config.session_id.clone(),
-            mode: Some(plan.config.execution_mode.label().to_string()),
-            model: plan.config.model.clone(),
-            reasoning_level: plan.config.reasoning_level.map(|r| r.label().to_string()),
-            skip_permissions: Some(plan.config.skip_permissions),
-            tool_version: Some(plan.selected_version.clone()),
-            collaboration_modes: Some(plan.config.collaboration_modes),
-            docker_service,
-            docker_force_host,
-            docker_recreate,
-            docker_build: None,
-            docker_keep,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0),
-        };
-        if let Err(e) = save_session_entry(&plan.config.worktree_path, session_entry) {
-            debug!(
-                category = "tui",
-                error = %e,
-                "Failed to save session entry"
-            );
-        }
-
-        // Update branch list with new agent info
-        self.branch_list
-            .update_running_agents(&self.pane_list.panes);
-
-        // Reflow layout (columns/rows)
-        self.reflow_agent_layout(Some(&pane_id));
-
-        Ok(pane_id)
-    }
-
-    /// FR-036: Single Active Pane Constraint - at most 1 visible agent pane
-    fn desired_agent_column_count(count: usize) -> usize {
-        // Under single-active constraint, count is always 0 or 1
-        if count > 0 {
-            1
-        } else {
-            0
-        }
-    }
-
-    fn visible_agent_pane_ids(&self) -> Vec<String> {
-        self.pane_list
-            .panes
-            .iter()
-            .filter(|p| !p.is_background)
-            .map(|p| p.pane_id.clone())
-            .collect()
-    }
-
-    fn agent_layout_snapshot(&self) -> Option<(PaneGeometry, Vec<PaneColumn>)> {
-        let gwt_pane_id = self.gwt_pane_id.as_deref()?;
-        let geometries = list_pane_geometries(gwt_pane_id).ok()?;
-        let mut geometry_map: HashMap<String, PaneGeometry> = HashMap::new();
-        for geometry in geometries {
-            geometry_map.insert(geometry.pane_id.clone(), geometry);
-        }
-
-        let gwt_geometry = geometry_map.get(gwt_pane_id)?.clone();
-        let visible_ids: std::collections::HashSet<String> =
-            self.visible_agent_pane_ids().into_iter().collect();
-        if visible_ids.is_empty() {
-            return Some((gwt_geometry, Vec::new()));
-        }
-
-        let agent_geometries: Vec<PaneGeometry> = visible_ids
-            .iter()
-            .filter_map(|id| geometry_map.get(id))
-            .cloned()
-            .collect();
-        let columns = group_panes_by_left(&agent_geometries);
-        Some((gwt_geometry, columns))
-    }
-
-    fn rebuild_agent_columns(
-        &mut self,
-        pane_ids: &[String],
-        gwt_pane_id: &str,
-    ) -> Result<HashMap<String, String>, String> {
-        if pane_ids.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        let mut columns: Vec<Vec<String>> = Vec::new();
-        for pane_id in pane_ids {
-            if columns.last().map(|c| c.len() == 3).unwrap_or(true) {
-                columns.push(Vec::new());
-            }
-            columns.last_mut().unwrap().push(pane_id.clone());
-        }
-
-        for pane_id in pane_ids {
-            break_pane(pane_id).map_err(|e| e.to_string())?;
-        }
-
-        let mut id_map: HashMap<String, String> = HashMap::new();
-        let mut column_roots: Vec<String> = Vec::new();
-        let mut rightmost_target = gwt_pane_id.to_string();
-
-        for column in &columns {
-            let source = &column[0];
-            let joined = join_pane_to_target(source, &rightmost_target, SplitDirection::Horizontal)
-                .map_err(|e| e.to_string())?;
-            id_map.insert(source.clone(), joined.clone());
-            rightmost_target = joined.clone();
-            column_roots.push(joined);
-        }
-
-        for (column, root) in columns.iter().zip(column_roots.iter()) {
-            let mut row_target = root.clone();
-            for pane_id in column.iter().skip(1) {
-                let joined = join_pane_to_target(pane_id, &row_target, SplitDirection::Vertical)
-                    .map_err(|e| e.to_string())?;
-                id_map.insert(pane_id.clone(), joined.clone());
-                row_target = joined;
-            }
-        }
-
-        if !id_map.is_empty() {
-            for pane in &mut self.pane_list.panes {
-                if let Some(new_id) = id_map.get(&pane.pane_id) {
-                    pane.pane_id = new_id.clone();
-                }
-            }
-            for pane_id in &mut self.agent_panes {
-                if let Some(new_id) = id_map.get(pane_id) {
-                    *pane_id = new_id.clone();
-                }
-            }
-            self.branch_list
-                .update_running_agents(&self.pane_list.panes);
-        }
-
-        Ok(id_map)
-    }
-
-    fn reflow_agent_layout(&mut self, focus_pane: Option<&str>) {
-        if !self.tmux_mode.is_multi() {
-            return;
-        }
-        let Some(gwt_pane_id) = self.gwt_pane_id.clone() else {
-            return;
-        };
-
-        let visible_panes = self.visible_agent_pane_ids();
-        if visible_panes.is_empty() {
-            return;
-        }
-
-        let desired_columns = Self::desired_agent_column_count(visible_panes.len());
-        let mut focus_target = focus_pane.map(|id| id.to_string());
-
-        let Some((mut gwt_geometry, mut columns)) = self.agent_layout_snapshot() else {
-            return;
-        };
-
-        if columns.len() != desired_columns {
-            match self.rebuild_agent_columns(&visible_panes, &gwt_pane_id) {
-                Ok(id_map) => {
-                    if let Some(target) = focus_target.as_ref() {
-                        if let Some(new_id) = id_map.get(target) {
-                            focus_target = Some(new_id.clone());
-                        }
-                    }
-                }
-                Err(err) => {
-                    debug!(
-                        category = "tui",
-                        error = %err,
-                        "Failed to rebuild agent layout"
-                    );
-                    return;
-                }
-            }
-
-            if let Some((new_gwt_geometry, new_columns)) = self.agent_layout_snapshot() {
-                gwt_geometry = new_gwt_geometry;
-                columns = new_columns;
-            }
-        }
-
-        if columns.is_empty() {
-            return;
-        }
-
-        let total_width: u16 = gwt_geometry.width + columns.iter().map(|c| c.width).sum::<u16>();
-        let widths = compute_equal_splits(total_width, columns.len() + 1);
-        if let Some(width) = widths.first() {
-            if let Err(err) = resize_pane_width(&gwt_geometry.pane_id, *width) {
-                debug!(
-                    category = "tui",
-                    error = %err,
-                    "Failed to resize gwt pane width"
-                );
-            }
-        }
-
-        for (column, width) in columns.iter().zip(widths.iter().skip(1)) {
-            if let Some(pane_id) = column.pane_ids.first() {
-                if let Err(err) = resize_pane_width(pane_id, *width) {
-                    debug!(
-                        category = "tui",
-                        pane_id = %pane_id,
-                        error = %err,
-                        "Failed to resize agent column width"
-                    );
-                }
-            }
-        }
-
-        for column in &columns {
-            let heights = compute_equal_splits(column.total_height, column.pane_ids.len());
-            for (pane_id, height) in column.pane_ids.iter().zip(heights.into_iter()) {
-                if let Err(err) = resize_pane_height(pane_id, height) {
-                    debug!(
-                        category = "tui",
-                        pane_id = %pane_id,
-                        error = %err,
-                        "Failed to resize agent row height"
-                    );
-                }
-            }
-        }
-
-        if let Some(pane_id) = focus_target {
-            let _ = gwt_core::tmux::pane::select_pane(&pane_id);
-        }
     }
 
     /// Execute branch cleanup (FR-010)
@@ -7328,7 +6381,7 @@ impl Model {
                     if self.selected_branch_has_agent() {
                         items.push(Self::keybind_item("d", "Terminate"));
                     }
-                    if !self.branch_list.filter.is_empty() || self.has_active_agent_pane() {
+                    if !self.branch_list.filter.is_empty() {
                         items.push(Self::keybind_item("Esc", "Clear/Hide"));
                     }
                     items.push(Self::keybind_item("Ctrl+C", "Quit"));
@@ -7901,11 +6954,8 @@ impl Model {
                             self.branch_list.clear_filter();
                             self.refresh_branch_summary();
                             None
-                        } else if self.has_active_agent_pane() {
-                            // FR-095: Hide active agent pane
-                            Some(Message::HideActiveAgentPane)
                         } else {
-                            // On main screen without filter and no active pane - do nothing
+                            // On main screen without filter - do nothing
                             None
                         }
                     } else {
@@ -8310,25 +7360,6 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
     let cleanup_path = model.bare_repo_path.as_ref().unwrap_or(&model.repo_root);
     auto_cleanup_orphans_on_exit(cleanup_path, pending_launch.is_some());
 
-    // Cleanup agent panes on exit (tmux multi-mode)
-    if model.tmux_mode.is_multi() && !model.agent_panes.is_empty() {
-        debug!(
-            category = "tui",
-            pane_count = model.agent_panes.len(),
-            "Cleaning up agent panes on exit"
-        );
-        for pane_id in &model.agent_panes {
-            if let Err(e) = kill_pane(pane_id) {
-                debug!(
-                    category = "tui",
-                    pane_id = %pane_id,
-                    error = %e,
-                    "Failed to kill agent pane"
-                );
-            }
-        }
-    }
-
     // Restore terminal
     disable_raw_mode()?;
     execute!(
@@ -8369,262 +7400,6 @@ fn canonical_tool_id(tool_id: &str) -> String {
     tool_id.trim().to_string()
 }
 
-/// Build agent-specific command line arguments for tmux mode
-/// (Same logic as main.rs build_agent_args)
-fn build_agent_args_for_tmux(config: &AgentLaunchConfig) -> Vec<String> {
-    use gwt_core::agent::codex::{codex_default_args, codex_skip_permissions_flag};
-
-    // SPEC-71f2742d: Handle custom agents
-    if let Some(ref custom) = config.custom_agent {
-        return build_custom_agent_args_for_tmux(custom, config);
-    }
-
-    let mut args = Vec::new();
-
-    match config.agent {
-        CodingAgent::ClaudeCode => {
-            // Model selection
-            if let Some(model) = &config.model {
-                if !model.is_empty() {
-                    args.push("--model".to_string());
-                    args.push(model.clone());
-                }
-            }
-
-            // Execution mode (FR-102) - same logic as single mode
-            match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume | ExecutionMode::Convert => {
-                    if let Some(session_id) = &config.session_id {
-                        args.push("--resume".to_string());
-                        args.push(session_id.clone());
-                    } else if matches!(config.execution_mode, ExecutionMode::Continue) {
-                        args.push("-c".to_string());
-                    } else {
-                        args.push("-r".to_string());
-                    }
-                }
-                ExecutionMode::Normal => {}
-            }
-
-            // Skip permissions
-            if config.skip_permissions {
-                args.push("--dangerously-skip-permissions".to_string());
-            }
-        }
-        CodingAgent::CodexCli => {
-            // Execution mode - resume subcommand must come first
-            match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume | ExecutionMode::Convert => {
-                    args.push("resume".to_string());
-                    if let Some(session_id) = &config.session_id {
-                        args.push(session_id.clone());
-                    } else if matches!(config.execution_mode, ExecutionMode::Continue) {
-                        args.push("--last".to_string());
-                    }
-                }
-                ExecutionMode::Normal => {}
-            }
-
-            // Skip permissions (Codex uses versioned flag)
-            let skip_flag = if config.skip_permissions {
-                Some(codex_skip_permissions_flag(None))
-            } else {
-                None
-            };
-            let bypass_sandbox = matches!(
-                skip_flag,
-                Some("--dangerously-bypass-approvals-and-sandbox")
-            );
-
-            let reasoning_override = config.reasoning_level.map(|r| r.label());
-            args.extend(codex_default_args(
-                config.model.as_deref(),
-                reasoning_override,
-                None, // skills_flag_version
-                bypass_sandbox,
-                config.collaboration_modes,
-            ));
-
-            if let Some(flag) = skip_flag {
-                args.push(flag.to_string());
-            }
-        }
-        CodingAgent::GeminiCli => {
-            // Model selection (Gemini uses -m or --model)
-            if let Some(model) = &config.model {
-                if !model.is_empty() {
-                    args.push("-m".to_string());
-                    args.push(model.clone());
-                }
-            }
-
-            // Execution mode
-            match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume | ExecutionMode::Convert => {
-                    if let Some(session_id) = &config.session_id {
-                        args.push("--resume".to_string());
-                        args.push(session_id.clone());
-                    } else if matches!(config.execution_mode, ExecutionMode::Continue) {
-                        args.push("--continue".to_string());
-                    } else {
-                        args.push("--resume".to_string());
-                    }
-                }
-                ExecutionMode::Normal => {}
-            }
-
-            // Skip permissions
-            if config.skip_permissions {
-                args.push("-y".to_string());
-            }
-        }
-        CodingAgent::OpenCode => {
-            // Model selection
-            if let Some(model) = &config.model {
-                if !model.is_empty() {
-                    args.push("--model".to_string());
-                    args.push(model.clone());
-                }
-            }
-
-            // Execution mode
-            match config.execution_mode {
-                ExecutionMode::Continue | ExecutionMode::Resume | ExecutionMode::Convert => {
-                    if let Some(session_id) = &config.session_id {
-                        args.push("--resume".to_string());
-                        args.push(session_id.clone());
-                    } else if matches!(config.execution_mode, ExecutionMode::Continue) {
-                        args.push("--continue".to_string());
-                    } else {
-                        args.push("--resume".to_string());
-                    }
-                }
-                ExecutionMode::Normal => {}
-            }
-        }
-    }
-
-    args
-}
-
-/// Build command line arguments for custom agents (SPEC-71f2742d T206)
-fn build_custom_agent_args_for_tmux(
-    custom: &CustomCodingAgent,
-    config: &AgentLaunchConfig,
-) -> Vec<String> {
-    let mut args = Vec::new();
-
-    // Add default args
-    args.extend(custom.default_args.clone());
-
-    // Add mode-specific args (T208)
-    if let Some(ref mode_args) = custom.mode_args {
-        match config.execution_mode {
-            ExecutionMode::Normal => {
-                args.extend(mode_args.normal.clone());
-            }
-            ExecutionMode::Continue => {
-                args.extend(mode_args.continue_mode.clone());
-            }
-            ExecutionMode::Resume | ExecutionMode::Convert => {
-                args.extend(mode_args.resume.clone());
-            }
-        }
-    }
-
-    // Add permission skip args if skip_permissions is true (T210)
-    if config.skip_permissions && !custom.permission_skip_args.is_empty() {
-        args.extend(custom.permission_skip_args.clone());
-    }
-
-    args
-}
-
-fn is_valid_env_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    match chars.next() {
-        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-fn shell_escape(value: &str) -> String {
-    let escaped = value.replace('\'', "'\\''");
-    format!("'{}'", escaped)
-}
-
-fn build_shell_command(command: &str, args: &[String]) -> String {
-    let mut cmd_parts = vec![shell_escape(command)];
-    cmd_parts.extend(args.iter().map(|arg| shell_escape(arg)));
-    cmd_parts.join(" ")
-}
-
-fn normalize_container_executable(executable: &str) -> String {
-    let is_windows_drive_abs = executable.len() > 2
-        && executable.as_bytes()[1] == b':'
-        && (executable.as_bytes()[2] == b'\\' || executable.as_bytes()[2] == b'/');
-    let is_unc_path = executable.starts_with("\\\\");
-
-    if is_windows_drive_abs || is_unc_path {
-        if let Some(name) = executable.rsplit(&['\\', '/'][..]).next() {
-            if !name.is_empty() {
-                return name.to_string();
-            }
-        }
-    }
-
-    let path = Path::new(executable);
-    if path.is_absolute() {
-        if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
-            if !name.is_empty() {
-                return name.to_string();
-            }
-        }
-    }
-
-    executable.to_string()
-}
-
-fn wrap_tmux_command_for_fast_exit(command: &str) -> String {
-    format!(
-        "start=$(date +%s); {} ; exit_status=$?; end=$(date +%s); if [ $exit_status -ne 0 ] || [ $((end-start)) -lt {} ]; then echo; echo \"[gwt] Agent exited immediately (status=$exit_status).\"; echo \"[gwt] Press Enter to close this pane.\"; read -r _; fi; exit $exit_status",
-        command, FAST_EXIT_THRESHOLD_SECS
-    )
-}
-
-/// Build the full tmux command string with environment variables
-fn build_tmux_command(
-    env_vars: &[(String, String)],
-    env_remove: &[String],
-    command: &str,
-) -> String {
-    let mut parts = Vec::new();
-
-    // Remove environment variables
-    for key in env_remove {
-        if !is_valid_env_name(key) {
-            continue;
-        }
-        parts.push(format!("unset {}", key));
-    }
-
-    // Add environment variable exports
-    for (key, value) in env_vars {
-        if !is_valid_env_name(key) {
-            continue;
-        }
-        let escaped_value = shell_escape(value);
-        parts.push(format!("export {}={}", key, escaped_value));
-    }
-
-    if parts.is_empty() {
-        command.to_string()
-    } else {
-        parts.push(command.to_string());
-        parts.join("; ")
-    }
-}
 
 fn resolve_remote_head(repo_root: &Path, remote: &str) -> Option<String> {
     let output = Command::new("git")
@@ -8945,12 +7720,6 @@ mod tests {
         }
         let ready_path = worktree_ready.expect("expected WorktreeReady update");
         assert_eq!(ready_path, worktree_path);
-    }
-
-    #[test]
-    fn test_background_window_name_uses_branch_name_only() {
-        let branch = "feature/clean-name";
-        assert_eq!(background_window_name(branch), branch);
     }
 
     #[test]
@@ -9391,50 +8160,9 @@ mod tests {
         assert_eq!(model.footer_scroll_offset, 0);
     }
 
-    #[test]
-    fn test_resolve_orphaned_agent_name_prefers_session_entry() {
-        let entry = sample_tool_entry("codex-cli");
-        let resolved = resolve_orphaned_agent_name("bash", Some(&entry));
-        assert_eq!(resolved, "codex-cli");
-    }
 
-    #[test]
-    fn test_wrap_tmux_command_for_fast_exit_uses_exit_status_variable() {
-        let wrapped = wrap_tmux_command_for_fast_exit("echo ok");
-        assert!(wrapped.contains("exit_status=$?"));
-        assert!(wrapped.contains("status=$exit_status"));
-        assert!(wrapped.contains("exit $exit_status"));
-        assert!(!wrapped.contains("; status=$?;"));
-    }
 
-    #[test]
-    fn test_normalize_container_executable_strips_path() {
-        assert_eq!(
-            normalize_container_executable("/usr/local/bin/bunx"),
-            "bunx"
-        );
-        assert_eq!(
-            normalize_container_executable("C:\\tools\\codex.exe"),
-            "codex.exe"
-        );
-        assert_eq!(normalize_container_executable("codex"), "codex");
-        assert_eq!(
-            normalize_container_executable("./scripts/agent.sh"),
-            "./scripts/agent.sh"
-        );
-        assert_eq!(
-            normalize_container_executable("scripts\\agent.exe"),
-            "scripts\\agent.exe"
-        );
-    }
 
-    #[test]
-    fn test_resolve_orphaned_agent_name_fallbacks() {
-        let resolved = resolve_orphaned_agent_name("bash", None);
-        assert_eq!(resolved, "bash");
-        let resolved = resolve_orphaned_agent_name("  ", None);
-        assert_eq!(resolved, "unknown");
-    }
 
     #[test]
     fn test_extract_tool_version_from_usage_matches_tool_id() {

@@ -15,8 +15,7 @@ pub mod lock;
 pub mod logging;
 pub mod migration;
 pub mod terminal;
-pub mod tmux;
 pub mod worktree;
 
 pub use error::{GwtError, Result};
-pub use execution_mode::{TerminalMode, TmuxMode};
+pub use execution_mode::TerminalMode;
