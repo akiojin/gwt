@@ -11,6 +11,7 @@ pub mod logs;
 pub mod pane_list;
 pub mod profiles;
 pub mod settings;
+pub mod speckit_wizard;
 pub mod split_layout;
 pub mod wizard;
 pub mod worktree_create;
@@ -27,6 +28,7 @@ pub use help::{render_help, HelpState};
 pub use logs::{render_logs, LogsState};
 pub use profiles::{render_profiles, ProfilesState};
 pub use settings::{render_settings, SettingsState};
+pub use speckit_wizard::{render_speckit_wizard, SpecKitWizardState};
 pub use wizard::{
     render_wizard, CodingAgent, ExecutionMode, QuickStartEntry, ReasoningLevel,
     WizardConfirmResult, WizardState,

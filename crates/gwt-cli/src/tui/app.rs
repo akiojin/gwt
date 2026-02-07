@@ -56,11 +56,12 @@ use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
 use super::screens::{
     collect_os_env, render_agent_mode, render_ai_wizard, render_branch_list, render_confirm,
     render_environment, render_error_with_queue, render_help, render_logs, render_profiles,
-    render_session_selector, render_settings, render_wizard, render_worktree_create, AIWizardState,
-    AgentMessage, AgentModeState, AgentRole, BranchItem, BranchListState, BranchType, CodingAgent,
-    ConfirmState, EnvironmentState, ErrorQueue, ErrorState, ExecutionMode, HelpState, LogsState,
-    ProfilesState, QuickStartEntry, ReasoningLevel, SettingsState, WizardConfirmResult,
-    WizardState, WorktreeCreateState,
+    render_session_selector, render_settings, render_speckit_wizard, render_wizard,
+    render_worktree_create, AIWizardState, AgentMessage, AgentModeState, AgentRole, BranchItem,
+    BranchListState, BranchType, CodingAgent, ConfirmState, EnvironmentState, ErrorQueue,
+    ErrorState, ExecutionMode, HelpState, LogsState, ProfilesState, QuickStartEntry,
+    ReasoningLevel, SettingsState, SpecKitWizardState, WizardConfirmResult, WizardState,
+    WorktreeCreateState,
 };
 // log_gwt_error is available for use when GwtError types are available
 
@@ -309,6 +310,8 @@ pub struct Model {
     wizard: WizardState,
     /// AI settings wizard state (FR-100)
     ai_wizard: AIWizardState,
+    /// Spec Kit wizard state (FR-019)
+    speckit_wizard: SpecKitWizardState,
     /// Status message
     status_message: Option<String>,
     /// Status message timestamp (for auto-clear)
@@ -396,6 +399,8 @@ pub enum Screen {
     Environment,
     /// AI settings wizard (FR-100)
     AISettingsWizard,
+    /// Spec Kit wizard (FR-019)
+    SpecKitWizard,
 }
 
 /// Messages (Events in Elm Architecture)
@@ -453,6 +458,8 @@ pub enum Message {
     ExecuteAgentTermination,
     /// FR-102g: Manually re-register Claude Code hooks (u key)
     ReregisterHooks,
+    /// FR-019: Open Spec Kit wizard
+    OpenSpecKitWizard,
 }
 
 impl Model {
@@ -493,6 +500,7 @@ impl Model {
             environment: EnvironmentState::new(),
             wizard: WizardState::new(),
             ai_wizard: AIWizardState::new(),
+            speckit_wizard: SpecKitWizardState::new(),
             status_message: None,
             status_message_time: None,
             launch_status: None,
@@ -3208,6 +3216,12 @@ impl Model {
                     if let Some(prev_screen) = self.screen_stack.pop() {
                         self.screen = prev_screen;
                     }
+                } else if matches!(self.screen, Screen::SpecKitWizard) {
+                    // Close Spec Kit wizard
+                    self.speckit_wizard.close();
+                    if let Some(prev_screen) = self.screen_stack.pop() {
+                        self.screen = prev_screen;
+                    }
                 } else if matches!(self.screen, Screen::AISettingsWizard) {
                     // Go back in AI wizard or close if at first step
                     if self.ai_wizard.show_delete_confirm {
@@ -3288,6 +3302,7 @@ impl Model {
                 Screen::Profiles => self.profiles.select_next(),
                 Screen::Environment => self.environment.select_next(),
                 Screen::AISettingsWizard => self.ai_wizard.select_next_model(),
+                Screen::SpecKitWizard => {}
                 Screen::Confirm => {}
             },
             Message::SelectPrev => match self.screen {
@@ -3314,6 +3329,7 @@ impl Model {
                 Screen::Profiles => self.profiles.select_prev(),
                 Screen::Environment => self.environment.select_prev(),
                 Screen::AISettingsWizard => self.ai_wizard.select_prev_model(),
+                Screen::SpecKitWizard => {}
                 Screen::Confirm => {}
             },
             Message::PageUp => match self.screen {
@@ -3505,6 +3521,27 @@ impl Model {
                 Screen::AISettingsWizard => {
                     self.handle_ai_wizard_enter();
                 }
+                Screen::SpecKitWizard => {
+                    if self.speckit_wizard.step
+                        == super::screens::speckit_wizard::SpecKitWizardStep::Clarify
+                    {
+                        if self.speckit_wizard.input.trim().is_empty() {
+                            self.speckit_wizard
+                                .set_error("Please enter a feature description.");
+                        } else {
+                            self.speckit_wizard.next_step();
+                            self.speckit_wizard
+                                .set_processing("Generating specification...");
+                        }
+                    } else if self.speckit_wizard.step
+                        == super::screens::speckit_wizard::SpecKitWizardStep::Done
+                    {
+                        self.speckit_wizard.close();
+                        if let Some(prev_screen) = self.screen_stack.pop() {
+                            self.screen = prev_screen;
+                        }
+                    }
+                }
                 _ => {}
             },
             Message::Char(c) => {
@@ -3569,6 +3606,14 @@ impl Model {
                             self.ai_wizard.show_delete();
                         }
                     }
+                } else if matches!(self.screen, Screen::SpecKitWizard)
+                    && self.speckit_wizard.step
+                        == super::screens::speckit_wizard::SpecKitWizardStep::Clarify
+                {
+                    self.speckit_wizard
+                        .input
+                        .insert(self.speckit_wizard.input_cursor, c);
+                    self.speckit_wizard.input_cursor += 1;
                 } else if matches!(self.screen, Screen::Error) {
                     // Error screen shortcuts
                     match c {
@@ -3624,6 +3669,15 @@ impl Model {
                     && self.ai_wizard.is_text_input()
                 {
                     self.ai_wizard.delete_char();
+                } else if matches!(self.screen, Screen::SpecKitWizard)
+                    && self.speckit_wizard.step
+                        == super::screens::speckit_wizard::SpecKitWizardStep::Clarify
+                    && self.speckit_wizard.input_cursor > 0
+                {
+                    self.speckit_wizard.input_cursor -= 1;
+                    self.speckit_wizard
+                        .input
+                        .remove(self.speckit_wizard.input_cursor);
                 }
             }
             Message::CursorLeft => {
@@ -3642,6 +3696,10 @@ impl Model {
                     self.ai_wizard.cursor_left();
                 } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
                     self.agent_mode.cursor_left();
+                } else if matches!(self.screen, Screen::SpecKitWizard)
+                    && self.speckit_wizard.input_cursor > 0
+                {
+                    self.speckit_wizard.input_cursor -= 1;
                 }
             }
             Message::CursorRight => {
@@ -3660,6 +3718,10 @@ impl Model {
                     self.ai_wizard.cursor_right();
                 } else if matches!(self.screen, Screen::AgentMode) && self.agent_mode.ai_ready {
                     self.agent_mode.cursor_right();
+                } else if matches!(self.screen, Screen::SpecKitWizard)
+                    && self.speckit_wizard.input_cursor < self.speckit_wizard.input.len()
+                {
+                    self.speckit_wizard.input_cursor += 1;
                 }
             }
             Message::RefreshData => {
@@ -3752,6 +3814,11 @@ impl Model {
                     self.status_message = Some("Could not find Claude settings path.".to_string());
                     self.status_message_time = Some(Instant::now());
                 }
+            }
+            Message::OpenSpecKitWizard => {
+                self.speckit_wizard.open();
+                self.screen_stack.push(self.screen.clone());
+                self.screen = Screen::SpecKitWizard;
             }
             Message::Tab => match self.screen {
                 Screen::Settings => self.settings.next_category(),
@@ -4647,6 +4714,9 @@ impl Model {
             Screen::Profiles => render_profiles(&mut self.profiles, frame, chunks[1]),
             Screen::Environment => render_environment(&mut self.environment, frame, chunks[1]),
             Screen::AISettingsWizard => render_ai_wizard(&mut self.ai_wizard, frame, chunks[1]),
+            Screen::SpecKitWizard => {
+                render_speckit_wizard(frame, chunks[1], &self.speckit_wizard);
+            }
             Screen::Confirm => {}
         }
 
@@ -4850,6 +4920,7 @@ impl Model {
                     self.ai_wizard.step_title()
                 }
             }
+            Screen::SpecKitWizard => "[Enter] Next | [Esc] Cancel",
         }
     }
 
@@ -5059,6 +5130,14 @@ impl Model {
                         Some(Message::NavigateTo(Screen::Settings))
                     } else {
                         Some(Message::Char('s'))
+                    }
+                }
+                (KeyCode::Char('S'), KeyModifiers::SHIFT) => {
+                    // FR-019: Shift+S opens Spec Kit wizard from branch list
+                    if matches!(self.screen, Screen::BranchList) && !self.branch_list.filter_mode {
+                        Some(Message::OpenSpecKitWizard)
+                    } else {
+                        Some(Message::Char('S'))
                     }
                 }
                 (KeyCode::Char('r'), KeyModifiers::NONE) => {

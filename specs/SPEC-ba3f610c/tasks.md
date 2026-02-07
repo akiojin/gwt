@@ -279,14 +279,14 @@ US4 (完了検出) ────────────┘
 
 ### ブランチモード連携 (FR-016)
 
-- [ ] **T082** [P] [共通] `crates/gwt-cli/src/tui/screens/branch_list.rs` でブランチ一覧に`agent/`プレフィックスブランチが表示されることを確認（既存の表示ロジックが対応済みなら変更不要、対応していなければフィルタ解除）
+- [x] **T082** [P] [共通] `crates/gwt-cli/src/tui/screens/branch_list.rs` でブランチ一覧に`agent/`プレフィックスブランチが表示されることを確認（既存の表示ロジックが対応済みなら変更不要、対応していなければフィルタ解除）
 
 ### Spec Kitウィザード (FR-019, ブランチモードからのSpec Kit起動仕様)
 
-- [ ] **T083** [共通] `crates/gwt-cli/src/tui/screens/speckit_wizard.rs` を新規作成し、SpecKitWizardState構造体を定義（input, step: Clarify/Specify/Plan/Tasks/Done, artifacts）
-- [ ] **T084** [共通] T083の後に `crates/gwt-cli/src/tui/screens/speckit_wizard.rs` にrender_speckit_wizard関数を実装（ステップ表示 + 機能説明入力フォーム + 進捗表示）
-- [ ] **T085** [共通] T084の後に `crates/gwt-cli/src/tui/screens/mod.rs` に `pub mod speckit_wizard;` を追加しエクスポート
-- [ ] **T086** [共通] T085の後に `crates/gwt-cli/src/tui/app.rs` にショートカットキーでSpec Kitウィザード起動ロジックを追加（ブランチモード時にキー押下→SpecKitWizardState初期化→ウィザード画面表示→完了後ブランチモードに戻る）
+- [x] **T083** [共通] `crates/gwt-cli/src/tui/screens/speckit_wizard.rs` を新規作成し、SpecKitWizardState構造体を定義（input, step: Clarify/Specify/Plan/Tasks/Done, artifacts）
+- [x] **T084** [共通] T083の後に `crates/gwt-cli/src/tui/screens/speckit_wizard.rs` にrender_speckit_wizard関数を実装（ステップ表示 + 機能説明入力フォーム + 進捗表示）
+- [x] **T085** [共通] T084の後に `crates/gwt-cli/src/tui/screens/mod.rs` に `pub mod speckit_wizard;` を追加しエクスポート
+- [x] **T086** [共通] T085の後に `crates/gwt-cli/src/tui/app.rs` にショートカットキーでSpec Kitウィザード起動ロジックを追加（ブランチモード時にキー押下→SpecKitWizardState初期化→ウィザード画面表示→完了後ブランチモードに戻る）
 
 **✅ P2 UX完了チェックポイント**: ブランチモードからSpec Kit利用可能
 
