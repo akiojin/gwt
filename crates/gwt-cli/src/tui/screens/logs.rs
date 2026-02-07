@@ -123,7 +123,9 @@ impl LogsState {
         Self::default()
     }
 
-    pub fn with_entries(mut self, entries: Vec<LogEntry>) -> Self {
+    pub fn with_entries(mut self, mut entries: Vec<LogEntry>) -> Self {
+        // FR-017: Sort entries by timestamp descending (newest first)
+        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         self.entries = entries;
         self
     }
@@ -604,6 +606,45 @@ mod tests {
         assert_eq!(parsed["target"], "test");
         assert_eq!(parsed["message"], "Test message");
         assert_eq!(parsed["category"], "worktree");
+    }
+
+    #[test]
+    fn test_entries_sorted_newest_first() {
+        // FR-017: Entries must be displayed in descending timestamp order (newest first)
+        let entries = vec![
+            LogEntry {
+                timestamp: "2024-01-01T10:00:00Z".to_string(),
+                level: "INFO".to_string(),
+                message: "Old entry".to_string(),
+                target: "test".to_string(),
+                category: None,
+                extra: std::collections::HashMap::new(),
+            },
+            LogEntry {
+                timestamp: "2024-01-01T12:00:00Z".to_string(),
+                level: "ERROR".to_string(),
+                message: "New entry".to_string(),
+                target: "test".to_string(),
+                category: None,
+                extra: std::collections::HashMap::new(),
+            },
+            LogEntry {
+                timestamp: "2024-01-01T11:00:00Z".to_string(),
+                level: "WARN".to_string(),
+                message: "Middle entry".to_string(),
+                target: "test".to_string(),
+                category: None,
+                extra: std::collections::HashMap::new(),
+            },
+        ];
+
+        let state = LogsState::new().with_entries(entries);
+        let filtered = state.filtered_entries();
+
+        // Newest entry should be first
+        assert_eq!(filtered[0].message, "New entry");
+        assert_eq!(filtered[1].message, "Middle entry");
+        assert_eq!(filtered[2].message, "Old entry");
     }
 
     #[test]
