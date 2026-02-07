@@ -53,6 +53,8 @@ use std::time::{Duration, Instant, SystemTime};
 use tracing::{debug, error, info, warn};
 
 const BRANCH_LIST_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(500);
+/// Timeout for Ctrl+G prefix mode (SPEC-1d6dd9fc FR-021)
+const PREFIX_MODE_TIMEOUT: Duration = Duration::from_secs(2);
 const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const SESSION_SUMMARY_QUIET_PERIOD: Duration = Duration::from_secs(5);
 const FAST_EXIT_THRESHOLD_SECS: u64 = 2;
@@ -617,6 +619,14 @@ pub struct Model {
     bare_repo_path: Option<PathBuf>,
     /// GitView state (SPEC-1ea18899)
     git_view: GitViewState,
+    /// SPEC-1d6dd9fc: Current focus target for input routing
+    focus_target: FocusTarget,
+    /// SPEC-1d6dd9fc: Whether prefix mode (Ctrl+G) is active
+    prefix_mode_active: bool,
+    /// SPEC-1d6dd9fc: When prefix mode was activated (for timeout)
+    prefix_mode_time: Option<Instant>,
+    /// SPEC-1d6dd9fc: Built-in terminal pane manager
+    terminal_manager: gwt_core::terminal::manager::PaneManager,
     /// GitView cache for all branches (SPEC-1ea18899 FR-050)
     git_view_cache: GitViewCache,
     /// GitView cache update receiver (SPEC-1ea18899)
@@ -662,6 +672,32 @@ enum ServiceSelectionDecision {
         force_host: bool,
     },
     AwaitSelection,
+}
+
+/// Focus target for input routing (SPEC-1d6dd9fc FR-020..FR-024)
+#[derive(Clone, Debug, PartialEq)]
+pub enum FocusTarget {
+    /// gwt UI (branch list, settings, etc.)
+    GwtUi,
+    /// Terminal pane (PTY transparent input)
+    TerminalPane,
+}
+
+/// Prefix key commands (SPEC-1d6dd9fc FR-025..FR-029c)
+#[derive(Clone, Debug, PartialEq)]
+pub enum PrefixCommand {
+    /// Next tab (Ctrl+G → n)
+    NextTab,
+    /// Previous tab (Ctrl+G → p)
+    PrevTab,
+    /// Close current pane (Ctrl+G → x)
+    ClosePane,
+    /// Fullscreen toggle (Ctrl+G → z)
+    FullscreenToggle,
+    /// Cancel prefix mode (Ctrl+G → Esc)
+    Cancel,
+    /// Send Ctrl+G literal to PTY (Ctrl+G → Ctrl+G)
+    SendPrefix,
 }
 
 /// Screen types
@@ -743,6 +779,14 @@ pub enum Message {
     ExecuteAgentTermination,
     /// FR-102g: Manually re-register Claude Code hooks (u key)
     ReregisterHooks,
+    /// SPEC-1d6dd9fc: Prefix key command dispatched
+    PrefixKey(PrefixCommand),
+    /// SPEC-1d6dd9fc FR-020: Focus terminal pane
+    FocusTerminalPane,
+    /// SPEC-1d6dd9fc FR-020: Focus gwt UI
+    FocusGwtUi,
+    /// SPEC-1d6dd9fc: Write raw bytes to active PTY
+    WriteToPty(Vec<u8>),
 }
 
 impl Model {
@@ -876,6 +920,10 @@ impl Model {
             git_view_cache: GitViewCache::new(),
             git_view_cache_rx: None,
             git_view_pr_rx: None,
+            focus_target: FocusTarget::GwtUi,
+            prefix_mode_active: false,
+            prefix_mode_time: None,
+            terminal_manager: gwt_core::terminal::manager::PaneManager::new(),
         };
 
         model
@@ -5049,6 +5097,56 @@ impl Model {
                     self.status_message_time = Some(Instant::now());
                 }
             }
+            // SPEC-1d6dd9fc: Prefix key commands
+            Message::PrefixKey(cmd) => match cmd {
+                PrefixCommand::NextTab => {
+                    self.terminal_manager.next_tab();
+                }
+                PrefixCommand::PrevTab => {
+                    self.terminal_manager.prev_tab();
+                }
+                PrefixCommand::ClosePane => {
+                    self.terminal_manager.close_active_pane();
+                    if self.terminal_manager.is_empty() {
+                        self.focus_target = FocusTarget::GwtUi;
+                        self.split_layout.has_terminal_pane = false;
+                        self.split_layout.is_fullscreen = false;
+                    }
+                }
+                PrefixCommand::FullscreenToggle => {
+                    self.terminal_manager.toggle_fullscreen();
+                    self.split_layout.is_fullscreen = self.terminal_manager.is_fullscreen();
+                }
+                PrefixCommand::Cancel => {
+                    // Cancel prefix mode - return focus to gwt UI
+                    self.focus_target = FocusTarget::GwtUi;
+                }
+                PrefixCommand::SendPrefix => {
+                    // Send Ctrl+G literal (0x07 = BEL) to active PTY
+                    if let Some(pane) = self.terminal_manager.active_pane_mut() {
+                        let _ = pane.write_input(&[0x07]);
+                    }
+                }
+            },
+            Message::FocusTerminalPane => {
+                if !self.terminal_manager.is_empty() {
+                    self.focus_target = FocusTarget::TerminalPane;
+                }
+            }
+            Message::FocusGwtUi => {
+                self.focus_target = FocusTarget::GwtUi;
+            }
+            Message::WriteToPty(bytes) => {
+                if let Some(pane) = self.terminal_manager.active_pane_mut() {
+                    if let Err(e) = pane.write_input(&bytes) {
+                        debug!(
+                            category = "terminal",
+                            error = %e,
+                            "Failed to write to PTY"
+                        );
+                    }
+                }
+            }
             // FR-020 SPEC-71f2742d: Tab cycles BranchList → AgentMode → Settings → BranchList
             Message::Tab => match self.screen {
                 Screen::Settings => {
@@ -6810,17 +6908,29 @@ impl Model {
         // Content
         match base_screen {
             Screen::BranchList => {
-                // Use split layout (branch list takes full area, PaneList abolished)
+                // Use split layout (branch list + optional terminal pane)
                 let split_areas = calculate_split_layout(chunks[1], &self.split_layout);
 
-                // Render branch list (always has focus now)
-                render_branch_list(
-                    &mut self.branch_list,
-                    frame,
-                    split_areas.branch_list,
-                    None,
-                    true, // Branch list always has focus
-                );
+                // Render branch list (has focus when gwt UI is focused)
+                let branch_has_focus = self.focus_target == FocusTarget::GwtUi;
+                if split_areas.branch_list.width > 0 && split_areas.branch_list.height > 0 {
+                    render_branch_list(
+                        &mut self.branch_list,
+                        frame,
+                        split_areas.branch_list,
+                        None,
+                        branch_has_focus,
+                    );
+                }
+
+                // SPEC-1d6dd9fc: Render terminal pane if active
+                if let Some(terminal_area) = split_areas.terminal_pane {
+                    let view = super::screens::terminal_pane::TerminalPaneView {
+                        pane_manager: &self.terminal_manager,
+                        is_focused: self.focus_target == FocusTarget::TerminalPane,
+                    };
+                    super::screens::terminal_pane::render_terminal_pane(&view, frame, terminal_area);
+                }
             }
             Screen::WorktreeCreate => {
                 render_worktree_create(&self.worktree_create, frame, chunks[1])
@@ -7607,10 +7717,84 @@ impl Model {
             }
         }
 
+        // SPEC-1d6dd9fc: Prefix mode timeout check
+        if self.prefix_mode_active {
+            if let Some(t) = self.prefix_mode_time {
+                if t.elapsed() >= PREFIX_MODE_TIMEOUT {
+                    self.prefix_mode_active = false;
+                    self.prefix_mode_time = None;
+                }
+            }
+        }
+
+        // SPEC-1d6dd9fc: Handle prefix mode (Ctrl+G → command) before anything else
+        if self.prefix_mode_active && is_key_press {
+            self.prefix_mode_active = false;
+            self.prefix_mode_time = None;
+            return match (key.code, key.modifiers) {
+                (KeyCode::Char('n'), KeyModifiers::NONE) => {
+                    Some(Message::PrefixKey(PrefixCommand::NextTab))
+                }
+                (KeyCode::Char('p'), KeyModifiers::NONE) => {
+                    Some(Message::PrefixKey(PrefixCommand::PrevTab))
+                }
+                (KeyCode::Char('x'), KeyModifiers::NONE) => {
+                    Some(Message::PrefixKey(PrefixCommand::ClosePane))
+                }
+                (KeyCode::Char('z'), KeyModifiers::NONE) => {
+                    Some(Message::PrefixKey(PrefixCommand::FullscreenToggle))
+                }
+                (KeyCode::Esc, _) => Some(Message::PrefixKey(PrefixCommand::Cancel)),
+                (KeyCode::Char('g'), KeyModifiers::CONTROL) => {
+                    // Ctrl+G → Ctrl+G: send Ctrl+G literal to PTY
+                    Some(Message::PrefixKey(PrefixCommand::SendPrefix))
+                }
+                _ => {
+                    // Unknown command: cancel prefix mode silently
+                    None
+                }
+            };
+        }
+
+        // SPEC-1d6dd9fc: Terminal pane has focus - route all input to PTY
+        if self.focus_target == FocusTarget::TerminalPane
+            && !self.terminal_manager.is_empty()
+            && is_key_press
+        {
+            // Ctrl+G activates prefix mode (returns focus to gwt UI commands)
+            if key.code == KeyCode::Char('g') && key.modifiers == KeyModifiers::CONTROL {
+                self.prefix_mode_active = true;
+                self.prefix_mode_time = Some(Instant::now());
+                return None;
+            }
+            // Ctrl+C still works globally
+            if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+                return Some(Message::CtrlC);
+            }
+            // All other keys → PTY transparent input
+            let bytes = key_event_to_bytes(&key);
+            if !bytes.is_empty() {
+                return Some(Message::WriteToPty(bytes));
+            }
+            return None;
+        }
+
         if self.text_input_active() {
             self.handle_text_input_key(key, is_key_press)
         } else {
-            // Normal key handling
+            // Normal key handling (gwt UI has focus)
+
+            // SPEC-1d6dd9fc: Ctrl+G in gwt UI activates prefix mode
+            if key.code == KeyCode::Char('g')
+                && key.modifiers == KeyModifiers::CONTROL
+                && is_key_press
+                && !self.terminal_manager.is_empty()
+            {
+                self.prefix_mode_active = true;
+                self.prefix_mode_time = Some(Instant::now());
+                return None;
+            }
+
             match (key.code, key.modifiers) {
                 (KeyCode::Char('c'), KeyModifiers::CONTROL) if is_key_press => Some(Message::CtrlC),
                 (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT)
@@ -7888,6 +8072,57 @@ impl Model {
                 _ => None,
             }
         }
+    }
+}
+
+/// Convert a crossterm KeyEvent to terminal bytes for PTY input (SPEC-1d6dd9fc FR-022).
+fn key_event_to_bytes(key: &KeyEvent) -> Vec<u8> {
+    match key.code {
+        KeyCode::Char(c) => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                // Control characters: Ctrl+A=0x01 .. Ctrl+Z=0x1A
+                let ctrl = c.to_ascii_lowercase();
+                if ctrl.is_ascii_lowercase() {
+                    vec![ctrl as u8 - b'a' + 1]
+                } else {
+                    Vec::new()
+                }
+            } else {
+                let mut buf = [0u8; 4];
+                let s = c.encode_utf8(&mut buf);
+                s.as_bytes().to_vec()
+            }
+        }
+        KeyCode::Enter => vec![b'\r'],
+        KeyCode::Backspace => vec![0x7f],
+        KeyCode::Tab => vec![b'\t'],
+        KeyCode::Esc => vec![0x1b],
+        KeyCode::Up => b"\x1b[A".to_vec(),
+        KeyCode::Down => b"\x1b[B".to_vec(),
+        KeyCode::Right => b"\x1b[C".to_vec(),
+        KeyCode::Left => b"\x1b[D".to_vec(),
+        KeyCode::Home => b"\x1b[H".to_vec(),
+        KeyCode::End => b"\x1b[F".to_vec(),
+        KeyCode::PageUp => b"\x1b[5~".to_vec(),
+        KeyCode::PageDown => b"\x1b[6~".to_vec(),
+        KeyCode::Delete => b"\x1b[3~".to_vec(),
+        KeyCode::Insert => b"\x1b[2~".to_vec(),
+        KeyCode::F(n) => match n {
+            1 => b"\x1bOP".to_vec(),
+            2 => b"\x1bOQ".to_vec(),
+            3 => b"\x1bOR".to_vec(),
+            4 => b"\x1bOS".to_vec(),
+            5 => b"\x1b[15~".to_vec(),
+            6 => b"\x1b[17~".to_vec(),
+            7 => b"\x1b[18~".to_vec(),
+            8 => b"\x1b[19~".to_vec(),
+            9 => b"\x1b[20~".to_vec(),
+            10 => b"\x1b[21~".to_vec(),
+            11 => b"\x1b[23~".to_vec(),
+            12 => b"\x1b[24~".to_vec(),
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
     }
 }
 
@@ -10066,5 +10301,498 @@ mod tests {
         assert!(!Model::should_prompt_recreate(&ContainerStatus::Running));
         assert!(Model::should_prompt_recreate(&ContainerStatus::Stopped));
         assert!(!Model::should_prompt_recreate(&ContainerStatus::NotFound));
+    }
+
+    // ===== SPEC-1d6dd9fc T011: Event handling tests =====
+
+    // 1. FocusTarget default is GwtUi
+    #[test]
+    fn test_focus_target_default_is_gwt_ui() {
+        let model = Model::new_with_context(None);
+        assert_eq!(model.focus_target, FocusTarget::GwtUi);
+    }
+
+    // 2. Prefix mode is not active by default
+    #[test]
+    fn test_prefix_mode_default_inactive() {
+        let model = Model::new_with_context(None);
+        assert!(!model.prefix_mode_active);
+        assert!(model.prefix_mode_time.is_none());
+    }
+
+    // 3. PrefixCommand::NextTab switches to next tab
+    #[test]
+    fn test_prefix_next_tab() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+        // Add panes via manager
+        let p1 = gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+            pane_id: "p1".to_string(),
+            command: "/usr/bin/true".to_string(),
+            args: vec![],
+            working_dir: std::env::temp_dir(),
+            branch_name: "branch-a".to_string(),
+            agent_name: "agent-a".to_string(),
+            agent_color: ratatui::style::Color::Green,
+            rows: 24,
+            cols: 80,
+            env_vars: HashMap::new(),
+        })
+        .unwrap();
+        let p2 = gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+            pane_id: "p2".to_string(),
+            command: "/usr/bin/true".to_string(),
+            args: vec![],
+            working_dir: std::env::temp_dir(),
+            branch_name: "branch-b".to_string(),
+            agent_name: "agent-b".to_string(),
+            agent_color: ratatui::style::Color::Blue,
+            rows: 24,
+            cols: 80,
+            env_vars: HashMap::new(),
+        })
+        .unwrap();
+        model.terminal_manager.add_pane(p1).unwrap();
+        model.terminal_manager.add_pane(p2).unwrap();
+        // active_index is 1 (last added)
+        assert_eq!(model.terminal_manager.active_index(), 1);
+
+        model.update(Message::PrefixKey(PrefixCommand::NextTab));
+        assert_eq!(model.terminal_manager.active_index(), 0);
+    }
+
+    // 4. PrefixCommand::PrevTab switches to previous tab
+    #[test]
+    fn test_prefix_prev_tab() {
+        let mut model = Model::new_with_context(None);
+        let p1 = gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+            pane_id: "p1".to_string(),
+            command: "/usr/bin/true".to_string(),
+            args: vec![],
+            working_dir: std::env::temp_dir(),
+            branch_name: "b".to_string(),
+            agent_name: "a".to_string(),
+            agent_color: ratatui::style::Color::Green,
+            rows: 24,
+            cols: 80,
+            env_vars: HashMap::new(),
+        })
+        .unwrap();
+        let p2 = gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+            pane_id: "p2".to_string(),
+            command: "/usr/bin/true".to_string(),
+            args: vec![],
+            working_dir: std::env::temp_dir(),
+            branch_name: "b2".to_string(),
+            agent_name: "a2".to_string(),
+            agent_color: ratatui::style::Color::Blue,
+            rows: 24,
+            cols: 80,
+            env_vars: HashMap::new(),
+        })
+        .unwrap();
+        model.terminal_manager.add_pane(p1).unwrap();
+        model.terminal_manager.add_pane(p2).unwrap();
+        assert_eq!(model.terminal_manager.active_index(), 1);
+
+        model.update(Message::PrefixKey(PrefixCommand::PrevTab));
+        assert_eq!(model.terminal_manager.active_index(), 0);
+    }
+
+    // 5. PrefixCommand::ClosePane closes active pane and reverts focus
+    #[test]
+    fn test_prefix_close_pane_reverts_focus() {
+        let mut model = Model::new_with_context(None);
+        let p1 = gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+            pane_id: "p1".to_string(),
+            command: "/usr/bin/true".to_string(),
+            args: vec![],
+            working_dir: std::env::temp_dir(),
+            branch_name: "b".to_string(),
+            agent_name: "a".to_string(),
+            agent_color: ratatui::style::Color::Green,
+            rows: 24,
+            cols: 80,
+            env_vars: HashMap::new(),
+        })
+        .unwrap();
+        model.terminal_manager.add_pane(p1).unwrap();
+        model.split_layout.has_terminal_pane = true;
+        model.focus_target = FocusTarget::TerminalPane;
+
+        model.update(Message::PrefixKey(PrefixCommand::ClosePane));
+        assert!(model.terminal_manager.is_empty());
+        assert_eq!(model.focus_target, FocusTarget::GwtUi);
+        assert!(!model.split_layout.has_terminal_pane);
+    }
+
+    // 6. PrefixCommand::FullscreenToggle toggles fullscreen
+    #[test]
+    fn test_prefix_fullscreen_toggle() {
+        let mut model = Model::new_with_context(None);
+        let p1 = gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+            pane_id: "p1".to_string(),
+            command: "/usr/bin/true".to_string(),
+            args: vec![],
+            working_dir: std::env::temp_dir(),
+            branch_name: "b".to_string(),
+            agent_name: "a".to_string(),
+            agent_color: ratatui::style::Color::Green,
+            rows: 24,
+            cols: 80,
+            env_vars: HashMap::new(),
+        })
+        .unwrap();
+        model.terminal_manager.add_pane(p1).unwrap();
+        assert!(!model.split_layout.is_fullscreen);
+
+        model.update(Message::PrefixKey(PrefixCommand::FullscreenToggle));
+        assert!(model.split_layout.is_fullscreen);
+
+        model.update(Message::PrefixKey(PrefixCommand::FullscreenToggle));
+        assert!(!model.split_layout.is_fullscreen);
+    }
+
+    // 7. PrefixCommand::Cancel returns focus to GwtUi
+    #[test]
+    fn test_prefix_cancel_returns_focus() {
+        let mut model = Model::new_with_context(None);
+        model.focus_target = FocusTarget::TerminalPane;
+
+        model.update(Message::PrefixKey(PrefixCommand::Cancel));
+        assert_eq!(model.focus_target, FocusTarget::GwtUi);
+    }
+
+    // 8. FocusTerminalPane changes focus
+    #[test]
+    fn test_focus_terminal_pane() {
+        let mut model = Model::new_with_context(None);
+        let p1 = gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+            pane_id: "p1".to_string(),
+            command: "/usr/bin/true".to_string(),
+            args: vec![],
+            working_dir: std::env::temp_dir(),
+            branch_name: "b".to_string(),
+            agent_name: "a".to_string(),
+            agent_color: ratatui::style::Color::Green,
+            rows: 24,
+            cols: 80,
+            env_vars: HashMap::new(),
+        })
+        .unwrap();
+        model.terminal_manager.add_pane(p1).unwrap();
+        assert_eq!(model.focus_target, FocusTarget::GwtUi);
+
+        model.update(Message::FocusTerminalPane);
+        assert_eq!(model.focus_target, FocusTarget::TerminalPane);
+    }
+
+    // 9. FocusTerminalPane does nothing when no panes
+    #[test]
+    fn test_focus_terminal_pane_no_panes() {
+        let mut model = Model::new_with_context(None);
+        assert!(model.terminal_manager.is_empty());
+
+        model.update(Message::FocusTerminalPane);
+        assert_eq!(model.focus_target, FocusTarget::GwtUi);
+    }
+
+    // 10. FocusGwtUi changes focus
+    #[test]
+    fn test_focus_gwt_ui() {
+        let mut model = Model::new_with_context(None);
+        model.focus_target = FocusTarget::TerminalPane;
+
+        model.update(Message::FocusGwtUi);
+        assert_eq!(model.focus_target, FocusTarget::GwtUi);
+    }
+
+    // 11. key_event_to_bytes for character
+    #[test]
+    fn test_key_event_to_bytes_char() {
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        assert_eq!(key_event_to_bytes(&key), b"a");
+    }
+
+    // 12. key_event_to_bytes for Enter
+    #[test]
+    fn test_key_event_to_bytes_enter() {
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(key_event_to_bytes(&key), b"\r");
+    }
+
+    // 13. key_event_to_bytes for arrow keys
+    #[test]
+    fn test_key_event_to_bytes_arrows() {
+        assert_eq!(
+            key_event_to_bytes(&KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            b"\x1b[A"
+        );
+        assert_eq!(
+            key_event_to_bytes(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            b"\x1b[B"
+        );
+    }
+
+    // 14. key_event_to_bytes for Ctrl+A
+    #[test]
+    fn test_key_event_to_bytes_ctrl_a() {
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
+        assert_eq!(key_event_to_bytes(&key), vec![0x01]);
+    }
+
+    // 15. key_event_to_bytes for Backspace
+    #[test]
+    fn test_key_event_to_bytes_backspace() {
+        let key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+        assert_eq!(key_event_to_bytes(&key), vec![0x7f]);
+    }
+
+    // 16. key_event_to_bytes for Esc
+    #[test]
+    fn test_key_event_to_bytes_esc() {
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(key_event_to_bytes(&key), vec![0x1b]);
+    }
+
+    // 17. key_event_to_bytes for Tab
+    #[test]
+    fn test_key_event_to_bytes_tab() {
+        let key = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(key_event_to_bytes(&key), b"\t");
+    }
+
+    // 18. key_event_to_bytes for F1
+    #[test]
+    fn test_key_event_to_bytes_f1() {
+        let key = KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE);
+        assert_eq!(key_event_to_bytes(&key), b"\x1bOP");
+    }
+
+    // 19. Ctrl+G in gwt UI with panes activates prefix mode
+    #[test]
+    fn test_ctrl_g_activates_prefix_mode() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+        let p1 = gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+            pane_id: "p1".to_string(),
+            command: "/usr/bin/true".to_string(),
+            args: vec![],
+            working_dir: std::env::temp_dir(),
+            branch_name: "b".to_string(),
+            agent_name: "a".to_string(),
+            agent_color: ratatui::style::Color::Green,
+            rows: 24,
+            cols: 80,
+            env_vars: HashMap::new(),
+        })
+        .unwrap();
+        model.terminal_manager.add_pane(p1).unwrap();
+
+        let key = KeyEvent::new_with_kind(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        );
+        let msg = model.handle_key_event(key);
+        assert!(msg.is_none()); // Ctrl+G itself does not produce a message
+        assert!(model.prefix_mode_active);
+    }
+
+    // 20. Ctrl+G without panes does NOT activate prefix mode
+    #[test]
+    fn test_ctrl_g_no_panes_no_prefix() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+        assert!(model.terminal_manager.is_empty());
+
+        let key = KeyEvent::new_with_kind(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        );
+        let _msg = model.handle_key_event(key);
+        // Without panes, Ctrl+G should NOT enter prefix mode
+        assert!(!model.prefix_mode_active);
+        // Ctrl+G with CONTROL modifier falls through to normal handling
+        // where no match exists for it, so msg may be None
+    }
+
+    // 21. Prefix mode + n = NextTab
+    #[test]
+    fn test_prefix_mode_n_next_tab() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+        model.prefix_mode_active = true;
+        model.prefix_mode_time = Some(Instant::now());
+
+        let key =
+            KeyEvent::new_with_kind(KeyCode::Char('n'), KeyModifiers::NONE, KeyEventKind::Press);
+        let msg = model.handle_key_event(key);
+        assert!(!model.prefix_mode_active);
+        match msg {
+            Some(Message::PrefixKey(PrefixCommand::NextTab)) => {}
+            other => panic!("Expected PrefixKey(NextTab), got: {:?}", other),
+        }
+    }
+
+    // 22. Prefix mode + z = FullscreenToggle
+    #[test]
+    fn test_prefix_mode_z_fullscreen() {
+        let mut model = Model::new_with_context(None);
+        model.prefix_mode_active = true;
+        model.prefix_mode_time = Some(Instant::now());
+
+        let key =
+            KeyEvent::new_with_kind(KeyCode::Char('z'), KeyModifiers::NONE, KeyEventKind::Press);
+        let msg = model.handle_key_event(key);
+        assert!(!model.prefix_mode_active);
+        match msg {
+            Some(Message::PrefixKey(PrefixCommand::FullscreenToggle)) => {}
+            other => panic!("Expected PrefixKey(FullscreenToggle), got: {:?}", other),
+        }
+    }
+
+    // 23. Prefix mode + Esc = Cancel
+    #[test]
+    fn test_prefix_mode_esc_cancel() {
+        let mut model = Model::new_with_context(None);
+        model.prefix_mode_active = true;
+        model.prefix_mode_time = Some(Instant::now());
+
+        let key = KeyEvent::new_with_kind(KeyCode::Esc, KeyModifiers::NONE, KeyEventKind::Press);
+        let msg = model.handle_key_event(key);
+        assert!(!model.prefix_mode_active);
+        match msg {
+            Some(Message::PrefixKey(PrefixCommand::Cancel)) => {}
+            other => panic!("Expected PrefixKey(Cancel), got: {:?}", other),
+        }
+    }
+
+    // 24. Prefix mode + Ctrl+G = SendPrefix
+    #[test]
+    fn test_prefix_mode_ctrl_g_send_prefix() {
+        let mut model = Model::new_with_context(None);
+        model.prefix_mode_active = true;
+        model.prefix_mode_time = Some(Instant::now());
+
+        let key = KeyEvent::new_with_kind(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        );
+        let msg = model.handle_key_event(key);
+        assert!(!model.prefix_mode_active);
+        match msg {
+            Some(Message::PrefixKey(PrefixCommand::SendPrefix)) => {}
+            other => panic!("Expected PrefixKey(SendPrefix), got: {:?}", other),
+        }
+    }
+
+    // 25. Prefix mode times out after PREFIX_MODE_TIMEOUT
+    #[test]
+    fn test_prefix_mode_timeout() {
+        let mut model = Model::new_with_context(None);
+        model.prefix_mode_active = true;
+        model.prefix_mode_time = Some(Instant::now() - PREFIX_MODE_TIMEOUT - Duration::from_millis(1));
+
+        let key =
+            KeyEvent::new_with_kind(KeyCode::Char('n'), KeyModifiers::NONE, KeyEventKind::Press);
+        let _msg = model.handle_key_event(key);
+        // Should have timed out, so prefix is deactivated and 'n' is handled normally
+        assert!(!model.prefix_mode_active);
+    }
+
+    // 26. Terminal focus: Ctrl+G activates prefix mode (from PTY focus)
+    #[test]
+    fn test_terminal_focus_ctrl_g_prefix() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+        model.focus_target = FocusTarget::TerminalPane;
+        let p1 = gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+            pane_id: "p1".to_string(),
+            command: "/usr/bin/true".to_string(),
+            args: vec![],
+            working_dir: std::env::temp_dir(),
+            branch_name: "b".to_string(),
+            agent_name: "a".to_string(),
+            agent_color: ratatui::style::Color::Green,
+            rows: 24,
+            cols: 80,
+            env_vars: HashMap::new(),
+        })
+        .unwrap();
+        model.terminal_manager.add_pane(p1).unwrap();
+
+        let key = KeyEvent::new_with_kind(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        );
+        let msg = model.handle_key_event(key);
+        assert!(msg.is_none());
+        assert!(model.prefix_mode_active);
+    }
+
+    // 27. Terminal focus: regular keys produce WriteToPty
+    #[test]
+    fn test_terminal_focus_regular_key_write_pty() {
+        let mut model = Model::new_with_context(None);
+        model.screen = Screen::BranchList;
+        model.focus_target = FocusTarget::TerminalPane;
+        let p1 = gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+            pane_id: "p1".to_string(),
+            command: "/usr/bin/true".to_string(),
+            args: vec![],
+            working_dir: std::env::temp_dir(),
+            branch_name: "b".to_string(),
+            agent_name: "a".to_string(),
+            agent_color: ratatui::style::Color::Green,
+            rows: 24,
+            cols: 80,
+            env_vars: HashMap::new(),
+        })
+        .unwrap();
+        model.terminal_manager.add_pane(p1).unwrap();
+
+        let key =
+            KeyEvent::new_with_kind(KeyCode::Char('x'), KeyModifiers::NONE, KeyEventKind::Press);
+        let msg = model.handle_key_event(key);
+        match msg {
+            Some(Message::WriteToPty(bytes)) => assert_eq!(bytes, b"x"),
+            other => panic!("Expected WriteToPty, got: {:?}", other),
+        }
+    }
+
+    // 28. Terminal focus: Ctrl+C still produces CtrlC message
+    #[test]
+    fn test_terminal_focus_ctrl_c_still_works() {
+        let mut model = Model::new_with_context(None);
+        model.focus_target = FocusTarget::TerminalPane;
+        let p1 = gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+            pane_id: "p1".to_string(),
+            command: "/usr/bin/true".to_string(),
+            args: vec![],
+            working_dir: std::env::temp_dir(),
+            branch_name: "b".to_string(),
+            agent_name: "a".to_string(),
+            agent_color: ratatui::style::Color::Green,
+            rows: 24,
+            cols: 80,
+            env_vars: HashMap::new(),
+        })
+        .unwrap();
+        model.terminal_manager.add_pane(p1).unwrap();
+
+        let key = KeyEvent::new_with_kind(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        );
+        let msg = model.handle_key_event(key);
+        match msg {
+            Some(Message::CtrlC) => {}
+            other => panic!("Expected CtrlC, got: {:?}", other),
+        }
     }
 }
