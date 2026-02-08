@@ -62,6 +62,15 @@ fn format_tab_label(index: usize, agent_name: &str) -> String {
     format!("{}:{}", index + 1, agent_name)
 }
 
+/// FR-045: Get the terminal pane block title.
+/// Returns the active agent name, or "No Agent" if no panes exist.
+fn terminal_pane_title(manager: &PaneManager) -> String {
+    match manager.active_pane() {
+        Some(pane) => format!(" {} ", pane.agent_name()),
+        None => " No Agent ".to_string(),
+    }
+}
+
 /// Render the terminal pane (tab bar + VT100 content + status bar).
 pub fn render_terminal_pane(view: &TerminalPaneView, frame: &mut Frame, area: Rect) {
     if area.height < 3 || area.width < 10 {
@@ -74,16 +83,19 @@ pub fn render_terminal_pane(view: &TerminalPaneView, frame: &mut Frame, area: Re
         Color::DarkGray
     };
 
+    // FR-045: Dynamic title based on active agent name
+    let title = terminal_pane_title(view.pane_manager);
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
-        .title(" Terminal ");
+        .title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     if inner.height < 3 || view.pane_manager.is_empty() {
-        // Not enough room or no panes - render empty
-        let msg = Paragraph::new("No terminal panes")
+        // FR-046: Show "No agent running" when no panes
+        let msg = Paragraph::new("No agent running")
             .alignment(Alignment::Center)
             .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(msg, inner);
@@ -298,5 +310,37 @@ mod tests {
     fn test_copy_mode_state_default_no_selection() {
         let state = CopyModeState::default();
         assert!(state.selection_start.is_none());
+    }
+
+    // --- terminal_pane_title tests (FR-045) ---
+
+    #[test]
+    fn test_block_title_no_agent() {
+        let manager = PaneManager::new();
+        let title = terminal_pane_title(&manager);
+        assert_eq!(title, " No Agent ");
+    }
+
+    #[test]
+    fn test_block_title_shows_agent_name() {
+        use gwt_core::terminal::pane::{PaneConfig, TerminalPane};
+        use std::collections::HashMap;
+        let mut manager = PaneManager::new();
+        let pane = TerminalPane::new(PaneConfig {
+            pane_id: "p1".to_string(),
+            command: "/usr/bin/true".to_string(),
+            args: vec![],
+            working_dir: std::env::temp_dir(),
+            branch_name: "main".to_string(),
+            agent_name: "claude".to_string(),
+            agent_color: Color::Green,
+            rows: 24,
+            cols: 80,
+            env_vars: HashMap::new(),
+        })
+        .unwrap();
+        manager.add_pane(pane).unwrap();
+        let title = terminal_pane_title(&manager);
+        assert_eq!(title, " claude ");
     }
 }

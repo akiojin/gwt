@@ -16,8 +16,12 @@ pub struct SplitLayoutState {
 
 impl SplitLayoutState {
     /// Create a new layout state.
+    /// Terminal pane is always visible (FR-046).
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            has_terminal_pane: true,
+            is_fullscreen: false,
+        }
     }
 }
 
@@ -77,8 +81,18 @@ mod tests {
     #[test]
     fn test_state_default() {
         let state = SplitLayoutState::new();
-        assert!(!state.has_terminal_pane);
+        // FR-046: Terminal pane is always visible
+        assert!(state.has_terminal_pane);
         assert!(!state.is_fullscreen);
+    }
+
+    /// FR-046: Terminal pane is always shown even with new() default.
+    #[test]
+    fn test_always_shows_terminal_pane() {
+        let state = SplitLayoutState::new();
+        let area = Rect::new(0, 0, 160, 40);
+        let layout = calculate_split_layout(area, &state);
+        assert!(layout.terminal_pane.is_some());
     }
 
     #[test]

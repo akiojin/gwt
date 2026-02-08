@@ -4848,7 +4848,6 @@ impl Model {
                     self.terminal_manager.close_active_pane();
                     if self.terminal_manager.is_empty() {
                         self.focus_target = FocusTarget::GwtUi;
-                        self.split_layout.has_terminal_pane = false;
                         self.split_layout.is_fullscreen = false;
                     }
                 }
@@ -9487,7 +9486,8 @@ mod tests {
         model.update(Message::PrefixKey(PrefixCommand::ClosePane));
         assert!(model.terminal_manager.is_empty());
         assert_eq!(model.focus_target, FocusTarget::GwtUi);
-        assert!(!model.split_layout.has_terminal_pane);
+        // FR-046: has_terminal_pane stays true (always visible)
+        assert!(model.split_layout.has_terminal_pane);
     }
 
     // 6. PrefixCommand::FullscreenToggle toggles fullscreen
