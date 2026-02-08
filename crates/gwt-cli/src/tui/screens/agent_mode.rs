@@ -1,5 +1,6 @@
 //! Agent Mode screen
 
+use gwt_core::terminal::manager::PaneManager;
 use ratatui::{prelude::*, style::Modifier, widgets::*};
 use unicode_width::UnicodeWidthChar;
 
@@ -17,6 +18,7 @@ pub struct AgentMessage {
     pub content: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct AgentTaskSummary {
     pub title: String,
@@ -28,11 +30,14 @@ pub struct AgentModeState {
     pub input: String,
     pub input_cursor: usize,
     pub messages: Vec<AgentMessage>,
+    #[allow(dead_code)]
     pub tasks: Vec<AgentTaskSummary>,
     pub ai_ready: bool,
     pub ai_error: Option<String>,
     pub last_error: Option<String>,
     pub is_waiting: bool,
+    /// FR-124: Selected task index in the pane task list
+    pub selected_task_index: usize,
 }
 
 impl AgentModeState {
@@ -46,6 +51,7 @@ impl AgentModeState {
             ai_error: None,
             last_error: None,
             is_waiting: false,
+            selected_task_index: 0,
         }
     }
 
@@ -96,6 +102,7 @@ pub fn render_agent_mode(
     frame: &mut Frame,
     area: Rect,
     status_message: Option<&str>,
+    pane_manager: &PaneManager,
 ) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -111,7 +118,8 @@ pub fn render_agent_mode(
         .split(main_area);
 
     render_chat_panel(state, frame, main_chunks[0], status_message);
-    render_task_panel(state, frame, main_chunks[1]);
+    // FR-123: Render task panel from PaneManager
+    render_task_panel(state, frame, main_chunks[1], pane_manager);
     render_input_panel(state, frame, input_area);
 }
 
@@ -198,11 +206,18 @@ fn render_chat_panel(
     frame.render_widget(paragraph, inner);
 }
 
-fn render_task_panel(state: &AgentModeState, frame: &mut Frame, area: Rect) {
+/// FR-123: Render task panel from PaneManager's running agents.
+/// FR-124: Highlight selected task and active pane.
+fn render_task_panel(
+    state: &AgentModeState,
+    frame: &mut Frame,
+    area: Rect,
+    pane_manager: &PaneManager,
+) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::White))
-        .title(" Tasks ")
+        .title(" Agents ")
         .title_style(
             Style::default()
                 .fg(Color::Cyan)
@@ -212,21 +227,65 @@ fn render_task_panel(state: &AgentModeState, frame: &mut Frame, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let panes = pane_manager.panes();
     let mut lines: Vec<Line<'static>> = Vec::new();
-    if state.tasks.is_empty() {
+
+    if panes.is_empty() {
         lines.push(Line::from(Span::styled(
-            "No tasks yet.".to_string(),
+            "No agents running.".to_string(),
             Style::default().fg(Color::DarkGray),
         )));
     } else {
-        for task in &state.tasks {
+        let active_idx = pane_manager.active_index();
+        for (i, pane) in panes.iter().enumerate() {
+            let is_active = i == active_idx;
+            let is_selected = i == state.selected_task_index;
+
+            let status_str = match pane.status() {
+                gwt_core::terminal::pane::PaneStatus::Running => "Running",
+                gwt_core::terminal::pane::PaneStatus::Completed(code) => {
+                    if *code == 0 {
+                        "Done"
+                    } else {
+                        "Failed"
+                    }
+                }
+                gwt_core::terminal::pane::PaneStatus::Error(_) => "Error",
+            };
+            let elapsed = chrono::Utc::now()
+                .signed_duration_since(pane.started_at())
+                .num_seconds();
+            let elapsed_str = if elapsed >= 3600 {
+                format!("{}h{}m", elapsed / 3600, (elapsed % 3600) / 60)
+            } else if elapsed >= 60 {
+                format!("{}m{}s", elapsed / 60, elapsed % 60)
+            } else {
+                format!("{}s", elapsed)
+            };
+
+            let marker = if is_active { ">" } else { " " };
+            let agent_color = pane.agent_color();
+
+            let style = if is_selected {
+                Style::default().bg(Color::DarkGray).fg(Color::White)
+            } else {
+                Style::default()
+            };
+
             lines.push(Line::from(vec![
-                Span::styled(task.title.clone(), Style::default().fg(Color::White)),
-                Span::raw(" ".to_string()),
+                Span::styled(format!("{} ", marker), style),
                 Span::styled(
-                    format!("[{}]", task.status),
-                    Style::default().fg(Color::DarkGray),
+                    pane.agent_name().to_string(),
+                    style.fg(agent_color).add_modifier(Modifier::BOLD),
                 ),
+                Span::styled(format!(" [{}]", status_str), style.fg(Color::Yellow)),
+                Span::styled(format!(" {}", elapsed_str), style.fg(Color::DarkGray)),
+            ]));
+
+            // Show branch name on second line
+            lines.push(Line::from(vec![
+                Span::styled("  ".to_string(), style),
+                Span::styled(pane.branch_name().to_string(), style.fg(Color::DarkGray)),
             ]));
         }
     }

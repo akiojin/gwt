@@ -1,7 +1,7 @@
-//! Layout for split view (branch list + agent pane)
+//! Layout for split view (left pane + agent pane)
 //!
-//! Handles layout calculation for the main content area,
-//! supporting branch-list-only, 50:50 split, and fullscreen agent pane modes.
+//! Handles layout calculation for the main screen area,
+//! supporting left-pane-only, 50:50 split, and fullscreen agent pane modes.
 
 use ratatui::layout::{Constraint, Layout, Rect};
 
@@ -29,29 +29,29 @@ impl SplitLayoutState {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct SplitLayoutAreas {
-    /// Area for the branch list.
-    pub branch_list: Rect,
+    /// Area for the left pane (screen-specific UI).
+    pub left_pane: Rect,
     /// Area for the agent pane (if active).
     pub agent_pane: Option<Rect>,
 }
 
 /// Calculate the layout areas based on state and available space.
 ///
-/// - No agent pane: branch list takes full area.
+/// - No agent pane: left pane takes full area.
 /// - Fullscreen mode: agent pane takes full area.
 /// - Width < 80: fallback to agent pane only (too narrow to split).
 /// - Otherwise: 50:50 horizontal split.
 pub fn calculate_split_layout(area: Rect, state: &SplitLayoutState) -> SplitLayoutAreas {
     if !state.has_agent_pane {
         return SplitLayoutAreas {
-            branch_list: area,
+            left_pane: area,
             agent_pane: None,
         };
     }
 
     if state.is_fullscreen {
         return SplitLayoutAreas {
-            branch_list: Rect::default(),
+            left_pane: Rect::default(),
             agent_pane: Some(area),
         };
     }
@@ -59,7 +59,7 @@ pub fn calculate_split_layout(area: Rect, state: &SplitLayoutState) -> SplitLayo
     if area.width < 80 {
         // Too narrow to split: fallback to agent pane only
         return SplitLayoutAreas {
-            branch_list: Rect::default(),
+            left_pane: Rect::default(),
             agent_pane: Some(area),
         };
     }
@@ -69,7 +69,7 @@ pub fn calculate_split_layout(area: Rect, state: &SplitLayoutState) -> SplitLayo
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
 
     SplitLayoutAreas {
-        branch_list: chunks[0],
+        left_pane: chunks[0],
         agent_pane: Some(chunks[1]),
     }
 }
@@ -96,14 +96,14 @@ mod tests {
     }
 
     #[test]
-    fn test_no_agent_pane_full_branch_list() {
+    fn test_no_agent_pane_full_left() {
         let area = Rect::new(0, 0, 120, 40);
         let state = SplitLayoutState {
             has_agent_pane: false,
             is_fullscreen: false,
         };
         let layout = calculate_split_layout(area, &state);
-        assert_eq!(layout.branch_list, area);
+        assert_eq!(layout.left_pane, area);
         assert!(layout.agent_pane.is_none());
     }
 
@@ -115,8 +115,8 @@ mod tests {
             is_fullscreen: false,
         };
         let layout = calculate_split_layout(area, &state);
-        assert_eq!(layout.branch_list.width, 80);
-        assert_eq!(layout.branch_list.height, 40);
+        assert_eq!(layout.left_pane.width, 80);
+        assert_eq!(layout.left_pane.height, 40);
         let tp = layout.agent_pane.expect("agent_pane should be Some");
         assert_eq!(tp.width, 80);
         assert_eq!(tp.height, 40);
@@ -130,7 +130,7 @@ mod tests {
             is_fullscreen: true,
         };
         let layout = calculate_split_layout(area, &state);
-        assert_eq!(layout.branch_list, Rect::default());
+        assert_eq!(layout.left_pane, Rect::default());
         let tp = layout.agent_pane.expect("agent_pane should be Some");
         assert_eq!(tp, area);
     }
@@ -143,7 +143,7 @@ mod tests {
             is_fullscreen: false,
         };
         let layout = calculate_split_layout(area, &state);
-        assert_eq!(layout.branch_list, Rect::default());
+        assert_eq!(layout.left_pane, Rect::default());
         let tp = layout.agent_pane.expect("agent_pane should be Some");
         assert_eq!(tp, area);
     }
@@ -156,7 +156,7 @@ mod tests {
             is_fullscreen: false,
         };
         let layout = calculate_split_layout(area, &state);
-        assert_eq!(layout.branch_list.width, 40);
+        assert_eq!(layout.left_pane.width, 40);
         let tp = layout.agent_pane.expect("agent_pane should be Some");
         assert_eq!(tp.width, 40);
     }
@@ -169,7 +169,7 @@ mod tests {
             is_fullscreen: false,
         };
         let layout = calculate_split_layout(area, &state);
-        assert_eq!(layout.branch_list.width, 80);
+        assert_eq!(layout.left_pane.width, 80);
         let tp = layout.agent_pane.expect("agent_pane should be Some");
         assert_eq!(tp.width, 80);
         assert_eq!(tp.x, 80);

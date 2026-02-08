@@ -2649,16 +2649,10 @@ impl Model {
         // Mouse protocol enabled: send X10 scroll bytes
         let term_size = crossterm::terminal::size().unwrap_or((160, 40));
         let full_area = ratatui::layout::Rect::new(0, 0, term_size.0, term_size.1);
-        let content_area = ratatui::layout::Rect::new(
-            0,
-            1,
-            full_area.width,
-            full_area.height.saturating_sub(1),
-        );
-        let split_areas = super::screens::split_layout::calculate_split_layout(
-            content_area,
-            &self.split_layout,
-        );
+        let content_area =
+            ratatui::layout::Rect::new(0, 1, full_area.width, full_area.height.saturating_sub(1));
+        let split_areas =
+            super::screens::split_layout::calculate_split_layout(content_area, &self.split_layout);
         if let Some(pane_area) = split_areas.agent_pane {
             let bytes = super::screens::agent_pane::mouse_scroll_to_bytes(
                 is_up,
@@ -4217,10 +4211,7 @@ impl Model {
                 // FR-008e: Check pane process status
                 if let Some(pane) = self.terminal_manager.active_pane_mut() {
                     if let Err(e) = pane.check_status() {
-                        error!(
-                            category = "terminal",
-                            "Pane status check error: {}", e
-                        );
+                        error!(category = "terminal", "Pane status check error: {}", e);
                     }
                 }
                 // Reset Ctrl+C counter after timeout
@@ -4319,7 +4310,14 @@ impl Model {
                     // SPEC-4b893dae: Update branch summary on selection change
                     self.refresh_branch_summary();
                 }
-                Screen::AgentMode => {}
+                // FR-124: Navigate task list in AgentMode
+                Screen::AgentMode => {
+                    let pane_count = self.terminal_manager.pane_count();
+                    if pane_count > 0 {
+                        self.agent_mode.selected_task_index =
+                            (self.agent_mode.selected_task_index + 1) % pane_count;
+                    }
+                }
                 Screen::WorktreeCreate => self.worktree_create.select_next_base(),
                 Screen::Settings => self.settings.select_next(),
                 Screen::Logs => self.logs.select_next(),
@@ -4345,7 +4343,14 @@ impl Model {
                     // SPEC-4b893dae: Update branch summary on selection change
                     self.refresh_branch_summary();
                 }
-                Screen::AgentMode => {}
+                // FR-124: Navigate task list in AgentMode
+                Screen::AgentMode => {
+                    let pane_count = self.terminal_manager.pane_count();
+                    if pane_count > 0 {
+                        self.agent_mode.selected_task_index =
+                            (self.agent_mode.selected_task_index + pane_count - 1) % pane_count;
+                    }
+                }
                 Screen::WorktreeCreate => self.worktree_create.select_prev_base(),
                 Screen::Settings => self.settings.select_prev(),
                 Screen::Logs => self.logs.select_prev(),
@@ -4430,6 +4435,10 @@ impl Model {
                         self.agent_mode.set_waiting(true);
                         let messages = self.agent_mode.messages.clone();
                         self.spawn_agent_mode_request(messages);
+                    } else if !self.terminal_manager.is_empty() {
+                        // FR-124: Enter with empty input activates selected task's pane
+                        self.terminal_manager
+                            .set_active_index(self.agent_mode.selected_task_index);
                     }
                 }
                 Screen::WorktreeCreate => {
@@ -6320,6 +6329,9 @@ impl Model {
     }
 
     /// View function (Elm Architecture)
+    ///
+    /// FR-120: Always-split layout — left pane (screen UI + header/footer/status)
+    /// and right pane (agent pane) side by side.
     pub fn view(&mut self, frame: &mut Frame) {
         let base_screen = if matches!(self.screen, Screen::Confirm) {
             self.screen_stack
@@ -6330,114 +6342,120 @@ impl Model {
             self.screen.clone()
         };
 
-        // Keep a consistent header across major screens.
-        let needs_header = !matches!(base_screen, Screen::AISettingsWizard);
-        let header_height = if needs_header { 6 } else { 0 };
+        // FR-120: Always split the full screen into left pane + agent pane
+        let split_areas = calculate_split_layout(frame.area(), &self.split_layout);
 
-        // Footer help sits above the status bar.
-        let needs_footer = !matches!(base_screen, Screen::AISettingsWizard);
-        let full_footer_lines = if needs_footer {
-            let lines = self.footer_lines(frame.area().width);
-            self.sync_footer_metrics(frame.area().width, lines.len());
-            lines
-        } else {
-            Vec::new()
-        };
-        let footer_lines = if needs_footer {
-            self.footer_visible_lines(&full_footer_lines, FOOTER_VISIBLE_HEIGHT)
-        } else {
-            Vec::new()
-        };
-        let footer_height = if needs_footer {
-            FOOTER_VISIBLE_HEIGHT as u16
-        } else {
-            0
-        };
+        // FR-125: AISettingsWizard uses full left pane without header/footer/status
+        let is_wizard = matches!(base_screen, Screen::AISettingsWizard);
 
-        // Status bar is always the bottom-most line.
-        let needs_status_bar = !matches!(base_screen, Screen::AISettingsWizard);
-        let status_bar_height = if needs_status_bar { 1 } else { 0 };
+        // --- Left pane ---
+        if split_areas.left_pane.width > 0 && split_areas.left_pane.height > 0 {
+            if is_wizard {
+                // FR-125: Wizard gets full left pane
+                render_ai_wizard(&mut self.ai_wizard, frame, split_areas.left_pane);
+            } else {
+                // FR-121: Header, content, footer, status bar inside left pane
+                let needs_header = true;
+                let header_height: u16 = 6;
 
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(header_height),     // Header
-                Constraint::Min(0),                    // Content
-                Constraint::Length(footer_height),     // Footer help
-                Constraint::Length(status_bar_height), // Status bar
-            ])
-            .split(frame.area());
+                let full_footer_lines = {
+                    let lines = self.footer_lines(split_areas.left_pane.width);
+                    self.sync_footer_metrics(split_areas.left_pane.width, lines.len());
+                    lines
+                };
+                let footer_lines =
+                    self.footer_visible_lines(&full_footer_lines, FOOTER_VISIBLE_HEIGHT);
+                let footer_height = FOOTER_VISIBLE_HEIGHT as u16;
+                let status_bar_height: u16 = 1;
 
-        // Header
-        if needs_header {
-            self.view_boxed_header(frame, chunks[0], &base_screen);
-        }
+                let left_chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(header_height),     // Header
+                        Constraint::Min(0),                    // Content
+                        Constraint::Length(footer_height),     // Footer help
+                        Constraint::Length(status_bar_height), // Status bar
+                    ])
+                    .split(split_areas.left_pane);
 
-        // Content
-        match base_screen {
-            Screen::BranchList => {
-                // Use split layout (branch list + optional terminal pane)
-                let split_areas = calculate_split_layout(chunks[1], &self.split_layout);
-
-                // Render branch list (has focus when gwt UI is focused)
-                let branch_has_focus = self.focus_target == FocusTarget::GwtUi;
-                if split_areas.branch_list.width > 0 && split_areas.branch_list.height > 0 {
-                    render_branch_list(
-                        &mut self.branch_list,
-                        frame,
-                        split_areas.branch_list,
-                        None,
-                        branch_has_focus,
-                    );
+                // Header
+                if needs_header {
+                    self.view_boxed_header(frame, left_chunks[0], &base_screen);
                 }
 
-                // SPEC-1d6dd9fc FR-047: Render agent pane if active
-                if let Some(agent_area) = split_areas.agent_pane {
-                    let view = super::screens::agent_pane::AgentPaneView {
-                        pane_manager: &self.terminal_manager,
-                        is_focused: self.focus_target == FocusTarget::AgentPane,
-                    };
-                    super::screens::agent_pane::render_agent_pane(&view, frame, agent_area);
+                // Content — render screen-specific UI
+                let content_area = left_chunks[1];
+                match base_screen {
+                    Screen::BranchList => {
+                        let branch_has_focus = self.focus_target == FocusTarget::GwtUi;
+                        render_branch_list(
+                            &mut self.branch_list,
+                            frame,
+                            content_area,
+                            None,
+                            branch_has_focus,
+                        );
+                    }
+                    Screen::WorktreeCreate => {
+                        render_worktree_create(&self.worktree_create, frame, content_area)
+                    }
+                    Screen::AgentMode => {
+                        // FR-123: Pass pane manager for task list
+                        render_agent_mode(
+                            &self.agent_mode,
+                            frame,
+                            content_area,
+                            None,
+                            &self.terminal_manager,
+                        );
+                    }
+                    Screen::Settings => render_settings(&self.settings, frame, content_area),
+                    Screen::Logs => render_logs(&mut self.logs, frame, content_area),
+                    Screen::Help => render_help(&self.help, frame, content_area),
+                    Screen::Error => {
+                        render_error_with_queue(&self.error_queue, frame, content_area)
+                    }
+                    Screen::Profiles => render_profiles(&mut self.profiles, frame, content_area),
+                    Screen::Environment => {
+                        render_environment(&mut self.environment, frame, content_area)
+                    }
+                    Screen::ServiceSelect => {
+                        render_service_select(&mut self.service_select, frame, content_area)
+                    }
+                    Screen::AISettingsWizard => {
+                        // Handled above in is_wizard branch
+                    }
+                    Screen::CloneWizard => {
+                        render_clone_wizard(&self.clone_wizard, frame, content_area)
+                    }
+                    Screen::MigrationDialog => {
+                        render_migration_dialog(&mut self.migration_dialog, frame, content_area)
+                    }
+                    Screen::GitView => {
+                        render_git_view(&mut self.git_view, frame, content_area);
+                    }
+                    Screen::Confirm => {}
                 }
+
+                if matches!(self.screen, Screen::Confirm) {
+                    render_confirm(&mut self.confirm, frame, content_area);
+                }
+
+                // Footer help
+                self.view_footer(frame, left_chunks[2], &footer_lines);
+
+                // Bottom status bar
+                self.view_status_bar(frame, left_chunks[3], &base_screen);
             }
-            Screen::WorktreeCreate => {
-                render_worktree_create(&self.worktree_create, frame, chunks[1])
-            }
-            Screen::AgentMode => {
-                render_agent_mode(&self.agent_mode, frame, chunks[1], None);
-            }
-            Screen::Settings => render_settings(&self.settings, frame, chunks[1]),
-            Screen::Logs => render_logs(&mut self.logs, frame, chunks[1]),
-            Screen::Help => render_help(&self.help, frame, chunks[1]),
-            Screen::Error => render_error_with_queue(&self.error_queue, frame, chunks[1]),
-            Screen::Profiles => render_profiles(&mut self.profiles, frame, chunks[1]),
-            Screen::Environment => render_environment(&mut self.environment, frame, chunks[1]),
-            Screen::ServiceSelect => {
-                render_service_select(&mut self.service_select, frame, chunks[1])
-            }
-            Screen::AISettingsWizard => render_ai_wizard(&mut self.ai_wizard, frame, chunks[1]),
-            Screen::CloneWizard => render_clone_wizard(&self.clone_wizard, frame, chunks[1]),
-            Screen::MigrationDialog => {
-                render_migration_dialog(&mut self.migration_dialog, frame, chunks[1])
-            }
-            Screen::GitView => {
-                render_git_view(&mut self.git_view, frame, chunks[1]);
-            }
-            Screen::Confirm => {}
         }
 
-        if matches!(self.screen, Screen::Confirm) {
-            render_confirm(&mut self.confirm, frame, chunks[1]);
-        }
-
-        // Footer help
-        if needs_footer {
-            self.view_footer(frame, chunks[2], &footer_lines);
-        }
-
-        // Bottom status bar
-        if needs_status_bar {
-            self.view_status_bar(frame, chunks[3], &base_screen);
+        // --- Right pane: always render agent pane (FR-046, FR-047, FR-120) ---
+        if let Some(agent_area) = split_areas.agent_pane {
+            let view = super::screens::agent_pane::AgentPaneView {
+                pane_manager: &self.terminal_manager,
+                is_focused: self.focus_target == FocusTarget::AgentPane,
+            };
+            super::screens::agent_pane::render_agent_pane(&view, frame, agent_area);
         }
 
         // Wizard overlay (FR-044: popup on top of branch list)
@@ -6733,15 +6751,25 @@ impl Model {
             }
             Screen::AgentMode => {
                 let enter_label = if self.agent_mode.ai_ready {
-                    "Send"
+                    if self.agent_mode.input.trim().is_empty() && !self.terminal_manager.is_empty()
+                    {
+                        "Activate"
+                    } else {
+                        "Send"
+                    }
                 } else {
                     "Configure AI"
                 };
-                vec![
+                let mut items = vec![
+                    Self::keybind_item("Up/Down", "Select Task"),
                     Self::keybind_item("Enter", enter_label),
                     Self::keybind_item("Tab", "Settings"),
                     Self::keybind_item("Esc", "Back"),
-                ]
+                ];
+                if !self.terminal_manager.is_empty() {
+                    items.insert(0, Self::keybind_item("Ctrl+G", "Focus Agent"));
+                }
+                items
             }
             Screen::WorktreeCreate => match self.worktree_create.step {
                 WorktreeCreateStep::BranchName => vec![

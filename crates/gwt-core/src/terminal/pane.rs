@@ -202,9 +202,7 @@ impl TerminalPane {
 /// Detect CSI 6n (Device Status Report: cursor position query) in a byte stream.
 /// The sequence is ESC [ 6 n (0x1b 0x5b 0x36 0x6e).
 fn contains_dsr_request(bytes: &[u8]) -> bool {
-    bytes
-        .windows(4)
-        .any(|w| w == b"\x1b[6n")
+    bytes.windows(4).any(|w| w == b"\x1b[6n")
 }
 
 #[cfg(test)]
