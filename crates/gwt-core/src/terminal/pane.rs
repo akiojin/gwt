@@ -92,9 +92,18 @@ impl TerminalPane {
     }
 
     /// Process bytes from the PTY output through the emulator and scrollback.
+    /// Detects DSR (Device Status Report) requests and auto-responds with cursor position.
     pub fn process_bytes(&mut self, bytes: &[u8]) -> Result<(), TerminalError> {
         self.emulator.process(bytes);
         self.scrollback.write(bytes)?;
+
+        // Detect CSI 6n (DSR: Report Cursor Position) and respond with cursor position.
+        // Apps like Codex CLI send this query and expect ESC[{row};{col}R response.
+        if contains_dsr_request(bytes) {
+            let (row, col) = self.emulator.cursor_position();
+            let response = format!("\x1b[{};{}R", row + 1, col + 1);
+            self.write_input(response.as_bytes())?;
+        }
         Ok(())
     }
 
@@ -188,6 +197,14 @@ impl TerminalPane {
     pub fn kill(&mut self) -> Result<(), TerminalError> {
         self.pty.kill()
     }
+}
+
+/// Detect CSI 6n (Device Status Report: cursor position query) in a byte stream.
+/// The sequence is ESC [ 6 n (0x1b 0x5b 0x36 0x6e).
+fn contains_dsr_request(bytes: &[u8]) -> bool {
+    bytes
+        .windows(4)
+        .any(|w| w == b"\x1b[6n")
 }
 
 #[cfg(test)]
@@ -378,5 +395,27 @@ mod tests {
 
         assert!(exited, "Process should have exited after kill");
         assert_ne!(pane.status(), &PaneStatus::Running);
+    }
+
+    // --- contains_dsr_request tests ---
+
+    #[test]
+    fn test_dsr_request_detected() {
+        assert!(contains_dsr_request(b"\x1b[6n"));
+    }
+
+    #[test]
+    fn test_dsr_request_in_mixed_output() {
+        assert!(contains_dsr_request(b"hello\x1b[6nworld"));
+    }
+
+    #[test]
+    fn test_dsr_request_not_present() {
+        assert!(!contains_dsr_request(b"hello world"));
+    }
+
+    #[test]
+    fn test_dsr_request_partial_sequence() {
+        assert!(!contains_dsr_request(b"\x1b[6"));
     }
 }
