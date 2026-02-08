@@ -1,21 +1,88 @@
 <script lang="ts">
+  import type { ProjectInfo } from "../types";
+
+  interface RecentProject {
+    path: string;
+    name: string;
+    lastOpened: string;
+  }
+
   let { onOpen }: { onOpen: (path: string) => void } = $props();
 
-  const recentProjects = [
-    { path: "/Users/dev/my-project", name: "my-project", lastOpened: "Today" },
-    { path: "/Users/dev/another-repo", name: "another-repo", lastOpened: "Yesterday" },
-  ];
+  let recentProjects: RecentProject[] = $state([]);
+  let loading: boolean = $state(false);
+
+  $effect(() => {
+    loadRecentProjects();
+  });
+
+  async function loadRecentProjects() {
+    try {
+      const { load } = await import("@tauri-apps/plugin-store");
+      const store = await load("recent-projects.json", { defaults: {} });
+      const saved = await store.get<RecentProject[]>("projects");
+      if (saved) {
+        recentProjects = saved;
+      }
+    } catch {
+      // Dev mode fallback
+      recentProjects = [
+        { path: "/Users/dev/my-project", name: "my-project", lastOpened: "Today" },
+        {
+          path: "/Users/dev/another-repo",
+          name: "another-repo",
+          lastOpened: "Yesterday",
+        },
+      ];
+    }
+  }
+
+  async function saveToRecent(path: string) {
+    const name = path.split("/").pop() || path;
+    const now = new Date().toLocaleDateString();
+    const entry: RecentProject = { path, name, lastOpened: now };
+
+    // Remove duplicate, add to front
+    const filtered = recentProjects.filter((p) => p.path !== path);
+    const updated = [entry, ...filtered].slice(0, 10);
+
+    try {
+      const { load } = await import("@tauri-apps/plugin-store");
+      const store = await load("recent-projects.json", { defaults: {} });
+      await store.set("projects", updated);
+      await store.save();
+    } catch {
+      // Dev mode: ignore
+    }
+
+    recentProjects = updated;
+  }
 
   async function openFolder() {
+    loading = true;
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const selected = await open({ directory: true, multiple: false });
       if (selected) {
-        onOpen(selected as string);
+        await openProject(selected as string);
       }
     } catch {
-      // Fallback for dev mode (no Tauri)
-      onOpen("/Users/dev/demo-project");
+      // Dev mode fallback
+      await openProject("/Users/dev/demo-project");
+    }
+    loading = false;
+  }
+
+  async function openProject(path: string) {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const info = await invoke<ProjectInfo>("open_project", { path });
+      await saveToRecent(info.path);
+      onOpen(info.path);
+    } catch {
+      // Dev mode fallback: just open directly
+      await saveToRecent(path);
+      onOpen(path);
     }
   }
 </script>
@@ -25,15 +92,15 @@
     <h1 class="title">gwt</h1>
     <p class="subtitle">Git Worktree Manager</p>
 
-    <button class="open-btn" onclick={openFolder}>
-      Open Project...
+    <button class="open-btn" onclick={openFolder} disabled={loading}>
+      {loading ? "Opening..." : "Open Project..."}
     </button>
 
     {#if recentProjects.length > 0}
       <div class="recent">
         <h3>Recent Projects</h3>
         {#each recentProjects as project}
-          <button class="recent-item" onclick={() => onOpen(project.path)}>
+          <button class="recent-item" onclick={() => openProject(project.path)}>
             <span class="recent-name">{project.name}</span>
             <span class="recent-path">{project.path}</span>
             <span class="recent-time">{project.lastOpened}</span>
@@ -90,8 +157,13 @@
     transition: background-color 0.15s;
   }
 
-  .open-btn:hover {
+  .open-btn:hover:not(:disabled) {
     background-color: var(--accent-hover);
+  }
+
+  .open-btn:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
   }
 
   .recent {
