@@ -1,21 +1,22 @@
 <!-- markdownlint-disable MD013 -->
 # 仕様一覧
 
-**最終更新**: 2026-02-03
+**最終更新**: 2026-02-08
 
 このファイルは `.specify/scripts/bash/update-specs-index.sh` により自動生成されました。
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
-| [SPEC-92053c0d](SPEC-92053c0d/spec.md) | 機能仕様: commitlint を npm ci 無しで実行可能にする | 2026-02-03 |
-| [SPEC-d2f4762a](SPEC-d2f4762a/spec.md) | 機能仕様: ブランチ選択画面（Branch Selection Screen） | 2025-11-18 |
+| [SPEC-1ad9c07d](SPEC-1ad9c07d/spec.md) | 機能仕様: エージェント起動ウィザード統合 | 2026-02-08 |
 | [SPEC-fdebd681](SPEC-fdebd681/spec.md) | Codex collaboration_modes Support | - |
 | [SPEC-f8dab6e2](SPEC-f8dab6e2/spec.md) | 機能仕様: Claude Code プラグインマーケットプレイス自動登録 | 2026-01-30 |
+| [SPEC-f5f5657e](SPEC-f5f5657e/spec.md) | 機能仕様: Docker環境統合（エージェント自動起動） | 2026-02-03 |
 | [SPEC-f59c553d](SPEC-f59c553d/spec.md) | 機能仕様: npm postinstall ダウンロード安定化 | 2026-01-26 |
 | [SPEC-f47db390](SPEC-f47db390/spec.md) | 機能仕様: セッションID永続化とContinue/Resume強化 | 2025-12-06 |
 | [SPEC-e66acf66](SPEC-e66acf66/spec.md) | 機能仕様: エラーポップアップ・ログ出力システム | 2026-01-22 |
 | [SPEC-e4798383](SPEC-e4798383/spec.md) | 機能仕様: GitHub Issue連携によるブランチ作成 | 2025-01-25 |
 | [SPEC-dafff079](SPEC-dafff079/spec.md) | 機能仕様: 環境変数プロファイル機能 | 2025-12-15 |
+| [SPEC-d2f4762a](SPEC-d2f4762a/spec.md) | 機能仕様: ブランチ選択画面（Branch Selection Screen） | 2025-11-18 |
 | [SPEC-d27be71b](SPEC-d27be71b/spec.md) | SPEC-d27be71b: Ink.js から OpenTUI への移行 | 2026-01-04 |
 | [SPEC-c8e7a5b2](SPEC-c8e7a5b2/spec.md) | 機能仕様: CLI起動時Web UIサーバー自動起動 | 2025-12-12 |
 | [SPEC-c1d5bad7](SPEC-c1d5bad7/spec.md) | ログ一覧・詳細表示・クリップボードコピー機能 | 2025-12-25 |
@@ -26,8 +27,9 @@
 | [SPEC-a70a1ece](SPEC-a70a1ece/spec.md) | 機能仕様: bareリポジトリ対応とヘッダーブランチ表示 | 2026-02-01 |
 | [SPEC-a3f4c9df](SPEC-a3f4c9df/spec.md) | 機能仕様: 設定ファイル統合・整理 | 2026-02-02 |
 | [SPEC-a0d7334d](SPEC-a0d7334d/spec.md) | 機能仕様: Dependabot PR の向き先を develop に固定 | 2025-12-22 |
-| [SPEC-96e694b4](SPEC-96e694b4/spec.md) | 機能仕様: Codex CLI gpt-5.2-codex 対応 | 2025-12-18 |
+| [SPEC-96e694b4](SPEC-96e694b4/spec.md) | 機能仕様: Codex CLI gpt-5.3-codex 追加 | 2025-12-18 |
 | [SPEC-925c010b](SPEC-925c010b/spec.md) | 機能仕様: Docker Compose の Playwright noVNC を arm64 で起動可能にする | 2026-01-17 |
+| [SPEC-92053c0d](SPEC-92053c0d/spec.md) | 機能仕様: commitlint を npm ci 無しで実行可能にする | 2026-02-03 |
 | [SPEC-902a89dc](SPEC-902a89dc/spec.md) | 機能仕様: Worktreeパス修復機能 | 2026-01-05 |
 | [SPEC-8adfd99e](SPEC-8adfd99e/spec.md) | 機能仕様: Web UI 環境変数編集機能 | 2025-11-11 |
 | [SPEC-861d8cdf](SPEC-861d8cdf/spec.md) | 機能仕様: エージェント状態の可視化 | 2026-01-20 |

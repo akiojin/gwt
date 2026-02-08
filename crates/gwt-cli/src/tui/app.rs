@@ -19,9 +19,9 @@ use crossterm::{
 use gwt_core::agent::codex::supports_collaboration_modes;
 use gwt_core::agent::{OrchestratorEvent, OrchestratorMessage, SessionStatus, SessionStore};
 use gwt_core::ai::{
-    summarize_session, AIClient, AIError, AgentHistoryStore, AgentType, ChatMessage,
-    ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, ModelInfo, OpenCodeSessionParser,
-    SessionParseError, SessionParser,
+    format_error_for_display, summarize_session, AIClient, AIError, AgentHistoryStore, AgentType,
+    ChatMessage, ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, ModelInfo,
+    OpenCodeSessionParser, SessionParseError, SessionParser,
 };
 use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{
@@ -70,6 +70,7 @@ use super::screens::environment::EditField;
 use super::screens::git_view::{build_git_view_data, build_git_view_data_no_worktree, GitViewData};
 use super::screens::pane_list::PaneListState;
 use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
+use super::screens::wizard::{parse_branch_suggestions, AIBranchSuggestPhase};
 use super::screens::worktree_create::WorktreeCreateStep;
 use super::screens::{
     collect_os_env, render_agent_mode, render_ai_wizard, render_branch_list, render_clone_wizard,
@@ -392,6 +393,10 @@ struct AiWizardUpdate {
     result: Result<Vec<ModelInfo>, AIError>,
 }
 
+struct AiBranchSuggestUpdate {
+    result: Result<Vec<String>, AIError>,
+}
+
 struct BranchListUpdate {
     branches: Vec<BranchItem>,
     branch_names: Vec<String>,
@@ -590,6 +595,8 @@ pub struct Model {
     orchestrator_message_rx: Option<Receiver<OrchestratorMessage>>,
     /// AI wizard model fetch receiver
     ai_wizard_rx: Option<Receiver<AiWizardUpdate>>,
+    /// AI branch suggest receiver (SPEC-1ad9c07d)
+    ai_branch_suggest_rx: Option<Receiver<AiBranchSuggestUpdate>>,
     /// Tmux mode (Single or Multi)
     tmux_mode: TmuxMode,
     /// Tmux session name (when in multi mode)
@@ -887,6 +894,7 @@ impl Model {
             orchestrator_event_tx: None,
             orchestrator_message_rx: None,
             ai_wizard_rx: None,
+            ai_branch_suggest_rx: None,
             tmux_mode: TmuxMode::detect(),
             tmux_session: None,
             gwt_pane_id: None,
@@ -2075,6 +2083,38 @@ impl Model {
                     break;
                 }
             }
+        }
+    }
+
+    fn apply_ai_branch_suggest_updates(&mut self) {
+        let Some(rx) = self.ai_branch_suggest_rx.take() else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(update) => {
+                // Only apply updates while the wizard is visible.
+                if !self.wizard.visible || self.wizard.step != WizardStep::AIBranchSuggest {
+                    return;
+                }
+                match update.result {
+                    Ok(suggestions) => {
+                        self.wizard.ai_branch_suggestions = suggestions;
+                        self.wizard.ai_branch_selected = 0;
+                        self.wizard.ai_branch_error = None;
+                        self.wizard.ai_branch_phase = AIBranchSuggestPhase::Select;
+                    }
+                    Err(err) => {
+                        self.wizard.ai_branch_suggestions.clear();
+                        self.wizard.ai_branch_error = Some(format_error_for_display(&err));
+                        self.wizard.ai_branch_phase = AIBranchSuggestPhase::Error;
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {
+                self.ai_branch_suggest_rx = Some(rx);
+            }
+            Err(TryRecvError::Disconnected) => {}
         }
     }
 
@@ -4558,6 +4598,7 @@ impl Model {
                 self.apply_agent_mode_updates();
                 self.apply_orchestrator_messages();
                 self.apply_ai_wizard_updates();
+                self.apply_ai_branch_suggest_updates();
                 self.poll_session_summary_if_needed();
                 // SPEC-1ea18899: Apply GitView cache updates
                 self.apply_git_view_cache_updates();
@@ -5508,6 +5549,8 @@ impl Model {
                         .collect();
                     self.wizard
                         .open_for_branch(&branch_name, history, running_pane_idx);
+                    // SPEC-1ad9c07d: snapshot AI enabled flag for conditional wizard steps
+                    self.wizard.ai_enabled = self.active_ai_enabled();
                 } else {
                     self.status_message = Some("No branch selected".to_string());
                     self.status_message_time = Some(Instant::now());
@@ -5516,6 +5559,8 @@ impl Model {
             Message::OpenWizardNewBranch => {
                 // Open wizard for new branch
                 self.wizard.open_for_new_branch();
+                // SPEC-1ad9c07d: snapshot AI enabled flag for conditional wizard steps
+                self.wizard.ai_enabled = self.active_ai_enabled();
             }
             Message::WizardNext => {
                 if self.wizard.visible {
@@ -5529,6 +5574,67 @@ impl Model {
             }
             Message::WizardConfirm => {
                 if self.wizard.visible {
+                    // SPEC-1ad9c07d: AIBranchSuggest has phase-specific Enter behavior
+                    if self.wizard.step == WizardStep::AIBranchSuggest {
+                        match self.wizard.ai_branch_phase {
+                            AIBranchSuggestPhase::Input => {
+                                let input = self.wizard.ai_branch_input.trim().to_string();
+                                if input.is_empty() {
+                                    self.wizard.ai_branch_error =
+                                        Some("Please enter a description.".to_string());
+                                    return;
+                                }
+
+                                let Some(settings) = self.active_ai_settings() else {
+                                    self.wizard.ai_branch_error =
+                                        Some("AI settings are not configured.".to_string());
+                                    self.wizard.ai_branch_phase = AIBranchSuggestPhase::Error;
+                                    return;
+                                };
+
+                                self.wizard.ai_branch_phase = AIBranchSuggestPhase::Loading;
+                                self.wizard.ai_branch_error = None;
+                                self.wizard.ai_branch_suggestions.clear();
+                                self.wizard.ai_branch_selected = 0;
+
+                                let preferred_prefix = self.wizard.branch_type.prefix().to_string();
+
+                                let messages = vec![
+                                    ChatMessage {
+                                        role: "system".to_string(),
+                                        content: "You are a git branch naming assistant. Generate exactly 3 branch name suggestions based on the user's description.\n\nRules:\n- Each suggestion must include exactly one of these prefixes: feature/, bugfix/, hotfix/, release/\n- Use lowercase\n- Use hyphens for separators\n- Keep names concise (<= 50 characters including prefix)\n\nRespond with JSON only in this format: {\"suggestions\": [\"prefix/name-1\", \"prefix/name-2\", \"prefix/name-3\"]}".to_string(),
+                                    },
+                                    ChatMessage {
+                                        role: "user".to_string(),
+                                        content: format!(
+                                            "Preferred prefix: {}\nDescription: {}\n\nRespond with JSON: {{\"suggestions\": [\"prefix/name-1\", \"prefix/name-2\", \"prefix/name-3\"]}}",
+                                            preferred_prefix, input
+                                        ),
+                                    },
+                                ];
+
+                                let (tx, rx) = mpsc::channel();
+                                self.ai_branch_suggest_rx = Some(rx);
+
+                                thread::spawn(move || {
+                                    let result = AIClient::new(settings)
+                                        .and_then(|client| client.create_response(messages))
+                                        .and_then(|text| parse_branch_suggestions(&text));
+                                    let _ = tx.send(AiBranchSuggestUpdate { result });
+                                });
+
+                                return;
+                            }
+                            AIBranchSuggestPhase::Loading => {
+                                // Do nothing while fetching
+                                return;
+                            }
+                            AIBranchSuggestPhase::Select | AIBranchSuggestPhase::Error => {
+                                // Fall through to normal wizard.confirm()
+                            }
+                        }
+                    }
+
                     // SPEC-e4798383: Check for duplicate branch before confirming IssueSelect
                     if self.wizard.step == WizardStep::IssueSelect {
                         self.wizard.check_issue_duplicate(&self.repo_root);
@@ -5570,7 +5676,39 @@ impl Model {
             }
             Message::WizardBack => {
                 if self.wizard.visible {
-                    self.wizard.prev_step();
+                    // SPEC-1ad9c07d: AIBranchSuggest has phase-specific Esc behavior
+                    if self.wizard.step == WizardStep::AIBranchSuggest {
+                        match self.wizard.ai_branch_phase {
+                            AIBranchSuggestPhase::Input => {
+                                // Skip to manual branch name input
+                                self.wizard.ai_branch_error = None;
+                                self.wizard.next_step();
+                            }
+                            AIBranchSuggestPhase::Loading => {
+                                // Cancel: drop receiver and ignore result
+                                self.ai_branch_suggest_rx = None;
+                                self.wizard.ai_branch_phase = AIBranchSuggestPhase::Input;
+                                self.wizard.ai_branch_error = None;
+                                self.wizard.ai_branch_suggestions.clear();
+                                self.wizard.ai_branch_selected = 0;
+                                self.wizard.ai_branch_cursor = self.wizard.ai_branch_input.len();
+                            }
+                            AIBranchSuggestPhase::Select => {
+                                self.wizard.ai_branch_phase = AIBranchSuggestPhase::Input;
+                                self.wizard.ai_branch_error = None;
+                                self.wizard.ai_branch_suggestions.clear();
+                                self.wizard.ai_branch_selected = 0;
+                                self.wizard.ai_branch_cursor = self.wizard.ai_branch_input.len();
+                            }
+                            AIBranchSuggestPhase::Error => {
+                                self.wizard.ai_branch_phase = AIBranchSuggestPhase::Input;
+                                self.wizard.ai_branch_error = None;
+                                self.wizard.ai_branch_cursor = self.wizard.ai_branch_input.len();
+                            }
+                        }
+                    } else {
+                        self.wizard.prev_step();
+                    }
                 }
             }
         }
