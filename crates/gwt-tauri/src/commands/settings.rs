@@ -39,9 +39,21 @@ impl From<&Settings> for SettingsData {
             web_address: s.web.address.clone(),
             web_cors: s.web.cors,
             agent_default: s.agent.default_agent.clone(),
-            agent_claude_path: s.agent.claude_path.as_ref().map(|p| p.to_string_lossy().to_string()),
-            agent_codex_path: s.agent.codex_path.as_ref().map(|p| p.to_string_lossy().to_string()),
-            agent_gemini_path: s.agent.gemini_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+            agent_claude_path: s
+                .agent
+                .claude_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+            agent_codex_path: s
+                .agent
+                .codex_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+            agent_gemini_path: s
+                .agent
+                .gemini_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
             agent_auto_install_deps: s.agent.auto_install_deps,
             docker_force_host: s.docker.force_host,
         }
@@ -53,6 +65,7 @@ impl SettingsData {
     ///
     /// Uses serde round-trip since the sub-types (WebSettings, AgentSettings, DockerSettings)
     /// are not re-exported from gwt_core::config.
+    #[allow(clippy::field_reassign_with_default)]
     fn to_settings(&self) -> Result<Settings, String> {
         let mut s = Settings::default();
         s.protected_branches = self.protected_branches.clone();
@@ -113,9 +126,7 @@ pub fn save_settings(settings: SettingsData, state: State<AppState>) -> Result<(
         }
         None => {
             // Save to global config if no project is opened
-            core_settings
-                .save_global()
-                .map_err(|e| e.to_string())?;
+            core_settings.save_global().map_err(|e| e.to_string())?;
         }
     }
 
