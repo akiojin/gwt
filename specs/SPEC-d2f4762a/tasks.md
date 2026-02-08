@@ -244,7 +244,7 @@
 
 - [x] **T901** [P] [共通] `specs/SPEC-d2f4762a/spec.md` のアイコン仕様とカーソル非表示要件を更新
 - [x] **T902** [P] [共通] `specs/SPEC-d2f4762a/plan.md` のアイコン方針をASCIIに更新
-- [x] **T903** [P] [共通] `specs/SPEC-d27be71b/spec.md` の意思決定ログを更新（ASCII整理を反映）
+- [x] **T903** [P] [共通] `specs/archive/SPEC-d27be71b/spec.md` の意思決定ログを更新（ASCII整理を反映）
 - [x] **T904** [P] [共通] `CLAUDE.md` のアイコン方針をASCIIに戻す
 
 ### テスト（TDD）
@@ -546,7 +546,7 @@
 - [x] **T804** [P] [共通] `specs/SPEC-d2f4762a/plan.md` に安全判定スピナー/リモートブランチ空白の方針を追記
 - [x] **T805** [P] [共通] `specs/SPEC-d2f4762a/spec.md` の安全時アイコンを緑色`o`に更新
 - [x] **T806** [P] [共通] `specs/SPEC-d2f4762a/plan.md` の安全時アイコン方針に緑色`o`を追記
-- [x] **T807** [P] [共通] `specs/SPEC-d27be71b/spec.md` の意思決定ログを安全時`o`に更新
+- [x] **T807** [P] [共通] `specs/archive/SPEC-d27be71b/spec.md` の意思決定ログを安全時`o`に更新
 - [x] **T816** [P] [共通] `specs/SPEC-d2f4762a/spec.md` の安全判定スピナーをブランチ単位で順次更新する要件を追記
 - [x] **T817** [P] [共通] `specs/SPEC-d2f4762a/plan.md` の安全判定スピナー方針にブランチ単位更新を追記
 - [x] **T826** [P] [共通] `specs/SPEC-d2f4762a/spec.md` の安全/Worktreeアイコンの明るい緑表示を追記

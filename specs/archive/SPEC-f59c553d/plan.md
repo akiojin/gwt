@@ -1,7 +1,7 @@
 # 実装計画: npm postinstall ダウンロード安定化
 
-**仕様ID**: `SPEC-f59c553d` | **日付**: 2026-01-26 | **仕様書**: `specs/SPEC-f59c553d/spec.md`
-**入力**: `/specs/SPEC-f59c553d/spec.md` からの機能仕様
+**仕様ID**: `SPEC-f59c553d` | **日付**: 2026-01-26 | **仕様書**: `specs/archive/SPEC-f59c553d/spec.md`
+**入力**: `/specs/archive/SPEC-f59c553d/spec.md` からの機能仕様
 
 ## 概要
 
@@ -31,7 +31,7 @@ npm postinstallとbunxオンデマンド取得のGitHub Releasesダウンロー�
 ### ドキュメント（この機能）
 
 ```text
-specs/SPEC-f59c553d/
+specs/archive/SPEC-f59c553d/
 ├── plan.md
 ├── research.md
 ├── data-model.md
@@ -55,7 +55,7 @@ bin/
 
 **目的**: 既存のpostinstall実装とGitHub Releases取得フローを確認し、変更方針を決定する
 
-**出力**: `specs/SPEC-f59c553d/research.md`
+**出力**: `specs/archive/SPEC-f59c553d/research.md`
 
 ### 調査項目
 
@@ -77,9 +77,9 @@ bin/
 **目的**: 実装前に関数分割とテスト対象を明確化する
 
 **出力**:
-- `specs/SPEC-f59c553d/data-model.md`
-- `specs/SPEC-f59c553d/quickstart.md`
-- `specs/SPEC-f59c553d/contracts/` （該当なし）
+- `specs/archive/SPEC-f59c553d/data-model.md`
+- `specs/archive/SPEC-f59c553d/quickstart.md`
+- `specs/archive/SPEC-f59c553d/contracts/` （該当なし）
 
 ### 1.1 データモデル設計
 
@@ -104,7 +104,7 @@ bin/
 
 **入力**: このプラン + 仕様書 + 設計ドキュメント
 
-**出力**: `specs/SPEC-f59c553d/tasks.md`
+**出力**: `specs/archive/SPEC-f59c553d/tasks.md`
 
 ## 実装戦略
 

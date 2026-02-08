@@ -4,7 +4,7 @@
 
 ## Phase 1: Setup
 
-- [x] T001 Create SPEC directory structure (`specs/SPEC-c8e7a5b2/`)
+- [x] T001 Create SPEC directory structure (`specs/archive/SPEC-c8e7a5b2/`)
 - [x] T002 Create spec.md with full specification
 - [x] T003 Create plan.md with implementation plan
 - [x] T004 Create tasks.md (this file)

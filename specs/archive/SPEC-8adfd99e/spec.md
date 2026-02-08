@@ -142,5 +142,5 @@
 ## 参考資料 *(該当する場合)*
 
 - [SPEC-1d62511e/spec.md](../SPEC-1d62511e/spec.md) - Web UI 全体仕様
-- [SPEC-71f2742d/spec.md](../SPEC-71f2742d/spec.md) - カスタムAIツール仕様（env フィールドを含む）
+- [SPEC-71f2742d/spec.md](../../SPEC-71f2742d/spec.md) - カスタムAIツール仕様（env フィールドを含む）
 - [src/config/tools.ts](../../src/config/tools.ts) - `tools.json` ロードと検証ロジック

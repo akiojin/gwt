@@ -128,6 +128,6 @@
 
 ## 参考資料
 
-- [SPEC-8adfd99e/spec.md](../SPEC-8adfd99e/spec.md)
+- [SPEC-8adfd99e/spec.md](../archive/SPEC-8adfd99e/spec.md)
 - [src/config/builtin-tools.ts](../../src/config/builtin-tools.ts)
 - [src/config/tools.ts](../../src/config/tools.ts)

@@ -4,7 +4,7 @@ description: "npm postinstall + bunxオンデマンド取得 ダウンロード�
 
 # タスク: npm postinstall + bunxオンデマンド取得 ダウンロード安定化
 
-**入力**: `/specs/SPEC-f59c553d/`
+**入力**: `/specs/archive/SPEC-f59c553d/`
 **前提条件**: plan.md / spec.md / research.md / data-model.md / quickstart.md
 
 ## フォーマット: `[ID] [P?] [ストーリー] 説明`

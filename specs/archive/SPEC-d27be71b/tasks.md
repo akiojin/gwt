@@ -1,6 +1,6 @@
 # タスク: Ink.js から OpenTUI への移行
 
-**入力**: `/specs/SPEC-d27be71b/` からの設計ドキュメント
+**入力**: `/specs/archive/SPEC-d27be71b/` からの設計ドキュメント
 **前提条件**: plan.md（必須）、spec.md（ユーザーストーリー用に必須）
 
 ## フォーマット: `[ID] [P?] [ストーリー] 説明`
@@ -33,7 +33,7 @@ Phase 8 (統合・仕上げ)
 
 ### セットアップタスク
 
-- [x] **T001** [P] [共通] Zig コンパイラのインストール手順を `specs/SPEC-d27be71b/quickstart.md` に文書化
+- [x] **T001** [P] [共通] Zig コンパイラのインストール手順を `specs/archive/SPEC-d27be71b/quickstart.md` に文書化
 - [x] **T002** [P] [共通] CI/CD に Zig セットアップを追加 `.github/workflows/test.yml`
 - [x] **T003** [共通] `package.json` に OpenTUI 依存を追加（@opentui/core, @opentui/solid, solid-js）
 - [x] **T004** [共通] T003の後に `bun install` で依存インストールを検証
@@ -53,7 +53,7 @@ Phase 8 (統合・仕上げ)
 - [x] **T103** [P] [基盤] `src/cli/ui/core/keybindings.ts` にキーバインド定義を集約
 - [x] **T104** [基盤] T101の後に `src/cli/ui/stores/` に SolidJS ストア構造を設計
 - [x] **T105** [P] [基盤] 現行 Ink.js の性能ベースラインを計測（5000ブランチ + 入力レイテンシ簡易測定）
-- [x] **T106** [基盤] T105の後に `specs/SPEC-d27be71b/research.md` にベースライン結果を記録
+- [x] **T106** [基盤] T105の後に `specs/archive/SPEC-d27be71b/research.md` にベースライン結果を記録
 
 **✅ 基盤チェックポイント**: ビルド成功 + ベースライン計測完了で Go/No-Go 判定
 

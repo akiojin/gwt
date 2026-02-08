@@ -1,6 +1,6 @@
 # タスク: Web UI 環境変数編集機能
 
-**入力**: `/specs/SPEC-8adfd99e/` の spec/plan
+**入力**: `/specs/archive/SPEC-8adfd99e/` の spec/plan
 **前提条件**: plan 承認済み、feature/webui 系の土台が動作していること
 
 **テスト方針**: CLAUDE.md の TDD ルールに従い、テスト→実装の順で進める。各フェーズ完了時に `bun run test`, `bun run build`, `bun run lint`, `bun run format:check`, `bunx --bun markdownlint-cli "**/*.md" --config .markdownlint.json --ignore-path .markdownlintignore` を実行し、失敗時は修正する。
@@ -40,7 +40,7 @@
 
 - [ ] **T940** [US4] `tests/unit/launcher.env.test.ts` を作成し、`tools.json` の env 変更が `launchCustomAITool` で利用されることを RED
 - [ ] **T941** [US4] `src/launcher.ts`/周辺で必要ならキャッシュクリア or 最新ロードロジックを追加し、Web 保存後に CLI でも即反映されるようにして T940 をグリーン化
-- [ ] **T942** [US4] 手動/自動テストドキュメント（`specs/SPEC-8adfd99e/quickstart.md` など）に Web→CLI 検証手順を追記
+- [ ] **T942** [US4] 手動/自動テストドキュメント（`specs/archive/SPEC-8adfd99e/quickstart.md` など）に Web→CLI 検証手順を追記
 
 ## フェーズ6: 最終検証
 

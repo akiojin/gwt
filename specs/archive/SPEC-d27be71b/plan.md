@@ -1,7 +1,7 @@
 # 実装計画: Ink.js から OpenTUI への移行
 
-**仕様ID**: `SPEC-d27be71b` | **日付**: 2026-01-04 | **仕様書**: [specs/SPEC-d27be71b/spec.md](specs/SPEC-d27be71b/spec.md)
-**入力**: `/specs/SPEC-d27be71b/spec.md` からの機能仕様
+**仕様ID**: `SPEC-d27be71b` | **日付**: 2026-01-04 | **仕様書**: [specs/archive/SPEC-d27be71b/spec.md](specs/archive/SPEC-d27be71b/spec.md)
+**入力**: `/specs/archive/SPEC-d27be71b/spec.md` からの機能仕様
 
 ## 概要
 
@@ -51,7 +51,7 @@
 ### ドキュメント（この機能）
 
 ```text
-specs/SPEC-d27be71b/
+specs/archive/SPEC-d27be71b/
 ├── plan.md              # このファイル（/speckit.plan コマンド出力）
 ├── research.md          # フェーズ0出力（/speckit.plan コマンド）
 ├── data-model.md        # フェーズ1出力（/speckit.plan コマンド）
@@ -84,7 +84,7 @@ tests/
 
 **目的**: 要件に基づいて技術スタックを決定し、既存のコードパターンを理解する
 
-**出力**: `specs/SPEC-d27be71b/research.md`
+**出力**: `specs/archive/SPEC-d27be71b/research.md`
 
 ### 調査項目
 
@@ -114,9 +114,9 @@ tests/
 **目的**: 実装前に技術設計を定義する
 
 **出力**:
-- `specs/SPEC-d27be71b/data-model.md`
-- `specs/SPEC-d27be71b/quickstart.md`
-- `specs/SPEC-d27be71b/contracts/` （外部契約は無し）
+- `specs/archive/SPEC-d27be71b/data-model.md`
+- `specs/archive/SPEC-d27be71b/quickstart.md`
+- `specs/archive/SPEC-d27be71b/contracts/` （外部契約は無し）
 
 ### 1.1 データモデル設計
 
@@ -146,7 +146,7 @@ tests/
 
 **入力**: このプラン + 仕様書 + 設計ドキュメント
 
-**出力**: `specs/SPEC-d27be71b/tasks.md` - 実装のための実行可能なタスクリスト
+**出力**: `specs/archive/SPEC-d27be71b/tasks.md` - 実装のための実行可能なタスクリスト
 
 ## 実装戦略
 
