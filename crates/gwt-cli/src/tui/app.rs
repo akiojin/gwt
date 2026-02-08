@@ -19,9 +19,8 @@ use crossterm::{
 use gwt_core::agent::codex::supports_collaboration_modes;
 use gwt_core::ai::{
     summarize_scrollback, summarize_session, AIClient, AIError, AgentHistoryStore, AgentType,
-    ChatMessage,
-    ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, ModelInfo, OpenCodeSessionParser,
-    SessionParseError, SessionParser,
+    ChatMessage, ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, ModelInfo,
+    OpenCodeSessionParser, SessionParseError, SessionParser,
 };
 use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{
@@ -648,8 +647,8 @@ enum ServiceSelectionDecision {
 pub enum FocusTarget {
     /// gwt UI (branch list, settings, etc.)
     GwtUi,
-    /// Terminal pane (PTY transparent input)
-    TerminalPane,
+    /// Agent pane (PTY transparent input, FR-047)
+    AgentPane,
 }
 
 /// Prefix key commands (SPEC-1d6dd9fc FR-025..FR-029c)
@@ -752,8 +751,8 @@ pub enum Message {
     ReregisterHooks,
     /// SPEC-1d6dd9fc: Prefix key command dispatched
     PrefixKey(PrefixCommand),
-    /// SPEC-1d6dd9fc FR-020: Focus terminal pane
-    FocusTerminalPane,
+    /// SPEC-1d6dd9fc FR-020: Focus agent pane
+    FocusAgentPane,
     /// SPEC-1d6dd9fc FR-020: Focus gwt UI
     FocusGwtUi,
     /// SPEC-1d6dd9fc: Write raw bytes to active PTY
@@ -1578,13 +1577,15 @@ impl Model {
         let branch_name = branch.name.clone();
 
         // FR-121: Try scrollback path first
-        let scrollback_path = gwt_core::terminal::manager::PaneManager::load_pane_id_for_branch(
-            &branch_name,
-        )
-        .and_then(|pane_id| {
-            gwt_core::terminal::scrollback::ScrollbackFile::scrollback_path_for_pane(&pane_id).ok()
-        })
-        .filter(|p| p.exists());
+        let scrollback_path =
+            gwt_core::terminal::manager::PaneManager::load_pane_id_for_branch(&branch_name)
+                .and_then(|pane_id| {
+                    gwt_core::terminal::scrollback::ScrollbackFile::scrollback_path_for_pane(
+                        &pane_id,
+                    )
+                    .ok()
+                })
+                .filter(|p| p.exists());
 
         let mut session_id = branch.last_session_id.clone();
         let tool_id = branch.last_tool_id.clone();
@@ -1759,16 +1760,15 @@ impl Model {
                     let mtime = std::fs::metadata(scrollback_path)
                         .ok()
                         .and_then(|m| m.modified().ok());
-                    let scrollback_text =
-                        match gwt_core::terminal::scrollback::strip_ansi(
-                            &std::fs::read(scrollback_path).unwrap_or_default(),
-                        ) {
-                            text if text.trim().is_empty() => {
-                                // Empty scrollback: fall through to parser path
-                                None
-                            }
-                            text => Some(text),
-                        };
+                    let scrollback_text = match gwt_core::terminal::scrollback::strip_ansi(
+                        &std::fs::read(scrollback_path).unwrap_or_default(),
+                    ) {
+                        text if text.trim().is_empty() => {
+                            // Empty scrollback: fall through to parser path
+                            None
+                        }
+                        text => Some(text),
+                    };
 
                     if let Some(text) = scrollback_text {
                         match summarize_scrollback(&client, &text, &task.branch) {
@@ -2039,13 +2039,15 @@ impl Model {
         self.session_poll_deferred = false;
 
         // FR-121: Try scrollback path first for staleness check
-        let scrollback_path = gwt_core::terminal::manager::PaneManager::load_pane_id_for_branch(
-            &branch_name,
-        )
-        .and_then(|pane_id| {
-            gwt_core::terminal::scrollback::ScrollbackFile::scrollback_path_for_pane(&pane_id).ok()
-        })
-        .filter(|p| p.exists());
+        let scrollback_path =
+            gwt_core::terminal::manager::PaneManager::load_pane_id_for_branch(&branch_name)
+                .and_then(|pane_id| {
+                    gwt_core::terminal::scrollback::ScrollbackFile::scrollback_path_for_pane(
+                        &pane_id,
+                    )
+                    .ok()
+                })
+                .filter(|p| p.exists());
 
         if let Some(ref sb_path) = scrollback_path {
             // Use scrollback file mtime for staleness
@@ -2598,6 +2600,32 @@ impl Model {
             MouseEventKind::ScrollUp => self.branch_list.scroll_session_line_up(),
             MouseEventKind::ScrollDown => self.branch_list.scroll_session_line_down(),
             _ => {}
+        }
+    }
+
+    /// FR-048: Handle mouse scroll events for the agent pane.
+    /// Converts scroll events to terminal escape sequences and sends to PTY.
+    fn handle_agent_pane_scroll(&mut self, mouse: MouseEvent) {
+        let is_up = matches!(mouse.kind, MouseEventKind::ScrollUp);
+
+        // Compute agent pane area from current terminal size
+        let term_size = crossterm::terminal::size().unwrap_or((160, 40));
+        let full_area = ratatui::layout::Rect::new(0, 0, term_size.0, term_size.1);
+        // Account for status line (1 row at top)
+        let content_area =
+            ratatui::layout::Rect::new(0, 1, full_area.width, full_area.height.saturating_sub(1));
+        let split_areas =
+            super::screens::split_layout::calculate_split_layout(content_area, &self.split_layout);
+        if let Some(pane_area) = split_areas.agent_pane {
+            let bytes = super::screens::agent_pane::mouse_scroll_to_bytes(
+                is_up,
+                mouse.column,
+                mouse.row,
+                pane_area,
+            );
+            if let Some(pane) = self.terminal_manager.active_pane_mut() {
+                let _ = pane.write_input(&bytes);
+            }
         }
     }
 
@@ -4898,9 +4926,9 @@ impl Model {
                     }
                 }
             },
-            Message::FocusTerminalPane => {
+            Message::FocusAgentPane => {
                 if !self.terminal_manager.is_empty() {
-                    self.focus_target = FocusTarget::TerminalPane;
+                    self.focus_target = FocusTarget::AgentPane;
                 }
             }
             Message::FocusGwtUi => {
@@ -5476,8 +5504,8 @@ impl Model {
             }
         }
 
-        self.focus_target = FocusTarget::TerminalPane;
-        self.split_layout.has_terminal_pane = true;
+        self.focus_target = FocusTarget::AgentPane;
+        self.split_layout.has_agent_pane = true;
 
         // Record agent as running
         self.branch_list
@@ -5528,8 +5556,7 @@ impl Model {
             return true;
         }
 
-        let docker_file_type = match detect_docker_files(&plan.config.worktree_path)
-        {
+        let docker_file_type = match detect_docker_files(&plan.config.worktree_path) {
             Some(dtype) => dtype,
             None => return false,
         };
@@ -5639,8 +5666,7 @@ impl Model {
             });
         }
 
-        let docker_file_type = match detect_docker_files(&plan.config.worktree_path)
-        {
+        let docker_file_type = match detect_docker_files(&plan.config.worktree_path) {
             Some(dtype) => dtype,
             None => {
                 return Ok(ServiceSelectionDecision::Proceed {
@@ -5755,8 +5781,7 @@ impl Model {
             return;
         }
 
-        let docker_file_type = match detect_docker_files(&plan.config.worktree_path)
-        {
+        let docker_file_type = match detect_docker_files(&plan.config.worktree_path) {
             Some(dtype) => dtype,
             None => {
                 self.launch_plan_in_tmux(
@@ -5871,8 +5896,7 @@ impl Model {
             return;
         }
 
-        let docker_file_type = match detect_docker_files(&plan.config.worktree_path)
-        {
+        let docker_file_type = match detect_docker_files(&plan.config.worktree_path) {
             Some(dtype) => dtype,
             None => {
                 self.launch_plan_in_tmux(
@@ -6283,17 +6307,13 @@ impl Model {
                     );
                 }
 
-                // SPEC-1d6dd9fc: Render terminal pane if active
-                if let Some(terminal_area) = split_areas.terminal_pane {
-                    let view = super::screens::terminal_pane::TerminalPaneView {
+                // SPEC-1d6dd9fc FR-047: Render agent pane if active
+                if let Some(agent_area) = split_areas.agent_pane {
+                    let view = super::screens::agent_pane::AgentPaneView {
                         pane_manager: &self.terminal_manager,
-                        is_focused: self.focus_target == FocusTarget::TerminalPane,
+                        is_focused: self.focus_target == FocusTarget::AgentPane,
                     };
-                    super::screens::terminal_pane::render_terminal_pane(
-                        &view,
-                        frame,
-                        terminal_area,
-                    );
+                    super::screens::agent_pane::render_agent_pane(&view, frame, agent_area);
                 }
             }
             Screen::WorktreeCreate => {
@@ -7126,8 +7146,8 @@ impl Model {
             };
         }
 
-        // SPEC-1d6dd9fc: Terminal pane has focus - route all input to PTY
-        if self.focus_target == FocusTarget::TerminalPane
+        // SPEC-1d6dd9fc: Agent pane has focus - route all input to PTY
+        if self.focus_target == FocusTarget::AgentPane
             && !self.terminal_manager.is_empty()
             && is_key_press
         {
@@ -7545,7 +7565,13 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
                     } else {
                         match mouse.kind {
                             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                                if matches!(model.screen, Screen::BranchList) {
+                                // FR-048: Route scroll to agent pane when focused
+                                if model.focus_target == FocusTarget::AgentPane
+                                    && !model.terminal_manager.is_empty()
+                                    && matches!(model.screen, Screen::BranchList)
+                                {
+                                    model.handle_agent_pane_scroll(mouse);
+                                } else if matches!(model.screen, Screen::BranchList) {
                                     model.handle_branch_list_scroll(mouse);
                                 }
                             }
@@ -7647,7 +7673,6 @@ fn canonical_tool_id(tool_id: &str) -> String {
     }
     tool_id.trim().to_string()
 }
-
 
 fn resolve_remote_head(repo_root: &Path, remote: &str) -> Option<String> {
     let output = Command::new("git")
@@ -8407,10 +8432,6 @@ mod tests {
         model.update(Message::NavigateTo(Screen::Logs));
         assert_eq!(model.footer_scroll_offset, 0);
     }
-
-
-
-
 
     #[test]
     fn test_extract_tool_version_from_usage_matches_tool_id() {
@@ -9480,14 +9501,14 @@ mod tests {
             })
             .unwrap();
         model.terminal_manager.add_pane(p1).unwrap();
-        model.split_layout.has_terminal_pane = true;
-        model.focus_target = FocusTarget::TerminalPane;
+        model.split_layout.has_agent_pane = true;
+        model.focus_target = FocusTarget::AgentPane;
 
         model.update(Message::PrefixKey(PrefixCommand::ClosePane));
         assert!(model.terminal_manager.is_empty());
         assert_eq!(model.focus_target, FocusTarget::GwtUi);
-        // FR-046: has_terminal_pane stays true (always visible)
-        assert!(model.split_layout.has_terminal_pane);
+        // FR-046: has_agent_pane stays true (agent pane always visible)
+        assert!(model.split_layout.has_agent_pane);
     }
 
     // 6. PrefixCommand::FullscreenToggle toggles fullscreen
@@ -9522,15 +9543,15 @@ mod tests {
     #[test]
     fn test_prefix_cancel_returns_focus() {
         let mut model = Model::new_with_context(None);
-        model.focus_target = FocusTarget::TerminalPane;
+        model.focus_target = FocusTarget::AgentPane;
 
         model.update(Message::PrefixKey(PrefixCommand::Cancel));
         assert_eq!(model.focus_target, FocusTarget::GwtUi);
     }
 
-    // 8. FocusTerminalPane changes focus
+    // 8. FocusAgentPane changes focus
     #[test]
-    fn test_focus_terminal_pane() {
+    fn test_focus_agent_pane() {
         let mut model = Model::new_with_context(None);
         let p1 =
             gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
@@ -9549,17 +9570,17 @@ mod tests {
         model.terminal_manager.add_pane(p1).unwrap();
         assert_eq!(model.focus_target, FocusTarget::GwtUi);
 
-        model.update(Message::FocusTerminalPane);
-        assert_eq!(model.focus_target, FocusTarget::TerminalPane);
+        model.update(Message::FocusAgentPane);
+        assert_eq!(model.focus_target, FocusTarget::AgentPane);
     }
 
-    // 9. FocusTerminalPane does nothing when no panes
+    // 9. FocusAgentPane does nothing when no panes
     #[test]
-    fn test_focus_terminal_pane_no_panes() {
+    fn test_focus_agent_pane_no_panes() {
         let mut model = Model::new_with_context(None);
         assert!(model.terminal_manager.is_empty());
 
-        model.update(Message::FocusTerminalPane);
+        model.update(Message::FocusAgentPane);
         assert_eq!(model.focus_target, FocusTarget::GwtUi);
     }
 
@@ -9567,7 +9588,7 @@ mod tests {
     #[test]
     fn test_focus_gwt_ui() {
         let mut model = Model::new_with_context(None);
-        model.focus_target = FocusTarget::TerminalPane;
+        model.focus_target = FocusTarget::AgentPane;
 
         model.update(Message::FocusGwtUi);
         assert_eq!(model.focus_target, FocusTarget::GwtUi);
@@ -9776,7 +9797,7 @@ mod tests {
     fn test_terminal_focus_ctrl_g_prefix() {
         let mut model = Model::new_with_context(None);
         model.screen = Screen::BranchList;
-        model.focus_target = FocusTarget::TerminalPane;
+        model.focus_target = FocusTarget::AgentPane;
         let p1 =
             gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
                 pane_id: "p1".to_string(),
@@ -9808,7 +9829,7 @@ mod tests {
     fn test_terminal_focus_regular_key_write_pty() {
         let mut model = Model::new_with_context(None);
         model.screen = Screen::BranchList;
-        model.focus_target = FocusTarget::TerminalPane;
+        model.focus_target = FocusTarget::AgentPane;
         let p1 =
             gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
                 pane_id: "p1".to_string(),
@@ -9838,7 +9859,7 @@ mod tests {
     #[test]
     fn test_terminal_focus_ctrl_c_still_works() {
         let mut model = Model::new_with_context(None);
-        model.focus_target = FocusTarget::TerminalPane;
+        model.focus_target = FocusTarget::AgentPane;
         let p1 =
             gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
                 pane_id: "p1".to_string(),

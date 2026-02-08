@@ -1,6 +1,7 @@
 //! TUI Screens
 
 pub mod agent_mode;
+pub mod agent_pane;
 pub mod ai_wizard;
 pub mod branch_list;
 pub mod clone_wizard;
@@ -16,7 +17,6 @@ pub mod profiles;
 pub mod service_select;
 pub mod settings;
 pub mod split_layout;
-pub mod terminal_pane;
 pub mod wizard;
 pub mod worktree_create;
 
@@ -39,9 +39,9 @@ pub use wizard::{
 };
 pub use worktree_create::{render_worktree_create, WorktreeCreateState};
 
-// Terminal pane rendering (SPEC-1d6dd9fc)
+// Agent pane rendering (SPEC-1d6dd9fc FR-047)
 #[allow(unused_imports)]
-pub use terminal_pane::{render_terminal_pane, TerminalPaneView};
+pub use agent_pane::{render_agent_pane, AgentPaneView};
 
 // Docker integration screens (SPEC-f5f5657e)
 pub use service_select::{render_service_select, ServiceSelectState};

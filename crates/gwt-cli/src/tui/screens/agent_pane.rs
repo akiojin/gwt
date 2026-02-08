@@ -1,6 +1,6 @@
-//! Terminal pane rendering for the TUI
+//! Agent pane rendering for the TUI (FR-047)
 //!
-//! Renders terminal pane contents including tab bar, VT100 output area,
+//! Renders agent pane contents including tab bar, VT100 output area,
 //! and status bar using the gwt-core terminal infrastructure.
 
 #![allow(dead_code)]
@@ -22,8 +22,8 @@ pub struct CopyModeState {
     pub selection_start: Option<(u16, u16)>,
 }
 
-/// View data for rendering a terminal pane area.
-pub struct TerminalPaneView<'a> {
+/// View data for rendering an agent pane area (FR-047).
+pub struct AgentPaneView<'a> {
     pub pane_manager: &'a PaneManager,
     pub is_focused: bool,
 }
@@ -62,17 +62,17 @@ fn format_tab_label(index: usize, agent_name: &str) -> String {
     format!("{}:{}", index + 1, agent_name)
 }
 
-/// FR-045: Get the terminal pane block title.
+/// FR-045: Get the agent pane block title.
 /// Returns the active agent name, or "No Agent" if no panes exist.
-fn terminal_pane_title(manager: &PaneManager) -> String {
+fn agent_pane_title(manager: &PaneManager) -> String {
     match manager.active_pane() {
         Some(pane) => format!(" {} ", pane.agent_name()),
         None => " No Agent ".to_string(),
     }
 }
 
-/// Render the terminal pane (tab bar + VT100 content + status bar).
-pub fn render_terminal_pane(view: &TerminalPaneView, frame: &mut Frame, area: Rect) {
+/// Render the agent pane (tab bar + VT100 content + status bar).
+pub fn render_agent_pane(view: &AgentPaneView, frame: &mut Frame, area: Rect) {
     if area.height < 3 || area.width < 10 {
         return;
     }
@@ -84,7 +84,7 @@ pub fn render_terminal_pane(view: &TerminalPaneView, frame: &mut Frame, area: Re
     };
 
     // FR-045: Dynamic title based on active agent name
-    let title = terminal_pane_title(view.pane_manager);
+    let title = agent_pane_title(view.pane_manager);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -195,6 +195,24 @@ fn render_status_bar(manager: &PaneManager, frame: &mut Frame, area: Rect) {
     let line = Line::from(spans);
     let paragraph = Paragraph::new(line).style(Style::default().bg(Color::DarkGray));
     frame.render_widget(paragraph, area);
+}
+
+/// FR-048: Convert mouse scroll event to terminal escape bytes.
+/// Uses X10 mouse protocol: ESC [ M button x y
+/// ScrollUp = button 64 (0x40), ScrollDown = button 65 (0x41)
+/// Coordinates are offset by 33 (0x21) per X10 protocol.
+pub fn mouse_scroll_to_bytes(is_scroll_up: bool, col: u16, row: u16, pane_area: Rect) -> Vec<u8> {
+    // Convert host terminal coordinates to pane-local coordinates
+    // Account for border (1px on each side)
+    let local_col = col.saturating_sub(pane_area.x + 1);
+    let local_row = row.saturating_sub(pane_area.y + 1);
+
+    // X10 protocol: button byte, x+33, y+33 (capped at 255)
+    let button: u8 = if is_scroll_up { 64 } else { 65 };
+    let x = ((local_col as u32) + 33).min(255) as u8;
+    let y = ((local_row as u32) + 33).min(255) as u8;
+
+    vec![0x1b, b'[', b'M', button, x, y]
 }
 
 #[cfg(test)]
@@ -312,12 +330,12 @@ mod tests {
         assert!(state.selection_start.is_none());
     }
 
-    // --- terminal_pane_title tests (FR-045) ---
+    // --- agent_pane_title tests (FR-045) ---
 
     #[test]
     fn test_block_title_no_agent() {
         let manager = PaneManager::new();
-        let title = terminal_pane_title(&manager);
+        let title = agent_pane_title(&manager);
         assert_eq!(title, " No Agent ");
     }
 
@@ -340,7 +358,38 @@ mod tests {
         })
         .unwrap();
         manager.add_pane(pane).unwrap();
-        let title = terminal_pane_title(&manager);
+        let title = agent_pane_title(&manager);
         assert_eq!(title, " claude ");
+    }
+
+    // --- FR-048: mouse_scroll_to_bytes tests ---
+
+    #[test]
+    fn test_mouse_scroll_to_bytes_up() {
+        let pane_area = Rect::new(80, 0, 80, 40);
+        let bytes = mouse_scroll_to_bytes(true, 90, 10, pane_area);
+        // button=64, x=(90-80-1)+33=42, y=(10-0-1)+33=42
+        assert_eq!(bytes[0], 0x1b);
+        assert_eq!(bytes[1], b'[');
+        assert_eq!(bytes[2], b'M');
+        assert_eq!(bytes[3], 64); // ScrollUp button
+        assert_eq!(bytes[4], 42); // x = 9 + 33
+        assert_eq!(bytes[5], 42); // y = 9 + 33
+    }
+
+    #[test]
+    fn test_mouse_scroll_to_bytes_down() {
+        let pane_area = Rect::new(80, 0, 80, 40);
+        let bytes = mouse_scroll_to_bytes(false, 90, 10, pane_area);
+        assert_eq!(bytes[3], 65); // ScrollDown button
+    }
+
+    #[test]
+    fn test_mouse_scroll_to_bytes_origin() {
+        let pane_area = Rect::new(0, 0, 80, 40);
+        let bytes = mouse_scroll_to_bytes(true, 1, 1, pane_area);
+        // local_col = 1 - 0 - 1 = 0, local_row = 1 - 0 - 1 = 0
+        assert_eq!(bytes[4], 33); // x = 0 + 33
+        assert_eq!(bytes[5], 33); // y = 0 + 33
     }
 }
