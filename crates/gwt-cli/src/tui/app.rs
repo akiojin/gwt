@@ -1108,106 +1108,162 @@ impl Model {
             let branches: Vec<_> = if repo_type == RepoType::Bare {
                 // Bare repo: Local = only branches with worktrees
                 all_branches
-                    .into_iter()
+                    .iter()
                     .filter(|b| worktree_branch_names.contains(&b.name))
-                    .collect()
+                    .cloned()
+                    .collect::<Vec<_>>()
             } else {
-                all_branches
+                all_branches.clone()
             };
 
             // SPEC-a70a1ece FR-171: For bare repos, branches without worktrees go to Remote
-            let remote_branches = if repo_type == RepoType::Bare {
-                // Get all branches and filter out ones with worktrees
-                let all_for_remote = Branch::list_basic(git_path).unwrap_or_default();
-                all_for_remote
-                    .into_iter()
+            let remote_branches_stage1 = if repo_type == RepoType::Bare {
+                all_branches
+                    .iter()
                     .filter(|b| !worktree_branch_names.contains(&b.name))
+                    .cloned()
                     .collect::<Vec<_>>()
             } else {
                 Branch::list_remote(git_path).unwrap_or_default()
             };
 
-            let mut remote_display_branches = Vec::new();
-            for mut branch in remote_branches {
-                if repo_type != RepoType::Bare && !branch.name.starts_with("remotes/") {
-                    branch.name = format!("remotes/{}", branch.name);
-                }
-                remote_display_branches.push(branch);
-            }
-            let worktree_targets: Vec<WorktreeStatusTarget> = worktrees
-                .iter()
-                .filter_map(|wt| {
-                    wt.branch.clone().map(|branch| WorktreeStatusTarget {
-                        branch,
-                        path: wt.path.clone(),
-                    })
-                })
-                .collect();
-
             // Load tool usage from TypeScript session file (FR-070)
             let tool_usage_map = gwt_core::config::get_last_tool_usage_map(&repo_root);
-            let mut safety_targets = Vec::new();
 
-            let mut branch_items: Vec<BranchItem> = branches
-                .iter()
-                .map(|b| {
-                    let mut item = BranchItem::from_branch_minimal(b, &worktrees);
-
-                    // Set tool usage from TypeScript session history or agent history (FR-070/088)
-                    apply_last_tool_usage(&mut item, &repo_root, &tool_usage_map, &agent_history);
-
-                    // Safety check short-circuit: use immediate signals first
-                    if item.branch_type == BranchType::Local {
-                        if !base_branch_exists {
-                            item.safe_to_cleanup = Some(false);
-                        } else {
-                            // Check safety even without upstream (FR-004b)
-                            item.safe_to_cleanup = None;
-                            safety_targets.push(SafetyCheckTarget {
-                                branch: b.name.clone(),
-                                upstream: b.upstream.clone(),
-                            });
-                        }
+            let build_update = |remote_branches: Vec<Branch>| -> BranchListUpdate {
+                let mut remote_display_branches = Vec::new();
+                for mut branch in remote_branches {
+                    if repo_type != RepoType::Bare && !branch.name.starts_with("remotes/") {
+                        branch.name = format!("remotes/{}", branch.name);
                     }
+                    remote_display_branches.push(branch);
+                }
 
-                    item.update_safety_status();
+                let worktree_targets: Vec<WorktreeStatusTarget> = worktrees
+                    .iter()
+                    .filter_map(|wt| {
+                        wt.branch.clone().map(|branch| WorktreeStatusTarget {
+                            branch,
+                            path: wt.path.clone(),
+                        })
+                    })
+                    .collect();
+
+                let mut safety_targets = Vec::new();
+                let mut branch_items: Vec<BranchItem> = branches
+                    .iter()
+                    .map(|b| {
+                        let mut item = BranchItem::from_branch_minimal(b, &worktrees);
+
+                        // Set tool usage from TypeScript session history or agent history (FR-070/088)
+                        apply_last_tool_usage(
+                            &mut item,
+                            &repo_root,
+                            &tool_usage_map,
+                            &agent_history,
+                        );
+
+                        // Safety check short-circuit: use immediate signals first
+                        if item.branch_type == BranchType::Local {
+                            if !base_branch_exists {
+                                item.safe_to_cleanup = Some(false);
+                            } else {
+                                // Check safety even without upstream (FR-004b)
+                                item.safe_to_cleanup = None;
+                                safety_targets.push(SafetyCheckTarget {
+                                    branch: b.name.clone(),
+                                    upstream: b.upstream.clone(),
+                                });
+                            }
+                        }
+
+                        item.update_safety_status();
+                        item
+                    })
+                    .collect();
+
+                branch_items.extend(remote_display_branches.iter().map(|b| {
+                    let mut item = BranchItem::from_branch_minimal(b, &worktrees);
+                    // SPEC-a70a1ece FR-171: For bare repos, branches without worktrees are Remote
+                    if repo_type == RepoType::Bare {
+                        item.branch_type = BranchType::Remote;
+                    }
+                    apply_last_tool_usage(&mut item, &repo_root, &tool_usage_map, &agent_history);
                     item
-                })
-                .collect();
-            branch_items.extend(remote_display_branches.iter().map(|b| {
-                let mut item = BranchItem::from_branch_minimal(b, &worktrees);
-                // SPEC-a70a1ece FR-171: For bare repos, branches without worktrees are Remote
-                if repo_type == RepoType::Bare {
-                    item.branch_type = BranchType::Remote;
+                }));
+
+                // Sort branches by timestamp for those with sessions
+                branch_items.iter_mut().for_each(|item| {
+                    if item.last_commit_timestamp.is_none() {
+                        // Try to get timestamp from git (fallback)
+                        // For now, leave as None - the sort will handle it
+                    }
+                });
+
+                let total_count = branch_items.len();
+                let active_count = branch_items.iter().filter(|b| b.has_worktree).count();
+                let base_branches: Vec<String> = branches.iter().map(|b| b.name.clone()).collect();
+                let branch_names: Vec<String> =
+                    branch_items.iter().map(|b| b.name.clone()).collect();
+
+                BranchListUpdate {
+                    branches: branch_items,
+                    branch_names,
+                    worktree_targets,
+                    safety_targets,
+                    base_branches,
+                    base_branch: base_branch.clone(),
+                    base_branch_exists,
+                    total_count,
+                    active_count,
                 }
-                apply_last_tool_usage(&mut item, &repo_root, &tool_usage_map, &agent_history);
-                item
-            }));
+            };
 
-            // Sort branches by timestamp for those with sessions
-            branch_items.iter_mut().for_each(|item| {
-                if item.last_commit_timestamp.is_none() {
-                    // Try to get timestamp from git (fallback)
-                    // For now, leave as None - the sort will handle it
+            // Stage 1: Use local refs only so the list becomes available quickly.
+            let _ = tx.send(build_update(remote_branches_stage1.clone()));
+
+            // Stage 2: Supplement remote branches via ls-remote, without blocking Stage 1.
+            let origin_heads = Branch::list_remote_from_origin(git_path).unwrap_or_default();
+            if origin_heads.is_empty() {
+                return;
+            }
+
+            let mut remote_branches_stage2 = remote_branches_stage1;
+            let stage1_len = remote_branches_stage2.len();
+
+            if repo_type == RepoType::Bare {
+                let mut existing: HashSet<String> = remote_branches_stage2
+                    .iter()
+                    .map(|b| b.name.clone())
+                    .collect();
+                for mut branch in origin_heads {
+                    let Some(name) = branch.name.strip_prefix("origin/") else {
+                        continue;
+                    };
+                    if worktree_branch_names.contains(name) || existing.contains(name) {
+                        continue;
+                    }
+                    branch.name = name.to_string();
+                    existing.insert(branch.name.clone());
+                    remote_branches_stage2.push(branch);
                 }
-            });
+            } else {
+                let mut existing: HashSet<String> = remote_branches_stage2
+                    .iter()
+                    .map(|b| b.name.clone())
+                    .collect();
+                for branch in origin_heads {
+                    if existing.contains(&branch.name) {
+                        continue;
+                    }
+                    existing.insert(branch.name.clone());
+                    remote_branches_stage2.push(branch);
+                }
+            }
 
-            let total_count = branch_items.len();
-            let active_count = branch_items.iter().filter(|b| b.has_worktree).count();
-            let base_branches: Vec<String> = branches.iter().map(|b| b.name.clone()).collect();
-            let branch_names: Vec<String> = branch_items.iter().map(|b| b.name.clone()).collect();
-
-            let _ = tx.send(BranchListUpdate {
-                branches: branch_items,
-                branch_names,
-                worktree_targets,
-                safety_targets,
-                base_branches,
-                base_branch,
-                base_branch_exists,
-                total_count,
-                active_count,
-            });
+            if remote_branches_stage2.len() > stage1_len {
+                let _ = tx.send(build_update(remote_branches_stage2));
+            }
         });
     }
 
@@ -2258,65 +2314,80 @@ impl Model {
     }
 
     fn apply_branch_list_updates(&mut self) {
-        let Some(rx) = &self.branch_list_rx else {
-            return;
+        let (last_update, disconnected) = {
+            let Some(rx) = &self.branch_list_rx else {
+                return;
+            };
+
+            let mut last_update: Option<BranchListUpdate> = None;
+            let mut disconnected = false;
+
+            loop {
+                match rx.try_recv() {
+                    Ok(update) => last_update = Some(update),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+
+            (last_update, disconnected)
         };
 
-        match rx.try_recv() {
-            Ok(update) => {
-                let cleanup_snapshot = self.branch_list.cleanup_snapshot();
-                let session_cache = self.branch_list.clone_session_cache();
-                let session_inflight = self.branch_list.clone_session_inflight();
-                let session_missing = self.branch_list.clone_session_missing();
-                let session_warnings = self.branch_list.clone_session_warnings();
-                let sort_mode = self.branch_list.sort_mode;
-                let mut branch_list = BranchListState::new();
-                branch_list.sort_mode = sort_mode;
-                let mut branch_list = branch_list.with_branches(update.branches);
-                branch_list.active_profile = self.profiles_config.active.clone();
-                branch_list.ai_enabled = self.active_ai_enabled();
-                branch_list.session_summary_enabled = self.active_session_summary_enabled();
-                branch_list.set_session_cache(session_cache);
-                branch_list.set_session_inflight(session_inflight);
-                branch_list.set_session_missing(session_missing);
-                branch_list.set_session_warnings(session_warnings);
-                branch_list.set_repo_web_url(self.branch_list.repo_web_url().cloned());
-                branch_list.working_directory = Some(self.repo_root.display().to_string());
-                branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
-                // セッション警告のクリーンアップ（削除されたブランチ分）
-                let remaining_branches: std::collections::HashSet<String> = branch_list
-                    .branches
-                    .iter()
-                    .map(|b| b.name.clone())
-                    .collect();
-                branch_list.cleanup_session_warnings(&remaining_branches);
-                branch_list.restore_cleanup_snapshot(&cleanup_snapshot);
-                self.branch_list = branch_list;
-                // SPEC-4b893dae: Update branch summary after branches are loaded
-                self.refresh_branch_summary();
+        if let Some(update) = last_update {
+            let cleanup_snapshot = self.branch_list.cleanup_snapshot();
+            let session_cache = self.branch_list.clone_session_cache();
+            let session_inflight = self.branch_list.clone_session_inflight();
+            let session_missing = self.branch_list.clone_session_missing();
+            let session_warnings = self.branch_list.clone_session_warnings();
+            let sort_mode = self.branch_list.sort_mode;
+            let mut branch_list = BranchListState::new();
+            branch_list.sort_mode = sort_mode;
+            let mut branch_list = branch_list.with_branches(update.branches);
+            branch_list.active_profile = self.profiles_config.active.clone();
+            branch_list.ai_enabled = self.active_ai_enabled();
+            branch_list.session_summary_enabled = self.active_session_summary_enabled();
+            branch_list.set_session_cache(session_cache);
+            branch_list.set_session_inflight(session_inflight);
+            branch_list.set_session_missing(session_missing);
+            branch_list.set_session_warnings(session_warnings);
+            branch_list.set_repo_web_url(self.branch_list.repo_web_url().cloned());
+            branch_list.working_directory = Some(self.repo_root.display().to_string());
+            branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
+            // セッション警告のクリーンアップ（削除されたブランチ分）
+            let remaining_branches: std::collections::HashSet<String> = branch_list
+                .branches
+                .iter()
+                .map(|b| b.name.clone())
+                .collect();
+            branch_list.cleanup_session_warnings(&remaining_branches);
+            branch_list.restore_cleanup_snapshot(&cleanup_snapshot);
+            self.branch_list = branch_list;
+            // SPEC-4b893dae: Update branch summary after branches are loaded
+            self.refresh_branch_summary();
 
-                self.total_count = update.total_count;
-                self.active_count = update.active_count;
+            self.total_count = update.total_count;
+            self.active_count = update.active_count;
 
-                let total_updates = update.safety_targets.len() + update.worktree_targets.len();
-                self.branch_list.reset_status_progress(total_updates);
-                self.spawn_safety_checks(
-                    update.safety_targets,
-                    update.base_branch,
-                    update.base_branch_exists,
-                );
-                self.spawn_worktree_status_checks(update.worktree_targets);
-                self.spawn_pr_title_fetch(update.branch_names);
+            let total_updates = update.safety_targets.len() + update.worktree_targets.len();
+            self.branch_list.reset_status_progress(total_updates);
+            self.spawn_safety_checks(
+                update.safety_targets,
+                update.base_branch,
+                update.base_branch_exists,
+            );
+            self.spawn_worktree_status_checks(update.worktree_targets);
+            self.spawn_pr_title_fetch(update.branch_names);
 
-                self.worktree_create =
-                    WorktreeCreateState::new().with_base_branches(update.base_branches);
-                self.branch_list_rx = None;
-            }
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => {
-                self.branch_list.set_loading(false);
-                self.branch_list_rx = None;
-            }
+            self.worktree_create =
+                WorktreeCreateState::new().with_base_branches(update.base_branches);
+        }
+
+        if disconnected {
+            self.branch_list.set_loading(false);
+            self.branch_list_rx = None;
         }
     }
 
