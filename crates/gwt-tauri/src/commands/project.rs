@@ -70,10 +70,7 @@ fn read_bare_repo_name(project_root: &Path) -> Option<String> {
 fn resolve_project_root(selected: &Path) -> std::path::PathBuf {
     if git::is_git_repo(selected) {
         if git::is_bare_repository(selected) {
-            selected
-                .parent()
-                .unwrap_or(selected)
-                .to_path_buf()
+            selected.parent().unwrap_or(selected).to_path_buf()
         } else {
             // If selected is a worktree, this resolves to the bare project's root directory.
             git::get_main_repo_root(selected)
