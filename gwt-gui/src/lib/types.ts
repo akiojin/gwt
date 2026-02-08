@@ -10,7 +10,12 @@ export interface BranchInfo {
 export interface ProjectInfo {
   path: string;
   repo_name: string;
-  current_branch: string;
+  current_branch: string | null;
+}
+
+export interface CloneProgress {
+  stage: string; // "receiving" | "resolving"
+  percent: number; // 0-100
 }
 
 export interface TerminalInfo {

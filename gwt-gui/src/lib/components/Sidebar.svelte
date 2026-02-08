@@ -15,6 +15,7 @@
   let branches: BranchInfo[] = $state([]);
   let loading: boolean = $state(false);
   let searchQuery: string = $state("");
+  let errorMessage: string | null = $state(null);
 
   const filters: FilterType[] = ["Local", "Remote", "All"];
 
@@ -35,6 +36,7 @@
 
   async function fetchBranches() {
     loading = true;
+    errorMessage = null;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       if (activeFilter === "Local") {
@@ -64,7 +66,13 @@
         branches = merged;
       }
     } catch (err) {
-      console.error("Failed to fetch branches:", err);
+      const msg =
+        typeof err === "string"
+          ? err
+          : err && typeof err === "object" && "message" in err
+            ? String((err as { message?: unknown }).message)
+            : String(err);
+      errorMessage = `Failed to fetch branches: ${msg}`;
       branches = [];
     }
     loading = false;
@@ -120,6 +128,8 @@
   <div class="branch-list">
     {#if loading}
       <div class="loading-indicator">Loading...</div>
+    {:else if errorMessage}
+      <div class="error-indicator">{errorMessage}</div>
     {:else if filteredBranches.length === 0}
       <div class="empty-indicator">No branches found.</div>
     {:else}
@@ -212,11 +222,16 @@
   }
 
   .loading-indicator,
+  .error-indicator,
   .empty-indicator {
     padding: 16px;
     text-align: center;
     color: var(--text-muted);
     font-size: 12px;
+  }
+
+  .error-indicator {
+    color: rgb(255, 160, 160);
   }
 
   .branch-item {

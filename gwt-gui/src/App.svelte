@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Tab, BranchInfo } from "./lib/types";
+  import type { Tab, BranchInfo, ProjectInfo } from "./lib/types";
   import MenuBar from "./lib/components/MenuBar.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import MainArea from "./lib/components/MainArea.svelte";
@@ -12,6 +12,7 @@
   let showAgentLaunch: boolean = $state(false);
   let showSettings: boolean = $state(false);
   let showAbout: boolean = $state(false);
+  let appError: string | null = $state(null);
 
   let selectedBranch: BranchInfo | null = $state(null);
   let currentBranch: string = $state("");
@@ -22,6 +23,15 @@
   let activeTabId: string = $state("summary");
 
   let terminalCount = $derived(tabs.filter((t) => t.type === "agent").length);
+
+  function toErrorMessage(err: unknown): string {
+    if (typeof err === "string") return err;
+    if (err && typeof err === "object" && "message" in err) {
+      const msg = (err as { message?: unknown }).message;
+      if (typeof msg === "string") return msg;
+    }
+    return String(err);
+  }
 
   function handleProjectOpen(path: string) {
     projectPath = path;
@@ -108,11 +118,15 @@
           const { open } = await import("@tauri-apps/plugin-dialog");
           const selected = await open({ directory: true, multiple: false });
           if (selected) {
-            projectPath = selected as string;
+            const { invoke } = await import("@tauri-apps/api/core");
+            const info = await invoke<ProjectInfo>("open_project", {
+              path: selected as string,
+            });
+            projectPath = info.path;
             fetchCurrentBranch();
           }
-        } catch {
-          // Dev mode: ignore
+        } catch (err) {
+          appError = `Failed to open project: ${toErrorMessage(err)}`;
         }
         break;
       }
@@ -196,6 +210,20 @@
   </div>
 {/if}
 
+{#if appError}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="overlay" onclick={() => (appError = null)}>
+    <div class="error-dialog" onclick={(e) => e.stopPropagation()}>
+      <h2>Error</h2>
+      <p class="error-text">{appError}</p>
+      <button class="about-close" onclick={() => (appError = null)}>
+        Close
+      </button>
+    </div>
+  </div>
+{/if}
+
 <style>
   .app-layout {
     display: flex;
@@ -264,5 +292,30 @@
 
   .about-close:hover {
     background: var(--bg-hover);
+  }
+
+  .error-dialog {
+    background: var(--bg-secondary);
+    border: 1px solid rgba(255, 90, 90, 0.35);
+    border-radius: 12px;
+    padding: 28px 32px;
+    text-align: center;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+    max-width: 560px;
+  }
+
+  .error-dialog h2 {
+    font-size: 18px;
+    font-weight: 800;
+    color: rgb(255, 160, 160);
+    margin-bottom: 10px;
+  }
+
+  .error-text {
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.5;
+    margin-bottom: 18px;
+    white-space: pre-wrap;
   }
 </style>
