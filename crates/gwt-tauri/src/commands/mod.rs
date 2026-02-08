@@ -1,3 +1,9 @@
+pub mod agents;
+pub mod branches;
+pub mod project;
+pub mod settings;
+pub mod terminal;
+
 #[tauri::command]
 pub fn greet(name: &str) -> String {
     format!("Hello, {}! Welcome to gwt.", name)
