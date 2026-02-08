@@ -17,6 +17,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
+use unicode_width::UnicodeWidthStr;
 
 /// Version information from npm registry (FR-063)
 #[derive(Debug, Clone)]
@@ -848,6 +849,41 @@ pub(crate) fn parse_branch_suggestions(response: &str) -> Result<Vec<String>, AI
     Ok(out)
 }
 
+fn clamp_cursor_to_char_boundary(s: &str, cursor: usize) -> usize {
+    let mut c = cursor.min(s.len());
+    while c > 0 && !s.is_char_boundary(c) {
+        c -= 1;
+    }
+    c
+}
+
+fn prev_char_boundary(s: &str, cursor: usize) -> usize {
+    let cursor = clamp_cursor_to_char_boundary(s, cursor);
+    if cursor == 0 {
+        return 0;
+    }
+    s[..cursor]
+        .char_indices()
+        .last()
+        .map(|(i, _)| i)
+        .unwrap_or(0)
+}
+
+fn next_char_boundary(s: &str, cursor: usize) -> usize {
+    let cursor = clamp_cursor_to_char_boundary(s, cursor);
+    if cursor >= s.len() {
+        return s.len();
+    }
+    let ch = s[cursor..].chars().next().unwrap_or('\0');
+    cursor.saturating_add(ch.len_utf8()).min(s.len())
+}
+
+fn display_width_to_cursor(s: &str, cursor: usize) -> u16 {
+    let cursor = clamp_cursor_to_char_boundary(s, cursor);
+    let width = UnicodeWidthStr::width(&s[..cursor]);
+    (width.min(u16::MAX as usize)) as u16
+}
+
 /// Wizard state
 #[derive(Debug, Default)]
 pub struct WizardState {
@@ -865,6 +901,8 @@ pub struct WizardState {
     pub new_branch_name: String,
     /// Cursor position for branch name input
     pub cursor: usize,
+    /// Whether gh CLI is available (snapshot at wizard open)
+    pub gh_cli_available: bool,
     // AIBranchSuggest (SPEC-1ad9c07d)
     /// Whether AI settings are enabled (snapshot at wizard open)
     pub ai_enabled: bool,
@@ -1050,6 +1088,7 @@ impl WizardState {
         self.branch_type = BranchType::default();
         self.new_branch_name.clear();
         self.cursor = 0;
+        self.gh_cli_available = gwt_core::git::is_gh_cli_available();
         // Reset AI branch suggest state (SPEC-1ad9c07d)
         self.ai_enabled = false;
         self.ai_branch_phase = AIBranchSuggestPhase::default();
@@ -1694,7 +1733,7 @@ impl WizardState {
             }
             WizardStep::BranchTypeSelect => {
                 // SPEC-e4798383: Check if gh CLI is available
-                if gwt_core::git::is_gh_cli_available() {
+                if self.gh_cli_available {
                     // Start loading issues
                     self.issue_loading = true;
                     self.issue_error = None;
@@ -1912,7 +1951,7 @@ impl WizardState {
             WizardStep::IssueSelect => WizardStep::BranchTypeSelect,
             WizardStep::AIBranchSuggest => {
                 // Go back to IssueSelect if gh CLI is available, otherwise BranchTypeSelect
-                if gwt_core::git::is_gh_cli_available() {
+                if self.gh_cli_available {
                     WizardStep::IssueSelect
                 } else {
                     WizardStep::BranchTypeSelect
@@ -1921,7 +1960,7 @@ impl WizardState {
             WizardStep::BranchNameInput => {
                 if self.ai_enabled {
                     WizardStep::AIBranchSuggest
-                } else if gwt_core::git::is_gh_cli_available() {
+                } else if self.gh_cli_available {
                     // Go back to IssueSelect if gh CLI is available, otherwise BranchTypeSelect
                     WizardStep::IssueSelect
                 } else {
@@ -2283,8 +2322,9 @@ impl WizardState {
     pub fn insert_char(&mut self, c: char) {
         match self.step {
             WizardStep::BranchNameInput => {
+                self.cursor = clamp_cursor_to_char_boundary(&self.new_branch_name, self.cursor);
                 self.new_branch_name.insert(self.cursor, c);
-                self.cursor += 1;
+                self.cursor = self.cursor.saturating_add(c.len_utf8());
             }
             WizardStep::IssueSelect => {
                 // FR-008: Incremental search
@@ -2292,8 +2332,10 @@ impl WizardState {
                 self.update_filtered_issues();
             }
             WizardStep::AIBranchSuggest if self.ai_branch_phase == AIBranchSuggestPhase::Input => {
+                self.ai_branch_cursor =
+                    clamp_cursor_to_char_boundary(&self.ai_branch_input, self.ai_branch_cursor);
                 self.ai_branch_input.insert(self.ai_branch_cursor, c);
-                self.ai_branch_cursor += 1;
+                self.ai_branch_cursor = self.ai_branch_cursor.saturating_add(c.len_utf8());
                 self.ai_branch_error = None;
             }
             _ => {}
@@ -2304,8 +2346,9 @@ impl WizardState {
     pub fn delete_char(&mut self) {
         match self.step {
             WizardStep::BranchNameInput if self.cursor > 0 => {
-                self.cursor -= 1;
-                self.new_branch_name.remove(self.cursor);
+                let prev = prev_char_boundary(&self.new_branch_name, self.cursor);
+                self.new_branch_name.remove(prev);
+                self.cursor = prev;
             }
             WizardStep::IssueSelect if !self.issue_search_query.is_empty() => {
                 self.issue_search_query.pop();
@@ -2315,8 +2358,9 @@ impl WizardState {
                 if self.ai_branch_phase == AIBranchSuggestPhase::Input
                     && self.ai_branch_cursor > 0 =>
             {
-                self.ai_branch_cursor -= 1;
-                self.ai_branch_input.remove(self.ai_branch_cursor);
+                let prev = prev_char_boundary(&self.ai_branch_input, self.ai_branch_cursor);
+                self.ai_branch_input.remove(prev);
+                self.ai_branch_cursor = prev;
                 self.ai_branch_error = None;
             }
             _ => {}
@@ -2398,7 +2442,7 @@ impl WizardState {
 
     /// Load issues from GitHub (FR-005)
     pub fn load_issues(&mut self, repo_path: &Path) {
-        use gwt_core::git::{fetch_open_issues, is_gh_cli_available};
+        use gwt_core::git::fetch_open_issues;
 
         self.issue_loading = true;
         self.issue_error = None;
@@ -2409,7 +2453,7 @@ impl WizardState {
         self.selected_issue = None;
         self.issue_existing_branch = None;
 
-        if !is_gh_cli_available() {
+        if !self.gh_cli_available {
             self.issue_loading = false;
             // gh CLI not available - will auto-skip
             return;
@@ -2430,14 +2474,11 @@ impl WizardState {
     pub fn cursor_left(&mut self) {
         match self.step {
             WizardStep::BranchNameInput => {
-                if self.cursor > 0 {
-                    self.cursor -= 1;
-                }
+                self.cursor = prev_char_boundary(&self.new_branch_name, self.cursor);
             }
             WizardStep::AIBranchSuggest if self.ai_branch_phase == AIBranchSuggestPhase::Input => {
-                if self.ai_branch_cursor > 0 {
-                    self.ai_branch_cursor -= 1;
-                }
+                self.ai_branch_cursor =
+                    prev_char_boundary(&self.ai_branch_input, self.ai_branch_cursor);
             }
             _ => {}
         }
@@ -2447,14 +2488,11 @@ impl WizardState {
     pub fn cursor_right(&mut self) {
         match self.step {
             WizardStep::BranchNameInput => {
-                if self.cursor < self.new_branch_name.len() {
-                    self.cursor += 1;
-                }
+                self.cursor = next_char_boundary(&self.new_branch_name, self.cursor);
             }
             WizardStep::AIBranchSuggest if self.ai_branch_phase == AIBranchSuggestPhase::Input => {
-                if self.ai_branch_cursor < self.ai_branch_input.len() {
-                    self.ai_branch_cursor += 1;
-                }
+                self.ai_branch_cursor =
+                    next_char_boundary(&self.ai_branch_input, self.ai_branch_cursor);
             }
             _ => {}
         }
@@ -3455,8 +3493,9 @@ fn render_ai_branch_suggest_step(state: &mut WizardState, frame: &mut Frame, are
             frame.render_widget(input, chunks[input_idx]);
 
             // Show cursor
+            let cursor_x = display_width_to_cursor(&state.ai_branch_input, state.ai_branch_cursor);
             frame.set_cursor_position((
-                chunks[input_idx].x + state.ai_branch_cursor as u16,
+                chunks[input_idx].x.saturating_add(cursor_x),
                 chunks[input_idx].y,
             ));
         }
@@ -3591,8 +3630,9 @@ fn render_branch_name_step(state: &WizardState, frame: &mut Frame, area: Rect) {
 
     // Show cursor
     if !state.new_branch_name.is_empty() || state.cursor == 0 {
+        let cursor_x = display_width_to_cursor(&state.new_branch_name, state.cursor);
         frame.set_cursor_position((
-            chunks[input_idx].x + state.cursor as u16,
+            chunks[input_idx].x.saturating_add(cursor_x),
             chunks[input_idx].y,
         ));
     }
@@ -4580,6 +4620,50 @@ Here are suggestions:
     }
 
     #[test]
+    fn test_branch_name_input_handles_non_ascii_without_panic() {
+        let mut state = WizardState::new();
+        state.open_for_new_branch();
+        state.step = WizardStep::BranchNameInput;
+
+        state.insert_char('あ');
+        assert_eq!(state.new_branch_name, "あ");
+        assert_eq!(state.cursor, "あ".len());
+
+        state.cursor_left();
+        assert_eq!(state.cursor, 0);
+
+        state.cursor_right();
+        assert_eq!(state.cursor, "あ".len());
+
+        state.delete_char();
+        assert!(state.new_branch_name.is_empty());
+        assert_eq!(state.cursor, 0);
+    }
+
+    #[test]
+    fn test_ai_branch_suggest_input_handles_non_ascii_without_panic() {
+        let mut state = WizardState::new();
+        state.open_for_new_branch();
+        state.step = WizardStep::AIBranchSuggest;
+        state.ai_branch_phase = AIBranchSuggestPhase::Input;
+
+        state.insert_char('日');
+        state.insert_char('本');
+        assert_eq!(state.ai_branch_input, "日本");
+        assert_eq!(state.ai_branch_cursor, "日本".len());
+
+        state.cursor_left();
+        assert_eq!(state.ai_branch_cursor, "日".len());
+
+        state.delete_char();
+        assert_eq!(state.ai_branch_input, "本");
+        assert_eq!(state.ai_branch_cursor, 0);
+
+        state.cursor_right();
+        assert_eq!(state.ai_branch_cursor, "本".len());
+    }
+
+    #[test]
     fn test_ai_branch_suggest_select_applies_branch_type_and_name() {
         let mut state = WizardState::new();
         state.open_for_new_branch();
@@ -4597,19 +4681,30 @@ Here are suggestions:
     }
 
     #[test]
-    fn test_branch_type_select_next_step_uses_gh_or_ai_branch_suggest() {
+    fn test_branch_type_select_next_step_goes_to_issue_select_when_gh_available() {
         let mut state = WizardState::new();
         state.open_for_new_branch();
         state.ai_enabled = true;
+        state.gh_cli_available = true;
         state.step = WizardStep::BranchTypeSelect;
 
         state.next_step();
 
-        if gwt_core::git::is_gh_cli_available() {
-            assert_eq!(state.step, WizardStep::IssueSelect);
-        } else {
-            assert_eq!(state.step, WizardStep::AIBranchSuggest);
-        }
+        assert_eq!(state.step, WizardStep::IssueSelect);
+    }
+
+    #[test]
+    fn test_branch_type_select_next_step_goes_to_ai_branch_suggest_when_gh_missing_and_ai_enabled()
+    {
+        let mut state = WizardState::new();
+        state.open_for_new_branch();
+        state.ai_enabled = true;
+        state.gh_cli_available = false;
+        state.step = WizardStep::BranchTypeSelect;
+
+        state.next_step();
+
+        assert_eq!(state.step, WizardStep::AIBranchSuggest);
     }
 
     // ==========================================================
