@@ -2631,7 +2631,7 @@ impl Model {
 
     /// FR-048: Handle mouse scroll events for the agent pane.
     /// When mouse protocol is enabled: send X10 mouse scroll bytes.
-    /// When mouse protocol is disabled: send arrow key sequences (Up/Down × 3).
+    /// When mouse protocol is disabled: ignore scroll events (no PTY interaction).
     fn handle_agent_pane_scroll(&mut self, mouse: MouseEvent) {
         let mouse_enabled = self
             .terminal_manager
@@ -2639,40 +2639,35 @@ impl Model {
             .map(|p| p.mouse_protocol_enabled())
             .unwrap_or(false);
 
+        if !mouse_enabled {
+            // Mouse protocol disabled: ignore scroll (FR-048)
+            return;
+        }
+
         let is_up = matches!(mouse.kind, MouseEventKind::ScrollUp);
 
-        if mouse_enabled {
-            // Mouse protocol enabled: send X10 scroll bytes
-            let term_size = crossterm::terminal::size().unwrap_or((160, 40));
-            let full_area = ratatui::layout::Rect::new(0, 0, term_size.0, term_size.1);
-            let content_area = ratatui::layout::Rect::new(
-                0,
-                1,
-                full_area.width,
-                full_area.height.saturating_sub(1),
+        // Mouse protocol enabled: send X10 scroll bytes
+        let term_size = crossterm::terminal::size().unwrap_or((160, 40));
+        let full_area = ratatui::layout::Rect::new(0, 0, term_size.0, term_size.1);
+        let content_area = ratatui::layout::Rect::new(
+            0,
+            1,
+            full_area.width,
+            full_area.height.saturating_sub(1),
+        );
+        let split_areas = super::screens::split_layout::calculate_split_layout(
+            content_area,
+            &self.split_layout,
+        );
+        if let Some(pane_area) = split_areas.agent_pane {
+            let bytes = super::screens::agent_pane::mouse_scroll_to_bytes(
+                is_up,
+                mouse.column,
+                mouse.row,
+                pane_area,
             );
-            let split_areas = super::screens::split_layout::calculate_split_layout(
-                content_area,
-                &self.split_layout,
-            );
-            if let Some(pane_area) = split_areas.agent_pane {
-                let bytes = super::screens::agent_pane::mouse_scroll_to_bytes(
-                    is_up,
-                    mouse.column,
-                    mouse.row,
-                    pane_area,
-                );
-                if let Some(pane) = self.terminal_manager.active_pane_mut() {
-                    let _ = pane.write_input(&bytes);
-                }
-            }
-        } else {
-            // Mouse protocol disabled: send arrow keys (3 lines per scroll tick)
-            let arrow = if is_up { b"\x1b[A" } else { b"\x1b[B" };
             if let Some(pane) = self.terminal_manager.active_pane_mut() {
-                for _ in 0..3 {
-                    let _ = pane.write_input(arrow);
-                }
+                let _ = pane.write_input(&bytes);
             }
         }
     }
@@ -4241,9 +4236,17 @@ impl Model {
                         self.status_message_time = None;
                     }
                 }
-                // Update spinner animation
-                self.branch_list.tick_spinner();
-                self.update_footer_scroll();
+                // NFR-006: Update spinner/footer at 250ms intervals regardless of tick_rate
+                let now = Instant::now();
+                let should_update_ui_anim = match self.last_spinner_update {
+                    Some(last) => now.duration_since(last) >= Duration::from_millis(250),
+                    None => true,
+                };
+                if should_update_ui_anim {
+                    self.last_spinner_update = Some(now);
+                    self.branch_list.tick_spinner();
+                    self.update_footer_scroll();
+                }
                 self.apply_branch_list_updates();
                 self.apply_branch_summary_updates();
                 self.apply_pr_title_updates();
@@ -8486,16 +8489,18 @@ mod tests {
         assert!(lines.len() > 1, "Footer should overflow for scrolling");
         let max_offset = lines.len().saturating_sub(1);
 
+        // NFR-006: call update_footer_scroll directly to test tick logic
+        // independent of time-based gating
         let advance_ticks = FOOTER_SCROLL_TICKS_PER_LINE as usize * max_offset.max(1);
         for _ in 0..advance_ticks {
-            model.update(Message::Tick);
+            model.update_footer_scroll();
         }
 
         assert_eq!(model.footer_scroll_offset, max_offset);
         assert_eq!(model.footer_scroll_pause, 0);
 
         for _ in 0..FOOTER_SCROLL_TICKS_PER_LINE {
-            model.update(Message::Tick);
+            model.update_footer_scroll();
         }
 
         assert_eq!(model.footer_scroll_offset, max_offset.saturating_sub(1));
@@ -8511,8 +8516,9 @@ mod tests {
         let lines = footer_lines_for(&mut model, 40);
         assert!(lines.len() > 1, "Footer should overflow for scrolling");
 
+        // NFR-006: call update_footer_scroll directly
         for _ in 0..FOOTER_SCROLL_TICKS_PER_LINE {
-            model.update(Message::Tick);
+            model.update_footer_scroll();
         }
         assert!(model.footer_scroll_offset > 0);
 

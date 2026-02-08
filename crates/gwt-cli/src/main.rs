@@ -5,8 +5,8 @@ use clap::Parser;
 use gwt_core::agent::codex::{codex_default_args, codex_skip_permissions_flag};
 use gwt_core::agent::get_command_version;
 use gwt_core::ai::{
-    AgentType as SessionAgentType, ClaudeSessionParser, CodexSessionParser,
-    GeminiSessionParser, OpenCodeSessionParser, SessionParser,
+    AgentType as SessionAgentType, ClaudeSessionParser, CodexSessionParser, GeminiSessionParser,
+    OpenCodeSessionParser, SessionParser,
 };
 use gwt_core::config::{save_session_entry, AgentStatus, Settings, ToolSessionEntry};
 use gwt_core::error::GwtError;
@@ -1899,8 +1899,6 @@ mod tests {
 
     use std::thread::sleep;
     use tempfile::TempDir;
-
-
 
     fn sample_config(agent: CodingAgent) -> AgentLaunchConfig {
         AgentLaunchConfig {

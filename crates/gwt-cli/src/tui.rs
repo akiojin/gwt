@@ -6,9 +6,9 @@ mod event;
 mod screens;
 pub mod widgets;
 
-pub use app::{run_with_context, AgentLaunchConfig};
 #[allow(unused_imports)]
 pub use app::TuiEntryContext;
+pub use app::{run_with_context, AgentLaunchConfig};
 pub use screens::{CodingAgent, ExecutionMode};
 
 pub(crate) fn normalize_agent_label(agent_name: &str) -> String {

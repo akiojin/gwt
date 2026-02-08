@@ -1954,7 +1954,8 @@ fn render_branch_row(
         selection_width + safety_icon.len() + 1 + display_name.width() + current_label.width();
 
     // Build right side (last tool usage info) and calculate its width
-    let (right_spans, right_width): (Vec<Span>, usize) = if let Some(tool) = &branch.last_tool_usage {
+    let (right_spans, right_width): (Vec<Span>, usize) = if let Some(tool) = &branch.last_tool_usage
+    {
         // No running agent, but show last tool usage (FR-070)
         let agent_id = tool.split('@').next();
         let agent_color = get_agent_color(agent_id);
