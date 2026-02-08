@@ -1,38 +1,52 @@
 <!-- markdownlint-disable MD013 -->
 # 仕様一覧
 
-**最終更新**: 2026-02-08
+**最終更新**: 2026-02-09
 
 このファイルは `.specify/scripts/bash/update-specs-index.sh` により自動生成されました。
 
-## 現行仕様
+## 運用ルール
+
+- `カテゴリ: GUI` は、現行のTauri GUI実装で有効な要件（binding）です。
+- `カテゴリ: Porting` は、TUI/WebUI由来の移植待ち（non-binding）です。未実装でも不具合ではありません。
+- Porting を実装対象にする場合は、次のどちらかを実施します:
+1. 既存 spec の内容を GUI 前提に更新し、`カテゴリ` を `GUI` に変更する
+2. 新しい GUI spec を作成し、元の Porting spec を `**依存仕様**:` で参照する
+
+## 現行仕様（GUI）
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
 | [SPEC-d6210238](SPEC-d6210238/spec.md) | 機能仕様: TUI→Tauri GUI完全移行 Phase 1: 基盤構築 | 2026-02-08 |
 | [SPEC-dfb1611a](SPEC-dfb1611a/spec.md) | 機能仕様: gwt GUI プロジェクト管理 Phase 2 追加機能 | 2026-02-08 |
 | [SPEC-92053c0d](SPEC-92053c0d/spec.md) | 機能仕様: commitlint を npm ci 無しで実行可能にする | 2026-02-03 |
-| [SPEC-f5f5657e](SPEC-f5f5657e/spec.md) | 機能仕様: Docker環境統合（エージェント自動起動） | 2026-02-03 |
-| [SPEC-1ea18899](SPEC-1ea18899/spec.md) | 機能仕様: GitView画面 | 2026-02-02 |
 | [SPEC-a3f4c9df](SPEC-a3f4c9df/spec.md) | 機能仕様: 設定ファイル統合・整理 | 2026-02-02 |
-| [SPEC-a70a1ece](SPEC-a70a1ece/spec.md) | 機能仕様: bareリポジトリ対応とヘッダーブランチ表示 | 2026-02-01 |
-| [SPEC-f8dab6e2](SPEC-f8dab6e2/spec.md) | 機能仕様: Claude Code プラグインマーケットプレイス自動登録 | 2026-01-30 |
-| [SPEC-71f2742d](SPEC-71f2742d/spec.md) | 機能仕様: カスタムコーディングエージェント登録機能 | 2026-01-26 |
-| [SPEC-2ca73d7d](SPEC-2ca73d7d/spec.md) | 機能仕様: エージェント履歴の永続化 | 2026-01-22 |
-| [SPEC-e66acf66](SPEC-e66acf66/spec.md) | 機能仕様: エラーポップアップ・ログ出力システム | 2026-01-22 |
 | [SPEC-067a8026](SPEC-067a8026/spec.md) | 機能仕様: LLMベースリリースワークフロー | 2026-01-21 |
-| [SPEC-861d8cdf](SPEC-861d8cdf/spec.md) | 機能仕様: エージェント状態の可視化 | 2026-01-20 |
 | [SPEC-6408df0c](SPEC-6408df0c/spec.md) | 機能仕様: HuskyでCIと同等のLintを実行 | 2026-01-19 |
 | [SPEC-925c010b](SPEC-925c010b/spec.md) | 機能仕様: Docker Compose の Playwright noVNC を arm64 で起動可能にする | 2026-01-17 |
 | [SPEC-77b1bc70](SPEC-77b1bc70/spec.md) | 機能仕様: リリースフロー要件の明文化とリリース開始時 main→develop 同期 | 2026-01-16 |
-| [SPEC-902a89dc](SPEC-902a89dc/spec.md) | 機能仕様: Worktreeパス修復機能 | 2026-01-05 |
 | [SPEC-29e16bd0](SPEC-29e16bd0/spec.md) | 機能仕様: tools.json スキーママイグレーション | 2026-01-04 |
-| [SPEC-c1d5bad7](SPEC-c1d5bad7/spec.md) | ログ一覧・詳細表示・クリップボードコピー機能 | 2025-12-25 |
 | [SPEC-a0d7334d](SPEC-a0d7334d/spec.md) | 機能仕様: Dependabot PR の向き先を develop に固定 | 2025-12-22 |
+| [SPEC-b9f5c4a1](SPEC-b9f5c4a1/spec.md) | ログ運用統一仕様 | 2025-12-11 |
+
+## 移植待ち（Porting）
+
+| SPEC ID | タイトル | 作成日 |
+| --- | --- | --- |
+| [SPEC-f5f5657e](SPEC-f5f5657e/spec.md) | 機能仕様: Docker環境統合（エージェント自動起動） | 2026-02-03 |
+| [SPEC-1ea18899](SPEC-1ea18899/spec.md) | 機能仕様: GitView画面 | 2026-02-02 |
+| [SPEC-a70a1ece](SPEC-a70a1ece/spec.md) | 機能仕様: bareリポジトリ対応とヘッダーブランチ表示 | 2026-02-01 |
+| [SPEC-f8dab6e2](SPEC-f8dab6e2/spec.md) | 機能仕様: Claude Code プラグインマーケットプレイス自動登録 | 2026-01-30 |
+| [SPEC-71f2742d](SPEC-71f2742d/spec.md) | 機能仕様: カスタムコーディングエージェント登録機能 | 2026-01-26 |
+| [SPEC-fdebd681](SPEC-fdebd681/spec.md) | Codex collaboration_modes Support | 2026-01-26 |
+| [SPEC-2ca73d7d](SPEC-2ca73d7d/spec.md) | 機能仕様: エージェント履歴の永続化 | 2026-01-22 |
+| [SPEC-e66acf66](SPEC-e66acf66/spec.md) | 機能仕様: エラーポップアップ・ログ出力システム | 2026-01-22 |
+| [SPEC-861d8cdf](SPEC-861d8cdf/spec.md) | 機能仕様: エージェント状態の可視化 | 2026-01-20 |
+| [SPEC-902a89dc](SPEC-902a89dc/spec.md) | 機能仕様: Worktreeパス修復機能 | 2026-01-05 |
+| [SPEC-c1d5bad7](SPEC-c1d5bad7/spec.md) | ログ一覧・詳細表示・クリップボードコピー機能 | 2025-12-25 |
 | [SPEC-b0b1b0b1](SPEC-b0b1b0b1/spec.md) | 機能仕様: AIツール終了時の未コミット警告と未プッシュ確認 | 2025-12-20 |
 | [SPEC-96e694b4](SPEC-96e694b4/spec.md) | 機能仕様: Codex CLI gpt-5.3-codex 追加 | 2025-12-18 |
 | [SPEC-dafff079](SPEC-dafff079/spec.md) | 機能仕様: 環境変数プロファイル機能 | 2025-12-15 |
-| [SPEC-b9f5c4a1](SPEC-b9f5c4a1/spec.md) | ログ運用統一仕様 | 2025-12-11 |
 | [SPEC-40c7b4f1](SPEC-40c7b4f1/spec.md) | 機能仕様: ブランチ選択時のdivergence/FF失敗ハンドリング（起動継続） | 2025-12-09 |
 | [SPEC-3b0ed29b](SPEC-3b0ed29b/spec.md) | 機能仕様: コーディングエージェント対応 | 2025-12-06 |
 | [SPEC-f47db390](SPEC-f47db390/spec.md) | 機能仕様: セッションID永続化とContinue/Resume強化 | 2025-12-06 |
@@ -46,7 +60,6 @@
 | [SPEC-e4798383](SPEC-e4798383/spec.md) | 機能仕様: GitHub Issue連携によるブランチ作成 | 2025-01-25 |
 | [SPEC-1defd8fd](SPEC-1defd8fd/spec.md) | 機能仕様: bugfixブランチタイプのサポート追加 | 2025-01-18 |
 | [SPEC-62c129ca](SPEC-62c129ca/spec.md) | SPEC-62c129ca: ブランチリストのマウスクリック動作改善 | - |
-| [SPEC-fdebd681](SPEC-fdebd681/spec.md) | Codex collaboration_modes Support | - |
 
 ## 過去要件（archive）
 

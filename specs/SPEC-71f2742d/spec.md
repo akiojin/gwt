@@ -3,6 +3,8 @@
 **仕様ID**: `SPEC-71f2742d`
 **作成日**: 2026-01-26
 **ステータス**: ドラフト
+**カテゴリ**: Porting
+
 **入力**: ユーザー説明: "カスタムコーディングエージェント登録機能: ビルトインエージェント（Claude Code, Codex CLI, Gemini CLI, OpenCode）に加えて、ユーザーが独自のコーディングエージェントを ~/.gwt/tools.json に定義して利用できる機能。customCodingAgents配列でid, displayName, type, command, defaultArgs, modeArgs, permissionSkipArgs, envを指定可能。登録されたカスタムエージェントはWizardのエージェント選択画面に表示され、ビルトインと同様に起動できる。"
 
 ## ユーザーシナリオとテスト *(必須)*

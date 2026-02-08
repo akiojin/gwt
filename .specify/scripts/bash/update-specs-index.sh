@@ -55,7 +55,7 @@ extract_created() {
     # - **作成日**: 2026-02-08
     # - - **作成日**: 2026-02-08
     local created
-    created="$(grep -m 1 -E '^\*{0,2}-?[[:space:]]*\*\*作成日\*\*:' "$spec_file" 2>/dev/null | cut -d ':' -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    created="$(grep -m 1 -E '^\*{0,2}-?[[:space:]]*\*\*(作成日|Created)\*\*:' "$spec_file" 2>/dev/null | cut -d ':' -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
 
     if [[ -z "$created" ]]; then
         echo "-"
@@ -63,6 +63,23 @@ extract_created() {
     fi
 
     echo "$created"
+}
+
+extract_category() {
+    local spec_file="$1"
+
+    # Support both:
+    # - **カテゴリ**: GUI
+    # - - **カテゴリ**: Porting
+    local category
+    category="$(grep -m 1 -E '^\*{0,2}-?[[:space:]]*\*\*カテゴリ\*\*:' "$spec_file" 2>/dev/null | cut -d ':' -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+
+    if [[ -z "$category" ]]; then
+        echo "-"
+        return 0
+    fi
+
+    echo "$category"
 }
 
 extract_deps() {
@@ -107,11 +124,17 @@ tmp_file="$(mktemp)"
 entries_file=""
 archive_entries_file=""
 active_entries_file=""
+gui_entries_file=""
+porting_entries_file=""
+uncategorized_entries_file=""
 cleanup() {
     rm -f "$tmp_file"
     rm -f "$entries_file"
     rm -f "$archive_entries_file"
     rm -f "$active_entries_file"
+    rm -f "$gui_entries_file"
+    rm -f "$porting_entries_file"
+    rm -f "$uncategorized_entries_file"
 }
 trap cleanup EXIT
 
@@ -161,26 +184,32 @@ collect_entries() {
         local title="（タイトル未設定）"
         local created="-"
         local deps=""
+        local category="-"
 
-        if [[ -f "$spec_file" ]]; then
-            title="$(grep -m 1 -E '^#' "$spec_file" 2>/dev/null | sed -E 's/^#+[[:space:]]*//;s/[[:space:]]*$//')"
-            if [[ -z "$title" ]]; then
-                title="（タイトル未設定）"
-            fi
+        # spec.md が無いディレクトリは索引対象外（プレースホルダ生成を避ける）
+        if [[ ! -f "$spec_file" ]]; then
+            continue
+        fi
 
-            created="$(extract_created "$spec_file")"
+        title="$(grep -m 1 -E '^#' "$spec_file" 2>/dev/null | sed -E 's/^#+[[:space:]]*//;s/[[:space:]]*$//')"
+        if [[ -z "$title" ]]; then
+            title="（タイトル未設定）"
+        fi
 
-            if [[ "$kind" = "active" ]]; then
-                deps="$(extract_deps "$spec_file" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g;s/^[[:space:]]+//;s/[[:space:]]+$//')"
-            fi
+        created="$(extract_created "$spec_file")"
+
+        if [[ "$kind" = "active" ]]; then
+            deps="$(extract_deps "$spec_file" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g;s/^[[:space:]]+//;s/[[:space:]]+$//')"
+            category="$(extract_category "$spec_file")"
         fi
 
         # Strip tabs to keep TSV well-formed
         title="${title//$'\t'/ }"
         created="${created//$'\t'/ }"
         deps="${deps//$'\t'/ }"
+        category="${category//$'\t'/ }"
 
-        printf '%s\t%s\t%s\t%s\n' "$spec_id" "$title" "$created" "$deps" >>"$entries_out"
+        printf '%s\t%s\t%s\t%s\t%s\n' "$spec_id" "$title" "$created" "$deps" "$category" >>"$entries_out"
     done
 }
 
@@ -190,6 +219,15 @@ fi
 if [[ -d "$ARCHIVE_DIR" ]]; then
     collect_entries "$archive_entries_file" "$ARCHIVE_DIR" "archive"
 fi
+
+gui_entries_file="$(mktemp)"
+porting_entries_file="$(mktemp)"
+uncategorized_entries_file="$(mktemp)"
+
+# Split active entries by category
+awk -F'\t' '$5 == "GUI"' "$active_entries_file" >"$gui_entries_file" || true
+awk -F'\t' '$5 == "Porting"' "$active_entries_file" >"$porting_entries_file" || true
+awk -F'\t' '$5 == "-" || $5 == ""' "$active_entries_file" >"$uncategorized_entries_file" || true
 
 render_table() {
     local title="$1"
@@ -309,7 +347,22 @@ function datekey(s,   d) {
     echo "" >>"$tmp_file"
 }
 
-render_table "現行仕様" "active" "$active_entries_file"
+{
+    echo "## 運用ルール"
+    echo ""
+    echo '- `カテゴリ: GUI` は、現行のTauri GUI実装で有効な要件（binding）です。'
+    echo '- `カテゴリ: Porting` は、TUI/WebUI由来の移植待ち（non-binding）です。未実装でも不具合ではありません。'
+    echo "- Porting を実装対象にする場合は、次のどちらかを実施します:"
+    echo '1. 既存 spec の内容を GUI 前提に更新し、`カテゴリ` を `GUI` に変更する'
+    echo '2. 新しい GUI spec を作成し、元の Porting spec を `**依存仕様**:` で参照する'
+    echo ""
+} >>"$tmp_file"
+
+render_table "現行仕様（GUI）" "active" "$gui_entries_file"
+render_table "移植待ち（Porting）" "active" "$porting_entries_file"
+if [[ -s "$uncategorized_entries_file" ]]; then
+    render_table "カテゴリ未設定（要対応）" "active" "$uncategorized_entries_file"
+fi
 render_table "過去要件（archive）" "archive" "$archive_entries_file"
 
 mv "$tmp_file" "$OUTPUT_FILE"

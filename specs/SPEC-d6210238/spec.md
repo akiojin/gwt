@@ -3,6 +3,8 @@
 **仕様ID**: `SPEC-d6210238`
 **作成日**: 2026-02-08
 **ステータス**: ドラフト
+**カテゴリ**: GUI
+
 **入力**: gwt を ratatui TUI から Tauri v2 + Svelte 5 + xterm.js GUI に完全移行する Phase 1
 
 ## ユーザーシナリオとテスト *(必須)*

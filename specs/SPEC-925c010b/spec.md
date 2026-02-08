@@ -3,6 +3,8 @@
 **仕様ID**: `[SPEC-925c010b]`
 **作成日**: 2026-01-17
 **ステータス**: ドラフト
+**カテゴリ**: GUI
+
 **入力**: ユーザー説明: "docker compose up -d で playwright-novnc が arm64 だと no matching manifest になる"
 
 ## ユーザーシナリオとテスト *(必須)*
