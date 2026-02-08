@@ -105,6 +105,22 @@ GUI から行えないと、常にCLIに戻る必要がある。
 - **FR-321**: Recent Projectsの存在しないパスはクリック時にエラー表示し、リストから自動除外**しなければならない**
 - **FR-322**: ブランチ一覧取得失敗時にサイドバーにエラーメッセージを表示**しなければならない**
 
+## インターフェース（フロント/バック間）
+
+### Tauri Commands
+
+- `open_project(path: string) -> ProjectInfo`
+- `create_project(request: NewProjectRequest) -> ProjectInfo`
+
+### Tauri Events
+
+- `clone-progress`: `CloneProgress`
+
+### トレイに関する補足（Linux）
+
+- Linux 環境では、トレイアイコンのクリックイベントが通知されない場合がある。
+- そのため、トレイのコンテキストメニューに「Show」を用意し、ウィンドウ再表示の代替導線とする。
+
 ### 主要エンティティ
 
 - **NewProjectRequest**: 新規プロジェクト作成リクエスト。リポジトリURL、親ディレクトリパスを持つ
