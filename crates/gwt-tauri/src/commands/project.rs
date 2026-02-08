@@ -30,6 +30,84 @@ pub struct CloneProgress {
     pub percent: u8,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct ProjectJsonConfig {
+    pub bare_repo_name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ProjectTomlConfig {
+    pub bare_repo_name: String,
+}
+
+fn read_bare_repo_name(project_root: &Path) -> Option<String> {
+    let gwt_dir = project_root.join(".gwt");
+    if !gwt_dir.is_dir() {
+        return None;
+    }
+
+    let toml_path = gwt_dir.join("project.toml");
+    if let Ok(content) = std::fs::read_to_string(&toml_path) {
+        if let Ok(cfg) = toml::from_str::<ProjectTomlConfig>(&content) {
+            if !cfg.bare_repo_name.trim().is_empty() {
+                return Some(cfg.bare_repo_name);
+            }
+        }
+    }
+
+    let json_path = gwt_dir.join("project.json");
+    if let Ok(content) = std::fs::read_to_string(&json_path) {
+        if let Ok(cfg) = serde_json::from_str::<ProjectJsonConfig>(&content) {
+            if !cfg.bare_repo_name.trim().is_empty() {
+                return Some(cfg.bare_repo_name);
+            }
+        }
+    }
+
+    None
+}
+
+fn resolve_project_root(selected: &Path) -> std::path::PathBuf {
+    if git::is_git_repo(selected) {
+        if git::is_bare_repository(selected) {
+            selected
+                .parent()
+                .unwrap_or(selected)
+                .to_path_buf()
+        } else {
+            // If selected is a worktree, this resolves to the bare project's root directory.
+            git::get_main_repo_root(selected)
+        }
+    } else {
+        selected.to_path_buf()
+    }
+}
+
+pub(crate) fn resolve_repo_path_for_project_root(
+    project_root: &Path,
+) -> Result<std::path::PathBuf, String> {
+    if git::is_git_repo(project_root) {
+        return Ok(project_root.to_path_buf());
+    }
+
+    if let Some(bare_repo_name) = read_bare_repo_name(project_root) {
+        let candidate = project_root.join(&bare_repo_name);
+        if candidate.exists() && git::is_bare_repository(&candidate) {
+            return Ok(candidate);
+        }
+    }
+
+    // Fallback: try to detect a bare repo under the selected directory.
+    if let Some(bare) = git::find_bare_repo_in_dir(project_root) {
+        return Ok(bare);
+    }
+
+    Err(format!(
+        "Not a gwt project: bare repository not found in {}",
+        project_root.display()
+    ))
+}
+
 /// Open a project (set project_path in AppState)
 #[tauri::command]
 pub fn open_project(path: String, state: State<AppState>) -> Result<ProjectInfo, String> {
@@ -39,26 +117,26 @@ pub fn open_project(path: String, state: State<AppState>) -> Result<ProjectInfo,
         return Err(format!("Path does not exist: {}", path));
     }
 
-    if !git::is_git_repo(p) {
-        return Err(format!("Not a git repository: {}", path));
-    }
+    let project_root = resolve_project_root(p);
+    let repo_path = resolve_repo_path_for_project_root(&project_root)?;
+    let project_root_str = project_root.to_string_lossy().to_string();
 
     // Get repo name from the directory name
-    let repo_name = p
+    let repo_name = project_root
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.clone());
+        .unwrap_or_else(|| project_root_str.clone());
 
     // Get current branch
-    let current_branch = Branch::current(p).ok().flatten().map(|b| b.name);
+    let current_branch = Branch::current(&repo_path).ok().flatten().map(|b| b.name);
 
     // Update state
     if let Ok(mut project_path) = state.project_path.lock() {
-        *project_path = Some(path.clone());
+        *project_path = Some(project_root_str.clone());
     }
 
     Ok(ProjectInfo {
-        path,
+        path: project_root_str,
         repo_name,
         current_branch,
     })
@@ -76,7 +154,9 @@ pub fn get_project_info(state: State<AppState>) -> Option<ProjectInfo> {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| path_str.clone());
 
-    let current_branch = Branch::current(p).ok().flatten().map(|b| b.name);
+    let current_branch = resolve_repo_path_for_project_root(p)
+        .ok()
+        .and_then(|repo_path| Branch::current(&repo_path).ok().flatten().map(|b| b.name));
 
     Some(ProjectInfo {
         path: path_str.clone(),
@@ -301,8 +381,8 @@ pub fn create_project(
         return Err(format!("git clone failed: {}", tail.trim()));
     }
 
-    // Open the cloned repository (FR-304)
-    open_project(target.to_string_lossy().to_string(), state)
+    // Open the project root (FR-304)
+    open_project(request.parent_dir, state)
 }
 
 #[cfg(test)]
@@ -374,5 +454,48 @@ mod tests {
             parse_clone_progress_line("Cloning into 'repo.git'..."),
             None
         );
+    }
+
+    #[test]
+    fn test_resolve_repo_path_for_project_root_from_project_json() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+
+        std::fs::create_dir_all(root.join(".gwt")).expect("create .gwt dir");
+        std::fs::write(
+            root.join(".gwt").join("project.json"),
+            r#"{"bare_repo_name":"repo.git","migrated_at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .expect("write project.json");
+
+        let bare = root.join("repo.git");
+        let status = Command::new("git")
+            .args(["init", "--bare"])
+            .arg(&bare)
+            .status()
+            .expect("git init --bare");
+        assert!(status.success());
+
+        let resolved =
+            resolve_repo_path_for_project_root(root).expect("should resolve bare repo path");
+        assert_eq!(resolved, bare);
+    }
+
+    #[test]
+    fn test_resolve_repo_path_for_project_root_fallback_scans_for_bare_repo() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+
+        let bare = root.join("repo.git");
+        let status = Command::new("git")
+            .args(["init", "--bare"])
+            .arg(&bare)
+            .status()
+            .expect("git init --bare");
+        assert!(status.success());
+
+        let resolved =
+            resolve_repo_path_for_project_root(root).expect("should resolve bare repo path");
+        assert_eq!(resolved, bare);
     }
 }
