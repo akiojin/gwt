@@ -9,7 +9,7 @@ Git Worktree Manager (gwt) を TypeScript/Bun から Rust へ完全移行する�
 
 - **作成日**: 2026-01-11
 - **最終更新**: 2026-01-14
-- **ステータス**: In Progress
+- **ステータス**: 廃止（Tauri GUI移行により無効）
 - **優先度**: High
 
 ## 背景と動機
