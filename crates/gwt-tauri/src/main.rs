@@ -18,6 +18,7 @@ fn main() {
             commands::branches::list_remote_branches,
             commands::branches::get_current_branch,
             commands::project::open_project,
+            commands::project::create_project,
             commands::project::get_project_info,
             commands::project::is_git_repo,
             commands::terminal::launch_terminal,

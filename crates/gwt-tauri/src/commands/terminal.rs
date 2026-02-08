@@ -88,11 +88,7 @@ pub fn launch_terminal(
 }
 
 /// Stream PTY output to the frontend via Tauri events
-fn stream_pty_output(
-    mut reader: Box<dyn Read + Send>,
-    pane_id: String,
-    app_handle: AppHandle,
-) {
+fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_handle: AppHandle) {
     let mut buf = [0u8; 4096];
     loop {
         match reader.read(&mut buf) {
