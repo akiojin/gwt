@@ -179,6 +179,11 @@ impl TerminalPane {
         self.started_at
     }
 
+    /// FR-048: Check if the PTY application has enabled mouse protocol.
+    pub fn mouse_protocol_enabled(&self) -> bool {
+        self.emulator.mouse_protocol_mode() != vt100::MouseProtocolMode::None
+    }
+
     /// Kill the child process.
     pub fn kill(&mut self) -> Result<(), TerminalError> {
         self.pty.kill()

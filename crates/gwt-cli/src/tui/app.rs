@@ -2604,8 +2604,20 @@ impl Model {
     }
 
     /// FR-048: Handle mouse scroll events for the agent pane.
-    /// Converts scroll events to terminal escape sequences and sends to PTY.
+    /// Only sends scroll to PTY when the app has enabled mouse protocol.
+    /// When mouse protocol is None (e.g. shell prompt), scroll is ignored.
     fn handle_agent_pane_scroll(&mut self, mouse: MouseEvent) {
+        // FR-048: Only send scroll when PTY app has enabled mouse protocol
+        let mouse_enabled = self
+            .terminal_manager
+            .active_pane()
+            .map(|p| p.mouse_protocol_enabled())
+            .unwrap_or(false);
+
+        if !mouse_enabled {
+            return;
+        }
+
         let is_up = matches!(mouse.kind, MouseEventKind::ScrollUp);
 
         // Compute agent pane area from current terminal size
