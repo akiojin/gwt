@@ -9,12 +9,15 @@
 - **設計・実装は複雑にせずに、シンプルさの極限を追求してください**
 - **ただし、ユーザビリティと開発者体験の品質は決して妥協しない**
 - 実装はシンプルに、開発者体験は最高品質に
-- CLI操作の直感性と効率性を技術的複雑さより優先
+- GUI操作の直感性と効率性を技術的複雑さより優先
 
-### 🧩 Ratatui ガイドライン
+### 🧩 Tauri GUI ガイドライン
 
-- CLI TUI は `ratatui` を利用
-- 端末描画で使用するアイコンは ASCII に統一し、全角/絵文字は避ける
+- デスクトップGUI は Tauri v2 + Svelte 5 + xterm.js
+- バックエンド: Rust (gwt-core + gwt-tauri)
+- フロントエンド: Svelte 5 + TypeScript + Vite (gwt-gui/)
+- ターミナルエミュレーション: xterm.js v5
+- UIアイコンは ASCII に統一し、全角/絵文字は避ける
 
 ### 📝 設計ガイドライン
 
@@ -78,18 +81,18 @@
 
 ### ローカル検証/実行ルール（Rust）
 
-- このリポジトリのローカル検証・実行は Cargo を使用する
-- ビルド: `cargo build --release`
+- このリポジトリのローカル検証・実行は Cargo + Tauri CLI を使用する
+- ビルド: `cargo tauri build`
+- 開発: `cargo tauri dev`
 - テスト: `cargo test`
 - Lint: `cargo clippy --all-targets --all-features -- -D warnings`
 - フォーマット: `cargo fmt`
-- 実行: `./target/release/gwt` または `cargo run`
-- npm配布: `bunx @akiojin/gwt` または `npm install -g @akiojin/gwt`
+- フロントエンドチェック: `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json`
 
 ## コミュニケーションガイドライン
 
 - 回答は必ず日本語
-- CLIのユーザー向け出力は英語のみ（日本語の文言を表示しない）
+- GUIのユーザー向け表示は英語のみ（日本語の文言を表示しない）
 - ログ（`~/.gwt/logs/` 等）はこの環境から直接参照できる前提で対応すること
 - ログ参照の指示があれば、この環境から直接読み取って調査すること
 
@@ -122,38 +125,19 @@
   - develop → main への PR を作成（リリースブランチは作成しない）
 - Release PR が main にマージされると `.github/workflows/release.yml` が以下を自動実行:
   - タグ・GitHub Release を作成
-  - クロスコンパイル済みバイナリを GitHub Release にアップロード
-  - npm へ公開（provenance 付き）
+  - Tauri ビルド（.dmg/.msi/.AppImage）を GitHub Release にアップロード
 
 ## パッケージ公開状況
 
-> **重要**: 各プラットフォームのバージョンは独立して管理されており、一度公開したバージョンは再利用不可。リリース前に必ず各プラットフォームの最新バージョンを確認すること。
-
-| プラットフォーム | パッケージ名 | 確認コマンド |
-| -------------- | ----------- | ----------- |
-| npmjs | `@akiojin/gwt` | `npm view @akiojin/gwt version` |
-| GitHub Release | - | `gh release list --repo akiojin/gwt --limit 1` |
-
-### 次回リリース時の注意
-
-- 各プラットフォームのバージョンは一度公開すると再利用不可
-- リリース前に上記の確認コマンドで最新バージョンをチェックすること
-- npm の `latest` タグが古いバージョンを指している場合は手動で修正が必要:
-  `npm dist-tag add @akiojin/gwt@<version> latest`
+| プラットフォーム | 確認コマンド |
+| -------------- | ----------- |
+| GitHub Release | `gh release list --repo akiojin/gwt --limit 1` |
 
 ## 使用中の技術
-- Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, reqwest (blocking), serde_json, chrono (SPEC-4b893dae)
-- ファイルシステム（セッションファイル読み取り）、メモリキャッシュ (SPEC-4b893dae)
-- Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, tracing, tracing-appender, serde_json, chrono, arboard (SPEC-e66acf66)
-- ファイル（gwt.jsonl.YYYY-MM-DD） (SPEC-e66acf66)
-- Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, reqwest (blocking), serde_json, chrono, tracing (SPEC-ba3f610c)
-- ファイルシステム (`~/.gwt/sessions/` - JSON形式) (SPEC-ba3f610c)
-- Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, serde, serde_json, chrono, directories (SPEC-71f2742d)
-- ファイル（~/.gwt/tools.json, .gwt/tools.json） (SPEC-71f2742d)
-- ファイルシステム（.gwt/設定、gitメタデータ） (SPEC-a70a1ece)
-- メモリキャッシュ（GitViewCache） (SPEC-1ea18899)
 
-- Rust (Stable) + Ratatui TUI フレームワーク
+- Rust 2021 Edition (stable) + Tauri v2, portable-pty, serde, tokio
+- Svelte 5 + TypeScript + Vite 6
+- xterm.js v5 (@xterm/xterm, @xterm/addon-fit, @xterm/addon-web-links)
 - ファイル/ローカル Git メタデータ（DB なし）
 
 ## プロジェクト構成
@@ -161,17 +145,13 @@
 ```text
 ├── Cargo.toml          # ワークスペース設定
 ├── crates/
-│   ├── gwt-cli/        # CLIエントリポイント・TUI
-│   ├── gwt-core/       # コアライブラリ（worktree管理）
-│   ├── gwt-web/        # Webサーバー（将来）
-│   └── gwt-frontend/   # Webフロントエンド（将来）
-├── package.json        # npm配布用ラッパー
-├── bin/gwt.js          # バイナリラッパースクリプト
-└── scripts/postinstall.js  # バイナリダウンロードスクリプト
+│   ├── gwt-core/       # コアライブラリ（Git操作・PTY管理・設定）
+│   └── gwt-tauri/      # Tauri v2 バックエンド（コマンド・状態管理）
+├── gwt-gui/            # Svelte 5 フロントエンド（UI・xterm.js）
+│   ├── src/
+│   │   ├── lib/components/  # UIコンポーネント
+│   │   ├── lib/terminal/    # xterm.jsラッパー
+│   │   └── lib/types.ts     # TypeScript型定義
+│   └── package.json
+└── package.json        # Tauri開発用スクリプト
 ```
-
-## 最近の変更
-- SPEC-1ea18899: 追加: Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, serde, serde_json, chrono
-- SPEC-a70a1ece: 追加: Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, serde, serde_json, chrono
-- SPEC-71f2742d: 追加: Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, serde, serde_json, chrono, directories
-- SPEC-ba3f610c: 追加: Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, reqwest (blocking), serde_json, chrono, tracing

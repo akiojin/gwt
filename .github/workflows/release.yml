@@ -77,58 +77,63 @@ jobs:
             --notes "$NOTES" \
             --draft=false
 
-  build-binaries:
-    name: Build (${{ matrix.target }})
+  build-tauri:
+    name: Build Tauri (${{ matrix.platform }})
     needs: create-tag
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            artifact: gwt-linux-x86_64
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            artifact: gwt-linux-aarch64
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact: gwt-macos-aarch64
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact: gwt-windows-x86_64.exe
+          - platform: linux
+            os: ubuntu-latest
+          - platform: macos
+            os: macos-latest
+          - platform: windows
+            os: windows-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
-      - name: Install musl tools (Linux)
-        if: contains(matrix.target, 'linux-musl')
+          key: tauri-${{ matrix.platform }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Install system dependencies (Linux)
+        if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
-      - name: Prepare artifact (Unix)
-        if: matrix.os != 'windows-latest'
-        run: |
-          cp target/${{ matrix.target }}/release/gwt ${{ matrix.artifact }}
-          chmod +x ${{ matrix.artifact }}
-      - name: Prepare artifact (Windows)
-        if: matrix.os == 'windows-latest'
-        run: |
-          copy target\${{ matrix.target }}\release\gwt.exe ${{ matrix.artifact }}
-      - name: Upload artifact
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Install frontend dependencies
+        run: cd gwt-gui && npm ci
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2"
+      - name: Build Tauri
+        run: cargo tauri build
+      - name: Upload artifacts (Linux)
+        if: matrix.platform == 'linux'
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          name: gwt-linux
+          path: |
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
+      - name: Upload artifacts (macOS)
+        if: matrix.platform == 'macos'
+        uses: actions/upload-artifact@v6
+        with:
+          name: gwt-macos
+          path: target/release/bundle/dmg/*.dmg
+      - name: Upload artifacts (Windows)
+        if: matrix.platform == 'windows'
+        uses: actions/upload-artifact@v6
+        with:
+          name: gwt-windows
+          path: target/release/bundle/msi/*.msi
 
   upload-release:
     name: Upload to GitHub Release
-    needs: [create-tag, build-binaries]
+    needs: [create-tag, build-tauri]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -142,23 +147,3 @@ jobs:
         with:
           tag_name: ${{ needs.create-tag.outputs.tag_name }}
           files: artifacts/**/*
-
-  publish-npm:
-    name: Publish to npm
-    needs: [create-tag, upload-release]
-    runs-on: ubuntu-latest
-    environment: release
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Publish to npm
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
