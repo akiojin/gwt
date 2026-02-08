@@ -9,7 +9,7 @@
 #![allow(dead_code)]
 
 use gwt_core::agent::codex::supports_collaboration_modes;
-use gwt_core::ai::AgentType;
+use gwt_core::ai::{AIError, AgentType};
 use gwt_core::config::{CustomCodingAgent, ToolsConfig};
 use gwt_core::git::GitHubIssue;
 use ratatui::{prelude::*, widgets::*};
@@ -17,6 +17,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
+use unicode_width::UnicodeWidthStr;
 
 /// Version information from npm registry (FR-063)
 #[derive(Debug, Clone)]
@@ -121,7 +122,23 @@ pub enum WizardStep {
     BranchTypeSelect,
     /// GitHub Issue selection (SPEC-e4798383)
     IssueSelect,
+    /// AI branch name suggestion (SPEC-1ad9c07d)
+    AIBranchSuggest,
     BranchNameInput,
+}
+
+/// AIBranchSuggest sub-phase (SPEC-1ad9c07d)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AIBranchSuggestPhase {
+    /// Text input
+    #[default]
+    Input,
+    /// Waiting for AI response (non-blocking UI)
+    Loading,
+    /// Select one of suggestions
+    Select,
+    /// Error message + fallback options
+    Error,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -762,6 +779,109 @@ impl BranchType {
             BranchType::Release,
         ]
     }
+
+    /// Parse a full branch name that includes a type prefix.
+    ///
+    /// Example: "feature/add-login" -> (Feature, "add-login")
+    pub fn from_prefix(name: &str) -> Option<(BranchType, &str)> {
+        let trimmed = name.trim();
+        for t in BranchType::all() {
+            if let Some(rest) = trimmed.strip_prefix(t.prefix()) {
+                return Some((*t, rest));
+            }
+        }
+        None
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct BranchSuggestionsResponse {
+    suggestions: Vec<String>,
+}
+
+/// Parse AI response text into sanitized branch name suggestions.
+///
+/// Expected JSON: {"suggestions": ["feature/foo", "bugfix/bar", "feature/baz"]}
+pub(crate) fn parse_branch_suggestions(response: &str) -> Result<Vec<String>, AIError> {
+    let start = response
+        .find('{')
+        .ok_or_else(|| AIError::ParseError("No JSON object found in response".to_string()))?;
+    let end = response
+        .rfind('}')
+        .ok_or_else(|| AIError::ParseError("No JSON object found in response".to_string()))?;
+    if end <= start {
+        return Err(AIError::ParseError(
+            "Invalid JSON object bounds in response".to_string(),
+        ));
+    }
+    let json = &response[start..=end];
+
+    let parsed: BranchSuggestionsResponse = serde_json::from_str(json)
+        .map_err(|e| AIError::ParseError(format!("Invalid suggestions JSON: {}", e)))?;
+
+    if parsed.suggestions.len() != 3 {
+        return Err(AIError::ParseError(
+            "Expected exactly 3 suggestions".to_string(),
+        ));
+    }
+
+    let mut out = Vec::with_capacity(3);
+    for raw in parsed.suggestions {
+        let trimmed = raw.trim();
+        let Some((t, rest)) = BranchType::from_prefix(trimmed) else {
+            return Err(AIError::ParseError(format!(
+                "Suggestion missing/invalid prefix: {}",
+                trimmed
+            )));
+        };
+
+        // Sanitize suffix only; keep prefix.
+        let sanitized = gwt_core::agent::worktree::sanitize_branch_name(rest);
+        if sanitized.is_empty() {
+            return Err(AIError::ParseError(format!(
+                "Suggestion suffix is empty after sanitization: {}",
+                trimmed
+            )));
+        }
+        out.push(format!("{}{}", t.prefix(), sanitized));
+    }
+
+    Ok(out)
+}
+
+fn clamp_cursor_to_char_boundary(s: &str, cursor: usize) -> usize {
+    let mut c = cursor.min(s.len());
+    while c > 0 && !s.is_char_boundary(c) {
+        c -= 1;
+    }
+    c
+}
+
+fn prev_char_boundary(s: &str, cursor: usize) -> usize {
+    let cursor = clamp_cursor_to_char_boundary(s, cursor);
+    if cursor == 0 {
+        return 0;
+    }
+    s[..cursor]
+        .char_indices()
+        .last()
+        .map(|(i, _)| i)
+        .unwrap_or(0)
+}
+
+fn next_char_boundary(s: &str, cursor: usize) -> usize {
+    let cursor = clamp_cursor_to_char_boundary(s, cursor);
+    if cursor >= s.len() {
+        return s.len();
+    }
+    let ch = s[cursor..].chars().next().unwrap_or('\0');
+    cursor.saturating_add(ch.len_utf8()).min(s.len())
+}
+
+fn display_width_to_cursor(s: &str, cursor: usize) -> u16 {
+    let cursor = clamp_cursor_to_char_boundary(s, cursor);
+    let width = UnicodeWidthStr::width(&s[..cursor]);
+    (width.min(u16::MAX as usize)) as u16
 }
 
 /// Wizard state
@@ -781,6 +901,23 @@ pub struct WizardState {
     pub new_branch_name: String,
     /// Cursor position for branch name input
     pub cursor: usize,
+    /// Whether gh CLI is available (snapshot at wizard open)
+    pub gh_cli_available: bool,
+    // AIBranchSuggest (SPEC-1ad9c07d)
+    /// Whether AI settings are enabled (snapshot at wizard open)
+    pub ai_enabled: bool,
+    /// Current AIBranchSuggest sub-phase
+    pub ai_branch_phase: AIBranchSuggestPhase,
+    /// Free-form purpose input text for AI branch suggestion
+    pub ai_branch_input: String,
+    /// Cursor position for ai_branch_input
+    pub ai_branch_cursor: usize,
+    /// Suggested full branch names (with prefix), max 3
+    pub ai_branch_suggestions: Vec<String>,
+    /// Selected suggestion index (Select phase)
+    pub ai_branch_selected: usize,
+    /// Error message for Error phase
+    pub ai_branch_error: Option<String>,
     /// Selected coding agent
     pub agent: CodingAgent,
     /// Selected agent index
@@ -951,6 +1088,15 @@ impl WizardState {
         self.branch_type = BranchType::default();
         self.new_branch_name.clear();
         self.cursor = 0;
+        self.gh_cli_available = gwt_core::git::is_gh_cli_available();
+        // Reset AI branch suggest state (SPEC-1ad9c07d)
+        self.ai_enabled = false;
+        self.ai_branch_phase = AIBranchSuggestPhase::default();
+        self.ai_branch_input.clear();
+        self.ai_branch_cursor = 0;
+        self.ai_branch_suggestions.clear();
+        self.ai_branch_selected = 0;
+        self.ai_branch_error = None;
         self.scroll_offset = 0;
         self.branch_action_index = 0;
         self.has_branch_action = false;
@@ -1587,7 +1733,7 @@ impl WizardState {
             }
             WizardStep::BranchTypeSelect => {
                 // SPEC-e4798383: Check if gh CLI is available
-                if gwt_core::git::is_gh_cli_available() {
+                if self.gh_cli_available {
                     // Start loading issues
                     self.issue_loading = true;
                     self.issue_error = None;
@@ -1599,7 +1745,17 @@ impl WizardState {
                     WizardStep::IssueSelect
                 } else {
                     // Skip IssueSelect if gh CLI is not available (FR-012)
-                    WizardStep::BranchNameInput
+                    if self.ai_enabled {
+                        // Enter AIBranchSuggest directly when AI is enabled
+                        self.ai_branch_phase = AIBranchSuggestPhase::Input;
+                        self.ai_branch_error = None;
+                        self.ai_branch_suggestions.clear();
+                        self.ai_branch_selected = 0;
+                        self.ai_branch_cursor = self.ai_branch_input.len();
+                        WizardStep::AIBranchSuggest
+                    } else {
+                        WizardStep::BranchNameInput
+                    }
                 }
             }
             WizardStep::IssueSelect => {
@@ -1617,6 +1773,34 @@ impl WizardState {
                         .to_string();
                 }
                 self.cursor = self.new_branch_name.len();
+                if self.ai_enabled {
+                    // Reset phase when entering AIBranchSuggest
+                    self.ai_branch_phase = AIBranchSuggestPhase::Input;
+                    self.ai_branch_error = None;
+                    self.ai_branch_suggestions.clear();
+                    self.ai_branch_selected = 0;
+                    self.ai_branch_cursor = self.ai_branch_input.len();
+                    WizardStep::AIBranchSuggest
+                } else {
+                    WizardStep::BranchNameInput
+                }
+            }
+            WizardStep::AIBranchSuggest => {
+                // Apply selected suggestion only when in Select phase.
+                // For manual fallback, keep current new_branch_name as-is.
+                if self.ai_branch_phase == AIBranchSuggestPhase::Select {
+                    if let Some(selected) = self.ai_branch_suggestions.get(self.ai_branch_selected)
+                    {
+                        if let Some((t, rest)) = BranchType::from_prefix(selected) {
+                            let sanitized = gwt_core::agent::worktree::sanitize_branch_name(rest);
+                            if !sanitized.is_empty() {
+                                self.branch_type = t;
+                                self.new_branch_name = sanitized;
+                            }
+                        }
+                    }
+                    self.cursor = self.new_branch_name.len();
+                }
                 WizardStep::BranchNameInput
             }
             WizardStep::BranchNameInput => WizardStep::AgentSelect,
@@ -1765,9 +1949,19 @@ impl WizardState {
                 }
             }
             WizardStep::IssueSelect => WizardStep::BranchTypeSelect,
-            WizardStep::BranchNameInput => {
+            WizardStep::AIBranchSuggest => {
                 // Go back to IssueSelect if gh CLI is available, otherwise BranchTypeSelect
-                if gwt_core::git::is_gh_cli_available() {
+                if self.gh_cli_available {
+                    WizardStep::IssueSelect
+                } else {
+                    WizardStep::BranchTypeSelect
+                }
+            }
+            WizardStep::BranchNameInput => {
+                if self.ai_enabled {
+                    WizardStep::AIBranchSuggest
+                } else if self.gh_cli_available {
+                    // Go back to IssueSelect if gh CLI is available, otherwise BranchTypeSelect
                     WizardStep::IssueSelect
                 } else {
                     WizardStep::BranchTypeSelect
@@ -2007,6 +2201,14 @@ impl WizardState {
                     self.issue_selected_index += 1;
                 }
             }
+            WizardStep::AIBranchSuggest => {
+                if self.ai_branch_phase == AIBranchSuggestPhase::Select {
+                    let max = self.ai_branch_suggestions.len().saturating_sub(1);
+                    if self.ai_branch_selected < max {
+                        self.ai_branch_selected += 1;
+                    }
+                }
+            }
             WizardStep::BranchNameInput => {
                 // No selection in input mode
             }
@@ -2103,6 +2305,13 @@ impl WizardState {
                     self.issue_selected_index -= 1;
                 }
             }
+            WizardStep::AIBranchSuggest => {
+                if self.ai_branch_phase == AIBranchSuggestPhase::Select
+                    && self.ai_branch_selected > 0
+                {
+                    self.ai_branch_selected -= 1;
+                }
+            }
             WizardStep::BranchNameInput => {
                 // No selection in input mode
             }
@@ -2113,13 +2322,21 @@ impl WizardState {
     pub fn insert_char(&mut self, c: char) {
         match self.step {
             WizardStep::BranchNameInput => {
+                self.cursor = clamp_cursor_to_char_boundary(&self.new_branch_name, self.cursor);
                 self.new_branch_name.insert(self.cursor, c);
-                self.cursor += 1;
+                self.cursor = self.cursor.saturating_add(c.len_utf8());
             }
             WizardStep::IssueSelect => {
                 // FR-008: Incremental search
                 self.issue_search_query.push(c);
                 self.update_filtered_issues();
+            }
+            WizardStep::AIBranchSuggest if self.ai_branch_phase == AIBranchSuggestPhase::Input => {
+                self.ai_branch_cursor =
+                    clamp_cursor_to_char_boundary(&self.ai_branch_input, self.ai_branch_cursor);
+                self.ai_branch_input.insert(self.ai_branch_cursor, c);
+                self.ai_branch_cursor = self.ai_branch_cursor.saturating_add(c.len_utf8());
+                self.ai_branch_error = None;
             }
             _ => {}
         }
@@ -2129,12 +2346,22 @@ impl WizardState {
     pub fn delete_char(&mut self) {
         match self.step {
             WizardStep::BranchNameInput if self.cursor > 0 => {
-                self.cursor -= 1;
-                self.new_branch_name.remove(self.cursor);
+                let prev = prev_char_boundary(&self.new_branch_name, self.cursor);
+                self.new_branch_name.remove(prev);
+                self.cursor = prev;
             }
             WizardStep::IssueSelect if !self.issue_search_query.is_empty() => {
                 self.issue_search_query.pop();
                 self.update_filtered_issues();
+            }
+            WizardStep::AIBranchSuggest
+                if self.ai_branch_phase == AIBranchSuggestPhase::Input
+                    && self.ai_branch_cursor > 0 =>
+            {
+                let prev = prev_char_boundary(&self.ai_branch_input, self.ai_branch_cursor);
+                self.ai_branch_input.remove(prev);
+                self.ai_branch_cursor = prev;
+                self.ai_branch_error = None;
             }
             _ => {}
         }
@@ -2199,13 +2426,23 @@ impl WizardState {
             self.issue_selected_index = 0;
             self.new_branch_name.clear();
             self.cursor = 0;
-            self.step = WizardStep::BranchNameInput;
+            if self.ai_enabled {
+                // Auto-skip to AIBranchSuggest when AI is enabled (SPEC-1ad9c07d)
+                self.ai_branch_phase = AIBranchSuggestPhase::Input;
+                self.ai_branch_error = None;
+                self.ai_branch_suggestions.clear();
+                self.ai_branch_selected = 0;
+                self.ai_branch_cursor = self.ai_branch_input.len();
+                self.step = WizardStep::AIBranchSuggest;
+            } else {
+                self.step = WizardStep::BranchNameInput;
+            }
         }
     }
 
     /// Load issues from GitHub (FR-005)
     pub fn load_issues(&mut self, repo_path: &Path) {
-        use gwt_core::git::{fetch_open_issues, is_gh_cli_available};
+        use gwt_core::git::fetch_open_issues;
 
         self.issue_loading = true;
         self.issue_error = None;
@@ -2216,7 +2453,7 @@ impl WizardState {
         self.selected_issue = None;
         self.issue_existing_branch = None;
 
-        if !is_gh_cli_available() {
+        if !self.gh_cli_available {
             self.issue_loading = false;
             // gh CLI not available - will auto-skip
             return;
@@ -2235,15 +2472,29 @@ impl WizardState {
 
     /// Move cursor left
     pub fn cursor_left(&mut self) {
-        if self.cursor > 0 {
-            self.cursor -= 1;
+        match self.step {
+            WizardStep::BranchNameInput => {
+                self.cursor = prev_char_boundary(&self.new_branch_name, self.cursor);
+            }
+            WizardStep::AIBranchSuggest if self.ai_branch_phase == AIBranchSuggestPhase::Input => {
+                self.ai_branch_cursor =
+                    prev_char_boundary(&self.ai_branch_input, self.ai_branch_cursor);
+            }
+            _ => {}
         }
     }
 
     /// Move cursor right
     pub fn cursor_right(&mut self) {
-        if self.cursor < self.new_branch_name.len() {
-            self.cursor += 1;
+        match self.step {
+            WizardStep::BranchNameInput => {
+                self.cursor = next_char_boundary(&self.new_branch_name, self.cursor);
+            }
+            WizardStep::AIBranchSuggest if self.ai_branch_phase == AIBranchSuggestPhase::Input => {
+                self.ai_branch_cursor =
+                    next_char_boundary(&self.ai_branch_input, self.ai_branch_cursor);
+            }
+            _ => {}
         }
     }
 
@@ -2288,7 +2539,14 @@ impl WizardState {
             WizardStep::BranchAction => self.branch_action_options().len(),
             WizardStep::BranchTypeSelect => BranchType::all().len(),
             WizardStep::IssueSelect => self.filtered_issues.len() + 1, // +1 for Skip option
-            WizardStep::BranchNameInput => 0,                          // Text input, no list items
+            WizardStep::AIBranchSuggest => {
+                if self.ai_branch_phase == AIBranchSuggestPhase::Select {
+                    self.ai_branch_suggestions.len()
+                } else {
+                    0
+                }
+            }
+            WizardStep::BranchNameInput => 0, // Text input, no list items
             WizardStep::AgentSelect => self.all_agents.len(),
             WizardStep::ModelSelect => self.get_models().len(), // T503: Use get_models() for custom agent support
             WizardStep::ReasoningLevel => ReasoningLevel::all().len(),
@@ -2318,6 +2576,7 @@ impl WizardState {
                 .position(|t| *t == self.branch_type)
                 .unwrap_or(0),
             WizardStep::IssueSelect => self.issue_selected_index,
+            WizardStep::AIBranchSuggest => self.ai_branch_selected,
             WizardStep::BranchNameInput => 0,
             WizardStep::AgentSelect => self.agent_index,
             WizardStep::ModelSelect => self.model_index,
@@ -2368,6 +2627,9 @@ impl WizardState {
                 if let Some(&issue_idx) = self.filtered_issues.get(index) {
                     self.selected_issue = self.issue_list.get(issue_idx).cloned();
                 }
+            }
+            WizardStep::AIBranchSuggest => {
+                self.ai_branch_selected = index;
             }
             WizardStep::BranchNameInput => {
                 return false; // No list items
@@ -2517,6 +2779,7 @@ pub fn render_wizard(state: &mut WizardState, frame: &mut Frame, area: Rect) {
         WizardStep::BranchAction => render_branch_action_step(state, frame, content_area),
         WizardStep::BranchTypeSelect => render_branch_type_step(state, frame, content_area),
         WizardStep::IssueSelect => render_issue_select_step(state, frame, content_area),
+        WizardStep::AIBranchSuggest => render_ai_branch_suggest_step(state, frame, content_area),
         WizardStep::BranchNameInput => render_branch_name_step(state, frame, content_area),
         WizardStep::AgentSelect => render_agent_step(state, frame, content_area),
         WizardStep::ModelSelect => render_model_step(state, frame, content_area),
@@ -2536,10 +2799,15 @@ pub fn render_wizard(state: &mut WizardState, frame: &mut Frame, area: Rect) {
         inner_area.width,
         1,
     );
-    let footer_text = if state.step == WizardStep::BranchNameInput {
-        "[Enter] Confirm  [Esc] Back"
-    } else {
-        "[Enter] Select  [Esc] Back  [Up/Down] Navigate"
+    let footer_text = match state.step {
+        WizardStep::AIBranchSuggest => match state.ai_branch_phase {
+            AIBranchSuggestPhase::Input => "[Enter] Generate  [Esc] Skip",
+            AIBranchSuggestPhase::Loading => "[Esc] Cancel",
+            AIBranchSuggestPhase::Select => "[Enter] Select  [Esc] Back  [Up/Down] Navigate",
+            AIBranchSuggestPhase::Error => "[Enter] Manual input  [Esc] Retry",
+        },
+        WizardStep::BranchNameInput => "[Enter] Confirm  [Esc] Back",
+        _ => "[Enter] Select  [Esc] Back  [Up/Down] Navigate",
     };
     let footer = Paragraph::new(footer_text)
         .style(Style::default().fg(Color::DarkGray))
@@ -2555,6 +2823,7 @@ fn wizard_title(step: WizardStep) -> &'static str {
         WizardStep::BranchAction => " Select Branch Action ",
         WizardStep::BranchTypeSelect => " Select Branch Type ",
         WizardStep::IssueSelect => " GitHub Issue ",
+        WizardStep::AIBranchSuggest => " AI Branch Suggest ",
         WizardStep::BranchNameInput => " Enter Branch Name ",
         WizardStep::AgentSelect => " Select Coding Agent ",
         WizardStep::ModelSelect => " Select Model ",
@@ -2683,6 +2952,30 @@ fn wizard_required_content_width(state: &WizardState) -> usize {
                 consider("  No open issues".to_string());
             }
         }
+        WizardStep::AIBranchSuggest => match state.ai_branch_phase {
+            AIBranchSuggestPhase::Input => {
+                consider("What is this branch for?".to_string());
+                let input_text = if state.ai_branch_input.is_empty() {
+                    "Describe what you are changing...".to_string()
+                } else {
+                    state.ai_branch_input.clone()
+                };
+                consider(input_text);
+            }
+            AIBranchSuggestPhase::Loading => {
+                consider("Generating branch name suggestions...".to_string());
+            }
+            AIBranchSuggestPhase::Select => {
+                consider("Select a branch name:".to_string());
+                for s in &state.ai_branch_suggestions {
+                    consider(format!("  {}", s));
+                }
+            }
+            AIBranchSuggestPhase::Error => {
+                let msg = state.ai_branch_error.as_deref().unwrap_or("Unknown error");
+                consider(format!("Error: {}", msg));
+            }
+        },
         WizardStep::BranchNameInput => {
             consider(format!("Branch: {}", state.branch_type.prefix()));
             let input_text = if state.new_branch_name.is_empty() {
@@ -3147,6 +3440,131 @@ fn render_issue_select_step(state: &WizardState, frame: &mut Frame, area: Rect) 
     frame.render_widget(list, chunks[2]);
 }
 
+fn render_ai_branch_suggest_step(state: &mut WizardState, frame: &mut Frame, area: Rect) {
+    match state.ai_branch_phase {
+        AIBranchSuggestPhase::Input => {
+            let has_error = state.ai_branch_error.is_some();
+            let constraints: Vec<Constraint> = if has_error {
+                vec![
+                    Constraint::Length(1), // Label
+                    Constraint::Length(1), // Empty
+                    Constraint::Length(1), // Error
+                    Constraint::Length(1), // Empty
+                    Constraint::Length(1), // Input
+                ]
+            } else {
+                vec![
+                    Constraint::Length(1), // Label
+                    Constraint::Length(1), // Empty
+                    Constraint::Length(1), // Input
+                ]
+            };
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(constraints)
+                .split(area);
+
+            let label = Paragraph::new("What is this branch for?").style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            );
+            frame.render_widget(label, chunks[0]);
+
+            let input_idx = if has_error { 4 } else { 2 };
+            if let Some(msg) = state.ai_branch_error.as_deref() {
+                let text =
+                    truncate_with_ellipsis(&format!("Error: {}", msg), chunks[2].width as usize);
+                let error = Paragraph::new(text).style(Style::default().fg(Color::Red));
+                frame.render_widget(error, chunks[2]);
+            }
+
+            let input_text = if state.ai_branch_input.is_empty() {
+                "Describe what you are changing...".to_string()
+            } else {
+                state.ai_branch_input.clone()
+            };
+            let input_style = if state.ai_branch_input.is_empty() {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
+            let input = Paragraph::new(input_text).style(input_style);
+            frame.render_widget(input, chunks[input_idx]);
+
+            // Show cursor
+            let cursor_x = display_width_to_cursor(&state.ai_branch_input, state.ai_branch_cursor);
+            frame.set_cursor_position((
+                chunks[input_idx].x.saturating_add(cursor_x),
+                chunks[input_idx].y,
+            ));
+        }
+        AIBranchSuggestPhase::Loading => {
+            let loading = Paragraph::new("Generating branch name suggestions...")
+                .style(Style::default().fg(Color::Yellow));
+            frame.render_widget(loading, area);
+        }
+        AIBranchSuggestPhase::Select => {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1), // Label
+                    Constraint::Length(1), // Empty
+                    Constraint::Min(1),    // List
+                ])
+                .split(area);
+
+            let label = Paragraph::new("Select a branch name:").style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            );
+            frame.render_widget(label, chunks[0]);
+
+            // Update list area for mouse click detection (only when list is visible).
+            state.list_inner_area = Some(chunks[2]);
+
+            let max_width = chunks[2].width as usize;
+            let items: Vec<ListItem> = state
+                .ai_branch_suggestions
+                .iter()
+                .enumerate()
+                .map(|(i, s)| {
+                    let is_selected = i == state.ai_branch_selected;
+                    let prefix = if is_selected { "> " } else { "  " };
+                    let style = if is_selected {
+                        Style::default().bg(Color::Cyan).fg(Color::Black)
+                    } else {
+                        Style::default()
+                    };
+                    let text = truncate_with_ellipsis(
+                        &format!("{}{}", prefix, s),
+                        max_width.saturating_sub(0),
+                    );
+                    ListItem::new(text).style(style)
+                })
+                .collect();
+
+            let list = List::new(items);
+            frame.render_widget(list, chunks[2]);
+        }
+        AIBranchSuggestPhase::Error => {
+            let msg = state.ai_branch_error.as_deref().unwrap_or("Unknown error");
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1), // Error line
+                    Constraint::Length(1), // Empty
+                ])
+                .split(area);
+
+            let text = truncate_with_ellipsis(&format!("Error: {}", msg), chunks[0].width as usize);
+            let error = Paragraph::new(text).style(Style::default().fg(Color::Red));
+            frame.render_widget(error, chunks[0]);
+        }
+    }
+}
+
 fn render_branch_name_step(state: &WizardState, frame: &mut Frame, area: Rect) {
     // FR-014: Show Issue info if selected
     let has_issue = state.selected_issue.is_some();
@@ -3212,8 +3630,9 @@ fn render_branch_name_step(state: &WizardState, frame: &mut Frame, area: Rect) {
 
     // Show cursor
     if !state.new_branch_name.is_empty() || state.cursor == 0 {
+        let cursor_x = display_width_to_cursor(&state.new_branch_name, state.cursor);
         frame.set_cursor_position((
-            chunks[input_idx].x + state.cursor as u16,
+            chunks[input_idx].x.saturating_add(cursor_x),
             chunks[input_idx].y,
         ));
     }
@@ -4128,6 +4547,167 @@ mod tests {
     }
 
     // ==========================================================
+    // SPEC-1ad9c07d: AI Branch Suggest Tests
+    // ==========================================================
+
+    #[test]
+    fn test_branch_type_from_prefix_parses_known_prefixes() {
+        let (t, rest) = BranchType::from_prefix("feature/add-login").unwrap();
+        assert_eq!(t, BranchType::Feature);
+        assert_eq!(rest, "add-login");
+
+        let (t, rest) = BranchType::from_prefix("bugfix/fix-crash").unwrap();
+        assert_eq!(t, BranchType::Bugfix);
+        assert_eq!(rest, "fix-crash");
+
+        assert!(BranchType::from_prefix("unknown/name").is_none());
+        assert!(BranchType::from_prefix("no-prefix").is_none());
+    }
+
+    #[test]
+    fn test_parse_branch_suggestions_success_and_sanitizes_suffix_only() {
+        let response = r#"
+Here are suggestions:
+```json
+{"suggestions": ["feature/Add Login", "bugfix/fix-crash!", "release/v1.2.3"]}
+```
+"#;
+
+        let suggestions = parse_branch_suggestions(response).unwrap();
+        assert_eq!(
+            suggestions,
+            vec![
+                "feature/add-login".to_string(),
+                "bugfix/fix-crash".to_string(),
+                "release/v1-2-3".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_branch_suggestions_fails_on_invalid_json() {
+        let err = parse_branch_suggestions("not-json").unwrap_err();
+        assert!(matches!(err, AIError::ParseError(_)));
+    }
+
+    #[test]
+    fn test_parse_branch_suggestions_requires_exactly_three() {
+        let err = parse_branch_suggestions(r#"{"suggestions":["feature/a"]}"#).unwrap_err();
+        assert!(matches!(err, AIError::ParseError(_)));
+    }
+
+    #[test]
+    fn test_parse_branch_suggestions_fails_on_invalid_prefix() {
+        let err = parse_branch_suggestions(r#"{"suggestions":["foo/bar","feature/a","bugfix/b"]}"#)
+            .unwrap_err();
+        assert!(matches!(err, AIError::ParseError(_)));
+    }
+
+    #[test]
+    fn test_ai_branch_suggest_manual_fallback_keeps_existing_branch_name() {
+        let mut state = WizardState::new();
+        state.open_for_new_branch();
+        state.ai_enabled = true;
+        state.step = WizardStep::AIBranchSuggest;
+        state.new_branch_name = "issue-42".to_string();
+        state.cursor = state.new_branch_name.len();
+        state.ai_branch_phase = AIBranchSuggestPhase::Input;
+
+        // Manual fallback path should keep existing name (e.g., from IssueSelect).
+        state.next_step();
+        assert_eq!(state.step, WizardStep::BranchNameInput);
+        assert_eq!(state.new_branch_name, "issue-42");
+    }
+
+    #[test]
+    fn test_branch_name_input_handles_non_ascii_without_panic() {
+        let mut state = WizardState::new();
+        state.open_for_new_branch();
+        state.step = WizardStep::BranchNameInput;
+
+        state.insert_char('あ');
+        assert_eq!(state.new_branch_name, "あ");
+        assert_eq!(state.cursor, "あ".len());
+
+        state.cursor_left();
+        assert_eq!(state.cursor, 0);
+
+        state.cursor_right();
+        assert_eq!(state.cursor, "あ".len());
+
+        state.delete_char();
+        assert!(state.new_branch_name.is_empty());
+        assert_eq!(state.cursor, 0);
+    }
+
+    #[test]
+    fn test_ai_branch_suggest_input_handles_non_ascii_without_panic() {
+        let mut state = WizardState::new();
+        state.open_for_new_branch();
+        state.step = WizardStep::AIBranchSuggest;
+        state.ai_branch_phase = AIBranchSuggestPhase::Input;
+
+        state.insert_char('日');
+        state.insert_char('本');
+        assert_eq!(state.ai_branch_input, "日本");
+        assert_eq!(state.ai_branch_cursor, "日本".len());
+
+        state.cursor_left();
+        assert_eq!(state.ai_branch_cursor, "日".len());
+
+        state.delete_char();
+        assert_eq!(state.ai_branch_input, "本");
+        assert_eq!(state.ai_branch_cursor, 0);
+
+        state.cursor_right();
+        assert_eq!(state.ai_branch_cursor, "本".len());
+    }
+
+    #[test]
+    fn test_ai_branch_suggest_select_applies_branch_type_and_name() {
+        let mut state = WizardState::new();
+        state.open_for_new_branch();
+        state.step = WizardStep::AIBranchSuggest;
+        state.ai_branch_phase = AIBranchSuggestPhase::Select;
+        state.ai_branch_suggestions = vec!["bugfix/fix-crash".to_string()];
+        state.ai_branch_selected = 0;
+        state.branch_type = BranchType::Feature;
+        state.new_branch_name.clear();
+
+        state.next_step();
+        assert_eq!(state.step, WizardStep::BranchNameInput);
+        assert_eq!(state.branch_type, BranchType::Bugfix);
+        assert_eq!(state.new_branch_name, "fix-crash");
+    }
+
+    #[test]
+    fn test_branch_type_select_next_step_goes_to_issue_select_when_gh_available() {
+        let mut state = WizardState::new();
+        state.open_for_new_branch();
+        state.ai_enabled = true;
+        state.gh_cli_available = true;
+        state.step = WizardStep::BranchTypeSelect;
+
+        state.next_step();
+
+        assert_eq!(state.step, WizardStep::IssueSelect);
+    }
+
+    #[test]
+    fn test_branch_type_select_next_step_goes_to_ai_branch_suggest_when_gh_missing_and_ai_enabled()
+    {
+        let mut state = WizardState::new();
+        state.open_for_new_branch();
+        state.ai_enabled = true;
+        state.gh_cli_available = false;
+        state.step = WizardStep::BranchTypeSelect;
+
+        state.next_step();
+
+        assert_eq!(state.step, WizardStep::AIBranchSuggest);
+    }
+
+    // ==========================================================
     // SPEC-e4798383: GitHub Issue Selection Tests
     // ==========================================================
 
@@ -4152,6 +4732,24 @@ mod tests {
     }
 
     #[test]
+    fn test_issue_select_skip_goes_to_ai_branch_suggest_when_ai_enabled() {
+        let mut state = WizardState::new();
+        state.open_for_new_branch();
+        state.ai_enabled = true;
+        state.branch_type = BranchType::Feature;
+
+        state.step = WizardStep::IssueSelect;
+        state.issue_list.clear();
+        state.filtered_issues.clear();
+
+        let result = state.confirm();
+        assert_eq!(result, WizardConfirmResult::Advance);
+        assert_eq!(state.step, WizardStep::AIBranchSuggest);
+        assert!(state.new_branch_name.is_empty());
+        assert!(state.selected_issue.is_none());
+    }
+
+    #[test]
     fn test_issue_select_auto_skip_when_no_issues() {
         let mut state = WizardState::new();
         state.open_for_new_branch();
@@ -4161,6 +4759,22 @@ mod tests {
         state.apply_loaded_issues(vec![]);
 
         assert_eq!(state.step, WizardStep::BranchNameInput);
+        assert!(!state.issue_loading);
+        assert!(state.selected_issue.is_none());
+        assert!(state.new_branch_name.is_empty());
+    }
+
+    #[test]
+    fn test_issue_select_auto_skip_when_no_issues_goes_to_ai_branch_suggest_when_ai_enabled() {
+        let mut state = WizardState::new();
+        state.open_for_new_branch();
+        state.ai_enabled = true;
+        state.step = WizardStep::IssueSelect;
+        state.issue_loading = true;
+
+        state.apply_loaded_issues(vec![]);
+
+        assert_eq!(state.step, WizardStep::AIBranchSuggest);
         assert!(!state.issue_loading);
         assert!(state.selected_issue.is_none());
         assert!(state.new_branch_name.is_empty());
@@ -4225,6 +4839,31 @@ mod tests {
         assert_eq!(state.new_branch_name, "issue-42");
         assert!(state.selected_issue.is_some());
         assert_eq!(state.selected_issue.as_ref().unwrap().number, 42);
+    }
+
+    #[test]
+    fn test_issue_select_generates_branch_name_and_goes_to_ai_branch_suggest_when_ai_enabled() {
+        let mut state = WizardState::new();
+        state.open_for_new_branch();
+        state.ai_enabled = true;
+        state.branch_type = BranchType::Feature;
+        state.step = WizardStep::IssueSelect;
+
+        state.issue_list = vec![GitHubIssue::new(
+            42,
+            "Test issue".to_string(),
+            "2025-01-25T10:00:00Z".to_string(),
+        )];
+        state.filtered_issues = vec![0];
+        state.issue_selected_index = 1;
+        state.issue_existing_branch = None;
+
+        let result = state.confirm();
+        assert_eq!(result, WizardConfirmResult::Advance);
+        assert_eq!(state.step, WizardStep::AIBranchSuggest);
+        assert_eq!(state.new_branch_name, "issue-42");
+        assert_eq!(state.cursor, state.new_branch_name.len());
+        assert!(state.selected_issue.is_some());
     }
 
     /// Test Skip option (index 0) skips issue selection

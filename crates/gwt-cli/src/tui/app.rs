@@ -19,9 +19,9 @@ use crossterm::{
 use gwt_core::agent::codex::supports_collaboration_modes;
 use gwt_core::agent::{OrchestratorEvent, OrchestratorMessage, SessionStatus, SessionStore};
 use gwt_core::ai::{
-    summarize_session, AIClient, AIError, AgentHistoryStore, AgentType, ChatMessage,
-    ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, ModelInfo, OpenCodeSessionParser,
-    SessionParseError, SessionParser,
+    format_error_for_display, summarize_session, AIClient, AIError, AgentHistoryStore, AgentType,
+    ChatMessage, ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, ModelInfo,
+    OpenCodeSessionParser, SessionParseError, SessionParser,
 };
 use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{
@@ -70,6 +70,7 @@ use super::screens::environment::EditField;
 use super::screens::git_view::{build_git_view_data, build_git_view_data_no_worktree, GitViewData};
 use super::screens::pane_list::PaneListState;
 use super::screens::split_layout::{calculate_split_layout, SplitLayoutState};
+use super::screens::wizard::{parse_branch_suggestions, AIBranchSuggestPhase};
 use super::screens::worktree_create::WorktreeCreateStep;
 use super::screens::{
     collect_os_env, render_agent_mode, render_ai_wizard, render_branch_list, render_clone_wizard,
@@ -392,6 +393,10 @@ struct AiWizardUpdate {
     result: Result<Vec<ModelInfo>, AIError>,
 }
 
+struct AiBranchSuggestUpdate {
+    result: Result<Vec<String>, AIError>,
+}
+
 struct BranchListUpdate {
     branches: Vec<BranchItem>,
     branch_names: Vec<String>,
@@ -590,6 +595,8 @@ pub struct Model {
     orchestrator_message_rx: Option<Receiver<OrchestratorMessage>>,
     /// AI wizard model fetch receiver
     ai_wizard_rx: Option<Receiver<AiWizardUpdate>>,
+    /// AI branch suggest receiver (SPEC-1ad9c07d)
+    ai_branch_suggest_rx: Option<Receiver<AiBranchSuggestUpdate>>,
     /// Tmux mode (Single or Multi)
     tmux_mode: TmuxMode,
     /// Tmux session name (when in multi mode)
@@ -887,6 +894,7 @@ impl Model {
             orchestrator_event_tx: None,
             orchestrator_message_rx: None,
             ai_wizard_rx: None,
+            ai_branch_suggest_rx: None,
             tmux_mode: TmuxMode::detect(),
             tmux_session: None,
             gwt_pane_id: None,
@@ -1108,106 +1116,162 @@ impl Model {
             let branches: Vec<_> = if repo_type == RepoType::Bare {
                 // Bare repo: Local = only branches with worktrees
                 all_branches
-                    .into_iter()
+                    .iter()
                     .filter(|b| worktree_branch_names.contains(&b.name))
-                    .collect()
+                    .cloned()
+                    .collect::<Vec<_>>()
             } else {
-                all_branches
+                all_branches.clone()
             };
 
             // SPEC-a70a1ece FR-171: For bare repos, branches without worktrees go to Remote
-            let remote_branches = if repo_type == RepoType::Bare {
-                // Get all branches and filter out ones with worktrees
-                let all_for_remote = Branch::list_basic(git_path).unwrap_or_default();
-                all_for_remote
-                    .into_iter()
+            let remote_branches_stage1 = if repo_type == RepoType::Bare {
+                all_branches
+                    .iter()
                     .filter(|b| !worktree_branch_names.contains(&b.name))
+                    .cloned()
                     .collect::<Vec<_>>()
             } else {
                 Branch::list_remote(git_path).unwrap_or_default()
             };
 
-            let mut remote_display_branches = Vec::new();
-            for mut branch in remote_branches {
-                if repo_type != RepoType::Bare && !branch.name.starts_with("remotes/") {
-                    branch.name = format!("remotes/{}", branch.name);
-                }
-                remote_display_branches.push(branch);
-            }
-            let worktree_targets: Vec<WorktreeStatusTarget> = worktrees
-                .iter()
-                .filter_map(|wt| {
-                    wt.branch.clone().map(|branch| WorktreeStatusTarget {
-                        branch,
-                        path: wt.path.clone(),
-                    })
-                })
-                .collect();
-
             // Load tool usage from TypeScript session file (FR-070)
             let tool_usage_map = gwt_core::config::get_last_tool_usage_map(&repo_root);
-            let mut safety_targets = Vec::new();
 
-            let mut branch_items: Vec<BranchItem> = branches
-                .iter()
-                .map(|b| {
-                    let mut item = BranchItem::from_branch_minimal(b, &worktrees);
-
-                    // Set tool usage from TypeScript session history or agent history (FR-070/088)
-                    apply_last_tool_usage(&mut item, &repo_root, &tool_usage_map, &agent_history);
-
-                    // Safety check short-circuit: use immediate signals first
-                    if item.branch_type == BranchType::Local {
-                        if !base_branch_exists {
-                            item.safe_to_cleanup = Some(false);
-                        } else {
-                            // Check safety even without upstream (FR-004b)
-                            item.safe_to_cleanup = None;
-                            safety_targets.push(SafetyCheckTarget {
-                                branch: b.name.clone(),
-                                upstream: b.upstream.clone(),
-                            });
-                        }
+            let build_update = |remote_branches: Vec<Branch>| -> BranchListUpdate {
+                let mut remote_display_branches = Vec::new();
+                for mut branch in remote_branches {
+                    if repo_type != RepoType::Bare && !branch.name.starts_with("remotes/") {
+                        branch.name = format!("remotes/{}", branch.name);
                     }
+                    remote_display_branches.push(branch);
+                }
 
-                    item.update_safety_status();
+                let worktree_targets: Vec<WorktreeStatusTarget> = worktrees
+                    .iter()
+                    .filter_map(|wt| {
+                        wt.branch.clone().map(|branch| WorktreeStatusTarget {
+                            branch,
+                            path: wt.path.clone(),
+                        })
+                    })
+                    .collect();
+
+                let mut safety_targets = Vec::new();
+                let mut branch_items: Vec<BranchItem> = branches
+                    .iter()
+                    .map(|b| {
+                        let mut item = BranchItem::from_branch_minimal(b, &worktrees);
+
+                        // Set tool usage from TypeScript session history or agent history (FR-070/088)
+                        apply_last_tool_usage(
+                            &mut item,
+                            &repo_root,
+                            &tool_usage_map,
+                            &agent_history,
+                        );
+
+                        // Safety check short-circuit: use immediate signals first
+                        if item.branch_type == BranchType::Local {
+                            if !base_branch_exists {
+                                item.safe_to_cleanup = Some(false);
+                            } else {
+                                // Check safety even without upstream (FR-004b)
+                                item.safe_to_cleanup = None;
+                                safety_targets.push(SafetyCheckTarget {
+                                    branch: b.name.clone(),
+                                    upstream: b.upstream.clone(),
+                                });
+                            }
+                        }
+
+                        item.update_safety_status();
+                        item
+                    })
+                    .collect();
+
+                branch_items.extend(remote_display_branches.iter().map(|b| {
+                    let mut item = BranchItem::from_branch_minimal(b, &worktrees);
+                    // SPEC-a70a1ece FR-171: For bare repos, branches without worktrees are Remote
+                    if repo_type == RepoType::Bare {
+                        item.branch_type = BranchType::Remote;
+                    }
+                    apply_last_tool_usage(&mut item, &repo_root, &tool_usage_map, &agent_history);
                     item
-                })
-                .collect();
-            branch_items.extend(remote_display_branches.iter().map(|b| {
-                let mut item = BranchItem::from_branch_minimal(b, &worktrees);
-                // SPEC-a70a1ece FR-171: For bare repos, branches without worktrees are Remote
-                if repo_type == RepoType::Bare {
-                    item.branch_type = BranchType::Remote;
+                }));
+
+                // Sort branches by timestamp for those with sessions
+                branch_items.iter_mut().for_each(|item| {
+                    if item.last_commit_timestamp.is_none() {
+                        // Try to get timestamp from git (fallback)
+                        // For now, leave as None - the sort will handle it
+                    }
+                });
+
+                let total_count = branch_items.len();
+                let active_count = branch_items.iter().filter(|b| b.has_worktree).count();
+                let base_branches: Vec<String> = branches.iter().map(|b| b.name.clone()).collect();
+                let branch_names: Vec<String> =
+                    branch_items.iter().map(|b| b.name.clone()).collect();
+
+                BranchListUpdate {
+                    branches: branch_items,
+                    branch_names,
+                    worktree_targets,
+                    safety_targets,
+                    base_branches,
+                    base_branch: base_branch.clone(),
+                    base_branch_exists,
+                    total_count,
+                    active_count,
                 }
-                apply_last_tool_usage(&mut item, &repo_root, &tool_usage_map, &agent_history);
-                item
-            }));
+            };
 
-            // Sort branches by timestamp for those with sessions
-            branch_items.iter_mut().for_each(|item| {
-                if item.last_commit_timestamp.is_none() {
-                    // Try to get timestamp from git (fallback)
-                    // For now, leave as None - the sort will handle it
+            // Stage 1: Use local refs only so the list becomes available quickly.
+            let _ = tx.send(build_update(remote_branches_stage1.clone()));
+
+            // Stage 2: Supplement remote branches via ls-remote, without blocking Stage 1.
+            let origin_heads = Branch::list_remote_from_origin(git_path).unwrap_or_default();
+            if origin_heads.is_empty() {
+                return;
+            }
+
+            let mut remote_branches_stage2 = remote_branches_stage1;
+            let stage1_len = remote_branches_stage2.len();
+
+            if repo_type == RepoType::Bare {
+                let mut existing: HashSet<String> = remote_branches_stage2
+                    .iter()
+                    .map(|b| b.name.clone())
+                    .collect();
+                for mut branch in origin_heads {
+                    let Some(name) = branch.name.strip_prefix("origin/") else {
+                        continue;
+                    };
+                    if worktree_branch_names.contains(name) || existing.contains(name) {
+                        continue;
+                    }
+                    branch.name = name.to_string();
+                    existing.insert(branch.name.clone());
+                    remote_branches_stage2.push(branch);
                 }
-            });
+            } else {
+                let mut existing: HashSet<String> = remote_branches_stage2
+                    .iter()
+                    .map(|b| b.name.clone())
+                    .collect();
+                for branch in origin_heads {
+                    if existing.contains(&branch.name) {
+                        continue;
+                    }
+                    existing.insert(branch.name.clone());
+                    remote_branches_stage2.push(branch);
+                }
+            }
 
-            let total_count = branch_items.len();
-            let active_count = branch_items.iter().filter(|b| b.has_worktree).count();
-            let base_branches: Vec<String> = branches.iter().map(|b| b.name.clone()).collect();
-            let branch_names: Vec<String> = branch_items.iter().map(|b| b.name.clone()).collect();
-
-            let _ = tx.send(BranchListUpdate {
-                branches: branch_items,
-                branch_names,
-                worktree_targets,
-                safety_targets,
-                base_branches,
-                base_branch,
-                base_branch_exists,
-                total_count,
-                active_count,
-            });
+            if remote_branches_stage2.len() > stage1_len {
+                let _ = tx.send(build_update(remote_branches_stage2));
+            }
         });
     }
 
@@ -2078,6 +2142,38 @@ impl Model {
         }
     }
 
+    fn apply_ai_branch_suggest_updates(&mut self) {
+        let Some(rx) = self.ai_branch_suggest_rx.take() else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(update) => {
+                // Only apply updates while the wizard is visible.
+                if !self.wizard.visible || self.wizard.step != WizardStep::AIBranchSuggest {
+                    return;
+                }
+                match update.result {
+                    Ok(suggestions) => {
+                        self.wizard.ai_branch_suggestions = suggestions;
+                        self.wizard.ai_branch_selected = 0;
+                        self.wizard.ai_branch_error = None;
+                        self.wizard.ai_branch_phase = AIBranchSuggestPhase::Select;
+                    }
+                    Err(err) => {
+                        self.wizard.ai_branch_suggestions.clear();
+                        self.wizard.ai_branch_error = Some(format_error_for_display(&err));
+                        self.wizard.ai_branch_phase = AIBranchSuggestPhase::Error;
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {
+                self.ai_branch_suggest_rx = Some(rx);
+            }
+            Err(TryRecvError::Disconnected) => {}
+        }
+    }
+
     fn poll_session_summary_if_needed(&mut self) {
         if !self.branch_list.session_summary_enabled {
             return;
@@ -2258,65 +2354,80 @@ impl Model {
     }
 
     fn apply_branch_list_updates(&mut self) {
-        let Some(rx) = &self.branch_list_rx else {
-            return;
+        let (last_update, disconnected) = {
+            let Some(rx) = &self.branch_list_rx else {
+                return;
+            };
+
+            let mut last_update: Option<BranchListUpdate> = None;
+            let mut disconnected = false;
+
+            loop {
+                match rx.try_recv() {
+                    Ok(update) => last_update = Some(update),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+
+            (last_update, disconnected)
         };
 
-        match rx.try_recv() {
-            Ok(update) => {
-                let cleanup_snapshot = self.branch_list.cleanup_snapshot();
-                let session_cache = self.branch_list.clone_session_cache();
-                let session_inflight = self.branch_list.clone_session_inflight();
-                let session_missing = self.branch_list.clone_session_missing();
-                let session_warnings = self.branch_list.clone_session_warnings();
-                let sort_mode = self.branch_list.sort_mode;
-                let mut branch_list = BranchListState::new();
-                branch_list.sort_mode = sort_mode;
-                let mut branch_list = branch_list.with_branches(update.branches);
-                branch_list.active_profile = self.profiles_config.active.clone();
-                branch_list.ai_enabled = self.active_ai_enabled();
-                branch_list.session_summary_enabled = self.active_session_summary_enabled();
-                branch_list.set_session_cache(session_cache);
-                branch_list.set_session_inflight(session_inflight);
-                branch_list.set_session_missing(session_missing);
-                branch_list.set_session_warnings(session_warnings);
-                branch_list.set_repo_web_url(self.branch_list.repo_web_url().cloned());
-                branch_list.working_directory = Some(self.repo_root.display().to_string());
-                branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
-                // セッション警告のクリーンアップ（削除されたブランチ分）
-                let remaining_branches: std::collections::HashSet<String> = branch_list
-                    .branches
-                    .iter()
-                    .map(|b| b.name.clone())
-                    .collect();
-                branch_list.cleanup_session_warnings(&remaining_branches);
-                branch_list.restore_cleanup_snapshot(&cleanup_snapshot);
-                self.branch_list = branch_list;
-                // SPEC-4b893dae: Update branch summary after branches are loaded
-                self.refresh_branch_summary();
+        if let Some(update) = last_update {
+            let cleanup_snapshot = self.branch_list.cleanup_snapshot();
+            let session_cache = self.branch_list.clone_session_cache();
+            let session_inflight = self.branch_list.clone_session_inflight();
+            let session_missing = self.branch_list.clone_session_missing();
+            let session_warnings = self.branch_list.clone_session_warnings();
+            let sort_mode = self.branch_list.sort_mode;
+            let mut branch_list = BranchListState::new();
+            branch_list.sort_mode = sort_mode;
+            let mut branch_list = branch_list.with_branches(update.branches);
+            branch_list.active_profile = self.profiles_config.active.clone();
+            branch_list.ai_enabled = self.active_ai_enabled();
+            branch_list.session_summary_enabled = self.active_session_summary_enabled();
+            branch_list.set_session_cache(session_cache);
+            branch_list.set_session_inflight(session_inflight);
+            branch_list.set_session_missing(session_missing);
+            branch_list.set_session_warnings(session_warnings);
+            branch_list.set_repo_web_url(self.branch_list.repo_web_url().cloned());
+            branch_list.working_directory = Some(self.repo_root.display().to_string());
+            branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
+            // セッション警告のクリーンアップ（削除されたブランチ分）
+            let remaining_branches: std::collections::HashSet<String> = branch_list
+                .branches
+                .iter()
+                .map(|b| b.name.clone())
+                .collect();
+            branch_list.cleanup_session_warnings(&remaining_branches);
+            branch_list.restore_cleanup_snapshot(&cleanup_snapshot);
+            self.branch_list = branch_list;
+            // SPEC-4b893dae: Update branch summary after branches are loaded
+            self.refresh_branch_summary();
 
-                self.total_count = update.total_count;
-                self.active_count = update.active_count;
+            self.total_count = update.total_count;
+            self.active_count = update.active_count;
 
-                let total_updates = update.safety_targets.len() + update.worktree_targets.len();
-                self.branch_list.reset_status_progress(total_updates);
-                self.spawn_safety_checks(
-                    update.safety_targets,
-                    update.base_branch,
-                    update.base_branch_exists,
-                );
-                self.spawn_worktree_status_checks(update.worktree_targets);
-                self.spawn_pr_title_fetch(update.branch_names);
+            let total_updates = update.safety_targets.len() + update.worktree_targets.len();
+            self.branch_list.reset_status_progress(total_updates);
+            self.spawn_safety_checks(
+                update.safety_targets,
+                update.base_branch,
+                update.base_branch_exists,
+            );
+            self.spawn_worktree_status_checks(update.worktree_targets);
+            self.spawn_pr_title_fetch(update.branch_names);
 
-                self.worktree_create =
-                    WorktreeCreateState::new().with_base_branches(update.base_branches);
-                self.branch_list_rx = None;
-            }
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => {
-                self.branch_list.set_loading(false);
-                self.branch_list_rx = None;
-            }
+            self.worktree_create =
+                WorktreeCreateState::new().with_base_branches(update.base_branches);
+        }
+
+        if disconnected {
+            self.branch_list.set_loading(false);
+            self.branch_list_rx = None;
         }
     }
 
@@ -4558,6 +4669,7 @@ impl Model {
                 self.apply_agent_mode_updates();
                 self.apply_orchestrator_messages();
                 self.apply_ai_wizard_updates();
+                self.apply_ai_branch_suggest_updates();
                 self.poll_session_summary_if_needed();
                 // SPEC-1ea18899: Apply GitView cache updates
                 self.apply_git_view_cache_updates();
@@ -5508,6 +5620,8 @@ impl Model {
                         .collect();
                     self.wizard
                         .open_for_branch(&branch_name, history, running_pane_idx);
+                    // SPEC-1ad9c07d: snapshot AI enabled flag for conditional wizard steps
+                    self.wizard.ai_enabled = self.active_ai_enabled();
                 } else {
                     self.status_message = Some("No branch selected".to_string());
                     self.status_message_time = Some(Instant::now());
@@ -5516,6 +5630,8 @@ impl Model {
             Message::OpenWizardNewBranch => {
                 // Open wizard for new branch
                 self.wizard.open_for_new_branch();
+                // SPEC-1ad9c07d: snapshot AI enabled flag for conditional wizard steps
+                self.wizard.ai_enabled = self.active_ai_enabled();
             }
             Message::WizardNext => {
                 if self.wizard.visible {
@@ -5529,6 +5645,67 @@ impl Model {
             }
             Message::WizardConfirm => {
                 if self.wizard.visible {
+                    // SPEC-1ad9c07d: AIBranchSuggest has phase-specific Enter behavior
+                    if self.wizard.step == WizardStep::AIBranchSuggest {
+                        match self.wizard.ai_branch_phase {
+                            AIBranchSuggestPhase::Input => {
+                                let input = self.wizard.ai_branch_input.trim().to_string();
+                                if input.is_empty() {
+                                    self.wizard.ai_branch_error =
+                                        Some("Please enter a description.".to_string());
+                                    return;
+                                }
+
+                                let Some(settings) = self.active_ai_settings() else {
+                                    self.wizard.ai_branch_error =
+                                        Some("AI settings are not configured.".to_string());
+                                    self.wizard.ai_branch_phase = AIBranchSuggestPhase::Error;
+                                    return;
+                                };
+
+                                self.wizard.ai_branch_phase = AIBranchSuggestPhase::Loading;
+                                self.wizard.ai_branch_error = None;
+                                self.wizard.ai_branch_suggestions.clear();
+                                self.wizard.ai_branch_selected = 0;
+
+                                let preferred_prefix = self.wizard.branch_type.prefix().to_string();
+
+                                let messages = vec![
+                                    ChatMessage {
+                                        role: "system".to_string(),
+                                        content: "You are a git branch naming assistant. Generate exactly 3 branch name suggestions based on the user's description.\n\nRules:\n- Each suggestion must include exactly one of these prefixes: feature/, bugfix/, hotfix/, release/\n- Use lowercase\n- Use hyphens for separators\n- Keep names concise (<= 50 characters including prefix)\n\nRespond with JSON only in this format: {\"suggestions\": [\"prefix/name-1\", \"prefix/name-2\", \"prefix/name-3\"]}".to_string(),
+                                    },
+                                    ChatMessage {
+                                        role: "user".to_string(),
+                                        content: format!(
+                                            "Preferred prefix: {}\nDescription: {}\n\nRespond with JSON: {{\"suggestions\": [\"prefix/name-1\", \"prefix/name-2\", \"prefix/name-3\"]}}",
+                                            preferred_prefix, input
+                                        ),
+                                    },
+                                ];
+
+                                let (tx, rx) = mpsc::channel();
+                                self.ai_branch_suggest_rx = Some(rx);
+
+                                thread::spawn(move || {
+                                    let result = AIClient::new(settings)
+                                        .and_then(|client| client.create_response(messages))
+                                        .and_then(|text| parse_branch_suggestions(&text));
+                                    let _ = tx.send(AiBranchSuggestUpdate { result });
+                                });
+
+                                return;
+                            }
+                            AIBranchSuggestPhase::Loading => {
+                                // Do nothing while fetching
+                                return;
+                            }
+                            AIBranchSuggestPhase::Select | AIBranchSuggestPhase::Error => {
+                                // Fall through to normal wizard.confirm()
+                            }
+                        }
+                    }
+
                     // SPEC-e4798383: Check for duplicate branch before confirming IssueSelect
                     if self.wizard.step == WizardStep::IssueSelect {
                         self.wizard.check_issue_duplicate(&self.repo_root);
@@ -5570,7 +5747,39 @@ impl Model {
             }
             Message::WizardBack => {
                 if self.wizard.visible {
-                    self.wizard.prev_step();
+                    // SPEC-1ad9c07d: AIBranchSuggest has phase-specific Esc behavior
+                    if self.wizard.step == WizardStep::AIBranchSuggest {
+                        match self.wizard.ai_branch_phase {
+                            AIBranchSuggestPhase::Input => {
+                                // Skip to manual branch name input
+                                self.wizard.ai_branch_error = None;
+                                self.wizard.next_step();
+                            }
+                            AIBranchSuggestPhase::Loading => {
+                                // Cancel: drop receiver and ignore result
+                                self.ai_branch_suggest_rx = None;
+                                self.wizard.ai_branch_phase = AIBranchSuggestPhase::Input;
+                                self.wizard.ai_branch_error = None;
+                                self.wizard.ai_branch_suggestions.clear();
+                                self.wizard.ai_branch_selected = 0;
+                                self.wizard.ai_branch_cursor = self.wizard.ai_branch_input.len();
+                            }
+                            AIBranchSuggestPhase::Select => {
+                                self.wizard.ai_branch_phase = AIBranchSuggestPhase::Input;
+                                self.wizard.ai_branch_error = None;
+                                self.wizard.ai_branch_suggestions.clear();
+                                self.wizard.ai_branch_selected = 0;
+                                self.wizard.ai_branch_cursor = self.wizard.ai_branch_input.len();
+                            }
+                            AIBranchSuggestPhase::Error => {
+                                self.wizard.ai_branch_phase = AIBranchSuggestPhase::Input;
+                                self.wizard.ai_branch_error = None;
+                                self.wizard.ai_branch_cursor = self.wizard.ai_branch_input.len();
+                            }
+                        }
+                    } else {
+                        self.wizard.prev_step();
+                    }
                 }
             }
         }
