@@ -33,14 +33,9 @@
           selectedAgent = available.name;
         }
       }
-    } catch {
-      // Dev mode fallback
-      agents = [
-        { name: "Claude Code", agent_type: "claude", available: true },
-        { name: "Cursor", agent_type: "cursor", available: false },
-        { name: "GitHub Copilot", agent_type: "copilot", available: false },
-      ];
-      selectedAgent = "Claude Code";
+    } catch (err) {
+      console.error("Failed to detect agents:", err);
+      agents = [];
     }
     loading = false;
   }

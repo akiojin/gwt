@@ -24,16 +24,9 @@
       if (saved) {
         recentProjects = saved;
       }
-    } catch {
-      // Dev mode fallback
-      recentProjects = [
-        { path: "/Users/dev/my-project", name: "my-project", lastOpened: "Today" },
-        {
-          path: "/Users/dev/another-repo",
-          name: "another-repo",
-          lastOpened: "Yesterday",
-        },
-      ];
+    } catch (err) {
+      console.error("Failed to load recent projects:", err);
+      recentProjects = [];
     }
   }
 
@@ -66,9 +59,8 @@
       if (selected) {
         await openProject(selected as string);
       }
-    } catch {
-      // Dev mode fallback
-      await openProject("/Users/dev/demo-project");
+    } catch (err) {
+      console.error("Failed to open folder dialog:", err);
     }
     loading = false;
   }
@@ -79,10 +71,8 @@
       const info = await invoke<ProjectInfo>("open_project", { path });
       await saveToRecent(info.path);
       onOpen(info.path);
-    } catch {
-      // Dev mode fallback: just open directly
-      await saveToRecent(path);
-      onOpen(path);
+    } catch (err) {
+      console.error("Failed to open project:", err);
     }
   }
 </script>

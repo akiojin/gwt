@@ -63,50 +63,9 @@
         }
         branches = merged;
       }
-    } catch {
-      // Dev mode fallback
-      branches = [
-        {
-          name: "main",
-          commit: "abc1234",
-          is_current: true,
-          ahead: 0,
-          behind: 0,
-          divergence_status: "UpToDate",
-        },
-        {
-          name: "develop",
-          commit: "def5678",
-          is_current: false,
-          ahead: 2,
-          behind: 0,
-          divergence_status: "Ahead",
-        },
-        {
-          name: "feature/multi-terminal",
-          commit: "ghi9012",
-          is_current: false,
-          ahead: 5,
-          behind: 1,
-          divergence_status: "Diverged",
-        },
-        {
-          name: "feature/auth",
-          commit: "jkl3456",
-          is_current: false,
-          ahead: 0,
-          behind: 3,
-          divergence_status: "Behind",
-        },
-        {
-          name: "fix/login-bug",
-          commit: "mno7890",
-          is_current: false,
-          ahead: 1,
-          behind: 0,
-          divergence_status: "Ahead",
-        },
-      ];
+    } catch (err) {
+      console.error("Failed to fetch branches:", err);
+      branches = [];
     }
     loading = false;
   }

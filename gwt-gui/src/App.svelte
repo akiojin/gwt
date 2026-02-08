@@ -47,9 +47,9 @@
       if (branch) {
         currentBranch = branch.name;
       }
-    } catch {
-      // Dev mode fallback
-      currentBranch = "main";
+    } catch (err) {
+      console.error("Failed to fetch current branch:", err);
+      currentBranch = "";
     }
   }
 
@@ -63,9 +63,9 @@
         agentName,
         branch,
       });
-    } catch {
-      // Dev mode fallback
-      paneId = `dev-${Date.now()}`;
+    } catch (err) {
+      console.error("Failed to launch terminal:", err);
+      return;
     }
 
     const newTab: Tab = {

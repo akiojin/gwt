@@ -21,8 +21,8 @@
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       settings = await invoke<SettingsData>("get_settings");
-    } catch {
-      // Dev mode fallback - use defaults
+    } catch (err) {
+      console.error("Failed to load settings:", err);
     }
     loading = false;
   }
@@ -34,8 +34,9 @@
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("save_settings", { settings });
       saveMessage = "Settings saved.";
-    } catch {
-      saveMessage = "Saved (dev mode).";
+    } catch (err) {
+      console.error("Failed to save settings:", err);
+      saveMessage = "Failed to save settings.";
     }
     saving = false;
     setTimeout(() => {

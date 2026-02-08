@@ -115,12 +115,8 @@
         }
       );
       unlisten = unlistenFn;
-    } catch {
-      // Dev mode fallback - show a welcome message
-      if (terminal) {
-        terminal.writeln(`\x1b[32m[Terminal ${paneId}]\x1b[0m Connected`);
-        terminal.writeln("Waiting for backend connection...");
-      }
+    } catch (err) {
+      console.error("Failed to setup terminal event listener:", err);
     }
   }
 
@@ -130,11 +126,8 @@
       const encoder = new TextEncoder();
       const bytes = Array.from(encoder.encode(data));
       await invoke("write_terminal", { paneId, data: bytes });
-    } catch {
-      // Dev mode: echo input
-      if (terminal) {
-        terminal.write(data);
-      }
+    } catch (err) {
+      console.error("Failed to write to terminal:", err);
     }
   }
 
@@ -142,8 +135,8 @@
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("write_terminal", { paneId, data });
-    } catch {
-      // Dev mode: no-op for binary
+    } catch (err) {
+      console.error("Failed to write binary to terminal:", err);
     }
   }
 
@@ -151,8 +144,8 @@
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("resize_terminal", { paneId, rows, cols });
-    } catch {
-      // Dev mode: ignore resize
+    } catch (err) {
+      console.error("Failed to resize terminal:", err);
     }
   }
 </script>
