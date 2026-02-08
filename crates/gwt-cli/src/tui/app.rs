@@ -2630,39 +2630,49 @@ impl Model {
     }
 
     /// FR-048: Handle mouse scroll events for the agent pane.
-    /// Only sends scroll to PTY when the app has enabled mouse protocol.
-    /// When mouse protocol is None (e.g. shell prompt), scroll is ignored.
+    /// When mouse protocol is enabled: send X10 mouse scroll bytes.
+    /// When mouse protocol is disabled: send arrow key sequences (Up/Down × 3).
     fn handle_agent_pane_scroll(&mut self, mouse: MouseEvent) {
-        // FR-048: Only send scroll when PTY app has enabled mouse protocol
         let mouse_enabled = self
             .terminal_manager
             .active_pane()
             .map(|p| p.mouse_protocol_enabled())
             .unwrap_or(false);
 
-        if !mouse_enabled {
-            return;
-        }
-
         let is_up = matches!(mouse.kind, MouseEventKind::ScrollUp);
 
-        // Compute agent pane area from current terminal size
-        let term_size = crossterm::terminal::size().unwrap_or((160, 40));
-        let full_area = ratatui::layout::Rect::new(0, 0, term_size.0, term_size.1);
-        // Account for status line (1 row at top)
-        let content_area =
-            ratatui::layout::Rect::new(0, 1, full_area.width, full_area.height.saturating_sub(1));
-        let split_areas =
-            super::screens::split_layout::calculate_split_layout(content_area, &self.split_layout);
-        if let Some(pane_area) = split_areas.agent_pane {
-            let bytes = super::screens::agent_pane::mouse_scroll_to_bytes(
-                is_up,
-                mouse.column,
-                mouse.row,
-                pane_area,
+        if mouse_enabled {
+            // Mouse protocol enabled: send X10 scroll bytes
+            let term_size = crossterm::terminal::size().unwrap_or((160, 40));
+            let full_area = ratatui::layout::Rect::new(0, 0, term_size.0, term_size.1);
+            let content_area = ratatui::layout::Rect::new(
+                0,
+                1,
+                full_area.width,
+                full_area.height.saturating_sub(1),
             );
+            let split_areas = super::screens::split_layout::calculate_split_layout(
+                content_area,
+                &self.split_layout,
+            );
+            if let Some(pane_area) = split_areas.agent_pane {
+                let bytes = super::screens::agent_pane::mouse_scroll_to_bytes(
+                    is_up,
+                    mouse.column,
+                    mouse.row,
+                    pane_area,
+                );
+                if let Some(pane) = self.terminal_manager.active_pane_mut() {
+                    let _ = pane.write_input(&bytes);
+                }
+            }
+        } else {
+            // Mouse protocol disabled: send arrow keys (3 lines per scroll tick)
+            let arrow = if is_up { b"\x1b[A" } else { b"\x1b[B" };
             if let Some(pane) = self.terminal_manager.active_pane_mut() {
-                let _ = pane.write_input(&bytes);
+                for _ in 0..3 {
+                    let _ = pane.write_input(arrow);
+                }
             }
         }
     }
