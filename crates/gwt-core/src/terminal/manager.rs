@@ -164,6 +164,11 @@ impl PaneManager {
         Ok(pane_id)
     }
 
+    /// Get a mutable reference to a pane by its ID.
+    pub fn pane_mut_by_id(&mut self, id: &str) -> Option<&mut TerminalPane> {
+        self.panes.iter_mut().find(|p| p.pane_id() == id)
+    }
+
     /// Immutable slice of all panes.
     pub fn panes(&self) -> &[TerminalPane] {
         &self.panes
@@ -509,7 +514,25 @@ mod tests {
         }
     }
 
-    // --- 22. launch_agent sets active_pane to new pane ---
+    // --- 22. pane_mut_by_id ---
+
+    #[test]
+    fn test_pane_mut_by_id_found() {
+        let mut mgr = PaneManager::new();
+        mgr.add_pane(create_test_pane("p0")).unwrap();
+        mgr.add_pane(create_test_pane("p1")).unwrap();
+        assert!(mgr.pane_mut_by_id("p0").is_some());
+        assert!(mgr.pane_mut_by_id("p1").is_some());
+    }
+
+    #[test]
+    fn test_pane_mut_by_id_not_found() {
+        let mut mgr = PaneManager::new();
+        mgr.add_pane(create_test_pane("p0")).unwrap();
+        assert!(mgr.pane_mut_by_id("nonexistent").is_none());
+    }
+
+    // --- 23. launch_agent sets active_pane to new pane ---
 
     #[test]
     fn test_launch_agent_sets_active_pane() {

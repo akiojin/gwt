@@ -5,7 +5,7 @@ use clap::Parser;
 use gwt_core::agent::codex::{codex_default_args, codex_skip_permissions_flag};
 use gwt_core::agent::get_command_version;
 use gwt_core::ai::{
-    AgentHistoryStore, AgentType as SessionAgentType, ClaudeSessionParser, CodexSessionParser,
+    AgentType as SessionAgentType, ClaudeSessionParser, CodexSessionParser,
     GeminiSessionParser, OpenCodeSessionParser, SessionParser,
 };
 use gwt_core::config::{save_session_entry, AgentStatus, Settings, ToolSessionEntry};
@@ -26,7 +26,7 @@ mod commands;
 mod tui;
 
 use cli::Cli;
-use tui::{AgentLaunchConfig, CodingAgent, ExecutionMode, TuiEntryContext};
+use tui::{AgentLaunchConfig, CodingAgent, ExecutionMode};
 
 fn main() {
     if let Err(e) = run() {
@@ -82,75 +82,9 @@ fn run() -> Result<(), GwtError> {
     match cli.command {
         Some(cmd) => commands::handle_command(cmd, &repo_root, &settings),
         None => {
-            let mut entry: Option<TuiEntryContext> = None;
-            loop {
-                let selection = tui::run_with_context(entry.take())?;
-                match selection {
-                    Some(launch_plan) => {
-                        // FR-088: Record agent usage to history (single mode)
-                        // Run in background thread to avoid blocking agent startup
-                        let history_repo_root = repo_root.clone();
-                        let history_branch_name = launch_plan.config.branch_name.clone();
-                        // T603: Use custom agent ID/label when available (SPEC-71f2742d US6)
-                        let (history_agent_id, history_agent_label) = if let Some(ref custom) =
-                            launch_plan.config.custom_agent
-                        {
-                            (
-                                custom.id.clone(),
-                                format!("{}@{}", custom.display_name, launch_plan.selected_version),
-                            )
-                        } else {
-                            (
-                                launch_plan.config.agent.id().to_string(),
-                                format!(
-                                    "{}@{}",
-                                    launch_plan.config.agent.label(),
-                                    launch_plan.selected_version
-                                ),
-                            )
-                        };
-                        thread::spawn(move || {
-                            let mut agent_history = AgentHistoryStore::load().unwrap_or_default();
-                            if let Err(e) = agent_history.record(
-                                &history_repo_root,
-                                &history_branch_name,
-                                &history_agent_id,
-                                &history_agent_label,
-                            ) {
-                                warn!(category = "main", "Failed to record agent history: {}", e);
-                            }
-                            if let Err(e) = agent_history.save() {
-                                warn!(category = "main", "Failed to save agent history: {}", e);
-                            }
-                        });
-                        // SPEC-a70a1ece: Capture repo_root before launch_plan is consumed
-                        let entry_repo_root = launch_plan.repo_root.clone();
-                        match execute_launch_plan(launch_plan) {
-                            Ok(AgentExitKind::Success) => {
-                                entry = Some(
-                                    TuiEntryContext::success(
-                                        "Session completed successfully.".to_string(),
-                                    )
-                                    .with_repo_root(entry_repo_root),
-                                );
-                            }
-                            Ok(AgentExitKind::Interrupted) => {
-                                entry = Some(
-                                    TuiEntryContext::warning("Session interrupted.".to_string())
-                                        .with_repo_root(entry_repo_root),
-                                );
-                            }
-                            Err(err) => {
-                                entry = Some(
-                                    TuiEntryContext::error(err.to_string())
-                                        .with_repo_root(entry_repo_root),
-                                );
-                            }
-                        }
-                    }
-                    None => break,
-                }
-            }
+            // FR-008b: Agent launches are handled inside TUI via builtin terminal panes.
+            // The TUI no longer returns a pending launch plan.
+            tui::run_with_context(None)?;
             Ok(())
         }
     }
@@ -262,15 +196,23 @@ fn skip_install_warning_message(pm: &str) -> String {
     )
 }
 
+// NOTE: The functions below were part of the external agent launch path (single-mode).
+// They are now unused because all agent launches go through builtin terminal panes (FR-008b).
+// They are retained for tests and potential future use.
+
+#[allow(dead_code)]
 const FAST_EXIT_THRESHOLD_SECS: u64 = 2;
+#[allow(dead_code)]
 const FAST_EXIT_THRESHOLD_MS: u128 = (FAST_EXIT_THRESHOLD_SECS as u128) * 1000;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AgentExitKind {
     Success,
     Interrupted,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct SessionUpdateContext {
     worktree_path: PathBuf,
@@ -285,6 +227,7 @@ struct SessionUpdateContext {
     collaboration_modes: bool,
 }
 
+#[allow(dead_code)]
 impl SessionUpdateContext {
     fn to_entry(&self) -> ToolSessionEntry {
         ToolSessionEntry {
@@ -309,11 +252,13 @@ impl SessionUpdateContext {
     }
 }
 
+#[allow(dead_code)]
 struct SessionUpdater {
     stop_tx: mpsc::Sender<()>,
     handle: thread::JoinHandle<()>,
 }
 
+#[allow(dead_code)]
 impl SessionUpdater {
     fn stop(self) {
         let _ = self.stop_tx.send(());
@@ -321,6 +266,7 @@ impl SessionUpdater {
     }
 }
 
+#[allow(dead_code)]
 fn spawn_session_updater(context: SessionUpdateContext, interval: Duration) -> SessionUpdater {
     let (stop_tx, stop_rx) = mpsc::channel();
     let handle = thread::spawn(move || loop {
@@ -336,14 +282,17 @@ fn spawn_session_updater(context: SessionUpdateContext, interval: Duration) -> S
     SessionUpdater { stop_tx, handle }
 }
 
+#[allow(dead_code)]
 fn build_launching_message(config: &AgentLaunchConfig) -> String {
     format!("Launching {}...", config.agent.label())
 }
 
+#[allow(dead_code)]
 fn is_fast_exit(duration_ms: u128) -> bool {
     duration_ms < FAST_EXIT_THRESHOLD_MS
 }
 
+#[allow(dead_code)]
 fn format_command_line(executable: &str, args: &[String]) -> String {
     let mut parts = Vec::with_capacity(args.len() + 1);
     parts.push(executable.to_string());
@@ -351,6 +300,7 @@ fn format_command_line(executable: &str, args: &[String]) -> String {
     parts.join(" ")
 }
 
+#[allow(dead_code)]
 fn emit_fast_exit_notice(duration_ms: u128, command_display: &str) {
     eprintln!("Agent exited immediately ({} ms).", duration_ms);
     eprintln!("This usually means the agent could not start.");
@@ -532,6 +482,7 @@ pub(crate) struct LaunchPlan {
     pub install_plan: InstallPlan,
     pub env: Vec<(String, String)>,
     /// Repository root for single mode re-entry (SPEC-a70a1ece)
+    #[allow(dead_code)]
     pub repo_root: PathBuf,
 }
 
@@ -578,6 +529,7 @@ fn build_install_plan(worktree_path: &Path, auto_install: bool) -> InstallPlan {
     }
 }
 
+#[allow(dead_code)]
 fn run_install_plan(worktree_path: &Path, plan: &InstallPlan) -> Result<(), GwtError> {
     match plan {
         InstallPlan::None => Ok(()),
@@ -817,6 +769,7 @@ fn prepare_custom_agent_launch_plan(
     })
 }
 
+#[allow(dead_code)]
 fn execute_launch_plan(plan: LaunchPlan) -> Result<AgentExitKind, GwtError> {
     let LaunchPlan {
         config,
@@ -1645,10 +1598,12 @@ pub(crate) fn detect_session_id_for_tool(tool_id: &str, worktree_path: &Path) ->
     None
 }
 
+#[allow(dead_code)]
 fn detect_agent_session_id(config: &AgentLaunchConfig) -> Option<String> {
     detect_session_id_for_tool(config.agent.id(), &config.worktree_path)
 }
 
+#[allow(dead_code)]
 fn apply_tty_stdio(command: &mut Command) {
     #[cfg(unix)]
     {
@@ -1667,6 +1622,7 @@ fn apply_tty_stdio(command: &mut Command) {
     }
 }
 
+#[allow(dead_code)]
 fn apply_pty_wrapper(executable: &str, args: &[String]) -> (String, Vec<String>) {
     #[cfg(target_os = "macos")]
     {
@@ -1857,6 +1813,7 @@ fn resolve_codex_flag_version(config: &AgentLaunchConfig) -> Option<String> {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExitClassification {
     Success,
@@ -1867,6 +1824,7 @@ enum ExitClassification {
     },
 }
 
+#[allow(dead_code)]
 fn classify_exit(code: Option<i32>, signal: Option<i32>) -> ExitClassification {
     if code == Some(0) && signal.is_none() {
         return ExitClassification::Success;
@@ -1885,22 +1843,26 @@ fn classify_exit(code: Option<i32>, signal: Option<i32>) -> ExitClassification {
     ExitClassification::Failure { code, signal }
 }
 
+#[allow(dead_code)]
 #[cfg(unix)]
 fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
     use std::os::unix::process::ExitStatusExt;
     status.signal()
 }
 
+#[allow(dead_code)]
 #[cfg(not(unix))]
 fn exit_signal(_status: &std::process::ExitStatus) -> Option<i32> {
     None
 }
 
+#[allow(dead_code)]
 fn classify_exit_status(status: std::process::ExitStatus) -> ExitClassification {
     classify_exit(status.code(), exit_signal(&status))
 }
 
 /// Format exit code with platform-specific explanation
+#[allow(dead_code)]
 fn format_exit_code(code: i32) -> String {
     // Negative codes on Windows are typically NTSTATUS values
     if code < 0 {
@@ -1914,6 +1876,7 @@ fn format_exit_code(code: i32) -> String {
 }
 
 /// Describe common NTSTATUS codes (Windows-specific error codes)
+#[allow(dead_code)]
 fn describe_ntstatus(code: u32) -> Option<&'static str> {
     match code {
         0xC0000005 => Some("STATUS_ACCESS_VIOLATION"),

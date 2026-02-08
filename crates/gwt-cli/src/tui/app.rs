@@ -590,6 +590,10 @@ pub struct Model {
     terminal_manager: gwt_core::terminal::manager::PaneManager,
     /// SPEC-1d6dd9fc FR-070: Whether copy mode is active
     copy_mode_active: bool,
+    /// SPEC-1d6dd9fc FR-008d: PTY output sender (cloned for each reader thread)
+    pty_output_tx: mpsc::Sender<(String, Vec<u8>)>,
+    /// SPEC-1d6dd9fc FR-008d: PTY output receiver (polled in Tick)
+    pty_output_rx: mpsc::Receiver<(String, Vec<u8>)>,
     /// GitView cache for all branches (SPEC-1ea18899 FR-050)
     git_view_cache: GitViewCache,
     /// GitView cache update receiver (SPEC-1ea18899)
@@ -801,6 +805,7 @@ impl Model {
         };
 
         let (agent_mode_tx, agent_mode_rx) = mpsc::channel();
+        let (pty_output_tx, pty_output_rx) = mpsc::channel();
 
         let mut model = Self {
             should_quit: false,
@@ -885,6 +890,8 @@ impl Model {
             prefix_mode_time: None,
             terminal_manager: gwt_core::terminal::manager::PaneManager::new(),
             copy_mode_active: false,
+            pty_output_tx,
+            pty_output_rx,
         };
 
         model
@@ -3991,6 +3998,16 @@ impl Model {
                 self.reset_footer_scroll();
             }
             Message::Tick => {
+                // FR-008d: Poll PTY output from reader threads
+                while let Ok((pane_id, bytes)) = self.pty_output_rx.try_recv() {
+                    if let Some(pane) = self.terminal_manager.pane_mut_by_id(&pane_id) {
+                        let _ = pane.process_bytes(&bytes);
+                    }
+                }
+                // FR-008e: Check pane process status
+                if let Some(pane) = self.terminal_manager.active_pane_mut() {
+                    let _ = pane.check_status();
+                }
                 // Reset Ctrl+C counter after timeout
                 if let Some(last) = self.last_ctrl_c {
                     if Instant::now().duration_since(last) > Duration::from_secs(2) {
@@ -5247,14 +5264,102 @@ impl Model {
     }
 
     /// Internal implementation of launch plan handling (called after plugin setup confirmation)
+    ///
+    /// FR-008b/FR-008c: All agent launches now go through builtin terminal panes.
     fn handle_launch_plan_internal(&mut self, plan: LaunchPlan) {
         if let InstallPlan::Skip { message } = &plan.install_plan {
             self.status_message = Some(message.clone());
             self.status_message_time = Some(Instant::now());
+            return;
+        }
+        if let Err(e) = self.launch_agent_in_builtin_pane(&plan) {
+            self.status_message = Some(format!("Failed to launch agent: {}", e));
+            self.status_message_time = Some(Instant::now());
+        }
+    }
+
+    /// Launch an agent inside a builtin terminal pane (FR-008b).
+    ///
+    /// Converts a LaunchPlan to BuiltinLaunchConfig and spawns a PTY reader thread.
+    fn launch_agent_in_builtin_pane(&mut self, plan: &LaunchPlan) -> Result<(), String> {
+        use gwt_core::terminal::BuiltinLaunchConfig;
+
+        let agent_name = if let Some(ref custom) = plan.config.custom_agent {
+            custom.display_name.clone()
+        } else {
+            plan.config.agent.label().to_string()
+        };
+        let agent_color = if plan.config.custom_agent.is_some() {
+            ratatui::style::Color::White
+        } else {
+            plan.config.agent.color()
+        };
+
+        let mut env_map = std::collections::HashMap::new();
+        for (k, v) in &plan.env {
+            env_map.insert(k.clone(), v.clone());
+        }
+        for (k, v) in &plan.config.env {
+            env_map.insert(k.clone(), v.clone());
         }
 
-        self.pending_agent_launch = Some(plan);
-        self.should_quit = true;
+        let config = BuiltinLaunchConfig {
+            command: plan.executable.clone(),
+            args: plan.command_args.clone(),
+            working_dir: plan.config.worktree_path.clone(),
+            branch_name: plan.config.branch_name.clone(),
+            agent_name,
+            agent_color,
+            env_vars: env_map,
+        };
+
+        let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+        let pane_rows = rows.saturating_sub(4);
+        let pane_cols = cols / 2;
+
+        let pane_id = self
+            .terminal_manager
+            .launch_agent(config, pane_rows, pane_cols)
+            .map_err(|e| e.to_string())?;
+
+        // FR-008d: Spawn a reader thread for PTY output
+        if let Some(pane) = self.terminal_manager.pane_mut_by_id(&pane_id) {
+            if let Ok(mut reader) = pane.take_reader() {
+                let tx = self.pty_output_tx.clone();
+                let id = pane_id.clone();
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        match std::io::Read::read(&mut reader, &mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                if tx.send((id.clone(), buf[..n].to_vec())).is_err() {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                });
+            }
+        }
+
+        self.focus_target = FocusTarget::TerminalPane;
+        self.split_layout.has_terminal_pane = true;
+
+        // Record agent as running
+        self.branch_list
+            .running_agents
+            .insert(plan.config.branch_name.clone(), ());
+
+        info!(
+            category = "tui",
+            pane_id = %pane_id,
+            branch = %plan.config.branch_name,
+            "Launched agent in builtin terminal pane"
+        );
+
+        Ok(())
     }
 
     fn docker_force_host_enabled(&self) -> bool {
@@ -5799,9 +5904,11 @@ impl Model {
         _force_recreate: bool,
         _stop_on_exit: bool,
     ) {
-        // Tmux removed: fall through to single-mode agent launch
-        self.pending_agent_launch = Some(plan.clone());
-        self.should_quit = true;
+        // FR-008b: All launches go through builtin terminal panes
+        if let Err(e) = self.launch_agent_in_builtin_pane(plan) {
+            self.status_message = Some(format!("Failed to launch agent: {}", e));
+            self.status_message_time = Some(Instant::now());
+        }
     }
 
     fn handle_service_select_confirm(&mut self) {
@@ -7274,12 +7381,18 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
     let mut model = Model::new_with_context(context);
 
     // Event loop
-    let tick_rate = Duration::from_millis(250);
     let mut last_tick = Instant::now();
 
     loop {
         // Draw
         terminal.draw(|f| model.view(f))?;
+
+        // FR-008e: Dynamic tick rate - shorter when terminal panes are active
+        let tick_rate = if model.terminal_manager.is_empty() {
+            Duration::from_millis(250)
+        } else {
+            Duration::from_millis(50)
+        };
 
         // Handle events
         let timeout = tick_rate
@@ -7352,6 +7465,9 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
             break;
         }
     }
+
+    // FR-092: Kill all terminal panes on exit
+    let _ = model.terminal_manager.kill_all();
 
     // Get pending agent launch before cleanup
     let pending_launch = model.pending_agent_launch.take();
