@@ -32,8 +32,6 @@ dirs = "6"
 reqwest.workspace = true
 walkdir = "2"
 portable-pty.workspace = true
-vt100.workspace = true
-ratatui.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

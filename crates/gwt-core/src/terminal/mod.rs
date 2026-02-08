@@ -1,18 +1,28 @@
-pub mod emulator;
 pub mod error;
 pub mod ipc;
 pub mod manager;
 pub mod pane;
 pub mod pty;
-pub mod renderer;
 pub mod scrollback;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use ratatui::style::Color;
-
 pub use error::TerminalError;
+
+/// Agent color representation (replaces ratatui::style::Color)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentColor {
+    Green,
+    Blue,
+    Cyan,
+    Red,
+    Yellow,
+    Magenta,
+    White,
+    Rgb(u8, u8, u8),
+    Indexed(u8),
+}
 
 /// Configuration for launching an agent in the built-in terminal.
 pub struct BuiltinLaunchConfig {
@@ -27,7 +37,7 @@ pub struct BuiltinLaunchConfig {
     /// Agent name for display.
     pub agent_name: String,
     /// Agent color for tab/header.
-    pub agent_color: Color,
+    pub agent_color: AgentColor,
     /// Environment variables to set.
     pub env_vars: HashMap<String, String>,
 }

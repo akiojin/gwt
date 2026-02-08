@@ -267,6 +267,7 @@ impl Default for PaneManager {
 mod tests {
     use super::*;
     use crate::terminal::pane::PaneConfig;
+    use crate::terminal::AgentColor;
     use tempfile::TempDir;
 
     /// Helper: create a TerminalPane backed by `/usr/bin/true` (exits immediately).
@@ -278,7 +279,7 @@ mod tests {
             working_dir: std::env::temp_dir(),
             branch_name: "test-branch".to_string(),
             agent_name: "test-agent".to_string(),
-            agent_color: ratatui::style::Color::Green,
+            agent_color: AgentColor::Green,
             rows: 24,
             cols: 80,
             env_vars: HashMap::new(),
@@ -544,7 +545,7 @@ mod tests {
             working_dir: std::env::temp_dir(),
             branch_name: "feature/test".to_string(),
             agent_name: "test-agent".to_string(),
-            agent_color: ratatui::style::Color::Cyan,
+            agent_color: AgentColor::Cyan,
             env_vars: HashMap::new(),
         };
         let pane_id = mgr.launch_agent(config, 24, 80).unwrap();
@@ -566,7 +567,7 @@ mod tests {
                 working_dir: std::env::temp_dir(),
                 branch_name: format!("feature/test-{i}"),
                 agent_name: format!("agent-{i}"),
-                agent_color: ratatui::style::Color::Green,
+                agent_color: AgentColor::Green,
                 env_vars: HashMap::new(),
             };
             mgr.launch_agent(config, 24, 80).unwrap();
@@ -580,7 +581,7 @@ mod tests {
             working_dir: std::env::temp_dir(),
             branch_name: "feature/test-4".to_string(),
             agent_name: "agent-4".to_string(),
-            agent_color: ratatui::style::Color::Red,
+            agent_color: AgentColor::Red,
             env_vars: HashMap::new(),
         };
         let result = mgr.launch_agent(config, 24, 80);
@@ -621,7 +622,7 @@ mod tests {
             working_dir: std::env::temp_dir(),
             branch_name: "feature/a".to_string(),
             agent_name: "agent-a".to_string(),
-            agent_color: ratatui::style::Color::Green,
+            agent_color: AgentColor::Green,
             env_vars: HashMap::new(),
         };
         let pane_id1 = mgr.launch_agent(config1, 24, 80).unwrap();
@@ -632,7 +633,7 @@ mod tests {
             working_dir: std::env::temp_dir(),
             branch_name: "feature/b".to_string(),
             agent_name: "agent-b".to_string(),
-            agent_color: ratatui::style::Color::Blue,
+            agent_color: AgentColor::Blue,
             env_vars: HashMap::new(),
         };
         let pane_id2 = mgr.launch_agent(config2, 24, 80).unwrap();
@@ -693,7 +694,7 @@ mod tests {
             working_dir: std::env::temp_dir(),
             branch_name: "feature/alpha".to_string(),
             agent_name: "agent-a".to_string(),
-            agent_color: ratatui::style::Color::Green,
+            agent_color: AgentColor::Green,
             env_vars: HashMap::new(),
         };
         mgr.launch_agent(config1, 24, 80).unwrap();
@@ -704,7 +705,7 @@ mod tests {
             working_dir: std::env::temp_dir(),
             branch_name: "feature/beta".to_string(),
             agent_name: "agent-b".to_string(),
-            agent_color: ratatui::style::Color::Blue,
+            agent_color: AgentColor::Blue,
             env_vars: HashMap::new(),
         };
         mgr.launch_agent(config2, 24, 80).unwrap();

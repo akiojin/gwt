@@ -1,17 +1,12 @@
-//! Terminal pane: integrates PTY, emulator, and scrollback
+//! Terminal pane: integrates PTY and scrollback
 
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
-use ratatui::style::Color;
-
-use super::emulator::TerminalEmulator;
 use super::pty::{PtyConfig, PtyHandle};
-use super::renderer::render_to_buffer;
 use super::scrollback::ScrollbackFile;
+use super::AgentColor;
 use super::TerminalError;
 
 /// Status of a terminal pane's child process.
@@ -30,22 +25,21 @@ pub struct PaneConfig {
     pub working_dir: PathBuf,
     pub branch_name: String,
     pub agent_name: String,
-    pub agent_color: Color,
+    pub agent_color: AgentColor,
     pub rows: u16,
     pub cols: u16,
     pub env_vars: HashMap<String, String>,
 }
 
-/// A terminal pane integrating PTY, VT100 emulator, and scrollback.
+/// A terminal pane integrating PTY and scrollback.
 pub struct TerminalPane {
     pane_id: String,
-    emulator: TerminalEmulator,
     scrollback: ScrollbackFile,
     pty: PtyHandle,
     writer: Option<Box<dyn Write + Send>>,
     branch_name: String,
     agent_name: String,
-    agent_color: Color,
+    agent_color: AgentColor,
     status: PaneStatus,
     started_at: chrono::DateTime<chrono::Utc>,
 }
@@ -69,12 +63,10 @@ impl TerminalPane {
 
         let pty = PtyHandle::new(pty_config)?;
         let writer = Some(pty.take_writer()?);
-        let emulator = TerminalEmulator::new(config.rows, config.cols);
         let scrollback = ScrollbackFile::new(&config.pane_id)?;
 
         Ok(Self {
             pane_id: config.pane_id,
-            emulator,
             scrollback,
             pty,
             writer,
@@ -91,19 +83,9 @@ impl TerminalPane {
         self.pty.take_reader()
     }
 
-    /// Process bytes from the PTY output through the emulator and scrollback.
-    /// Detects DSR (Device Status Report) requests and auto-responds with cursor position.
+    /// Process bytes from the PTY output through the scrollback.
     pub fn process_bytes(&mut self, bytes: &[u8]) -> Result<(), TerminalError> {
-        self.emulator.process(bytes);
         self.scrollback.write(bytes)?;
-
-        // Detect CSI 6n (DSR: Report Cursor Position) and respond with cursor position.
-        // Apps like Codex CLI send this query and expect ESC[{row};{col}R response.
-        if contains_dsr_request(bytes) {
-            let (row, col) = self.emulator.cursor_position();
-            let response = format!("\x1b[{};{}R", row + 1, col + 1);
-            self.write_input(response.as_bytes())?;
-        }
         Ok(())
     }
 
@@ -126,9 +108,8 @@ impl TerminalPane {
         Ok(())
     }
 
-    /// Resize the terminal pane (emulator + PTY).
+    /// Resize the terminal pane (PTY only).
     pub fn resize(&mut self, rows: u16, cols: u16) -> Result<(), TerminalError> {
-        self.emulator.resize(rows, cols);
         self.pty.resize(rows, cols)
     }
 
@@ -148,16 +129,6 @@ impl TerminalPane {
         Ok(&self.status)
     }
 
-    /// Get a reference to the VT100 screen.
-    pub fn screen(&self) -> &vt100::Screen {
-        self.emulator.screen()
-    }
-
-    /// Render the terminal contents into a ratatui buffer.
-    pub fn render(&self, area: Rect, buf: &mut Buffer) {
-        render_to_buffer(self.emulator.screen(), area, buf);
-    }
-
     /// Get the pane ID.
     pub fn pane_id(&self) -> &str {
         &self.pane_id
@@ -174,7 +145,7 @@ impl TerminalPane {
     }
 
     /// Get the agent color.
-    pub fn agent_color(&self) -> Color {
+    pub fn agent_color(&self) -> AgentColor {
         self.agent_color
     }
 
@@ -188,21 +159,10 @@ impl TerminalPane {
         self.started_at
     }
 
-    /// FR-048: Check if the PTY application has enabled mouse protocol.
-    pub fn mouse_protocol_enabled(&self) -> bool {
-        self.emulator.mouse_protocol_mode() != vt100::MouseProtocolMode::None
-    }
-
     /// Kill the child process.
     pub fn kill(&mut self) -> Result<(), TerminalError> {
         self.pty.kill()
     }
-}
-
-/// Detect CSI 6n (Device Status Report: cursor position query) in a byte stream.
-/// The sequence is ESC [ 6 n (0x1b 0x5b 0x36 0x6e).
-fn contains_dsr_request(bytes: &[u8]) -> bool {
-    bytes.windows(4).any(|w| w == b"\x1b[6n")
 }
 
 #[cfg(test)]
@@ -265,7 +225,7 @@ mod tests {
             working_dir: std::env::temp_dir(),
             branch_name: "feature/test".to_string(),
             agent_name: "test-agent".to_string(),
-            agent_color: Color::Green,
+            agent_color: AgentColor::Green,
             rows: 24,
             cols: 80,
             env_vars: HashMap::new(),
@@ -298,8 +258,11 @@ mod tests {
         pane.process_bytes(&output)
             .expect("Failed to process bytes");
 
-        let cell = pane.screen().cell(0, 0).expect("cell(0,0) should exist");
-        assert_eq!(cell.contents(), "h", "Expected 'h' at (0,0)");
+        let output_str = String::from_utf8_lossy(&output);
+        assert!(
+            output_str.contains("hello"),
+            "Expected 'hello' in output, got: {output_str}"
+        );
     }
 
     // 3. Input writing test
@@ -331,8 +294,8 @@ mod tests {
         let config = make_config("/bin/sleep", vec!["1"]);
         let mut pane = TerminalPane::new(config).expect("Failed to create pane");
 
+        // resize should succeed (PTY resize only)
         pane.resize(48, 120).expect("Resize should succeed");
-        assert_eq!(pane.emulator.size(), (48, 120));
     }
 
     // 5. Status test (process completes with exit code 0)
@@ -367,7 +330,7 @@ mod tests {
         assert!(pane.pane_id().starts_with("test-pane-"));
         assert_eq!(pane.branch_name(), "feature/test");
         assert_eq!(pane.agent_name(), "test-agent");
-        assert_eq!(pane.agent_color(), Color::Green);
+        assert_eq!(pane.agent_color(), AgentColor::Green);
         assert_eq!(pane.status(), &PaneStatus::Running);
         assert!(pane.started_at() <= chrono::Utc::now());
     }
@@ -393,27 +356,5 @@ mod tests {
 
         assert!(exited, "Process should have exited after kill");
         assert_ne!(pane.status(), &PaneStatus::Running);
-    }
-
-    // --- contains_dsr_request tests ---
-
-    #[test]
-    fn test_dsr_request_detected() {
-        assert!(contains_dsr_request(b"\x1b[6n"));
-    }
-
-    #[test]
-    fn test_dsr_request_in_mixed_output() {
-        assert!(contains_dsr_request(b"hello\x1b[6nworld"));
-    }
-
-    #[test]
-    fn test_dsr_request_not_present() {
-        assert!(!contains_dsr_request(b"hello world"));
-    }
-
-    #[test]
-    fn test_dsr_request_partial_sequence() {
-        assert!(!contains_dsr_request(b"\x1b[6"));
     }
 }
