@@ -185,6 +185,20 @@ impl PaneManager {
         self.active_index
     }
 
+    /// Find the index of a pane by branch name (FR-035).
+    pub fn find_pane_index_by_branch(&self, branch_name: &str) -> Option<usize> {
+        self.panes
+            .iter()
+            .position(|p| p.branch_name() == branch_name)
+    }
+
+    /// Set the active pane by index.
+    pub fn set_active_index(&mut self, index: usize) {
+        if index < self.panes.len() {
+            self.active_index = index;
+        }
+    }
+
     /// Returns the path to the branch→pane_id index file.
     fn index_path() -> Result<PathBuf, TerminalError> {
         let home = dirs::home_dir().ok_or_else(|| TerminalError::ScrollbackError {
@@ -233,9 +247,10 @@ impl PaneManager {
                 details: format!("failed to create directory: {e}"),
             })?;
         }
-        let json = serde_json::to_string_pretty(map).map_err(|e| TerminalError::ScrollbackError {
-            details: format!("failed to serialize index: {e}"),
-        })?;
+        let json =
+            serde_json::to_string_pretty(map).map_err(|e| TerminalError::ScrollbackError {
+                details: format!("failed to serialize index: {e}"),
+            })?;
         fs::write(path, json).map_err(|e| TerminalError::ScrollbackError {
             details: format!("failed to write index file: {e}"),
         })
@@ -635,8 +650,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let index_path = tmp.path().join("index.json");
 
-        PaneManager::save_branch_mapping_to(index_path.clone(), "feature/foo", "pane-abc")
-            .unwrap();
+        PaneManager::save_branch_mapping_to(index_path.clone(), "feature/foo", "pane-abc").unwrap();
 
         let result = PaneManager::load_pane_id_for_branch_from(index_path, "feature/foo");
         assert_eq!(result, Some("pane-abc".to_string()));
@@ -649,10 +663,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let index_path = tmp.path().join("index.json");
 
-        PaneManager::save_branch_mapping_to(index_path.clone(), "feature/bar", "pane-old")
-            .unwrap();
-        PaneManager::save_branch_mapping_to(index_path.clone(), "feature/bar", "pane-new")
-            .unwrap();
+        PaneManager::save_branch_mapping_to(index_path.clone(), "feature/bar", "pane-old").unwrap();
+        PaneManager::save_branch_mapping_to(index_path.clone(), "feature/bar", "pane-new").unwrap();
 
         let result = PaneManager::load_pane_id_for_branch_from(index_path, "feature/bar");
         assert_eq!(result, Some("pane-new".to_string()));
@@ -667,5 +679,70 @@ mod tests {
 
         let result = PaneManager::load_pane_id_for_branch_from(index_path, "nonexistent");
         assert_eq!(result, None);
+    }
+
+    // --- 27. find_pane_index_by_branch (FR-035) ---
+
+    #[test]
+    fn test_find_pane_index_by_branch_found() {
+        use crate::terminal::BuiltinLaunchConfig;
+        let mut mgr = PaneManager::new();
+        let config1 = BuiltinLaunchConfig {
+            command: "/usr/bin/true".to_string(),
+            args: vec![],
+            working_dir: std::env::temp_dir(),
+            branch_name: "feature/alpha".to_string(),
+            agent_name: "agent-a".to_string(),
+            agent_color: ratatui::style::Color::Green,
+            env_vars: HashMap::new(),
+        };
+        mgr.launch_agent(config1, 24, 80).unwrap();
+
+        let config2 = BuiltinLaunchConfig {
+            command: "/usr/bin/true".to_string(),
+            args: vec![],
+            working_dir: std::env::temp_dir(),
+            branch_name: "feature/beta".to_string(),
+            agent_name: "agent-b".to_string(),
+            agent_color: ratatui::style::Color::Blue,
+            env_vars: HashMap::new(),
+        };
+        mgr.launch_agent(config2, 24, 80).unwrap();
+
+        assert_eq!(mgr.find_pane_index_by_branch("feature/alpha"), Some(0));
+        assert_eq!(mgr.find_pane_index_by_branch("feature/beta"), Some(1));
+    }
+
+    #[test]
+    fn test_find_pane_index_by_branch_not_found() {
+        let mgr = PaneManager::new();
+        assert_eq!(mgr.find_pane_index_by_branch("nonexistent"), None);
+    }
+
+    // --- 28. set_active_index ---
+
+    #[test]
+    fn test_set_active_index() {
+        let mut mgr = PaneManager::new();
+        mgr.add_pane(create_test_pane("p0")).unwrap();
+        mgr.add_pane(create_test_pane("p1")).unwrap();
+        mgr.add_pane(create_test_pane("p2")).unwrap();
+        assert_eq!(mgr.active_index(), 2); // last added
+
+        mgr.set_active_index(0);
+        assert_eq!(mgr.active_index(), 0);
+
+        mgr.set_active_index(1);
+        assert_eq!(mgr.active_index(), 1);
+    }
+
+    #[test]
+    fn test_set_active_index_out_of_bounds() {
+        let mut mgr = PaneManager::new();
+        mgr.add_pane(create_test_pane("p0")).unwrap();
+        assert_eq!(mgr.active_index(), 0);
+
+        mgr.set_active_index(999); // out of bounds, should be ignored
+        assert_eq!(mgr.active_index(), 0);
     }
 }

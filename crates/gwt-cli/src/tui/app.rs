@@ -2475,8 +2475,10 @@ impl Model {
         };
         let branch_name = branch.name.clone();
 
-        // Check if agent is running for this branch
-        let running_pane_idx: Option<usize> = None;
+        // FR-035: Check if agent is running for this branch
+        let running_pane_idx = self
+            .terminal_manager
+            .find_pane_index_by_branch(&branch_name);
 
         // Always open wizard
         // FR-050: Load session history for Quick Start feature
@@ -4198,12 +4200,23 @@ impl Model {
                 // FR-008d: Poll PTY output from reader threads
                 while let Ok((pane_id, bytes)) = self.pty_output_rx.try_recv() {
                     if let Some(pane) = self.terminal_manager.pane_mut_by_id(&pane_id) {
-                        let _ = pane.process_bytes(&bytes);
+                        if let Err(e) = pane.process_bytes(&bytes) {
+                            error!(
+                                category = "terminal",
+                                pane_id = %pane_id,
+                                "PTY output processing error: {}", e
+                            );
+                        }
                     }
                 }
                 // FR-008e: Check pane process status
                 if let Some(pane) = self.terminal_manager.active_pane_mut() {
-                    let _ = pane.check_status();
+                    if let Err(e) = pane.check_status() {
+                        error!(
+                            category = "terminal",
+                            "Pane status check error: {}", e
+                        );
+                    }
                 }
                 // Reset Ctrl+C counter after timeout
                 if let Some(last) = self.last_ctrl_c {
@@ -4973,7 +4986,7 @@ impl Model {
             Message::WriteToPty(bytes) => {
                 if let Some(pane) = self.terminal_manager.active_pane_mut() {
                     if let Err(e) = pane.write_input(&bytes) {
-                        debug!(
+                        error!(
                             category = "terminal",
                             error = %e,
                             "Failed to write to PTY"
@@ -5162,8 +5175,11 @@ impl Model {
                                 self.wizard.load_issues(&self.repo_root);
                             }
                         }
-                        WizardConfirmResult::FocusPane(_pane_idx) => {
-                            // Focus on existing agent pane (reserved for builtin terminal)
+                        WizardConfirmResult::FocusPane(pane_idx) => {
+                            // FR-036: Focus on existing agent pane
+                            self.terminal_manager.set_active_index(pane_idx);
+                            self.focus_target = FocusTarget::AgentPane;
+                            self.split_layout.has_agent_pane = true;
                         }
                     }
                 }
@@ -5469,6 +5485,12 @@ impl Model {
             return;
         }
         if let Err(e) = self.launch_agent_in_builtin_pane(&plan) {
+            error!(
+                category = "terminal",
+                branch = %plan.config.branch_name,
+                agent = %plan.config.agent.label(),
+                "Failed to launch agent in builtin pane: {}", e
+            );
             self.status_message = Some(format!("Failed to launch agent: {}", e));
             self.status_message_time = Some(Instant::now());
         }
@@ -5533,10 +5555,23 @@ impl Model {
                                     break;
                                 }
                             }
-                            Err(_) => break,
+                            Err(e) => {
+                                tracing::error!(
+                                    category = "terminal",
+                                    pane_id = %id,
+                                    "PTY reader error: {}", e
+                                );
+                                break;
+                            }
                         }
                     }
                 });
+            } else {
+                error!(
+                    category = "terminal",
+                    pane_id = %pane_id,
+                    "Failed to take PTY reader"
+                );
             }
         }
 
