@@ -7157,11 +7157,8 @@ impl Model {
                 self.prefix_mode_time = Some(Instant::now());
                 return None;
             }
-            // Ctrl+C still works globally
-            if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
-                return Some(Message::CtrlC);
-            }
-            // All other keys → PTY transparent input
+            // FR-049: Ctrl+C is passed through to PTY (gwt quit only works from gwt UI)
+            // All keys (including Ctrl+C) → PTY transparent input
             let bytes = key_event_to_bytes(&key);
             if !bytes.is_empty() {
                 return Some(Message::WriteToPty(bytes));
@@ -9855,9 +9852,9 @@ mod tests {
         }
     }
 
-    // 28. Terminal focus: Ctrl+C still produces CtrlC message
+    // 28. FR-049: Agent pane focus: Ctrl+C is passed through to PTY (not gwt quit)
     #[test]
-    fn test_terminal_focus_ctrl_c_still_works() {
+    fn test_agent_pane_focus_ctrl_c_passthrough_to_pty() {
         let mut model = Model::new_with_context(None);
         model.focus_target = FocusTarget::AgentPane;
         let p1 =
@@ -9883,8 +9880,11 @@ mod tests {
         );
         let msg = model.handle_key_event(key);
         match msg {
-            Some(Message::CtrlC) => {}
-            other => panic!("Expected CtrlC, got: {:?}", other),
+            Some(Message::WriteToPty(bytes)) => {
+                // Ctrl+C = ETX (0x03)
+                assert_eq!(bytes, vec![0x03]);
+            }
+            other => panic!("Expected WriteToPty with Ctrl+C bytes, got: {:?}", other),
         }
     }
 
