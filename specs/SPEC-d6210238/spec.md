@@ -147,6 +147,7 @@ VS Code の「Open Folder」と同様の体験を提供する。
 - gwt-core の Color 型置換後、既存の gwt-cli（旧コード）との互換性は不要（TUI は完全廃止のため）
 - Tauri v2 のクロスプラットフォームビルド差異（macOS/Windows/Linux）は Phase 4 で対応
 - gwt-core テストで PTY を生成するテストは OS 依存のため、CI 環境での挙動に注意が必要
+- Open Project で、Gitリポジトリそのものではなく gwt の作業ルート（bareリポジトリの親ディレクトリ）を選択した場合でも、プロジェクトとして開けること（TUI互換）
 
 ## 要件 *(必須)*
 
