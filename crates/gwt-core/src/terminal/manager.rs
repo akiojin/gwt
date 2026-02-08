@@ -7,6 +7,10 @@ use super::pane::{PaneConfig, TerminalPane};
 use super::BuiltinLaunchConfig;
 use super::TerminalError;
 
+use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
+
 /// Maximum number of simultaneous panes (FR-033).
 const DEFAULT_MAX_PANES: usize = 4;
 
@@ -147,6 +151,7 @@ impl PaneManager {
                 .next()
                 .unwrap_or("0")
         );
+        let branch_name_for_mapping = config.branch_name.clone();
         let pane_config = PaneConfig {
             pane_id: pane_id.clone(),
             command: config.command,
@@ -161,6 +166,7 @@ impl PaneManager {
         };
         let pane = TerminalPane::new(pane_config)?;
         self.add_pane(pane)?;
+        let _ = Self::save_branch_mapping(&branch_name_for_mapping, &pane_id);
         Ok(pane_id)
     }
 
@@ -178,6 +184,62 @@ impl PaneManager {
     pub fn active_index(&self) -> usize {
         self.active_index
     }
+
+    /// Returns the path to the branch→pane_id index file.
+    fn index_path() -> Result<PathBuf, TerminalError> {
+        let home = dirs::home_dir().ok_or_else(|| TerminalError::ScrollbackError {
+            details: "failed to determine home directory".to_string(),
+        })?;
+        Ok(home.join(".gwt").join("terminals").join("index.json"))
+    }
+
+    /// Saves a branch→pane_id mapping to `~/.gwt/terminals/index.json`.
+    pub fn save_branch_mapping(branch: &str, pane_id: &str) -> Result<(), TerminalError> {
+        Self::save_branch_mapping_to(Self::index_path()?, branch, pane_id)
+    }
+
+    /// Saves a branch→pane_id mapping to a specific path (for testing).
+    pub fn save_branch_mapping_to(
+        path: PathBuf,
+        branch: &str,
+        pane_id: &str,
+    ) -> Result<(), TerminalError> {
+        let mut map = Self::load_index(&path);
+        map.insert(branch.to_string(), pane_id.to_string());
+        Self::write_index(&path, &map)
+    }
+
+    /// Loads the pane_id for a given branch from `~/.gwt/terminals/index.json`.
+    pub fn load_pane_id_for_branch(branch: &str) -> Option<String> {
+        Self::load_pane_id_for_branch_from(Self::index_path().ok()?, branch)
+    }
+
+    /// Loads the pane_id for a given branch from a specific index file (for testing).
+    pub fn load_pane_id_for_branch_from(path: PathBuf, branch: &str) -> Option<String> {
+        let map = Self::load_index(&path);
+        map.get(branch).cloned()
+    }
+
+    fn load_index(path: &PathBuf) -> HashMap<String, String> {
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|data| serde_json::from_str(&data).ok())
+            .unwrap_or_default()
+    }
+
+    fn write_index(path: &PathBuf, map: &HashMap<String, String>) -> Result<(), TerminalError> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| TerminalError::ScrollbackError {
+                details: format!("failed to create directory: {e}"),
+            })?;
+        }
+        let json = serde_json::to_string_pretty(map).map_err(|e| TerminalError::ScrollbackError {
+            details: format!("failed to serialize index: {e}"),
+        })?;
+        fs::write(path, json).map_err(|e| TerminalError::ScrollbackError {
+            details: format!("failed to write index file: {e}"),
+        })
+    }
 }
 
 impl Default for PaneManager {
@@ -190,7 +252,7 @@ impl Default for PaneManager {
 mod tests {
     use super::*;
     use crate::terminal::pane::PaneConfig;
-    use std::collections::HashMap;
+    use tempfile::TempDir;
 
     /// Helper: create a TerminalPane backed by `/usr/bin/true` (exits immediately).
     fn create_test_pane(id: &str) -> TerminalPane {
@@ -564,5 +626,46 @@ mod tests {
         // Active pane should be the latest one
         let active = mgr.active_pane().expect("should have active pane");
         assert_eq!(active.pane_id(), pane_id2);
+    }
+
+    // --- 24. save_branch_mapping and load ---
+
+    #[test]
+    fn test_save_and_load_branch_mapping() {
+        let tmp = TempDir::new().unwrap();
+        let index_path = tmp.path().join("index.json");
+
+        PaneManager::save_branch_mapping_to(index_path.clone(), "feature/foo", "pane-abc")
+            .unwrap();
+
+        let result = PaneManager::load_pane_id_for_branch_from(index_path, "feature/foo");
+        assert_eq!(result, Some("pane-abc".to_string()));
+    }
+
+    // --- 25. mapping overwrites on relaunch ---
+
+    #[test]
+    fn test_mapping_overwrites_on_relaunch() {
+        let tmp = TempDir::new().unwrap();
+        let index_path = tmp.path().join("index.json");
+
+        PaneManager::save_branch_mapping_to(index_path.clone(), "feature/bar", "pane-old")
+            .unwrap();
+        PaneManager::save_branch_mapping_to(index_path.clone(), "feature/bar", "pane-new")
+            .unwrap();
+
+        let result = PaneManager::load_pane_id_for_branch_from(index_path, "feature/bar");
+        assert_eq!(result, Some("pane-new".to_string()));
+    }
+
+    // --- 26. load nonexistent branch returns None ---
+
+    #[test]
+    fn test_load_nonexistent_branch() {
+        let tmp = TempDir::new().unwrap();
+        let index_path = tmp.path().join("index.json");
+
+        let result = PaneManager::load_pane_id_for_branch_from(index_path, "nonexistent");
+        assert_eq!(result, None);
     }
 }

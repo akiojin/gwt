@@ -125,6 +125,25 @@ impl ScrollbackFile {
         Ok(())
     }
 
+    /// Returns the path to the scrollback file for a given pane ID.
+    pub fn scrollback_path_for_pane(pane_id: &str) -> Result<PathBuf, TerminalError> {
+        let home = dirs::home_dir().ok_or_else(|| TerminalError::ScrollbackError {
+            details: "failed to determine home directory".to_string(),
+        })?;
+        Ok(home
+            .join(".gwt")
+            .join("terminals")
+            .join(format!("{pane_id}.log")))
+    }
+
+    /// Reads the entire scrollback file and returns plain text with ANSI sequences removed.
+    pub fn read_all_text(&self) -> Result<String, TerminalError> {
+        let data = fs::read(&self.file_path).map_err(|e| TerminalError::ScrollbackError {
+            details: format!("failed to read scrollback file: {e}"),
+        })?;
+        Ok(strip_ansi(&data))
+    }
+
     /// Removes all log files in `~/.gwt/terminals/`.
     ///
     /// Intended to be called on gwt shutdown.
@@ -149,6 +168,71 @@ impl ScrollbackFile {
         }
         Ok(())
     }
+}
+
+/// Strips ANSI escape sequences from raw bytes, returning plain UTF-8 text.
+///
+/// Handles CSI (`ESC [`), OSC (`ESC ]`), and other ESC sequences.
+/// Preserves `\n`, `\r`, and `\t` but removes other C0 control characters.
+pub fn strip_ansi(input: &[u8]) -> String {
+    let mut out = Vec::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        let b = input[i];
+        if b == 0x1b {
+            // ESC
+            i += 1;
+            if i >= input.len() {
+                break;
+            }
+            match input[i] {
+                b'[' => {
+                    // CSI sequence: skip until final byte (0x40-0x7e)
+                    i += 1;
+                    while i < input.len() {
+                        let c = input[i];
+                        i += 1;
+                        if (0x40..=0x7e).contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                b']' => {
+                    // OSC sequence: skip until ST (ESC \) or BEL (0x07)
+                    i += 1;
+                    while i < input.len() {
+                        if input[i] == 0x07 {
+                            i += 1;
+                            break;
+                        }
+                        if input[i] == 0x1b && i + 1 < input.len() && input[i + 1] == b'\\' {
+                            i += 2;
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                b'(' | b')' | b'*' | b'+' => {
+                    // Character set designation: skip one more byte
+                    i += 1;
+                }
+                _ => {
+                    // Other ESC sequences (e.g., ESC =, ESC >): skip just the byte after ESC
+                    i += 1;
+                }
+            }
+        } else if b < 0x20 || b == 0x7f {
+            // Control character: keep \n, \r, \t; skip others
+            if b == b'\n' || b == b'\r' || b == b'\t' {
+                out.push(b);
+            }
+            i += 1;
+        } else {
+            out.push(b);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[cfg(test)]
@@ -251,5 +335,66 @@ mod tests {
         let expected = tmp.path().join("path-test.log");
         let sb = ScrollbackFile::with_path(expected.clone()).unwrap();
         assert_eq!(sb.file_path(), expected.as_path());
+    }
+
+    // --- ANSI strip tests ---
+
+    #[test]
+    fn test_strip_ansi_colors() {
+        let input = b"\x1b[31mhello\x1b[0m world";
+        let result = strip_ansi(input);
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_strip_ansi_cursor_movement() {
+        let input = b"\x1b[2J\x1b[H\x1b[3Ahello\x1b[5B";
+        let result = strip_ansi(input);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_strip_ansi_osc() {
+        // OSC with BEL terminator
+        let input = b"\x1b]0;my title\x07hello";
+        let result = strip_ansi(input);
+        assert_eq!(result, "hello");
+
+        // OSC with ST terminator
+        let input2 = b"\x1b]0;my title\x1b\\hello";
+        let result2 = strip_ansi(input2);
+        assert_eq!(result2, "hello");
+    }
+
+    #[test]
+    fn test_strip_ansi_plain_text() {
+        let input = b"hello world\nline2\ttab";
+        let result = strip_ansi(input);
+        assert_eq!(result, "hello world\nline2\ttab");
+    }
+
+    #[test]
+    fn test_strip_ansi_control_chars() {
+        // Control chars other than \n, \r, \t should be removed
+        let input = b"hello\x01\x02\x03world";
+        let result = strip_ansi(input);
+        assert_eq!(result, "helloworld");
+    }
+
+    #[test]
+    fn test_read_all_text() {
+        let tmp = TempDir::new().unwrap();
+        let mut sb = create_test_scrollback(&tmp, "ansi");
+        sb.write(b"\x1b[32mgreen\x1b[0m text\nline2\n").unwrap();
+        sb.flush().unwrap();
+
+        let text = sb.read_all_text().unwrap();
+        assert_eq!(text, "green text\nline2\n");
+    }
+
+    #[test]
+    fn test_scrollback_path_for_pane() {
+        let path = ScrollbackFile::scrollback_path_for_pane("pane-abc123").unwrap();
+        assert!(path.ends_with(".gwt/terminals/pane-abc123.log"));
     }
 }

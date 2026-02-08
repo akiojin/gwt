@@ -18,7 +18,8 @@ use crossterm::{
 };
 use gwt_core::agent::codex::supports_collaboration_modes;
 use gwt_core::ai::{
-    summarize_session, AIClient, AIError, AgentHistoryStore, AgentType, ChatMessage,
+    summarize_scrollback, summarize_session, AIClient, AIError, AgentHistoryStore, AgentType,
+    ChatMessage,
     ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, ModelInfo, OpenCodeSessionParser,
     SessionParseError, SessionParser,
 };
@@ -340,6 +341,7 @@ struct SessionSummaryTask {
     branch: String,
     session_id: String,
     tool_id: String,
+    scrollback_path: Option<std::path::PathBuf>,
 }
 
 struct SessionSummaryUpdate {
@@ -1574,6 +1576,16 @@ impl Model {
         };
 
         let branch_name = branch.name.clone();
+
+        // FR-121: Try scrollback path first
+        let scrollback_path = gwt_core::terminal::manager::PaneManager::load_pane_id_for_branch(
+            &branch_name,
+        )
+        .and_then(|pane_id| {
+            gwt_core::terminal::scrollback::ScrollbackFile::scrollback_path_for_pane(&pane_id).ok()
+        })
+        .filter(|p| p.exists());
+
         let mut session_id = branch.last_session_id.clone();
         let tool_id = branch.last_tool_id.clone();
 
@@ -1589,11 +1601,21 @@ impl Model {
             }
         }
 
-        let (Some(session_id), Some(tool_id)) = (session_id, tool_id) else {
-            self.branch_list.mark_session_missing(&branch_name);
-            return;
+        // If we have a scrollback path, we can proceed with a placeholder session_id/tool_id
+        let (session_id, canonical_tool_id) = if scrollback_path.is_some() {
+            let sid = session_id.unwrap_or_else(|| "scrollback".to_string());
+            let tid = tool_id
+                .map(|t| canonical_tool_id(&t))
+                .unwrap_or_else(|| "builtin".to_string());
+            (sid, tid)
+        } else {
+            let (Some(session_id), Some(tool_id)) = (session_id, tool_id) else {
+                self.branch_list.mark_session_missing(&branch_name);
+                return;
+            };
+            (session_id, canonical_tool_id(&tool_id))
         };
-        let canonical_tool_id = canonical_tool_id(&tool_id);
+
         self.branch_list.clear_session_missing(&branch_name);
         if branch.last_session_id.as_deref() != Some(&session_id)
             || branch.last_tool_id.as_deref() != Some(&canonical_tool_id)
@@ -1624,6 +1646,7 @@ impl Model {
             branch: branch_name,
             session_id,
             tool_id: canonical_tool_id,
+            scrollback_path,
         };
         self.spawn_session_summaries(vec![task], settings);
     }
@@ -1731,6 +1754,67 @@ impl Model {
             };
 
             for task in tasks {
+                // FR-121: Scrollback path takes priority over session parser
+                if let Some(scrollback_path) = &task.scrollback_path {
+                    let mtime = std::fs::metadata(scrollback_path)
+                        .ok()
+                        .and_then(|m| m.modified().ok());
+                    let scrollback_text =
+                        match gwt_core::terminal::scrollback::strip_ansi(
+                            &std::fs::read(scrollback_path).unwrap_or_default(),
+                        ) {
+                            text if text.trim().is_empty() => {
+                                // Empty scrollback: fall through to parser path
+                                None
+                            }
+                            text => Some(text),
+                        };
+
+                    if let Some(text) = scrollback_text {
+                        match summarize_scrollback(&client, &text, &task.branch) {
+                            Ok(summary) => {
+                                let _ = tx.send(SessionSummaryUpdate {
+                                    branch: task.branch,
+                                    session_id: task.session_id,
+                                    summary: Some(summary),
+                                    error: None,
+                                    warning: None,
+                                    mtime,
+                                    missing: false,
+                                });
+                            }
+                            Err(err) => match err {
+                                AIError::IncompleteSummary => {
+                                    let _ = tx.send(SessionSummaryUpdate {
+                                        branch: task.branch,
+                                        session_id: task.session_id,
+                                        summary: None,
+                                        error: None,
+                                        warning: Some(
+                                            "Incomplete summary; keeping previous".to_string(),
+                                        ),
+                                        mtime,
+                                        missing: false,
+                                    });
+                                }
+                                other => {
+                                    let _ = tx.send(SessionSummaryUpdate {
+                                        branch: task.branch,
+                                        session_id: task.session_id,
+                                        summary: None,
+                                        error: Some(format_ai_error(other)),
+                                        warning: None,
+                                        mtime,
+                                        missing: false,
+                                    });
+                                }
+                            },
+                        }
+                        continue;
+                    }
+                }
+
+                // FR-124: Fallback to session parser
                 let parser = match session_parser_for_tool(&task.tool_id) {
                     Some(parser) => parser,
                     None => {
@@ -1954,6 +2038,54 @@ impl Model {
         self.last_session_poll = Some(now);
         self.session_poll_deferred = false;
 
+        // FR-121: Try scrollback path first for staleness check
+        let scrollback_path = gwt_core::terminal::manager::PaneManager::load_pane_id_for_branch(
+            &branch_name,
+        )
+        .and_then(|pane_id| {
+            gwt_core::terminal::scrollback::ScrollbackFile::scrollback_path_for_pane(&pane_id).ok()
+        })
+        .filter(|p| p.exists());
+
+        if let Some(ref sb_path) = scrollback_path {
+            // Use scrollback file mtime for staleness
+            let metadata = match std::fs::metadata(sb_path) {
+                Ok(meta) => meta,
+                Err(_) => return,
+            };
+            let Some(mtime) = metadata.modified().ok() else {
+                return;
+            };
+            let sid = session_id
+                .clone()
+                .unwrap_or_else(|| "scrollback".to_string());
+            if !self
+                .branch_list
+                .session_summary_stale(&branch_name, &sid, mtime)
+            {
+                return;
+            }
+            if !session_file_is_quiet(mtime, SystemTime::now()) {
+                self.last_session_poll = Some(defer_poll_for_quiet(now));
+                return;
+            }
+            let Some(settings) = self.active_ai_settings() else {
+                return;
+            };
+            let tid = tool_id
+                .map(|t| canonical_tool_id(&t))
+                .unwrap_or_else(|| "builtin".to_string());
+            let task = SessionSummaryTask {
+                branch: branch_name,
+                session_id: sid,
+                tool_id: tid,
+                scrollback_path: Some(sb_path.clone()),
+            };
+            self.spawn_session_summaries(vec![task], settings);
+            return;
+        }
+
+        // FR-124: Fallback to session parser
         let Some(session_id) = session_id else {
             self.branch_list.mark_session_missing(&branch_name);
             return;
@@ -2006,6 +2138,7 @@ impl Model {
             branch: branch_name,
             session_id,
             tool_id,
+            scrollback_path: None,
         };
         self.spawn_session_summaries(vec![task], settings);
     }
