@@ -5,7 +5,7 @@
   "build": {
     "frontendDist": "../../gwt-gui/dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "cd ../gwt-gui && npm run dev",
+    "beforeDevCommand": "cd gwt-gui && npm run dev",
     "beforeBuildCommand": "cd ../gwt-gui && npm run build"
   },
   "app": {
