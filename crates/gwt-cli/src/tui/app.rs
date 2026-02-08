@@ -2603,6 +2603,30 @@ impl Model {
         }
     }
 
+    /// FR-020: Update focus target based on mouse click position.
+    /// Clicks on the agent pane area switch focus to AgentPane,
+    /// clicks on the branch list area switch focus to GwtUi.
+    fn update_focus_from_click(&mut self, col: u16, row: u16) {
+        let term_size = crossterm::terminal::size().unwrap_or((160, 40));
+        let full_area = ratatui::layout::Rect::new(0, 0, term_size.0, term_size.1);
+        let content_area =
+            ratatui::layout::Rect::new(0, 1, full_area.width, full_area.height.saturating_sub(1));
+        let split_areas =
+            super::screens::split_layout::calculate_split_layout(content_area, &self.split_layout);
+
+        if let Some(pane_area) = split_areas.agent_pane {
+            if col >= pane_area.x
+                && col < pane_area.x + pane_area.width
+                && row >= pane_area.y
+                && row < pane_area.y + pane_area.height
+            {
+                self.focus_target = FocusTarget::AgentPane;
+            } else {
+                self.focus_target = FocusTarget::GwtUi;
+            }
+        }
+    }
+
     /// FR-048: Handle mouse scroll events for the agent pane.
     /// Only sends scroll to PTY when the app has enabled mouse protocol.
     /// When mouse protocol is None (e.g. shell prompt), scroll is ignored.
@@ -7585,6 +7609,15 @@ pub fn run_with_context(context: Option<TuiEntryContext>) -> Result<Option<Launc
                                 }
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
+                                // FR-020: Switch focus between gwt UI and agent pane on click
+                                if matches!(model.screen, Screen::BranchList)
+                                    && model.split_layout.has_agent_pane
+                                    && !model.wizard.visible
+                                    && !model.ai_wizard.visible
+                                {
+                                    model.update_focus_from_click(mouse.column, mouse.row);
+                                }
+
                                 // Overlay priority: wizard > ai_wizard > confirm > screen-specific
                                 if model.wizard.visible {
                                     model.handle_wizard_mouse(mouse);
