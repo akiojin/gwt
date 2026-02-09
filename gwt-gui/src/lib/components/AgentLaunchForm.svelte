@@ -15,7 +15,6 @@
 
   type BranchMode = "existing" | "new";
   type SessionMode = "normal" | "continue" | "resume";
-  type RunnerMode = "auto" | "installed" | "bunx";
   type RuntimeTarget = "host" | "docker";
 
   type AgentVersionsInfo = {
@@ -26,26 +25,27 @@
     source: "cache" | "registry" | "fallback";
   };
 
-		  let agents: AgentInfo[] = $state([]);
-		  let selectedAgent: string = $state("");
-		  let branchMode: BranchMode = $state("existing" as BranchMode);
-		  let sessionMode: SessionMode = $state("normal" as SessionMode);
-		  let runMethod: RunnerMode = $state("auto" as RunnerMode);
-	  let runMethodByAgent: Record<string, RunnerMode> = $state({});
-	  let model: string = $state("");
-	  let agentVersion: string = $state("latest");
-	  let modelByAgent: Record<string, string> = $state({});
-	  let agentVersionByAgent: Record<string, string> = $state({});
-	  let lastAgent: string = $state("");
+  type SelectOption = { value: string; label: string };
 
-	  let resumeSessionId: string = $state("");
-	  let skipPermissions: boolean = $state(false);
-	  let reasoningLevel: string = $state("");
-	  let collaborationModes: boolean = $state(false);
+  let agents: AgentInfo[] = $state([]);
+  let selectedAgent: string = $state("");
+  let branchMode: BranchMode = $state("existing" as BranchMode);
+  let sessionMode: SessionMode = $state("normal" as SessionMode);
 
-	  let showAdvanced: boolean = $state(false);
-	  let extraArgsText: string = $state("");
-	  let envOverridesText: string = $state("");
+  let model: string = $state("");
+  let agentVersion: string = $state("latest");
+  let modelByAgent: Record<string, string> = $state({});
+  let agentVersionByAgent: Record<string, string> = $state({});
+  let lastAgent: string = $state("");
+
+  let resumeSessionId: string = $state("");
+  let skipPermissions: boolean = $state(false);
+  let reasoningLevel: string = $state("");
+  let collaborationModes: boolean = $state(false);
+
+  let showAdvanced: boolean = $state(false);
+  let extraArgsText: string = $state("");
+  let envOverridesText: string = $state("");
 
   let dockerContext: DockerContext | null = $state(null as DockerContext | null);
   let dockerLoading: boolean = $state(false);
@@ -63,21 +63,22 @@
   let versionOptions: string[] = $state([]);
   let versionsError: string | null = $state(null);
 
-  // Intentionally capture the initial values - fields are editable by the user
-  let branch: string = $state((() => selectedBranch)());
-  let baseBranch: string = $state((() => selectedBranch)());
+  // Capture the branch at open-time. "Existing Branch" is read-only.
+  const existingBranch: string = (() => selectedBranch)();
+  // "New Branch" fields are editable by the user.
+  let baseBranch: string = $state(existingBranch);
   let newBranch: string = $state("");
 
-	  let loading: boolean = $state(true);
-	  let launching: boolean = $state(false);
-	  let errorMessage: string | null = $state(null);
+  let loading: boolean = $state(true);
+  let launching: boolean = $state(false);
+  let errorMessage: string | null = $state(null);
 
-	  let selectedAgentInfo = $derived(
-	    agents.find((a) => a.id === selectedAgent) ?? null
-	  );
-	  let agentNotInstalled = $derived(
-	    selectedAgentInfo?.version === "bunx" || selectedAgentInfo?.version === "npx"
-	  );
+  let selectedAgentInfo = $derived(
+    agents.find((a) => a.id === selectedAgent) ?? null
+  );
+  let agentNotInstalled = $derived(
+    selectedAgentInfo?.version === "bunx" || selectedAgentInfo?.version === "npx"
+  );
   let composeDetected = $derived(
     dockerContext?.file_type === "compose" && !dockerContext.force_host
   );
@@ -86,43 +87,72 @@
       (dockerContext?.docker_available ?? false) &&
       (dockerContext?.compose_available ?? false)
   );
-	  function supportsModelFor(agentId: string): boolean {
-	    return (
-	      agentId === "codex" ||
-	      agentId === "claude" ||
-	      agentId === "gemini" ||
-	      agentId === "opencode"
-	    );
-	  }
+  function supportsModelFor(agentId: string): boolean {
+    return agentId === "codex" || agentId === "claude" || agentId === "gemini";
+  }
 
-	  let supportsModel = $derived(supportsModelFor(selectedAgent));
-	  let supportsReasoning = $derived(selectedAgent === "codex");
-	  let supportsCollaboration = $derived(selectedAgent === "codex");
-	  let needsResumeSessionId = $derived(
-	    selectedAgent === "opencode" && sessionMode === "resume"
-	  );
+  let supportsModel = $derived(supportsModelFor(selectedAgent));
+  let supportsReasoning = $derived(selectedAgent === "codex");
+  let supportsCollaboration = $derived(selectedAgent === "codex");
+  let needsResumeSessionId = $derived(
+    selectedAgent === "opencode" && sessionMode === "resume"
+  );
 
-	  let modelOptions = $derived(
-	    selectedAgent === "codex"
-	      ? [
-	          "gpt-5.3-codex",
-	          "gpt-5.2-codex",
-	          "gpt-5.1-codex-max",
-	          "gpt-5.2",
-	          "gpt-5.1-codex-mini",
-	        ]
-	      : selectedAgent === "claude"
-	        ? ["opus", "sonnet", "haiku"]
-	        : selectedAgent === "gemini"
-	          ? [
-	              "gemini-3-pro-preview",
-	              "gemini-3-flash-preview",
-	              "gemini-2.5-pro",
-	              "gemini-2.5-flash",
-	              "gemini-2.5-flash-lite",
-	            ]
-	        : []
-	  );
+  let modelOptions = $derived(
+    selectedAgent === "codex"
+      ? [
+          "gpt-5.3-codex",
+          "gpt-5.2-codex",
+          "gpt-5.1-codex-max",
+          "gpt-5.2",
+          "gpt-5.1-codex-mini",
+        ]
+      : selectedAgent === "claude"
+        ? ["opus", "sonnet", "haiku"]
+        : selectedAgent === "gemini"
+          ? [
+              "gemini-3-pro-preview",
+              "gemini-3-flash-preview",
+              "gemini-2.5-pro",
+              "gemini-2.5-flash",
+              "gemini-2.5-flash-lite",
+            ]
+          : []
+  );
+
+  let versionSelectOptions = $derived(
+    (() => {
+      const opts: SelectOption[] = [];
+      if (!selectedAgent) return opts;
+
+      const seen = new Set<string>();
+
+      if (!agentNotInstalled) {
+        const ver = selectedAgentInfo?.version?.trim() || "installed";
+        opts.push({ value: "installed", label: `Installed (${ver})` });
+        seen.add("installed");
+      }
+
+      opts.push({ value: "latest", label: "latest" });
+      seen.add("latest");
+
+      for (const t of versionTags) {
+        const tag = t.trim();
+        if (!tag || seen.has(tag)) continue;
+        opts.push({ value: tag, label: tag });
+        seen.add(tag);
+      }
+
+      for (const v of versionOptions) {
+        const ver = v.trim();
+        if (!ver || seen.has(ver)) continue;
+        opts.push({ value: ver, label: ver });
+        seen.add(ver);
+      }
+
+      return opts;
+    })()
+  );
 
   $effect(() => {
     detectAgents();
@@ -131,11 +161,10 @@
   $effect(() => {
     void projectPath;
     void branchMode;
-    void branch;
+    void existingBranch;
     void baseBranch;
 
-    const refBranch =
-      (branchMode === "existing" ? branch : baseBranch).trim();
+    const refBranch = (branchMode === "existing" ? existingBranch : baseBranch).trim();
     if (!projectPath || !refBranch) {
       dockerContext = null;
       dockerError = null;
@@ -152,73 +181,83 @@
     loadDockerContext(refBranch);
   });
 
-	  $effect(() => {
-	    if (selectedAgent === lastAgent) return;
+  $effect(() => {
+    if (selectedAgent === lastAgent) return;
 
-	    if (lastAgent && supportsModelFor(lastAgent)) {
-	      modelByAgent = { ...modelByAgent, [lastAgent]: model };
-	    }
-	    if (lastAgent) {
-	      agentVersionByAgent = { ...agentVersionByAgent, [lastAgent]: agentVersion };
-	      runMethodByAgent = { ...runMethodByAgent, [lastAgent]: runMethod };
-	    }
+    if (lastAgent && supportsModelFor(lastAgent)) {
+      modelByAgent = { ...modelByAgent, [lastAgent]: model };
+    }
+    if (lastAgent) {
+      agentVersionByAgent = { ...agentVersionByAgent, [lastAgent]: agentVersion };
+    }
 
-	    lastAgent = selectedAgent;
-	    model = modelByAgent[selectedAgent] ?? "";
-	    agentVersion = agentVersionByAgent[selectedAgent] ?? "latest";
-	    runMethod =
-	      runMethodByAgent[selectedAgent] ??
-	      (agentNotInstalled ? "bunx" : "auto");
-	  });
+    lastAgent = selectedAgent;
+    model = modelByAgent[selectedAgent] ?? "";
 
-	  $effect(() => {
-	    if (!selectedAgent || runMethod !== "bunx") {
-	      versionsLoading = false;
-	      versionsError = null;
-	      versionTags = [];
-	      versionOptions = [];
-	      return;
-	    }
-	    loadAgentVersions(selectedAgent);
-	  });
+    const storedVersion = agentVersionByAgent[selectedAgent];
+    if (storedVersion) {
+      agentVersion =
+        storedVersion === "installed" && agentNotInstalled
+          ? "latest"
+          : storedVersion;
+    } else {
+      agentVersion = agentNotInstalled ? "latest" : "installed";
+    }
+  });
 
-	  function toErrorMessage(err: unknown): string {
+  $effect(() => {
+    if (!selectedAgent) {
+      versionsLoading = false;
+      versionsError = null;
+      versionTags = [];
+      versionOptions = [];
+      return;
+    }
+    loadAgentVersions(selectedAgent);
+  });
+
+  function toErrorMessage(err: unknown): string {
     if (typeof err === "string") return err;
     if (err && typeof err === "object" && "message" in err) {
       const msg = (err as { message?: unknown }).message;
       if (typeof msg === "string") return msg;
     }
-	    return String(err);
-	  }
+    return String(err);
+  }
 
-	  function parseExtraArgs(text: string): string[] {
-	    return text
-	      .split("\n")
-	      .map((line) => line.trim())
-	      .filter((line) => line.length > 0);
-	  }
+  function parseExtraArgs(text: string): string[] {
+    return text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+  }
 
-	  function parseEnvOverrides(text: string): { env: Record<string, string>; error: string | null } {
-	    const env: Record<string, string> = {};
-	    const lines = text.split("\n");
-	    for (let i = 0; i < lines.length; i++) {
-	      const raw = lines[i].trim();
-	      if (!raw || raw.startsWith("#")) continue;
-	      const idx = raw.indexOf("=");
-	      if (idx <= 0) {
-	        return { env: {}, error: `Invalid env override at line ${i + 1}. Use KEY=VALUE.` };
-	      }
-	      const key = raw.slice(0, idx).trim();
-	      const value = raw.slice(idx + 1).trimStart();
-	      if (!key) {
-	        return { env: {}, error: `Invalid env override at line ${i + 1}. Key is required.` };
-	      }
-	      env[key] = value;
-	    }
-	    return { env, error: null };
-	  }
+  function parseEnvOverrides(
+    text: string
+  ): { env: Record<string, string>; error: string | null } {
+    const env: Record<string, string> = {};
+    const lines = text.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const raw = lines[i].trim();
+      if (!raw || raw.startsWith("#")) continue;
+      const idx = raw.indexOf("=");
+      if (idx <= 0) {
+        return {
+          env: {},
+          error: `Invalid env override at line ${i + 1}. Use KEY=VALUE.`,
+        };
+      }
+      const key = raw.slice(0, idx).trim();
+      const value = raw.slice(idx + 1).trimStart();
+      if (!key) {
+        return { env: {}, error: `Invalid env override at line ${i + 1}. Key is required.` };
+      }
+      env[key] = value;
+    }
+    return { env, error: null };
+  }
 
-	  async function loadAgentVersions(agentId: string) {
+  async function loadAgentVersions(agentId: string) {
     versionsLoading = true;
     versionsError = null;
     try {
@@ -226,11 +265,11 @@
       const info = await invoke<AgentVersionsInfo>("list_agent_versions", { agentId });
       if (selectedAgent !== agentId) return;
       versionTags = info.tags ?? [];
-      versionOptions = info.versions ?? [];
+      versionOptions = (info.versions ?? []).slice(0, 10);
     } catch (err) {
       if (selectedAgent !== agentId) return;
       versionsError = toErrorMessage(err);
-      versionTags = ["latest"];
+      versionTags = [];
       versionOptions = [];
     } finally {
       if (selectedAgent === agentId) {
@@ -301,58 +340,56 @@
     loading = false;
   }
 
-	  async function handleLaunch() {
-	    errorMessage = null;
-	    if (!selectedAgent) return;
-	    launching = true;
-	    try {
-	      const request: LaunchAgentRequest = {
-	        agentId: selectedAgent,
-	        branch: "",
-	        mode: sessionMode,
-	        skipPermissions,
-	      };
+  async function handleLaunch() {
+    errorMessage = null;
+    if (!selectedAgent) return;
+    launching = true;
+    try {
+      const request: LaunchAgentRequest = {
+        agentId: selectedAgent,
+        branch: "",
+        mode: sessionMode,
+        skipPermissions,
+      };
 
-	      if (supportsModel && model.trim()) {
-	        request.model = model.trim();
-	      }
+      if (supportsModel && model.trim()) {
+        request.model = model.trim();
+      }
 
-	      if (runMethod === "installed") {
-	        request.agentVersion = "installed";
-	      } else if (runMethod === "bunx") {
-	        request.agentVersion = agentVersion.trim() || "latest";
-	      }
+      if (agentVersion.trim()) {
+        request.agentVersion = agentVersion.trim();
+      }
 
-	      if (sessionMode !== "normal" && resumeSessionId.trim()) {
-	        request.resumeSessionId = resumeSessionId.trim();
-	      }
+      if (sessionMode !== "normal" && resumeSessionId.trim()) {
+        request.resumeSessionId = resumeSessionId.trim();
+      }
 
-	      if (needsResumeSessionId && !request.resumeSessionId) {
-	        errorMessage = "Session ID is required for OpenCode resume.";
-	        return;
-	      }
+      if (needsResumeSessionId && !request.resumeSessionId) {
+        errorMessage = "Session ID is required for OpenCode resume.";
+        return;
+      }
 
-	      if (supportsReasoning && reasoningLevel.trim()) {
-	        request.reasoningLevel = reasoningLevel.trim();
-	      }
+      if (supportsReasoning && reasoningLevel.trim()) {
+        request.reasoningLevel = reasoningLevel.trim();
+      }
 
-	      if (supportsCollaboration) {
-	        request.collaborationModes = collaborationModes;
-	      }
+      if (supportsCollaboration) {
+        request.collaborationModes = collaborationModes;
+      }
 
-	      const extraArgs = parseExtraArgs(extraArgsText);
-	      if (extraArgs.length > 0) {
-	        request.extraArgs = extraArgs;
-	      }
+      const extraArgs = parseExtraArgs(extraArgsText);
+      if (extraArgs.length > 0) {
+        request.extraArgs = extraArgs;
+      }
 
-	      const envParsed = parseEnvOverrides(envOverridesText);
-	      if (envParsed.error) {
-	        errorMessage = envParsed.error;
-	        return;
-	      }
-	      if (Object.keys(envParsed.env).length > 0) {
-	        request.envOverrides = envParsed.env;
-	      }
+      const envParsed = parseEnvOverrides(envOverridesText);
+      if (envParsed.error) {
+        errorMessage = envParsed.error;
+        return;
+      }
+      if (Object.keys(envParsed.env).length > 0) {
+        request.envOverrides = envParsed.env;
+      }
 
       if (composeDetected) {
         if (runtimeTarget === "host") {
@@ -375,25 +412,25 @@
         }
       }
 
-	      if (branchMode === "existing") {
-	        if (!branch.trim()) return;
-	        request.branch = branch.trim();
-	        await onLaunch({
-	          ...request,
-	        });
-	        onClose();
-	        return;
-	      }
+      if (branchMode === "existing") {
+        if (!existingBranch.trim()) return;
+        request.branch = existingBranch.trim();
+        await onLaunch({
+          ...request,
+        });
+        onClose();
+        return;
+      }
 
-	      if (!baseBranch.trim() || !newBranch.trim()) return;
-	      request.branch = newBranch.trim();
-	      await onLaunch({
-	        ...request,
-	        createBranch: { name: newBranch.trim(), base: baseBranch.trim() },
-	      });
-	      onClose();
-	    } catch (err) {
-	      errorMessage = `Failed to launch agent: ${toErrorMessage(err)}`;
+      if (!baseBranch.trim() || !newBranch.trim()) return;
+      request.branch = newBranch.trim();
+      await onLaunch({
+        ...request,
+        createBranch: { name: newBranch.trim(), base: baseBranch.trim() },
+      });
+      onClose();
+    } catch (err) {
+      errorMessage = `Failed to launch agent: ${toErrorMessage(err)}`;
     } finally {
       launching = false;
     }
@@ -454,21 +491,36 @@
 
         {#if supportsModel}
           <div class="field">
-            <label for="model-input">Model</label>
-            <input
-              id="model-input"
-              type="text"
-              list="model-options"
-              bind:value={model}
-              placeholder="Optional (e.g., gpt-5.3-codex, opus, gemini-2.5-pro, provider/model)"
-            />
-            <datalist id="model-options">
+            <label for="model-select">Model</label>
+            <select id="model-select" bind:value={model}>
+              <option value="">Default</option>
               {#each modelOptions as opt (opt)}
-                <option value={opt}></option>
+                <option value={opt}>{opt}</option>
               {/each}
-            </datalist>
+            </select>
           </div>
         {/if}
+
+        <div class="field">
+          <label for="agent-version-select">Agent Version</label>
+          <select id="agent-version-select" bind:value={agentVersion}>
+            {#each versionSelectOptions as opt (opt.value)}
+              <option value={opt.value}>{opt.label}</option>
+            {/each}
+          </select>
+          {#if agentNotInstalled}
+            <span class="field-hint">
+              Installed binary not found. Launch will use bunx/npx.
+            </span>
+          {/if}
+          {#if versionsLoading}
+            <span class="field-hint">Loading versions...</span>
+          {:else if versionsError}
+            <span class="field-hint warn">
+              Failed to load version list from registry.
+            </span>
+          {/if}
+        </div>
 
         <div class="field">
           <span class="field-label" id="session-mode-label">Session</span>
@@ -508,66 +560,6 @@
             />
             {#if needsResumeSessionId}
               <span class="field-hint">OpenCode resume requires a session id.</span>
-            {/if}
-          </div>
-        {/if}
-
-        <div class="field">
-          <span class="field-label" id="run-method-label">Run Method</span>
-          <div class="mode-toggle" role="group" aria-labelledby="run-method-label">
-            <button
-              class="mode-btn"
-              class:active={runMethod === "auto"}
-              onclick={() => (runMethod = "auto")}
-            >
-              Auto
-            </button>
-            <button
-              class="mode-btn"
-              class:active={runMethod === "installed"}
-              onclick={() => (runMethod = "installed")}
-            >
-              Installed
-            </button>
-            <button
-              class="mode-btn"
-              class:active={runMethod === "bunx"}
-              onclick={() => (runMethod = "bunx")}
-            >
-              bunx/npx
-            </button>
-          </div>
-          {#if agentNotInstalled}
-            <span class="field-hint">
-              Installed binary not found. Auto will use bunx/npx.
-            </span>
-          {/if}
-        </div>
-
-        {#if runMethod === "bunx"}
-          <div class="field">
-            <label for="agent-version-input">Agent Version</label>
-            <input
-              id="agent-version-input"
-              type="text"
-              list="agent-version-options"
-              bind:value={agentVersion}
-              placeholder="latest"
-            />
-            <datalist id="agent-version-options">
-              {#each versionTags as tag (tag)}
-                <option value={tag}></option>
-              {/each}
-              {#each versionOptions as ver (ver)}
-                <option value={ver}></option>
-              {/each}
-            </datalist>
-            {#if versionsLoading}
-              <span class="field-hint">Loading versions...</span>
-            {:else if versionsError}
-              <span class="field-hint">
-                Failed to load versions. You can still type a version or dist-tag.
-              </span>
             {/if}
           </div>
         {/if}
@@ -659,15 +651,13 @@
         </div>
 
         {#if branchMode === "existing"}
-        <div class="field">
-          <label for="branch-input">Branch</label>
-          <input
-            id="branch-input"
-            type="text"
-            bind:value={branch}
-            placeholder="Enter branch name..."
-          />
-        </div>
+          <div class="field">
+            <label for="branch-input">Branch</label>
+            <input id="branch-input" type="text" value={existingBranch} readonly />
+            {#if !existingBranch.trim()}
+              <span class="field-hint warn">No branch selected.</span>
+            {/if}
+          </div>
         {:else}
           <div class="field">
             <label for="base-branch-input">Base Branch</label>
@@ -773,7 +763,7 @@
             !selectedAgent ||
             (needsResumeSessionId && !resumeSessionId.trim()) ||
             (branchMode === "existing"
-              ? !branch.trim()
+              ? !existingBranch.trim()
               : !baseBranch.trim() || !newBranch.trim())
           }
           onclick={handleLaunch}
