@@ -298,11 +298,16 @@
     return null;
   }
 
-  function setNewBranchFromFullName(fullName: string) {
+  function setNewBranchFromFullName(fullName: string): boolean {
     const parsed = splitBranchNamePrefix(fullName);
-    if (!parsed) return;
+    if (!parsed) {
+      suggestError = "Invalid suggestion prefix.";
+      return false;
+    }
+    suggestError = null;
     newBranchPrefix = parsed.prefix;
     newBranchSuffix = parsed.suffix;
+    return true;
   }
 
   function handleNewBranchSuffixInput(raw: string) {
@@ -371,12 +376,17 @@
       });
 
       if (result.status === "ok") {
-        suggestSuggestions = result.suggestions ?? [];
-        if (suggestSuggestions.length !== 3) {
+        const suggestions = (result.suggestions ?? [])
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0);
+        if (suggestions.length !== 3) {
+          suggestSuggestions = [];
           suggestError = "Failed to generate suggestions.";
+          return;
         }
+        suggestSuggestions = suggestions;
       } else if (result.status === "ai-not-configured") {
-        suggestError = "AI settings are not configured.";
+        suggestError = "AI suggestions are unavailable.";
       } else {
         suggestError = result.error || "Failed to generate suggestions.";
       }
@@ -600,6 +610,7 @@
         <div class="field">
           <label for="agent-select">Agent</label>
           <select id="agent-select" bind:value={selectedAgent}>
+            <option value="" disabled>Select an agent...</option>
             {#each agents as agent (agent.id)}
               <option value={agent.id} disabled={!agent.available}>
                 {agent.name} ({agent.version}{agent.available ? "" : ", Unavailable"})
@@ -985,8 +996,9 @@
                     class="suggestion-item"
                     type="button"
                     onclick={() => {
-                      setNewBranchFromFullName(s);
-                      closeSuggestModal();
+                      if (setNewBranchFromFullName(s)) {
+                        closeSuggestModal();
+                      }
                     }}
                   >
                     <span class="mono">{s}</span>
