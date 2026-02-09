@@ -101,7 +101,7 @@ fn session_parser_for_tool(tool_id: &str) -> Option<Box<dyn SessionParser>> {
 fn resolve_active_ai_settings(
     config: &ProfilesConfig,
 ) -> Option<(bool, bool, Option<ResolvedAISettings>)> {
-    // Match the TUI behavior:
+    // Match the legacy behavior:
     // - Prefer active profile AI settings if present.
     // - Else fall back to default_ai.
     // - "ai_enabled": endpoint/model present
