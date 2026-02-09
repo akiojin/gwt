@@ -30,9 +30,6 @@ pub struct AgentSession {
     /// Base branch from which agent worktrees are created
     #[serde(default)]
     pub base_branch: Option<String>,
-    /// Associated Spec Kit artifact ID
-    #[serde(default)]
-    pub spec_id: Option<String>,
     /// Position in the session queue (0 = active)
     #[serde(default)]
     pub queue_position: u32,
@@ -57,7 +54,6 @@ impl AgentSession {
             worktrees: Vec::new(),
             repository_path,
             base_branch: None,
-            spec_id: None,
             queue_position: 0,
             llm_call_count: 0,
             estimated_tokens: 0,
