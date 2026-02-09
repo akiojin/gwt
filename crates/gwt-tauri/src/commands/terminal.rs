@@ -121,13 +121,13 @@ fn load_profile_env(profile_override: Option<&str>) -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
-struct BuiltinAgentDef {
-    label: &'static str,
-    local_command: &'static str,
-    bunx_package: &'static str,
+pub(crate) struct BuiltinAgentDef {
+    pub(crate) label: &'static str,
+    pub(crate) local_command: &'static str,
+    pub(crate) bunx_package: &'static str,
 }
 
-fn builtin_agent_def(agent_id: &str) -> Result<BuiltinAgentDef, String> {
+pub(crate) fn builtin_agent_def(agent_id: &str) -> Result<BuiltinAgentDef, String> {
     match agent_id {
         "claude" => Ok(BuiltinAgentDef {
             label: "Claude Code",

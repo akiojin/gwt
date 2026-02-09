@@ -19,11 +19,27 @@
 
   type LaunchMode = "existing" | "new";
 
+  type AgentVersionsInfo = {
+    agentId: string;
+    package: string;
+    tags: string[];
+    versions: string[];
+    source: "cache" | "registry" | "fallback";
+  };
+
   let agents: AgentInfo[] = $state([]);
   let selectedAgent: string = $state("");
   let mode: LaunchMode = $state("existing");
   let model: string = $state("");
   let agentVersion: string = $state("latest");
+  let modelByAgent: Record<string, string> = $state({});
+  let agentVersionByAgent: Record<string, string> = $state({});
+  let lastAgent: string = $state("");
+
+  let versionsLoading: boolean = $state(false);
+  let versionTags: string[] = $state([]);
+  let versionOptions: string[] = $state([]);
+  let versionsError: string | null = $state(null);
 
   // Intentionally capture the initial values - fields are editable by the user
   let branch: string = $state((() => selectedBranch)());
@@ -40,12 +56,48 @@
   let isFallbackAgent = $derived(
     selectedAgentInfo?.version === "bunx" || selectedAgentInfo?.version === "npx"
   );
-  let supportsModel = $derived(
-    selectedAgent === "codex" || selectedAgent === "claude"
+  function supportsModelFor(agentId: string): boolean {
+    return agentId === "codex" || agentId === "claude";
+  }
+
+  let supportsModel = $derived(supportsModelFor(selectedAgent));
+
+  let modelOptions = $derived(
+    selectedAgent === "codex"
+      ? ["gpt-5.1-codex", "gpt-5.1-codex-max", "gpt-5.2"]
+      : selectedAgent === "claude"
+        ? ["sonnet", "opus", "haiku"]
+        : []
   );
 
   $effect(() => {
     detectAgents();
+  });
+
+  $effect(() => {
+    if (selectedAgent === lastAgent) return;
+
+    if (lastAgent && supportsModelFor(lastAgent)) {
+      modelByAgent = { ...modelByAgent, [lastAgent]: model };
+    }
+    if (lastAgent) {
+      agentVersionByAgent = { ...agentVersionByAgent, [lastAgent]: agentVersion };
+    }
+
+    lastAgent = selectedAgent;
+    model = modelByAgent[selectedAgent] ?? "";
+    agentVersion = agentVersionByAgent[selectedAgent] ?? "latest";
+  });
+
+  $effect(() => {
+    if (!selectedAgent || !isFallbackAgent) {
+      versionsLoading = false;
+      versionsError = null;
+      versionTags = [];
+      versionOptions = [];
+      return;
+    }
+    loadAgentVersions(selectedAgent);
   });
 
   function toErrorMessage(err: unknown): string {
@@ -55,6 +107,27 @@
       if (typeof msg === "string") return msg;
     }
     return String(err);
+  }
+
+  async function loadAgentVersions(agentId: string) {
+    versionsLoading = true;
+    versionsError = null;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const info = await invoke<AgentVersionsInfo>("list_agent_versions", { agentId });
+      if (selectedAgent !== agentId) return;
+      versionTags = info.tags ?? [];
+      versionOptions = info.versions ?? [];
+    } catch (err) {
+      if (selectedAgent !== agentId) return;
+      versionsError = toErrorMessage(err);
+      versionTags = ["latest"];
+      versionOptions = [];
+    } finally {
+      if (selectedAgent === agentId) {
+        versionsLoading = false;
+      }
+    }
   }
 
   async function detectAgents() {
@@ -169,9 +242,15 @@
             <input
               id="model-input"
               type="text"
+              list="model-options"
               bind:value={model}
               placeholder="Optional (e.g., gpt-5.2, sonnet)"
             />
+            <datalist id="model-options">
+              {#each modelOptions as opt (opt)}
+                <option value={opt}></option>
+              {/each}
+            </datalist>
           </div>
         {/if}
 
@@ -181,9 +260,25 @@
             <input
               id="agent-version-input"
               type="text"
+              list="agent-version-options"
               bind:value={agentVersion}
               placeholder="latest"
             />
+            <datalist id="agent-version-options">
+              {#each versionTags as tag (tag)}
+                <option value={tag}></option>
+              {/each}
+              {#each versionOptions as ver (ver)}
+                <option value={ver}></option>
+              {/each}
+            </datalist>
+            {#if versionsLoading}
+              <span class="field-hint">Loading versions...</span>
+            {:else if versionsError}
+              <span class="field-hint">
+                Failed to load versions. You can still type a version or dist-tag.
+              </span>
+            {/if}
           </div>
         {/if}
 
@@ -351,6 +446,12 @@
     color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
+  }
+
+  .field-hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    line-height: 1.4;
   }
 
   .agent-cards {

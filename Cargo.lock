@@ -2243,6 +2243,7 @@ name = "gwt-tauri"
 version = "6.28.1"
 dependencies = [
  "gwt-core",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tauri",

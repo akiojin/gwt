@@ -110,6 +110,7 @@ pub fn build_app(
             crate::commands::settings::get_settings,
             crate::commands::settings::save_settings,
             crate::commands::agents::detect_agents,
+            crate::commands::agents::list_agent_versions,
             crate::commands::profiles::get_profiles,
             crate::commands::profiles::save_profiles,
         ])
