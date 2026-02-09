@@ -17,6 +17,7 @@
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
+| [SPEC-86bb4e7c](SPEC-86bb4e7c/spec.md) | 機能仕様: gwt GUI ブランチフィルター修正・エージェント起動ウィザード・Profiles設定 | 2026-02-09 |
 | [SPEC-d6210238](SPEC-d6210238/spec.md) | 機能仕様: TUI→Tauri GUI完全移行 Phase 1: 基盤構築 | 2026-02-08 |
 | [SPEC-dfb1611a](SPEC-dfb1611a/spec.md) | 機能仕様: gwt GUI プロジェクト管理 Phase 2 追加機能 | 2026-02-08 |
 | [SPEC-92053c0d](SPEC-92053c0d/spec.md) | 機能仕様: commitlint を npm ci 無しで実行可能にする | 2026-02-03 |
