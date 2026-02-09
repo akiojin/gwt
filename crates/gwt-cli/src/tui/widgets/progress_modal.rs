@@ -389,7 +389,7 @@ mod tests {
         let lines = ProgressModal::step_lines(&step, 78);
         // FR-052a: should wrap to multiple lines, not truncate
         assert!(lines.len() >= 3); // step line + at least 2 error lines
-        // All error lines should have indent
+                                   // All error lines should have indent
         for line in &lines[1..] {
             assert!(line.to_string().starts_with("      "));
         }
