@@ -7,8 +7,6 @@ pub mod claude;
 pub mod codex;
 pub mod conversation;
 pub mod gemini;
-pub mod master;
-pub mod orchestrator;
 pub mod prompt_builder;
 pub mod scanner;
 pub mod session;
@@ -23,8 +21,6 @@ use crate::error::{GwtError, Result};
 use std::path::Path;
 
 pub use conversation::{Conversation, Message, MessageRole};
-pub use master::{MasterAgent, ParsedTask};
-pub use orchestrator::{OrchestratorEvent, OrchestratorLoop, OrchestratorMessage};
 pub use prompt_builder::PromptBuilder;
 pub use scanner::{BuildSystem, RepositoryScanResult, RepositoryScanner};
 pub use session::{AgentSession, SessionStatus};

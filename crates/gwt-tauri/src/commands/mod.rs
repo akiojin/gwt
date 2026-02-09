@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod branch_suggest;
 pub mod branches;
 pub mod docker;
 pub mod profiles;

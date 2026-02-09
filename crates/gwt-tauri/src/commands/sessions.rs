@@ -7,7 +7,7 @@ use gwt_core::ai::{
     ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, OpenCodeSessionParser,
     SessionParseError, SessionParser, SessionSummary,
 };
-use gwt_core::config::{ProfilesConfig, ResolvedAISettings, ToolSessionEntry};
+use gwt_core::config::{ProfilesConfig, ToolSessionEntry};
 use serde::Serialize;
 use std::path::Path;
 use std::time::SystemTime;
@@ -98,41 +98,6 @@ fn session_parser_for_tool(tool_id: &str) -> Option<Box<dyn SessionParser>> {
     }
 }
 
-fn resolve_active_ai_settings(
-    config: &ProfilesConfig,
-) -> Option<(bool, bool, Option<ResolvedAISettings>)> {
-    // Match the TUI behavior:
-    // - Prefer active profile AI settings if present.
-    // - Else fall back to default_ai.
-    // - "ai_enabled": endpoint/model present
-    // - "summary_enabled": ai_enabled && summary_enabled flag
-    if let Some(profile) = config.active_profile() {
-        if let Some(settings) = profile.ai.as_ref() {
-            let ai_enabled = settings.is_enabled();
-            let summary_enabled = settings.is_summary_enabled();
-            let resolved = if ai_enabled {
-                Some(settings.resolved())
-            } else {
-                None
-            };
-            return Some((ai_enabled, summary_enabled, resolved));
-        }
-    }
-
-    let ai_enabled = config
-        .default_ai
-        .as_ref()
-        .map(|s| s.is_enabled())
-        .unwrap_or(false);
-    let summary_enabled = config
-        .default_ai
-        .as_ref()
-        .map(|s| s.is_summary_enabled())
-        .unwrap_or(false);
-    let resolved = config.default_ai.as_ref().map(|s| s.resolved());
-    Some((ai_enabled, summary_enabled, resolved))
-}
-
 fn get_branch_session_summary_inner(
     project_path: &str,
     branch: &str,
@@ -173,10 +138,9 @@ fn get_branch_session_summary_inner(
     }
 
     let profiles = ProfilesConfig::load().map_err(|e| e.to_string())?;
-    let (ai_enabled, summary_enabled, resolved) =
-        resolve_active_ai_settings(&profiles).unwrap_or((false, false, None));
+    let ai = profiles.resolve_active_ai_settings();
 
-    if !ai_enabled {
+    if !ai.ai_enabled {
         return Ok(summary_status(
             "ai-not-configured",
             Some(tool_id),
@@ -184,7 +148,7 @@ fn get_branch_session_summary_inner(
             None,
         ));
     }
-    if !summary_enabled {
+    if !ai.summary_enabled {
         return Ok(summary_status(
             "disabled",
             Some(tool_id),
@@ -193,7 +157,9 @@ fn get_branch_session_summary_inner(
         ));
     }
 
-    let settings = resolved.ok_or_else(|| "AI settings are not configured".to_string())?;
+    let settings = ai
+        .resolved
+        .ok_or_else(|| "AI settings are not configured".to_string())?;
     let parser = match session_parser_for_tool(&tool_id) {
         Some(p) => p,
         None => {
