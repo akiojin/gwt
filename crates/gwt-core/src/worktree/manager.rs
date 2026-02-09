@@ -177,6 +177,55 @@ impl WorktreeManager {
         })
     }
 
+    fn get_registered_worktree_by_path_basic(&self, path: &Path) -> Result<Option<Worktree>> {
+        let git_worktrees = self.repo.list_worktrees()?;
+        let target = path;
+        let target_canon = std::fs::canonicalize(target).ok();
+
+        for info in git_worktrees {
+            if info.path == target {
+                return Ok(Some(Worktree::from_git_info(&info)));
+            }
+            match (&target_canon, std::fs::canonicalize(&info.path).ok()) {
+                (Some(a), Some(b)) if a == &b => return Ok(Some(Worktree::from_git_info(&info))),
+                _ => {}
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn handle_registered_worktree_path_conflict(
+        &self,
+        path: &Path,
+        did_prune: &mut bool,
+    ) -> Result<()> {
+        let Some(wt) = self.get_registered_worktree_by_path_basic(path)? else {
+            return Ok(());
+        };
+
+        match wt.status {
+            WorktreeStatus::Active => Err(GwtError::WorktreeAlreadyExists { path: wt.path }),
+            WorktreeStatus::Locked => Err(GwtError::WorktreeLocked { path: wt.path }),
+            WorktreeStatus::Missing | WorktreeStatus::Prunable => {
+                if *did_prune {
+                    return Err(GwtError::OrphanedWorktree { path: wt.path });
+                }
+
+                if !self.prune_worktrees_if_safe()? {
+                    return Err(GwtError::OrphanedWorktree { path: wt.path });
+                }
+                *did_prune = true;
+
+                if self.get_registered_worktree_by_path_basic(path)?.is_some() {
+                    return Err(GwtError::OrphanedWorktree { path: wt.path });
+                }
+
+                Ok(())
+            }
+        }
+    }
+
     fn resolve_existing_worktree_for_create(
         &self,
         wt: Worktree,
@@ -217,7 +266,7 @@ impl WorktreeManager {
     }
 
     fn prune_worktrees_if_safe(&self) -> Result<bool> {
-        let current_name = current_worktree_metadata_name();
+        let current_name = current_worktree_metadata_name_for_repo(&self.repo_root);
 
         let output = match std::process::Command::new("git")
             .args(["worktree", "prune", "--dry-run", "--verbose"])
@@ -399,6 +448,10 @@ impl WorktreeManager {
         let path =
             WorktreePath::generate_with_location(&self.repo_root, &resolved_branch, self.location);
 
+        // Git can still have this path registered even when the directory is missing.
+        // In that case, git worktree add fails with "missing but already registered worktree".
+        self.handle_registered_worktree_path_conflict(&path, &mut did_prune)?;
+
         // FR-038-040: Handle existing path (auto-recovery disabled)
         if path.exists() {
             self.handle_existing_path(&path)?;
@@ -413,6 +466,19 @@ impl WorktreeManager {
                         GwtError::GitOperationFailed { operation, details }
                             if operation == "worktree add" =>
                         {
+                            if let Some(conflict_path) =
+                                parse_missing_registered_worktree_path(details)
+                            {
+                                if !did_prune {
+                                    if self.prune_worktrees_if_safe()? {
+                                        did_prune = true;
+                                        continue;
+                                    }
+                                }
+                                return Err(GwtError::OrphanedWorktree {
+                                    path: conflict_path,
+                                });
+                            }
                             if let Some(checked_out_path) = parse_already_checked_out_path(details)
                             {
                                 if checked_out_path.exists() {
@@ -484,11 +550,15 @@ impl WorktreeManager {
         // SPEC-a70a1ece T405: Use location-aware path generation
         let path =
             WorktreePath::generate_with_location(&self.repo_root, branch_name, self.location);
+        let mut did_prune = false;
 
         // FR-038-040: Handle existing path (auto-recovery disabled)
         if path.exists() {
             self.handle_existing_path(&path)?;
         }
+
+        // The directory can be missing while git still has it registered.
+        self.handle_registered_worktree_path_conflict(&path, &mut did_prune)?;
 
         // Check if branch already exists
         if Branch::exists(&self.repo_root, branch_name)? {
@@ -532,7 +602,34 @@ impl WorktreeManager {
         }
 
         // Create worktree with new branch
-        self.repo.create_worktree(&path, branch_name, true)?;
+        loop {
+            match self.repo.create_worktree(&path, branch_name, true) {
+                Ok(()) => break,
+                Err(err) => {
+                    match &err {
+                        GwtError::GitOperationFailed { operation, details }
+                            if operation == "worktree add" =>
+                        {
+                            if let Some(conflict_path) =
+                                parse_missing_registered_worktree_path(details)
+                            {
+                                if !did_prune {
+                                    if self.prune_worktrees_if_safe()? {
+                                        did_prune = true;
+                                        continue;
+                                    }
+                                }
+                                return Err(GwtError::OrphanedWorktree {
+                                    path: conflict_path,
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                    return Err(err);
+                }
+            }
+        }
 
         // If base branch specified, reset to it
         if let Some(base) = normalized_base.as_deref() {
@@ -896,28 +993,64 @@ fn parse_already_checked_out_path(details: &str) -> Option<PathBuf> {
     None
 }
 
-fn current_worktree_metadata_name() -> Option<String> {
+fn parse_missing_registered_worktree_path(details: &str) -> Option<PathBuf> {
+    // Example:
+    // fatal: '/path/to/worktree' is a missing but already registered worktree; use 'add -f' to override, or 'prune' or 'remove' to clear
+    if let Some(start) = details.find("fatal: '") {
+        let rest = &details[start + "fatal: '".len()..];
+        if let Some(end) = rest.find("' is a missing but already registered worktree") {
+            return Some(PathBuf::from(rest[..end].trim()));
+        }
+    }
+
+    if let Some(start) = details.find("fatal: \"") {
+        let rest = &details[start + "fatal: \"".len()..];
+        if let Some(end) = rest.find("\" is a missing but already registered worktree") {
+            return Some(PathBuf::from(rest[..end].trim()));
+        }
+    }
+
+    None
+}
+
+fn current_worktree_metadata_name_for_repo(repo_root: &Path) -> Option<String> {
+    fn rev_parse_path(dir: &Path, arg: &str) -> Option<PathBuf> {
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", arg])
+            .current_dir(dir)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+
+        let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if raw.is_empty() {
+            return None;
+        }
+
+        let p = PathBuf::from(&raw);
+        Some(if p.is_absolute() { p } else { dir.join(p) })
+    }
+
     let cwd = std::env::current_dir().ok()?;
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--git-dir"])
-        .current_dir(&cwd)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
+    let cwd_common = rev_parse_path(&cwd, "--git-common-dir")?;
+    let repo_common = rev_parse_path(repo_root, "--git-common-dir")?;
 
-    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if raw.is_empty() {
-        return None;
-    }
-
-    let git_dir = PathBuf::from(&raw);
-    let abs_git_dir = if git_dir.is_absolute() {
-        git_dir
-    } else {
-        cwd.join(git_dir)
+    let same_common = match (
+        std::fs::canonicalize(&cwd_common).ok(),
+        std::fs::canonicalize(&repo_common).ok(),
+    ) {
+        (Some(a), Some(b)) => a == b,
+        _ => cwd_common == repo_common,
     };
+
+    if !same_common {
+        return None;
+    }
+
+    let git_dir = rev_parse_path(&cwd, "--git-dir")?;
+    let abs_git_dir = std::fs::canonicalize(&git_dir).unwrap_or(git_dir);
 
     // Linked worktrees use <common-dir>/worktrees/<name> as git-dir.
     let parent = abs_git_dir.parent()?;
@@ -1126,6 +1259,34 @@ mod tests {
         // No new worktree should be created.
         let worktrees = manager.list().unwrap();
         assert_eq!(worktrees.len(), 1);
+    }
+
+    #[test]
+    fn test_create_for_branch_recovers_missing_registered_worktree_path() {
+        let temp = create_test_repo();
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+
+        let branch = "feature/auto-merge";
+        Branch::create(temp.path(), branch, "HEAD").unwrap();
+
+        // Register the target path as a detached worktree, then delete the directory.
+        // This simulates: "<path> is a missing but already registered worktree".
+        let wt_path = WorktreePath::generate(temp.path(), branch);
+        run_git_in(
+            temp.path(),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                wt_path.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        std::fs::remove_dir_all(&wt_path).unwrap();
+
+        let wt = manager.create_for_branch(branch).unwrap();
+        assert_eq!(wt.branch.as_deref(), Some(branch));
+        assert!(wt.path.exists());
     }
 
     #[test]
@@ -1464,6 +1625,33 @@ mod tests {
 
         // Verify *.git directory still exists at expected location
         assert!(bare_path.exists(), "Bare repo should still exist");
+    }
+
+    #[test]
+    fn test_bare_repo_create_for_branch_recovers_missing_registered_worktree_path() {
+        let (_temp, bare_path, base_branch) = create_bare_test_repo();
+        let manager = WorktreeManager::new(&bare_path).unwrap();
+
+        let branch = "feature/auto-merge";
+        Branch::create(&bare_path, branch, &base_branch).unwrap();
+
+        let wt_path =
+            WorktreePath::generate_with_location(&bare_path, branch, WorktreeLocation::Sibling);
+        run_git_in(
+            &bare_path,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                wt_path.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        std::fs::remove_dir_all(&wt_path).unwrap();
+
+        let wt = manager.create_for_branch(branch).unwrap();
+        assert_eq!(wt.branch.as_deref(), Some(branch));
+        assert!(wt.path.exists());
     }
 
     #[test]

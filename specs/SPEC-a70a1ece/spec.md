@@ -189,6 +189,9 @@ submoduleを含むリポジトリをclone/worktree作成した場合、自動的
 - `git worktree add` が "already checked out at <path>" を返すが `<path>` が存在しない場合、staleなworktreeメタデータの可能性がある
   - 安全確認の上で `git worktree prune` を一度だけ実行し、再試行する
   - `git worktree prune --dry-run --verbose` の結果、現在実行中のworktreeメタデータが削除対象に含まれる場合は自動pruneを行わず、手動対応を促す
+- `git worktree add` が "<path> is a missing but already registered worktree" を返す場合も、staleなworktreeメタデータの可能性がある
+  - 安全確認の上で `git worktree prune` を一度だけ実行し、再試行する
+  - `git worktree prune --dry-run --verbose` の結果、現在実行中のworktreeメタデータが削除対象に含まれる場合は自動pruneを行わず、手動対応を促す
 - ネットワーク接続がない状態でcloneを実行した場合、適切なエラーメッセージを表示する
 - マイグレーション中にlocked worktreeが検出された場合、unlockを促すメッセージを表示してブロックする
 - マイグレーション中にディスク容量が不足した場合、必要容量と空き容量を表示してブロックする
