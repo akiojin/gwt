@@ -4,7 +4,23 @@ use crate::state::AppState;
 use gwt_core::config::Settings;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use tauri::State;
+use tracing::error;
+
+fn with_panic_guard<T>(context: &str, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(result) => result,
+        Err(_) => {
+            error!(
+                category = "tauri",
+                operation = context,
+                "Unexpected panic while handling settings command"
+            );
+            Err(format!("Unexpected error while {}", context))
+        }
+    }
+}
 
 /// Serializable settings data for the frontend
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,45 +106,49 @@ impl SettingsData {
 /// Get current settings
 #[tauri::command]
 pub fn get_settings(state: State<AppState>) -> Result<SettingsData, String> {
-    let project_path = state
-        .project_path
-        .lock()
-        .map_err(|e| format!("Failed to lock state: {}", e))?;
+    with_panic_guard("loading settings", || {
+        let project_path = state
+            .project_path
+            .lock()
+            .map_err(|e| format!("Failed to lock state: {}", e))?;
 
-    let repo_root = match project_path.as_ref() {
-        Some(p) => PathBuf::from(p),
-        None => {
-            // Return default settings if no project is opened
-            return Ok(SettingsData::from(&Settings::default()));
-        }
-    };
+        let repo_root = match project_path.as_ref() {
+            Some(p) => PathBuf::from(p),
+            None => {
+                // Return default settings if no project is opened
+                return Ok(SettingsData::from(&Settings::default()));
+            }
+        };
 
-    let settings = Settings::load(&repo_root).map_err(|e| e.to_string())?;
-    Ok(SettingsData::from(&settings))
+        let settings = Settings::load(&repo_root).map_err(|e| e.to_string())?;
+        Ok(SettingsData::from(&settings))
+    })
 }
 
 /// Save settings
 #[tauri::command]
 pub fn save_settings(settings: SettingsData, state: State<AppState>) -> Result<(), String> {
-    let project_path = state
-        .project_path
-        .lock()
-        .map_err(|e| format!("Failed to lock state: {}", e))?;
+    with_panic_guard("saving settings", || {
+        let project_path = state
+            .project_path
+            .lock()
+            .map_err(|e| format!("Failed to lock state: {}", e))?;
 
-    let core_settings = settings.to_settings()?;
+        let core_settings = settings.to_settings()?;
 
-    match project_path.as_ref() {
-        Some(p) => {
-            let config_path = Path::new(p).join(".gwt.toml");
-            core_settings
-                .save(&config_path)
-                .map_err(|e| e.to_string())?;
+        match project_path.as_ref() {
+            Some(p) => {
+                let config_path = Path::new(p).join(".gwt.toml");
+                core_settings
+                    .save(&config_path)
+                    .map_err(|e| e.to_string())?;
+            }
+            None => {
+                // Save to global config if no project is opened
+                core_settings.save_global().map_err(|e| e.to_string())?;
+            }
         }
-        None => {
-            // Save to global config if no project is opened
-            core_settings.save_global().map_err(|e| e.to_string())?;
-        }
-    }
 
-    Ok(())
+        Ok(())
+    })
 }
