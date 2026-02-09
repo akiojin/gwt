@@ -166,11 +166,12 @@
     if (!profiles) return;
     const p = currentProfile;
     if (!p) return;
+    if (!selectedProfileKey) return;
     const nextEnv = { ...(p.env ?? {}), [key]: value };
     const nextProfile: Profile = { ...p, env: nextEnv };
     profiles = {
       ...profiles,
-      profiles: { ...profiles.profiles, [selectedProfileKey]: nextProfile },
+      profiles: { ...(profiles.profiles ?? {}), [selectedProfileKey]: nextProfile },
     };
   }
 
@@ -178,12 +179,13 @@
     if (!profiles) return;
     const p = currentProfile;
     if (!p) return;
+    if (!selectedProfileKey) return;
     const nextEnv = { ...(p.env ?? {}) };
     delete nextEnv[key];
     const nextProfile: Profile = { ...p, env: nextEnv };
     profiles = {
       ...profiles,
-      profiles: { ...profiles.profiles, [selectedProfileKey]: nextProfile },
+      profiles: { ...(profiles.profiles ?? {}), [selectedProfileKey]: nextProfile },
     };
   }
 
@@ -199,6 +201,7 @@
     if (!profiles) return;
     const p = currentProfile;
     if (!p) return;
+    if (!selectedProfileKey) return;
     const nextProfile: Profile = enabled
       ? {
           ...p,
@@ -212,7 +215,7 @@
       : { ...p, ai: null };
     profiles = {
       ...profiles,
-      profiles: { ...profiles.profiles, [selectedProfileKey]: nextProfile },
+      profiles: { ...(profiles.profiles ?? {}), [selectedProfileKey]: nextProfile },
     };
   }
 
@@ -220,11 +223,12 @@
     if (!profiles) return;
     const p = currentProfile;
     if (!p || !p.ai) return;
+    if (!selectedProfileKey) return;
     const nextAi = { ...p.ai, [field]: value } as Profile["ai"];
     const nextProfile: Profile = { ...p, ai: nextAi };
     profiles = {
       ...profiles,
-      profiles: { ...profiles.profiles, [selectedProfileKey]: nextProfile },
+      profiles: { ...(profiles.profiles ?? {}), [selectedProfileKey]: nextProfile },
     };
   }
 </script>
