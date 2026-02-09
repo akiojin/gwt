@@ -180,6 +180,9 @@ impl ProfilesConfig {
     /// 1. profiles.toml (new format)
     /// 2. profiles.yaml (legacy format)
     /// 3. Default profile
+    ///
+    /// Note: loading does not write to disk. Migration from YAML to TOML happens on explicit
+    /// save (or `migrate_if_needed`) to avoid unintended side effects during startup.
     pub fn load() -> Result<Self> {
         let toml_path = Self::toml_path();
         let yaml_path = Self::yaml_path();
@@ -219,20 +222,6 @@ impl ProfilesConfig {
             match Self::load_yaml(&yaml_path) {
                 Ok(mut config) => {
                     config.ensure_defaults();
-                    // Auto-migrate: save as TOML for next time (SPEC-a3f4c9df)
-                    if let Err(e) = config.save() {
-                        warn!(
-                            category = "config",
-                            error = %e,
-                            "Failed to auto-migrate profiles to TOML"
-                        );
-                    } else {
-                        info!(
-                            category = "config",
-                            operation = "auto_migrate",
-                            "Auto-migrated profiles.yaml to profiles.toml"
-                        );
-                    }
                     return Ok(config);
                 }
                 Err(e) => {

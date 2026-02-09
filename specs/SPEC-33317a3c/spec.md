@@ -3,6 +3,8 @@
 **仕様ID**: `SPEC-33317a3c`
 **作成日**: 2025-11-11
 **ステータス**: 実装済み
+**カテゴリ**: Porting
+
 **入力**: ユーザー説明: "shareEnv->envにして、起動時にローカルに設定されている環境変数を自動追加したい"
 
 ## ユーザーシナリオとテスト *(必須)*
@@ -128,6 +130,6 @@
 
 ## 参考資料
 
-- [SPEC-8adfd99e/spec.md](../SPEC-8adfd99e/spec.md)
+- [SPEC-8adfd99e/spec.md](../archive/SPEC-8adfd99e/spec.md)
 - [src/config/builtin-tools.ts](../../src/config/builtin-tools.ts)
 - [src/config/tools.ts](../../src/config/tools.ts)

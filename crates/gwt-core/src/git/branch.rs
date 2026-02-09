@@ -897,6 +897,43 @@ mod tests {
     }
 
     #[test]
+    fn test_list_remote_from_origin_uses_origin_prefix() {
+        // Keep the origin TempDir alive so `git ls-remote origin` can read from it.
+        let temp = create_test_repo();
+        let origin = TempDir::new().unwrap();
+
+        Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(origin.path())
+            .output()
+            .unwrap();
+
+        let branch = Branch::current(temp.path()).unwrap().unwrap().name;
+
+        Command::new("git")
+            .args(["remote", "add", "origin", origin.path().to_str().unwrap()])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        Command::new("git")
+            .args(["push", "-u", "origin", &branch])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        let remotes = Branch::list_remote_from_origin(temp.path()).unwrap();
+        let expected = format!("origin/{}", branch);
+
+        assert!(
+            remotes.iter().any(|b| b.name == expected),
+            "Expected {expected} in list_remote_from_origin result"
+        );
+        // ls-remote doesn't provide committer timestamp
+        assert!(remotes.iter().all(|b| b.commit_timestamp.is_none()));
+    }
+
+    #[test]
     fn test_current_branch() {
         let temp = create_test_repo();
         let current = Branch::current(temp.path()).unwrap();

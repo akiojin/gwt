@@ -1,0 +1,197 @@
+//! Tauri app wiring (builder configuration + run event handling)
+
+use crate::state::AppState;
+use std::sync::atomic::Ordering;
+use tauri::Manager;
+use tracing::info;
+
+fn should_prevent_window_close(is_quitting: bool) -> bool {
+    !is_quitting
+}
+
+fn should_prevent_exit_request(is_quitting: bool) -> bool {
+    !is_quitting
+}
+
+pub fn build_app(
+    builder: tauri::Builder<tauri::Wry>,
+    app_state: AppState,
+) -> tauri::Builder<tauri::Wry> {
+    let builder = builder.manage(app_state);
+
+    // Plugins are not required for unit tests and may rely on runtime features.
+    #[cfg(not(test))]
+    let builder = builder
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_store::Builder::default().build());
+
+    builder
+        .setup(|_app| {
+            #[cfg(not(test))]
+            {
+                // System tray (SPEC-dfb1611a FR-310〜FR-313)
+                let tray_menu = tauri::menu::Menu::new(_app)?;
+                let show_item =
+                    tauri::menu::MenuItem::with_id(_app, "tray-show", "Show", true, None::<&str>)?;
+                let quit_item =
+                    tauri::menu::MenuItem::with_id(_app, "tray-quit", "Quit", true, None::<&str>)?;
+                tray_menu.append_items(&[&show_item, &quit_item])?;
+
+                // NOTE: Requires `tauri` features `tray-icon` + `image-png`.
+                let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))?;
+
+                let _tray = tauri::tray::TrayIconBuilder::with_id("gwt-tray")
+                    .icon(icon)
+                    .tooltip("gwt")
+                    .menu(&tray_menu)
+                    .on_menu_event(|app, event| match event.id().as_ref() {
+                        "tray-show" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        "tray-quit" => {
+                            app.state::<AppState>().request_quit();
+                            app.exit(0);
+                        }
+                        _ => {}
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            if let Some(window) = tray.app_handle().get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                    })
+                    .build(_app)?;
+            }
+
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Keep the process alive when the user clicks the window close button (x).
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                info!(
+                    category = "tauri",
+                    event = "CloseRequested",
+                    "Window close requested"
+                );
+                let is_quitting = window
+                    .app_handle()
+                    .state::<AppState>()
+                    .is_quitting
+                    .load(Ordering::SeqCst);
+
+                if !should_prevent_window_close(is_quitting) {
+                    return;
+                }
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
+        .invoke_handler(tauri::generate_handler![
+            crate::commands::greet,
+            crate::commands::branches::list_branches,
+            crate::commands::branches::list_worktree_branches,
+            crate::commands::branches::list_remote_branches,
+            crate::commands::branches::get_current_branch,
+            crate::commands::project::open_project,
+            crate::commands::project::create_project,
+            crate::commands::project::get_project_info,
+            crate::commands::project::is_git_repo,
+            crate::commands::docker::detect_docker_context,
+            crate::commands::sessions::get_branch_quick_start,
+            crate::commands::sessions::get_branch_session_summary,
+            crate::commands::terminal::launch_terminal,
+            crate::commands::terminal::launch_agent,
+            crate::commands::terminal::write_terminal,
+            crate::commands::terminal::resize_terminal,
+            crate::commands::terminal::close_terminal,
+            crate::commands::terminal::list_terminals,
+            crate::commands::settings::get_settings,
+            crate::commands::settings::save_settings,
+            crate::commands::agents::detect_agents,
+            crate::commands::agents::list_agent_versions,
+            crate::commands::profiles::get_profiles,
+            crate::commands::profiles::save_profiles,
+        ])
+}
+
+pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri::RunEvent) {
+    match event {
+        tauri::RunEvent::ExitRequested { api, .. } => {
+            info!(
+                category = "tauri",
+                event = "ExitRequested",
+                "Exit requested"
+            );
+            // SPEC-dfb1611a FR-314: only the tray "Quit" is allowed to exit.
+            let is_quitting = app_handle
+                .state::<AppState>()
+                .is_quitting
+                .load(Ordering::SeqCst);
+
+            if should_prevent_exit_request(is_quitting) {
+                api.prevent_exit();
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    info!(
+                        category = "tauri",
+                        event = "ExitPrevented",
+                        "Exit prevented; hiding main window"
+                    );
+                    let _ = window.hide();
+                }
+            }
+        }
+        tauri::RunEvent::Exit => {
+            info!(category = "tauri", event = "Exit", "App exiting");
+        }
+        #[cfg(target_os = "macos")]
+        tauri::RunEvent::Reopen {
+            has_visible_windows,
+            ..
+        } => {
+            // Ensure the app is recoverable from dock reopen even if the window is hidden.
+            if !has_visible_windows {
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_prevent_window_close_when_not_quitting() {
+        assert!(should_prevent_window_close(false));
+        assert!(!should_prevent_window_close(true));
+    }
+
+    #[test]
+    fn should_prevent_exit_request_when_not_quitting() {
+        assert!(should_prevent_exit_request(false));
+        assert!(!should_prevent_exit_request(true));
+    }
+
+    #[test]
+    fn app_state_request_quit_sets_flag() {
+        let state = AppState::new();
+        assert!(!state.is_quitting.load(Ordering::SeqCst));
+        state.request_quit();
+        assert!(state.is_quitting.load(Ordering::SeqCst));
+    }
+}

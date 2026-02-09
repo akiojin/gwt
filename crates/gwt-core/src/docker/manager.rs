@@ -78,6 +78,24 @@ fn extract_port_envs_from_compose_filtered(
     results
 }
 
+fn extract_services_from_compose(content: &str) -> Vec<String> {
+    let Ok(value) = serde_yaml::from_str::<Value>(content) else {
+        return Vec::new();
+    };
+
+    let Some(services) = value.get("services").and_then(|v| v.as_mapping()) else {
+        return Vec::new();
+    };
+
+    let mut results: Vec<String> = services
+        .keys()
+        .filter_map(|k| k.as_str().map(|s| s.to_string()))
+        .filter(|s| !s.trim().is_empty())
+        .collect();
+    results.sort();
+    results
+}
+
 fn parse_docker_ps_ports(output: &str) -> HashSet<u16> {
     let mut ports = HashSet::new();
     for line in output.lines() {
@@ -679,6 +697,20 @@ impl DockerManager {
             .ok_or_else(|| GwtError::Docker("Failed to list docker compose services".to_string()))
     }
 
+    /// Extract compose service names by parsing the compose file.
+    ///
+    /// This is a fast path for UI binding: it does not require `docker` to be installed.
+    pub fn list_services_from_compose_file(compose_path: &Path) -> Result<Vec<String>> {
+        let content = fs::read_to_string(compose_path).map_err(|e| {
+            GwtError::Docker(format!(
+                "Failed to read docker compose file {}: {}",
+                compose_path.display(),
+                e
+            ))
+        })?;
+        Ok(extract_services_from_compose(&content))
+    }
+
     /// Extract `${NAME:-PORT}` defaults from compose `ports:` entries.
     ///
     /// When `service` is provided, only that service is inspected.
@@ -1229,6 +1261,20 @@ services:
         assert!(envs.contains(&("PORT".to_string(), 3000)));
         assert!(envs.contains(&("LOCAL_PORT".to_string(), 8080)));
         assert!(envs.contains(&("PUBLISHED_PORT".to_string(), 3000)));
+    }
+
+    #[test]
+    fn test_extract_services_from_compose() {
+        let content = r#"
+services:
+  db:
+    image: postgres
+  app:
+    build: .
+"#;
+
+        let services = extract_services_from_compose(content);
+        assert_eq!(services, vec!["app".to_string(), "db".to_string()]);
     }
 
     #[test]

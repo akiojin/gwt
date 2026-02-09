@@ -3,6 +3,8 @@
 **SPEC ID**: `SPEC-fdebd681`
 **Created**: 2026-01-26
 **Status**: Approved
+**カテゴリ**: Porting
+
 **Implementation Phase**: Phase 2 (Implementation)
 
 ## User Scenarios and Tests *(Required)*
