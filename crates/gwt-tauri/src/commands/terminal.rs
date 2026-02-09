@@ -281,7 +281,9 @@ fn get_command_version_with_timeout(command: &str) -> Option<String> {
     let command = command.to_string();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let out = std::process::Command::new(command).arg("--version").output();
+        let out = std::process::Command::new(command)
+            .arg("--version")
+            .output();
         let _ = tx.send(out);
     });
 
@@ -306,7 +308,7 @@ struct ResolvedAgentLaunchCommand {
     command: String,
     args: Vec<String>,
     label: &'static str,
-    tool_version: String,              // "installed" | "latest" | "1.2.3" | dist-tag
+    tool_version: String, // "installed" | "latest" | "1.2.3" | dist-tag
     version_for_gates: Option<String>, // best-effort raw version string (may be "latest")
 }
 
@@ -1168,8 +1170,11 @@ pub fn launch_agent(
                 }
 
                 let container_name = DockerManager::generate_container_name(&branch_name);
-                let manager =
-                    DockerManager::new(&working_dir, &branch_name, DockerFileType::Compose(compose_path));
+                let manager = DockerManager::new(
+                    &working_dir,
+                    &branch_name,
+                    DockerFileType::Compose(compose_path),
+                );
 
                 let mut env = manager.collect_passthrough_env();
                 // Merge profile/env overrides so compose interpolation and container env inherit them.
@@ -1178,7 +1183,13 @@ pub fn launch_agent(
                 }
                 env.insert("COMPOSE_PROJECT_NAME".to_string(), container_name.clone());
 
-                docker_compose_up(&working_dir, &container_name, &env, docker_build, docker_recreate)?;
+                docker_compose_up(
+                    &working_dir,
+                    &container_name,
+                    &env,
+                    docker_build,
+                    docker_recreate,
+                )?;
 
                 docker_container_name = Some(container_name);
                 docker_env = Some(env);
@@ -1268,7 +1279,11 @@ pub fn launch_agent(
             },
             docker_service: docker_service_entry,
             docker_force_host: docker_force_host_entry,
-            docker_recreate: if use_docker { Some(docker_recreate) } else { None },
+            docker_recreate: if use_docker {
+                Some(docker_recreate)
+            } else {
+                None
+            },
             docker_build: if use_docker { Some(docker_build) } else { None },
             docker_keep: if use_docker { Some(docker_keep) } else { None },
             timestamp: started_at_millis,
@@ -1291,7 +1306,11 @@ pub fn launch_agent(
         reasoning_level: reasoning_level.clone(),
         skip_permissions,
         collaboration_modes,
-        docker_service: if use_docker { docker_service.clone() } else { None },
+        docker_service: if use_docker {
+            docker_service.clone()
+        } else {
+            None
+        },
         docker_force_host: if force_host_request {
             Some(true)
         } else if use_docker {
@@ -1299,7 +1318,11 @@ pub fn launch_agent(
         } else {
             None
         },
-        docker_recreate: if use_docker { Some(docker_recreate) } else { None },
+        docker_recreate: if use_docker {
+            Some(docker_recreate)
+        } else {
+            None
+        },
         docker_build: if use_docker { Some(docker_build) } else { None },
         docker_keep: if use_docker { Some(docker_keep) } else { None },
         docker_container_name: docker_container_name.clone(),
@@ -1310,7 +1333,9 @@ pub fn launch_agent(
         let service = docker_service
             .as_deref()
             .ok_or_else(|| "Docker service is required".to_string())?;
-        let docker_env = docker_env.as_ref().ok_or_else(|| "Docker env is missing".to_string())?;
+        let docker_env = docker_env
+            .as_ref()
+            .ok_or_else(|| "Docker env is missing".to_string())?;
         let docker_args = build_docker_compose_exec_args(
             service,
             DOCKER_WORKDIR,
@@ -1469,8 +1494,11 @@ fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_hand
 
                     let result = match detect_docker_files(&worktree_path) {
                         Some(DockerFileType::Compose(compose_path)) => {
-                            let manager =
-                                DockerManager::new(&worktree_path, "", DockerFileType::Compose(compose_path));
+                            let manager = DockerManager::new(
+                                &worktree_path,
+                                "",
+                                DockerFileType::Compose(compose_path),
+                            );
                             let mut env = manager.collect_passthrough_env();
                             env.insert("COMPOSE_PROJECT_NAME".to_string(), container_name.clone());
                             docker_compose_down(&worktree_path, &container_name, &env)
@@ -1516,7 +1544,11 @@ fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_hand
     }
 }
 
-fn detect_session_id(agent_id: &str, worktree_path: &std::path::Path, started_at_millis: i64) -> Option<String> {
+fn detect_session_id(
+    agent_id: &str,
+    worktree_path: &std::path::Path,
+    started_at_millis: i64,
+) -> Option<String> {
     let sessions = match agent_id {
         "codex" => gwt_core::ai::CodexSessionParser::with_default_home()
             .map(|p| p.list_sessions(Some(worktree_path)))

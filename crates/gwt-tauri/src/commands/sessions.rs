@@ -29,7 +29,9 @@ pub fn get_branch_quick_start(
         return Err("Branch is required".to_string());
     }
 
-    Ok(gwt_core::config::get_branch_tool_history(&repo_path, branch))
+    Ok(gwt_core::config::get_branch_tool_history(
+        &repo_path, branch,
+    ))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -82,12 +84,15 @@ fn summary_status(
 fn session_parser_for_tool(tool_id: &str) -> Option<Box<dyn SessionParser>> {
     let agent_type = AiAgentType::from_tool_id(tool_id)?;
     match agent_type {
-        AiAgentType::ClaudeCode => ClaudeSessionParser::with_default_home()
-            .map(|p| Box::new(p) as Box<dyn SessionParser>),
-        AiAgentType::CodexCli => CodexSessionParser::with_default_home()
-            .map(|p| Box::new(p) as Box<dyn SessionParser>),
-        AiAgentType::GeminiCli => GeminiSessionParser::with_default_home()
-            .map(|p| Box::new(p) as Box<dyn SessionParser>),
+        AiAgentType::ClaudeCode => {
+            ClaudeSessionParser::with_default_home().map(|p| Box::new(p) as Box<dyn SessionParser>)
+        }
+        AiAgentType::CodexCli => {
+            CodexSessionParser::with_default_home().map(|p| Box::new(p) as Box<dyn SessionParser>)
+        }
+        AiAgentType::GeminiCli => {
+            GeminiSessionParser::with_default_home().map(|p| Box::new(p) as Box<dyn SessionParser>)
+        }
         AiAgentType::OpenCode => OpenCodeSessionParser::with_default_home()
             .map(|p| Box::new(p) as Box<dyn SessionParser>),
     }
@@ -148,18 +153,21 @@ fn get_branch_session_summary_inner(
     };
 
     let tool_id = entry.tool_id.trim().to_string();
-    let session_id = entry
-        .session_id
-        .as_deref()
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let session_id = entry.session_id.as_deref().unwrap_or("").trim().to_string();
 
     if tool_id.is_empty() || session_id.is_empty() {
         return Ok(summary_status(
             "no-session",
-            if tool_id.is_empty() { None } else { Some(tool_id) },
-            if session_id.is_empty() { None } else { Some(session_id) },
+            if tool_id.is_empty() {
+                None
+            } else {
+                Some(tool_id)
+            },
+            if session_id.is_empty() {
+                None
+            } else {
+                Some(session_id)
+            },
             None,
         ));
     }
@@ -255,10 +263,12 @@ fn get_branch_session_summary_inner(
                     .session_summary_cache
                     .lock()
                     .map_err(|_| "Session summary cache lock poisoned".to_string())?;
-                cache_guard
-                    .entry(repo_key)
-                    .or_default()
-                    .set(branch.to_string(), session_id.clone(), summary.clone(), mtime);
+                cache_guard.entry(repo_key).or_default().set(
+                    branch.to_string(),
+                    session_id.clone(),
+                    summary.clone(),
+                    mtime,
+                );
             }
             Ok(ok_summary(&tool_id, &session_id, &summary))
         }
@@ -321,7 +331,10 @@ mod tests {
             let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
             std::env::set_var("HOME", home_path);
             std::env::set_var("XDG_CONFIG_HOME", home_path.join(".config"));
-            Self { prev_home, prev_xdg }
+            Self {
+                prev_home,
+                prev_xdg,
+            }
         }
     }
 
@@ -339,7 +352,10 @@ mod tests {
     }
 
     fn init_git_repo(path: &Path) {
-        let out = Command::new("git").args(["init"]).current_dir(path).output();
+        let out = Command::new("git")
+            .args(["init"])
+            .current_dir(path)
+            .output();
         assert!(out.is_ok(), "git init failed to run");
         assert!(
             out.unwrap().status.success(),
@@ -381,8 +397,8 @@ mod tests {
         init_git_repo(repo.path());
 
         let state = AppState::new();
-        let out =
-            get_branch_session_summary_inner(repo.path().to_str().unwrap(), "main", &state).unwrap();
+        let out = get_branch_session_summary_inner(repo.path().to_str().unwrap(), "main", &state)
+            .unwrap();
         assert_eq!(out.status, "no-session");
     }
 
@@ -397,8 +413,8 @@ mod tests {
         write_session_entry(repo.path(), "main", "codex-cli", "session-1");
 
         let state = AppState::new();
-        let out =
-            get_branch_session_summary_inner(repo.path().to_str().unwrap(), "main", &state).unwrap();
+        let out = get_branch_session_summary_inner(repo.path().to_str().unwrap(), "main", &state)
+            .unwrap();
         assert_eq!(out.status, "ai-not-configured");
         assert_eq!(out.tool_id.as_deref(), Some("codex-cli"));
         assert_eq!(out.session_id.as_deref(), Some("session-1"));
@@ -424,11 +440,10 @@ mod tests {
         write_session_entry(repo.path(), "main", "codex-cli", "session-1");
 
         let state = AppState::new();
-        let out =
-            get_branch_session_summary_inner(repo.path().to_str().unwrap(), "main", &state).unwrap();
+        let out = get_branch_session_summary_inner(repo.path().to_str().unwrap(), "main", &state)
+            .unwrap();
         assert_eq!(out.status, "disabled");
         assert_eq!(out.tool_id.as_deref(), Some("codex-cli"));
         assert_eq!(out.session_id.as_deref(), Some("session-1"));
     }
 }
-

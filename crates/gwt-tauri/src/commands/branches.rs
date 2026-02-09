@@ -6,8 +6,8 @@ use gwt_core::worktree::WorktreeManager;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::path::Path;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::Path;
 use tracing::error;
 
 /// Serializable branch info for the frontend

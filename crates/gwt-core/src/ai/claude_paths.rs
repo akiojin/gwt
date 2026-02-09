@@ -38,4 +38,3 @@ mod tests {
         assert!(!encoded.is_empty());
     }
 }
-

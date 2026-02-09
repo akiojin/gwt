@@ -170,7 +170,8 @@ fn bun_info_json_with_timeout(package: &str, field: &str) -> Result<Value, Strin
     }
 
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    serde_json::from_str::<Value>(&stdout).map_err(|e| format!("Failed to parse bun info {field}: {e}"))
+    serde_json::from_str::<Value>(&stdout)
+        .map_err(|e| format!("Failed to parse bun info {field}: {e}"))
 }
 
 fn fetch_npm_versions_via_bun(package: &str) -> Result<(Vec<String>, Vec<String>), String> {

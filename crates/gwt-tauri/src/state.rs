@@ -1,7 +1,7 @@
-use gwt_core::terminal::manager::PaneManager;
 use gwt_core::ai::SessionSummaryCache;
-use std::path::PathBuf;
+use gwt_core::terminal::manager::PaneManager;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 

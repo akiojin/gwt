@@ -3,8 +3,8 @@
 use crate::state::AppState;
 use gwt_core::config::Settings;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::{Path, PathBuf};
 use tauri::State;
 use tracing::error;
 

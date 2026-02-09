@@ -54,7 +54,10 @@ fn resolve_existing_worktree_path(
 
 /// Detect docker compose context for a branch (best-effort, read-only).
 #[tauri::command]
-pub fn detect_docker_context(project_path: String, branch: String) -> Result<DockerContext, String> {
+pub fn detect_docker_context(
+    project_path: String,
+    branch: String,
+) -> Result<DockerContext, String> {
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)?;
 
@@ -106,4 +109,3 @@ pub fn detect_docker_context(project_path: String, branch: String) -> Result<Doc
         force_host,
     })
 }
-

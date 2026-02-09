@@ -10,8 +10,8 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use super::{ConversionError, ConversionMetadata, ConversionResult, LossInfo, SessionEncoder};
-use crate::ai::session_parser::{AgentType, MessageRole, ParsedSession};
 use crate::ai::claude_paths::encode_claude_project_path;
+use crate::ai::session_parser::{AgentType, MessageRole, ParsedSession};
 
 /// Encoder for Claude Code JSONL format.
 pub struct ClaudeEncoder {

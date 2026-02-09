@@ -1,8 +1,8 @@
 //! AI module for OpenAI-compatible APIs
 
 pub mod agent_history;
-pub mod client;
 pub(crate) mod claude_paths;
+pub mod client;
 pub mod session_converter;
 pub mod session_parser;
 pub mod summary;

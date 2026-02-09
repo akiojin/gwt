@@ -29,5 +29,7 @@ pub fn get_profiles() -> Result<ProfilesConfig, String> {
 /// Save profiles config (always writes TOML: ~/.gwt/profiles.toml)
 #[tauri::command]
 pub fn save_profiles(config: ProfilesConfig) -> Result<(), String> {
-    with_panic_guard("saving profiles", || config.save().map_err(|e| e.to_string()))
+    with_panic_guard("saving profiles", || {
+        config.save().map_err(|e| e.to_string())
+    })
 }

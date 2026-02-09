@@ -4,8 +4,8 @@ use super::{
     find_session_file, parse_jsonl_session, AgentType, SessionListEntry, SessionParseError,
     SessionParser,
 };
-use chrono::{DateTime, Utc};
 use crate::ai::claude_paths::encode_claude_project_path;
+use chrono::{DateTime, Utc};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -168,10 +168,7 @@ mod tests {
         fs::write(project_dir.join("sess-1.jsonl"), r#"{"type":"user","message":{"role":"user","content":"hi"},"timestamp":"2026-02-09T00:00:00.000Z"}"#).unwrap();
 
         // Another project dir should not be included when filtering.
-        let other_dir = home
-            .join(".claude")
-            .join("projects")
-            .join("other-project");
+        let other_dir = home.join(".claude").join("projects").join("other-project");
         fs::create_dir_all(&other_dir).unwrap();
         fs::write(other_dir.join("sess-2.jsonl"), r#"{"type":"user","message":{"role":"user","content":"nope"},"timestamp":"2026-02-09T00:00:00.000Z"}"#).unwrap();
 

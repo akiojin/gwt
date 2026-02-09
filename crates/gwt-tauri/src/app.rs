@@ -152,11 +152,7 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
             }
         }
         tauri::RunEvent::Exit => {
-            info!(
-                category = "tauri",
-                event = "Exit",
-                "App exiting"
-            );
+            info!(category = "tauri", event = "Exit", "App exiting");
         }
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen {
