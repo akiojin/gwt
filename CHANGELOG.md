@@ -1,6 +1,13 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [6.30.3] - 2026-02-09
+
+### Bug Fixes
+
+- Make worktree add idempotent (#918)
+- Recover from missing registered worktree paths (#920)
+
 ## [6.30.2] - 2026-02-09
 
 ### Bug Fixes
