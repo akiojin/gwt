@@ -1,19 +1,22 @@
 <script lang="ts">
-  import type { AgentInfo, LaunchAgentRequest } from "../types";
+  import type { AgentInfo, DockerContext, LaunchAgentRequest } from "../types";
 
   let {
+    projectPath,
     selectedBranch = "",
     onLaunch,
     onClose,
-	  }: {
-	    selectedBranch?: string;
-	    onLaunch: (request: LaunchAgentRequest) => Promise<void>;
-	    onClose: () => void;
-	  } = $props();
+  }: {
+    projectPath: string;
+    selectedBranch?: string;
+    onLaunch: (request: LaunchAgentRequest) => Promise<void>;
+    onClose: () => void;
+  } = $props();
 
-	  type BranchMode = "existing" | "new";
-	  type SessionMode = "normal" | "continue" | "resume";
-	  type RunnerMode = "auto" | "installed" | "bunx";
+  type BranchMode = "existing" | "new";
+  type SessionMode = "normal" | "continue" | "resume";
+  type RunnerMode = "auto" | "installed" | "bunx";
+  type RuntimeTarget = "host" | "docker";
 
   type AgentVersionsInfo = {
     agentId: string;
@@ -44,6 +47,17 @@
 	  let extraArgsText: string = $state("");
 	  let envOverridesText: string = $state("");
 
+  let dockerContext: DockerContext | null = $state(null as DockerContext | null);
+  let dockerLoading: boolean = $state(false);
+  let dockerError: string | null = $state(null);
+  let dockerContextKey: string = $state("");
+
+  let runtimeTarget: RuntimeTarget = $state("host" as RuntimeTarget);
+  let dockerService: string = $state("");
+  let dockerBuild: boolean = $state(false);
+  let dockerRecreate: boolean = $state(false);
+  let dockerKeep: boolean = $state(false);
+
   let versionsLoading: boolean = $state(false);
   let versionTags: string[] = $state([]);
   let versionOptions: string[] = $state([]);
@@ -64,6 +78,14 @@
 	  let agentNotInstalled = $derived(
 	    selectedAgentInfo?.version === "bunx" || selectedAgentInfo?.version === "npx"
 	  );
+  let composeDetected = $derived(
+    dockerContext?.file_type === "compose" && !dockerContext.force_host
+  );
+  let dockerSelectable = $derived(
+    composeDetected &&
+      (dockerContext?.docker_available ?? false) &&
+      (dockerContext?.compose_available ?? false)
+  );
 	  function supportsModelFor(agentId: string): boolean {
 	    return agentId === "codex" || agentId === "claude" || agentId === "opencode";
 	  }
@@ -85,6 +107,30 @@
 
   $effect(() => {
     detectAgents();
+  });
+
+  $effect(() => {
+    void projectPath;
+    void branchMode;
+    void branch;
+    void baseBranch;
+
+    const refBranch =
+      (branchMode === "existing" ? branch : baseBranch).trim();
+    if (!projectPath || !refBranch) {
+      dockerContext = null;
+      dockerError = null;
+      dockerLoading = false;
+      dockerContextKey = "";
+      runtimeTarget = "host" as RuntimeTarget;
+      dockerService = "";
+      return;
+    }
+
+    const key = `${projectPath}::${refBranch}`;
+    if (dockerContextKey === key) return;
+    dockerContextKey = key;
+    loadDockerContext(refBranch);
   });
 
 	  $effect(() => {
@@ -174,6 +220,54 @@
     }
   }
 
+  async function loadDockerContext(refBranch: string) {
+    dockerLoading = true;
+    dockerError = null;
+    try {
+      const key = `${projectPath}::${refBranch}`;
+      const { invoke } = await import("@tauri-apps/api/core");
+      const ctx = await invoke<DockerContext>("detect_docker_context", {
+        projectPath,
+        branch: refBranch,
+      });
+      if (dockerContextKey !== key) return;
+
+      dockerContext = ctx;
+
+      if (!ctx || ctx.force_host || ctx.file_type !== "compose") {
+        runtimeTarget = "host" as RuntimeTarget;
+        dockerService = "";
+        return;
+      }
+
+      runtimeTarget =
+        ctx.docker_available && ctx.compose_available
+          ? ("docker" as RuntimeTarget)
+          : ("host" as RuntimeTarget);
+
+      const services = ctx.compose_services ?? [];
+      if (services.length === 0) {
+        dockerService = "";
+        return;
+      }
+      if (!services.includes(dockerService)) {
+        dockerService = services[0];
+      }
+    } catch (err) {
+      const key = `${projectPath}::${refBranch}`;
+      if (dockerContextKey !== key) return;
+      dockerContext = null;
+      dockerError = toErrorMessage(err);
+      runtimeTarget = "host" as RuntimeTarget;
+      dockerService = "";
+    } finally {
+      const key = `${projectPath}::${refBranch}`;
+      if (dockerContextKey === key) {
+        dockerLoading = false;
+      }
+    }
+  }
+
   async function detectAgents() {
     loading = true;
     try {
@@ -240,6 +334,27 @@
 	      if (Object.keys(envParsed.env).length > 0) {
 	        request.envOverrides = envParsed.env;
 	      }
+
+      if (composeDetected) {
+        if (runtimeTarget === "host") {
+          request.dockerForceHost = true;
+        } else if (runtimeTarget === "docker") {
+          if (!dockerSelectable) {
+            errorMessage = "Docker is not available on this system.";
+            return;
+          }
+          const service = dockerService.trim();
+          if (!service) {
+            errorMessage = "Docker service is required.";
+            return;
+          }
+          request.dockerService = service;
+          request.dockerForceHost = false;
+          request.dockerBuild = dockerBuild;
+          request.dockerRecreate = dockerRecreate;
+          request.dockerKeep = dockerKeep;
+        }
+      }
 
 	      if (branchMode === "existing") {
 	        if (!branch.trim()) return;
@@ -554,6 +669,80 @@
             />
           </div>
         {/if}
+
+        {#if dockerLoading}
+          <div class="field">
+            <span class="field-hint">Detecting Docker context...</span>
+          </div>
+        {/if}
+
+        {#if dockerError}
+          <div class="field">
+            <span class="field-hint warn">Docker detection failed: {dockerError}</span>
+          </div>
+        {/if}
+
+        {#if composeDetected}
+          <div class="field">
+            <span class="field-label" id="runtime-label">Runtime</span>
+            <div class="mode-toggle" role="group" aria-labelledby="runtime-label">
+              <button
+                class="mode-btn"
+                class:active={runtimeTarget === "host"}
+                onclick={() => (runtimeTarget = "host")}
+              >
+                HostOS
+              </button>
+              <button
+                class="mode-btn"
+                class:active={runtimeTarget === "docker"}
+                disabled={!dockerSelectable}
+                onclick={() => (runtimeTarget = "docker")}
+              >
+                Docker
+              </button>
+            </div>
+            {#if dockerContext && !dockerContext.docker_available}
+              <span class="field-hint warn">Docker is not available on PATH.</span>
+            {:else if dockerContext && !dockerContext.compose_available}
+              <span class="field-hint warn">docker compose is not available.</span>
+            {:else if dockerContext && !dockerContext.daemon_running}
+              <span class="field-hint warn">
+                Docker daemon is not running. gwt will try to start it on launch.
+              </span>
+            {/if}
+          </div>
+
+          {#if runtimeTarget === "docker"}
+            <div class="field">
+              <label for="docker-service-select">Service</label>
+              <select id="docker-service-select" bind:value={dockerService}>
+                {#each (dockerContext?.compose_services ?? []) as svc (svc)}
+                  <option value={svc}>{svc}</option>
+                {/each}
+              </select>
+              {#if (dockerContext?.compose_services?.length ?? 0) === 0}
+                <span class="field-hint warn">No services found in compose file.</span>
+              {/if}
+            </div>
+
+            <div class="field">
+              <span class="field-label">Docker</span>
+              <label class="check-row">
+                <input type="checkbox" bind:checked={dockerBuild} />
+                <span>Build images</span>
+              </label>
+              <label class="check-row">
+                <input type="checkbox" bind:checked={dockerRecreate} />
+                <span>Force recreate</span>
+              </label>
+              <label class="check-row">
+                <input type="checkbox" bind:checked={dockerKeep} />
+                <span>Keep containers running after exit</span>
+              </label>
+            </div>
+          {/if}
+        {/if}
       </div>
 
       <div class="dialog-footer">
@@ -682,6 +871,10 @@
     font-size: 11px;
     color: var(--text-muted);
     line-height: 1.4;
+  }
+
+  .field-hint.warn {
+    color: rgb(255, 160, 160);
   }
 
   .agent-cards {

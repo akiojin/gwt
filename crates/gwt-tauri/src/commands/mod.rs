@@ -1,5 +1,6 @@
 pub mod agents;
 pub mod branches;
+pub mod docker;
 pub mod profiles;
 pub mod project;
 pub mod sessions;

@@ -3,7 +3,11 @@
 use crate::commands::project::resolve_repo_path_for_project_root;
 use crate::state::{AppState, PaneLaunchMeta};
 use gwt_core::ai::SessionParser;
-use gwt_core::config::ProfilesConfig;
+use gwt_core::config::{ProfilesConfig, Settings};
+use gwt_core::docker::{
+    compose_available, daemon_running, detect_docker_files, docker_available, try_start_daemon,
+    DockerFileType, DockerManager,
+};
 use gwt_core::git::Remote;
 use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::terminal::{AgentColor, BuiltinLaunchConfig};
@@ -13,6 +17,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -80,6 +85,16 @@ pub struct LaunchAgentRequest {
     pub extra_args: Option<Vec<String>>,
     /// Environment variable overrides to merge into the launch env (highest precedence).
     pub env_overrides: Option<HashMap<String, String>>,
+    /// Docker compose service name to exec into (compose detected only).
+    pub docker_service: Option<String>,
+    /// Force host launch (skip docker) even when compose is detected.
+    pub docker_force_host: Option<bool>,
+    /// Force recreate containers (`docker compose up --force-recreate`).
+    pub docker_recreate: Option<bool>,
+    /// Build images before launch (`docker compose up --build`).
+    pub docker_build: Option<bool>,
+    /// Keep containers running after agent exit (skip `docker compose down`).
+    pub docker_keep: Option<bool>,
     /// Explicit session ID to resume/continue with (best-effort; agent-specific).
     pub resume_session_id: Option<String>,
     /// Optional new branch creation request (creates branch + worktree before launch)
@@ -364,6 +379,41 @@ fn resolve_agent_launch_command(
     })
 }
 
+fn resolve_agent_launch_command_for_container(
+    agent_id: &str,
+    requested_version: Option<&str>,
+) -> Result<ResolvedAgentLaunchCommand, String> {
+    let def = builtin_agent_def(agent_id)?;
+
+    let requested = normalize_agent_version(requested_version);
+    let requested_is_installed = requested
+        .as_deref()
+        .is_some_and(|v| v.eq_ignore_ascii_case("installed"));
+
+    if requested_is_installed {
+        return Ok(ResolvedAgentLaunchCommand {
+            command: def.local_command.to_string(),
+            args: Vec::new(),
+            label: def.label,
+            tool_version: "installed".to_string(),
+            version_for_gates: None,
+        });
+    }
+
+    // Container execution is resolved without host-side command detection.
+    // Prefer `npx --yes` for portability (bun is not guaranteed in containers).
+    let version = requested.unwrap_or_else(|| "latest".to_string());
+    let package = build_bunx_package_spec(def.bunx_package, Some(version.as_str()));
+
+    Ok(ResolvedAgentLaunchCommand {
+        command: "npx".to_string(),
+        args: vec!["--yes".to_string(), package],
+        label: def.label,
+        tool_version: version.clone(),
+        version_for_gates: Some(version),
+    })
+}
+
 fn agent_color_for(agent_id: &str) -> AgentColor {
     match agent_id {
         "claude" => AgentColor::Yellow,
@@ -399,6 +449,136 @@ fn now_millis() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+const DOCKER_WORKDIR: &str = "/workspace";
+
+fn build_docker_compose_up_args(build: bool, recreate: bool) -> Vec<String> {
+    let mut args = vec![
+        "compose".to_string(),
+        "up".to_string(),
+        "-d".to_string(),
+        if build {
+            "--build".to_string()
+        } else {
+            "--no-build".to_string()
+        },
+    ];
+    if recreate {
+        args.push("--force-recreate".to_string());
+    }
+    args
+}
+
+fn build_docker_compose_down_args() -> Vec<String> {
+    vec!["compose".to_string(), "down".to_string()]
+}
+
+fn build_docker_compose_exec_args(
+    service: &str,
+    workdir: &str,
+    env_vars: &HashMap<String, String>,
+    inner_command: &str,
+    inner_args: &[String],
+) -> Vec<String> {
+    let mut args = vec![
+        "compose".to_string(),
+        "exec".to_string(),
+        "-w".to_string(),
+        workdir.to_string(),
+    ];
+
+    let mut keys: Vec<&String> = env_vars.keys().collect();
+    keys.sort();
+    for key in keys {
+        let k = key.trim();
+        if k.is_empty() {
+            continue;
+        }
+        let v = env_vars.get(key).map(|s| s.as_str()).unwrap_or_default();
+        args.push("-e".to_string());
+        args.push(format!("{k}={v}"));
+    }
+
+    args.push(service.to_string());
+    args.push(inner_command.to_string());
+    args.extend(inner_args.iter().cloned());
+    args
+}
+
+fn ensure_docker_compose_ready() -> Result<(), String> {
+    if !docker_available() {
+        return Err("docker is not available".to_string());
+    }
+    if !compose_available() {
+        return Err("docker compose is not available".to_string());
+    }
+
+    if daemon_running() {
+        return Ok(());
+    }
+
+    // Best-effort start (e.g., Docker Desktop on macOS).
+    try_start_daemon().map_err(|e| e.to_string())?;
+    if daemon_running() {
+        Ok(())
+    } else {
+        Err("Docker daemon is not running".to_string())
+    }
+}
+
+fn docker_compose_up(
+    worktree_path: &std::path::Path,
+    container_name: &str,
+    env_vars: &HashMap<String, String>,
+    build: bool,
+    recreate: bool,
+) -> Result<(), String> {
+    ensure_docker_compose_ready()?;
+
+    let output = Command::new("docker")
+        .args(build_docker_compose_up_args(build, recreate))
+        .current_dir(worktree_path)
+        .env("COMPOSE_PROJECT_NAME", container_name)
+        .envs(env_vars)
+        .output()
+        .map_err(|e| format!("Failed to run docker compose up: {}", e))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        return Err("docker compose up failed".to_string());
+    }
+    Err(stderr)
+}
+
+fn docker_compose_down(
+    worktree_path: &std::path::Path,
+    container_name: &str,
+    env_vars: &HashMap<String, String>,
+) -> Result<(), String> {
+    ensure_docker_compose_ready()?;
+
+    let output = Command::new("docker")
+        .args(build_docker_compose_down_args())
+        .current_dir(worktree_path)
+        .env("COMPOSE_PROJECT_NAME", container_name)
+        .envs(env_vars)
+        .output()
+        .map_err(|e| format!("Failed to run docker compose down: {}", e))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        return Err("docker compose down failed".to_string());
+    }
+    Err(stderr)
 }
 
 fn codex_supports_collaboration_modes(version_for_gates: Option<&str>) -> bool {
@@ -744,6 +924,11 @@ mod tests {
             collaboration_modes: None,
             extra_args: None,
             env_overrides: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
             resume_session_id: None,
             create_branch: None,
         }
@@ -827,6 +1012,46 @@ mod tests {
         let err = build_agent_args("opencode", &req, None).unwrap_err();
         assert!(err.to_lowercase().contains("session id"));
     }
+
+    #[test]
+    fn build_docker_compose_up_args_build_and_recreate_flags() {
+        assert_eq!(
+            build_docker_compose_up_args(false, false),
+            vec![
+                "compose".to_string(),
+                "up".to_string(),
+                "-d".to_string(),
+                "--no-build".to_string(),
+            ]
+        );
+
+        let build = build_docker_compose_up_args(true, false);
+        assert!(build.contains(&"--build".to_string()));
+        assert!(!build.contains(&"--no-build".to_string()));
+
+        let recreate = build_docker_compose_up_args(false, true);
+        assert!(recreate.contains(&"--force-recreate".to_string()));
+    }
+
+    #[test]
+    fn build_docker_compose_exec_args_sorts_env_and_appends_inner_command() {
+        let mut env = HashMap::new();
+        env.insert("B".to_string(), "2".to_string());
+        env.insert("A".to_string(), "1".to_string());
+
+        let inner_args = vec!["--yes".to_string(), "pkg@latest".to_string()];
+        let args = build_docker_compose_exec_args("app", "/workspace", &env, "npx", &inner_args);
+
+        let pos_a = args.iter().position(|s| s == "A=1").unwrap();
+        let pos_b = args.iter().position(|s| s == "B=2").unwrap();
+        assert!(pos_a < pos_b);
+
+        let pos_service = args.iter().position(|s| s == "app").unwrap();
+        let pos_cmd = args.iter().position(|s| s == "npx").unwrap();
+        assert!(pos_service < pos_cmd);
+
+        assert!(args.ends_with(&inner_args));
+    }
 }
 
 /// Launch an agent with gwt semantics (worktree + profiles)
@@ -851,14 +1076,6 @@ pub fn launch_agent(
     if agent_id.is_empty() {
         return Err("Agent is required".to_string());
     }
-    let resolved = resolve_agent_launch_command(agent_id, request.agent_version.as_deref())?;
-    let version_for_gates = resolved
-        .version_for_gates
-        .as_deref()
-        .or(Some(resolved.tool_version.as_str()));
-    let mut args = resolved.args.clone();
-    args.extend(build_agent_args(agent_id, &request, version_for_gates)?);
-
     let repo_path = resolve_repo_path_for_project_root(&project_root)?;
 
     let (working_dir, branch_name) = if let Some(create) = request.create_branch.as_ref() {
@@ -907,6 +1124,80 @@ pub fn launch_agent(
         env_vars.insert("IS_SANDBOX".to_string(), "1".to_string());
     }
 
+    let settings = Settings::load(&project_root).unwrap_or_default();
+    let force_host_settings = settings.docker.force_host;
+    let force_host_request = request.docker_force_host.unwrap_or(false);
+    let docker_force_host = force_host_settings || force_host_request;
+
+    let docker_build = request.docker_build.unwrap_or(false);
+    let docker_recreate = request.docker_recreate.unwrap_or(false);
+    let docker_keep = request.docker_keep.unwrap_or(false);
+
+    let mut docker_service = request
+        .docker_service
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let mut docker_container_name: Option<String> = None;
+    let mut docker_env: Option<HashMap<String, String>> = None;
+
+    let use_docker = if docker_force_host {
+        false
+    } else {
+        match detect_docker_files(&working_dir) {
+            Some(DockerFileType::Compose(compose_path)) => {
+                // Best-effort compose service selection.
+                let services = DockerManager::list_services_from_compose_file(&compose_path)
+                    .map_err(|e| e.to_string())?;
+                if services.is_empty() {
+                    return Err("No services found in docker compose file".to_string());
+                }
+
+                if let Some(selected) = docker_service.as_deref() {
+                    if !services.iter().any(|s| s == selected) {
+                        return Err(format!("Docker service not found: {}", selected));
+                    }
+                } else {
+                    docker_service = Some(services[0].clone());
+                }
+
+                let container_name = DockerManager::generate_container_name(&branch_name);
+                let manager =
+                    DockerManager::new(&working_dir, &branch_name, DockerFileType::Compose(compose_path));
+
+                let mut env = manager.collect_passthrough_env();
+                // Merge profile/env overrides so compose interpolation and container env inherit them.
+                for (k, v) in &env_vars {
+                    env.insert(k.to_string(), v.to_string());
+                }
+                env.insert("COMPOSE_PROJECT_NAME".to_string(), container_name.clone());
+
+                docker_compose_up(&working_dir, &container_name, &env, docker_build, docker_recreate)?;
+
+                docker_container_name = Some(container_name);
+                docker_env = Some(env);
+                true
+            }
+            _ => false,
+        }
+    };
+
+    let resolved = if use_docker {
+        resolve_agent_launch_command_for_container(agent_id, request.agent_version.as_deref())?
+    } else {
+        resolve_agent_launch_command(agent_id, request.agent_version.as_deref())?
+    };
+
+    let version_for_gates = resolved
+        .version_for_gates
+        .as_deref()
+        .or(Some(resolved.tool_version.as_str()));
+
+    let mut args = resolved.args.clone();
+    args.extend(build_agent_args(agent_id, &request, version_for_gates)?);
+
     let mode = request.mode.unwrap_or(SessionMode::Normal);
     let mode_str = match mode {
         SessionMode::Normal => "normal",
@@ -939,6 +1230,18 @@ pub fn launch_agent(
 
     // Best-effort session history entry (do not block launch on IO errors).
     {
+        let docker_force_host_entry = if force_host_request {
+            Some(true)
+        } else if use_docker {
+            Some(false)
+        } else {
+            None
+        };
+        let docker_service_entry = if use_docker {
+            docker_service.clone()
+        } else {
+            None
+        };
         let entry = gwt_core::config::ToolSessionEntry {
             branch: branch_name.clone(),
             worktree_path: Some(working_dir.to_string_lossy().to_string()),
@@ -959,11 +1262,11 @@ pub fn launch_agent(
             } else {
                 None
             },
-            docker_service: None,
-            docker_force_host: None,
-            docker_recreate: None,
-            docker_build: None,
-            docker_keep: None,
+            docker_service: docker_service_entry,
+            docker_force_host: docker_force_host_entry,
+            docker_recreate: if use_docker { Some(docker_recreate) } else { None },
+            docker_build: if use_docker { Some(docker_build) } else { None },
+            docker_keep: if use_docker { Some(docker_keep) } else { None },
             timestamp: started_at_millis,
         };
 
@@ -984,17 +1287,52 @@ pub fn launch_agent(
         reasoning_level: reasoning_level.clone(),
         skip_permissions,
         collaboration_modes,
+        docker_service: if use_docker { docker_service.clone() } else { None },
+        docker_force_host: if force_host_request {
+            Some(true)
+        } else if use_docker {
+            Some(false)
+        } else {
+            None
+        },
+        docker_recreate: if use_docker { Some(docker_recreate) } else { None },
+        docker_build: if use_docker { Some(docker_build) } else { None },
+        docker_keep: if use_docker { Some(docker_keep) } else { None },
+        docker_container_name: docker_container_name.clone(),
         started_at_millis,
     };
 
-    let config = BuiltinLaunchConfig {
-        command: resolved.command,
-        args,
-        working_dir,
-        branch_name,
-        agent_name: resolved.label.to_string(),
-        agent_color: agent_color_for(agent_id),
-        env_vars,
+    let config = if use_docker {
+        let service = docker_service
+            .as_deref()
+            .ok_or_else(|| "Docker service is required".to_string())?;
+        let docker_env = docker_env.as_ref().ok_or_else(|| "Docker env is missing".to_string())?;
+        let docker_args = build_docker_compose_exec_args(
+            service,
+            DOCKER_WORKDIR,
+            docker_env,
+            &resolved.command,
+            &args,
+        );
+        BuiltinLaunchConfig {
+            command: "docker".to_string(),
+            args: docker_args,
+            working_dir,
+            branch_name,
+            agent_name: resolved.label.to_string(),
+            agent_color: agent_color_for(agent_id),
+            env_vars: docker_env.clone(),
+        }
+    } else {
+        BuiltinLaunchConfig {
+            command: resolved.command,
+            args,
+            working_dir,
+            branch_name,
+            agent_name: resolved.label.to_string(),
+            agent_color: agent_color_for(agent_id),
+            env_vars,
+        }
     };
 
     launch_with_config(config, Some(meta), &state, app_handle)
@@ -1072,11 +1410,11 @@ fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_hand
                 } else {
                     None
                 },
-                docker_service: None,
-                docker_force_host: None,
-                docker_recreate: None,
-                docker_build: None,
-                docker_keep: None,
+                docker_service: meta.docker_service.clone(),
+                docker_force_host: meta.docker_force_host,
+                docker_recreate: meta.docker_recreate,
+                docker_build: meta.docker_build,
+                docker_keep: meta.docker_keep,
                 timestamp: now_millis(),
             };
 
@@ -1098,6 +1436,61 @@ fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_hand
                 data: bytes.to_vec(),
             };
             let _ = app_handle.emit("terminal-output", &payload);
+        }
+
+        // Best-effort docker compose down on exit.
+        if let Some(container_name) = meta.docker_container_name.as_deref() {
+            let keep = meta.docker_keep.unwrap_or(false);
+            if !keep {
+                let pane_id_clone = pane_id.clone();
+                let app_handle_clone = app_handle.clone();
+                let worktree_path = meta.worktree_path.clone();
+                let container_name = container_name.to_string();
+
+                std::thread::spawn(move || {
+                    let state = app_handle_clone.state::<AppState>();
+
+                    let msg = "\r\n[Stopping Docker containers...]\r\n";
+                    let bytes = msg.as_bytes();
+                    if let Ok(mut manager) = state.pane_manager.lock() {
+                        if let Some(pane) = manager.pane_mut_by_id(&pane_id_clone) {
+                            let _ = pane.process_bytes(bytes);
+                        }
+                    }
+                    let payload = TerminalOutputPayload {
+                        pane_id: pane_id_clone.clone(),
+                        data: bytes.to_vec(),
+                    };
+                    let _ = app_handle_clone.emit("terminal-output", &payload);
+
+                    let result = match detect_docker_files(&worktree_path) {
+                        Some(DockerFileType::Compose(compose_path)) => {
+                            let manager =
+                                DockerManager::new(&worktree_path, "", DockerFileType::Compose(compose_path));
+                            let mut env = manager.collect_passthrough_env();
+                            env.insert("COMPOSE_PROJECT_NAME".to_string(), container_name.clone());
+                            docker_compose_down(&worktree_path, &container_name, &env)
+                        }
+                        _ => Ok(()),
+                    };
+
+                    let msg = match result {
+                        Ok(()) => "\r\n[Docker containers stopped]\r\n".to_string(),
+                        Err(err) => format!("\r\n[Failed to stop Docker containers: {}]\r\n", err),
+                    };
+                    let bytes = msg.as_bytes();
+                    if let Ok(mut manager) = state.pane_manager.lock() {
+                        if let Some(pane) = manager.pane_mut_by_id(&pane_id_clone) {
+                            let _ = pane.process_bytes(bytes);
+                        }
+                    }
+                    let payload = TerminalOutputPayload {
+                        pane_id: pane_id_clone.clone(),
+                        data: bytes.to_vec(),
+                    };
+                    let _ = app_handle_clone.emit("terminal-output", &payload);
+                });
+            }
         }
     }
 

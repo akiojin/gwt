@@ -206,6 +206,7 @@
 
 {#if showAgentLaunch}
   <AgentLaunchForm
+    projectPath={projectPath as string}
     selectedBranch={selectedBranch?.name ?? currentBranch}
     onLaunch={handleAgentLaunch}
     onClose={() => (showAgentLaunch = false)}

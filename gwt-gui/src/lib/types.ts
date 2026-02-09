@@ -94,7 +94,22 @@ export interface ToolSessionEntry {
   skip_permissions?: boolean | null;
   tool_version?: string | null;
   collaboration_modes?: boolean | null;
+  docker_service?: string | null;
+  docker_force_host?: boolean | null;
+  docker_recreate?: boolean | null;
+  docker_build?: boolean | null;
+  docker_keep?: boolean | null;
   timestamp: number;
+}
+
+export interface DockerContext {
+  worktree_path?: string | null;
+  file_type: "compose" | "none";
+  compose_services: string[];
+  docker_available: boolean;
+  compose_available: boolean;
+  daemon_running: boolean;
+  force_host: boolean;
 }
 
 export interface LaunchAgentRequest {
@@ -111,4 +126,9 @@ export interface LaunchAgentRequest {
   envOverrides?: Record<string, string>;
   resumeSessionId?: string;
   createBranch?: { name: string; base?: string | null };
+  dockerService?: string;
+  dockerForceHost?: boolean;
+  dockerRecreate?: boolean;
+  dockerBuild?: boolean;
+  dockerKeep?: boolean;
 }

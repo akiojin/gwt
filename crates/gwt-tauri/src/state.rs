@@ -23,6 +23,12 @@ pub struct PaneLaunchMeta {
     pub reasoning_level: Option<String>,
     pub skip_permissions: bool,
     pub collaboration_modes: bool,
+    pub docker_service: Option<String>,
+    pub docker_force_host: Option<bool>,
+    pub docker_recreate: Option<bool>,
+    pub docker_build: Option<bool>,
+    pub docker_keep: Option<bool>,
+    pub docker_container_name: Option<String>,
     pub started_at_millis: i64,
 }
 

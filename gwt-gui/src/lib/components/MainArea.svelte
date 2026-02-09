@@ -152,6 +152,11 @@
         skipPermissions: entry.skip_permissions ?? undefined,
         reasoningLevel: entry.reasoning_level?.trim() || undefined,
         collaborationModes: entry.collaboration_modes ?? undefined,
+        dockerService: entry.docker_service?.trim() || undefined,
+        dockerForceHost: entry.docker_force_host ?? undefined,
+        dockerRecreate: entry.docker_recreate ?? undefined,
+        dockerBuild: entry.docker_build ?? undefined,
+        dockerKeep: entry.docker_keep ?? undefined,
       };
 
       await onQuickLaunch(request);
