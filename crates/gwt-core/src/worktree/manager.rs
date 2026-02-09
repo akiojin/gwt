@@ -469,11 +469,9 @@ impl WorktreeManager {
                             if let Some(conflict_path) =
                                 parse_missing_registered_worktree_path(details)
                             {
-                                if !did_prune {
-                                    if self.prune_worktrees_if_safe()? {
-                                        did_prune = true;
-                                        continue;
-                                    }
+                                if !did_prune && self.prune_worktrees_if_safe()? {
+                                    did_prune = true;
+                                    continue;
                                 }
                                 return Err(GwtError::OrphanedWorktree {
                                     path: conflict_path,
@@ -613,11 +611,9 @@ impl WorktreeManager {
                             if let Some(conflict_path) =
                                 parse_missing_registered_worktree_path(details)
                             {
-                                if !did_prune {
-                                    if self.prune_worktrees_if_safe()? {
-                                        did_prune = true;
-                                        continue;
-                                    }
+                                if !did_prune && self.prune_worktrees_if_safe()? {
+                                    did_prune = true;
+                                    continue;
                                 }
                                 return Err(GwtError::OrphanedWorktree {
                                     path: conflict_path,
