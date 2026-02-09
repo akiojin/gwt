@@ -8,6 +8,14 @@
     "beforeDevCommand": "cd gwt-gui && npm run dev",
     "beforeBuildCommand": "cd gwt-gui && npm run build"
   },
+  "bundle": {
+    "active": true,
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ]
+  },
   "app": {
     "windows": [
       {
