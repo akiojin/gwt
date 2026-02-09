@@ -353,7 +353,9 @@ impl WorktreeManager {
             // branch name and check again before fetching/creating anything.
             if let Some((remote_candidate, branch_candidate)) = split_remote_ref(normalized_branch)
             {
-                if remotes.iter().any(|r| r.name == remote_candidate) {
+                if remotes.iter().any(|r| r.name == remote_candidate)
+                    && Branch::remote_exists(&self.repo_root, remote_candidate, branch_candidate)?
+                {
                     if let Some(wt) = self.get_by_branch_basic(branch_candidate)? {
                         if let Some(wt) =
                             self.resolve_existing_worktree_for_create(wt, &mut did_prune)?
@@ -1348,6 +1350,63 @@ mod tests {
         let wt = manager.create_for_branch("feature/issue-42").unwrap();
         assert_eq!(wt.branch, Some("feature/issue-42".to_string()));
         assert!(wt.path.exists());
+    }
+
+    #[test]
+    fn test_create_for_branch_does_not_misinterpret_branch_as_remote_ref() {
+        let temp = create_test_repo();
+
+        let remote = TempDir::new().unwrap();
+        let remote_path = remote.path().to_string_lossy().to_string();
+        run_git_in(remote.path(), &["init", "--bare"]);
+
+        run_git_in(
+            temp.path(),
+            &["remote", "add", "origin", remote_path.as_str()],
+        );
+
+        let default_branch = git_stdout(temp.path(), &["rev-parse", "--abbrev-ref", "HEAD"]);
+        run_git_in(
+            temp.path(),
+            &["push", "-u", "origin", default_branch.as_str()],
+        );
+
+        let creator = TempDir::new().unwrap();
+        let creator_path = creator.path().to_string_lossy().to_string();
+        let clone_output = Command::new("git")
+            .args(["clone", remote_path.as_str(), creator_path.as_str()])
+            .output()
+            .unwrap();
+        assert!(
+            clone_output.status.success(),
+            "git clone failed: {}",
+            String::from_utf8_lossy(&clone_output.stderr)
+        );
+
+        run_git_in(creator.path(), &["checkout", "-b", "feature/foo"]);
+        run_git_in(creator.path(), &["push", "origin", "feature/foo"]);
+
+        // Add a remote whose name collides with a common branch prefix.
+        // This should not make "feature/foo" get misinterpreted as "<remote>/<branch>".
+        run_git_in(
+            temp.path(),
+            &["remote", "add", "feature", remote_path.as_str()],
+        );
+
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+
+        Branch::create(temp.path(), "foo", "HEAD").unwrap();
+        let foo_wt = manager.create_for_branch("foo").unwrap();
+        assert_eq!(foo_wt.branch.as_deref(), Some("foo"));
+
+        assert!(!Branch::exists(temp.path(), "feature/foo").unwrap());
+
+        let wt = manager.create_for_branch("feature/foo").unwrap();
+        assert_eq!(wt.branch.as_deref(), Some("feature/foo"));
+        assert_ne!(
+            canonicalize_or_self(&wt.path),
+            canonicalize_or_self(&foo_wt.path)
+        );
     }
 
     #[test]
