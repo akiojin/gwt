@@ -269,9 +269,10 @@ fn build_agent_model_args(agent_id: &str, model: Option<&str>) -> Vec<String> {
         "codex" => vec![format!("--model={model}")],
         // SPEC-3b0ed29b: Claude Code uses `--model <name>`.
         "claude" => vec!["--model".to_string(), model.to_string()],
+        // SPEC-3b0ed29b: Gemini CLI uses `-m <name>`.
+        "gemini" => vec!["-m".to_string(), model.to_string()],
         // SPEC-3b0ed29b: OpenCode uses `-m provider/model`.
         "opencode" => vec!["-m".to_string(), model.to_string()],
-        // Gemini model flag is unspecified in current binding specs; ignore.
         _ => Vec::new(),
     }
 }
@@ -690,7 +691,7 @@ fn build_agent_args(
                 args.push("-y".to_string());
             }
 
-            // Gemini model flag is currently unspecified in GUI binding specs.
+            args.extend(build_agent_model_args(agent_id, request.model.as_deref()));
         }
         "opencode" => {
             match mode {
@@ -906,7 +907,10 @@ mod tests {
             build_agent_model_args("opencode", Some("provider/model")),
             vec!["-m".to_string(), "provider/model".to_string()]
         );
-        assert!(build_agent_model_args("gemini", Some("any")).is_empty());
+        assert_eq!(
+            build_agent_model_args("gemini", Some("gemini-2.5-pro")),
+            vec!["-m".to_string(), "gemini-2.5-pro".to_string()]
+        );
         assert!(build_agent_model_args("codex", None).is_empty());
         assert!(build_agent_model_args("codex", Some("  ")).is_empty());
     }
