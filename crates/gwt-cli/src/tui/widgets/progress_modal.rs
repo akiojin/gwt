@@ -152,7 +152,7 @@ impl<'a> ProgressModal<'a> {
         }
     }
 
-    /// Build lines for a single step (FR-052a: error on separate indented line)
+    /// Build lines for a single step (FR-052a: error wrapped to multiple lines)
     fn step_lines(step: &ProgressStep, inner_width: u16) -> Vec<Line<'static>> {
         let color = Self::status_color(step.status);
         let marker = step.marker();
