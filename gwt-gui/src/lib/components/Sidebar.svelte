@@ -7,10 +7,12 @@
     projectPath,
     onBranchSelect,
     onBranchActivate,
+    refreshKey = 0,
   }: {
     projectPath: string;
     onBranchSelect: (branch: BranchInfo) => void;
     onBranchActivate?: (branch: BranchInfo) => void;
+    refreshKey?: number;
   } = $props();
 
   let activeFilter: FilterType = $state("Local");
@@ -18,6 +20,8 @@
   let loading: boolean = $state(false);
   let searchQuery: string = $state("");
   let errorMessage: string | null = $state(null);
+  let lastFetchKey = "";
+  let fetchToken = 0;
 
   const filters: FilterType[] = ["Local", "Remote", "All"];
 
@@ -30,31 +34,38 @@
   );
 
   $effect(() => {
-    // Re-fetch when filter or projectPath changes
-    void activeFilter;
-    void projectPath;
+    // Re-fetch when filter/projectPath changes and when explicitly requested by the parent.
+    const key = `${projectPath}::${activeFilter}::${refreshKey}`;
+    if (key === lastFetchKey) return;
+    lastFetchKey = key;
     fetchBranches();
   });
 
   async function fetchBranches() {
+    const token = ++fetchToken;
     loading = true;
     errorMessage = null;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       if (activeFilter === "Local") {
-        branches = await invoke<BranchInfo[]>("list_worktree_branches", {
+        const next = await invoke<BranchInfo[]>("list_worktree_branches", {
           projectPath,
         });
+        if (token !== fetchToken) return;
+        branches = next;
       } else if (activeFilter === "Remote") {
-        branches = await invoke<BranchInfo[]>("list_remote_branches", {
+        const next = await invoke<BranchInfo[]>("list_remote_branches", {
           projectPath,
         });
+        if (token !== fetchToken) return;
+        branches = next;
       } else {
         // All: merge local + remote
         const [local, remote] = await Promise.all([
           invoke<BranchInfo[]>("list_worktree_branches", { projectPath }),
           invoke<BranchInfo[]>("list_remote_branches", { projectPath }),
         ]);
+        if (token !== fetchToken) return;
         // Deduplicate by name
         const seen = new Set<string>();
         const merged: BranchInfo[] = [];
@@ -76,9 +87,11 @@
           : err && typeof err === "object" && "message" in err
             ? String((err as { message?: unknown }).message)
             : String(err);
+      if (token !== fetchToken) return;
       errorMessage = `Failed to fetch branches: ${msg}`;
       branches = [];
     }
+    if (token !== fetchToken) return;
     loading = false;
   }
 
