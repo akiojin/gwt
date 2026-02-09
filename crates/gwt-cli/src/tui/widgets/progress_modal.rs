@@ -136,16 +136,9 @@ impl<'a> ProgressModal<'a> {
         Self { state }
     }
 
-    /// Calculate modal dimensions (FR-045: width >= 80 chars)
-    fn modal_area(&self, area: Rect) -> Rect {
-        let modal_width = 80.min(area.width.saturating_sub(4));
-        // Title(1) + border(2) + 6 steps + error line(1) + empty(1) + summary(1) = 12, +2 for padding
-        let modal_height = 14.min(area.height.saturating_sub(4));
-
-        let x = (area.width.saturating_sub(modal_width)) / 2;
-        let y = (area.height.saturating_sub(modal_height)) / 2;
-
-        Rect::new(area.x + x, area.y + y, modal_width, modal_height)
+    /// Calculate modal width (FR-045: width >= 80 chars)
+    fn modal_width(area: Rect) -> u16 {
+        80.min(area.width.saturating_sub(4))
     }
 
     /// Get color for step status (FR-050)
@@ -184,21 +177,28 @@ impl<'a> ProgressModal<'a> {
 
         let mut lines = vec![Line::from(spans)];
 
-        // Show error message on separate indented line if failed (FR-052a)
+        // Show error message on separate indented lines if failed (FR-052a)
         if step.status == StepStatus::Failed {
             if let Some(ref msg) = step.error_message {
                 let indent = "      ";
                 let max_msg_len = (inner_width as usize).saturating_sub(indent.len());
-                let truncated = if msg.len() > max_msg_len {
-                    let cut = max_msg_len.saturating_sub(3);
-                    format!("{}{}...", indent, &msg[..cut])
+                if max_msg_len == 0 {
+                    lines.push(Line::from(Span::styled(
+                        msg.to_string(),
+                        Style::default().fg(Color::Red),
+                    )));
                 } else {
-                    format!("{}{}", indent, msg)
-                };
-                lines.push(Line::from(Span::styled(
-                    truncated,
-                    Style::default().fg(Color::Red),
-                )));
+                    let mut remaining = msg.as_str();
+                    while !remaining.is_empty() {
+                        let chunk_len = remaining.len().min(max_msg_len);
+                        let chunk = &remaining[..chunk_len];
+                        lines.push(Line::from(Span::styled(
+                            format!("{}{}", indent, chunk),
+                            Style::default().fg(Color::Red),
+                        )));
+                        remaining = &remaining[chunk_len..];
+                    }
+                }
             }
         }
 
@@ -223,34 +223,16 @@ impl Widget for ProgressModal<'_> {
             }
         }
 
-        let modal_area = self.modal_area(area);
+        // Calculate modal width first, then inner width (modal - 2 for borders)
+        let modal_width = Self::modal_width(area);
+        let inner_width = modal_width.saturating_sub(2);
 
-        // Clear the modal area
-        Clear.render(modal_area, buf);
-
-        // Modal block with dynamic title (FR-046)
-        let title = self.state.title();
-        let block = Block::default()
-            .title(format!(" {} ", title))
-            .title_alignment(Alignment::Center)
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(if self.state.has_failed() {
-                Color::Red
-            } else if self.state.completed {
-                Color::Green
-            } else {
-                Color::Cyan
-            }));
-
-        let inner = block.inner(modal_area);
-        block.render(modal_area, buf);
-
-        // Build content lines
+        // Build content lines first to determine dynamic height (FR-052a)
         let mut lines: Vec<Line> = Vec::new();
 
-        // Step lines (FR-052a: error messages on separate lines)
+        // Step lines (FR-052a: error messages wrapped to multiple lines)
         for step in &self.state.steps {
-            lines.extend(Self::step_lines(step, inner.width));
+            lines.extend(Self::step_lines(step, inner_width));
         }
 
         // Add empty line before summary/error
@@ -277,6 +259,33 @@ impl Widget for ProgressModal<'_> {
                     .add_modifier(Modifier::BOLD),
             )]));
         }
+
+        // Dynamic modal height: content lines + 2 for borders
+        let modal_height = ((lines.len() as u16) + 2).min(area.height.saturating_sub(4));
+
+        let x = (area.width.saturating_sub(modal_width)) / 2;
+        let y = (area.height.saturating_sub(modal_height)) / 2;
+        let modal_area = Rect::new(area.x + x, area.y + y, modal_width, modal_height);
+
+        // Clear the modal area
+        Clear.render(modal_area, buf);
+
+        // Modal block with dynamic title (FR-046)
+        let title = self.state.title();
+        let block = Block::default()
+            .title(format!(" {} ", title))
+            .title_alignment(Alignment::Center)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(if self.state.has_failed() {
+                Color::Red
+            } else if self.state.completed {
+                Color::Green
+            } else {
+                Color::Cyan
+            }));
+
+        let inner = block.inner(modal_area);
+        block.render(modal_area, buf);
 
         // Render content
         let content = Paragraph::new(lines);
@@ -372,31 +381,37 @@ mod tests {
     }
 
     #[test]
-    fn test_step_lines_long_error_truncated_with_ellipsis() {
+    fn test_step_lines_long_error_wraps_to_multiple_lines() {
         let mut step = ProgressStep::new(ProgressStepKind::CreateWorktree);
         let long_msg =
             "[E1013] Git operation failed: worktree add: fatal: 'feature/long-branch-name' is already checked out at '/very/long/path/to/worktrees/feature/long-branch-name'";
         step.fail(long_msg.to_string());
         let lines = ProgressModal::step_lines(&step, 78);
-        assert_eq!(lines.len(), 2);
-        let error_line = lines[1].to_string();
-        // Should be truncated with "..."
-        assert!(error_line.ends_with("..."));
-        // Should not exceed inner_width
-        assert!(error_line.len() <= 78);
+        // FR-052a: should wrap to multiple lines, not truncate
+        assert!(lines.len() >= 3); // step line + at least 2 error lines
+        // All error lines should have indent
+        for line in &lines[1..] {
+            assert!(line.to_string().starts_with("      "));
+        }
+        // Full message should be preserved across all error lines
+        let full_error: String = lines[1..]
+            .iter()
+            .map(|l| l.to_string().trim_start().to_string())
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(full_error, long_msg);
     }
 
     #[test]
-    fn test_step_lines_error_fits_exactly_no_truncation() {
+    fn test_step_lines_error_fits_in_single_line() {
         let mut step = ProgressStep::new(ProgressStepKind::CreateWorktree);
         // 6 spaces indent, so 72 chars available for the message in a 78-wide area
         let msg = "x".repeat(72);
         step.fail(msg.clone());
         let lines = ProgressModal::step_lines(&step, 78);
+        // Should fit in exactly 1 error line (step + error = 2 lines)
         assert_eq!(lines.len(), 2);
         let error_line = lines[1].to_string();
-        // Should NOT be truncated (exactly fits)
-        assert!(!error_line.ends_with("..."));
         assert!(error_line.contains(&msg));
     }
 
