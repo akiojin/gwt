@@ -87,7 +87,12 @@
       (dockerContext?.compose_available ?? false)
   );
 	  function supportsModelFor(agentId: string): boolean {
-	    return agentId === "codex" || agentId === "claude" || agentId === "opencode";
+	    return (
+	      agentId === "codex" ||
+	      agentId === "claude" ||
+	      agentId === "gemini" ||
+	      agentId === "opencode"
+	    );
 	  }
 
 	  let supportsModel = $derived(supportsModelFor(selectedAgent));
@@ -107,7 +112,15 @@
 	          "gpt-5.1-codex-mini",
 	        ]
 	      : selectedAgent === "claude"
-	        ? ["sonnet", "opus", "haiku"]
+	        ? ["opus", "sonnet", "haiku"]
+	        : selectedAgent === "gemini"
+	          ? [
+	              "gemini-3-pro-preview",
+	              "gemini-3-flash-preview",
+	              "gemini-2.5-pro",
+	              "gemini-2.5-flash",
+	              "gemini-2.5-flash-lite",
+	            ]
 	        : []
 	  );
 
@@ -447,7 +460,7 @@
               type="text"
               list="model-options"
               bind:value={model}
-              placeholder="Optional (e.g., gpt-5.2, sonnet, openai/gpt-5.2)"
+              placeholder="Optional (e.g., gpt-5.3-codex, opus, gemini-2.5-pro, provider/model)"
             />
             <datalist id="model-options">
               {#each modelOptions as opt (opt)}
