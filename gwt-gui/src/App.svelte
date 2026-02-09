@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Tab, BranchInfo, ProjectInfo } from "./lib/types";
+  import type { Tab, BranchInfo, ProjectInfo, LaunchAgentRequest } from "./lib/types";
   import MenuBar from "./lib/components/MenuBar.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import MainArea from "./lib/components/MainArea.svelte";
@@ -72,26 +72,25 @@
     }
   }
 
-  async function handleAgentLaunch(request: {
-    agentId: string;
-    branch: string;
-    model?: string;
-    agentVersion?: string;
-    createBranch?: { name: string; base?: string | null };
-  }) {
+  function agentTabLabel(agentId: string): string {
+    return agentId === "claude"
+      ? "Claude Code"
+      : agentId === "codex"
+        ? "Codex"
+        : agentId === "gemini"
+          ? "Gemini"
+          : agentId === "opencode"
+            ? "OpenCode"
+            : agentId;
+  }
+
+  async function handleAgentLaunch(request: LaunchAgentRequest) {
     const { invoke } = await import("@tauri-apps/api/core");
     const paneId = await invoke<string>("launch_agent", { request });
 
     const newTab: Tab = {
       id: `agent-${paneId}`,
-      label:
-        request.agentId === "claude"
-          ? "Claude Code"
-          : request.agentId === "codex"
-            ? "Codex"
-            : request.agentId === "gemini"
-              ? "Gemini"
-              : request.agentId,
+      label: agentTabLabel(request.agentId),
       type: "agent",
       paneId,
     };
@@ -192,8 +191,10 @@
         {tabs}
         {activeTabId}
         {selectedBranch}
+        projectPath={projectPath as string}
         {showSettings}
         onLaunchAgent={requestAgentLaunch}
+        onQuickLaunch={handleAgentLaunch}
         onTabSelect={handleTabSelect}
         onTabClose={handleTabClose}
         onSettingsClose={() => (showSettings = false)}

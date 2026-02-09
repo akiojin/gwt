@@ -5,6 +5,7 @@ export interface BranchInfo {
   ahead: number;
   behind: number;
   divergence_status: string; // "UpToDate" | "Ahead" | "Behind" | "Diverged"
+  last_tool_usage?: string | null;
 }
 
 export interface ProjectInfo {
@@ -79,4 +80,35 @@ export interface Tab {
   label: string;
   type: "summary" | "agent";
   paneId?: string;
+}
+
+export interface ToolSessionEntry {
+  branch: string;
+  worktree_path?: string | null;
+  tool_id: string;
+  tool_label: string;
+  session_id?: string | null;
+  mode?: string | null;
+  model?: string | null;
+  reasoning_level?: string | null;
+  skip_permissions?: boolean | null;
+  tool_version?: string | null;
+  collaboration_modes?: boolean | null;
+  timestamp: number;
+}
+
+export interface LaunchAgentRequest {
+  agentId: string;
+  branch: string;
+  profile?: string;
+  model?: string;
+  agentVersion?: string;
+  mode?: "normal" | "continue" | "resume";
+  skipPermissions?: boolean;
+  reasoningLevel?: string;
+  collaborationModes?: boolean;
+  extraArgs?: string[];
+  envOverrides?: Record<string, string>;
+  resumeSessionId?: string;
+  createBranch?: { name: string; base?: string | null };
 }

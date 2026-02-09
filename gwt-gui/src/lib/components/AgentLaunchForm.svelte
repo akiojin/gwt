@@ -1,23 +1,19 @@
 <script lang="ts">
-  import type { AgentInfo } from "../types";
+  import type { AgentInfo, LaunchAgentRequest } from "../types";
 
   let {
     selectedBranch = "",
     onLaunch,
     onClose,
-  }: {
-    selectedBranch?: string;
-    onLaunch: (request: {
-      agentId: string;
-      branch: string;
-      model?: string;
-      agentVersion?: string;
-      createBranch?: { name: string; base?: string | null };
-    }) => Promise<void>;
-    onClose: () => void;
-  } = $props();
+	  }: {
+	    selectedBranch?: string;
+	    onLaunch: (request: LaunchAgentRequest) => Promise<void>;
+	    onClose: () => void;
+	  } = $props();
 
-  type LaunchMode = "existing" | "new";
+	  type BranchMode = "existing" | "new";
+	  type SessionMode = "normal" | "continue" | "resume";
+	  type RunnerMode = "auto" | "installed" | "bunx";
 
   type AgentVersionsInfo = {
     agentId: string;
@@ -27,14 +23,26 @@
     source: "cache" | "registry" | "fallback";
   };
 
-  let agents: AgentInfo[] = $state([]);
-  let selectedAgent: string = $state("");
-  let mode: LaunchMode = $state("existing");
-  let model: string = $state("");
-  let agentVersion: string = $state("latest");
-  let modelByAgent: Record<string, string> = $state({});
-  let agentVersionByAgent: Record<string, string> = $state({});
-  let lastAgent: string = $state("");
+		  let agents: AgentInfo[] = $state([]);
+		  let selectedAgent: string = $state("");
+		  let branchMode: BranchMode = $state("existing" as BranchMode);
+		  let sessionMode: SessionMode = $state("normal" as SessionMode);
+		  let runMethod: RunnerMode = $state("auto" as RunnerMode);
+	  let runMethodByAgent: Record<string, RunnerMode> = $state({});
+	  let model: string = $state("");
+	  let agentVersion: string = $state("latest");
+	  let modelByAgent: Record<string, string> = $state({});
+	  let agentVersionByAgent: Record<string, string> = $state({});
+	  let lastAgent: string = $state("");
+
+	  let resumeSessionId: string = $state("");
+	  let skipPermissions: boolean = $state(false);
+	  let reasoningLevel: string = $state("");
+	  let collaborationModes: boolean = $state(false);
+
+	  let showAdvanced: boolean = $state(false);
+	  let extraArgsText: string = $state("");
+	  let envOverridesText: string = $state("");
 
   let versionsLoading: boolean = $state(false);
   let versionTags: string[] = $state([]);
@@ -46,70 +54,106 @@
   let baseBranch: string = $state((() => selectedBranch)());
   let newBranch: string = $state("");
 
-  let loading: boolean = $state(true);
-  let launching: boolean = $state(false);
-  let errorMessage: string | null = $state(null);
+	  let loading: boolean = $state(true);
+	  let launching: boolean = $state(false);
+	  let errorMessage: string | null = $state(null);
 
-  let selectedAgentInfo = $derived(
-    agents.find((a) => a.id === selectedAgent) ?? null
-  );
-  let isFallbackAgent = $derived(
-    selectedAgentInfo?.version === "bunx" || selectedAgentInfo?.version === "npx"
-  );
-  function supportsModelFor(agentId: string): boolean {
-    return agentId === "codex" || agentId === "claude";
-  }
+	  let selectedAgentInfo = $derived(
+	    agents.find((a) => a.id === selectedAgent) ?? null
+	  );
+	  let agentNotInstalled = $derived(
+	    selectedAgentInfo?.version === "bunx" || selectedAgentInfo?.version === "npx"
+	  );
+	  function supportsModelFor(agentId: string): boolean {
+	    return agentId === "codex" || agentId === "claude" || agentId === "opencode";
+	  }
 
-  let supportsModel = $derived(supportsModelFor(selectedAgent));
+	  let supportsModel = $derived(supportsModelFor(selectedAgent));
+	  let supportsReasoning = $derived(selectedAgent === "codex");
+	  let supportsCollaboration = $derived(selectedAgent === "codex");
+	  let needsResumeSessionId = $derived(
+	    selectedAgent === "opencode" && sessionMode === "resume"
+	  );
 
-  let modelOptions = $derived(
-    selectedAgent === "codex"
-      ? ["gpt-5.1-codex", "gpt-5.1-codex-max", "gpt-5.2"]
-      : selectedAgent === "claude"
-        ? ["sonnet", "opus", "haiku"]
-        : []
-  );
+	  let modelOptions = $derived(
+	    selectedAgent === "codex"
+	      ? ["gpt-5.1-codex", "gpt-5.1-codex-max", "gpt-5.2"]
+	      : selectedAgent === "claude"
+	        ? ["sonnet", "opus", "haiku"]
+	        : []
+	  );
 
   $effect(() => {
     detectAgents();
   });
 
-  $effect(() => {
-    if (selectedAgent === lastAgent) return;
+	  $effect(() => {
+	    if (selectedAgent === lastAgent) return;
 
-    if (lastAgent && supportsModelFor(lastAgent)) {
-      modelByAgent = { ...modelByAgent, [lastAgent]: model };
-    }
-    if (lastAgent) {
-      agentVersionByAgent = { ...agentVersionByAgent, [lastAgent]: agentVersion };
-    }
+	    if (lastAgent && supportsModelFor(lastAgent)) {
+	      modelByAgent = { ...modelByAgent, [lastAgent]: model };
+	    }
+	    if (lastAgent) {
+	      agentVersionByAgent = { ...agentVersionByAgent, [lastAgent]: agentVersion };
+	      runMethodByAgent = { ...runMethodByAgent, [lastAgent]: runMethod };
+	    }
 
-    lastAgent = selectedAgent;
-    model = modelByAgent[selectedAgent] ?? "";
-    agentVersion = agentVersionByAgent[selectedAgent] ?? "latest";
-  });
+	    lastAgent = selectedAgent;
+	    model = modelByAgent[selectedAgent] ?? "";
+	    agentVersion = agentVersionByAgent[selectedAgent] ?? "latest";
+	    runMethod =
+	      runMethodByAgent[selectedAgent] ??
+	      (agentNotInstalled ? "bunx" : "auto");
+	  });
 
-  $effect(() => {
-    if (!selectedAgent || !isFallbackAgent) {
-      versionsLoading = false;
-      versionsError = null;
-      versionTags = [];
-      versionOptions = [];
-      return;
-    }
-    loadAgentVersions(selectedAgent);
-  });
+	  $effect(() => {
+	    if (!selectedAgent || runMethod !== "bunx") {
+	      versionsLoading = false;
+	      versionsError = null;
+	      versionTags = [];
+	      versionOptions = [];
+	      return;
+	    }
+	    loadAgentVersions(selectedAgent);
+	  });
 
-  function toErrorMessage(err: unknown): string {
+	  function toErrorMessage(err: unknown): string {
     if (typeof err === "string") return err;
     if (err && typeof err === "object" && "message" in err) {
       const msg = (err as { message?: unknown }).message;
       if (typeof msg === "string") return msg;
     }
-    return String(err);
-  }
+	    return String(err);
+	  }
 
-  async function loadAgentVersions(agentId: string) {
+	  function parseExtraArgs(text: string): string[] {
+	    return text
+	      .split("\n")
+	      .map((line) => line.trim())
+	      .filter((line) => line.length > 0);
+	  }
+
+	  function parseEnvOverrides(text: string): { env: Record<string, string>; error: string | null } {
+	    const env: Record<string, string> = {};
+	    const lines = text.split("\n");
+	    for (let i = 0; i < lines.length; i++) {
+	      const raw = lines[i].trim();
+	      if (!raw || raw.startsWith("#")) continue;
+	      const idx = raw.indexOf("=");
+	      if (idx <= 0) {
+	        return { env: {}, error: `Invalid env override at line ${i + 1}. Use KEY=VALUE.` };
+	      }
+	      const key = raw.slice(0, idx).trim();
+	      const value = raw.slice(idx + 1).trimStart();
+	      if (!key) {
+	        return { env: {}, error: `Invalid env override at line ${i + 1}. Key is required.` };
+	      }
+	      env[key] = value;
+	    }
+	    return { env, error: null };
+	  }
+
+	  async function loadAgentVersions(agentId: string) {
     versionsLoading = true;
     versionsError = null;
     try {
@@ -144,40 +188,78 @@
     loading = false;
   }
 
-  async function handleLaunch() {
-    errorMessage = null;
-    if (!selectedAgent) return;
-    launching = true;
-    try {
-      const options: { model?: string; agentVersion?: string } = {};
-      if (supportsModel && model.trim()) {
-        options.model = model.trim();
-      }
-      if (isFallbackAgent && agentVersion.trim()) {
-        options.agentVersion = agentVersion.trim();
-      }
+	  async function handleLaunch() {
+	    errorMessage = null;
+	    if (!selectedAgent) return;
+	    launching = true;
+	    try {
+	      const request: LaunchAgentRequest = {
+	        agentId: selectedAgent,
+	        branch: "",
+	        mode: sessionMode,
+	        skipPermissions,
+	      };
 
-      if (mode === "existing") {
-        if (!branch.trim()) return;
-        await onLaunch({
-          agentId: selectedAgent,
-          branch: branch.trim(),
-          ...options,
-        });
-        onClose();
-        return;
-      }
+	      if (supportsModel && model.trim()) {
+	        request.model = model.trim();
+	      }
 
-      if (!baseBranch.trim() || !newBranch.trim()) return;
-      await onLaunch({
-        agentId: selectedAgent,
-        branch: newBranch.trim(),
-        ...options,
-        createBranch: { name: newBranch.trim(), base: baseBranch.trim() },
-      });
-      onClose();
-    } catch (err) {
-      errorMessage = `Failed to launch agent: ${toErrorMessage(err)}`;
+	      if (runMethod === "installed") {
+	        request.agentVersion = "installed";
+	      } else if (runMethod === "bunx") {
+	        request.agentVersion = agentVersion.trim() || "latest";
+	      }
+
+	      if (sessionMode !== "normal" && resumeSessionId.trim()) {
+	        request.resumeSessionId = resumeSessionId.trim();
+	      }
+
+	      if (needsResumeSessionId && !request.resumeSessionId) {
+	        errorMessage = "Session ID is required for OpenCode resume.";
+	        return;
+	      }
+
+	      if (supportsReasoning && reasoningLevel.trim()) {
+	        request.reasoningLevel = reasoningLevel.trim();
+	      }
+
+	      if (supportsCollaboration) {
+	        request.collaborationModes = collaborationModes;
+	      }
+
+	      const extraArgs = parseExtraArgs(extraArgsText);
+	      if (extraArgs.length > 0) {
+	        request.extraArgs = extraArgs;
+	      }
+
+	      const envParsed = parseEnvOverrides(envOverridesText);
+	      if (envParsed.error) {
+	        errorMessage = envParsed.error;
+	        return;
+	      }
+	      if (Object.keys(envParsed.env).length > 0) {
+	        request.envOverrides = envParsed.env;
+	      }
+
+	      if (branchMode === "existing") {
+	        if (!branch.trim()) return;
+	        request.branch = branch.trim();
+	        await onLaunch({
+	          ...request,
+	        });
+	        onClose();
+	        return;
+	      }
+
+	      if (!baseBranch.trim() || !newBranch.trim()) return;
+	      request.branch = newBranch.trim();
+	      await onLaunch({
+	        ...request,
+	        createBranch: { name: newBranch.trim(), base: baseBranch.trim() },
+	      });
+	      onClose();
+	    } catch (err) {
+	      errorMessage = `Failed to launch agent: ${toErrorMessage(err)}`;
     } finally {
       launching = false;
     }
@@ -244,7 +326,7 @@
               type="text"
               list="model-options"
               bind:value={model}
-              placeholder="Optional (e.g., gpt-5.2, sonnet)"
+              placeholder="Optional (e.g., gpt-5.2, sonnet, openai/gpt-5.2)"
             />
             <datalist id="model-options">
               {#each modelOptions as opt (opt)}
@@ -254,7 +336,81 @@
           </div>
         {/if}
 
-        {#if isFallbackAgent}
+        <div class="field">
+          <span class="field-label" id="session-mode-label">Session</span>
+          <div class="mode-toggle" role="group" aria-labelledby="session-mode-label">
+            <button
+              class="mode-btn"
+              class:active={sessionMode === "normal"}
+              onclick={() => (sessionMode = "normal")}
+            >
+              Normal
+            </button>
+            <button
+              class="mode-btn"
+              class:active={sessionMode === "continue"}
+              onclick={() => (sessionMode = "continue")}
+            >
+              Continue
+            </button>
+            <button
+              class="mode-btn"
+              class:active={sessionMode === "resume"}
+              onclick={() => (sessionMode = "resume")}
+            >
+              Resume
+            </button>
+          </div>
+        </div>
+
+        {#if sessionMode !== "normal"}
+          <div class="field">
+            <label for="resume-session-input">Session ID</label>
+            <input
+              id="resume-session-input"
+              type="text"
+              bind:value={resumeSessionId}
+              placeholder={needsResumeSessionId ? "Required" : "Optional"}
+            />
+            {#if needsResumeSessionId}
+              <span class="field-hint">OpenCode resume requires a session id.</span>
+            {/if}
+          </div>
+        {/if}
+
+        <div class="field">
+          <span class="field-label" id="run-method-label">Run Method</span>
+          <div class="mode-toggle" role="group" aria-labelledby="run-method-label">
+            <button
+              class="mode-btn"
+              class:active={runMethod === "auto"}
+              onclick={() => (runMethod = "auto")}
+            >
+              Auto
+            </button>
+            <button
+              class="mode-btn"
+              class:active={runMethod === "installed"}
+              onclick={() => (runMethod = "installed")}
+            >
+              Installed
+            </button>
+            <button
+              class="mode-btn"
+              class:active={runMethod === "bunx"}
+              onclick={() => (runMethod = "bunx")}
+            >
+              bunx/npx
+            </button>
+          </div>
+          {#if agentNotInstalled}
+            <span class="field-hint">
+              Installed binary not found. Auto will use bunx/npx.
+            </span>
+          {/if}
+        </div>
+
+        {#if runMethod === "bunx"}
           <div class="field">
             <label for="agent-version-input">Agent Version</label>
             <input
@@ -283,26 +439,92 @@
         {/if}
 
         <div class="field">
-          <span class="field-label" id="launch-mode-label">Mode</span>
-          <div class="mode-toggle" role="group" aria-labelledby="launch-mode-label">
+          <span class="field-label">Permissions</span>
+          <label class="check-row">
+            <input type="checkbox" bind:checked={skipPermissions} />
+            <span>Skip Permissions</span>
+          </label>
+        </div>
+
+        {#if supportsReasoning}
+          <div class="field">
+            <label for="reasoning-select">Reasoning</label>
+            <select id="reasoning-select" bind:value={reasoningLevel}>
+              <option value="">Default</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="xhigh">xhigh</option>
+            </select>
+          </div>
+        {/if}
+
+        {#if supportsCollaboration}
+          <div class="field">
+            <span class="field-label">Codex</span>
+            <label class="check-row">
+              <input type="checkbox" bind:checked={collaborationModes} />
+              <span>Enable collaboration_modes</span>
+            </label>
+          </div>
+        {/if}
+
+        <div class="field">
+          <button
+            class="advanced-btn"
+            type="button"
+            onclick={() => (showAdvanced = !showAdvanced)}
+          >
+            {showAdvanced ? "Hide Advanced" : "Advanced"}
+          </button>
+        </div>
+
+        {#if showAdvanced}
+          <div class="field">
+            <label for="extra-args-input">Extra Args</label>
+            <textarea
+              id="extra-args-input"
+              rows="3"
+              bind:value={extraArgsText}
+              placeholder="One argument per line"
+            ></textarea>
+          </div>
+
+          <div class="field">
+            <label for="env-overrides-input">Env Overrides</label>
+            <textarea
+              id="env-overrides-input"
+              rows="4"
+              bind:value={envOverridesText}
+              placeholder="KEY=VALUE (one per line)"
+            ></textarea>
+            <span class="field-hint">
+              These variables are applied only for this launch.
+            </span>
+          </div>
+        {/if}
+
+        <div class="field">
+          <span class="field-label" id="branch-mode-label">Branch</span>
+          <div class="mode-toggle" role="group" aria-labelledby="branch-mode-label">
             <button
               class="mode-btn"
-              class:active={mode === "existing"}
-              onclick={() => (mode = "existing")}
+              class:active={branchMode === "existing"}
+              onclick={() => (branchMode = "existing")}
             >
               Existing Branch
             </button>
             <button
               class="mode-btn"
-              class:active={mode === "new"}
-              onclick={() => (mode = "new")}
+              class:active={branchMode === "new"}
+              onclick={() => (branchMode = "new")}
             >
               New Branch
             </button>
           </div>
         </div>
 
-        {#if mode === "existing"}
+        {#if branchMode === "existing"}
         <div class="field">
           <label for="branch-input">Branch</label>
           <input
@@ -341,7 +563,10 @@
           disabled={
             launching ||
             !selectedAgent ||
-            (mode === "existing" ? !branch.trim() : !baseBranch.trim() || !newBranch.trim())
+            (needsResumeSessionId && !resumeSessionId.trim()) ||
+            (branchMode === "existing"
+              ? !branch.trim()
+              : !baseBranch.trim() || !newBranch.trim())
           }
           onclick={handleLaunch}
         >
@@ -370,8 +595,12 @@
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
     border-radius: 12px;
-    width: 460px;
+    width: 560px;
     max-width: 90vw;
+    max-height: 88vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
     box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
   }
 
@@ -414,6 +643,7 @@
     display: flex;
     flex-direction: column;
     gap: 16px;
+    overflow: auto;
   }
 
   .error {
@@ -505,7 +735,9 @@
     color: var(--red);
   }
 
-  .field input {
+  .field input,
+  .field textarea,
+  .field select {
     padding: 8px 12px;
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
@@ -516,8 +748,48 @@
     outline: none;
   }
 
-  .field input:focus {
+  .field input:focus,
+  .field textarea:focus,
+  .field select:focus {
     border-color: var(--accent);
+  }
+
+  .field textarea {
+    resize: vertical;
+    line-height: 1.35;
+  }
+
+  .check-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--text-primary);
+    user-select: none;
+  }
+
+  .check-row input {
+    accent-color: var(--accent);
+  }
+
+  .advanced-btn {
+    width: 100%;
+    padding: 8px 10px;
+    background: transparent;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    font-family: inherit;
+    transition: border-color 0.15s, background 0.15s;
+  }
+
+  .advanced-btn:hover {
+    border-color: var(--accent);
+    background: var(--bg-surface);
+    color: var(--text-primary);
   }
 
   .mode-toggle {

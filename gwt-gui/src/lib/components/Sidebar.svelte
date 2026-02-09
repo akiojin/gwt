@@ -107,6 +107,15 @@
         return "";
     }
   }
+
+  function toolUsageClass(usage: string | null | undefined): string {
+    const key = (usage ?? "").toLowerCase();
+    if (key.startsWith("claude@")) return "claude";
+    if (key.startsWith("codex@")) return "codex";
+    if (key.startsWith("gemini@")) return "gemini";
+    if (key.startsWith("opencode@") || key.startsWith("open-code@")) return "opencode";
+    return "";
+  }
 </script>
 
 <aside class="sidebar">
@@ -146,6 +155,11 @@
         >
           <span class="branch-icon">{branch.is_current ? "*" : " "}</span>
           <span class="branch-name">{branch.name}</span>
+          {#if branch.last_tool_usage}
+            <span class="tool-usage {toolUsageClass(branch.last_tool_usage)}">
+              {branch.last_tool_usage}
+            </span>
+          {/if}
           {#if divergenceIndicator(branch)}
             <span
               class="divergence {divergenceClass(branch.divergence_status)}"
@@ -276,6 +290,36 @@
     overflow: hidden;
     text-overflow: ellipsis;
     flex: 1;
+  }
+
+  .tool-usage {
+    font-size: 10px;
+    font-family: monospace;
+    color: var(--text-muted);
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    padding: 1px 6px;
+    flex-shrink: 0;
+  }
+
+  .tool-usage.claude {
+    color: var(--yellow);
+    border-color: rgba(249, 226, 175, 0.35);
+  }
+
+  .tool-usage.codex {
+    color: var(--cyan);
+    border-color: rgba(148, 226, 213, 0.35);
+  }
+
+  .tool-usage.gemini {
+    color: var(--magenta);
+    border-color: rgba(203, 166, 247, 0.35);
+  }
+
+  .tool-usage.opencode {
+    color: var(--green);
+    border-color: rgba(166, 227, 161, 0.35);
   }
 
   .divergence {
