@@ -114,6 +114,12 @@ export interface SessionSummaryResult {
   error?: string | null;
 }
 
+export interface BranchSuggestResult {
+  status: "ok" | "ai-not-configured" | "error";
+  suggestions: string[];
+  error?: string | null;
+}
+
 export interface DockerContext {
   worktree_path?: string | null;
   file_type: "compose" | "none";

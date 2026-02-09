@@ -122,6 +122,7 @@
 #### Agent launch
 
 - **FR-010**: ブランチ詳細（Summary）に `Launch Agent...` の主要導線を表示しなければ**ならない**
+- **FR-010a**: 起動ウィザードの Agent 選択はドロップダウンで表示し、利用不可（unavailable）のエージェントは選択できないようにしなければ**ならない**（表示自体は維持する）
 - **FR-011**: ブランチのダブルクリックで `Launch Agent...` と同等の導線を提供しなければ**ならない**
 - **FR-012**: エージェント起動時の working directory は必ず対象ブランチの Worktree ディレクトリでなければ**ならない**
 - **FR-012a**: 起動ウィザードの `Existing Branch` は選択中ブランチを使用し、ブランチ名は **編集不可（read-only）** でなければ**ならない**
@@ -129,11 +130,15 @@
 - **FR-014**: Worktree 衝突時に自動復旧（削除/修復/初期化）を行っては**ならない**
 - **FR-015**: 起動ウィザードは `New Branch`（新規ブランチ作成）モードを提供しなければ**ならない**
 - **FR-016**: `New Branch` モードでは `Base Branch` と `New Branch Name` を入力でき、Launch 実行時にブランチ作成 + Worktree 作成を行わなければ**ならない**
+- **FR-016a**: `New Branch` の `Base Branch` は自由入力ではなく、`Local`（Worktreeが存在するブランチ）および `Remote` ブランチ候補から **選択** できなければ**ならない**
+- **FR-016b**: `New Branch Name` はブランチタイプ（`feature/bugfix/hotfix/release`）のプレフィックスを **選択式で固定** し、それ以降のサフィックス部分のみを編集可能にしなければ**ならない**
+- **FR-016c**: 起動ウィザードは `New Branch Name` の AI 提案 UI を提供し、ユーザー説明からプレフィックス込みの **3つのブランチ名候補** を生成して選択できなければ**ならない**。AI未設定/エラー時も UI はクラッシュしては**ならない**
 - **FR-017**: `Base Branch` がリモートブランチの場合、必要に応じて fetch を行い、Worktree 作成後にブランチを `Base Branch` のコミットへ一致させなければ**ならない**
 - **FR-018**: エージェントがローカルに未インストールの場合でも、起動ウィザードの選択肢から除外しては**ならない**。起動時に bunx でフォールバック実行を試みなければ**ならない**（`SPEC-3b0ed29b` FR-002）
 - **FR-019**: bunx が `node_modules/.bin` 配下で検出された場合、その bunx を使用しては**ならない**。代わりに `npx --yes` へフォールバックしなければ**ならない**（`SPEC-3b0ed29b` FR-002a）
 - **FR-025**: 起動ウィザードは Model（任意）を **選択** できなければ**ならない**。Codex の場合は `--model=...`、Claude Code の場合は `--model ...`、Gemini の場合は `-m ...` 形式で起動引数へ反映しなければ**ならない**（`SPEC-3b0ed29b` FR-005）
 - **FR-026**: 起動ウィザードは Version（任意）を **選択** できなければ**ならない**。選択肢は `installed`（利用可能な場合）、`latest`、および取得できたバージョン候補である。bunx/npx フォールバック実行時は `@...@{version}` としてパッケージ指定へ反映しなければ**ならない**
+- **FR-026a**: Codex を選択した場合のみ Reasoning を表示し、Reasoning の表示位置は `Agent Version` の直下でなければ**ならない**
 - **FR-027**: 起動ウィザードの Model/Version は **選択式のみ** で、自由入力を受け付けては**ならない**（選択肢はエージェントごとに異なる）
 - **FR-028**: Agent Version の候補一覧は、取得可能な場合は **bun（`bun info <pkg> time/dist-tags --json`）を優先して** npm レジストリ由来のバージョン一覧を表示しなければ**ならない**。取得に失敗しても UI はクラッシュしては**ならない**（`latest` のみ表示で継続）
 
@@ -155,6 +160,7 @@
 - `list_remote_branches(projectPath: string) -> BranchInfo[]`（bare の場合は ls-remote を使用）
 - `detect_agents() -> DetectedAgentInfo[]`
 - `launch_agent(request: LaunchAgentRequest) -> paneId: string`（新規ブランチ作成モードを含む。Model/Agent Version を含む）
+- `suggest_branch_names(description: string) -> BranchSuggestResult`（New Branch Name のAI提案用。3候補を返す）
 - `get_profiles() -> ProfilesConfig`
 - `save_profiles(config: ProfilesConfig) -> void`
 
