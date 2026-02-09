@@ -3,6 +3,10 @@
   import TerminalView from "../terminal/TerminalView.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
 
+  function isAgentTabWithPaneId(tab: Tab): tab is Tab & { paneId: string } {
+    return tab.type === "agent" && typeof tab.paneId === "string" && tab.paneId.length > 0;
+  }
+
   let {
     tabs,
     activeTabId,
@@ -24,6 +28,8 @@
   } = $props();
 
   let activeTab = $derived(tabs.find((t) => t.id === activeTabId));
+  let agentTabs = $derived(tabs.filter(isAgentTabWithPaneId));
+  let showTerminalLayer = $derived(!showSettings && activeTab?.type === "agent");
 </script>
 
 <main class="main-area">
@@ -54,57 +60,62 @@
       </div>
     {/each}
   </div>
-  <div class="tab-content" class:terminal-mode={activeTab?.type === "agent"}>
-    {#if showSettings}
-      <SettingsPanel onClose={onSettingsClose} />
-    {:else if activeTabId === "summary"}
-      <div class="summary-content">
-        {#if selectedBranch}
-          <div class="branch-detail">
-            <div class="branch-header">
-              <h2>{selectedBranch.name}</h2>
-              <button
-                class="launch-btn"
-                onclick={() => onLaunchAgent?.()}
-              >
-                Launch Agent...
-              </button>
+  <div class="tab-content">
+    <div class="panel-layer" class:hidden={showTerminalLayer}>
+      {#if showSettings}
+        <SettingsPanel onClose={onSettingsClose} />
+      {:else if activeTabId === "summary"}
+        <div class="summary-content">
+          {#if selectedBranch}
+            <div class="branch-detail">
+              <div class="branch-header">
+                <h2>{selectedBranch.name}</h2>
+                <button class="launch-btn" onclick={() => onLaunchAgent?.()}>
+                  Launch Agent...
+                </button>
+              </div>
+              <div class="detail-grid">
+                <div class="detail-item">
+                  <span class="detail-label">Commit</span>
+                  <span class="detail-value mono">{selectedBranch.commit}</span>
+                </div>
+                <div class="detail-item">
+                  <span class="detail-label">Status</span>
+                  <span class="detail-value">
+                    {selectedBranch.divergence_status}
+                    {#if selectedBranch.ahead > 0}
+                      (+{selectedBranch.ahead})
+                    {/if}
+                    {#if selectedBranch.behind > 0}
+                      (-{selectedBranch.behind})
+                    {/if}
+                  </span>
+                </div>
+                <div class="detail-item">
+                  <span class="detail-label">Current</span>
+                  <span class="detail-value">
+                    {selectedBranch.is_current ? "Yes" : "No"}
+                  </span>
+                </div>
+              </div>
             </div>
-            <div class="detail-grid">
-              <div class="detail-item">
-                <span class="detail-label">Commit</span>
-                <span class="detail-value mono">{selectedBranch.commit}</span>
-              </div>
-              <div class="detail-item">
-                <span class="detail-label">Status</span>
-                <span class="detail-value">
-                  {selectedBranch.divergence_status}
-                  {#if selectedBranch.ahead > 0}
-                    (+{selectedBranch.ahead})
-                  {/if}
-                  {#if selectedBranch.behind > 0}
-                    (-{selectedBranch.behind})
-                  {/if}
-                </span>
-              </div>
-              <div class="detail-item">
-                <span class="detail-label">Current</span>
-                <span class="detail-value">
-                  {selectedBranch.is_current ? "Yes" : "No"}
-                </span>
-              </div>
+          {:else}
+            <div class="placeholder">
+              <h2>Session Summary</h2>
+              <p>Select a branch to view details.</p>
             </div>
-          </div>
-        {:else}
-          <div class="placeholder">
-            <h2>Session Summary</h2>
-            <p>Select a branch to view details.</p>
-          </div>
-        {/if}
-      </div>
-    {:else if activeTab?.type === "agent" && activeTab.paneId}
-      <TerminalView paneId={activeTab.paneId} />
-    {/if}
+          {/if}
+        </div>
+      {/if}
+    </div>
+
+    <div class="terminal-layer" class:hidden={!showTerminalLayer}>
+      {#each agentTabs as tab (tab.id)}
+        <div class="terminal-wrapper" class:active={activeTabId === tab.id}>
+          <TerminalView paneId={tab.paneId} />
+        </div>
+      {/each}
+    </div>
   </div>
 </main>
 
@@ -187,13 +198,41 @@
 
   .tab-content {
     flex: 1;
-    overflow: auto;
-    padding: 24px;
+    position: relative;
+    overflow: hidden;
   }
 
-  .tab-content.terminal-mode {
-    padding: 0;
+  .panel-layer {
+    position: absolute;
+    inset: 0;
+    overflow: auto;
+    padding: 24px;
+    z-index: 2;
+  }
+
+  .terminal-layer {
+    position: absolute;
+    inset: 0;
     overflow: hidden;
+    z-index: 1;
+  }
+
+  .panel-layer.hidden,
+  .terminal-layer.hidden {
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  .terminal-wrapper {
+    position: absolute;
+    inset: 0;
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  .terminal-wrapper.active {
+    visibility: visible;
+    pointer-events: auto;
   }
 
   .summary-content {

@@ -12,7 +12,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use which::which;
 
 /// Terminal output event payload sent to the frontend
@@ -401,18 +401,26 @@ pub fn launch_agent(
 
 /// Stream PTY output to the frontend via Tauri events
 fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_handle: AppHandle) {
+    let state = app_handle.state::<AppState>();
     let mut buf = [0u8; 4096];
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break, // EOF
             Ok(n) => {
+                // Keep the scrollback file up-to-date even if the UI is not listening.
+                if let Ok(mut manager) = state.pane_manager.lock() {
+                    if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
+                        let _ = pane.process_bytes(&buf[..n]);
+                    }
+                }
+
                 let payload = TerminalOutputPayload {
                     pane_id: pane_id.clone(),
                     data: buf[..n].to_vec(),
                 };
-                if app_handle.emit("terminal-output", &payload).is_err() {
-                    break;
-                }
+                // UI output is best-effort. Never stop consuming the PTY stream just because
+                // the frontend isn't ready (tab switch, hot reload, etc.).
+                let _ = app_handle.emit("terminal-output", &payload);
             }
             Err(_) => break,
         }
