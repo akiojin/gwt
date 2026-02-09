@@ -1431,6 +1431,10 @@ mod tests {
             String::from_utf8_lossy(&clone_output.stderr)
         );
 
+        // CI environments may not have git author identity configured globally.
+        run_git_in(creator.path(), &["config", "user.email", "test@test.com"]);
+        run_git_in(creator.path(), &["config", "user.name", "Test"]);
+
         run_git_in(creator.path(), &["checkout", "-b", "feature/remote-base"]);
         std::fs::write(creator.path().join("remote.txt"), "remote").unwrap();
         run_git_in(creator.path(), &["add", "."]);
