@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [6.30.2] - 2026-02-09
+
+### Bug Fixes
+
+- Make worktree add idempotent (#918)
+
 ## [6.30.1] - 2026-02-09
 
 ### Bug Fixes
