@@ -332,7 +332,7 @@ impl WorktreeManager {
         }
 
         let normalized_base = base_branch.map(|base| normalize_remote_ref(base).to_string());
-        // If base branch specified, checkout it first
+        // If base branch specified, validate it and ensure it's locally resolvable.
         if let Some(base) = normalized_base.as_deref() {
             // Verify base branch exists
             if !Branch::exists(&self.repo_root, base)? {
@@ -346,6 +346,48 @@ impl WorktreeManager {
                         return Err(GwtError::BranchNotFound {
                             name: base.to_string(),
                         });
+                    }
+
+                    // remote_exists may succeed via ls-remote (bare repo), but the ref still needs
+                    // to exist locally for `git reset --hard origin/<branch>` to work.
+                    let has_local_remote_ref = std::process::Command::new("git")
+                        .args([
+                            "show-ref",
+                            "--verify",
+                            "--quiet",
+                            &format!("refs/remotes/{}/{}", remote, branch),
+                        ])
+                        .current_dir(&self.repo_root)
+                        .output()
+                        .map(|o| o.status.success())
+                        .unwrap_or(false);
+
+                    if !has_local_remote_ref {
+                        // Fetch once to materialize refs/remotes/* locally.
+                        self.repo.fetch_all()?;
+
+                        let has_local_remote_ref_after = std::process::Command::new("git")
+                            .args([
+                                "show-ref",
+                                "--verify",
+                                "--quiet",
+                                &format!("refs/remotes/{}/{}", remote, branch),
+                            ])
+                            .current_dir(&self.repo_root)
+                            .output()
+                            .map(|o| o.status.success())
+                            .unwrap_or(false);
+
+                        if !has_local_remote_ref_after {
+                            error!(
+                                category = "worktree",
+                                branch = base,
+                                "Base branch not found after fetch"
+                            );
+                            return Err(GwtError::BranchNotFound {
+                                name: base.to_string(),
+                            });
+                        }
                     }
                 } else {
                     error!(
@@ -366,13 +408,18 @@ impl WorktreeManager {
         // If base branch specified, reset to it
         if let Some(base) = normalized_base.as_deref() {
             let wt_repo = Repository::open(&path)?;
-            std::process::Command::new("git")
+            let reset_output = std::process::Command::new("git")
                 .args(["reset", "--hard", base])
                 .current_dir(&path)
                 .output()
                 .map_err(|e| GwtError::WorktreeCreateFailed {
                     reason: e.to_string(),
                 })?;
+            if !reset_output.status.success() {
+                return Err(GwtError::WorktreeCreateFailed {
+                    reason: String::from_utf8_lossy(&reset_output.stderr).to_string(),
+                });
+            }
             drop(wt_repo);
         }
 
@@ -930,6 +977,55 @@ mod tests {
         let wt = manager.create_for_branch("feature/issue-42").unwrap();
         assert_eq!(wt.branch, Some("feature/issue-42".to_string()));
         assert!(wt.path.exists());
+    }
+
+    #[test]
+    fn test_create_new_branch_from_remote_base_fetches_and_resets() {
+        let temp = create_test_repo();
+
+        let remote = TempDir::new().unwrap();
+        let remote_path = remote.path().to_string_lossy().to_string();
+        run_git_in(remote.path(), &["init", "--bare"]);
+
+        run_git_in(
+            temp.path(),
+            &["remote", "add", "origin", remote_path.as_str()],
+        );
+
+        let default_branch = git_stdout(temp.path(), &["rev-parse", "--abbrev-ref", "HEAD"]);
+        run_git_in(
+            temp.path(),
+            &["push", "-u", "origin", default_branch.as_str()],
+        );
+
+        // Create a remote-only branch with an extra commit so HEAD differs from the base ref.
+        let creator = TempDir::new().unwrap();
+        let creator_path = creator.path().to_string_lossy().to_string();
+        let clone_output = Command::new("git")
+            .args(["clone", remote_path.as_str(), creator_path.as_str()])
+            .output()
+            .unwrap();
+        assert!(
+            clone_output.status.success(),
+            "git clone failed: {}",
+            String::from_utf8_lossy(&clone_output.stderr)
+        );
+
+        run_git_in(creator.path(), &["checkout", "-b", "feature/remote-base"]);
+        std::fs::write(creator.path().join("remote.txt"), "remote").unwrap();
+        run_git_in(creator.path(), &["add", "."]);
+        run_git_in(creator.path(), &["commit", "-m", "remote commit"]);
+        run_git_in(creator.path(), &["push", "origin", "feature/remote-base"]);
+        let remote_commit = git_stdout(creator.path(), &["rev-parse", "HEAD"]);
+
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+        let wt = manager
+            .create_new_branch("feature/from-remote", Some("origin/feature/remote-base"))
+            .unwrap();
+
+        // The new worktree should be based on the remote ref (not the local default branch HEAD).
+        let wt_head = git_stdout(&wt.path, &["rev-parse", "HEAD"]);
+        assert_eq!(wt_head, remote_commit);
     }
 
     #[test]
