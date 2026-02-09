@@ -6,6 +6,7 @@
   import StatusBar from "./lib/components/StatusBar.svelte";
   import OpenProject from "./lib/components/OpenProject.svelte";
   import AgentLaunchForm from "./lib/components/AgentLaunchForm.svelte";
+  import { onMount } from "svelte";
 
   let projectPath: string | null = $state(null);
   let sidebarVisible: boolean = $state(true);
@@ -26,6 +27,35 @@
   $effect(() => {
     void projectPath;
     void setWindowTitle();
+  });
+
+  onMount(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen<{ pane_id: string }>(
+          "terminal-closed",
+          (event) => {
+            removeTabLocal(`agent-${event.payload.pane_id}`);
+          }
+        );
+        if (disposed) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+      } catch (err) {
+        console.error("Failed to setup terminal closed listener:", err);
+      }
+    })();
+
+    return () => {
+      disposed = true;
+      if (unlisten) unlisten();
+    };
   });
 
   function toErrorMessage(err: unknown): string {
@@ -139,9 +169,21 @@
     activeTabId = newTab.id;
   }
 
-  async function handleTabClose(tabId: string) {
+  function removeTabLocal(tabId: string) {
     const idx = tabs.findIndex((t) => t.id === tabId);
-    const tab = idx >= 0 ? tabs[idx] : undefined;
+    if (idx < 0) return;
+
+    const nextTabs = tabs.filter((t) => t.id !== tabId);
+    tabs = nextTabs;
+
+    if (activeTabId !== tabId) return;
+    const fallback =
+      nextTabs[idx] ?? nextTabs[idx - 1] ?? nextTabs[nextTabs.length - 1] ?? null;
+    activeTabId = fallback?.id ?? "";
+  }
+
+  async function handleTabClose(tabId: string) {
+    const tab = tabs.find((t) => t.id === tabId);
     if (tab?.paneId) {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -151,13 +193,7 @@
       }
     }
 
-    const nextTabs = tabs.filter((t) => t.id !== tabId);
-    tabs = nextTabs;
-
-    if (activeTabId !== tabId) return;
-    const fallback =
-      nextTabs[idx] ?? nextTabs[idx - 1] ?? nextTabs[nextTabs.length - 1] ?? null;
-    activeTabId = fallback?.id ?? "";
+    removeTabLocal(tabId);
   }
 
   function handleTabSelect(tabId: string) {
