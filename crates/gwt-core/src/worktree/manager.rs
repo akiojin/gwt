@@ -177,6 +177,99 @@ impl WorktreeManager {
         })
     }
 
+    fn resolve_existing_worktree_for_create(
+        &self,
+        wt: Worktree,
+        did_prune: &mut bool,
+    ) -> Result<Option<Worktree>> {
+        match wt.status {
+            WorktreeStatus::Active => Ok(Some(wt)),
+            WorktreeStatus::Locked => Err(GwtError::WorktreeLocked { path: wt.path }),
+            WorktreeStatus::Missing | WorktreeStatus::Prunable => {
+                // Stale worktree metadata can make git think the branch is still checked out.
+                // Try a single safe prune to clear it, then re-check.
+                if *did_prune {
+                    return Err(GwtError::OrphanedWorktree { path: wt.path });
+                }
+
+                let branch = wt.branch.clone();
+                if !self.prune_worktrees_if_safe()? {
+                    return Err(GwtError::OrphanedWorktree { path: wt.path });
+                }
+                *did_prune = true;
+
+                let Some(branch_name) = branch.as_deref() else {
+                    return Ok(None);
+                };
+
+                match self.get_by_branch_basic(branch_name)? {
+                    Some(wt2) => match wt2.status {
+                        WorktreeStatus::Active => Ok(Some(wt2)),
+                        WorktreeStatus::Locked => Err(GwtError::WorktreeLocked { path: wt2.path }),
+                        WorktreeStatus::Missing | WorktreeStatus::Prunable => {
+                            Err(GwtError::OrphanedWorktree { path: wt2.path })
+                        }
+                    },
+                    None => Ok(None),
+                }
+            }
+        }
+    }
+
+    fn prune_worktrees_if_safe(&self) -> Result<bool> {
+        let current_name = current_worktree_metadata_name();
+
+        let output = match std::process::Command::new("git")
+            .args(["worktree", "prune", "--dry-run", "--verbose"])
+            .current_dir(&self.repo_root)
+            .output()
+        {
+            Ok(o) => o,
+            Err(e) => {
+                warn!(
+                    category = "git",
+                    operation = "worktree_prune_dry_run",
+                    error = %e,
+                    "Failed to run git worktree prune --dry-run"
+                );
+                return Ok(false);
+            }
+        };
+
+        if !output.status.success() {
+            let err_msg = String::from_utf8_lossy(&output.stderr);
+            warn!(
+                category = "git",
+                operation = "worktree_prune_dry_run",
+                error = %err_msg,
+                "git worktree prune --dry-run failed"
+            );
+            return Ok(false);
+        }
+
+        let dry_run = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        if let Some(name) = current_name {
+            let needle = format!("Removing worktrees/{}:", name);
+            if dry_run.contains(&needle) {
+                warn!(
+                    category = "git",
+                    operation = "worktree_prune",
+                    worktree = name.as_str(),
+                    "Refusing to auto-prune because current worktree metadata is in prune targets"
+                );
+                return Ok(false);
+            }
+        }
+
+        self.prune()?;
+        Ok(true)
+    }
+
     /// Create a new worktree for an existing branch
     pub fn create_for_branch(&self, branch_name: &str) -> Result<Worktree> {
         debug!(
@@ -184,10 +277,45 @@ impl WorktreeManager {
             branch = branch_name,
             "Creating worktree for existing branch"
         );
+        // Idempotency: if the branch is already checked out in some worktree, return it.
+        // This prevents git worktree add failures like:
+        // "fatal: '<branch>' is already checked out at '<path>'".
+        let normalized_branch = normalize_remote_ref(branch_name);
+        let mut did_prune = false;
+
+        if let Some(wt) = self.get_by_branch_basic(branch_name)? {
+            if let Some(wt) = self.resolve_existing_worktree_for_create(wt, &mut did_prune)? {
+                return Ok(wt);
+            }
+        }
+
+        if normalized_branch != branch_name {
+            if let Some(wt) = self.get_by_branch_basic(normalized_branch)? {
+                if let Some(wt) = self.resolve_existing_worktree_for_create(wt, &mut did_prune)? {
+                    return Ok(wt);
+                }
+            }
+        }
+
         let mut resolved_branch = branch_name.to_string();
         if !Branch::exists(&self.repo_root, branch_name)? {
-            let normalized_branch = normalize_remote_ref(branch_name);
             let remotes = Remote::list(&self.repo_root)?;
+
+            // If caller passed a remote ref (e.g., origin/feature/foo), map it to the local
+            // branch name and check again before fetching/creating anything.
+            if let Some((remote_candidate, branch_candidate)) = split_remote_ref(normalized_branch)
+            {
+                if remotes.iter().any(|r| r.name == remote_candidate) {
+                    if let Some(wt) = self.get_by_branch_basic(branch_candidate)? {
+                        if let Some(wt) =
+                            self.resolve_existing_worktree_for_create(wt, &mut did_prune)?
+                        {
+                            return Ok(wt);
+                        }
+                    }
+                }
+            }
+
             let mut remote_branch =
                 resolve_remote_branch(&self.repo_root, normalized_branch, &remotes)?;
 
@@ -261,6 +389,12 @@ impl WorktreeManager {
             }
         }
 
+        if let Some(wt) = self.get_by_branch_basic(&resolved_branch)? {
+            if let Some(wt) = self.resolve_existing_worktree_for_create(wt, &mut did_prune)? {
+                return Ok(wt);
+            }
+        }
+
         // SPEC-a70a1ece T405: Use location-aware path generation
         let path =
             WorktreePath::generate_with_location(&self.repo_root, &resolved_branch, self.location);
@@ -270,8 +404,45 @@ impl WorktreeManager {
             self.handle_existing_path(&path)?;
         }
 
-        // Create worktree
-        self.repo.create_worktree(&path, &resolved_branch, false)?;
+        // Create worktree (with one safe prune+retry on stale metadata)
+        loop {
+            match self.repo.create_worktree(&path, &resolved_branch, false) {
+                Ok(()) => break,
+                Err(err) => {
+                    match &err {
+                        GwtError::GitOperationFailed { operation, details }
+                            if operation == "worktree add" =>
+                        {
+                            if let Some(checked_out_path) = parse_already_checked_out_path(details)
+                            {
+                                if checked_out_path.exists() {
+                                    if let Some(wt) = self.get_by_path(&checked_out_path)? {
+                                        return Ok(wt);
+                                    }
+                                    if let Some(wt) = self.get_by_branch_basic(&resolved_branch)? {
+                                        return Ok(wt);
+                                    }
+                                } else if !did_prune {
+                                    if self.prune_worktrees_if_safe()? {
+                                        did_prune = true;
+                                        continue;
+                                    }
+                                    return Err(GwtError::OrphanedWorktree {
+                                        path: checked_out_path,
+                                    });
+                                } else {
+                                    return Err(GwtError::OrphanedWorktree {
+                                        path: checked_out_path,
+                                    });
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    return Err(err);
+                }
+            }
+        }
 
         // SPEC-a70a1ece T1004-T1005: Initialize submodules (non-fatal on failure)
         if let Err(e) = crate::git::init_submodules(&path) {
@@ -707,6 +878,59 @@ fn split_remote_ref(name: &str) -> Option<(&str, &str)> {
     name.split_once('/')
 }
 
+fn parse_already_checked_out_path(details: &str) -> Option<PathBuf> {
+    // Example:
+    // fatal: 'feature/foo' is already checked out at '/path/to/worktree'
+    if let Some(start) = details.find("is already checked out at '") {
+        let rest = &details[start + "is already checked out at '".len()..];
+        if let Some(end) = rest.find('\'') {
+            return Some(PathBuf::from(rest[..end].trim()));
+        }
+    }
+    if let Some(start) = details.find("is already checked out at \"") {
+        let rest = &details[start + "is already checked out at \"".len()..];
+        if let Some(end) = rest.find('"') {
+            return Some(PathBuf::from(rest[..end].trim()));
+        }
+    }
+    None
+}
+
+fn current_worktree_metadata_name() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(&cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let git_dir = PathBuf::from(&raw);
+    let abs_git_dir = if git_dir.is_absolute() {
+        git_dir
+    } else {
+        cwd.join(git_dir)
+    };
+
+    // Linked worktrees use <common-dir>/worktrees/<name> as git-dir.
+    let parent = abs_git_dir.parent()?;
+    if parent.file_name().and_then(|n| n.to_str()) != Some("worktrees") {
+        return None;
+    }
+
+    abs_git_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())
+}
+
 fn ordered_remote_names(remotes: &[Remote]) -> Vec<String> {
     let mut names: Vec<String> = remotes.iter().map(|r| r.name.clone()).collect();
     names.sort_by(|a, b| {
@@ -864,6 +1088,44 @@ mod tests {
         let wt = manager.create_for_branch("feature/existing").unwrap();
         assert_eq!(wt.branch, Some("feature/existing".to_string()));
         assert!(wt.path.exists());
+    }
+
+    #[test]
+    fn test_create_for_branch_returns_existing_worktree_when_already_present() {
+        let temp = create_test_repo();
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+
+        Branch::create(temp.path(), "feature/exists", "HEAD").unwrap();
+
+        let wt1 = manager.create_for_branch("feature/exists").unwrap();
+        let wt2 = manager.create_for_branch("feature/exists").unwrap();
+
+        assert_eq!(
+            canonicalize_or_self(&wt2.path),
+            canonicalize_or_self(&wt1.path)
+        );
+
+        // Should not create a second worktree for the same branch.
+        let worktrees = manager.list().unwrap();
+        assert_eq!(worktrees.len(), 2);
+    }
+
+    #[test]
+    fn test_create_for_branch_on_current_branch_returns_main_worktree() {
+        let temp = create_test_repo();
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+
+        let current_branch = git_stdout(temp.path(), &["rev-parse", "--abbrev-ref", "HEAD"]);
+        let wt = manager.create_for_branch(&current_branch).unwrap();
+
+        assert_eq!(
+            canonicalize_or_self(&wt.path),
+            canonicalize_or_self(temp.path())
+        );
+
+        // No new worktree should be created.
+        let worktrees = manager.list().unwrap();
+        assert_eq!(worktrees.len(), 1);
     }
 
     #[test]
@@ -1070,7 +1332,7 @@ mod tests {
 
     #[test]
     fn test_existing_worktree_conflict() {
-        // Path exists AND is in worktree list → WorktreeAlreadyExists
+        // If the branch already has a worktree, create_for_branch should be idempotent.
         let temp = create_test_repo();
         let manager = WorktreeManager::new(temp.path()).unwrap();
 
@@ -1078,16 +1340,12 @@ mod tests {
         let wt = manager.create_new_branch("feature/exists", None).unwrap();
         assert!(wt.path.exists());
 
-        // Try to create another worktree at the same place
-        // (need to use a different branch name since branch already exists)
-        // Actually, let's just try to re-create for the same branch
-        let result = manager.create_for_branch("feature/exists");
-        assert!(result.is_err());
-        // Should be WorktreeAlreadyExists since it's actually in the worktree list
-        assert!(matches!(
-            result,
-            Err(GwtError::WorktreeAlreadyExists { .. })
-        ));
+        // Re-create for the same branch: should return the existing worktree.
+        let wt2 = manager.create_for_branch("feature/exists").unwrap();
+        assert_eq!(
+            canonicalize_or_self(&wt2.path),
+            canonicalize_or_self(&wt.path)
+        );
     }
 
     /// Create a bare test repository (SPEC-a70a1ece T406)

@@ -114,7 +114,7 @@ fn cmd_add(
         manager.create_for_branch(branch)?
     };
 
-    println!("Created worktree at: {}", wt.path.display());
+    println!("Worktree: {}", wt.path.display());
     println!("Branch: {}", wt.display_name());
 
     Ok(())
