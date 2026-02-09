@@ -225,7 +225,6 @@ impl WorktreeManager {
             }
         }
     }
-
     fn resolve_existing_worktree_for_create(
         &self,
         wt: Worktree,
