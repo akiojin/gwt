@@ -83,6 +83,22 @@
 1. **前提条件** 起動ウィザードを開く、**操作** OpenCode を選択して Launch、**期待結果** OpenCode が起動する（未インストールでも bunx/npx フォールバックが動作する）
 2. **前提条件** OpenCode のモデル未指定、**操作** Launch、**期待結果** 起動がブロックされない（空で止まらない）
 
+---
+
+### ユーザーストーリー 5 - Summary に AI セッション要約を表示できる (優先度: P0)
+
+開発者として、TUI と同様に Summary（Session Summary）で **直近のエージェントセッションのAI要約** を確認し、状況把握と再開ができるようにしたい。
+
+**独立したテスト**: AI 要約の取得コマンドは、AI 未設定/無効/セッション無しの各ケースで安定したレスポンスを返し、UI がクラッシュしないことをユニットテストで検証できる。
+
+**受け入れシナリオ**:
+
+1. **前提条件** Profiles に AI 設定（endpoint/model）が設定済みかつ Session Summary=Enabled、対象ブランチに直近の sessionId がある、**操作** Summary を開く、**期待結果** `Generating...` が表示された後、AI 要約（Markdown）が表示される
+2. **前提条件** AI が未設定（endpoint/model が空）または無効、**操作** Summary を開く、**期待結果** 「AI設定が必要」である旨のヒントが表示される（UI はクラッシュしない）
+3. **前提条件** AI は設定済みだが Session Summary=Disabled、**操作** Summary を開く、**期待結果** 「Session summary disabled」が表示される
+4. **前提条件** 対象ブランチにセッション履歴が無い、**操作** Summary を開く、**期待結果** 「No session」が表示される
+5. **前提条件** Session Summary タブを閉じている、**操作** Worktree（ブランチ）を選択する、**期待結果** Session Summary タブが再度追加/表示され、選択中ブランチの内容が表示される（既存のエージェントタブは閉じられない）
+
 ## エッジケース
 
 - 設定/履歴ファイルの読み込みは **ディスクへの副作用無し**（ユーザーが Save/Launch を実行するまで書き込まない）。
@@ -109,6 +125,15 @@
 - **FR-011**: Quick Start は Continue/New の2操作を提供し、選択に応じて起動リクエストへ反映しなければ**ならない**
 - **FR-012**: gwt はエージェント起動時にセッション履歴（ブランチ/ツール/設定）を追記しなければ**ならない**
 - **FR-013**: gwt はエージェント終了後にセッションID検出を試み、成功時は履歴へ保存しなければ**ならない**（失敗時は警告ログのみ）
+- **FR-014**: Summary は選択中ブランチの **直近セッション**（最新の ToolSessionEntry）について AI 要約（Markdown）を表示しなければ**ならない**
+- **FR-015**: AI 要約の生成は、Profiles の AI 設定が有効かつ Session Summary=Enabled の場合のみ実行しなければ**ならない**
+- **FR-016**: AI 要約の取得/生成は読み取り専用であり、GUI 表示のために設定/履歴ファイルへ自動書き込みを行っては**ならない**
+- **FR-017**: Session Summary はメインエリアの **タブ** として表示され、ユーザーはタブを閉じることができなければ**ならない**
+- **FR-018**: Worktree（ブランチ）選択時、Session Summary タブが閉じられている場合は自動で再追加し、選択中ブランチの内容を表示しなければ**ならない**
+
+#### タブ表示（Worktree優先）
+
+- **FR-019**: エージェント起動で追加されるタブのラベルは、エージェント名ではなく **Worktree名（ブランチ名）** を表示しなければ**ならない**
 
 #### ブランチ一覧のツール表示
 
@@ -127,6 +152,7 @@
 - `detect_agents() -> DetectedAgentInfo[]`（OpenCode を含む）
 - `list_agent_versions(agentId: string) -> AgentVersionsInfo`（bunx/npx 用）
 - `get_branch_quick_start(projectPath: string, branch: string) -> ToolSessionEntry[]`（Quick Start 表示用）
+- `get_branch_session_summary(projectPath: string, branch: string) -> SessionSummaryResult`（Summary 表示用）
 - `launch_agent(request: LaunchAgentRequest) -> paneId: string`
 
 #### DTO 変更
