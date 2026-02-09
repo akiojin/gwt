@@ -39,7 +39,7 @@
 2. **前提条件** 同上、**操作** Codex + Skip Permissions=ON で Launch、**期待結果** Codex の skip フラグ（バージョンに応じて `--yolo` または `--dangerously-bypass-approvals-and-sandbox`）が付与される
 3. **前提条件** 同上、**操作** Codex + Reasoning を変更して Launch、**期待結果** Codex の reasoning 設定が起動引数へ反映される
 4. **前提条件** 同上、**操作** Claude Code + Skip Permissions=ON で Launch、**期待結果** `--dangerously-skip-permissions` が付与される（Windows 以外では `IS_SANDBOX=1` を付与）
-5. **前提条件** 同上、**操作** bunx/npx 実行を選び Version に `latest` 以外を指定して Launch、**期待結果** bunx/npx のパッケージ指定が `@...@{version}` になる
+5. **前提条件** 同上、**操作** Agent Version で `latest` 以外（例: `1.2.3`）を **選択** して Launch、**期待結果** bunx/npx のパッケージ指定が `@...@{version}` になる
 
 ---
 
@@ -99,8 +99,8 @@
 - **FR-001**: 起動ウィザードは Session Mode（`normal`/`continue`/`resume`）を選択できなければ**ならない**
 - **FR-002**: 起動ウィザードは Skip Permissions（ON/OFF）を選択できなければ**ならない**
 - **FR-003**: 起動ウィザードは Codex の Reasoning を選択できなければ**ならない**
-- **FR-004**: 起動ウィザードは 実行方法（`installed`/`bunx|npx`）を選択できなければ**ならない**（デフォルトは `auto`）
-- **FR-005**: 起動ウィザードは Version（dist-tag/semver）を入力できなければ**ならない**（bunx/npx 実行時）
+- **FR-004**: 起動ウィザードは Agent Version を **選択** できなければ**ならない**。選択肢は `installed`（利用可能な場合）, `latest`, および取得できたバージョン候補である。デフォルトは `installed`（利用可能な場合）で、無い場合は `latest` とする。
+- **FR-005**: Agent Version は **選択式のみ** で、自由入力を受け付けては**ならない**。`installed` 以外が選ばれた場合、bunx/npx による起動（`@...@{version}`）が行われなければ**ならない**。
 - **FR-006**: 起動ウィザードは Extra Args（任意）と Env Overrides（任意）を指定できなければ**ならない**
 
 #### Quick Start / 履歴
