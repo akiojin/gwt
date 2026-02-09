@@ -1094,32 +1094,33 @@ pub fn launch_agent(
     }
     let repo_path = resolve_repo_path_for_project_root(&project_root)?;
 
-    let (working_dir, branch_name, worktree_created) = if let Some(create) = request.create_branch.as_ref() {
-        let new_branch = create.name.trim();
-        if new_branch.is_empty() {
-            return Err("New branch name is required".to_string());
-        }
-        let base = create
-            .base
-            .as_deref()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty());
+    let (working_dir, branch_name, worktree_created) =
+        if let Some(create) = request.create_branch.as_ref() {
+            let new_branch = create.name.trim();
+            if new_branch.is_empty() {
+                return Err("New branch name is required".to_string());
+            }
+            let base = create
+                .base
+                .as_deref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty());
 
-        (
-            create_new_worktree_path(&repo_path, new_branch, base)?,
-            new_branch.to_string(),
-            true,
-        )
-    } else {
-        let branch_ref = request.branch.trim();
-        if branch_ref.is_empty() {
-            return Err("Branch is required".to_string());
-        }
-        let remotes = Remote::list(&repo_path).unwrap_or_default();
-        let name = strip_known_remote_prefix(branch_ref, &remotes).to_string();
-        let (path, created) = resolve_worktree_path(&repo_path, branch_ref)?;
-        (path, name, created)
-    };
+            (
+                create_new_worktree_path(&repo_path, new_branch, base)?,
+                new_branch.to_string(),
+                true,
+            )
+        } else {
+            let branch_ref = request.branch.trim();
+            if branch_ref.is_empty() {
+                return Err("Branch is required".to_string());
+            }
+            let remotes = Remote::list(&repo_path).unwrap_or_default();
+            let name = strip_known_remote_prefix(branch_ref, &remotes).to_string();
+            let (path, created) = resolve_worktree_path(&repo_path, branch_ref)?;
+            (path, name, created)
+        };
 
     if worktree_created {
         let payload = WorktreesChangedPayload {
