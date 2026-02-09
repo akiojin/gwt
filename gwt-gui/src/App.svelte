@@ -1,11 +1,14 @@
 <script lang="ts">
   import type { Tab, BranchInfo, ProjectInfo, LaunchAgentRequest } from "./lib/types";
-  import MenuBar from "./lib/components/MenuBar.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import MainArea from "./lib/components/MainArea.svelte";
   import StatusBar from "./lib/components/StatusBar.svelte";
   import OpenProject from "./lib/components/OpenProject.svelte";
   import AgentLaunchForm from "./lib/components/AgentLaunchForm.svelte";
+
+  interface MenuActionPayload {
+    action: string;
+  }
 
   let projectPath: string | null = $state(null);
   let sidebarVisible: boolean = $state(true);
@@ -196,11 +199,21 @@
         break;
       }
       case "close-project":
-        projectPath = null;
-        tabs = [{ id: "summary", label: "Session Summary", type: "summary" }];
-        activeTabId = "summary";
-        selectedBranch = null;
-        currentBranch = "";
+        {
+          // Clear backend state (window-scoped) best-effort.
+          try {
+            const { invoke } = await import("@tauri-apps/api/core");
+            await invoke("close_project");
+          } catch {
+            // Ignore: not available outside Tauri runtime.
+          }
+
+          projectPath = null;
+          tabs = [{ id: "summary", label: "Session Summary", type: "summary" }];
+          activeTabId = "summary";
+          selectedBranch = null;
+          currentBranch = "";
+        }
         break;
       case "toggle-sidebar":
         sidebarVisible = !sidebarVisible;
@@ -225,13 +238,34 @@
         break;
     }
   }
+
+  // Native menubar integration (Tauri emits "menu-action" to the focused window).
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        unlisten = await listen<MenuActionPayload>("menu-action", (event) => {
+          void handleMenuAction(event.payload.action);
+        });
+      } catch {
+        // Ignore: not available outside Tauri runtime.
+      }
+    })();
+
+    return () => {
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  });
 </script>
 
 {#if projectPath === null}
   <OpenProject onOpen={handleProjectOpen} />
 {:else}
   <div class="app-layout">
-    <MenuBar {projectPath} onAction={handleMenuAction} />
     <div class="app-body">
       {#if sidebarVisible}
         <Sidebar

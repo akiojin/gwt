@@ -2,6 +2,7 @@
 
 mod app;
 mod commands;
+mod menu;
 mod state;
 
 use state::AppState;
