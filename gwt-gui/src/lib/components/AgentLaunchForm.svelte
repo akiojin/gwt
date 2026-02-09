@@ -123,7 +123,11 @@
                 <span class="agent-name">{agent.name}</span>
                 <span class="agent-type">{agent.version}</span>
                 {#if !agent.available}
-                  <span class="agent-status">Not installed</span>
+                  <span class="agent-status">Unavailable</span>
+                {:else if agent.version === "bunx" || agent.version === "npx"}
+                  <span class="agent-status">
+                    Not installed ({agent.version})
+                  </span>
                 {:else if !agent.authenticated}
                   <span class="agent-status">Not authenticated</span>
                 {/if}

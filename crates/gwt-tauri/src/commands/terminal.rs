@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, State};
+use which::which;
 
 /// Terminal output event payload sent to the frontend
 #[derive(Debug, Clone, Serialize)]
@@ -116,13 +117,89 @@ fn load_profile_env(profile_override: Option<&str>) -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
-fn agent_command_and_label(agent_id: &str) -> Result<(&'static str, &'static str), String> {
+struct BuiltinAgentDef {
+    label: &'static str,
+    local_command: &'static str,
+    bunx_package: &'static str,
+}
+
+fn builtin_agent_def(agent_id: &str) -> Result<BuiltinAgentDef, String> {
     match agent_id {
-        "claude" => Ok(("claude", "Claude Code")),
-        "codex" => Ok(("codex", "Codex")),
-        "gemini" => Ok(("gemini", "Gemini")),
+        "claude" => Ok(BuiltinAgentDef {
+            label: "Claude Code",
+            local_command: "claude",
+            bunx_package: "@anthropic-ai/claude-code",
+        }),
+        "codex" => Ok(BuiltinAgentDef {
+            label: "Codex",
+            local_command: "codex",
+            bunx_package: "@openai/codex",
+        }),
+        "gemini" => Ok(BuiltinAgentDef {
+            label: "Gemini",
+            local_command: "gemini",
+            bunx_package: "@google/gemini-cli",
+        }),
         _ => Err(format!("Unknown agent: {}", agent_id)),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FallbackRunner {
+    Bunx,
+    Npx,
+}
+
+pub(crate) fn is_node_modules_bin(path: &str) -> bool {
+    // Cross-platform substring match is fine here; this is only used to avoid
+    // project-local bunx/npx wrappers per SPEC-3b0ed29b FR-002a.
+    path.contains("node_modules/.bin") || path.contains("node_modules\\.bin")
+}
+
+pub(crate) fn choose_fallback_runner(
+    _bunx_path: Option<&str>,
+    _npx_available: bool,
+) -> Option<FallbackRunner> {
+    match _bunx_path {
+        Some(path) if !is_node_modules_bin(path) => Some(FallbackRunner::Bunx),
+        Some(_) if _npx_available => Some(FallbackRunner::Npx),
+        _ => None,
+    }
+}
+
+pub(crate) fn build_fallback_launch(
+    runner: FallbackRunner,
+    package: &str,
+) -> (String, Vec<String>) {
+    match runner {
+        FallbackRunner::Bunx => ("bunx".to_string(), vec![package.to_string()]),
+        FallbackRunner::Npx => (
+            "npx".to_string(),
+            vec!["--yes".to_string(), package.to_string()],
+        ),
+    }
+}
+
+fn resolve_agent_launch_command(
+    agent_id: &str,
+) -> Result<(String, Vec<String>, &'static str), String> {
+    let def = builtin_agent_def(agent_id)?;
+
+    // Prefer local installed command.
+    if which(def.local_command).is_ok() {
+        return Ok((def.local_command.to_string(), Vec::new(), def.label));
+    }
+
+    // Fallback to bunx (or npx for local node_modules bunx) per SPEC-3b0ed29b.
+    let bunx_path = which("bunx").ok().map(|p| p.to_string_lossy().to_string());
+    let npx_available = which("npx").is_ok();
+
+    let runner = choose_fallback_runner(bunx_path.as_deref(), npx_available)
+        .ok_or_else(|| "Agent is not installed and bunx/npx is not available".to_string())?;
+
+    let package = format!("{}@latest", def.bunx_package);
+    let (cmd, args) = build_fallback_launch(runner, &package);
+    Ok((cmd, args, def.label))
 }
 
 fn launch_with_config(
@@ -198,6 +275,59 @@ pub fn launch_terminal(
     launch_with_config(config, &state, app_handle)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_node_modules_bin_matches_common_paths() {
+        assert!(is_node_modules_bin("/repo/node_modules/.bin/bunx"));
+        assert!(is_node_modules_bin("C:\\repo\\node_modules\\.bin\\bunx"));
+        assert!(!is_node_modules_bin("/usr/local/bin/bunx"));
+    }
+
+    #[test]
+    fn choose_fallback_runner_prefers_bunx_when_not_local() {
+        assert_eq!(
+            choose_fallback_runner(Some("/usr/local/bin/bunx"), true),
+            Some(FallbackRunner::Bunx)
+        );
+    }
+
+    #[test]
+    fn choose_fallback_runner_uses_npx_when_bunx_is_local_node_modules() {
+        assert_eq!(
+            choose_fallback_runner(Some("/repo/node_modules/.bin/bunx"), true),
+            Some(FallbackRunner::Npx)
+        );
+    }
+
+    #[test]
+    fn choose_fallback_runner_none_when_only_local_bunx_and_no_npx() {
+        assert_eq!(
+            choose_fallback_runner(Some("/repo/node_modules/.bin/bunx"), false),
+            None
+        );
+    }
+
+    #[test]
+    fn build_fallback_launch_bunx_uses_package_as_first_arg() {
+        let (cmd, args) = build_fallback_launch(FallbackRunner::Bunx, "@openai/codex@latest");
+        assert_eq!(cmd, "bunx");
+        assert_eq!(args, vec!["@openai/codex@latest".to_string()]);
+    }
+
+    #[test]
+    fn build_fallback_launch_npx_uses_yes_flag() {
+        let (cmd, args) = build_fallback_launch(FallbackRunner::Npx, "@openai/codex@latest");
+        assert_eq!(cmd, "npx");
+        assert_eq!(
+            args,
+            vec!["--yes".to_string(), "@openai/codex@latest".to_string()]
+        );
+    }
+}
+
 /// Launch an agent with gwt semantics (worktree + profiles)
 #[tauri::command]
 pub fn launch_agent(
@@ -220,7 +350,7 @@ pub fn launch_agent(
     if agent_id.is_empty() {
         return Err("Agent is required".to_string());
     }
-    let (command, label) = agent_command_and_label(agent_id)?;
+    let (command, args, label) = resolve_agent_launch_command(agent_id)?;
 
     let repo_path = resolve_repo_path_for_project_root(&project_root)?;
 
@@ -257,8 +387,8 @@ pub fn launch_agent(
     );
 
     let config = BuiltinLaunchConfig {
-        command: command.to_string(),
-        args: vec![],
+        command,
+        args,
         working_dir,
         branch_name,
         agent_name: label.to_string(),
