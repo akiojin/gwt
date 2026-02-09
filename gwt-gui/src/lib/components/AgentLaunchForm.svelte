@@ -99,7 +99,13 @@
 
 	  let modelOptions = $derived(
 	    selectedAgent === "codex"
-	      ? ["gpt-5.1-codex", "gpt-5.1-codex-max", "gpt-5.2"]
+	      ? [
+	          "gpt-5.3-codex",
+	          "gpt-5.2-codex",
+	          "gpt-5.1-codex-max",
+	          "gpt-5.2",
+	          "gpt-5.1-codex-mini",
+	        ]
 	      : selectedAgent === "claude"
 	        ? ["sonnet", "opus", "haiku"]
 	        : []
