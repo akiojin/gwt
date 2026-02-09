@@ -1036,7 +1036,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2173,7 +2173,7 @@ checksum = "17e2ac29387b1aa07a1e448f7bb4f35b500787971e965b02842b900afa5c8f6f"
 
 [[package]]
 name = "gwt-cli"
-version = "6.29.0"
+version = "6.30.0"
 dependencies = [
  "arboard",
  "chrono",
@@ -2198,7 +2198,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-core"
-version = "6.29.0"
+version = "6.30.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2229,7 +2229,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-frontend"
-version = "6.29.0"
+version = "6.30.0"
 dependencies = [
  "console_error_panic_hook",
  "gloo-net",
@@ -2244,7 +2244,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-web"
-version = "6.29.0"
+version = "6.30.0"
 dependencies = [
  "axum",
  "futures-util",
@@ -2725,7 +2725,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4287,7 +4287,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4862,7 +4862,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5488,9 +5488,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "ureq"
-version = "3.1.4"
+version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d39cb1dbab692d82a977c0392ffac19e188bd9186a9f32806f0aaa859d75585a"
+checksum = "fdc97a28575b85cfedf2a7e7d3cc64b3e11bd8ac766666318003abbacc7a21fc"
 dependencies = [
  "base64",
  "cookie_store",
@@ -5839,7 +5839,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
