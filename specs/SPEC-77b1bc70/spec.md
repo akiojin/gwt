@@ -25,7 +25,23 @@
 
 ---
 
-### ユーザーストーリー 2 - リリース開始時に main を develop に統合したい (優先度: P1)
+### ユーザーストーリー 2 - 追加インストーラーを GitHub Release に添付したい (優先度: P1)
+
+main の release コミットがマージされたら、Tauri の標準バンドルに加えて
+macOS の .pkg と Windows の WiX .msi を GitHub Release に添付したい。
+
+**この優先度の理由**: インストーラーを配布しないと導入手順が煩雑になり、リリース完了の定義が曖昧になるため最優先。
+
+**独立したテスト**: release.yml の実行後に GitHub Release に .pkg と WiX .msi が添付されることを確認できれば十分。
+
+**受け入れシナリオ**:
+
+1. **前提条件**: release PR が main にマージされる、**操作**: release.yml を実行する、**期待結果**: macOS .pkg が GitHub Release に添付される
+2. **前提条件**: release PR が main にマージされる、**操作**: release.yml を実行する、**期待結果**: Windows WiX .msi が GitHub Release に添付される
+
+---
+
+### ユーザーストーリー 3 - リリース開始時に main を develop に統合したい (優先度: P1)
 
 リリース開始時点で main の最新変更が develop に取り込まれている状態にしたい。
 これにより hotfix など main 側の変更がリリース候補から漏れるのを防ぐ。
@@ -41,7 +57,7 @@
 
 ---
 
-### ユーザーストーリー 3 - リリースガイドを廃止し、仕様へ統合したい (優先度: P2)
+### ユーザーストーリー 4 - リリースガイドを廃止し、仕様へ統合したい (優先度: P2)
 
 重複ドキュメントを減らすため、リリースガイドを削除し、必要な情報は仕様書に集約したい。
 
@@ -57,6 +73,7 @@
 
 - main→develop の統合時に競合が発生した場合、workflow は失敗し、release PR は作成されない
 - トークン権限不足で develop へ push できない場合、workflow は失敗する
+- 追加インストーラーの生成に失敗した場合、release.yml は失敗し、Release は完成しない
 
 ## 要件 *(必須)*
 
@@ -75,6 +92,8 @@
 - **FR-011**: release.yml から main→develop の back-merge（sync-develop）処理を削除**しなければならない**
 - **FR-012**: release-guide.md / release-guide.ja.md を削除**しなければならない**
 - **FR-013**: prepare-release workflow は `GITHUB_TOKEN` を使って develop へ push **しなければならない**
+- **FR-014**: release.yml は macOS の .pkg を生成し、GitHub Release に添付**しなければならない**
+- **FR-015**: release.yml は Windows の WiX .msi を生成し、GitHub Release に添付**しなければならない**
 
 ### 主要エンティティ *(機能がデータを含む場合は含める)*
 
@@ -91,6 +110,7 @@
 - **SC-005**: release.yml 実行後、npm に新バージョンが公開される
 - **SC-006**: release.yml に sync-develop ジョブが存在しない
 - **SC-007**: release-guide.md / release-guide.ja.md が削除されている
+- **SC-008**: release.yml 実行後、GitHub Release に macOS .pkg と Windows WiX .msi が添付される
 
 ## 制約と仮定 *(該当する場合)*
 
@@ -120,6 +140,8 @@
 ## 依存関係 *(該当する場合)*
 
 - GitHub Actions の workflow 設定
+- macOS の pkgbuild
+- Windows の WiX Toolset
 
 ## 参考資料 *(該当する場合)*
 
