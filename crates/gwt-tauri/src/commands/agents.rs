@@ -5,6 +5,7 @@ use crate::commands::terminal::{choose_fallback_runner, FallbackRunner};
 use crate::state::{AgentVersionsCache, AppState};
 use gwt_core::agent::{claude, codex, gemini, AgentInfo};
 use serde::Serialize;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
 use tauri::State;
@@ -104,6 +105,78 @@ fn fetch_npm_versions(package: &str) -> Result<(Vec<String>, Vec<String>), Strin
         .json::<serde_json::Value>()
         .map_err(|e| format!("Failed to parse npm metadata: {e}"))?;
 
+    Ok(parse_npm_versions(&doc, 200))
+}
+
+fn build_npm_metadata_doc_from_bun(dist_tags: Value, time: Value) -> Result<Value, String> {
+    let dist_tags_obj = dist_tags
+        .as_object()
+        .ok_or_else(|| "bun info dist-tags did not return a JSON object".to_string())?;
+
+    let time_obj = time
+        .as_object()
+        .ok_or_else(|| "bun info time did not return a JSON object".to_string())?;
+
+    let mut versions = serde_json::Map::new();
+    for key in time_obj.keys() {
+        // npm metadata includes non-version keys in "time"; ignore them.
+        if key == "created" || key == "modified" {
+            continue;
+        }
+        versions.insert(key.clone(), Value::Object(serde_json::Map::new()));
+    }
+
+    Ok(serde_json::json!({
+        "dist-tags": Value::Object(dist_tags_obj.clone()),
+        "versions": Value::Object(versions),
+        "time": Value::Object(time_obj.clone()),
+    }))
+}
+
+fn bun_info_json_with_timeout(package: &str, field: &str) -> Result<Value, String> {
+    let bun_path = which("bun")
+        .map_err(|_| "bun is not available on PATH".to_string())?
+        .to_string_lossy()
+        .to_string();
+
+    let package = package.to_string();
+    let field = field.to_string();
+    let field_for_cmd = field.clone();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let out = std::process::Command::new(bun_path)
+            .args(["info", &package, &field_for_cmd, "--json"])
+            .output();
+        let _ = tx.send(out);
+    });
+
+    let out = rx
+        .recv_timeout(Duration::from_secs(3))
+        .map_err(|_| format!("bun info {field} timed out"))?
+        .map_err(|e| format!("Failed to run bun info {field}: {e}"))?;
+
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(format!(
+            "bun info {field} failed (exit={}){}",
+            out.status.code().unwrap_or(-1),
+            if stderr.is_empty() {
+                "".to_string()
+            } else {
+                format!(": {stderr}")
+            }
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    serde_json::from_str::<Value>(&stdout).map_err(|e| format!("Failed to parse bun info {field}: {e}"))
+}
+
+fn fetch_npm_versions_via_bun(package: &str) -> Result<(Vec<String>, Vec<String>), String> {
+    let dist_tags = bun_info_json_with_timeout(package, "dist-tags")?;
+    let time = bun_info_json_with_timeout(package, "time")?;
+    let doc = build_npm_metadata_doc_from_bun(dist_tags, time)?;
     Ok(parse_npm_versions(&doc, 200))
 }
 
@@ -263,9 +336,12 @@ pub fn list_agent_versions(
     let def = builtin_agent_def(&agent_id)?;
     let package = def.bunx_package;
 
-    let (tags, versions, source) = match fetch_npm_versions(package) {
+    let (tags, versions, source) = match fetch_npm_versions_via_bun(package) {
         Ok((tags, versions)) => (tags, versions, "registry"),
-        Err(_) => (vec!["latest".to_string()], Vec::new(), "fallback"),
+        Err(_) => match fetch_npm_versions(package) {
+            Ok((tags, versions)) => (tags, versions, "registry"),
+            Err(_) => (vec!["latest".to_string()], Vec::new(), "fallback"),
+        },
     };
 
     if let Ok(mut cache) = state.agent_versions_cache.lock() {
@@ -314,6 +390,36 @@ mod tests {
                 "2.0.0": "2020-01-03T00:00:00.000Z"
             }
         });
+
+        let (tags, versions) = parse_npm_versions(&doc, 200);
+        assert_eq!(tags[0], "latest");
+        assert_eq!(versions[0], "2.0.0");
+        assert_eq!(versions[1], "1.1.0");
+        assert_eq!(versions[2], "1.0.0");
+    }
+
+    #[test]
+    fn build_npm_metadata_doc_from_bun_uses_time_keys_as_versions() {
+        let dist_tags = json!({ "next": "2.0.0", "latest": "1.1.0" });
+        let time = json!({
+            "created": "2020-01-01T00:00:00.000Z",
+            "modified": "2020-01-03T00:00:00.000Z",
+            "1.0.0": "2020-01-01T00:00:00.000Z",
+            "1.1.0": "2020-01-02T00:00:00.000Z",
+            "2.0.0": "2020-01-03T00:00:00.000Z"
+        });
+
+        let doc = build_npm_metadata_doc_from_bun(dist_tags, time).expect("doc build");
+        let versions_obj = doc
+            .get("versions")
+            .and_then(|v| v.as_object())
+            .expect("versions object");
+
+        assert!(versions_obj.contains_key("1.0.0"));
+        assert!(versions_obj.contains_key("1.1.0"));
+        assert!(versions_obj.contains_key("2.0.0"));
+        assert!(!versions_obj.contains_key("created"));
+        assert!(!versions_obj.contains_key("modified"));
 
         let (tags, versions) = parse_npm_versions(&doc, 200);
         assert_eq!(tags[0], "latest");
