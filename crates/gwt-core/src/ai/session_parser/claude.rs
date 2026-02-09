@@ -5,6 +5,7 @@ use super::{
     SessionParser,
 };
 use chrono::{DateTime, Utc};
+use crate::ai::claude_paths::encode_claude_project_path;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -50,21 +51,11 @@ impl SessionParser for ClaudeSessionParser {
             return vec![];
         }
 
-        let mut entries = Vec::new();
-
-        // If worktree_path is specified, prioritize that project directory
-        if let Some(wt_path) = worktree_path {
-            // Claude Code stores sessions under .claude/projects/<project-hash>/
-            // Try to find the project directory for this worktree
-            if let Some(project_entries) = self.find_sessions_for_worktree(&root, wt_path) {
-                entries.extend(project_entries);
-            }
-        }
-
-        // If no worktree-specific sessions found, search all projects
-        if entries.is_empty() {
-            entries = self.collect_all_sessions(&root);
-        }
+        let mut entries = if let Some(wt_path) = worktree_path {
+            self.collect_sessions_for_worktree(&root, wt_path)
+        } else {
+            self.collect_all_sessions(&root)
+        };
 
         // Sort by last_updated (newest first)
         entries.sort_by(|a, b| b.last_updated.cmp(&a.last_updated));
@@ -73,42 +64,19 @@ impl SessionParser for ClaudeSessionParser {
 }
 
 impl ClaudeSessionParser {
-    fn find_sessions_for_worktree(
+    fn collect_sessions_for_worktree(
         &self,
         root: &Path,
         worktree_path: &Path,
-    ) -> Option<Vec<SessionListEntry>> {
-        // Claude Code uses a hash of the project path as directory name
-        // We need to search through project directories to find matching ones
-        let entries = fs::read_dir(root).ok()?;
-        let mut results = Vec::new();
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-
-            // Check if this project directory contains sessions related to our worktree
-            // by checking if the directory name matches or contains worktree info
-            let sessions = self.collect_sessions_from_dir(&path);
-            for session in sessions {
-                // Check if session file path contains worktree path component
-                if session
-                    .file_path
-                    .to_string_lossy()
-                    .contains(&worktree_path.to_string_lossy().to_string())
-                {
-                    results.push(session);
-                }
-            }
+    ) -> Vec<SessionListEntry> {
+        // Claude Code stores sessions under:
+        // `~/.claude/projects/{encoded-worktree-path}/{session-id}.jsonl`
+        let encoded = encode_claude_project_path(worktree_path);
+        let dir = root.join(encoded);
+        if !dir.is_dir() {
+            return Vec::new();
         }
-
-        if results.is_empty() {
-            None
-        } else {
-            Some(results)
-        }
+        self.collect_sessions_from_dir(&dir)
     }
 
     fn collect_all_sessions(&self, root: &Path) -> Vec<SessionListEntry> {
@@ -177,5 +145,41 @@ impl ClaudeSessionParser {
         }
 
         results
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn list_sessions_filters_by_encoded_worktree_dir() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        let parser = ClaudeSessionParser::new(home.clone());
+
+        let worktree = PathBuf::from("/repo/worktrees/feature-x");
+        let encoded = encode_claude_project_path(&worktree);
+        let project_dir = home.join(".claude").join("projects").join(encoded);
+        fs::create_dir_all(&project_dir).unwrap();
+
+        // Session for target worktree
+        fs::write(project_dir.join("sess-1.jsonl"), r#"{"type":"user","message":{"role":"user","content":"hi"},"timestamp":"2026-02-09T00:00:00.000Z"}"#).unwrap();
+
+        // Another project dir should not be included when filtering.
+        let other_dir = home
+            .join(".claude")
+            .join("projects")
+            .join("other-project");
+        fs::create_dir_all(&other_dir).unwrap();
+        fs::write(other_dir.join("sess-2.jsonl"), r#"{"type":"user","message":{"role":"user","content":"nope"},"timestamp":"2026-02-09T00:00:00.000Z"}"#).unwrap();
+
+        let filtered = parser.list_sessions(Some(&worktree));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].session_id, "sess-1");
+
+        let all = parser.list_sessions(None);
+        assert_eq!(all.len(), 2);
     }
 }
