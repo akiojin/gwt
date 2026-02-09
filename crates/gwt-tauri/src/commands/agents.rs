@@ -182,6 +182,21 @@ pub fn detect_agents() -> Vec<DetectedAgentInfo> {
         }
     }
 
+    fn detect_opencode() -> Option<AgentInfo> {
+        let path = which("opencode").ok()?;
+        let version = gwt_core::agent::get_command_version("opencode", "--version")
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        Some(AgentInfo {
+            name: "OpenCode".to_string(),
+            version,
+            path: Some(path),
+            // OpenCode can use multiple providers; we avoid false negatives here.
+            authenticated: true,
+        })
+    }
+
     vec![
         map_with_fallback(
             "claude",
@@ -203,6 +218,14 @@ pub fn detect_agents() -> Vec<DetectedAgentInfo> {
             "gemini",
             "Gemini",
             gemini::GeminiAgent::detect(),
+            runner,
+            bunx_path.as_deref(),
+            npx_path.as_deref(),
+        ),
+        map_with_fallback(
+            "opencode",
+            "OpenCode",
+            detect_opencode(),
             runner,
             bunx_path.as_deref(),
             npx_path.as_deref(),

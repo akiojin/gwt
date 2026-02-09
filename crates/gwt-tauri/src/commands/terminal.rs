@@ -1,7 +1,8 @@
 //! Terminal/PTY management commands for xterm.js integration
 
 use crate::commands::project::resolve_repo_path_for_project_root;
-use crate::state::AppState;
+use crate::state::{AppState, PaneLaunchMeta};
+use gwt_core::ai::SessionParser;
 use gwt_core::config::ProfilesConfig;
 use gwt_core::git::Remote;
 use gwt_core::terminal::pane::PaneStatus;
@@ -12,6 +13,8 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use which::which;
 
@@ -40,6 +43,14 @@ pub struct CreateBranchRequest {
     pub base: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionMode {
+    Normal,
+    Continue,
+    Resume,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LaunchAgentRequest {
@@ -51,8 +62,26 @@ pub struct LaunchAgentRequest {
     pub profile: Option<String>,
     /// Optional model selection (agent-specific).
     pub model: Option<String>,
-    /// Optional npm version/dist-tag used for bunx/npx fallback (e.g. "latest", "1.2.3").
+    /// Optional tool version selection.
+    ///
+    /// - `None`: auto (prefer installed command when present, else bunx/npx)
+    /// - `"installed"`: force installed command (falls back to bunx/npx when missing)
+    /// - other: force bunx/npx package `@...@{version}` (e.g. "latest", "1.2.3")
     pub agent_version: Option<String>,
+    /// Optional session mode override (default: normal).
+    pub mode: Option<SessionMode>,
+    /// Skip permissions / approvals (agent-specific; default: false).
+    pub skip_permissions: Option<bool>,
+    /// Codex reasoning override (e.g. "low", "medium", "high", "xhigh").
+    pub reasoning_level: Option<String>,
+    /// Enable collaboration_modes for Codex (default: false).
+    pub collaboration_modes: Option<bool>,
+    /// Additional command line args to append (one arg per entry).
+    pub extra_args: Option<Vec<String>>,
+    /// Environment variable overrides to merge into the launch env (highest precedence).
+    pub env_overrides: Option<HashMap<String, String>>,
+    /// Explicit session ID to resume/continue with (best-effort; agent-specific).
+    pub resume_session_id: Option<String>,
     /// Optional new branch creation request (creates branch + worktree before launch)
     pub create_branch: Option<CreateBranchRequest>,
 }
@@ -144,6 +173,11 @@ pub(crate) fn builtin_agent_def(agent_id: &str) -> Result<BuiltinAgentDef, Strin
             local_command: "gemini",
             bunx_package: "@google/gemini-cli",
         }),
+        "opencode" => Ok(BuiltinAgentDef {
+            label: "OpenCode",
+            local_command: "opencode",
+            bunx_package: "opencode-ai",
+        }),
         _ => Err(format!("Unknown agent: {}", agent_id)),
     }
 }
@@ -220,36 +254,297 @@ fn build_agent_model_args(agent_id: &str, model: Option<&str>) -> Vec<String> {
         "codex" => vec![format!("--model={model}")],
         // SPEC-3b0ed29b: Claude Code uses `--model <name>`.
         "claude" => vec!["--model".to_string(), model.to_string()],
+        // SPEC-3b0ed29b: OpenCode uses `-m provider/model`.
+        "opencode" => vec!["-m".to_string(), model.to_string()],
         // Gemini model flag is unspecified in current binding specs; ignore.
         _ => Vec::new(),
     }
 }
 
-fn resolve_agent_launch_command(
-    agent_id: &str,
-    agent_version: Option<&str>,
-) -> Result<(String, Vec<String>, &'static str), String> {
-    let def = builtin_agent_def(agent_id)?;
+fn get_command_version_with_timeout(command: &str) -> Option<String> {
+    let command = command.to_string();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let out = std::process::Command::new(command).arg("--version").output();
+        let _ = tx.send(out);
+    });
 
-    // Prefer local installed command.
-    if which(def.local_command).is_ok() {
-        return Ok((def.local_command.to_string(), Vec::new(), def.label));
+    let out = rx.recv_timeout(Duration::from_secs(3)).ok()?.ok()?;
+    if !out.status.success() {
+        return None;
     }
 
-    // Fallback to bunx (or npx for local node_modules bunx) per SPEC-3b0ed29b.
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return Some(stdout);
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return Some(stderr);
+    }
+    None
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedAgentLaunchCommand {
+    command: String,
+    args: Vec<String>,
+    label: &'static str,
+    tool_version: String,              // "installed" | "latest" | "1.2.3" | dist-tag
+    version_for_gates: Option<String>, // best-effort raw version string (may be "latest")
+}
+
+fn resolve_agent_launch_command(
+    agent_id: &str,
+    requested_version: Option<&str>,
+) -> Result<ResolvedAgentLaunchCommand, String> {
+    let def = builtin_agent_def(agent_id)?;
+
+    let requested = normalize_agent_version(requested_version);
+    let requested_is_installed = requested
+        .as_deref()
+        .is_some_and(|v| v.eq_ignore_ascii_case("installed"));
+
+    let local_available = which(def.local_command).is_ok();
+
+    // Force npm runner when a specific version/dist-tag is provided.
+    if let Some(v) = requested.as_deref() {
+        if !requested_is_installed {
+            let bunx_path = which("bunx").ok().map(|p| p.to_string_lossy().to_string());
+            let npx_available = which("npx").is_ok();
+
+            let runner = choose_fallback_runner(bunx_path.as_deref(), npx_available)
+                .ok_or_else(|| "bunx/npx is not available".to_string())?;
+            let package = build_bunx_package_spec(def.bunx_package, Some(v));
+            let (cmd, args) = build_fallback_launch(runner, &package);
+            return Ok(ResolvedAgentLaunchCommand {
+                command: cmd.clone(),
+                args,
+                label: def.label,
+                tool_version: v.to_string(),
+                version_for_gates: Some(v.to_string()),
+            });
+        }
+    }
+
+    // Prefer installed command when available (auto), or when explicitly requested.
+    if local_available {
+        let version_raw = get_command_version_with_timeout(def.local_command);
+        return Ok(ResolvedAgentLaunchCommand {
+            command: def.local_command.to_string(),
+            args: Vec::new(),
+            label: def.label,
+            tool_version: "installed".to_string(),
+            version_for_gates: version_raw,
+        });
+    }
+
+    // Installed was requested but missing: fall back to npm runner with latest.
+    // Auto mode also lands here when installed is missing.
     let bunx_path = which("bunx").ok().map(|p| p.to_string_lossy().to_string());
     let npx_available = which("npx").is_ok();
 
     let runner = choose_fallback_runner(bunx_path.as_deref(), npx_available)
         .ok_or_else(|| "Agent is not installed and bunx/npx is not available".to_string())?;
 
-    let package = build_bunx_package_spec(def.bunx_package, agent_version);
+    let package = build_bunx_package_spec(def.bunx_package, None);
     let (cmd, args) = build_fallback_launch(runner, &package);
-    Ok((cmd, args, def.label))
+    let tool_version = if requested_is_installed {
+        "installed".to_string()
+    } else {
+        "latest".to_string()
+    };
+    Ok(ResolvedAgentLaunchCommand {
+        command: cmd,
+        args,
+        label: def.label,
+        tool_version,
+        // bunx/npx "latest" is treated specially by some feature gates (e.g. collaboration_modes).
+        version_for_gates: Some("latest".to_string()),
+    })
+}
+
+fn agent_color_for(agent_id: &str) -> AgentColor {
+    match agent_id {
+        "claude" => AgentColor::Yellow,
+        "codex" => AgentColor::Cyan,
+        "gemini" => AgentColor::Magenta,
+        "opencode" => AgentColor::Green,
+        _ => AgentColor::White,
+    }
+}
+
+fn tool_id_for(agent_id: &str) -> String {
+    match agent_id {
+        "claude" => "claude-code".to_string(),
+        "codex" => "codex-cli".to_string(),
+        "gemini" => "gemini-cli".to_string(),
+        "opencode" => "opencode".to_string(),
+        _ => agent_id.to_string(),
+    }
+}
+
+fn sanitize_extra_args(extra: Option<&[String]>) -> Vec<String> {
+    extra
+        .unwrap_or(&[])
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
+}
+
+fn now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn codex_supports_collaboration_modes(version_for_gates: Option<&str>) -> bool {
+    version_for_gates.is_some_and(|v| v.eq_ignore_ascii_case("latest"))
+        || gwt_core::agent::codex::supports_collaboration_modes(version_for_gates)
+}
+
+fn build_agent_args(
+    agent_id: &str,
+    request: &LaunchAgentRequest,
+    version_for_gates: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let mode = request.mode.unwrap_or(SessionMode::Normal);
+    let skip_permissions = request.skip_permissions.unwrap_or(false);
+    let collaboration_requested = request.collaboration_modes.unwrap_or(false);
+    let resume_session_id = request
+        .resume_session_id
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+
+    let extra_args = sanitize_extra_args(request.extra_args.as_deref());
+    let mut args: Vec<String> = Vec::new();
+
+    match agent_id {
+        "codex" => {
+            let mut prefix: Vec<String> = Vec::new();
+            match mode {
+                SessionMode::Normal => {}
+                SessionMode::Continue => {
+                    prefix.push("resume".to_string());
+                    if let Some(id) = resume_session_id {
+                        prefix.push(id.to_string());
+                    } else {
+                        prefix.push("--last".to_string());
+                    }
+                }
+                SessionMode::Resume => {
+                    prefix.push("resume".to_string());
+                    if let Some(id) = resume_session_id {
+                        prefix.push(id.to_string());
+                    }
+                }
+            }
+            args.extend(prefix);
+
+            let collaboration =
+                collaboration_requested && codex_supports_collaboration_modes(version_for_gates);
+            args.extend(gwt_core::agent::codex::codex_default_args(
+                request.model.as_deref(),
+                request.reasoning_level.as_deref(),
+                version_for_gates,
+                skip_permissions,
+                collaboration,
+            ));
+
+            if skip_permissions {
+                args.push(
+                    gwt_core::agent::codex::codex_skip_permissions_flag(version_for_gates)
+                        .to_string(),
+                );
+            }
+        }
+        "claude" => {
+            match mode {
+                SessionMode::Normal => {}
+                SessionMode::Continue => {
+                    if let Some(id) = resume_session_id {
+                        args.push("--resume".to_string());
+                        args.push(id.to_string());
+                    } else {
+                        args.push("--continue".to_string());
+                    }
+                }
+                SessionMode::Resume => {
+                    args.push("--resume".to_string());
+                    if let Some(id) = resume_session_id {
+                        args.push(id.to_string());
+                    }
+                }
+            }
+
+            if skip_permissions {
+                args.push("--dangerously-skip-permissions".to_string());
+            }
+
+            args.extend(build_agent_model_args(agent_id, request.model.as_deref()));
+        }
+        "gemini" => {
+            match mode {
+                SessionMode::Normal => {}
+                SessionMode::Continue => {
+                    args.push("-r".to_string());
+                    if let Some(id) = resume_session_id {
+                        args.push(id.to_string());
+                    } else {
+                        args.push("latest".to_string());
+                    }
+                }
+                SessionMode::Resume => {
+                    args.push("-r".to_string());
+                    if let Some(id) = resume_session_id {
+                        args.push(id.to_string());
+                    }
+                }
+            }
+
+            if skip_permissions {
+                args.push("-y".to_string());
+            }
+
+            // Gemini model flag is currently unspecified in GUI binding specs.
+        }
+        "opencode" => {
+            match mode {
+                SessionMode::Normal => {}
+                SessionMode::Continue => {
+                    // Prefer explicit session ID when provided (Quick Start).
+                    if let Some(id) = resume_session_id {
+                        args.push("-s".to_string());
+                        args.push(id.to_string());
+                    } else {
+                        args.push("-c".to_string());
+                    }
+                }
+                SessionMode::Resume => {
+                    let Some(id) = resume_session_id else {
+                        return Err("Session ID is required for OpenCode resume".to_string());
+                    };
+                    args.push("-s".to_string());
+                    args.push(id.to_string());
+                }
+            }
+
+            args.extend(build_agent_model_args(agent_id, request.model.as_deref()));
+        }
+        _ => {}
+    }
+
+    args.extend(extra_args);
+    Ok(args)
 }
 
 fn launch_with_config(
     config: BuiltinLaunchConfig,
+    meta: Option<PaneLaunchMeta>,
     state: &AppState,
     app_handle: AppHandle,
 ) -> Result<String, String> {
@@ -262,6 +557,12 @@ fn launch_with_config(
             .launch_agent(config, 24, 80)
             .map_err(|e| format!("Failed to launch terminal: {}", e))?
     };
+
+    if let Some(meta) = meta {
+        if let Ok(mut map) = state.pane_launch_meta.lock() {
+            map.insert(pane_id.clone(), meta);
+        }
+    }
 
     // Take the PTY reader and spawn a thread to stream output to the frontend
     let reader = {
@@ -318,7 +619,7 @@ pub fn launch_terminal(
         env_vars: HashMap::new(),
     };
 
-    launch_with_config(config, &state, app_handle)
+    launch_with_config(config, None, &state, app_handle)
 }
 
 #[cfg(test)]
@@ -421,9 +722,110 @@ mod tests {
             build_agent_model_args("claude", Some("sonnet")),
             vec!["--model".to_string(), "sonnet".to_string()]
         );
+        assert_eq!(
+            build_agent_model_args("opencode", Some("provider/model")),
+            vec!["-m".to_string(), "provider/model".to_string()]
+        );
         assert!(build_agent_model_args("gemini", Some("any")).is_empty());
         assert!(build_agent_model_args("codex", None).is_empty());
         assert!(build_agent_model_args("codex", Some("  ")).is_empty());
+    }
+
+    fn make_request(agent_id: &str) -> LaunchAgentRequest {
+        LaunchAgentRequest {
+            agent_id: agent_id.to_string(),
+            branch: "feature/test".to_string(),
+            profile: None,
+            model: None,
+            agent_version: None,
+            mode: None,
+            skip_permissions: None,
+            reasoning_level: None,
+            collaboration_modes: None,
+            extra_args: None,
+            env_overrides: None,
+            resume_session_id: None,
+            create_branch: None,
+        }
+    }
+
+    #[test]
+    fn build_agent_args_codex_continue_defaults_to_resume_last() {
+        let mut req = make_request("codex");
+        req.mode = Some(SessionMode::Continue);
+        let args = build_agent_args("codex", &req, Some("0.92.0")).unwrap();
+        assert_eq!(args[0], "resume");
+        assert_eq!(args[1], "--last");
+        assert!(args.iter().any(|a| a.starts_with("--model=")));
+    }
+
+    #[test]
+    fn build_agent_args_codex_collaboration_modes_allows_latest() {
+        let mut req = make_request("codex");
+        req.collaboration_modes = Some(true);
+        let args = build_agent_args("codex", &req, Some("latest")).unwrap();
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--enable" && w[1] == "collaboration_modes"));
+    }
+
+    #[test]
+    fn build_agent_args_codex_skip_flag_is_version_gated() {
+        let mut req = make_request("codex");
+        req.skip_permissions = Some(true);
+
+        let legacy = build_agent_args("codex", &req, Some("0.79.9")).unwrap();
+        assert!(legacy.iter().any(|a| a == "--yolo"));
+
+        let modern = build_agent_args("codex", &req, Some("0.80.0")).unwrap();
+        assert!(modern
+            .iter()
+            .any(|a| a == "--dangerously-bypass-approvals-and-sandbox"));
+    }
+
+    #[test]
+    fn build_agent_args_claude_continue_prefers_resume_id_when_provided() {
+        let mut req = make_request("claude");
+        req.mode = Some(SessionMode::Continue);
+        req.resume_session_id = Some("sess-123".to_string());
+        let args = build_agent_args("claude", &req, None).unwrap();
+        assert_eq!(args[0], "--resume");
+        assert_eq!(args[1], "sess-123");
+    }
+
+    #[test]
+    fn build_agent_args_claude_resume_without_id_opens_picker() {
+        let mut req = make_request("claude");
+        req.mode = Some(SessionMode::Resume);
+        let args = build_agent_args("claude", &req, None).unwrap();
+        assert_eq!(args[0], "--resume");
+        assert_eq!(args.len(), 1);
+    }
+
+    #[test]
+    fn build_agent_args_gemini_continue_prefers_resume_id_when_provided() {
+        let mut req = make_request("gemini");
+        req.mode = Some(SessionMode::Continue);
+        req.resume_session_id = Some("sess-123".to_string());
+        let args = build_agent_args("gemini", &req, None).unwrap();
+        assert_eq!(args, vec!["-r".to_string(), "sess-123".to_string()]);
+    }
+
+    #[test]
+    fn build_agent_args_opencode_continue_prefers_resume_id_when_provided() {
+        let mut req = make_request("opencode");
+        req.mode = Some(SessionMode::Continue);
+        req.resume_session_id = Some("sess-123".to_string());
+        let args = build_agent_args("opencode", &req, None).unwrap();
+        assert_eq!(args, vec!["-s".to_string(), "sess-123".to_string()]);
+    }
+
+    #[test]
+    fn build_agent_args_opencode_resume_requires_session_id() {
+        let mut req = make_request("opencode");
+        req.mode = Some(SessionMode::Resume);
+        let err = build_agent_args("opencode", &req, None).unwrap_err();
+        assert!(err.to_lowercase().contains("session id"));
     }
 }
 
@@ -449,10 +851,13 @@ pub fn launch_agent(
     if agent_id.is_empty() {
         return Err("Agent is required".to_string());
     }
-    let agent_version = normalize_agent_version(request.agent_version.as_deref());
-    let (command, mut args, label) =
-        resolve_agent_launch_command(agent_id, agent_version.as_deref())?;
-    args.extend(build_agent_model_args(agent_id, request.model.as_deref()));
+    let resolved = resolve_agent_launch_command(agent_id, request.agent_version.as_deref())?;
+    let version_for_gates = resolved
+        .version_for_gates
+        .as_deref()
+        .or(Some(resolved.tool_version.as_str()));
+    let mut args = resolved.args.clone();
+    args.extend(build_agent_args(agent_id, &request, version_for_gates)?);
 
     let repo_path = resolve_repo_path_for_project_root(&project_root)?;
 
@@ -488,17 +893,111 @@ pub fn launch_agent(
         project_root.to_string_lossy().to_string(),
     );
 
+    // Request-specific overrides are highest precedence.
+    if let Some(overrides) = request.env_overrides.as_ref() {
+        for (k, v) in overrides {
+            env_vars.insert(k.to_string(), v.to_string());
+        }
+    }
+
+    let skip_permissions = request.skip_permissions.unwrap_or(false);
+    if agent_id == "claude" && skip_permissions && std::env::consts::OS != "windows" {
+        // SPEC-3b0ed29b: Skip-permissions on non-Windows sets IS_SANDBOX=1 to avoid
+        // accidental confirmation prompts in sandboxed environments.
+        env_vars.insert("IS_SANDBOX".to_string(), "1".to_string());
+    }
+
+    let mode = request.mode.unwrap_or(SessionMode::Normal);
+    let mode_str = match mode {
+        SessionMode::Normal => "normal",
+        SessionMode::Continue => "continue",
+        SessionMode::Resume => "resume",
+    }
+    .to_string();
+
+    let collaboration_modes = if agent_id == "codex" {
+        let requested = request.collaboration_modes.unwrap_or(false);
+        requested && codex_supports_collaboration_modes(version_for_gates)
+    } else {
+        false
+    };
+
+    let model = request
+        .model
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let reasoning_level = request
+        .reasoning_level
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let started_at_millis = now_millis();
+
+    // Best-effort session history entry (do not block launch on IO errors).
+    {
+        let entry = gwt_core::config::ToolSessionEntry {
+            branch: branch_name.clone(),
+            worktree_path: Some(working_dir.to_string_lossy().to_string()),
+            tool_id: tool_id_for(agent_id),
+            tool_label: resolved.label.to_string(),
+            session_id: None,
+            mode: Some(mode_str.clone()),
+            model: model.clone(),
+            reasoning_level: if agent_id == "codex" {
+                reasoning_level.clone()
+            } else {
+                None
+            },
+            skip_permissions: Some(skip_permissions),
+            tool_version: Some(resolved.tool_version.clone()),
+            collaboration_modes: if agent_id == "codex" {
+                Some(collaboration_modes)
+            } else {
+                None
+            },
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
+            timestamp: started_at_millis,
+        };
+
+        if let Err(err) = gwt_core::config::save_session_entry(&repo_path, entry) {
+            tracing::warn!(error = %err, "Failed to save session entry (launch): continuing");
+        }
+    }
+
+    let meta = PaneLaunchMeta {
+        agent_id: agent_id.to_string(),
+        branch: branch_name.clone(),
+        repo_path: repo_path.clone(),
+        worktree_path: working_dir.clone(),
+        tool_label: resolved.label.to_string(),
+        tool_version: resolved.tool_version.clone(),
+        mode: mode_str.clone(),
+        model: model.clone(),
+        reasoning_level: reasoning_level.clone(),
+        skip_permissions,
+        collaboration_modes,
+        started_at_millis,
+    };
+
     let config = BuiltinLaunchConfig {
-        command,
+        command: resolved.command,
         args,
         working_dir,
         branch_name,
-        agent_name: label.to_string(),
-        agent_color: AgentColor::Green,
+        agent_name: resolved.label.to_string(),
+        agent_color: agent_color_for(agent_id),
         env_vars,
     };
 
-    launch_with_config(config, &state, app_handle)
+    launch_with_config(config, Some(meta), &state, app_handle)
 }
 
 /// Stream PTY output to the frontend via Tauri events
@@ -527,6 +1026,128 @@ fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_hand
             Err(_) => break,
         }
     }
+
+    // Update pane status after the PTY stream ends.
+    let exit_code = if let Ok(mut manager) = state.pane_manager.lock() {
+        if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
+            let _ = pane.check_status();
+            match pane.status() {
+                PaneStatus::Completed(code) => Some(*code),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Best-effort sessionId detection and persistence.
+    let meta = state
+        .pane_launch_meta
+        .lock()
+        .ok()
+        .and_then(|mut map| map.remove(&pane_id));
+    if let Some(meta) = meta {
+        if let Some(session_id) =
+            detect_session_id(&meta.agent_id, &meta.worktree_path, meta.started_at_millis)
+        {
+            let entry = gwt_core::config::ToolSessionEntry {
+                branch: meta.branch.clone(),
+                worktree_path: Some(meta.worktree_path.to_string_lossy().to_string()),
+                tool_id: tool_id_for(&meta.agent_id),
+                tool_label: meta.tool_label.clone(),
+                session_id: Some(session_id.clone()),
+                mode: Some(meta.mode.clone()),
+                model: meta.model.clone(),
+                reasoning_level: if meta.agent_id == "codex" {
+                    meta.reasoning_level.clone()
+                } else {
+                    None
+                },
+                skip_permissions: Some(meta.skip_permissions),
+                tool_version: Some(meta.tool_version.clone()),
+                collaboration_modes: if meta.agent_id == "codex" {
+                    Some(meta.collaboration_modes)
+                } else {
+                    None
+                },
+                docker_service: None,
+                docker_force_host: None,
+                docker_recreate: None,
+                docker_build: None,
+                docker_keep: None,
+                timestamp: now_millis(),
+            };
+
+            if let Err(err) = gwt_core::config::save_session_entry(&meta.repo_path, entry) {
+                tracing::warn!(error = %err, "Failed to save session entry (exit)");
+            }
+
+            let msg = format!("\r\n[Session ID: {}]\r\n", session_id);
+            let bytes = msg.as_bytes();
+
+            if let Ok(mut manager) = state.pane_manager.lock() {
+                if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
+                    let _ = pane.process_bytes(bytes);
+                }
+            }
+
+            let payload = TerminalOutputPayload {
+                pane_id: pane_id.clone(),
+                data: bytes.to_vec(),
+            };
+            let _ = app_handle.emit("terminal-output", &payload);
+        }
+    }
+
+    if let Some(code) = exit_code {
+        let msg = format!("\r\n[Process exited with code {}]\r\n", code);
+        let bytes = msg.as_bytes();
+
+        if let Ok(mut manager) = state.pane_manager.lock() {
+            if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
+                let _ = pane.process_bytes(bytes);
+            }
+        }
+
+        let payload = TerminalOutputPayload {
+            pane_id: pane_id.clone(),
+            data: bytes.to_vec(),
+        };
+        let _ = app_handle.emit("terminal-output", &payload);
+    }
+}
+
+fn detect_session_id(agent_id: &str, worktree_path: &std::path::Path, started_at_millis: i64) -> Option<String> {
+    let sessions = match agent_id {
+        "codex" => gwt_core::ai::CodexSessionParser::with_default_home()
+            .map(|p| p.list_sessions(Some(worktree_path)))
+            .unwrap_or_default(),
+        "claude" => gwt_core::ai::ClaudeSessionParser::with_default_home()
+            .map(|p| p.list_sessions(Some(worktree_path)))
+            .unwrap_or_default(),
+        "gemini" => gwt_core::ai::GeminiSessionParser::with_default_home()
+            .map(|p| p.list_sessions(Some(worktree_path)))
+            .unwrap_or_default(),
+        "opencode" => gwt_core::ai::OpenCodeSessionParser::with_default_home()
+            .map(|p| p.list_sessions(Some(worktree_path)))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+
+    let cutoff = started_at_millis.saturating_sub(2_000);
+    for entry in sessions {
+        let last_updated = entry
+            .last_updated
+            .map(|t| t.timestamp_millis())
+            .unwrap_or(i64::MAX);
+        if last_updated >= cutoff {
+            return Some(entry.session_id);
+        }
+    }
+
+    None
 }
 
 /// Write data to a terminal pane

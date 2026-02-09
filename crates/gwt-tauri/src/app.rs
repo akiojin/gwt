@@ -101,6 +101,7 @@ pub fn build_app(
             crate::commands::project::create_project,
             crate::commands::project::get_project_info,
             crate::commands::project::is_git_repo,
+            crate::commands::sessions::get_branch_quick_start,
             crate::commands::terminal::launch_terminal,
             crate::commands::terminal::launch_agent,
             crate::commands::terminal::write_terminal,

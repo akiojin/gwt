@@ -1,9 +1,10 @@
 //! Branch management commands
 
 use crate::commands::project::resolve_repo_path_for_project_root;
-use gwt_core::git::{is_bare_repository, Branch};
+use gwt_core::git::{is_bare_repository, Branch, Remote};
 use gwt_core::worktree::WorktreeManager;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -20,6 +21,7 @@ pub struct BranchInfo {
     pub divergence_status: String,
     pub commit_timestamp: Option<i64>,
     pub is_gone: bool,
+    pub last_tool_usage: Option<String>,
 }
 
 impl From<Branch> for BranchInfo {
@@ -36,8 +38,26 @@ impl From<Branch> for BranchInfo {
             divergence_status,
             commit_timestamp: b.commit_timestamp,
             is_gone: b.is_gone,
+            last_tool_usage: None,
         }
     }
+}
+
+fn strip_known_remote_prefix<'a>(branch: &'a str, remotes: &[Remote]) -> &'a str {
+    let Some((first, rest)) = branch.split_once('/') else {
+        return branch;
+    };
+    if remotes.iter().any(|r| r.name == first) {
+        return rest;
+    }
+    branch
+}
+
+fn build_last_tool_usage_map(repo_path: &Path) -> HashMap<String, String> {
+    gwt_core::config::get_last_tool_usage_map(repo_path)
+        .into_iter()
+        .map(|(branch, entry)| (branch, entry.format_tool_usage()))
+        .collect()
 }
 
 /// List all local branches in a repository
@@ -45,8 +65,14 @@ impl From<Branch> for BranchInfo {
 pub fn list_branches(project_path: String) -> Result<Vec<BranchInfo>, String> {
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let last_tool = build_last_tool_usage_map(&repo_path);
+
     let branches = Branch::list(&repo_path).map_err(|e| e.to_string())?;
-    Ok(branches.into_iter().map(BranchInfo::from).collect())
+    let mut infos: Vec<BranchInfo> = branches.into_iter().map(BranchInfo::from).collect();
+    for info in &mut infos {
+        info.last_tool_usage = last_tool.get(&info.name).cloned();
+    }
+    Ok(infos)
 }
 
 /// List branches that currently have a local worktree (gwt "Local" view)
@@ -54,6 +80,7 @@ pub fn list_branches(project_path: String) -> Result<Vec<BranchInfo>, String> {
 pub fn list_worktree_branches(project_path: String) -> Result<Vec<BranchInfo>, String> {
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let last_tool = build_last_tool_usage_map(&repo_path);
 
     let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
     let worktrees = manager.list_basic().map_err(|e| e.to_string())?;
@@ -69,11 +96,15 @@ pub fn list_worktree_branches(project_path: String) -> Result<Vec<BranchInfo>, S
     }
 
     let branches = Branch::list(&repo_path).map_err(|e| e.to_string())?;
-    Ok(branches
+    let mut infos: Vec<BranchInfo> = branches
         .into_iter()
         .filter(|b| names.contains(&b.name))
         .map(BranchInfo::from)
-        .collect())
+        .collect();
+    for info in &mut infos {
+        info.last_tool_usage = last_tool.get(&info.name).cloned();
+    }
+    Ok(infos)
 }
 
 /// List all remote branches in a repository
@@ -81,12 +112,20 @@ pub fn list_worktree_branches(project_path: String) -> Result<Vec<BranchInfo>, S
 pub fn list_remote_branches(project_path: String) -> Result<Vec<BranchInfo>, String> {
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let last_tool = build_last_tool_usage_map(&repo_path);
+    let remotes = Remote::list(&repo_path).unwrap_or_default();
+
     let branches = if is_bare_repository(&repo_path) {
         Branch::list_remote_from_origin(&repo_path).map_err(|e| e.to_string())?
     } else {
         Branch::list_remote(&repo_path).map_err(|e| e.to_string())?
     };
-    Ok(branches.into_iter().map(BranchInfo::from).collect())
+    let mut infos: Vec<BranchInfo> = branches.into_iter().map(BranchInfo::from).collect();
+    for info in &mut infos {
+        let normalized = strip_known_remote_prefix(&info.name, &remotes);
+        info.last_tool_usage = last_tool.get(normalized).cloned();
+    }
+    Ok(infos)
 }
 
 /// Get the current branch
@@ -95,5 +134,10 @@ pub fn get_current_branch(project_path: String) -> Result<Option<BranchInfo>, St
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)?;
     let branch = Branch::current(&repo_path).map_err(|e| e.to_string())?;
-    Ok(branch.map(BranchInfo::from))
+    let last_tool = build_last_tool_usage_map(&repo_path);
+    Ok(branch.map(|b| {
+        let mut info = BranchInfo::from(b);
+        info.last_tool_usage = last_tool.get(&info.name).cloned();
+        info
+    }))
 }
