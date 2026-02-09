@@ -30,6 +30,12 @@ pub struct TerminalOutputPayload {
     pub data: Vec<u8>,
 }
 
+/// Terminal closed event payload sent to the frontend
+#[derive(Debug, Clone, Serialize)]
+pub struct TerminalClosedPayload {
+    pub pane_id: String,
+}
+
 /// Worktree change event payload sent to the frontend
 #[derive(Debug, Clone, Serialize)]
 pub struct WorktreesChangedPayload {
@@ -927,6 +933,20 @@ mod tests {
         assert!(build_agent_model_args("codex", Some("  ")).is_empty());
     }
 
+    #[test]
+    fn is_enter_only_accepts_cr_lf_variants() {
+        assert!(is_enter_only(b"\r"));
+        assert!(is_enter_only(b"\n"));
+        assert!(is_enter_only(b"\r\n"));
+    }
+
+    #[test]
+    fn is_enter_only_rejects_non_enter_input() {
+        assert!(!is_enter_only(b""));
+        assert!(!is_enter_only(b"a"));
+        assert!(!is_enter_only(b"\nq"));
+    }
+
     fn make_request(agent_id: &str) -> LaunchAgentRequest {
         LaunchAgentRequest {
             agent_id: agent_id.to_string(),
@@ -1416,18 +1436,20 @@ fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_hand
     }
 
     // Update pane status after the PTY stream ends.
-    let exit_code = if let Ok(mut manager) = state.pane_manager.lock() {
+    let (exit_code, ended) = if let Ok(mut manager) = state.pane_manager.lock() {
         if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
             let _ = pane.check_status();
-            match pane.status() {
+            let exit_code = match pane.status() {
                 PaneStatus::Completed(code) => Some(*code),
                 _ => None,
-            }
+            };
+            let ended = !matches!(pane.status(), PaneStatus::Running);
+            (exit_code, ended)
         } else {
-            None
+            (None, false)
         }
     } else {
-        None
+        (None, false)
     };
 
     // Best-effort sessionId detection and persistence.
@@ -1563,6 +1585,23 @@ fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_hand
         };
         let _ = app_handle.emit("terminal-output", &payload);
     }
+
+    if ended {
+        let msg = "\r\nPress Enter to close this tab.\r\n";
+        let bytes = msg.as_bytes();
+
+        if let Ok(mut manager) = state.pane_manager.lock() {
+            if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
+                let _ = pane.process_bytes(bytes);
+            }
+        }
+
+        let payload = TerminalOutputPayload {
+            pane_id: pane_id.clone(),
+            data: bytes.to_vec(),
+        };
+        let _ = app_handle.emit("terminal-output", &payload);
+    }
 }
 
 fn detect_session_id(
@@ -1600,22 +1639,61 @@ fn detect_session_id(
     None
 }
 
+fn is_enter_only(data: &[u8]) -> bool {
+    matches!(data, [b'\r'] | [b'\n'] | [b'\r', b'\n'])
+}
+
 /// Write data to a terminal pane
 #[tauri::command]
 pub fn write_terminal(
     pane_id: String,
     data: Vec<u8>,
     state: State<AppState>,
+    app_handle: AppHandle,
 ) -> Result<(), String> {
+    let close_requested = is_enter_only(&data);
+
     let mut manager = state
         .pane_manager
         .lock()
         .map_err(|e| format!("Failed to lock pane manager: {}", e))?;
-    let pane = manager
-        .pane_mut_by_id(&pane_id)
+
+    let should_close = {
+        let pane = manager
+            .pane_mut_by_id(&pane_id)
+            .ok_or_else(|| format!("Pane not found: {}", pane_id))?;
+
+        // Ensure we don't treat a completed pane as running due to stale status.
+        let _ = pane.check_status();
+
+        match pane.status() {
+            PaneStatus::Running => {
+                pane.write_input(&data)
+                    .map_err(|e| format!("Failed to write to terminal: {}", e))?;
+                return Ok(());
+            }
+            PaneStatus::Completed(_) | PaneStatus::Error(_) => close_requested,
+        }
+    };
+
+    if !should_close {
+        return Ok(());
+    }
+
+    let index = manager
+        .panes()
+        .iter()
+        .position(|p| p.pane_id() == pane_id)
         .ok_or_else(|| format!("Pane not found: {}", pane_id))?;
-    pane.write_input(&data)
-        .map_err(|e| format!("Failed to write to terminal: {}", e))
+
+    manager.close_pane(index);
+    let _ = app_handle.emit(
+        "terminal-closed",
+        &TerminalClosedPayload {
+            pane_id: pane_id.clone(),
+        },
+    );
+    Ok(())
 }
 
 /// Resize a terminal pane
@@ -1639,7 +1717,11 @@ pub fn resize_terminal(
 
 /// Close a terminal pane
 #[tauri::command]
-pub fn close_terminal(pane_id: String, state: State<AppState>) -> Result<(), String> {
+pub fn close_terminal(
+    pane_id: String,
+    state: State<AppState>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
     let mut manager = state
         .pane_manager
         .lock()
@@ -1652,6 +1734,12 @@ pub fn close_terminal(pane_id: String, state: State<AppState>) -> Result<(), Str
         .ok_or_else(|| format!("Pane not found: {}", pane_id))?;
 
     manager.close_pane(index);
+    let _ = app_handle.emit(
+        "terminal-closed",
+        &TerminalClosedPayload {
+            pane_id: pane_id.clone(),
+        },
+    );
     Ok(())
 }
 

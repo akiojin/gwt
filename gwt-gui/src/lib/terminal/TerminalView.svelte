@@ -5,13 +5,44 @@
   import "@xterm/xterm/css/xterm.css";
   import { onMount } from "svelte";
 
-  let { paneId }: { paneId: string } = $props();
+  let {
+    paneId,
+    active = false,
+  }: { paneId: string; active?: boolean } = $props();
 
   let containerEl: HTMLDivElement | undefined = $state(undefined);
   let terminal: Terminal | undefined = $state(undefined);
   let fitAddon: FitAddon | undefined = $state(undefined);
   let resizeObserver: ResizeObserver | undefined = $state(undefined);
   let unlisten: (() => void) | undefined = $state(undefined);
+  let focusedForActive: boolean = $state(false);
+
+  function requestTerminalFocus() {
+    if (!terminal) return;
+    requestAnimationFrame(() => {
+      try {
+        terminal?.focus();
+      } catch {
+        // Ignore focus errors in non-interactive contexts.
+      }
+    });
+  }
+
+  $effect(() => {
+    void active;
+    void terminal;
+
+    if (!active) {
+      focusedForActive = false;
+      return;
+    }
+
+    if (focusedForActive) return;
+    if (!terminal) return;
+
+    focusedForActive = true;
+    requestTerminalFocus();
+  });
 
   onMount(() => {
     if (!containerEl) return;
