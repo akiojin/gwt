@@ -49,6 +49,7 @@
         { label: "Launch Agent...", action: "launch-agent" },
         { label: "", separator: true },
         { label: "List Terminals", action: "list-terminals" },
+        { label: "Terminal Diagnostics", action: "terminal-diagnostics" },
       ],
     },
     {

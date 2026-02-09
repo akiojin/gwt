@@ -1,5 +1,11 @@
 <script lang="ts">
-  import type { Tab, BranchInfo, ProjectInfo, LaunchAgentRequest } from "./lib/types";
+  import type {
+    Tab,
+    BranchInfo,
+    ProjectInfo,
+    LaunchAgentRequest,
+    TerminalAnsiProbe,
+  } from "./lib/types";
   import MenuBar from "./lib/components/MenuBar.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import MainArea from "./lib/components/MainArea.svelte";
@@ -11,6 +17,7 @@
   let sidebarVisible: boolean = $state(true);
   let showAgentLaunch: boolean = $state(false);
   let showAbout: boolean = $state(false);
+  let showTerminalDiagnostics: boolean = $state(false);
   let appError: string | null = $state(null);
 
   let selectedBranch: BranchInfo | null = $state(null);
@@ -22,6 +29,10 @@
   let activeTabId: string = $state("summary");
 
   let terminalCount = $derived(tabs.filter((t) => t.type === "agent").length);
+
+  let terminalDiagnosticsLoading: boolean = $state(false);
+  let terminalDiagnostics: TerminalAnsiProbe | null = $state(null);
+  let terminalDiagnosticsError: string | null = $state(null);
 
   $effect(() => {
     void projectPath;
@@ -223,6 +234,31 @@
           }
         }
         break;
+      case "terminal-diagnostics": {
+        const active = tabs.find((t) => t.id === activeTabId) ?? null;
+        const paneId = active?.paneId ?? "";
+        if (!paneId) {
+          appError = "No active terminal tab.";
+          break;
+        }
+
+        showTerminalDiagnostics = true;
+        terminalDiagnosticsLoading = true;
+        terminalDiagnosticsError = null;
+        terminalDiagnostics = null;
+
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          terminalDiagnostics = await invoke<TerminalAnsiProbe>("probe_terminal_ansi", {
+            paneId,
+          });
+        } catch (err) {
+          terminalDiagnosticsError = `Failed to probe terminal: ${toErrorMessage(err)}`;
+        } finally {
+          terminalDiagnosticsLoading = false;
+        }
+        break;
+      }
     }
   }
 </script>
@@ -273,6 +309,86 @@
       <p>Git Worktree Manager</p>
       <p class="about-version">GUI Edition</p>
       <button class="about-close" onclick={() => (showAbout = false)}>
+        Close
+      </button>
+    </div>
+  </div>
+{/if}
+
+{#if showTerminalDiagnostics}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="overlay" onclick={() => (showTerminalDiagnostics = false)}>
+    <div class="diag-dialog" onclick={(e) => e.stopPropagation()}>
+      <h2>Terminal Diagnostics</h2>
+
+      {#if terminalDiagnosticsLoading}
+        <p class="diag-muted">Probing output...</p>
+      {:else if terminalDiagnosticsError}
+        <p class="diag-error">{terminalDiagnosticsError}</p>
+      {:else if terminalDiagnostics}
+        <div class="diag-grid">
+          <div class="diag-item">
+            <span class="diag-label">Pane</span>
+            <span class="diag-value mono">{terminalDiagnostics.pane_id}</span>
+          </div>
+          <div class="diag-item">
+            <span class="diag-label">Bytes</span>
+            <span class="diag-value mono">{terminalDiagnostics.bytes_scanned}</span>
+          </div>
+          <div class="diag-item">
+            <span class="diag-label">ESC</span>
+            <span class="diag-value mono">{terminalDiagnostics.esc_count}</span>
+          </div>
+          <div class="diag-item">
+            <span class="diag-label">SGR</span>
+            <span class="diag-value mono">{terminalDiagnostics.sgr_count}</span>
+          </div>
+          <div class="diag-item">
+            <span class="diag-label">Color SGR</span>
+            <span class="diag-value mono">{terminalDiagnostics.color_sgr_count}</span>
+          </div>
+          <div class="diag-item">
+            <span class="diag-label">256-color</span>
+            <span class="diag-value mono">
+              {terminalDiagnostics.has_256_color ? "yes" : "no"}
+            </span>
+          </div>
+          <div class="diag-item">
+            <span class="diag-label">TrueColor</span>
+            <span class="diag-value mono">
+              {terminalDiagnostics.has_true_color ? "yes" : "no"}
+            </span>
+          </div>
+        </div>
+
+        {#if terminalDiagnostics.color_sgr_count === 0}
+          <div class="diag-hint">
+            <p>
+              No color SGR codes were detected in the tail of the scrollback. This
+              usually means the program did not emit ANSI colors (for example, output
+              was captured or treated as non-interactive).
+            </p>
+            <p class="diag-muted">Try forcing color output:</p>
+            <pre class="diag-code mono">git -c color.ui=always diff</pre>
+            <pre class="diag-code mono">rg --color=always PATTERN</pre>
+          </div>
+        {:else}
+          <div class="diag-hint">
+            <p>
+              Color SGR codes were detected. If you still do not see colors, the issue
+              is likely in the terminal rendering path.
+            </p>
+          </div>
+        {/if}
+      {:else}
+        <p class="diag-muted">No data.</p>
+      {/if}
+
+      <button
+        class="about-close"
+        onclick={() => (showTerminalDiagnostics = false)}
+      >
         Close
       </button>
     </div>
@@ -361,6 +477,89 @@
 
   .about-close:hover {
     background: var(--bg-hover);
+  }
+
+  .diag-dialog {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 24px 28px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+    max-width: 720px;
+    width: min(720px, 92vw);
+  }
+
+  .diag-dialog h2 {
+    font-size: 16px;
+    font-weight: 800;
+    color: var(--text-primary);
+    margin-bottom: 12px;
+  }
+
+  .diag-muted {
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  .diag-error {
+    color: rgb(255, 160, 160);
+    font-size: 12px;
+    white-space: pre-wrap;
+  }
+
+  .diag-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 14px;
+    margin: 14px 0 18px;
+  }
+
+  .diag-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-primary);
+  }
+
+  .diag-label {
+    color: var(--text-muted);
+    font-size: 11px;
+  }
+
+  .diag-value {
+    color: var(--text-primary);
+    font-size: 12px;
+    text-align: right;
+  }
+
+  .diag-hint {
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: var(--bg-surface);
+    padding: 12px 14px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.55;
+    margin-bottom: 16px;
+  }
+
+  .diag-hint p {
+    margin: 0 0 8px;
+  }
+
+  .diag-code {
+    margin: 8px 0;
+    padding: 10px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-primary);
+    overflow-x: auto;
+    white-space: pre;
+    font-size: 12px;
   }
 
   .error-dialog {

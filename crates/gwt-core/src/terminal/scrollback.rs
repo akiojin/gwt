@@ -3,7 +3,7 @@
 //! Manages terminal output persistence to disk for scrollback.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::terminal::TerminalError;
@@ -142,6 +142,45 @@ impl ScrollbackFile {
             details: format!("failed to read scrollback file: {e}"),
         })?;
         Ok(strip_ansi(&data))
+    }
+
+    /// Reads up to `max_bytes` from the end of the scrollback file.
+    ///
+    /// This is intended for diagnostics (e.g. ANSI/SGR probing) where reading the whole
+    /// log would be too expensive.
+    pub fn read_tail_bytes(&self, max_bytes: usize) -> Result<Vec<u8>, TerminalError> {
+        Self::read_tail_bytes_at(&self.file_path, max_bytes)
+    }
+
+    /// Reads up to `max_bytes` from the end of `path`.
+    pub fn read_tail_bytes_at(path: &Path, max_bytes: usize) -> Result<Vec<u8>, TerminalError> {
+        let mut file = File::open(path).map_err(|e| TerminalError::ScrollbackError {
+            details: format!("failed to open scrollback file: {e}"),
+        })?;
+        let len = file
+            .metadata()
+            .map(|m| m.len())
+            .map_err(|e| TerminalError::ScrollbackError {
+                details: format!("failed to stat scrollback file: {e}"),
+            })?;
+
+        let start = if max_bytes == 0 || len as usize <= max_bytes {
+            0
+        } else {
+            len - max_bytes as u64
+        };
+
+        file.seek(SeekFrom::Start(start))
+            .map_err(|e| TerminalError::ScrollbackError {
+                details: format!("failed to seek scrollback file: {e}"),
+            })?;
+
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf)
+            .map_err(|e| TerminalError::ScrollbackError {
+                details: format!("failed to read scrollback file: {e}"),
+            })?;
+        Ok(buf)
     }
 
     /// Removes all log files in `~/.gwt/terminals/`.
@@ -396,5 +435,36 @@ mod tests {
     fn test_scrollback_path_for_pane() {
         let path = ScrollbackFile::scrollback_path_for_pane("pane-abc123").unwrap();
         assert!(path.ends_with(".gwt/terminals/pane-abc123.log"));
+    }
+
+    #[test]
+    fn test_read_tail_bytes_at_reads_from_end() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("tail.log");
+        fs::write(&path, b"0123456789").unwrap();
+
+        let tail = ScrollbackFile::read_tail_bytes_at(&path, 4).unwrap();
+        assert_eq!(tail, b"6789");
+    }
+
+    #[test]
+    fn test_read_tail_bytes_at_when_max_exceeds_len_returns_all() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("tail2.log");
+        fs::write(&path, b"abc").unwrap();
+
+        let tail = ScrollbackFile::read_tail_bytes_at(&path, 1024).unwrap();
+        assert_eq!(tail, b"abc");
+    }
+
+    #[test]
+    fn test_read_tail_bytes_uses_instance_path() {
+        let tmp = TempDir::new().unwrap();
+        let mut sb = create_test_scrollback(&tmp, "tail3");
+        sb.write(b"hello world").unwrap();
+        sb.flush().unwrap();
+
+        let tail = sb.read_tail_bytes(5).unwrap();
+        assert_eq!(tail, b"world");
     }
 }

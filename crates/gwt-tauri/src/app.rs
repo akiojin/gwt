@@ -116,6 +116,7 @@ pub fn build_app(
             crate::commands::terminal::resize_terminal,
             crate::commands::terminal::close_terminal,
             crate::commands::terminal::list_terminals,
+            crate::commands::terminal::probe_terminal_ansi,
             crate::commands::settings::get_settings,
             crate::commands::settings::save_settings,
             crate::commands::agents::detect_agents,
