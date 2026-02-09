@@ -34,7 +34,7 @@
 
 **受け入れシナリオ**:
 
-1. **前提条件** Open Project で gwt の作業ルート（bare repo の親ディレクトリ）を開いている、**操作** Sidebar の `Local` を選択、**期待結果** `refs/heads/*` 相当のブランチ（例: `main`, `feature/...`）が表示される
+1. **前提条件** Open Project で gwt の作業ルート（bare repo の親ディレクトリ）を開いている、**操作** Sidebar の `Local` を選択、**期待結果** **ローカルに存在する Worktree のブランチのみ**（例: `develop`, `feature/...`）が表示される（bare リポジトリ自身は除外される）
 2. **前提条件** 同上、**操作** Sidebar の `Remote` を選択、**期待結果** bare リポジトリの場合は `git ls-remote --heads origin` 相当で取得されたブランチ（`origin/main` など）が表示される
 3. **前提条件** 同上、**操作** Sidebar の `All` を選択、**期待結果** `Local` と `Remote` の両方が表示される（同名の表示ルールは後述の要件に従う）
 4. **前提条件** `origin` remote が未設定、**操作** `Remote` を選択、**期待結果** UI がクラッシュせず空一覧またはエラー表示となり、`Local` へ戻れば通常表示できる
@@ -56,7 +56,20 @@
 
 ---
 
-### ユーザーストーリー 3 - Profiles（AI/環境変数）をGUIで編集できる (優先度: P0)
+### ユーザーストーリー 3 - ブランチ作成 + Worktree 作成を起動ウィザードで行える (優先度: P0)
+
+開発者として、選択したブランチをベースに新規ブランチを作成し、その Worktree を作成した上で、エージェントを起動したい（TUI の「ブランチ選択→ウィザード」体験を維持したい）。
+
+**受け入れシナリオ**:
+
+1. **前提条件** 何らかのブランチが選択されている、**操作** `Launch Agent...` を開き `New Branch` を選択し `Base Branch` と `New Branch Name` を入力して Launch、**期待結果** 新規ブランチが作成され Worktree が作成され、Worktree を working directory としてエージェントが起動する
+2. **前提条件** `Base Branch` がリモートブランチ（例: `origin/develop`）、**操作** 同上、**期待結果** 事前にリモート refs がローカルに存在しない場合でも、必要に応じて fetch され、作成したブランチが `Base Branch` のコミットに基づく
+3. **前提条件** `New Branch Name` が既に存在する、**操作** 同上、**期待結果** 既存ブランチは上書きされず、UI にエラーが表示され起動は中断される
+4. **前提条件** Worktree 作成先パスが衝突する、**操作** 同上、**期待結果** 自動削除/自動修復は行われず、UI にエラーが表示され起動は中断される
+
+---
+
+### ユーザーストーリー 4 - Profiles（AI/環境変数）をGUIで編集できる (優先度: P0)
 
 開発者として、TUI と同等に AI 設定と環境変数プロファイルを編集し、エージェント起動時に適用したい。
 
@@ -83,6 +96,8 @@
 - **FR-001**: `Local/Remote/All` の各モードは、明確に異なるブランチ集合を表示しなければ**ならない**
 - **FR-002**: bare リポジトリにおける `Remote` は `git ls-remote --heads origin` により取得しなければ**ならない**（`SPEC-a70a1ece` FR-124）
 - **FR-003**: `Remote` 取得に失敗しても UI はクラッシュしては**ならない**（エラー表示/空表示で継続）
+- **FR-004**: `Local` は **ローカルに存在する Worktree のブランチのみ** を表示しなければ**ならない**（`git worktree list --porcelain` 相当の情報に基づく）
+- **FR-005**: `Local` は bare リポジトリ自身（main worktree）を表示しては**ならない**
 
 #### Agent launch
 
@@ -91,6 +106,9 @@
 - **FR-012**: エージェント起動時の working directory は必ず対象ブランチの Worktree ディレクトリでなければ**ならない**
 - **FR-013**: Worktree が存在しない場合は作成し、存在する場合は再利用しなければ**ならない**
 - **FR-014**: Worktree 衝突時に自動復旧（削除/修復/初期化）を行っては**ならない**
+- **FR-015**: 起動ウィザードは `New Branch`（新規ブランチ作成）モードを提供しなければ**ならない**
+- **FR-016**: `New Branch` モードでは `Base Branch` と `New Branch Name` を入力でき、Launch 実行時にブランチ作成 + Worktree 作成を行わなければ**ならない**
+- **FR-017**: `Base Branch` がリモートブランチの場合、必要に応じて fetch を行い、Worktree 作成後にブランチを `Base Branch` のコミットへ一致させなければ**ならない**
 
 #### Profiles / Settings
 
@@ -104,9 +122,10 @@
 
 ### Tauri Commands
 
+- `list_worktree_branches(projectPath: string) -> BranchInfo[]`
 - `list_remote_branches(projectPath: string) -> BranchInfo[]`（bare の場合は ls-remote を使用）
 - `detect_agents() -> DetectedAgentInfo[]`
-- `launch_agent(request: LaunchAgentRequest) -> paneId: string`
+- `launch_agent(request: LaunchAgentRequest) -> paneId: string`（新規ブランチ作成モードを含む）
 - `get_profiles() -> ProfilesConfig`
 - `save_profiles(config: ProfilesConfig) -> void`
 
@@ -119,5 +138,4 @@
 ## 制約と仮定
 
 - GUI のユーザー向け表示は英語のみ。
-- 新規ブランチ作成は行わず、現在ブランチ（`feature/multi-terminal`）で作業を完結する。
-
+- 開発作業は現在の git ブランチ（`feature/multi-terminal`）で完結し、開発用の新規ブランチ作成/切り替えは行わない。
