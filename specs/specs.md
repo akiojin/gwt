@@ -76,4 +76,3 @@
 | [SPEC-1f56fd80](archive/SPEC-1f56fd80/spec.md) | 機能仕様: Web UI システムトレイ統合 | 2025-12-12 |
 | [SPEC-c8e7a5b2](archive/SPEC-c8e7a5b2/spec.md) | 機能仕様: CLI起動時Web UIサーバー自動起動 | 2025-12-12 |
 | [SPEC-8adfd99e](archive/SPEC-8adfd99e/spec.md) | 機能仕様: Web UI 環境変数編集機能 | 2025-11-11 |
-

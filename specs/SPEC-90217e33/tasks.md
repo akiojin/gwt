@@ -47,4 +47,3 @@ description: "SPEC-90217e33 実装タスク"
 - [ ] **T902** [検証] `cargo clippy --all-targets --all-features -- -D warnings`
 - [ ] **T903** [検証] `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json`
 - [ ] **T904** [デリバリー] Conventional Commits で分割コミットし、各コミットで `bunx commitlint --from HEAD~1 --to HEAD` を通して push する
-

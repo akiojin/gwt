@@ -127,6 +127,7 @@ active_entries_file=""
 gui_entries_file=""
 porting_entries_file=""
 uncategorized_entries_file=""
+trimmed_file=""
 cleanup() {
     rm -f "$tmp_file"
     rm -f "$entries_file"
@@ -135,6 +136,7 @@ cleanup() {
     rm -f "$gui_entries_file"
     rm -f "$porting_entries_file"
     rm -f "$uncategorized_entries_file"
+    rm -f "$trimmed_file"
 }
 trap cleanup EXIT
 
@@ -364,5 +366,17 @@ if [[ -s "$uncategorized_entries_file" ]]; then
     render_table "カテゴリ未設定（要対応）" "active" "$uncategorized_entries_file"
 fi
 render_table "過去要件（archive）" "archive" "$archive_entries_file"
+
+# markdownlint MD012: avoid trailing blank lines in generated output.
+trimmed_file="$(mktemp)"
+awk '
+{ lines[NR] = $0 }
+END {
+    n = NR
+    while (n > 0 && lines[n] ~ /^[[:space:]]*$/) n--
+    for (i = 1; i <= n; i++) print lines[i]
+}
+' "$tmp_file" >"$trimmed_file"
+mv "$trimmed_file" "$tmp_file"
 
 mv "$tmp_file" "$OUTPUT_FILE"

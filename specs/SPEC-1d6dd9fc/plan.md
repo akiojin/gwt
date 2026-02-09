@@ -64,28 +64,28 @@ crates/gwt-core/src/tmux/
 
 ### Layer 2: コアエンジン（Layer 1に依存）
 
-4. **VT100エミュレータラッパー（emulator.rs）**
+1. **VT100エミュレータラッパー（emulator.rs）**
    - 選定crateの抽象化レイヤー
    - 入力処理、出力パース、セルバッファ管理
    - BEL文字のホスト転送
 
-5. **ファイルベーススクロールバック（scrollback.rs）**
+2. **ファイルベーススクロールバック（scrollback.rs）**
    - 非同期ファイル書き込み（tokio::fs）
    - ファイルからの読み込み（スクロールバックモード用）
    - gwt終了時のクリーンアップ
 
-6. **VT100→ratatuiレンダラー（renderer.rs）**
+3. **VT100→ratatuiレンダラー（renderer.rs）**
    - VT100セルバッファ→ratatui Bufferの変換
    - パフォーマンス計測と最適化判断
 
 ### Layer 3: ペイン管理（Layer 2に依存）
 
-7. **TerminalPane構造体（pane.rs）**
+1. **TerminalPane構造体（pane.rs）**
    - PTY + VT100エミュレータ + スクロールバックの統合
    - ステータス管理（Running/Completed/Error）
    - 非同期I/Oループ
 
-8. **PaneManager（manager.rs）**
+2. **PaneManager（manager.rs）**
    - 複数ペインのライフサイクル管理
    - タブ切り替え、アクティブペイン管理
    - 最大4ペイン制限
@@ -93,45 +93,45 @@ crates/gwt-core/src/tmux/
 
 ### Layer 4: UI統合（Layer 3に依存）
 
-9. **ターミナルペインWidget（terminal_pane.rs）**
+1. **ターミナルペインWidget（terminal_pane.rs）**
    - ratatui Widget traitの実装
    - ステータスバー描画（ブランチ名、エージェント名カラー、ステータス、経過時間）
    - タブバー描画
    - フォーカスインジケータ
 
-10. **レイアウト改修（split_layout.rs）**
+2. **レイアウト改修（split_layout.rs）**
     - 左右50:50分割
     - フルスクリーンモード
     - 80列未満フォールバック
 
-11. **イベント処理改修（app.rs, event.rs）**
+3. **イベント処理改修（app.rs, event.rs）**
     - プレフィックスキー（Ctrl+G）処理
     - フォーカス管理（左側UI ↔ 右側ペイン）
     - マウスクリックによるフォーカス切り替え
     - PTYへの透過的キー入力送信
 
-12. **エージェント起動フロー改修（launcher.rs等）**
+4. **エージェント起動フロー改修（launcher.rs等）**
     - 内蔵ターミナルモードの追加
     - tmuxモードとの切り替え（設定ベース）
 
 ### Layer 5: 高度な機能（Layer 4に依存）
 
-13. **ペイン間通信（ipc.rs）**
+1. **ペイン間通信（ipc.rs）**
     - Unixドメインソケットサーバー
     - send-keys、pipe-pane、共有チャネル
     - フォールバック（ソケット作成失敗時）
 
-14. **コピー&ペースト**
+2. **コピー&ペースト**
     - コピーモード（Ctrl+G → [）
     - テキスト選択、arboardクリップボード
     - ペースト（Ctrl+G → ]）
     - Shift+マウスパススルー
 
-15. **Docker統合**
+3. **Docker統合**
     - docker exec PTY対応
     - 既存DockerManagerとの統合
 
-16. **ホストターミナルリサイズ**
+4. **ホストターミナルリサイズ**
     - SIGWINCH処理
     - VT100+PTYサイズ更新
     - フォールバック閾値処理
