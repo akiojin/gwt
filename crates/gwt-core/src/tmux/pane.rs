@@ -946,7 +946,7 @@ pub fn is_process_running(pid: u32) -> bool {
 /// # Arguments
 /// * `session` - The tmux session name
 /// * `worktrees` - A slice of (branch_name, worktree_path) tuples
-/// * `gwt_pane_id` - The pane ID of the gwt TUI (to exclude from detection)
+/// * `gwt_pane_id` - The pane ID of gwt itself (to exclude from detection)
 ///
 /// # Returns
 /// A vector of AgentPane for each pane whose current_path matches a worktree path

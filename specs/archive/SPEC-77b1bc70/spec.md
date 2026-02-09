@@ -21,7 +21,7 @@
 **受け入れシナリオ**:
 
 1. **前提条件**: develop にリリース対象のコミットがある、**操作**: prepare-release workflow を実行する、**期待結果**: バージョン判定・CHANGELOG 更新・release PR 作成が完了する
-2. **前提条件**: release PR が main にマージされる、**操作**: release.yml を実行する、**期待結果**: タグ・GitHub Release 作成、バイナリアップロード、npm 公開が完了する
+2. **前提条件**: release PR が main にマージされる、**操作**: release.yml を実行する、**期待結果**: タグ・GitHub Release 作成、成果物（標準バンドル/追加インストーラー）の添付が完了する
 
 ---
 
@@ -88,7 +88,7 @@ macOS の .pkg と Windows の WiX .msi を GitHub Release に添付したい。
 - **FR-007**: prepare-release workflow は release/YYYYMMDD-HHMMSS ブランチから main への release PR を作成**しなければならない**
 - **FR-008**: release.yml はタグと GitHub Release を作成**しなければならない**
 - **FR-009**: release.yml はクロスコンパイル済みバイナリを GitHub Release にアップロード**しなければならない**
-- **FR-010**: release.yml は npm へ provenance 付きで公開**しなければならない**
+- **FR-010**: release.yml は npm publish（npm への公開）を実行しては**ならない**
 - **FR-011**: release.yml から main→develop の back-merge（sync-develop）処理を削除**しなければならない**
 - **FR-012**: release-guide.md / release-guide.ja.md を削除**しなければならない**
 - **FR-013**: prepare-release workflow は `GITHUB_TOKEN` を使って develop へ push **しなければならない**
@@ -107,7 +107,7 @@ macOS の .pkg と Windows の WiX .msi を GitHub Release に添付したい。
 - **SC-002**: prepare-release workflow 実行後、release PR が作成される
 - **SC-003**: release.yml 実行後、`vX.Y.Z` タグと GitHub Release が作成される
 - **SC-004**: release.yml 実行後、GitHub Release にバイナリが添付される
-- **SC-005**: release.yml 実行後、npm に新バージョンが公開される
+- **SC-005**: release.yml に npm publish ジョブが存在しない
 - **SC-006**: release.yml に sync-develop ジョブが存在しない
 - **SC-007**: release-guide.md / release-guide.ja.md が削除されている
 - **SC-008**: release.yml 実行後、GitHub Release に macOS .pkg と Windows WiX .msi が添付される
@@ -130,7 +130,6 @@ macOS の .pkg と Windows の WiX .msi を GitHub Release に添付したい。
 次の項目は、この機能の範囲外です：
 
 - リリース判定ルール（Conventional Commits）の変更
-- ビルド・配布ジョブ（crates.io/npm/GitHub Release）の削除や配布先の変更
 - main への直接リリース手順の変更
 
 ## セキュリティとプライバシーの考慮事項 *(該当する場合)*
