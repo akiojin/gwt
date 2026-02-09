@@ -11,7 +11,7 @@ use gwt_core::docker::{
 use gwt_core::git::Remote;
 use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::terminal::runner::{
-    build_fallback_launch, choose_fallback_runner, resolve_command_path, FallbackRunner,
+    build_fallback_launch, choose_fallback_runner, resolve_command_path,
 };
 use gwt_core::terminal::{AgentColor, BuiltinLaunchConfig};
 use gwt_core::worktree::WorktreeManager;
@@ -787,6 +787,7 @@ pub fn launch_terminal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gwt_core::terminal::runner::FallbackRunner;
     use std::path::Path;
 
     #[test]
