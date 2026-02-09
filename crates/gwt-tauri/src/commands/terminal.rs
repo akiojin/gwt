@@ -30,6 +30,13 @@ pub struct TerminalOutputPayload {
     pub data: Vec<u8>,
 }
 
+/// Worktree change event payload sent to the frontend
+#[derive(Debug, Clone, Serialize)]
+pub struct WorktreesChangedPayload {
+    pub project_path: String,
+    pub branch: String,
+}
+
 /// Serializable terminal info for the frontend
 #[derive(Debug, Clone, Serialize)]
 pub struct TerminalInfo {
@@ -111,26 +118,29 @@ fn strip_known_remote_prefix<'a>(branch: &'a str, remotes: &[Remote]) -> &'a str
     branch
 }
 
-fn resolve_worktree_path(repo_path: &std::path::Path, branch_ref: &str) -> Result<PathBuf, String> {
+fn resolve_worktree_path(
+    repo_path: &std::path::Path,
+    branch_ref: &str,
+) -> Result<(PathBuf, bool), String> {
     let manager = WorktreeManager::new(repo_path).map_err(|e| e.to_string())?;
 
     let remotes = Remote::list(repo_path).unwrap_or_default();
     let normalized = strip_known_remote_prefix(branch_ref, &remotes);
 
     if let Ok(Some(wt)) = manager.get_by_branch_basic(normalized) {
-        return Ok(wt.path);
+        return Ok((wt.path, false));
     }
     // Rare: worktree registered with the raw remote-like name.
     if normalized != branch_ref {
         if let Ok(Some(wt)) = manager.get_by_branch_basic(branch_ref) {
-            return Ok(wt.path);
+            return Ok((wt.path, false));
         }
     }
 
     let wt = manager
         .create_for_branch(branch_ref)
         .map_err(|e| e.to_string())?;
-    Ok(wt.path)
+    Ok((wt.path, true))
 }
 
 fn create_new_worktree_path(
@@ -790,7 +800,7 @@ pub fn launch_terminal(
     };
 
     let repo_path = resolve_repo_path_for_project_root(&project_root)?;
-    let working_dir = resolve_worktree_path(&repo_path, &branch)?;
+    let (working_dir, _created) = resolve_worktree_path(&repo_path, &branch)?;
 
     let config = BuiltinLaunchConfig {
         command: agent_name.clone(),
@@ -1084,7 +1094,7 @@ pub fn launch_agent(
     }
     let repo_path = resolve_repo_path_for_project_root(&project_root)?;
 
-    let (working_dir, branch_name) = if let Some(create) = request.create_branch.as_ref() {
+    let (working_dir, branch_name, worktree_created) = if let Some(create) = request.create_branch.as_ref() {
         let new_branch = create.name.trim();
         if new_branch.is_empty() {
             return Err("New branch name is required".to_string());
@@ -1098,6 +1108,7 @@ pub fn launch_agent(
         (
             create_new_worktree_path(&repo_path, new_branch, base)?,
             new_branch.to_string(),
+            true,
         )
     } else {
         let branch_ref = request.branch.trim();
@@ -1106,8 +1117,17 @@ pub fn launch_agent(
         }
         let remotes = Remote::list(&repo_path).unwrap_or_default();
         let name = strip_known_remote_prefix(branch_ref, &remotes).to_string();
-        (resolve_worktree_path(&repo_path, branch_ref)?, name)
+        let (path, created) = resolve_worktree_path(&repo_path, branch_ref)?;
+        (path, name, created)
     };
+
+    if worktree_created {
+        let payload = WorktreesChangedPayload {
+            project_path: project_root.to_string_lossy().to_string(),
+            branch: branch_name.clone(),
+        };
+        let _ = app_handle.emit("worktrees-changed", &payload);
+    }
 
     let mut env_vars = load_profile_env(request.profile.as_deref());
     // Useful for debugging and for agents that want to introspect gwt context.
