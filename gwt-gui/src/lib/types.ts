@@ -104,6 +104,7 @@ export interface ToolSessionEntry {
 
 export interface SessionSummaryResult {
   status: "ok" | "ai-not-configured" | "disabled" | "no-session" | "error";
+  generating: boolean;
   toolId?: string | null;
   sessionId?: string | null;
   markdown?: string | null;
