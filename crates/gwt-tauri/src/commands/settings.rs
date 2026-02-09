@@ -31,9 +31,6 @@ pub struct SettingsData {
     pub debug: bool,
     pub log_dir: Option<String>,
     pub log_retention_days: u32,
-    pub web_port: u16,
-    pub web_address: String,
-    pub web_cors: bool,
     pub agent_default: Option<String>,
     pub agent_claude_path: Option<String>,
     pub agent_codex_path: Option<String>,
@@ -51,9 +48,6 @@ impl From<&Settings> for SettingsData {
             debug: s.debug,
             log_dir: s.log_dir.as_ref().map(|p| p.to_string_lossy().to_string()),
             log_retention_days: s.log_retention_days,
-            web_port: s.web.port,
-            web_address: s.web.address.clone(),
-            web_cors: s.web.cors,
             agent_default: s.agent.default_agent.clone(),
             agent_claude_path: s
                 .agent
@@ -79,7 +73,7 @@ impl From<&Settings> for SettingsData {
 impl SettingsData {
     /// Convert back to gwt_core Settings by creating a default and updating fields.
     ///
-    /// Uses serde round-trip since the sub-types (WebSettings, AgentSettings, DockerSettings)
+    /// Uses serde round-trip since the sub-types (AgentSettings, DockerSettings)
     /// are not re-exported from gwt_core::config.
     #[allow(clippy::field_reassign_with_default)]
     fn to_settings(&self) -> Result<Settings, String> {
@@ -90,9 +84,6 @@ impl SettingsData {
         s.debug = self.debug;
         s.log_dir = self.log_dir.as_ref().map(PathBuf::from);
         s.log_retention_days = self.log_retention_days;
-        s.web.port = self.web_port;
-        s.web.address = self.web_address.clone();
-        s.web.cors = self.web_cors;
         s.agent.default_agent = self.agent_default.clone();
         s.agent.claude_path = self.agent_claude_path.as_ref().map(PathBuf::from);
         s.agent.codex_path = self.agent_codex_path.as_ref().map(PathBuf::from);

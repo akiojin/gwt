@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 pub use error::TerminalError;
 
-/// Agent color representation (replaces ratatui::style::Color)
+/// Agent color representation for UI rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentColor {
     Green,

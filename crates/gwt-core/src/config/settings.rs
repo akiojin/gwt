@@ -32,8 +32,6 @@ pub struct Settings {
     pub log_dir: Option<PathBuf>,
     /// Log retention days
     pub log_retention_days: u32,
-    /// Web server settings
-    pub web: WebSettings,
     /// Agent settings
     pub agent: AgentSettings,
     /// Docker settings
@@ -53,31 +51,8 @@ impl Default for Settings {
             debug: false,
             log_dir: None,
             log_retention_days: 7,
-            web: WebSettings::default(),
             agent: AgentSettings::default(),
             docker: DockerSettings::default(),
-        }
-    }
-}
-
-/// Web server settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct WebSettings {
-    /// Server port
-    pub port: u16,
-    /// Bind address
-    pub address: String,
-    /// Enable CORS
-    pub cors: bool,
-}
-
-impl Default for WebSettings {
-    fn default() -> Self {
-        Self {
-            port: 3000,
-            address: "127.0.0.1".to_string(),
-            cors: true,
         }
     }
 }
@@ -173,12 +148,6 @@ impl Settings {
         if let Ok(value) = std::env::var("GWT_DOCKER_FORCE_HOST") {
             if let Some(parsed) = parse_env_bool(&value) {
                 settings.docker.force_host = parsed;
-            }
-        }
-
-        if let Ok(value) = std::env::var("PORT") {
-            if let Ok(parsed) = value.trim().parse::<u16>() {
-                settings.web.port = parsed;
             }
         }
 
@@ -462,47 +431,16 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    struct EnvVarGuard {
-        key: &'static str,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl EnvVarGuard {
-        fn unset(key: &'static str) -> Self {
-            let previous = std::env::var_os(key);
-            std::env::remove_var(key);
-            Self { key, previous }
-        }
-
-        fn set<V: AsRef<std::ffi::OsStr>>(key: &'static str, value: V) -> Self {
-            let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            match &self.previous {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-
     #[test]
     fn test_default_settings() {
         let settings = Settings::default();
         assert!(!settings.protected_branches.is_empty());
         assert!(settings.protected_branches.contains(&"main".to_string()));
         assert!(!settings.debug);
-        assert_eq!(settings.web.port, 3000);
     }
 
     #[test]
     fn test_load_auto_migrates_json() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
-        let _env_guard = EnvVarGuard::unset("GWT_DEFAULT_BASE_BRANCH");
         let temp = TempDir::new().unwrap();
         let json_path = temp.path().join(".gwt.json");
         let toml_path = temp.path().join(".gwt.toml");
@@ -520,21 +458,12 @@ mod tests {
 
     #[test]
     fn test_save_and_load() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
-        let _env_debug = EnvVarGuard::unset("GWT_DEBUG");
-        let _env_web_port = EnvVarGuard::unset("GWT_WEB_PORT");
-        let _env_port = EnvVarGuard::unset("PORT");
-        let _env_protected = EnvVarGuard::unset("GWT_PROTECTED_BRANCHES");
         let temp = TempDir::new().unwrap();
         let config_path = temp.path().join(".gwt.toml");
 
         let settings = Settings {
             protected_branches: vec!["main".to_string(), "release".to_string()],
             debug: true,
-            web: WebSettings {
-                port: 9090,
-                ..Default::default()
-            },
             ..Default::default()
         };
 
@@ -544,7 +473,6 @@ mod tests {
         assert!(loaded.protected_branches.contains(&"main".to_string()));
         assert!(loaded.protected_branches.contains(&"release".to_string()));
         assert!(loaded.debug);
-        assert_eq!(loaded.web.port, 9090);
     }
 
     #[test]
@@ -558,47 +486,39 @@ mod tests {
 
     #[test]
     fn test_env_override() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
 
-        let _env_debug = EnvVarGuard::set("GWT_DEBUG", "true");
+        // Set environment variable
+        std::env::set_var("GWT_DEBUG", "true");
 
         let settings = Settings::load(temp.path()).unwrap();
+
+        // Clean up
+        std::env::remove_var("GWT_DEBUG");
 
         assert!(settings.debug);
     }
 
     #[test]
     fn test_env_override_docker_force_host_accepts_numeric_bool() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
 
-        let _env_force_host = EnvVarGuard::set("GWT_DOCKER_FORCE_HOST", "1");
+        std::env::set_var("GWT_DOCKER_FORCE_HOST", "1");
         let settings = Settings::load(temp.path()).unwrap();
+        std::env::remove_var("GWT_DOCKER_FORCE_HOST");
 
         assert!(settings.docker.force_host);
     }
 
     #[test]
     fn test_env_override_auto_install_deps() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
 
-        let _env_auto_install = EnvVarGuard::set("GWT_AGENT_AUTO_INSTALL_DEPS", "true");
+        std::env::set_var("GWT_AGENT_AUTO_INSTALL_DEPS", "true");
         let settings = Settings::load(temp.path()).unwrap();
+        std::env::remove_var("GWT_AGENT_AUTO_INSTALL_DEPS");
 
         assert!(settings.agent.auto_install_deps);
-    }
-
-    #[test]
-    fn test_env_override_port() {
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
-        let temp = TempDir::new().unwrap();
-
-        let _env_port = EnvVarGuard::set("PORT", "4567");
-        let settings = Settings::load(temp.path()).unwrap();
-
-        assert_eq!(settings.web.port, 4567);
     }
 
     #[test]
@@ -623,8 +543,6 @@ mod tests {
     #[test]
     fn test_new_global_config_priority() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
-        let _env_debug = EnvVarGuard::unset("GWT_DEBUG");
-        let _env_default_base_branch = EnvVarGuard::unset("GWT_DEFAULT_BASE_BRANCH");
         let temp = TempDir::new().unwrap();
         let _env = crate::config::TestEnvGuard::new(temp.path());
 
@@ -652,8 +570,6 @@ default_base_branch = "new-global"
     #[test]
     fn test_legacy_global_config_fallback() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
-        let _env_debug = EnvVarGuard::unset("GWT_DEBUG");
-        let _env_default_base_branch = EnvVarGuard::unset("GWT_DEFAULT_BASE_BRANCH");
         let temp = TempDir::new().unwrap();
         let _env = crate::config::TestEnvGuard::with_xdg(temp.path(), &temp.path().join(".config"));
 
