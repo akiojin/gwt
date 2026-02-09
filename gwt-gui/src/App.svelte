@@ -12,6 +12,8 @@
   let showAgentLaunch: boolean = $state(false);
   let showAbout: boolean = $state(false);
   let appError: string | null = $state(null);
+  let sidebarRefreshKey: number = $state(0);
+  let worktreesEventAvailable: boolean = $state(false);
 
   let selectedBranch: BranchInfo | null = $state(null);
   let currentBranch: string = $state("");
@@ -26,6 +28,44 @@
   $effect(() => {
     void projectPath;
     void setWindowTitle();
+  });
+
+  // Best-effort: subscribe once and refresh Sidebar when worktrees change.
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen<unknown>("worktrees-changed", (event) => {
+          if (!projectPath) return;
+
+          // If payload includes a project_path, only refresh the active project.
+          const p = (event as { payload?: unknown }).payload;
+          if (p && typeof p === "object" && "project_path" in p) {
+            const raw = (p as { project_path?: unknown }).project_path;
+            if (typeof raw === "string" && raw && raw !== projectPath) return;
+          }
+
+          sidebarRefreshKey++;
+        });
+
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+        worktreesEventAvailable = true;
+      } catch {
+        worktreesEventAvailable = false;
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
   });
 
   function toErrorMessage(err: unknown): string {
@@ -137,6 +177,11 @@
 
     tabs = [...tabs, newTab];
     activeTabId = newTab.id;
+
+    // Fallback: if the event API is not available, trigger a best-effort refresh.
+    if (!worktreesEventAvailable) {
+      sidebarRefreshKey++;
+    }
   }
 
   async function handleTabClose(tabId: string) {
@@ -201,6 +246,7 @@
         activeTabId = "summary";
         selectedBranch = null;
         currentBranch = "";
+        sidebarRefreshKey = 0;
         break;
       case "toggle-sidebar":
         sidebarVisible = !sidebarVisible;
@@ -236,6 +282,7 @@
       {#if sidebarVisible}
         <Sidebar
           {projectPath}
+          refreshKey={sidebarRefreshKey}
           onBranchSelect={handleBranchSelect}
           onBranchActivate={handleBranchActivate}
         />
