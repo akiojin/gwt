@@ -27,8 +27,8 @@ use gwt_core::config::get_branch_tool_history;
 use gwt_core::config::{
     get_claude_settings_path, is_gwt_hooks_registered, is_gwt_marketplace_registered,
     is_temporary_execution, register_gwt_hooks, reregister_gwt_hooks, save_session_entry,
-    setup_gwt_plugin, AISettings, CustomCodingAgent, Profile, ProfilesConfig, ResolvedAISettings,
-    ToolSessionEntry,
+    setup_gwt_plugin, AISettings, CustomCodingAgent, Profile, ProfilesConfig, ProfilesConfigSource,
+    ProfilesLoadDiagnostics, ResolvedAISettings, ToolSessionEntry,
 };
 use gwt_core::docker::port::PortAllocator;
 use gwt_core::docker::{ContainerStatus, DockerManager};
@@ -117,6 +117,17 @@ fn normalize_branch_name(name: &str) -> String {
 
 fn format_ai_error(err: AIError) -> String {
     err.to_string()
+}
+
+fn missing_ai_parts(settings: &AISettings) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if settings.endpoint.trim().is_empty() {
+        missing.push("endpoint");
+    }
+    if settings.model.trim().is_empty() {
+        missing.push("model");
+    }
+    missing
 }
 
 fn background_window_name(branch_name: &str) -> String {
@@ -501,6 +512,8 @@ pub struct Model {
     profiles: ProfilesState,
     /// Profiles configuration
     profiles_config: ProfilesConfig,
+    /// Diagnostics for profile config loading (source and fallbacks)
+    profiles_diagnostics: ProfilesLoadDiagnostics,
     /// Environment variables state
     environment: EnvironmentState,
     /// Docker service selection state
@@ -847,6 +860,7 @@ impl Model {
             error_queue: ErrorQueue::new(),
             profiles: ProfilesState::new(),
             profiles_config: ProfilesConfig::default(),
+            profiles_diagnostics: ProfilesLoadDiagnostics::default(),
             environment: EnvironmentState::new(),
             service_select: ServiceSelectState::new(),
             port_select: PortSelectState::default(),
@@ -1080,8 +1094,10 @@ impl Model {
         let mut branch_list = BranchListState::new();
         branch_list.sort_mode = sort_mode;
         branch_list.active_profile = self.profiles_config.active.clone();
-        branch_list.ai_enabled = self.active_ai_enabled();
-        branch_list.session_summary_enabled = self.active_session_summary_enabled();
+        let (ai_enabled, session_summary_enabled, reason) = self.current_branch_list_ai_status();
+        branch_list.ai_enabled = ai_enabled;
+        branch_list.session_summary_enabled = session_summary_enabled;
+        branch_list.ai_disabled_reason = reason;
         branch_list.working_directory = Some(self.repo_root.display().to_string());
         branch_list.version = Some(env!("CARGO_PKG_VERSION").to_string());
         branch_list.set_loading(true);
@@ -1564,8 +1580,7 @@ impl Model {
     }
 
     fn refresh_branch_summary(&mut self) {
-        self.branch_list.ai_enabled = self.active_ai_enabled();
-        self.branch_list.session_summary_enabled = self.active_session_summary_enabled();
+        self.update_branch_list_ai_status();
         if let Some(request) = self.branch_list.prepare_branch_summary(&self.repo_root) {
             self.spawn_branch_summary_fetch(request);
         }
@@ -2387,8 +2402,11 @@ impl Model {
             branch_list.sort_mode = sort_mode;
             let mut branch_list = branch_list.with_branches(update.branches);
             branch_list.active_profile = self.profiles_config.active.clone();
-            branch_list.ai_enabled = self.active_ai_enabled();
-            branch_list.session_summary_enabled = self.active_session_summary_enabled();
+            let (ai_enabled, session_summary_enabled, reason) =
+                self.current_branch_list_ai_status();
+            branch_list.ai_enabled = ai_enabled;
+            branch_list.session_summary_enabled = session_summary_enabled;
+            branch_list.ai_disabled_reason = reason;
             branch_list.set_session_cache(session_cache);
             branch_list.set_session_inflight(session_inflight);
             branch_list.set_session_missing(session_missing);
@@ -3650,8 +3668,9 @@ impl Model {
     }
 
     fn load_profiles(&mut self) {
-        let profiles_config = ProfilesConfig::load().unwrap_or_default();
+        let (profiles_config, diag) = ProfilesConfig::load_with_diagnostics();
         self.profiles_config = profiles_config.clone();
+        self.profiles_diagnostics = diag.clone();
 
         let mut names: Vec<String> = profiles_config.profiles.keys().cloned().collect();
         names.sort();
@@ -3707,8 +3726,27 @@ impl Model {
 
         self.profiles = ProfilesState::new().with_profiles(profiles);
         self.branch_list.active_profile = self.profiles_config.active.clone();
-        self.branch_list.ai_enabled = self.active_ai_enabled();
-        self.branch_list.session_summary_enabled = self.active_session_summary_enabled();
+        self.update_branch_list_ai_status();
+
+        // Keep Settings screen cache in sync
+        self.settings.profiles_config = Some(self.profiles_config.clone());
+        self.settings.profiles_diagnostics = Some(self.profiles_diagnostics.clone());
+
+        if (self.profiles_diagnostics.fallback_from_toml
+            || self.profiles_diagnostics.fallback_from_yaml
+            || self.profiles_diagnostics.fallback_from_json)
+            && self.status_message.is_none()
+        {
+            self.status_message =
+                Some("Failed to load profiles config; using fallback.".to_string());
+            self.status_message_time = Some(Instant::now());
+        } else if self.profiles_diagnostics.source == ProfilesConfigSource::Json
+            && self.profiles_diagnostics.migrated_from_json
+            && self.status_message.is_none()
+        {
+            self.status_message = Some("Migrated profiles.json to profiles.toml.".to_string());
+            self.status_message_time = Some(Instant::now());
+        }
     }
 
     fn save_profiles(&mut self) {
@@ -3757,6 +3795,58 @@ impl Model {
             .as_ref()
             .map(|settings| settings.is_summary_enabled())
             .unwrap_or(false)
+    }
+
+    fn update_branch_list_ai_status(&mut self) {
+        let (ai_enabled, session_summary_enabled, reason) = self.current_branch_list_ai_status();
+        self.branch_list.ai_enabled = ai_enabled;
+        self.branch_list.session_summary_enabled = session_summary_enabled;
+        self.branch_list.ai_disabled_reason = reason;
+    }
+
+    fn current_branch_list_ai_status(&self) -> (bool, bool, Option<String>) {
+        let ai_enabled = self.active_ai_enabled();
+        let session_summary_enabled = self.active_session_summary_enabled();
+        let reason = if ai_enabled {
+            None
+        } else {
+            self.ai_disabled_reason()
+        };
+        (ai_enabled, session_summary_enabled, reason)
+    }
+
+    fn ai_disabled_reason(&self) -> Option<String> {
+        if self.active_ai_enabled() {
+            return None;
+        }
+
+        let load_failed = self.profiles_diagnostics.fallback_from_toml
+            || self.profiles_diagnostics.fallback_from_yaml
+            || self.profiles_diagnostics.fallback_from_json;
+
+        // Profile override takes precedence (even if incomplete)
+        if let Some(profile) = self.profiles_config.active_profile() {
+            if let Some(ai) = profile.ai.as_ref() {
+                let missing = missing_ai_parts(ai);
+                if !missing.is_empty() {
+                    return Some(format!("missing {}", missing.join(" and ")));
+                }
+            }
+        }
+
+        // Default AI settings
+        if let Some(ai) = self.profiles_config.default_ai.as_ref() {
+            let missing = missing_ai_parts(ai);
+            if !missing.is_empty() {
+                return Some(format!("missing {}", missing.join(" and ")));
+            }
+        }
+
+        if load_failed {
+            return Some("failed to load profiles config".to_string());
+        }
+
+        Some("AI settings not configured".to_string())
     }
 
     fn active_env_overrides(&self) -> Vec<(String, String)> {

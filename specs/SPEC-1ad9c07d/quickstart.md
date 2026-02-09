@@ -70,17 +70,24 @@ cargo test && cargo clippy --all-targets --all-features -- -D warnings
 
 ### AI設定の確認
 
-AI設定はプロファイル設定で管理される。`~/.gwt/profiles.json` を確認:
+AI設定はプロファイル設定で管理される。`~/.gwt/profiles.toml` を確認:
 
-```json
-{
-  "default_ai": {
-    "endpoint": "https://api.openai.com/v1",
-    "api_key": "sk-...",
-    "model": "gpt-4o-mini",
-    "summary_enabled": true
-  }
-}
+```toml
+version = 1
+active = "default"
+
+[default_ai]
+endpoint = "https://api.openai.com/v1"
+api_key = "sk-..."
+model = "gpt-4o-mini"
+summary_enabled = true
+
+[profiles.default]
+name = "default"
+description = ""
+disabled_env = []
+
+[profiles.default.env]
 ```
 
 ### デバッグ

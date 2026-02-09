@@ -8,7 +8,8 @@
 
 use crate::tui::screens::environment::{collect_os_env, EnvItem, EnvironmentState};
 use gwt_core::config::{
-    AgentType, CustomCodingAgent, Profile, ProfilesConfig, Settings, ToolsConfig,
+    AgentType, CustomCodingAgent, Profile, ProfilesConfig, ProfilesConfigSource,
+    ProfilesLoadDiagnostics, Settings, ToolsConfig,
 };
 use ratatui::{prelude::*, widgets::*};
 use std::collections::HashMap;
@@ -447,6 +448,8 @@ pub struct SettingsState {
     // Profile management fields
     /// Profiles configuration
     pub profiles_config: Option<ProfilesConfig>,
+    /// Profiles config load diagnostics (source and fallbacks)
+    pub profiles_diagnostics: Option<ProfilesLoadDiagnostics>,
     /// Profile mode (list/add/edit/delete/env_edit)
     pub profile_mode: ProfileMode,
     /// Selected profile index
@@ -477,6 +480,7 @@ impl Default for SettingsState {
             delete_confirm: false,
             // Profile defaults
             profiles_config: None,
+            profiles_diagnostics: None,
             profile_mode: ProfileMode::default(),
             profile_index: 0,
             profile_form: ProfileFormState::default(),
@@ -512,12 +516,15 @@ impl SettingsState {
 
     /// Load profiles configuration from ~/.gwt/profiles.yaml
     pub fn load_profiles_config(&mut self) {
-        self.profiles_config = ProfilesConfig::load().ok();
+        let (config, diag) = ProfilesConfig::load_with_diagnostics();
+        self.profiles_config = Some(config);
+        self.profiles_diagnostics = Some(diag);
     }
 
     /// Set profiles configuration
     pub fn with_profiles_config(mut self, config: ProfilesConfig) -> Self {
         self.profiles_config = Some(config);
+        self.profiles_diagnostics = None;
         self
     }
 
@@ -1894,12 +1901,26 @@ fn render_ai_settings_content(state: &SettingsState, frame: &mut Frame, area: Re
         .profiles_config
         .as_ref()
         .and_then(|c| c.default_ai.as_ref());
+    let source = profiles_source_label(state.profiles_diagnostics.as_ref());
 
     if let Some(ai) = default_ai {
+        let status_text = if ai.is_enabled() {
+            "Ready"
+        } else {
+            "Incomplete (endpoint and model required)"
+        };
+        let status_style = if ai.is_enabled() {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::Yellow)
+        };
+
         // Show current settings
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(1), // Status
+                Constraint::Length(1), // Source
                 Constraint::Length(1), // Endpoint label
                 Constraint::Length(1), // Endpoint value
                 Constraint::Length(1), // API Key label
@@ -1915,34 +1936,41 @@ fn render_ai_settings_content(state: &SettingsState, frame: &mut Frame, area: Re
             .margin(1)
             .split(inner);
 
+        // Status + source
+        let status = Paragraph::new(format!("Status: {}", status_text)).style(status_style);
+        frame.render_widget(status, chunks[0]);
+        let source_line = Paragraph::new(format!("Source: {}", source))
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(source_line, chunks[1]);
+
         // Endpoint
         let label = Paragraph::new("Endpoint:").style(Style::default().fg(Color::DarkGray));
-        frame.render_widget(label, chunks[0]);
+        frame.render_widget(label, chunks[2]);
         let value =
             Paragraph::new(format!("  {}", ai.endpoint)).style(Style::default().fg(Color::White));
-        frame.render_widget(value, chunks[1]);
+        frame.render_widget(value, chunks[3]);
 
         // API Key
         let label = Paragraph::new("API Key:").style(Style::default().fg(Color::DarkGray));
-        frame.render_widget(label, chunks[2]);
+        frame.render_widget(label, chunks[4]);
         let key_display = if ai.api_key.is_empty() {
             "(not set)".to_string()
         } else {
             format!("  {}...", &ai.api_key.chars().take(8).collect::<String>())
         };
         let value = Paragraph::new(key_display).style(Style::default().fg(Color::White));
-        frame.render_widget(value, chunks[3]);
+        frame.render_widget(value, chunks[5]);
 
         // Model
         let label = Paragraph::new("Model:").style(Style::default().fg(Color::DarkGray));
-        frame.render_widget(label, chunks[4]);
+        frame.render_widget(label, chunks[6]);
         let value =
             Paragraph::new(format!("  {}", ai.model)).style(Style::default().fg(Color::White));
-        frame.render_widget(value, chunks[5]);
+        frame.render_widget(value, chunks[7]);
 
         // Session summary
         let label = Paragraph::new("Session summary:").style(Style::default().fg(Color::DarkGray));
-        frame.render_widget(label, chunks[6]);
+        frame.render_widget(label, chunks[8]);
         let summary_value = if ai.summary_enabled { "On" } else { "Off" };
         let summary_style = if ai.summary_enabled {
             Style::default().fg(Color::Green)
@@ -1950,7 +1978,7 @@ fn render_ai_settings_content(state: &SettingsState, frame: &mut Frame, area: Re
             Style::default().fg(Color::Red)
         };
         let value = Paragraph::new(format!("  {}", summary_value)).style(summary_style);
-        frame.render_widget(value, chunks[7]);
+        frame.render_widget(value, chunks[9]);
 
         // Button
         let button_area = Layout::default()
@@ -1960,7 +1988,7 @@ fn render_ai_settings_content(state: &SettingsState, frame: &mut Frame, area: Re
                 Constraint::Percentage(50),
                 Constraint::Percentage(25),
             ])
-            .split(chunks[9])[1];
+            .split(chunks[11])[1];
 
         let button = Paragraph::new("[ Edit AI Settings ]")
             .alignment(Alignment::Center)
@@ -1980,6 +2008,8 @@ fn render_ai_settings_content(state: &SettingsState, frame: &mut Frame, area: Re
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(1), // Status
+                Constraint::Length(1), // Source
                 Constraint::Length(3), // Info text
                 Constraint::Length(3), // Button
                 Constraint::Min(0),    // Padding
@@ -1987,10 +2017,17 @@ fn render_ai_settings_content(state: &SettingsState, frame: &mut Frame, area: Re
             .margin(1)
             .split(inner);
 
+        let status =
+            Paragraph::new("Status: Not configured").style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(status, chunks[0]);
+        let source_line = Paragraph::new(format!("Source: {}", source))
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(source_line, chunks[1]);
+
         let info = Paragraph::new("No AI settings configured.")
             .alignment(Alignment::Center)
             .style(Style::default().fg(Color::DarkGray));
-        frame.render_widget(info, chunks[0]);
+        frame.render_widget(info, chunks[2]);
 
         let button_area = Layout::default()
             .direction(Direction::Horizontal)
@@ -1999,7 +2036,7 @@ fn render_ai_settings_content(state: &SettingsState, frame: &mut Frame, area: Re
                 Constraint::Percentage(50),
                 Constraint::Percentage(25),
             ])
-            .split(chunks[1])[1];
+            .split(chunks[3])[1];
 
         let button = Paragraph::new("[ Configure AI Settings ]")
             .alignment(Alignment::Center)
@@ -2017,10 +2054,25 @@ fn render_ai_settings_content(state: &SettingsState, frame: &mut Frame, area: Re
     }
 }
 
+fn profiles_source_label(diag: Option<&ProfilesLoadDiagnostics>) -> &'static str {
+    let Some(diag) = diag else {
+        return "unknown";
+    };
+    match diag.source {
+        ProfilesConfigSource::Toml => "profiles.toml",
+        ProfilesConfigSource::Yaml => "profiles.yaml",
+        ProfilesConfigSource::Json => "profiles.json",
+        ProfilesConfigSource::Default => "default",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gwt_core::config::{Profile, ProfilesConfig, Settings};
+    use gwt_core::config::{
+        AISettings, Profile, ProfilesConfig, ProfilesConfigSource, ProfilesLoadDiagnostics,
+        Settings,
+    };
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::collections::HashMap;
@@ -2256,6 +2308,58 @@ mod tests {
         assert!(
             instructions.contains("[R] Reset"),
             "Instructions should show R for Reset"
+        );
+    }
+
+    fn buffer_contains_text(
+        buffer: &ratatui::buffer::Buffer,
+        width: u16,
+        height: u16,
+        text: &str,
+    ) -> bool {
+        for y in 0..height {
+            let line: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
+            if line.contains(text) {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn test_ai_settings_status_incomplete_when_model_missing() {
+        let mut state = SettingsState::new().with_settings(Settings::default());
+        state.category = SettingsCategory::AISettings;
+
+        let mut config = ProfilesConfig::default();
+        config.default_ai = Some(AISettings {
+            endpoint: "https://api.openai.com/v1".to_string(),
+            api_key: "".to_string(),
+            model: "".to_string(),
+            summary_enabled: true,
+        });
+        state.profiles_config = Some(config);
+        state.profiles_diagnostics = Some(ProfilesLoadDiagnostics {
+            source: ProfilesConfigSource::Toml,
+            ..Default::default()
+        });
+
+        let width = 110;
+        let height = 24;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal init");
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_settings(&state, f, area);
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        assert!(
+            buffer_contains_text(buffer, width, height, "Incomplete"),
+            "AI Settings should show incomplete status when model is missing"
         );
     }
 }

@@ -483,6 +483,8 @@ pub struct BranchListState {
     pub branch_summary: Option<BranchSummary>,
     /// AI settings enabled for active profile
     pub ai_enabled: bool,
+    /// Reason why AI is disabled (if any)
+    pub ai_disabled_reason: Option<String>,
     /// Session summary enabled for active profile
     pub session_summary_enabled: bool,
     /// Session summary cache (session)
@@ -553,6 +555,7 @@ impl Default for BranchListState {
             running_agents: HashMap::new(),
             branch_summary: None,
             ai_enabled: false,
+            ai_disabled_reason: None,
             session_summary_enabled: false,
             session_summary_cache: SessionSummaryCache::default(),
             session_summary_inflight: HashSet::new(),
@@ -2230,6 +2233,12 @@ fn render_session_panel(
                 "Configure AI in Profiles to enable session summary",
                 Style::default().fg(Color::Yellow),
             )));
+            if let Some(reason) = state.ai_disabled_reason.as_ref() {
+                lines.push(Line::from(Span::styled(
+                    format!("({})", reason),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
         } else if !state.session_summary_enabled {
             lines.push(Line::from(Span::styled(
                 "Session summary disabled",

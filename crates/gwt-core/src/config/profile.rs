@@ -3,6 +3,7 @@
 //! Manages environment profiles with automatic migration from YAML to TOML.
 //! - New format: ~/.gwt/profiles.toml (TOML)
 //! - Legacy format: ~/.gwt/profiles.yaml (YAML)
+//! - Legacy format: ~/.gwt/profiles.json (JSON, minimal support for default_ai only)
 
 use crate::config::migration::{backup_broken_file, ensure_config_dir, write_atomic};
 use crate::error::{GwtError, Result};
@@ -93,6 +94,31 @@ pub struct ResolvedAISettings {
     pub model: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProfilesConfigSource {
+    /// No config file found, using built-in defaults.
+    #[default]
+    Default,
+    /// Loaded from ~/.gwt/profiles.toml.
+    Toml,
+    /// Loaded from ~/.gwt/profiles.yaml (legacy).
+    Yaml,
+    /// Loaded from ~/.gwt/profiles.json (legacy) and converted in-memory.
+    Json,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProfilesLoadDiagnostics {
+    pub source: ProfilesConfigSource,
+    pub fallback_from_toml: bool,
+    pub fallback_from_yaml: bool,
+    pub fallback_from_json: bool,
+    pub migrated_from_json: bool,
+    pub backed_up_broken_toml: bool,
+    pub backed_up_broken_yaml: bool,
+    pub backed_up_broken_json: bool,
+}
+
 impl AISettings {
     /// Resolve AI settings (no environment variable fallback - settings must be explicit)
     pub fn resolved(&self) -> ResolvedAISettings {
@@ -128,6 +154,12 @@ fn default_summary_enabled() -> bool {
     true
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct LegacyProfilesJson {
+    #[serde(default)]
+    default_ai: Option<AISettings>,
+}
+
 /// Profiles configuration stored on disk
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfilesConfig {
@@ -158,6 +190,12 @@ impl ProfilesConfig {
         home.join(".gwt").join("profiles.yaml")
     }
 
+    /// Legacy JSON profiles config file path (~/.gwt/profiles.json)
+    pub fn json_path() -> PathBuf {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        home.join(".gwt").join("profiles.json")
+    }
+
     /// Get the preferred config file path (TOML if exists, else YAML)
     /// For backward compatibility, returns YAML path if only YAML exists
     #[deprecated(note = "Use toml_path() for new code")]
@@ -181,8 +219,16 @@ impl ProfilesConfig {
     /// 2. profiles.yaml (legacy format)
     /// 3. Default profile
     pub fn load() -> Result<Self> {
+        let (config, _diag) = Self::load_with_diagnostics();
+        Ok(config)
+    }
+
+    pub fn load_with_diagnostics() -> (Self, ProfilesLoadDiagnostics) {
         let toml_path = Self::toml_path();
         let yaml_path = Self::yaml_path();
+        let json_path = Self::json_path();
+
+        let mut diag = ProfilesLoadDiagnostics::default();
 
         // Try TOML first (new format takes priority)
         if toml_path.exists() {
@@ -194,9 +240,11 @@ impl ProfilesConfig {
             match Self::load_toml(&toml_path) {
                 Ok(mut config) => {
                     config.ensure_defaults();
-                    return Ok(config);
+                    diag.source = ProfilesConfigSource::Toml;
+                    return (config, diag);
                 }
                 Err(e) => {
+                    diag.fallback_from_toml = true;
                     warn!(
                         category = "config",
                         path = %toml_path.display(),
@@ -204,7 +252,9 @@ impl ProfilesConfig {
                         "Failed to load TOML profiles, trying YAML fallback"
                     );
                     // Backup broken TOML file
-                    let _ = backup_broken_file(&toml_path);
+                    if backup_broken_file(&toml_path).is_ok() {
+                        diag.backed_up_broken_toml = true;
+                    }
                 }
             }
         }
@@ -219,6 +269,7 @@ impl ProfilesConfig {
             match Self::load_yaml(&yaml_path) {
                 Ok(mut config) => {
                     config.ensure_defaults();
+                    diag.source = ProfilesConfigSource::Yaml;
                     // Auto-migrate: save as TOML for next time (SPEC-a3f4c9df)
                     if let Err(e) = config.save() {
                         warn!(
@@ -233,9 +284,10 @@ impl ProfilesConfig {
                             "Auto-migrated profiles.yaml to profiles.toml"
                         );
                     }
-                    return Ok(config);
+                    return (config, diag);
                 }
                 Err(e) => {
+                    diag.fallback_from_yaml = true;
                     warn!(
                         category = "config",
                         path = %yaml_path.display(),
@@ -243,7 +295,46 @@ impl ProfilesConfig {
                         "Failed to load YAML profiles"
                     );
                     // Backup broken YAML file
-                    let _ = backup_broken_file(&yaml_path);
+                    if backup_broken_file(&yaml_path).is_ok() {
+                        diag.backed_up_broken_yaml = true;
+                    }
+                }
+            }
+        }
+
+        // Try JSON fallback (legacy minimal format)
+        if json_path.exists() {
+            debug!(
+                category = "config",
+                path = %json_path.display(),
+                "Loading profiles from JSON (legacy)"
+            );
+            match Self::load_legacy_json(&json_path) {
+                Ok(mut config) => {
+                    config.ensure_defaults();
+                    diag.source = ProfilesConfigSource::Json;
+                    // Auto-migrate: save as TOML for next time
+                    diag.migrated_from_json = config.save().is_ok();
+                    if diag.migrated_from_json {
+                        info!(
+                            category = "config",
+                            operation = "auto_migrate",
+                            "Auto-migrated profiles.json to profiles.toml"
+                        );
+                    }
+                    return (config, diag);
+                }
+                Err(e) => {
+                    diag.fallback_from_json = true;
+                    warn!(
+                        category = "config",
+                        path = %json_path.display(),
+                        error = %e,
+                        "Failed to load JSON profiles"
+                    );
+                    if backup_broken_file(&json_path).is_ok() {
+                        diag.backed_up_broken_json = true;
+                    }
                 }
             }
         }
@@ -253,7 +344,8 @@ impl ProfilesConfig {
             category = "config",
             "No profiles config found, using default"
         );
-        Ok(Self::default_with_profile())
+        diag.source = ProfilesConfigSource::Default;
+        (Self::default_with_profile(), diag)
     }
 
     /// Load profiles from TOML file
@@ -273,6 +365,18 @@ impl ProfilesConfig {
             serde_yaml::from_str(&content).map_err(|e| GwtError::ConfigParseError {
                 reason: format!("Failed to parse YAML: {}", e),
             })?;
+        Ok(config)
+    }
+
+    fn load_legacy_json(path: &Path) -> Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let legacy: LegacyProfilesJson =
+            serde_json::from_str(&content).map_err(|e| GwtError::ConfigParseError {
+                reason: format!("Failed to parse JSON: {}", e),
+            })?;
+
+        let mut config = Self::default_with_profile();
+        config.default_ai = legacy.default_ai;
         Ok(config)
     }
 
@@ -451,6 +555,83 @@ profiles:
         let loaded = ProfilesConfig::load().unwrap();
         assert_eq!(loaded.active.as_deref(), Some("legacy"));
         assert!(loaded.profiles.contains_key("legacy"));
+    }
+
+    #[test]
+    fn test_load_json_legacy_fallback_migrates_to_toml() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        // Create legacy JSON file manually
+        let gwt_dir = temp.path().join(".gwt");
+        std::fs::create_dir_all(&gwt_dir).unwrap();
+        let json_path = gwt_dir.join("profiles.json");
+        std::fs::write(
+            &json_path,
+            r#"{
+  "default_ai": {
+    "endpoint": "https://api.openai.com/v1",
+    "api_key": "sk-test",
+    "model": "gpt-4o-mini",
+    "summary_enabled": true
+  }
+}"#,
+        )
+        .unwrap();
+
+        let (loaded, diag) = ProfilesConfig::load_with_diagnostics();
+        assert_eq!(diag.source, ProfilesConfigSource::Json);
+        assert!(diag.migrated_from_json);
+        assert!(json_path.exists());
+
+        let default_ai = loaded.default_ai.expect("default_ai should be loaded");
+        assert_eq!(default_ai.endpoint, "https://api.openai.com/v1");
+        assert_eq!(default_ai.api_key, "sk-test");
+        assert_eq!(default_ai.model, "gpt-4o-mini");
+        assert!(default_ai.summary_enabled);
+
+        // Should auto-migrate to TOML for next time
+        let toml_path = ProfilesConfig::toml_path();
+        assert!(toml_path.exists());
+    }
+
+    #[test]
+    fn test_load_broken_toml_falls_back_to_yaml_with_diagnostics() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let gwt_dir = temp.path().join(".gwt");
+        std::fs::create_dir_all(&gwt_dir).unwrap();
+
+        // Create a broken TOML file
+        std::fs::write(gwt_dir.join("profiles.toml"), "active = ").unwrap();
+
+        // Create valid YAML fallback
+        std::fs::write(
+            gwt_dir.join("profiles.yaml"),
+            r#"
+version: 1
+active: legacy
+profiles:
+  legacy:
+    name: legacy
+    env: {}
+"#,
+        )
+        .unwrap();
+
+        let (loaded, diag) = ProfilesConfig::load_with_diagnostics();
+        assert_eq!(diag.source, ProfilesConfigSource::Yaml);
+        assert!(diag.fallback_from_toml);
+        assert!(diag.backed_up_broken_toml);
+        assert_eq!(loaded.active.as_deref(), Some("legacy"));
+
+        // Broken TOML should be backed up (profiles.toml -> profiles.broken)
+        assert!(gwt_dir.join("profiles.broken").exists());
+        // YAML load auto-migrates to TOML
+        assert!(gwt_dir.join("profiles.toml").exists());
     }
 
     #[test]

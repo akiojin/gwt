@@ -166,6 +166,7 @@ TS互換セッション（~/.config/gwt/sessions/*.json）と新セッション�
 | 旧ファイル | 新ファイル | フォーマット変換 |
 |-----------|-----------|-----------------|
 | ~/.gwt/profiles.yaml | ~/.gwt/profiles.toml | YAML → TOML |
+| ~/.gwt/profiles.json | ~/.gwt/profiles.toml | JSON → TOML（legacy: default_aiのみ） |
 | ~/.gwt/tools.json | ~/.gwt/tools.toml | JSON → TOML |
 | .gwt/tools.json | .gwt/tools.toml | JSON → TOML |
 | .gwt/project.json | .gwt/project.toml | JSON → TOML |
@@ -200,13 +201,21 @@ TS互換セッション（~/.config/gwt/sessions/*.json）と新セッション�
 #### profiles.toml
 
 ```toml
-version = "1.0.0"
+version = 1
+active = "default"
 
-[[profiles]]
+[default_ai]
+endpoint = "https://api.openai.com/v1"
+api_key = "sk-..."
+model = "gpt-4o-mini"
+summary_enabled = true
+
+[profiles.default]
 name = "default"
 description = "Default profile"
+disabled_env = []
 
-[profiles.env]
+[profiles.default.env]
 OPENAI_API_KEY = "sk-..."
 ```
 
