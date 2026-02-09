@@ -26,14 +26,52 @@ export interface TerminalInfo {
 }
 
 export interface AgentInfo {
+  id: "claude" | "codex" | "gemini" | (string & {});
   name: string;
-  agent_type: string;
+  version: string;
+  path?: string;
+  authenticated: boolean;
   available: boolean;
 }
 
 export interface SettingsData {
-  log_retention_days: number;
   protected_branches: string[];
+  default_base_branch: string;
+  worktree_root: string;
+  debug: boolean;
+  log_dir?: string | null;
+  log_retention_days: number;
+  web_port: number;
+  web_address: string;
+  web_cors: boolean;
+  agent_default?: string | null;
+  agent_claude_path?: string | null;
+  agent_codex_path?: string | null;
+  agent_gemini_path?: string | null;
+  agent_auto_install_deps: boolean;
+  docker_force_host: boolean;
+}
+
+export interface AISettings {
+  endpoint: string;
+  api_key: string;
+  model: string;
+  summary_enabled: boolean;
+}
+
+export interface Profile {
+  name: string;
+  env: Record<string, string>;
+  disabled_env: string[];
+  description: string;
+  ai?: AISettings | null;
+}
+
+export interface ProfilesConfig {
+  version: number;
+  active?: string | null;
+  default_ai?: AISettings | null;
+  profiles: Record<string, Profile>;
 }
 
 export interface Tab {

@@ -1,8 +1,13 @@
 //! Terminal/PTY management commands for xterm.js integration
 
+use crate::commands::project::resolve_repo_path_for_project_root;
 use crate::state::AppState;
+use gwt_core::config::ProfilesConfig;
+use gwt_core::git::Remote;
 use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::terminal::{AgentColor, BuiltinLaunchConfig};
+use gwt_core::worktree::WorktreeManager;
+use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::Read;
@@ -25,35 +30,83 @@ pub struct TerminalInfo {
     pub status: String,
 }
 
-/// Launch a new terminal pane with an agent
-#[tauri::command]
-pub fn launch_terminal(
-    agent_name: String,
-    branch: String,
-    state: State<AppState>,
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchAgentRequest {
+    /// Agent id (e.g., "claude", "codex", "gemini")
+    pub agent_id: String,
+    /// Branch name or remote ref (e.g., "main", "feature/foo", "origin/main")
+    pub branch: String,
+    /// Optional profile name override (uses active profile when omitted)
+    pub profile: Option<String>,
+}
+
+fn strip_known_remote_prefix<'a>(branch: &'a str, remotes: &[Remote]) -> &'a str {
+    let Some((first, rest)) = branch.split_once('/') else {
+        return branch;
+    };
+    if remotes.iter().any(|r| r.name == first) {
+        return rest;
+    }
+    branch
+}
+
+fn resolve_worktree_path(repo_path: &std::path::Path, branch_ref: &str) -> Result<PathBuf, String> {
+    let manager = WorktreeManager::new(repo_path).map_err(|e| e.to_string())?;
+
+    let remotes = Remote::list(repo_path).unwrap_or_default();
+    let normalized = strip_known_remote_prefix(branch_ref, &remotes);
+
+    if let Ok(Some(wt)) = manager.get_by_branch_basic(normalized) {
+        return Ok(wt.path);
+    }
+    // Rare: worktree registered with the raw remote-like name.
+    if normalized != branch_ref {
+        if let Ok(Some(wt)) = manager.get_by_branch_basic(branch_ref) {
+            return Ok(wt.path);
+        }
+    }
+
+    let wt = manager
+        .create_for_branch(branch_ref)
+        .map_err(|e| e.to_string())?;
+    Ok(wt.path)
+}
+
+fn load_profile_env(profile_override: Option<&str>) -> HashMap<String, String> {
+    let Ok(config) = ProfilesConfig::load() else {
+        return HashMap::new();
+    };
+
+    let profile_name = profile_override
+        .map(|s| s.to_string())
+        .or_else(|| config.active.clone());
+
+    let Some(name) = profile_name else {
+        return HashMap::new();
+    };
+
+    config
+        .profiles
+        .get(&name)
+        .map(|p| p.env.clone())
+        .unwrap_or_default()
+}
+
+fn agent_command_and_label(agent_id: &str) -> Result<(&'static str, &'static str), String> {
+    match agent_id {
+        "claude" => Ok(("claude", "Claude Code")),
+        "codex" => Ok(("codex", "Codex")),
+        "gemini" => Ok(("gemini", "Gemini")),
+        _ => Err(format!("Unknown agent: {}", agent_id)),
+    }
+}
+
+fn launch_with_config(
+    config: BuiltinLaunchConfig,
+    state: &AppState,
     app_handle: AppHandle,
 ) -> Result<String, String> {
-    let working_dir = {
-        let project_path = state
-            .project_path
-            .lock()
-            .map_err(|e| format!("Failed to lock state: {}", e))?;
-        match project_path.as_ref() {
-            Some(p) => PathBuf::from(p),
-            None => return Err("No project opened".to_string()),
-        }
-    };
-
-    let config = BuiltinLaunchConfig {
-        command: agent_name.clone(),
-        args: vec![],
-        working_dir,
-        branch_name: branch,
-        agent_name,
-        agent_color: AgentColor::Green,
-        env_vars: HashMap::new(),
-    };
-
     let pane_id = {
         let mut manager = state
             .pane_manager
@@ -85,6 +138,93 @@ pub fn launch_terminal(
     });
 
     Ok(pane_id)
+}
+
+/// Launch a new terminal pane with an agent
+#[tauri::command]
+pub fn launch_terminal(
+    agent_name: String,
+    branch: String,
+    state: State<AppState>,
+    app_handle: AppHandle,
+) -> Result<String, String> {
+    let project_root = {
+        let project_path = state
+            .project_path
+            .lock()
+            .map_err(|e| format!("Failed to lock state: {}", e))?;
+        match project_path.as_ref() {
+            Some(p) => PathBuf::from(p),
+            None => return Err("No project opened".to_string()),
+        }
+    };
+
+    let repo_path = resolve_repo_path_for_project_root(&project_root)?;
+    let working_dir = resolve_worktree_path(&repo_path, &branch)?;
+
+    let config = BuiltinLaunchConfig {
+        command: agent_name.clone(),
+        args: vec![],
+        working_dir,
+        branch_name: branch,
+        agent_name,
+        agent_color: AgentColor::Green,
+        env_vars: HashMap::new(),
+    };
+
+    launch_with_config(config, &state, app_handle)
+}
+
+/// Launch an agent with gwt semantics (worktree + profiles)
+#[tauri::command]
+pub fn launch_agent(
+    request: LaunchAgentRequest,
+    state: State<AppState>,
+    app_handle: AppHandle,
+) -> Result<String, String> {
+    let project_root = {
+        let project_path = state
+            .project_path
+            .lock()
+            .map_err(|e| format!("Failed to lock state: {}", e))?;
+        match project_path.as_ref() {
+            Some(p) => PathBuf::from(p),
+            None => return Err("No project opened".to_string()),
+        }
+    };
+
+    let branch_ref = request.branch.trim();
+    if branch_ref.is_empty() {
+        return Err("Branch is required".to_string());
+    }
+
+    let (command, label) = agent_command_and_label(request.agent_id.trim())?;
+
+    let repo_path = resolve_repo_path_for_project_root(&project_root)?;
+    let working_dir = resolve_worktree_path(&repo_path, branch_ref)?;
+
+    let mut env_vars = load_profile_env(request.profile.as_deref());
+    // Useful for debugging and for agents that want to introspect gwt context.
+    env_vars.insert(
+        "GWT_PROJECT_ROOT".to_string(),
+        project_root.to_string_lossy().to_string(),
+    );
+
+    let config = BuiltinLaunchConfig {
+        command: command.to_string(),
+        args: vec![],
+        working_dir,
+        branch_name: strip_known_remote_prefix(
+            branch_ref,
+            &Remote::list(&repo_path).unwrap_or_default(),
+        )
+        .to_string(),
+        agent_name: label.to_string(),
+        agent_color: AgentColor::Green,
+        env_vars,
+    };
+
+    launch_with_config(config, &state, app_handle)
 }
 
 /// Stream PTY output to the frontend via Tauri events

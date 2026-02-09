@@ -27,12 +27,8 @@
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       agents = await invoke<AgentInfo[]>("detect_agents");
-      if (agents.length > 0) {
-        const available = agents.find((a) => a.available);
-        if (available) {
-          selectedAgent = available.name;
-        }
-      }
+      const available = agents.find((a) => a.available);
+      if (available) selectedAgent = available.id;
     } catch (err) {
       console.error("Failed to detect agents:", err);
       agents = [];
@@ -74,15 +70,17 @@
             {#each agents as agent}
               <button
                 class="agent-card"
-                class:selected={selectedAgent === agent.name}
+                class:selected={selectedAgent === agent.id}
                 class:unavailable={!agent.available}
                 disabled={!agent.available}
-                onclick={() => (selectedAgent = agent.name)}
+                onclick={() => (selectedAgent = agent.id)}
               >
                 <span class="agent-name">{agent.name}</span>
-                <span class="agent-type">{agent.agent_type}</span>
+                <span class="agent-type">{agent.version}</span>
                 {#if !agent.available}
-                  <span class="agent-status">Not available</span>
+                  <span class="agent-status">Not installed</span>
+                {:else if !agent.authenticated}
+                  <span class="agent-status">Not authenticated</span>
                 {/if}
               </button>
             {/each}

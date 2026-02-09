@@ -6,9 +6,11 @@
   let {
     projectPath,
     onBranchSelect,
+    onBranchActivate,
   }: {
     projectPath: string;
     onBranchSelect: (branch: BranchInfo) => void;
+    onBranchActivate?: (branch: BranchInfo) => void;
   } = $props();
 
   let activeFilter: FilterType = $state("Local");
@@ -138,6 +140,7 @@
           class="branch-item"
           class:active={branch.is_current}
           onclick={() => onBranchSelect(branch)}
+          ondblclick={() => onBranchActivate?.(branch)}
         >
           <span class="branch-icon">{branch.is_current ? "*" : " "}</span>
           <span class="branch-name">{branch.name}</span>

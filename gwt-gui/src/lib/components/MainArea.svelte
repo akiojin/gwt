@@ -8,6 +8,7 @@
     activeTabId,
     selectedBranch,
     showSettings = false,
+    onLaunchAgent,
     onTabSelect,
     onTabClose,
     onSettingsClose,
@@ -16,6 +17,7 @@
     activeTabId: string;
     selectedBranch: BranchInfo | null;
     showSettings?: boolean;
+    onLaunchAgent?: () => void;
     onTabSelect: (tabId: string) => void;
     onTabClose: (tabId: string) => void;
     onSettingsClose: () => void;
@@ -59,7 +61,15 @@
       <div class="summary-content">
         {#if selectedBranch}
           <div class="branch-detail">
-            <h2>{selectedBranch.name}</h2>
+            <div class="branch-header">
+              <h2>{selectedBranch.name}</h2>
+              <button
+                class="launch-btn"
+                onclick={() => onLaunchAgent?.()}
+              >
+                Launch Agent...
+              </button>
+            </div>
             <div class="detail-grid">
               <div class="detail-item">
                 <span class="detail-label">Commit</span>
@@ -210,12 +220,36 @@
     max-width: 600px;
   }
 
+  .branch-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+
   .branch-detail h2 {
     font-size: 20px;
     font-weight: 600;
     color: var(--text-primary);
-    margin-bottom: 20px;
     font-family: monospace;
+  }
+
+  .launch-btn {
+    background: var(--accent);
+    color: var(--bg-primary);
+    border: none;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+    white-space: nowrap;
+  }
+
+  .launch-btn:hover {
+    background: var(--accent-hover);
   }
 
   .detail-grid {

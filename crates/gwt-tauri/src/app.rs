@@ -101,6 +101,7 @@ pub fn build_app(
             crate::commands::project::get_project_info,
             crate::commands::project::is_git_repo,
             crate::commands::terminal::launch_terminal,
+            crate::commands::terminal::launch_agent,
             crate::commands::terminal::write_terminal,
             crate::commands::terminal::resize_terminal,
             crate::commands::terminal::close_terminal,
@@ -108,6 +109,8 @@ pub fn build_app(
             crate::commands::settings::get_settings,
             crate::commands::settings::save_settings,
             crate::commands::agents::detect_agents,
+            crate::commands::profiles::get_profiles,
+            crate::commands::profiles::save_profiles,
         ])
 }
 

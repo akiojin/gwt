@@ -1,7 +1,7 @@
 //! Branch management commands
 
 use crate::commands::project::resolve_repo_path_for_project_root;
-use gwt_core::git::Branch;
+use gwt_core::git::{is_bare_repository, Branch};
 use serde::Serialize;
 use std::path::Path;
 
@@ -52,7 +52,11 @@ pub fn list_branches(project_path: String) -> Result<Vec<BranchInfo>, String> {
 pub fn list_remote_branches(project_path: String) -> Result<Vec<BranchInfo>, String> {
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)?;
-    let branches = Branch::list_remote(&repo_path).map_err(|e| e.to_string())?;
+    let branches = if is_bare_repository(&repo_path) {
+        Branch::list_remote_from_origin(&repo_path).map_err(|e| e.to_string())?
+    } else {
+        Branch::list_remote(&repo_path).map_err(|e| e.to_string())?
+    };
     Ok(branches.into_iter().map(BranchInfo::from).collect())
 }
 

@@ -47,6 +47,15 @@
     activeTabId = "summary";
   }
 
+  function requestAgentLaunch() {
+    showAgentLaunch = true;
+  }
+
+  function handleBranchActivate(branch: BranchInfo) {
+    handleBranchSelect(branch);
+    requestAgentLaunch();
+  }
+
   async function fetchCurrentBranch() {
     if (!projectPath) return;
     try {
@@ -69,18 +78,25 @@
 
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      paneId = await invoke<string>("launch_terminal", {
-        agentName,
-        branch,
+      paneId = await invoke<string>("launch_agent", {
+        request: { agentId: agentName, branch },
       });
     } catch (err) {
       console.error("Failed to launch terminal:", err);
+      appError = `Failed to launch agent: ${toErrorMessage(err)}`;
       return;
     }
 
     const newTab: Tab = {
       id: `agent-${paneId}`,
-      label: agentName,
+      label:
+        agentName === "claude"
+          ? "Claude Code"
+          : agentName === "codex"
+            ? "Codex"
+            : agentName === "gemini"
+              ? "Gemini"
+              : agentName,
       type: "agent",
       paneId,
     };
@@ -171,13 +187,18 @@
     <MenuBar {projectPath} onAction={handleMenuAction} />
     <div class="app-body">
       {#if sidebarVisible}
-        <Sidebar {projectPath} onBranchSelect={handleBranchSelect} />
+        <Sidebar
+          {projectPath}
+          onBranchSelect={handleBranchSelect}
+          onBranchActivate={handleBranchActivate}
+        />
       {/if}
       <MainArea
         {tabs}
         {activeTabId}
         {selectedBranch}
         {showSettings}
+        onLaunchAgent={requestAgentLaunch}
         onTabSelect={handleTabSelect}
         onTabClose={handleTabClose}
         onSettingsClose={() => (showSettings = false)}

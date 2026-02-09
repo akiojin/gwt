@@ -1,5 +1,6 @@
 pub mod agents;
 pub mod branches;
+pub mod profiles;
 pub mod project;
 pub mod settings;
 pub mod terminal;
