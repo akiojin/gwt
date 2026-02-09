@@ -5,7 +5,7 @@
 use gwt_core::ai::{
     format_error_for_display, suggest_branch_names as core_suggest_branch_names, AIClient,
 };
-use gwt_core::config::{ProfilesConfig, ResolvedAISettings};
+use gwt_core::config::ProfilesConfig;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -16,23 +16,6 @@ pub struct BranchSuggestResult {
     /// Suggestions are full branch names with prefix (e.g., "feature/foo").
     pub suggestions: Vec<String>,
     pub error: Option<String>,
-}
-
-fn resolve_active_ai_settings(config: &ProfilesConfig) -> Option<ResolvedAISettings> {
-    // Match the TUI behavior: active profile AI overrides default_ai.
-    if let Some(profile) = config.active_profile() {
-        if let Some(settings) = profile.ai.as_ref() {
-            if settings.is_enabled() {
-                return Some(settings.resolved());
-            }
-        }
-    }
-    if let Some(settings) = config.default_ai.as_ref() {
-        if settings.is_enabled() {
-            return Some(settings.resolved());
-        }
-    }
-    None
 }
 
 /// Suggest 3 branch names for "New Branch Name".
@@ -46,7 +29,8 @@ pub fn suggest_branch_names(description: String) -> Result<BranchSuggestResult, 
     }
 
     let profiles = ProfilesConfig::load().map_err(|e| e.to_string())?;
-    let Some(settings) = resolve_active_ai_settings(&profiles) else {
+    let ai = profiles.resolve_active_ai_settings();
+    let Some(settings) = ai.resolved else {
         return Ok(BranchSuggestResult {
             status: "ai-not-configured".to_string(),
             suggestions: Vec::new(),
