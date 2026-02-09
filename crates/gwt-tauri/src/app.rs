@@ -3,6 +3,7 @@
 use crate::state::AppState;
 use std::sync::atomic::Ordering;
 use tauri::Manager;
+use tracing::info;
 
 fn should_prevent_window_close(is_quitting: bool) -> bool {
     !is_quitting
@@ -78,6 +79,11 @@ pub fn build_app(
         .on_window_event(|window, event| {
             // Keep the process alive when the user clicks the window close button (x).
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                info!(
+                    category = "tauri",
+                    event = "CloseRequested",
+                    "Window close requested"
+                );
                 let is_quitting = window
                     .app_handle()
                     .state::<AppState>()
@@ -122,6 +128,11 @@ pub fn build_app(
 pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri::RunEvent) {
     match event {
         tauri::RunEvent::ExitRequested { api, .. } => {
+            info!(
+                category = "tauri",
+                event = "ExitRequested",
+                "Exit requested"
+            );
             // SPEC-dfb1611a FR-314: only the tray "Quit" is allowed to exit.
             let is_quitting = app_handle
                 .state::<AppState>()
@@ -131,9 +142,21 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
             if should_prevent_exit_request(is_quitting) {
                 api.prevent_exit();
                 if let Some(window) = app_handle.get_webview_window("main") {
+                    info!(
+                        category = "tauri",
+                        event = "ExitPrevented",
+                        "Exit prevented; hiding main window"
+                    );
                     let _ = window.hide();
                 }
             }
+        }
+        tauri::RunEvent::Exit => {
+            info!(
+                category = "tauri",
+                event = "Exit",
+                "App exiting"
+            );
         }
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen {
