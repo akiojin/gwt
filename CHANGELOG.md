@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [6.30.1] - 2026-02-09
+
+### Bug Fixes
+
+- 進捗モーダルのエラーメッセージを複数行折り返しで全文表示 (FR-052a) (#916)
+
 ## [6.30.0] - 2026-02-08
 
 ### Bug Fixes
