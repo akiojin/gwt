@@ -758,20 +758,17 @@ fn launch_with_config(
 /// Launch a new terminal pane with an agent
 #[tauri::command]
 pub fn launch_terminal(
+    window: tauri::Window,
     agent_name: String,
     branch: String,
     state: State<AppState>,
     app_handle: AppHandle,
 ) -> Result<String, String> {
     let project_root = {
-        let project_path = state
-            .project_path
-            .lock()
-            .map_err(|e| format!("Failed to lock state: {}", e))?;
-        match project_path.as_ref() {
-            Some(p) => PathBuf::from(p),
-            None => return Err("No project opened".to_string()),
-        }
+        let Some(p) = state.project_for_window(window.label()) else {
+            return Err("No project opened".to_string());
+        };
+        PathBuf::from(p)
     };
 
     let repo_path = resolve_repo_path_for_project_root(&project_root)?;
@@ -1088,19 +1085,16 @@ mod tests {
 /// Launch an agent with gwt semantics (worktree + profiles)
 #[tauri::command]
 pub fn launch_agent(
+    window: tauri::Window,
     request: LaunchAgentRequest,
     state: State<AppState>,
     app_handle: AppHandle,
 ) -> Result<String, String> {
     let project_root = {
-        let project_path = state
-            .project_path
-            .lock()
-            .map_err(|e| format!("Failed to lock state: {}", e))?;
-        match project_path.as_ref() {
-            Some(p) => PathBuf::from(p),
-            None => return Err("No project opened".to_string()),
-        }
+        let Some(p) = state.project_for_window(window.label()) else {
+            return Err("No project opened".to_string());
+        };
+        PathBuf::from(p)
     };
 
     let agent_id = request.agent_id.trim();
