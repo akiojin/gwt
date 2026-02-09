@@ -81,6 +81,8 @@ jobs:
     name: Build Tauri (${{ matrix.platform }})
     needs: create-tag
     runs-on: ${{ matrix.os }}
+    env:
+      RELEASE_VERSION: ${{ needs.create-tag.outputs.version }}
     strategy:
       matrix:
         include:
@@ -110,6 +112,94 @@ jobs:
         run: cargo install tauri-cli --version "^2"
       - name: Build Tauri
         run: cargo tauri build
+      - name: Build macOS installer (.pkg)
+        if: matrix.platform == 'macos'
+        id: package_macos
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_VERSION}"
+          if [[ -z "$version" ]]; then
+            echo "::error::Release version is not available."
+            exit 1
+          fi
+          app_path=$(ls target/release/bundle/macos/*.app | head -n 1)
+          if [[ -z "$app_path" ]]; then
+            echo "::error::Failed to find macOS .app bundle."
+            exit 1
+          fi
+          arch="$(uname -m)"
+          pkg_dir="target/release/bundle/pkg"
+          mkdir -p "$pkg_dir"
+          pkg_path="${pkg_dir}/gwt-macos-${arch}.pkg"
+          pkgbuild \
+            --component "$app_path" \
+            --install-location "/Applications" \
+            --identifier "com.akiojin.gwt" \
+            --version "$version" \
+            "$pkg_path"
+          echo "pkg_path=$pkg_path" >> "$GITHUB_OUTPUT"
+      - name: Validate macOS installer (.pkg)
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkg_path="${{ steps.package_macos.outputs.pkg_path }}"
+          if [[ -z "$pkg_path" || ! -f "$pkg_path" ]]; then
+            echo "::error::macOS pkg not found."
+            exit 1
+          fi
+          if [[ ! "$pkg_path" == *.pkg ]]; then
+            echo "::error::macOS pkg has unexpected name."
+            exit 1
+          fi
+          if [[ ! -s "$pkg_path" ]]; then
+            echo "::error::macOS pkg is empty."
+            exit 1
+          fi
+      - name: Install WiX Toolset
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: choco install wixtoolset --version 3.11.2 -y --allow-downgrade --force
+      - name: Build Windows installer (WiX .msi)
+        if: matrix.platform == 'windows'
+        id: package_windows
+        shell: pwsh
+        run: |
+          $version = "${env:RELEASE_VERSION}"
+          if ([string]::IsNullOrEmpty($version)) {
+            Write-Error "Release version is not available."
+            exit 1
+          }
+          $msiVersion = $version -replace '-.*$', '.0'
+          $binaryDir = Join-Path $PWD "target\\release"
+          $wxsPath = Join-Path $PWD "installers\\windows\\gwt.wxs"
+          $wixObj = "gwt.wixobj"
+          $wixDir = Join-Path $PWD "target\\release\\bundle\\wix"
+          New-Item -ItemType Directory -Path $wixDir -Force | Out-Null
+          $msiPath = Join-Path $wixDir "gwt-wix-windows-x86_64.msi"
+          $wixBin = "${env:ProgramFiles(x86)}\\WiX Toolset v3.11\\bin"
+          $env:PATH = "$wixBin;$env:PATH"
+          candle.exe $wxsPath -out $wixObj -dBinariesDir="$binaryDir" -dProductVersion="$msiVersion"
+          light.exe $wixObj -out $msiPath -sice:ICE03
+          "msi_path=$msiPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Validate Windows installer (WiX .msi)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $msiPath = "${{ steps.package_windows.outputs.msi_path }}"
+          if ([string]::IsNullOrEmpty($msiPath)) {
+            Write-Error "Windows MSI path is missing."
+            exit 1
+          }
+          if (-not (Test-Path $msiPath)) {
+            Write-Error "Windows MSI not found: $msiPath"
+            exit 1
+          }
+          if (-not ($msiPath.ToLower().EndsWith(".msi"))) {
+            Write-Error "Windows MSI has unexpected name."
+            exit 1
+          }
       - name: Upload artifacts (Linux)
         if: matrix.platform == 'linux'
         uses: actions/upload-artifact@v6
@@ -124,12 +214,24 @@ jobs:
         with:
           name: gwt-macos
           path: target/release/bundle/dmg/*.dmg
+      - name: Upload macOS installer (.pkg)
+        if: matrix.platform == 'macos'
+        uses: actions/upload-artifact@v6
+        with:
+          name: gwt-macos-pkg
+          path: target/release/bundle/pkg/*.pkg
       - name: Upload artifacts (Windows)
         if: matrix.platform == 'windows'
         uses: actions/upload-artifact@v6
         with:
           name: gwt-windows
           path: target/release/bundle/msi/*.msi
+      - name: Upload Windows installer (WiX .msi)
+        if: matrix.platform == 'windows'
+        uses: actions/upload-artifact@v6
+        with:
+          name: gwt-windows-wix
+          path: target/release/bundle/wix/*.msi
 
   upload-release:
     name: Upload to GitHub Release
