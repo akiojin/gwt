@@ -10,7 +10,6 @@
   let projectPath: string | null = $state(null);
   let sidebarVisible: boolean = $state(true);
   let showAgentLaunch: boolean = $state(false);
-  let showSettings: boolean = $state(false);
   let showAbout: boolean = $state(false);
   let appError: string | null = $state(null);
 
@@ -24,6 +23,11 @@
 
   let terminalCount = $derived(tabs.filter((t) => t.type === "agent").length);
 
+  $effect(() => {
+    void projectPath;
+    void setWindowTitle();
+  });
+
   function toErrorMessage(err: unknown): string {
     if (typeof err === "string") return err;
     if (err && typeof err === "object" && "message" in err) {
@@ -33,9 +37,35 @@
     return String(err);
   }
 
+  async function setWindowTitle() {
+    const title = projectPath ? `gwt - ${projectPath}` : "gwt";
+
+    // Document title also covers non-tauri contexts (e.g. web preview).
+    document.title = title;
+
+    try {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      await getCurrentWindow().setTitle(title);
+    } catch {
+      // Ignore: title API not available outside Tauri runtime.
+    }
+  }
+
   function handleProjectOpen(path: string) {
     projectPath = path;
     fetchCurrentBranch();
+  }
+
+  function openSessionSummaryTab() {
+    const existing = tabs.find((t) => t.type === "summary" || t.id === "summary");
+    if (existing) {
+      activeTabId = existing.id;
+      return;
+    }
+
+    const tab: Tab = { id: "summary", label: "Session Summary", type: "summary" };
+    tabs = [tab, ...tabs];
+    activeTabId = tab.id;
   }
 
   function handleBranchSelect(branch: BranchInfo) {
@@ -43,8 +73,8 @@
     if (branch.is_current) {
       currentBranch = branch.name;
     }
-    // Switch to summary tab to show branch info
-    activeTabId = "summary";
+    // Switch to session summary (re-open tab if it was closed).
+    openSessionSummaryTab();
   }
 
   function requestAgentLaunch() {
@@ -84,13 +114,23 @@
             : agentId;
   }
 
+  function normalizeBranchName(name: string): string {
+    const trimmed = name.trim();
+    return trimmed.startsWith("origin/") ? trimmed.slice("origin/".length) : trimmed;
+  }
+
+  function worktreeTabLabel(branch: string): string {
+    const b = branch.trim();
+    return b ? normalizeBranchName(b) : "Worktree";
+  }
+
   async function handleAgentLaunch(request: LaunchAgentRequest) {
     const { invoke } = await import("@tauri-apps/api/core");
     const paneId = await invoke<string>("launch_agent", { request });
 
     const newTab: Tab = {
       id: `agent-${paneId}`,
-      label: agentTabLabel(request.agentId),
+      label: worktreeTabLabel(request.branch),
       type: "agent",
       paneId,
     };
@@ -100,7 +140,8 @@
   }
 
   async function handleTabClose(tabId: string) {
-    const tab = tabs.find((t) => t.id === tabId);
+    const idx = tabs.findIndex((t) => t.id === tabId);
+    const tab = idx >= 0 ? tabs[idx] : undefined;
     if (tab?.paneId) {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -110,15 +151,29 @@
       }
     }
 
-    tabs = tabs.filter((t) => t.id !== tabId);
-    if (activeTabId === tabId) {
-      activeTabId = "summary";
-    }
+    const nextTabs = tabs.filter((t) => t.id !== tabId);
+    tabs = nextTabs;
+
+    if (activeTabId !== tabId) return;
+    const fallback =
+      nextTabs[idx] ?? nextTabs[idx - 1] ?? nextTabs[nextTabs.length - 1] ?? null;
+    activeTabId = fallback?.id ?? "";
   }
 
   function handleTabSelect(tabId: string) {
     activeTabId = tabId;
-    showSettings = false;
+  }
+
+  function openSettingsTab() {
+    const existing = tabs.find((t) => t.type === "settings" || t.id === "settings");
+    if (existing) {
+      activeTabId = existing.id;
+      return;
+    }
+
+    const tab: Tab = { id: "settings", label: "Settings", type: "settings" };
+    tabs = [...tabs, tab];
+    activeTabId = tab.id;
   }
 
   async function handleMenuAction(action: string) {
@@ -146,7 +201,6 @@
         activeTabId = "summary";
         selectedBranch = null;
         currentBranch = "";
-        showSettings = false;
         break;
       case "toggle-sidebar":
         sidebarVisible = !sidebarVisible;
@@ -155,8 +209,7 @@
         showAgentLaunch = true;
         break;
       case "open-settings":
-        showSettings = true;
-        activeTabId = "summary";
+        openSettingsTab();
         break;
       case "about":
         showAbout = true;
@@ -192,12 +245,10 @@
         {activeTabId}
         {selectedBranch}
         projectPath={projectPath as string}
-        {showSettings}
         onLaunchAgent={requestAgentLaunch}
         onQuickLaunch={handleAgentLaunch}
         onTabSelect={handleTabSelect}
         onTabClose={handleTabClose}
-        onSettingsClose={() => (showSettings = false)}
       />
     </div>
     <StatusBar {projectPath} {currentBranch} {terminalCount} />

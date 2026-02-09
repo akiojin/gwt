@@ -78,7 +78,7 @@ export interface ProfilesConfig {
 export interface Tab {
   id: string;
   label: string;
-  type: "summary" | "agent";
+  type: "summary" | "agent" | "settings";
   paneId?: string;
 }
 
@@ -100,6 +100,18 @@ export interface ToolSessionEntry {
   docker_build?: boolean | null;
   docker_keep?: boolean | null;
   timestamp: number;
+}
+
+export interface SessionSummaryResult {
+  status: "ok" | "ai-not-configured" | "disabled" | "no-session" | "error";
+  toolId?: string | null;
+  sessionId?: string | null;
+  markdown?: string | null;
+  taskOverview?: string | null;
+  shortSummary?: string | null;
+  bulletPoints: string[];
+  warning?: string | null;
+  error?: string | null;
 }
 
 export interface DockerContext {

@@ -1,5 +1,11 @@
 <script lang="ts">
-  import type { Tab, BranchInfo, LaunchAgentRequest, ToolSessionEntry } from "../types";
+  import type {
+    Tab,
+    BranchInfo,
+    LaunchAgentRequest,
+    ToolSessionEntry,
+    SessionSummaryResult,
+  } from "../types";
   import TerminalView from "../terminal/TerminalView.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
 
@@ -12,34 +18,38 @@
     activeTabId,
     selectedBranch,
     projectPath,
-    showSettings = false,
     onLaunchAgent,
     onQuickLaunch,
     onTabSelect,
     onTabClose,
-    onSettingsClose,
   }: {
     tabs: Tab[];
     activeTabId: string;
     selectedBranch: BranchInfo | null;
     projectPath: string;
-    showSettings?: boolean;
     onLaunchAgent?: () => void;
     onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
     onTabSelect: (tabId: string) => void;
     onTabClose: (tabId: string) => void;
-    onSettingsClose: () => void;
   } = $props();
 
   let activeTab = $derived(tabs.find((t) => t.id === activeTabId));
   let agentTabs = $derived(tabs.filter(isAgentTabWithPaneId));
-  let showTerminalLayer = $derived(!showSettings && activeTab?.type === "agent");
+  let showTerminalLayer = $derived(activeTab?.type === "agent");
 
   let quickStartEntries: ToolSessionEntry[] = $state([]);
   let quickStartLoading: boolean = $state(false);
   let quickStartError: string | null = $state(null);
   let quickLaunchError: string | null = $state(null);
   let quickLaunching: boolean = $state(false);
+
+  let sessionSummaryLoading: boolean = $state(false);
+  let sessionSummaryStatus: SessionSummaryResult["status"] | "" = $state("");
+  let sessionSummaryMarkdown: string | null = $state(null);
+  let sessionSummaryWarning: string | null = $state(null);
+  let sessionSummaryError: string | null = $state(null);
+  let sessionSummaryToolId: string | null = $state(null);
+  let sessionSummarySessionId: string | null = $state(null);
 
   function toErrorMessage(err: unknown): string {
     if (typeof err === "string") return err;
@@ -127,6 +137,65 @@
     loadQuickStart();
   });
 
+  async function loadSessionSummary() {
+    sessionSummaryError = null;
+    sessionSummaryWarning = null;
+
+    const branch = selectedBranch?.name?.trim() ?? "";
+    if (!branch) {
+      sessionSummaryLoading = false;
+      sessionSummaryStatus = "";
+      sessionSummaryMarkdown = null;
+      sessionSummaryToolId = null;
+      sessionSummarySessionId = null;
+      return;
+    }
+
+    const key = `${projectPath}::${branch}`;
+    sessionSummaryLoading = true;
+    sessionSummaryStatus = "";
+    sessionSummaryMarkdown = null;
+    sessionSummaryToolId = null;
+    sessionSummarySessionId = null;
+
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const result = await invoke<SessionSummaryResult>("get_branch_session_summary", {
+        projectPath,
+        branch: normalizeBranchName(branch),
+      });
+
+      const currentKey = `${projectPath}::${selectedBranch?.name?.trim() ?? ""}`;
+      if (currentKey !== key) return;
+
+      sessionSummaryStatus = result.status;
+      sessionSummaryMarkdown = result.markdown ?? null;
+      sessionSummaryWarning = result.warning ?? null;
+      sessionSummaryError = result.error ?? null;
+      sessionSummaryToolId = result.toolId ?? null;
+      sessionSummarySessionId = result.sessionId ?? null;
+    } catch (err) {
+      sessionSummaryStatus = "error";
+      sessionSummaryMarkdown = null;
+      sessionSummaryToolId = null;
+      sessionSummarySessionId = null;
+      sessionSummaryError = `Failed to generate session summary: ${toErrorMessage(err)}`;
+    } finally {
+      const currentKey = `${projectPath}::${selectedBranch?.name?.trim() ?? ""}`;
+      if (currentKey === key) {
+        sessionSummaryLoading = false;
+      }
+    }
+  }
+
+  $effect(() => {
+    void selectedBranch;
+    void projectPath;
+    void activeTabId;
+    if (activeTab?.type !== "summary") return;
+    loadSessionSummary();
+  });
+
   async function quickLaunch(entry: ToolSessionEntry, action: "continue" | "new") {
     if (!selectedBranch) return;
     if (!onQuickLaunch) return;
@@ -182,25 +251,23 @@
           <span class="tab-dot"></span>
         {/if}
         <span class="tab-label">{tab.label}</span>
-        {#if tab.type === "agent"}
-          <button
-            class="tab-close"
-            onclick={(e) => {
-              e.stopPropagation();
-              onTabClose(tab.id);
-            }}
-          >
-            x
-          </button>
-        {/if}
+        <button
+          class="tab-close"
+          onclick={(e) => {
+            e.stopPropagation();
+            onTabClose(tab.id);
+          }}
+        >
+          x
+        </button>
       </div>
     {/each}
   </div>
   <div class="tab-content">
     <div class="panel-layer" class:hidden={showTerminalLayer}>
-      {#if showSettings}
-        <SettingsPanel onClose={onSettingsClose} />
-      {:else if activeTabId === "summary"}
+      {#if activeTab?.type === "settings"}
+        <SettingsPanel onClose={() => onTabClose(activeTabId)} />
+      {:else if activeTab?.type === "summary"}
         <div class="summary-content">
           {#if selectedBranch}
             <div class="branch-detail">
@@ -261,11 +328,11 @@
                   <div class="quick-empty">
                     Launch an agent once on this branch to enable Quick Start.
                   </div>
-                {:else if quickStartEntries.length > 0}
-                  <div class="quick-list">
-                    {#each quickStartEntries as entry (entry.tool_id)}
-                      <div class="quick-row">
-                        <div class="quick-info">
+	                {:else if quickStartEntries.length > 0}
+	                  <div class="quick-list">
+	                    {#each quickStartEntries as entry (entry.tool_id)}
+	                      <div class="quick-row">
+	                        <div class="quick-info">
                           <div class="quick-tool {toolClass(entry)}">
                             <span class="quick-tool-name">{displayToolName(entry)}</span>
                             <span class="quick-tool-version">
@@ -306,7 +373,56 @@
                         </div>
                       </div>
                     {/each}
+	                  </div>
+	                {/if}
+	              </div>
+
+              <div class="quick-start ai-summary">
+                <div class="quick-header">
+                  <span class="quick-title">AI Summary</span>
+                  {#if sessionSummaryLoading}
+                    <span class="quick-subtitle">Generating...</span>
+                  {:else if sessionSummaryStatus === "ok" && sessionSummaryToolId && sessionSummarySessionId}
+                    <span class="quick-subtitle">
+                      {sessionSummaryToolId} #{sessionSummarySessionId}
+                    </span>
+                  {:else if sessionSummaryStatus === "ai-not-configured"}
+                    <span class="quick-subtitle">AI not configured</span>
+                  {:else if sessionSummaryStatus === "disabled"}
+                    <span class="quick-subtitle">Disabled</span>
+                  {:else if sessionSummaryStatus === "no-session"}
+                    <span class="quick-subtitle">No session</span>
+                  {:else if sessionSummaryStatus === "error"}
+                    <span class="quick-subtitle">Error</span>
+                  {/if}
+                </div>
+
+                {#if sessionSummaryWarning}
+                  <div class="session-summary-warning">
+                    {sessionSummaryWarning}
                   </div>
+                {/if}
+
+                {#if sessionSummaryLoading}
+                  <div class="session-summary-placeholder">Generating...</div>
+                {:else if sessionSummaryStatus === "ai-not-configured"}
+                  <div class="session-summary-placeholder">
+                    Configure AI in Settings to enable session summary.
+                  </div>
+                {:else if sessionSummaryStatus === "disabled"}
+                  <div class="session-summary-placeholder">
+                    Session summary disabled.
+                  </div>
+                {:else if sessionSummaryStatus === "no-session"}
+                  <div class="session-summary-placeholder">No session.</div>
+                {:else if sessionSummaryStatus === "error"}
+                  <div class="quick-error">
+                    {sessionSummaryError ?? "Failed to generate session summary."}
+                  </div>
+                {:else if sessionSummaryStatus === "ok" && sessionSummaryMarkdown}
+                  <pre class="session-summary-markdown">{sessionSummaryMarkdown}</pre>
+                {:else}
+                  <div class="session-summary-placeholder">No summary.</div>
                 {/if}
               </div>
             </div>
