@@ -23,6 +23,7 @@
 | [SPEC-1ad9c07d](SPEC-1ad9c07d/spec.md) | 機能仕様: エージェント起動ウィザード統合 | 2026-02-08 |
 | [SPEC-d6210238](SPEC-d6210238/spec.md) | 機能仕様: TUI→Tauri GUI完全移行 Phase 1: 基盤構築 | 2026-02-08 |
 | [SPEC-dfb1611a](SPEC-dfb1611a/spec.md) | 機能仕様: gwt GUI プロジェクト管理 Phase 2 追加機能 | 2026-02-08 |
+| [SPEC-4470704f](SPEC-4470704f/spec.md) | 機能仕様: gwt GUI マルチウィンドウ + Native Windowメニュー | 2026-02-09 |
 | [SPEC-92053c0d](SPEC-92053c0d/spec.md) | 機能仕様: commitlint を npm ci 無しで実行可能にする | 2026-02-03 |
 | [SPEC-a3f4c9df](SPEC-a3f4c9df/spec.md) | 機能仕様: 設定ファイル統合・整理 | 2026-02-02 |
 | [SPEC-067a8026](SPEC-067a8026/spec.md) | 機能仕様: LLMベースリリースワークフロー | 2026-01-21 |

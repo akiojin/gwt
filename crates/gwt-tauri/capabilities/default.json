@@ -1,7 +1,7 @@
 {
   "identifier": "default",
   "description": "Default capability for gwt",
-  "windows": ["main"],
+  "windows": ["main", "project-*"],
   "permissions": [
     "core:default",
     "dialog:default",
