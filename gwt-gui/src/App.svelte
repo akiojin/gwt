@@ -75,6 +75,8 @@
   async function handleAgentLaunch(request: {
     agentId: string;
     branch: string;
+    model?: string;
+    agentVersion?: string;
     createBranch?: { name: string; base?: string | null };
   }) {
     const { invoke } = await import("@tauri-apps/api/core");

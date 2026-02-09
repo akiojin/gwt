@@ -49,6 +49,10 @@ pub struct LaunchAgentRequest {
     pub branch: String,
     /// Optional profile name override (uses active profile when omitted)
     pub profile: Option<String>,
+    /// Optional model selection (agent-specific).
+    pub model: Option<String>,
+    /// Optional npm version/dist-tag used for bunx/npx fallback (e.g. "latest", "1.2.3").
+    pub agent_version: Option<String>,
     /// Optional new branch creation request (creates branch + worktree before launch)
     pub create_branch: Option<CreateBranchRequest>,
 }
@@ -180,8 +184,50 @@ pub(crate) fn build_fallback_launch(
     }
 }
 
+fn normalize_agent_version(version: Option<&str>) -> Option<String> {
+    let v = version?.trim();
+    if v.is_empty() {
+        return None;
+    }
+
+    // Allow users to paste "v1.2.3" / "@1.2.3" and normalize to npm-friendly tokens.
+    let v = v.strip_prefix('@').unwrap_or(v);
+    let v = if let Some(rest) = v.strip_prefix('v') {
+        if rest.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            rest
+        } else {
+            v
+        }
+    } else {
+        v
+    };
+
+    Some(v.to_string())
+}
+
+fn build_bunx_package_spec(package: &str, version: Option<&str>) -> String {
+    let v = normalize_agent_version(version).unwrap_or_else(|| "latest".to_string());
+    format!("{package}@{v}")
+}
+
+fn build_agent_model_args(agent_id: &str, model: Option<&str>) -> Vec<String> {
+    let Some(model) = model.map(|s| s.trim()).filter(|s| !s.is_empty()) else {
+        return Vec::new();
+    };
+
+    match agent_id {
+        // SPEC-3b0ed29b FR-005: Codex uses `--model=...`.
+        "codex" => vec![format!("--model={model}")],
+        // SPEC-3b0ed29b: Claude Code uses `--model <name>`.
+        "claude" => vec!["--model".to_string(), model.to_string()],
+        // Gemini model flag is unspecified in current binding specs; ignore.
+        _ => Vec::new(),
+    }
+}
+
 fn resolve_agent_launch_command(
     agent_id: &str,
+    agent_version: Option<&str>,
 ) -> Result<(String, Vec<String>, &'static str), String> {
     let def = builtin_agent_def(agent_id)?;
 
@@ -197,7 +243,7 @@ fn resolve_agent_launch_command(
     let runner = choose_fallback_runner(bunx_path.as_deref(), npx_available)
         .ok_or_else(|| "Agent is not installed and bunx/npx is not available".to_string())?;
 
-    let package = format!("{}@latest", def.bunx_package);
+    let package = build_bunx_package_spec(def.bunx_package, agent_version);
     let (cmd, args) = build_fallback_launch(runner, &package);
     Ok((cmd, args, def.label))
 }
@@ -326,6 +372,59 @@ mod tests {
             vec!["--yes".to_string(), "@openai/codex@latest".to_string()]
         );
     }
+
+    #[test]
+    fn normalize_agent_version_trims_and_strips_prefixes() {
+        assert_eq!(normalize_agent_version(None), None);
+        assert_eq!(normalize_agent_version(Some("  ")), None);
+        assert_eq!(
+            normalize_agent_version(Some("v1.2.3")),
+            Some("1.2.3".to_string())
+        );
+        assert_eq!(
+            normalize_agent_version(Some("@1.2.3")),
+            Some("1.2.3".to_string())
+        );
+        assert_eq!(
+            normalize_agent_version(Some("  latest ")),
+            Some("latest".to_string())
+        );
+        assert_eq!(
+            normalize_agent_version(Some("vnext")),
+            Some("vnext".to_string())
+        );
+    }
+
+    #[test]
+    fn build_bunx_package_spec_defaults_to_latest() {
+        assert_eq!(
+            build_bunx_package_spec("@openai/codex", None),
+            "@openai/codex@latest"
+        );
+    }
+
+    #[test]
+    fn build_bunx_package_spec_uses_specified_version() {
+        assert_eq!(
+            build_bunx_package_spec("@openai/codex", Some("1.2.3")),
+            "@openai/codex@1.2.3"
+        );
+    }
+
+    #[test]
+    fn build_agent_model_args_is_agent_specific() {
+        assert_eq!(
+            build_agent_model_args("codex", Some("gpt-5.2")),
+            vec!["--model=gpt-5.2".to_string()]
+        );
+        assert_eq!(
+            build_agent_model_args("claude", Some("sonnet")),
+            vec!["--model".to_string(), "sonnet".to_string()]
+        );
+        assert!(build_agent_model_args("gemini", Some("any")).is_empty());
+        assert!(build_agent_model_args("codex", None).is_empty());
+        assert!(build_agent_model_args("codex", Some("  ")).is_empty());
+    }
 }
 
 /// Launch an agent with gwt semantics (worktree + profiles)
@@ -350,7 +449,10 @@ pub fn launch_agent(
     if agent_id.is_empty() {
         return Err("Agent is required".to_string());
     }
-    let (command, args, label) = resolve_agent_launch_command(agent_id)?;
+    let agent_version = normalize_agent_version(request.agent_version.as_deref());
+    let (command, mut args, label) =
+        resolve_agent_launch_command(agent_id, agent_version.as_deref())?;
+    args.extend(build_agent_model_args(agent_id, request.model.as_deref()));
 
     let repo_path = resolve_repo_path_for_project_root(&project_root)?;
 

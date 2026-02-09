@@ -81,6 +81,19 @@
 3. **前提条件** Settings で環境変数を編集、**操作** Save を実行、**期待結果** TOML 形式（`~/.gwt/profiles.toml`）として保存される（既存 YAML は自動削除されない）
 4. **前提条件** アクティブプロファイルが設定されている、**操作** エージェント起動、**期待結果** そのプロファイルの環境変数が起動プロセスに渡される（OS 環境変数より優先される）
 
+---
+
+### ユーザーストーリー 5 - 起動ウィザードでモデル/バージョンを選択できる (優先度: P0)
+
+開発者として、エージェント起動ウィザードで **モデル** と **バージョン** を選択し、選択結果が起動コマンドに反映されてほしい。
+
+**受け入れシナリオ**:
+
+1. **前提条件** 起動ウィザードが開いている、**操作** Codex を選択し Model を入力して Launch、**期待結果** Codex の起動引数に `--model=...` が追加される
+2. **前提条件** 起動ウィザードが開いている、**操作** Claude Code を選択し Model を入力して Launch、**期待結果** Claude Code の起動引数に `--model ...` が追加される
+3. **前提条件** 対象エージェントがローカルに未インストールで bunx/npx フォールバックが利用可能、**操作** Agent Version に `1.2.3` を入力して Launch、**期待結果** bunx/npx の最初の引数（パッケージ指定）が `@...@1.2.3` になる
+4. **前提条件** 同上、**操作** Agent Version を空で Launch、**期待結果** `@...@latest` が使用される
+
 ## エッジケース
 
 - Open Project で Git リポジトリそのものではなく gwt の作業ルートを開いた場合でも動作する（bare repo 自動検出）。
@@ -112,6 +125,8 @@
 - **FR-017**: `Base Branch` がリモートブランチの場合、必要に応じて fetch を行い、Worktree 作成後にブランチを `Base Branch` のコミットへ一致させなければ**ならない**
 - **FR-018**: エージェントがローカルに未インストールの場合でも、起動ウィザードの選択肢から除外しては**ならない**。起動時に bunx でフォールバック実行を試みなければ**ならない**（`SPEC-3b0ed29b` FR-002）
 - **FR-019**: bunx が `node_modules/.bin` 配下で検出された場合、その bunx を使用しては**ならない**。代わりに `npx --yes` へフォールバックしなければ**ならない**（`SPEC-3b0ed29b` FR-002a）
+- **FR-025**: 起動ウィザードは Model（任意）を入力できなければ**ならない**。Codex の場合は `--model=...`、Claude Code の場合は `--model ...` 形式で起動引数へ反映しなければ**ならない**（`SPEC-3b0ed29b` FR-005）
+- **FR-026**: 起動ウィザードは Agent Version（任意）を入力できなければ**ならない**。bunx/npx フォールバック実行時は `@...@{version}` としてパッケージ指定へ反映し、未指定の場合は `latest` を使用しなければ**ならない**
 
 #### Profiles / Settings
 
@@ -128,7 +143,7 @@
 - `list_worktree_branches(projectPath: string) -> BranchInfo[]`
 - `list_remote_branches(projectPath: string) -> BranchInfo[]`（bare の場合は ls-remote を使用）
 - `detect_agents() -> DetectedAgentInfo[]`
-- `launch_agent(request: LaunchAgentRequest) -> paneId: string`（新規ブランチ作成モードを含む）
+- `launch_agent(request: LaunchAgentRequest) -> paneId: string`（新規ブランチ作成モードを含む。Model/Agent Version を含む）
 - `get_profiles() -> ProfilesConfig`
 - `save_profiles(config: ProfilesConfig) -> void`
 

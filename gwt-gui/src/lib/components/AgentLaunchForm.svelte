@@ -10,6 +10,8 @@
     onLaunch: (request: {
       agentId: string;
       branch: string;
+      model?: string;
+      agentVersion?: string;
       createBranch?: { name: string; base?: string | null };
     }) => Promise<void>;
     onClose: () => void;
@@ -20,6 +22,8 @@
   let agents: AgentInfo[] = $state([]);
   let selectedAgent: string = $state("");
   let mode: LaunchMode = $state("existing");
+  let model: string = $state("");
+  let agentVersion: string = $state("latest");
 
   // Intentionally capture the initial values - fields are editable by the user
   let branch: string = $state((() => selectedBranch)());
@@ -29,6 +33,16 @@
   let loading: boolean = $state(true);
   let launching: boolean = $state(false);
   let errorMessage: string | null = $state(null);
+
+  let selectedAgentInfo = $derived(
+    agents.find((a) => a.id === selectedAgent) ?? null
+  );
+  let isFallbackAgent = $derived(
+    selectedAgentInfo?.version === "bunx" || selectedAgentInfo?.version === "npx"
+  );
+  let supportsModel = $derived(
+    selectedAgent === "codex" || selectedAgent === "claude"
+  );
 
   $effect(() => {
     detectAgents();
@@ -62,9 +76,21 @@
     if (!selectedAgent) return;
     launching = true;
     try {
+      const options: { model?: string; agentVersion?: string } = {};
+      if (supportsModel && model.trim()) {
+        options.model = model.trim();
+      }
+      if (isFallbackAgent && agentVersion.trim()) {
+        options.agentVersion = agentVersion.trim();
+      }
+
       if (mode === "existing") {
         if (!branch.trim()) return;
-        await onLaunch({ agentId: selectedAgent, branch: branch.trim() });
+        await onLaunch({
+          agentId: selectedAgent,
+          branch: branch.trim(),
+          ...options,
+        });
         onClose();
         return;
       }
@@ -73,6 +99,7 @@
       await onLaunch({
         agentId: selectedAgent,
         branch: newBranch.trim(),
+        ...options,
         createBranch: { name: newBranch.trim(), base: baseBranch.trim() },
       });
       onClose();
@@ -135,6 +162,30 @@
             {/each}
           </div>
         </div>
+
+        {#if supportsModel}
+          <div class="field">
+            <label for="model-input">Model</label>
+            <input
+              id="model-input"
+              type="text"
+              bind:value={model}
+              placeholder="Optional (e.g., gpt-5.2, sonnet)"
+            />
+          </div>
+        {/if}
+
+        {#if isFallbackAgent}
+          <div class="field">
+            <label for="agent-version-input">Agent Version</label>
+            <input
+              id="agent-version-input"
+              type="text"
+              bind:value={agentVersion}
+              placeholder="latest"
+            />
+          </div>
+        {/if}
 
         <div class="field">
           <span class="field-label" id="launch-mode-label">Mode</span>
