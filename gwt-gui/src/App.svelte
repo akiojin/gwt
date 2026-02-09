@@ -68,6 +68,37 @@
     };
   });
 
+  // Best-effort: close agent tabs when the backend closes the pane.
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen<{ pane_id: string }>(
+          "terminal-closed",
+          (event) => {
+            removeTabLocal(`agent-${event.payload.pane_id}`);
+          }
+        );
+
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+      } catch (err) {
+        console.error("Failed to setup terminal closed listener:", err);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  });
+
   function toErrorMessage(err: unknown): string {
     if (typeof err === "string") return err;
     if (err && typeof err === "object" && "message" in err) {
@@ -184,9 +215,21 @@
     }
   }
 
-  async function handleTabClose(tabId: string) {
+  function removeTabLocal(tabId: string) {
     const idx = tabs.findIndex((t) => t.id === tabId);
-    const tab = idx >= 0 ? tabs[idx] : undefined;
+    if (idx < 0) return;
+
+    const nextTabs = tabs.filter((t) => t.id !== tabId);
+    tabs = nextTabs;
+
+    if (activeTabId !== tabId) return;
+    const fallback =
+      nextTabs[idx] ?? nextTabs[idx - 1] ?? nextTabs[nextTabs.length - 1] ?? null;
+    activeTabId = fallback?.id ?? "";
+  }
+
+  async function handleTabClose(tabId: string) {
+    const tab = tabs.find((t) => t.id === tabId);
     if (tab?.paneId) {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -196,13 +239,7 @@
       }
     }
 
-    const nextTabs = tabs.filter((t) => t.id !== tabId);
-    tabs = nextTabs;
-
-    if (activeTabId !== tabId) return;
-    const fallback =
-      nextTabs[idx] ?? nextTabs[idx - 1] ?? nextTabs[nextTabs.length - 1] ?? null;
-    activeTabId = fallback?.id ?? "";
+    removeTabLocal(tabId);
   }
 
   function handleTabSelect(tabId: string) {
