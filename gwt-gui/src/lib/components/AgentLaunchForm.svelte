@@ -7,20 +7,41 @@
     onClose,
   }: {
     selectedBranch?: string;
-    onLaunch: (agentName: string, branch: string) => void;
+    onLaunch: (request: {
+      agentId: string;
+      branch: string;
+      createBranch?: { name: string; base?: string | null };
+    }) => Promise<void>;
     onClose: () => void;
   } = $props();
 
+  type LaunchMode = "existing" | "new";
+
   let agents: AgentInfo[] = $state([]);
   let selectedAgent: string = $state("");
-  // Intentionally capture the initial value - the branch field is editable by the user
+  let mode: LaunchMode = $state("existing");
+
+  // Intentionally capture the initial values - fields are editable by the user
   let branch: string = $state((() => selectedBranch)());
+  let baseBranch: string = $state((() => selectedBranch)());
+  let newBranch: string = $state("");
+
   let loading: boolean = $state(true);
   let launching: boolean = $state(false);
+  let errorMessage: string | null = $state(null);
 
   $effect(() => {
     detectAgents();
   });
+
+  function toErrorMessage(err: unknown): string {
+    if (typeof err === "string") return err;
+    if (err && typeof err === "object" && "message" in err) {
+      const msg = (err as { message?: unknown }).message;
+      if (typeof msg === "string") return msg;
+    }
+    return String(err);
+  }
 
   async function detectAgents() {
     loading = true;
@@ -37,9 +58,29 @@
   }
 
   async function handleLaunch() {
-    if (!selectedAgent || !branch) return;
+    errorMessage = null;
+    if (!selectedAgent) return;
     launching = true;
-    onLaunch(selectedAgent, branch);
+    try {
+      if (mode === "existing") {
+        if (!branch.trim()) return;
+        await onLaunch({ agentId: selectedAgent, branch: branch.trim() });
+        onClose();
+        return;
+      }
+
+      if (!baseBranch.trim() || !newBranch.trim()) return;
+      await onLaunch({
+        agentId: selectedAgent,
+        branch: newBranch.trim(),
+        createBranch: { name: newBranch.trim(), base: baseBranch.trim() },
+      });
+      onClose();
+    } catch (err) {
+      errorMessage = `Failed to launch agent: ${toErrorMessage(err)}`;
+    } finally {
+      launching = false;
+    }
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -64,6 +105,10 @@
       <div class="loading">Detecting agents...</div>
     {:else}
       <div class="dialog-body">
+        {#if errorMessage}
+          <div class="error">{errorMessage}</div>
+        {/if}
+
         <div class="field">
           <label for="agent-select">Agent</label>
           <div class="agent-cards">
@@ -88,6 +133,27 @@
         </div>
 
         <div class="field">
+          <span class="field-label" id="launch-mode-label">Mode</span>
+          <div class="mode-toggle" role="group" aria-labelledby="launch-mode-label">
+            <button
+              class="mode-btn"
+              class:active={mode === "existing"}
+              onclick={() => (mode = "existing")}
+            >
+              Existing Branch
+            </button>
+            <button
+              class="mode-btn"
+              class:active={mode === "new"}
+              onclick={() => (mode = "new")}
+            >
+              New Branch
+            </button>
+          </div>
+        </div>
+
+        {#if mode === "existing"}
+        <div class="field">
           <label for="branch-input">Branch</label>
           <input
             id="branch-input"
@@ -96,13 +162,37 @@
             placeholder="Enter branch name..."
           />
         </div>
+        {:else}
+          <div class="field">
+            <label for="base-branch-input">Base Branch</label>
+            <input
+              id="base-branch-input"
+              type="text"
+              bind:value={baseBranch}
+              placeholder="e.g., develop or origin/develop"
+            />
+          </div>
+          <div class="field">
+            <label for="new-branch-input">New Branch Name</label>
+            <input
+              id="new-branch-input"
+              type="text"
+              bind:value={newBranch}
+              placeholder="e.g., feature/my-change"
+            />
+          </div>
+        {/if}
       </div>
 
       <div class="dialog-footer">
         <button class="btn btn-cancel" onclick={onClose}>Cancel</button>
         <button
           class="btn btn-launch"
-          disabled={!selectedAgent || !branch || launching}
+          disabled={
+            launching ||
+            !selectedAgent ||
+            (mode === "existing" ? !branch.trim() : !baseBranch.trim() || !newBranch.trim())
+          }
           onclick={handleLaunch}
         >
           {launching ? "Launching..." : "Launch"}
@@ -176,6 +266,16 @@
     gap: 16px;
   }
 
+  .error {
+    padding: 10px 12px;
+    border: 1px solid rgba(255, 0, 0, 0.35);
+    background: rgba(255, 0, 0, 0.08);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: 12px;
+    line-height: 1.4;
+  }
+
   .field {
     display: flex;
     flex-direction: column;
@@ -183,6 +283,14 @@
   }
 
   .field label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .field-label {
     font-size: 12px;
     font-weight: 500;
     color: var(--text-secondary);
@@ -254,6 +362,34 @@
 
   .field input:focus {
     border-color: var(--accent);
+  }
+
+  .mode-toggle {
+    display: flex;
+    gap: 6px;
+  }
+
+  .mode-btn {
+    flex: 1;
+    padding: 8px 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+    transition: border-color 0.15s, background 0.15s;
+  }
+
+  .mode-btn:hover {
+    border-color: var(--accent);
+  }
+
+  .mode-btn.active {
+    border-color: var(--accent);
+    background: var(--bg-surface);
   }
 
   .dialog-footer {

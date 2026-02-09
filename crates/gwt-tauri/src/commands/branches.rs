@@ -2,7 +2,9 @@
 
 use crate::commands::project::resolve_repo_path_for_project_root;
 use gwt_core::git::{is_bare_repository, Branch};
+use gwt_core::worktree::WorktreeManager;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::path::Path;
 
 /// Serializable branch info for the frontend
@@ -45,6 +47,33 @@ pub fn list_branches(project_path: String) -> Result<Vec<BranchInfo>, String> {
     let repo_path = resolve_repo_path_for_project_root(project_root)?;
     let branches = Branch::list(&repo_path).map_err(|e| e.to_string())?;
     Ok(branches.into_iter().map(BranchInfo::from).collect())
+}
+
+/// List branches that currently have a local worktree (gwt "Local" view)
+#[tauri::command]
+pub fn list_worktree_branches(project_path: String) -> Result<Vec<BranchInfo>, String> {
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+
+    let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
+    let worktrees = manager.list_basic().map_err(|e| e.to_string())?;
+
+    let names: HashSet<String> = worktrees
+        .into_iter()
+        .filter(|wt| !wt.is_main && wt.is_active())
+        .filter_map(|wt| wt.branch)
+        .collect();
+
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let branches = Branch::list(&repo_path).map_err(|e| e.to_string())?;
+    Ok(branches
+        .into_iter()
+        .filter(|b| names.contains(&b.name))
+        .map(BranchInfo::from)
+        .collect())
 }
 
 /// List all remote branches in a repository

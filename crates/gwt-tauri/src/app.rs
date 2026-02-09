@@ -94,6 +94,7 @@ pub fn build_app(
         .invoke_handler(tauri::generate_handler![
             crate::commands::greet,
             crate::commands::branches::list_branches,
+            crate::commands::branches::list_worktree_branches,
             crate::commands::branches::list_remote_branches,
             crate::commands::branches::get_current_branch,
             crate::commands::project::open_project,

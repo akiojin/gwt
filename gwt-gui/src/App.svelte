@@ -72,31 +72,24 @@
     }
   }
 
-  async function handleAgentLaunch(agentName: string, branch: string) {
-    showAgentLaunch = false;
-    let paneId = "";
-
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      paneId = await invoke<string>("launch_agent", {
-        request: { agentId: agentName, branch },
-      });
-    } catch (err) {
-      console.error("Failed to launch terminal:", err);
-      appError = `Failed to launch agent: ${toErrorMessage(err)}`;
-      return;
-    }
+  async function handleAgentLaunch(request: {
+    agentId: string;
+    branch: string;
+    createBranch?: { name: string; base?: string | null };
+  }) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const paneId = await invoke<string>("launch_agent", { request });
 
     const newTab: Tab = {
       id: `agent-${paneId}`,
       label:
-        agentName === "claude"
+        request.agentId === "claude"
           ? "Claude Code"
-          : agentName === "codex"
+          : request.agentId === "codex"
             ? "Codex"
-            : agentName === "gemini"
+            : request.agentId === "gemini"
               ? "Gemini"
-              : agentName,
+              : request.agentId,
       type: "agent",
       paneId,
     };

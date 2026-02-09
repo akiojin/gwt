@@ -32,6 +32,15 @@ pub struct TerminalInfo {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CreateBranchRequest {
+    /// New branch name (e.g., "feature/foo")
+    pub name: String,
+    /// Optional base branch/ref (e.g., "develop", "origin/develop")
+    pub base: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LaunchAgentRequest {
     /// Agent id (e.g., "claude", "codex", "gemini")
     pub agent_id: String,
@@ -39,6 +48,8 @@ pub struct LaunchAgentRequest {
     pub branch: String,
     /// Optional profile name override (uses active profile when omitted)
     pub profile: Option<String>,
+    /// Optional new branch creation request (creates branch + worktree before launch)
+    pub create_branch: Option<CreateBranchRequest>,
 }
 
 fn strip_known_remote_prefix<'a>(branch: &'a str, remotes: &[Remote]) -> &'a str {
@@ -69,6 +80,18 @@ fn resolve_worktree_path(repo_path: &std::path::Path, branch_ref: &str) -> Resul
 
     let wt = manager
         .create_for_branch(branch_ref)
+        .map_err(|e| e.to_string())?;
+    Ok(wt.path)
+}
+
+fn create_new_worktree_path(
+    repo_path: &std::path::Path,
+    branch_name: &str,
+    base_branch: Option<&str>,
+) -> Result<PathBuf, String> {
+    let manager = WorktreeManager::new(repo_path).map_err(|e| e.to_string())?;
+    let wt = manager
+        .create_new_branch(branch_name, base_branch)
         .map_err(|e| e.to_string())?;
     Ok(wt.path)
 }
@@ -193,15 +216,38 @@ pub fn launch_agent(
         }
     };
 
-    let branch_ref = request.branch.trim();
-    if branch_ref.is_empty() {
-        return Err("Branch is required".to_string());
+    let agent_id = request.agent_id.trim();
+    if agent_id.is_empty() {
+        return Err("Agent is required".to_string());
     }
-
-    let (command, label) = agent_command_and_label(request.agent_id.trim())?;
+    let (command, label) = agent_command_and_label(agent_id)?;
 
     let repo_path = resolve_repo_path_for_project_root(&project_root)?;
-    let working_dir = resolve_worktree_path(&repo_path, branch_ref)?;
+
+    let (working_dir, branch_name) = if let Some(create) = request.create_branch.as_ref() {
+        let new_branch = create.name.trim();
+        if new_branch.is_empty() {
+            return Err("New branch name is required".to_string());
+        }
+        let base = create
+            .base
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty());
+
+        (
+            create_new_worktree_path(&repo_path, new_branch, base)?,
+            new_branch.to_string(),
+        )
+    } else {
+        let branch_ref = request.branch.trim();
+        if branch_ref.is_empty() {
+            return Err("Branch is required".to_string());
+        }
+        let remotes = Remote::list(&repo_path).unwrap_or_default();
+        let name = strip_known_remote_prefix(branch_ref, &remotes).to_string();
+        (resolve_worktree_path(&repo_path, branch_ref)?, name)
+    };
 
     let mut env_vars = load_profile_env(request.profile.as_deref());
     // Useful for debugging and for agents that want to introspect gwt context.
@@ -214,11 +260,7 @@ pub fn launch_agent(
         command: command.to_string(),
         args: vec![],
         working_dir,
-        branch_name: strip_known_remote_prefix(
-            branch_ref,
-            &Remote::list(&repo_path).unwrap_or_default(),
-        )
-        .to_string(),
+        branch_name,
         agent_name: label.to_string(),
         agent_color: AgentColor::Green,
         env_vars,

@@ -42,7 +42,9 @@
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       if (activeFilter === "Local") {
-        branches = await invoke<BranchInfo[]>("list_branches", { projectPath });
+        branches = await invoke<BranchInfo[]>("list_worktree_branches", {
+          projectPath,
+        });
       } else if (activeFilter === "Remote") {
         branches = await invoke<BranchInfo[]>("list_remote_branches", {
           projectPath,
@@ -50,7 +52,7 @@
       } else {
         // All: merge local + remote
         const [local, remote] = await Promise.all([
-          invoke<BranchInfo[]>("list_branches", { projectPath }),
+          invoke<BranchInfo[]>("list_worktree_branches", { projectPath }),
           invoke<BranchInfo[]>("list_remote_branches", { projectPath }),
         ]);
         // Deduplicate by name
