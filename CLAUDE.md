@@ -134,6 +134,19 @@
 | GitHub Release | `gh release list --repo akiojin/gwt --limit 1` |
 
 ## 使用中の技術
+- Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, reqwest (blocking), serde_json, chrono (SPEC-4b893dae)
+- ファイルシステム（セッションファイル読み取り）、メモリキャッシュ (SPEC-4b893dae)
+- Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, tracing, tracing-appender, serde_json, chrono, arboard (SPEC-e66acf66)
+- ファイル（gwt.jsonl.YYYY-MM-DD） (SPEC-e66acf66)
+- Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, reqwest (blocking), serde_json, chrono, tracing (SPEC-ba3f610c)
+- ファイルシステム (`~/.gwt/sessions/` - JSON形式) (SPEC-ba3f610c)
+- Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, reqwest (blocking), serde_json, chrono, tracing, tracing-appender, uuid (SPEC-ba3f610c)
+- ファイルシステム（`~/.gwt/sessions/` JSON形式、`specs/SPEC-XXXXXXXX/` Spec Kit成果物） (SPEC-ba3f610c)
+- Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, serde, serde_json, chrono, directories (SPEC-71f2742d)
+- ファイル（~/.gwt/tools.json, .gwt/tools.json） (SPEC-71f2742d)
+- ファイルシステム（.gwt/設定、gitメタデータ） (SPEC-a70a1ece)
+- メモリキャッシュ（GitViewCache） (SPEC-1ea18899)
+- N/A（メモリ内状態のみ） (SPEC-1ad9c07d)
 
 - Rust 2021 Edition (stable) + Tauri v2, portable-pty, serde, tokio
 - Svelte 5 + TypeScript + Vite 6
@@ -155,3 +168,8 @@
 │   └── package.json
 └── package.json        # Tauri開発用スクリプト
 ```
+
+## 最近の変更
+- SPEC-1ad9c07d: 追加: Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, reqwest (blocking), serde_json, chrono, tracing
+- SPEC-ba3f610c: 追加: Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, reqwest (blocking), serde_json, chrono, tracing, tracing-appender, uuid
+- SPEC-ba3f610c: 追加: Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, reqwest (blocking), serde_json, chrono, tracing

@@ -1,14 +1,58 @@
 {
-  "name": "gwt",
-  "private": true,
-  "version": "6.28.1",
+  "name": "@akiojin/gwt",
+  "version": "6.30.3",
+  "description": "Interactive Git worktree manager with Coding Agent selection (Claude Code / Codex CLI / Gemini CLI)",
+  "bin": {
+    "gwt": "bin/gwt.js"
+  },
+  "type": "module",
   "scripts": {
     "dev": "cargo tauri dev",
     "build": "cargo tauri build",
-    "prepare": "test -n \"$CI\" || bunx husky install"
+    "postinstall": "node scripts/postinstall.js",
+    "prepare": "test -n \"$CI\" || bunx husky install",
+    "lint:husky": "bash scripts/verify-husky-hooks.sh"
   },
+  "keywords": [
+    "git",
+    "worktree",
+    "claude",
+    "claude code",
+    "codex",
+    "gemini",
+    "cli",
+    "interactive",
+    "branch",
+    "development",
+    "rust"
+  ],
+  "author": "akiojin",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/akiojin/gwt.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "bin/",
+    "scripts/"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
   "devDependencies": {
-    "@commitlint/cli": "^20.3.1",
-    "@commitlint/config-conventional": "^20.3.1"
+    "@commitlint/cli": "^20.4.1",
+    "@commitlint/config-conventional": "^20.4.1"
   }
 }

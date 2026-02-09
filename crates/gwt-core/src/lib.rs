@@ -14,7 +14,9 @@ pub mod git;
 pub mod lock;
 pub mod logging;
 pub mod migration;
+pub mod speckit;
 pub mod terminal;
+pub mod tmux;
 pub mod worktree;
 
 pub use error::{GwtError, Result};

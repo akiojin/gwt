@@ -1,7 +1,7 @@
 <!-- markdownlint-disable MD013 -->
 # 仕様一覧
 
-**最終更新**: 2026-02-09
+**最終更新**: 2026-02-10
 
 このファイルは `.specify/scripts/bash/update-specs-index.sh` により自動生成されました。
 
@@ -20,6 +20,7 @@
 | [SPEC-488af8e2](SPEC-488af8e2/spec.md) | 機能仕様: gwt GUI Docker Compose 統合（起動ウィザード + Quick Start） | 2026-02-09 |
 | [SPEC-86bb4e7c](SPEC-86bb4e7c/spec.md) | 機能仕様: gwt GUI ブランチフィルター修正・エージェント起動ウィザード・Profiles設定 | 2026-02-09 |
 | [SPEC-90217e33](SPEC-90217e33/spec.md) | 機能仕様: gwt GUI コーディングエージェント機能のTUI完全移行（Quick Start / Mode / Skip / Reasoning / Version） | 2026-02-09 |
+| [SPEC-1ad9c07d](SPEC-1ad9c07d/spec.md) | 機能仕様: エージェント起動ウィザード統合 | 2026-02-08 |
 | [SPEC-d6210238](SPEC-d6210238/spec.md) | 機能仕様: TUI→Tauri GUI完全移行 Phase 1: 基盤構築 | 2026-02-08 |
 | [SPEC-dfb1611a](SPEC-dfb1611a/spec.md) | 機能仕様: gwt GUI プロジェクト管理 Phase 2 追加機能 | 2026-02-08 |
 | [SPEC-92053c0d](SPEC-92053c0d/spec.md) | 機能仕様: commitlint を npm ci 無しで実行可能にする | 2026-02-03 |
