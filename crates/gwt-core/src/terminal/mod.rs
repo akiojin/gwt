@@ -3,6 +3,7 @@ pub mod ipc;
 pub mod manager;
 pub mod pane;
 pub mod pty;
+pub mod runner;
 pub mod scrollback;
 
 use std::collections::HashMap;
