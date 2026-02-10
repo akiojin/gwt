@@ -27,6 +27,7 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
         crate::menu::MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS => Some("terminal-diagnostics"),
         crate::menu::MENU_ID_SETTINGS_PREFERENCES => Some("open-settings"),
         crate::menu::MENU_ID_HELP_ABOUT => Some("about"),
+        crate::menu::MENU_ID_HELP_CHECK_UPDATES => Some("check-updates"),
         _ => None,
     }
 }
@@ -165,6 +166,16 @@ pub fn build_app(
                         let _ = os_env_cell.set(result.env);
                     });
                 }
+
+                // Background task: check app update (best-effort, TTL cached).
+                {
+                    let mgr = _app.state::<AppState>().update_manager.clone();
+                    let app_handle_clone = _app.handle().clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        let state = mgr.check(false);
+                        let _ = app_handle_clone.emit("app-update-state", &state);
+                    });
+                }
             }
 
             Ok(())
@@ -300,6 +311,8 @@ pub fn build_app(
             crate::commands::git_view::get_working_tree_status,
             crate::commands::git_view::get_stash_list,
             crate::commands::git_view::get_base_branch_candidates,
+            crate::commands::update::check_app_update,
+            crate::commands::update::apply_app_update,
         ])
 }
 

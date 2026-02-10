@@ -16,6 +16,7 @@ pub mod logging;
 pub mod migration;
 pub mod terminal;
 pub mod tmux;
+pub mod update;
 pub mod worktree;
 
 pub use error::{GwtError, Result};

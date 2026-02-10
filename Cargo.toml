@@ -22,6 +22,9 @@ gwt-core = { path = "crates/gwt-core" }
 # Error handling
 thiserror = "2"
 
+# Semver
+semver = "1"
+
 # Git operations
 gix = { version = "0.78", default-features = false, features = [
     "blocking-network-client",

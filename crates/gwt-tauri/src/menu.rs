@@ -21,6 +21,7 @@ pub const MENU_ID_GIT_CLEANUP_WORKTREES: &str = "git-cleanup-worktrees";
 
 pub const MENU_ID_SETTINGS_PREFERENCES: &str = "settings-preferences";
 pub const MENU_ID_HELP_ABOUT: &str = "help-about";
+pub const MENU_ID_HELP_CHECK_UPDATES: &str = "help-check-updates";
 
 pub const WINDOW_FOCUS_MENU_PREFIX: &str = "window-focus::";
 
@@ -127,6 +128,13 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
 
     let window = build_window_submenu(app, state)?;
     let help_about = MenuItem::with_id(app, MENU_ID_HELP_ABOUT, "About gwt", true, None::<&str>)?;
+    let help_check_updates = MenuItem::with_id(
+        app,
+        MENU_ID_HELP_CHECK_UPDATES,
+        "Check for Updates...",
+        true,
+        None::<&str>,
+    )?;
     let settings_prefs = MenuItem::with_id(
         app,
         MENU_ID_SETTINGS_PREFERENCES,
@@ -136,6 +144,7 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
     )?;
     let gwt = SubmenuBuilder::new(app, app_menu_label)
         .item(&help_about)
+        .item(&help_check_updates)
         .separator()
         .item(&settings_prefs)
         .build()?;
