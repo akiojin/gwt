@@ -26,6 +26,16 @@ export interface TerminalInfo {
   status: string;
 }
 
+export interface TerminalAnsiProbe {
+  pane_id: string;
+  bytes_scanned: number;
+  esc_count: number;
+  sgr_count: number;
+  color_sgr_count: number;
+  has_256_color: boolean;
+  has_true_color: boolean;
+}
+
 export interface AgentInfo {
   id: "claude" | "codex" | "gemini" | (string & {});
   name: string;
