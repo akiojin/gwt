@@ -1140,6 +1140,46 @@ mod tests {
         assert_eq!(probe.sgr_count, 2);
         assert_eq!(probe.color_sgr_count, 0);
     }
+
+    #[test]
+    fn probe_terminal_ansi_flushes_scrollback_before_reading() {
+        let state = AppState::new();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let pane_id = format!("pane-test-{nonce}");
+
+        let pane =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: pane_id.clone(),
+                command: "/usr/bin/true".to_string(),
+                args: vec![],
+                working_dir: std::env::temp_dir(),
+                branch_name: "test-branch".to_string(),
+                agent_name: "test-agent".to_string(),
+                agent_color: AgentColor::Green,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+            })
+            .expect("failed to create test pane");
+
+        {
+            let mut mgr = state.pane_manager.lock().unwrap();
+            mgr.add_pane(pane).expect("failed to add test pane");
+            let pane = mgr.pane_mut_by_id(&pane_id).expect("missing test pane");
+            pane.process_bytes(b"hi \x1b[31mred\x1b[0m\n")
+                .expect("failed to write test bytes");
+        }
+
+        let probe = probe_terminal_ansi_from_state(&state, &pane_id).expect("probe should succeed");
+        assert!(probe.bytes_scanned > 0);
+        assert!(probe.sgr_count >= 2);
+        assert!(probe.color_sgr_count >= 1);
+
+        let _ = ScrollbackFile::cleanup(&pane_id);
+    }
 }
 
 /// Launch an agent with gwt semantics (worktree + profiles)
@@ -1913,10 +1953,31 @@ fn build_terminal_ansi_probe(pane_id: &str, bytes: &[u8]) -> TerminalAnsiProbe {
     }
 }
 
+fn probe_terminal_ansi_from_state(
+    state: &AppState,
+    pane_id: &str,
+) -> Result<TerminalAnsiProbe, String> {
+    // Best-effort: flush in-memory scrollback so diagnostics does not read stale data.
+    {
+        let mut mgr = state
+            .pane_manager
+            .lock()
+            .map_err(|e| format!("Failed to lock state: {}", e))?;
+        if let Some(pane) = mgr.pane_mut_by_id(pane_id) {
+            pane.flush_scrollback().map_err(|e| e.to_string())?;
+        }
+    }
+
+    let path = ScrollbackFile::scrollback_path_for_pane(pane_id).map_err(|e| e.to_string())?;
+    let bytes = ScrollbackFile::read_tail_bytes_at(&path, 256 * 1024).map_err(|e| e.to_string())?;
+    Ok(build_terminal_ansi_probe(pane_id, &bytes))
+}
+
 /// Probe a pane's scrollback tail for ANSI/SGR/color usage (diagnostics).
 #[tauri::command]
-pub fn probe_terminal_ansi(pane_id: String) -> Result<TerminalAnsiProbe, String> {
-    let path = ScrollbackFile::scrollback_path_for_pane(&pane_id).map_err(|e| e.to_string())?;
-    let bytes = ScrollbackFile::read_tail_bytes_at(&path, 256 * 1024).map_err(|e| e.to_string())?;
-    Ok(build_terminal_ansi_probe(&pane_id, &bytes))
+pub fn probe_terminal_ansi(
+    state: State<AppState>,
+    pane_id: String,
+) -> Result<TerminalAnsiProbe, String> {
+    probe_terminal_ansi_from_state(&state, &pane_id)
 }

@@ -19,11 +19,33 @@ pub struct ScrollbackFile {
 }
 
 impl ScrollbackFile {
+    fn validate_pane_id(pane_id: &str) -> Result<(), TerminalError> {
+        if pane_id.is_empty() {
+            return Err(TerminalError::ScrollbackError {
+                details: "pane_id must not be empty".to_string(),
+            });
+        }
+
+        // Restrict to a safe filename segment to avoid path traversal.
+        // (All built-in pane ids already match this shape.)
+        let ok = pane_id
+            .bytes()
+            .all(|b| matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_'));
+        if !ok {
+            return Err(TerminalError::ScrollbackError {
+                details: "invalid pane_id".to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
     /// Creates a new scrollback file for the given pane ID.
     ///
     /// The file is stored at `~/.gwt/terminals/{pane_id}.log`.
     /// Creates the directory if it does not exist.
     pub fn new(pane_id: &str) -> Result<Self, TerminalError> {
+        Self::validate_pane_id(pane_id)?;
         let home = dirs::home_dir().ok_or_else(|| TerminalError::ScrollbackError {
             details: "failed to determine home directory".to_string(),
         })?;
@@ -110,6 +132,7 @@ impl ScrollbackFile {
 
     /// Removes the log file for the given pane ID.
     pub fn cleanup(pane_id: &str) -> Result<(), TerminalError> {
+        Self::validate_pane_id(pane_id)?;
         let home = dirs::home_dir().ok_or_else(|| TerminalError::ScrollbackError {
             details: "failed to determine home directory".to_string(),
         })?;
@@ -127,6 +150,7 @@ impl ScrollbackFile {
 
     /// Returns the path to the scrollback file for a given pane ID.
     pub fn scrollback_path_for_pane(pane_id: &str) -> Result<PathBuf, TerminalError> {
+        Self::validate_pane_id(pane_id)?;
         let home = dirs::home_dir().ok_or_else(|| TerminalError::ScrollbackError {
             details: "failed to determine home directory".to_string(),
         })?;
@@ -164,10 +188,11 @@ impl ScrollbackFile {
                 details: format!("failed to stat scrollback file: {e}"),
             })?;
 
-        let start = if max_bytes == 0 || len as usize <= max_bytes {
+        let max_bytes_u64 = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+        let start = if max_bytes == 0 || len <= max_bytes_u64 {
             0
         } else {
-            len - max_bytes as u64
+            len - max_bytes_u64
         };
 
         file.seek(SeekFrom::Start(start))
@@ -435,6 +460,15 @@ mod tests {
     fn test_scrollback_path_for_pane() {
         let path = ScrollbackFile::scrollback_path_for_pane("pane-abc123").unwrap();
         assert!(path.ends_with(".gwt/terminals/pane-abc123.log"));
+    }
+
+    #[test]
+    fn test_scrollback_path_for_pane_rejects_invalid_pane_id() {
+        assert!(ScrollbackFile::scrollback_path_for_pane("").is_err());
+        assert!(ScrollbackFile::scrollback_path_for_pane("../evil").is_err());
+        assert!(ScrollbackFile::scrollback_path_for_pane("pane/evil").is_err());
+        assert!(ScrollbackFile::scrollback_path_for_pane("pane\\evil").is_err());
+        assert!(ScrollbackFile::scrollback_path_for_pane("pane:evil").is_err());
     }
 
     #[test]

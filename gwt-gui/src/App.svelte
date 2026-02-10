@@ -520,6 +520,10 @@
     z-index: 1000;
   }
 
+  .mono {
+    font-family: monospace;
+  }
+
   .about-dialog {
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
