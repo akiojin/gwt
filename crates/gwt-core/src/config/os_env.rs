@@ -264,7 +264,7 @@ mod tests {
         let map = parse_env_null_separated(input);
         assert_eq!(map.get("PATH").unwrap(), "/usr/bin");
         assert_eq!(map.get("HOME").unwrap(), "/home/user");
-        assert!(map.get("Welcome to zsh\nPATH").is_none());
+        assert!(!map.contains_key("Welcome to zsh\nPATH"));
     }
 
     #[test]
