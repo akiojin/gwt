@@ -506,6 +506,26 @@ mod tests {
         assert!(r2.is_ok()); // cleaned up
     }
 
+    #[test]
+    fn force_deletes_unsafe_worktree() {
+        let temp = tempfile::TempDir::new().unwrap();
+        create_test_repo(temp.path());
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+        let agents = HashSet::new();
+
+        gwt_core::git::Branch::create(temp.path(), "feature/wip", "HEAD").unwrap();
+        let wt = manager.create_for_branch("feature/wip").unwrap();
+
+        // Make the worktree dirty (uncommitted changes)
+        std::fs::write(wt.path.join("dirty.txt"), "unsaved work").unwrap();
+
+        // force=true should succeed even with uncommitted changes
+        let result =
+            cleanup_single_branch(&manager, temp.path(), "feature/wip", true, &agents);
+        assert!(result.is_ok());
+        assert!(!gwt_core::git::Branch::exists(temp.path(), "feature/wip").unwrap());
+    }
+
     // -- Test helpers --
 
     fn create_test_repo(path: &std::path::Path) {

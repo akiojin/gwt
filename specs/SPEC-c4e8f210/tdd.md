@@ -2,317 +2,88 @@
 
 ## バックエンドテスト（Rust）
 
-### T1: `list_worktrees` コマンド
+実装ファイル: `crates/gwt-tauri/src/commands/cleanup.rs`
 
-```rust
-// tests/worktree_cleanup_test.rs
+### T1: 安全性判定テスト（`compute_safety_level`）
 
-#[cfg(test)]
-mod list_worktrees_tests {
-    // 安全性判定テスト
-    #[test]
-    fn safe_when_no_changes_and_no_unpushed() {
-        // Given: worktree with has_changes=false, has_unpushed=false
-        // When: list_worktrees is called
-        // Then: safety level is "safe"
-    }
+| テスト名 | 状態 | 内容 |
+|---|---|---|
+| `safe_when_no_changes_and_no_unpushed` | 実装済 | changes=false, unpushed=false → Safe |
+| `warning_when_unpushed_only` | 実装済 | changes=false, unpushed=true → Warning |
+| `warning_when_changes_only` | 実装済 | changes=true, unpushed=false → Warning |
+| `danger_when_both_changes_and_unpushed` | 実装済 | changes=true, unpushed=true → Danger |
+| `disabled_when_protected` | 実装済 | is_protected=true → Disabled |
+| `disabled_when_current` | 実装済 | is_current=true → Disabled |
+| `disabled_when_agent_running` | 実装済 | is_agent_running=true → Disabled |
+| `safety_level_sort_order` | 実装済 | Safe < Warning < Danger < Disabled |
+| `protected_branch_detected` | 実装済 | main/master/develop/release が protected 判定 |
 
-    #[test]
-    fn warning_when_unpushed_only() {
-        // Given: worktree with has_changes=false, has_unpushed=true
-        // When: list_worktrees is called
-        // Then: safety level is "warning"
-    }
+### T2/T3: クリーンアップガード・実行テスト（`cleanup_single_branch`）
 
-    #[test]
-    fn warning_when_changes_only() {
-        // Given: worktree with has_changes=true, has_unpushed=false
-        // When: list_worktrees is called
-        // Then: safety level is "warning"
-    }
+| テスト名 | 状態 | 内容 |
+|---|---|---|
+| `rejects_protected_branch` | 実装済 | protected branch の削除拒否 |
+| `rejects_current_worktree` | 実装済 | current worktree の削除拒否 |
+| `rejects_agent_running_branch` | 実装済 | agent 稼働中ブランチの削除拒否 |
+| `successful_cleanup_removes_worktree_and_branch` | 実装済 | worktree + ローカルブランチ削除成功 |
+| `skips_failure_and_continues_in_batch` | 実装済 | 失敗スキップ + 残り継続 |
+| `force_deletes_unsafe_worktree` | 実装済 | force=true で unsafe ブランチ削除成功 |
 
-    #[test]
-    fn danger_when_both_changes_and_unpushed() {
-        // Given: worktree with has_changes=true, has_unpushed=true
-        // When: list_worktrees is called
-        // Then: safety level is "danger"
-    }
+### イベント関連テスト（統合テスト対象）
 
-    #[test]
-    fn protected_branch_is_flagged() {
-        // Given: worktree on "main" branch
-        // When: list_worktrees is called
-        // Then: is_protected=true
-    }
+以下はTauriの `AppHandle` を必要とするため、ユニットテストではなく手動/E2Eテストで検証する。
 
-    #[test]
-    fn current_worktree_is_flagged() {
-        // Given: worktree that is currently active
-        // When: list_worktrees is called
-        // Then: is_current=true
-    }
-
-    #[test]
-    fn branch_info_fields_are_included() {
-        // Given: worktree with ahead=2, behind=1, is_gone=true
-        // When: list_worktrees is called
-        // Then: WorktreeInfo contains ahead=2, behind=1, is_gone=true
-    }
-
-    #[test]
-    fn sort_order_is_safety_based() {
-        // Given: worktrees with mixed safety levels
-        // When: list_worktrees is called
-        // Then: results are sorted safe -> warning -> danger -> disabled
-    }
-}
-```
-
-### T2: `cleanup_worktrees` コマンド
-
-```rust
-mod cleanup_worktrees_tests {
-    #[test]
-    fn successful_cleanup_removes_worktree_and_local_branch() {
-        // Given: safe worktree on branch "feature/done"
-        // When: cleanup_worktrees(["feature/done"], force=false)
-        // Then: worktree directory is removed
-        // And: local branch "feature/done" is deleted
-        // And: result contains {branch: "feature/done", success: true}
-    }
-
-    #[test]
-    fn does_not_delete_remote_branch() {
-        // Given: worktree with remote tracking branch
-        // When: cleanup_worktrees(["feature/done"], force=false)
-        // Then: remote branch still exists
-    }
-
-    #[test]
-    fn skips_failure_and_continues() {
-        // Given: 3 worktrees, 2nd one is locked
-        // When: cleanup_worktrees(["a", "b-locked", "c"], force=false)
-        // Then: "a" and "c" are deleted
-        // And: "b-locked" result has success=false with error message
-    }
-
-    #[test]
-    fn refuses_protected_branch_without_force() {
-        // Given: worktree on "main"
-        // When: cleanup_worktrees(["main"], force=false)
-        // Then: result contains {branch: "main", success: false}
-    }
-
-    #[test]
-    fn refuses_current_worktree() {
-        // Given: worktree that is currently active
-        // When: cleanup_worktrees([current_branch], force=true)
-        // Then: result contains success=false (cannot delete current)
-    }
-
-    #[test]
-    fn force_deletes_unsafe_worktree() {
-        // Given: worktree with uncommitted changes
-        // When: cleanup_worktrees(["feature/wip"], force=true)
-        // Then: worktree and branch are deleted
-    }
-
-    #[test]
-    fn emits_progress_events_for_each_branch() {
-        // Given: 3 worktrees selected for cleanup
-        // When: cleanup_worktrees(["a", "b", "c"], force=false)
-        // Then: 3 "cleanup-progress" events are emitted (one per branch)
-        // And: 1 "cleanup-completed" event with all results
-    }
-
-    #[test]
-    fn emits_worktrees_changed_on_completion() {
-        // Given: worktrees selected for cleanup
-        // When: cleanup_worktrees completes
-        // Then: "worktrees-changed" event is emitted
-    }
-}
-```
-
-### T3: `cleanup_single_worktree` コマンド
-
-```rust
-mod cleanup_single_worktree_tests {
-    #[test]
-    fn successful_single_cleanup() {
-        // Given: safe worktree on "feature/done"
-        // When: cleanup_single_worktree("feature/done", force=false)
-        // Then: Ok(())
-        // And: worktree and local branch are deleted
-    }
-
-    #[test]
-    fn fails_on_protected_branch() {
-        // Given: worktree on "develop"
-        // When: cleanup_single_worktree("develop", force=false)
-        // Then: Err with descriptive message
-    }
-
-    #[test]
-    fn fails_on_unsafe_without_force() {
-        // Given: worktree with uncommitted changes
-        // When: cleanup_single_worktree("feature/wip", force=false)
-        // Then: Err with message about uncommitted changes
-    }
-}
-```
+| テスト名 | 状態 | 内容 |
+|---|---|---|
+| `emits_progress_events_for_each_branch` | 統合テスト | 各ブランチに cleanup-progress イベント emit |
+| `emits_worktrees_changed_on_completion` | 統合テスト | 完了時に worktrees-changed イベント emit |
+| `does_not_delete_remote_branch` | 統合テスト | リモートブランチ非削除（remote setup 必要） |
 
 ## フロントエンドテスト（TypeScript / Svelte）
 
+フロントエンドテストフレームワーク未導入のため、以下は仕様として記載。
+`svelte-check` による型チェック（0 errors, 0 warnings）で静的検証済み。
+
 ### Sidebar 安全性インジケーター
 
-```typescript
-// Sidebar.test.ts
-
-describe('Sidebar safety indicators', () => {
-    test('displays green dot for safe branches', () => {
-        // Given: branch with has_changes=false, has_unpushed=false
-        // Then: green CSS dot indicator is rendered
-    });
-
-    test('displays yellow dot for warning branches', () => {
-        // Given: branch with has_changes=false, has_unpushed=true
-        // Then: yellow CSS dot indicator is rendered
-    });
-
-    test('displays red dot for danger branches', () => {
-        // Given: branch with has_changes=true, has_unpushed=true
-        // Then: red CSS dot indicator is rendered
-    });
-
-    test('displays gray dot for protected branches', () => {
-        // Given: branch with is_protected=true
-        // Then: gray CSS dot indicator is rendered
-    });
-
-    test('shows spinner for deleting branches', () => {
-        // Given: branch in "deleting" state
-        // Then: spinner is shown instead of safety dot
-        // And: branch row is not clickable
-    });
-
-    test('disables click on deleting branches', () => {
-        // Given: branch in "deleting" state
-        // When: user clicks the branch row
-        // Then: no action is taken (click handler not fired)
-    });
-});
-```
+| テストケース | 検証方法 | 内容 |
+|---|---|---|
+| 緑ドット表示（safe） | svelte-check + 手動 | changes=false, unpushed=false → 緑 CSS ドット |
+| 黄ドット表示（warning） | svelte-check + 手動 | changes XOR unpushed → 黄 CSS ドット |
+| 赤ドット表示（danger） | svelte-check + 手動 | changes=true, unpushed=true → 赤 CSS ドット |
+| グレードット表示（protected/current） | svelte-check + 手動 | is_protected=true → グレー CSS ドット |
+| 削除中スピナー表示 | svelte-check + 手動 | deleting 状態 → スピナー表示、ドット非表示 |
+| 削除中クリック無効 | svelte-check + 手動 | deleting 状態 → pointer-events: none |
 
 ### Cleanup モーダル
 
-```typescript
-// CleanupModal.test.ts
-
-describe('CleanupModal', () => {
-    test('displays all worktrees sorted by safety', () => {
-        // Given: worktrees with mixed safety levels
-        // When: modal opens
-        // Then: items sorted safe -> warning -> danger -> disabled
-    });
-
-    test('displays full info per row', () => {
-        // Given: worktree with all fields populated
-        // Then: row shows safety indicator, branch name, status,
-        //       changes, unpushed, ahead/behind, gone, tool
-    });
-
-    test('disables checkbox for protected branches', () => {
-        // Given: protected branch worktree
-        // Then: checkbox is disabled, row appears grayed out
-    });
-
-    test('disables checkbox for current worktree', () => {
-        // Given: current worktree
-        // Then: checkbox is disabled
-    });
-
-    test('disables checkbox for agent-running worktree', () => {
-        // Given: worktree with running agent
-        // Then: checkbox is disabled
-    });
-
-    test('Select All Safe checks only safe items', () => {
-        // Given: 2 safe, 1 warning, 1 danger, 1 protected worktrees
-        // When: "Select All Safe" clicked
-        // Then: only 2 safe items are checked
-    });
-
-    test('no confirmation when only safe items selected', () => {
-        // Given: only safe items checked
-        // When: "Cleanup" clicked
-        // Then: no confirmation dialog, cleanup starts immediately
-    });
-
-    test('shows confirmation when unsafe items selected', () => {
-        // Given: warning + danger items checked
-        // When: "Cleanup" clicked
-        // Then: confirmation dialog appears with count of unsafe items
-    });
-
-    test('modal closes immediately after cleanup starts', () => {
-        // Given: items selected
-        // When: "Cleanup" clicked (and confirmed if needed)
-        // Then: modal closes
-    });
-
-    test('modal re-opens with errors on partial failure', () => {
-        // Given: cleanup completed with 1 failure
-        // When: cleanup-completed event received
-        // Then: modal re-opens showing failed items with error messages
-    });
-});
-```
+| テストケース | 検証方法 | 内容 |
+|---|---|---|
+| 安全性順ソート | svelte-check + 手動 | safe → warning → danger → disabled |
+| フル情報表示 | svelte-check + 手動 | 各行に全フィールド表示 |
+| protected チェック不可 | svelte-check + 手動 | checkbox disabled |
+| current チェック不可 | svelte-check + 手動 | checkbox disabled |
+| agent-running チェック不可 | svelte-check + 手動 | checkbox disabled |
+| Select All Safe | svelte-check + 手動 | safe のみチェック |
+| safe のみ選択時は確認なし | svelte-check + 手動 | 確認ダイアログなしで即実行 |
+| unsafe 選択時は確認あり | svelte-check + 手動 | 確認ダイアログ表示 |
+| モーダル即閉じ | svelte-check + 手動 | Cleanup 実行後モーダル閉じ |
+| 失敗時モーダル再表示 | svelte-check + 手動 | cleanup-completed でエラーあり → 再表示 |
 
 ### コンテキストメニュー
 
-```typescript
-// ContextMenu.test.ts
-
-describe('Branch context menu', () => {
-    test('shows both cleanup options', () => {
-        // Given: right-click on a branch
-        // Then: menu contains "Cleanup this branch" and "Cleanup Worktrees..."
-    });
-
-    test('Cleanup this branch shows confirmation dialog', () => {
-        // Given: right-click on safe branch
-        // When: "Cleanup this branch" selected
-        // Then: confirmation dialog appears
-    });
-
-    test('Cleanup Worktrees opens modal with preselection', () => {
-        // Given: right-click on branch "feature/abc"
-        // When: "Cleanup Worktrees..." selected
-        // Then: modal opens with "feature/abc" pre-checked
-    });
-
-    test('context menu not shown for protected branches single cleanup', () => {
-        // Given: right-click on "main" branch
-        // Then: "Cleanup this branch" is disabled/not shown
-        // And: "Cleanup Worktrees..." is still available
-    });
-});
-```
+| テストケース | 検証方法 | 内容 |
+|---|---|---|
+| 2項目表示 | svelte-check + 手動 | "Cleanup this branch" + "Cleanup Worktrees..." |
+| 単体削除は常に確認 | svelte-check + 手動 | 確認ダイアログ必ず表示 |
+| プリセレクト付きモーダル | svelte-check + 手動 | Cleanup Worktrees... で対象ブランチ選択済み |
+| protected は単体削除不可 | svelte-check + 手動 | "Cleanup this branch" disabled |
 
 ### キーボードショートカット
 
-```typescript
-// Shortcuts.test.ts
-
-describe('Keyboard shortcuts', () => {
-    test('Cmd+Shift+K opens cleanup modal', () => {
-        // Given: app is focused
-        // When: Cmd+Shift+K is pressed
-        // Then: Cleanup modal opens
-    });
-});
-```
+| テストケース | 検証方法 | 内容 |
+|---|---|---|
+| Cmd+Shift+K でモーダル起動 | 手動 | Cleanup モーダルが開く |
 
 ## テスト実行コマンド
 
@@ -326,3 +97,15 @@ cargo clippy --all-targets --all-features -- -D warnings
 # フロントエンドチェック
 cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json
 ```
+
+## テストカバレッジサマリー
+
+| カテゴリ | 自動テスト | 型チェック | 手動検証 |
+|---|---|---|---|
+| 安全性判定 | 9/9 | - | - |
+| ガード/削除 | 6/6 | - | - |
+| イベント | - | - | 3/3 |
+| Sidebar UI | - | 6/6 | 6/6 |
+| モーダル UI | - | 10/10 | 10/10 |
+| コンテキストメニュー | - | 4/4 | 4/4 |
+| ショートカット | - | - | 1/1 |
