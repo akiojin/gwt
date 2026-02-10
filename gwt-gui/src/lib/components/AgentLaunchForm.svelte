@@ -1,5 +1,6 @@
 <script lang="ts">
   import type {
+    AgentConfig,
     AgentInfo,
     BranchInfo,
     BranchSuggestResult,
@@ -33,10 +34,31 @@
 
   type SelectOption = { value: string; label: string };
 
+  function defaultAgentConfig(): AgentConfig {
+    return {
+      version: 1,
+      claude: {
+        provider: "anthropic",
+        glm: {
+          base_url: "https://api.z.ai/api/anthropic",
+          auth_token: "",
+          api_timeout_ms: "3000000",
+          default_opus_model: "glm-4.7",
+          default_sonnet_model: "glm-4.7",
+          default_haiku_model: "glm-4.5-air",
+        },
+      },
+    };
+  }
+
   let agents: AgentInfo[] = $state([]);
   let selectedAgent: string = $state("");
   let branchMode: BranchMode = $state("existing" as BranchMode);
   let sessionMode: SessionMode = $state("normal" as SessionMode);
+
+  let agentConfig: AgentConfig = $state(defaultAgentConfig());
+  let agentConfigLoading: boolean = $state(false);
+  let agentConfigError: string | null = $state(null);
 
   let model: string = $state("");
   let agentVersion: string = $state("latest");
@@ -184,6 +206,10 @@
   });
 
   $effect(() => {
+    loadAgentConfig();
+  });
+
+  $effect(() => {
     void projectPath;
     void branchMode;
     void existingBranch;
@@ -248,6 +274,41 @@
       if (typeof msg === "string") return msg;
     }
     return String(err);
+  }
+
+  async function loadAgentConfig() {
+    agentConfigLoading = true;
+    agentConfigError = null;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const cfg = await invoke<AgentConfig>("get_agent_config");
+      agentConfig = cfg ?? defaultAgentConfig();
+    } catch (err) {
+      agentConfig = defaultAgentConfig();
+      agentConfigError = `Failed to load agent config: ${toErrorMessage(err)}`;
+    } finally {
+      agentConfigLoading = false;
+    }
+  }
+
+  function setClaudeProvider(provider: AgentConfig["claude"]["provider"]) {
+    agentConfig = {
+      ...agentConfig,
+      claude: { ...agentConfig.claude, provider },
+    };
+  }
+
+  function updateClaudeGlmField(
+    field: keyof AgentConfig["claude"]["glm"],
+    value: string
+  ) {
+    agentConfig = {
+      ...agentConfig,
+      claude: {
+        ...agentConfig.claude,
+        glm: { ...agentConfig.claude.glm, [field]: value },
+      },
+    };
   }
 
   function parseExtraArgs(text: string): string[] {
@@ -527,8 +588,51 @@
         errorMessage = envParsed.error;
         return;
       }
-      if (Object.keys(envParsed.env).length > 0) {
-        request.envOverrides = envParsed.env;
+      let mergedEnv: Record<string, string> = envParsed.env;
+
+      if (selectedAgent === "claude") {
+        if (agentConfig?.claude?.provider === "glm") {
+          const baseUrl = (agentConfig.claude.glm.base_url ?? "").trim();
+          const token = (agentConfig.claude.glm.auth_token ?? "").trim();
+          const timeout = (agentConfig.claude.glm.api_timeout_ms ?? "").trim();
+          const opusModel = (agentConfig.claude.glm.default_opus_model ?? "").trim();
+          const sonnetModel = (agentConfig.claude.glm.default_sonnet_model ?? "").trim();
+          const haikuModel = (agentConfig.claude.glm.default_haiku_model ?? "").trim();
+
+          if (!baseUrl) {
+            errorMessage = "Base URL is required for GLM (z.ai).";
+            return;
+          }
+          if (!token) {
+            errorMessage = "API Token is required for GLM (z.ai).";
+            return;
+          }
+
+          const glmEnv: Record<string, string> = {
+            ANTHROPIC_BASE_URL: baseUrl,
+            ANTHROPIC_AUTH_TOKEN: token,
+          };
+          if (timeout) glmEnv.API_TIMEOUT_MS = timeout;
+          if (opusModel) glmEnv.ANTHROPIC_DEFAULT_OPUS_MODEL = opusModel;
+          if (sonnetModel) glmEnv.ANTHROPIC_DEFAULT_SONNET_MODEL = sonnetModel;
+          if (haikuModel) glmEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL = haikuModel;
+
+          mergedEnv = { ...glmEnv, ...mergedEnv };
+        }
+
+        // Persist provider selection (GLM <-> Anthropic) before launch so the backend
+        // doesn't keep injecting GLM env vars from a stale config file.
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          await invoke("save_agent_config", { config: agentConfig });
+        } catch (err) {
+          errorMessage = `Failed to save agent config: ${toErrorMessage(err)}`;
+          return;
+        }
+      }
+
+      if (Object.keys(mergedEnv).length > 0) {
+        request.envOverrides = mergedEnv;
       }
 
       if (composeDetected) {
@@ -640,6 +744,123 @@
               {/each}
             </select>
           </div>
+        {/if}
+
+        {#if selectedAgent === "claude"}
+          <div class="field">
+            <label for="claude-provider-select">Provider</label>
+            <select
+              id="claude-provider-select"
+              value={agentConfig.claude.provider}
+              disabled={agentConfigLoading}
+              onchange={(e) =>
+                setClaudeProvider(
+                  (e.target as HTMLSelectElement).value as AgentConfig["claude"]["provider"]
+                )}
+            >
+              <option value="anthropic">Anthropic (default)</option>
+              <option value="glm">GLM (z.ai)</option>
+            </select>
+            <span class="field-hint">Saved in ~/.gwt/agents.toml</span>
+            {#if agentConfigError}
+              <span class="field-hint warn">{agentConfigError}</span>
+            {/if}
+          </div>
+
+          {#if agentConfig.claude.provider === "glm"}
+            <div class="field">
+              <span class="field-label">GLM (z.ai)</span>
+              <div class="glm-grid">
+                <div class="glm-field full">
+                  <label class="glm-label" for="glm-base-url">Base URL</label>
+                  <input
+                    id="glm-base-url"
+                    type="text"
+                    value={agentConfig.claude.glm.base_url}
+                    placeholder="https://api.z.ai/api/anthropic"
+                    oninput={(e) =>
+                      updateClaudeGlmField(
+                        "base_url",
+                        (e.target as HTMLInputElement).value
+                      )}
+                  />
+                </div>
+                <div class="glm-field full">
+                  <label class="glm-label" for="glm-api-token">API Token</label>
+                  <input
+                    id="glm-api-token"
+                    type="password"
+                    value={agentConfig.claude.glm.auth_token}
+                    placeholder="Required"
+                    oninput={(e) =>
+                      updateClaudeGlmField(
+                        "auth_token",
+                        (e.target as HTMLInputElement).value
+                      )}
+                  />
+                </div>
+                <div class="glm-field">
+                  <label class="glm-label" for="glm-timeout-ms">API Timeout (ms)</label>
+                  <input
+                    id="glm-timeout-ms"
+                    type="text"
+                    value={agentConfig.claude.glm.api_timeout_ms}
+                    placeholder="e.g. 3000000"
+                    oninput={(e) =>
+                      updateClaudeGlmField(
+                        "api_timeout_ms",
+                        (e.target as HTMLInputElement).value
+                      )}
+                  />
+                </div>
+                <div class="glm-field">
+                  <label class="glm-label" for="glm-opus-model">Opus Model ID</label>
+                  <input
+                    id="glm-opus-model"
+                    type="text"
+                    value={agentConfig.claude.glm.default_opus_model}
+                    placeholder="e.g. glm-4.7"
+                    oninput={(e) =>
+                      updateClaudeGlmField(
+                        "default_opus_model",
+                        (e.target as HTMLInputElement).value
+                      )}
+                  />
+                </div>
+                <div class="glm-field">
+                  <label class="glm-label" for="glm-sonnet-model">Sonnet Model ID</label>
+                  <input
+                    id="glm-sonnet-model"
+                    type="text"
+                    value={agentConfig.claude.glm.default_sonnet_model}
+                    placeholder="e.g. glm-4.7"
+                    oninput={(e) =>
+                      updateClaudeGlmField(
+                        "default_sonnet_model",
+                        (e.target as HTMLInputElement).value
+                      )}
+                  />
+                </div>
+                <div class="glm-field">
+                  <label class="glm-label" for="glm-haiku-model">Haiku Model ID</label>
+                  <input
+                    id="glm-haiku-model"
+                    type="text"
+                    value={agentConfig.claude.glm.default_haiku_model}
+                    placeholder="e.g. glm-4.5-air"
+                    oninput={(e) =>
+                      updateClaudeGlmField(
+                        "default_haiku_model",
+                        (e.target as HTMLInputElement).value
+                      )}
+                  />
+                </div>
+              </div>
+              <span class="field-hint">
+                Applied as environment variables when launching Claude Code.
+              </span>
+            </div>
+          {/if}
         {/if}
 
         <div class="field">
@@ -1164,6 +1385,49 @@
   .field textarea {
     resize: vertical;
     line-height: 1.35;
+  }
+
+  .glm-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-primary);
+  }
+
+  .glm-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .glm-field.full {
+    grid-column: 1 / -1;
+  }
+
+  .glm-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .glm-field input {
+    padding: 8px 12px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 13px;
+    font-family: monospace;
+    outline: none;
+  }
+
+  .glm-field input:focus {
+    border-color: var(--accent);
   }
 
   .branch-name-row {

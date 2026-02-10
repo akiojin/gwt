@@ -1,3 +1,4 @@
+pub mod agent_config;
 pub mod agents;
 pub mod branch_suggest;
 pub mod branches;
