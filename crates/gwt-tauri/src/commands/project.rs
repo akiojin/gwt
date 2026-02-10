@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::{fs, io::Read};
+use tauri::Manager;
 use tauri::State;
 use tauri::{AppHandle, Emitter};
 
@@ -107,7 +108,11 @@ pub(crate) fn resolve_repo_path_for_project_root(
 
 /// Open a project (set project_path in AppState)
 #[tauri::command]
-pub fn open_project(path: String, state: State<AppState>) -> Result<ProjectInfo, String> {
+pub fn open_project(
+    window: tauri::Window,
+    path: String,
+    state: State<AppState>,
+) -> Result<ProjectInfo, String> {
     let p = Path::new(&path);
 
     if !p.exists() {
@@ -127,10 +132,9 @@ pub fn open_project(path: String, state: State<AppState>) -> Result<ProjectInfo,
     // Get current branch
     let current_branch = Branch::current(&repo_path).ok().flatten().map(|b| b.name);
 
-    // Update state
-    if let Ok(mut project_path) = state.project_path.lock() {
-        *project_path = Some(project_root_str.clone());
-    }
+    // Update window-scoped state
+    state.set_project_for_window(window.label(), project_root_str.clone());
+    let _ = crate::menu::rebuild_menu(window.app_handle());
 
     Ok(ProjectInfo {
         path: project_root_str,
@@ -141,10 +145,9 @@ pub fn open_project(path: String, state: State<AppState>) -> Result<ProjectInfo,
 
 /// Get current project info from state
 #[tauri::command]
-pub fn get_project_info(state: State<AppState>) -> Option<ProjectInfo> {
-    let project_path = state.project_path.lock().ok()?;
-    let path_str = project_path.as_ref()?;
-    let p = Path::new(path_str);
+pub fn get_project_info(window: tauri::Window, state: State<AppState>) -> Option<ProjectInfo> {
+    let path_str = state.project_for_window(window.label())?;
+    let p = Path::new(&path_str);
 
     let repo_name = p
         .file_name()
@@ -156,10 +159,18 @@ pub fn get_project_info(state: State<AppState>) -> Option<ProjectInfo> {
         .and_then(|repo_path| Branch::current(&repo_path).ok().flatten().map(|b| b.name));
 
     Some(ProjectInfo {
-        path: path_str.clone(),
+        path: path_str,
         repo_name,
         current_branch,
     })
+}
+
+/// Close the current window's project (clear window-scoped state)
+#[tauri::command]
+pub fn close_project(window: tauri::Window, state: State<AppState>) -> Result<(), String> {
+    state.clear_project_for_window(window.label());
+    let _ = crate::menu::rebuild_menu(window.app_handle());
+    Ok(())
 }
 
 /// Check if a path is a git repository
@@ -264,9 +275,10 @@ fn extract_percent(s: &str) -> Option<u8> {
 }
 
 /// Create a new project by bare-cloning a GitHub repository into `<parent>/<repo>.git`
-/// and then opening it (updating `AppState.project_path`).
+/// and then opening it (updating window-scoped project state).
 #[tauri::command]
 pub fn create_project(
+    window: tauri::Window,
     request: NewProjectRequest,
     state: State<AppState>,
     app_handle: AppHandle,
@@ -379,7 +391,7 @@ pub fn create_project(
     }
 
     // Open the project root (FR-304)
-    open_project(request.parent_dir, state)
+    open_project(window, request.parent_dir, state)
 }
 
 #[cfg(test)]
