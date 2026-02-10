@@ -25,6 +25,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::const_is_empty)]
     fn test_templates_are_non_empty() {
         assert!(!SPECIFY_TEMPLATE.is_empty());
         assert!(!PLAN_TEMPLATE.is_empty());
