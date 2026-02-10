@@ -46,6 +46,17 @@ fn command_candidates_in_dir(dir: &Path, command: &str) -> Vec<PathBuf> {
     }
 }
 
+fn env_get<'a>(env: &'a HashMap<String, String>, key: &str) -> Option<&'a str> {
+    if cfg!(windows) {
+        // Windows env keys are case-insensitive. `std::env::vars()` preserves casing, so
+        // look up case-insensitively to avoid missing PATH/Path variations.
+        env.iter()
+            .find_map(|(k, v)| k.eq_ignore_ascii_case(key).then_some(v.as_str()))
+    } else {
+        env.get(key).map(|s| s.as_str())
+    }
+}
+
 fn resolve_command_path_with_env(command: &str, env: &HashMap<String, String>) -> Option<PathBuf> {
     let cmd = command.trim();
     if cmd.is_empty() {
@@ -54,7 +65,7 @@ fn resolve_command_path_with_env(command: &str, env: &HashMap<String, String>) -
 
     // 1) Search PATH explicitly using which_in so tests can control the environment safely.
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let paths = env.get("PATH").map(|s| s.as_str()).filter(|s| !s.trim().is_empty());
+    let paths = env_get(env, "PATH").filter(|s| !s.trim().is_empty());
     let mut weak_path: Option<PathBuf> = None;
     if let Ok(iter) = which::which_in_all(cmd, paths, &cwd) {
         for found in iter {
@@ -75,23 +86,20 @@ fn resolve_command_path_with_env(command: &str, env: &HashMap<String, String>) -
     let mut candidates: Vec<PathBuf> = Vec::new();
 
     // Bun install env var (typically "~/.bun").
-    if let Some(root) = env.get("BUN_INSTALL").map(PathBuf::from) {
+    if let Some(root) = env_get(env, "BUN_INSTALL").map(PathBuf::from) {
         candidates.extend(command_candidates_in_dir(&root.join("bin"), cmd));
     }
 
-    let home = env.get("HOME").map(PathBuf::from);
+    let home = env_get(env, "HOME").map(PathBuf::from);
 
     if cfg!(windows) {
-        let user_profile = env.get("USERPROFILE").map(PathBuf::from);
+        let user_profile = env_get(env, "USERPROFILE").map(PathBuf::from);
         // Bun default: %USERPROFILE%\.bun\bin (fallback to HOME if USERPROFILE is not set).
         if let Some(h) = user_profile.as_ref().or(home.as_ref()) {
-            candidates.extend(command_candidates_in_dir(
-                &h.join(".bun").join("bin"),
-                cmd,
-            ));
+            candidates.extend(command_candidates_in_dir(&h.join(".bun").join("bin"), cmd));
         }
         // Alternative Bun location on Windows: %LOCALAPPDATA%\bun\bin
-        if let Some(local) = env.get("LOCALAPPDATA").map(PathBuf::from) {
+        if let Some(local) = env_get(env, "LOCALAPPDATA").map(PathBuf::from) {
             candidates.extend(command_candidates_in_dir(
                 &local.join("bun").join("bin"),
                 cmd,
@@ -100,10 +108,7 @@ fn resolve_command_path_with_env(command: &str, env: &HashMap<String, String>) -
     } else {
         // Bun default: ~/.bun/bin
         if let Some(h) = home.as_ref() {
-            candidates.extend(command_candidates_in_dir(
-                &h.join(".bun").join("bin"),
-                cmd,
-            ));
+            candidates.extend(command_candidates_in_dir(&h.join(".bun").join("bin"), cmd));
         }
 
         // Common system paths (macOS/Linux).
@@ -352,5 +357,27 @@ mod tests {
             resolve_command_path_with_env(command, &env),
             Some(custom_cmd)
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_command_path_reads_path_case_insensitively_on_windows() {
+        let dir = tempdir().expect("tempdir");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).expect("create bin dir");
+
+        let command = "gwt-path-case-test";
+        let cmd = bin.join(format!("{command}.exe"));
+        write_stub_command(&cmd);
+
+        let path = std::env::join_paths([&bin])
+            .expect("join PATH")
+            .to_string_lossy()
+            .to_string();
+
+        let mut env = HashMap::new();
+        env.insert("Path".to_string(), path);
+
+        assert_eq!(resolve_command_path_with_env(command, &env), Some(cmd));
     }
 }

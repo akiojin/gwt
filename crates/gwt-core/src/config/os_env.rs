@@ -20,6 +20,8 @@ pub enum ShellType {
 pub enum EnvSource {
     /// Successfully captured from a login shell invocation.
     LoginShell,
+    /// Used the current process environment (expected on Windows).
+    ProcessEnv,
     /// Fell back to `std::env::vars()` due to an error.
     StdEnvFallback { reason: String },
 }
@@ -51,10 +53,7 @@ pub fn parse_env_null_separated(bytes: &[u8]) -> HashMap<String, String> {
             if key.is_empty() {
                 continue;
             }
-            if let (Ok(k), Ok(v)) = (
-                std::str::from_utf8(key),
-                std::str::from_utf8(value),
-            ) {
+            if let (Ok(k), Ok(v)) = (std::str::from_utf8(key), std::str::from_utf8(value)) {
                 map.insert(k.to_owned(), v.to_owned());
             }
         }
@@ -105,10 +104,7 @@ pub fn detect_shell_type(shell_path: &str) -> ShellType {
 /// Build the command + args to capture the login-shell environment.
 ///
 /// Returns `(program, arguments)`.
-pub fn build_env_capture_command(
-    shell_type: ShellType,
-    shell_path: &str,
-) -> (String, Vec<String>) {
+pub fn build_env_capture_command(shell_type: ShellType, shell_path: &str) -> (String, Vec<String>) {
     let prog = shell_path.to_owned();
     let args = match shell_type {
         ShellType::Nushell => vec![
@@ -116,11 +112,9 @@ pub fn build_env_capture_command(
             "-c".to_owned(),
             "$env | to json".to_owned(),
         ],
-        ShellType::Bash | ShellType::Zsh | ShellType::Fish | ShellType::Sh => vec![
-            "-l".to_owned(),
-            "-c".to_owned(),
-            "env -0".to_owned(),
-        ],
+        ShellType::Bash | ShellType::Zsh | ShellType::Fish | ShellType::Sh => {
+            vec!["-l".to_owned(), "-c".to_owned(), "env -0".to_owned()]
+        }
     };
     (prog, args)
 }
@@ -132,8 +126,8 @@ pub fn build_env_capture_command(
 /// Capture the login shell's environment variables.
 ///
 /// On Unix this spawns a login shell and reads its `env -0` (or nushell
-/// JSON) output.  On Windows (or on any error) it falls back to
-/// `std::env::vars()`.
+/// JSON) output. On Windows it uses the current process environment. On any
+/// Unix error it falls back to `std::env::vars()`.
 #[cfg(unix)]
 pub async fn capture_login_shell_env() -> OsEnvResult {
     use std::time::Duration;
@@ -174,11 +168,7 @@ pub async fn capture_login_shell_env() -> OsEnvResult {
         }
         Ok(Ok(output)) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let reason = format!(
-                "shell exited with {}: {}",
-                output.status,
-                stderr.trim_end()
-            );
+            let reason = format!("shell exited with {}: {}", output.status, stderr.trim_end());
             tracing::warn!(%reason, "login shell env capture failed");
             fallback_env(reason)
         }
@@ -197,7 +187,10 @@ pub async fn capture_login_shell_env() -> OsEnvResult {
 
 #[cfg(windows)]
 pub async fn capture_login_shell_env() -> OsEnvResult {
-    fallback_env("Windows: using process environment".to_owned())
+    OsEnvResult {
+        env: std::env::vars().collect(),
+        source: EnvSource::ProcessEnv,
+    }
 }
 
 fn fallback_env(reason: String) -> OsEnvResult {

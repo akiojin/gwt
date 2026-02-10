@@ -1157,11 +1157,15 @@ mod tests {
 
     #[test]
     fn test_merge_os_base_only() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::commands::TestEnvGuard::new(home.path());
+
         let os_env = HashMap::from([
             ("PATH".to_string(), "/usr/bin".to_string()),
             ("HOME".to_string(), "/Users/test".to_string()),
         ]);
-        // No profiles config exists in test env, should return os_env unchanged
+        // Isolate HOME so user profile config never affects this test.
         let result = merge_profile_env(&os_env, None);
         assert_eq!(result.get("PATH"), Some(&"/usr/bin".to_string()));
         assert_eq!(result.get("HOME"), Some(&"/Users/test".to_string()));
@@ -1276,7 +1280,10 @@ pub fn launch_agent(
     let os_env = match state.os_env.get() {
         Some(env) => env.clone(),
         None => {
-            tracing::warn!(category = "os_env", "OS env not ready, using std::env fallback");
+            tracing::warn!(
+                category = "os_env",
+                "OS env not ready, using std::env fallback"
+            );
             std::env::vars().collect()
         }
     };
@@ -2113,6 +2120,9 @@ pub fn get_captured_environment(state: State<AppState>) -> CapturedEnvInfo {
             let (source_str, reason) = match state.os_env_source.get() {
                 Some(gwt_core::config::os_env::EnvSource::LoginShell) => {
                     ("login_shell".to_string(), None)
+                }
+                Some(gwt_core::config::os_env::EnvSource::ProcessEnv) => {
+                    ("process_env".to_string(), None)
                 }
                 Some(gwt_core::config::os_env::EnvSource::StdEnvFallback { reason }) => {
                     ("std_env_fallback".to_string(), Some(reason.clone()))

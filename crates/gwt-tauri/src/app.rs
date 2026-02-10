@@ -99,20 +99,30 @@ pub fn build_app(
                     tauri::async_runtime::spawn(async move {
                         let result = os_env::capture_login_shell_env().await;
 
-                        if let os_env::EnvSource::StdEnvFallback { ref reason } = result.source {
-                            tracing::warn!(
-                                category = "os_env",
-                                reason = %reason,
-                                "Login shell env capture failed, using process env fallback"
-                            );
-                            let _ = app_handle_clone.emit("os-env-fallback", reason.clone());
-                        } else {
-                            tracing::info!(
-                                category = "os_env",
-                                count = result.env.len(),
-                                "Captured login shell environment"
-                            );
-                        }
+                        match &result.source {
+                            os_env::EnvSource::LoginShell => {
+                                tracing::info!(
+                                    category = "os_env",
+                                    count = result.env.len(),
+                                    "Captured login shell environment"
+                                );
+                            }
+                            os_env::EnvSource::ProcessEnv => {
+                                tracing::info!(
+                                    category = "os_env",
+                                    count = result.env.len(),
+                                    "Using process environment"
+                                );
+                            }
+                            os_env::EnvSource::StdEnvFallback { reason } => {
+                                tracing::warn!(
+                                    category = "os_env",
+                                    reason = %reason,
+                                    "Login shell env capture failed, using process env fallback"
+                                );
+                                let _ = app_handle_clone.emit("os-env-fallback", reason.clone());
+                            }
+                        };
 
                         let _ = os_env_source_cell.set(result.source);
                         let _ = os_env_cell.set(result.env);
