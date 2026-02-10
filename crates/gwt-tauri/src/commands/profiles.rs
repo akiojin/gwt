@@ -2,6 +2,7 @@
 
 use gwt_core::config::ProfilesConfig;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use tauri::AppHandle;
 use tracing::error;
 
 fn with_panic_guard<T>(context: &str, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
@@ -28,8 +29,10 @@ pub fn get_profiles() -> Result<ProfilesConfig, String> {
 
 /// Save profiles config (always writes TOML: ~/.gwt/profiles.toml)
 #[tauri::command]
-pub fn save_profiles(config: ProfilesConfig) -> Result<(), String> {
+pub fn save_profiles(config: ProfilesConfig, app_handle: AppHandle) -> Result<(), String> {
     with_panic_guard("saving profiles", || {
-        config.save().map_err(|e| e.to_string())
+        config.save().map_err(|e| e.to_string())?;
+        let _ = crate::menu::rebuild_menu(&app_handle);
+        Ok(())
     })
 }

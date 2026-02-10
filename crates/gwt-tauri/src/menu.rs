@@ -1,6 +1,7 @@
 //! Native menubar wiring (Tauri menu).
 
 use crate::state::AppState;
+use gwt_core::config::ProfilesConfig;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -18,6 +19,7 @@ pub const MENU_ID_TOOLS_LIST_TERMINALS: &str = "tools-list-terminals";
 pub const MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS: &str = "tools-terminal-diagnostics";
 
 pub const MENU_ID_GIT_CLEANUP_WORKTREES: &str = "git-cleanup-worktrees";
+pub const MENU_ID_GIT_VERSION_HISTORY: &str = "git-version-history";
 
 pub const MENU_ID_SETTINGS_PREFERENCES: &str = "settings-preferences";
 pub const MENU_ID_HELP_ABOUT: &str = "help-about";
@@ -94,9 +96,20 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         true,
         Some("CmdOrCtrl+Shift+K"),
     )?;
-    let git = SubmenuBuilder::new(app, "Git")
-        .item(&git_cleanup_worktrees)
-        .build()?;
+    let mut git_builder = SubmenuBuilder::new(app, "Git");
+
+    if should_show_version_history_menu(app, state) {
+        let version_history = MenuItem::with_id(
+            app,
+            MENU_ID_GIT_VERSION_HISTORY,
+            "Version History...",
+            true,
+            None::<&str>,
+        )?;
+        git_builder = git_builder.item(&version_history).separator();
+    }
+
+    let git = git_builder.item(&git_cleanup_worktrees).build()?;
 
     let tools_launch_agent = MenuItem::with_id(
         app,
@@ -146,6 +159,26 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
     menu.append(&tools)?;
     menu.append(&window)?;
     Ok(menu)
+}
+
+fn should_show_version_history_menu(app: &AppHandle<Wry>, state: &AppState) -> bool {
+    // Only show when there is an open project in the currently focused window
+    // and AI settings are configured.
+    let focused_label = app
+        .webview_windows()
+        .into_iter()
+        .find_map(|(label, w)| w.is_focused().ok().and_then(|f| f.then_some(label)))
+        .unwrap_or_else(|| "main".to_string());
+
+    if state.project_for_window(&focused_label).is_none() {
+        return false;
+    }
+
+    let Ok(profiles) = ProfilesConfig::load() else {
+        return false;
+    };
+    let ai = profiles.resolve_active_ai_settings();
+    ai.resolved.is_some()
 }
 
 fn build_window_submenu(

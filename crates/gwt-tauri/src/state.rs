@@ -37,6 +37,18 @@ pub struct PaneLaunchMeta {
     pub started_at_millis: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct VersionHistoryCacheEntry {
+    pub label: String,
+    pub range_from: Option<String>,
+    pub range_to: String,
+    pub range_from_oid: Option<String>,
+    pub range_to_oid: String,
+    pub commit_count: u32,
+    pub summary_markdown: String,
+    pub changelog_markdown: String,
+}
+
 pub struct AppState {
     /// Project root path per window label.
     ///
@@ -50,6 +62,9 @@ pub struct AppState {
     pub agent_versions_cache: Mutex<HashMap<String, AgentVersionsCache>>,
     pub session_summary_cache: Mutex<HashMap<String, SessionSummaryCache>>,
     pub session_summary_inflight: Mutex<HashSet<String>>,
+    pub project_version_history_cache:
+        Mutex<HashMap<String, HashMap<String, VersionHistoryCacheEntry>>>,
+    pub project_version_history_inflight: Mutex<HashSet<String>>,
     pub pane_launch_meta: Mutex<HashMap<String, PaneLaunchMeta>>,
     /// Launch job cancellation flags keyed by job id.
     pub launch_jobs: Mutex<HashMap<String, Arc<AtomicBool>>>,
@@ -67,6 +82,8 @@ impl AppState {
             agent_versions_cache: Mutex::new(HashMap::new()),
             session_summary_cache: Mutex::new(HashMap::new()),
             session_summary_inflight: Mutex::new(HashSet::new()),
+            project_version_history_cache: Mutex::new(HashMap::new()),
+            project_version_history_inflight: Mutex::new(HashSet::new()),
             pane_launch_meta: Mutex::new(HashMap::new()),
             launch_jobs: Mutex::new(HashMap::new()),
             is_quitting: AtomicBool::new(false),
