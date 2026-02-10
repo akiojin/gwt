@@ -1285,16 +1285,12 @@ pub fn launch_agent(
         let _ = app_handle.emit("worktrees-changed", &payload);
     }
 
-    // Get OS environment (non-blocking; fallback to std::env if not ready yet)
-    let os_env = match state.os_env.get() {
-        Some(env) => env.clone(),
-        None => {
-            tracing::warn!(
-                category = "os_env",
-                "OS env not ready, using std::env fallback"
-            );
-            std::env::vars().collect()
-        }
+    // Wait for the startup OS env capture to finish so agent launches are deterministic.
+    if !state.wait_os_env_ready(std::time::Duration::from_secs(2)) {
+        return Err("Environment is still loading. Please try again.".to_string());
+    }
+    let Some(os_env) = state.os_env.get().cloned() else {
+        return Err("Environment is still loading. Please try again.".to_string());
     };
 
     let mut env_vars = merge_profile_env(&os_env, request.profile.as_deref());

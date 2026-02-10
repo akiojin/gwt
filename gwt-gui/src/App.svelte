@@ -492,6 +492,7 @@
   <AgentLaunchForm
     projectPath={projectPath as string}
     selectedBranch={selectedBranch?.name ?? currentBranch}
+    osEnvReady={osEnvReady}
     onLaunch={handleAgentLaunch}
     onClose={() => (showAgentLaunch = false)}
   />

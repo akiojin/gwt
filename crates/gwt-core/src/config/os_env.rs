@@ -48,12 +48,22 @@ pub fn parse_env_null_separated(bytes: &[u8]) -> HashMap<String, String> {
             continue;
         }
         if let Some(pos) = entry.iter().position(|&b| b == b'=') {
-            let key = &entry[..pos];
+            let mut key = &entry[..pos];
             let value = &entry[pos + 1..];
+            // Some shells may print banner/MOTD text to stdout before `env -0` output.
+            // That can lead to chunks like "Welcome\\nPATH=..." where the key contains
+            // a newline prefix. Recover the last line as the effective key.
+            if let Some(last_nl) = key.iter().rposition(|&b| b == b'\n' || b == b'\r') {
+                key = &key[last_nl + 1..];
+            }
             if key.is_empty() {
                 continue;
             }
             if let (Ok(k), Ok(v)) = (std::str::from_utf8(key), std::str::from_utf8(value)) {
+                let k = k.trim();
+                if k.is_empty() {
+                    continue;
+                }
                 map.insert(k.to_owned(), v.to_owned());
             }
         }
@@ -246,6 +256,15 @@ mod tests {
         assert_eq!(map.len(), 2);
         assert_eq!(map.get("GOOD").unwrap(), "val");
         assert_eq!(map.get("ALSO").unwrap(), "ok");
+    }
+
+    #[test]
+    fn test_parse_banner_prefixed_chunk_recovers_key() {
+        let input = b"Welcome to zsh\nPATH=/usr/bin\0HOME=/home/user\0";
+        let map = parse_env_null_separated(input);
+        assert_eq!(map.get("PATH").unwrap(), "/usr/bin");
+        assert_eq!(map.get("HOME").unwrap(), "/home/user");
+        assert!(map.get("Welcome to zsh\nPATH").is_none());
     }
 
     #[test]
