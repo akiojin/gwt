@@ -53,7 +53,7 @@
 
 ## メニュー仕様（ネイティブ）
 
-- トップレベル: gwt / File / Window / Debug
+- トップレベル: gwt / File / Window / Tools / Debug
 - `File`
   - New Window
   - Open Project...
@@ -61,7 +61,7 @@
 - `Window`
   - プロジェクトが開かれているウィンドウ一覧（同名の場合はパスを付加して区別）
   - 選択時: 対象ウィンドウを show + focus
-  - Toggle Sidebar
+- `Tools`
   - Launch Agent...
   - List Terminals
   - Terminal Diagnostics
