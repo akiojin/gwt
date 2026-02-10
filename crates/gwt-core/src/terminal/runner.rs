@@ -21,9 +21,12 @@ struct EnvSnapshot {
 
 impl EnvSnapshot {
     fn capture() -> Self {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .or_else(|| dirs::home_dir());
         Self {
             path: std::env::var_os("PATH").map(|v| v.to_string_lossy().to_string()),
-            home: std::env::var_os("HOME").map(PathBuf::from),
+            home,
             user_profile: std::env::var_os("USERPROFILE").map(PathBuf::from),
             local_app_data: std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
             bun_install: std::env::var_os("BUN_INSTALL").map(PathBuf::from),
@@ -75,8 +78,15 @@ fn resolve_command_path_with_env(command: &str, env: &EnvSnapshot) -> Option<Pat
     // 1) Search PATH explicitly using which_in so tests can control the environment safely.
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let paths = env.path.as_deref().filter(|s| !s.trim().is_empty());
+    let mut weak_path: Option<PathBuf> = None;
     if let Ok(found) = which::which_in(cmd, paths, &cwd) {
-        return Some(found);
+        // PATH may contain project-local shims (e.g. node_modules/.bin) when running under
+        // temporary executors (bunx/npx). Prefer global installs when available.
+        if is_node_modules_bin(&found) {
+            weak_path = Some(found);
+        } else {
+            return Some(found);
+        }
     }
 
     // 2) Search common install locations (best-effort).
@@ -117,7 +127,11 @@ fn resolve_command_path_with_env(command: &str, env: &EnvSnapshot) -> Option<Pat
         }
     }
 
-    candidates.into_iter().find(|p| p.is_file())
+    if let Some(found) = candidates.into_iter().find(|p| p.is_file()) {
+        return Some(found);
+    }
+
+    weak_path
 }
 
 /// Resolve a command to an absolute path when possible.
@@ -161,6 +175,24 @@ pub fn build_fallback_launch(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn command_path_in_dir(dir: &Path, command: &str) -> PathBuf {
+        if cfg!(windows) {
+            dir.join(format!("{command}.exe"))
+        } else {
+            dir.join(command)
+        }
+    }
+
+    fn write_stub_command(path: &Path) {
+        std::fs::write(path, "").expect("write command stub");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perm = std::fs::Permissions::from_mode(0o755);
+            std::fs::set_permissions(path, perm).expect("chmod command stub");
+        }
+    }
 
     #[test]
     fn is_node_modules_bin_matches_common_paths() {
@@ -254,5 +286,68 @@ mod tests {
         };
 
         assert_eq!(resolve_command_path_with_env("bunx", &env), Some(bunx));
+    }
+
+    #[test]
+    fn resolve_command_path_prefers_global_when_path_points_to_node_modules_bin() {
+        let dir = tempdir().expect("tempdir");
+        let local_bin = dir.path().join("project").join("node_modules").join(".bin");
+        std::fs::create_dir_all(&local_bin).expect("create node_modules bin dir");
+
+        let global_bin = dir.path().join(".bun").join("bin");
+        std::fs::create_dir_all(&global_bin).expect("create global bun bin dir");
+
+        let command = "gwt-resolve-test";
+        let local_cmd = command_path_in_dir(&local_bin, command);
+        let global_cmd = command_path_in_dir(&global_bin, command);
+        write_stub_command(&local_cmd);
+        write_stub_command(&global_cmd);
+
+        let path = std::env::join_paths([&local_bin])
+            .expect("join PATH")
+            .to_string_lossy()
+            .to_string();
+
+        let env = EnvSnapshot {
+            path: Some(path),
+            home: Some(dir.path().to_path_buf()),
+            user_profile: None,
+            local_app_data: None,
+            bun_install: None,
+        };
+
+        assert_eq!(
+            resolve_command_path_with_env(command, &env),
+            Some(global_cmd)
+        );
+    }
+
+    #[test]
+    fn resolve_command_path_uses_node_modules_bin_when_no_global_candidate_exists() {
+        let dir = tempdir().expect("tempdir");
+        let local_bin = dir.path().join("project").join("node_modules").join(".bin");
+        std::fs::create_dir_all(&local_bin).expect("create node_modules bin dir");
+
+        let command = "gwt-resolve-test-only-local";
+        let local_cmd = command_path_in_dir(&local_bin, command);
+        write_stub_command(&local_cmd);
+
+        let path = std::env::join_paths([&local_bin])
+            .expect("join PATH")
+            .to_string_lossy()
+            .to_string();
+
+        let env = EnvSnapshot {
+            path: Some(path),
+            home: Some(dir.path().to_path_buf()),
+            user_profile: None,
+            local_app_data: None,
+            bun_install: None,
+        };
+
+        assert_eq!(
+            resolve_command_path_with_env(command, &env),
+            Some(local_cmd)
+        );
     }
 }
