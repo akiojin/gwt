@@ -3,10 +3,13 @@
 //! This module implements:
 //! - Update discovery via GitHub Releases (latest)
 //! - TTL-based local cache to avoid repeated API calls
-//! - User-approved apply flow: download payload, then restart into the new version
-//! - Internal helper mode to safely replace the running executable (especially on Windows)
+//! - User-approved apply flow:
+//!   - Portable payload (tar.gz/zip) => extract and replace the running executable, then restart
+//!   - Installer payload (.pkg/.msi) => run installer with privileges/UAC, then restart
+//! - Internal helper modes (`__internal`) to safely apply updates after the parent process exits
 
 use chrono::{DateTime, Utc};
+use flate2::read::GzDecoder;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT};
 use semver::Version;
@@ -31,6 +34,12 @@ struct UpdateCacheFile {
     checked_at: DateTime<Utc>,
     latest_version: Option<String>,
     release_url: Option<String>,
+    #[serde(default)]
+    portable_asset_url: Option<String>,
+    #[serde(default)]
+    installer_asset_url: Option<String>,
+    /// Legacy cache field (used by older versions).
+    #[serde(default)]
     asset_url: Option<String>,
 }
 
@@ -52,7 +61,7 @@ pub enum UpdateState {
         latest: String,
         /// Release page URL.
         release_url: String,
-        /// Preferred payload URL for this platform, if present.
+        /// Preferred payload URL for this platform/install, if present.
         #[serde(skip_serializing_if = "Option::is_none")]
         asset_url: Option<String>,
         /// When this update was last checked.
@@ -70,6 +79,8 @@ pub enum UpdateState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RestartArgsFile {
     pub args: Vec<String>,
+    #[serde(default)]
+    pub cwd: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,6 +95,76 @@ struct GitHubRelease {
 struct GitHubAsset {
     name: String,
     browser_download_url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallerKind {
+    MacPkg,
+    WindowsMsi,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreparedPayload {
+    PortableBinary { path: PathBuf },
+    Installer { path: PathBuf, kind: InstallerKind },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ApplyPlan {
+    Portable { url: String },
+    Installer { url: String, kind: InstallerKind },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Platform {
+    os: String,
+    arch: String,
+}
+
+impl Platform {
+    fn detect() -> Self {
+        Self {
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+        }
+    }
+
+    fn artifact(&self) -> Option<&'static str> {
+        match (self.os.as_str(), self.arch.as_str()) {
+            ("linux", "x86_64") => Some("linux-x86_64"),
+            ("linux", "aarch64") => Some("linux-arm64"),
+            ("macos", "x86_64") => Some("macos-x86_64"),
+            ("macos", "aarch64") => Some("macos-arm64"),
+            ("windows", "x86_64") => Some("windows-x86_64"),
+            _ => None,
+        }
+    }
+
+    fn binary_name(&self) -> String {
+        if self.os == "windows" {
+            "gwt.exe".to_string()
+        } else {
+            "gwt".to_string()
+        }
+    }
+
+    fn portable_asset_name(&self) -> Option<String> {
+        let artifact = self.artifact()?;
+        if self.os == "windows" {
+            Some(format!("gwt-{artifact}.zip"))
+        } else {
+            Some(format!("gwt-{artifact}.tar.gz"))
+        }
+    }
+
+    fn installer_asset_name(&self) -> Option<(String, InstallerKind)> {
+        let artifact = self.artifact()?;
+        match self.os.as_str() {
+            "macos" => Some((format!("gwt-{artifact}.pkg"), InstallerKind::MacPkg)),
+            "windows" => Some((format!("gwt-{artifact}.msi"), InstallerKind::WindowsMsi)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +230,10 @@ impl UpdateManager {
     }
 
     pub fn check(&self, force: bool) -> UpdateState {
+        self.check_for_executable(force, None)
+    }
+
+    pub fn check_for_executable(&self, force: bool, current_exe: Option<&Path>) -> UpdateState {
         let now = Utc::now();
         let cache = read_cache(&self.cache_path).ok();
 
@@ -160,7 +245,7 @@ impl UpdateManager {
                     .ok()
                     .is_some_and(|age| age < self.ttl)
                 {
-                    return self.state_from_cache(cache);
+                    return self.state_from_cache(cache, current_exe);
                 }
             }
         }
@@ -180,14 +265,35 @@ impl UpdateManager {
                     }
                 };
 
-                let asset_url = expected_asset_name()
+                let platform = Platform::detect();
+
+                let portable_asset_url = platform
+                    .portable_asset_name()
                     .and_then(|name| release.assets.iter().find(|a| a.name == name))
                     .map(|a| a.browser_download_url.clone());
+
+                let installer_asset_url = platform
+                    .installer_asset_name()
+                    .and_then(|(name, _)| release.assets.iter().find(|a| a.name == name))
+                    .map(|a| a.browser_download_url.clone());
+
+                let asset_url = choose_apply_plan(
+                    &platform,
+                    current_exe,
+                    portable_asset_url.as_deref(),
+                    installer_asset_url.as_deref(),
+                )
+                .map(|p| match p {
+                    ApplyPlan::Portable { url } => url,
+                    ApplyPlan::Installer { url, .. } => url,
+                });
 
                 let cache_file = UpdateCacheFile {
                     checked_at: now,
                     latest_version: Some(latest_ver.to_string()),
                     release_url: Some(release.html_url.clone()),
+                    portable_asset_url: portable_asset_url.clone(),
+                    installer_asset_url: installer_asset_url.clone(),
                     asset_url: asset_url.clone(),
                 };
                 let _ = write_cache(&self.cache_path, &cache_file);
@@ -209,7 +315,7 @@ impl UpdateManager {
             Err(err) => {
                 if !force {
                     if let Some(cache) = &cache {
-                        return self.state_from_cache(cache);
+                        return self.state_from_cache(cache, current_exe);
                     }
                 }
                 UpdateState::Failed {
@@ -220,15 +326,13 @@ impl UpdateManager {
         }
     }
 
-    pub fn prepare_update(&self, latest: &str, asset_url: &str) -> Result<PathBuf, String> {
+    pub fn prepare_update(&self, latest: &str, asset_url: &str) -> Result<PreparedPayload, String> {
         let update_dir = self
             .updates_dir
             .join(format!("v{}", latest.trim().trim_start_matches('v')));
         fs::create_dir_all(&update_dir).map_err(|e| format!("Failed to create update dir: {e}"))?;
 
-        let asset_name = asset_name_from_url(asset_url)
-            .or_else(expected_asset_name)
-            .unwrap_or_else(|| "gwt-update".to_string());
+        let asset_name = asset_name_from_url(asset_url).unwrap_or_else(|| "gwt-update".to_string());
         let dest = update_dir.join(&asset_name);
 
         let res = self
@@ -251,21 +355,41 @@ impl UpdateManager {
             return Err("Downloaded payload is empty".to_string());
         }
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(&dest)
-                .ok()
-                .map(|m| m.permissions().mode())
-                .unwrap_or(0o755);
-            let mut perms = fs::metadata(&dest)
-                .map_err(|e| format!("Failed to read payload metadata: {e}"))?
-                .permissions();
-            perms.set_mode(mode | 0o111);
-            let _ = fs::set_permissions(&dest, perms);
+        let dest_str = dest.to_string_lossy().to_string();
+        if dest_str.ends_with(".tar.gz") || dest_str.ends_with(".zip") {
+            let extract_dir = update_dir.join("extract");
+            let _ = fs::remove_dir_all(&extract_dir);
+            fs::create_dir_all(&extract_dir)
+                .map_err(|e| format!("Failed to create extract dir: {e}"))?;
+            extract_archive(&dest, &extract_dir)?;
+            let platform = Platform::detect();
+            let binary_name = platform.binary_name();
+            let Some(binary_path) = find_extracted_binary(&extract_dir, &binary_name)? else {
+                return Err(format!(
+                    "Extracted payload does not contain expected binary: {binary_name}"
+                ));
+            };
+            ensure_executable(&binary_path)?;
+            return Ok(PreparedPayload::PortableBinary { path: binary_path });
         }
 
-        Ok(dest)
+        if dest_str.ends_with(".pkg") {
+            return Ok(PreparedPayload::Installer {
+                path: dest,
+                kind: InstallerKind::MacPkg,
+            });
+        }
+
+        if dest_str.ends_with(".msi") {
+            return Ok(PreparedPayload::Installer {
+                path: dest,
+                kind: InstallerKind::WindowsMsi,
+            });
+        }
+
+        // Portable direct binary.
+        ensure_executable(&dest)?;
+        Ok(PreparedPayload::PortableBinary { path: dest })
     }
 
     pub fn write_restart_args_file(&self, path: &Path, args: Vec<String>) -> Result<(), String> {
@@ -273,7 +397,11 @@ impl UpdateManager {
             .parent()
             .ok_or_else(|| "Invalid args file path".to_string())?;
         fs::create_dir_all(parent).map_err(|e| format!("Failed to create args dir: {e}"))?;
-        write_json_atomic(path, &RestartArgsFile { args })
+        let cwd = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .to_string_lossy()
+            .to_string();
+        write_json_atomic(path, &RestartArgsFile { args, cwd })
             .map_err(|e| format!("Failed to write args file: {e}"))
     }
 
@@ -287,6 +415,7 @@ impl UpdateManager {
     pub fn spawn_internal_apply_update(
         &self,
         helper_exe: &Path,
+        old_pid: u32,
         target_exe: &Path,
         new_exe: &Path,
         args_file: &Path,
@@ -294,6 +423,8 @@ impl UpdateManager {
         Command::new(helper_exe)
             .arg("__internal")
             .arg("apply-update")
+            .arg("--old-pid")
+            .arg(old_pid.to_string())
             .arg("--target")
             .arg(target_exe)
             .arg("--source")
@@ -302,6 +433,36 @@ impl UpdateManager {
             .arg(args_file)
             .spawn()
             .map_err(|e| format!("Failed to spawn update helper: {e}"))?;
+        Ok(())
+    }
+
+    pub fn spawn_internal_run_installer(
+        &self,
+        helper_exe: &Path,
+        old_pid: u32,
+        target_exe: &Path,
+        installer: &Path,
+        installer_kind: InstallerKind,
+        args_file: &Path,
+    ) -> Result<(), String> {
+        Command::new(helper_exe)
+            .arg("__internal")
+            .arg("run-installer")
+            .arg("--old-pid")
+            .arg(old_pid.to_string())
+            .arg("--target")
+            .arg(target_exe)
+            .arg("--installer")
+            .arg(installer)
+            .arg("--installer-kind")
+            .arg(match installer_kind {
+                InstallerKind::MacPkg => "mac_pkg",
+                InstallerKind::WindowsMsi => "windows_msi",
+            })
+            .arg("--args-file")
+            .arg(args_file)
+            .spawn()
+            .map_err(|e| format!("Failed to spawn installer helper: {e}"))?;
         Ok(())
     }
 
@@ -356,7 +517,7 @@ impl UpdateManager {
             .map_err(|e| format!("Failed to parse GitHub release JSON: {e}"))
     }
 
-    fn state_from_cache(&self, cache: &UpdateCacheFile) -> UpdateState {
+    fn state_from_cache(&self, cache: &UpdateCacheFile, current_exe: Option<&Path>) -> UpdateState {
         let checked_at = cache.checked_at;
 
         let Some(latest_str) = cache.latest_version.as_deref() else {
@@ -377,11 +538,24 @@ impl UpdateManager {
                     self.owner, self.repo, latest_ver
                 )
             });
+
+            let platform = Platform::detect();
+            let portable = cache
+                .portable_asset_url
+                .as_deref()
+                .or(cache.asset_url.as_deref());
+            let installer = cache.installer_asset_url.as_deref();
+            let asset_url = choose_apply_plan(&platform, current_exe, portable, installer).map(|p| {
+                match p {
+                    ApplyPlan::Portable { url } => url,
+                    ApplyPlan::Installer { url, .. } => url,
+                }
+            });
             UpdateState::Available {
                 current: self.current_version.to_string(),
                 latest: latest_ver.to_string(),
                 release_url,
-                asset_url: cache.asset_url.clone(),
+                asset_url,
                 checked_at,
             }
         } else {
@@ -393,13 +567,55 @@ impl UpdateManager {
 }
 
 pub fn internal_apply_update(
+    old_pid: u32,
     target_exe: &Path,
     source_exe: &Path,
     args_file: &Path,
 ) -> Result<(), String> {
+    wait_for_pid_exit(old_pid, Duration::from_secs(300))?;
     let args = UpdateManager::read_restart_args_file(args_file)?;
     replace_executable(target_exe, source_exe)?;
 
+    Command::new(target_exe)
+        .args(args)
+        .spawn()
+        .map_err(|e| format!("Failed to restart: {e}"))?;
+    Ok(())
+}
+
+pub fn internal_run_installer(
+    old_pid: u32,
+    target_exe: &Path,
+    installer: &Path,
+    installer_kind: InstallerKind,
+    args_file: &Path,
+) -> Result<(), String> {
+    wait_for_pid_exit(old_pid, Duration::from_secs(300))?;
+
+    match installer_kind {
+        InstallerKind::MacPkg => {
+            #[cfg(target_os = "macos")]
+            {
+                run_macos_pkg_installer_with_privileges(installer)?;
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                return Err("mac_pkg installer can only run on macOS".to_string());
+            }
+        }
+        InstallerKind::WindowsMsi => {
+            #[cfg(target_os = "windows")]
+            {
+                run_windows_msi_with_uac(installer)?;
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                return Err("windows_msi installer can only run on Windows".to_string());
+            }
+        }
+    }
+
+    let args = UpdateManager::read_restart_args_file(args_file)?;
     Command::new(target_exe)
         .args(args)
         .spawn()
@@ -459,18 +675,253 @@ fn asset_name_from_url(url: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-fn expected_asset_name() -> Option<String> {
-    let os = std::env::consts::OS;
-    let arch = std::env::consts::ARCH;
-
-    match (os, arch) {
-        ("macos", "aarch64") => Some("gwt-macos-aarch64".to_string()),
-        ("macos", "x86_64") => Some("gwt-macos-x86_64".to_string()),
-        ("linux", "aarch64") => Some("gwt-linux-aarch64".to_string()),
-        ("linux", "x86_64") => Some("gwt-linux-x86_64".to_string()),
-        ("windows", "x86_64") => Some("gwt-windows-x86_64.exe".to_string()),
-        _ => None,
+fn choose_apply_plan(
+    platform: &Platform,
+    current_exe: Option<&Path>,
+    portable_url: Option<&str>,
+    installer_url: Option<&str>,
+) -> Option<ApplyPlan> {
+    // macOS: prefer installer when available to preserve codesign/notarization integrity.
+    if platform.os == "macos" {
+        if let Some(url) = installer_url {
+            let kind = platform.installer_asset_name().map(|(_, k)| k)?;
+            return Some(ApplyPlan::Installer {
+                url: url.to_string(),
+                kind,
+            });
+        }
     }
+
+    let writable = current_exe
+        .and_then(|p| p.parent())
+        .and_then(|dir| is_dir_writable(dir).ok())
+        .unwrap_or(true);
+
+    // If we cannot replace in-place, prefer installer when available.
+    if !writable {
+        if let Some(url) = installer_url {
+            let kind = platform.installer_asset_name().map(|(_, k)| k)?;
+            return Some(ApplyPlan::Installer {
+                url: url.to_string(),
+                kind,
+            });
+        }
+        return None;
+    }
+
+    if let Some(url) = portable_url {
+        return Some(ApplyPlan::Portable {
+            url: url.to_string(),
+        });
+    }
+
+    if let Some(url) = installer_url {
+        let kind = platform.installer_asset_name().map(|(_, k)| k)?;
+        return Some(ApplyPlan::Installer {
+            url: url.to_string(),
+            kind,
+        });
+    }
+
+    None
+}
+
+fn is_dir_writable(dir: &Path) -> Result<bool, String> {
+    let _ = fs::create_dir_all(dir);
+    let probe = dir.join(format!(".gwt_write_probe_{}", std::process::id()));
+    let result = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .map(|_| true)
+        .or_else(|e| {
+            if matches!(e.kind(), io::ErrorKind::PermissionDenied) {
+                Ok(false)
+            } else {
+                Err(e)
+            }
+        })
+        .map_err(|e| format!("Failed to probe dir writability: {e}"))?;
+    if result {
+        let _ = fs::remove_file(&probe);
+    }
+    Ok(result)
+}
+
+fn extract_archive(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
+    let name = archive_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
+
+    if name.ends_with(".tar.gz") {
+        let file = fs::File::open(archive_path)
+            .map_err(|e| format!("Failed to open archive: {e}"))?;
+        let decoder = GzDecoder::new(file);
+        let mut archive = tar::Archive::new(decoder);
+        archive
+            .unpack(dest_dir)
+            .map_err(|e| format!("Failed to unpack tar.gz: {e}"))?;
+        return Ok(());
+    }
+
+    if name.ends_with(".zip") {
+        let file = fs::File::open(archive_path)
+            .map_err(|e| format!("Failed to open archive: {e}"))?;
+        let mut zip =
+            zip::ZipArchive::new(file).map_err(|e| format!("Failed to read zip: {e}"))?;
+        zip.extract(dest_dir)
+            .map_err(|e| format!("Failed to extract zip: {e}"))?;
+        return Ok(());
+    }
+
+    Err(format!("Unsupported archive format: {name}"))
+}
+
+fn find_extracted_binary(extract_dir: &Path, binary_name: &str) -> Result<Option<PathBuf>, String> {
+    // Expected layout: dist/gwt-<artifact>/<binary>
+    let mut candidates = Vec::<PathBuf>::new();
+    for entry in fs::read_dir(extract_dir).map_err(|e| format!("Failed to read dir: {e}"))? {
+        let entry = entry.map_err(|e| format!("Failed to read dir entry: {e}"))?;
+        let path = entry.path();
+        if path.is_dir() {
+            candidates.push(path.join(binary_name));
+        } else if path.file_name().and_then(|n| n.to_str()) == Some(binary_name) {
+            candidates.push(path);
+        }
+    }
+
+    for c in candidates {
+        if c.exists() {
+            return Ok(Some(c));
+        }
+    }
+
+    // Fallback: deep search.
+    let mut stack = vec![extract_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir)
+            .unwrap_or_else(|_| fs::read_dir(extract_dir).unwrap())
+            .flatten()
+        {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.file_name().and_then(|n| n.to_str()) == Some(binary_name) {
+                return Ok(Some(path));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn ensure_executable(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(path)
+            .ok()
+            .map(|m| m.permissions().mode())
+            .unwrap_or(0o755);
+        let mut perms = fs::metadata(path)
+            .map_err(|e| format!("Failed to read metadata: {e}"))?
+            .permissions();
+        perms.set_mode(mode | 0o111);
+        let _ = fs::set_permissions(path, perms);
+    }
+    Ok(())
+}
+
+fn wait_for_pid_exit(pid: u32, timeout: Duration) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    while is_process_running(pid) {
+        if started.elapsed() > timeout {
+            return Err(format!("Timed out waiting for process {pid} to exit"));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    Ok(())
+}
+
+fn is_process_running(pid: u32) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let script = format!(
+            "if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}"
+        );
+        return Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn sh_single_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    let escaped = s.replace('\'', "'\\''");
+    format!("'{escaped}'")
+}
+
+#[cfg(target_os = "macos")]
+fn escape_applescript_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\"', "\\\"")
+}
+
+#[cfg(target_os = "macos")]
+fn run_macos_pkg_installer_with_privileges(installer: &Path) -> Result<(), String> {
+    let installer_path = installer.to_string_lossy().to_string();
+    let shell_cmd = format!(
+        "/usr/sbin/installer -pkg {} -target /",
+        sh_single_quote(&installer_path)
+    );
+    let applescript_cmd = format!(
+        "do shell script \"{}\" with administrator privileges",
+        escape_applescript_string(&shell_cmd)
+    );
+    let status = Command::new("osascript")
+        .arg("-e")
+        .arg(applescript_cmd)
+        .status()
+        .map_err(|e| format!("Failed to run macOS installer via osascript: {e}"))?;
+    if !status.success() {
+        return Err(format!("osascript installer exited with {status}"));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn run_windows_msi_with_uac(installer: &Path) -> Result<(), String> {
+    // Trigger UAC for msiexec via PowerShell.
+    let msi = installer.to_string_lossy().to_string();
+    let args = format!(
+        "Start-Process msiexec.exe -Verb RunAs -Wait -ArgumentList @('/i', '{}', '/passive')",
+        msi.replace('\'', "''")
+    );
+    let status = Command::new("powershell")
+        .arg("-NoProfile")
+        .arg("-Command")
+        .arg(args)
+        .status()
+        .map_err(|e| format!("Failed to run msiexec: {e}"))?;
+    if !status.success() {
+        return Err(format!("msiexec exited with {status}"));
+    }
+    Ok(())
 }
 
 fn replace_executable(target_exe: &Path, source_exe: &Path) -> Result<(), String> {
@@ -570,6 +1021,8 @@ mod tests {
             checked_at: Utc::now(),
             latest_version: Some("999.0.0".to_string()),
             release_url: Some("https://example.com/release".to_string()),
+            portable_asset_url: None,
+            installer_asset_url: None,
             asset_url: Some("https://example.com/asset".to_string()),
         };
         write_cache(mgr.cache_path(), &cache).unwrap();
@@ -593,6 +1046,8 @@ mod tests {
             checked_at: Utc::now(),
             latest_version: Some("999.0.0".to_string()),
             release_url: Some("https://example.com/release".to_string()),
+            portable_asset_url: None,
+            installer_asset_url: None,
             asset_url: Some("https://example.com/asset".to_string()),
         };
         write_cache(mgr.cache_path(), &cache).unwrap();
