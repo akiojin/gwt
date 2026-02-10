@@ -52,7 +52,7 @@
 
 ## メニュー仕様（ネイティブ）
 
-- トップレベル: gwt / File / Window
+- トップレベル: gwt / File / Window / Debug
 - `File`
   - New Window
   - Open Project...
@@ -67,6 +67,8 @@
 - `gwt`
   - About gwt
   - Preferences...
+- `Debug`
+  - Show Captured Environment
 
 ## テスト戦略
 
