@@ -19,6 +19,7 @@ toml.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+chrono.workspace = true
 which = "8"
 reqwest.workspace = true
 
