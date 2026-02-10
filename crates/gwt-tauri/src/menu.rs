@@ -214,7 +214,10 @@ fn collect_window_entries(app: &AppHandle<Wry>, state: &AppState) -> Vec<WindowM
 
     let mut raw: Vec<(String, String)> = Vec::new();
     for (label, path) in projects {
-        if app.get_webview_window(&label).is_none() {
+        let Some(window) = app.get_webview_window(&label) else {
+            continue;
+        };
+        if window.is_visible().ok() == Some(false) {
             continue;
         }
         raw.push((label, path));
