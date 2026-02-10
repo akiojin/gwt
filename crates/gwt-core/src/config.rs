@@ -4,6 +4,7 @@
 
 mod agent_config;
 mod bare_project;
+mod claude_hook_events;
 mod claude_hooks;
 mod claude_plugins;
 pub mod migration;
@@ -16,6 +17,7 @@ mod ts_session;
 
 pub use agent_config::{AgentConfig, ClaudeAgentConfig, ClaudeAgentProvider, ClaudeGlmConfig};
 pub use bare_project::BareProjectConfig;
+pub use claude_hook_events::process_claude_hook_event;
 pub use claude_hooks::{
     all_hook_events, get_claude_settings_path, is_gwt_hooks_registered, is_temporary_execution,
     is_temporary_execution_path, register_gwt_hooks, reregister_gwt_hooks, unregister_gwt_hooks,
