@@ -335,6 +335,24 @@
     activeTabId = tab.id;
   }
 
+  function openVersionHistoryTab() {
+    const existing = tabs.find(
+      (t) => t.type === "versionHistory" || t.id === "versionHistory",
+    );
+    if (existing) {
+      activeTabId = existing.id;
+      return;
+    }
+
+    const tab: Tab = {
+      id: "versionHistory",
+      label: "Version History",
+      type: "versionHistory",
+    };
+    tabs = [...tabs, tab];
+    activeTabId = tab.id;
+  }
+
   async function handleMenuAction(action: string) {
     switch (action) {
       case "open-project": {
@@ -387,6 +405,9 @@
         break;
       case "open-settings":
         openSettingsTab();
+        break;
+      case "version-history":
+        openVersionHistoryTab();
         break;
       case "about":
         showAbout = true;

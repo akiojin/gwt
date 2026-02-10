@@ -22,6 +22,7 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
         crate::menu::MENU_ID_FILE_OPEN_PROJECT => Some("open-project"),
         crate::menu::MENU_ID_FILE_CLOSE_PROJECT => Some("close-project"),
         crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES => Some("cleanup-worktrees"),
+        crate::menu::MENU_ID_GIT_VERSION_HISTORY => Some("version-history"),
         crate::menu::MENU_ID_TOOLS_LAUNCH_AGENT => Some("launch-agent"),
         crate::menu::MENU_ID_TOOLS_LIST_TERMINALS => Some("list-terminals"),
         crate::menu::MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS => Some("terminal-diagnostics"),
@@ -246,6 +247,8 @@ pub fn build_app(
             crate::commands::git_view::get_working_tree_status,
             crate::commands::git_view::get_stash_list,
             crate::commands::git_view::get_base_branch_candidates,
+            crate::commands::version_history::list_project_versions,
+            crate::commands::version_history::get_project_version_history,
         ])
 }
 

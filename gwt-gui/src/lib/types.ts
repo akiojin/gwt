@@ -108,7 +108,7 @@ export interface ProfilesConfig {
 export interface Tab {
   id: string;
   label: string;
-  type: "summary" | "agent" | "settings";
+  type: "summary" | "agent" | "settings" | "versionHistory";
   paneId?: string;
 }
 
@@ -130,6 +130,30 @@ export interface ToolSessionEntry {
   docker_build?: boolean | null;
   docker_keep?: boolean | null;
   timestamp: number;
+}
+
+export interface ProjectVersions {
+  items: VersionItem[];
+}
+
+export interface VersionItem {
+  id: string; // "unreleased" | "vX.Y.Z"
+  label: string;
+  range_from?: string | null;
+  range_to: string; // "HEAD" | "vX.Y.Z"
+  commit_count: number;
+}
+
+export interface VersionHistoryResult {
+  status: "ok" | "generating" | "error" | "disabled";
+  version_id: string;
+  label: string;
+  range_from?: string | null;
+  range_to: string;
+  commit_count: number;
+  summary_markdown?: string | null;
+  changelog_markdown?: string | null;
+  error?: string | null;
 }
 
 export interface SessionSummaryResult {

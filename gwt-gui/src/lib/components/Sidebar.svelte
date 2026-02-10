@@ -23,6 +23,7 @@
   let searchQuery: string = $state("");
   let errorMessage: string | null = $state(null);
   let lastFetchKey = "";
+  let lastWorktreesFetchKey = "";
   let fetchToken = 0;
   let localRefreshKey = $state(0);
 
@@ -165,15 +166,23 @@
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       if (activeFilter === "Local") {
-        const [next, worktrees] = await Promise.all([
-          invoke<BranchInfo[]>("list_worktree_branches", { projectPath }),
-          invoke<WorktreeInfo[]>("list_worktrees", { projectPath }).catch(
-            () => [] as WorktreeInfo[]
-          ),
-        ]);
+        const next = await invoke<BranchInfo[]>("list_worktree_branches", { projectPath });
         if (token !== fetchToken) return;
         branches = next;
-        updateWorktreeMap(worktrees);
+
+        // Worktree safety info is relatively expensive and does not need to be refreshed
+        // for every "branch list refresh" (refreshKey). Refresh it only when requested
+        // via localRefreshKey or when we currently have no safety data.
+        const wtKey = `${projectPath}::${localRefreshKey}`;
+        const shouldFetchWorktrees = wtKey !== lastWorktreesFetchKey;
+        if (shouldFetchWorktrees) {
+          const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", { projectPath }).catch(
+            () => [] as WorktreeInfo[]
+          );
+          if (token !== fetchToken) return;
+          updateWorktreeMap(worktrees);
+          lastWorktreesFetchKey = wtKey;
+        }
       } else if (activeFilter === "Remote") {
         const next = await invoke<BranchInfo[]>("list_remote_branches", {
           projectPath,
@@ -181,14 +190,12 @@
         if (token !== fetchToken) return;
         branches = next;
         worktreeMap = new Map();
+        lastWorktreesFetchKey = "";
       } else {
         // All: merge local + remote
-        const [local, remote, worktrees] = await Promise.all([
+        const [local, remote] = await Promise.all([
           invoke<BranchInfo[]>("list_worktree_branches", { projectPath }),
           invoke<BranchInfo[]>("list_remote_branches", { projectPath }),
-          invoke<WorktreeInfo[]>("list_worktrees", { projectPath }).catch(
-            () => [] as WorktreeInfo[]
-          ),
         ]);
         if (token !== fetchToken) return;
         // Deduplicate by name
@@ -204,7 +211,17 @@
           }
         }
         branches = merged;
-        updateWorktreeMap(worktrees);
+
+        const wtKey = `${projectPath}::${localRefreshKey}`;
+        const shouldFetchWorktrees = wtKey !== lastWorktreesFetchKey;
+        if (shouldFetchWorktrees) {
+          const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", { projectPath }).catch(
+            () => [] as WorktreeInfo[]
+          );
+          if (token !== fetchToken) return;
+          updateWorktreeMap(worktrees);
+          lastWorktreesFetchKey = wtKey;
+        }
       }
     } catch (err) {
       const msg =

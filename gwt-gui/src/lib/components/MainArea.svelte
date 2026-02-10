@@ -10,6 +10,7 @@
   import TerminalView from "../terminal/TerminalView.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
   import GitSection from "./GitSection.svelte";
+  import VersionHistoryPanel from "./VersionHistoryPanel.svelte";
 
   function isAgentTabWithPaneId(tab: Tab): tab is Tab & { paneId: string } {
     return tab.type === "agent" && typeof tab.paneId === "string" && tab.paneId.length > 0;
@@ -329,7 +330,7 @@
     {/each}
   </div>
   <div class="tab-content">
-    <div class="panel-layer" class:hidden={showTerminalLayer}>
+      <div class="panel-layer" class:hidden={showTerminalLayer}>
       {#if activeTab?.type === "settings"}
         <SettingsPanel onClose={() => onTabClose(activeTabId)} />
       {:else if activeTab?.type === "summary"}
@@ -505,6 +506,8 @@
             </div>
           {/if}
         </div>
+      {:else if activeTab?.type === "versionHistory"}
+        <VersionHistoryPanel {projectPath} />
       {/if}
     </div>
 
