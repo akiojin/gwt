@@ -122,7 +122,64 @@ jobs:
         run: cd gwt-gui && pnpm install --frozen-lockfile
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2"
-      - name: Build Tauri
+      - name: Setup macOS code signing (optional)
+        if: matrix.platform == 'macos' && secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != ''
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          keychain_password="${KEYCHAIN_PASSWORD:-}"
+          if [[ -z "$keychain_password" ]]; then
+            keychain_password="actions"
+          fi
+
+          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+
+          security create-keychain -p "$keychain_password" build.keychain
+          security set-keychain-settings -t 21600 -u build.keychain
+          security unlock-keychain -p "$keychain_password" build.keychain
+
+          security import certificate.p12 \
+            -k build.keychain \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security \
+            -T /usr/bin/pkgbuild \
+            -T /usr/bin/productbuild \
+            -T /usr/bin/productsign
+
+          security list-keychains -d user -s build.keychain
+          security default-keychain -s build.keychain
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" build.keychain
+
+          security find-identity -v -p codesigning build.keychain || true
+
+      - name: Build Tauri (macOS signed)
+        if: matrix.platform == 'macos' && secrets.APPLE_SIGNING_IDENTITY != '' && secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != ''
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${{ secrets.APPLE_ID }}" && -n "${{ secrets.APPLE_PASSWORD }}" && -n "${{ secrets.APPLE_TEAM_ID }}" ]]; then
+            export APPLE_ID='${{ secrets.APPLE_ID }}'
+            export APPLE_PASSWORD='${{ secrets.APPLE_PASSWORD }}'
+            export APPLE_TEAM_ID='${{ secrets.APPLE_TEAM_ID }}'
+          fi
+
+          cargo tauri build
+
+      - name: Build Tauri (macOS unsigned)
+        if: matrix.platform == 'macos' && (secrets.APPLE_SIGNING_IDENTITY == '' || secrets.APPLE_CERTIFICATE == '' || secrets.APPLE_CERTIFICATE_PASSWORD == '')
+        run: cargo tauri build --no-sign
+
+      - name: Build Tauri (non-macOS)
+        if: matrix.platform != 'macos'
         run: cargo tauri build
       - name: Build macOS installer (.pkg)
         if: matrix.platform == 'macos'
@@ -144,13 +201,52 @@ jobs:
           pkg_dir="target/release/bundle/pkg"
           mkdir -p "$pkg_dir"
           pkg_path="${pkg_dir}/gwt-macos-${arch}.pkg"
-          pkgbuild \
-            --component "$app_path" \
-            --install-location "/Applications" \
-            --identifier "com.akiojin.gwt" \
-            --version "$version" \
-            "$pkg_path"
+          installer_identity="${{ secrets.APPLE_INSTALLER_SIGNING_IDENTITY }}"
+          if [[ -n "$installer_identity" ]]; then
+            pkgbuild \
+              --sign "$installer_identity" \
+              --component "$app_path" \
+              --install-location "/Applications" \
+              --identifier "com.akiojin.gwt" \
+              --version "$version" \
+              "$pkg_path"
+          else
+            pkgbuild \
+              --component "$app_path" \
+              --install-location "/Applications" \
+              --identifier "com.akiojin.gwt" \
+              --version "$version" \
+              "$pkg_path"
+          fi
           echo "pkg_path=$pkg_path" >> "$GITHUB_OUTPUT"
+      - name: Notarize macOS artifacts (optional)
+        if: matrix.platform == 'macos' && secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dmg_path="$(ls target/release/bundle/dmg/*.dmg | head -n 1 || true)"
+          pkg_path="${{ steps.package_macos.outputs.pkg_path }}"
+
+          if [[ -n "$dmg_path" && -f "$dmg_path" ]]; then
+            echo "Notarizing DMG: $dmg_path"
+            xcrun notarytool submit "$dmg_path" \
+              --apple-id "${{ secrets.APPLE_ID }}" \
+              --password "${{ secrets.APPLE_PASSWORD }}" \
+              --team-id "${{ secrets.APPLE_TEAM_ID }}" \
+              --wait
+            xcrun stapler staple "$dmg_path"
+          fi
+
+          if [[ -n "$pkg_path" && -f "$pkg_path" ]]; then
+            echo "Notarizing PKG: $pkg_path"
+            xcrun notarytool submit "$pkg_path" \
+              --apple-id "${{ secrets.APPLE_ID }}" \
+              --password "${{ secrets.APPLE_PASSWORD }}" \
+              --team-id "${{ secrets.APPLE_TEAM_ID }}" \
+              --wait
+            xcrun stapler staple "$pkg_path"
+          fi
       - name: Validate macOS installer (.pkg)
         if: matrix.platform == 'macos'
         shell: bash
