@@ -1,5 +1,6 @@
 <script lang="ts">
-  import type { CloneProgress, ProjectInfo } from "../types";
+  import type { CloneProgress, ProbePathResult, ProjectInfo } from "../types";
+  import MigrationModal from "./MigrationModal.svelte";
 
   interface RecentProject {
     path: string;
@@ -17,7 +18,11 @@
   let showNewProject: boolean = $state(false);
   let repoUrl: string = $state("");
   let parentDir: string = $state("");
+  let shallowClone: boolean = $state(true);
   let cloneProgress: CloneProgress | null = $state(null);
+
+  let migrationOpen: boolean = $state(false);
+  let migrationSourceRoot: string = $state("");
 
   $effect(() => {
     loadRecentProjects();
@@ -37,9 +42,18 @@
   }
 
   function normalizeOpenProjectError(msg: string): string {
+    if (msg.includes("Migration required")) return "Migration required.";
     if (msg.includes("Path does not exist")) return "Path does not exist.";
     if (msg.includes("Not a git repository")) return "Not a git repository.";
+    if (msg.includes("Not a gwt project")) return "Not a gwt project.";
     return msg;
+  }
+
+  function normalizeProbeError(probe: ProbePathResult): string {
+    if (probe.kind === "notFound") return "Path does not exist.";
+    if (probe.kind === "invalid") return "Invalid path.";
+    if (probe.kind === "notGwtProject") return "Not a gwt project.";
+    return probe.message || "Failed to open project.";
   }
 
   async function loadRecentProjects() {
@@ -97,7 +111,7 @@
       const { open } = await import("@tauri-apps/plugin-dialog");
       const selected = await open({ directory: true, multiple: false });
       if (selected) {
-        await openProject(selected as string, false);
+        await probeAndOpen(selected as string, false);
       }
     } catch (err) {
       errorMessage = `Failed to open folder dialog: ${toErrorMessage(err)}`;
@@ -105,22 +119,63 @@
     opening = false;
   }
 
-  async function openProject(path: string, fromRecent: boolean) {
+  async function openGwtProject(projectPath: string, fromRecent: boolean) {
     opening = true;
     errorMessage = null;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      const info = await invoke<ProjectInfo>("open_project", { path });
+      const info = await invoke<ProjectInfo>("open_project", { path: projectPath });
       await saveToRecent(info.path);
       onOpen(info.path);
+    } catch (err) {
+      const msg = toErrorMessage(err);
+      if (fromRecent && msg.includes("Path does not exist")) {
+        await removeFromRecent(projectPath);
+      }
+      errorMessage = normalizeOpenProjectError(msg);
+    } finally {
+      opening = false;
+    }
+  }
+
+  async function probeAndOpen(path: string, fromRecent: boolean) {
+    opening = true;
+    errorMessage = null;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const probe = await invoke<ProbePathResult>("probe_path", { path });
+
+      if (probe.kind === "gwtProject" && probe.project_path) {
+        await openGwtProject(probe.project_path, fromRecent);
+        return;
+      }
+
+      if (probe.kind === "migrationRequired" && probe.migration_source_root) {
+        migrationSourceRoot = probe.migration_source_root;
+        migrationOpen = true;
+        return;
+      }
+
+      if (probe.kind === "emptyDir" && probe.project_path) {
+        showNewProject = true;
+        parentDir = probe.project_path;
+        return;
+      }
+
+      if (fromRecent && probe.kind === "notFound") {
+        await removeFromRecent(path);
+      }
+
+      errorMessage = normalizeProbeError(probe);
     } catch (err) {
       const msg = toErrorMessage(err);
       if (fromRecent && msg.includes("Path does not exist")) {
         await removeFromRecent(path);
       }
       errorMessage = normalizeOpenProjectError(msg);
+    } finally {
+      opening = false;
     }
-    opening = false;
   }
 
   async function chooseParentDir() {
@@ -158,7 +213,7 @@
 
       const { invoke } = await import("@tauri-apps/api/core");
       const info = await invoke<ProjectInfo>("create_project", {
-        request: { repoUrl, parentDir },
+        request: { repoUrl, parentDir, shallow: shallowClone },
       });
       await saveToRecent(info.path);
       onOpen(info.path);
@@ -237,6 +292,33 @@
           </div>
         </div>
 
+        <div class="field">
+          <span class="label">Clone Mode</span>
+          <div class="row">
+            <button
+              class="mode-btn"
+              class:active={shallowClone}
+              type="button"
+              onclick={() => (shallowClone = true)}
+              disabled={creating}
+            >
+              Shallow (Recommended)
+            </button>
+            <button
+              class="mode-btn"
+              class:active={!shallowClone}
+              type="button"
+              onclick={() => (shallowClone = false)}
+              disabled={creating}
+            >
+              Full
+            </button>
+          </div>
+          <span class="mode-hint">
+            Shallow clone uses --depth=1 (faster).
+          </span>
+        </div>
+
         <button
           class="create-btn"
           onclick={createProject}
@@ -268,7 +350,7 @@
         {#each recentProjects as project}
           <button
             class="recent-item"
-            onclick={() => openProject(project.path, true)}
+            onclick={() => probeAndOpen(project.path, true)}
             disabled={opening || creating}
           >
             <span class="recent-name">{project.name}</span>
@@ -280,6 +362,20 @@
     {/if}
   </div>
 </div>
+
+<MigrationModal
+  open={migrationOpen}
+  sourceRoot={migrationSourceRoot}
+  onCompleted={async (p) => {
+    migrationOpen = false;
+    migrationSourceRoot = "";
+    await openGwtProject(p, false);
+  }}
+  onDismiss={() => {
+    migrationOpen = false;
+    migrationSourceRoot = "";
+  }}
+/>
 
 <style>
   .open-project {
@@ -412,6 +508,40 @@
     display: flex;
     gap: 8px;
     align-items: center;
+  }
+
+  .mode-btn {
+    flex: 1;
+    padding: 8px 10px;
+    background: none;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: 12px;
+    font-family: inherit;
+    font-weight: 600;
+  }
+
+  .mode-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    background-color: var(--bg-surface);
+  }
+
+  .mode-btn:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+  }
+
+  .mode-btn.active {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.06) inset;
+  }
+
+  .mode-hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    line-height: 1.4;
   }
 
   .input {

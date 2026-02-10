@@ -126,16 +126,27 @@
   let agentNotInstalled = $derived(
     selectedAgentInfo?.version === "bunx" || selectedAgentInfo?.version === "npx"
   );
-  let composeDetected = $derived(
-    dockerContext?.file_type === "compose" && !dockerContext.force_host
+  let dockerDetected = $derived(
+    !!dockerContext && dockerContext.file_type !== "none" && !dockerContext.force_host
+  );
+  let dockerComposeLike = $derived(
+    dockerDetected &&
+      (dockerContext?.file_type === "compose" ||
+        (dockerContext?.file_type === "devcontainer" &&
+          (dockerContext?.compose_services?.length ?? 0) > 0))
   );
   let dockerSelectable = $derived(
-    composeDetected &&
+    dockerDetected &&
       (dockerContext?.docker_available ?? false) &&
-      (dockerContext?.compose_available ?? false)
+      (dockerComposeLike ? (dockerContext?.compose_available ?? false) : true)
   );
   function supportsModelFor(agentId: string): boolean {
-    return agentId === "codex" || agentId === "claude" || agentId === "gemini";
+    return (
+      agentId === "codex" ||
+      agentId === "claude" ||
+      agentId === "gemini" ||
+      agentId === "opencode"
+    );
   }
 
   let supportsModel = $derived(supportsModelFor(selectedAgent));
@@ -493,25 +504,37 @@
 
       dockerContext = ctx;
 
-      if (!ctx || ctx.force_host || ctx.file_type !== "compose") {
+      if (!ctx || ctx.force_host || ctx.file_type === "none") {
         runtimeTarget = "host" as RuntimeTarget;
         dockerService = "";
         return;
       }
 
-      runtimeTarget =
-        ctx.docker_available && ctx.compose_available
-          ? ("docker" as RuntimeTarget)
-          : ("host" as RuntimeTarget);
-
       const services = ctx.compose_services ?? [];
-      if (services.length === 0) {
-        dockerService = "";
+
+      const composeLike =
+        ctx.file_type === "compose" ||
+        (ctx.file_type === "devcontainer" && services.length > 0);
+
+      if (composeLike) {
+        runtimeTarget =
+          ctx.docker_available && ctx.compose_available
+            ? ("docker" as RuntimeTarget)
+            : ("host" as RuntimeTarget);
+
+        if (services.length === 0) {
+          dockerService = "";
+          return;
+        }
+        if (!services.includes(dockerService)) {
+          dockerService = services[0];
+        }
         return;
       }
-      if (!services.includes(dockerService)) {
-        dockerService = services[0];
-      }
+
+      // Dockerfile / image-based devcontainer.
+      runtimeTarget = ctx.docker_available ? ("docker" as RuntimeTarget) : ("host" as RuntimeTarget);
+      dockerService = "";
     } catch (err) {
       const key = `${projectPath}::${refBranch}`;
       if (dockerContextKey !== key) return;
@@ -635,7 +658,7 @@
         request.envOverrides = mergedEnv;
       }
 
-      if (composeDetected) {
+      if (dockerDetected) {
         if (runtimeTarget === "host") {
           request.dockerForceHost = true;
         } else if (runtimeTarget === "docker") {
@@ -643,16 +666,19 @@
             errorMessage = "Docker is not available on this system.";
             return;
           }
-          const service = dockerService.trim();
-          if (!service) {
-            errorMessage = "Docker service is required.";
-            return;
+
+          if (dockerComposeLike) {
+            const service = dockerService.trim();
+            if (!service) {
+              errorMessage = "Docker service is required.";
+              return;
+            }
+            request.dockerService = service;
+            request.dockerRecreate = dockerRecreate;
+            request.dockerKeep = dockerKeep;
           }
-          request.dockerService = service;
-          request.dockerForceHost = false;
+
           request.dockerBuild = dockerBuild;
-          request.dockerRecreate = dockerRecreate;
-          request.dockerKeep = dockerKeep;
         }
       }
 
@@ -735,15 +761,27 @@
         </div>
 
         {#if supportsModel}
-          <div class="field">
-            <label for="model-select">Model</label>
-            <select id="model-select" bind:value={model}>
-              <option value="">Default</option>
-              {#each modelOptions as opt (opt)}
-                <option value={opt}>{opt}</option>
-              {/each}
-            </select>
-          </div>
+          {#if selectedAgent === "opencode"}
+            <div class="field">
+              <label for="opencode-model-input">Model</label>
+              <input
+                id="opencode-model-input"
+                type="text"
+                bind:value={model}
+                placeholder="provider/model (optional)"
+              />
+            </div>
+          {:else}
+            <div class="field">
+              <label for="model-select">Model</label>
+              <select id="model-select" bind:value={model}>
+                <option value="">Default</option>
+                {#each modelOptions as opt (opt)}
+                  <option value={opt}>{opt}</option>
+                {/each}
+              </select>
+            </div>
+          {/if}
         {/if}
 
         {#if selectedAgent === "claude"}
@@ -1091,7 +1129,7 @@
           </div>
         {/if}
 
-        {#if composeDetected}
+        {#if dockerDetected}
           <div class="field">
             <span class="field-label" id="runtime-label">Runtime</span>
             <div class="mode-toggle" role="group" aria-labelledby="runtime-label">
@@ -1113,7 +1151,7 @@
             </div>
             {#if dockerContext && !dockerContext.docker_available}
               <span class="field-hint warn">Docker is not available on PATH.</span>
-            {:else if dockerContext && !dockerContext.compose_available}
+            {:else if dockerContext && dockerComposeLike && !dockerContext.compose_available}
               <span class="field-hint warn">docker compose is not available.</span>
             {:else if dockerContext && !dockerContext.daemon_running}
               <span class="field-hint warn">
@@ -1123,32 +1161,38 @@
           </div>
 
           {#if runtimeTarget === "docker"}
-            <div class="field">
-              <label for="docker-service-select">Service</label>
-              <select id="docker-service-select" bind:value={dockerService}>
-                {#each (dockerContext?.compose_services ?? []) as svc (svc)}
-                  <option value={svc}>{svc}</option>
-                {/each}
-              </select>
-              {#if (dockerContext?.compose_services?.length ?? 0) === 0}
-                <span class="field-hint warn">No services found in compose file.</span>
-              {/if}
-            </div>
+            {#if dockerComposeLike}
+              <div class="field">
+                <label for="docker-service-select">Service</label>
+                <select id="docker-service-select" bind:value={dockerService}>
+                  {#each (dockerContext?.compose_services ?? []) as svc (svc)}
+                    <option value={svc}>{svc}</option>
+                  {/each}
+                </select>
+                {#if (dockerContext?.compose_services?.length ?? 0) === 0}
+                  <span class="field-hint warn">
+                    No services found in compose file.
+                  </span>
+                {/if}
+              </div>
+            {/if}
 
             <div class="field">
               <span class="field-label">Docker</span>
               <label class="check-row">
                 <input type="checkbox" bind:checked={dockerBuild} />
-                <span>Build images</span>
+                <span>{dockerComposeLike ? "Build images" : "Build image"}</span>
               </label>
-              <label class="check-row">
-                <input type="checkbox" bind:checked={dockerRecreate} />
-                <span>Force recreate</span>
-              </label>
-              <label class="check-row">
-                <input type="checkbox" bind:checked={dockerKeep} />
-                <span>Keep containers running after exit</span>
-              </label>
+              {#if dockerComposeLike}
+                <label class="check-row">
+                  <input type="checkbox" bind:checked={dockerRecreate} />
+                  <span>Force recreate</span>
+                </label>
+                <label class="check-row">
+                  <input type="checkbox" bind:checked={dockerKeep} />
+                  <span>Keep containers running after exit</span>
+                </label>
+              {/if}
             </div>
           {/if}
         {/if}

@@ -37,7 +37,7 @@ export interface TerminalAnsiProbe {
 }
 
 export interface AgentInfo {
-  id: "claude" | "codex" | "gemini" | (string & {});
+  id: "claude" | "codex" | "gemini" | "opencode" | (string & {});
   name: string;
   version: string;
   path?: string;
@@ -151,12 +151,52 @@ export interface BranchSuggestResult {
 
 export interface DockerContext {
   worktree_path?: string | null;
-  file_type: "compose" | "none";
+  file_type: "compose" | "devcontainer" | "dockerfile" | "none";
   compose_services: string[];
   docker_available: boolean;
   compose_available: boolean;
   daemon_running: boolean;
   force_host: boolean;
+}
+
+export interface ProbePathResult {
+  kind:
+    | "gwtProject"
+    | "migrationRequired"
+    | "emptyDir"
+    | "notFound"
+    | "invalid"
+    | "notGwtProject";
+  project_path?: string | null;
+  migration_source_root?: string | null;
+  message?: string | null;
+}
+
+export interface MigrationProgressPayload {
+  job_id: string;
+  state: string;
+  current?: number | null;
+  total?: number | null;
+}
+
+export interface MigrationFinishedPayload {
+  job_id: string;
+  ok: boolean;
+  error?: string | null;
+  project_path?: string | null;
+}
+
+export interface LaunchProgressPayload {
+  job_id: string;
+  step: string;
+  detail?: string | null;
+}
+
+export interface LaunchFinishedPayload {
+  job_id: string;
+  status: "ok" | "cancelled" | "error";
+  pane_id?: string | null;
+  error?: string | null;
 }
 
 export interface LaunchAgentRequest {
