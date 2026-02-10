@@ -159,6 +159,36 @@ export interface DockerContext {
   force_host: boolean;
 }
 
+export interface WorktreeInfo {
+  path: string;
+  branch: string | null;
+  commit: string;
+  status: string; // "active" | "locked" | "prunable" | "missing"
+  is_main: boolean;
+  has_changes: boolean;
+  has_unpushed: boolean;
+  is_current: boolean;
+  is_protected: boolean;
+  is_agent_running: boolean;
+  ahead: number;
+  behind: number;
+  is_gone: boolean;
+  last_tool_usage: string | null;
+  safety_level: "safe" | "warning" | "danger" | "disabled";
+}
+
+export interface CleanupResult {
+  branch: string;
+  success: boolean;
+  error: string | null;
+}
+
+export interface CleanupProgress {
+  branch: string;
+  status: "deleting" | "deleted" | "failed";
+  error?: string;
+}
+
 export interface LaunchAgentRequest {
   agentId: string;
   branch: string;

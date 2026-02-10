@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { BranchInfo } from "../types";
+  import type { BranchInfo, WorktreeInfo, CleanupProgress } from "../types";
 
   type FilterType = "Local" | "Remote" | "All";
 
@@ -7,11 +7,13 @@
     projectPath,
     onBranchSelect,
     onBranchActivate,
+    onCleanupRequest,
     refreshKey = 0,
   }: {
     projectPath: string;
     onBranchSelect: (branch: BranchInfo) => void;
     onBranchActivate?: (branch: BranchInfo) => void;
+    onCleanupRequest?: (preSelectedBranch?: string) => void;
     refreshKey?: number;
   } = $props();
 
@@ -22,6 +24,22 @@
   let errorMessage: string | null = $state(null);
   let lastFetchKey = "";
   let fetchToken = 0;
+  let localRefreshKey = $state(0);
+
+  // Worktree safety info
+  let worktreeMap: Map<string, WorktreeInfo> = $state(new Map());
+
+  // Branches currently being deleted
+  let deletingBranches: Set<string> = $state(new Set());
+
+  // Context menu state
+  let contextMenu: { x: number; y: number; branch: BranchInfo } | null =
+    $state(null);
+
+  // Confirmation dialog state
+  let confirmDelete: { branch: string; safetyLevel: string } | null =
+    $state(null);
+  let confirmDeleteError: string | null = $state(null);
 
   const filters: FilterType[] = ["Local", "Remote", "All"];
 
@@ -34,11 +52,110 @@
   );
 
   $effect(() => {
-    // Re-fetch when filter/projectPath changes and when explicitly requested by the parent.
-    const key = `${projectPath}::${activeFilter}::${refreshKey}`;
+    // Re-fetch when filter/projectPath changes and when explicitly requested.
+    const key = `${projectPath}::${activeFilter}::${refreshKey}::${localRefreshKey}`;
     if (key === lastFetchKey) return;
     lastFetchKey = key;
     fetchBranches();
+  });
+
+  // Listen to cleanup-progress events for deletion state tracking
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen<CleanupProgress>(
+          "cleanup-progress",
+          (event) => {
+            const { branch, status } = event.payload;
+            if (status === "deleting") {
+              deletingBranches = new Set([...deletingBranches, branch]);
+            } else {
+              const next = new Set(deletingBranches);
+              next.delete(branch);
+              deletingBranches = next;
+            }
+          }
+        );
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+      } catch {
+        /* Tauri not available */
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  });
+
+  // Listen to cleanup-completed to clear state and refresh
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen("cleanup-completed", () => {
+          deletingBranches = new Set();
+          localRefreshKey++;
+        });
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+      } catch {
+        /* Tauri not available */
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  });
+
+  // Close context menu on outside click / Escape
+  $effect(() => {
+    if (!contextMenu) return;
+    const handleClick = () => {
+      contextMenu = null;
+    };
+    const handleKeydown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") contextMenu = null;
+    };
+    // Defer so the opening right-click doesn't immediately close it
+    const id = setTimeout(() => {
+      document.addEventListener("click", handleClick);
+      document.addEventListener("keydown", handleKeydown);
+    }, 0);
+    return () => {
+      clearTimeout(id);
+      document.removeEventListener("click", handleClick);
+      document.removeEventListener("keydown", handleKeydown);
+    };
+  });
+
+  // Close dialogs on Escape
+  $effect(() => {
+    if (!confirmDelete && !confirmDeleteError) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        confirmDelete = null;
+        confirmDeleteError = null;
+      }
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
   });
 
   async function fetchBranches() {
@@ -48,22 +165,30 @@
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       if (activeFilter === "Local") {
-        const next = await invoke<BranchInfo[]>("list_worktree_branches", {
-          projectPath,
-        });
+        const [next, worktrees] = await Promise.all([
+          invoke<BranchInfo[]>("list_worktree_branches", { projectPath }),
+          invoke<WorktreeInfo[]>("list_worktrees", { projectPath }).catch(
+            () => [] as WorktreeInfo[]
+          ),
+        ]);
         if (token !== fetchToken) return;
         branches = next;
+        updateWorktreeMap(worktrees);
       } else if (activeFilter === "Remote") {
         const next = await invoke<BranchInfo[]>("list_remote_branches", {
           projectPath,
         });
         if (token !== fetchToken) return;
         branches = next;
+        worktreeMap = new Map();
       } else {
         // All: merge local + remote
-        const [local, remote] = await Promise.all([
+        const [local, remote, worktrees] = await Promise.all([
           invoke<BranchInfo[]>("list_worktree_branches", { projectPath }),
           invoke<BranchInfo[]>("list_remote_branches", { projectPath }),
+          invoke<WorktreeInfo[]>("list_worktrees", { projectPath }).catch(
+            () => [] as WorktreeInfo[]
+          ),
         ]);
         if (token !== fetchToken) return;
         // Deduplicate by name
@@ -79,6 +204,7 @@
           }
         }
         branches = merged;
+        updateWorktreeMap(worktrees);
       }
     } catch (err) {
       const msg =
@@ -93,6 +219,41 @@
     }
     if (token !== fetchToken) return;
     loading = false;
+  }
+
+  function updateWorktreeMap(worktrees: WorktreeInfo[]) {
+    const map = new Map<string, WorktreeInfo>();
+    for (const wt of worktrees) {
+      if (wt.branch) map.set(wt.branch, wt);
+    }
+    worktreeMap = map;
+  }
+
+  function getSafetyLevel(branch: BranchInfo): string {
+    const wt = worktreeMap.get(branch.name);
+    if (!wt) return "";
+    return wt.safety_level || "";
+  }
+
+  function getSafetyTitle(branch: BranchInfo): string {
+    const level = getSafetyLevel(branch);
+    switch (level) {
+      case "safe":
+        return "Safe to delete";
+      case "warning":
+        return "Has uncommitted changes or unpushed commits";
+      case "danger":
+        return "Has uncommitted changes and unpushed commits";
+      case "disabled":
+        return "Protected or current branch";
+      default:
+        return "";
+    }
+  }
+
+  function isBranchProtected(branch: BranchInfo): boolean {
+    const wt = worktreeMap.get(branch.name);
+    return wt ? wt.is_protected || wt.is_current : false;
   }
 
   function divergenceIndicator(branch: BranchInfo): string {
@@ -126,8 +287,68 @@
     if (key.startsWith("claude@")) return "claude";
     if (key.startsWith("codex@")) return "codex";
     if (key.startsWith("gemini@")) return "gemini";
-    if (key.startsWith("opencode@") || key.startsWith("open-code@")) return "opencode";
+    if (key.startsWith("opencode@") || key.startsWith("open-code@"))
+      return "opencode";
     return "";
+  }
+
+  // --- Context menu ---
+
+  function handleContextMenu(e: MouseEvent, branch: BranchInfo) {
+    if (deletingBranches.has(branch.name)) return;
+    e.preventDefault();
+    contextMenu = { x: e.clientX, y: e.clientY, branch };
+  }
+
+  function handleCleanupThisBranch() {
+    if (!contextMenu) return;
+    const branch = contextMenu.branch;
+    contextMenu = null;
+    const level = getSafetyLevel(branch);
+    confirmDelete = { branch: branch.name, safetyLevel: level };
+    confirmDeleteError = null;
+  }
+
+  function handleCleanupWorktrees() {
+    if (!contextMenu) return;
+    const branchName = contextMenu.branch.name;
+    contextMenu = null;
+    onCleanupRequest?.(branchName);
+  }
+
+  // --- Single delete ---
+
+  async function handleConfirmDelete() {
+    if (!confirmDelete) return;
+    const { branch, safetyLevel } = confirmDelete;
+    const force = safetyLevel !== "safe";
+    confirmDelete = null;
+    confirmDeleteError = null;
+
+    deletingBranches = new Set([...deletingBranches, branch]);
+
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("cleanup_single_worktree", {
+        projectPath,
+        branch,
+        force,
+      });
+      const next = new Set(deletingBranches);
+      next.delete(branch);
+      deletingBranches = next;
+      localRefreshKey++;
+    } catch (err) {
+      const next = new Set(deletingBranches);
+      next.delete(branch);
+      deletingBranches = next;
+      confirmDeleteError =
+        typeof err === "string"
+          ? err
+          : err && typeof err === "object" && "message" in err
+            ? String((err as { message?: unknown }).message)
+            : String(err);
+    }
   }
 </script>
 
@@ -142,6 +363,13 @@
         {filter}
       </button>
     {/each}
+    <button
+      class="cleanup-btn"
+      onclick={() => onCleanupRequest?.()}
+      title="Cleanup Worktrees..."
+    >
+      Cleanup
+    </button>
   </div>
   <div class="search-bar">
     <input
@@ -163,13 +391,30 @@
         <button
           class="branch-item"
           class:active={branch.is_current}
-          onclick={() => onBranchSelect(branch)}
-          ondblclick={() => onBranchActivate?.(branch)}
+          class:deleting={deletingBranches.has(branch.name)}
+          onclick={() => {
+            if (!deletingBranches.has(branch.name)) onBranchSelect(branch);
+          }}
+          ondblclick={() => {
+            if (!deletingBranches.has(branch.name))
+              onBranchActivate?.(branch);
+          }}
+          oncontextmenu={(e) => handleContextMenu(e, branch)}
         >
           <span class="branch-icon">{branch.is_current ? "*" : " "}</span>
+          {#if deletingBranches.has(branch.name)}
+            <span class="safety-spinner"></span>
+          {:else if getSafetyLevel(branch)}
+            <span
+              class="safety-dot {getSafetyLevel(branch)}"
+              title={getSafetyTitle(branch)}
+            ></span>
+          {/if}
           <span class="branch-name">{branch.name}</span>
           {#if branch.last_tool_usage}
-            <span class="tool-usage {toolUsageClass(branch.last_tool_usage)}">
+            <span
+              class="tool-usage {toolUsageClass(branch.last_tool_usage)}"
+            >
               {branch.last_tool_usage}
             </span>
           {/if}
@@ -185,6 +430,85 @@
     {/if}
   </div>
 </aside>
+
+<!-- Context menu (fixed position, outside sidebar overflow) -->
+{#if contextMenu}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="context-menu"
+    style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
+    onclick={(e) => e.stopPropagation()}
+  >
+    <button
+      class="context-menu-item"
+      class:disabled={isBranchProtected(contextMenu.branch)}
+      onclick={() => {
+        if (contextMenu && !isBranchProtected(contextMenu.branch))
+          handleCleanupThisBranch();
+      }}
+    >
+      Cleanup this branch
+    </button>
+    <button class="context-menu-item" onclick={handleCleanupWorktrees}>
+      Cleanup Worktrees...
+    </button>
+  </div>
+{/if}
+
+<!-- Single delete confirmation dialog -->
+{#if confirmDelete}
+  {@const wt = worktreeMap.get(confirmDelete.branch)}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="overlay" onclick={() => (confirmDelete = null)}>
+    <div class="confirm-dialog" onclick={(e) => e.stopPropagation()}>
+      <h3>Delete Worktree</h3>
+      <p class="confirm-text">
+        {#if confirmDelete.safetyLevel === "danger"}
+          Branch <strong>{confirmDelete.branch}</strong> has uncommitted changes
+          and unpushed commits. This cannot be undone.
+        {:else if confirmDelete.safetyLevel === "warning" && wt?.has_changes}
+          Branch <strong>{confirmDelete.branch}</strong> has uncommitted changes.
+        {:else if confirmDelete.safetyLevel === "warning" && wt?.has_unpushed}
+          Branch <strong>{confirmDelete.branch}</strong> has unpushed commits.
+        {:else}
+          Delete worktree and local branch <strong
+            >{confirmDelete.branch}</strong
+          >?
+        {/if}
+      </p>
+      <div class="confirm-actions">
+        <button class="confirm-cancel" onclick={() => (confirmDelete = null)}>
+          Cancel
+        </button>
+        <button class="confirm-delete" onclick={handleConfirmDelete}>
+          Delete
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Delete error dialog -->
+{#if confirmDeleteError}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="overlay" onclick={() => (confirmDeleteError = null)}>
+    <div class="confirm-dialog" onclick={(e) => e.stopPropagation()}>
+      <h3>Delete Failed</h3>
+      <p class="confirm-error">{confirmDeleteError}</p>
+      <div class="confirm-actions">
+        <button
+          class="confirm-cancel"
+          onclick={() => (confirmDeleteError = null)}
+        >
+          Close
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   .sidebar {
@@ -220,6 +544,23 @@
     background-color: var(--accent);
     color: var(--bg-primary);
     border-color: var(--accent);
+  }
+
+  .cleanup-btn {
+    background: none;
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    padding: 4px 8px;
+    font-size: 11px;
+    cursor: pointer;
+    border-radius: 4px;
+    font-family: inherit;
+    white-space: nowrap;
+  }
+
+  .cleanup-btn:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
   }
 
   .search-bar {
@@ -289,11 +630,61 @@
     color: var(--accent);
   }
 
+  .branch-item.deleting {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  .branch-item.deleting:hover {
+    background: none;
+  }
+
   .branch-icon {
     color: var(--text-muted);
     font-size: 12px;
     font-family: monospace;
     width: 12px;
+    flex-shrink: 0;
+  }
+
+  /* Safety dot indicator */
+  .safety-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .safety-dot.safe {
+    background-color: var(--green);
+  }
+
+  .safety-dot.warning {
+    background-color: var(--yellow);
+  }
+
+  .safety-dot.danger {
+    background-color: var(--red);
+  }
+
+  .safety-dot.disabled {
+    background-color: var(--text-muted);
+  }
+
+  /* Spinner for deleting branches */
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .safety-spinner {
+    width: 8px;
+    height: 8px;
+    border: 1.5px solid var(--text-muted);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
     flex-shrink: 0;
   }
 
@@ -353,5 +744,125 @@
 
   .divergence.diverged {
     color: var(--red);
+  }
+
+  /* Context menu */
+  .context-menu {
+    position: fixed;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 4px 0;
+    min-width: 180px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    z-index: 2000;
+  }
+
+  .context-menu-item {
+    display: block;
+    width: 100%;
+    background: none;
+    border: none;
+    color: var(--text-primary);
+    padding: 6px 12px;
+    font-size: 12px;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .context-menu-item:hover {
+    background-color: var(--bg-hover);
+  }
+
+  .context-menu-item.disabled {
+    color: var(--text-muted);
+    cursor: default;
+  }
+
+  .context-menu-item.disabled:hover {
+    background: none;
+  }
+
+  /* Overlays & dialogs */
+  .overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+  }
+
+  .confirm-dialog {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 20px 24px;
+    max-width: 400px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+  }
+
+  .confirm-dialog h3 {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 8px;
+  }
+
+  .confirm-text {
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.5;
+    margin-bottom: 16px;
+  }
+
+  .confirm-error {
+    color: rgb(255, 160, 160);
+    font-size: 12px;
+    line-height: 1.5;
+    margin-bottom: 16px;
+    white-space: pre-wrap;
+  }
+
+  .confirm-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  .confirm-cancel {
+    padding: 5px 14px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-color);
+    border-radius: 5px;
+    color: var(--text-primary);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+  }
+
+  .confirm-cancel:hover {
+    background: var(--bg-hover);
+  }
+
+  .confirm-delete {
+    padding: 5px 14px;
+    background: var(--red);
+    border: 1px solid transparent;
+    border-radius: 5px;
+    color: var(--bg-primary);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .confirm-delete:hover {
+    opacity: 0.9;
   }
 </style>

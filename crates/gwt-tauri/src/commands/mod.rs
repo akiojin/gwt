@@ -2,6 +2,7 @@ pub mod agent_config;
 pub mod agents;
 pub mod branch_suggest;
 pub mod branches;
+pub mod cleanup;
 pub mod docker;
 pub mod profiles;
 pub mod project;

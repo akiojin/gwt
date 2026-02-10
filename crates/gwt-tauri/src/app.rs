@@ -113,6 +113,7 @@ pub fn build_app(
                 crate::menu::MENU_ID_VIEW_LAUNCH_AGENT => Some("launch-agent"),
                 crate::menu::MENU_ID_VIEW_LIST_TERMINALS => Some("list-terminals"),
                 crate::menu::MENU_ID_VIEW_TERMINAL_DIAGNOSTICS => Some("terminal-diagnostics"),
+                crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES => Some("cleanup-worktrees"),
                 crate::menu::MENU_ID_SETTINGS_PREFERENCES => Some("open-settings"),
                 crate::menu::MENU_ID_HELP_ABOUT => Some("about"),
                 _ => None,
@@ -185,6 +186,9 @@ pub fn build_app(
             crate::commands::agent_config::save_agent_config,
             crate::commands::profiles::get_profiles,
             crate::commands::profiles::save_profiles,
+            crate::commands::cleanup::list_worktrees,
+            crate::commands::cleanup::cleanup_worktrees,
+            crate::commands::cleanup::cleanup_single_worktree,
         ])
 }
 
