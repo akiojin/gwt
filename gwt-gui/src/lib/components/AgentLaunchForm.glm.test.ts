@@ -69,6 +69,14 @@ describe("AgentLaunchForm (Claude GLM)", () => {
           throw new Error(`Unexpected invoke: ${cmd}`);
       }
     });
+
+    // Some codepaths can end up calling the real Tauri invoke implementation in tests.
+    // Provide a minimal stub so it routes to our mock instead of crashing on
+    // `window.__TAURI_INTERNALS__` being undefined.
+    (window as any).__TAURI_INTERNALS__ = {
+      ...(window as any).__TAURI_INTERNALS__,
+      invoke: (cmd: string, args?: any) => invokeMock(cmd, args),
+    };
   });
 
   afterEach(() => {
@@ -89,10 +97,18 @@ describe("AgentLaunchForm (Claude GLM)", () => {
     const providerSelect = await waitFor(() =>
       rendered.getByLabelText("Provider")
     );
+    await waitFor(() => {
+      expect((providerSelect as HTMLSelectElement).disabled).toBe(false);
+    });
 
     await fireEvent.change(providerSelect, { target: { value: "glm" } });
+    await waitFor(() => {
+      expect((providerSelect as HTMLSelectElement).value).toBe("glm");
+    });
 
-    const tokenInput = rendered.getByLabelText("API Token");
+    const tokenInput = await waitFor(() =>
+      rendered.getByLabelText("API Token")
+    );
     await fireEvent.input(tokenInput, { target: { value: "tok_123" } });
 
     const advancedBtn = rendered.getByRole("button", { name: "Advanced" });
@@ -148,5 +164,52 @@ describe("AgentLaunchForm (Claude GLM)", () => {
     const request = onLaunch.mock.calls[0][0] as any;
     expect(request.agentId).toBe("claude");
     expect(request.envOverrides).toBeUndefined();
+  });
+
+  it("persists switching back to Anthropic before launch", async () => {
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+
+    const rendered = await renderForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch,
+      onClose,
+    });
+
+    const providerSelect = await waitFor(() =>
+      rendered.getByLabelText("Provider")
+    );
+    await waitFor(() => {
+      expect((providerSelect as HTMLSelectElement).disabled).toBe(false);
+    });
+
+    await fireEvent.change(providerSelect, { target: { value: "glm" } });
+    await waitFor(() => {
+      expect((providerSelect as HTMLSelectElement).value).toBe("glm");
+    });
+
+    const tokenInput = await waitFor(() =>
+      rendered.getByLabelText("API Token")
+    );
+    await fireEvent.input(tokenInput, { target: { value: "tok_123" } });
+
+    await fireEvent.change(providerSelect, { target: { value: "anthropic" } });
+
+    const launchBtn = rendered.getByRole("button", { name: "Launch" });
+    await fireEvent.click(launchBtn);
+
+    await waitFor(() => {
+      expect(onLaunch).toHaveBeenCalledTimes(1);
+    });
+
+    const request = onLaunch.mock.calls[0][0] as any;
+    expect(request.agentId).toBe("claude");
+    expect(request.envOverrides).toBeUndefined();
+
+    const saveCalls = invokeMock.mock.calls.filter((c: any[]) => c[0] === "save_agent_config");
+    expect(saveCalls.length).toBeGreaterThan(0);
+    const lastSave = saveCalls[saveCalls.length - 1];
+    expect(lastSave?.[1]?.config?.claude?.provider).toBe("anthropic");
   });
 });

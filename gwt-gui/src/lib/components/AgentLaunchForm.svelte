@@ -590,34 +590,38 @@
       }
       let mergedEnv: Record<string, string> = envParsed.env;
 
-      if (selectedAgent === "claude" && agentConfig?.claude?.provider === "glm") {
-        const baseUrl = (agentConfig.claude.glm.base_url ?? "").trim();
-        const token = (agentConfig.claude.glm.auth_token ?? "").trim();
-        const timeout = (agentConfig.claude.glm.api_timeout_ms ?? "").trim();
-        const opusModel = (agentConfig.claude.glm.default_opus_model ?? "").trim();
-        const sonnetModel = (agentConfig.claude.glm.default_sonnet_model ?? "").trim();
-        const haikuModel = (agentConfig.claude.glm.default_haiku_model ?? "").trim();
+      if (selectedAgent === "claude") {
+        if (agentConfig?.claude?.provider === "glm") {
+          const baseUrl = (agentConfig.claude.glm.base_url ?? "").trim();
+          const token = (agentConfig.claude.glm.auth_token ?? "").trim();
+          const timeout = (agentConfig.claude.glm.api_timeout_ms ?? "").trim();
+          const opusModel = (agentConfig.claude.glm.default_opus_model ?? "").trim();
+          const sonnetModel = (agentConfig.claude.glm.default_sonnet_model ?? "").trim();
+          const haikuModel = (agentConfig.claude.glm.default_haiku_model ?? "").trim();
 
-        if (!baseUrl) {
-          errorMessage = "Base URL is required for GLM (z.ai).";
-          return;
+          if (!baseUrl) {
+            errorMessage = "Base URL is required for GLM (z.ai).";
+            return;
+          }
+          if (!token) {
+            errorMessage = "API Token is required for GLM (z.ai).";
+            return;
+          }
+
+          const glmEnv: Record<string, string> = {
+            ANTHROPIC_BASE_URL: baseUrl,
+            ANTHROPIC_AUTH_TOKEN: token,
+          };
+          if (timeout) glmEnv.API_TIMEOUT_MS = timeout;
+          if (opusModel) glmEnv.ANTHROPIC_DEFAULT_OPUS_MODEL = opusModel;
+          if (sonnetModel) glmEnv.ANTHROPIC_DEFAULT_SONNET_MODEL = sonnetModel;
+          if (haikuModel) glmEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL = haikuModel;
+
+          mergedEnv = { ...glmEnv, ...mergedEnv };
         }
-        if (!token) {
-          errorMessage = "API Token is required for GLM (z.ai).";
-          return;
-        }
 
-        const glmEnv: Record<string, string> = {
-          ANTHROPIC_BASE_URL: baseUrl,
-          ANTHROPIC_AUTH_TOKEN: token,
-        };
-        if (timeout) glmEnv.API_TIMEOUT_MS = timeout;
-        if (opusModel) glmEnv.ANTHROPIC_DEFAULT_OPUS_MODEL = opusModel;
-        if (sonnetModel) glmEnv.ANTHROPIC_DEFAULT_SONNET_MODEL = sonnetModel;
-        if (haikuModel) glmEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL = haikuModel;
-
-        mergedEnv = { ...glmEnv, ...mergedEnv };
-
+        // Persist provider selection (GLM <-> Anthropic) before launch so the backend
+        // doesn't keep injecting GLM env vars from a stale config file.
         try {
           const { invoke } = await import("@tauri-apps/api/core");
           await invoke("save_agent_config", { config: agentConfig });
