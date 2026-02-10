@@ -6,6 +6,9 @@ use tauri::Manager;
 use tauri::{Emitter, WebviewWindowBuilder};
 use tracing::info;
 
+#[cfg(not(test))]
+use gwt_core::config::os_env;
+
 fn should_prevent_window_close(is_quitting: bool) -> bool {
     !is_quitting
 }
@@ -85,6 +88,46 @@ pub fn build_app(
 
                 #[cfg(target_os = "macos")]
                 _tray.set_icon_as_template(true)?;
+
+                // Background task: capture login shell environment
+                {
+                    let state = _app.state::<AppState>();
+                    let os_env_cell = state.os_env.clone();
+                    let os_env_source_cell = state.os_env_source.clone();
+                    let app_handle_clone = _app.handle().clone();
+
+                    tauri::async_runtime::spawn(async move {
+                        let result = os_env::capture_login_shell_env().await;
+
+                        match &result.source {
+                            os_env::EnvSource::LoginShell => {
+                                tracing::info!(
+                                    category = "os_env",
+                                    count = result.env.len(),
+                                    "Captured login shell environment"
+                                );
+                            }
+                            os_env::EnvSource::ProcessEnv => {
+                                tracing::info!(
+                                    category = "os_env",
+                                    count = result.env.len(),
+                                    "Using process environment"
+                                );
+                            }
+                            os_env::EnvSource::StdEnvFallback { reason } => {
+                                tracing::warn!(
+                                    category = "os_env",
+                                    reason = %reason,
+                                    "Login shell env capture failed, using process env fallback"
+                                );
+                                let _ = app_handle_clone.emit("os-env-fallback", reason.clone());
+                            }
+                        };
+
+                        let _ = os_env_source_cell.set(result.source);
+                        let _ = os_env_cell.set(result.env);
+                    });
+                }
             }
 
             Ok(())
@@ -114,6 +157,7 @@ pub fn build_app(
                 crate::menu::MENU_ID_VIEW_LIST_TERMINALS => Some("list-terminals"),
                 crate::menu::MENU_ID_VIEW_TERMINAL_DIAGNOSTICS => Some("terminal-diagnostics"),
                 crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES => Some("cleanup-worktrees"),
+                crate::menu::MENU_ID_DEBUG_OS_ENV => Some("debug-os-env"),
                 crate::menu::MENU_ID_SETTINGS_PREFERENCES => Some("open-settings"),
                 crate::menu::MENU_ID_HELP_ABOUT => Some("about"),
                 _ => None,
@@ -189,6 +233,15 @@ pub fn build_app(
             crate::commands::cleanup::list_worktrees,
             crate::commands::cleanup::cleanup_worktrees,
             crate::commands::cleanup::cleanup_single_worktree,
+            crate::commands::terminal::get_captured_environment,
+            crate::commands::terminal::is_os_env_ready,
+            crate::commands::git_view::get_git_change_summary,
+            crate::commands::git_view::get_branch_diff_files,
+            crate::commands::git_view::get_file_diff,
+            crate::commands::git_view::get_branch_commits,
+            crate::commands::git_view::get_working_tree_status,
+            crate::commands::git_view::get_stash_list,
+            crate::commands::git_view::get_base_branch_candidates,
         ])
 }
 

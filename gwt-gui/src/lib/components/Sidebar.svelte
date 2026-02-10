@@ -534,7 +534,7 @@
     border: 1px solid var(--border-color);
     color: var(--text-secondary);
     padding: 4px 8px;
-    font-size: 11px;
+    font-size: var(--ui-font-sm);
     cursor: pointer;
     border-radius: 4px;
     font-family: inherit;
@@ -575,7 +575,7 @@
     border: 1px solid var(--border-color);
     border-radius: 4px;
     color: var(--text-primary);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     font-family: inherit;
     outline: none;
   }
@@ -600,7 +600,7 @@
     padding: 16px;
     text-align: center;
     color: var(--text-muted);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
   }
 
   .error-indicator {
@@ -641,7 +641,7 @@
 
   .branch-icon {
     color: var(--text-muted);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     font-family: monospace;
     width: 12px;
     flex-shrink: 0;
@@ -689,7 +689,7 @@
   }
 
   .branch-name {
-    font-size: 13px;
+    font-size: var(--ui-font-base);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -697,7 +697,7 @@
   }
 
   .tool-usage {
-    font-size: 10px;
+    font-size: var(--ui-font-xs);
     font-family: monospace;
     color: var(--text-muted);
     border: 1px solid var(--border-color);
@@ -727,7 +727,7 @@
   }
 
   .divergence {
-    font-size: 10px;
+    font-size: var(--ui-font-xs);
     font-family: monospace;
     padding: 1px 4px;
     border-radius: 3px;

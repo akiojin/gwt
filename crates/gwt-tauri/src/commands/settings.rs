@@ -37,6 +37,8 @@ pub struct SettingsData {
     pub agent_gemini_path: Option<String>,
     pub agent_auto_install_deps: bool,
     pub docker_force_host: bool,
+    pub ui_font_size: u32,
+    pub terminal_font_size: u32,
 }
 
 impl From<&Settings> for SettingsData {
@@ -66,6 +68,8 @@ impl From<&Settings> for SettingsData {
                 .map(|p| p.to_string_lossy().to_string()),
             agent_auto_install_deps: s.agent.auto_install_deps,
             docker_force_host: s.docker.force_host,
+            ui_font_size: s.appearance.ui_font_size,
+            terminal_font_size: s.appearance.terminal_font_size,
         }
     }
 }
@@ -90,6 +94,8 @@ impl SettingsData {
         s.agent.gemini_path = self.agent_gemini_path.as_ref().map(PathBuf::from);
         s.agent.auto_install_deps = self.agent_auto_install_deps;
         s.docker.force_host = self.docker_force_host;
+        s.appearance.ui_font_size = self.ui_font_size;
+        s.appearance.terminal_font_size = self.terminal_font_size;
         Ok(s)
     }
 }
@@ -136,4 +142,22 @@ pub fn save_settings(
 
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_settings_data_round_trip() {
+        let mut core = Settings::default();
+        core.appearance.ui_font_size = 16;
+        core.appearance.terminal_font_size = 20;
+        let data = SettingsData::from(&core);
+        assert_eq!(data.ui_font_size, 16);
+        assert_eq!(data.terminal_font_size, 20);
+        let back = data.to_settings().unwrap();
+        assert_eq!(back.appearance.ui_font_size, 16);
+        assert_eq!(back.appearance.terminal_font_size, 20);
+    }
 }
