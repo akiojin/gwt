@@ -717,9 +717,10 @@ mod tests {
             .modified()
             .unwrap_or_else(|_| SystemTime::now());
 
-        let mut summary = SessionSummary::default();
-        summary.markdown =
-            Some("## Purpose\nCached\n\n## Summary\nCached\n\n## Highlights\n- A\n".to_string());
+        let summary = SessionSummary {
+            markdown: Some("## Purpose\nCached\n\n## Summary\nCached\n\n## Highlights\n- A\n".to_string()),
+            ..Default::default()
+        };
 
         let state = AppState::new();
         {
