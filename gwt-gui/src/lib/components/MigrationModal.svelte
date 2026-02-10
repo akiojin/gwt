@@ -82,7 +82,7 @@
         unlistenProgress = await listen<MigrationProgressPayload>(
           "migration-progress",
           (event) => {
-            if (!jobId || event.payload.job_id !== jobId) return;
+            if (!jobId || event.payload.jobId !== jobId) return;
             stage = event.payload.state || stage;
             current =
               typeof event.payload.current === "number" ? event.payload.current : null;
@@ -93,11 +93,11 @@
         unlistenFinished = await listen<MigrationFinishedPayload>(
           "migration-finished",
           (event) => {
-            if (!jobId || event.payload.job_id !== jobId) return;
+            if (!jobId || event.payload.jobId !== jobId) return;
             running = false;
-            if (event.payload.ok && event.payload.project_path) {
+            if (event.payload.ok && event.payload.projectPath) {
               stage = "completed";
-              onCompleted(event.payload.project_path);
+              onCompleted(event.payload.projectPath);
               return;
             }
             error = event.payload.error || "Migration failed.";
@@ -333,4 +333,3 @@
     cursor: not-allowed;
   }
 </style>
-

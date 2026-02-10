@@ -145,20 +145,20 @@
       const { invoke } = await import("@tauri-apps/api/core");
       const probe = await invoke<ProbePathResult>("probe_path", { path });
 
-      if (probe.kind === "gwtProject" && probe.project_path) {
-        await openGwtProject(probe.project_path, fromRecent);
+      if (probe.kind === "gwtProject" && probe.projectPath) {
+        await openGwtProject(probe.projectPath, fromRecent);
         return;
       }
 
-      if (probe.kind === "migrationRequired" && probe.migration_source_root) {
-        migrationSourceRoot = probe.migration_source_root;
+      if (probe.kind === "migrationRequired" && probe.migrationSourceRoot) {
+        migrationSourceRoot = probe.migrationSourceRoot;
         migrationOpen = true;
         return;
       }
 
-      if (probe.kind === "emptyDir" && probe.project_path) {
+      if (probe.kind === "emptyDir" && probe.projectPath) {
         showNewProject = true;
-        parentDir = probe.project_path;
+        parentDir = probe.projectPath;
         return;
       }
 

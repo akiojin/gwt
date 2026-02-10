@@ -366,17 +366,17 @@
               path: selected as string,
             });
 
-            if (probe.kind === "gwtProject" && probe.project_path) {
+            if (probe.kind === "gwtProject" && probe.projectPath) {
               const info = await invoke<ProjectInfo>("open_project", {
-                path: probe.project_path,
+                path: probe.projectPath,
               });
               projectPath = info.path;
               fetchCurrentBranch();
               break;
             }
 
-            if (probe.kind === "migrationRequired" && probe.migration_source_root) {
-              migrationSourceRoot = probe.migration_source_root;
+            if (probe.kind === "migrationRequired" && probe.migrationSourceRoot) {
+              migrationSourceRoot = probe.migrationSourceRoot;
               migrationOpen = true;
               break;
             }

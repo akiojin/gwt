@@ -116,7 +116,7 @@
         unlistenProgress = await listen<LaunchProgressPayload>(
           "launch-progress",
           (event) => {
-            if (!jobId || event.payload.job_id !== jobId) return;
+            if (!jobId || event.payload.jobId !== jobId) return;
             if (status !== "running") return;
             const next = event.payload.step as StepId;
             if (stepIndex(next) >= 0 && next !== step) {
@@ -130,17 +130,17 @@
         unlistenFinished = await listen<LaunchFinishedPayload>(
           "launch-finished",
           (event) => {
-            if (!jobId || event.payload.job_id !== jobId) return;
+            if (!jobId || event.payload.jobId !== jobId) return;
 
             if (event.payload.status === "cancelled") {
               onClose();
               return;
             }
 
-            if (event.payload.status === "ok" && event.payload.pane_id) {
+            if (event.payload.status === "ok" && event.payload.paneId) {
               status = "ok";
-              finishedPaneId = event.payload.pane_id;
-              onSuccess(event.payload.pane_id);
+              finishedPaneId = event.payload.paneId;
+              onSuccess(event.payload.paneId);
               window.setTimeout(() => onClose(), 2000);
               return;
             }
@@ -371,4 +371,3 @@
     background: var(--accent-hover);
   }
 </style>
-
