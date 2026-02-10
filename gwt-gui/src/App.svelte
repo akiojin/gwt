@@ -443,6 +443,45 @@
     }
   }
 
+  // Claude Code Hooks: check & register on startup
+  $effect(() => {
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const status = await invoke<{
+          registered: boolean;
+          updated: boolean;
+          temporary_execution: boolean;
+        }>("check_and_update_hooks");
+
+        if (status.temporary_execution) {
+          console.warn("gwt is running from a temporary execution environment; hooks may not persist.");
+        }
+
+        if (!status.registered) {
+          const { confirm } = await import("@tauri-apps/plugin-dialog");
+          const message = status.temporary_execution
+            ? [
+                "gwt is running from a temporary execution environment (e.g. bunx/npx cache).",
+                "If you register hooks now, the stored executable path may not persist and hooks can break later.",
+                "",
+                "Register Claude Code hooks for gwt anyway? This allows gwt to track agent status.",
+              ].join("\n")
+            : "Register Claude Code hooks for gwt? This allows gwt to track agent status.";
+          const ok = await confirm(
+            message,
+            { title: "gwt", kind: status.temporary_execution ? "warning" : "info" },
+          );
+          if (ok) {
+            await invoke("register_hooks");
+          }
+        }
+      } catch (err) {
+        console.error("Failed to check/register Claude Code hooks:", err);
+      }
+    })();
+  });
+
   // Native menubar integration (Tauri emits "menu-action" to the focused window).
   $effect(() => {
     let unlisten: null | (() => void) = null;
