@@ -36,6 +36,8 @@ pub struct Settings {
     pub agent: AgentSettings,
     /// Docker settings
     pub docker: DockerSettings,
+    /// Appearance settings
+    pub appearance: AppearanceSettings,
 }
 
 impl Default for Settings {
@@ -53,6 +55,7 @@ impl Default for Settings {
             log_retention_days: 7,
             agent: AgentSettings::default(),
             docker: DockerSettings::default(),
+            appearance: AppearanceSettings::default(),
         }
     }
 }
@@ -79,6 +82,25 @@ pub struct AgentSettings {
 pub struct DockerSettings {
     /// Force host launch (skip docker) even when Docker files are detected
     pub force_host: bool,
+}
+
+/// Appearance settings (font sizes)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppearanceSettings {
+    /// UI font size in pixels (8-24, default 13)
+    pub ui_font_size: u32,
+    /// Terminal font size in pixels (8-24, default 13)
+    pub terminal_font_size: u32,
+}
+
+impl Default for AppearanceSettings {
+    fn default() -> Self {
+        Self {
+            ui_font_size: 13,
+            terminal_font_size: 13,
+        }
+    }
 }
 
 impl Settings {
@@ -614,6 +636,38 @@ default_base_branch = "legacy-global"
         std::fs::create_dir_all(&new_gwt).unwrap();
         std::fs::write(new_gwt.join("config.toml"), "debug = false").unwrap();
         assert!(!Settings::needs_global_path_migration());
+    }
+
+    #[test]
+    fn test_appearance_default() {
+        let settings = Settings::default();
+        assert_eq!(settings.appearance.ui_font_size, 13);
+        assert_eq!(settings.appearance.terminal_font_size, 13);
+    }
+
+    #[test]
+    fn test_appearance_backward_compat() {
+        // Config without [appearance] section should deserialize with defaults
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join(".gwt.toml");
+        std::fs::write(&config_path, "debug = true\n").unwrap();
+        let settings = Settings::load(temp.path()).unwrap();
+        assert!(settings.debug);
+        assert_eq!(settings.appearance.ui_font_size, 13);
+        assert_eq!(settings.appearance.terminal_font_size, 13);
+    }
+
+    #[test]
+    fn test_appearance_save_load() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join(".gwt.toml");
+        let mut settings = Settings::default();
+        settings.appearance.ui_font_size = 16;
+        settings.appearance.terminal_font_size = 18;
+        settings.save(&config_path).unwrap();
+        let loaded = Settings::load(temp.path()).unwrap();
+        assert_eq!(loaded.appearance.ui_font_size, 16);
+        assert_eq!(loaded.appearance.terminal_font_size, 18);
     }
 
     #[test]
