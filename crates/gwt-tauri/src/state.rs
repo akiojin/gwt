@@ -1,9 +1,11 @@
 use gwt_core::ai::SessionSummaryCache;
+use gwt_core::config::os_env::EnvSource;
 use gwt_core::terminal::manager::PaneManager;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use tokio::sync::OnceCell;
 
 #[derive(Debug, Clone)]
 pub struct AgentVersionsCache {
@@ -44,6 +46,8 @@ pub struct AppState {
     pub session_summary_inflight: Mutex<HashSet<String>>,
     pub pane_launch_meta: Mutex<HashMap<String, PaneLaunchMeta>>,
     pub is_quitting: AtomicBool,
+    pub os_env: Arc<OnceCell<HashMap<String, String>>>,
+    pub os_env_source: Arc<OnceCell<EnvSource>>,
 }
 
 impl AppState {
@@ -56,7 +60,14 @@ impl AppState {
             session_summary_inflight: Mutex::new(HashSet::new()),
             pane_launch_meta: Mutex::new(HashMap::new()),
             is_quitting: AtomicBool::new(false),
+            os_env: Arc::new(OnceCell::new()),
+            os_env_source: Arc::new(OnceCell::new()),
         }
+    }
+
+    /// Whether OS environment capture has completed.
+    pub fn is_os_env_ready(&self) -> bool {
+        self.os_env.initialized()
     }
 
     pub fn set_project_for_window(&self, window_label: &str, project_path: String) {

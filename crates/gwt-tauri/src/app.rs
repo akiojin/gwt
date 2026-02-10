@@ -6,6 +6,9 @@ use tauri::Manager;
 use tauri::{Emitter, WebviewWindowBuilder};
 use tracing::info;
 
+#[cfg(not(test))]
+use gwt_core::config::os_env;
+
 fn should_prevent_window_close(is_quitting: bool) -> bool {
     !is_quitting
 }
@@ -85,6 +88,36 @@ pub fn build_app(
 
                 #[cfg(target_os = "macos")]
                 _tray.set_icon_as_template(true)?;
+
+                // Background task: capture login shell environment
+                {
+                    let state = _app.state::<AppState>();
+                    let os_env_cell = state.os_env.clone();
+                    let os_env_source_cell = state.os_env_source.clone();
+                    let app_handle_clone = _app.handle().clone();
+
+                    tauri::async_runtime::spawn(async move {
+                        let result = os_env::capture_login_shell_env().await;
+
+                        if let os_env::EnvSource::StdEnvFallback { ref reason } = result.source {
+                            tracing::warn!(
+                                category = "os_env",
+                                reason = %reason,
+                                "Login shell env capture failed, using process env fallback"
+                            );
+                            let _ = app_handle_clone.emit("os-env-fallback", reason.clone());
+                        } else {
+                            tracing::info!(
+                                category = "os_env",
+                                count = result.env.len(),
+                                "Captured login shell environment"
+                            );
+                        }
+
+                        let _ = os_env_source_cell.set(result.source);
+                        let _ = os_env_cell.set(result.env);
+                    });
+                }
             }
 
             Ok(())
@@ -113,6 +146,7 @@ pub fn build_app(
                 crate::menu::MENU_ID_VIEW_LAUNCH_AGENT => Some("launch-agent"),
                 crate::menu::MENU_ID_VIEW_LIST_TERMINALS => Some("list-terminals"),
                 crate::menu::MENU_ID_VIEW_TERMINAL_DIAGNOSTICS => Some("terminal-diagnostics"),
+                crate::menu::MENU_ID_DEBUG_OS_ENV => Some("debug-os-env"),
                 crate::menu::MENU_ID_SETTINGS_PREFERENCES => Some("open-settings"),
                 crate::menu::MENU_ID_HELP_ABOUT => Some("about"),
                 _ => None,
@@ -185,6 +219,8 @@ pub fn build_app(
             crate::commands::agent_config::save_agent_config,
             crate::commands::profiles::get_profiles,
             crate::commands::profiles::save_profiles,
+            crate::commands::terminal::get_captured_environment,
+            crate::commands::terminal::is_os_env_ready,
         ])
 }
 
