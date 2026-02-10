@@ -501,7 +501,7 @@
     <div class="terminal-layer" class:hidden={!showTerminalLayer}>
       {#each agentTabs as tab (tab.id)}
         <div class="terminal-wrapper" class:active={activeTabId === tab.id}>
-          <TerminalView paneId={tab.paneId} />
+          <TerminalView paneId={tab.paneId} active={activeTabId === tab.id} />
         </div>
       {/each}
     </div>

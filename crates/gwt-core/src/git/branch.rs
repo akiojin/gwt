@@ -20,7 +20,7 @@ fn run_git_with_timeout(
     let mut child = Command::new("git")
         .args(args)
         .current_dir(repo_path)
-        // Avoid hanging on interactive auth prompts in TUI.
+        // Avoid hanging on interactive auth prompts.
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

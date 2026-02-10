@@ -42,9 +42,6 @@ export interface SettingsData {
   debug: boolean;
   log_dir?: string | null;
   log_retention_days: number;
-  web_port: number;
-  web_address: string;
-  web_cors: boolean;
   agent_default?: string | null;
   agent_claude_path?: string | null;
   agent_codex_path?: string | null;
@@ -112,6 +109,12 @@ export interface SessionSummaryResult {
   shortSummary?: string | null;
   bulletPoints: string[];
   warning?: string | null;
+  error?: string | null;
+}
+
+export interface BranchSuggestResult {
+  status: "ok" | "ai-not-configured" | "error";
+  suggestions: string[];
   error?: string | null;
 }
 

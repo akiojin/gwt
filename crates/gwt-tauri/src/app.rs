@@ -38,7 +38,13 @@ pub fn build_app(
                 tray_menu.append_items(&[&show_item, &quit_item])?;
 
                 // NOTE: Requires `tauri` features `tray-icon` + `image-png`.
-                let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))?;
+                // macOS: use a template icon so the system can tint it appropriately.
+                // Others: use a high-contrast 2-tone icon for light/dark tray backgrounds.
+                #[cfg(target_os = "macos")]
+                let tray_icon_bytes = include_bytes!("../icons/trayTemplate.png");
+                #[cfg(not(target_os = "macos"))]
+                let tray_icon_bytes = include_bytes!("../icons/tray.png");
+                let icon = tauri::image::Image::from_bytes(tray_icon_bytes)?;
 
                 let _tray = tauri::tray::TrayIconBuilder::with_id("gwt-tray")
                     .icon(icon)
@@ -72,6 +78,9 @@ pub fn build_app(
                         }
                     })
                     .build(_app)?;
+
+                #[cfg(target_os = "macos")]
+                _tray.set_icon_as_template(true)?;
             }
 
             Ok(())
@@ -110,6 +119,7 @@ pub fn build_app(
             crate::commands::docker::detect_docker_context,
             crate::commands::sessions::get_branch_quick_start,
             crate::commands::sessions::get_branch_session_summary,
+            crate::commands::branch_suggest::suggest_branch_names,
             crate::commands::terminal::launch_terminal,
             crate::commands::terminal::launch_agent,
             crate::commands::terminal::write_terminal,

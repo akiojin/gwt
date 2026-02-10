@@ -12,6 +12,8 @@
   let showAgentLaunch: boolean = $state(false);
   let showAbout: boolean = $state(false);
   let appError: string | null = $state(null);
+  let sidebarRefreshKey: number = $state(0);
+  let worktreesEventAvailable: boolean = $state(false);
 
   let selectedBranch: BranchInfo | null = $state(null);
   let currentBranch: string = $state("");
@@ -26,6 +28,75 @@
   $effect(() => {
     void projectPath;
     void setWindowTitle();
+  });
+
+  // Best-effort: subscribe once and refresh Sidebar when worktrees change.
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen<unknown>("worktrees-changed", (event) => {
+          if (!projectPath) return;
+
+          // If payload includes a project_path, only refresh the active project.
+          const p = (event as { payload?: unknown }).payload;
+          if (p && typeof p === "object" && "project_path" in p) {
+            const raw = (p as { project_path?: unknown }).project_path;
+            if (typeof raw === "string" && raw && raw !== projectPath) return;
+          }
+
+          sidebarRefreshKey++;
+        });
+
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+        worktreesEventAvailable = true;
+      } catch {
+        worktreesEventAvailable = false;
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  });
+
+  // Best-effort: close agent tabs when the backend closes the pane.
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen<{ pane_id: string }>(
+          "terminal-closed",
+          (event) => {
+            removeTabLocal(`agent-${event.payload.pane_id}`);
+          }
+        );
+
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+      } catch (err) {
+        console.error("Failed to setup terminal closed listener:", err);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
   });
 
   function toErrorMessage(err: unknown): string {
@@ -137,11 +208,28 @@
 
     tabs = [...tabs, newTab];
     activeTabId = newTab.id;
+
+    // Fallback: if the event API is not available, trigger a best-effort refresh.
+    if (!worktreesEventAvailable) {
+      sidebarRefreshKey++;
+    }
+  }
+
+  function removeTabLocal(tabId: string) {
+    const idx = tabs.findIndex((t) => t.id === tabId);
+    if (idx < 0) return;
+
+    const nextTabs = tabs.filter((t) => t.id !== tabId);
+    tabs = nextTabs;
+
+    if (activeTabId !== tabId) return;
+    const fallback =
+      nextTabs[idx] ?? nextTabs[idx - 1] ?? nextTabs[nextTabs.length - 1] ?? null;
+    activeTabId = fallback?.id ?? "";
   }
 
   async function handleTabClose(tabId: string) {
-    const idx = tabs.findIndex((t) => t.id === tabId);
-    const tab = idx >= 0 ? tabs[idx] : undefined;
+    const tab = tabs.find((t) => t.id === tabId);
     if (tab?.paneId) {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -151,13 +239,7 @@
       }
     }
 
-    const nextTabs = tabs.filter((t) => t.id !== tabId);
-    tabs = nextTabs;
-
-    if (activeTabId !== tabId) return;
-    const fallback =
-      nextTabs[idx] ?? nextTabs[idx - 1] ?? nextTabs[nextTabs.length - 1] ?? null;
-    activeTabId = fallback?.id ?? "";
+    removeTabLocal(tabId);
   }
 
   function handleTabSelect(tabId: string) {
@@ -201,6 +283,7 @@
         activeTabId = "summary";
         selectedBranch = null;
         currentBranch = "";
+        sidebarRefreshKey = 0;
         break;
       case "toggle-sidebar":
         sidebarVisible = !sidebarVisible;
@@ -236,6 +319,7 @@
       {#if sidebarVisible}
         <Sidebar
           {projectPath}
+          refreshKey={sidebarRefreshKey}
           onBranchSelect={handleBranchSelect}
           onBranchActivate={handleBranchActivate}
         />
