@@ -3,8 +3,12 @@
 
   let {
     projectPath,
+    branch,
+    refreshToken,
   }: {
     projectPath: string;
+    branch: string;
+    refreshToken: number;
   } = $props();
 
   let entries: StashEntry[] = $state([]);
@@ -25,7 +29,7 @@
     error = null;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      entries = await invoke<StashEntry[]>("get_stash_list", { projectPath });
+      entries = await invoke<StashEntry[]>("get_stash_list", { projectPath, branch });
     } catch (err) {
       error = toErrorMessage(err);
       entries = [];
@@ -36,6 +40,8 @@
 
   $effect(() => {
     void projectPath;
+    void branch;
+    void refreshToken;
     load();
   });
 </script>
