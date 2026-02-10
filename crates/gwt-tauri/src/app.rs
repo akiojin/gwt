@@ -31,6 +31,7 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
     }
 }
 
+#[cfg_attr(test, allow(dead_code))]
 fn show_best_window(app: &tauri::AppHandle<tauri::Wry>) {
     let Some(window) = best_window(app) else {
         return;
@@ -39,6 +40,7 @@ fn show_best_window(app: &tauri::AppHandle<tauri::Wry>) {
     let _ = window.set_focus();
 }
 
+#[cfg_attr(test, allow(dead_code))]
 fn best_window(app: &tauri::AppHandle<tauri::Wry>) -> Option<tauri::WebviewWindow<tauri::Wry>> {
     // Prefer the focused window.
     if let Some((_, w)) = app
