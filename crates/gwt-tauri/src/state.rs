@@ -1,10 +1,12 @@
 use gwt_core::ai::SessionSummaryCache;
+use gwt_core::config::os_env::EnvSource;
 use gwt_core::terminal::manager::PaneManager;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::OnceCell;
 
 #[derive(Debug, Clone)]
 pub struct AgentVersionsCache {
@@ -48,6 +50,8 @@ pub struct AppState {
     /// Launch job cancellation flags keyed by job id.
     pub launch_jobs: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub is_quitting: AtomicBool,
+    pub os_env: Arc<OnceCell<HashMap<String, String>>>,
+    pub os_env_source: Arc<OnceCell<EnvSource>>,
 }
 
 impl AppState {
@@ -61,7 +65,26 @@ impl AppState {
             pane_launch_meta: Mutex::new(HashMap::new()),
             launch_jobs: Mutex::new(HashMap::new()),
             is_quitting: AtomicBool::new(false),
+            os_env: Arc::new(OnceCell::new()),
+            os_env_source: Arc::new(OnceCell::new()),
         }
+    }
+
+    /// Whether OS environment capture has completed.
+    pub fn is_os_env_ready(&self) -> bool {
+        self.os_env.initialized()
+    }
+
+    /// Wait briefly for OS environment capture to complete.
+    ///
+    /// This avoids non-deterministic launches when the UI requests a session before
+    /// the startup capture task finishes.
+    pub fn wait_os_env_ready(&self, timeout: Duration) -> bool {
+        let start = std::time::Instant::now();
+        while !self.is_os_env_ready() && start.elapsed() < timeout {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        self.is_os_env_ready()
     }
 
     pub fn set_project_for_window(&self, window_label: &str, project_path: String) {

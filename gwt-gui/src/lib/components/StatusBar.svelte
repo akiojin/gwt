@@ -5,10 +5,12 @@
     projectPath,
     currentBranch = "",
     terminalCount = 0,
+    osEnvReady = true,
   }: {
     projectPath: string;
     currentBranch?: string;
     terminalCount?: number;
+    osEnvReady?: boolean;
   } = $props();
 
   let agents: AgentInfo[] = $state([]);
@@ -51,6 +53,12 @@
 
   $effect(() => {
     void projectPath;
+    void osEnvReady;
+    if (!osEnvReady) {
+      agents = [];
+      agentsLoading = false;
+      return;
+    }
     detectAgents();
   });
 </script>
@@ -65,8 +73,13 @@
       [{terminalCount} terminal{terminalCount !== 1 ? "s" : ""}]
     </span>
   {/if}
+  {#if !osEnvReady}
+    <span class="status-loading">Loading environment...</span>
+  {/if}
   <span class="status-item agents">
-    {#if agentsLoading}
+    {#if !osEnvReady}
+      <span class="agent muted">Agents: waiting</span>
+    {:else if agentsLoading}
       <span class="agent muted">Agents: ...</span>
     {:else}
       {#each AGENT_ORDER as a (a.id)}
@@ -88,7 +101,7 @@
     background-color: var(--bg-surface);
     border-top: 1px solid var(--border-color);
     padding: 0 12px;
-    font-size: 11px;
+    font-size: var(--ui-font-sm);
     color: var(--text-muted);
     gap: 16px;
   }
@@ -133,8 +146,13 @@
     flex: 1;
   }
 
+  .status-loading {
+    color: var(--text-muted);
+    font-style: italic;
+  }
+
   .path {
     font-family: monospace;
-    font-size: 10px;
+    font-size: var(--ui-font-xs);
   }
 </style>

@@ -501,44 +501,11 @@ pub fn get_branch_session_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::{TestEnvGuard, ENV_LOCK};
     use std::fs;
     use std::path::Path;
     use std::process::Command;
-    use std::sync::Mutex;
     use tempfile::TempDir;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    struct TestEnvGuard {
-        prev_home: Option<std::ffi::OsString>,
-        prev_xdg: Option<std::ffi::OsString>,
-    }
-
-    impl TestEnvGuard {
-        fn new(home_path: &Path) -> Self {
-            let prev_home = std::env::var_os("HOME");
-            let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
-            std::env::set_var("HOME", home_path);
-            std::env::set_var("XDG_CONFIG_HOME", home_path.join(".config"));
-            Self {
-                prev_home,
-                prev_xdg,
-            }
-        }
-    }
-
-    impl Drop for TestEnvGuard {
-        fn drop(&mut self) {
-            match &self.prev_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-            match &self.prev_xdg {
-                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-                None => std::env::remove_var("XDG_CONFIG_HOME"),
-            }
-        }
-    }
 
     fn init_git_repo(path: &Path) {
         let out = Command::new("git")

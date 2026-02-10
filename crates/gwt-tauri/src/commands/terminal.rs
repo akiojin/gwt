@@ -202,9 +202,16 @@ fn create_new_worktree_path(
     Ok(wt.path)
 }
 
-fn load_profile_env(profile_override: Option<&str>) -> HashMap<String, String> {
+/// Merge OS environment variables with profile environment.
+/// Order: OS env (base) → disabled_env removes → profile env overwrites
+fn merge_profile_env(
+    os_env: &HashMap<String, String>,
+    profile_override: Option<&str>,
+) -> HashMap<String, String> {
+    let mut env_vars = os_env.clone();
+
     let Ok(config) = ProfilesConfig::load() else {
-        return HashMap::new();
+        return env_vars;
     };
 
     let profile_name = profile_override
@@ -212,14 +219,33 @@ fn load_profile_env(profile_override: Option<&str>) -> HashMap<String, String> {
         .or_else(|| config.active.clone());
 
     let Some(name) = profile_name else {
-        return HashMap::new();
+        return env_vars;
     };
 
-    config
-        .profiles
-        .get(&name)
-        .map(|p| p.env.clone())
-        .unwrap_or_default()
+    let Some(profile) = config.profiles.get(&name) else {
+        return env_vars;
+    };
+
+    // Remove disabled OS env vars
+    for key in &profile.disabled_env {
+        env_vars.remove(key);
+    }
+
+    // Override with profile env vars
+    for (key, value) in &profile.env {
+        env_vars.insert(key.clone(), value.clone());
+    }
+
+    env_vars
+}
+
+fn ensure_terminal_env_defaults(env_vars: &mut HashMap<String, String>) {
+    env_vars
+        .entry("TERM".to_string())
+        .or_insert_with(|| "xterm-256color".to_string());
+    env_vars
+        .entry("COLORTERM".to_string())
+        .or_insert_with(|| "truecolor".to_string());
 }
 
 pub(crate) struct BuiltinAgentDef {
@@ -1282,6 +1308,29 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_os_base_only() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::commands::TestEnvGuard::new(home.path());
+
+        let os_env = HashMap::from([
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("HOME".to_string(), "/Users/test".to_string()),
+        ]);
+        // Isolate HOME so user profile config never affects this test.
+        let result = merge_profile_env(&os_env, None);
+        assert_eq!(result.get("PATH"), Some(&"/usr/bin".to_string()));
+        assert_eq!(result.get("HOME"), Some(&"/Users/test".to_string()));
+    }
+
+    #[test]
+    fn test_merge_empty_os_env() {
+        let os_env = HashMap::new();
+        let result = merge_profile_env(&os_env, None);
+        assert!(result.is_empty());
+    }
+
+    #[test]
     fn probe_terminal_ansi_flushes_scrollback_before_reading() {
         let state = AppState::new();
         let nonce = SystemTime::now()
@@ -1418,9 +1467,25 @@ fn launch_agent_for_project_root(
         let _ = app_handle.emit("worktrees-changed", &payload);
     }
 
-    report_launch_progress(job_id, &app_handle, "deps", None);
+    report_launch_progress(job_id, &app_handle, "deps", Some("Waiting for environment"));
+    if is_launch_cancelled(cancelled) {
+        return Err("Cancelled".to_string());
+    }
 
-    let mut env_vars = load_profile_env(request.profile.as_deref());
+    // Wait for the startup OS env capture to finish so agent launches are deterministic.
+    if !state.wait_os_env_ready(Duration::from_secs(2)) {
+        return Err("Environment is still loading. Please try again.".to_string());
+    }
+    let Some(os_env) = state.os_env.get().cloned() else {
+        return Err("Environment is still loading. Please try again.".to_string());
+    };
+
+    if is_launch_cancelled(cancelled) {
+        return Err("Cancelled".to_string());
+    }
+
+    report_launch_progress(job_id, &app_handle, "deps", None);
+    let mut env_vars = merge_profile_env(&os_env, request.profile.as_deref());
     // Useful for debugging and for agents that want to introspect gwt context.
     env_vars.insert(
         "GWT_PROJECT_ROOT".to_string(),
@@ -1496,6 +1561,10 @@ fn launch_agent_for_project_root(
         // accidental confirmation prompts in sandboxed environments.
         env_vars.insert("IS_SANDBOX".to_string(), "1".to_string());
     }
+
+    // Ensure TERM/COLORTERM propagate into Docker exec environments as well.
+    // (PTY sets these for the host process, but docker exec only receives vars passed via -e.)
+    ensure_terminal_env_defaults(&mut env_vars);
 
     let settings = Settings::load(&project_root).unwrap_or_default();
     let force_host_settings = settings.docker.force_host;
@@ -2606,4 +2675,67 @@ pub fn probe_terminal_ansi(
     pane_id: String,
 ) -> Result<TerminalAnsiProbe, String> {
     probe_terminal_ansi_from_state(&state, &pane_id)
+}
+
+// ---------------------------------------------------------------------------
+// OS Environment introspection commands
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapturedEnvEntry {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapturedEnvInfo {
+    pub entries: Vec<CapturedEnvEntry>,
+    pub source: String,
+    pub reason: Option<String>,
+    pub ready: bool,
+}
+
+#[tauri::command]
+pub fn get_captured_environment(state: State<AppState>) -> CapturedEnvInfo {
+    let (entries, source_str, reason) = match state.os_env.get() {
+        Some(env) => {
+            let mut entries: Vec<CapturedEnvEntry> = env
+                .iter()
+                .map(|(k, v)| CapturedEnvEntry {
+                    key: k.clone(),
+                    value: v.clone(),
+                })
+                .collect();
+            entries.sort_by(|a, b| a.key.cmp(&b.key));
+
+            let (source_str, reason) = match state.os_env_source.get() {
+                Some(gwt_core::config::os_env::EnvSource::LoginShell) => {
+                    ("login_shell".to_string(), None)
+                }
+                Some(gwt_core::config::os_env::EnvSource::ProcessEnv) => {
+                    ("process_env".to_string(), None)
+                }
+                Some(gwt_core::config::os_env::EnvSource::StdEnvFallback { reason }) => {
+                    ("std_env_fallback".to_string(), Some(reason.clone()))
+                }
+                None => ("unknown".to_string(), None),
+            };
+            (entries, source_str, reason)
+        }
+        None => (vec![], "not_ready".to_string(), None),
+    };
+
+    CapturedEnvInfo {
+        ready: state.os_env.initialized(),
+        entries,
+        source: source_str,
+        reason,
+    }
+}
+
+#[tauri::command]
+pub fn is_os_env_ready(state: State<AppState>) -> bool {
+    state.is_os_env_ready()
 }
