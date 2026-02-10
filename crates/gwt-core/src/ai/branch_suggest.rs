@@ -1,4 +1,4 @@
-//! Branch naming assistant (AI) - shared between TUI and GUI.
+//! Branch naming assistant (AI).
 //!
 //! This module generates and parses branch name suggestions with fixed prefixes.
 
