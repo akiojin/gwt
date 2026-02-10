@@ -185,6 +185,8 @@ pub fn build_app(
             crate::commands::agent_config::save_agent_config,
             crate::commands::profiles::get_profiles,
             crate::commands::profiles::save_profiles,
+            crate::commands::hooks::check_and_update_hooks,
+            crate::commands::hooks::register_hooks,
         ])
 }
 

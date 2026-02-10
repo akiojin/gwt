@@ -3,6 +3,7 @@ pub mod agents;
 pub mod branch_suggest;
 pub mod branches;
 pub mod docker;
+pub mod hooks;
 pub mod profiles;
 pub mod project;
 pub mod sessions;
