@@ -18,14 +18,14 @@ fn should_prevent_exit_request(is_quitting: bool) -> bool {
 }
 
 fn show_best_window(app: &tauri::AppHandle<tauri::Wry>) {
-    let Some(window) = best_window(app) else { return };
+    let Some(window) = best_window(app) else {
+        return;
+    };
     let _ = window.show();
     let _ = window.set_focus();
 }
 
-fn best_window(
-    app: &tauri::AppHandle<tauri::Wry>,
-) -> Option<tauri::WebviewWindow<tauri::Wry>> {
+fn best_window(app: &tauri::AppHandle<tauri::Wry>) -> Option<tauri::WebviewWindow<tauri::Wry>> {
     // Prefer the focused window.
     if let Some((_, w)) = app
         .webview_windows()
@@ -296,7 +296,12 @@ fn focused_window_label(app: &tauri::AppHandle<tauri::Wry>) -> String {
         .into_iter()
         .find_map(|(label, w)| w.is_focused().ok().and_then(|f| f.then_some(label)))
         .or_else(|| app.get_webview_window("main").map(|_| "main".to_string()))
-        .or_else(|| app.webview_windows().into_iter().next().map(|(label, _)| label))
+        .or_else(|| {
+            app.webview_windows()
+                .into_iter()
+                .next()
+                .map(|(label, _)| label)
+        })
         .unwrap_or_else(|| "main".to_string())
 }
 
