@@ -4,6 +4,7 @@
     BranchInfo,
     ProjectInfo,
     LaunchAgentRequest,
+    ProbePathResult,
     TerminalAnsiProbe,
     CapturedEnvInfo,
   } from "./lib/types";
@@ -12,6 +13,8 @@
   import StatusBar from "./lib/components/StatusBar.svelte";
   import OpenProject from "./lib/components/OpenProject.svelte";
   import AgentLaunchForm from "./lib/components/AgentLaunchForm.svelte";
+  import LaunchProgressModal from "./lib/components/LaunchProgressModal.svelte";
+  import MigrationModal from "./lib/components/MigrationModal.svelte";
   import CleanupModal from "./lib/components/CleanupModal.svelte";
 
   interface MenuActionPayload {
@@ -31,6 +34,13 @@
 
   let selectedBranch: BranchInfo | null = $state(null);
   let currentBranch: string = $state("");
+
+  let launchProgressOpen: boolean = $state(false);
+  let launchJobId: string = $state("");
+  let pendingLaunchRequest: LaunchAgentRequest | null = $state(null);
+
+  let migrationOpen: boolean = $state(false);
+  let migrationSourceRoot: string = $state("");
 
   let tabs: Tab[] = $state([
     { id: "summary", label: "Session Summary", type: "summary" },
@@ -274,11 +284,20 @@
 
   async function handleAgentLaunch(request: LaunchAgentRequest) {
     const { invoke } = await import("@tauri-apps/api/core");
-    const paneId = await invoke<string>("launch_agent", { request });
+    const jobId = await invoke<string>("start_launch_job", { request });
+
+    pendingLaunchRequest = request;
+    launchJobId = jobId;
+    launchProgressOpen = true;
+  }
+
+  function handleLaunchSuccess(paneId: string) {
+    const req = pendingLaunchRequest;
+    const label = req ? worktreeTabLabel(req.branch) : "Worktree";
 
     const newTab: Tab = {
       id: `agent-${paneId}`,
-      label: worktreeTabLabel(request.branch),
+      label,
       type: "agent",
       paneId,
     };
@@ -343,11 +362,38 @@
           const selected = await open({ directory: true, multiple: false });
           if (selected) {
             const { invoke } = await import("@tauri-apps/api/core");
-            const info = await invoke<ProjectInfo>("open_project", {
+            const probe = await invoke<ProbePathResult>("probe_path", {
               path: selected as string,
             });
-            projectPath = info.path;
-            fetchCurrentBranch();
+
+            if (probe.kind === "gwtProject" && probe.projectPath) {
+              const info = await invoke<ProjectInfo>("open_project", {
+                path: probe.projectPath,
+              });
+              projectPath = info.path;
+              fetchCurrentBranch();
+              break;
+            }
+
+            if (probe.kind === "migrationRequired" && probe.migrationSourceRoot) {
+              migrationSourceRoot = probe.migrationSourceRoot;
+              migrationOpen = true;
+              break;
+            }
+
+            if (probe.kind === "emptyDir") {
+              appError =
+                "Selected folder is empty. Use New Project on the start screen.";
+              break;
+            }
+
+            appError =
+              probe.message ||
+              (probe.kind === "notFound"
+                ? "Path does not exist."
+                : probe.kind === "invalid"
+                  ? "Invalid path."
+                  : "Not a gwt project.");
           }
         } catch (err) {
           appError = `Failed to open project: ${toErrorMessage(err)}`;
@@ -672,6 +718,38 @@
   </div>
 {/if}
 
+<MigrationModal
+  open={migrationOpen}
+  sourceRoot={migrationSourceRoot}
+  onCompleted={async (p) => {
+    migrationOpen = false;
+    migrationSourceRoot = "";
+
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const info = await invoke<ProjectInfo>("open_project", { path: p });
+      projectPath = info.path;
+      fetchCurrentBranch();
+    } catch (err) {
+      appError = `Failed to open migrated project: ${toErrorMessage(err)}`;
+    }
+  }}
+  onDismiss={() => {
+    migrationOpen = false;
+    migrationSourceRoot = "";
+  }}
+/>
+
+<LaunchProgressModal
+  open={launchProgressOpen}
+  jobId={launchJobId}
+  onSuccess={handleLaunchSuccess}
+  onClose={() => {
+    launchProgressOpen = false;
+    launchJobId = "";
+    pendingLaunchRequest = null;
+  }}
+/>
 {#if showOsEnvDebug}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->

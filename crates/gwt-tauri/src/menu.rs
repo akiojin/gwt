@@ -17,6 +17,8 @@ pub const MENU_ID_TOOLS_LAUNCH_AGENT: &str = "tools-launch-agent";
 pub const MENU_ID_TOOLS_LIST_TERMINALS: &str = "tools-list-terminals";
 pub const MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS: &str = "tools-terminal-diagnostics";
 
+pub const MENU_ID_GIT_CLEANUP_WORKTREES: &str = "git-cleanup-worktrees";
+
 pub const MENU_ID_SETTINGS_PREFERENCES: &str = "settings-preferences";
 pub const MENU_ID_HELP_ABOUT: &str = "help-about";
 
@@ -85,6 +87,17 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         .item(&file_close_project)
         .build()?;
 
+    let git_cleanup_worktrees = MenuItem::with_id(
+        app,
+        MENU_ID_GIT_CLEANUP_WORKTREES,
+        "Cleanup Worktrees...",
+        true,
+        Some("CmdOrCtrl+Shift+K"),
+    )?;
+    let git = SubmenuBuilder::new(app, "Git")
+        .item(&git_cleanup_worktrees)
+        .build()?;
+
     let tools_launch_agent = MenuItem::with_id(
         app,
         MENU_ID_TOOLS_LAUNCH_AGENT,
@@ -129,6 +142,7 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
 
     menu.append(&gwt)?;
     menu.append(&file)?;
+    menu.append(&git)?;
     menu.append(&tools)?;
     menu.append(&window)?;
     Ok(menu)

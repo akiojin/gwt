@@ -17,6 +17,20 @@ fn should_prevent_exit_request(is_quitting: bool) -> bool {
     !is_quitting
 }
 
+fn menu_action_from_id(id: &str) -> Option<&'static str> {
+    match id {
+        crate::menu::MENU_ID_FILE_OPEN_PROJECT => Some("open-project"),
+        crate::menu::MENU_ID_FILE_CLOSE_PROJECT => Some("close-project"),
+        crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES => Some("cleanup-worktrees"),
+        crate::menu::MENU_ID_TOOLS_LAUNCH_AGENT => Some("launch-agent"),
+        crate::menu::MENU_ID_TOOLS_LIST_TERMINALS => Some("list-terminals"),
+        crate::menu::MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS => Some("terminal-diagnostics"),
+        crate::menu::MENU_ID_SETTINGS_PREFERENCES => Some("open-settings"),
+        crate::menu::MENU_ID_HELP_ABOUT => Some("about"),
+        _ => None,
+    }
+}
+
 pub fn build_app(
     builder: tauri::Builder<tauri::Wry>,
     app_state: AppState,
@@ -149,18 +163,9 @@ pub fn build_app(
                 return;
             }
 
-            let action = match id {
-                crate::menu::MENU_ID_FILE_OPEN_PROJECT => Some("open-project"),
-                crate::menu::MENU_ID_FILE_CLOSE_PROJECT => Some("close-project"),
-                crate::menu::MENU_ID_TOOLS_LAUNCH_AGENT => Some("launch-agent"),
-                crate::menu::MENU_ID_TOOLS_LIST_TERMINALS => Some("list-terminals"),
-                crate::menu::MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS => Some("terminal-diagnostics"),
-                crate::menu::MENU_ID_SETTINGS_PREFERENCES => Some("open-settings"),
-                crate::menu::MENU_ID_HELP_ABOUT => Some("about"),
-                _ => None,
+            let Some(action) = menu_action_from_id(id) else {
+                return;
             };
-
-            let Some(action) = action else { return };
             emit_menu_action(app, action);
         })
         .on_window_event(|window, event| {
@@ -204,16 +209,21 @@ pub fn build_app(
             crate::commands::branches::list_remote_branches,
             crate::commands::branches::get_current_branch,
             crate::commands::project::open_project,
+            crate::commands::project::probe_path,
             crate::commands::project::create_project,
+            crate::commands::project::start_migration_job,
             crate::commands::project::close_project,
             crate::commands::project::get_project_info,
             crate::commands::project::is_git_repo,
+            crate::commands::project::quit_app,
             crate::commands::docker::detect_docker_context,
             crate::commands::sessions::get_branch_quick_start,
             crate::commands::sessions::get_branch_session_summary,
             crate::commands::branch_suggest::suggest_branch_names,
             crate::commands::terminal::launch_terminal,
             crate::commands::terminal::launch_agent,
+            crate::commands::terminal::start_launch_job,
+            crate::commands::terminal::cancel_launch_job,
             crate::commands::terminal::write_terminal,
             crate::commands::terminal::resize_terminal,
             crate::commands::terminal::close_terminal,
@@ -376,5 +386,13 @@ mod tests {
         assert!(!state.is_quitting.load(Ordering::SeqCst));
         state.request_quit();
         assert!(state.is_quitting.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn menu_action_from_id_maps_git_cleanup() {
+        assert_eq!(
+            menu_action_from_id(crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES),
+            Some("cleanup-worktrees")
+        );
     }
 }
