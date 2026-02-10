@@ -135,6 +135,8 @@ cargo build --workspace
 ./target/release/gwt
 ```
 
+Note: CI の Node ベースツール（例: commitlint）は Corepack 経由の pnpm で実行します。ロックファイルは `pnpm-lock.yaml` を正とし、`package-lock.json` は使用しません。
+
 ## クイックスタート
 
 任意のGitリポジトリで実行:

@@ -40,6 +40,7 @@
   "engines": {
     "node": ">=18"
   },
+  "packageManager": "pnpm@10.29.2",
   "os": [
     "darwin",
     "linux",

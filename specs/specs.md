@@ -1,13 +1,13 @@
 <!-- markdownlint-disable MD013 -->
 # 仕様一覧
 
-**最終更新**: 2026-02-08
+**最終更新**: 2026-02-10
 
 このファイルは `.specify/scripts/bash/update-specs-index.sh` により自動生成されました。
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
-| [SPEC-1ad9c07d](SPEC-1ad9c07d/spec.md) | 機能仕様: エージェント起動ウィザード統合 | 2026-02-08 |
+| [SPEC-b28ab8d9](SPEC-b28ab8d9/spec.md) | 機能仕様: CI の Node ツールチェーンを pnpm に統一する（commitlint） | 2026-02-10 |
 | [SPEC-fdebd681](SPEC-fdebd681/spec.md) | Codex collaboration_modes Support | - |
 | [SPEC-f8dab6e2](SPEC-f8dab6e2/spec.md) | 機能仕様: Claude Code プラグインマーケットプレイス自動登録 | 2026-01-30 |
 | [SPEC-f5f5657e](SPEC-f5f5657e/spec.md) | 機能仕様: Docker環境統合（エージェント自動起動） | 2026-02-03 |
@@ -49,4 +49,5 @@
 | [SPEC-1ea18899](SPEC-1ea18899/spec.md) | 機能仕様: GitView画面 | 2026-02-02 |
 | [SPEC-1defd8fd](SPEC-1defd8fd/spec.md) | 機能仕様: bugfixブランチタイプのサポート追加 | 2025-01-18 |
 | [SPEC-1d62511e](SPEC-1d62511e/spec.md) | SPEC-1d62511e: TypeScript/Bun から Rust への完全移行 | 2026-01-11 |
+| [SPEC-1ad9c07d](SPEC-1ad9c07d/spec.md) | 機能仕様: エージェント起動ウィザード統合 | 2026-02-08 |
 | [SPEC-067a8026](SPEC-067a8026/spec.md) | 機能仕様: LLMベースリリースワークフロー | 2026-01-21 |

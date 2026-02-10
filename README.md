@@ -96,6 +96,8 @@ cargo build --workspace
 ./target/release/gwt
 ```
 
+Note: CI runs Node-based tooling (e.g. commitlint) with pnpm (via Corepack). The lockfile is `pnpm-lock.yaml` (no `package-lock.json`).
+
 ## Quick Start
 
 Run in any Git repository:
