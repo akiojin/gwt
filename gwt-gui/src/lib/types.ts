@@ -26,6 +26,16 @@ export interface TerminalInfo {
   status: string;
 }
 
+export interface TerminalAnsiProbe {
+  pane_id: string;
+  bytes_scanned: number;
+  esc_count: number;
+  sgr_count: number;
+  color_sgr_count: number;
+  has_256_color: boolean;
+  has_true_color: boolean;
+}
+
 export interface AgentInfo {
   id: "claude" | "codex" | "gemini" | (string & {});
   name: string;
@@ -33,6 +43,27 @@ export interface AgentInfo {
   path?: string;
   authenticated: boolean;
   available: boolean;
+}
+
+export type ClaudeAgentProvider = "anthropic" | "glm";
+
+export interface ClaudeGlmConfig {
+  base_url: string;
+  auth_token: string;
+  api_timeout_ms: string;
+  default_opus_model: string;
+  default_sonnet_model: string;
+  default_haiku_model: string;
+}
+
+export interface ClaudeAgentConfig {
+  provider: ClaudeAgentProvider;
+  glm: ClaudeGlmConfig;
+}
+
+export interface AgentConfig {
+  version: number;
+  claude: ClaudeAgentConfig;
 }
 
 export interface SettingsData {
@@ -48,6 +79,8 @@ export interface SettingsData {
   agent_gemini_path?: string | null;
   agent_auto_install_deps: boolean;
   docker_force_host: boolean;
+  ui_font_size: number;
+  terminal_font_size: number;
 }
 
 export interface AISettings {
@@ -101,6 +134,7 @@ export interface ToolSessionEntry {
 
 export interface SessionSummaryResult {
   status: "ok" | "ai-not-configured" | "disabled" | "no-session" | "error";
+  generating: boolean;
   toolId?: string | null;
   sessionId?: string | null;
   markdown?: string | null;
@@ -108,6 +142,12 @@ export interface SessionSummaryResult {
   shortSummary?: string | null;
   bulletPoints: string[];
   warning?: string | null;
+  error?: string | null;
+}
+
+export interface BranchSuggestResult {
+  status: "ok" | "ai-not-configured" | "error";
+  suggestions: string[];
   error?: string | null;
 }
 
@@ -119,6 +159,59 @@ export interface DockerContext {
   compose_available: boolean;
   daemon_running: boolean;
   force_host: boolean;
+}
+
+export interface CapturedEnvEntry {
+  key: string;
+  value: string;
+}
+
+export interface CapturedEnvInfo {
+  entries: CapturedEnvEntry[];
+  source: string;
+  reason: string | null;
+  ready: boolean;
+}
+
+export type FileChangeKind = "Added" | "Modified" | "Deleted" | "Renamed";
+
+export interface FileChange {
+  path: string;
+  kind: FileChangeKind;
+  additions: number;
+  deletions: number;
+  is_binary: boolean;
+}
+
+export interface FileDiff {
+  content: string;
+  truncated: boolean;
+}
+
+export interface CommitEntry {
+  sha: string;
+  message: string;
+  timestamp: number;
+  author: string;
+}
+
+export interface StashEntry {
+  index: number;
+  message: string;
+  file_count: number;
+}
+
+export interface WorkingTreeEntry {
+  path: string;
+  status: FileChangeKind;
+  is_staged: boolean;
+}
+
+export interface GitChangeSummary {
+  file_count: number;
+  commit_count: number;
+  stash_count: number;
+  base_branch: string;
 }
 
 export interface LaunchAgentRequest {

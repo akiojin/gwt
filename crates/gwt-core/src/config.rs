@@ -2,16 +2,19 @@
 //!
 //! Handles TOML configuration files with automatic migration from JSON.
 
+mod agent_config;
 mod bare_project;
 mod claude_hooks;
 mod claude_plugins;
 pub mod migration;
+pub mod os_env;
 mod profile;
 mod session;
 mod settings;
 pub mod tools;
 mod ts_session;
 
+pub use agent_config::{AgentConfig, ClaudeAgentConfig, ClaudeAgentProvider, ClaudeGlmConfig};
 pub use bare_project::BareProjectConfig;
 pub use claude_hooks::{
     all_hook_events, get_claude_settings_path, is_gwt_hooks_registered, is_temporary_execution,
@@ -29,7 +32,11 @@ pub use migration::{
     backup_broken_file, ensure_config_dir, get_cleanup_candidates, migrate_json_to_toml,
     migrate_yaml_to_toml, write_atomic, CleanupCandidate,
 };
-pub use profile::{AISettings, Profile, ProfilesConfig, ResolvedAISettings};
+pub use os_env::{capture_login_shell_env, EnvSource, OsEnvResult, ShellType};
+pub use profile::{
+    AISettings, ActiveAISettingsResolution, ActiveAISettingsSource, Profile, ProfilesConfig,
+    ResolvedAISettings,
+};
 pub use session::{get_session_for_branch, load_sessions_from_worktrees, AgentStatus, Session};
 pub use settings::Settings;
 pub use tools::{AgentType, CustomCodingAgent, ModeArgs, ModelDef, ToolsConfig};

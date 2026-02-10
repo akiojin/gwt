@@ -52,22 +52,23 @@
 
 ## メニュー仕様（ネイティブ）
 
-- トップレベル: File / Edit / View / Window / Settings / Help
+- トップレベル: gwt / File / Window / Debug
 - `File`
   - New Window
   - Open Project...
   - Close Project
-- `View`
-  - Toggle Sidebar
-  - Launch Agent...
-  - List Terminals
 - `Window`
   - プロジェクトが開かれているウィンドウ一覧（同名の場合はパスを付加して区別）
   - 選択時: 対象ウィンドウを show + focus
-- `Settings`
-  - Preferences...
-- `Help`
+  - Toggle Sidebar
+  - Launch Agent...
+  - List Terminals
+  - Terminal Diagnostics
+- `gwt`
   - About gwt
+  - Preferences...
+- `Debug`
+  - Show Captured Environment
 
 ## テスト戦略
 
@@ -89,4 +90,3 @@
 - **Windowsでのウィンドウ生成のデッドロック**: メニューイベントなど同期コンテキストからの生成はリスクがあるため、別スレッドでウィンドウ生成を行う
 - **capabilities不足でIPC失敗**: 追加ウィンドウのラベルを `project-*` に統一し、capabilities の windows に glob を追加する
 - **フォーカス特定の曖昧さ**: `is_focused` を利用してメニューイベントの配送先ウィンドウを決定し、見つからない場合は `main` をフォールバックとする
-

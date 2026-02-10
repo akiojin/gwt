@@ -34,4 +34,3 @@ description: "gwt GUI マルチウィンドウ + Native Windowメニュー 実�
 - [ ] **T401** [統合] `cargo test -p gwt-tauri` を実行してテストを通す
 - [ ] **T402** [統合] `cd gwt-gui && npm run check` を実行して静的チェックを通す
 - [ ] **T403** [統合] 手動受け入れ（`File > New Window`、2プロジェクト同時、`Window` メニュー切替、hide復帰、干渉なし）を確認
-

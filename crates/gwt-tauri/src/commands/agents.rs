@@ -1,9 +1,9 @@
 //! Agent detection commands
 
 use crate::commands::terminal::builtin_agent_def;
-use crate::commands::terminal::{choose_fallback_runner, FallbackRunner};
 use crate::state::{AgentVersionsCache, AppState};
 use gwt_core::agent::{claude, codex, gemini, AgentInfo};
+use gwt_core::terminal::runner::{choose_fallback_runner, resolve_command_path, FallbackRunner};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -134,8 +134,8 @@ fn build_npm_metadata_doc_from_bun(dist_tags: Value, time: Value) -> Result<Valu
 }
 
 fn bun_info_json_with_timeout(package: &str, field: &str) -> Result<Value, String> {
-    let bun_path = which("bun")
-        .map_err(|_| "bun is not available on PATH".to_string())?
+    let bun_path = resolve_command_path("bun")
+        .ok_or_else(|| "bun is not available on PATH".to_string())?
         .to_string_lossy()
         .to_string();
 
@@ -184,9 +184,14 @@ fn fetch_npm_versions_via_bun(package: &str) -> Result<(Vec<String>, Vec<String>
 /// Detect available coding agents
 #[tauri::command]
 pub fn detect_agents() -> Vec<DetectedAgentInfo> {
-    let bunx_path = which("bunx").ok().map(|p| p.to_string_lossy().to_string());
-    let npx_path = which("npx").ok().map(|p| p.to_string_lossy().to_string());
+    let bunx_path = resolve_command_path("bunx");
+    let npx_path = resolve_command_path("npx");
     let runner = choose_fallback_runner(bunx_path.as_deref(), npx_path.is_some());
+
+    let bunx_path_str = bunx_path
+        .as_deref()
+        .map(|p| p.to_string_lossy().to_string());
+    let npx_path_str = npx_path.as_deref().map(|p| p.to_string_lossy().to_string());
 
     fn fallback_version(runner: FallbackRunner) -> &'static str {
         match runner {
@@ -227,7 +232,14 @@ pub fn detect_agents() -> Vec<DetectedAgentInfo> {
 
         if let Some(runner) = runner {
             let authenticated = match id {
-                "claude" => std::env::var("ANTHROPIC_API_KEY").is_ok(),
+                "claude" => {
+                    std::env::var("ANTHROPIC_API_KEY").is_ok()
+                        || std::env::var("ANTHROPIC_AUTH_TOKEN").is_ok()
+                        || gwt_core::config::AgentConfig::load()
+                            .ok()
+                            .map(|c| !c.claude.glm.auth_token.trim().is_empty())
+                            .unwrap_or(false)
+                }
                 "codex" => std::env::var("OPENAI_API_KEY").is_ok(),
                 "gemini" => {
                     std::env::var("GOOGLE_API_KEY").is_ok()
@@ -277,32 +289,32 @@ pub fn detect_agents() -> Vec<DetectedAgentInfo> {
             "Claude Code",
             claude::ClaudeAgent::detect(),
             runner,
-            bunx_path.as_deref(),
-            npx_path.as_deref(),
+            bunx_path_str.as_deref(),
+            npx_path_str.as_deref(),
         ),
         map_with_fallback(
             "codex",
             "Codex",
             codex::CodexAgent::detect(),
             runner,
-            bunx_path.as_deref(),
-            npx_path.as_deref(),
+            bunx_path_str.as_deref(),
+            npx_path_str.as_deref(),
         ),
         map_with_fallback(
             "gemini",
             "Gemini",
             gemini::GeminiAgent::detect(),
             runner,
-            bunx_path.as_deref(),
-            npx_path.as_deref(),
+            bunx_path_str.as_deref(),
+            npx_path_str.as_deref(),
         ),
         map_with_fallback(
             "opencode",
             "OpenCode",
             detect_opencode(),
             runner,
-            bunx_path.as_deref(),
-            npx_path.as_deref(),
+            bunx_path_str.as_deref(),
+            npx_path_str.as_deref(),
         ),
     ]
 }

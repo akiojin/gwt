@@ -11,9 +11,15 @@ PLANS.md
 /target/
 **/*.rs.bk
 
+# Generated (Tauri build)
+/crates/gwt-tauri/gen/schemas/linux-schema.json
+
 # npm wrapper (for bunx distribution)
 node_modules/
 bun.lock
+
+# Legacy npm lockfile (gwt-gui migrated to pnpm)
+gwt-gui/package-lock.json
 
 # Downloaded native binaries (postinstall downloads these)
 bin/gwt
