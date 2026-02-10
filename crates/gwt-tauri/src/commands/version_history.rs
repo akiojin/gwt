@@ -16,6 +16,7 @@ use tauri::Manager;
 use tauri::{AppHandle, Emitter, State};
 
 const VERSION_ID_UNRELEASED: &str = "unreleased";
+const RANGE_OID_UNBORN_HEAD: &str = "UNBORN_HEAD";
 
 const MAX_SUBJECTS_FOR_CHANGELOG: usize = 400;
 const MAX_SUBJECTS_FOR_AI: usize = 120;
@@ -137,7 +138,16 @@ pub fn get_project_version_history(
         Some(r) => Some(rev_parse(&repo_path, r)?),
         None => None,
     };
-    let range_to_oid = rev_parse(&repo_path, &range_to)?;
+    let range_to_oid = match rev_parse(&repo_path, &range_to) {
+        Ok(v) => v,
+        Err(err) => {
+            if range_to == "HEAD" && is_unborn_head(&repo_path) {
+                RANGE_OID_UNBORN_HEAD.to_string()
+            } else {
+                return Err(err);
+            }
+        }
+    };
 
     // Cache hit
     if let Some(hit) = get_cached_version_history(
@@ -698,6 +708,9 @@ fn rev_parse(repo_path: &Path, rev: &str) -> Result<String, String> {
 }
 
 fn rev_list_count(repo_path: &Path, from: Option<&str>, to: &str) -> Result<u32, String> {
+    if to == "HEAD" && is_unborn_head(repo_path) {
+        return Ok(0);
+    }
     let range = match from {
         Some(f) if !f.trim().is_empty() => format!("{f}..{to}"),
         _ => to.to_string(),
@@ -715,6 +728,9 @@ fn git_log_subjects(
     to: &str,
     max: usize,
 ) -> Result<Vec<String>, String> {
+    if to == "HEAD" && is_unborn_head(repo_path) {
+        return Ok(Vec::new());
+    }
     let range = match from {
         Some(f) if !f.trim().is_empty() => format!("{f}..{to}"),
         _ => to.to_string(),
@@ -754,6 +770,19 @@ fn git_output(repo_path: &Path, args: &[String]) -> Result<String, String> {
         } else {
             stderr
         })
+    }
+}
+
+fn is_unborn_head(repo_path: &Path) -> bool {
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .current_dir(repo_path)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output();
+
+    match output {
+        Ok(out) => !out.status.success(),
+        Err(_) => false,
     }
 }
 
@@ -826,6 +855,22 @@ mod tests {
         assert_eq!(out.items[0].range_to, "HEAD");
         assert!(out.items.iter().any(|i| i.id == "v1.0.1"));
         assert!(out.items.iter().any(|i| i.id == "v1.0.0"));
+    }
+
+    #[test]
+    fn list_project_versions_handles_unborn_head() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(home.path());
+
+        let repo = TempDir::new().unwrap();
+        init_git_repo(repo.path());
+
+        let out = list_project_versions(repo.path().to_string_lossy().to_string(), 10).unwrap();
+        assert_eq!(out.items.len(), 1);
+        assert_eq!(out.items[0].id, "unreleased");
+        assert_eq!(out.items[0].range_to, "HEAD");
+        assert_eq!(out.items[0].commit_count, 0);
     }
 
     #[test]

@@ -10,6 +10,9 @@
   let loading: boolean = $state(false);
   let error: string | null = $state(null);
 
+  // Ensure we register the backend update listener before kicking off generation.
+  let mounted: boolean = $state(false);
+
   let generatingIndex: number = $state(-1);
   let expanded: Record<string, boolean> = $state({ unreleased: true });
 
@@ -110,6 +113,8 @@
 
   $effect(() => {
     void projectPath;
+    void mounted;
+    if (!mounted) return;
     if (!projectPath) return;
     void loadVersions();
   });
@@ -139,6 +144,8 @@
         });
       } catch {
         // Ignore outside Tauri runtime.
+      } finally {
+        mounted = true;
       }
     })();
 
@@ -414,4 +421,3 @@
     padding: 14px 0;
   }
 </style>
-
