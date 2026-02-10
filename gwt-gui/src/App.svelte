@@ -6,12 +6,15 @@
     LaunchAgentRequest,
     TerminalAnsiProbe,
   } from "./lib/types";
-  import MenuBar from "./lib/components/MenuBar.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import MainArea from "./lib/components/MainArea.svelte";
   import StatusBar from "./lib/components/StatusBar.svelte";
   import OpenProject from "./lib/components/OpenProject.svelte";
   import AgentLaunchForm from "./lib/components/AgentLaunchForm.svelte";
+
+  interface MenuActionPayload {
+    action: string;
+  }
 
   let projectPath: string | null = $state(null);
   let sidebarVisible: boolean = $state(true);
@@ -289,18 +292,30 @@
         break;
       }
       case "close-project":
-        projectPath = null;
-        tabs = [{ id: "summary", label: "Session Summary", type: "summary" }];
-        activeTabId = "summary";
-        selectedBranch = null;
-        currentBranch = "";
-        sidebarRefreshKey = 0;
+        {
+          // Clear backend state (window-scoped) best-effort.
+          try {
+            const { invoke } = await import("@tauri-apps/api/core");
+            await invoke("close_project");
+          } catch {
+            // Ignore: not available outside Tauri runtime.
+          }
+
+          projectPath = null;
+          tabs = [{ id: "summary", label: "Session Summary", type: "summary" }];
+          activeTabId = "summary";
+          selectedBranch = null;
+          currentBranch = "";
+          sidebarRefreshKey = 0;
+        }
         break;
       case "toggle-sidebar":
         sidebarVisible = !sidebarVisible;
         break;
       case "launch-agent":
-        showAgentLaunch = true;
+        if (projectPath) {
+          showAgentLaunch = true;
+        }
         break;
       case "open-settings":
         openSettingsTab();
@@ -344,13 +359,41 @@
       }
     }
   }
+
+  // Native menubar integration (Tauri emits "menu-action" to the focused window).
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen<MenuActionPayload>("menu-action", (event) => {
+          void handleMenuAction(event.payload.action);
+        });
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+      } catch {
+        // Ignore: not available outside Tauri runtime.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  });
 </script>
 
 {#if projectPath === null}
   <OpenProject onOpen={handleProjectOpen} />
 {:else}
   <div class="app-layout">
-    <MenuBar {projectPath} onAction={handleMenuAction} />
     <div class="app-body">
       {#if sidebarVisible}
         <Sidebar
