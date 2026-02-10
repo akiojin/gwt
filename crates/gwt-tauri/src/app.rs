@@ -31,6 +31,35 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
     }
 }
 
+#[cfg_attr(test, allow(dead_code))]
+fn show_best_window(app: &tauri::AppHandle<tauri::Wry>) {
+    let Some(window) = best_window(app) else {
+        return;
+    };
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn best_window(app: &tauri::AppHandle<tauri::Wry>) -> Option<tauri::WebviewWindow<tauri::Wry>> {
+    // Prefer the focused window.
+    if let Some((_, w)) = app
+        .webview_windows()
+        .into_iter()
+        .find(|(_, w)| w.is_focused().ok() == Some(true))
+    {
+        return Some(w);
+    }
+
+    // Next, prefer "main" if present.
+    if let Some(w) = app.get_webview_window("main") {
+        return Some(w);
+    }
+
+    // Finally, fall back to any existing window.
+    app.webview_windows().into_iter().next().map(|(_, w)| w)
+}
+
 pub fn build_app(
     builder: tauri::Builder<tauri::Wry>,
     app_state: AppState,
@@ -73,10 +102,7 @@ pub fn build_app(
                     .menu(&tray_menu)
                     .on_menu_event(|app, event| match event.id().as_ref() {
                         "tray-show" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
+                            show_best_window(app);
                         }
                         "tray-quit" => {
                             app.state::<AppState>().request_quit();
@@ -92,10 +118,7 @@ pub fn build_app(
                             ..
                         } = event
                         {
-                            if let Some(window) = tray.app_handle().get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
+                            show_best_window(tray.app_handle());
                         }
                     })
                     .build(_app)?;
@@ -176,15 +199,23 @@ pub fn build_app(
                     event = "CloseRequested",
                     "Window close requested"
                 );
-                let is_quitting = window
-                    .app_handle()
-                    .state::<AppState>()
-                    .is_quitting
-                    .load(Ordering::SeqCst);
+                let state = window.app_handle().state::<AppState>();
+                let is_quitting = state.is_quitting.load(Ordering::SeqCst);
 
                 if !should_prevent_window_close(is_quitting) {
                     return;
                 }
+
+                // Allow specific windows to actually close (used for macOS Cmd+Q behavior).
+                if state.consume_window_close_permission(window.label()) {
+                    info!(
+                        category = "tauri",
+                        event = "CloseAllowed",
+                        "Window close allowed"
+                    );
+                    return;
+                }
+
                 api.prevent_close();
                 let _ = window.hide();
                 let _ = crate::menu::rebuild_menu(window.app_handle());
@@ -200,6 +231,24 @@ pub fn build_app(
                     .state::<AppState>()
                     .clear_project_for_window(window.label());
                 let _ = crate::menu::rebuild_menu(window.app_handle());
+
+                // Exit the app when all windows are truly closed (hidden windows still count as open).
+                let app_handle = window.app_handle().clone();
+                let destroyed_label = window.label().to_string();
+                let remaining_windows = app_handle
+                    .webview_windows()
+                    .into_iter()
+                    .filter(|(label, _)| label != &destroyed_label)
+                    .count();
+                if remaining_windows == 0 {
+                    info!(
+                        category = "tauri",
+                        event = "AllWindowsClosed",
+                        "All windows closed; exiting app"
+                    );
+                    app_handle.state::<AppState>().request_quit();
+                    app_handle.exit(0);
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -258,6 +307,13 @@ fn focused_window_label(app: &tauri::AppHandle<tauri::Wry>) -> String {
     app.webview_windows()
         .into_iter()
         .find_map(|(label, w)| w.is_focused().ok().and_then(|f| f.then_some(label)))
+        .or_else(|| app.get_webview_window("main").map(|_| "main".to_string()))
+        .or_else(|| {
+            app.webview_windows()
+                .into_iter()
+                .next()
+                .map(|(label, _)| label)
+        })
         .unwrap_or_else(|| "main".to_string())
 }
 
@@ -334,13 +390,33 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
 
             if should_prevent_exit_request(is_quitting) {
                 api.prevent_exit();
-                if let Some(window) = app_handle.get_webview_window("main") {
-                    info!(
-                        category = "tauri",
-                        event = "ExitPrevented",
-                        "Exit prevented; hiding main window"
-                    );
-                    let _ = window.hide();
+
+                // macOS: treat Cmd+Q as "close the focused window", not "hide to tray".
+                #[cfg(target_os = "macos")]
+                {
+                    if let Some(window) = best_window(app_handle) {
+                        app_handle
+                            .state::<AppState>()
+                            .allow_window_close(window.label());
+                        let _ = window.close();
+                    } else {
+                        // No windows exist; allow the process to exit.
+                        app_handle.state::<AppState>().request_quit();
+                        app_handle.exit(0);
+                    }
+                }
+
+                // Other OSes: keep current behavior (exit request hides to tray).
+                #[cfg(not(target_os = "macos"))]
+                {
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        info!(
+                            category = "tauri",
+                            event = "ExitPrevented",
+                            "Exit prevented; hiding main window"
+                        );
+                        let _ = window.hide();
+                    }
                 }
             }
         }
@@ -354,10 +430,7 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
         } => {
             // Ensure the app is recoverable from dock reopen even if the window is hidden.
             if !has_visible_windows {
-                if let Some(window) = app_handle.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
+                show_best_window(app_handle);
             }
         }
         _ => {}
