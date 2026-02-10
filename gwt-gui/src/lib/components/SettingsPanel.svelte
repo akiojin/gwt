@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import type { ProfilesConfig, Profile, SettingsData } from "../types";
 
   let { onClose }: { onClose: () => void } = $props();
@@ -37,8 +37,22 @@
 
   $effect(() => {
     if (!settings) return;
-    applyUiFontSize(settings.ui_font_size ?? 13);
-    applyTerminalFontSize(settings.terminal_font_size ?? 13);
+    const uiSize = settings.ui_font_size ?? 13;
+    const terminalSize = settings.terminal_font_size ?? 13;
+    if (uiSize >= 8 && uiSize <= 24) {
+      applyUiFontSize(uiSize);
+    }
+    if (terminalSize >= 8 && terminalSize <= 24) {
+      applyTerminalFontSize(terminalSize);
+    }
+  });
+
+  onMount(() => {
+    const computed = getComputedStyle(document.documentElement).getPropertyValue("--ui-font-base");
+    const parsedUi = Number.parseInt(computed.trim(), 10);
+    savedUiFontSize = Number.isNaN(parsedUi) ? 13 : parsedUi;
+    const storedTerminal = (window as any).__gwtTerminalFontSize;
+    savedTerminalFontSize = typeof storedTerminal === "number" ? storedTerminal : 13;
   });
 
   onDestroy(() => {
