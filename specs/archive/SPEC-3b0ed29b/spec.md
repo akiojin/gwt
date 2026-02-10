@@ -2,7 +2,7 @@
 
 **仕様ID**: `SPEC-3b0ed29b`
 **作成日**: 2025-12-06
-**更新日**: 2026-01-25
+**更新日**: 2026-02-09
 **ステータス**: 改訂中
 **カテゴリ**: Porting
 
@@ -12,6 +12,7 @@
 **追記**: 2026-01-22 macOSのPTYラッパーで引数が欠落せずに起動できるようにする（`script`のオプション解釈を遮断）。
 **追記**: 2026-01-22 Windows環境でClaude Codeの権限スキップ時に`IS_SANDBOX=1`がクラッシュ要因となる場合があるため、Windowsでは`IS_SANDBOX`を付与しない。
 **追記**: 2026-01-25 起動準備の進捗表示をステータス表示領域からセンターモーダルに変更。ステップリスト形式（チェックマーク）、キャンセル機能、冗長表示の統一を追加。
+**追記**: 2026-02-09 Claude Code で GLM (z.ai) を Provider として選択し、手動設定（Base URL / Token / Timeout / Model mapping）を gwt から保存して起動時に環境変数として渡せるようにする。
 
 ## 概要
 
@@ -297,6 +298,25 @@ gwtから各コーディングエージェント（Claude Code、Codex、Gemini�
 
 1. **前提条件** macOS環境でCodex起動引数に`-c`が含まれる、**操作** 起動コマンドを生成、**期待結果** PTYラッパーが`script -q -- /dev/null <command> <args...>`形式で生成され、引数が欠落しない
 2. **前提条件** macOS環境でClaude Codeを起動、**操作** 起動コマンドを生成、**期待結果** PTYラッパーが`script -q -- /dev/null <command> <args...>`形式で生成され、`--resume`などの引数が保持される
+
+---
+
+### ユーザーストーリー 17 - Claude Code で GLM (z.ai) を選択して手動設定で起動できる (優先度: P2)
+
+開発者がClaude Codeを起動する際、ProviderとしてGLM (z.ai) を選択でき、z.aiの手動設定（Base URL / Token / Timeout / Model mapping）をgwt上で入力して保存できる。保存先はプロファイルとは別の設定ファイル（`~/.gwt/agents.toml`）とし、起動時には入力値が環境変数としてClaude Codeに渡される。
+
+**この優先度の理由**: Anthropic以外の互換エンドポイント（例: z.ai）でClaude Codeを利用したい場合に、手動設定を毎回コピペせずに起動できることが生産性に直結するため。
+
+**独立したテスト**: Claude Code起動フォームでProvider=GLMを選択し、GLM設定欄の表示、設定の保存、および起動時に期待する環境変数がマージされることを確認すれば検証できる。
+
+**受け入れシナリオ**:
+
+1. **前提条件** エージェント起動画面を開く、**操作** Claude Codeを選択、**期待結果** Provider選択欄（Anthropic/GLM）が表示される
+2. **前提条件** Provider選択欄が表示されている、**操作** ProviderでGLM (z.ai) を選択、**期待結果** Base URL / API Token / API Timeout / Opus/Sonnet/Haiku Model ID の入力欄が表示される
+3. **前提条件** Provider=GLMで必要な値が入力済み、**操作** Launchを実行、**期待結果** Claude Code起動時に`ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`API_TIMEOUT_MS`/`ANTHROPIC_DEFAULT_*_MODEL`が環境変数として渡される
+4. **前提条件** Provider=GLMでAPI Tokenが未入力、**操作** Launchを実行、**期待結果** 起動は行われず、英語のエラーメッセージが画面内に表示される
+5. **前提条件** Provider=Anthropic、**操作** Launchを実行、**期待結果** GLM用の環境変数は注入されない
+6. **前提条件** Provider=GLMでAdvancedのEnv Overridesに同一キーが指定されている、**操作** Launchを実行、**期待結果** AdvancedのEnv Overridesが優先される
 
 ---
 

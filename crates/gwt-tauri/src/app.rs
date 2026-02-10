@@ -129,6 +129,8 @@ pub fn build_app(
             crate::commands::settings::save_settings,
             crate::commands::agents::detect_agents,
             crate::commands::agents::list_agent_versions,
+            crate::commands::agent_config::get_agent_config,
+            crate::commands::agent_config::save_agent_config,
             crate::commands::profiles::get_profiles,
             crate::commands::profiles::save_profiles,
         ])
