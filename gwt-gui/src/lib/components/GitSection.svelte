@@ -48,10 +48,10 @@
         invoke<string[]>("get_base_branch_candidates", { projectPath }),
       ]);
 
-      summary = summaryResult;
-      baseBranchCandidates = candidates;
+      summary = summaryResult ?? null;
+      baseBranchCandidates = candidates ?? [];
 
-      if (!baseBranch && summaryResult.base_branch) {
+      if (!baseBranch && summaryResult?.base_branch) {
         baseBranch = summaryResult.base_branch;
       }
     } catch (err) {
