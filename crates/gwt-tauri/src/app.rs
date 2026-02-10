@@ -233,6 +233,8 @@ pub fn build_app(
             crate::commands::cleanup::list_worktrees,
             crate::commands::cleanup::cleanup_worktrees,
             crate::commands::cleanup::cleanup_single_worktree,
+            crate::commands::hooks::check_and_update_hooks,
+            crate::commands::hooks::register_hooks,
             crate::commands::terminal::get_captured_environment,
             crate::commands::terminal::is_os_env_ready,
             crate::commands::git_view::get_git_change_summary,

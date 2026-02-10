@@ -23,6 +23,7 @@ description: "gwt GUI マルチウィンドウ + Native Windowメニュー 実�
 - [ ] **T103** [US2] `File > New Window` の実装（新規ウィンドウ生成、show+focus）
 - [ ] **T104** [US2] `Window` メニューの動的生成（プロジェクトが開かれているウィンドウ一覧、同名の区別、選択で show+focus）
 - [ ] **T105** [US2] メニュー再構築トリガ（プロジェクト open/close、フォーカス変化、ウィンドウ破棄）を追加
+- [ ] **T106** [US2] 非表示（閉じて hide）ウィンドウを Window メニューから除外
 
 ## フェーズ3: ユーザーストーリー3 - Nativeメニューバー統合（in-app menubar廃止）(P2)
 
@@ -34,3 +35,4 @@ description: "gwt GUI マルチウィンドウ + Native Windowメニュー 実�
 - [ ] **T401** [統合] `cargo test -p gwt-tauri` を実行してテストを通す
 - [ ] **T402** [統合] `cd gwt-gui && npm run check` を実行して静的チェックを通す
 - [ ] **T403** [統合] 手動受け入れ（`File > New Window`、2プロジェクト同時、`Window` メニュー切替、hide復帰、干渉なし）を確認
+- [ ] **T404** [統合] 手動受け入れ（非表示ウィンドウが Window メニューに残らない）を確認
