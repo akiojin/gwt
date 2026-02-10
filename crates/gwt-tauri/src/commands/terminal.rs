@@ -3,7 +3,7 @@
 use crate::commands::project::resolve_repo_path_for_project_root;
 use crate::state::{AppState, PaneLaunchMeta};
 use gwt_core::ai::SessionParser;
-use gwt_core::config::{ProfilesConfig, Settings};
+use gwt_core::config::{AgentConfig, ClaudeAgentProvider, ProfilesConfig, Settings};
 use gwt_core::docker::{
     compose_available, daemon_running, detect_docker_files, docker_available, try_start_daemon,
     DockerFileType, DockerManager,
@@ -195,6 +195,15 @@ fn load_profile_env(profile_override: Option<&str>) -> HashMap<String, String> {
         .get(&name)
         .map(|p| p.env.clone())
         .unwrap_or_default()
+}
+
+fn ensure_terminal_env_defaults(env_vars: &mut HashMap<String, String>) {
+    env_vars
+        .entry("TERM".to_string())
+        .or_insert_with(|| "xterm-256color".to_string());
+    env_vars
+        .entry("COLORTERM".to_string())
+        .or_insert_with(|| "truecolor".to_string());
 }
 
 pub(crate) struct BuiltinAgentDef {
@@ -1243,10 +1252,66 @@ pub fn launch_agent(
         project_root.to_string_lossy().to_string(),
     );
 
+    // Agent-specific env (global; not per-profile). Request overrides are still highest precedence.
+    let mut wants_claude_glm = false;
+    if agent_id == "claude" {
+        if let Ok(cfg) = AgentConfig::load() {
+            wants_claude_glm = cfg.claude.provider == ClaudeAgentProvider::Glm;
+            if wants_claude_glm {
+                let base_url = cfg.claude.glm.base_url.trim();
+                let token = cfg.claude.glm.auth_token.trim();
+                let timeout = cfg.claude.glm.api_timeout_ms.trim();
+                let opus = cfg.claude.glm.default_opus_model.trim();
+                let sonnet = cfg.claude.glm.default_sonnet_model.trim();
+                let haiku = cfg.claude.glm.default_haiku_model.trim();
+
+                if !base_url.is_empty() {
+                    env_vars.insert("ANTHROPIC_BASE_URL".to_string(), base_url.to_string());
+                }
+                if !token.is_empty() {
+                    env_vars.insert("ANTHROPIC_AUTH_TOKEN".to_string(), token.to_string());
+                }
+                if !timeout.is_empty() {
+                    env_vars.insert("API_TIMEOUT_MS".to_string(), timeout.to_string());
+                }
+                if !opus.is_empty() {
+                    env_vars.insert("ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(), opus.to_string());
+                }
+                if !sonnet.is_empty() {
+                    env_vars.insert(
+                        "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
+                        sonnet.to_string(),
+                    );
+                }
+                if !haiku.is_empty() {
+                    env_vars.insert(
+                        "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
+                        haiku.to_string(),
+                    );
+                }
+            }
+        }
+    }
+
     // Request-specific overrides are highest precedence.
     if let Some(overrides) = request.env_overrides.as_ref() {
         for (k, v) in overrides {
             env_vars.insert(k.to_string(), v.to_string());
+        }
+    }
+
+    if wants_claude_glm {
+        // If we are configured for GLM, require at least Base URL + Token by the end of merging.
+        let base_url = env_vars
+            .get("ANTHROPIC_BASE_URL")
+            .map(|s| s.trim())
+            .unwrap_or("");
+        let token = env_vars
+            .get("ANTHROPIC_AUTH_TOKEN")
+            .map(|s| s.trim())
+            .unwrap_or("");
+        if base_url.is_empty() || token.is_empty() {
+            return Err("GLM (z.ai) provider is selected but required env vars are missing. Configure Base URL and API Token in Launch Agent > Provider.".to_string());
         }
     }
 
@@ -1256,6 +1321,10 @@ pub fn launch_agent(
         // accidental confirmation prompts in sandboxed environments.
         env_vars.insert("IS_SANDBOX".to_string(), "1".to_string());
     }
+
+    // Ensure TERM/COLORTERM propagate into Docker exec environments as well.
+    // (PTY sets these for the host process, but docker exec only receives vars passed via -e.)
+    ensure_terminal_env_defaults(&mut env_vars);
 
     let settings = Settings::load(&project_root).unwrap_or_default();
     let force_host_settings = settings.docker.force_host;

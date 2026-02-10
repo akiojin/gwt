@@ -45,6 +45,27 @@ export interface AgentInfo {
   available: boolean;
 }
 
+export type ClaudeAgentProvider = "anthropic" | "glm";
+
+export interface ClaudeGlmConfig {
+  base_url: string;
+  auth_token: string;
+  api_timeout_ms: string;
+  default_opus_model: string;
+  default_sonnet_model: string;
+  default_haiku_model: string;
+}
+
+export interface ClaudeAgentConfig {
+  provider: ClaudeAgentProvider;
+  glm: ClaudeGlmConfig;
+}
+
+export interface AgentConfig {
+  version: number;
+  claude: ClaudeAgentConfig;
+}
+
 export interface SettingsData {
   protected_branches: string[];
   default_base_branch: string;
