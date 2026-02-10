@@ -133,6 +133,7 @@
     const handleFontSizeChange = (e: Event) => {
       const size = (e as CustomEvent<number>).detail;
       if (term && typeof size === "number" && size >= 8 && size <= 24) {
+        (window as any).__gwtTerminalFontSize = size;
         term.options.fontSize = size;
         fit.fit();
         notifyResize(term.rows, term.cols);

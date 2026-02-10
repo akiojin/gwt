@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import type { ProfilesConfig, Profile, SettingsData } from "../types";
 
   let { onClose }: { onClose: () => void } = $props();
@@ -38,6 +39,11 @@
     if (!settings) return;
     applyUiFontSize(settings.ui_font_size ?? 13);
     applyTerminalFontSize(settings.terminal_font_size ?? 13);
+  });
+
+  onDestroy(() => {
+    applyUiFontSize(savedUiFontSize);
+    applyTerminalFontSize(savedTerminalFontSize);
   });
 
   function toErrorMessage(err: unknown): string {
@@ -135,6 +141,7 @@
   }
 
   function applyTerminalFontSize(size: number) {
+    (window as any).__gwtTerminalFontSize = size;
     window.dispatchEvent(new CustomEvent("gwt-terminal-font-size", { detail: size }));
   }
 

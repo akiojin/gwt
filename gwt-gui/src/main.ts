@@ -19,6 +19,7 @@ const app = mount(App, { target: document.getElementById("app")! });
       document.documentElement.style.setProperty("--ui-font-base", settings.ui_font_size + "px");
     }
     if (settings.terminal_font_size) {
+      (window as any).__gwtTerminalFontSize = settings.terminal_font_size;
       window.dispatchEvent(new CustomEvent("gwt-terminal-font-size", { detail: settings.terminal_font_size }));
     }
   } catch {
