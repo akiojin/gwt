@@ -7,6 +7,7 @@ mod bare_project;
 mod claude_hooks;
 mod claude_plugins;
 pub mod migration;
+pub mod os_env;
 mod profile;
 mod session;
 mod settings;
@@ -37,6 +38,7 @@ pub use profile::{
 };
 pub use session::{get_session_for_branch, load_sessions_from_worktrees, AgentStatus, Session};
 pub use settings::Settings;
+pub use os_env::{capture_login_shell_env, EnvSource, OsEnvResult, ShellType};
 pub use tools::{AgentType, CustomCodingAgent, ModeArgs, ModelDef, ToolsConfig};
 pub use ts_session::{
     get_branch_tool_history, get_last_tool_usage_map, get_ts_session_json_path,
