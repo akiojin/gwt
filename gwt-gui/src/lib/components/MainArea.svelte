@@ -9,6 +9,7 @@
   } from "../types";
   import TerminalView from "../terminal/TerminalView.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
+  import GitSection from "./GitSection.svelte";
 
   function isAgentTabWithPaneId(tab: Tab): tab is Tab & { paneId: string } {
     return tab.type === "agent" && typeof tab.paneId === "string" && tab.paneId.length > 0;
@@ -494,6 +495,8 @@
                   <div class="session-summary-placeholder">No summary.</div>
                 {/if}
               </div>
+
+              <GitSection projectPath={projectPath} branch={selectedBranch.name} />
             </div>
           {:else}
             <div class="placeholder">
