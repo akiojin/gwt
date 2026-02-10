@@ -174,15 +174,23 @@ pub fn build_app(
                     event = "CloseRequested",
                     "Window close requested"
                 );
-                let is_quitting = window
-                    .app_handle()
-                    .state::<AppState>()
-                    .is_quitting
-                    .load(Ordering::SeqCst);
+                let state = window.app_handle().state::<AppState>();
+                let is_quitting = state.is_quitting.load(Ordering::SeqCst);
 
                 if !should_prevent_window_close(is_quitting) {
                     return;
                 }
+
+                // Allow specific windows to actually close (used for macOS Cmd+Q behavior).
+                if state.consume_window_close_permission(window.label()) {
+                    info!(
+                        category = "tauri",
+                        event = "CloseAllowed",
+                        "Window close allowed"
+                    );
+                    return;
+                }
+
                 api.prevent_close();
                 let _ = window.hide();
                 let _ = crate::menu::rebuild_menu(window.app_handle());
@@ -198,6 +206,18 @@ pub fn build_app(
                     .state::<AppState>()
                     .clear_project_for_window(window.label());
                 let _ = crate::menu::rebuild_menu(window.app_handle());
+
+                // Exit the app when all windows are truly closed (hidden windows still count as open).
+                let app_handle = window.app_handle().clone();
+                if app_handle.webview_windows().is_empty() {
+                    info!(
+                        category = "tauri",
+                        event = "AllWindowsClosed",
+                        "All windows closed; exiting app"
+                    );
+                    app_handle.state::<AppState>().request_quit();
+                    app_handle.exit(0);
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -325,13 +345,38 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
 
             if should_prevent_exit_request(is_quitting) {
                 api.prevent_exit();
-                if let Some(window) = app_handle.get_webview_window("main") {
-                    info!(
-                        category = "tauri",
-                        event = "ExitPrevented",
-                        "Exit prevented; hiding main window"
-                    );
-                    let _ = window.hide();
+
+                // macOS: treat Cmd+Q as "close the focused window", not "hide to tray".
+                #[cfg(target_os = "macos")]
+                {
+                    let label = focused_window_label(app_handle);
+                    let target = app_handle
+                        .get_webview_window(&label)
+                        .or_else(|| app_handle.get_webview_window("main"));
+
+                    if let Some(window) = target {
+                        app_handle
+                            .state::<AppState>()
+                            .allow_window_close(window.label());
+                        let _ = window.close();
+                    } else {
+                        // No windows exist; allow the process to exit.
+                        app_handle.state::<AppState>().request_quit();
+                        app_handle.exit(0);
+                    }
+                }
+
+                // Other OSes: keep current behavior (exit request hides to tray).
+                #[cfg(not(target_os = "macos"))]
+                {
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        info!(
+                            category = "tauri",
+                            event = "ExitPrevented",
+                            "Exit prevented; hiding main window"
+                        );
+                        let _ = window.hide();
+                    }
                 }
             }
         }
