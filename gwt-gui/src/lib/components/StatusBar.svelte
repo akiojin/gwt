@@ -32,7 +32,7 @@
     background-color: var(--bg-surface);
     border-top: 1px solid var(--border-color);
     padding: 0 12px;
-    font-size: 11px;
+    font-size: var(--ui-font-sm);
     color: var(--text-muted);
     gap: 16px;
   }
@@ -51,6 +51,6 @@
 
   .path {
     font-family: monospace;
-    font-size: 10px;
+    font-size: var(--ui-font-xs);
   }
 </style>

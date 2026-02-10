@@ -422,12 +422,12 @@
 
   .about-dialog p {
     color: var(--text-secondary);
-    font-size: 13px;
+    font-size: var(--ui-font-base);
   }
 
   .about-version {
     color: var(--text-muted);
-    font-size: 11px;
+    font-size: var(--ui-font-sm);
     margin-top: 4px;
     margin-bottom: 20px;
   }
@@ -440,7 +440,7 @@
     color: var(--text-primary);
     cursor: pointer;
     font-family: inherit;
-    font-size: 12px;
+    font-size: var(--ui-font-md);
   }
 
   .about-close:hover {
@@ -458,7 +458,7 @@
   }
 
   .error-dialog h2 {
-    font-size: 18px;
+    font-size: var(--ui-font-2xl);
     font-weight: 800;
     color: rgb(255, 160, 160);
     margin-bottom: 10px;
@@ -466,7 +466,7 @@
 
   .error-text {
     color: var(--text-secondary);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     line-height: 1.5;
     margin-bottom: 18px;
     white-space: pre-wrap;

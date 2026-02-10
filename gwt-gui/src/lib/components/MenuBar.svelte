@@ -159,7 +159,7 @@
     border: none;
     color: var(--text-secondary);
     padding: 2px 8px;
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     cursor: pointer;
     border-radius: 4px;
     font-family: inherit;
@@ -193,7 +193,7 @@
     background: none;
     border: none;
     color: var(--text-primary);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     cursor: pointer;
     font-family: inherit;
     text-align: left;
@@ -209,7 +209,7 @@
   }
 
   .dropdown-shortcut {
-    font-size: 11px;
+    font-size: var(--ui-font-sm);
     color: var(--text-muted);
     margin-left: 24px;
   }
@@ -232,7 +232,7 @@
   .project-name {
     margin-left: auto;
     color: var(--text-muted);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     -webkit-app-region: no-drag;
   }
 </style>

@@ -48,6 +48,8 @@ export interface SettingsData {
   agent_gemini_path?: string | null;
   agent_auto_install_deps: boolean;
   docker_force_host: boolean;
+  ui_font_size: number;
+  terminal_font_size: number;
 }
 
 export interface AISettings {

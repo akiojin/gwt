@@ -44,13 +44,18 @@
     requestTerminalFocus();
   });
 
+  function getInitialTerminalFontSize(): number {
+    const stored = (window as any).__gwtTerminalFontSize;
+    return typeof stored === "number" && stored >= 8 && stored <= 24 ? stored : 13;
+  }
+
   onMount(() => {
     if (!containerEl) return;
 
     const term = new Terminal({
       cursorBlink: true,
       cursorStyle: "bar",
-      fontSize: 13,
+      fontSize: getInitialTerminalFontSize(),
       fontFamily: "'JetBrains Mono', 'Fira Code', 'SF Mono', 'Menlo', monospace",
       lineHeight: 1.2,
       scrollback: 10000,
@@ -124,10 +129,22 @@
     fitAddon = fit;
     resizeObserver = observer;
 
+    // Listen for font size changes from Settings panel
+    const handleFontSizeChange = (e: Event) => {
+      const size = (e as CustomEvent<number>).detail;
+      if (term && typeof size === "number" && size >= 8 && size <= 24) {
+        term.options.fontSize = size;
+        fit.fit();
+        notifyResize(term.rows, term.cols);
+      }
+    };
+    window.addEventListener("gwt-terminal-font-size", handleFontSizeChange);
+
     return () => {
       if (unlisten) {
         unlisten();
       }
+      window.removeEventListener("gwt-terminal-font-size", handleFontSizeChange);
       observer.disconnect();
       term.dispose();
     };
