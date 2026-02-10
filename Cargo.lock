@@ -2242,6 +2242,7 @@ dependencies = [
 name = "gwt-tauri"
 version = "6.30.3"
 dependencies = [
+ "chrono",
  "gwt-core",
  "reqwest 0.12.28",
  "serde",

@@ -3,8 +3,8 @@
 use crate::commands::project::resolve_repo_path_for_project_root;
 use gwt_core::config::Settings;
 use gwt_core::docker::{
-    compose_available, daemon_running, detect_docker_files, docker_available, DockerFileType,
-    DockerManager,
+    compose_available, daemon_running, detect_docker_files, docker_available, DevContainerConfig,
+    DockerFileType, DockerManager,
 };
 use gwt_core::git::Remote;
 use gwt_core::worktree::WorktreeManager;
@@ -14,7 +14,7 @@ use std::path::Path;
 #[derive(Debug, Clone, Serialize)]
 pub struct DockerContext {
     pub worktree_path: Option<String>,
-    /// "compose" | "none"
+    /// "compose" | "devcontainer" | "dockerfile" | "none"
     pub file_type: String,
     pub compose_services: Vec<String>,
     pub docker_available: bool,
@@ -94,6 +94,34 @@ pub fn detect_docker_context(
                     .unwrap_or_default();
                 ("compose".to_string(), services)
             }
+            Some(DockerFileType::DevContainer(devcontainer_path)) => {
+                let devcontainer_dir = devcontainer_path
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| wt.to_path_buf());
+                let cfg = DevContainerConfig::load(&devcontainer_path).ok();
+
+                let compose_files = cfg
+                    .as_ref()
+                    .map(|c| c.get_compose_files())
+                    .unwrap_or_default();
+
+                if compose_files.is_empty() {
+                    ("devcontainer".to_string(), Vec::new())
+                } else {
+                    let mut services: Vec<String> = Vec::new();
+                    for file in compose_files {
+                        let compose_path = devcontainer_dir.join(file);
+                        let mut s = DockerManager::list_services_from_compose_file(&compose_path)
+                            .unwrap_or_default();
+                        services.append(&mut s);
+                    }
+                    services.sort();
+                    services.dedup();
+                    ("devcontainer".to_string(), services)
+                }
+            }
+            Some(DockerFileType::Dockerfile(_)) => ("dockerfile".to_string(), Vec::new()),
             _ => ("none".to_string(), Vec::new()),
         },
         None => ("none".to_string(), Vec::new()),
