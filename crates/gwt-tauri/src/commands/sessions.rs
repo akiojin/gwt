@@ -718,7 +718,9 @@ mod tests {
             .unwrap_or_else(|_| SystemTime::now());
 
         let summary = SessionSummary {
-            markdown: Some("## Purpose\nCached\n\n## Summary\nCached\n\n## Highlights\n- A\n".to_string()),
+            markdown: Some(
+                "## Purpose\nCached\n\n## Summary\nCached\n\n## Highlights\n- A\n".to_string(),
+            ),
             ..Default::default()
         };
 
