@@ -13,16 +13,12 @@ pub const MENU_ID_FILE_NEW_WINDOW: &str = "file-new-window";
 pub const MENU_ID_FILE_OPEN_PROJECT: &str = "file-open-project";
 pub const MENU_ID_FILE_CLOSE_PROJECT: &str = "file-close-project";
 
-pub const MENU_ID_VIEW_TOGGLE_SIDEBAR: &str = "view-toggle-sidebar";
-pub const MENU_ID_VIEW_LAUNCH_AGENT: &str = "view-launch-agent";
-pub const MENU_ID_VIEW_LIST_TERMINALS: &str = "view-list-terminals";
-pub const MENU_ID_VIEW_TERMINAL_DIAGNOSTICS: &str = "view-terminal-diagnostics";
-
-pub const MENU_ID_GIT_CLEANUP_WORKTREES: &str = "git-cleanup-worktrees";
+pub const MENU_ID_TOOLS_LAUNCH_AGENT: &str = "tools-launch-agent";
+pub const MENU_ID_TOOLS_LIST_TERMINALS: &str = "tools-list-terminals";
+pub const MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS: &str = "tools-terminal-diagnostics";
 
 pub const MENU_ID_SETTINGS_PREFERENCES: &str = "settings-preferences";
 pub const MENU_ID_HELP_ABOUT: &str = "help-about";
-pub const MENU_ID_DEBUG_OS_ENV: &str = "debug-os-env";
 
 pub const WINDOW_FOCUS_MENU_PREFIX: &str = "window-focus::";
 
@@ -89,72 +85,34 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         .item(&file_close_project)
         .build()?;
 
-    let edit = SubmenuBuilder::new(app, "Edit")
-        .cut()
-        .copy()
-        .paste()
-        .separator()
-        .select_all()
-        .build()?;
-
-    let view_toggle_sidebar = MenuItem::with_id(
+    let tools_launch_agent = MenuItem::with_id(
         app,
-        MENU_ID_VIEW_TOGGLE_SIDEBAR,
-        "Toggle Sidebar",
-        true,
-        Some("CmdOrCtrl+B"),
-    )?;
-    let view_launch_agent = MenuItem::with_id(
-        app,
-        MENU_ID_VIEW_LAUNCH_AGENT,
+        MENU_ID_TOOLS_LAUNCH_AGENT,
         "Launch Agent...",
         true,
         None::<&str>,
     )?;
-    let view_list_terminals = MenuItem::with_id(
+    let tools_list_terminals = MenuItem::with_id(
         app,
-        MENU_ID_VIEW_LIST_TERMINALS,
+        MENU_ID_TOOLS_LIST_TERMINALS,
         "List Terminals",
         true,
         None::<&str>,
     )?;
-    let view_terminal_diagnostics = MenuItem::with_id(
+    let tools_terminal_diagnostics = MenuItem::with_id(
         app,
-        MENU_ID_VIEW_TERMINAL_DIAGNOSTICS,
+        MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS,
         "Terminal Diagnostics",
         true,
         None::<&str>,
     )?;
-    let view = SubmenuBuilder::new(app, "View")
-        .item(&view_toggle_sidebar)
-        .separator()
-        .item(&view_launch_agent)
-        .item(&view_list_terminals)
-        .item(&view_terminal_diagnostics)
+    let tools = SubmenuBuilder::new(app, "Tools")
+        .item(&tools_launch_agent)
+        .item(&tools_list_terminals)
+        .item(&tools_terminal_diagnostics)
         .build()?;
-
-    let git_cleanup = MenuItem::with_id(
-        app,
-        MENU_ID_GIT_CLEANUP_WORKTREES,
-        "Cleanup Worktrees...",
-        true,
-        Some("CmdOrCtrl+Shift+K"),
-    )?;
-    let git = SubmenuBuilder::new(app, "Git").item(&git_cleanup).build()?;
 
     let window = build_window_submenu(app, state)?;
-
-    let debug_os_env = MenuItem::with_id(
-        app,
-        MENU_ID_DEBUG_OS_ENV,
-        "Show Captured Environment",
-        true,
-        None::<&str>,
-    )?;
-    let debug = SubmenuBuilder::new(app, "Debug")
-        .item(&debug_os_env)
-        .build()?;
-
     let help_about = MenuItem::with_id(app, MENU_ID_HELP_ABOUT, "About gwt", true, None::<&str>)?;
     let settings_prefs = MenuItem::with_id(
         app,
@@ -171,11 +129,8 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
 
     menu.append(&gwt)?;
     menu.append(&file)?;
-    menu.append(&edit)?;
-    menu.append(&view)?;
-    menu.append(&git)?;
+    menu.append(&tools)?;
     menu.append(&window)?;
-    menu.append(&debug)?;
     Ok(menu)
 }
 
@@ -212,43 +167,6 @@ fn build_window_submenu(
             builder = builder.item(&item);
         }
     }
-
-    let toggle_sidebar = MenuItem::with_id(
-        app,
-        MENU_ID_VIEW_TOGGLE_SIDEBAR,
-        "Toggle Sidebar",
-        true,
-        Some("CmdOrCtrl+B"),
-    )?;
-    let launch_agent = MenuItem::with_id(
-        app,
-        MENU_ID_VIEW_LAUNCH_AGENT,
-        "Launch Agent...",
-        true,
-        None::<&str>,
-    )?;
-    let list_terminals = MenuItem::with_id(
-        app,
-        MENU_ID_VIEW_LIST_TERMINALS,
-        "List Terminals",
-        true,
-        None::<&str>,
-    )?;
-    let terminal_diagnostics = MenuItem::with_id(
-        app,
-        MENU_ID_VIEW_TERMINAL_DIAGNOSTICS,
-        "Terminal Diagnostics",
-        true,
-        None::<&str>,
-    )?;
-
-    builder = builder
-        .separator()
-        .item(&toggle_sidebar)
-        .separator()
-        .item(&launch_agent)
-        .item(&list_terminals)
-        .item(&terminal_diagnostics);
 
     builder.build()
 }
