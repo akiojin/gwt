@@ -31,4 +31,3 @@
   - repo_root 分離後の index 保存/読み取りが衝突しないテスト。
 - `gwt-tauri`:
   - ANSI 解析のユニットテスト（色SGRあり/なし、非SGR CSI、reset/italic 等）。
-

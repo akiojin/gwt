@@ -6,4 +6,3 @@
 - [ ] T4: `gwt-gui` メニューに `Terminal Diagnostics` 追加
 - [ ] T5: `gwt-gui` Diagnostics オーバーレイ実装（結果表示 + ガイダンス）
 - [ ] T6: `cargo test` 実行で全テストが通る
-
