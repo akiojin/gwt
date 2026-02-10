@@ -21,13 +21,14 @@ Prereqs:
 
 - Rust (stable)
 - Node.js 22
+- pnpm (via Corepack)
 - Tauri system dependencies (per platform)
 
 Run in dev:
 
 ```bash
 cd gwt-gui
-npm ci
+pnpm install --frozen-lockfile
 
 cd ..
 cargo tauri dev
@@ -37,7 +38,7 @@ Build:
 
 ```bash
 cd gwt-gui
-npm ci
+pnpm install --frozen-lockfile
 
 cd ..
 cargo tauri build

@@ -18,6 +18,9 @@ PLANS.md
 node_modules/
 bun.lock
 
+# Legacy npm lockfile (gwt-gui migrated to pnpm)
+gwt-gui/package-lock.json
+
 # Downloaded native binaries (postinstall downloads these)
 bin/gwt
 bin/gwt.exe

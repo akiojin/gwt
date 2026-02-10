@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import type { ProfilesConfig, Profile, SettingsData } from "../types";
 
   let { onClose }: { onClose: () => void } = $props();
@@ -18,6 +19,9 @@
   let newEnvKey: string = $state("");
   let newEnvValue: string = $state("");
 
+  let savedUiFontSize: number = $state(13);
+  let savedTerminalFontSize: number = $state(13);
+
   function getCurrentProfile(cfg: ProfilesConfig | null, key: string): Profile | null {
     if (!cfg) return null;
     if (!key) return null;
@@ -29,6 +33,17 @@
 
   $effect(() => {
     loadAll();
+  });
+
+  $effect(() => {
+    if (!settings) return;
+    applyUiFontSize(settings.ui_font_size ?? 13);
+    applyTerminalFontSize(settings.terminal_font_size ?? 13);
+  });
+
+  onDestroy(() => {
+    applyUiFontSize(savedUiFontSize);
+    applyTerminalFontSize(savedTerminalFontSize);
   });
 
   function toErrorMessage(err: unknown): string {
@@ -52,6 +67,8 @@
         invoke<ProfilesConfig>("get_profiles"),
       ]);
       settings = loadedSettings;
+      savedUiFontSize = loadedSettings.ui_font_size ?? 13;
+      savedTerminalFontSize = loadedSettings.terminal_font_size ?? 13;
       profiles = loadedProfiles;
 
       const keys = Object.keys(loadedProfiles.profiles ?? {});
@@ -77,6 +94,8 @@
         await invoke("save_profiles", { config: profiles });
       }
       saveMessage = "Settings saved.";
+      savedUiFontSize = settings.ui_font_size ?? 13;
+      savedTerminalFontSize = settings.terminal_font_size ?? 13;
     } catch (err) {
       console.error("Failed to save settings/profiles:", err);
       saveMessage = `Failed to save settings: ${toErrorMessage(err)}`;
@@ -111,6 +130,32 @@
     const keys = Object.keys(cfg.profiles ?? {});
     keys.sort((a, b) => a.localeCompare(b));
     return keys;
+  }
+
+  function clampFontSize(v: number): number {
+    return Math.max(8, Math.min(24, Math.round(v)));
+  }
+
+  function applyUiFontSize(size: number) {
+    document.documentElement.style.setProperty("--ui-font-base", size + "px");
+  }
+
+  function applyTerminalFontSize(size: number) {
+    (window as any).__gwtTerminalFontSize = size;
+    window.dispatchEvent(new CustomEvent("gwt-terminal-font-size", { detail: size }));
+  }
+
+  function adjustFontSize(field: "ui_font_size" | "terminal_font_size", delta: number) {
+    if (!settings) return;
+    const current = settings[field] ?? 13;
+    const next = clampFontSize(current + delta);
+    settings = { ...settings, [field]: next };
+  }
+
+  function handleClose() {
+    applyUiFontSize(savedUiFontSize);
+    applyTerminalFontSize(savedTerminalFontSize);
+    onClose();
   }
 
   function setActiveProfile(name: string | null) {
@@ -236,7 +281,7 @@
 <div class="settings-panel">
   <div class="settings-header">
     <h2>Settings</h2>
-    <button class="close-btn" onclick={onClose}>[x]</button>
+    <button class="close-btn" onclick={handleClose}>[x]</button>
   </div>
 
   {#if loadingSettings || loadingProfiles}
@@ -245,6 +290,68 @@
     <div class="loading">{errorMessage ?? "Failed to load settings."}</div>
   {:else}
     <div class="settings-body">
+      <div class="section-title">Appearance</div>
+
+      <div class="field">
+        <!-- svelte-ignore a11y_label_has_associated_control -->
+        <label>Terminal Font Size</label>
+        <div class="font-size-control">
+          <button
+            class="font-size-btn"
+            onclick={() => adjustFontSize("terminal_font_size", -1)}
+            disabled={!settings || (settings.terminal_font_size ?? 13) <= 8}
+          >-</button>
+          <input
+            type="number"
+            min="8"
+            max="24"
+            step="1"
+            value={settings.terminal_font_size ?? 13}
+            oninput={(e) => {
+              if (!settings) return;
+              settings = { ...settings, terminal_font_size: clampFontSize(Number((e.target as HTMLInputElement).value) || 13) };
+            }}
+          />
+          <button
+            class="font-size-btn"
+            onclick={() => adjustFontSize("terminal_font_size", 1)}
+            disabled={!settings || (settings.terminal_font_size ?? 13) >= 24}
+          >+</button>
+          <span class="font-size-unit">px</span>
+        </div>
+      </div>
+
+      <div class="field">
+        <!-- svelte-ignore a11y_label_has_associated_control -->
+        <label>UI Font Size</label>
+        <div class="font-size-control">
+          <button
+            class="font-size-btn"
+            onclick={() => adjustFontSize("ui_font_size", -1)}
+            disabled={!settings || (settings.ui_font_size ?? 13) <= 8}
+          >-</button>
+          <input
+            type="number"
+            min="8"
+            max="24"
+            step="1"
+            value={settings.ui_font_size ?? 13}
+            oninput={(e) => {
+              if (!settings) return;
+              settings = { ...settings, ui_font_size: clampFontSize(Number((e.target as HTMLInputElement).value) || 13) };
+            }}
+          />
+          <button
+            class="font-size-btn"
+            onclick={() => adjustFontSize("ui_font_size", 1)}
+            disabled={!settings || (settings.ui_font_size ?? 13) >= 24}
+          >+</button>
+          <span class="font-size-unit">px</span>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
       <div class="field">
         <label for="log-retention">Log Retention (days)</label>
         <input
@@ -450,7 +557,7 @@
       {#if saveMessage}
         <span class="save-message">{saveMessage}</span>
       {/if}
-      <button class="btn btn-cancel" onclick={onClose}>Close</button>
+      <button class="btn btn-cancel" onclick={handleClose}>Close</button>
       <button
         class="btn btn-save"
         disabled={saving || !settings}
@@ -479,7 +586,7 @@
   }
 
   .settings-header h2 {
-    font-size: 16px;
+    font-size: var(--ui-font-xl);
     font-weight: 600;
     color: var(--text-primary);
   }
@@ -489,7 +596,7 @@
     border: none;
     color: var(--text-muted);
     cursor: pointer;
-    font-size: 14px;
+    font-size: var(--ui-font-lg);
     font-family: monospace;
     padding: 2px 4px;
   }
@@ -520,7 +627,7 @@
   }
 
   .section-title {
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     font-weight: 600;
     color: var(--text-primary);
     letter-spacing: 0.6px;
@@ -534,7 +641,7 @@
   }
 
   .field label {
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     font-weight: 500;
     color: var(--text-secondary);
     text-transform: uppercase;
@@ -548,7 +655,7 @@
     border: 1px solid var(--border-color);
     border-radius: 6px;
     color: var(--text-primary);
-    font-size: 13px;
+    font-size: var(--ui-font-base);
     font-family: monospace;
     outline: none;
     max-width: 200px;
@@ -560,7 +667,7 @@
     border: 1px solid var(--border-color);
     border-radius: 6px;
     color: var(--text-primary);
-    font-size: 13px;
+    font-size: var(--ui-font-base);
     font-family: monospace;
     outline: none;
     max-width: 320px;
@@ -604,7 +711,7 @@
     border: 1px solid var(--border-color);
     border-radius: 6px;
     color: var(--text-primary);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     font-family: monospace;
     outline: none;
     width: 100%;
@@ -630,7 +737,7 @@
   }
 
   .ai-enabled-label {
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     color: var(--text-secondary);
   }
 
@@ -649,7 +756,7 @@
   }
 
   .ai-label {
-    font-size: 11px;
+    font-size: var(--ui-font-sm);
     color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.5px;
@@ -661,7 +768,7 @@
     border: 1px solid var(--border-color);
     border-radius: 6px;
     color: var(--text-primary);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     font-family: monospace;
     outline: none;
     max-width: none;
@@ -683,7 +790,7 @@
   }
 
   .field-hint {
-    font-size: 11px;
+    font-size: var(--ui-font-sm);
     color: var(--text-muted);
   }
 
@@ -701,7 +808,7 @@
     background: var(--bg-surface);
     border: 1px solid var(--border-color);
     border-radius: 4px;
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     font-family: monospace;
     color: var(--text-primary);
   }
@@ -711,7 +818,7 @@
     border: none;
     color: var(--text-muted);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--ui-font-sm);
     font-family: monospace;
     padding: 0 2px;
     line-height: 1;
@@ -734,7 +841,7 @@
     border: 1px solid var(--border-color);
     border-radius: 6px;
     color: var(--text-primary);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     font-family: monospace;
     outline: none;
   }
@@ -753,7 +860,7 @@
   }
 
   .save-message {
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     color: var(--green);
     margin-right: auto;
   }
@@ -762,7 +869,7 @@
     padding: 8px 16px;
     border: none;
     border-radius: 6px;
-    font-size: 13px;
+    font-size: var(--ui-font-base);
     font-weight: 500;
     cursor: pointer;
     font-family: inherit;
@@ -773,7 +880,7 @@
     padding: 6px 12px;
     background: var(--bg-surface);
     color: var(--text-secondary);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
   }
 
   .btn-add:hover {
@@ -817,7 +924,7 @@
     border: 1px solid var(--border-color);
     color: var(--text-secondary);
     padding: 6px 10px;
-    font-size: 12px;
+    font-size: var(--ui-font-md);
   }
 
   .btn-ghost:hover {
@@ -827,6 +934,68 @@
 
   .mono {
     font-family: monospace;
+  }
+
+  .font-size-control {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 200px;
+  }
+
+  .font-size-control input[type="number"] {
+    width: 60px;
+    text-align: center;
+    padding: 6px 4px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: var(--ui-font-base);
+    font-family: monospace;
+    outline: none;
+    -moz-appearance: textfield;
+  }
+
+  .font-size-control input[type="number"]::-webkit-inner-spin-button,
+  .font-size-control input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+
+  .font-size-control input[type="number"]:focus {
+    border-color: var(--accent);
+  }
+
+  .font-size-btn {
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: var(--ui-font-lg);
+    font-family: monospace;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .font-size-btn:hover:not(:disabled) {
+    background: var(--bg-hover);
+    border-color: var(--accent);
+  }
+
+  .font-size-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .font-size-unit {
+    font-size: var(--ui-font-sm);
+    color: var(--text-muted);
   }
 
   @media (max-width: 800px) {

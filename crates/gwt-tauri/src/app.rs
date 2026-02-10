@@ -231,6 +231,13 @@ pub fn build_app(
             crate::commands::profiles::save_profiles,
             crate::commands::terminal::get_captured_environment,
             crate::commands::terminal::is_os_env_ready,
+            crate::commands::git_view::get_git_change_summary,
+            crate::commands::git_view::get_branch_diff_files,
+            crate::commands::git_view::get_file_diff,
+            crate::commands::git_view::get_branch_commits,
+            crate::commands::git_view::get_working_tree_status,
+            crate::commands::git_view::get_stash_list,
+            crate::commands::git_view::get_base_branch_candidates,
         ])
 }
 

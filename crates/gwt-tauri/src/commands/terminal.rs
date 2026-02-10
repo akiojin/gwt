@@ -214,6 +214,15 @@ fn merge_profile_env(
     env_vars
 }
 
+fn ensure_terminal_env_defaults(env_vars: &mut HashMap<String, String>) {
+    env_vars
+        .entry("TERM".to_string())
+        .or_insert_with(|| "xterm-256color".to_string());
+    env_vars
+        .entry("COLORTERM".to_string())
+        .or_insert_with(|| "truecolor".to_string());
+}
+
 pub(crate) struct BuiltinAgentDef {
     pub(crate) label: &'static str,
     pub(crate) local_command: &'static str,
@@ -1364,6 +1373,10 @@ pub fn launch_agent(
         // accidental confirmation prompts in sandboxed environments.
         env_vars.insert("IS_SANDBOX".to_string(), "1".to_string());
     }
+
+    // Ensure TERM/COLORTERM propagate into Docker exec environments as well.
+    // (PTY sets these for the host process, but docker exec only receives vars passed via -e.)
+    ensure_terminal_env_defaults(&mut env_vars);
 
     let settings = Settings::load(&project_root).unwrap_or_default();
     let force_host_settings = settings.docker.force_host;

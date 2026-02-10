@@ -50,8 +50,9 @@ impl PtyHandle {
         }
         cmd.cwd(&config.working_dir);
 
-        // Always set TERM
+        // Default to a color-capable terminal environment.
         cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
 
         // Set user-provided environment variables
         for (key, value) in &config.env_vars {
@@ -236,6 +237,10 @@ mod tests {
         assert!(
             output.contains("TERM=xterm-256color"),
             "Expected TERM=xterm-256color in output, got: {output}"
+        );
+        assert!(
+            output.contains("COLORTERM=truecolor"),
+            "Expected COLORTERM=truecolor in output, got: {output}"
         );
     }
 

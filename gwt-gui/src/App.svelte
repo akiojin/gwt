@@ -696,12 +696,12 @@
 
   .about-dialog p {
     color: var(--text-secondary);
-    font-size: 13px;
+    font-size: var(--ui-font-base);
   }
 
   .about-version {
     color: var(--text-muted);
-    font-size: 11px;
+    font-size: var(--ui-font-sm);
     margin-top: 4px;
     margin-bottom: 20px;
   }
@@ -714,7 +714,7 @@
     color: var(--text-primary);
     cursor: pointer;
     font-family: inherit;
-    font-size: 12px;
+    font-size: var(--ui-font-md);
   }
 
   .about-close:hover {
@@ -732,7 +732,7 @@
   }
 
   .diag-dialog h2 {
-    font-size: 16px;
+    font-size: var(--ui-font-xl);
     font-weight: 800;
     color: var(--text-primary);
     margin-bottom: 12px;
@@ -740,12 +740,12 @@
 
   .diag-muted {
     color: var(--text-muted);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
   }
 
   .diag-error {
     color: rgb(255, 160, 160);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     white-space: pre-wrap;
   }
 
@@ -769,12 +769,12 @@
 
   .diag-label {
     color: var(--text-muted);
-    font-size: 11px;
+    font-size: var(--ui-font-sm);
   }
 
   .diag-value {
     color: var(--text-primary);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     text-align: right;
   }
 
@@ -784,7 +784,7 @@
     background: var(--bg-surface);
     padding: 12px 14px;
     color: var(--text-secondary);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     line-height: 1.55;
     margin-bottom: 16px;
   }
@@ -801,7 +801,7 @@
     background: var(--bg-primary);
     overflow-x: auto;
     white-space: pre;
-    font-size: 12px;
+    font-size: var(--ui-font-md);
   }
 
   .error-dialog {
@@ -815,7 +815,7 @@
   }
 
   .error-dialog h2 {
-    font-size: 18px;
+    font-size: var(--ui-font-2xl);
     font-weight: 800;
     color: rgb(255, 160, 160);
     margin-bottom: 10px;
@@ -823,7 +823,7 @@
 
   .error-text {
     color: var(--text-secondary);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     line-height: 1.5;
     margin-bottom: 18px;
     white-space: pre-wrap;
