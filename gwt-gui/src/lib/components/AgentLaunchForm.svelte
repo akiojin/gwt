@@ -111,7 +111,7 @@
   let baseBranchOptionsLoading: boolean = $state(false);
   let baseBranchOptionsError: string | null = $state(null);
 
-  // AI Branch Suggest modal (TUI parity)
+  // AI Branch Suggest modal (parity)
   let suggestOpen: boolean = $state(false);
   let suggestDescription: string = $state("");
   let suggestLoading: boolean = $state(false);
