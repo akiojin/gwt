@@ -23,9 +23,9 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
@@ -479,7 +479,11 @@ fn now_millis() -> i64 {
 
 const DOCKER_WORKDIR: &str = "/workspace";
 
-fn build_docker_compose_up_args(compose_args: &[String], build: bool, recreate: bool) -> Vec<String> {
+fn build_docker_compose_up_args(
+    compose_args: &[String],
+    build: bool,
+    recreate: bool,
+) -> Vec<String> {
     let mut args = vec!["compose".to_string()];
     args.extend(compose_args.iter().cloned());
     args.extend([
@@ -512,15 +516,9 @@ fn build_docker_compose_exec_args(
     inner_command: &str,
     inner_args: &[String],
 ) -> Vec<String> {
-    let mut args = vec![
-        "compose".to_string(),
-    ];
+    let mut args = vec!["compose".to_string()];
     args.extend(compose_args.iter().cloned());
-    args.extend([
-        "exec".to_string(),
-        "-w".to_string(),
-        workdir.to_string(),
-    ]);
+    args.extend(["exec".to_string(), "-w".to_string(), workdir.to_string()]);
 
     let mut keys: Vec<&String> = env_vars.keys().collect();
     keys.sort();
@@ -659,12 +657,18 @@ fn docker_image_created_time(image: &str) -> Option<SystemTime> {
     Some(parsed.with_timezone(&Utc).into())
 }
 
-fn docker_should_build_image(dockerfile_path: &std::path::Path, image: &str, build_requested: bool) -> bool {
+fn docker_should_build_image(
+    dockerfile_path: &std::path::Path,
+    image: &str,
+    build_requested: bool,
+) -> bool {
     if build_requested || !docker_image_exists(image) {
         return true;
     }
 
-    let modified = std::fs::metadata(dockerfile_path).and_then(|m| m.modified()).ok();
+    let modified = std::fs::metadata(dockerfile_path)
+        .and_then(|m| m.modified())
+        .ok();
     let created = docker_image_created_time(image);
 
     match (modified, created) {
@@ -1599,7 +1603,8 @@ fn launch_agent_for_project_root(
                 };
             }
             Some(DockerFileType::DevContainer(devcontainer_path)) => {
-                let cfg = DevContainerConfig::load(&devcontainer_path).map_err(|e| e.to_string())?;
+                let cfg =
+                    DevContainerConfig::load(&devcontainer_path).map_err(|e| e.to_string())?;
                 let devcontainer_dir = devcontainer_path
                     .parent()
                     .ok_or_else(|| "Invalid devcontainer path".to_string())?;
@@ -1920,7 +1925,11 @@ fn launch_agent_for_project_root(
                 env_vars: docker_env.clone(),
             }
         }
-        DockerExecMode::DockerRun { image, workdir, build } => {
+        DockerExecMode::DockerRun {
+            image,
+            workdir,
+            build,
+        } => {
             let docker_file_type = build
                 .as_ref()
                 .map(|b| DockerFileType::Dockerfile(b.dockerfile_path.clone()))
@@ -1968,7 +1977,10 @@ fn launch_agent_for_project_root(
                 if k.is_empty() {
                     continue;
                 }
-                let v = container_env.get(key).map(|s| s.as_str()).unwrap_or_default();
+                let v = container_env
+                    .get(key)
+                    .map(|s| s.as_str())
+                    .unwrap_or_default();
                 run_args.push("-e".to_string());
                 run_args.push(format!("{k}={v}"));
             }

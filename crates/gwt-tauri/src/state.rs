@@ -2,8 +2,8 @@ use gwt_core::ai::SessionSummaryCache;
 use gwt_core::terminal::manager::PaneManager;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::sync::Mutex;
 
 #[derive(Debug, Clone)]

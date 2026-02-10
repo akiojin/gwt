@@ -3,8 +3,8 @@
 use crate::commands::project::resolve_repo_path_for_project_root;
 use gwt_core::config::Settings;
 use gwt_core::docker::{
-    compose_available, daemon_running, detect_docker_files, docker_available, DockerFileType,
-    DockerManager, DevContainerConfig,
+    compose_available, daemon_running, detect_docker_files, docker_available, DevContainerConfig,
+    DockerFileType, DockerManager,
 };
 use gwt_core::git::Remote;
 use gwt_core::worktree::WorktreeManager;
@@ -112,9 +112,8 @@ pub fn detect_docker_context(
                     let mut services: Vec<String> = Vec::new();
                     for file in compose_files {
                         let compose_path = devcontainer_dir.join(file);
-                        let mut s =
-                            DockerManager::list_services_from_compose_file(&compose_path)
-                                .unwrap_or_default();
+                        let mut s = DockerManager::list_services_from_compose_file(&compose_path)
+                            .unwrap_or_default();
                         services.append(&mut s);
                     }
                     services.sort();
