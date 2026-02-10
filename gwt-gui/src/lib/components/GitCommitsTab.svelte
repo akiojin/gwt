@@ -5,10 +5,12 @@
     projectPath,
     branch,
     baseBranch,
+    refreshToken,
   }: {
     projectPath: string;
     branch: string;
     baseBranch: string;
+    refreshToken: number;
   } = $props();
 
   let commits: CommitEntry[] = $state([]);
@@ -105,6 +107,7 @@
     void projectPath;
     void branch;
     void baseBranch;
+    void refreshToken;
     load();
   });
 </script>

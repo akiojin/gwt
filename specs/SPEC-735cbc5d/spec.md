@@ -271,9 +271,9 @@ diff が develop との比較に切り替わる。
   個別ファイルの diff 取得（1000 行制限付き）
 - `get_branch_commits(project_path, branch, base_branch, offset, limit)`:
   コミット一覧取得（ページネーション対応）
-- `get_working_tree_status(project_path)`:
+- `get_working_tree_status(project_path, branch)`:
   Working tree 状態取得（staged / unstaged 分離）
-- `get_stash_list(project_path)`:
+- `get_stash_list(project_path, branch)`:
   stash 一覧取得
 - `get_base_branch_candidates(project_path)`:
   基準ブランチ候補一覧取得
