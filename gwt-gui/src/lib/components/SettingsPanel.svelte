@@ -984,6 +984,7 @@
     font-size: var(--ui-font-base);
     font-family: monospace;
     outline: none;
+    appearance: textfield;
     -moz-appearance: textfield;
   }
 
