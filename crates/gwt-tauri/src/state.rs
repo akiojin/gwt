@@ -42,6 +42,10 @@ pub struct AppState {
     ///
     /// Only stores windows that currently have a project opened.
     pub window_projects: Mutex<HashMap<String, String>>,
+    /// One-shot permission to allow a window to actually close (instead of hiding to tray).
+    ///
+    /// Used to implement macOS Cmd+Q as "close the focused window" while keeping (x) as "hide".
+    pub windows_allowed_to_close: Mutex<HashSet<String>>,
     pub pane_manager: Mutex<PaneManager>,
     pub agent_versions_cache: Mutex<HashMap<String, AgentVersionsCache>>,
     pub session_summary_cache: Mutex<HashMap<String, SessionSummaryCache>>,
@@ -58,6 +62,7 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             window_projects: Mutex::new(HashMap::new()),
+            windows_allowed_to_close: Mutex::new(HashSet::new()),
             pane_manager: Mutex::new(PaneManager::new()),
             agent_versions_cache: Mutex::new(HashMap::new()),
             session_summary_cache: Mutex::new(HashMap::new()),
@@ -104,6 +109,20 @@ impl AppState {
         map.get(window_label).cloned()
     }
 
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn allow_window_close(&self, window_label: &str) {
+        if let Ok(mut set) = self.windows_allowed_to_close.lock() {
+            set.insert(window_label.to_string());
+        }
+    }
+
+    pub fn consume_window_close_permission(&self, window_label: &str) -> bool {
+        if let Ok(mut set) = self.windows_allowed_to_close.lock() {
+            return set.remove(window_label);
+        }
+        false
+    }
+
     pub fn request_quit(&self) {
         self.is_quitting.store(true, Ordering::SeqCst);
     }
@@ -126,5 +145,15 @@ mod tests {
 
         state.clear_project_for_window("main");
         assert_eq!(state.project_for_window("main"), None);
+    }
+
+    #[test]
+    fn window_close_permission_is_one_shot() {
+        let state = AppState::new();
+        assert!(!state.consume_window_close_permission("main"));
+
+        state.allow_window_close("main");
+        assert!(state.consume_window_close_permission("main"));
+        assert!(!state.consume_window_close_permission("main"));
     }
 }
