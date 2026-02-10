@@ -34,7 +34,7 @@ pub fn build_app(
             #[cfg(not(test))]
             {
                 // Native menubar (SPEC-4470704f)
-                let _ = crate::menu::rebuild_menu(_app.handle());
+                let _ = crate::menu::rebuild_menu(&_app.handle());
 
                 // System tray (SPEC-dfb1611a FR-310〜FR-313)
                 let tray_menu = tauri::menu::Menu::new(_app)?;
@@ -155,8 +155,6 @@ pub fn build_app(
                 crate::menu::MENU_ID_VIEW_TOGGLE_SIDEBAR => Some("toggle-sidebar"),
                 crate::menu::MENU_ID_VIEW_LAUNCH_AGENT => Some("launch-agent"),
                 crate::menu::MENU_ID_VIEW_LIST_TERMINALS => Some("list-terminals"),
-                crate::menu::MENU_ID_VIEW_TERMINAL_DIAGNOSTICS => Some("terminal-diagnostics"),
-                crate::menu::MENU_ID_DEBUG_OS_ENV => Some("debug-os-env"),
                 crate::menu::MENU_ID_SETTINGS_PREFERENCES => Some("open-settings"),
                 crate::menu::MENU_ID_HELP_ABOUT => Some("about"),
                 _ => None,
@@ -184,11 +182,11 @@ pub fn build_app(
                 }
                 api.prevent_close();
                 let _ = window.hide();
-                let _ = crate::menu::rebuild_menu(window.app_handle());
+                let _ = crate::menu::rebuild_menu(&window.app_handle());
             }
 
             if let tauri::WindowEvent::Focused(true) = event {
-                let _ = crate::menu::rebuild_menu(window.app_handle());
+                let _ = crate::menu::rebuild_menu(&window.app_handle());
             }
 
             if let tauri::WindowEvent::Destroyed = event {
@@ -196,7 +194,7 @@ pub fn build_app(
                     .app_handle()
                     .state::<AppState>()
                     .clear_project_for_window(window.label());
-                let _ = crate::menu::rebuild_menu(window.app_handle());
+                let _ = crate::menu::rebuild_menu(&window.app_handle());
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -250,9 +248,7 @@ fn focused_window_label(app: &tauri::AppHandle<tauri::Wry>) -> String {
 
 fn emit_menu_action(app: &tauri::AppHandle<tauri::Wry>, action: &str) {
     let label = focused_window_label(app);
-    let Some(window) = app
-        .get_webview_window(&label)
-        .or_else(|| app.get_webview_window("main"))
+    let Some(window) = app.get_webview_window(&label).or_else(|| app.get_webview_window("main"))
     else {
         return;
     };
@@ -272,7 +268,7 @@ fn open_new_window(app: &tauri::AppHandle<tauri::Wry>) {
     // NOTE: On Windows, window creation can deadlock in synchronous handlers.
     // Create the window on a separate thread (Tauri docs).
     std::thread::spawn(move || {
-        let mut conf = match app.config().app.windows.first() {
+        let mut conf = match app.config().app.windows.get(0) {
             Some(c) => c.clone(),
             None => {
                 info!(

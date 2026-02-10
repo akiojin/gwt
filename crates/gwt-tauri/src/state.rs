@@ -66,23 +66,6 @@ impl AppState {
         }
     }
 
-    /// Whether OS environment capture has completed.
-    pub fn is_os_env_ready(&self) -> bool {
-        self.os_env.initialized()
-    }
-
-    /// Wait briefly for OS environment capture to complete.
-    ///
-    /// This avoids non-deterministic launches when the UI requests a session before
-    /// the startup capture task finishes.
-    pub fn wait_os_env_ready(&self, timeout: Duration) -> bool {
-        let start = std::time::Instant::now();
-        while !self.is_os_env_ready() && start.elapsed() < timeout {
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        self.is_os_env_ready()
-    }
-
     pub fn set_project_for_window(&self, window_label: &str, project_path: String) {
         if let Ok(mut map) = self.window_projects.lock() {
             map.insert(window_label.to_string(), project_path);
@@ -108,7 +91,6 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
 
     #[test]
     fn window_projects_set_get_clear() {
@@ -116,32 +98,9 @@ mod tests {
         assert_eq!(state.project_for_window("main"), None);
 
         state.set_project_for_window("main", "/tmp/repo".to_string());
-        assert_eq!(
-            state.project_for_window("main"),
-            Some("/tmp/repo".to_string())
-        );
+        assert_eq!(state.project_for_window("main"), Some("/tmp/repo".to_string()));
 
         state.clear_project_for_window("main");
         assert_eq!(state.project_for_window("main"), None);
-    }
-
-    #[test]
-    fn wait_os_env_ready_returns_true_when_initialized_within_timeout() {
-        let state = AppState::new();
-        assert!(!state.is_os_env_ready());
-
-        let cell = state.os_env.clone();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(50));
-            let _ = cell.set(HashMap::new());
-        });
-
-        assert!(state.wait_os_env_ready(Duration::from_secs(1)));
-    }
-
-    #[test]
-    fn wait_os_env_ready_returns_false_on_timeout() {
-        let state = AppState::new();
-        assert!(!state.wait_os_env_ready(Duration::from_millis(1)));
     }
 }

@@ -1,12 +1,5 @@
 <script lang="ts">
-  import type {
-    Tab,
-    BranchInfo,
-    ProjectInfo,
-    LaunchAgentRequest,
-    TerminalAnsiProbe,
-    CapturedEnvInfo,
-  } from "./lib/types";
+  import type { Tab, BranchInfo, ProjectInfo, LaunchAgentRequest } from "./lib/types";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import MainArea from "./lib/components/MainArea.svelte";
   import StatusBar from "./lib/components/StatusBar.svelte";
@@ -361,7 +354,6 @@
           activeTabId = "summary";
           selectedBranch = null;
           currentBranch = "";
-          sidebarRefreshKey = 0;
         }
         break;
       case "toggle-sidebar":
@@ -433,26 +425,19 @@
   // Native menubar integration (Tauri emits "menu-action" to the focused window).
   $effect(() => {
     let unlisten: null | (() => void) = null;
-    let cancelled = false;
 
     (async () => {
       try {
         const { listen } = await import("@tauri-apps/api/event");
-        const unlistenFn = await listen<MenuActionPayload>("menu-action", (event) => {
+        unlisten = await listen<MenuActionPayload>("menu-action", (event) => {
           void handleMenuAction(event.payload.action);
         });
-        if (cancelled) {
-          unlistenFn();
-          return;
-        }
-        unlisten = unlistenFn;
       } catch {
         // Ignore: not available outside Tauri runtime.
       }
     })();
 
     return () => {
-      cancelled = true;
       if (unlisten) {
         unlisten();
       }

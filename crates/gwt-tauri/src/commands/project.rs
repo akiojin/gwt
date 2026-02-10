@@ -134,7 +134,7 @@ pub fn open_project(
 
     // Update window-scoped state
     state.set_project_for_window(window.label(), project_root_str.clone());
-    let _ = crate::menu::rebuild_menu(window.app_handle());
+    let _ = crate::menu::rebuild_menu(&window.app_handle());
 
     Ok(ProjectInfo {
         path: project_root_str,
@@ -169,7 +169,7 @@ pub fn get_project_info(window: tauri::Window, state: State<AppState>) -> Option
 #[tauri::command]
 pub fn close_project(window: tauri::Window, state: State<AppState>) -> Result<(), String> {
     state.clear_project_for_window(window.label());
-    let _ = crate::menu::rebuild_menu(window.app_handle());
+    let _ = crate::menu::rebuild_menu(&window.app_handle());
     Ok(())
 }
 
