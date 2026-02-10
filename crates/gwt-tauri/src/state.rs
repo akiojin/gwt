@@ -2,6 +2,7 @@ use gwt_core::ai::SessionSummaryCache;
 use gwt_core::terminal::manager::PaneManager;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -30,6 +31,7 @@ pub struct PaneLaunchMeta {
     pub docker_build: Option<bool>,
     pub docker_keep: Option<bool>,
     pub docker_container_name: Option<String>,
+    pub docker_compose_args: Option<Vec<String>>,
     pub started_at_millis: i64,
 }
 
@@ -43,6 +45,8 @@ pub struct AppState {
     pub session_summary_cache: Mutex<HashMap<String, SessionSummaryCache>>,
     pub session_summary_inflight: Mutex<HashSet<String>>,
     pub pane_launch_meta: Mutex<HashMap<String, PaneLaunchMeta>>,
+    /// Launch job cancellation flags keyed by job id.
+    pub launch_jobs: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub is_quitting: AtomicBool,
 }
 
@@ -55,6 +59,7 @@ impl AppState {
             session_summary_cache: Mutex::new(HashMap::new()),
             session_summary_inflight: Mutex::new(HashSet::new()),
             pane_launch_meta: Mutex::new(HashMap::new()),
+            launch_jobs: Mutex::new(HashMap::new()),
             is_quitting: AtomicBool::new(false),
         }
     }
