@@ -11,11 +11,13 @@
   let {
     projectPath,
     selectedBranch = "",
+    osEnvReady = true,
     onLaunch,
     onClose,
   }: {
     projectPath: string;
     selectedBranch?: string;
+    osEnvReady?: boolean;
     onLaunch: (request: LaunchAgentRequest) => Promise<void>;
     onClose: () => void;
   } = $props();
@@ -1155,11 +1157,15 @@
       </div>
 
       <div class="dialog-footer">
+        {#if !osEnvReady}
+          <span class="footer-hint">Loading environment...</span>
+        {/if}
         <button class="btn btn-cancel" onclick={onClose}>Cancel</button>
         <button
           class="btn btn-launch"
           disabled={
             launching ||
+            !osEnvReady ||
             !selectedAgent ||
             (needsResumeSessionId && !resumeSessionId.trim()) ||
             (branchMode === "existing"
@@ -1284,7 +1290,7 @@
   }
 
   .dialog-header h2 {
-    font-size: 15px;
+    font-size: var(--ui-font-lg);
     font-weight: 600;
     color: var(--text-primary);
   }
@@ -1294,7 +1300,7 @@
     border: none;
     color: var(--text-muted);
     cursor: pointer;
-    font-size: 14px;
+    font-size: var(--ui-font-lg);
     font-family: monospace;
     padding: 2px 4px;
   }
@@ -1323,7 +1329,7 @@
     background: rgba(255, 0, 0, 0.08);
     border-radius: 8px;
     color: var(--text-primary);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     line-height: 1.4;
   }
 
@@ -1334,7 +1340,7 @@
   }
 
   .field label {
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     font-weight: 500;
     color: var(--text-secondary);
     text-transform: uppercase;
@@ -1342,7 +1348,7 @@
   }
 
   .field-label {
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     font-weight: 500;
     color: var(--text-secondary);
     text-transform: uppercase;
@@ -1350,7 +1356,7 @@
   }
 
   .field-hint {
-    font-size: 11px;
+    font-size: var(--ui-font-sm);
     color: var(--text-muted);
     line-height: 1.4;
   }
@@ -1371,7 +1377,7 @@
     border: 1px solid var(--border-color);
     border-radius: 6px;
     color: var(--text-primary);
-    font-size: 13px;
+    font-size: var(--ui-font-base);
     font-family: monospace;
     outline: none;
   }
@@ -1408,7 +1414,7 @@
   }
 
   .glm-label {
-    font-size: 11px;
+    font-size: var(--ui-font-sm);
     font-weight: 600;
     color: var(--text-secondary);
     text-transform: uppercase;
@@ -1421,7 +1427,7 @@
     border: 1px solid var(--border-color);
     border-radius: 6px;
     color: var(--text-primary);
-    font-size: 13px;
+    font-size: var(--ui-font-base);
     font-family: monospace;
     outline: none;
   }
@@ -1453,7 +1459,7 @@
     border: 1px solid var(--border-color);
     border-radius: 8px;
     color: var(--text-primary);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     font-weight: 600;
     cursor: pointer;
     font-family: inherit;
@@ -1506,7 +1512,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     color: var(--text-primary);
     user-select: none;
   }
@@ -1522,7 +1528,7 @@
     border: 1px solid var(--border-color);
     border-radius: 8px;
     color: var(--text-secondary);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     font-weight: 700;
     cursor: pointer;
     font-family: inherit;
@@ -1547,7 +1553,7 @@
     border: 1px solid var(--border-color);
     border-radius: 8px;
     color: var(--text-primary);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     font-weight: 600;
     cursor: pointer;
     font-family: inherit;
@@ -1571,11 +1577,19 @@
     border-top: 1px solid var(--border-color);
   }
 
+  .footer-hint {
+    margin-right: auto;
+    font-size: var(--ui-font-sm);
+    color: var(--text-muted);
+    font-style: italic;
+    padding-top: 2px;
+  }
+
   .btn {
     padding: 8px 16px;
     border: none;
     border-radius: 6px;
-    font-size: 13px;
+    font-size: var(--ui-font-base);
     font-weight: 500;
     cursor: pointer;
     font-family: inherit;

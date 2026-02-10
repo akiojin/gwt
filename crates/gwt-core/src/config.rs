@@ -7,6 +7,7 @@ mod bare_project;
 mod claude_hooks;
 mod claude_plugins;
 pub mod migration;
+pub mod os_env;
 mod profile;
 mod session;
 mod settings;
@@ -31,6 +32,7 @@ pub use migration::{
     backup_broken_file, ensure_config_dir, get_cleanup_candidates, migrate_json_to_toml,
     migrate_yaml_to_toml, write_atomic, CleanupCandidate,
 };
+pub use os_env::{capture_login_shell_env, EnvSource, OsEnvResult, ShellType};
 pub use profile::{
     AISettings, ActiveAISettingsResolution, ActiveAISettingsSource, Profile, ProfilesConfig,
     ResolvedAISettings,

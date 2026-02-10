@@ -309,7 +309,7 @@
 
   .subtitle {
     color: var(--text-muted);
-    font-size: 14px;
+    font-size: var(--ui-font-lg);
     margin-bottom: 24px;
   }
 
@@ -326,7 +326,7 @@
     color: var(--bg-primary);
     border: none;
     border-radius: 8px;
-    font-size: 14px;
+    font-size: var(--ui-font-lg);
     font-weight: 600;
     cursor: pointer;
     font-family: inherit;
@@ -349,7 +349,7 @@
     color: var(--text-primary);
     border: 1px solid var(--border-color);
     border-radius: 8px;
-    font-size: 14px;
+    font-size: var(--ui-font-lg);
     font-weight: 600;
     cursor: pointer;
     font-family: inherit;
@@ -373,7 +373,7 @@
     background: rgba(255, 90, 90, 0.08);
     color: rgb(255, 160, 160);
     border-radius: 8px;
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     line-height: 1.4;
   }
 
@@ -390,7 +390,7 @@
 
   .new-project h3 {
     color: var(--text-secondary);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     font-weight: 500;
     text-transform: uppercase;
     letter-spacing: 1px;
@@ -404,7 +404,7 @@
   }
 
   .label {
-    font-size: 11px;
+    font-size: var(--ui-font-sm);
     color: var(--text-muted);
   }
 
@@ -421,7 +421,7 @@
     border: 1px solid var(--border-color);
     border-radius: 6px;
     color: var(--text-primary);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     font-family: inherit;
     outline: none;
   }
@@ -438,7 +438,7 @@
     border-radius: 6px;
     color: var(--text-primary);
     cursor: pointer;
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     font-family: inherit;
   }
 
@@ -459,7 +459,7 @@
     color: var(--bg-primary);
     border: none;
     border-radius: 8px;
-    font-size: 13px;
+    font-size: var(--ui-font-base);
     font-weight: 700;
     cursor: pointer;
     font-family: inherit;
@@ -482,7 +482,7 @@
     display: flex;
     align-items: baseline;
     justify-content: space-between;
-    font-size: 11px;
+    font-size: var(--ui-font-sm);
     color: var(--text-muted);
   }
 
@@ -514,7 +514,7 @@
 
   .recent h3 {
     color: var(--text-secondary);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     font-weight: 500;
     text-transform: uppercase;
     letter-spacing: 1px;
@@ -544,20 +544,20 @@
   }
 
   .recent-name {
-    font-size: 13px;
+    font-size: var(--ui-font-base);
     color: var(--text-primary);
     font-weight: 500;
   }
 
   .recent-time {
-    font-size: 11px;
+    font-size: var(--ui-font-sm);
     color: var(--text-muted);
     grid-row: 1;
     grid-column: 2;
   }
 
   .recent-path {
-    font-size: 11px;
+    font-size: var(--ui-font-sm);
     color: var(--text-muted);
     font-family: monospace;
     grid-column: 1 / -1;
