@@ -377,9 +377,17 @@
 
         if (!status.registered) {
           const { confirm } = await import("@tauri-apps/plugin-dialog");
+          const message = status.temporary_execution
+            ? [
+                "gwt is running from a temporary execution environment (e.g. bunx/npx cache).",
+                "If you register hooks now, the stored executable path may not persist and hooks can break later.",
+                "",
+                "Register Claude Code hooks for gwt anyway? This allows gwt to track agent status.",
+              ].join("\n")
+            : "Register Claude Code hooks for gwt? This allows gwt to track agent status.";
           const ok = await confirm(
-            "Register Claude Code hooks for gwt? This allows gwt to track agent status.",
-            { title: "gwt", kind: "info" },
+            message,
+            { title: "gwt", kind: status.temporary_execution ? "warning" : "info" },
           );
           if (ok) {
             await invoke("register_hooks");

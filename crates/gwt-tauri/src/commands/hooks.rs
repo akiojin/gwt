@@ -27,8 +27,14 @@ pub fn check_and_update_hooks() -> Result<HooksStatus, String> {
         });
     }
 
-    // Already registered: silently update executable path
-    let updated = config::reregister_gwt_hooks(&settings_path).map_err(|e| e.to_string())?;
+    // Already registered: update executable path unless running from a temporary execution
+    // environment (bunx/npx cache paths, etc.). Auto re-registration from a transient path can
+    // overwrite a previously stable hook command and regress hook-based status tracking.
+    let updated = if temporary_execution {
+        false
+    } else {
+        config::reregister_gwt_hooks(&settings_path).map_err(|e| e.to_string())?
+    };
 
     Ok(HooksStatus {
         registered: true,
