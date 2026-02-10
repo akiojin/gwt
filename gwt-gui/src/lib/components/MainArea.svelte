@@ -232,6 +232,13 @@
             if (!currentBranch || payload.branch !== currentBranch) return;
 
             const result = payload.result;
+            const incomingSessionId = result.sessionId ?? null;
+            if (!incomingSessionId) return;
+
+            // Drop stale events when the branch's latest session has advanced while a job was running.
+            const currentSessionId = sessionSummarySessionId ?? null;
+            if (currentSessionId && incomingSessionId !== currentSessionId) return;
+
             sessionSummaryStatus = result.status;
             sessionSummaryGenerating = !!result.generating;
             sessionSummaryMarkdown = result.markdown ?? null;

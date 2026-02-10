@@ -293,8 +293,27 @@ fn get_branch_session_summary_immediate(
     Ok((immediate, Some(job)))
 }
 
+fn is_latest_branch_session(repo_key: &str, branch: &str, tool_id: &str, session_id: &str) -> bool {
+    let entries = gwt_core::config::get_branch_tool_history(Path::new(repo_key), branch);
+    let Some(entry) = entries.first() else {
+        // If we can't determine the current session, treat as latest to avoid breaking updates.
+        return true;
+    };
+
+    let current_tool_id = entry.tool_id.trim();
+    let current_session_id = entry.session_id.as_deref().unwrap_or("").trim();
+    if current_tool_id.is_empty() || current_session_id.is_empty() {
+        return true;
+    }
+
+    current_tool_id == tool_id && current_session_id == session_id
+}
+
 fn start_session_summary_job(job: SessionSummaryJob, state: &AppState, app_handle: AppHandle) {
-    let inflight_key = format!("{}::{}", job.repo_key, job.branch);
+    let inflight_key = format!(
+        "{}::{}::{}::{}",
+        job.repo_key, job.branch, job.tool_id, job.session_id
+    );
     let should_spawn = match state.session_summary_inflight.lock() {
         Ok(mut set) => {
             if set.contains(&inflight_key) {
@@ -329,6 +348,12 @@ fn start_session_summary_job(job: SessionSummaryJob, state: &AppState, app_handl
 
         if let Ok(mut set) = state.session_summary_inflight.lock() {
             set.remove(&inflight_key);
+        }
+
+        // If the branch has moved to a different latest session while this job was running,
+        // skip emitting an update event to avoid clobbering the UI with stale data.
+        if !is_latest_branch_session(&job.repo_key, &job.branch, &job.tool_id, &job.session_id) {
+            return;
         }
 
         let payload = SessionSummaryUpdatedPayload {
@@ -405,13 +430,17 @@ fn generate_and_cache_session_summary(
 
     match summarize_session(&client, &parsed) {
         Ok(summary) => {
-            if let Ok(mut cache_guard) = state.session_summary_cache.lock() {
-                cache_guard.entry(job.repo_key.clone()).or_default().set(
-                    job.branch.clone(),
-                    job.session_id.clone(),
-                    summary.clone(),
-                    job.mtime,
-                );
+            // Avoid overwriting the cache if the branch's latest session has changed
+            // since the job started (e.g., a new session was recorded).
+            if is_latest_branch_session(&job.repo_key, &job.branch, &job.tool_id, &job.session_id) {
+                if let Ok(mut cache_guard) = state.session_summary_cache.lock() {
+                    cache_guard.entry(job.repo_key.clone()).or_default().set(
+                        job.branch.clone(),
+                        job.session_id.clone(),
+                        summary.clone(),
+                        job.mtime,
+                    );
+                }
             }
             ok_summary(&job.tool_id, &job.session_id, &summary)
         }
