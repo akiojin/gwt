@@ -12,6 +12,7 @@
   import StatusBar from "./lib/components/StatusBar.svelte";
   import OpenProject from "./lib/components/OpenProject.svelte";
   import AgentLaunchForm from "./lib/components/AgentLaunchForm.svelte";
+  import CleanupModal from "./lib/components/CleanupModal.svelte";
 
   interface MenuActionPayload {
     action: string;
@@ -20,6 +21,8 @@
   let projectPath: string | null = $state(null);
   let sidebarVisible: boolean = $state(true);
   let showAgentLaunch: boolean = $state(false);
+  let showCleanupModal: boolean = $state(false);
+  let cleanupPreselectedBranch: string | null = $state(null);
   let showAbout: boolean = $state(false);
   let showTerminalDiagnostics: boolean = $state(false);
   let appError: string | null = $state(null);
@@ -226,6 +229,11 @@
     requestAgentLaunch();
   }
 
+  function handleCleanupRequest(preSelectedBranch?: string) {
+    cleanupPreselectedBranch = preSelectedBranch ?? null;
+    showCleanupModal = true;
+  }
+
   async function fetchCurrentBranch() {
     if (!projectPath) return;
     try {
@@ -372,6 +380,12 @@
           showAgentLaunch = true;
         }
         break;
+      case "cleanup-worktrees":
+        if (projectPath) {
+          cleanupPreselectedBranch = null;
+          showCleanupModal = true;
+        }
+        break;
       case "open-settings":
         openSettingsTab();
         break;
@@ -458,6 +472,25 @@
       }
     };
   });
+
+  // Global keyboard shortcut: Cmd+Shift+K / Ctrl+Shift+K to open Cleanup modal.
+  // The native menu accelerator handles this on macOS, but this provides a
+  // fallback for web-preview and non-Tauri contexts.
+  $effect(() => {
+    function onKeydown(e: KeyboardEvent) {
+      if (
+        e.key === "K" &&
+        e.shiftKey &&
+        (e.metaKey || e.ctrlKey) &&
+        !e.altKey
+      ) {
+        e.preventDefault();
+        void handleMenuAction("cleanup-worktrees");
+      }
+    }
+    document.addEventListener("keydown", onKeydown);
+    return () => document.removeEventListener("keydown", onKeydown);
+  });
 </script>
 
 {#if projectPath === null}
@@ -471,6 +504,7 @@
           refreshKey={sidebarRefreshKey}
           onBranchSelect={handleBranchSelect}
           onBranchActivate={handleBranchActivate}
+          onCleanupRequest={handleCleanupRequest}
         />
       {/if}
       <MainArea
@@ -497,6 +531,13 @@
     onClose={() => (showAgentLaunch = false)}
   />
 {/if}
+
+<CleanupModal
+  open={showCleanupModal}
+  preselectedBranch={cleanupPreselectedBranch}
+  projectPath={projectPath ?? ""}
+  onClose={() => (showCleanupModal = false)}
+/>
 
 {#if showAbout}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
