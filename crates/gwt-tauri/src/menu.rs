@@ -16,6 +16,7 @@ pub const MENU_ID_FILE_CLOSE_PROJECT: &str = "file-close-project";
 pub const MENU_ID_VIEW_TOGGLE_SIDEBAR: &str = "view-toggle-sidebar";
 pub const MENU_ID_VIEW_LAUNCH_AGENT: &str = "view-launch-agent";
 pub const MENU_ID_VIEW_LIST_TERMINALS: &str = "view-list-terminals";
+pub const MENU_ID_VIEW_TERMINAL_DIAGNOSTICS: &str = "view-terminal-diagnostics";
 
 pub const MENU_ID_SETTINGS_PREFERENCES: &str = "settings-preferences";
 pub const MENU_ID_HELP_ABOUT: &str = "help-about";
@@ -112,11 +113,19 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         true,
         None::<&str>,
     )?;
+    let view_terminal_diagnostics = MenuItem::with_id(
+        app,
+        MENU_ID_VIEW_TERMINAL_DIAGNOSTICS,
+        "Terminal Diagnostics",
+        true,
+        None::<&str>,
+    )?;
     let view = SubmenuBuilder::new(app, "View")
         .item(&view_toggle_sidebar)
         .separator()
         .item(&view_launch_agent)
         .item(&view_list_terminals)
+        .item(&view_terminal_diagnostics)
         .build()?;
 
     let window = build_window_submenu(app, state)?;
