@@ -23,7 +23,7 @@ impl EnvSnapshot {
     fn capture() -> Self {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
-            .or_else(|| dirs::home_dir());
+            .or_else(dirs::home_dir);
         Self {
             path: std::env::var_os("PATH").map(|v| v.to_string_lossy().to_string()),
             home,
@@ -79,12 +79,17 @@ fn resolve_command_path_with_env(command: &str, env: &EnvSnapshot) -> Option<Pat
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let paths = env.path.as_deref().filter(|s| !s.trim().is_empty());
     let mut weak_path: Option<PathBuf> = None;
-    if let Ok(found) = which::which_in(cmd, paths, &cwd) {
-        // PATH may contain project-local shims (e.g. node_modules/.bin) when running under
-        // temporary executors (bunx/npx). Prefer global installs when available.
-        if is_node_modules_bin(&found) {
-            weak_path = Some(found);
-        } else {
+    if let Ok(iter) = which::which_in_all(cmd, paths, &cwd) {
+        for found in iter {
+            // PATH may contain project-local shims (e.g. node_modules/.bin) when running under
+            // temporary executors (bunx/npx). Prefer global installs when available.
+            if is_node_modules_bin(&found) {
+                if weak_path.is_none() {
+                    weak_path = Some(found);
+                }
+                continue;
+            }
+
             return Some(found);
         }
     }
@@ -348,6 +353,40 @@ mod tests {
         assert_eq!(
             resolve_command_path_with_env(command, &env),
             Some(local_cmd)
+        );
+    }
+
+    #[test]
+    fn resolve_command_path_picks_non_shim_from_later_in_path() {
+        let dir = tempdir().expect("tempdir");
+        let local_bin = dir.path().join("project").join("node_modules").join(".bin");
+        std::fs::create_dir_all(&local_bin).expect("create node_modules bin dir");
+
+        let custom_bin = dir.path().join("custom").join("bin");
+        std::fs::create_dir_all(&custom_bin).expect("create custom bin dir");
+
+        let command = "gwt-resolve-test-path-order";
+        let local_cmd = command_path_in_dir(&local_bin, command);
+        let custom_cmd = command_path_in_dir(&custom_bin, command);
+        write_stub_command(&local_cmd);
+        write_stub_command(&custom_cmd);
+
+        let path = std::env::join_paths([&local_bin, &custom_bin])
+            .expect("join PATH")
+            .to_string_lossy()
+            .to_string();
+
+        let env = EnvSnapshot {
+            path: Some(path),
+            home: Some(dir.path().to_path_buf()),
+            user_profile: None,
+            local_app_data: None,
+            bun_install: None,
+        };
+
+        assert_eq!(
+            resolve_command_path_with_env(command, &env),
+            Some(custom_cmd)
         );
     }
 }
