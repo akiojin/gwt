@@ -79,6 +79,8 @@ export interface SettingsData {
   agent_gemini_path?: string | null;
   agent_auto_install_deps: boolean;
   docker_force_host: boolean;
+  ui_font_size: number;
+  terminal_font_size: number;
 }
 
 export interface AISettings {
@@ -157,6 +159,18 @@ export interface DockerContext {
   compose_available: boolean;
   daemon_running: boolean;
   force_host: boolean;
+}
+
+export interface CapturedEnvEntry {
+  key: string;
+  value: string;
+}
+
+export interface CapturedEnvInfo {
+  entries: CapturedEnvEntry[];
+  source: string;
+  reason: string | null;
+  ready: boolean;
 }
 
 export type FileChangeKind = "Added" | "Modified" | "Deleted" | "Renamed";

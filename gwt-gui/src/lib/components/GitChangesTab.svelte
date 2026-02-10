@@ -191,6 +191,8 @@
   });
 
   $effect(() => {
+    void projectPath;
+    void branch;
     void refreshToken;
     if (filterMode === "uncommitted") {
       loadWorkingTree();

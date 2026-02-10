@@ -33,10 +33,6 @@
     return String(err);
   }
 
-  function normalizeBranchName(name: string): string {
-    return name.startsWith("origin/") ? name.slice("origin/".length) : name;
-  }
-
   async function loadSummary() {
     loading = true;
     error = null;
@@ -46,7 +42,7 @@
       const [summaryResult, candidates] = await Promise.all([
         invoke<GitChangeSummary>("get_git_change_summary", {
           projectPath,
-          branch: normalizeBranchName(branch),
+          branch,
           baseBranch: baseBranch || undefined,
         }),
         invoke<string[]>("get_base_branch_candidates", { projectPath }),
@@ -176,11 +172,11 @@
         <!-- Tab content -->
         <div class="git-tab-content">
           {#if activeTab === "changes"}
-            <GitChangesTab {projectPath} branch={normalizeBranchName(branch)} {baseBranch} {refreshToken} />
+            <GitChangesTab {projectPath} {branch} {baseBranch} {refreshToken} />
           {:else if activeTab === "commits"}
-            <GitCommitsTab {projectPath} branch={normalizeBranchName(branch)} {baseBranch} {refreshToken} />
+            <GitCommitsTab {projectPath} {branch} {baseBranch} {refreshToken} />
           {:else if activeTab === "stash"}
-            <GitStashTab {projectPath} branch={normalizeBranchName(branch)} {refreshToken} />
+            <GitStashTab {projectPath} {branch} {refreshToken} />
           {/if}
         </div>
       {/if}
