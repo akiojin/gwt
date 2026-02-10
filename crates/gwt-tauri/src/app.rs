@@ -209,7 +209,13 @@ pub fn build_app(
 
                 // Exit the app when all windows are truly closed (hidden windows still count as open).
                 let app_handle = window.app_handle().clone();
-                if app_handle.webview_windows().is_empty() {
+                let destroyed_label = window.label().to_string();
+                let remaining_windows = app_handle
+                    .webview_windows()
+                    .into_iter()
+                    .filter(|(label, _)| label != &destroyed_label)
+                    .count();
+                if remaining_windows == 0 {
                     info!(
                         category = "tauri",
                         event = "AllWindowsClosed",
