@@ -302,7 +302,9 @@
         sidebarVisible = !sidebarVisible;
         break;
       case "launch-agent":
-        showAgentLaunch = true;
+        if (projectPath) {
+          showAgentLaunch = true;
+        }
         break;
       case "open-settings":
         openSettingsTab();
@@ -325,19 +327,26 @@
   // Native menubar integration (Tauri emits "menu-action" to the focused window).
   $effect(() => {
     let unlisten: null | (() => void) = null;
+    let cancelled = false;
 
     (async () => {
       try {
         const { listen } = await import("@tauri-apps/api/event");
-        unlisten = await listen<MenuActionPayload>("menu-action", (event) => {
+        const unlistenFn = await listen<MenuActionPayload>("menu-action", (event) => {
           void handleMenuAction(event.payload.action);
         });
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
       } catch {
         // Ignore: not available outside Tauri runtime.
       }
     })();
 
     return () => {
+      cancelled = true;
       if (unlisten) {
         unlisten();
       }
