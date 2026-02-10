@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import type { ProfilesConfig, Profile, SettingsData } from "../types";
 
   let { onClose }: { onClose: () => void } = $props();
@@ -37,8 +37,22 @@
 
   $effect(() => {
     if (!settings) return;
-    applyUiFontSize(settings.ui_font_size ?? 13);
-    applyTerminalFontSize(settings.terminal_font_size ?? 13);
+    const uiSize = settings.ui_font_size ?? 13;
+    const terminalSize = settings.terminal_font_size ?? 13;
+    if (uiSize >= 8 && uiSize <= 24) {
+      applyUiFontSize(uiSize);
+    }
+    if (terminalSize >= 8 && terminalSize <= 24) {
+      applyTerminalFontSize(terminalSize);
+    }
+  });
+
+  onMount(() => {
+    const computed = getComputedStyle(document.documentElement).getPropertyValue("--ui-font-base");
+    const parsedUi = Number.parseInt(computed.trim(), 10);
+    savedUiFontSize = Number.isNaN(parsedUi) ? 13 : parsedUi;
+    const storedTerminal = (window as any).__gwtTerminalFontSize;
+    savedTerminalFontSize = typeof storedTerminal === "number" ? storedTerminal : 13;
   });
 
   onDestroy(() => {
@@ -309,7 +323,15 @@
             value={settings.terminal_font_size ?? 13}
             oninput={(e) => {
               if (!settings) return;
-              settings = { ...settings, terminal_font_size: clampFontSize(Number((e.target as HTMLInputElement).value) || 13) };
+              const raw = (e.target as HTMLInputElement).value;
+              if (raw === "") return;
+              const parsed = Number(raw);
+              if (Number.isNaN(parsed)) return;
+              settings = { ...settings, terminal_font_size: parsed };
+            }}
+            onchange={() => {
+              if (!settings) return;
+              settings = { ...settings, terminal_font_size: clampFontSize(settings.terminal_font_size ?? 13) };
             }}
           />
           <button
@@ -338,7 +360,15 @@
             value={settings.ui_font_size ?? 13}
             oninput={(e) => {
               if (!settings) return;
-              settings = { ...settings, ui_font_size: clampFontSize(Number((e.target as HTMLInputElement).value) || 13) };
+              const raw = (e.target as HTMLInputElement).value;
+              if (raw === "") return;
+              const parsed = Number(raw);
+              if (Number.isNaN(parsed)) return;
+              settings = { ...settings, ui_font_size: parsed };
+            }}
+            onchange={() => {
+              if (!settings) return;
+              settings = { ...settings, ui_font_size: clampFontSize(settings.ui_font_size ?? 13) };
             }}
           />
           <button
@@ -954,6 +984,7 @@
     font-size: var(--ui-font-base);
     font-family: monospace;
     outline: none;
+    appearance: textfield;
     -moz-appearance: textfield;
   }
 
