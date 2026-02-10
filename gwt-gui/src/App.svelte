@@ -369,7 +369,6 @@
           activeTabId = "summary";
           selectedBranch = null;
           currentBranch = "";
-          sidebarRefreshKey = 0;
         }
         break;
       case "toggle-sidebar":
