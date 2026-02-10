@@ -3,7 +3,7 @@
 use crate::commands::project::resolve_repo_path_for_project_root;
 use crate::state::{AppState, PaneLaunchMeta};
 use gwt_core::ai::SessionParser;
-use gwt_core::config::{ProfilesConfig, Settings};
+use gwt_core::config::{AgentConfig, ClaudeAgentProvider, ProfilesConfig, Settings};
 use gwt_core::docker::{
     compose_available, daemon_running, detect_docker_files, docker_available, try_start_daemon,
     DockerFileType, DockerManager,
@@ -13,6 +13,7 @@ use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::terminal::runner::{
     build_fallback_launch, choose_fallback_runner, resolve_command_path,
 };
+use gwt_core::terminal::scrollback::ScrollbackFile;
 use gwt_core::terminal::{AgentColor, BuiltinLaunchConfig};
 use gwt_core::worktree::WorktreeManager;
 use serde::Deserialize;
@@ -53,6 +54,18 @@ pub struct TerminalInfo {
     pub agent_name: String,
     pub branch_name: String,
     pub status: String,
+}
+
+/// ANSI/SGR probe result for a terminal pane (diagnostics).
+#[derive(Debug, Clone, Serialize)]
+pub struct TerminalAnsiProbe {
+    pub pane_id: String,
+    pub bytes_scanned: usize,
+    pub esc_count: usize,
+    pub sgr_count: usize,
+    pub color_sgr_count: usize,
+    pub has_256_color: bool,
+    pub has_true_color: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -182,6 +195,15 @@ fn load_profile_env(profile_override: Option<&str>) -> HashMap<String, String> {
         .get(&name)
         .map(|p| p.env.clone())
         .unwrap_or_default()
+}
+
+fn ensure_terminal_env_defaults(env_vars: &mut HashMap<String, String>) {
+    env_vars
+        .entry("TERM".to_string())
+        .or_insert_with(|| "xterm-256color".to_string());
+    env_vars
+        .entry("COLORTERM".to_string())
+        .or_insert_with(|| "truecolor".to_string());
 }
 
 pub(crate) struct BuiltinAgentDef {
@@ -711,6 +733,7 @@ fn build_agent_args(
 }
 
 fn launch_with_config(
+    repo_path: &std::path::Path,
     config: BuiltinLaunchConfig,
     meta: Option<PaneLaunchMeta>,
     state: &AppState,
@@ -722,7 +745,7 @@ fn launch_with_config(
             .lock()
             .map_err(|e| format!("Failed to lock pane manager: {}", e))?;
         manager
-            .launch_agent(config, 24, 80)
+            .launch_agent(repo_path, config, 24, 80)
             .map_err(|e| format!("Failed to launch terminal: {}", e))?
     };
 
@@ -758,20 +781,17 @@ fn launch_with_config(
 /// Launch a new terminal pane with an agent
 #[tauri::command]
 pub fn launch_terminal(
+    window: tauri::Window,
     agent_name: String,
     branch: String,
     state: State<AppState>,
     app_handle: AppHandle,
 ) -> Result<String, String> {
     let project_root = {
-        let project_path = state
-            .project_path
-            .lock()
-            .map_err(|e| format!("Failed to lock state: {}", e))?;
-        match project_path.as_ref() {
-            Some(p) => PathBuf::from(p),
-            None => return Err("No project opened".to_string()),
-        }
+        let Some(p) = state.project_for_window(window.label()) else {
+            return Err("No project opened".to_string());
+        };
+        PathBuf::from(p)
     };
 
     let repo_path = resolve_repo_path_for_project_root(&project_root)?;
@@ -787,7 +807,7 @@ pub fn launch_terminal(
         env_vars: HashMap::new(),
     };
 
-    launch_with_config(config, None, &state, app_handle)
+    launch_with_config(&repo_path, config, None, &state, app_handle)
 }
 
 #[cfg(test)]
@@ -1083,24 +1103,104 @@ mod tests {
 
         assert!(args.ends_with(&inner_args));
     }
+
+    #[test]
+    fn build_terminal_ansi_probe_counts_basic_color_sgr() {
+        let bytes = b"hi \x1b[31mred\x1b[0m\n";
+        let probe = build_terminal_ansi_probe("pane-x", bytes);
+        assert_eq!(probe.pane_id, "pane-x");
+        assert!(probe.esc_count >= 2);
+        assert!(probe.sgr_count >= 2);
+        assert_eq!(probe.color_sgr_count, 1);
+        assert!(!probe.has_256_color);
+        assert!(!probe.has_true_color);
+    }
+
+    #[test]
+    fn build_terminal_ansi_probe_detects_256_and_truecolor() {
+        let bytes_256 = b"\x1b[38;5;196mX\x1b[0m";
+        let probe_256 = build_terminal_ansi_probe("p", bytes_256);
+        assert_eq!(probe_256.color_sgr_count, 1);
+        assert!(probe_256.has_256_color);
+        assert!(!probe_256.has_true_color);
+
+        let bytes_true = b"\x1b[38;2;255;0;0mX\x1b[0m";
+        let probe_true = build_terminal_ansi_probe("p", bytes_true);
+        assert_eq!(probe_true.color_sgr_count, 1);
+        assert!(!probe_true.has_256_color);
+        assert!(probe_true.has_true_color);
+    }
+
+    #[test]
+    fn build_terminal_ansi_probe_does_not_count_non_sgr_csi() {
+        let bytes = b"\x1b[2K\x1b[10D";
+        let probe = build_terminal_ansi_probe("p", bytes);
+        assert_eq!(probe.sgr_count, 0);
+        assert_eq!(probe.color_sgr_count, 0);
+    }
+
+    #[test]
+    fn build_terminal_ansi_probe_does_not_treat_italic_as_color() {
+        let bytes = b"\x1b[3mitalic\x1b[0m";
+        let probe = build_terminal_ansi_probe("p", bytes);
+        assert_eq!(probe.sgr_count, 2);
+        assert_eq!(probe.color_sgr_count, 0);
+    }
+
+    #[test]
+    fn probe_terminal_ansi_flushes_scrollback_before_reading() {
+        let state = AppState::new();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let pane_id = format!("pane-test-{nonce}");
+
+        let pane =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: pane_id.clone(),
+                command: "/usr/bin/true".to_string(),
+                args: vec![],
+                working_dir: std::env::temp_dir(),
+                branch_name: "test-branch".to_string(),
+                agent_name: "test-agent".to_string(),
+                agent_color: AgentColor::Green,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+            })
+            .expect("failed to create test pane");
+
+        {
+            let mut mgr = state.pane_manager.lock().unwrap();
+            mgr.add_pane(pane).expect("failed to add test pane");
+            let pane = mgr.pane_mut_by_id(&pane_id).expect("missing test pane");
+            pane.process_bytes(b"hi \x1b[31mred\x1b[0m\n")
+                .expect("failed to write test bytes");
+        }
+
+        let probe = probe_terminal_ansi_from_state(&state, &pane_id).expect("probe should succeed");
+        assert!(probe.bytes_scanned > 0);
+        assert!(probe.sgr_count >= 2);
+        assert!(probe.color_sgr_count >= 1);
+
+        let _ = ScrollbackFile::cleanup(&pane_id);
+    }
 }
 
 /// Launch an agent with gwt semantics (worktree + profiles)
 #[tauri::command]
 pub fn launch_agent(
+    window: tauri::Window,
     request: LaunchAgentRequest,
     state: State<AppState>,
     app_handle: AppHandle,
 ) -> Result<String, String> {
     let project_root = {
-        let project_path = state
-            .project_path
-            .lock()
-            .map_err(|e| format!("Failed to lock state: {}", e))?;
-        match project_path.as_ref() {
-            Some(p) => PathBuf::from(p),
-            None => return Err("No project opened".to_string()),
-        }
+        let Some(p) = state.project_for_window(window.label()) else {
+            return Err("No project opened".to_string());
+        };
+        PathBuf::from(p)
     };
 
     let agent_id = request.agent_id.trim();
@@ -1152,10 +1252,66 @@ pub fn launch_agent(
         project_root.to_string_lossy().to_string(),
     );
 
+    // Agent-specific env (global; not per-profile). Request overrides are still highest precedence.
+    let mut wants_claude_glm = false;
+    if agent_id == "claude" {
+        if let Ok(cfg) = AgentConfig::load() {
+            wants_claude_glm = cfg.claude.provider == ClaudeAgentProvider::Glm;
+            if wants_claude_glm {
+                let base_url = cfg.claude.glm.base_url.trim();
+                let token = cfg.claude.glm.auth_token.trim();
+                let timeout = cfg.claude.glm.api_timeout_ms.trim();
+                let opus = cfg.claude.glm.default_opus_model.trim();
+                let sonnet = cfg.claude.glm.default_sonnet_model.trim();
+                let haiku = cfg.claude.glm.default_haiku_model.trim();
+
+                if !base_url.is_empty() {
+                    env_vars.insert("ANTHROPIC_BASE_URL".to_string(), base_url.to_string());
+                }
+                if !token.is_empty() {
+                    env_vars.insert("ANTHROPIC_AUTH_TOKEN".to_string(), token.to_string());
+                }
+                if !timeout.is_empty() {
+                    env_vars.insert("API_TIMEOUT_MS".to_string(), timeout.to_string());
+                }
+                if !opus.is_empty() {
+                    env_vars.insert("ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(), opus.to_string());
+                }
+                if !sonnet.is_empty() {
+                    env_vars.insert(
+                        "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
+                        sonnet.to_string(),
+                    );
+                }
+                if !haiku.is_empty() {
+                    env_vars.insert(
+                        "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
+                        haiku.to_string(),
+                    );
+                }
+            }
+        }
+    }
+
     // Request-specific overrides are highest precedence.
     if let Some(overrides) = request.env_overrides.as_ref() {
         for (k, v) in overrides {
             env_vars.insert(k.to_string(), v.to_string());
+        }
+    }
+
+    if wants_claude_glm {
+        // If we are configured for GLM, require at least Base URL + Token by the end of merging.
+        let base_url = env_vars
+            .get("ANTHROPIC_BASE_URL")
+            .map(|s| s.trim())
+            .unwrap_or("");
+        let token = env_vars
+            .get("ANTHROPIC_AUTH_TOKEN")
+            .map(|s| s.trim())
+            .unwrap_or("");
+        if base_url.is_empty() || token.is_empty() {
+            return Err("GLM (z.ai) provider is selected but required env vars are missing. Configure Base URL and API Token in Launch Agent > Provider.".to_string());
         }
     }
 
@@ -1165,6 +1321,10 @@ pub fn launch_agent(
         // accidental confirmation prompts in sandboxed environments.
         env_vars.insert("IS_SANDBOX".to_string(), "1".to_string());
     }
+
+    // Ensure TERM/COLORTERM propagate into Docker exec environments as well.
+    // (PTY sets these for the host process, but docker exec only receives vars passed via -e.)
+    ensure_terminal_env_defaults(&mut env_vars);
 
     let settings = Settings::load(&project_root).unwrap_or_default();
     let force_host_settings = settings.docker.force_host;
@@ -1400,7 +1560,7 @@ pub fn launch_agent(
         }
     };
 
-    launch_with_config(config, Some(meta), &state, app_handle)
+    launch_with_config(&repo_path, config, Some(meta), &state, app_handle)
 }
 
 /// Stream PTY output to the frontend via Tauri events
@@ -1763,4 +1923,124 @@ pub fn list_terminals(state: State<AppState>) -> Vec<TerminalInfo> {
             }
         })
         .collect()
+}
+
+fn build_terminal_ansi_probe(pane_id: &str, bytes: &[u8]) -> TerminalAnsiProbe {
+    let esc_count = bytes.iter().filter(|&&b| b == 0x1b).count();
+    let mut sgr_count = 0usize;
+    let mut color_sgr_count = 0usize;
+    let mut has_256_color = false;
+    let mut has_true_color = false;
+
+    let mut i = 0usize;
+    while i + 1 < bytes.len() {
+        if bytes[i] == 0x1b && bytes[i + 1] == b'[' {
+            // CSI: parameter bytes (0x30-0x3f), intermediate bytes (0x20-0x2f), final byte (0x40-0x7e)
+            let mut j = i + 2;
+            while j < bytes.len() {
+                let c = bytes[j];
+                if (0x40..=0x7e).contains(&c) {
+                    if c == b'm' {
+                        sgr_count += 1;
+
+                        // Parse params between '[' and 'm' as SGR codes.
+                        let params = &bytes[i + 2..j];
+                        let mut codes: Vec<u16> = Vec::new();
+                        let mut num: u16 = 0;
+                        let mut has_num = false;
+                        for &b in params {
+                            if b.is_ascii_digit() {
+                                has_num = true;
+                                num = num.saturating_mul(10).saturating_add((b - b'0') as u16);
+                                continue;
+                            }
+                            if b == b';' {
+                                codes.push(if has_num { num } else { 0 });
+                                num = 0;
+                                has_num = false;
+                            }
+                        }
+                        if has_num {
+                            codes.push(num);
+                        } else if params.last().is_some_and(|b| *b == b';') {
+                            // Trailing empty param counts as 0 (e.g. ESC[;m).
+                            codes.push(0);
+                        }
+
+                        let mut is_color = false;
+                        for (idx, code) in codes.iter().enumerate() {
+                            match *code {
+                                // Basic and bright colors (fg/bg) + default fg/bg resets.
+                                30..=37 | 90..=97 | 40..=47 | 100..=107 | 39 | 49 => {
+                                    is_color = true
+                                }
+                                // Extended colors.
+                                38 | 48 => match codes.get(idx + 1).copied() {
+                                    Some(5) => {
+                                        has_256_color = true;
+                                        is_color = true;
+                                    }
+                                    Some(2) => {
+                                        has_true_color = true;
+                                        is_color = true;
+                                    }
+                                    _ => {}
+                                },
+                                _ => {}
+                            }
+                        }
+
+                        if is_color {
+                            color_sgr_count += 1;
+                        }
+                    }
+                    j += 1;
+                    break;
+                }
+                j += 1;
+            }
+            i = j;
+            continue;
+        }
+        i += 1;
+    }
+
+    TerminalAnsiProbe {
+        pane_id: pane_id.to_string(),
+        bytes_scanned: bytes.len(),
+        esc_count,
+        sgr_count,
+        color_sgr_count,
+        has_256_color,
+        has_true_color,
+    }
+}
+
+fn probe_terminal_ansi_from_state(
+    state: &AppState,
+    pane_id: &str,
+) -> Result<TerminalAnsiProbe, String> {
+    // Best-effort: flush in-memory scrollback so diagnostics does not read stale data.
+    {
+        let mut mgr = state
+            .pane_manager
+            .lock()
+            .map_err(|e| format!("Failed to lock state: {}", e))?;
+        if let Some(pane) = mgr.pane_mut_by_id(pane_id) {
+            pane.flush_scrollback().map_err(|e| e.to_string())?;
+        }
+    }
+
+    let path = ScrollbackFile::scrollback_path_for_pane(pane_id).map_err(|e| e.to_string())?;
+    let bytes = ScrollbackFile::read_tail_bytes_at(&path, 256 * 1024).map_err(|e| e.to_string())?;
+    Ok(build_terminal_ansi_probe(pane_id, &bytes))
+}
+
+/// Probe a pane's scrollback tail for ANSI/SGR/color usage (diagnostics).
+#[tauri::command]
+pub fn probe_terminal_ansi(
+    state: State<AppState>,
+    pane_id: String,
+) -> Result<TerminalAnsiProbe, String> {
+    probe_terminal_ansi_from_state(&state, &pane_id)
 }

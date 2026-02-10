@@ -232,7 +232,14 @@ pub fn detect_agents() -> Vec<DetectedAgentInfo> {
 
         if let Some(runner) = runner {
             let authenticated = match id {
-                "claude" => std::env::var("ANTHROPIC_API_KEY").is_ok(),
+                "claude" => {
+                    std::env::var("ANTHROPIC_API_KEY").is_ok()
+                        || std::env::var("ANTHROPIC_AUTH_TOKEN").is_ok()
+                        || gwt_core::config::AgentConfig::load()
+                            .ok()
+                            .map(|c| !c.claude.glm.auth_token.trim().is_empty())
+                            .unwrap_or(false)
+                }
                 "codex" => std::env::var("OPENAI_API_KEY").is_ok(),
                 "gemini" => {
                     std::env::var("GOOGLE_API_KEY").is_ok()

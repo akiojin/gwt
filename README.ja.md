@@ -19,13 +19,14 @@ gwt は Git worktree 管理とコーディングエージェント起動
 
 - Rust（stable）
 - Node.js 22
+- pnpm（Corepack 経由）
 - Tauri の OS 依存パッケージ（プラットフォーム別）
 
 開発起動:
 
 ```bash
 cd gwt-gui
-npm ci
+pnpm install --frozen-lockfile
 
 cd ..
 cargo tauri dev
@@ -35,7 +36,7 @@ cargo tauri dev
 
 ```bash
 cd gwt-gui
-npm ci
+pnpm install --frozen-lockfile
 
 cd ..
 cargo tauri build

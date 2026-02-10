@@ -1,6 +1,6 @@
 use gwt_core::ai::SessionSummaryCache;
 use gwt_core::terminal::manager::PaneManager;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -34,10 +34,14 @@ pub struct PaneLaunchMeta {
 }
 
 pub struct AppState {
-    pub project_path: Mutex<Option<String>>,
+    /// Project root path per window label.
+    ///
+    /// Only stores windows that currently have a project opened.
+    pub window_projects: Mutex<HashMap<String, String>>,
     pub pane_manager: Mutex<PaneManager>,
     pub agent_versions_cache: Mutex<HashMap<String, AgentVersionsCache>>,
     pub session_summary_cache: Mutex<HashMap<String, SessionSummaryCache>>,
+    pub session_summary_inflight: Mutex<HashSet<String>>,
     pub pane_launch_meta: Mutex<HashMap<String, PaneLaunchMeta>>,
     pub is_quitting: AtomicBool,
 }
@@ -45,16 +49,54 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
-            project_path: Mutex::new(None),
+            window_projects: Mutex::new(HashMap::new()),
             pane_manager: Mutex::new(PaneManager::new()),
             agent_versions_cache: Mutex::new(HashMap::new()),
             session_summary_cache: Mutex::new(HashMap::new()),
+            session_summary_inflight: Mutex::new(HashSet::new()),
             pane_launch_meta: Mutex::new(HashMap::new()),
             is_quitting: AtomicBool::new(false),
         }
     }
 
+    pub fn set_project_for_window(&self, window_label: &str, project_path: String) {
+        if let Ok(mut map) = self.window_projects.lock() {
+            map.insert(window_label.to_string(), project_path);
+        }
+    }
+
+    pub fn clear_project_for_window(&self, window_label: &str) {
+        if let Ok(mut map) = self.window_projects.lock() {
+            map.remove(window_label);
+        }
+    }
+
+    pub fn project_for_window(&self, window_label: &str) -> Option<String> {
+        let map = self.window_projects.lock().ok()?;
+        map.get(window_label).cloned()
+    }
+
     pub fn request_quit(&self) {
         self.is_quitting.store(true, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_projects_set_get_clear() {
+        let state = AppState::new();
+        assert_eq!(state.project_for_window("main"), None);
+
+        state.set_project_for_window("main", "/tmp/repo".to_string());
+        assert_eq!(
+            state.project_for_window("main"),
+            Some("/tmp/repo".to_string())
+        );
+
+        state.clear_project_for_window("main");
+        assert_eq!(state.project_for_window("main"), None);
     }
 }

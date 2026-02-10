@@ -26,6 +26,16 @@ export interface TerminalInfo {
   status: string;
 }
 
+export interface TerminalAnsiProbe {
+  pane_id: string;
+  bytes_scanned: number;
+  esc_count: number;
+  sgr_count: number;
+  color_sgr_count: number;
+  has_256_color: boolean;
+  has_true_color: boolean;
+}
+
 export interface AgentInfo {
   id: "claude" | "codex" | "gemini" | (string & {});
   name: string;
@@ -33,6 +43,27 @@ export interface AgentInfo {
   path?: string;
   authenticated: boolean;
   available: boolean;
+}
+
+export type ClaudeAgentProvider = "anthropic" | "glm";
+
+export interface ClaudeGlmConfig {
+  base_url: string;
+  auth_token: string;
+  api_timeout_ms: string;
+  default_opus_model: string;
+  default_sonnet_model: string;
+  default_haiku_model: string;
+}
+
+export interface ClaudeAgentConfig {
+  provider: ClaudeAgentProvider;
+  glm: ClaudeGlmConfig;
+}
+
+export interface AgentConfig {
+  version: number;
+  claude: ClaudeAgentConfig;
 }
 
 export interface SettingsData {
@@ -103,6 +134,7 @@ export interface ToolSessionEntry {
 
 export interface SessionSummaryResult {
   status: "ok" | "ai-not-configured" | "disabled" | "no-session" | "error";
+  generating: boolean;
   toolId?: string | null;
   sessionId?: string | null;
   markdown?: string | null;

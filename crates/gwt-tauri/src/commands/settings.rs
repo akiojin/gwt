@@ -102,17 +102,12 @@ impl SettingsData {
 
 /// Get current settings
 #[tauri::command]
-pub fn get_settings(state: State<AppState>) -> Result<SettingsData, String> {
+pub fn get_settings(window: tauri::Window, state: State<AppState>) -> Result<SettingsData, String> {
     with_panic_guard("loading settings", || {
-        let project_path = state
-            .project_path
-            .lock()
-            .map_err(|e| format!("Failed to lock state: {}", e))?;
-
-        let repo_root = match project_path.as_ref() {
+        let repo_root = match state.project_for_window(window.label()) {
             Some(p) => PathBuf::from(p),
             None => {
-                // Return default settings if no project is opened
+                // Return default settings if no project is opened in this window
                 return Ok(SettingsData::from(&Settings::default()));
             }
         };
@@ -124,18 +119,17 @@ pub fn get_settings(state: State<AppState>) -> Result<SettingsData, String> {
 
 /// Save settings
 #[tauri::command]
-pub fn save_settings(settings: SettingsData, state: State<AppState>) -> Result<(), String> {
+pub fn save_settings(
+    window: tauri::Window,
+    settings: SettingsData,
+    state: State<AppState>,
+) -> Result<(), String> {
     with_panic_guard("saving settings", || {
-        let project_path = state
-            .project_path
-            .lock()
-            .map_err(|e| format!("Failed to lock state: {}", e))?;
-
         let core_settings = settings.to_settings()?;
 
-        match project_path.as_ref() {
+        match state.project_for_window(window.label()) {
             Some(p) => {
-                let config_path = Path::new(p).join(".gwt.toml");
+                let config_path = Path::new(&p).join(".gwt.toml");
                 core_settings
                     .save(&config_path)
                     .map_err(|e| e.to_string())?;
