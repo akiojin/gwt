@@ -181,6 +181,67 @@ jobs:
       - name: Build Tauri (non-macOS)
         if: matrix.platform != 'macos'
         run: cargo tauri build
+
+      - name: Package self-update payload (Unix)
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          os="${{ matrix.platform }}"
+          arch="$(uname -m)"
+
+          artifact=""
+          if [[ "$os" == "linux" ]]; then
+            case "$arch" in
+              x86_64) artifact="linux-x86_64" ;;
+              aarch64|arm64) artifact="linux-arm64" ;;
+              *) echo "::error::unsupported linux arch: $arch"; exit 1 ;;
+            esac
+          elif [[ "$os" == "macos" ]]; then
+            case "$arch" in
+              x86_64) artifact="macos-x86_64" ;;
+              arm64|aarch64) artifact="macos-arm64" ;;
+              *) echo "::error::unsupported macos arch: $arch"; exit 1 ;;
+            esac
+          else
+            echo "::error::unexpected platform for unix packaging: $os"
+            exit 1
+          fi
+
+          out_dir="target/release/bundle/self-update"
+          mkdir -p "$out_dir"
+          staging="dist/gwt-${artifact}"
+          rm -rf "$staging"
+          mkdir -p "$staging"
+          cp "target/release/gwt" "$staging/"
+
+          archive="$out_dir/gwt-${artifact}.tar.gz"
+          tar czf "$archive" -C dist "$(basename "$staging")"
+
+          [[ -s "$archive" ]] || { echo "::error::self-update archive is empty"; exit 1; }
+
+      - name: Package self-update payload (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $artifact = "windows-x86_64"
+          $outDir = Join-Path $PWD "target\\release\\bundle\\self-update"
+          New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+          $staging = Join-Path $PWD ("dist\\gwt-" + $artifact)
+          if (Test-Path $staging) {
+            Remove-Item $staging -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $staging -Force | Out-Null
+          Copy-Item "target\\release\\gwt.exe" $staging
+
+          $archive = Join-Path $outDir ("gwt-" + $artifact + ".zip")
+          Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $archive -Force
+
+          if (-not (Test-Path $archive)) {
+            Write-Error "self-update archive not found: $archive"
+            exit 1
+          }
       - name: Build macOS installer (.pkg)
         if: matrix.platform == 'macos'
         id: package_macos
@@ -198,9 +259,15 @@ jobs:
             exit 1
           fi
           arch="$(uname -m)"
+          artifact=""
+          case "$arch" in
+            x86_64) artifact="macos-x86_64" ;;
+            arm64|aarch64) artifact="macos-arm64" ;;
+            *) echo "::error::unsupported macos arch: $arch"; exit 1 ;;
+          esac
           pkg_dir="target/release/bundle/pkg"
           mkdir -p "$pkg_dir"
-          pkg_path="${pkg_dir}/gwt-macos-${arch}.pkg"
+          pkg_path="${pkg_dir}/gwt-${artifact}.pkg"
           installer_identity="${{ secrets.APPLE_INSTALLER_SIGNING_IDENTITY }}"
           if [[ -n "$installer_identity" ]]; then
             pkgbuild \
@@ -285,7 +352,7 @@ jobs:
           $wixObj = "gwt.wixobj"
           $wixDir = Join-Path $PWD "target\\release\\bundle\\wix"
           New-Item -ItemType Directory -Path $wixDir -Force | Out-Null
-          $msiPath = Join-Path $wixDir "gwt-wix-windows-x86_64.msi"
+          $msiPath = Join-Path $wixDir "gwt-windows-x86_64.msi"
           $wixBin = "${env:ProgramFiles(x86)}\\WiX Toolset v3.11\\bin"
           $env:PATH = "$wixBin;$env:PATH"
           candle.exe $wxsPath -out $wixObj -dBinariesDir="$binaryDir" -dProductVersion="$msiVersion"
@@ -316,12 +383,15 @@ jobs:
           path: |
             target/release/bundle/deb/*.deb
             target/release/bundle/appimage/*.AppImage
+            target/release/bundle/self-update/*.tar.gz
       - name: Upload artifacts (macOS)
         if: matrix.platform == 'macos'
         uses: actions/upload-artifact@v6
         with:
           name: gwt-macos
-          path: target/release/bundle/dmg/*.dmg
+          path: |
+            target/release/bundle/dmg/*.dmg
+            target/release/bundle/self-update/*.tar.gz
       - name: Upload macOS installer (.pkg)
         if: matrix.platform == 'macos'
         uses: actions/upload-artifact@v6
@@ -333,7 +403,9 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: gwt-windows
-          path: target/release/bundle/msi/*.msi
+          path: |
+            target/release/bundle/msi/*.msi
+            target/release/bundle/self-update/*.zip
       - name: Upload Windows installer (WiX .msi)
         if: matrix.platform == 'windows'
         uses: actions/upload-artifact@v6
