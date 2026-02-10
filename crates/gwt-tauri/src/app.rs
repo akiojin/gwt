@@ -34,7 +34,7 @@ pub fn build_app(
             #[cfg(not(test))]
             {
                 // Native menubar (SPEC-4470704f)
-                let _ = crate::menu::rebuild_menu(&_app.handle());
+                let _ = crate::menu::rebuild_menu(_app.handle());
 
                 // System tray (SPEC-dfb1611a FR-310〜FR-313)
                 let tray_menu = tauri::menu::Menu::new(_app)?;
@@ -182,11 +182,11 @@ pub fn build_app(
                 }
                 api.prevent_close();
                 let _ = window.hide();
-                let _ = crate::menu::rebuild_menu(&window.app_handle());
+                let _ = crate::menu::rebuild_menu(window.app_handle());
             }
 
             if let tauri::WindowEvent::Focused(true) = event {
-                let _ = crate::menu::rebuild_menu(&window.app_handle());
+                let _ = crate::menu::rebuild_menu(window.app_handle());
             }
 
             if let tauri::WindowEvent::Destroyed = event {
@@ -194,7 +194,7 @@ pub fn build_app(
                     .app_handle()
                     .state::<AppState>()
                     .clear_project_for_window(window.label());
-                let _ = crate::menu::rebuild_menu(&window.app_handle());
+                let _ = crate::menu::rebuild_menu(window.app_handle());
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -268,7 +268,7 @@ fn open_new_window(app: &tauri::AppHandle<tauri::Wry>) {
     // NOTE: On Windows, window creation can deadlock in synchronous handlers.
     // Create the window on a separate thread (Tauri docs).
     std::thread::spawn(move || {
-        let mut conf = match app.config().app.windows.get(0) {
+        let mut conf = match app.config().app.windows.first() {
             Some(c) => c.clone(),
             None => {
                 info!(
