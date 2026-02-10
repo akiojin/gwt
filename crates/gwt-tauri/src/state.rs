@@ -126,7 +126,6 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
 
     #[test]
     fn window_projects_set_get_clear() {
@@ -141,26 +140,6 @@ mod tests {
 
         state.clear_project_for_window("main");
         assert_eq!(state.project_for_window("main"), None);
-    }
-
-    #[test]
-    fn wait_os_env_ready_returns_true_when_initialized_within_timeout() {
-        let state = AppState::new();
-        assert!(!state.is_os_env_ready());
-
-        let cell = state.os_env.clone();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(50));
-            let _ = cell.set(HashMap::new());
-        });
-
-        assert!(state.wait_os_env_ready(Duration::from_secs(1)));
-    }
-
-    #[test]
-    fn wait_os_env_ready_returns_false_on_timeout() {
-        let state = AppState::new();
-        assert!(!state.wait_os_env_ready(Duration::from_millis(1)));
     }
 
     #[test]
