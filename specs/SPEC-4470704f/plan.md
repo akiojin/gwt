@@ -52,22 +52,21 @@
 
 ## メニュー仕様（ネイティブ）
 
-- トップレベル: File / Edit / View / Window / Settings / Help
+- トップレベル: gwt / File / Window
 - `File`
   - New Window
   - Open Project...
   - Close Project
-- `View`
-  - Toggle Sidebar
-  - Launch Agent...
-  - List Terminals
 - `Window`
   - プロジェクトが開かれているウィンドウ一覧（同名の場合はパスを付加して区別）
   - 選択時: 対象ウィンドウを show + focus
-- `Settings`
-  - Preferences...
-- `Help`
+  - Toggle Sidebar
+  - Launch Agent...
+  - List Terminals
+  - Terminal Diagnostics
+- `gwt`
   - About gwt
+  - Preferences...
 
 ## テスト戦略
 

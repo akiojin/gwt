@@ -56,6 +56,8 @@ pub fn rebuild_menu(app: &AppHandle<Wry>) -> tauri::Result<()> {
 pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<Wry>> {
     let menu = Menu::new(app)?;
 
+    let app_menu_label = app.package_info().name.clone();
+
     let file_new_window = MenuItem::with_id(
         app,
         MENU_ID_FILE_NEW_WINDOW,
@@ -84,52 +86,9 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         .item(&file_close_project)
         .build()?;
 
-    let edit = SubmenuBuilder::new(app, "Edit")
-        .cut()
-        .copy()
-        .paste()
-        .separator()
-        .select_all()
-        .build()?;
-
-    let view_toggle_sidebar = MenuItem::with_id(
-        app,
-        MENU_ID_VIEW_TOGGLE_SIDEBAR,
-        "Toggle Sidebar",
-        true,
-        Some("CmdOrCtrl+B"),
-    )?;
-    let view_launch_agent = MenuItem::with_id(
-        app,
-        MENU_ID_VIEW_LAUNCH_AGENT,
-        "Launch Agent...",
-        true,
-        None::<&str>,
-    )?;
-    let view_list_terminals = MenuItem::with_id(
-        app,
-        MENU_ID_VIEW_LIST_TERMINALS,
-        "List Terminals",
-        true,
-        None::<&str>,
-    )?;
-    let view_terminal_diagnostics = MenuItem::with_id(
-        app,
-        MENU_ID_VIEW_TERMINAL_DIAGNOSTICS,
-        "Terminal Diagnostics",
-        true,
-        None::<&str>,
-    )?;
-    let view = SubmenuBuilder::new(app, "View")
-        .item(&view_toggle_sidebar)
-        .separator()
-        .item(&view_launch_agent)
-        .item(&view_list_terminals)
-        .item(&view_terminal_diagnostics)
-        .build()?;
-
     let window = build_window_submenu(app, state)?;
 
+    let help_about = MenuItem::with_id(app, MENU_ID_HELP_ABOUT, "About gwt", true, None::<&str>)?;
     let settings_prefs = MenuItem::with_id(
         app,
         MENU_ID_SETTINGS_PREFERENCES,
@@ -137,19 +96,15 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         true,
         Some("CmdOrCtrl+,"),
     )?;
-    let settings = SubmenuBuilder::new(app, "Settings")
+    let gwt = SubmenuBuilder::new(app, app_menu_label)
+        .item(&help_about)
+        .separator()
         .item(&settings_prefs)
         .build()?;
 
-    let help_about = MenuItem::with_id(app, MENU_ID_HELP_ABOUT, "About gwt", true, None::<&str>)?;
-    let help = SubmenuBuilder::new(app, "Help").item(&help_about).build()?;
-
+    menu.append(&gwt)?;
     menu.append(&file)?;
-    menu.append(&edit)?;
-    menu.append(&view)?;
     menu.append(&window)?;
-    menu.append(&settings)?;
-    menu.append(&help)?;
     Ok(menu)
 }
 
@@ -160,6 +115,7 @@ fn build_window_submenu(
     let entries = collect_window_entries(app, state);
 
     let mut builder = SubmenuBuilder::new(app, "Window");
+
     if entries.is_empty() {
         let none = MenuItem::with_id(
             app,
@@ -169,23 +125,59 @@ fn build_window_submenu(
             None::<&str>,
         )?;
         builder = builder.item(&none);
-        return builder.build();
+    } else {
+        let mut sorted = entries;
+        sorted.sort_by(|a, b| a.display.cmp(&b.display));
+
+        for e in sorted {
+            let item = CheckMenuItem::with_id(
+                app,
+                window_focus_menu_id(&e.window_label),
+                &e.display,
+                true,
+                e.focused,
+                None::<&str>,
+            )?;
+            builder = builder.item(&item);
+        }
     }
 
-    let mut sorted = entries;
-    sorted.sort_by(|a, b| a.display.cmp(&b.display));
+    let toggle_sidebar = MenuItem::with_id(
+        app,
+        MENU_ID_VIEW_TOGGLE_SIDEBAR,
+        "Toggle Sidebar",
+        true,
+        Some("CmdOrCtrl+B"),
+    )?;
+    let launch_agent = MenuItem::with_id(
+        app,
+        MENU_ID_VIEW_LAUNCH_AGENT,
+        "Launch Agent...",
+        true,
+        None::<&str>,
+    )?;
+    let list_terminals = MenuItem::with_id(
+        app,
+        MENU_ID_VIEW_LIST_TERMINALS,
+        "List Terminals",
+        true,
+        None::<&str>,
+    )?;
+    let terminal_diagnostics = MenuItem::with_id(
+        app,
+        MENU_ID_VIEW_TERMINAL_DIAGNOSTICS,
+        "Terminal Diagnostics",
+        true,
+        None::<&str>,
+    )?;
 
-    for e in sorted {
-        let item = CheckMenuItem::with_id(
-            app,
-            window_focus_menu_id(&e.window_label),
-            &e.display,
-            true,
-            e.focused,
-            None::<&str>,
-        )?;
-        builder = builder.item(&item);
-    }
+    builder = builder
+        .separator()
+        .item(&toggle_sidebar)
+        .separator()
+        .item(&launch_agent)
+        .item(&list_terminals)
+        .item(&terminal_diagnostics);
 
     builder.build()
 }
