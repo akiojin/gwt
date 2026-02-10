@@ -89,6 +89,11 @@ impl TerminalPane {
         Ok(())
     }
 
+    /// Flush scrollback to disk (best-effort durability / diagnostics).
+    pub fn flush_scrollback(&mut self) -> Result<(), TerminalError> {
+        self.scrollback.flush()
+    }
+
     /// Write input data to the PTY.
     pub fn write_input(&mut self, data: &[u8]) -> Result<(), TerminalError> {
         if let Some(ref mut writer) = self.writer {

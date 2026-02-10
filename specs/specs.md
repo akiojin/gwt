@@ -1,8 +1,11 @@
-# 仕様（アーカイブ）
+# 仕様一覧
 
 **最終更新**: 2026-02-10
 
-GUI（Tauri）への移行に伴い、過去の仕様・要件ドキュメントはすべて `specs/archive/` に移動しました。
+- 現行の仕様・要件: `specs/SPEC-XXXXXXXX/spec.md`
+- 以前までのTUIの仕様・要件（archive）: `specs/archive/SPEC-XXXXXXXX/spec.md`
 
-- 仕様の参照: `specs/archive/SPEC-XXXXXXXX/spec.md`
-- `specs/` 直下には新規の仕様は追加しません
+## 運用ルール
+
+- 新規の仕様・要件は `specs/` 配下に追加します
+- 以前までのTUIの仕様・要件は `specs/archive/` に移動します

@@ -7,9 +7,10 @@ use super::pane::{PaneConfig, TerminalPane};
 use super::BuiltinLaunchConfig;
 use super::TerminalError;
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Maximum number of simultaneous panes (FR-033).
 const DEFAULT_MAX_PANES: usize = 4;
@@ -139,6 +140,7 @@ impl PaneManager {
     /// Returns the generated pane ID, or `PaneLimitReached` if at capacity.
     pub fn launch_agent(
         &mut self,
+        repo_root: &Path,
         config: BuiltinLaunchConfig,
         rows: u16,
         cols: u16,
@@ -166,7 +168,7 @@ impl PaneManager {
         };
         let pane = TerminalPane::new(pane_config)?;
         self.add_pane(pane)?;
-        let _ = Self::save_branch_mapping(&branch_name_for_mapping, &pane_id);
+        let _ = Self::save_branch_mapping(repo_root, &branch_name_for_mapping, &pane_id);
         Ok(pane_id)
     }
 
@@ -199,17 +201,38 @@ impl PaneManager {
         }
     }
 
-    /// Returns the path to the branch→pane_id index file.
-    fn index_path() -> Result<PathBuf, TerminalError> {
+    /// Returns the directory containing branch→pane_id indices.
+    fn index_dir() -> Result<PathBuf, TerminalError> {
         let home = dirs::home_dir().ok_or_else(|| TerminalError::ScrollbackError {
             details: "failed to determine home directory".to_string(),
         })?;
-        Ok(home.join(".gwt").join("terminals").join("index.json"))
+        Ok(home.join(".gwt").join("terminals").join("index"))
     }
 
-    /// Saves a branch→pane_id mapping to `~/.gwt/terminals/index.json`.
-    pub fn save_branch_mapping(branch: &str, pane_id: &str) -> Result<(), TerminalError> {
-        Self::save_branch_mapping_to(Self::index_path()?, branch, pane_id)
+    /// Returns the path to the branch→pane_id index file for a repository root.
+    fn index_path_for_repo(repo_root: &Path) -> Result<PathBuf, TerminalError> {
+        let dir = Self::index_dir()?;
+        let repo_name = repo_root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("repo");
+
+        // Match the TypeScript session filename approach:
+        // Buffer.from(repositoryRoot).toString("base64").replace(/[/+=]/g, "_")
+        let repo_path_str = repo_root.to_string_lossy();
+        let hash = STANDARD.encode(repo_path_str.as_bytes());
+        let hash_safe = hash.replace(['/', '+', '='], "_");
+
+        Ok(dir.join(format!("{repo_name}_{hash_safe}.json")))
+    }
+
+    /// Saves a branch→pane_id mapping to `~/.gwt/terminals/index/{repoName}_{hash}.json`.
+    pub fn save_branch_mapping(
+        repo_root: &Path,
+        branch: &str,
+        pane_id: &str,
+    ) -> Result<(), TerminalError> {
+        Self::save_branch_mapping_to(Self::index_path_for_repo(repo_root)?, branch, pane_id)
     }
 
     /// Saves a branch→pane_id mapping to a specific path (for testing).
@@ -223,9 +246,9 @@ impl PaneManager {
         Self::write_index(&path, &map)
     }
 
-    /// Loads the pane_id for a given branch from `~/.gwt/terminals/index.json`.
-    pub fn load_pane_id_for_branch(branch: &str) -> Option<String> {
-        Self::load_pane_id_for_branch_from(Self::index_path().ok()?, branch)
+    /// Loads the pane_id for a given branch from the repository-scoped index file.
+    pub fn load_pane_id_for_branch(repo_root: &Path, branch: &str) -> Option<String> {
+        Self::load_pane_id_for_branch_from(Self::index_path_for_repo(repo_root).ok()?, branch)
     }
 
     /// Loads the pane_id for a given branch from a specific index file (for testing).
@@ -539,6 +562,7 @@ mod tests {
     fn test_launch_agent_success() {
         use crate::terminal::BuiltinLaunchConfig;
         let mut mgr = PaneManager::new();
+        let repo_root = std::env::temp_dir();
         let config = BuiltinLaunchConfig {
             command: "/usr/bin/true".to_string(),
             args: vec![],
@@ -548,7 +572,7 @@ mod tests {
             agent_color: AgentColor::Cyan,
             env_vars: HashMap::new(),
         };
-        let pane_id = mgr.launch_agent(config, 24, 80).unwrap();
+        let pane_id = mgr.launch_agent(&repo_root, config, 24, 80).unwrap();
         assert!(!pane_id.is_empty());
         assert!(pane_id.starts_with("pane-"));
         assert_eq!(mgr.pane_count(), 1);
@@ -560,6 +584,7 @@ mod tests {
     fn test_launch_agent_limit_reached() {
         use crate::terminal::BuiltinLaunchConfig;
         let mut mgr = PaneManager::new();
+        let repo_root = std::env::temp_dir();
         for i in 0..4 {
             let config = BuiltinLaunchConfig {
                 command: "/usr/bin/true".to_string(),
@@ -570,7 +595,7 @@ mod tests {
                 agent_color: AgentColor::Green,
                 env_vars: HashMap::new(),
             };
-            mgr.launch_agent(config, 24, 80).unwrap();
+            mgr.launch_agent(&repo_root, config, 24, 80).unwrap();
         }
         assert_eq!(mgr.pane_count(), 4);
 
@@ -584,7 +609,7 @@ mod tests {
             agent_color: AgentColor::Red,
             env_vars: HashMap::new(),
         };
-        let result = mgr.launch_agent(config, 24, 80);
+        let result = mgr.launch_agent(&repo_root, config, 24, 80);
         assert!(result.is_err());
         match result.unwrap_err() {
             TerminalError::PaneLimitReached { max } => assert_eq!(max, 4),
@@ -616,6 +641,7 @@ mod tests {
     fn test_launch_agent_sets_active_pane() {
         use crate::terminal::BuiltinLaunchConfig;
         let mut mgr = PaneManager::new();
+        let repo_root = std::env::temp_dir();
         let config1 = BuiltinLaunchConfig {
             command: "/usr/bin/true".to_string(),
             args: vec![],
@@ -625,7 +651,7 @@ mod tests {
             agent_color: AgentColor::Green,
             env_vars: HashMap::new(),
         };
-        let pane_id1 = mgr.launch_agent(config1, 24, 80).unwrap();
+        let pane_id1 = mgr.launch_agent(&repo_root, config1, 24, 80).unwrap();
 
         let config2 = BuiltinLaunchConfig {
             command: "/usr/bin/true".to_string(),
@@ -636,7 +662,7 @@ mod tests {
             agent_color: AgentColor::Blue,
             env_vars: HashMap::new(),
         };
-        let pane_id2 = mgr.launch_agent(config2, 24, 80).unwrap();
+        let pane_id2 = mgr.launch_agent(&repo_root, config2, 24, 80).unwrap();
 
         assert_ne!(pane_id1, pane_id2);
         // Active pane should be the latest one
@@ -671,6 +697,29 @@ mod tests {
         assert_eq!(result, Some("pane-new".to_string()));
     }
 
+    #[test]
+    fn test_index_path_for_repo_is_scoped_and_safe() {
+        let tmp = TempDir::new().unwrap();
+        let repo_a = tmp.path().join("repo-a");
+        let repo_b = tmp.path().join("repo-b");
+        fs::create_dir_all(&repo_a).unwrap();
+        fs::create_dir_all(&repo_b).unwrap();
+
+        let path_a = PaneManager::index_path_for_repo(&repo_a).unwrap();
+        let path_b = PaneManager::index_path_for_repo(&repo_b).unwrap();
+        assert_ne!(path_a, path_b);
+
+        // Ensure the file name is safe for common filesystems (no base64 punctuation).
+        let name = path_a.file_name().unwrap().to_string_lossy();
+        assert!(!name.contains('/'));
+        assert!(!name.contains('+'));
+        assert!(!name.contains('='));
+
+        // Ensure indices live under ~/.gwt/terminals/index/.
+        let dir = path_a.parent().unwrap();
+        assert_eq!(dir.file_name().and_then(|s| s.to_str()), Some("index"));
+    }
+
     // --- 26. load nonexistent branch returns None ---
 
     #[test]
@@ -688,6 +737,7 @@ mod tests {
     fn test_find_pane_index_by_branch_found() {
         use crate::terminal::BuiltinLaunchConfig;
         let mut mgr = PaneManager::new();
+        let repo_root = std::env::temp_dir();
         let config1 = BuiltinLaunchConfig {
             command: "/usr/bin/true".to_string(),
             args: vec![],
@@ -697,7 +747,7 @@ mod tests {
             agent_color: AgentColor::Green,
             env_vars: HashMap::new(),
         };
-        mgr.launch_agent(config1, 24, 80).unwrap();
+        mgr.launch_agent(&repo_root, config1, 24, 80).unwrap();
 
         let config2 = BuiltinLaunchConfig {
             command: "/usr/bin/true".to_string(),
@@ -708,7 +758,7 @@ mod tests {
             agent_color: AgentColor::Blue,
             env_vars: HashMap::new(),
         };
-        mgr.launch_agent(config2, 24, 80).unwrap();
+        mgr.launch_agent(&repo_root, config2, 24, 80).unwrap();
 
         assert_eq!(mgr.find_pane_index_by_branch("feature/alpha"), Some(0));
         assert_eq!(mgr.find_pane_index_by_branch("feature/beta"), Some(1));
