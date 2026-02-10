@@ -16,12 +16,14 @@
   import LaunchProgressModal from "./lib/components/LaunchProgressModal.svelte";
   import MigrationModal from "./lib/components/MigrationModal.svelte";
   import CleanupModal from "./lib/components/CleanupModal.svelte";
+  import { formatWindowTitle, getAppVersionSafe } from "./lib/windowTitle";
 
   interface MenuActionPayload {
     action: string;
   }
 
   let projectPath: string | null = $state(null);
+  let appVersion: string | null = $state(null);
   let sidebarVisible: boolean = $state(true);
   let showAgentLaunch: boolean = $state(false);
   let showCleanupModal: boolean = $state(false);
@@ -107,8 +109,20 @@
     return () => { cancelled = true; if (unlisten) unlisten(); };
   });
 
+  // Best-effort: read app version from Tauri runtime (web preview will ignore).
+  $effect(() => {
+    let cancelled = false;
+    (async () => {
+      const v = await getAppVersionSafe();
+      if (cancelled) return;
+      appVersion = v;
+    })();
+    return () => { cancelled = true; };
+  });
+
   $effect(() => {
     void projectPath;
+    void appVersion;
     void setWindowTitle();
   });
 
@@ -191,7 +205,11 @@
   }
 
   async function setWindowTitle() {
-    const title = projectPath ? `gwt - ${projectPath}` : "gwt";
+    const title = formatWindowTitle({
+      appName: "gwt",
+      version: appVersion,
+      projectPath,
+    });
 
     // Document title also covers non-tauri contexts (e.g. web preview).
     document.title = title;
