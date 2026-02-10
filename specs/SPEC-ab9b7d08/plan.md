@@ -27,4 +27,3 @@
 - unit test（Vitest）でタイトルフォーマットを検証する
 - `pnpm -C gwt-gui test` が成功すること
 - `pnpm -C gwt-gui check`（svelte-check）でエラー・警告がないこと
-
