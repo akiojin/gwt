@@ -144,30 +144,6 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
 
     let window = build_window_submenu(app, state)?;
 
-    let settings_prefs = MenuItem::with_id(
-        app,
-        MENU_ID_SETTINGS_PREFERENCES,
-        "Preferences...",
-        true,
-        Some("CmdOrCtrl+,"),
-    )?;
-    let settings = SubmenuBuilder::new(app, "Settings")
-        .item(&settings_prefs)
-        .build()?;
-
-    let help_about = MenuItem::with_id(app, MENU_ID_HELP_ABOUT, "About gwt", true, None::<&str>)?;
-    let help = SubmenuBuilder::new(app, "Help").item(&help_about).build()?;
-
-    menu.append(&file)?;
-    menu.append(&edit)?;
-    menu.append(&view)?;
-    menu.append(&git)?;
-    menu.append(&window)?;
-    menu.append(&settings)?;
-    menu.append(&help)?;
-    Ok(menu)
-}
-
     let debug_os_env = MenuItem::with_id(
         app,
         MENU_ID_DEBUG_OS_ENV,
