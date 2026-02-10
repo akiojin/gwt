@@ -1,11 +1,14 @@
 <script lang="ts">
   import type { Tab, BranchInfo, ProjectInfo, LaunchAgentRequest } from "./lib/types";
-  import MenuBar from "./lib/components/MenuBar.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import MainArea from "./lib/components/MainArea.svelte";
   import StatusBar from "./lib/components/StatusBar.svelte";
   import OpenProject from "./lib/components/OpenProject.svelte";
   import AgentLaunchForm from "./lib/components/AgentLaunchForm.svelte";
+
+  interface MenuActionPayload {
+    action: string;
+  }
 
   let projectPath: string | null = $state(null);
   let sidebarVisible: boolean = $state(true);
@@ -59,6 +62,37 @@
         worktreesEventAvailable = true;
       } catch {
         worktreesEventAvailable = false;
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  });
+
+  // Best-effort: close agent tabs when the backend closes the pane.
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen<{ pane_id: string }>(
+          "terminal-closed",
+          (event) => {
+            removeTabLocal(`agent-${event.payload.pane_id}`);
+          }
+        );
+
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+      } catch (err) {
+        console.error("Failed to setup terminal closed listener:", err);
       }
     })();
 
@@ -184,9 +218,21 @@
     }
   }
 
-  async function handleTabClose(tabId: string) {
+  function removeTabLocal(tabId: string) {
     const idx = tabs.findIndex((t) => t.id === tabId);
-    const tab = idx >= 0 ? tabs[idx] : undefined;
+    if (idx < 0) return;
+
+    const nextTabs = tabs.filter((t) => t.id !== tabId);
+    tabs = nextTabs;
+
+    if (activeTabId !== tabId) return;
+    const fallback =
+      nextTabs[idx] ?? nextTabs[idx - 1] ?? nextTabs[nextTabs.length - 1] ?? null;
+    activeTabId = fallback?.id ?? "";
+  }
+
+  async function handleTabClose(tabId: string) {
+    const tab = tabs.find((t) => t.id === tabId);
     if (tab?.paneId) {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -196,13 +242,7 @@
       }
     }
 
-    const nextTabs = tabs.filter((t) => t.id !== tabId);
-    tabs = nextTabs;
-
-    if (activeTabId !== tabId) return;
-    const fallback =
-      nextTabs[idx] ?? nextTabs[idx - 1] ?? nextTabs[nextTabs.length - 1] ?? null;
-    activeTabId = fallback?.id ?? "";
+    removeTabLocal(tabId);
   }
 
   function handleTabSelect(tabId: string) {
@@ -241,18 +281,30 @@
         break;
       }
       case "close-project":
-        projectPath = null;
-        tabs = [{ id: "summary", label: "Session Summary", type: "summary" }];
-        activeTabId = "summary";
-        selectedBranch = null;
-        currentBranch = "";
-        sidebarRefreshKey = 0;
+        {
+          // Clear backend state (window-scoped) best-effort.
+          try {
+            const { invoke } = await import("@tauri-apps/api/core");
+            await invoke("close_project");
+          } catch {
+            // Ignore: not available outside Tauri runtime.
+          }
+
+          projectPath = null;
+          tabs = [{ id: "summary", label: "Session Summary", type: "summary" }];
+          activeTabId = "summary";
+          selectedBranch = null;
+          currentBranch = "";
+          sidebarRefreshKey = 0;
+        }
         break;
       case "toggle-sidebar":
         sidebarVisible = !sidebarVisible;
         break;
       case "launch-agent":
-        showAgentLaunch = true;
+        if (projectPath) {
+          showAgentLaunch = true;
+        }
         break;
       case "open-settings":
         openSettingsTab();
@@ -271,13 +323,41 @@
         break;
     }
   }
+
+  // Native menubar integration (Tauri emits "menu-action" to the focused window).
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen<MenuActionPayload>("menu-action", (event) => {
+          void handleMenuAction(event.payload.action);
+        });
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+      } catch {
+        // Ignore: not available outside Tauri runtime.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  });
 </script>
 
 {#if projectPath === null}
   <OpenProject onOpen={handleProjectOpen} />
 {:else}
   <div class="app-layout">
-    <MenuBar {projectPath} onAction={handleMenuAction} />
     <div class="app-body">
       {#if sidebarVisible}
         <Sidebar

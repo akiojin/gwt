@@ -31,7 +31,10 @@ pub use migration::{
     backup_broken_file, ensure_config_dir, get_cleanup_candidates, migrate_json_to_toml,
     migrate_yaml_to_toml, write_atomic, CleanupCandidate,
 };
-pub use profile::{AISettings, Profile, ProfilesConfig, ResolvedAISettings};
+pub use profile::{
+    AISettings, ActiveAISettingsResolution, ActiveAISettingsSource, Profile, ProfilesConfig,
+    ResolvedAISettings,
+};
 pub use session::{get_session_for_branch, load_sessions_from_worktrees, AgentStatus, Session};
 pub use settings::Settings;
 pub use tools::{AgentType, CustomCodingAgent, ModeArgs, ModelDef, ToolsConfig};

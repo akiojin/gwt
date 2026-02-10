@@ -1,5 +1,12 @@
 <script lang="ts">
-  import type { AgentConfig, AgentInfo, DockerContext, LaunchAgentRequest } from "../types";
+  import type {
+    AgentConfig,
+    AgentInfo,
+    BranchInfo,
+    BranchSuggestResult,
+    DockerContext,
+    LaunchAgentRequest,
+  } from "../types";
 
   let {
     projectPath,
@@ -88,7 +95,26 @@
   const existingBranch: string = (() => selectedBranch)();
   // "New Branch" fields are editable by the user.
   let baseBranch: string = $state(existingBranch);
-  let newBranch: string = $state("");
+
+  type BranchPrefix = "feature/" | "bugfix/" | "hotfix/" | "release/";
+  const BRANCH_PREFIXES: BranchPrefix[] = ["feature/", "bugfix/", "hotfix/", "release/"];
+
+  let newBranchPrefix: BranchPrefix = $state("feature/" as BranchPrefix);
+  let newBranchSuffix: string = $state("");
+  let newBranchFullName = $derived(buildNewBranchName(newBranchPrefix, newBranchSuffix));
+
+  // Base Branch options (Worktree + Remote)
+  let baseBranchLocalOptions: string[] = $state([]);
+  let baseBranchRemoteOptions: string[] = $state([]);
+  let baseBranchOptionsLoading: boolean = $state(false);
+  let baseBranchOptionsError: string | null = $state(null);
+
+  // AI Branch Suggest modal (TUI parity)
+  let suggestOpen: boolean = $state(false);
+  let suggestDescription: string = $state("");
+  let suggestLoading: boolean = $state(false);
+  let suggestError: string | null = $state(null);
+  let suggestSuggestions: string[] = $state([]);
 
   let loading: boolean = $state(true);
   let launching: boolean = $state(false);
@@ -317,6 +343,121 @@
     return { env, error: null };
   }
 
+  function buildNewBranchName(prefix: BranchPrefix, suffix: string): string {
+    const s = suffix.trim();
+    if (!s) return "";
+    return `${prefix}${s}`;
+  }
+
+  function splitBranchNamePrefix(input: string): { prefix: BranchPrefix; suffix: string } | null {
+    const trimmed = input.trim();
+    for (const p of BRANCH_PREFIXES) {
+      if (trimmed.startsWith(p)) {
+        return { prefix: p, suffix: trimmed.slice(p.length) };
+      }
+    }
+    return null;
+  }
+
+  function setNewBranchFromFullName(fullName: string): boolean {
+    const parsed = splitBranchNamePrefix(fullName);
+    if (!parsed) {
+      suggestError = "Invalid suggestion prefix.";
+      return false;
+    }
+    suggestError = null;
+    newBranchPrefix = parsed.prefix;
+    newBranchSuffix = parsed.suffix;
+    return true;
+  }
+
+  function handleNewBranchSuffixInput(raw: string) {
+    // When users paste a full branch name (e.g., "feature/foo"), split it and keep suffix editable.
+    const parsed = splitBranchNamePrefix(raw);
+    if (parsed) {
+      newBranchPrefix = parsed.prefix;
+      newBranchSuffix = parsed.suffix;
+      return;
+    }
+    newBranchSuffix = raw;
+  }
+
+  async function loadBaseBranchOptions() {
+    baseBranchOptionsLoading = true;
+    baseBranchOptionsError = null;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const [local, remote] = await Promise.all([
+        invoke<BranchInfo[]>("list_worktree_branches", { projectPath }),
+        invoke<BranchInfo[]>("list_remote_branches", { projectPath }),
+      ]);
+      baseBranchLocalOptions = (local ?? []).map((b) => b.name);
+      baseBranchRemoteOptions = (remote ?? []).map((b) => b.name);
+    } catch (err) {
+      baseBranchOptionsError = `Failed to load base branches: ${toErrorMessage(err)}`;
+      baseBranchLocalOptions = [];
+      baseBranchRemoteOptions = [];
+    } finally {
+      baseBranchOptionsLoading = false;
+    }
+  }
+
+  $effect(() => {
+    void projectPath;
+    void branchMode;
+    if (!projectPath || branchMode !== "new") return;
+    void loadBaseBranchOptions();
+  });
+
+  function openSuggestModal() {
+    suggestError = null;
+    suggestSuggestions = [];
+    suggestLoading = false;
+    suggestOpen = true;
+  }
+
+  function closeSuggestModal() {
+    suggestOpen = false;
+  }
+
+  async function generateBranchSuggestions() {
+    suggestError = null;
+    suggestSuggestions = [];
+    const description = suggestDescription.trim();
+    if (!description) {
+      suggestError = "Description is required.";
+      return;
+    }
+
+    suggestLoading = true;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const result = await invoke<BranchSuggestResult>("suggest_branch_names", {
+        description,
+      });
+
+      if (result.status === "ok") {
+        const suggestions = (result.suggestions ?? [])
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0);
+        if (suggestions.length !== 3) {
+          suggestSuggestions = [];
+          suggestError = "Failed to generate suggestions.";
+          return;
+        }
+        suggestSuggestions = suggestions;
+      } else if (result.status === "ai-not-configured") {
+        suggestError = "AI suggestions are unavailable.";
+      } else {
+        suggestError = result.error || "Failed to generate suggestions.";
+      }
+    } catch (err) {
+      suggestError = toErrorMessage(err);
+    } finally {
+      suggestLoading = false;
+    }
+  }
+
   async function loadAgentVersions(agentId: string) {
     versionsLoading = true;
     versionsError = null;
@@ -521,11 +662,12 @@
         return;
       }
 
-      if (!baseBranch.trim() || !newBranch.trim()) return;
-      request.branch = newBranch.trim();
+      const fullName = newBranchFullName.trim();
+      if (!baseBranch.trim() || !fullName) return;
+      request.branch = fullName;
       await onLaunch({
         ...request,
-        createBranch: { name: newBranch.trim(), base: baseBranch.trim() },
+        createBranch: { name: fullName, base: baseBranch.trim() },
       });
       onClose();
     } catch (err) {
@@ -537,6 +679,10 @@
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") {
+      if (suggestOpen) {
+        closeSuggestModal();
+        return;
+      }
       onClose();
     }
   }
@@ -563,29 +709,25 @@
 
         <div class="field">
           <label for="agent-select">Agent</label>
-          <div class="agent-cards">
-            {#each agents as agent}
-              <button
-                class="agent-card"
-                class:selected={selectedAgent === agent.id}
-                class:unavailable={!agent.available}
-                disabled={!agent.available}
-                onclick={() => (selectedAgent = agent.id)}
-              >
-                <span class="agent-name">{agent.name}</span>
-                <span class="agent-type">{agent.version}</span>
-                {#if !agent.available}
-                  <span class="agent-status">Unavailable</span>
-                {:else if agent.version === "bunx" || agent.version === "npx"}
-                  <span class="agent-status">
-                    Not installed ({agent.version})
-                  </span>
-                {:else if !agent.authenticated}
-                  <span class="agent-status">Not authenticated</span>
-                {/if}
-              </button>
+          <select id="agent-select" bind:value={selectedAgent}>
+            <option value="" disabled>Select an agent...</option>
+            {#each agents as agent (agent.id)}
+              <option value={agent.id} disabled={!agent.available}>
+                {agent.name} ({agent.version}{agent.available ? "" : ", Unavailable"})
+              </option>
             {/each}
-          </div>
+          </select>
+          {#if selectedAgentInfo}
+            {#if !selectedAgentInfo.available}
+              <span class="field-hint warn">Unavailable</span>
+            {:else if selectedAgentInfo.version === "bunx" || selectedAgentInfo.version === "npx"}
+              <span class="field-hint warn">
+                Not installed. Launch will use {selectedAgentInfo.version}.
+              </span>
+            {:else if !selectedAgentInfo.authenticated}
+              <span class="field-hint warn">Not authenticated</span>
+            {/if}
+          {/if}
         </div>
 
         {#if supportsModel}
@@ -738,6 +880,19 @@
           {/if}
         </div>
 
+        {#if supportsReasoning}
+          <div class="field">
+            <label for="reasoning-select">Reasoning</label>
+            <select id="reasoning-select" bind:value={reasoningLevel}>
+              <option value="">Default</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="xhigh">xhigh</option>
+            </select>
+          </div>
+        {/if}
+
         <div class="field">
           <span class="field-label" id="session-mode-label">Session</span>
           <div class="mode-toggle" role="group" aria-labelledby="session-mode-label">
@@ -787,19 +942,6 @@
             <span>Skip Permissions</span>
           </label>
         </div>
-
-        {#if supportsReasoning}
-          <div class="field">
-            <label for="reasoning-select">Reasoning</label>
-            <select id="reasoning-select" bind:value={reasoningLevel}>
-              <option value="">Default</option>
-              <option value="low">low</option>
-              <option value="medium">medium</option>
-              <option value="high">high</option>
-              <option value="xhigh">xhigh</option>
-            </select>
-          </div>
-        {/if}
 
         {#if supportsCollaboration}
           <div class="field">
@@ -876,22 +1018,60 @@
           </div>
         {:else}
           <div class="field">
-            <label for="base-branch-input">Base Branch</label>
-            <input
-              id="base-branch-input"
-              type="text"
+            <label for="base-branch-select">Base Branch</label>
+            <select
+              id="base-branch-select"
               bind:value={baseBranch}
-              placeholder="e.g., develop or origin/develop"
-            />
+              disabled={baseBranchOptionsLoading}
+            >
+              {#if !baseBranch.trim()}
+                <option value="" disabled>Select base branch...</option>
+              {/if}
+              {#if baseBranch.trim() &&
+                !baseBranchLocalOptions.includes(baseBranch) &&
+                !baseBranchRemoteOptions.includes(baseBranch)}
+                <option value={baseBranch}>{baseBranch}</option>
+              {/if}
+              <optgroup label="Local (Worktrees)">
+                {#each baseBranchLocalOptions as name (name)}
+                  <option value={name}>{name}</option>
+                {/each}
+              </optgroup>
+              <optgroup label="Remote">
+                {#each baseBranchRemoteOptions as name (name)}
+                  <option value={name}>{name}</option>
+                {/each}
+              </optgroup>
+            </select>
+            {#if baseBranchOptionsLoading}
+              <span class="field-hint">Loading branches...</span>
+            {:else if baseBranchOptionsError}
+              <span class="field-hint warn">{baseBranchOptionsError}</span>
+            {/if}
           </div>
           <div class="field">
-            <label for="new-branch-input">New Branch Name</label>
-            <input
-              id="new-branch-input"
-              type="text"
-              bind:value={newBranch}
-              placeholder="e.g., feature/my-change"
-            />
+            <label for="new-branch-suffix-input">New Branch Name</label>
+            <div class="branch-name-row">
+              <select id="new-branch-prefix-select" bind:value={newBranchPrefix}>
+                {#each BRANCH_PREFIXES as p (p)}
+                  <option value={p}>{p}</option>
+                {/each}
+              </select>
+              <input
+                id="new-branch-suffix-input"
+                type="text"
+                value={newBranchSuffix}
+                oninput={(e) =>
+                  handleNewBranchSuffixInput((e.target as HTMLInputElement).value)}
+                placeholder="e.g., my-change"
+              />
+              <button class="suggest-btn" type="button" onclick={openSuggestModal}>
+                Suggest...
+              </button>
+            </div>
+            <span class="field-hint">
+              Full name: {newBranchFullName.trim() ? newBranchFullName : "(empty)"}
+            </span>
           </div>
         {/if}
 
@@ -980,7 +1160,7 @@
             (needsResumeSessionId && !resumeSessionId.trim()) ||
             (branchMode === "existing"
               ? !existingBranch.trim()
-              : !baseBranch.trim() || !newBranch.trim())
+              : !baseBranch.trim() || !newBranchFullName.trim())
           }
           onclick={handleLaunch}
         >
@@ -989,6 +1169,79 @@
       </div>
     {/if}
   </div>
+
+  {#if suggestOpen}
+    <!-- Nested modal: stop propagation to avoid closing the Launch Agent dialog -->
+    <div
+      class="overlay suggest-overlay"
+      onclick={(e) => {
+        e.stopPropagation();
+        if (e.target !== e.currentTarget) return;
+        closeSuggestModal();
+      }}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Suggest Branch Name"
+    >
+      <div class="dialog suggest-dialog">
+        <div class="dialog-header">
+          <h2>Suggest Branch Name</h2>
+          <button class="close-btn" type="button" onclick={closeSuggestModal}>[x]</button>
+        </div>
+
+        <div class="dialog-body">
+          {#if suggestError}
+            <div class="error">{suggestError}</div>
+          {/if}
+
+          <div class="field">
+            <label for="suggest-desc-input">Description</label>
+            <textarea
+              id="suggest-desc-input"
+              rows="3"
+              bind:value={suggestDescription}
+              placeholder="What is this branch for?"
+            ></textarea>
+          </div>
+
+          {#if suggestSuggestions.length > 0}
+            <div class="field">
+              <span class="field-label">Suggestions</span>
+              <div class="suggestion-list">
+                {#each suggestSuggestions as s (s)}
+                  <button
+                    class="suggestion-item"
+                    type="button"
+                    onclick={() => {
+                      if (setNewBranchFromFullName(s)) {
+                        closeSuggestModal();
+                      }
+                    }}
+                  >
+                    <span class="mono">{s}</span>
+                  </button>
+                {/each}
+              </div>
+            </div>
+          {/if}
+        </div>
+
+        <div class="dialog-footer">
+          <button class="btn btn-cancel" type="button" onclick={closeSuggestModal}>
+            Close
+          </button>
+          <button
+            class="btn btn-launch"
+            type="button"
+            disabled={suggestLoading}
+            onclick={generateBranchSuggestions}
+          >
+            {suggestLoading ? "Generating..." : "Generate"}
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -1102,55 +1355,8 @@
     color: rgb(255, 160, 160);
   }
 
-  .agent-cards {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .agent-card {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 14px;
-    background: var(--bg-primary);
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    cursor: pointer;
-    font-family: inherit;
-    color: var(--text-primary);
-    text-align: left;
-    transition: border-color 0.15s;
-  }
-
-  .agent-card:hover:not(:disabled) {
-    border-color: var(--accent);
-  }
-
-  .agent-card.selected {
-    border-color: var(--accent);
-    background: var(--bg-surface);
-  }
-
-  .agent-card.unavailable {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .agent-name {
-    font-size: 13px;
-    font-weight: 500;
-  }
-
-  .agent-type {
-    font-size: 11px;
-    color: var(--text-muted);
-    margin-left: auto;
-  }
-
-  .agent-status {
-    font-size: 10px;
-    color: var(--red);
+  .mono {
+    font-family: monospace;
   }
 
   .field input,
@@ -1218,6 +1424,78 @@
 
   .glm-field input:focus {
     border-color: var(--accent);
+  }
+
+  .branch-name-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .branch-name-row select {
+    width: 120px;
+    flex: 0 0 auto;
+  }
+
+  .branch-name-row input {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .suggest-btn {
+    flex: 0 0 auto;
+    padding: 8px 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+    transition: border-color 0.15s, background 0.15s;
+  }
+
+  .suggest-btn:hover {
+    border-color: var(--accent);
+    background: var(--bg-surface);
+  }
+
+  .suggest-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .suggest-overlay {
+    z-index: 1100;
+  }
+
+  .suggest-dialog {
+    width: 520px;
+    max-width: 92vw;
+  }
+
+  .suggestion-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .suggestion-item {
+    padding: 10px 12px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    cursor: pointer;
+    text-align: left;
+    color: var(--text-primary);
+    font-family: inherit;
+    transition: border-color 0.15s, background 0.15s;
+  }
+
+  .suggestion-item:hover {
+    border-color: var(--accent);
+    background: var(--bg-surface);
   }
 
   .check-row {

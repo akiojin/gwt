@@ -10,6 +10,9 @@ use gwt_core::docker::{
 };
 use gwt_core::git::Remote;
 use gwt_core::terminal::pane::PaneStatus;
+use gwt_core::terminal::runner::{
+    build_fallback_launch, choose_fallback_runner, resolve_command_path,
+};
 use gwt_core::terminal::{AgentColor, BuiltinLaunchConfig};
 use gwt_core::worktree::WorktreeManager;
 use serde::Deserialize;
@@ -28,6 +31,12 @@ use which::which;
 pub struct TerminalOutputPayload {
     pub pane_id: String,
     pub data: Vec<u8>,
+}
+
+/// Terminal closed event payload sent to the frontend
+#[derive(Debug, Clone, Serialize)]
+pub struct TerminalClosedPayload {
+    pub pane_id: String,
 }
 
 /// Worktree change event payload sent to the frontend
@@ -207,42 +216,6 @@ pub(crate) fn builtin_agent_def(agent_id: &str) -> Result<BuiltinAgentDef, Strin
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FallbackRunner {
-    Bunx,
-    Npx,
-}
-
-pub(crate) fn is_node_modules_bin(path: &str) -> bool {
-    // Cross-platform substring match is fine here; this is only used to avoid
-    // project-local bunx/npx wrappers per SPEC-3b0ed29b FR-002a.
-    path.contains("node_modules/.bin") || path.contains("node_modules\\.bin")
-}
-
-pub(crate) fn choose_fallback_runner(
-    _bunx_path: Option<&str>,
-    _npx_available: bool,
-) -> Option<FallbackRunner> {
-    match _bunx_path {
-        Some(path) if !is_node_modules_bin(path) => Some(FallbackRunner::Bunx),
-        Some(_) if _npx_available => Some(FallbackRunner::Npx),
-        _ => None,
-    }
-}
-
-pub(crate) fn build_fallback_launch(
-    runner: FallbackRunner,
-    package: &str,
-) -> (String, Vec<String>) {
-    match runner {
-        FallbackRunner::Bunx => ("bunx".to_string(), vec![package.to_string()]),
-        FallbackRunner::Npx => (
-            "npx".to_string(),
-            vec!["--yes".to_string(), package.to_string()],
-        ),
-    }
-}
-
 fn normalize_agent_version(version: Option<&str>) -> Option<String> {
     let v = version?.trim();
     if v.is_empty() {
@@ -338,13 +311,14 @@ fn resolve_agent_launch_command(
     // Force npm runner when a specific version/dist-tag is provided.
     if let Some(v) = requested.as_deref() {
         if !requested_is_installed {
-            let bunx_path = which("bunx").ok().map(|p| p.to_string_lossy().to_string());
-            let npx_available = which("npx").is_ok();
+            let bunx_path = resolve_command_path("bunx");
+            let npx_path = resolve_command_path("npx");
 
-            let runner = choose_fallback_runner(bunx_path.as_deref(), npx_available)
+            let runner = choose_fallback_runner(bunx_path.as_deref(), npx_path.is_some())
                 .ok_or_else(|| "bunx/npx is not available".to_string())?;
             let package = build_bunx_package_spec(def.bunx_package, Some(v));
-            let (cmd, args) = build_fallback_launch(runner, &package);
+            let (cmd, args) =
+                build_fallback_launch(runner, &package, bunx_path.as_deref(), npx_path.as_deref());
             return Ok(ResolvedAgentLaunchCommand {
                 command: cmd.clone(),
                 args,
@@ -369,14 +343,15 @@ fn resolve_agent_launch_command(
 
     // Installed was requested but missing: fall back to npm runner with latest.
     // Auto mode also lands here when installed is missing.
-    let bunx_path = which("bunx").ok().map(|p| p.to_string_lossy().to_string());
-    let npx_available = which("npx").is_ok();
+    let bunx_path = resolve_command_path("bunx");
+    let npx_path = resolve_command_path("npx");
 
-    let runner = choose_fallback_runner(bunx_path.as_deref(), npx_available)
+    let runner = choose_fallback_runner(bunx_path.as_deref(), npx_path.is_some())
         .ok_or_else(|| "Agent is not installed and bunx/npx is not available".to_string())?;
 
     let package = build_bunx_package_spec(def.bunx_package, None);
-    let (cmd, args) = build_fallback_launch(runner, &package);
+    let (cmd, args) =
+        build_fallback_launch(runner, &package, bunx_path.as_deref(), npx_path.as_deref());
     let tool_version = if requested_is_installed {
         "installed".to_string()
     } else {
@@ -783,20 +758,17 @@ fn launch_with_config(
 /// Launch a new terminal pane with an agent
 #[tauri::command]
 pub fn launch_terminal(
+    window: tauri::Window,
     agent_name: String,
     branch: String,
     state: State<AppState>,
     app_handle: AppHandle,
 ) -> Result<String, String> {
     let project_root = {
-        let project_path = state
-            .project_path
-            .lock()
-            .map_err(|e| format!("Failed to lock state: {}", e))?;
-        match project_path.as_ref() {
-            Some(p) => PathBuf::from(p),
-            None => return Err("No project opened".to_string()),
-        }
+        let Some(p) = state.project_for_window(window.label()) else {
+            return Err("No project opened".to_string());
+        };
+        PathBuf::from(p)
     };
 
     let repo_path = resolve_repo_path_for_project_root(&project_root)?;
@@ -818,18 +790,26 @@ pub fn launch_terminal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gwt_core::terminal::runner::FallbackRunner;
+    use std::path::Path;
 
     #[test]
     fn is_node_modules_bin_matches_common_paths() {
-        assert!(is_node_modules_bin("/repo/node_modules/.bin/bunx"));
-        assert!(is_node_modules_bin("C:\\repo\\node_modules\\.bin\\bunx"));
-        assert!(!is_node_modules_bin("/usr/local/bin/bunx"));
+        assert!(gwt_core::terminal::runner::is_node_modules_bin(Path::new(
+            "/repo/node_modules/.bin/bunx"
+        )));
+        assert!(gwt_core::terminal::runner::is_node_modules_bin(Path::new(
+            "C:\\repo\\node_modules\\.bin\\bunx"
+        )));
+        assert!(!gwt_core::terminal::runner::is_node_modules_bin(Path::new(
+            "/usr/local/bin/bunx"
+        )));
     }
 
     #[test]
     fn choose_fallback_runner_prefers_bunx_when_not_local() {
         assert_eq!(
-            choose_fallback_runner(Some("/usr/local/bin/bunx"), true),
+            choose_fallback_runner(Some(Path::new("/usr/local/bin/bunx")), true),
             Some(FallbackRunner::Bunx)
         );
     }
@@ -837,7 +817,7 @@ mod tests {
     #[test]
     fn choose_fallback_runner_uses_npx_when_bunx_is_local_node_modules() {
         assert_eq!(
-            choose_fallback_runner(Some("/repo/node_modules/.bin/bunx"), true),
+            choose_fallback_runner(Some(Path::new("/repo/node_modules/.bin/bunx")), true),
             Some(FallbackRunner::Npx)
         );
     }
@@ -845,22 +825,40 @@ mod tests {
     #[test]
     fn choose_fallback_runner_none_when_only_local_bunx_and_no_npx() {
         assert_eq!(
-            choose_fallback_runner(Some("/repo/node_modules/.bin/bunx"), false),
+            choose_fallback_runner(Some(Path::new("/repo/node_modules/.bin/bunx")), false),
             None
         );
     }
 
     #[test]
+    fn choose_fallback_runner_uses_npx_when_bunx_is_missing() {
+        assert_eq!(
+            choose_fallback_runner(None, true),
+            Some(FallbackRunner::Npx)
+        );
+    }
+
+    #[test]
     fn build_fallback_launch_bunx_uses_package_as_first_arg() {
-        let (cmd, args) = build_fallback_launch(FallbackRunner::Bunx, "@openai/codex@latest");
-        assert_eq!(cmd, "bunx");
+        let (cmd, args) = build_fallback_launch(
+            FallbackRunner::Bunx,
+            "@openai/codex@latest",
+            Some(Path::new("/usr/local/bin/bunx")),
+            None,
+        );
+        assert_eq!(cmd, "/usr/local/bin/bunx");
         assert_eq!(args, vec!["@openai/codex@latest".to_string()]);
     }
 
     #[test]
     fn build_fallback_launch_npx_uses_yes_flag() {
-        let (cmd, args) = build_fallback_launch(FallbackRunner::Npx, "@openai/codex@latest");
-        assert_eq!(cmd, "npx");
+        let (cmd, args) = build_fallback_launch(
+            FallbackRunner::Npx,
+            "@openai/codex@latest",
+            None,
+            Some(Path::new("/usr/bin/npx")),
+        );
+        assert_eq!(cmd, "/usr/bin/npx");
         assert_eq!(
             args,
             vec!["--yes".to_string(), "@openai/codex@latest".to_string()]
@@ -925,6 +923,20 @@ mod tests {
         );
         assert!(build_agent_model_args("codex", None).is_empty());
         assert!(build_agent_model_args("codex", Some("  ")).is_empty());
+    }
+
+    #[test]
+    fn is_enter_only_accepts_cr_lf_variants() {
+        assert!(is_enter_only(b"\r"));
+        assert!(is_enter_only(b"\n"));
+        assert!(is_enter_only(b"\r\n"));
+    }
+
+    #[test]
+    fn is_enter_only_rejects_non_enter_input() {
+        assert!(!is_enter_only(b""));
+        assert!(!is_enter_only(b"a"));
+        assert!(!is_enter_only(b"\nq"));
     }
 
     fn make_request(agent_id: &str) -> LaunchAgentRequest {
@@ -1073,19 +1085,16 @@ mod tests {
 /// Launch an agent with gwt semantics (worktree + profiles)
 #[tauri::command]
 pub fn launch_agent(
+    window: tauri::Window,
     request: LaunchAgentRequest,
     state: State<AppState>,
     app_handle: AppHandle,
 ) -> Result<String, String> {
     let project_root = {
-        let project_path = state
-            .project_path
-            .lock()
-            .map_err(|e| format!("Failed to lock state: {}", e))?;
-        match project_path.as_ref() {
-            Some(p) => PathBuf::from(p),
-            None => return Err("No project opened".to_string()),
-        }
+        let Some(p) = state.project_for_window(window.label()) else {
+            return Err("No project opened".to_string());
+        };
+        PathBuf::from(p)
     };
 
     let agent_id = request.agent_id.trim();
@@ -1472,18 +1481,20 @@ fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_hand
     }
 
     // Update pane status after the PTY stream ends.
-    let exit_code = if let Ok(mut manager) = state.pane_manager.lock() {
+    let (exit_code, ended) = if let Ok(mut manager) = state.pane_manager.lock() {
         if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
             let _ = pane.check_status();
-            match pane.status() {
+            let exit_code = match pane.status() {
                 PaneStatus::Completed(code) => Some(*code),
                 _ => None,
-            }
+            };
+            let ended = !matches!(pane.status(), PaneStatus::Running);
+            (exit_code, ended)
         } else {
-            None
+            (None, false)
         }
     } else {
-        None
+        (None, false)
     };
 
     // Best-effort sessionId detection and persistence.
@@ -1619,6 +1630,23 @@ fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_hand
         };
         let _ = app_handle.emit("terminal-output", &payload);
     }
+
+    if ended {
+        let msg = "\r\nPress Enter to close this tab.\r\n";
+        let bytes = msg.as_bytes();
+
+        if let Ok(mut manager) = state.pane_manager.lock() {
+            if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
+                let _ = pane.process_bytes(bytes);
+            }
+        }
+
+        let payload = TerminalOutputPayload {
+            pane_id: pane_id.clone(),
+            data: bytes.to_vec(),
+        };
+        let _ = app_handle.emit("terminal-output", &payload);
+    }
 }
 
 fn detect_session_id(
@@ -1656,22 +1684,61 @@ fn detect_session_id(
     None
 }
 
+fn is_enter_only(data: &[u8]) -> bool {
+    matches!(data, [b'\r'] | [b'\n'] | [b'\r', b'\n'])
+}
+
 /// Write data to a terminal pane
 #[tauri::command]
 pub fn write_terminal(
     pane_id: String,
     data: Vec<u8>,
     state: State<AppState>,
+    app_handle: AppHandle,
 ) -> Result<(), String> {
+    let close_requested = is_enter_only(&data);
+
     let mut manager = state
         .pane_manager
         .lock()
         .map_err(|e| format!("Failed to lock pane manager: {}", e))?;
-    let pane = manager
-        .pane_mut_by_id(&pane_id)
+
+    let should_close = {
+        let pane = manager
+            .pane_mut_by_id(&pane_id)
+            .ok_or_else(|| format!("Pane not found: {}", pane_id))?;
+
+        // Ensure we don't treat a completed pane as running due to stale status.
+        let _ = pane.check_status();
+
+        match pane.status() {
+            PaneStatus::Running => {
+                pane.write_input(&data)
+                    .map_err(|e| format!("Failed to write to terminal: {}", e))?;
+                return Ok(());
+            }
+            PaneStatus::Completed(_) | PaneStatus::Error(_) => close_requested,
+        }
+    };
+
+    if !should_close {
+        return Ok(());
+    }
+
+    let index = manager
+        .panes()
+        .iter()
+        .position(|p| p.pane_id() == pane_id)
         .ok_or_else(|| format!("Pane not found: {}", pane_id))?;
-    pane.write_input(&data)
-        .map_err(|e| format!("Failed to write to terminal: {}", e))
+
+    manager.close_pane(index);
+    let _ = app_handle.emit(
+        "terminal-closed",
+        &TerminalClosedPayload {
+            pane_id: pane_id.clone(),
+        },
+    );
+    Ok(())
 }
 
 /// Resize a terminal pane
@@ -1695,7 +1762,11 @@ pub fn resize_terminal(
 
 /// Close a terminal pane
 #[tauri::command]
-pub fn close_terminal(pane_id: String, state: State<AppState>) -> Result<(), String> {
+pub fn close_terminal(
+    pane_id: String,
+    state: State<AppState>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
     let mut manager = state
         .pane_manager
         .lock()
@@ -1708,6 +1779,12 @@ pub fn close_terminal(pane_id: String, state: State<AppState>) -> Result<(), Str
         .ok_or_else(|| format!("Pane not found: {}", pane_id))?;
 
     manager.close_pane(index);
+    let _ = app_handle.emit(
+        "terminal-closed",
+        &TerminalClosedPayload {
+            pane_id: pane_id.clone(),
+        },
+    );
     Ok(())
 }
 

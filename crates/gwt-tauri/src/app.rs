@@ -3,6 +3,7 @@
 use crate::state::AppState;
 use std::sync::atomic::Ordering;
 use tauri::Manager;
+use tauri::{Emitter, WebviewWindowBuilder};
 use tracing::info;
 
 fn should_prevent_window_close(is_quitting: bool) -> bool {
@@ -29,6 +30,9 @@ pub fn build_app(
         .setup(|_app| {
             #[cfg(not(test))]
             {
+                // Native menubar (SPEC-4470704f)
+                let _ = crate::menu::rebuild_menu(_app.handle());
+
                 // System tray (SPEC-dfb1611a FR-310〜FR-313)
                 let tray_menu = tauri::menu::Menu::new(_app)?;
                 let show_item =
@@ -85,6 +89,37 @@ pub fn build_app(
 
             Ok(())
         })
+        .on_menu_event(|app, event| {
+            let id = event.id().as_ref();
+
+            if id == crate::menu::MENU_ID_FILE_NEW_WINDOW {
+                open_new_window(app);
+                return;
+            }
+
+            if let Some(target) = crate::menu::parse_window_focus_menu_id(id) {
+                if let Some(w) = app.get_webview_window(target) {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+                let _ = crate::menu::rebuild_menu(app);
+                return;
+            }
+
+            let action = match id {
+                crate::menu::MENU_ID_FILE_OPEN_PROJECT => Some("open-project"),
+                crate::menu::MENU_ID_FILE_CLOSE_PROJECT => Some("close-project"),
+                crate::menu::MENU_ID_VIEW_TOGGLE_SIDEBAR => Some("toggle-sidebar"),
+                crate::menu::MENU_ID_VIEW_LAUNCH_AGENT => Some("launch-agent"),
+                crate::menu::MENU_ID_VIEW_LIST_TERMINALS => Some("list-terminals"),
+                crate::menu::MENU_ID_SETTINGS_PREFERENCES => Some("open-settings"),
+                crate::menu::MENU_ID_HELP_ABOUT => Some("about"),
+                _ => None,
+            };
+
+            let Some(action) = action else { return };
+            emit_menu_action(app, action);
+        })
         .on_window_event(|window, event| {
             // Keep the process alive when the user clicks the window close button (x).
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -104,6 +139,19 @@ pub fn build_app(
                 }
                 api.prevent_close();
                 let _ = window.hide();
+                let _ = crate::menu::rebuild_menu(window.app_handle());
+            }
+
+            if let tauri::WindowEvent::Focused(true) = event {
+                let _ = crate::menu::rebuild_menu(window.app_handle());
+            }
+
+            if let tauri::WindowEvent::Destroyed = event {
+                window
+                    .app_handle()
+                    .state::<AppState>()
+                    .clear_project_for_window(window.label());
+                let _ = crate::menu::rebuild_menu(window.app_handle());
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -114,11 +162,13 @@ pub fn build_app(
             crate::commands::branches::get_current_branch,
             crate::commands::project::open_project,
             crate::commands::project::create_project,
+            crate::commands::project::close_project,
             crate::commands::project::get_project_info,
             crate::commands::project::is_git_repo,
             crate::commands::docker::detect_docker_context,
             crate::commands::sessions::get_branch_quick_start,
             crate::commands::sessions::get_branch_session_summary,
+            crate::commands::branch_suggest::suggest_branch_names,
             crate::commands::terminal::launch_terminal,
             crate::commands::terminal::launch_agent,
             crate::commands::terminal::write_terminal,
@@ -134,6 +184,70 @@ pub fn build_app(
             crate::commands::profiles::get_profiles,
             crate::commands::profiles::save_profiles,
         ])
+}
+
+fn focused_window_label(app: &tauri::AppHandle<tauri::Wry>) -> String {
+    app.webview_windows()
+        .into_iter()
+        .find_map(|(label, w)| w.is_focused().ok().and_then(|f| f.then_some(label)))
+        .unwrap_or_else(|| "main".to_string())
+}
+
+fn emit_menu_action(app: &tauri::AppHandle<tauri::Wry>, action: &str) {
+    let label = focused_window_label(app);
+    let Some(window) = app
+        .get_webview_window(&label)
+        .or_else(|| app.get_webview_window("main"))
+    else {
+        return;
+    };
+
+    let _ = window.emit(
+        crate::menu::MENU_ACTION_EVENT,
+        crate::menu::MenuActionPayload {
+            action: action.to_string(),
+        },
+    );
+}
+
+fn open_new_window(app: &tauri::AppHandle<tauri::Wry>) {
+    let app = app.clone();
+    let label = format!("project-{}", uuid::Uuid::new_v4());
+
+    // NOTE: On Windows, window creation can deadlock in synchronous handlers.
+    // Create the window on a separate thread (Tauri docs).
+    std::thread::spawn(move || {
+        let mut conf = match app.config().app.windows.first() {
+            Some(c) => c.clone(),
+            None => {
+                info!(
+                    category = "tauri",
+                    event = "NewWindowConfigMissing",
+                    "No window config found; skipping new window"
+                );
+                return;
+            }
+        };
+        conf.label = label.clone();
+
+        let builder = WebviewWindowBuilder::from_config(&app, &conf);
+        let window = match builder.and_then(|b| b.build()) {
+            Ok(w) => w,
+            Err(err) => {
+                info!(
+                    category = "tauri",
+                    event = "NewWindowFailed",
+                    error = %err,
+                    "Failed to create new window"
+                );
+                return;
+            }
+        };
+
+        let _ = window.show();
+        let _ = window.set_focus();
+        let _ = crate::menu::rebuild_menu(&app);
+    });
 }
 
 pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri::RunEvent) {
