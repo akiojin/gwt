@@ -127,6 +127,47 @@ export interface DockerContext {
   force_host: boolean;
 }
 
+export type FileChangeKind = "Added" | "Modified" | "Deleted" | "Renamed";
+
+export interface FileChange {
+  path: string;
+  kind: FileChangeKind;
+  additions: number;
+  deletions: number;
+  is_binary: boolean;
+}
+
+export interface FileDiff {
+  content: string;
+  truncated: boolean;
+}
+
+export interface CommitEntry {
+  sha: string;
+  message: string;
+  timestamp: number;
+  author: string;
+}
+
+export interface StashEntry {
+  index: number;
+  message: string;
+  file_count: number;
+}
+
+export interface WorkingTreeEntry {
+  path: string;
+  status: FileChangeKind;
+  is_staged: boolean;
+}
+
+export interface GitChangeSummary {
+  file_count: number;
+  commit_count: number;
+  stash_count: number;
+  base_branch: string;
+}
+
 export interface LaunchAgentRequest {
   agentId: string;
   branch: string;
