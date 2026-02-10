@@ -1,6 +1,7 @@
 //! Utilities for launching npm-based tools (bunx/npx) in environments where PATH may differ
 //! from an interactive shell (e.g., GUI apps).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Fallback runner for executing npm packages.
@@ -8,30 +9,6 @@ use std::path::{Path, PathBuf};
 pub enum FallbackRunner {
     Bunx,
     Npx,
-}
-
-#[derive(Debug, Clone, Default)]
-struct EnvSnapshot {
-    path: Option<String>,
-    home: Option<PathBuf>,
-    user_profile: Option<PathBuf>,
-    local_app_data: Option<PathBuf>,
-    bun_install: Option<PathBuf>,
-}
-
-impl EnvSnapshot {
-    fn capture() -> Self {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .or_else(dirs::home_dir);
-        Self {
-            path: std::env::var_os("PATH").map(|v| v.to_string_lossy().to_string()),
-            home,
-            user_profile: std::env::var_os("USERPROFILE").map(PathBuf::from),
-            local_app_data: std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
-            bun_install: std::env::var_os("BUN_INSTALL").map(PathBuf::from),
-        }
-    }
 }
 
 /// Returns true if the given path appears to be a project-local `node_modules/.bin` shim.
@@ -69,7 +46,7 @@ fn command_candidates_in_dir(dir: &Path, command: &str) -> Vec<PathBuf> {
     }
 }
 
-fn resolve_command_path_with_env(command: &str, env: &EnvSnapshot) -> Option<PathBuf> {
+fn resolve_command_path_with_env(command: &str, env: &HashMap<String, String>) -> Option<PathBuf> {
     let cmd = command.trim();
     if cmd.is_empty() {
         return None;
@@ -77,7 +54,7 @@ fn resolve_command_path_with_env(command: &str, env: &EnvSnapshot) -> Option<Pat
 
     // 1) Search PATH explicitly using which_in so tests can control the environment safely.
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let paths = env.path.as_deref().filter(|s| !s.trim().is_empty());
+    let paths = env.get("PATH").map(|s| s.as_str()).filter(|s| !s.trim().is_empty());
     let mut weak_path: Option<PathBuf> = None;
     if let Ok(iter) = which::which_in_all(cmd, paths, &cwd) {
         for found in iter {
@@ -98,20 +75,23 @@ fn resolve_command_path_with_env(command: &str, env: &EnvSnapshot) -> Option<Pat
     let mut candidates: Vec<PathBuf> = Vec::new();
 
     // Bun install env var (typically "~/.bun").
-    if let Some(root) = env.bun_install.as_ref() {
+    if let Some(root) = env.get("BUN_INSTALL").map(PathBuf::from) {
         candidates.extend(command_candidates_in_dir(&root.join("bin"), cmd));
     }
 
+    let home = env.get("HOME").map(PathBuf::from);
+
     if cfg!(windows) {
+        let user_profile = env.get("USERPROFILE").map(PathBuf::from);
         // Bun default: %USERPROFILE%\.bun\bin (fallback to HOME if USERPROFILE is not set).
-        if let Some(home) = env.user_profile.as_ref().or(env.home.as_ref()) {
+        if let Some(h) = user_profile.as_ref().or(home.as_ref()) {
             candidates.extend(command_candidates_in_dir(
-                &home.join(".bun").join("bin"),
+                &h.join(".bun").join("bin"),
                 cmd,
             ));
         }
         // Alternative Bun location on Windows: %LOCALAPPDATA%\bun\bin
-        if let Some(local) = env.local_app_data.as_ref() {
+        if let Some(local) = env.get("LOCALAPPDATA").map(PathBuf::from) {
             candidates.extend(command_candidates_in_dir(
                 &local.join("bun").join("bin"),
                 cmd,
@@ -119,9 +99,9 @@ fn resolve_command_path_with_env(command: &str, env: &EnvSnapshot) -> Option<Pat
         }
     } else {
         // Bun default: ~/.bun/bin
-        if let Some(home) = env.home.as_ref() {
+        if let Some(h) = home.as_ref() {
             candidates.extend(command_candidates_in_dir(
-                &home.join(".bun").join("bin"),
+                &h.join(".bun").join("bin"),
                 cmd,
             ));
         }
@@ -144,7 +124,8 @@ fn resolve_command_path_with_env(command: &str, env: &EnvSnapshot) -> Option<Pat
 /// This is a best-effort helper intended to make GUI-launched processes more reliable when their
 /// `PATH` differs from an interactive shell.
 pub fn resolve_command_path(command: &str) -> Option<PathBuf> {
-    resolve_command_path_with_env(command, &EnvSnapshot::capture())
+    let env: HashMap<String, String> = std::env::vars().collect();
+    resolve_command_path_with_env(command, &env)
 }
 
 /// Build the executable + base args for a bunx/npx launch.
@@ -282,13 +263,8 @@ mod tests {
         };
         std::fs::write(&bunx, "").expect("write bunx stub");
 
-        let env = EnvSnapshot {
-            path: None,
-            home: Some(dir.path().to_path_buf()),
-            user_profile: None,
-            local_app_data: None,
-            bun_install: None,
-        };
+        let mut env = HashMap::new();
+        env.insert("HOME".to_string(), dir.path().to_string_lossy().to_string());
 
         assert_eq!(resolve_command_path_with_env("bunx", &env), Some(bunx));
     }
@@ -313,13 +289,9 @@ mod tests {
             .to_string_lossy()
             .to_string();
 
-        let env = EnvSnapshot {
-            path: Some(path),
-            home: Some(dir.path().to_path_buf()),
-            user_profile: None,
-            local_app_data: None,
-            bun_install: None,
-        };
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), path);
+        env.insert("HOME".to_string(), dir.path().to_string_lossy().to_string());
 
         assert_eq!(
             resolve_command_path_with_env(command, &env),
@@ -342,13 +314,9 @@ mod tests {
             .to_string_lossy()
             .to_string();
 
-        let env = EnvSnapshot {
-            path: Some(path),
-            home: Some(dir.path().to_path_buf()),
-            user_profile: None,
-            local_app_data: None,
-            bun_install: None,
-        };
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), path);
+        env.insert("HOME".to_string(), dir.path().to_string_lossy().to_string());
 
         assert_eq!(
             resolve_command_path_with_env(command, &env),
@@ -376,13 +344,9 @@ mod tests {
             .to_string_lossy()
             .to_string();
 
-        let env = EnvSnapshot {
-            path: Some(path),
-            home: Some(dir.path().to_path_buf()),
-            user_profile: None,
-            local_app_data: None,
-            bun_install: None,
-        };
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), path);
+        env.insert("HOME".to_string(), dir.path().to_string_lossy().to_string());
 
         assert_eq!(
             resolve_command_path_with_env(command, &env),
