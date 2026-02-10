@@ -1,6 +1,6 @@
 //! AI branch name suggestion command (GUI Launch Agent)
 //!
-//! Mirrors the TUI branch naming assistant behavior (SPEC-1ad9c07d) and exposes it to the GUI.
+//! Mirrors the branch naming assistant behavior (SPEC-1ad9c07d) and exposes it to the GUI.
 
 use gwt_core::ai::{
     format_error_for_display, suggest_branch_names as core_suggest_branch_names, AIClient,
