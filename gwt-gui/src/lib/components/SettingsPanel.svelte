@@ -304,283 +304,290 @@
     <div class="loading">{errorMessage ?? "Failed to load settings."}</div>
   {:else}
     <div class="settings-body">
-      <div class="section-title">Appearance</div>
-
-      <div class="field">
-        <!-- svelte-ignore a11y_label_has_associated_control -->
-        <label>Terminal Font Size</label>
-        <div class="font-size-control">
-          <button
-            class="font-size-btn"
-            onclick={() => adjustFontSize("terminal_font_size", -1)}
-            disabled={!settings || (settings.terminal_font_size ?? 13) <= 8}
-          >-</button>
-          <input
-            type="number"
-            min="8"
-            max="24"
-            step="1"
-            value={settings.terminal_font_size ?? 13}
-            oninput={(e) => {
-              if (!settings) return;
-              const raw = (e.target as HTMLInputElement).value;
-              if (raw === "") return;
-              const parsed = Number(raw);
-              if (Number.isNaN(parsed)) return;
-              settings = { ...settings, terminal_font_size: parsed };
-            }}
-            onchange={() => {
-              if (!settings) return;
-              settings = { ...settings, terminal_font_size: clampFontSize(settings.terminal_font_size ?? 13) };
-            }}
-          />
-          <button
-            class="font-size-btn"
-            onclick={() => adjustFontSize("terminal_font_size", 1)}
-            disabled={!settings || (settings.terminal_font_size ?? 13) >= 24}
-          >+</button>
-          <span class="font-size-unit">px</span>
-        </div>
-      </div>
-
-      <div class="field">
-        <!-- svelte-ignore a11y_label_has_associated_control -->
-        <label>UI Font Size</label>
-        <div class="font-size-control">
-          <button
-            class="font-size-btn"
-            onclick={() => adjustFontSize("ui_font_size", -1)}
-            disabled={!settings || (settings.ui_font_size ?? 13) <= 8}
-          >-</button>
-          <input
-            type="number"
-            min="8"
-            max="24"
-            step="1"
-            value={settings.ui_font_size ?? 13}
-            oninput={(e) => {
-              if (!settings) return;
-              const raw = (e.target as HTMLInputElement).value;
-              if (raw === "") return;
-              const parsed = Number(raw);
-              if (Number.isNaN(parsed)) return;
-              settings = { ...settings, ui_font_size: parsed };
-            }}
-            onchange={() => {
-              if (!settings) return;
-              settings = { ...settings, ui_font_size: clampFontSize(settings.ui_font_size ?? 13) };
-            }}
-          />
-          <button
-            class="font-size-btn"
-            onclick={() => adjustFontSize("ui_font_size", 1)}
-            disabled={!settings || (settings.ui_font_size ?? 13) >= 24}
-          >+</button>
-          <span class="font-size-unit">px</span>
-        </div>
-      </div>
-
-      <div class="divider"></div>
-
-      <div class="field">
-        <label for="log-retention">Log Retention (days)</label>
-        <input
-          id="log-retention"
-          type="number"
-          min="1"
-          max="365"
-          bind:value={settings.log_retention_days}
-        />
-        <span class="field-hint">
-          Logs older than this will be cleaned up automatically.
-        </span>
-      </div>
-
-      <div class="field">
-        <!-- svelte-ignore a11y_label_has_associated_control -->
-        <label>Protected Branches</label>
-        <div class="branch-tags">
-          {#each settings.protected_branches as branch}
-            <span class="branch-tag">
-              {branch}
-              <button class="tag-remove" onclick={() => removeBranch(branch)}>
-                x
-              </button>
-            </span>
-          {/each}
-        </div>
-        <div class="branch-input-row">
-          <input
-            type="text"
-            bind:value={newBranch}
-            placeholder="Add branch..."
-            onkeydown={handleBranchKeydown}
-          />
-          <button class="btn btn-add" onclick={addBranch}>Add</button>
-        </div>
-        <span class="field-hint">
-          Branches that cannot be deleted or force-pushed.
-        </span>
-      </div>
-
-      <div class="divider"></div>
-
-      <div class="section-title">Profiles</div>
-      <div class="field">
-        <label for="active-profile">Active Profile</label>
-        <select
-          id="active-profile"
-          class="select"
-          value={profiles?.active ?? ""}
-          onchange={(e) => setActiveProfile((e.target as HTMLSelectElement).value || null)}
-        >
-          <option value="">(none)</option>
-          {#if profiles}
-            {#each sortedProfileKeys(profiles) as key}
-              <option value={key}>{key}</option>
-            {/each}
-          {/if}
-        </select>
-        <span class="field-hint">Saved in ~/.gwt/profiles.toml</span>
-      </div>
-
-      <div class="field">
-        <label for="profile-edit">Edit Profile</label>
-        <div class="row">
-          <select
-            id="profile-edit"
-            class="select"
-            bind:value={selectedProfileKey}
-            disabled={!profiles}
-          >
-            {#if profiles}
-              {#each sortedProfileKeys(profiles) as key}
-                <option value={key}>{key}</option>
-              {/each}
-            {/if}
-          </select>
-          <button class="btn btn-danger" onclick={deleteSelectedProfile} disabled={!profiles || !selectedProfileKey}>
-            Delete
-          </button>
-        </div>
-      </div>
-
-      <div class="field">
-        <label for="new-profile">New Profile</label>
-        <div class="row">
-          <input
-            id="new-profile"
-            type="text"
-            bind:value={newProfileName}
-            placeholder="e.g. development"
-          />
-          <button class="btn btn-add" onclick={createProfile} disabled={!profiles || !newProfileName.trim()}>
-            Create
-          </button>
-        </div>
-        <span class="field-hint">Name must be lowercase letters, numbers, or hyphens.</span>
-      </div>
-
-      <div class="field">
-        <!-- svelte-ignore a11y_label_has_associated_control -->
-        <label>Environment Variables</label>
-        {#if profiles && selectedProfileKey && currentProfile}
-          <div class="env-table">
-            {#each Object.keys(currentProfile.env ?? {}).sort((a, b) => a.localeCompare(b)) as key (key)}
-              <div class="env-row">
-                <span class="env-key mono">{key}</span>
-                <input
-                  class="env-value"
-                  type="text"
-                  value={currentProfile.env[key]}
-                  oninput={(e) => upsertEnvVar(key, (e.target as HTMLInputElement).value)}
-                />
-                <button class="btn btn-ghost" onclick={() => removeEnvVar(key)}>Remove</button>
-              </div>
-            {/each}
-          </div>
-
-          <div class="env-add-row">
-            <input
-              class="env-key-input"
-              type="text"
-              bind:value={newEnvKey}
-              placeholder="KEY"
-            />
-            <input
-              class="env-value-input"
-              type="text"
-              bind:value={newEnvValue}
-              placeholder="value"
-            />
-            <button class="btn btn-add" onclick={addEnvVar} disabled={!newEnvKey.trim()}>
-              Add
-            </button>
-          </div>
-        {:else}
-          <div class="field-hint">Create a profile to edit environment variables.</div>
-        {/if}
-      </div>
-
-      <div class="field">
-        <!-- svelte-ignore a11y_label_has_associated_control -->
-        <label>AI Settings (per profile)</label>
-        {#if profiles && selectedProfileKey && currentProfile}
-          <div class="ai-toggle">
-            <input
-              id="ai-enabled"
-              type="checkbox"
-              checked={!!currentProfile.ai}
-              onchange={(e) => setAiEnabled((e.target as HTMLInputElement).checked)}
-            />
-            <label for="ai-enabled" class="ai-enabled-label">Enable AI settings</label>
-          </div>
-
-          {#if currentProfile.ai}
-            <div class="ai-grid">
-              <div class="ai-field">
-                <span class="ai-label">Endpoint</span>
-                <input
-                  type="text"
-                  value={currentProfile.ai.endpoint}
-                  oninput={(e) => updateAiField("endpoint", (e.target as HTMLInputElement).value)}
-                />
-              </div>
-              <div class="ai-field">
-                <span class="ai-label">API Key</span>
-                <input
-                  type="text"
-                  value={currentProfile.ai.api_key}
-                  oninput={(e) => updateAiField("api_key", (e.target as HTMLInputElement).value)}
-                />
-              </div>
-              <div class="ai-field">
-                <span class="ai-label">Model</span>
-                <input
-                  type="text"
-                  value={currentProfile.ai.model}
-                  placeholder="e.g. gpt-5.2-codex"
-                  oninput={(e) => updateAiField("model", (e.target as HTMLInputElement).value)}
-                />
-              </div>
-              <div class="ai-field">
-                <span class="ai-label">Session Summary</span>
-                <div class="ai-checkbox">
-                  <input
-                    id="ai-summary"
-                    type="checkbox"
-                    checked={currentProfile.ai.summary_enabled}
-                    onchange={(e) => updateAiField("summary_enabled", (e.target as HTMLInputElement).checked)}
-                  />
-                  <label for="ai-summary">Enabled</label>
-                </div>
-              </div>
+      <details class="settings-section" open>
+        <summary class="section-title">Appearance</summary>
+        <div class="section-content">
+          <div class="field">
+            <!-- svelte-ignore a11y_label_has_associated_control -->
+            <label>Terminal Font Size</label>
+            <div class="font-size-control">
+              <button
+                class="font-size-btn"
+                onclick={() => adjustFontSize("terminal_font_size", -1)}
+                disabled={!settings || (settings.terminal_font_size ?? 13) <= 8}
+              >-</button>
+              <input
+                type="number"
+                min="8"
+                max="24"
+                step="1"
+                value={settings.terminal_font_size ?? 13}
+                oninput={(e) => {
+                  if (!settings) return;
+                  const raw = (e.target as HTMLInputElement).value;
+                  if (raw === "") return;
+                  const parsed = Number(raw);
+                  if (Number.isNaN(parsed)) return;
+                  settings = { ...settings, terminal_font_size: parsed };
+                }}
+                onchange={() => {
+                  if (!settings) return;
+                  settings = { ...settings, terminal_font_size: clampFontSize(settings.terminal_font_size ?? 13) };
+                }}
+              />
+              <button
+                class="font-size-btn"
+                onclick={() => adjustFontSize("terminal_font_size", 1)}
+                disabled={!settings || (settings.terminal_font_size ?? 13) >= 24}
+              >+</button>
+              <span class="font-size-unit">px</span>
             </div>
-          {/if}
-        {:else}
-          <div class="field-hint">Create a profile to configure AI settings.</div>
-        {/if}
-      </div>
+          </div>
+
+          <div class="field">
+            <!-- svelte-ignore a11y_label_has_associated_control -->
+            <label>UI Font Size</label>
+            <div class="font-size-control">
+              <button
+                class="font-size-btn"
+                onclick={() => adjustFontSize("ui_font_size", -1)}
+                disabled={!settings || (settings.ui_font_size ?? 13) <= 8}
+              >-</button>
+              <input
+                type="number"
+                min="8"
+                max="24"
+                step="1"
+                value={settings.ui_font_size ?? 13}
+                oninput={(e) => {
+                  if (!settings) return;
+                  const raw = (e.target as HTMLInputElement).value;
+                  if (raw === "") return;
+                  const parsed = Number(raw);
+                  if (Number.isNaN(parsed)) return;
+                  settings = { ...settings, ui_font_size: parsed };
+                }}
+                onchange={() => {
+                  if (!settings) return;
+                  settings = { ...settings, ui_font_size: clampFontSize(settings.ui_font_size ?? 13) };
+                }}
+              />
+              <button
+                class="font-size-btn"
+                onclick={() => adjustFontSize("ui_font_size", 1)}
+                disabled={!settings || (settings.ui_font_size ?? 13) >= 24}
+              >+</button>
+              <span class="font-size-unit">px</span>
+            </div>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="field">
+            <label for="log-retention">Log Retention (days)</label>
+            <input
+              id="log-retention"
+              type="number"
+              min="1"
+              max="365"
+              bind:value={settings.log_retention_days}
+            />
+            <span class="field-hint">
+              Logs older than this will be cleaned up automatically.
+            </span>
+          </div>
+
+          <div class="field">
+            <!-- svelte-ignore a11y_label_has_associated_control -->
+            <label>Protected Branches</label>
+            <div class="branch-tags">
+              {#each settings.protected_branches as branch}
+                <span class="branch-tag">
+                  {branch}
+                  <button class="tag-remove" onclick={() => removeBranch(branch)}>
+                    x
+                  </button>
+                </span>
+              {/each}
+            </div>
+            <div class="branch-input-row">
+              <input
+                type="text"
+                bind:value={newBranch}
+                placeholder="Add branch..."
+                onkeydown={handleBranchKeydown}
+              />
+              <button class="btn btn-add" onclick={addBranch}>Add</button>
+            </div>
+            <span class="field-hint">
+              Branches that cannot be deleted or force-pushed.
+            </span>
+          </div>
+        </div>
+      </details>
+
+      <div class="divider"></div>
+
+      <details class="settings-section" open>
+        <summary class="section-title">Profiles</summary>
+        <div class="section-content">
+          <div class="field">
+            <label for="active-profile">Active Profile</label>
+            <select
+              id="active-profile"
+              class="select"
+              value={profiles?.active ?? ""}
+              onchange={(e) => setActiveProfile((e.target as HTMLSelectElement).value || null)}
+            >
+              <option value="">(none)</option>
+              {#if profiles}
+                {#each sortedProfileKeys(profiles) as key}
+                  <option value={key}>{key}</option>
+                {/each}
+              {/if}
+            </select>
+            <span class="field-hint">Saved in ~/.gwt/profiles.toml</span>
+          </div>
+
+          <div class="field">
+            <label for="profile-edit">Edit Profile</label>
+            <div class="row">
+              <select
+                id="profile-edit"
+                class="select"
+                bind:value={selectedProfileKey}
+                disabled={!profiles}
+              >
+                {#if profiles}
+                  {#each sortedProfileKeys(profiles) as key}
+                    <option value={key}>{key}</option>
+                  {/each}
+                {/if}
+              </select>
+              <button class="btn btn-danger" onclick={deleteSelectedProfile} disabled={!profiles || !selectedProfileKey}>
+                Delete
+              </button>
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="new-profile">New Profile</label>
+            <div class="row">
+              <input
+                id="new-profile"
+                type="text"
+                bind:value={newProfileName}
+                placeholder="e.g. development"
+              />
+              <button class="btn btn-add" onclick={createProfile} disabled={!profiles || !newProfileName.trim()}>
+                Create
+              </button>
+            </div>
+            <span class="field-hint">Name must be lowercase letters, numbers, or hyphens.</span>
+          </div>
+
+          <div class="field">
+            <!-- svelte-ignore a11y_label_has_associated_control -->
+            <label>Environment Variables</label>
+            {#if profiles && selectedProfileKey && currentProfile}
+              <div class="env-table">
+                {#each Object.keys(currentProfile.env ?? {}).sort((a, b) => a.localeCompare(b)) as key (key)}
+                  <div class="env-row">
+                    <span class="env-key mono">{key}</span>
+                    <input
+                      class="env-value"
+                      type="text"
+                      value={currentProfile.env[key]}
+                      oninput={(e) => upsertEnvVar(key, (e.target as HTMLInputElement).value)}
+                    />
+                    <button class="btn btn-ghost" onclick={() => removeEnvVar(key)}>Remove</button>
+                  </div>
+                {/each}
+              </div>
+
+              <div class="env-add-row">
+                <input
+                  class="env-key-input"
+                  type="text"
+                  bind:value={newEnvKey}
+                  placeholder="KEY"
+                />
+                <input
+                  class="env-value-input"
+                  type="text"
+                  bind:value={newEnvValue}
+                  placeholder="value"
+                />
+                <button class="btn btn-add" onclick={addEnvVar} disabled={!newEnvKey.trim()}>
+                  Add
+                </button>
+              </div>
+            {:else}
+              <div class="field-hint">Create a profile to edit environment variables.</div>
+            {/if}
+          </div>
+
+          <div class="field">
+            <!-- svelte-ignore a11y_label_has_associated_control -->
+            <label>AI Settings (per profile)</label>
+            {#if profiles && selectedProfileKey && currentProfile}
+              <div class="ai-toggle">
+                <input
+                  id="ai-enabled"
+                  type="checkbox"
+                  checked={!!currentProfile.ai}
+                  onchange={(e) => setAiEnabled((e.target as HTMLInputElement).checked)}
+                />
+                <label for="ai-enabled" class="ai-enabled-label">Enable AI settings</label>
+              </div>
+
+              {#if currentProfile.ai}
+                <div class="ai-grid">
+                  <div class="ai-field">
+                    <span class="ai-label">Endpoint</span>
+                    <input
+                      type="text"
+                      value={currentProfile.ai.endpoint}
+                      oninput={(e) => updateAiField("endpoint", (e.target as HTMLInputElement).value)}
+                    />
+                  </div>
+                  <div class="ai-field">
+                    <span class="ai-label">API Key</span>
+                    <input
+                      type="text"
+                      value={currentProfile.ai.api_key}
+                      oninput={(e) => updateAiField("api_key", (e.target as HTMLInputElement).value)}
+                    />
+                  </div>
+                  <div class="ai-field">
+                    <span class="ai-label">Model</span>
+                    <input
+                      type="text"
+                      value={currentProfile.ai.model}
+                      placeholder="e.g. gpt-5.2-codex"
+                      oninput={(e) => updateAiField("model", (e.target as HTMLInputElement).value)}
+                    />
+                  </div>
+                  <div class="ai-field">
+                    <span class="ai-label">Session Summary</span>
+                    <div class="ai-checkbox">
+                      <input
+                        id="ai-summary"
+                        type="checkbox"
+                        checked={currentProfile.ai.summary_enabled}
+                        onchange={(e) => updateAiField("summary_enabled", (e.target as HTMLInputElement).checked)}
+                      />
+                      <label for="ai-summary">Enabled</label>
+                    </div>
+                  </div>
+                </div>
+              {/if}
+            {:else}
+              <div class="field-hint">Create a profile to configure AI settings.</div>
+            {/if}
+          </div>
+        </div>
+      </details>
     </div>
 
     <div class="settings-footer">
@@ -662,6 +669,58 @@
     color: var(--text-primary);
     letter-spacing: 0.6px;
     text-transform: uppercase;
+  }
+
+  .settings-section {
+    border: none;
+  }
+
+  .settings-section > summary.section-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+    padding: 4px 0;
+  }
+
+  .settings-section > summary.section-title::-webkit-details-marker {
+    display: none;
+  }
+
+  .settings-section > summary.section-title::marker {
+    content: "";
+  }
+
+  .settings-section > summary.section-title:focus-visible {
+    outline: 2px solid var(--border-color);
+    outline-offset: 4px;
+    border-radius: 6px;
+  }
+
+  .settings-section > summary.section-title::after {
+    content: "[+]";
+    font-family: monospace;
+    font-size: var(--ui-font-base);
+    color: var(--text-muted);
+    letter-spacing: 0;
+    text-transform: none;
+  }
+
+  .settings-section[open] > summary.section-title::after {
+    content: "[-]";
+  }
+
+  .settings-section > summary.section-title:hover::after {
+    color: var(--text-primary);
+  }
+
+  .section-content {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    padding-top: 24px;
   }
 
   .field {
