@@ -112,6 +112,7 @@ pub fn build_app(
                 crate::menu::MENU_ID_VIEW_TOGGLE_SIDEBAR => Some("toggle-sidebar"),
                 crate::menu::MENU_ID_VIEW_LAUNCH_AGENT => Some("launch-agent"),
                 crate::menu::MENU_ID_VIEW_LIST_TERMINALS => Some("list-terminals"),
+                crate::menu::MENU_ID_VIEW_TERMINAL_DIAGNOSTICS => Some("terminal-diagnostics"),
                 crate::menu::MENU_ID_SETTINGS_PREFERENCES => Some("open-settings"),
                 crate::menu::MENU_ID_HELP_ABOUT => Some("about"),
                 _ => None,
