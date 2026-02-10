@@ -5,6 +5,7 @@ pub mod branches;
 pub mod cleanup;
 pub mod docker;
 pub mod git_view;
+pub mod hooks;
 pub mod profiles;
 pub mod project;
 pub mod sessions;
