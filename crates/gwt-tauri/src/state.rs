@@ -1,6 +1,6 @@
 use gwt_core::ai::SessionSummaryCache;
 use gwt_core::terminal::manager::PaneManager;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -41,6 +41,7 @@ pub struct AppState {
     pub pane_manager: Mutex<PaneManager>,
     pub agent_versions_cache: Mutex<HashMap<String, AgentVersionsCache>>,
     pub session_summary_cache: Mutex<HashMap<String, SessionSummaryCache>>,
+    pub session_summary_inflight: Mutex<HashSet<String>>,
     pub pane_launch_meta: Mutex<HashMap<String, PaneLaunchMeta>>,
     pub is_quitting: AtomicBool,
 }
@@ -52,6 +53,7 @@ impl AppState {
             pane_manager: Mutex::new(PaneManager::new()),
             agent_versions_cache: Mutex::new(HashMap::new()),
             session_summary_cache: Mutex::new(HashMap::new()),
+            session_summary_inflight: Mutex::new(HashSet::new()),
             pane_launch_meta: Mutex::new(HashMap::new()),
             is_quitting: AtomicBool::new(false),
         }
