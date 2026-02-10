@@ -17,6 +17,7 @@
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
+| [SPEC-1b98b6d7](SPEC-1b98b6d7/spec.md) | 機能仕様: Claude Code Hooks 経由の gwt-tauri hook 実行で GUI を起動しない | 2026-02-10 |
 | [SPEC-133bf64f](SPEC-133bf64f/spec.md) | 機能仕様: Project Version History（タグ単位のAI要約 + 簡易CHANGELOG） | 2026-02-10 |
 | [SPEC-488af8e2](SPEC-488af8e2/spec.md) | 機能仕様: gwt GUI Docker Compose 統合（起動ウィザード + Quick Start） | 2026-02-09 |
 | [SPEC-86bb4e7c](SPEC-86bb4e7c/spec.md) | 機能仕様: gwt GUI ブランチフィルター修正・エージェント起動ウィザード・Profiles設定 | 2026-02-09 |

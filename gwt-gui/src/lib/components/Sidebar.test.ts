@@ -12,6 +12,10 @@ async function renderSidebar(props: any) {
   return render(Sidebar, { props });
 }
 
+function countInvokeCalls(name: string): number {
+  return invokeMock.mock.calls.filter((c) => c[0] === name).length;
+}
+
 describe("Sidebar", () => {
   beforeEach(() => {
     invokeMock.mockReset();
@@ -31,13 +35,13 @@ describe("Sidebar", () => {
       expect(invokeMock.mock.calls.length).toBeGreaterThan(0);
     });
 
-    const firstCallCount = invokeMock.mock.calls.length;
+    const firstLocalBranchFetchCount = countInvokeCalls("list_worktree_branches");
 
     // Rerender with the same key should not trigger a re-fetch.
     await rendered.rerender({ refreshKey: 0 });
 
     await new Promise((r) => setTimeout(r, 50));
-    expect(invokeMock.mock.calls.length).toBe(firstCallCount);
+    expect(countInvokeCalls("list_worktree_branches")).toBe(firstLocalBranchFetchCount);
   });
 
   it("re-fetches local branches when refreshKey changes", async () => {
@@ -53,7 +57,7 @@ describe("Sidebar", () => {
       expect(invokeMock.mock.calls.length).toBeGreaterThan(0);
     });
 
-    const firstCallCount = invokeMock.mock.calls.length;
+    const firstLocalBranchFetchCount = countInvokeCalls("list_worktree_branches");
 
     // Changing refreshKey should trigger a re-fetch.
     await rendered.rerender({
@@ -61,7 +65,9 @@ describe("Sidebar", () => {
     });
 
     await waitFor(() => {
-      expect(invokeMock.mock.calls.length).toBe(firstCallCount + 1);
+      expect(countInvokeCalls("list_worktree_branches")).toBe(
+        firstLocalBranchFetchCount + 1
+      );
     });
   });
 });
