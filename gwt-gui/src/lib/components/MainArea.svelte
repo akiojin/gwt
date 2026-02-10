@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import type {
     Tab,
     BranchInfo,
@@ -44,12 +45,19 @@
   let quickLaunching: boolean = $state(false);
 
   let sessionSummaryLoading: boolean = $state(false);
+  let sessionSummaryGenerating: boolean = $state(false);
   let sessionSummaryStatus: SessionSummaryResult["status"] | "" = $state("");
   let sessionSummaryMarkdown: string | null = $state(null);
   let sessionSummaryWarning: string | null = $state(null);
   let sessionSummaryError: string | null = $state(null);
   let sessionSummaryToolId: string | null = $state(null);
   let sessionSummarySessionId: string | null = $state(null);
+
+  type SessionSummaryUpdatedPayload = {
+    projectPath: string;
+    branch: string;
+    result: SessionSummaryResult;
+  };
 
   function toErrorMessage(err: unknown): string {
     if (typeof err === "string") return err;
@@ -100,7 +108,8 @@
     quickLaunchError = null;
     quickStartError = null;
 
-    const branch = selectedBranch?.name?.trim() ?? "";
+    const rawBranch = selectedBranch?.name?.trim() ?? "";
+    const branch = normalizeBranchName(rawBranch);
     if (!branch) {
       quickStartEntries = [];
       quickStartLoading = false;
@@ -114,17 +123,19 @@
       const { invoke } = await import("@tauri-apps/api/core");
       const entries = await invoke<ToolSessionEntry[]>("get_branch_quick_start", {
         projectPath,
-        branch: normalizeBranchName(branch),
+        branch,
       });
       // Avoid clobbering if selection changed while loading.
-      const currentKey = `${projectPath}::${selectedBranch?.name?.trim() ?? ""}`;
+      const currentBranch = normalizeBranchName(selectedBranch?.name?.trim() ?? "");
+      const currentKey = `${projectPath}::${currentBranch}`;
       if (currentKey !== key) return;
       quickStartEntries = entries ?? [];
     } catch (err) {
       quickStartEntries = [];
       quickStartError = `Failed to load Quick Start: ${toErrorMessage(err)}`;
     } finally {
-      const currentKey = `${projectPath}::${selectedBranch?.name?.trim() ?? ""}`;
+      const currentBranch = normalizeBranchName(selectedBranch?.name?.trim() ?? "");
+      const currentKey = `${projectPath}::${currentBranch}`;
       if (currentKey === key) {
         quickStartLoading = false;
       }
@@ -141,9 +152,11 @@
     sessionSummaryError = null;
     sessionSummaryWarning = null;
 
-    const branch = selectedBranch?.name?.trim() ?? "";
+    const rawBranch = selectedBranch?.name?.trim() ?? "";
+    const branch = normalizeBranchName(rawBranch);
     if (!branch) {
       sessionSummaryLoading = false;
+      sessionSummaryGenerating = false;
       sessionSummaryStatus = "";
       sessionSummaryMarkdown = null;
       sessionSummaryToolId = null;
@@ -153,6 +166,7 @@
 
     const key = `${projectPath}::${branch}`;
     sessionSummaryLoading = true;
+    sessionSummaryGenerating = false;
     sessionSummaryStatus = "";
     sessionSummaryMarkdown = null;
     sessionSummaryToolId = null;
@@ -162,13 +176,15 @@
       const { invoke } = await import("@tauri-apps/api/core");
       const result = await invoke<SessionSummaryResult>("get_branch_session_summary", {
         projectPath,
-        branch: normalizeBranchName(branch),
+        branch,
       });
 
-      const currentKey = `${projectPath}::${selectedBranch?.name?.trim() ?? ""}`;
+      const currentBranch = normalizeBranchName(selectedBranch?.name?.trim() ?? "");
+      const currentKey = `${projectPath}::${currentBranch}`;
       if (currentKey !== key) return;
 
       sessionSummaryStatus = result.status;
+      sessionSummaryGenerating = !!result.generating;
       sessionSummaryMarkdown = result.markdown ?? null;
       sessionSummaryWarning = result.warning ?? null;
       sessionSummaryError = result.error ?? null;
@@ -176,12 +192,14 @@
       sessionSummarySessionId = result.sessionId ?? null;
     } catch (err) {
       sessionSummaryStatus = "error";
+      sessionSummaryGenerating = false;
       sessionSummaryMarkdown = null;
       sessionSummaryToolId = null;
       sessionSummarySessionId = null;
       sessionSummaryError = `Failed to generate session summary: ${toErrorMessage(err)}`;
     } finally {
-      const currentKey = `${projectPath}::${selectedBranch?.name?.trim() ?? ""}`;
+      const currentBranch = normalizeBranchName(selectedBranch?.name?.trim() ?? "");
+      const currentKey = `${projectPath}::${currentBranch}`;
       if (currentKey === key) {
         sessionSummaryLoading = false;
       }
@@ -194,6 +212,52 @@
     void activeTabId;
     if (activeTab?.type !== "summary") return;
     loadSessionSummary();
+  });
+
+  onMount(() => {
+    let unlisten: null | (() => void) = null;
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        unlisten = await listen<SessionSummaryUpdatedPayload>(
+          "session-summary-updated",
+          (event) => {
+            const payload = event.payload;
+            if (!payload) return;
+            if (payload.projectPath !== projectPath) return;
+
+            const currentBranch = normalizeBranchName(
+              selectedBranch?.name?.trim() ?? ""
+            );
+            if (!currentBranch || payload.branch !== currentBranch) return;
+
+            const result = payload.result;
+            const incomingSessionId = result.sessionId ?? null;
+            if (!incomingSessionId) return;
+
+            // Drop stale events when the branch's latest session has advanced while a job was running.
+            const currentSessionId = sessionSummarySessionId ?? null;
+            if (currentSessionId && incomingSessionId !== currentSessionId) return;
+
+            sessionSummaryStatus = result.status;
+            sessionSummaryGenerating = !!result.generating;
+            sessionSummaryMarkdown = result.markdown ?? null;
+            sessionSummaryWarning = result.warning ?? null;
+            sessionSummaryError = result.error ?? null;
+            sessionSummaryToolId = result.toolId ?? null;
+            sessionSummarySessionId = result.sessionId ?? null;
+          }
+        );
+      } catch (err) {
+        console.error("Failed to setup session summary event listener:", err);
+      }
+    })();
+
+    return () => {
+      if (unlisten) {
+        unlisten();
+      }
+    };
   });
 
   async function quickLaunch(entry: ToolSessionEntry, action: "continue" | "new") {
@@ -381,10 +445,13 @@
                 <div class="quick-header">
                   <span class="quick-title">AI Summary</span>
                   {#if sessionSummaryLoading}
-                    <span class="quick-subtitle">Generating...</span>
+                    <span class="quick-subtitle">Loading...</span>
                   {:else if sessionSummaryStatus === "ok" && sessionSummaryToolId && sessionSummarySessionId}
                     <span class="quick-subtitle">
                       {sessionSummaryToolId} #{sessionSummarySessionId}
+                      {#if sessionSummaryGenerating}
+                        {sessionSummaryMarkdown ? " - Updating..." : " - Generating..."}
+                      {/if}
                     </span>
                   {:else if sessionSummaryStatus === "ai-not-configured"}
                     <span class="quick-subtitle">AI not configured</span>
@@ -404,6 +471,8 @@
                 {/if}
 
                 {#if sessionSummaryLoading}
+                  <div class="session-summary-placeholder">Loading...</div>
+                {:else if sessionSummaryStatus === "ok" && sessionSummaryGenerating && !sessionSummaryMarkdown}
                   <div class="session-summary-placeholder">Generating...</div>
                 {:else if sessionSummaryStatus === "ai-not-configured"}
                   <div class="session-summary-placeholder">

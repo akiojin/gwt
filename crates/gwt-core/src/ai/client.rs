@@ -321,7 +321,26 @@ fn parse_response_with_usage(body: &str) -> Result<(String, Option<u64>), AIErro
 
 /// Returns true if the error is retryable (rate limited or server error)
 fn is_retryable(error: &AIError) -> bool {
-    matches!(error, AIError::RateLimited { .. } | AIError::ServerError(_))
+    match error {
+        AIError::RateLimited { .. } => true,
+        AIError::ServerError(message) => !is_permanent_server_error(message),
+        _ => false,
+    }
+}
+
+fn is_permanent_server_error(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    // Some OpenAI-compatible backends return 501 for /responses. Retrying just adds long delays.
+    if m.contains("http 501") {
+        return true;
+    }
+    if m.contains("not implemented") {
+        return true;
+    }
+    if m.contains("does not support the responses api") {
+        return true;
+    }
+    false
 }
 
 /// Compute exponential backoff delay: 1s, 2s, 4s, 8s, 16s
@@ -680,6 +699,27 @@ mod tests {
     fn test_is_retryable_server_error() {
         let error = AIError::ServerError("Internal Server Error".to_string());
         assert!(is_retryable(&error));
+    }
+
+    #[test]
+    fn test_is_not_retryable_server_error_not_implemented() {
+        let error = AIError::ServerError("Not Implemented".to_string());
+        assert!(!is_retryable(&error));
+    }
+
+    #[test]
+    fn test_is_not_retryable_server_error_responses_api_unsupported() {
+        let error = AIError::ServerError(
+            "Not Implemented: The backend for model 'qwen3-coder:30b' does not support the Responses API"
+                .to_string(),
+        );
+        assert!(!is_retryable(&error));
+    }
+
+    #[test]
+    fn test_is_not_retryable_server_error_http_501() {
+        let error = AIError::ServerError("HTTP 501".to_string());
+        assert!(!is_retryable(&error));
     }
 
     #[test]
