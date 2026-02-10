@@ -248,7 +248,9 @@ fn focused_window_label(app: &tauri::AppHandle<tauri::Wry>) -> String {
 
 fn emit_menu_action(app: &tauri::AppHandle<tauri::Wry>, action: &str) {
     let label = focused_window_label(app);
-    let Some(window) = app.get_webview_window(&label).or_else(|| app.get_webview_window("main"))
+    let Some(window) = app
+        .get_webview_window(&label)
+        .or_else(|| app.get_webview_window("main"))
     else {
         return;
     };
