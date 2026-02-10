@@ -16,11 +16,11 @@ pub async fn check_app_update(
     let state = tauri::async_runtime::spawn_blocking(move || {
         mgr.check_for_executable(force, current_exe.as_deref())
     })
-        .await
-        .unwrap_or_else(|e| UpdateState::Failed {
-            message: format!("Update check failed: {e}"),
-            failed_at: Utc::now(),
-        });
+    .await
+    .unwrap_or_else(|e| UpdateState::Failed {
+        message: format!("Update check failed: {e}"),
+        failed_at: Utc::now(),
+    });
     Ok(state)
 }
 

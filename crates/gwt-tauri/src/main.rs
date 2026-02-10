@@ -39,9 +39,7 @@ fn maybe_run_internal_mode() -> bool {
                 match args[i].as_str() {
                     "--old-pid" => {
                         i += 1;
-                        old_pid = args
-                            .get(i)
-                            .and_then(|s| s.parse::<u32>().ok());
+                        old_pid = args.get(i).and_then(|s| s.parse::<u32>().ok());
                     }
                     "--target" => {
                         i += 1;
@@ -101,9 +99,7 @@ fn maybe_run_internal_mode() -> bool {
                 match args[i].as_str() {
                     "--old-pid" => {
                         i += 1;
-                        old_pid = args
-                            .get(i)
-                            .and_then(|s| s.parse::<u32>().ok());
+                        old_pid = args.get(i).and_then(|s| s.parse::<u32>().ok());
                     }
                     "--target" => {
                         i += 1;

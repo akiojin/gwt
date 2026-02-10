@@ -545,12 +545,11 @@ impl UpdateManager {
                 .as_deref()
                 .or(cache.asset_url.as_deref());
             let installer = cache.installer_asset_url.as_deref();
-            let asset_url = choose_apply_plan(&platform, current_exe, portable, installer).map(|p| {
-                match p {
+            let asset_url =
+                choose_apply_plan(&platform, current_exe, portable, installer).map(|p| match p {
                     ApplyPlan::Portable { url } => url,
                     ApplyPlan::Installer { url, .. } => url,
-                }
-            });
+                });
             UpdateState::Available {
                 current: self.current_version.to_string(),
                 latest: latest_ver.to_string(),
@@ -756,8 +755,8 @@ fn extract_archive(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
         .to_string();
 
     if name.ends_with(".tar.gz") {
-        let file = fs::File::open(archive_path)
-            .map_err(|e| format!("Failed to open archive: {e}"))?;
+        let file =
+            fs::File::open(archive_path).map_err(|e| format!("Failed to open archive: {e}"))?;
         let decoder = GzDecoder::new(file);
         let mut archive = tar::Archive::new(decoder);
         archive
@@ -767,10 +766,9 @@ fn extract_archive(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
     }
 
     if name.ends_with(".zip") {
-        let file = fs::File::open(archive_path)
-            .map_err(|e| format!("Failed to open archive: {e}"))?;
-        let mut zip =
-            zip::ZipArchive::new(file).map_err(|e| format!("Failed to read zip: {e}"))?;
+        let file =
+            fs::File::open(archive_path).map_err(|e| format!("Failed to open archive: {e}"))?;
+        let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("Failed to read zip: {e}"))?;
         zip.extract(dest_dir)
             .map_err(|e| format!("Failed to extract zip: {e}"))?;
         return Ok(());
