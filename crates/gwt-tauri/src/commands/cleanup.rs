@@ -93,10 +93,7 @@ fn running_agent_branches(state: &AppState) -> HashSet<String> {
     let mut branches = HashSet::new();
     if let Ok(manager) = state.pane_manager.lock() {
         for pane in manager.panes() {
-            if matches!(
-                pane.status(),
-                gwt_core::terminal::pane::PaneStatus::Running
-            ) {
+            if matches!(pane.status(), gwt_core::terminal::pane::PaneStatus::Running) {
                 branches.insert(pane.branch_name().to_string());
             }
         }
@@ -119,7 +116,10 @@ pub fn list_worktrees(
 
     // Get branch info for ahead/behind/is_gone/is_current
     let branches = Branch::list(&repo_path).unwrap_or_default();
-    let current_branch = branches.iter().find(|b| b.is_current).map(|b| b.name.clone());
+    let current_branch = branches
+        .iter()
+        .find(|b| b.is_current)
+        .map(|b| b.name.clone());
 
     let agent_branches = running_agent_branches(&state);
 
@@ -199,13 +199,7 @@ pub fn cleanup_worktrees(
             },
         );
 
-        let result = cleanup_single_branch(
-            &manager,
-            &repo_path,
-            branch,
-            force,
-            &agent_branches,
-        );
+        let result = cleanup_single_branch(&manager, &repo_path, branch, force, &agent_branches);
 
         let cleanup_result = match result {
             Ok(()) => {
@@ -451,8 +445,7 @@ mod tests {
         gwt_core::git::Branch::create(temp.path(), "feature/test", "HEAD").unwrap();
         let _wt = manager.create_for_branch("feature/test").unwrap();
 
-        let result =
-            cleanup_single_branch(&manager, temp.path(), "feature/test", false, &agents);
+        let result = cleanup_single_branch(&manager, temp.path(), "feature/test", false, &agents);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("running agent"));
     }
@@ -482,8 +475,7 @@ mod tests {
         let wt = manager.create_for_branch("feature/done").unwrap();
         assert!(wt.path.exists());
 
-        let result =
-            cleanup_single_branch(&manager, temp.path(), "feature/done", false, &agents);
+        let result = cleanup_single_branch(&manager, temp.path(), "feature/done", false, &agents);
         assert!(result.is_ok());
         assert!(!gwt_core::git::Branch::exists(temp.path(), "feature/done").unwrap());
     }
@@ -520,8 +512,7 @@ mod tests {
         std::fs::write(wt.path.join("dirty.txt"), "unsaved work").unwrap();
 
         // force=true should succeed even with uncommitted changes
-        let result =
-            cleanup_single_branch(&manager, temp.path(), "feature/wip", true, &agents);
+        let result = cleanup_single_branch(&manager, temp.path(), "feature/wip", true, &agents);
         assert!(result.is_ok());
         assert!(!gwt_core::git::Branch::exists(temp.path(), "feature/wip").unwrap());
     }

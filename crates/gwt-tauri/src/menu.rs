@@ -140,9 +140,7 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         true,
         Some("CmdOrCtrl+Shift+K"),
     )?;
-    let git = SubmenuBuilder::new(app, "Git")
-        .item(&git_cleanup)
-        .build()?;
+    let git = SubmenuBuilder::new(app, "Git").item(&git_cleanup).build()?;
 
     let window = build_window_submenu(app, state)?;
 
