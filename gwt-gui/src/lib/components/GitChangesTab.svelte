@@ -5,10 +5,12 @@
     projectPath,
     branch,
     baseBranch,
+    refreshToken,
   }: {
     projectPath: string;
     branch: string;
     baseBranch: string;
+    refreshToken: number;
   } = $props();
 
   type FilterMode = "committed" | "uncommitted";
@@ -137,6 +139,7 @@
       const { invoke } = await import("@tauri-apps/api/core");
       workingTree = await invoke<WorkingTreeEntry[]>("get_working_tree_status", {
         projectPath,
+        branch,
       });
     } catch (err) {
       workingTreeError = toErrorMessage(err);
@@ -183,10 +186,12 @@
     void projectPath;
     void branch;
     void baseBranch;
+    void refreshToken;
     loadFiles();
   });
 
   $effect(() => {
+    void refreshToken;
     if (filterMode === "uncommitted") {
       loadWorkingTree();
     }

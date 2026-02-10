@@ -16,6 +16,7 @@
   let loading: boolean = $state(false);
   let error: string | null = $state(null);
   let summary = $state<GitChangeSummary | null>(null);
+  let refreshToken: number = $state(0);
 
   let baseBranchCandidates: string[] = $state([]);
   let baseBranch: string = $state("");
@@ -66,6 +67,7 @@
   }
 
   async function refresh() {
+    refreshToken += 1;
     await loadSummary();
   }
 
@@ -174,11 +176,11 @@
         <!-- Tab content -->
         <div class="git-tab-content">
           {#if activeTab === "changes"}
-            <GitChangesTab {projectPath} branch={normalizeBranchName(branch)} {baseBranch} />
+            <GitChangesTab {projectPath} branch={normalizeBranchName(branch)} {baseBranch} {refreshToken} />
           {:else if activeTab === "commits"}
-            <GitCommitsTab {projectPath} branch={normalizeBranchName(branch)} {baseBranch} />
+            <GitCommitsTab {projectPath} branch={normalizeBranchName(branch)} {baseBranch} {refreshToken} />
           {:else if activeTab === "stash"}
-            <GitStashTab {projectPath} />
+            <GitStashTab {projectPath} branch={normalizeBranchName(branch)} {refreshToken} />
           {/if}
         </div>
       {/if}
