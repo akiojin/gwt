@@ -3,10 +3,12 @@
     projectPath,
     currentBranch = "",
     terminalCount = 0,
+    osEnvReady = true,
   }: {
     projectPath: string;
     currentBranch?: string;
     terminalCount?: number;
+    osEnvReady?: boolean;
   } = $props();
 </script>
 
@@ -19,6 +21,9 @@
     <span class="status-item terminal-count">
       [{terminalCount} terminal{terminalCount !== 1 ? "s" : ""}]
     </span>
+  {/if}
+  {#if !osEnvReady}
+    <span class="status-loading">Loading environment...</span>
   {/if}
   <span class="spacer"></span>
   <span class="status-item path">{projectPath}</span>
@@ -47,6 +52,11 @@
 
   .spacer {
     flex: 1;
+  }
+
+  .status-loading {
+    color: var(--text-muted);
+    font-style: italic;
   }
 
   .path {

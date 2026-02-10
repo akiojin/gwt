@@ -161,6 +161,18 @@ export interface DockerContext {
   force_host: boolean;
 }
 
+export interface CapturedEnvEntry {
+  key: string;
+  value: string;
+}
+
+export interface CapturedEnvInfo {
+  entries: CapturedEnvEntry[];
+  source: string;
+  reason: string | null;
+  ready: boolean;
+}
+
 export type FileChangeKind = "Added" | "Modified" | "Deleted" | "Renamed";
 
 export interface FileChange {

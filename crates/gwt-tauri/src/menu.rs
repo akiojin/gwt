@@ -20,6 +20,7 @@ pub const MENU_ID_VIEW_TERMINAL_DIAGNOSTICS: &str = "view-terminal-diagnostics";
 
 pub const MENU_ID_SETTINGS_PREFERENCES: &str = "settings-preferences";
 pub const MENU_ID_HELP_ABOUT: &str = "help-about";
+pub const MENU_ID_DEBUG_OS_ENV: &str = "debug-os-env";
 
 pub const WINDOW_FOCUS_MENU_PREFIX: &str = "window-focus::";
 
@@ -130,6 +131,17 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
 
     let window = build_window_submenu(app, state)?;
 
+    let debug_os_env = MenuItem::with_id(
+        app,
+        MENU_ID_DEBUG_OS_ENV,
+        "Show Captured Environment",
+        true,
+        None::<&str>,
+    )?;
+    let debug = SubmenuBuilder::new(app, "Debug")
+        .item(&debug_os_env)
+        .build()?;
+
     let settings_prefs = MenuItem::with_id(
         app,
         MENU_ID_SETTINGS_PREFERENCES,
@@ -148,6 +160,7 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
     menu.append(&edit)?;
     menu.append(&view)?;
     menu.append(&window)?;
+    menu.append(&debug)?;
     menu.append(&settings)?;
     menu.append(&help)?;
     Ok(menu)

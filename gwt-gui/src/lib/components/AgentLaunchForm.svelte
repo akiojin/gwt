@@ -11,11 +11,13 @@
   let {
     projectPath,
     selectedBranch = "",
+    osEnvReady = true,
     onLaunch,
     onClose,
   }: {
     projectPath: string;
     selectedBranch?: string;
+    osEnvReady?: boolean;
     onLaunch: (request: LaunchAgentRequest) => Promise<void>;
     onClose: () => void;
   } = $props();
@@ -1155,11 +1157,15 @@
       </div>
 
       <div class="dialog-footer">
+        {#if !osEnvReady}
+          <span class="footer-hint">Loading environment...</span>
+        {/if}
         <button class="btn btn-cancel" onclick={onClose}>Cancel</button>
         <button
           class="btn btn-launch"
           disabled={
             launching ||
+            !osEnvReady ||
             !selectedAgent ||
             (needsResumeSessionId && !resumeSessionId.trim()) ||
             (branchMode === "existing"
@@ -1569,6 +1575,14 @@
     gap: 8px;
     padding: 16px 20px;
     border-top: 1px solid var(--border-color);
+  }
+
+  .footer-hint {
+    margin-right: auto;
+    font-size: var(--ui-font-sm);
+    color: var(--text-muted);
+    font-style: italic;
+    padding-top: 2px;
   }
 
   .btn {

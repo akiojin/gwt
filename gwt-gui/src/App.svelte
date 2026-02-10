@@ -5,6 +5,7 @@
     ProjectInfo,
     LaunchAgentRequest,
     TerminalAnsiProbe,
+    CapturedEnvInfo,
   } from "./lib/types";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import MainArea from "./lib/components/MainArea.svelte";
@@ -38,6 +39,60 @@
   let terminalDiagnosticsLoading: boolean = $state(false);
   let terminalDiagnostics: TerminalAnsiProbe | null = $state(null);
   let terminalDiagnosticsError: string | null = $state(null);
+
+  let osEnvReady = $state(false);
+
+  let toastMessage = $state<string | null>(null);
+  let toastTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  let showOsEnvDebug = $state(false);
+  let osEnvDebugData = $state<CapturedEnvInfo | null>(null);
+  let osEnvDebugLoading = $state(false);
+  let osEnvDebugError = $state<string | null>(null);
+
+  function showToast(message: string, durationMs = 8000) {
+    toastMessage = message;
+    if (toastTimeout) clearTimeout(toastTimeout);
+    toastTimeout = setTimeout(() => { toastMessage = null; }, durationMs);
+  }
+
+  // Poll OS env readiness at startup; stop once ready.
+  $effect(() => {
+    if (osEnvReady) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        while (!cancelled && !osEnvReady) {
+          const ready = await invoke<boolean>("is_os_env_ready");
+          if (ready) {
+            osEnvReady = true;
+            return;
+          }
+          await new Promise(r => setTimeout(r, 200));
+        }
+      } catch { /* ignore */ }
+    };
+    poll();
+    return () => { cancelled = true; };
+  });
+
+  // Listen for OS env fallback event and show toast.
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen<string>("os-env-fallback", (event) => {
+          showToast(`Shell environment not loaded: ${event.payload}. Using process environment.`);
+        });
+        if (cancelled) { unlistenFn(); return; }
+        unlisten = unlistenFn;
+      } catch { /* ignore */ }
+    })();
+    return () => { cancelled = true; if (unlisten) unlisten(); };
+  });
 
   $effect(() => {
     void projectPath;
@@ -332,6 +387,21 @@
           }
         }
         break;
+      case "debug-os-env":
+        showOsEnvDebug = true;
+        osEnvDebugLoading = true;
+        osEnvDebugError = null;
+        (async () => {
+          try {
+            const { invoke } = await import("@tauri-apps/api/core");
+            osEnvDebugData = await invoke<CapturedEnvInfo>("get_captured_environment");
+          } catch (e) {
+            osEnvDebugError = String(e);
+          } finally {
+            osEnvDebugLoading = false;
+          }
+        })();
+        break;
       case "terminal-diagnostics": {
         const active = tabs.find((t) => t.id === activeTabId) ?? null;
         const paneId = active?.paneId ?? "";
@@ -414,7 +484,7 @@
         onTabClose={handleTabClose}
       />
     </div>
-    <StatusBar {projectPath} {currentBranch} {terminalCount} />
+    <StatusBar {projectPath} {currentBranch} {terminalCount} {osEnvReady} />
   </div>
 {/if}
 
@@ -422,6 +492,7 @@
   <AgentLaunchForm
     projectPath={projectPath as string}
     selectedBranch={selectedBranch?.name ?? currentBranch}
+    osEnvReady={osEnvReady}
     onLaunch={handleAgentLaunch}
     onClose={() => (showAgentLaunch = false)}
   />
@@ -522,6 +593,38 @@
   </div>
 {/if}
 
+{#if showOsEnvDebug}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="overlay" onclick={() => (showOsEnvDebug = false)}>
+    <div class="env-debug-dialog" onclick={(e) => e.stopPropagation()}>
+      <h3>Captured Environment</h3>
+      {#if osEnvDebugLoading}
+        <p class="env-debug-loading">Loading...</p>
+      {:else if osEnvDebugError}
+        <p class="env-debug-error">{osEnvDebugError}</p>
+      {:else if osEnvDebugData}
+        <div class="env-debug-meta">
+          <span>Source: <strong>{osEnvDebugData.source === 'login_shell' ? 'Login Shell' : osEnvDebugData.source === 'std_env_fallback' ? 'Process Env (fallback)' : osEnvDebugData.source}</strong></span>
+          {#if osEnvDebugData.reason}
+            <span class="env-debug-reason">Reason: {osEnvDebugData.reason}</span>
+          {/if}
+          <span>Variables: {osEnvDebugData.entries.length}</span>
+        </div>
+        <div class="env-debug-list">
+          {#each osEnvDebugData.entries as entry}
+            <div class="env-debug-row">
+              <span class="env-debug-key">{entry.key}</span>
+              <span class="env-debug-val">{entry.value}</span>
+            </div>
+          {/each}
+        </div>
+      {/if}
+      <button class="about-close" onclick={() => (showOsEnvDebug = false)}>Close</button>
+    </div>
+  </div>
+{/if}
+
 {#if appError}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -532,6 +635,15 @@
       <button class="about-close" onclick={() => (appError = null)}>
         Close
       </button>
+    </div>
+  </div>
+{/if}
+
+{#if toastMessage}
+  <div class="toast-container">
+    <div class="toast-message">
+      <span>{toastMessage}</span>
+      <button class="toast-close" onclick={() => (toastMessage = null)}>[x]</button>
     </div>
   </div>
 {/if}
@@ -716,5 +828,114 @@
     line-height: 1.5;
     margin-bottom: 18px;
     white-space: pre-wrap;
+  }
+
+  .toast-container {
+    position: fixed;
+    bottom: 40px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 2000;
+    pointer-events: none;
+  }
+
+  .toast-message {
+    pointer-events: auto;
+    background: var(--bg-tertiary, #45475a);
+    color: var(--text-warning, #f9e2af);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 10px 16px;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  }
+
+  .toast-close {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 13px;
+    padding: 0;
+  }
+
+  .env-debug-dialog {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 24px 28px;
+    min-width: 600px;
+    max-width: 800px;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+  }
+
+  .env-debug-dialog h3 {
+    margin: 0 0 16px;
+    font-size: 16px;
+    color: var(--text-primary);
+  }
+
+  .env-debug-meta {
+    display: flex;
+    gap: 16px;
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+  }
+
+  .env-debug-reason {
+    color: var(--text-warning, #f9e2af);
+  }
+
+  .env-debug-list {
+    overflow-y: auto;
+    flex: 1;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    margin-bottom: 16px;
+  }
+
+  .env-debug-row {
+    display: flex;
+    border-bottom: 1px solid var(--border-color);
+    font-size: 12px;
+    font-family: var(--font-mono, monospace);
+  }
+
+  .env-debug-row:last-child {
+    border-bottom: none;
+  }
+
+  .env-debug-key {
+    min-width: 200px;
+    max-width: 200px;
+    padding: 4px 8px;
+    color: var(--text-accent, #89b4fa);
+    word-break: break-all;
+    border-right: 1px solid var(--border-color);
+  }
+
+  .env-debug-val {
+    flex: 1;
+    padding: 4px 8px;
+    color: var(--text-primary);
+    word-break: break-all;
+    overflow-wrap: anywhere;
+  }
+
+  .env-debug-loading, .env-debug-error {
+    font-size: 13px;
+    padding: 12px 0;
+  }
+
+  .env-debug-error {
+    color: var(--text-error, #f38ba8);
   }
 </style>
