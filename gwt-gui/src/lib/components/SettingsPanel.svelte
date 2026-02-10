@@ -309,7 +309,15 @@
             value={settings.terminal_font_size ?? 13}
             oninput={(e) => {
               if (!settings) return;
-              settings = { ...settings, terminal_font_size: clampFontSize(Number((e.target as HTMLInputElement).value) || 13) };
+              const raw = (e.target as HTMLInputElement).value;
+              if (raw === "") return;
+              const parsed = Number(raw);
+              if (Number.isNaN(parsed)) return;
+              settings = { ...settings, terminal_font_size: parsed };
+            }}
+            onchange={() => {
+              if (!settings) return;
+              settings = { ...settings, terminal_font_size: clampFontSize(settings.terminal_font_size ?? 13) };
             }}
           />
           <button
@@ -338,7 +346,15 @@
             value={settings.ui_font_size ?? 13}
             oninput={(e) => {
               if (!settings) return;
-              settings = { ...settings, ui_font_size: clampFontSize(Number((e.target as HTMLInputElement).value) || 13) };
+              const raw = (e.target as HTMLInputElement).value;
+              if (raw === "") return;
+              const parsed = Number(raw);
+              if (Number.isNaN(parsed)) return;
+              settings = { ...settings, ui_font_size: parsed };
+            }}
+            onchange={() => {
+              if (!settings) return;
+              settings = { ...settings, ui_font_size: clampFontSize(settings.ui_font_size ?? 13) };
             }}
           />
           <button
