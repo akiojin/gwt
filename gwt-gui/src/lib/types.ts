@@ -159,6 +159,18 @@ export interface DockerContext {
   force_host: boolean;
 }
 
+export interface CapturedEnvEntry {
+  key: string;
+  value: string;
+}
+
+export interface CapturedEnvInfo {
+  entries: CapturedEnvEntry[];
+  source: string;
+  reason: string | null;
+  ready: boolean;
+}
+
 export interface LaunchAgentRequest {
   agentId: string;
   branch: string;
