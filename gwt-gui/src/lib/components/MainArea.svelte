@@ -9,6 +9,7 @@
   } from "../types";
   import TerminalView from "../terminal/TerminalView.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
+  import GitSection from "./GitSection.svelte";
 
   function isAgentTabWithPaneId(tab: Tab): tab is Tab & { paneId: string } {
     return tab.type === "agent" && typeof tab.paneId === "string" && tab.paneId.length > 0;
@@ -494,6 +495,8 @@
                   <div class="session-summary-placeholder">No summary.</div>
                 {/if}
               </div>
+
+              <GitSection projectPath={projectPath} branch={selectedBranch.name} />
             </div>
           {:else}
             <div class="placeholder">
@@ -546,7 +549,7 @@
     border: none;
     border-right: 1px solid var(--border-color);
     color: var(--text-secondary);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     cursor: pointer;
     white-space: nowrap;
     font-family: inherit;
@@ -580,7 +583,7 @@
     background: none;
     border: none;
     color: var(--text-muted);
-    font-size: 11px;
+    font-size: var(--ui-font-sm);
     font-family: monospace;
     cursor: pointer;
     padding: 0 2px;
@@ -645,7 +648,7 @@
   }
 
   .placeholder h2 {
-    font-size: 18px;
+    font-size: var(--ui-font-2xl);
     font-weight: 500;
     margin-bottom: 8px;
     color: var(--text-secondary);
@@ -664,7 +667,7 @@
   }
 
   .branch-detail h2 {
-    font-size: 20px;
+    font-size: var(--ui-font-3xl);
     font-weight: 600;
     color: var(--text-primary);
     font-family: monospace;
@@ -676,7 +679,7 @@
     border: none;
     border-radius: 8px;
     padding: 8px 12px;
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     font-weight: 600;
     cursor: pointer;
     font-family: inherit;
@@ -700,7 +703,7 @@
   }
 
   .detail-label {
-    font-size: 11px;
+    font-size: var(--ui-font-sm);
     font-weight: 500;
     color: var(--text-muted);
     text-transform: uppercase;
@@ -709,7 +712,7 @@
   }
 
   .detail-value {
-    font-size: 13px;
+    font-size: var(--ui-font-base);
     color: var(--text-primary);
   }
 
@@ -736,7 +739,7 @@
   }
 
   .quick-title {
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     font-weight: 700;
     letter-spacing: 0.5px;
     text-transform: uppercase;
@@ -744,7 +747,7 @@
   }
 
   .quick-subtitle {
-    font-size: 11px;
+    font-size: var(--ui-font-sm);
     color: var(--text-muted);
     font-family: monospace;
   }
@@ -755,12 +758,12 @@
     background: rgba(255, 0, 0, 0.08);
     border-radius: 8px;
     color: var(--text-primary);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     line-height: 1.4;
   }
 
   .quick-empty {
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     color: var(--text-muted);
     line-height: 1.4;
   }
@@ -798,12 +801,12 @@
   }
 
   .quick-tool-name {
-    font-size: 13px;
+    font-size: var(--ui-font-base);
     font-weight: 700;
   }
 
   .quick-tool-version {
-    font-size: 11px;
+    font-size: var(--ui-font-sm);
     color: var(--text-muted);
   }
 
@@ -828,7 +831,7 @@
     flex-wrap: wrap;
     gap: 6px;
     color: var(--text-muted);
-    font-size: 11px;
+    font-size: var(--ui-font-sm);
   }
 
   .quick-pill {
@@ -852,7 +855,7 @@
     border: 1px solid var(--border-color);
     background: var(--bg-surface);
     color: var(--text-primary);
-    font-size: 12px;
+    font-size: var(--ui-font-md);
     font-weight: 700;
     cursor: pointer;
     font-family: inherit;

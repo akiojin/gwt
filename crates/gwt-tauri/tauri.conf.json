@@ -1,12 +1,12 @@
 {
   "productName": "gwt",
-  "version": "6.28.1",
+  "version": "6.30.3",
   "identifier": "com.akiojin.gwt",
   "build": {
     "frontendDist": "../../gwt-gui/dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "cd gwt-gui && npm run dev",
-    "beforeBuildCommand": "cd gwt-gui && npm run build"
+    "beforeDevCommand": "cd gwt-gui && pnpm run dev",
+    "beforeBuildCommand": "cd gwt-gui && pnpm run build"
   },
   "bundle": {
     "active": true,

@@ -79,6 +79,8 @@ export interface SettingsData {
   agent_gemini_path?: string | null;
   agent_auto_install_deps: boolean;
   docker_force_host: boolean;
+  ui_font_size: number;
+  terminal_font_size: number;
 }
 
 export interface AISettings {
@@ -157,6 +159,89 @@ export interface DockerContext {
   compose_available: boolean;
   daemon_running: boolean;
   force_host: boolean;
+}
+
+export interface WorktreeInfo {
+  path: string;
+  branch: string | null;
+  commit: string;
+  status: string; // "active" | "locked" | "prunable" | "missing"
+  is_main: boolean;
+  has_changes: boolean;
+  has_unpushed: boolean;
+  is_current: boolean;
+  is_protected: boolean;
+  is_agent_running: boolean;
+  ahead: number;
+  behind: number;
+  is_gone: boolean;
+  last_tool_usage: string | null;
+  safety_level: "safe" | "warning" | "danger" | "disabled";
+}
+
+export interface CleanupResult {
+  branch: string;
+  success: boolean;
+  error: string | null;
+}
+
+export interface CleanupProgress {
+  branch: string;
+  status: "deleting" | "deleted" | "failed";
+  error?: string;
+}
+
+export interface CapturedEnvEntry {
+  key: string;
+  value: string;
+}
+
+export interface CapturedEnvInfo {
+  entries: CapturedEnvEntry[];
+  source: string;
+  reason: string | null;
+  ready: boolean;
+}
+
+export type FileChangeKind = "Added" | "Modified" | "Deleted" | "Renamed";
+
+export interface FileChange {
+  path: string;
+  kind: FileChangeKind;
+  additions: number;
+  deletions: number;
+  is_binary: boolean;
+}
+
+export interface FileDiff {
+  content: string;
+  truncated: boolean;
+}
+
+export interface CommitEntry {
+  sha: string;
+  message: string;
+  timestamp: number;
+  author: string;
+}
+
+export interface StashEntry {
+  index: number;
+  message: string;
+  file_count: number;
+}
+
+export interface WorkingTreeEntry {
+  path: string;
+  status: FileChangeKind;
+  is_staged: boolean;
+}
+
+export interface GitChangeSummary {
+  file_count: number;
+  commit_count: number;
+  stash_count: number;
+  base_branch: string;
 }
 
 export interface LaunchAgentRequest {
