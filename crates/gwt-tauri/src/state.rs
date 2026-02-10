@@ -89,7 +89,10 @@ mod tests {
         assert_eq!(state.project_for_window("main"), None);
 
         state.set_project_for_window("main", "/tmp/repo".to_string());
-        assert_eq!(state.project_for_window("main"), Some("/tmp/repo".to_string()));
+        assert_eq!(
+            state.project_for_window("main"),
+            Some("/tmp/repo".to_string())
+        );
 
         state.clear_project_for_window("main");
         assert_eq!(state.project_for_window("main"), None);
