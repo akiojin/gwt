@@ -1,4 +1,4 @@
-# 機能仕様: CI の Node ツールチェーンを pnpm に統一する（commitlint）
+# 機能仕様: CI の Node ツールチェーンを pnpm に統一する（gwt-gui + commitlint）
 
 **仕様ID**: `SPEC-b28ab8d9`  
 **作成日**: 2026-02-10  
@@ -7,9 +7,10 @@
 
 ## 背景 / 問題
 
+- 現状の GitHub Actions では `gwt-gui` の検証に `npm ci` → `npm run check` → `npm run build` を使用している（`.github/workflows/test.yml` / `release.yml`）。
 - 現状の GitHub Actions の commitlint ジョブは `npm install -g ...` に依存している。
 - グローバル npm インストールは実行時間が増えやすく、依存解決の再現性も低い。
-- リポジトリの Node ツールチェーンを `pnpm`（Corepack）に寄せ、ロックファイルと pnpm バージョンを固定して CI の再現性を高めたい。
+- リポジトリの Node ツールチェーンを `pnpm`（Corepack）に寄せ、ロックファイルと pnpm バージョンを固定して CI/ローカルの再現性を高めたい。
 
 ## ユーザーシナリオとテスト *(必須)*
 
@@ -26,16 +27,31 @@
 
 ---
 
-### ユーザーストーリー 2 - ロックファイルと pnpm バージョンが固定される (優先度: P1)
+### ユーザーストーリー 2 - gwt-gui の依存インストール/チェック/ビルドが pnpm で実行できる (優先度: P1)
+
+開発者が `gwt-gui` で `pnpm install --frozen-lockfile` を実行し、チェックとビルドを `pnpm` ベースで再現できる。
+また、CI は `gwt-gui` の検証に `pnpm` を使用し、`npm ci` へ依存しない。
+
+**独立したテスト**: `scripts/verify-ci-node-toolchain.sh` が `gwt-gui` のロックファイルと CI ワークフローの `pnpm` 利用を検証できること。
+
+**受け入れシナリオ**:
+
+1. **前提条件** `gwt-gui` のロックファイルが存在する、**操作** `cd gwt-gui && pnpm install --frozen-lockfile`、**期待結果** 成功する
+2. **前提条件** `gwt-gui`、**操作** `pnpm run check`、**期待結果** 成功する
+3. **前提条件** `gwt-gui`、**操作** `pnpm run build`、**期待結果** 成功する
+
+---
+
+### ユーザーストーリー 3 - ロックファイルと pnpm バージョンが固定される (優先度: P1)
 
 開発者がクリーンなチェックアウトで Node ツールチェーンを扱う際に、`pnpm-lock.yaml` と `packageManager` により依存解決と pnpm バージョンが固定される。
 
-**独立したテスト**: `scripts/verify-ci-node-toolchain.sh` が `pnpm-lock.yaml` の存在、`package-lock.json` の不在、`.npmrc` の設定を検証できること。
+**独立したテスト**: `scripts/verify-ci-node-toolchain.sh` が `gwt-gui/pnpm-lock.yaml` の存在、`gwt-gui/package-lock.json` の不在、CI ワークフローの `pnpm` 利用を検証できること。
 
 **受け入れシナリオ**:
 
 1. **前提条件** リポジトリがクリーンな状態、**操作** `pnpm install --frozen-lockfile` を実行、**期待結果** ロックファイルに基づいて成功する
-2. **前提条件** リポジトリルート、**操作** ロックファイルを確認、**期待結果** `pnpm-lock.yaml` が存在し `package-lock.json` が存在しない
+2. **前提条件** `gwt-gui`、**操作** ロックファイルを確認、**期待結果** `pnpm-lock.yaml` が存在し `package-lock.json` が存在しない
 
 ---
 
@@ -50,9 +66,11 @@
 
 - **FR-001**: CI の commitlint ジョブは `pnpm`（Corepack）で commitlint を実行しなければならない
 - **FR-002**: CI の commitlint ジョブは `npm install -g` に依存してはならない
-- **FR-003**: リポジトリは `pnpm-lock.yaml` を持ち、`package-lock.json` 運用を廃止しなければならない
-- **FR-004**: リポジトリは `packageManager` フィールドで pnpm バージョンを固定しなければならない
-- **FR-005**: `.npmrc` により `package-lock.json` が生成されない方針を明文化しなければならない
+- **FR-003**: CI の `gwt-gui` 検証は `pnpm`（Corepack）を使用しなければならない
+- **FR-004**: `gwt-gui` は `pnpm-lock.yaml` を持ち、`package-lock.json` 運用を廃止しなければならない
+- **FR-005**: CI は `.github/workflows/test.yml` / `release.yml` の `npm ci` / `npm run ...` を `pnpm` に置換しなければならない
+- **FR-006**: リポジトリは `packageManager` フィールドで pnpm バージョンを固定しなければならない
+- **FR-007**: `gwt-gui/package-lock.json` が誤って再導入されないように `.gitignore` で無視しなければならない
 
 ### 非機能要件
 
@@ -62,8 +80,9 @@
 ## 成功基準 *(必須)*
 
 - **SC-001**: `.github/workflows/lint.yml` の commitlint ジョブが `pnpm dlx` で動作する
-- **SC-002**: `package-lock.json` がリポジトリから削除され、`pnpm-lock.yaml` が導入される
-- **SC-003**: `scripts/verify-ci-node-toolchain.sh` が成功する
+- **SC-002**: `gwt-gui` で `pnpm install --frozen-lockfile` / `pnpm run check` / `pnpm run build` が成功する
+- **SC-003**: `gwt-gui/package-lock.json` が削除され、`gwt-gui/pnpm-lock.yaml` が導入される
+- **SC-004**: `scripts/verify-ci-node-toolchain.sh` が成功する
 
 ## 制約と仮定 *(該当する場合)*
 
