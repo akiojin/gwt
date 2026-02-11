@@ -228,6 +228,10 @@ pub fn open_project(
 
     // Update window-scoped state
     state.set_project_for_window(window.label(), project_root_str.clone());
+
+    // Record to recent projects history
+    let _ = gwt_core::config::record_recent_project(&project_root_str);
+
     let _ = crate::menu::rebuild_menu(window.app_handle());
 
     Ok(ProjectInfo {

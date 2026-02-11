@@ -10,6 +10,7 @@ mod claude_plugins;
 pub mod migration;
 pub mod os_env;
 mod profile;
+mod recent_projects;
 mod session;
 mod settings;
 pub mod tools;
@@ -39,6 +40,7 @@ pub use profile::{
     AISettings, ActiveAISettingsResolution, ActiveAISettingsSource, Profile, ProfilesConfig,
     ResolvedAISettings,
 };
+pub use recent_projects::{load_recent_projects, record_recent_project, RecentProject};
 pub use session::{get_session_for_branch, load_sessions_from_worktrees, AgentStatus, Session};
 pub use settings::Settings;
 pub use tools::{AgentType, CustomCodingAgent, ModeArgs, ModelDef, ToolsConfig};
