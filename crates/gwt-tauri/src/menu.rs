@@ -99,6 +99,16 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         .item(&file_close_project)
         .build()?;
 
+    let edit = SubmenuBuilder::new(app, "Edit")
+        .undo()
+        .redo()
+        .separator()
+        .cut()
+        .copy()
+        .paste()
+        .select_all()
+        .build()?;
+
     let git_cleanup_worktrees = MenuItem::with_id(
         app,
         MENU_ID_GIT_CLEANUP_WORKTREES,
@@ -165,6 +175,7 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
 
     menu.append(&gwt)?;
     menu.append(&file)?;
+    menu.append(&edit)?;
     menu.append(&git)?;
     menu.append(&tools)?;
     menu.append(&window)?;
