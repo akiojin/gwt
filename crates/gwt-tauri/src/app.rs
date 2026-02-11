@@ -287,6 +287,7 @@ pub fn build_app(
             crate::commands::agent_config::save_agent_config,
             crate::commands::profiles::get_profiles,
             crate::commands::profiles::save_profiles,
+            crate::commands::profiles::list_ai_models,
             crate::commands::cleanup::list_worktrees,
             crate::commands::cleanup::cleanup_worktrees,
             crate::commands::cleanup::cleanup_single_worktree,
