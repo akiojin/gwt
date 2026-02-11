@@ -431,7 +431,35 @@
     activeTabId = tab.id;
   }
 
+  async function syncWindowAgentTabs() {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const agentTabs = tabs
+        .filter((t) => t.type === "agent")
+        .map((t) => ({ id: t.id, label: t.label }));
+      const activeAgentTabId = agentTabs.some((t) => t.id === activeTabId)
+        ? activeTabId
+        : null;
+      await invoke("sync_window_agent_tabs", {
+        request: {
+          tabs: agentTabs,
+          activeTabId: activeAgentTabId,
+        },
+      });
+    } catch {
+      // Ignore: not available outside Tauri runtime.
+    }
+  }
+
   async function handleMenuAction(action: string) {
+    if (action.startsWith("focus-agent-tab::")) {
+      const tabId = action.slice("focus-agent-tab::".length).trim();
+      if (tabId && tabs.some((t) => t.id === tabId && t.type === "agent")) {
+        activeTabId = tabId;
+      }
+      return;
+    }
+
     // Handle dynamic "open-recent-project::<path>" actions before the switch.
     if (action.startsWith("open-recent-project::")) {
       const recentPath = action.slice("open-recent-project::".length);
@@ -602,6 +630,12 @@
       }
     }
   }
+
+  $effect(() => {
+    void tabs;
+    void activeTabId;
+    void syncWindowAgentTabs();
+  });
 
   // Claude Code Hooks: check & register on startup
   $effect(() => {
