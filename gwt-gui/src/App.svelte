@@ -432,6 +432,40 @@
   }
 
   async function handleMenuAction(action: string) {
+    // Handle dynamic "open-recent-project::<path>" actions before the switch.
+    if (action.startsWith("open-recent-project::")) {
+      const recentPath = action.slice("open-recent-project::".length);
+      if (recentPath) {
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const probe = await invoke<ProbePathResult>("probe_path", {
+            path: recentPath,
+          });
+
+          if (probe.kind === "gwtProject" && probe.projectPath) {
+            const info = await invoke<ProjectInfo>("open_project", {
+              path: probe.projectPath,
+            });
+            projectPath = info.path;
+            fetchCurrentBranch();
+            return;
+          }
+
+          if (probe.kind === "migrationRequired" && probe.migrationSourceRoot) {
+            migrationSourceRoot = probe.migrationSourceRoot;
+            migrationOpen = true;
+            return;
+          }
+
+          appError =
+            probe.message || "Failed to open recent project.";
+        } catch (err) {
+          appError = `Failed to open project: ${toErrorMessage(err)}`;
+        }
+      }
+      return;
+    }
+
     switch (action) {
       case "open-project": {
         try {
