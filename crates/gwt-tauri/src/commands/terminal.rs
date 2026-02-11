@@ -133,7 +133,9 @@ pub struct LaunchAgentRequest {
     pub skip_permissions: Option<bool>,
     /// Codex reasoning override (e.g. "low", "medium", "high", "xhigh").
     pub reasoning_level: Option<String>,
-    /// Enable collaboration_modes for Codex (default: false).
+    /// Collaboration modes for Codex. Ignored (always enabled when version supports it).
+    /// Kept for deserialization compatibility with older frontends.
+    #[allow(dead_code)]
     pub collaboration_modes: Option<bool>,
     /// Additional command line args to append (one arg per entry).
     pub extra_args: Option<Vec<String>>,
@@ -762,7 +764,6 @@ fn build_agent_args(
 ) -> Result<Vec<String>, String> {
     let mode = request.mode.unwrap_or(SessionMode::Normal);
     let skip_permissions = request.skip_permissions.unwrap_or(false);
-    let collaboration_requested = request.collaboration_modes.unwrap_or(false);
     let resume_session_id = request
         .resume_session_id
         .as_deref()
@@ -794,8 +795,7 @@ fn build_agent_args(
             }
             args.extend(prefix);
 
-            let collaboration =
-                collaboration_requested && codex_supports_collaboration_modes(version_for_gates);
+            let collaboration = codex_supports_collaboration_modes(version_for_gates);
             args.extend(gwt_core::agent::codex::codex_default_args(
                 request.model.as_deref(),
                 request.reasoning_level.as_deref(),
@@ -1155,9 +1155,8 @@ mod tests {
     }
 
     #[test]
-    fn build_agent_args_codex_collaboration_modes_allows_latest() {
-        let mut req = make_request("codex");
-        req.collaboration_modes = Some(true);
+    fn build_agent_args_codex_collaboration_modes_always_enabled() {
+        let req = make_request("codex");
         let args = build_agent_args("codex", &req, Some("latest")).unwrap();
         assert!(args
             .windows(2)
@@ -1896,8 +1895,7 @@ fn launch_agent_for_project_root(
     .to_string();
 
     let collaboration_modes = if agent_id == "codex" {
-        let requested = request.collaboration_modes.unwrap_or(false);
-        requested && codex_supports_collaboration_modes(version_for_gates)
+        codex_supports_collaboration_modes(version_for_gates)
     } else {
         false
     };
