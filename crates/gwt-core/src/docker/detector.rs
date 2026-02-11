@@ -1,7 +1,7 @@
 //! Docker file detection (SPEC-f5f5657e)
 //!
 //! Detects Docker-related files in a worktree directory.
-//! Detection priority: docker-compose.yml/compose.yml > Dockerfile > .devcontainer
+//! Detection priority: docker-compose.yml/compose.yml > .devcontainer > Dockerfile
 
 use std::path::{Path, PathBuf};
 use tracing::debug;
@@ -47,8 +47,8 @@ impl DockerFileType {
 ///
 /// Returns the first detected Docker file type based on priority:
 /// 1. docker-compose.yml or compose.yml (Compose)
-/// 2. Dockerfile (Dockerfile)
-/// 3. .devcontainer/devcontainer.json (DevContainer)
+/// 2. .devcontainer/devcontainer.json (DevContainer)
+/// 3. Dockerfile (Dockerfile)
 ///
 /// Returns None if no Docker files are found.
 pub fn detect_docker_files(worktree_path: &Path) -> Option<DockerFileType> {
@@ -77,20 +77,20 @@ pub fn detect_docker_files(worktree_path: &Path) -> Option<DockerFileType> {
         }
     }
 
-    // Priority 2: Dockerfile
-    let dockerfile_path = worktree_path.join("Dockerfile");
-    if dockerfile_path.exists() && dockerfile_path.is_file() {
-        debug!(category = "docker", "Found Dockerfile");
-        return Some(DockerFileType::Dockerfile(dockerfile_path));
-    }
-
-    // Priority 3: .devcontainer/devcontainer.json
+    // Priority 2: .devcontainer/devcontainer.json
     let devcontainer_path = worktree_path
         .join(".devcontainer")
         .join("devcontainer.json");
     if devcontainer_path.exists() && devcontainer_path.is_file() {
         debug!(category = "docker", "Found devcontainer.json");
         return Some(DockerFileType::DevContainer(devcontainer_path));
+    }
+
+    // Priority 3: Dockerfile
+    let dockerfile_path = worktree_path.join("Dockerfile");
+    if dockerfile_path.exists() && dockerfile_path.is_file() {
+        debug!(category = "docker", "Found Dockerfile");
+        return Some(DockerFileType::Dockerfile(dockerfile_path));
     }
 
     debug!(category = "docker", "No Docker files found");
@@ -202,9 +202,9 @@ mod tests {
         assert!(docker_type.is_compose());
     }
 
-    // T-105: Priority test - Dockerfile takes priority over devcontainer
+    // T-105: Priority test - devcontainer takes priority over Dockerfile
     #[test]
-    fn test_priority_dockerfile_over_devcontainer() {
+    fn test_priority_devcontainer_over_dockerfile() {
         let temp_dir = TempDir::new().unwrap();
 
         // Create Dockerfile
@@ -222,8 +222,8 @@ mod tests {
         let result = detect_docker_files(temp_dir.path());
         assert!(result.is_some());
         let docker_type = result.unwrap();
-        // Dockerfile should take priority over devcontainer
-        assert!(docker_type.is_dockerfile());
+        // devcontainer should take priority over Dockerfile
+        assert!(docker_type.is_devcontainer());
     }
 
     // T-105: Priority test - compose takes priority over all

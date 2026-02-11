@@ -9,13 +9,11 @@ pub mod ai;
 pub mod config;
 pub mod docker;
 pub mod error;
-pub mod execution_mode;
 pub mod git;
 pub mod lock;
 pub mod logging;
 pub mod migration;
-pub mod tmux;
+pub mod terminal;
 pub mod worktree;
 
 pub use error::{GwtError, Result};
-pub use execution_mode::TmuxMode;

@@ -398,6 +398,7 @@ mod tests {
     fn test_migrate_local_to_global() {
         // Lock mutex to prevent concurrent env var access
         let _guard = ENV_MUTEX.lock().unwrap();
+        let _home_lock = crate::config::HOME_LOCK.lock().unwrap();
 
         let temp = TempDir::new().unwrap();
         let worktree_path = temp.path();
@@ -431,6 +432,7 @@ mod tests {
     fn test_legacy_session_migration() {
         // Lock mutex to prevent concurrent env var access
         let _guard = ENV_MUTEX.lock().unwrap();
+        let _home_lock = crate::config::HOME_LOCK.lock().unwrap();
 
         let temp = TempDir::new().unwrap();
         let legacy_path = temp.path().join(Session::LEGACY_JSON_NAME);

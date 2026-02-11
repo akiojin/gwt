@@ -1,0 +1,36 @@
+{
+  "productName": "gwt",
+  "version": "6.30.3",
+  "identifier": "com.akiojin.gwt",
+  "build": {
+    "frontendDist": "../../gwt-gui/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "cd gwt-gui && pnpm run dev",
+    "beforeBuildCommand": "cd gwt-gui && pnpm run build"
+  },
+  "bundle": {
+    "active": true,
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ]
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "gwt",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600,
+        "decorations": true,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+    },
+    "macOSPrivateApi": true
+  }
+}

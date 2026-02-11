@@ -5,14 +5,19 @@ use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use reqwest::{StatusCode, Url};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use thiserror::Error;
+use tracing::warn;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 
 const MAX_OUTPUT_TOKENS: u32 = 400;
 const TEMPERATURE: f32 = 0.3;
+
+const MAX_RETRIES: usize = 5;
+const BACKOFF_BASE_SECS: u64 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -58,6 +63,19 @@ struct ResponsesRequest<'a> {
 #[derive(Debug, Deserialize)]
 struct ResponsesResponse {
     output: Vec<ResponseOutputItem>,
+    #[serde(default)]
+    usage: Option<UsageInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct UsageInfo {
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    completion_tokens: u64,
+    #[serde(default)]
+    total_tokens: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,6 +114,7 @@ pub struct AIClient {
     api_key: String,
     model: String,
     client: Client,
+    cumulative_tokens: AtomicU64,
 }
 
 impl AIClient {
@@ -120,7 +139,13 @@ impl AIClient {
             api_key: settings.api_key,
             model,
             client,
+            cumulative_tokens: AtomicU64::new(0),
         })
+    }
+
+    /// Returns the cumulative token count across all API calls
+    pub fn cumulative_tokens(&self) -> u64 {
+        self.cumulative_tokens.load(Ordering::Relaxed)
     }
 
     pub fn create_response(&self, messages: Vec<ChatMessage>) -> Result<String, AIError> {
@@ -137,9 +162,7 @@ impl AIClient {
             temperature: TEMPERATURE,
         };
 
-        let mut rate_retries = 0usize;
-        let mut server_retries = 0usize;
-        let mut network_retries = 0usize;
+        let mut retries = 0usize;
 
         loop {
             let mut headers = HeaderMap::new();
@@ -170,47 +193,48 @@ impl AIClient {
             match response {
                 Ok(resp) => {
                     let status = resp.status();
-                    let headers = resp.headers().clone();
+                    let resp_headers = resp.headers().clone();
                     let body = resp.text().unwrap_or_default();
                     if status == StatusCode::OK {
-                        return parse_response(&body);
+                        let (text, usage) = parse_response_with_usage(&body)?;
+                        if let Some(tokens) = usage {
+                            self.cumulative_tokens.fetch_add(tokens, Ordering::Relaxed);
+                        }
+                        return Ok(text);
                     }
                     if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
                         return Err(AIError::Unauthorized);
                     }
-                    if status == StatusCode::TOO_MANY_REQUESTS {
-                        let retry_after = parse_retry_after(&body, &headers);
-                        if rate_retries < 3 {
-                            let delay = retry_after.unwrap_or(1 << rate_retries);
-                            std::thread::sleep(Duration::from_secs(delay));
-                            rate_retries += 1;
-                            continue;
-                        }
-                        return Err(AIError::RateLimited { retry_after });
-                    }
-                    if status.is_server_error() {
+                    let error = if status == StatusCode::TOO_MANY_REQUESTS {
+                        let retry_after = parse_retry_after(&body, &resp_headers);
+                        AIError::RateLimited { retry_after }
+                    } else if status.is_server_error() {
                         let message = extract_error_message(&body)
                             .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
-                        if server_retries < 2 {
-                            std::thread::sleep(Duration::from_secs(1));
-                            server_retries += 1;
-                            continue;
-                        }
+                        AIError::ServerError(message)
+                    } else {
+                        let message = extract_error_message(&body)
+                            .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
                         return Err(AIError::ServerError(message));
-                    }
+                    };
 
-                    let message = extract_error_message(&body)
-                        .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
-                    return Err(AIError::ServerError(message));
-                }
-                Err(err) => {
-                    let message = err.to_string();
-                    if (err.is_timeout() || err.is_connect()) && network_retries < 2 {
-                        std::thread::sleep(Duration::from_secs(1));
-                        network_retries += 1;
+                    if is_retryable(&error) && retries < MAX_RETRIES {
+                        let delay = backoff_delay(retries);
+                        warn!(
+                            retry = retries + 1,
+                            max_retries = MAX_RETRIES,
+                            delay_secs = delay.as_secs(),
+                            error = %error,
+                            "Retrying API request"
+                        );
+                        std::thread::sleep(delay);
+                        retries += 1;
                         continue;
                     }
-                    return Err(AIError::NetworkError(message));
+                    return Err(error);
+                }
+                Err(err) => {
+                    return Err(AIError::NetworkError(err.to_string()));
                 }
             }
         }
@@ -265,7 +289,7 @@ fn build_responses_input(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Res
     (instructions, items)
 }
 
-fn parse_response(body: &str) -> Result<String, AIError> {
+fn parse_response_with_usage(body: &str) -> Result<(String, Option<u64>), AIError> {
     let parsed: ResponsesResponse = serde_json::from_str(body)
         .map_err(|e| AIError::ParseError(format!("Invalid response: {}", e)))?;
     let mut texts = Vec::new();
@@ -291,7 +315,37 @@ fn parse_response(body: &str) -> Result<String, AIError> {
             "No assistant output_text in response".to_string(),
         ));
     }
-    Ok(texts.join(""))
+    let usage_tokens = parsed.usage.map(|u| u.total_tokens);
+    Ok((texts.join(""), usage_tokens))
+}
+
+/// Returns true if the error is retryable (rate limited or server error)
+fn is_retryable(error: &AIError) -> bool {
+    match error {
+        AIError::RateLimited { .. } => true,
+        AIError::ServerError(message) => !is_permanent_server_error(message),
+        _ => false,
+    }
+}
+
+fn is_permanent_server_error(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    // Some OpenAI-compatible backends return 501 for /responses. Retrying just adds long delays.
+    if m.contains("http 501") {
+        return true;
+    }
+    if m.contains("not implemented") {
+        return true;
+    }
+    if m.contains("does not support the responses api") {
+        return true;
+    }
+    false
+}
+
+/// Compute exponential backoff delay: 1s, 2s, 4s, 8s, 16s
+fn backoff_delay(retry: usize) -> Duration {
+    Duration::from_secs(BACKOFF_BASE_SECS << retry)
 }
 
 fn extract_error_message(body: &str) -> Option<String> {
@@ -357,6 +411,7 @@ impl AIClient {
             api_key: api_key.to_string(),
             model: String::new(), // not used for list_models
             client,
+            cumulative_tokens: AtomicU64::new(0),
         })
     }
 
@@ -620,5 +675,136 @@ mod tests {
         // Empty API key should be allowed for local LLMs
         let result = AIClient::new_for_list_models("http://localhost:11434/v1", "");
         assert!(result.is_ok());
+    }
+
+    // ========================================
+    // Retryable Error Tests
+    // ========================================
+
+    #[test]
+    fn test_is_retryable_rate_limited() {
+        let error = AIError::RateLimited {
+            retry_after: Some(5),
+        };
+        assert!(is_retryable(&error));
+    }
+
+    #[test]
+    fn test_is_retryable_rate_limited_no_retry_after() {
+        let error = AIError::RateLimited { retry_after: None };
+        assert!(is_retryable(&error));
+    }
+
+    #[test]
+    fn test_is_retryable_server_error() {
+        let error = AIError::ServerError("Internal Server Error".to_string());
+        assert!(is_retryable(&error));
+    }
+
+    #[test]
+    fn test_is_not_retryable_server_error_not_implemented() {
+        let error = AIError::ServerError("Not Implemented".to_string());
+        assert!(!is_retryable(&error));
+    }
+
+    #[test]
+    fn test_is_not_retryable_server_error_responses_api_unsupported() {
+        let error = AIError::ServerError(
+            "Not Implemented: The backend for model 'qwen3-coder:30b' does not support the Responses API"
+                .to_string(),
+        );
+        assert!(!is_retryable(&error));
+    }
+
+    #[test]
+    fn test_is_not_retryable_server_error_http_501() {
+        let error = AIError::ServerError("HTTP 501".to_string());
+        assert!(!is_retryable(&error));
+    }
+
+    #[test]
+    fn test_is_not_retryable_unauthorized() {
+        let error = AIError::Unauthorized;
+        assert!(!is_retryable(&error));
+    }
+
+    #[test]
+    fn test_is_not_retryable_parse_error() {
+        let error = AIError::ParseError("bad json".to_string());
+        assert!(!is_retryable(&error));
+    }
+
+    #[test]
+    fn test_is_not_retryable_network_error() {
+        let error = AIError::NetworkError("timeout".to_string());
+        assert!(!is_retryable(&error));
+    }
+
+    #[test]
+    fn test_is_not_retryable_config_error() {
+        let error = AIError::ConfigError("missing key".to_string());
+        assert!(!is_retryable(&error));
+    }
+
+    #[test]
+    fn test_is_not_retryable_incomplete_summary() {
+        let error = AIError::IncompleteSummary;
+        assert!(!is_retryable(&error));
+    }
+
+    // ========================================
+    // Backoff Delay Tests
+    // ========================================
+
+    #[test]
+    fn test_backoff_delay_sequence() {
+        assert_eq!(backoff_delay(0), Duration::from_secs(1));
+        assert_eq!(backoff_delay(1), Duration::from_secs(2));
+        assert_eq!(backoff_delay(2), Duration::from_secs(4));
+        assert_eq!(backoff_delay(3), Duration::from_secs(8));
+        assert_eq!(backoff_delay(4), Duration::from_secs(16));
+    }
+
+    // ========================================
+    // Usage Parsing Tests
+    // ========================================
+
+    #[test]
+    fn test_parse_response_with_usage_tokens() {
+        let body = r#"{
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Hello"}]
+            }],
+            "usage": {"total_tokens": 42}
+        }"#;
+        let (text, usage) = parse_response_with_usage(body).unwrap();
+        assert_eq!(text, "Hello");
+        assert_eq!(usage, Some(42));
+    }
+
+    #[test]
+    fn test_parse_response_with_no_usage() {
+        let body = r#"{
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Hi"}]
+            }]
+        }"#;
+        let (text, usage) = parse_response_with_usage(body).unwrap();
+        assert_eq!(text, "Hi");
+        assert_eq!(usage, None);
+    }
+
+    // ========================================
+    // Cumulative Tokens Tests
+    // ========================================
+
+    #[test]
+    fn test_cumulative_tokens_initial_value() {
+        let client = AIClient::new_for_list_models("https://api.openai.com/v1", "key").unwrap();
+        assert_eq!(client.cumulative_tokens(), 0);
     }
 }

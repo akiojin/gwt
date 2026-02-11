@@ -32,12 +32,12 @@ pub struct Settings {
     pub log_dir: Option<PathBuf>,
     /// Log retention days
     pub log_retention_days: u32,
-    /// Web server settings
-    pub web: WebSettings,
     /// Agent settings
     pub agent: AgentSettings,
     /// Docker settings
     pub docker: DockerSettings,
+    /// Appearance settings
+    pub appearance: AppearanceSettings,
 }
 
 impl Default for Settings {
@@ -53,31 +53,9 @@ impl Default for Settings {
             debug: false,
             log_dir: None,
             log_retention_days: 7,
-            web: WebSettings::default(),
             agent: AgentSettings::default(),
             docker: DockerSettings::default(),
-        }
-    }
-}
-
-/// Web server settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct WebSettings {
-    /// Server port
-    pub port: u16,
-    /// Bind address
-    pub address: String,
-    /// Enable CORS
-    pub cors: bool,
-}
-
-impl Default for WebSettings {
-    fn default() -> Self {
-        Self {
-            port: 3000,
-            address: "127.0.0.1".to_string(),
-            cors: true,
+            appearance: AppearanceSettings::default(),
         }
     }
 }
@@ -104,6 +82,25 @@ pub struct AgentSettings {
 pub struct DockerSettings {
     /// Force host launch (skip docker) even when Docker files are detected
     pub force_host: bool,
+}
+
+/// Appearance settings (font sizes)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppearanceSettings {
+    /// UI font size in pixels (8-24, default 13)
+    pub ui_font_size: u32,
+    /// Terminal font size in pixels (8-24, default 13)
+    pub terminal_font_size: u32,
+}
+
+impl Default for AppearanceSettings {
+    fn default() -> Self {
+        Self {
+            ui_font_size: 13,
+            terminal_font_size: 13,
+        }
+    }
 }
 
 impl Settings {
@@ -173,12 +170,6 @@ impl Settings {
         if let Ok(value) = std::env::var("GWT_DOCKER_FORCE_HOST") {
             if let Some(parsed) = parse_env_bool(&value) {
                 settings.docker.force_host = parsed;
-            }
-        }
-
-        if let Ok(value) = std::env::var("PORT") {
-            if let Ok(parsed) = value.trim().parse::<u16>() {
-                settings.web.port = parsed;
             }
         }
 
@@ -468,7 +459,6 @@ mod tests {
         assert!(!settings.protected_branches.is_empty());
         assert!(settings.protected_branches.contains(&"main".to_string()));
         assert!(!settings.debug);
-        assert_eq!(settings.web.port, 3000);
     }
 
     #[test]
@@ -496,10 +486,6 @@ mod tests {
         let settings = Settings {
             protected_branches: vec!["main".to_string(), "release".to_string()],
             debug: true,
-            web: WebSettings {
-                port: 9090,
-                ..Default::default()
-            },
             ..Default::default()
         };
 
@@ -509,7 +495,6 @@ mod tests {
         assert!(loaded.protected_branches.contains(&"main".to_string()));
         assert!(loaded.protected_branches.contains(&"release".to_string()));
         assert!(loaded.debug);
-        assert_eq!(loaded.web.port, 9090);
     }
 
     #[test]
@@ -556,17 +541,6 @@ mod tests {
         std::env::remove_var("GWT_AGENT_AUTO_INSTALL_DEPS");
 
         assert!(settings.agent.auto_install_deps);
-    }
-
-    #[test]
-    fn test_env_override_port() {
-        let temp = TempDir::new().unwrap();
-
-        std::env::set_var("PORT", "4567");
-        let settings = Settings::load(temp.path()).unwrap();
-        std::env::remove_var("PORT");
-
-        assert_eq!(settings.web.port, 4567);
     }
 
     #[test]
@@ -662,6 +636,38 @@ default_base_branch = "legacy-global"
         std::fs::create_dir_all(&new_gwt).unwrap();
         std::fs::write(new_gwt.join("config.toml"), "debug = false").unwrap();
         assert!(!Settings::needs_global_path_migration());
+    }
+
+    #[test]
+    fn test_appearance_default() {
+        let settings = Settings::default();
+        assert_eq!(settings.appearance.ui_font_size, 13);
+        assert_eq!(settings.appearance.terminal_font_size, 13);
+    }
+
+    #[test]
+    fn test_appearance_backward_compat() {
+        // Config without [appearance] section should deserialize with defaults
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join(".gwt.toml");
+        std::fs::write(&config_path, "debug = true\n").unwrap();
+        let settings = Settings::load(temp.path()).unwrap();
+        assert!(settings.debug);
+        assert_eq!(settings.appearance.ui_font_size, 13);
+        assert_eq!(settings.appearance.terminal_font_size, 13);
+    }
+
+    #[test]
+    fn test_appearance_save_load() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join(".gwt.toml");
+        let mut settings = Settings::default();
+        settings.appearance.ui_font_size = 16;
+        settings.appearance.terminal_font_size = 18;
+        settings.save(&config_path).unwrap();
+        let loaded = Settings::load(temp.path()).unwrap();
+        assert_eq!(loaded.appearance.ui_font_size, 16);
+        assert_eq!(loaded.appearance.terminal_font_size, 18);
     }
 
     #[test]
