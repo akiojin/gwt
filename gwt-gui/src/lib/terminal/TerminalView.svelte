@@ -4,6 +4,7 @@
   import { WebLinksAddon } from "@xterm/addon-web-links";
   import "@xterm/xterm/css/xterm.css";
   import { onMount } from "svelte";
+  import { isCtrlCShortcut, isPasteShortcut } from "./shortcuts";
 
   let {
     paneId,
@@ -49,8 +50,45 @@
     return typeof stored === "number" && stored >= 8 && stored <= 24 ? stored : 13;
   }
 
+  async function copyTextToClipboard(text: string) {
+    if (!text) return;
+
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Fall through to legacy fallback.
+    }
+
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "true");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    textarea.style.pointerEvents = "none";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    document.execCommand("copy");
+    document.body.removeChild(textarea);
+  }
+
+  async function pasteFromClipboard(): Promise<boolean> {
+    if (!navigator.clipboard?.readText) return false;
+
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text) return true;
+      await writeToTerminal(text);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   onMount(() => {
-    if (!containerEl) return;
+    const rootEl = containerEl;
+    if (!rootEl) return;
 
     const term = new Terminal({
       cursorBlink: true,
@@ -89,13 +127,50 @@
 
     term.loadAddon(fit);
     term.loadAddon(webLinks);
-    term.open(containerEl);
+    term.open(rootEl);
 
     // Initial fit
     requestAnimationFrame(() => {
       fit.fit();
       notifyResize(term.rows, term.cols);
     });
+
+    term.attachCustomKeyEventHandler((event: KeyboardEvent) => {
+      if (event.type !== "keydown") return true;
+
+      if (isCtrlCShortcut(event)) {
+        const selection = term.getSelection();
+        if (selection.length > 0) {
+          event.preventDefault();
+          void copyTextToClipboard(selection);
+          return false;
+        }
+
+        event.preventDefault();
+        void writeToTerminalBytes([0x03]);
+        return false;
+      }
+
+      if (isPasteShortcut(event)) {
+        if (!navigator.clipboard?.readText) {
+          return true;
+        }
+
+        event.preventDefault();
+        void pasteFromClipboard();
+        return false;
+      }
+
+      return true;
+    });
+
+    const handlePaste = (event: ClipboardEvent) => {
+      const text = event.clipboardData?.getData("text/plain");
+      if (!text) return;
+      event.preventDefault();
+      void writeToTerminal(text);
+    };
+    rootEl.addEventListener("paste", handlePaste);
 
     // Handle user input -> send to PTY backend
     term.onData((data: string) => {
@@ -123,7 +198,7 @@
         }
       });
     });
-    observer.observe(containerEl);
+    observer.observe(rootEl);
 
     terminal = term;
     fitAddon = fit;
@@ -145,6 +220,7 @@
       if (unlisten) {
         unlisten();
       }
+      rootEl.removeEventListener("paste", handlePaste);
       window.removeEventListener("gwt-terminal-font-size", handleFontSizeChange);
       observer.disconnect();
       term.dispose();

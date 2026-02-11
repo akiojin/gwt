@@ -178,6 +178,12 @@ pub fn build_app(
                 return;
             }
 
+            if let Some(project_path) = crate::menu::parse_recent_project_menu_id(id) {
+                let action = format!("open-recent-project::{}", project_path);
+                emit_menu_action(app, &action);
+                return;
+            }
+
             if let Some(target) = crate::menu::parse_window_focus_menu_id(id) {
                 if let Some(w) = app.get_webview_window(target) {
                     let _ = w.show();
@@ -309,6 +315,7 @@ pub fn build_app(
             crate::commands::version_history::list_project_versions,
             crate::commands::version_history::get_project_version_history,
             crate::commands::window_tabs::sync_window_agent_tabs,
+            crate::commands::recent_projects::get_recent_projects,
         ])
 }
 
