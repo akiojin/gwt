@@ -8,12 +8,20 @@
     onBranchSelect,
     onBranchActivate,
     onCleanupRequest,
+    onResize,
+    widthPx = 260,
+    minWidthPx = 220,
+    maxWidthPx = 520,
     refreshKey = 0,
   }: {
     projectPath: string;
     onBranchSelect: (branch: BranchInfo) => void;
     onBranchActivate?: (branch: BranchInfo) => void;
     onCleanupRequest?: (preSelectedBranch?: string) => void;
+    onResize?: (nextWidthPx: number) => void;
+    widthPx?: number;
+    minWidthPx?: number;
+    maxWidthPx?: number;
     refreshKey?: number;
   } = $props();
 
@@ -41,6 +49,12 @@
   let confirmDelete: { branch: string; safetyLevel: string } | null =
     $state(null);
   let confirmDeleteError: string | null = $state(null);
+  let resizing = false;
+  let resizePointerId: number | null = null;
+  let resizeStartX = 0;
+  let resizeStartWidth = 0;
+  let previousBodyCursor = "";
+  let previousBodyUserSelect = "";
 
   const filters: FilterType[] = ["Local", "Remote", "All"];
 
@@ -51,6 +65,13 @@
         )
       : branches
   );
+  let clampedWidthPx = $derived(clampSidebarWidth(widthPx));
+
+  $effect(() => {
+    return () => {
+      stopResizing();
+    };
+  });
 
   $effect(() => {
     // Re-fetch when filter/projectPath changes and when explicitly requested.
@@ -311,10 +332,96 @@
 
   // --- Context menu ---
 
+  function clampSidebarWidth(width: number): number {
+    const min = Number.isFinite(minWidthPx) ? minWidthPx : 220;
+    const maxCandidate = Number.isFinite(maxWidthPx) ? maxWidthPx : 520;
+    const max = Math.max(min, maxCandidate);
+    if (!Number.isFinite(width)) return min;
+    return Math.max(min, Math.min(max, Math.round(width)));
+  }
+
+  function emitSidebarWidth(nextWidthPx: number) {
+    onResize?.(clampSidebarWidth(nextWidthPx));
+  }
+
+  function stopResizing() {
+    if (!resizing) return;
+    resizing = false;
+    resizePointerId = null;
+    window.removeEventListener("pointermove", handleResizePointerMove);
+    window.removeEventListener("pointerup", handleResizePointerUp);
+    window.removeEventListener("pointercancel", handleResizePointerUp);
+    document.body.style.cursor = previousBodyCursor;
+    document.body.style.userSelect = previousBodyUserSelect;
+  }
+
+  function handleResizePointerMove(event: PointerEvent) {
+    if (!resizing) return;
+    if (resizePointerId !== null && event.pointerId !== resizePointerId) return;
+    const delta = event.clientX - resizeStartX;
+    emitSidebarWidth(resizeStartWidth + delta);
+  }
+
+  function handleResizePointerUp(event: PointerEvent) {
+    if (resizePointerId !== null && event.pointerId !== resizePointerId) return;
+    stopResizing();
+  }
+
+  function handleResizePointerDown(event: PointerEvent) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+
+    resizeStartX = event.clientX;
+    resizeStartWidth = clampedWidthPx;
+    resizePointerId = event.pointerId;
+    resizing = true;
+
+    previousBodyCursor = document.body.style.cursor;
+    previousBodyUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    window.addEventListener("pointermove", handleResizePointerMove);
+    window.addEventListener("pointerup", handleResizePointerUp);
+    window.addEventListener("pointercancel", handleResizePointerUp);
+  }
+
+  function handleResizeKeydown(event: KeyboardEvent) {
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      const step = event.shiftKey ? 24 : 12;
+      const delta = event.key === "ArrowRight" ? step : -step;
+      emitSidebarWidth(clampedWidthPx + delta);
+      return;
+    }
+    if (event.key === "Home") {
+      event.preventDefault();
+      emitSidebarWidth(minWidthPx);
+      return;
+    }
+    if (event.key === "End") {
+      event.preventDefault();
+      emitSidebarWidth(maxWidthPx);
+    }
+  }
+
+  function canLaunchBranch(branch: BranchInfo): boolean {
+    return !deletingBranches.has(branch.name) && !!onBranchActivate;
+  }
+
   function handleContextMenu(e: MouseEvent, branch: BranchInfo) {
     if (deletingBranches.has(branch.name)) return;
     e.preventDefault();
     contextMenu = { x: e.clientX, y: e.clientY, branch };
+  }
+
+  function handleLaunchAgent() {
+    if (!contextMenu) return;
+    const branch = contextMenu.branch;
+    contextMenu = null;
+    if (!canLaunchBranch(branch)) return;
+    onBranchActivate?.(branch);
   }
 
   function handleCleanupThisBranch() {
@@ -369,7 +476,10 @@
   }
 </script>
 
-<aside class="sidebar">
+<aside
+  class="sidebar"
+  style="width: {clampedWidthPx}px; min-width: {clampedWidthPx}px;"
+>
   <div class="filter-bar">
     {#each filters as filter}
       <button
@@ -446,6 +556,13 @@
       {/each}
     {/if}
   </div>
+  <button
+    type="button"
+    class="resize-handle"
+    aria-label="Resize sidebar"
+    onpointerdown={handleResizePointerDown}
+    onkeydown={handleResizeKeydown}
+  ></button>
 </aside>
 
 <!-- Context menu (fixed position, outside sidebar overflow) -->
@@ -457,6 +574,14 @@
     style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
     onclick={(e) => e.stopPropagation()}
   >
+    <button
+      class="context-menu-item"
+      class:disabled={!canLaunchBranch(contextMenu.branch)}
+      disabled={!canLaunchBranch(contextMenu.branch)}
+      onclick={handleLaunchAgent}
+    >
+      Launch Agent...
+    </button>
     <button
       class="context-menu-item"
       class:disabled={isBranchProtected(contextMenu.branch)}
@@ -529,13 +654,47 @@
 
 <style>
   .sidebar {
-    width: var(--sidebar-width);
-    min-width: var(--sidebar-width);
+    position: relative;
+    flex-shrink: 0;
     background-color: var(--bg-secondary);
     border-right: 1px solid var(--border-color);
     display: flex;
     flex-direction: column;
     overflow: hidden;
+  }
+
+  .resize-handle {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 8px;
+    height: 100%;
+    border: none;
+    background: transparent;
+    cursor: col-resize;
+    padding: 0;
+    touch-action: none;
+    z-index: 1;
+  }
+
+  .resize-handle::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 3px;
+    width: 2px;
+    background: transparent;
+    transition: background-color 120ms ease;
+  }
+
+  .sidebar:hover .resize-handle::after,
+  .resize-handle:focus-visible::after {
+    background: var(--border-color);
+  }
+
+  .resize-handle:focus-visible {
+    outline: none;
   }
 
   .filter-bar {

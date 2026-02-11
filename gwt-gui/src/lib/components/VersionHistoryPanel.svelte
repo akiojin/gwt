@@ -237,6 +237,7 @@
     height: 100%;
     display: flex;
     flex-direction: column;
+    min-height: 0;
     padding: 18px 18px 24px;
     background: var(--bg-primary);
     overflow: hidden;
@@ -281,6 +282,8 @@
   }
 
   .vh-list {
+    flex: 1;
+    min-height: 0;
     overflow: auto;
     padding-top: 14px;
     display: flex;
