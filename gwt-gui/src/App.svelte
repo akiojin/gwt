@@ -22,9 +22,43 @@
     action: string;
   }
 
+  const SIDEBAR_WIDTH_STORAGE_KEY = "gwt.sidebar.width";
+  const DEFAULT_SIDEBAR_WIDTH_PX = 260;
+  const MIN_SIDEBAR_WIDTH_PX = 220;
+  const MAX_SIDEBAR_WIDTH_PX = 520;
+
+  function clampSidebarWidth(widthPx: number): number {
+    if (!Number.isFinite(widthPx)) return DEFAULT_SIDEBAR_WIDTH_PX;
+    return Math.max(
+      MIN_SIDEBAR_WIDTH_PX,
+      Math.min(MAX_SIDEBAR_WIDTH_PX, Math.round(widthPx))
+    );
+  }
+
+  function loadSidebarWidth(): number {
+    if (typeof window === "undefined") return DEFAULT_SIDEBAR_WIDTH_PX;
+    try {
+      const raw = window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
+      if (!raw) return DEFAULT_SIDEBAR_WIDTH_PX;
+      return clampSidebarWidth(Number(raw));
+    } catch {
+      return DEFAULT_SIDEBAR_WIDTH_PX;
+    }
+  }
+
+  function persistSidebarWidth(widthPx: number) {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(widthPx));
+    } catch {
+      // Ignore localStorage failures (e.g., disabled in strict environments).
+    }
+  }
+
   let projectPath: string | null = $state(null);
   let appVersion: string | null = $state(null);
   let sidebarVisible: boolean = $state(true);
+  let sidebarWidthPx: number = $state(loadSidebarWidth());
   let showAgentLaunch: boolean = $state(false);
   let showCleanupModal: boolean = $state(false);
   let cleanupPreselectedBranch: string | null = $state(null);
@@ -252,6 +286,13 @@
     showAgentLaunch = true;
   }
 
+  function handleSidebarResize(nextWidthPx: number) {
+    const next = clampSidebarWidth(nextWidthPx);
+    if (next === sidebarWidthPx) return;
+    sidebarWidthPx = next;
+    persistSidebarWidth(next);
+  }
+
   function handleBranchActivate(branch: BranchInfo) {
     handleBranchSelect(branch);
     requestAgentLaunch();
@@ -390,7 +431,69 @@
     activeTabId = tab.id;
   }
 
+  async function syncWindowAgentTabs() {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const agentTabs = tabs
+        .filter((t) => t.type === "agent")
+        .map((t) => ({ id: t.id, label: t.label }));
+      const activeAgentTabId = agentTabs.some((t) => t.id === activeTabId)
+        ? activeTabId
+        : null;
+      await invoke("sync_window_agent_tabs", {
+        request: {
+          tabs: agentTabs,
+          activeTabId: activeAgentTabId,
+        },
+      });
+    } catch {
+      // Ignore: not available outside Tauri runtime.
+    }
+  }
+
   async function handleMenuAction(action: string) {
+    if (action.startsWith("focus-agent-tab::")) {
+      const tabId = action.slice("focus-agent-tab::".length).trim();
+      if (tabId && tabs.some((t) => t.id === tabId && t.type === "agent")) {
+        activeTabId = tabId;
+      }
+      return;
+    }
+
+    // Handle dynamic "open-recent-project::<path>" actions before the switch.
+    if (action.startsWith("open-recent-project::")) {
+      const recentPath = action.slice("open-recent-project::".length);
+      if (recentPath) {
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const probe = await invoke<ProbePathResult>("probe_path", {
+            path: recentPath,
+          });
+
+          if (probe.kind === "gwtProject" && probe.projectPath) {
+            const info = await invoke<ProjectInfo>("open_project", {
+              path: probe.projectPath,
+            });
+            projectPath = info.path;
+            fetchCurrentBranch();
+            return;
+          }
+
+          if (probe.kind === "migrationRequired" && probe.migrationSourceRoot) {
+            migrationSourceRoot = probe.migrationSourceRoot;
+            migrationOpen = true;
+            return;
+          }
+
+          appError =
+            probe.message || "Failed to open recent project.";
+        } catch (err) {
+          appError = `Failed to open project: ${toErrorMessage(err)}`;
+        }
+      }
+      return;
+    }
+
     switch (action) {
       case "open-project": {
         try {
@@ -528,6 +631,12 @@
     }
   }
 
+  $effect(() => {
+    void tabs;
+    void activeTabId;
+    void syncWindowAgentTabs();
+  });
+
   // Claude Code Hooks: check & register on startup
   $effect(() => {
     (async () => {
@@ -625,6 +734,10 @@
         <Sidebar
           {projectPath}
           refreshKey={sidebarRefreshKey}
+          widthPx={sidebarWidthPx}
+          minWidthPx={MIN_SIDEBAR_WIDTH_PX}
+          maxWidthPx={MAX_SIDEBAR_WIDTH_PX}
+          onResize={handleSidebarResize}
           onBranchSelect={handleBranchSelect}
           onBranchActivate={handleBranchActivate}
           onCleanupRequest={handleCleanupRequest}
