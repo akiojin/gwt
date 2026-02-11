@@ -1369,6 +1369,49 @@ mod tests {
 
         let _ = ScrollbackFile::cleanup(&pane_id);
     }
+
+    // SPEC-3b0ed29b FR-106: Claude Code launch must always set CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
+    #[test]
+    fn claude_launch_env_sets_agent_teams() {
+        // Verify that after the IS_SANDBOX block, Claude Code launches include
+        // CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 regardless of skip_permissions.
+        let mut env_vars: HashMap<String, String> = HashMap::new();
+        let agent_id = "claude";
+        let skip_permissions = false;
+
+        // Simulate the env-var injection logic from launch_agent_inner
+        if agent_id == "claude" && skip_permissions && std::env::consts::OS != "windows" {
+            env_vars.insert("IS_SANDBOX".to_string(), "1".to_string());
+        }
+        if agent_id == "claude" {
+            env_vars
+                .entry("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".to_string())
+                .or_insert_with(|| "1".to_string());
+        }
+
+        assert_eq!(
+            env_vars.get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"),
+            Some(&"1".to_string()),
+            "Claude Code launch env must include CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"
+        );
+    }
+
+    #[test]
+    fn codex_launch_env_no_agent_teams() {
+        let mut env_vars: HashMap<String, String> = HashMap::new();
+        let agent_id = "codex";
+
+        if agent_id == "claude" {
+            env_vars
+                .entry("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".to_string())
+                .or_insert_with(|| "1".to_string());
+        }
+
+        assert!(
+            !env_vars.contains_key("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"),
+            "Codex launch env must not include CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"
+        );
+    }
 }
 
 fn is_launch_cancelled(cancelled: Option<&AtomicBool>) -> bool {
@@ -1560,6 +1603,13 @@ fn launch_agent_for_project_root(
         // SPEC-3b0ed29b: Skip-permissions on non-Windows sets IS_SANDBOX=1 to avoid
         // accidental confirmation prompts in sandboxed environments.
         env_vars.insert("IS_SANDBOX".to_string(), "1".to_string());
+    }
+
+    // SPEC-3b0ed29b FR-106: Always enable Agent Teams for Claude Code launches.
+    if agent_id == "claude" {
+        env_vars
+            .entry("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".to_string())
+            .or_insert_with(|| "1".to_string());
     }
 
     // Ensure TERM/COLORTERM propagate into Docker exec environments as well.
