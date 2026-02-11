@@ -4,7 +4,6 @@
 
   interface RecentProject {
     path: string;
-    name: string;
     lastOpened: string;
   }
 
@@ -58,50 +57,13 @@
 
   async function loadRecentProjects() {
     try {
-      const { load } = await import("@tauri-apps/plugin-store");
-      const store = await load("recent-projects.json", { defaults: {} });
-      const saved = await store.get<RecentProject[]>("projects");
-      if (saved) {
-        recentProjects = saved;
-      }
+      const { invoke } = await import("@tauri-apps/api/core");
+      const projects = await invoke<RecentProject[]>("get_recent_projects");
+      recentProjects = projects;
     } catch (err) {
       console.error("Failed to load recent projects:", err);
       recentProjects = [];
     }
-  }
-
-  async function saveToRecent(path: string) {
-    const name = path.split("/").pop() || path;
-    const now = new Date().toLocaleDateString();
-    const entry: RecentProject = { path, name, lastOpened: now };
-
-    // Remove duplicate, add to front
-    const filtered = recentProjects.filter((p) => p.path !== path);
-    const updated = [entry, ...filtered].slice(0, 10);
-
-    try {
-      const { load } = await import("@tauri-apps/plugin-store");
-      const store = await load("recent-projects.json", { defaults: {} });
-      await store.set("projects", updated);
-      await store.save();
-    } catch {
-      // Dev mode: ignore
-    }
-
-    recentProjects = updated;
-  }
-
-  async function removeFromRecent(path: string) {
-    const updated = recentProjects.filter((p) => p.path !== path);
-    try {
-      const { load } = await import("@tauri-apps/plugin-store");
-      const store = await load("recent-projects.json", { defaults: {} });
-      await store.set("projects", updated);
-      await store.save();
-    } catch {
-      // Dev mode: ignore
-    }
-    recentProjects = updated;
   }
 
   async function openFolder() {
@@ -125,14 +87,9 @@
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       const info = await invoke<ProjectInfo>("open_project", { path: projectPath });
-      await saveToRecent(info.path);
       onOpen(info.path);
     } catch (err) {
-      const msg = toErrorMessage(err);
-      if (fromRecent && msg.includes("Path does not exist")) {
-        await removeFromRecent(projectPath);
-      }
-      errorMessage = normalizeOpenProjectError(msg);
+      errorMessage = normalizeOpenProjectError(toErrorMessage(err));
     } finally {
       opening = false;
     }
@@ -162,17 +119,9 @@
         return;
       }
 
-      if (fromRecent && probe.kind === "notFound") {
-        await removeFromRecent(path);
-      }
-
       errorMessage = normalizeProbeError(probe);
     } catch (err) {
-      const msg = toErrorMessage(err);
-      if (fromRecent && msg.includes("Path does not exist")) {
-        await removeFromRecent(path);
-      }
-      errorMessage = normalizeOpenProjectError(msg);
+      errorMessage = normalizeOpenProjectError(toErrorMessage(err));
     } finally {
       opening = false;
     }
@@ -215,7 +164,6 @@
       const info = await invoke<ProjectInfo>("create_project", {
         request: { repoUrl, parentDir, shallow: shallowClone },
       });
-      await saveToRecent(info.path);
       onOpen(info.path);
     } catch (err) {
       const msg = toErrorMessage(err);
@@ -353,9 +301,9 @@
             onclick={() => probeAndOpen(project.path, true)}
             disabled={opening || creating}
           >
-            <span class="recent-name">{project.name}</span>
+            <span class="recent-name">{project.path.split("/").pop() || project.path}</span>
             <span class="recent-path">{project.path}</span>
-            <span class="recent-time">{project.lastOpened}</span>
+            <span class="recent-time">{new Date(project.lastOpened).toLocaleDateString()}</span>
           </button>
         {/each}
       </div>

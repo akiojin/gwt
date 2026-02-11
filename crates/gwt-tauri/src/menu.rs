@@ -24,6 +24,7 @@ pub const MENU_ID_GIT_VERSION_HISTORY: &str = "git-version-history";
 pub const MENU_ID_SETTINGS_PREFERENCES: &str = "settings-preferences";
 pub const MENU_ID_HELP_ABOUT: &str = "help-about";
 
+pub const RECENT_PROJECT_PREFIX: &str = "recent-project::";
 pub const WINDOW_FOCUS_MENU_PREFIX: &str = "window-focus::";
 
 #[derive(Debug, Clone, Serialize)]
@@ -41,6 +42,12 @@ pub struct WindowMenuEntry {
 
 pub fn window_focus_menu_id(window_label: &str) -> String {
     format!("{WINDOW_FOCUS_MENU_PREFIX}{window_label}")
+}
+
+pub fn parse_recent_project_menu_id(id: &str) -> Option<&str> {
+    id.strip_prefix(RECENT_PROJECT_PREFIX)
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
 }
 
 pub fn parse_window_focus_menu_id(id: &str) -> Option<&str> {
@@ -82,10 +89,13 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         true,
         None::<&str>,
     )?;
+    let open_recent = build_open_recent_submenu(app)?;
     let file = SubmenuBuilder::new(app, "File")
         .item(&file_new_window)
         .separator()
         .item(&file_open_project)
+        .item(&open_recent)
+        .separator()
         .item(&file_close_project)
         .build()?;
 
@@ -159,6 +169,30 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
     menu.append(&tools)?;
     menu.append(&window)?;
     Ok(menu)
+}
+
+fn build_open_recent_submenu(app: &AppHandle<Wry>) -> tauri::Result<tauri::menu::Submenu<Wry>> {
+    let projects = gwt_core::config::load_recent_projects();
+    let mut builder = SubmenuBuilder::new(app, "Open Recent");
+
+    if projects.is_empty() {
+        let none = MenuItem::with_id(
+            app,
+            "recent-none",
+            "No Recent Projects",
+            false,
+            None::<&str>,
+        )?;
+        builder = builder.item(&none);
+    } else {
+        for entry in projects.into_iter().take(10) {
+            let id = format!("{}{}", RECENT_PROJECT_PREFIX, entry.path);
+            let item = MenuItem::with_id(app, id, &entry.path, true, None::<&str>)?;
+            builder = builder.item(&item);
+        }
+    }
+
+    builder.build()
 }
 
 fn should_show_version_history_menu(app: &AppHandle<Wry>, state: &AppState) -> bool {
