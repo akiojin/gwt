@@ -1,15 +1,16 @@
 export function formatWindowTitle(opts: {
   appName: string;
-  version: string | null;
   projectPath: string | null;
 }): string {
-  const v = opts.version?.trim();
-  const versionPart = v ? ` v${v}` : "";
-
   if (opts.projectPath) {
-    return `${opts.appName}${versionPart} - ${opts.projectPath}`;
+    return `${opts.appName} - ${opts.projectPath}`;
   }
-  return `${opts.appName}${versionPart}`;
+  return opts.appName;
+}
+
+export function formatAboutVersion(version: string | null): string {
+  const v = version?.trim();
+  return `Version ${v || "unknown"}`;
 }
 
 export async function getAppVersionSafe(): Promise<string | null> {
