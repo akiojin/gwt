@@ -67,6 +67,8 @@ impl ClaudeAgent {
         if std::env::consts::OS != "windows" {
             cmd.env("IS_SANDBOX", "1");
         }
+        // SPEC-3b0ed29b FR-106: Always enable Agent Teams for Claude Code.
+        cmd.env("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
         cmd
     }
 }
