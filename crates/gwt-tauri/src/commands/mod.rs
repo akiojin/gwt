@@ -8,9 +8,11 @@ pub mod git_view;
 pub mod hooks;
 pub mod profiles;
 pub mod project;
+pub mod recent_projects;
 pub mod sessions;
 pub mod settings;
 pub mod terminal;
+pub mod version_history;
 
 #[cfg(test)]
 pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
