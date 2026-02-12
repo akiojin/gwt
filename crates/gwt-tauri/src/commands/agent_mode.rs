@@ -1,6 +1,6 @@
 use crate::agent_master::{get_agent_mode_state, send_agent_message, AgentModeState};
 use crate::state::AppState;
-use tauri::{State, Window};
+use tauri::{Manager, State, Window};
 
 #[tauri::command]
 pub fn get_agent_mode_state_cmd(window: Window, state: State<AppState>) -> AgentModeState {

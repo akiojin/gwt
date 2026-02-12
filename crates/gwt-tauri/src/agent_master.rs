@@ -251,7 +251,7 @@ fn parse_react_sections(text: &str, allow_observation: bool) -> Vec<ReactSection
                 continue;
             }
         }
-        if let Some(rest) = line.strip_prefix("Observation:") {
+        if line.strip_prefix("Observation:").is_some() {
             flush(current_kind, &mut current_lines, &mut sections);
             current_kind = None;
             continue;
