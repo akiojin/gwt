@@ -1150,23 +1150,30 @@ mod tests {
             mgr.add_pane(pane).expect("failed to add test pane");
         }
 
-        let result = send_keys_to_pane_from_state(&state, pane_id, "hello\n");
-        assert!(result.is_err());
-
         {
             let mut mgr = state.pane_manager.lock().unwrap();
+            let pane = mgr.pane_mut_by_id(pane_id).expect("missing test pane");
             for _ in 0..20 {
-                let status = {
-                    let pane = mgr.pane_mut_by_id(pane_id).expect("missing test pane");
-                    let _ = pane.check_status();
-                    pane.status()
-                };
-                if !matches!(status, PaneStatus::Running) {
+                let _ = pane.check_status();
+                if !matches!(pane.status(), PaneStatus::Running) {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
+            if matches!(pane.status(), PaneStatus::Running) {
+                let _ = pane.kill();
+                for _ in 0..20 {
+                    let _ = pane.check_status();
+                    if !matches!(pane.status(), PaneStatus::Running) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
         }
+
+        let result = send_keys_to_pane_from_state(&state, pane_id, "hello\n");
+        assert!(result.is_err());
 
         let mut mgr = state.pane_manager.lock().unwrap();
         let _ = mgr.kill_all();
@@ -2718,10 +2725,6 @@ pub(crate) fn send_keys_to_pane_from_state(
         PaneStatus::Completed(_) | PaneStatus::Error(_) => {
             return Err(format!("Pane not running: {}", pane_id));
         }
-    }
-
-    if !matches!(pane.status(), PaneStatus::Running) {
-        return Err(format!("Pane not running: {}", pane_id));
     }
 
     Ok(())
