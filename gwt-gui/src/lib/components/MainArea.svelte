@@ -40,8 +40,7 @@
   let activeTab = $derived(tabs.find((t) => t.id === activeTabId));
   let agentTabs = $derived(tabs.filter(isAgentTabWithPaneId));
   let showTerminalLayer = $derived(activeTab?.type === "agent");
-  let isPinnedTab = (tabType?: Tab["type"]) =>
-    tabType === "summary" || tabType === "agentMode";
+  let isPinnedTab = (tabType?: Tab["type"]) => tabType === "summary";
 
   let quickStartEntries: ToolSessionEntry[] = $state([]);
   let quickStartLoading: boolean = $state(false);
