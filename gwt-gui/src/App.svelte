@@ -954,6 +954,7 @@
 <CleanupModal
   open={showCleanupModal}
   preselectedBranch={cleanupPreselectedBranch}
+  refreshKey={sidebarRefreshKey}
   projectPath={projectPath ?? ""}
   {agentTabBranches}
   onClose={() => (showCleanupModal = false)}
