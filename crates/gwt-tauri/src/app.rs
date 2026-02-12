@@ -9,6 +9,7 @@ use tracing::{info, warn};
 #[cfg(not(test))]
 use gwt_core::config::os_env;
 
+#[cfg(any(not(test), target_os = "macos"))]
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 fn should_prevent_window_close(is_quitting: bool) -> bool {
@@ -19,6 +20,7 @@ fn should_prevent_exit_request(is_quitting: bool) -> bool {
     !is_quitting
 }
 
+#[cfg(any(not(test), target_os = "macos"))]
 fn has_running_agents(state: &AppState) -> bool {
     let Ok(mut manager) = state.pane_manager.lock() else {
         return false;
@@ -34,6 +36,7 @@ fn has_running_agents(state: &AppState) -> bool {
     false
 }
 
+#[cfg(any(not(test), target_os = "macos"))]
 fn try_begin_exit_confirm(state: &AppState) -> bool {
     state
         .exit_confirm_inflight
@@ -41,6 +44,7 @@ fn try_begin_exit_confirm(state: &AppState) -> bool {
         .is_ok()
 }
 
+#[cfg(any(not(test), target_os = "macos"))]
 fn end_exit_confirm(state: &AppState) {
     state.exit_confirm_inflight.store(false, Ordering::SeqCst);
 }
