@@ -1,12 +1,67 @@
 //! Git diff and branch comparison operations for GitView
 
+use super::{is_bare_repository, Repository};
 use crate::error::{GwtError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const DIFF_LINE_LIMIT: usize = 1000;
+
+fn find_any_worktree_path(repo_path: &Path) -> Option<PathBuf> {
+    let repo = Repository::discover(repo_path).ok()?;
+    let worktrees = repo.list_worktrees().ok()?;
+    worktrees
+        .into_iter()
+        .find(|wt| !wt.is_bare && wt.path.exists())
+        .map(|wt| wt.path)
+}
+
+fn normalize_numstat_path(path: &str) -> String {
+    // git diff --numstat uses "old => new" notation for renames, sometimes with brace expansion:
+    // - "old => new"
+    // - "dir/{old => new}/file"
+    // Convert these to the new path so we can look up stats using the --name-status new-path key.
+    if !path.contains(" => ") {
+        return path.to_string();
+    }
+
+    if path.contains('{') && path.contains('}') {
+        let mut out = String::new();
+        let mut chars = path.chars();
+
+        while let Some(ch) = chars.next() {
+            if ch != '{' {
+                out.push(ch);
+                continue;
+            }
+
+            let mut inner = String::new();
+            for ch2 in chars.by_ref() {
+                if ch2 == '}' {
+                    break;
+                }
+                inner.push(ch2);
+            }
+
+            if let Some((_old, new)) = inner.split_once(" => ") {
+                out.push_str(new.trim());
+            } else {
+                out.push('{');
+                out.push_str(&inner);
+                out.push('}');
+            }
+        }
+
+        return out;
+    }
+
+    match path.split_once(" => ") {
+        Some((_old, new)) => new.trim().to_string(),
+        None => path.to_string(),
+    }
+}
 
 /// Kind of file change in a diff
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,7 +171,7 @@ pub fn get_branch_diff_files(
     branch: &str,
     base_branch: &str,
 ) -> Result<Vec<FileChange>> {
-    let range = format!("{}..{}", base_branch, branch);
+    let range = format!("{}...{}", base_branch, branch);
 
     // Get numstat for additions/deletions and binary detection
     let numstat_output = Command::new("git")
@@ -157,13 +212,19 @@ pub fn get_branch_diff_files(
     let mut stats_map: HashMap<String, (usize, usize, bool)> = HashMap::new();
 
     for line in numstat.lines() {
-        let parts: Vec<&str> = line.split('\t').collect();
+        let parts: Vec<&str> = line.splitn(3, '\t').collect();
         if parts.len() >= 3 {
             let is_binary = parts[0] == "-" && parts[1] == "-";
             let additions = parts[0].parse().unwrap_or(0);
             let deletions = parts[1].parse().unwrap_or(0);
-            let path = parts[2].to_string();
-            stats_map.insert(path, (additions, deletions, is_binary));
+            let raw_path = parts[2].to_string();
+            let normalized_path = normalize_numstat_path(&raw_path);
+
+            let stats = (additions, deletions, is_binary);
+            stats_map.insert(raw_path.clone(), stats);
+            if normalized_path != raw_path {
+                stats_map.insert(normalized_path, stats);
+            }
         }
     }
 
@@ -213,7 +274,7 @@ pub fn get_file_diff(
     base_branch: &str,
     file_path: &str,
 ) -> Result<FileDiff> {
-    let range = format!("{}..{}", base_branch, branch);
+    let range = format!("{}...{}", base_branch, branch);
     let output = Command::new("git")
         .args(["diff", &range, "--", file_path])
         .current_dir(repo_path)
@@ -386,11 +447,12 @@ pub fn get_git_change_summary(
     branch: &str,
     base_branch: &str,
 ) -> Result<GitChangeSummary> {
-    let range = format!("{}..{}", base_branch, branch);
+    let diff_range = format!("{}...{}", base_branch, branch);
+    let commit_range = format!("{}..{}", base_branch, branch);
 
     // File count via --name-only
     let file_output = Command::new("git")
-        .args(["diff", "--name-only", &range])
+        .args(["diff", "--name-only", &diff_range])
         .current_dir(repo_path)
         .output()
         .map_err(|e| GwtError::GitOperationFailed {
@@ -409,7 +471,7 @@ pub fn get_git_change_summary(
 
     // Commit count via rev-list --count
     let commit_output = Command::new("git")
-        .args(["rev-list", "--count", &range])
+        .args(["rev-list", "--count", &commit_range])
         .current_dir(repo_path)
         .output()
         .map_err(|e| GwtError::GitOperationFailed {
@@ -427,14 +489,29 @@ pub fn get_git_change_summary(
     };
 
     // Stash count
-    let stash_output = Command::new("git")
+    let mut stash_exec_path = repo_path.to_path_buf();
+    let mut stash_output = Command::new("git")
         .args(["stash", "list"])
-        .current_dir(repo_path)
+        .current_dir(&stash_exec_path)
         .output()
         .map_err(|e| GwtError::GitOperationFailed {
             operation: "stash list".to_string(),
             details: e.to_string(),
         })?;
+
+    // Bare repositories require a worktree for stash operations. Retry with any existing worktree.
+    if !stash_output.status.success() && is_bare_repository(repo_path) {
+        if let Some(wt_path) = find_any_worktree_path(repo_path) {
+            stash_exec_path = wt_path;
+            if let Ok(o2) = Command::new("git")
+                .args(["stash", "list"])
+                .current_dir(&stash_exec_path)
+                .output()
+            {
+                stash_output = o2;
+            }
+        }
+    }
 
     let stash_count = if stash_output.status.success() {
         String::from_utf8_lossy(&stash_output.stdout)
@@ -610,6 +687,56 @@ mod tests {
 
         let files = get_branch_diff_files(temp.path(), "feature-empty", &base).unwrap();
         assert!(files.is_empty());
+    }
+
+    // T-DIFF-007: Diff should use merge-base (A...B) so base-only changes don't appear as "Changes"
+    #[test]
+    fn test_get_branch_diff_files_merge_base_range() {
+        let temp = create_test_repo();
+        let base = get_current_branch_name(temp.path());
+
+        run_git(temp.path(), &["checkout", "-b", "feature-mergebase"]);
+        std::fs::write(temp.path().join("feature.txt"), "feature\n").unwrap();
+        run_git(temp.path(), &["add", "feature.txt"]);
+        run_git(temp.path(), &["commit", "-m", "feature change"]);
+
+        // Advance base branch after feature split (feature is now behind/diverged from base)
+        run_git(temp.path(), &["checkout", &base]);
+        std::fs::write(temp.path().join("README.md"), "# Test\nbase-advance\n").unwrap();
+        run_git(temp.path(), &["add", "README.md"]);
+        run_git(temp.path(), &["commit", "-m", "base advance"]);
+
+        let files = get_branch_diff_files(temp.path(), "feature-mergebase", &base).unwrap();
+        assert!(
+            files.iter().any(|f| f.path == "feature.txt"),
+            "feature change should be included"
+        );
+        assert!(
+            !files.iter().any(|f| f.path == "README.md"),
+            "base-only change should not be included"
+        );
+    }
+
+    // T-DIFF-008: Rename+edit should keep numstat additions/deletions (not 0/0)
+    #[test]
+    fn test_get_branch_diff_files_rename_stats() {
+        let temp = create_test_repo();
+        let base = get_current_branch_name(temp.path());
+
+        run_git(temp.path(), &["checkout", "-b", "feature-rename"]);
+        run_git(temp.path(), &["mv", "old.rs", "renamed.rs"]);
+        std::fs::write(temp.path().join("renamed.rs"), "// old file\n// edited\n").unwrap();
+        run_git(temp.path(), &["add", "-A"]);
+        run_git(temp.path(), &["commit", "-m", "rename and edit"]);
+
+        let files = get_branch_diff_files(temp.path(), "feature-rename", &base).unwrap();
+        let renamed = files.iter().find(|f| f.path == "renamed.rs").unwrap();
+        assert_eq!(renamed.kind, FileChangeKind::Renamed);
+        assert!(
+            renamed.additions + renamed.deletions > 0,
+            "rename+edit should have non-zero stats"
+        );
+        assert!(!renamed.is_binary);
     }
 
     // T-DIFF-010: Basic file diff retrieval
@@ -790,5 +917,53 @@ mod tests {
         assert_eq!(summary.commit_count, 3);
         assert_eq!(summary.stash_count, 0);
         assert_eq!(summary.base_branch, base);
+    }
+
+    // T-DIFF-051: Bare repo should report stash_count via a worktree
+    #[test]
+    fn test_get_git_change_summary_stash_count_from_bare_repo() {
+        let temp = TempDir::new().unwrap();
+
+        // Create a normal repo (source)
+        let src = temp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        run_git(&src, &["init"]);
+        run_git(&src, &["config", "user.email", "test@test.com"]);
+        run_git(&src, &["config", "user.name", "Test User"]);
+        std::fs::write(src.join("README.md"), "# Test\n").unwrap();
+        run_git(&src, &["add", "."]);
+        run_git(&src, &["commit", "-m", "initial commit"]);
+
+        let base = get_current_branch_name(&src);
+
+        // Clone as bare repo
+        let bare = temp.path().join("repo.git");
+        let status = Command::new("git")
+            .args(["clone", "--bare"])
+            .arg(&src)
+            .arg(&bare)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git clone --bare failed");
+
+        // Create a worktree so stash operations are possible
+        let wt = temp.path().join("wt");
+        let status = Command::new("git")
+            .args(["worktree", "add"])
+            .arg(&wt)
+            .arg(&base)
+            .current_dir(&bare)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git worktree add failed");
+
+        run_git(&wt, &["config", "user.email", "test@test.com"]);
+        run_git(&wt, &["config", "user.name", "Test User"]);
+        std::fs::write(wt.join("README.md"), "# Test\nstash change\n").unwrap();
+        run_git(&wt, &["add", "README.md"]);
+        run_git(&wt, &["stash", "push", "-m", "wip"]);
+
+        let summary = get_git_change_summary(&bare, &base, &base).unwrap();
+        assert_eq!(summary.stash_count, 1);
     }
 }

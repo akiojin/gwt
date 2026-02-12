@@ -5,10 +5,12 @@
     projectPath,
     branch,
     baseBranch,
+    refreshToken,
   }: {
     projectPath: string;
     branch: string;
     baseBranch: string;
+    refreshToken: number;
   } = $props();
 
   type FilterMode = "committed" | "uncommitted";
@@ -117,11 +119,12 @@
     diffLoading = new Set();
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      files = await invoke<FileChange[]>("get_branch_diff_files", {
+      const result = await invoke<FileChange[]>("get_branch_diff_files", {
         projectPath,
         branch,
         baseBranch,
       });
+      files = result ?? [];
     } catch (err) {
       filesError = toErrorMessage(err);
       files = [];
@@ -135,9 +138,11 @@
     workingTreeError = null;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      workingTree = await invoke<WorkingTreeEntry[]>("get_working_tree_status", {
+      const result = await invoke<WorkingTreeEntry[]>("get_working_tree_status", {
         projectPath,
+        branch,
       });
+      workingTree = result ?? [];
     } catch (err) {
       workingTreeError = toErrorMessage(err);
       workingTree = [];
@@ -183,10 +188,14 @@
     void projectPath;
     void branch;
     void baseBranch;
+    void refreshToken;
     loadFiles();
   });
 
   $effect(() => {
+    void projectPath;
+    void branch;
+    void refreshToken;
     if (filterMode === "uncommitted") {
       loadWorkingTree();
     }

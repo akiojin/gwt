@@ -37,7 +37,7 @@ export interface TerminalAnsiProbe {
 }
 
 export interface AgentInfo {
-  id: "claude" | "codex" | "gemini" | (string & {});
+  id: "claude" | "codex" | "gemini" | "opencode" | (string & {});
   name: string;
   version: string;
   path?: string;
@@ -108,7 +108,7 @@ export interface ProfilesConfig {
 export interface Tab {
   id: string;
   label: string;
-  type: "summary" | "agent" | "settings";
+  type: "summary" | "agent" | "settings" | "versionHistory";
   paneId?: string;
 }
 
@@ -132,6 +132,30 @@ export interface ToolSessionEntry {
   timestamp: number;
 }
 
+export interface ProjectVersions {
+  items: VersionItem[];
+}
+
+export interface VersionItem {
+  id: string; // "unreleased" | "vX.Y.Z"
+  label: string;
+  range_from?: string | null;
+  range_to: string; // "HEAD" | "vX.Y.Z"
+  commit_count: number;
+}
+
+export interface VersionHistoryResult {
+  status: "ok" | "generating" | "error" | "disabled";
+  version_id: string;
+  label: string;
+  range_from?: string | null;
+  range_to: string;
+  commit_count: number;
+  summary_markdown?: string | null;
+  changelog_markdown?: string | null;
+  error?: string | null;
+}
+
 export interface SessionSummaryResult {
   status: "ok" | "ai-not-configured" | "disabled" | "no-session" | "error";
   generating: boolean;
@@ -153,12 +177,94 @@ export interface BranchSuggestResult {
 
 export interface DockerContext {
   worktree_path?: string | null;
-  file_type: "compose" | "none";
+  file_type: "compose" | "devcontainer" | "dockerfile" | "none";
   compose_services: string[];
   docker_available: boolean;
   compose_available: boolean;
   daemon_running: boolean;
   force_host: boolean;
+}
+
+export interface ProbePathResult {
+  kind:
+    | "gwtProject"
+    | "migrationRequired"
+    | "emptyDir"
+    | "notFound"
+    | "invalid"
+    | "notGwtProject";
+  projectPath?: string | null;
+  migrationSourceRoot?: string | null;
+  message?: string | null;
+}
+
+export interface MigrationProgressPayload {
+  jobId: string;
+  state: string;
+  current?: number | null;
+  total?: number | null;
+}
+
+export interface MigrationFinishedPayload {
+  jobId: string;
+  ok: boolean;
+  error?: string | null;
+  projectPath?: string | null;
+}
+
+export interface LaunchProgressPayload {
+  jobId: string;
+  step: string;
+  detail?: string | null;
+}
+
+export interface LaunchFinishedPayload {
+  jobId: string;
+  status: "ok" | "cancelled" | "error";
+  paneId?: string | null;
+  error?: string | null;
+}
+
+export interface WorktreeInfo {
+  path: string;
+  branch: string | null;
+  commit: string;
+  status: string; // "active" | "locked" | "prunable" | "missing"
+  is_main: boolean;
+  has_changes: boolean;
+  has_unpushed: boolean;
+  is_current: boolean;
+  is_protected: boolean;
+  is_agent_running: boolean;
+  ahead: number;
+  behind: number;
+  is_gone: boolean;
+  last_tool_usage: string | null;
+  safety_level: "safe" | "warning" | "danger" | "disabled";
+}
+
+export interface CleanupResult {
+  branch: string;
+  success: boolean;
+  error: string | null;
+}
+
+export interface CleanupProgress {
+  branch: string;
+  status: "deleting" | "deleted" | "failed";
+  error?: string;
+}
+
+export interface CapturedEnvEntry {
+  key: string;
+  value: string;
+}
+
+export interface CapturedEnvInfo {
+  entries: CapturedEnvEntry[];
+  source: string;
+  reason: string | null;
+  ready: boolean;
 }
 
 export type FileChangeKind = "Added" | "Modified" | "Deleted" | "Renamed";
@@ -211,7 +317,6 @@ export interface LaunchAgentRequest {
   mode?: "normal" | "continue" | "resume";
   skipPermissions?: boolean;
   reasoningLevel?: string;
-  collaborationModes?: boolean;
   extraArgs?: string[];
   envOverrides?: Record<string, string>;
   resumeSessionId?: string;

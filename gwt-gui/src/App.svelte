@@ -4,7 +4,9 @@
     BranchInfo,
     ProjectInfo,
     LaunchAgentRequest,
+    ProbePathResult,
     TerminalAnsiProbe,
+    CapturedEnvInfo,
     SettingsData,
   } from "./lib/types";
   import Sidebar from "./lib/components/Sidebar.svelte";
@@ -12,14 +14,59 @@
   import StatusBar from "./lib/components/StatusBar.svelte";
   import OpenProject from "./lib/components/OpenProject.svelte";
   import AgentLaunchForm from "./lib/components/AgentLaunchForm.svelte";
+  import LaunchProgressModal from "./lib/components/LaunchProgressModal.svelte";
+  import MigrationModal from "./lib/components/MigrationModal.svelte";
+  import CleanupModal from "./lib/components/CleanupModal.svelte";
+  import {
+    formatAboutVersion,
+    formatWindowTitle,
+    getAppVersionSafe,
+  } from "./lib/windowTitle";
 
   interface MenuActionPayload {
     action: string;
   }
 
+  const SIDEBAR_WIDTH_STORAGE_KEY = "gwt.sidebar.width";
+  const DEFAULT_SIDEBAR_WIDTH_PX = 260;
+  const MIN_SIDEBAR_WIDTH_PX = 220;
+  const MAX_SIDEBAR_WIDTH_PX = 520;
+
+  function clampSidebarWidth(widthPx: number): number {
+    if (!Number.isFinite(widthPx)) return DEFAULT_SIDEBAR_WIDTH_PX;
+    return Math.max(
+      MIN_SIDEBAR_WIDTH_PX,
+      Math.min(MAX_SIDEBAR_WIDTH_PX, Math.round(widthPx))
+    );
+  }
+
+  function loadSidebarWidth(): number {
+    if (typeof window === "undefined") return DEFAULT_SIDEBAR_WIDTH_PX;
+    try {
+      const raw = window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
+      if (!raw) return DEFAULT_SIDEBAR_WIDTH_PX;
+      return clampSidebarWidth(Number(raw));
+    } catch {
+      return DEFAULT_SIDEBAR_WIDTH_PX;
+    }
+  }
+
+  function persistSidebarWidth(widthPx: number) {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(widthPx));
+    } catch {
+      // Ignore localStorage failures (e.g., disabled in strict environments).
+    }
+  }
+
   let projectPath: string | null = $state(null);
+  let appVersion: string | null = $state(null);
   let sidebarVisible: boolean = $state(true);
+  let sidebarWidthPx: number = $state(loadSidebarWidth());
   let showAgentLaunch: boolean = $state(false);
+  let showCleanupModal: boolean = $state(false);
+  let cleanupPreselectedBranch: string | null = $state(null);
   let showAbout: boolean = $state(false);
   let showTerminalDiagnostics: boolean = $state(false);
   let appError: string | null = $state(null);
@@ -28,6 +75,13 @@
 
   let selectedBranch: BranchInfo | null = $state(null);
   let currentBranch: string = $state("");
+
+  let launchProgressOpen: boolean = $state(false);
+  let launchJobId: string = $state("");
+  let pendingLaunchRequest: LaunchAgentRequest | null = $state(null);
+
+  let migrationOpen: boolean = $state(false);
+  let migrationSourceRoot: string = $state("");
 
   let tabs: Tab[] = $state([
     { id: "summary", label: "Session Summary", type: "summary" },
@@ -40,9 +94,75 @@
   let terminalDiagnostics: TerminalAnsiProbe | null = $state(null);
   let terminalDiagnosticsError: string | null = $state(null);
 
+  let osEnvReady = $state(false);
+
+  let toastMessage = $state<string | null>(null);
+  let toastTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  let showOsEnvDebug = $state(false);
+  let osEnvDebugData = $state<CapturedEnvInfo | null>(null);
+  let osEnvDebugLoading = $state(false);
+  let osEnvDebugError = $state<string | null>(null);
+
+  function showToast(message: string, durationMs = 8000) {
+    toastMessage = message;
+    if (toastTimeout) clearTimeout(toastTimeout);
+    toastTimeout = setTimeout(() => { toastMessage = null; }, durationMs);
+  }
+
+  // Poll OS env readiness at startup; stop once ready.
+  $effect(() => {
+    if (osEnvReady) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        while (!cancelled && !osEnvReady) {
+          const ready = await invoke<boolean>("is_os_env_ready");
+          if (ready) {
+            osEnvReady = true;
+            return;
+          }
+          await new Promise(r => setTimeout(r, 200));
+        }
+      } catch { /* ignore */ }
+    };
+    poll();
+    return () => { cancelled = true; };
+  });
+
+  // Listen for OS env fallback event and show toast.
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen<string>("os-env-fallback", (event) => {
+          showToast(`Shell environment not loaded: ${event.payload}. Using process environment.`);
+        });
+        if (cancelled) { unlistenFn(); return; }
+        unlisten = unlistenFn;
+      } catch { /* ignore */ }
+    })();
+    return () => { cancelled = true; if (unlisten) unlisten(); };
+  });
+
+  // Best-effort: read app version from Tauri runtime (web preview will ignore).
+  $effect(() => {
+    let cancelled = false;
+    (async () => {
+      const v = await getAppVersionSafe();
+      if (cancelled) return;
+      appVersion = v;
+    })();
+    return () => { cancelled = true; };
+  });
+
   $effect(() => {
     void projectPath;
     void setWindowTitle();
+    void applyAppearanceSettings();
   });
 
   // Best-effort: subscribe once and refresh Sidebar when worktrees change.
@@ -150,7 +270,10 @@
   }
 
   async function setWindowTitle() {
-    const title = projectPath ? `gwt - ${projectPath}` : "gwt";
+    const title = formatWindowTitle({
+      appName: "gwt",
+      projectPath,
+    });
 
     // Document title also covers non-tauri contexts (e.g. web preview).
     document.title = title;
@@ -165,7 +288,6 @@
 
   function handleProjectOpen(path: string) {
     projectPath = path;
-    void applyAppearanceSettings();
     fetchCurrentBranch();
   }
 
@@ -194,9 +316,21 @@
     showAgentLaunch = true;
   }
 
+  function handleSidebarResize(nextWidthPx: number) {
+    const next = clampSidebarWidth(nextWidthPx);
+    if (next === sidebarWidthPx) return;
+    sidebarWidthPx = next;
+    persistSidebarWidth(next);
+  }
+
   function handleBranchActivate(branch: BranchInfo) {
     handleBranchSelect(branch);
     requestAgentLaunch();
+  }
+
+  function handleCleanupRequest(preSelectedBranch?: string) {
+    cleanupPreselectedBranch = preSelectedBranch ?? null;
+    showCleanupModal = true;
   }
 
   async function fetchCurrentBranch() {
@@ -239,11 +373,20 @@
 
   async function handleAgentLaunch(request: LaunchAgentRequest) {
     const { invoke } = await import("@tauri-apps/api/core");
-    const paneId = await invoke<string>("launch_agent", { request });
+    const jobId = await invoke<string>("start_launch_job", { request });
+
+    pendingLaunchRequest = request;
+    launchJobId = jobId;
+    launchProgressOpen = true;
+  }
+
+  function handleLaunchSuccess(paneId: string) {
+    const req = pendingLaunchRequest;
+    const label = req ? worktreeTabLabel(req.branch) : "Worktree";
 
     const newTab: Tab = {
       id: `agent-${paneId}`,
-      label: worktreeTabLabel(request.branch),
+      label,
       type: "agent",
       paneId,
     };
@@ -300,7 +443,87 @@
     activeTabId = tab.id;
   }
 
+  function openVersionHistoryTab() {
+    const existing = tabs.find(
+      (t) => t.type === "versionHistory" || t.id === "versionHistory",
+    );
+    if (existing) {
+      activeTabId = existing.id;
+      return;
+    }
+
+    const tab: Tab = {
+      id: "versionHistory",
+      label: "Version History",
+      type: "versionHistory",
+    };
+    tabs = [...tabs, tab];
+    activeTabId = tab.id;
+  }
+
+  async function syncWindowAgentTabs() {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const agentTabs = tabs
+        .filter((t) => t.type === "agent")
+        .map((t) => ({ id: t.id, label: t.label }));
+      const activeAgentTabId = agentTabs.some((t) => t.id === activeTabId)
+        ? activeTabId
+        : null;
+      await invoke("sync_window_agent_tabs", {
+        request: {
+          tabs: agentTabs,
+          activeTabId: activeAgentTabId,
+        },
+      });
+    } catch {
+      // Ignore: not available outside Tauri runtime.
+    }
+  }
+
   async function handleMenuAction(action: string) {
+    if (action.startsWith("focus-agent-tab::")) {
+      const tabId = action.slice("focus-agent-tab::".length).trim();
+      if (tabId && tabs.some((t) => t.id === tabId && t.type === "agent")) {
+        activeTabId = tabId;
+      }
+      return;
+    }
+
+    // Handle dynamic "open-recent-project::<path>" actions before the switch.
+    if (action.startsWith("open-recent-project::")) {
+      const recentPath = action.slice("open-recent-project::".length);
+      if (recentPath) {
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const probe = await invoke<ProbePathResult>("probe_path", {
+            path: recentPath,
+          });
+
+          if (probe.kind === "gwtProject" && probe.projectPath) {
+            const info = await invoke<ProjectInfo>("open_project", {
+              path: probe.projectPath,
+            });
+            projectPath = info.path;
+            fetchCurrentBranch();
+            return;
+          }
+
+          if (probe.kind === "migrationRequired" && probe.migrationSourceRoot) {
+            migrationSourceRoot = probe.migrationSourceRoot;
+            migrationOpen = true;
+            return;
+          }
+
+          appError =
+            probe.message || "Failed to open recent project.";
+        } catch (err) {
+          appError = `Failed to open project: ${toErrorMessage(err)}`;
+        }
+      }
+      return;
+    }
+
     switch (action) {
       case "open-project": {
         try {
@@ -308,12 +531,38 @@
           const selected = await open({ directory: true, multiple: false });
           if (selected) {
             const { invoke } = await import("@tauri-apps/api/core");
-            const info = await invoke<ProjectInfo>("open_project", {
+            const probe = await invoke<ProbePathResult>("probe_path", {
               path: selected as string,
             });
-            projectPath = info.path;
-            void applyAppearanceSettings();
-            fetchCurrentBranch();
+
+            if (probe.kind === "gwtProject" && probe.projectPath) {
+              const info = await invoke<ProjectInfo>("open_project", {
+                path: probe.projectPath,
+              });
+              projectPath = info.path;
+              fetchCurrentBranch();
+              break;
+            }
+
+            if (probe.kind === "migrationRequired" && probe.migrationSourceRoot) {
+              migrationSourceRoot = probe.migrationSourceRoot;
+              migrationOpen = true;
+              break;
+            }
+
+            if (probe.kind === "emptyDir") {
+              appError =
+                "Selected folder is empty. Use New Project on the start screen.";
+              break;
+            }
+
+            appError =
+              probe.message ||
+              (probe.kind === "notFound"
+                ? "Path does not exist."
+                : probe.kind === "invalid"
+                  ? "Invalid path."
+                  : "Not a gwt project.");
           }
         } catch (err) {
           appError = `Failed to open project: ${toErrorMessage(err)}`;
@@ -335,8 +584,6 @@
           activeTabId = "summary";
           selectedBranch = null;
           currentBranch = "";
-          sidebarRefreshKey = 0;
-          void applyAppearanceSettings();
         }
         break;
       case "toggle-sidebar":
@@ -347,8 +594,17 @@
           showAgentLaunch = true;
         }
         break;
+      case "cleanup-worktrees":
+        if (projectPath) {
+          cleanupPreselectedBranch = null;
+          showCleanupModal = true;
+        }
+        break;
       case "open-settings":
         openSettingsTab();
+        break;
+      case "version-history":
+        openVersionHistoryTab();
         break;
       case "about":
         showAbout = true;
@@ -361,6 +617,21 @@
             activeTabId = firstAgent.id;
           }
         }
+        break;
+      case "debug-os-env":
+        showOsEnvDebug = true;
+        osEnvDebugLoading = true;
+        osEnvDebugError = null;
+        (async () => {
+          try {
+            const { invoke } = await import("@tauri-apps/api/core");
+            osEnvDebugData = await invoke<CapturedEnvInfo>("get_captured_environment");
+          } catch (e) {
+            osEnvDebugError = String(e);
+          } finally {
+            osEnvDebugLoading = false;
+          }
+        })();
         break;
       case "terminal-diagnostics": {
         const active = tabs.find((t) => t.id === activeTabId) ?? null;
@@ -390,6 +661,51 @@
     }
   }
 
+  $effect(() => {
+    void tabs;
+    void activeTabId;
+    void syncWindowAgentTabs();
+  });
+
+  // Claude Code Hooks: check & register on startup
+  $effect(() => {
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const status = await invoke<{
+          registered: boolean;
+          updated: boolean;
+          temporary_execution: boolean;
+        }>("check_and_update_hooks");
+
+        if (status.temporary_execution) {
+          console.warn("gwt is running from a temporary execution environment; hooks may not persist.");
+        }
+
+        if (!status.registered) {
+          const { confirm } = await import("@tauri-apps/plugin-dialog");
+          const message = status.temporary_execution
+            ? [
+                "gwt is running from a temporary execution environment (e.g. bunx/npx cache).",
+                "If you register hooks now, the stored executable path may not persist and hooks can break later.",
+                "",
+                "Register Claude Code hooks for gwt anyway? This allows gwt to track agent status.",
+              ].join("\n")
+            : "Register Claude Code hooks for gwt? This allows gwt to track agent status.";
+          const ok = await confirm(
+            message,
+            { title: "gwt", kind: status.temporary_execution ? "warning" : "info" },
+          );
+          if (ok) {
+            await invoke("register_hooks");
+          }
+        }
+      } catch (err) {
+        console.error("Failed to check/register Claude Code hooks:", err);
+      }
+    })();
+  });
+
   // Native menubar integration (Tauri emits "menu-action" to the focused window).
   $effect(() => {
     let unlisten: null | (() => void) = null;
@@ -418,6 +734,25 @@
       }
     };
   });
+
+  // Global keyboard shortcut: Cmd+Shift+K / Ctrl+Shift+K to open Cleanup modal.
+  // The native menu accelerator handles this on macOS, but this provides a
+  // fallback for web-preview and non-Tauri contexts.
+  $effect(() => {
+    function onKeydown(e: KeyboardEvent) {
+      if (
+        e.key === "K" &&
+        e.shiftKey &&
+        (e.metaKey || e.ctrlKey) &&
+        !e.altKey
+      ) {
+        e.preventDefault();
+        void handleMenuAction("cleanup-worktrees");
+      }
+    }
+    document.addEventListener("keydown", onKeydown);
+    return () => document.removeEventListener("keydown", onKeydown);
+  });
 </script>
 
 {#if projectPath === null}
@@ -429,8 +764,13 @@
         <Sidebar
           {projectPath}
           refreshKey={sidebarRefreshKey}
+          widthPx={sidebarWidthPx}
+          minWidthPx={MIN_SIDEBAR_WIDTH_PX}
+          maxWidthPx={MAX_SIDEBAR_WIDTH_PX}
+          onResize={handleSidebarResize}
           onBranchSelect={handleBranchSelect}
           onBranchActivate={handleBranchActivate}
+          onCleanupRequest={handleCleanupRequest}
         />
       {/if}
       <MainArea
@@ -444,7 +784,7 @@
         onTabClose={handleTabClose}
       />
     </div>
-    <StatusBar {projectPath} {currentBranch} {terminalCount} />
+    <StatusBar {projectPath} {currentBranch} {terminalCount} {osEnvReady} />
   </div>
 {/if}
 
@@ -452,10 +792,18 @@
   <AgentLaunchForm
     projectPath={projectPath as string}
     selectedBranch={selectedBranch?.name ?? currentBranch}
+    osEnvReady={osEnvReady}
     onLaunch={handleAgentLaunch}
     onClose={() => (showAgentLaunch = false)}
   />
 {/if}
+
+<CleanupModal
+  open={showCleanupModal}
+  preselectedBranch={cleanupPreselectedBranch}
+  projectPath={projectPath ?? ""}
+  onClose={() => (showCleanupModal = false)}
+/>
 
 {#if showAbout}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -465,6 +813,7 @@
       <h2>gwt</h2>
       <p>Git Worktree Manager</p>
       <p class="about-version">GUI Edition</p>
+      <p class="about-version">{formatAboutVersion(appVersion)}</p>
       <button class="about-close" onclick={() => (showAbout = false)}>
         Close
       </button>
@@ -552,6 +901,70 @@
   </div>
 {/if}
 
+<MigrationModal
+  open={migrationOpen}
+  sourceRoot={migrationSourceRoot}
+  onCompleted={async (p) => {
+    migrationOpen = false;
+    migrationSourceRoot = "";
+
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const info = await invoke<ProjectInfo>("open_project", { path: p });
+      projectPath = info.path;
+      fetchCurrentBranch();
+    } catch (err) {
+      appError = `Failed to open migrated project: ${toErrorMessage(err)}`;
+    }
+  }}
+  onDismiss={() => {
+    migrationOpen = false;
+    migrationSourceRoot = "";
+  }}
+/>
+
+<LaunchProgressModal
+  open={launchProgressOpen}
+  jobId={launchJobId}
+  onSuccess={handleLaunchSuccess}
+  onClose={() => {
+    launchProgressOpen = false;
+    launchJobId = "";
+    pendingLaunchRequest = null;
+  }}
+/>
+{#if showOsEnvDebug}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="overlay" onclick={() => (showOsEnvDebug = false)}>
+    <div class="env-debug-dialog" onclick={(e) => e.stopPropagation()}>
+      <h3>Captured Environment</h3>
+      {#if osEnvDebugLoading}
+        <p class="env-debug-loading">Loading...</p>
+      {:else if osEnvDebugError}
+        <p class="env-debug-error">{osEnvDebugError}</p>
+      {:else if osEnvDebugData}
+        <div class="env-debug-meta">
+          <span>Source: <strong>{osEnvDebugData.source === 'login_shell' ? 'Login Shell' : osEnvDebugData.source === 'std_env_fallback' ? 'Process Env (fallback)' : osEnvDebugData.source}</strong></span>
+          {#if osEnvDebugData.reason}
+            <span class="env-debug-reason">Reason: {osEnvDebugData.reason}</span>
+          {/if}
+          <span>Variables: {osEnvDebugData.entries.length}</span>
+        </div>
+        <div class="env-debug-list">
+          {#each osEnvDebugData.entries as entry}
+            <div class="env-debug-row">
+              <span class="env-debug-key">{entry.key}</span>
+              <span class="env-debug-val">{entry.value}</span>
+            </div>
+          {/each}
+        </div>
+      {/if}
+      <button class="about-close" onclick={() => (showOsEnvDebug = false)}>Close</button>
+    </div>
+  </div>
+{/if}
+
 {#if appError}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -562,6 +975,15 @@
       <button class="about-close" onclick={() => (appError = null)}>
         Close
       </button>
+    </div>
+  </div>
+{/if}
+
+{#if toastMessage}
+  <div class="toast-container">
+    <div class="toast-message">
+      <span>{toastMessage}</span>
+      <button class="toast-close" onclick={() => (toastMessage = null)}>[x]</button>
     </div>
   </div>
 {/if}
@@ -746,5 +1168,114 @@
     line-height: 1.5;
     margin-bottom: 18px;
     white-space: pre-wrap;
+  }
+
+  .toast-container {
+    position: fixed;
+    bottom: 40px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 2000;
+    pointer-events: none;
+  }
+
+  .toast-message {
+    pointer-events: auto;
+    background: var(--bg-tertiary, #45475a);
+    color: var(--text-warning, #f9e2af);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 10px 16px;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  }
+
+  .toast-close {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 13px;
+    padding: 0;
+  }
+
+  .env-debug-dialog {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 24px 28px;
+    min-width: 600px;
+    max-width: 800px;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+  }
+
+  .env-debug-dialog h3 {
+    margin: 0 0 16px;
+    font-size: 16px;
+    color: var(--text-primary);
+  }
+
+  .env-debug-meta {
+    display: flex;
+    gap: 16px;
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+  }
+
+  .env-debug-reason {
+    color: var(--text-warning, #f9e2af);
+  }
+
+  .env-debug-list {
+    overflow-y: auto;
+    flex: 1;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    margin-bottom: 16px;
+  }
+
+  .env-debug-row {
+    display: flex;
+    border-bottom: 1px solid var(--border-color);
+    font-size: 12px;
+    font-family: var(--font-mono, monospace);
+  }
+
+  .env-debug-row:last-child {
+    border-bottom: none;
+  }
+
+  .env-debug-key {
+    min-width: 200px;
+    max-width: 200px;
+    padding: 4px 8px;
+    color: var(--text-accent, #89b4fa);
+    word-break: break-all;
+    border-right: 1px solid var(--border-color);
+  }
+
+  .env-debug-val {
+    flex: 1;
+    padding: 4px 8px;
+    color: var(--text-primary);
+    word-break: break-all;
+    overflow-wrap: anywhere;
+  }
+
+  .env-debug-loading, .env-debug-error {
+    font-size: 13px;
+    padding: 12px 0;
+  }
+
+  .env-debug-error {
+    color: var(--text-error, #f38ba8);
   }
 </style>

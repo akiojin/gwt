@@ -104,6 +104,13 @@ impl Default for AppearanceSettings {
 }
 
 impl Settings {
+    fn settings_env_provider() -> Env {
+        // Limit Figment env extraction to scalar keys we actually support via direct mapping.
+        // This avoids runtime variables such as GWT_AGENT (set for terminal panes) from
+        // colliding with nested settings structs during deserialization.
+        Env::prefixed("GWT_").split("_").only(&["debug"])
+    }
+
     /// Load settings from configuration files and environment
     pub fn load(repo_root: &Path) -> Result<Self> {
         debug!(
@@ -148,7 +155,7 @@ impl Settings {
             figment = figment.merge(Toml::file(path));
         }
 
-        figment = figment.merge(Env::prefixed("GWT_").split("_"));
+        figment = figment.merge(Self::settings_env_provider());
 
         let mut settings: Settings = figment.extract().map_err(|e| {
             error!(
@@ -230,7 +237,7 @@ impl Settings {
             figment = figment.merge(Toml::file(path));
         }
 
-        figment = figment.merge(Env::prefixed("GWT_").split("_"));
+        figment = figment.merge(Self::settings_env_provider());
 
         let mut settings: Settings = figment.extract().map_err(|e| {
             error!(
@@ -781,7 +788,7 @@ default_base_branch = "legacy-global"
         let temp = TempDir::new().unwrap();
         let _env = crate::config::TestEnvGuard::new(temp.path());
         let prev_gwt_agent = std::env::var_os("GWT_AGENT");
-        std::env::remove_var("GWT_AGENT");
+        std::env::set_var("GWT_AGENT", "Codex");
 
         let global_dir = temp.path().join(".gwt");
         std::fs::create_dir_all(&global_dir).unwrap();
@@ -802,6 +809,24 @@ terminal_font_size = 19
         assert_eq!(loaded.default_base_branch, "global-main");
         assert_eq!(loaded.appearance.ui_font_size, 17);
         assert_eq!(loaded.appearance.terminal_font_size, 19);
+
+        match prev_gwt_agent {
+            Some(value) => std::env::set_var("GWT_AGENT", value),
+            None => std::env::remove_var("GWT_AGENT"),
+        }
+    }
+
+    #[test]
+    fn test_load_ignores_runtime_gwt_agent_env() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join(".gwt.toml");
+        std::fs::write(&config_path, "debug = true\n").unwrap();
+
+        let prev_gwt_agent = std::env::var_os("GWT_AGENT");
+        std::env::set_var("GWT_AGENT", "Codex");
+
+        let loaded = Settings::load(temp.path()).unwrap();
+        assert!(loaded.debug);
 
         match prev_gwt_agent {
             Some(value) => std::env::set_var("GWT_AGENT", value),

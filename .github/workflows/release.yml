@@ -126,49 +126,14 @@ jobs:
         run: cargo tauri build
       - name: Build macOS installer (.pkg)
         if: matrix.platform == 'macos'
-        id: package_macos
         shell: bash
         run: |
           set -euo pipefail
-          version="${RELEASE_VERSION}"
-          if [[ -z "$version" ]]; then
+          if [[ -z "${RELEASE_VERSION}" ]]; then
             echo "::error::Release version is not available."
             exit 1
           fi
-          app_path=$(ls target/release/bundle/macos/*.app | head -n 1)
-          if [[ -z "$app_path" ]]; then
-            echo "::error::Failed to find macOS .app bundle."
-            exit 1
-          fi
-          arch="$(uname -m)"
-          pkg_dir="target/release/bundle/pkg"
-          mkdir -p "$pkg_dir"
-          pkg_path="${pkg_dir}/gwt-macos-${arch}.pkg"
-          pkgbuild \
-            --component "$app_path" \
-            --install-location "/Applications" \
-            --identifier "com.akiojin.gwt" \
-            --version "$version" \
-            "$pkg_path"
-          echo "pkg_path=$pkg_path" >> "$GITHUB_OUTPUT"
-      - name: Validate macOS installer (.pkg)
-        if: matrix.platform == 'macos'
-        shell: bash
-        run: |
-          set -euo pipefail
-          pkg_path="${{ steps.package_macos.outputs.pkg_path }}"
-          if [[ -z "$pkg_path" || ! -f "$pkg_path" ]]; then
-            echo "::error::macOS pkg not found."
-            exit 1
-          fi
-          if [[ ! "$pkg_path" == *.pkg ]]; then
-            echo "::error::macOS pkg has unexpected name."
-            exit 1
-          fi
-          if [[ ! -s "$pkg_path" ]]; then
-            echo "::error::macOS pkg is empty."
-            exit 1
-          fi
+          bash installers/macos/build-pkg.sh --version "${RELEASE_VERSION}"
       - name: Install WiX Toolset
         if: matrix.platform == 'windows'
         shell: pwsh

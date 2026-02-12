@@ -10,6 +10,7 @@
   import TerminalView from "../terminal/TerminalView.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
   import GitSection from "./GitSection.svelte";
+  import VersionHistoryPanel from "./VersionHistoryPanel.svelte";
 
   function isAgentTabWithPaneId(tab: Tab): tab is Tab & { paneId: string } {
     return tab.type === "agent" && typeof tab.paneId === "string" && tab.paneId.length > 0;
@@ -285,7 +286,6 @@
         agentVersion: displayToolVersion(entry),
         skipPermissions: entry.skip_permissions ?? undefined,
         reasoningLevel: entry.reasoning_level?.trim() || undefined,
-        collaborationModes: entry.collaboration_modes ?? undefined,
         dockerService: entry.docker_service?.trim() || undefined,
         dockerForceHost: entry.docker_force_host ?? undefined,
         dockerRecreate: entry.docker_recreate ?? undefined,
@@ -329,7 +329,7 @@
     {/each}
   </div>
   <div class="tab-content">
-    <div class="panel-layer" class:hidden={showTerminalLayer}>
+      <div class="panel-layer" class:hidden={showTerminalLayer}>
       {#if activeTab?.type === "settings"}
         <SettingsPanel onClose={() => onTabClose(activeTabId)} />
       {:else if activeTab?.type === "summary"}
@@ -505,6 +505,8 @@
             </div>
           {/if}
         </div>
+      {:else if activeTab?.type === "versionHistory"}
+        <VersionHistoryPanel {projectPath} />
       {/if}
     </div>
 

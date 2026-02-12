@@ -16,6 +16,7 @@
   let loading: boolean = $state(false);
   let error: string | null = $state(null);
   let summary = $state<GitChangeSummary | null>(null);
+  let refreshToken: number = $state(0);
 
   let baseBranchCandidates: string[] = $state([]);
   let baseBranch: string = $state("");
@@ -32,10 +33,6 @@
     return String(err);
   }
 
-  function normalizeBranchName(name: string): string {
-    return name.startsWith("origin/") ? name.slice("origin/".length) : name;
-  }
-
   async function loadSummary() {
     loading = true;
     error = null;
@@ -45,16 +42,16 @@
       const [summaryResult, candidates] = await Promise.all([
         invoke<GitChangeSummary>("get_git_change_summary", {
           projectPath,
-          branch: normalizeBranchName(branch),
+          branch,
           baseBranch: baseBranch || undefined,
         }),
         invoke<string[]>("get_base_branch_candidates", { projectPath }),
       ]);
 
-      summary = summaryResult;
-      baseBranchCandidates = candidates;
+      summary = summaryResult ?? null;
+      baseBranchCandidates = candidates ?? [];
 
-      if (!baseBranch && summaryResult.base_branch) {
+      if (!baseBranch && summaryResult?.base_branch) {
         baseBranch = summaryResult.base_branch;
       }
     } catch (err) {
@@ -66,6 +63,7 @@
   }
 
   async function refresh() {
+    refreshToken += 1;
     await loadSummary();
   }
 
@@ -174,11 +172,11 @@
         <!-- Tab content -->
         <div class="git-tab-content">
           {#if activeTab === "changes"}
-            <GitChangesTab {projectPath} branch={normalizeBranchName(branch)} {baseBranch} />
+            <GitChangesTab {projectPath} {branch} {baseBranch} {refreshToken} />
           {:else if activeTab === "commits"}
-            <GitCommitsTab {projectPath} branch={normalizeBranchName(branch)} {baseBranch} />
+            <GitCommitsTab {projectPath} {branch} {baseBranch} {refreshToken} />
           {:else if activeTab === "stash"}
-            <GitStashTab {projectPath} />
+            <GitStashTab {projectPath} {branch} {refreshToken} />
           {/if}
         </div>
       {/if}
