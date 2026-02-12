@@ -29,16 +29,21 @@ normalize_spec_id() {
         return
     fi
 
+    # Bash 3.2 compatibility: avoid ${var^^} / ${var,,}.
     local upper
-    upper="${raw^^}"
+    upper="$(printf '%s' "$raw" | tr '[:lower:]' '[:upper:]')"
     if [[ "$upper" == SPEC-* ]]; then
-        local suffix
-        suffix="${upper#SPEC-}"
-        echo "SPEC-${suffix,,}"
+        local suffix_upper
+        suffix_upper="${upper#SPEC-}"
+        local suffix_lower
+        suffix_lower="$(printf '%s' "$suffix_upper" | tr '[:upper:]' '[:lower:]')"
+        echo "SPEC-${suffix_lower}"
         return
     fi
 
-    echo "SPEC-${upper,,}"
+    local lower
+    lower="$(printf '%s' "$upper" | tr '[:upper:]' '[:lower:]')"
+    echo "SPEC-${lower}"
 }
 
 is_valid_spec_id() {
