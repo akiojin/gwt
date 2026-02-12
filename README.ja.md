@@ -62,6 +62,18 @@ cd ..
 cargo tauri build
 ```
 
+## AI 設定
+
+Agent Mode やセッション要約を使うには AI 設定が必要です。
+
+手順:
+
+- `Settings` を開く
+- `Profiles` でプロファイルを選択
+- `AI Settings` を有効化
+- `Endpoint` と `Model` を設定（ローカル LLM の場合は API Key 省略可）
+- `Save` をクリック
+
 ## ディレクトリ構成
 
 - `crates/gwt-core/`: コア（Git/worktree/設定/ログ/Docker/PTY）
