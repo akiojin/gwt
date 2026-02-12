@@ -1,4 +1,5 @@
 pub mod agent_config;
+pub mod agent_mode;
 pub mod agents;
 pub mod branch_suggest;
 pub mod branches;
@@ -8,9 +9,12 @@ pub mod git_view;
 pub mod hooks;
 pub mod profiles;
 pub mod project;
+pub mod recent_projects;
 pub mod sessions;
 pub mod settings;
 pub mod terminal;
+pub mod version_history;
+pub mod window_tabs;
 
 #[cfg(test)]
 pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

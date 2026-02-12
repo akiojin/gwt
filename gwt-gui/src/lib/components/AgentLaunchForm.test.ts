@@ -182,4 +182,69 @@ describe("AgentLaunchForm", () => {
     // Suggestions should be cleared when showing the error.
     expect(rendered.queryByText("feature/a")).toBeNull();
   });
+
+  it("disables capitalization and completion helpers for text and textarea inputs", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "opencode",
+            name: "OpenCode",
+            version: "0.0.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "list_worktree_branches") return [];
+      if (cmd === "list_remote_branches") return [];
+      return [];
+    });
+
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "feature/current-branch",
+      onLaunch,
+      onClose,
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    const expectInputNormalizationDisabled = (
+      element: HTMLInputElement | HTMLTextAreaElement | null
+    ) => {
+      expect(element).toBeTruthy();
+      expect(element?.getAttribute("autocapitalize")).toBe("off");
+      expect(element?.getAttribute("autocorrect")).toBe("off");
+      expect(element?.getAttribute("autocomplete")).toBe("off");
+      expect(element?.getAttribute("spellcheck")).toBe("false");
+    };
+
+    const modelInput = rendered.getByLabelText("Model") as HTMLInputElement;
+    expectInputNormalizationDisabled(modelInput);
+
+    const branchInput = rendered.container.querySelector(
+      "#branch-input"
+    ) as HTMLInputElement | null;
+    expectInputNormalizationDisabled(branchInput);
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Continue" }));
+    const sessionInput = rendered.getByLabelText("Session ID") as HTMLInputElement;
+    expectInputNormalizationDisabled(sessionInput);
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Advanced" }));
+    const extraArgsInput = rendered.getByLabelText("Extra Args") as HTMLTextAreaElement;
+    expectInputNormalizationDisabled(extraArgsInput);
+    const envOverridesInput = rendered.getByLabelText("Env Overrides") as HTMLTextAreaElement;
+    expectInputNormalizationDisabled(envOverridesInput);
+
+    await fireEvent.click(rendered.getByRole("button", { name: "New Branch" }));
+    const newBranchInput = rendered.getByLabelText("New Branch Name") as HTMLInputElement;
+    expectInputNormalizationDisabled(newBranchInput);
+  });
 });

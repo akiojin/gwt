@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, waitFor } from "@testing-library/svelte";
+import { render, waitFor, fireEvent, cleanup } from "@testing-library/svelte";
 
 const invokeMock = vi.fn();
 
@@ -16,8 +16,19 @@ function countInvokeCalls(name: string): number {
   return invokeMock.mock.calls.filter((c) => c[0] === name).length;
 }
 
+const branchFixture = {
+  name: "feature/sidebar-size",
+  commit: "1234567",
+  is_current: false,
+  ahead: 0,
+  behind: 0,
+  divergence_status: "UpToDate",
+  last_tool_usage: null,
+};
+
 describe("Sidebar", () => {
   beforeEach(() => {
+    cleanup();
     invokeMock.mockReset();
     invokeMock.mockResolvedValue([]);
   });
@@ -69,5 +80,88 @@ describe("Sidebar", () => {
         firstLocalBranchFetchCount + 1
       );
     });
+  });
+
+  it("applies sidebar width from props", async () => {
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      widthPx: 333,
+    });
+
+    const sidebar = rendered.container.querySelector(".sidebar");
+    expect(sidebar).toBeTruthy();
+    expect((sidebar as HTMLElement).style.width).toBe("333px");
+    expect((sidebar as HTMLElement).style.minWidth).toBe("333px");
+  });
+
+  it("opens Launch Agent from context menu", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [branchFixture];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const onBranchActivate = vi.fn();
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      onBranchActivate,
+    });
+
+    const branchLabel = await rendered.findByText(branchFixture.name);
+    const branchButton = branchLabel.closest("button");
+    expect(branchButton).toBeTruthy();
+
+    await fireEvent.contextMenu(branchButton as HTMLElement);
+
+    const launchMenuButton = await rendered.findByRole("button", {
+      name: "Launch Agent...",
+    });
+    expect(launchMenuButton).toBeTruthy();
+
+    await fireEvent.click(launchMenuButton);
+
+    expect(onBranchActivate).toHaveBeenCalledTimes(1);
+    expect(onBranchActivate).toHaveBeenCalledWith(
+      expect.objectContaining({ name: branchFixture.name })
+    );
+  });
+
+  it("disables capitalization and completion helpers for the branch filter input", async () => {
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    const searchInput = rendered.getByPlaceholderText("Filter branches...") as HTMLInputElement;
+    expect(searchInput.getAttribute("autocapitalize")).toBe("off");
+    expect(searchInput.getAttribute("autocorrect")).toBe("off");
+    expect(searchInput.getAttribute("autocomplete")).toBe("off");
+    expect(searchInput.getAttribute("spellcheck")).toBe("false");
+  });
+
+  it("disables Launch Agent menu item when no activation handler is provided", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [branchFixture];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    const branchLabel = await rendered.findByText(branchFixture.name);
+    const branchButton = branchLabel.closest("button");
+    expect(branchButton).toBeTruthy();
+
+    await fireEvent.contextMenu(branchButton as HTMLElement);
+
+    const launchMenuButton = await rendered.findByRole("button", {
+      name: "Launch Agent...",
+    });
+    expect((launchMenuButton as HTMLButtonElement).disabled).toBe(true);
   });
 });

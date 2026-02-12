@@ -22,7 +22,9 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
         crate::menu::MENU_ID_FILE_OPEN_PROJECT => Some("open-project"),
         crate::menu::MENU_ID_FILE_CLOSE_PROJECT => Some("close-project"),
         crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES => Some("cleanup-worktrees"),
+        crate::menu::MENU_ID_GIT_VERSION_HISTORY => Some("version-history"),
         crate::menu::MENU_ID_TOOLS_LAUNCH_AGENT => Some("launch-agent"),
+        crate::menu::MENU_ID_TOOLS_AGENT_MODE => Some("open-agent-mode"),
         crate::menu::MENU_ID_TOOLS_LIST_TERMINALS => Some("list-terminals"),
         crate::menu::MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS => Some("terminal-diagnostics"),
         crate::menu::MENU_ID_SETTINGS_PREFERENCES => Some("open-settings"),
@@ -177,12 +179,23 @@ pub fn build_app(
                 return;
             }
 
+            if let Some(project_path) = crate::menu::parse_recent_project_menu_id(id) {
+                let action = format!("open-recent-project::{}", project_path);
+                emit_menu_action(app, &action);
+                return;
+            }
+
             if let Some(target) = crate::menu::parse_window_focus_menu_id(id) {
                 if let Some(w) = app.get_webview_window(target) {
                     let _ = w.show();
                     let _ = w.set_focus();
                 }
                 let _ = crate::menu::rebuild_menu(app);
+                return;
+            }
+
+            if let Some(tab_id) = crate::menu::parse_window_tab_focus_menu_id(id) {
+                emit_menu_action(app, &format!("focus-agent-tab::{tab_id}"));
                 return;
             }
 
@@ -274,10 +287,15 @@ pub fn build_app(
             crate::commands::terminal::start_launch_job,
             crate::commands::terminal::cancel_launch_job,
             crate::commands::terminal::write_terminal,
+            crate::commands::terminal::send_keys_to_pane,
+            crate::commands::terminal::send_keys_broadcast,
             crate::commands::terminal::resize_terminal,
             crate::commands::terminal::close_terminal,
             crate::commands::terminal::list_terminals,
             crate::commands::terminal::probe_terminal_ansi,
+            crate::commands::terminal::capture_scrollback_tail,
+            crate::commands::agent_mode::get_agent_mode_state_cmd,
+            crate::commands::agent_mode::send_agent_mode_message,
             crate::commands::settings::get_settings,
             crate::commands::settings::save_settings,
             crate::commands::agents::detect_agents,
@@ -286,6 +304,7 @@ pub fn build_app(
             crate::commands::agent_config::save_agent_config,
             crate::commands::profiles::get_profiles,
             crate::commands::profiles::save_profiles,
+            crate::commands::profiles::list_ai_models,
             crate::commands::cleanup::list_worktrees,
             crate::commands::cleanup::cleanup_worktrees,
             crate::commands::cleanup::cleanup_single_worktree,
@@ -300,6 +319,10 @@ pub fn build_app(
             crate::commands::git_view::get_working_tree_status,
             crate::commands::git_view::get_stash_list,
             crate::commands::git_view::get_base_branch_candidates,
+            crate::commands::version_history::list_project_versions,
+            crate::commands::version_history::get_project_version_history,
+            crate::commands::window_tabs::sync_window_agent_tabs,
+            crate::commands::recent_projects::get_recent_projects,
         ])
 }
 
@@ -466,6 +489,14 @@ mod tests {
         assert_eq!(
             menu_action_from_id(crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES),
             Some("cleanup-worktrees")
+        );
+    }
+
+    #[test]
+    fn menu_action_from_id_maps_agent_mode() {
+        assert_eq!(
+            menu_action_from_id(crate::menu::MENU_ID_TOOLS_AGENT_MODE),
+            Some("open-agent-mode")
         );
     }
 }

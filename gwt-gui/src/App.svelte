@@ -7,6 +7,7 @@
     ProbePathResult,
     TerminalAnsiProbe,
     CapturedEnvInfo,
+    SettingsData,
   } from "./lib/types";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import MainArea from "./lib/components/MainArea.svelte";
@@ -16,13 +17,53 @@
   import LaunchProgressModal from "./lib/components/LaunchProgressModal.svelte";
   import MigrationModal from "./lib/components/MigrationModal.svelte";
   import CleanupModal from "./lib/components/CleanupModal.svelte";
+  import {
+    formatAboutVersion,
+    formatWindowTitle,
+    getAppVersionSafe,
+  } from "./lib/windowTitle";
 
   interface MenuActionPayload {
     action: string;
   }
 
+  const SIDEBAR_WIDTH_STORAGE_KEY = "gwt.sidebar.width";
+  const DEFAULT_SIDEBAR_WIDTH_PX = 260;
+  const MIN_SIDEBAR_WIDTH_PX = 220;
+  const MAX_SIDEBAR_WIDTH_PX = 520;
+
+  function clampSidebarWidth(widthPx: number): number {
+    if (!Number.isFinite(widthPx)) return DEFAULT_SIDEBAR_WIDTH_PX;
+    return Math.max(
+      MIN_SIDEBAR_WIDTH_PX,
+      Math.min(MAX_SIDEBAR_WIDTH_PX, Math.round(widthPx))
+    );
+  }
+
+  function loadSidebarWidth(): number {
+    if (typeof window === "undefined") return DEFAULT_SIDEBAR_WIDTH_PX;
+    try {
+      const raw = window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
+      if (!raw) return DEFAULT_SIDEBAR_WIDTH_PX;
+      return clampSidebarWidth(Number(raw));
+    } catch {
+      return DEFAULT_SIDEBAR_WIDTH_PX;
+    }
+  }
+
+  function persistSidebarWidth(widthPx: number) {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(widthPx));
+    } catch {
+      // Ignore localStorage failures (e.g., disabled in strict environments).
+    }
+  }
+
   let projectPath: string | null = $state(null);
+  let appVersion: string | null = $state(null);
   let sidebarVisible: boolean = $state(true);
+  let sidebarWidthPx: number = $state(loadSidebarWidth());
   let showAgentLaunch: boolean = $state(false);
   let showCleanupModal: boolean = $state(false);
   let cleanupPreselectedBranch: string | null = $state(null);
@@ -44,6 +85,7 @@
 
   let tabs: Tab[] = $state([
     { id: "summary", label: "Session Summary", type: "summary" },
+    { id: "agentMode", label: "Agent Mode", type: "agentMode" },
   ]);
   let activeTabId: string = $state("summary");
 
@@ -107,9 +149,21 @@
     return () => { cancelled = true; if (unlisten) unlisten(); };
   });
 
+  // Best-effort: read app version from Tauri runtime (web preview will ignore).
+  $effect(() => {
+    let cancelled = false;
+    (async () => {
+      const v = await getAppVersionSafe();
+      if (cancelled) return;
+      appVersion = v;
+    })();
+    return () => { cancelled = true; };
+  });
+
   $effect(() => {
     void projectPath;
     void setWindowTitle();
+    void applyAppearanceSettings();
   });
 
   // Best-effort: subscribe once and refresh Sidebar when worktrees change.
@@ -190,8 +244,37 @@
     return String(err);
   }
 
+  function clampFontSize(size: number): number {
+    return Math.max(8, Math.min(24, Math.round(size)));
+  }
+
+  function applyUiFontSize(size: number) {
+    document.documentElement.style.setProperty("--ui-font-base", `${size}px`);
+  }
+
+  function applyTerminalFontSize(size: number) {
+    (window as any).__gwtTerminalFontSize = size;
+    window.dispatchEvent(new CustomEvent("gwt-terminal-font-size", { detail: size }));
+  }
+
+  async function applyAppearanceSettings() {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const settings = await invoke<Pick<SettingsData, "ui_font_size" | "terminal_font_size">>(
+        "get_settings"
+      );
+      applyUiFontSize(clampFontSize(settings.ui_font_size ?? 13));
+      applyTerminalFontSize(clampFontSize(settings.terminal_font_size ?? 13));
+    } catch {
+      // Ignore: settings API not available outside Tauri runtime.
+    }
+  }
+
   async function setWindowTitle() {
-    const title = projectPath ? `gwt - ${projectPath}` : "gwt";
+    const title = formatWindowTitle({
+      appName: "gwt",
+      projectPath,
+    });
 
     // Document title also covers non-tauri contexts (e.g. web preview).
     document.title = title;
@@ -232,6 +315,13 @@
 
   function requestAgentLaunch() {
     showAgentLaunch = true;
+  }
+
+  function handleSidebarResize(nextWidthPx: number) {
+    const next = clampSidebarWidth(nextWidthPx);
+    if (next === sidebarWidthPx) return;
+    sidebarWidthPx = next;
+    persistSidebarWidth(next);
   }
 
   function handleBranchActivate(branch: BranchInfo) {
@@ -326,6 +416,9 @@
 
   async function handleTabClose(tabId: string) {
     const tab = tabs.find((t) => t.id === tabId);
+    if (tab?.type === "summary") {
+      return;
+    }
     if (tab?.paneId) {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -354,7 +447,106 @@
     activeTabId = tab.id;
   }
 
+  function openVersionHistoryTab() {
+    const existing = tabs.find(
+      (t) => t.type === "versionHistory" || t.id === "versionHistory",
+    );
+    if (existing) {
+      activeTabId = existing.id;
+      return;
+    }
+
+    const tab: Tab = {
+      id: "versionHistory",
+      label: "Version History",
+      type: "versionHistory",
+    };
+    tabs = [...tabs, tab];
+    activeTabId = tab.id;
+  }
+
+  function openAgentModeTab() {
+    const existing = tabs.find((t) => t.type === "agentMode" || t.id === "agentMode");
+    if (existing) {
+      activeTabId = existing.id;
+      return;
+    }
+
+    const tab: Tab = { id: "agentMode", label: "Agent Mode", type: "agentMode" };
+    const summaryIndex = tabs.findIndex((t) => t.type === "summary" || t.id === "summary");
+    if (summaryIndex >= 0) {
+      const nextTabs = [...tabs];
+      nextTabs.splice(summaryIndex + 1, 0, tab);
+      tabs = nextTabs;
+    } else {
+      tabs = [...tabs, tab];
+    }
+    activeTabId = tab.id;
+  }
+
+  async function syncWindowAgentTabs() {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const agentTabs = tabs
+        .filter((t) => t.type === "agent")
+        .map((t) => ({ id: t.id, label: t.label }));
+      const activeAgentTabId = agentTabs.some((t) => t.id === activeTabId)
+        ? activeTabId
+        : null;
+      await invoke("sync_window_agent_tabs", {
+        request: {
+          tabs: agentTabs,
+          activeTabId: activeAgentTabId,
+        },
+      });
+    } catch {
+      // Ignore: not available outside Tauri runtime.
+    }
+  }
+
   async function handleMenuAction(action: string) {
+    if (action.startsWith("focus-agent-tab::")) {
+      const tabId = action.slice("focus-agent-tab::".length).trim();
+      if (tabId && tabs.some((t) => t.id === tabId && t.type === "agent")) {
+        activeTabId = tabId;
+      }
+      return;
+    }
+
+    // Handle dynamic "open-recent-project::<path>" actions before the switch.
+    if (action.startsWith("open-recent-project::")) {
+      const recentPath = action.slice("open-recent-project::".length);
+      if (recentPath) {
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const probe = await invoke<ProbePathResult>("probe_path", {
+            path: recentPath,
+          });
+
+          if (probe.kind === "gwtProject" && probe.projectPath) {
+            const info = await invoke<ProjectInfo>("open_project", {
+              path: probe.projectPath,
+            });
+            projectPath = info.path;
+            fetchCurrentBranch();
+            return;
+          }
+
+          if (probe.kind === "migrationRequired" && probe.migrationSourceRoot) {
+            migrationSourceRoot = probe.migrationSourceRoot;
+            migrationOpen = true;
+            return;
+          }
+
+          appError =
+            probe.message || "Failed to open recent project.";
+        } catch (err) {
+          appError = `Failed to open project: ${toErrorMessage(err)}`;
+        }
+      }
+      return;
+    }
+
     switch (action) {
       case "open-project": {
         try {
@@ -411,7 +603,10 @@
           }
 
           projectPath = null;
-          tabs = [{ id: "summary", label: "Session Summary", type: "summary" }];
+          tabs = [
+            { id: "summary", label: "Session Summary", type: "summary" },
+            { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+          ];
           activeTabId = "summary";
           selectedBranch = null;
           currentBranch = "";
@@ -433,6 +628,12 @@
         break;
       case "open-settings":
         openSettingsTab();
+        break;
+      case "version-history":
+        openVersionHistoryTab();
+        break;
+      case "open-agent-mode":
+        openAgentModeTab();
         break;
       case "about":
         showAbout = true;
@@ -488,6 +689,12 @@
       }
     }
   }
+
+  $effect(() => {
+    void tabs;
+    void activeTabId;
+    void syncWindowAgentTabs();
+  });
 
   // Claude Code Hooks: check & register on startup
   $effect(() => {
@@ -586,6 +793,10 @@
         <Sidebar
           {projectPath}
           refreshKey={sidebarRefreshKey}
+          widthPx={sidebarWidthPx}
+          minWidthPx={MIN_SIDEBAR_WIDTH_PX}
+          maxWidthPx={MAX_SIDEBAR_WIDTH_PX}
+          onResize={handleSidebarResize}
           onBranchSelect={handleBranchSelect}
           onBranchActivate={handleBranchActivate}
           onCleanupRequest={handleCleanupRequest}
@@ -631,6 +842,7 @@
       <h2>gwt</h2>
       <p>Git Worktree Manager</p>
       <p class="about-version">GUI Edition</p>
+      <p class="about-version">{formatAboutVersion(appVersion)}</p>
       <button class="about-close" onclick={() => (showAbout = false)}>
         Close
       </button>

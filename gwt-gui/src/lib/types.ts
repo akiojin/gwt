@@ -36,6 +36,34 @@ export interface TerminalAnsiProbe {
   has_true_color: boolean;
 }
 
+export interface AgentModeMessage {
+  role: "user" | "assistant" | "system" | "tool";
+  kind?: "message" | "thought" | "action" | "observation" | "error";
+  content: string;
+  timestamp: number;
+}
+
+export interface AgentModeState {
+  messages: AgentModeMessage[];
+  ai_ready: boolean;
+  ai_error?: string | null;
+  last_error?: string | null;
+  is_waiting: boolean;
+  session_name?: string | null;
+  llm_call_count: number;
+  estimated_tokens: number;
+}
+
+export interface SendKeysRequest {
+  paneId: string;
+  text: string;
+}
+
+export interface CaptureScrollbackRequest {
+  paneId: string;
+  maxBytes?: number;
+}
+
 export interface AgentInfo {
   id: "claude" | "codex" | "gemini" | "opencode" | (string & {});
   name: string;
@@ -108,7 +136,7 @@ export interface ProfilesConfig {
 export interface Tab {
   id: string;
   label: string;
-  type: "summary" | "agent" | "settings";
+  type: "summary" | "agent" | "settings" | "versionHistory" | "agentMode";
   paneId?: string;
 }
 
@@ -130,6 +158,30 @@ export interface ToolSessionEntry {
   docker_build?: boolean | null;
   docker_keep?: boolean | null;
   timestamp: number;
+}
+
+export interface ProjectVersions {
+  items: VersionItem[];
+}
+
+export interface VersionItem {
+  id: string; // "unreleased" | "vX.Y.Z"
+  label: string;
+  range_from?: string | null;
+  range_to: string; // "HEAD" | "vX.Y.Z"
+  commit_count: number;
+}
+
+export interface VersionHistoryResult {
+  status: "ok" | "generating" | "error" | "disabled";
+  version_id: string;
+  label: string;
+  range_from?: string | null;
+  range_to: string;
+  commit_count: number;
+  summary_markdown?: string | null;
+  changelog_markdown?: string | null;
+  error?: string | null;
 }
 
 export interface SessionSummaryResult {
@@ -293,7 +345,6 @@ export interface LaunchAgentRequest {
   mode?: "normal" | "continue" | "resume";
   skipPermissions?: boolean;
   reasoningLevel?: string;
-  collaborationModes?: boolean;
   extraArgs?: string[];
   envOverrides?: Record<string, string>;
   resumeSessionId?: string;

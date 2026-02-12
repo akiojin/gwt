@@ -1,6 +1,6 @@
 //! Pane manager: manages multiple terminal panes
 //!
-//! Manages the lifecycle of up to 4 terminal panes,
+//! Manages the lifecycle of terminal panes,
 //! including tab switching, fullscreen toggle, and batch operations.
 
 use super::pane::{PaneConfig, TerminalPane};
@@ -12,35 +12,25 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Maximum number of simultaneous panes (FR-033).
-const DEFAULT_MAX_PANES: usize = 4;
-
 /// Manages multiple terminal panes with tab-based switching.
 pub struct PaneManager {
     panes: Vec<TerminalPane>,
     active_index: usize,
-    max_panes: usize,
     is_fullscreen: bool,
 }
 
 impl PaneManager {
-    /// Create a new PaneManager with max_panes=4.
+    /// Create a new PaneManager.
     pub fn new() -> Self {
         Self {
             panes: Vec::new(),
             active_index: 0,
-            max_panes: DEFAULT_MAX_PANES,
             is_fullscreen: false,
         }
     }
 
-    /// Add a pane. Returns `PaneLimitReached` if at capacity (FR-034).
+    /// Add a pane.
     pub fn add_pane(&mut self, pane: TerminalPane) -> Result<(), TerminalError> {
-        if self.panes.len() >= self.max_panes {
-            return Err(TerminalError::PaneLimitReached {
-                max: self.max_panes,
-            });
-        }
         self.panes.push(pane);
         self.active_index = self.panes.len() - 1;
         Ok(())
@@ -137,7 +127,7 @@ impl PaneManager {
     /// Launch an agent in a new terminal pane.
     ///
     /// Creates a `TerminalPane` from the given config and adds it to the manager.
-    /// Returns the generated pane ID, or `PaneLimitReached` if at capacity.
+    /// Returns the generated pane ID.
     pub fn launch_agent(
         &mut self,
         repo_root: &Path,
@@ -180,6 +170,11 @@ impl PaneManager {
     /// Immutable slice of all panes.
     pub fn panes(&self) -> &[TerminalPane] {
         &self.panes
+    }
+
+    /// Mutable slice of all panes.
+    pub fn panes_mut(&mut self) -> &mut [TerminalPane] {
+        &mut self.panes
     }
 
     /// Current active index.
@@ -335,25 +330,16 @@ mod tests {
         assert_eq!(mgr.active_index(), 0);
     }
 
-    // --- 3. Pane limit (4) ---
+    // --- 3. Add many panes ---
 
     #[test]
-    fn test_pane_limit() {
+    fn test_add_many_panes() {
         let mut mgr = PaneManager::new();
-        for i in 0..4 {
+        for i in 0..50 {
             let pane = create_test_pane(&format!("p{i}"));
             mgr.add_pane(pane).unwrap();
         }
-        assert_eq!(mgr.pane_count(), 4);
-
-        // 5th pane should fail
-        let pane5 = create_test_pane("p4");
-        let result = mgr.add_pane(pane5);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            TerminalError::PaneLimitReached { max } => assert_eq!(max, 4),
-            other => panic!("Expected PaneLimitReached, got: {other:?}"),
-        }
+        assert_eq!(mgr.pane_count(), 50);
     }
 
     // --- 4. next_tab cycling ---
@@ -578,14 +564,14 @@ mod tests {
         assert_eq!(mgr.pane_count(), 1);
     }
 
-    // --- 21. launch_agent 4 times, 5th returns PaneLimitReached ---
+    // --- 21. launch_agent can add many panes ---
 
     #[test]
-    fn test_launch_agent_limit_reached() {
+    fn test_launch_agent_adds_many_panes() {
         use crate::terminal::BuiltinLaunchConfig;
         let mut mgr = PaneManager::new();
         let repo_root = std::env::temp_dir();
-        for i in 0..4 {
+        for i in 0..10 {
             let config = BuiltinLaunchConfig {
                 command: "/usr/bin/true".to_string(),
                 args: vec![],
@@ -597,24 +583,7 @@ mod tests {
             };
             mgr.launch_agent(&repo_root, config, 24, 80).unwrap();
         }
-        assert_eq!(mgr.pane_count(), 4);
-
-        // 5th should fail
-        let config = BuiltinLaunchConfig {
-            command: "/usr/bin/true".to_string(),
-            args: vec![],
-            working_dir: std::env::temp_dir(),
-            branch_name: "feature/test-4".to_string(),
-            agent_name: "agent-4".to_string(),
-            agent_color: AgentColor::Red,
-            env_vars: HashMap::new(),
-        };
-        let result = mgr.launch_agent(&repo_root, config, 24, 80);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            TerminalError::PaneLimitReached { max } => assert_eq!(max, 4),
-            other => panic!("Expected PaneLimitReached, got: {other:?}"),
-        }
+        assert_eq!(mgr.pane_count(), 10);
     }
 
     // --- 22. pane_mut_by_id ---

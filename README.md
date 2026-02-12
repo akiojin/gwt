@@ -5,7 +5,27 @@
 gwt is a desktop GUI app for managing Git worktrees and launching coding agents
 (Claude Code, Codex, Gemini, OpenCode).
 
-## Downloads
+## Install
+
+### macOS (shell installer)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash
+```
+
+Or install a specific version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash -s -- --version 6.30.3
+```
+
+### Uninstall (macOS)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/uninstall.sh | bash
+```
+
+### Downloads
 
 GitHub Releases are the source of truth for distribution.
 

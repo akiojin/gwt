@@ -8,8 +8,10 @@
     SessionSummaryResult,
   } from "../types";
   import TerminalView from "../terminal/TerminalView.svelte";
+  import AgentModePanel from "./AgentModePanel.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
   import GitSection from "./GitSection.svelte";
+  import VersionHistoryPanel from "./VersionHistoryPanel.svelte";
 
   function isAgentTabWithPaneId(tab: Tab): tab is Tab & { paneId: string } {
     return tab.type === "agent" && typeof tab.paneId === "string" && tab.paneId.length > 0;
@@ -38,6 +40,7 @@
   let activeTab = $derived(tabs.find((t) => t.id === activeTabId));
   let agentTabs = $derived(tabs.filter(isAgentTabWithPaneId));
   let showTerminalLayer = $derived(activeTab?.type === "agent");
+  let isPinnedTab = (tabType?: Tab["type"]) => tabType === "summary";
 
   let quickStartEntries: ToolSessionEntry[] = $state([]);
   let quickStartLoading: boolean = $state(false);
@@ -285,7 +288,6 @@
         agentVersion: displayToolVersion(entry),
         skipPermissions: entry.skip_permissions ?? undefined,
         reasoningLevel: entry.reasoning_level?.trim() || undefined,
-        collaborationModes: entry.collaboration_modes ?? undefined,
         dockerService: entry.docker_service?.trim() || undefined,
         dockerForceHost: entry.docker_force_host ?? undefined,
         dockerRecreate: entry.docker_recreate ?? undefined,
@@ -316,20 +318,22 @@
           <span class="tab-dot"></span>
         {/if}
         <span class="tab-label">{tab.label}</span>
-        <button
-          class="tab-close"
-          onclick={(e) => {
-            e.stopPropagation();
-            onTabClose(tab.id);
-          }}
-        >
-          x
-        </button>
+        {#if !isPinnedTab(tab.type)}
+          <button
+            class="tab-close"
+            onclick={(e) => {
+              e.stopPropagation();
+              onTabClose(tab.id);
+            }}
+          >
+            x
+          </button>
+        {/if}
       </div>
     {/each}
   </div>
   <div class="tab-content">
-    <div class="panel-layer" class:hidden={showTerminalLayer}>
+      <div class="panel-layer" class:hidden={showTerminalLayer}>
       {#if activeTab?.type === "settings"}
         <SettingsPanel onClose={() => onTabClose(activeTabId)} />
       {:else if activeTab?.type === "summary"}
@@ -505,6 +509,10 @@
             </div>
           {/if}
         </div>
+      {:else if activeTab?.type === "versionHistory"}
+        <VersionHistoryPanel {projectPath} />
+      {:else if activeTab?.type === "agentMode"}
+        <AgentModePanel />
       {/if}
     </div>
 
@@ -729,6 +737,14 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
+  }
+
+  .session-summary-markdown {
+    margin: 0;
+    max-width: 100%;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
 
   .quick-header {
