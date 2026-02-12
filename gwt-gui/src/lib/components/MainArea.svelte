@@ -8,6 +8,7 @@
     SessionSummaryResult,
   } from "../types";
   import TerminalView from "../terminal/TerminalView.svelte";
+  import AgentModePanel from "./AgentModePanel.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
   import GitSection from "./GitSection.svelte";
   import VersionHistoryPanel from "./VersionHistoryPanel.svelte";
@@ -39,6 +40,7 @@
   let activeTab = $derived(tabs.find((t) => t.id === activeTabId));
   let agentTabs = $derived(tabs.filter(isAgentTabWithPaneId));
   let showTerminalLayer = $derived(activeTab?.type === "agent");
+  let isPinnedTab = (tabType?: Tab["type"]) => tabType === "summary";
 
   let quickStartEntries: ToolSessionEntry[] = $state([]);
   let quickStartLoading: boolean = $state(false);
@@ -286,7 +288,6 @@
         agentVersion: displayToolVersion(entry),
         skipPermissions: entry.skip_permissions ?? undefined,
         reasoningLevel: entry.reasoning_level?.trim() || undefined,
-        collaborationModes: entry.collaboration_modes ?? undefined,
         dockerService: entry.docker_service?.trim() || undefined,
         dockerForceHost: entry.docker_force_host ?? undefined,
         dockerRecreate: entry.docker_recreate ?? undefined,
@@ -317,15 +318,17 @@
           <span class="tab-dot"></span>
         {/if}
         <span class="tab-label">{tab.label}</span>
-        <button
-          class="tab-close"
-          onclick={(e) => {
-            e.stopPropagation();
-            onTabClose(tab.id);
-          }}
-        >
-          x
-        </button>
+        {#if !isPinnedTab(tab.type)}
+          <button
+            class="tab-close"
+            onclick={(e) => {
+              e.stopPropagation();
+              onTabClose(tab.id);
+            }}
+          >
+            x
+          </button>
+        {/if}
       </div>
     {/each}
   </div>
@@ -508,6 +511,8 @@
         </div>
       {:else if activeTab?.type === "versionHistory"}
         <VersionHistoryPanel {projectPath} />
+      {:else if activeTab?.type === "agentMode"}
+        <AgentModePanel />
       {/if}
     </div>
 
