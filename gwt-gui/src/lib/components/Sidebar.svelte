@@ -501,6 +501,7 @@
   <div class="search-bar">
     <input
       type="text"
+      autocapitalize="off"
       class="search-input"
       placeholder="Filter branches..."
       bind:value={searchQuery}

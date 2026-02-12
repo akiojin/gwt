@@ -182,4 +182,60 @@ describe("AgentLaunchForm", () => {
     // Suggestions should be cleared when showing the error.
     expect(rendered.queryByText("feature/a")).toBeNull();
   });
+
+  it("sets autocapitalize off for text and textarea inputs", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "opencode",
+            name: "OpenCode",
+            version: "0.0.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "list_worktree_branches") return [];
+      if (cmd === "list_remote_branches") return [];
+      return [];
+    });
+
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "feature/current-branch",
+      onLaunch,
+      onClose,
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    const modelInput = rendered.getByLabelText("Model") as HTMLInputElement;
+    expect(modelInput.getAttribute("autocapitalize")).toBe("off");
+
+    const branchInput = rendered.container.querySelector(
+      "#branch-input"
+    ) as HTMLInputElement | null;
+    expect(branchInput).toBeTruthy();
+    expect(branchInput?.getAttribute("autocapitalize")).toBe("off");
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Continue" }));
+    const sessionInput = rendered.getByLabelText("Session ID") as HTMLInputElement;
+    expect(sessionInput.getAttribute("autocapitalize")).toBe("off");
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Advanced" }));
+    const extraArgsInput = rendered.getByLabelText("Extra Args") as HTMLTextAreaElement;
+    expect(extraArgsInput.getAttribute("autocapitalize")).toBe("off");
+    const envOverridesInput = rendered.getByLabelText("Env Overrides") as HTMLTextAreaElement;
+    expect(envOverridesInput.getAttribute("autocapitalize")).toBe("off");
+
+    await fireEvent.click(rendered.getByRole("button", { name: "New Branch" }));
+    const newBranchInput = rendered.getByLabelText("New Branch Name") as HTMLInputElement;
+    expect(newBranchInput.getAttribute("autocapitalize")).toBe("off");
+  });
 });
