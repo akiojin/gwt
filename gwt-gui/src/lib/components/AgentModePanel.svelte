@@ -40,7 +40,7 @@
   }
 
   async function sendMessage() {
-    if (sending) return;
+    if (sending || state.is_waiting) return;
     const text = input.trim();
     if (!text) return;
     sending = true;
@@ -102,8 +102,10 @@
     {:else}
       {#each state.messages as msg}
         <div class={`agent-message ${msg.role} ${msg.kind ?? "message"}`}>
-          <div class="agent-role">{msg.kind ?? msg.role}</div>
-          <div class="agent-content">{msg.content}</div>
+          <div class="agent-bubble">
+            <div class="agent-meta">{msg.kind ?? msg.role}</div>
+            <div class="agent-content">{msg.content}</div>
+          </div>
         </div>
       {/each}
     {/if}
@@ -116,10 +118,14 @@
       onkeydown={onKeydown}
       oncompositionstart={onCompositionStart}
       oncompositionend={onCompositionEnd}
-      disabled={sending}
+      disabled={sending || state.is_waiting}
       rows="3"
     ></textarea>
-    <button class="send-btn" onclick={sendMessage} disabled={sending || !input.trim()}>
+    <button
+      class="send-btn"
+      onclick={sendMessage}
+      disabled={sending || state.is_waiting || !input.trim()}
+    >
       {#if sending || state.is_waiting}
         <span class="spinner" aria-hidden="true"></span>
       {/if}
@@ -184,50 +190,86 @@
   }
 
   .agent-message {
+    display: flex;
+    width: 100%;
+  }
+
+  .agent-message.user {
+    justify-content: flex-end;
+  }
+
+  .agent-message.assistant {
+    justify-content: flex-start;
+  }
+
+  .agent-message.system,
+  .agent-message.tool,
+  .agent-message.thought,
+  .agent-message.action,
+  .agent-message.observation,
+  .agent-message.error {
+    justify-content: center;
+  }
+
+  .agent-bubble {
+    max-width: 72%;
     padding: 8px 10px;
-    border-radius: 6px;
+    border-radius: 12px;
     background: var(--bg-surface);
     border: 1px solid var(--border-color);
   }
 
-  .agent-message.user {
+  .agent-message.user .agent-bubble {
+    background: rgba(64, 160, 255, 0.12);
     border-color: rgba(64, 160, 255, 0.4);
   }
 
-  .agent-message.assistant {
+  .agent-message.assistant .agent-bubble {
+    background: rgba(46, 196, 182, 0.12);
     border-color: rgba(46, 196, 182, 0.4);
   }
 
-  .agent-message.system {
+  .agent-message.system .agent-bubble {
+    background: rgba(240, 200, 90, 0.12);
     border-color: rgba(240, 200, 90, 0.4);
   }
 
-  .agent-message.tool {
+  .agent-message.tool .agent-bubble {
+    background: rgba(166, 227, 161, 0.12);
     border-color: rgba(166, 227, 161, 0.4);
   }
 
-  .agent-message.thought {
+  .agent-message.thought .agent-bubble {
     background: rgba(137, 180, 250, 0.12);
+    border-color: rgba(137, 180, 250, 0.4);
   }
 
-  .agent-message.action {
+  .agent-message.action .agent-bubble {
     background: rgba(250, 227, 175, 0.12);
+    border-color: rgba(250, 227, 175, 0.4);
   }
 
-  .agent-message.observation {
+  .agent-message.observation .agent-bubble {
     background: rgba(166, 227, 161, 0.12);
+    border-color: rgba(166, 227, 161, 0.4);
   }
 
-  .agent-message.error {
+  .agent-message.error .agent-bubble {
     background: rgba(243, 139, 168, 0.12);
+    border-color: rgba(243, 139, 168, 0.4);
   }
 
-  .agent-role {
+  .agent-meta {
     text-transform: uppercase;
     font-size: 10px;
     letter-spacing: 0.08em;
     color: var(--text-muted);
     margin-bottom: 4px;
+  }
+
+  .agent-message.user .agent-meta,
+  .agent-message.assistant .agent-meta {
+    display: none;
   }
 
   .agent-content {
