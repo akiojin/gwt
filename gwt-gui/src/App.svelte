@@ -91,6 +91,13 @@
 
   let terminalCount = $derived(tabs.filter((t) => t.type === "agent").length);
 
+  let agentTabBranches = $derived(
+    tabs
+      .filter((t) => t.type === "agent")
+      .map((t) => normalizeBranchName(t.label))
+      .filter((b) => b && b !== "Worktree" && b !== "Agent")
+  );
+
   let terminalDiagnosticsLoading: boolean = $state(false);
   let terminalDiagnostics: TerminalAnsiProbe | null = $state(null);
   let terminalDiagnosticsError: string | null = $state(null);
@@ -796,6 +803,7 @@
           widthPx={sidebarWidthPx}
           minWidthPx={MIN_SIDEBAR_WIDTH_PX}
           maxWidthPx={MAX_SIDEBAR_WIDTH_PX}
+          {agentTabBranches}
           onResize={handleSidebarResize}
           onBranchSelect={handleBranchSelect}
           onBranchActivate={handleBranchActivate}
@@ -831,6 +839,7 @@
   open={showCleanupModal}
   preselectedBranch={cleanupPreselectedBranch}
   projectPath={projectPath ?? ""}
+  {agentTabBranches}
   onClose={() => (showCleanupModal = false)}
 />
 
