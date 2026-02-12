@@ -1,3 +1,4 @@
+use crate::agent_master::AgentModeState;
 use gwt_core::ai::SessionSummaryCache;
 use gwt_core::config::os_env::EnvSource;
 use gwt_core::terminal::manager::PaneManager;
@@ -72,6 +73,8 @@ pub struct AppState {
     pub windows_allowed_to_close: Mutex<HashSet<String>>,
     /// Agent tab state per window label for native Window menu rendering.
     pub window_agent_tabs: Mutex<HashMap<String, WindowAgentTabsState>>,
+    /// Agent mode conversation state per window label.
+    pub window_agent_modes: Mutex<HashMap<String, AgentModeState>>,
     pub pane_manager: Mutex<PaneManager>,
     pub agent_versions_cache: Mutex<HashMap<String, AgentVersionsCache>>,
     pub session_summary_cache: Mutex<HashMap<String, SessionSummaryCache>>,
@@ -93,6 +96,7 @@ impl AppState {
             window_projects: Mutex::new(HashMap::new()),
             windows_allowed_to_close: Mutex::new(HashSet::new()),
             window_agent_tabs: Mutex::new(HashMap::new()),
+            window_agent_modes: Mutex::new(HashMap::new()),
             pane_manager: Mutex::new(PaneManager::new()),
             agent_versions_cache: Mutex::new(HashMap::new()),
             session_summary_cache: Mutex::new(HashMap::new()),
@@ -135,6 +139,9 @@ impl AppState {
             map.remove(window_label);
         }
         if let Ok(mut map) = self.window_agent_tabs.lock() {
+            map.remove(window_label);
+        }
+        if let Ok(mut map) = self.window_agent_modes.lock() {
             map.remove(window_label);
         }
     }

@@ -15,6 +15,7 @@ pub const MENU_ID_FILE_OPEN_PROJECT: &str = "file-open-project";
 pub const MENU_ID_FILE_CLOSE_PROJECT: &str = "file-close-project";
 
 pub const MENU_ID_TOOLS_LAUNCH_AGENT: &str = "tools-launch-agent";
+pub const MENU_ID_TOOLS_AGENT_MODE: &str = "tools-agent-mode";
 pub const MENU_ID_TOOLS_LIST_TERMINALS: &str = "tools-list-terminals";
 pub const MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS: &str = "tools-terminal-diagnostics";
 
@@ -156,6 +157,13 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         true,
         None::<&str>,
     )?;
+    let tools_agent_mode = MenuItem::with_id(
+        app,
+        MENU_ID_TOOLS_AGENT_MODE,
+        "Agent Mode",
+        true,
+        None::<&str>,
+    )?;
     let tools_list_terminals = MenuItem::with_id(
         app,
         MENU_ID_TOOLS_LIST_TERMINALS,
@@ -172,6 +180,7 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
     )?;
     let tools = SubmenuBuilder::new(app, "Tools")
         .item(&tools_launch_agent)
+        .item(&tools_agent_mode)
         .item(&tools_list_terminals)
         .item(&tools_terminal_diagnostics)
         .build()?;

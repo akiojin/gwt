@@ -36,6 +36,34 @@ export interface TerminalAnsiProbe {
   has_true_color: boolean;
 }
 
+export interface AgentModeMessage {
+  role: "user" | "assistant" | "system" | "tool";
+  kind?: "message" | "thought" | "action" | "observation" | "error";
+  content: string;
+  timestamp: number;
+}
+
+export interface AgentModeState {
+  messages: AgentModeMessage[];
+  ai_ready: boolean;
+  ai_error?: string | null;
+  last_error?: string | null;
+  is_waiting: boolean;
+  session_name?: string | null;
+  llm_call_count: number;
+  estimated_tokens: number;
+}
+
+export interface SendKeysRequest {
+  paneId: string;
+  text: string;
+}
+
+export interface CaptureScrollbackRequest {
+  paneId: string;
+  maxBytes?: number;
+}
+
 export interface AgentInfo {
   id: "claude" | "codex" | "gemini" | "opencode" | (string & {});
   name: string;
@@ -108,7 +136,7 @@ export interface ProfilesConfig {
 export interface Tab {
   id: string;
   label: string;
-  type: "summary" | "agent" | "settings" | "versionHistory";
+  type: "summary" | "agent" | "settings" | "versionHistory" | "agentMode";
   paneId?: string;
 }
 
