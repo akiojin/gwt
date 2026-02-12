@@ -8,29 +8,29 @@
 
 ## Phase 1: セットアップ
 
-- [ ] T001 [共通] 既存の Session Summary フローとキャッシュ/イベントを確認 `crates/gwt-tauri/src/commands/sessions.rs`
+- [x] T001 [共通] 既存の Session Summary フローとキャッシュ/イベントを確認 `crates/gwt-tauri/src/commands/sessions.rs`
 
 ## Phase 2: 基盤
 
-- [ ] T002 [共通] scrollback 要約用の pane 選定ヘルパと SummaryJob 型を追加 `crates/gwt-tauri/src/commands/sessions.rs`
-- [ ] T003 [共通] scrollback 取得と要約入力生成を追加 `crates/gwt-tauri/src/commands/sessions.rs`
+- [x] T002 [共通] scrollback 要約用の pane 選定ヘルパと SummaryJob 型を追加 `crates/gwt-tauri/src/commands/sessions.rs`
+- [x] T003 [共通] scrollback 取得と要約入力生成を追加 `crates/gwt-tauri/src/commands/sessions.rs`
 
 ## Phase 3: ストーリー 1
 
-- [ ] T004 [US1] session_id 未保存時に scrollback fallback を有効化 `crates/gwt-tauri/src/commands/sessions.rs`
-- [ ] T005 [US1] `session-summary-updated` で `pane:` 擬似ID を emit `crates/gwt-tauri/src/commands/sessions.rs`
-- [ ] T006 [P] [US1] `Live (pane summary)` 表示に切り替え `gwt-gui/src/lib/components/MainArea.svelte`
-- [ ] T007 [US1] scrollback fallback job 生成のユニットテスト追加 `crates/gwt-tauri/src/commands/sessions.rs`
+- [x] T004 [US1] session_id 未保存時に scrollback fallback を有効化 `crates/gwt-tauri/src/commands/sessions.rs`
+- [x] T005 [US1] `session-summary-updated` で `pane:` 擬似ID を emit `crates/gwt-tauri/src/commands/sessions.rs`
+- [x] T006 [P] [US1] `Live (pane summary)` 表示に切り替え `gwt-gui/src/lib/components/MainArea.svelte`
+- [x] T007 [US1] scrollback fallback job 生成のユニットテスト追加 `crates/gwt-tauri/src/commands/sessions.rs`
 
 ## Phase 4: ストーリー 2
 
-- [ ] T008 [US2] 最終出力が最新の pane を選定 `crates/gwt-tauri/src/commands/sessions.rs`
-- [ ] T009 [US2] pane 選定ロジックのユニットテスト追加 `crates/gwt-tauri/src/commands/sessions.rs`
+- [x] T008 [US2] 最終出力が最新の pane を選定 `crates/gwt-tauri/src/commands/sessions.rs`
+- [x] T009 [US2] pane 選定ロジックのユニットテスト追加 `crates/gwt-tauri/src/commands/sessions.rs`
 
 ## Phase 5: ストーリー 3
 
-- [ ] T010 [US3] session_id 確定時は既存フローを維持（fallback しない） `crates/gwt-tauri/src/commands/sessions.rs`
+- [x] T010 [US3] session_id 確定時は既存フローを維持（fallback しない） `crates/gwt-tauri/src/commands/sessions.rs`
 
 ## Phase 6: 仕上げ・横断
 
-- [ ] T011 [共通] `cargo test -p gwt-tauri sessions` を実行 `crates/gwt-tauri`
+- [x] T011 [共通] `cargo test -p gwt-tauri sessions` を実行 `crates/gwt-tauri`
