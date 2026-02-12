@@ -86,6 +86,8 @@ pub struct AppState {
     /// Launch job cancellation flags keyed by job id.
     pub launch_jobs: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub is_quitting: AtomicBool,
+    /// Prevent multiple exit confirmation dialogs from showing at once.
+    pub exit_confirm_inflight: AtomicBool,
     pub os_env: Arc<OnceCell<HashMap<String, String>>>,
     pub os_env_source: Arc<OnceCell<EnvSource>>,
 }
@@ -106,6 +108,7 @@ impl AppState {
             pane_launch_meta: Mutex::new(HashMap::new()),
             launch_jobs: Mutex::new(HashMap::new()),
             is_quitting: AtomicBool::new(false),
+            exit_confirm_inflight: AtomicBool::new(false),
             os_env: Arc::new(OnceCell::new()),
             os_env_source: Arc::new(OnceCell::new()),
         }
