@@ -16,11 +16,16 @@
   let fitAddon: FitAddon | undefined = $state(undefined);
   let resizeObserver: ResizeObserver | undefined = $state(undefined);
   let unlisten: (() => void) | undefined = $state(undefined);
-  let focusedForActive: boolean = $state(false);
+
+  function isTerminalFocused(rootEl: HTMLElement): boolean {
+    const el = document.activeElement;
+    return !!el && rootEl.contains(el);
+  }
 
   function requestTerminalFocus() {
     if (!terminal) return;
     requestAnimationFrame(() => {
+      if (!active) return;
       try {
         terminal?.focus();
       } catch {
@@ -33,16 +38,34 @@
     void active;
     void terminal;
 
-    if (!active) {
-      focusedForActive = false;
-      return;
-    }
+    if (!active) return;
 
-    if (focusedForActive) return;
+    const rootEl = containerEl;
+    if (!rootEl) return;
     if (!terminal) return;
 
-    focusedForActive = true;
-    requestTerminalFocus();
+    // Focus can fail if an overlay/modal is still on-screen when the tab becomes active.
+    // Retry a few times shortly after activation to make trackpad scrolling reliable.
+    const focusIfNeeded = () => {
+      if (!active) return;
+      if (!terminal) return;
+      if (isTerminalFocused(rootEl)) return;
+      requestTerminalFocus();
+    };
+
+    focusIfNeeded();
+
+    const timers = [
+      window.setTimeout(focusIfNeeded, 60),
+      window.setTimeout(focusIfNeeded, 200),
+      window.setTimeout(focusIfNeeded, 500),
+    ];
+
+    return () => {
+      for (const id of timers) {
+        window.clearTimeout(id);
+      }
+    };
   });
 
   function getInitialTerminalFontSize(): number {
@@ -89,6 +112,7 @@
   onMount(() => {
     const rootEl = containerEl;
     if (!rootEl) return;
+    let cancelled = false;
 
     const term = new Terminal({
       cursorBlink: true,
@@ -134,6 +158,14 @@
       fit.fit();
       notifyResize(term.rows, term.cols);
     });
+
+    const handleWheel = () => {
+      if (!active) return;
+      if (!terminal) return;
+      if (isTerminalFocused(rootEl)) return;
+      requestTerminalFocus();
+    };
+    rootEl.addEventListener("wheel", handleWheel, { passive: true });
 
     term.attachCustomKeyEventHandler((event: KeyboardEvent) => {
       if (event.type !== "keydown") return true;
@@ -186,8 +218,33 @@
       writeToTerminalBytes(Array.from(bytes));
     });
 
-    // Listen to terminal output from backend
-    setupEventListener();
+    // Best-effort: show recent scrollback so restored tabs aren't blank.
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const text = await invoke<string>("capture_scrollback_tail", {
+          paneId,
+          maxBytes: 64 * 1024,
+        });
+        if (text) {
+          term.write(text);
+        }
+      } catch {
+        // Ignore: not available outside Tauri runtime.
+      }
+
+      // Listen to terminal output from backend.
+      const unlistenFn = await setupEventListener(term);
+      if (cancelled) {
+        if (unlistenFn) {
+          unlistenFn();
+        }
+        return;
+      }
+      if (unlistenFn) {
+        unlisten = unlistenFn;
+      }
+    })();
 
     // ResizeObserver for auto-fitting
     const observer = new ResizeObserver(() => {
@@ -217,31 +274,34 @@
     window.addEventListener("gwt-terminal-font-size", handleFontSizeChange);
 
     return () => {
+      cancelled = true;
       if (unlisten) {
         unlisten();
       }
       rootEl.removeEventListener("paste", handlePaste);
+      rootEl.removeEventListener("wheel", handleWheel);
       window.removeEventListener("gwt-terminal-font-size", handleFontSizeChange);
       observer.disconnect();
       term.dispose();
     };
   });
 
-  async function setupEventListener() {
+  async function setupEventListener(term: Terminal): Promise<(() => void) | null> {
     try {
       const { listen } = await import("@tauri-apps/api/event");
       const unlistenFn = await listen<{ pane_id: string; data: number[] }>(
         "terminal-output",
         (event) => {
-          if (event.payload.pane_id === paneId && terminal) {
+          if (event.payload.pane_id === paneId) {
             const bytes = new Uint8Array(event.payload.data);
-            terminal.write(bytes);
+            term.write(bytes);
           }
         }
       );
-      unlisten = unlistenFn;
+      return unlistenFn;
     } catch (err) {
       console.error("Failed to setup terminal event listener:", err);
+      return null;
     }
   }
 

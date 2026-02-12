@@ -141,7 +141,8 @@
               status = "ok";
               finishedPaneId = event.payload.paneId;
               onSuccess(event.payload.paneId);
-              window.setTimeout(() => onClose(), 2000);
+              // Close immediately so the new terminal tab is usable without an extra click/scroll retry.
+              onClose();
               return;
             }
 
