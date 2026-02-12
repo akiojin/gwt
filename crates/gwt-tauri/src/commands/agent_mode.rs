@@ -10,7 +10,7 @@ pub fn get_agent_mode_state_cmd(window: Window, state: State<AppState>) -> Agent
 #[tauri::command]
 pub async fn send_agent_mode_message(window: Window, input: String) -> AgentModeState {
     let window_label = window.label().to_string();
-    let app_handle = window.app_handle();
+    let app_handle = window.app_handle().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let state = app_handle.state::<AppState>();
         send_agent_message(&state, &window_label, &input)
