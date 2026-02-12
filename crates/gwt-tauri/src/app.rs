@@ -24,6 +24,7 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
         crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES => Some("cleanup-worktrees"),
         crate::menu::MENU_ID_GIT_VERSION_HISTORY => Some("version-history"),
         crate::menu::MENU_ID_TOOLS_LAUNCH_AGENT => Some("launch-agent"),
+        crate::menu::MENU_ID_TOOLS_AGENT_MODE => Some("open-agent-mode"),
         crate::menu::MENU_ID_TOOLS_LIST_TERMINALS => Some("list-terminals"),
         crate::menu::MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS => Some("terminal-diagnostics"),
         crate::menu::MENU_ID_SETTINGS_PREFERENCES => Some("open-settings"),
@@ -488,6 +489,14 @@ mod tests {
         assert_eq!(
             menu_action_from_id(crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES),
             Some("cleanup-worktrees")
+        );
+    }
+
+    #[test]
+    fn menu_action_from_id_maps_agent_mode() {
+        assert_eq!(
+            menu_action_from_id(crate::menu::MENU_ID_TOOLS_AGENT_MODE),
+            Some("open-agent-mode")
         );
     }
 }
