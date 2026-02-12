@@ -213,6 +213,7 @@
           <input
             class="input"
             type="text"
+            autocapitalize="off"
             placeholder="https://github.com/owner/repo"
             bind:value={repoUrl}
             disabled={creating}
@@ -225,6 +226,7 @@
             <input
               class="input"
               type="text"
+              autocapitalize="off"
               placeholder="Choose a folder..."
               value={parentDir}
               readonly
