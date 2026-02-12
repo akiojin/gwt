@@ -16,7 +16,11 @@
   import LaunchProgressModal from "./lib/components/LaunchProgressModal.svelte";
   import MigrationModal from "./lib/components/MigrationModal.svelte";
   import CleanupModal from "./lib/components/CleanupModal.svelte";
-  import { formatWindowTitle, getAppVersionSafe } from "./lib/windowTitle";
+  import {
+    formatAboutVersion,
+    formatWindowTitle,
+    getAppVersionSafe,
+  } from "./lib/windowTitle";
 
   interface MenuActionPayload {
     action: string;
@@ -157,7 +161,6 @@
 
   $effect(() => {
     void projectPath;
-    void appVersion;
     void setWindowTitle();
   });
 
@@ -242,7 +245,6 @@
   async function setWindowTitle() {
     const title = formatWindowTitle({
       appName: "gwt",
-      version: appVersion,
       projectPath,
     });
 
@@ -787,6 +789,7 @@
       <h2>gwt</h2>
       <p>Git Worktree Manager</p>
       <p class="about-version">GUI Edition</p>
+      <p class="about-version">{formatAboutVersion(appVersion)}</p>
       <button class="about-close" onclick={() => (showAbout = false)}>
         Close
       </button>

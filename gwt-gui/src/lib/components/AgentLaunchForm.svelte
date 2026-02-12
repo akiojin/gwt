@@ -71,7 +71,6 @@
   let resumeSessionId: string = $state("");
   let skipPermissions: boolean = $state(false);
   let reasoningLevel: string = $state("");
-  let collaborationModes: boolean = $state(false);
 
   let showAdvanced: boolean = $state(false);
   let extraArgsText: string = $state("");
@@ -153,7 +152,6 @@
 
   let supportsModel = $derived(supportsModelFor(selectedAgent));
   let supportsReasoning = $derived(selectedAgent === "codex");
-  let supportsCollaboration = $derived(selectedAgent === "codex");
   let needsResumeSessionId = $derived(
     selectedAgent === "opencode" && sessionMode === "resume"
   );
@@ -599,10 +597,6 @@
         request.reasoningLevel = reasoningLevel.trim();
       }
 
-      if (supportsCollaboration) {
-        request.collaborationModes = collaborationModes;
-      }
-
       const extraArgs = parseExtraArgs(extraArgsText);
       if (extraArgs.length > 0) {
         request.extraArgs = extraArgs;
@@ -986,16 +980,6 @@
             <span>Skip Permissions</span>
           </label>
         </div>
-
-        {#if supportsCollaboration}
-          <div class="field">
-            <span class="field-label">Codex</span>
-            <label class="check-row">
-              <input type="checkbox" bind:checked={collaborationModes} />
-              <span>Enable collaboration_modes</span>
-            </label>
-          </div>
-        {/if}
 
         <div class="field">
           <button

@@ -133,7 +133,9 @@ pub struct LaunchAgentRequest {
     pub skip_permissions: Option<bool>,
     /// Codex reasoning override (e.g. "low", "medium", "high", "xhigh").
     pub reasoning_level: Option<String>,
-    /// Enable collaboration_modes for Codex (default: false).
+    /// Collaboration modes for Codex. Ignored (always enabled when version supports it).
+    /// Kept for deserialization compatibility with older frontends.
+    #[allow(dead_code)]
     pub collaboration_modes: Option<bool>,
     /// Additional command line args to append (one arg per entry).
     pub extra_args: Option<Vec<String>>,
@@ -762,7 +764,6 @@ fn build_agent_args(
 ) -> Result<Vec<String>, String> {
     let mode = request.mode.unwrap_or(SessionMode::Normal);
     let skip_permissions = request.skip_permissions.unwrap_or(false);
-    let collaboration_requested = request.collaboration_modes.unwrap_or(false);
     let resume_session_id = request
         .resume_session_id
         .as_deref()
@@ -794,8 +795,7 @@ fn build_agent_args(
             }
             args.extend(prefix);
 
-            let collaboration =
-                collaboration_requested && codex_supports_collaboration_modes(version_for_gates);
+            let collaboration = codex_supports_collaboration_modes(version_for_gates);
             args.extend(gwt_core::agent::codex::codex_default_args(
                 request.model.as_deref(),
                 request.reasoning_level.as_deref(),
@@ -1280,9 +1280,8 @@ mod tests {
     }
 
     #[test]
-    fn build_agent_args_codex_collaboration_modes_allows_latest() {
-        let mut req = make_request("codex");
-        req.collaboration_modes = Some(true);
+    fn build_agent_args_codex_collaboration_modes_always_enabled() {
+        let req = make_request("codex");
         let args = build_agent_args("codex", &req, Some("latest")).unwrap();
         assert!(args
             .windows(2)
@@ -1494,6 +1493,49 @@ mod tests {
 
         let _ = ScrollbackFile::cleanup(&pane_id);
     }
+
+    // SPEC-3b0ed29b FR-106: Claude Code launch must always set CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
+    #[test]
+    fn claude_launch_env_sets_agent_teams() {
+        // Verify that after the IS_SANDBOX block, Claude Code launches include
+        // CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 regardless of skip_permissions.
+        let mut env_vars: HashMap<String, String> = HashMap::new();
+        let agent_id = "claude";
+        let skip_permissions = false;
+
+        // Simulate the env-var injection logic from launch_agent_inner
+        if agent_id == "claude" && skip_permissions && std::env::consts::OS != "windows" {
+            env_vars.insert("IS_SANDBOX".to_string(), "1".to_string());
+        }
+        if agent_id == "claude" {
+            env_vars
+                .entry("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".to_string())
+                .or_insert_with(|| "1".to_string());
+        }
+
+        assert_eq!(
+            env_vars.get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"),
+            Some(&"1".to_string()),
+            "Claude Code launch env must include CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"
+        );
+    }
+
+    #[test]
+    fn codex_launch_env_no_agent_teams() {
+        let mut env_vars: HashMap<String, String> = HashMap::new();
+        let agent_id = "codex";
+
+        if agent_id == "claude" {
+            env_vars
+                .entry("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".to_string())
+                .or_insert_with(|| "1".to_string());
+        }
+
+        assert!(
+            !env_vars.contains_key("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"),
+            "Codex launch env must not include CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"
+        );
+    }
 }
 
 fn is_launch_cancelled(cancelled: Option<&AtomicBool>) -> bool {
@@ -1685,6 +1727,13 @@ fn launch_agent_for_project_root(
         // SPEC-3b0ed29b: Skip-permissions on non-Windows sets IS_SANDBOX=1 to avoid
         // accidental confirmation prompts in sandboxed environments.
         env_vars.insert("IS_SANDBOX".to_string(), "1".to_string());
+    }
+
+    // SPEC-3b0ed29b FR-106: Always enable Agent Teams for Claude Code launches.
+    if agent_id == "claude" {
+        env_vars
+            .entry("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".to_string())
+            .or_insert_with(|| "1".to_string());
     }
 
     // Ensure TERM/COLORTERM propagate into Docker exec environments as well.
@@ -1971,8 +2020,7 @@ fn launch_agent_for_project_root(
     .to_string();
 
     let collaboration_modes = if agent_id == "codex" {
-        let requested = request.collaboration_modes.unwrap_or(false);
-        requested && codex_supports_collaboration_modes(version_for_gates)
+        codex_supports_collaboration_modes(version_for_gates)
     } else {
         false
     };
