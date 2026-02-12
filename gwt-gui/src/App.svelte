@@ -7,6 +7,7 @@
     ProbePathResult,
     TerminalAnsiProbe,
     CapturedEnvInfo,
+    SettingsData,
   } from "./lib/types";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import MainArea from "./lib/components/MainArea.svelte";
@@ -84,6 +85,7 @@
 
   let tabs: Tab[] = $state([
     { id: "summary", label: "Session Summary", type: "summary" },
+    { id: "agentMode", label: "Agent Mode", type: "agentMode" },
   ]);
   let activeTabId: string = $state("summary");
 
@@ -161,6 +163,7 @@
   $effect(() => {
     void projectPath;
     void setWindowTitle();
+    void applyAppearanceSettings();
   });
 
   // Best-effort: subscribe once and refresh Sidebar when worktrees change.
@@ -239,6 +242,32 @@
       if (typeof msg === "string") return msg;
     }
     return String(err);
+  }
+
+  function clampFontSize(size: number): number {
+    return Math.max(8, Math.min(24, Math.round(size)));
+  }
+
+  function applyUiFontSize(size: number) {
+    document.documentElement.style.setProperty("--ui-font-base", `${size}px`);
+  }
+
+  function applyTerminalFontSize(size: number) {
+    (window as any).__gwtTerminalFontSize = size;
+    window.dispatchEvent(new CustomEvent("gwt-terminal-font-size", { detail: size }));
+  }
+
+  async function applyAppearanceSettings() {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const settings = await invoke<Pick<SettingsData, "ui_font_size" | "terminal_font_size">>(
+        "get_settings"
+      );
+      applyUiFontSize(clampFontSize(settings.ui_font_size ?? 13));
+      applyTerminalFontSize(clampFontSize(settings.terminal_font_size ?? 13));
+    } catch {
+      // Ignore: settings API not available outside Tauri runtime.
+    }
   }
 
   async function setWindowTitle() {
@@ -387,6 +416,9 @@
 
   async function handleTabClose(tabId: string) {
     const tab = tabs.find((t) => t.id === tabId);
+    if (tab?.type === "summary") {
+      return;
+    }
     if (tab?.paneId) {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -430,6 +462,25 @@
       type: "versionHistory",
     };
     tabs = [...tabs, tab];
+    activeTabId = tab.id;
+  }
+
+  function openAgentModeTab() {
+    const existing = tabs.find((t) => t.type === "agentMode" || t.id === "agentMode");
+    if (existing) {
+      activeTabId = existing.id;
+      return;
+    }
+
+    const tab: Tab = { id: "agentMode", label: "Agent Mode", type: "agentMode" };
+    const summaryIndex = tabs.findIndex((t) => t.type === "summary" || t.id === "summary");
+    if (summaryIndex >= 0) {
+      const nextTabs = [...tabs];
+      nextTabs.splice(summaryIndex + 1, 0, tab);
+      tabs = nextTabs;
+    } else {
+      tabs = [...tabs, tab];
+    }
     activeTabId = tab.id;
   }
 
@@ -552,7 +603,10 @@
           }
 
           projectPath = null;
-          tabs = [{ id: "summary", label: "Session Summary", type: "summary" }];
+          tabs = [
+            { id: "summary", label: "Session Summary", type: "summary" },
+            { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+          ];
           activeTabId = "summary";
           selectedBranch = null;
           currentBranch = "";
@@ -577,6 +631,9 @@
         break;
       case "version-history":
         openVersionHistoryTab();
+        break;
+      case "open-agent-mode":
+        openAgentModeTab();
         break;
       case "about":
         showAbout = true;

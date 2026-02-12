@@ -22,6 +22,15 @@
   let savedUiFontSize: number = $state(13);
   let savedTerminalFontSize: number = $state(13);
 
+  type AIModelInfo = {
+    id: string;
+  };
+  let aiModels: string[] = $state([]);
+  let aiModelsLoading: boolean = $state(false);
+  let aiModelsError: string | null = $state(null);
+  let aiModelsLoadedKey: string = $state("");
+  let aiModelsRequestSeq: number = 0;
+
   function getCurrentProfile(cfg: ProfilesConfig | null, key: string): Profile | null {
     if (!cfg) return null;
     if (!key) return null;
@@ -30,6 +39,18 @@
   }
 
   let currentProfile = $derived(getCurrentProfile(profiles, selectedProfileKey));
+  let aiModelOptions = $derived.by(() => {
+    const current = currentProfile?.ai?.model?.trim() ?? "";
+    const options = [...aiModels];
+    if (current && !options.includes(current)) {
+      options.unshift(current);
+    }
+    return options;
+  });
+  let currentModelMissing = $derived.by(() => {
+    const current = currentProfile?.ai?.model?.trim() ?? "";
+    return current.length > 0 && !aiModels.includes(current);
+  });
 
   $effect(() => {
     loadAll();
@@ -45,6 +66,38 @@
     if (terminalSize >= 8 && terminalSize <= 24) {
       applyTerminalFontSize(terminalSize);
     }
+  });
+
+  $effect(() => {
+    const profileKey = selectedProfileKey.trim();
+    const ai = currentProfile?.ai;
+    const endpoint = ai?.endpoint?.trim() ?? "";
+    const apiKey = ai?.api_key?.trim() ?? "";
+
+    if (!profileKey || !ai) {
+      aiModels = [];
+      aiModelsLoading = false;
+      aiModelsError = null;
+      aiModelsLoadedKey = "";
+      return;
+    }
+    if (!endpoint) {
+      aiModels = [];
+      aiModelsLoading = false;
+      aiModelsError = null;
+      aiModelsLoadedKey = "";
+      return;
+    }
+
+    const requestKey = `${profileKey}::${endpoint}::${apiKey}`;
+    if (requestKey === aiModelsLoadedKey) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      void fetchAiModels(endpoint, apiKey, requestKey, false);
+    }, 250);
+    return () => window.clearTimeout(timer);
   });
 
   onMount(() => {
@@ -67,6 +120,58 @@
       if (typeof msg === "string") return msg;
     }
     return String(err);
+  }
+
+  async function fetchAiModels(
+    endpoint: string,
+    apiKey: string,
+    requestKey: string,
+    force: boolean
+  ) {
+    if (!force && requestKey === aiModelsLoadedKey) return;
+
+    const requestSeq = ++aiModelsRequestSeq;
+    aiModelsLoading = true;
+    aiModelsError = null;
+
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const models = await invoke<AIModelInfo[]>("list_ai_models", {
+        endpoint,
+        apiKey,
+      });
+      if (requestSeq !== aiModelsRequestSeq) return;
+
+      const nextModels = Array.from(
+        new Set((models ?? []).map((m) => (m.id ?? "").trim()).filter((id) => id.length > 0))
+      ).sort((a, b) => a.localeCompare(b));
+
+      aiModels = nextModels;
+      aiModelsLoadedKey = requestKey;
+      aiModelsError = null;
+    } catch (err) {
+      if (requestSeq !== aiModelsRequestSeq) return;
+      aiModels = [];
+      aiModelsLoadedKey = "";
+      aiModelsError = `Failed to load models: ${toErrorMessage(err)}`;
+    } finally {
+      if (requestSeq === aiModelsRequestSeq) {
+        aiModelsLoading = false;
+      }
+    }
+  }
+
+  function refreshAiModels() {
+    const profileKey = selectedProfileKey.trim();
+    const ai = currentProfile?.ai;
+    const endpoint = ai?.endpoint?.trim() ?? "";
+    const apiKey = ai?.api_key?.trim() ?? "";
+    if (!profileKey || !ai || !endpoint) {
+      aiModelsError = "Endpoint is required.";
+      return;
+    }
+    const requestKey = `${profileKey}::${endpoint}::${apiKey}`;
+    void fetchAiModels(endpoint, apiKey, requestKey, true);
   }
 
   async function loadAll() {
@@ -413,6 +518,7 @@
             <div class="branch-input-row">
               <input
                 type="text"
+                autocapitalize="off"
                 bind:value={newBranch}
                 placeholder="Add branch..."
                 onkeydown={handleBranchKeydown}
@@ -476,6 +582,7 @@
               <input
                 id="new-profile"
                 type="text"
+                autocapitalize="off"
                 bind:value={newProfileName}
                 placeholder="e.g. development"
               />
@@ -497,6 +604,7 @@
                     <input
                       class="env-value"
                       type="text"
+                      autocapitalize="off"
                       value={currentProfile.env[key]}
                       oninput={(e) => upsertEnvVar(key, (e.target as HTMLInputElement).value)}
                     />
@@ -509,12 +617,14 @@
                 <input
                   class="env-key-input"
                   type="text"
+                  autocapitalize="off"
                   bind:value={newEnvKey}
                   placeholder="KEY"
                 />
                 <input
                   class="env-value-input"
                   type="text"
+                  autocapitalize="off"
                   bind:value={newEnvValue}
                   placeholder="value"
                 />
@@ -547,6 +657,7 @@
                     <span class="ai-label">Endpoint</span>
                     <input
                       type="text"
+                      autocapitalize="off"
                       value={currentProfile.ai.endpoint}
                       oninput={(e) => updateAiField("endpoint", (e.target as HTMLInputElement).value)}
                     />
@@ -555,18 +666,42 @@
                     <span class="ai-label">API Key</span>
                     <input
                       type="text"
+                      autocapitalize="off"
                       value={currentProfile.ai.api_key}
                       oninput={(e) => updateAiField("api_key", (e.target as HTMLInputElement).value)}
                     />
                   </div>
                   <div class="ai-field">
                     <span class="ai-label">Model</span>
-                    <input
-                      type="text"
-                      value={currentProfile.ai.model}
-                      placeholder="e.g. gpt-5.2-codex"
-                      oninput={(e) => updateAiField("model", (e.target as HTMLInputElement).value)}
-                    />
+                    <div class="row ai-model-row">
+                      <select
+                        class="select ai-model-select"
+                        value={currentProfile.ai.model}
+                        disabled={aiModelsLoading || !currentProfile.ai.endpoint.trim()}
+                        onchange={(e) => updateAiField("model", (e.target as HTMLSelectElement).value)}
+                      >
+                        <option value="">Select model...</option>
+                        {#each aiModelOptions as modelId (modelId)}
+                          <option value={modelId}>{modelId}</option>
+                        {/each}
+                      </select>
+                      <button
+                        class="btn btn-ghost"
+                        onclick={refreshAiModels}
+                        disabled={aiModelsLoading || !currentProfile.ai.endpoint.trim()}
+                      >
+                        {aiModelsLoading ? "Loading..." : "Refresh"}
+                      </button>
+                    </div>
+                    {#if aiModelsError}
+                      <span class="field-hint">{aiModelsError}</span>
+                    {:else if currentModelMissing}
+                      <span class="field-hint">
+                        Current model is not listed in /v1/models.
+                      </span>
+                    {:else if !aiModelsLoading && aiModels.length === 0 && currentProfile.ai.endpoint.trim()}
+                      <span class="field-hint">No models returned from /v1/models.</span>
+                    {/if}
                   </div>
                   <div class="ai-field">
                     <span class="ai-label">Session Summary</span>
@@ -851,7 +986,8 @@
     letter-spacing: 0.5px;
   }
 
-  .ai-field input[type="text"] {
+  .ai-field input[type="text"],
+  .ai-field select {
     padding: 8px 12px;
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
@@ -861,6 +997,16 @@
     font-family: monospace;
     outline: none;
     max-width: none;
+  }
+
+  .ai-model-row {
+    align-items: center;
+  }
+
+  .ai-model-select {
+    flex: 1;
+    max-width: none;
+    min-width: 220px;
   }
 
   .ai-checkbox {
