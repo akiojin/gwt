@@ -637,5 +637,4 @@ mod tests {
             Some("cleanup-worktrees")
         );
     }
-
 }

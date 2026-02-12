@@ -19,6 +19,7 @@
     onModeChange,
     selectedBranch = null,
     currentBranch = "",
+    agentTabBranches = [],
   }: {
     projectPath: string;
     onBranchSelect: (branch: BranchInfo) => void;
@@ -33,6 +34,7 @@
     onModeChange?: (next: SidebarMode) => void;
     selectedBranch?: BranchInfo | null;
     currentBranch?: string;
+    agentTabBranches?: string[];
   } = $props();
 
   let activeFilter: FilterType = $state("Local");
@@ -47,6 +49,25 @@
 
   // Worktree safety info
   let worktreeMap: Map<string, WorktreeInfo> = $state(new Map());
+
+  function normalizeTabBranch(name: string): string {
+    const trimmed = name.trim();
+    return trimmed.startsWith("origin/") ? trimmed.slice("origin/".length) : trimmed;
+  }
+
+  let agentTabBranchSet = $derived(
+    new Set(
+      agentTabBranches
+        .map((b) => normalizeTabBranch(b))
+        .filter((b) => b && b !== "Worktree" && b !== "Agent")
+    )
+  );
+
+  function hasActiveAgentTab(branch: BranchInfo): boolean {
+    // Only mark actual worktrees as active to avoid noise in Remote-only lists.
+    if (!worktreeMap.get(branch.name)) return false;
+    return agentTabBranchSet.has(branch.name);
+  }
 
   // Branches currently being deleted
   let deletingBranches: Set<string> = $state(new Set());
@@ -571,7 +592,7 @@
           <button
             class="branch-item"
             class:active={branch.is_current}
-            class:agent-active={branch.is_agent_running}
+            class:agent-active={hasActiveAgentTab(branch)}
             class:deleting={deletingBranches.has(branch.name)}
             onclick={() => {
               if (!deletingBranches.has(branch.name)) onBranchSelect(branch);
@@ -592,10 +613,10 @@
               ></span>
             {/if}
             <span class="branch-name">{branch.name}</span>
-            {#if branch.is_agent_running}
+            {#if hasActiveAgentTab(branch)}
               <span
-                class="agent-running-badge"
-                title="Agent is running on this branch"
+                class="agent-active-badge"
+                title="Agent tab is open for this branch"
               >
                 ACTIVE
               </span>
@@ -1002,7 +1023,7 @@
     flex: 1;
   }
 
-  .agent-running-badge {
+  .agent-active-badge {
     font-size: var(--ui-font-xs);
     font-family: monospace;
     color: var(--cyan);
