@@ -164,4 +164,43 @@ describe("Sidebar", () => {
     });
     expect((launchMenuButton as HTMLButtonElement).disabled).toBe(true);
   });
+
+  it("shows ACTIVE badge for branches with open agent tabs", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") {
+        return [branchFixture];
+      }
+      if (command === "list_worktrees") {
+        return [
+          {
+            path: "/tmp/worktrees/feature-sidebar-size",
+            branch: branchFixture.name,
+            commit: "1234567",
+            status: "active",
+            is_main: false,
+            has_changes: false,
+            has_unpushed: false,
+            is_current: false,
+            is_protected: false,
+            is_agent_running: false,
+            ahead: 0,
+            behind: 0,
+            is_gone: false,
+            last_tool_usage: null,
+            safety_level: "safe",
+          },
+        ];
+      }
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      agentTabBranches: [branchFixture.name],
+    });
+
+    await rendered.findByText(branchFixture.name);
+    expect(rendered.getByText("ACTIVE")).toBeTruthy();
+  });
 });

@@ -108,6 +108,22 @@
     return v && v.length > 0 ? v : "latest";
   }
 
+  function displayModelLabel(entry: ToolSessionEntry): string | null {
+    const model = entry.model?.trim();
+    if (model) return model;
+    const tool = entry.tool_id?.toLowerCase() ?? "";
+    if (
+      tool.includes("codex") ||
+      tool.includes("claude") ||
+      tool.includes("gemini") ||
+      tool.includes("opencode") ||
+      tool.includes("open-code")
+    ) {
+      return "default";
+    }
+    return null;
+  }
+
   async function loadQuickStart() {
     quickLaunchError = null;
     quickStartError = null;
@@ -409,8 +425,8 @@
                             </span>
                           </div>
                           <div class="quick-meta">
-                            {#if entry.model}
-                              <span class="quick-pill">model: {entry.model}</span>
+                            {#if displayModelLabel(entry) !== null}
+                              <span class="quick-pill">model: {displayModelLabel(entry)}</span>
                             {/if}
                             {#if toolClass(entry) === "codex" && entry.reasoning_level}
                               <span class="quick-pill">
@@ -451,9 +467,15 @@
                   <span class="quick-title">AI Summary</span>
                   {#if sessionSummaryLoading}
                     <span class="quick-subtitle">Loading...</span>
-                  {:else if sessionSummaryStatus === "ok" && sessionSummaryToolId && sessionSummarySessionId}
+                  {:else if sessionSummaryStatus === "ok" && sessionSummaryToolId}
                     <span class="quick-subtitle">
-                      {sessionSummaryToolId} #{sessionSummarySessionId}
+                      {#if sessionSummarySessionId?.startsWith("pane:")}
+                        {sessionSummaryToolId} - Live (pane summary)
+                      {:else if sessionSummarySessionId}
+                        {sessionSummaryToolId} #{sessionSummarySessionId}
+                      {:else}
+                        {sessionSummaryToolId}
+                      {/if}
                       {#if sessionSummaryGenerating}
                         {sessionSummaryMarkdown ? " - Updating..." : " - Generating..."}
                       {/if}

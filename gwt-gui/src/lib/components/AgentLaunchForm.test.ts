@@ -247,4 +247,73 @@ describe("AgentLaunchForm", () => {
     const newBranchInput = rendered.getByLabelText("New Branch Name") as HTMLInputElement;
     expectInputNormalizationDisabled(newBranchInput);
   });
+
+  it("forces host launch even when docker context is not detected (e.g., remote-only branch without worktree)", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.0.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "list_agent_versions") {
+        return {
+          agentId: "codex",
+          package: "@openai/codex",
+          tags: ["latest"],
+          versions: ["0.0.0"],
+          source: "cache",
+        };
+      }
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "none",
+          compose_services: [],
+          docker_available: false,
+          compose_available: false,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    // Some codepaths can end up calling the real Tauri invoke implementation in tests.
+    // Provide a minimal stub so it routes to our mock instead of crashing on
+    // `window.__TAURI_INTERNALS__` being undefined.
+    (window as any).__TAURI_INTERNALS__ = {
+      ...(window as any).__TAURI_INTERNALS__,
+      invoke: (cmd: string, args?: any) => invokeMock(cmd, args),
+    };
+
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "origin/remote-only",
+      onLaunch,
+      onClose,
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    const launchBtn = rendered.getByRole("button", { name: "Launch" });
+    await fireEvent.click(launchBtn);
+
+    await waitFor(() => {
+      expect(onLaunch).toHaveBeenCalledTimes(1);
+    });
+
+    const request = onLaunch.mock.calls[0][0] as any;
+    expect(request.dockerForceHost).toBe(true);
+  });
 });
