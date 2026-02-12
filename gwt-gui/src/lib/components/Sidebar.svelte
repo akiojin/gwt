@@ -1,7 +1,9 @@
 <script lang="ts">
   import type { BranchInfo, WorktreeInfo, CleanupProgress } from "../types";
+  import AgentSidebar from "./AgentSidebar.svelte";
 
   type FilterType = "Local" | "Remote" | "All";
+  type SidebarMode = "branch" | "agent";
 
   let {
     projectPath,
@@ -13,6 +15,10 @@
     minWidthPx = 220,
     maxWidthPx = 520,
     refreshKey = 0,
+    mode = "branch",
+    onModeChange,
+    selectedBranch = null,
+    currentBranch = "",
     agentTabBranches = [],
   }: {
     projectPath: string;
@@ -24,6 +30,10 @@
     minWidthPx?: number;
     maxWidthPx?: number;
     refreshKey?: number;
+    mode?: SidebarMode;
+    onModeChange?: (next: SidebarMode) => void;
+    selectedBranch?: BranchInfo | null;
+    currentBranch?: string;
     agentTabBranches?: string[];
   } = $props();
 
@@ -100,11 +110,27 @@
 
   $effect(() => {
     // Re-fetch when filter/projectPath changes and when explicitly requested.
+    if (mode !== "branch") {
+      lastFetchKey = "";
+      return;
+    }
     const key = `${projectPath}::${activeFilter}::${refreshKey}::${localRefreshKey}`;
     if (key === lastFetchKey) return;
     lastFetchKey = key;
     fetchBranches();
   });
+
+  $effect(() => {
+    if (mode === "branch") return;
+    contextMenu = null;
+    confirmDelete = null;
+    confirmDeleteError = null;
+  });
+
+  function handleModeChange(next: SidebarMode) {
+    if (mode === next) return;
+    onModeChange?.(next);
+  }
 
   // Listen to cleanup-progress events for deletion state tracking
   $effect(() => {
@@ -504,101 +530,131 @@
   class="sidebar"
   style="width: {clampedWidthPx}px; min-width: {clampedWidthPx}px;"
 >
-  <div class="filter-bar">
-    {#each filters as filter}
-      <button
-        class="filter-btn"
-        class:active={activeFilter === filter}
-        onclick={() => (activeFilter = filter)}
-      >
-        {filter}
-      </button>
-    {/each}
+  <div class="mode-toggle">
     <button
-      class="cleanup-btn"
-      onclick={() => onCleanupRequest?.()}
-      title="Cleanup Worktrees..."
+      class="mode-btn"
+      class:active={mode === "branch"}
+      aria-pressed={mode === "branch"}
+      title="Branch Mode"
+      onclick={() => handleModeChange("branch")}
     >
-      Cleanup
+      <span class="mode-icon">B</span>
+      <span class="mode-label">Branch</span>
+    </button>
+    <button
+      class="mode-btn"
+      class:active={mode === "agent"}
+      aria-pressed={mode === "agent"}
+      title="Agent Mode"
+      onclick={() => handleModeChange("agent")}
+    >
+      <span class="mode-icon">A</span>
+      <span class="mode-label">Agent</span>
     </button>
   </div>
-  <div class="search-bar">
-    <input
-      type="text"
-      autocapitalize="off"
-      autocorrect="off"
-      autocomplete="off"
-      spellcheck="false"
-      class="search-input"
-      placeholder="Filter branches..."
-      bind:value={searchQuery}
-    />
-  </div>
-  <div class="branch-list">
-    {#if loading}
-      <div class="loading-indicator">Loading...</div>
-    {:else if errorMessage}
-      <div class="error-indicator">{errorMessage}</div>
-    {:else if filteredBranches.length === 0}
-      <div class="empty-indicator">No branches found.</div>
-    {:else}
-      {#each filteredBranches as branch}
+  {#if mode === "branch"}
+    <div class="filter-bar">
+      {#each filters as filter}
         <button
-          class="branch-item"
-          class:active={branch.is_current}
-          class:agent-active={hasActiveAgentTab(branch)}
-          class:deleting={deletingBranches.has(branch.name)}
-          onclick={() => {
-            if (!deletingBranches.has(branch.name)) onBranchSelect(branch);
-          }}
-          ondblclick={() => {
-            if (!deletingBranches.has(branch.name))
-              onBranchActivate?.(branch);
-          }}
-          oncontextmenu={(e) => handleContextMenu(e, branch)}
+          class="filter-btn"
+          class:active={activeFilter === filter}
+          onclick={() => (activeFilter = filter)}
         >
-          <span class="branch-icon">{branch.is_current ? "*" : " "}</span>
-          {#if deletingBranches.has(branch.name)}
-            <span class="safety-spinner"></span>
-          {:else if getSafetyLevel(branch)}
-            <span
-              class="safety-dot {getSafetyLevel(branch)}"
-              title={getSafetyTitle(branch)}
-            ></span>
-          {/if}
-          {#if hasActiveAgentTab(branch)}
-            <span
-              class="agent-tab-icon"
-              title="Agent tab is open for this branch"
-              role="img"
-              aria-label="Agent tab is open for this branch"
-            >
-              <span class="agent-tab-frame f0" aria-hidden="true">|</span>
-              <span class="agent-tab-frame f1" aria-hidden="true">/</span>
-              <span class="agent-tab-frame f2" aria-hidden="true">-</span>
-              <span class="agent-tab-frame f3" aria-hidden="true">\</span>
-              <span class="agent-tab-fallback" aria-hidden="true">@</span>
-            </span>
-          {/if}
-          <span class="branch-name">{branch.name}</span>
-          {#if branch.last_tool_usage}
-            <span
-              class="tool-usage {toolUsageClass(branch.last_tool_usage)}"
-            >
-              {branch.last_tool_usage}
-            </span>
-          {/if}
-          {#if divergenceIndicator(branch)}
-            <span
-              class="divergence {divergenceClass(branch.divergence_status)}"
-            >
-              {divergenceIndicator(branch)}
-            </span>
-          {/if}
+          {filter}
         </button>
       {/each}
-    {/if}
-  </div>
+      <button
+        class="cleanup-btn"
+        onclick={() => onCleanupRequest?.()}
+        title="Cleanup Worktrees..."
+      >
+        Cleanup
+      </button>
+    </div>
+    <div class="search-bar">
+      <input
+        type="text"
+        autocapitalize="off"
+        autocorrect="off"
+        autocomplete="off"
+        spellcheck="false"
+        class="search-input"
+        placeholder="Filter branches..."
+        bind:value={searchQuery}
+      />
+    </div>
+    <div class="branch-list">
+      {#if loading}
+        <div class="loading-indicator">Loading...</div>
+      {:else if errorMessage}
+        <div class="error-indicator">{errorMessage}</div>
+      {:else if filteredBranches.length === 0}
+        <div class="empty-indicator">No branches found.</div>
+      {:else}
+        {#each filteredBranches as branch}
+          <button
+            class="branch-item"
+            class:active={branch.is_current}
+            class:agent-active={hasActiveAgentTab(branch)}
+            class:deleting={deletingBranches.has(branch.name)}
+            onclick={() => {
+              if (!deletingBranches.has(branch.name)) onBranchSelect(branch);
+            }}
+            ondblclick={() => {
+              if (!deletingBranches.has(branch.name))
+                onBranchActivate?.(branch);
+            }}
+            oncontextmenu={(e) => handleContextMenu(e, branch)}
+          >
+            <span class="branch-icon">{branch.is_current ? "*" : " "}</span>
+            {#if deletingBranches.has(branch.name)}
+              <span class="safety-spinner"></span>
+            {:else if getSafetyLevel(branch)}
+              <span
+                class="safety-dot {getSafetyLevel(branch)}"
+                title={getSafetyTitle(branch)}
+              ></span>
+            {/if}
+            {#if hasActiveAgentTab(branch)}
+              <span
+                class="agent-tab-icon"
+                title="Agent tab is open for this branch"
+                role="img"
+                aria-label="Agent tab is open for this branch"
+              >
+                <span class="agent-tab-frame f0" aria-hidden="true">|</span>
+                <span class="agent-tab-frame f1" aria-hidden="true">/</span>
+                <span class="agent-tab-frame f2" aria-hidden="true">-</span>
+                <span class="agent-tab-frame f3" aria-hidden="true">\</span>
+                <span class="agent-tab-fallback" aria-hidden="true">@</span>
+              </span>
+            {/if}
+            <span class="branch-name">{branch.name}</span>
+            {#if branch.last_tool_usage}
+              <span
+                class="tool-usage {toolUsageClass(branch.last_tool_usage)}"
+              >
+                {branch.last_tool_usage}
+              </span>
+            {/if}
+            {#if divergenceIndicator(branch)}
+              <span
+                class="divergence {divergenceClass(branch.divergence_status)}"
+              >
+                {divergenceIndicator(branch)}
+              </span>
+            {/if}
+          </button>
+        {/each}
+      {/if}
+    </div>
+  {:else}
+    <AgentSidebar
+      {projectPath}
+      selectedBranch={selectedBranch}
+      currentBranch={currentBranch}
+    />
+  {/if}
   <button
     type="button"
     class="resize-handle"
@@ -609,90 +665,96 @@
 </aside>
 
 <!-- Context menu (fixed position, outside sidebar overflow) -->
-{#if contextMenu}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    class="context-menu"
-    style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
-    onclick={(e) => e.stopPropagation()}
-  >
-    <button
-      class="context-menu-item"
-      class:disabled={!canLaunchBranch(contextMenu.branch)}
-      disabled={!canLaunchBranch(contextMenu.branch)}
-      onclick={handleLaunchAgent}
+{#if mode === "branch"}
+  {#if contextMenu}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="context-menu"
+      style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
+      onclick={(e) => e.stopPropagation()}
     >
-      Launch Agent...
-    </button>
-    <button
-      class="context-menu-item"
-      class:disabled={isBranchProtected(contextMenu.branch)}
-      onclick={() => {
-        if (contextMenu && !isBranchProtected(contextMenu.branch))
-          handleCleanupThisBranch();
-      }}
-    >
-      Cleanup this branch
-    </button>
-    <button class="context-menu-item" onclick={handleCleanupWorktrees}>
-      Cleanup Worktrees...
-    </button>
-  </div>
+      <button
+        class="context-menu-item"
+        class:disabled={!canLaunchBranch(contextMenu.branch)}
+        disabled={!canLaunchBranch(contextMenu.branch)}
+        onclick={handleLaunchAgent}
+      >
+        Launch Agent...
+      </button>
+      <button
+        class="context-menu-item"
+        class:disabled={isBranchProtected(contextMenu.branch)}
+        onclick={() => {
+          if (contextMenu && !isBranchProtected(contextMenu.branch))
+            handleCleanupThisBranch();
+        }}
+      >
+        Cleanup this branch
+      </button>
+      <button class="context-menu-item" onclick={handleCleanupWorktrees}>
+        Cleanup Worktrees...
+      </button>
+    </div>
+  {/if}
 {/if}
 
 <!-- Single delete confirmation dialog -->
-{#if confirmDelete}
-  {@const wt = worktreeMap.get(confirmDelete.branch)}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="overlay" onclick={() => (confirmDelete = null)}>
-    <div class="confirm-dialog" onclick={(e) => e.stopPropagation()}>
-      <h3>Delete Worktree</h3>
-      <p class="confirm-text">
-        {#if confirmDelete.safetyLevel === "danger"}
-          Branch <strong>{confirmDelete.branch}</strong> has uncommitted changes
-          and unpushed commits. This cannot be undone.
-        {:else if confirmDelete.safetyLevel === "warning" && wt?.has_changes}
-          Branch <strong>{confirmDelete.branch}</strong> has uncommitted changes.
-        {:else if confirmDelete.safetyLevel === "warning" && wt?.has_unpushed}
-          Branch <strong>{confirmDelete.branch}</strong> has unpushed commits.
-        {:else}
-          Delete worktree and local branch <strong
-            >{confirmDelete.branch}</strong
-          >?
-        {/if}
-      </p>
-      <div class="confirm-actions">
-        <button class="confirm-cancel" onclick={() => (confirmDelete = null)}>
-          Cancel
-        </button>
-        <button class="confirm-delete" onclick={handleConfirmDelete}>
-          Delete
-        </button>
+{#if mode === "branch"}
+  {#if confirmDelete}
+    {@const wt = worktreeMap.get(confirmDelete.branch)}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="overlay" onclick={() => (confirmDelete = null)}>
+      <div class="confirm-dialog" onclick={(e) => e.stopPropagation()}>
+        <h3>Delete Worktree</h3>
+        <p class="confirm-text">
+          {#if confirmDelete.safetyLevel === "danger"}
+            Branch <strong>{confirmDelete.branch}</strong> has uncommitted changes
+            and unpushed commits. This cannot be undone.
+          {:else if confirmDelete.safetyLevel === "warning" && wt?.has_changes}
+            Branch <strong>{confirmDelete.branch}</strong> has uncommitted changes.
+          {:else if confirmDelete.safetyLevel === "warning" && wt?.has_unpushed}
+            Branch <strong>{confirmDelete.branch}</strong> has unpushed commits.
+          {:else}
+            Delete worktree and local branch <strong
+              >{confirmDelete.branch}</strong
+            >?
+          {/if}
+        </p>
+        <div class="confirm-actions">
+          <button class="confirm-cancel" onclick={() => (confirmDelete = null)}>
+            Cancel
+          </button>
+          <button class="confirm-delete" onclick={handleConfirmDelete}>
+            Delete
+          </button>
+        </div>
       </div>
     </div>
-  </div>
+  {/if}
 {/if}
 
 <!-- Delete error dialog -->
-{#if confirmDeleteError}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="overlay" onclick={() => (confirmDeleteError = null)}>
-    <div class="confirm-dialog" onclick={(e) => e.stopPropagation()}>
-      <h3>Delete Failed</h3>
-      <p class="confirm-error">{confirmDeleteError}</p>
-      <div class="confirm-actions">
-        <button
-          class="confirm-cancel"
-          onclick={() => (confirmDeleteError = null)}
-        >
-          Close
-        </button>
+{#if mode === "branch"}
+  {#if confirmDeleteError}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="overlay" onclick={() => (confirmDeleteError = null)}>
+      <div class="confirm-dialog" onclick={(e) => e.stopPropagation()}>
+        <h3>Delete Failed</h3>
+        <p class="confirm-error">{confirmDeleteError}</p>
+        <div class="confirm-actions">
+          <button
+            class="confirm-cancel"
+            onclick={() => (confirmDeleteError = null)}
+          >
+            Close
+          </button>
+        </div>
       </div>
     </div>
-  </div>
+  {/if}
 {/if}
 
 <style>
@@ -745,6 +807,57 @@
     padding: 8px;
     gap: 4px;
     border-bottom: 1px solid var(--border-color);
+  }
+
+  .mode-toggle {
+    display: flex;
+    gap: 6px;
+    padding: 10px 8px 8px;
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  .mode-btn {
+    flex: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    background: none;
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    padding: 6px 8px;
+    font-size: var(--ui-font-sm);
+    cursor: pointer;
+    border-radius: 6px;
+    font-family: inherit;
+  }
+
+  .mode-btn.active {
+    background-color: var(--accent);
+    color: var(--bg-primary);
+    border-color: var(--accent);
+  }
+
+  .mode-icon {
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    border: 1px solid var(--border-color);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: var(--ui-font-xs);
+    font-family: monospace;
+  }
+
+  .mode-btn.active .mode-icon {
+    border-color: rgba(0, 0, 0, 0.15);
+  }
+
+  .mode-label {
+    font-size: var(--ui-font-xs);
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
   }
 
   .filter-btn {
