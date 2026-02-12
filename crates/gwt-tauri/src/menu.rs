@@ -87,6 +87,18 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         .item(&file_close_project)
         .build()?;
 
+    // Use native predefined Edit actions so Cmd/Ctrl shortcuts work consistently.
+    let edit = SubmenuBuilder::new(app, "Edit")
+        .undo()
+        .redo()
+        .separator()
+        .cut()
+        .copy()
+        .paste()
+        .separator()
+        .select_all()
+        .build()?;
+
     let git_cleanup_worktrees = MenuItem::with_id(
         app,
         MENU_ID_GIT_CLEANUP_WORKTREES,
@@ -134,6 +146,23 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         true,
         Some("CmdOrCtrl+,"),
     )?;
+
+    #[cfg(target_os = "macos")]
+    let gwt = SubmenuBuilder::new(app, app_menu_label)
+        .item(&help_about)
+        .separator()
+        .item(&settings_prefs)
+        .separator()
+        .services()
+        .separator()
+        .hide()
+        .hide_others()
+        .show_all()
+        .separator()
+        .quit()
+        .build()?;
+
+    #[cfg(not(target_os = "macos"))]
     let gwt = SubmenuBuilder::new(app, app_menu_label)
         .item(&help_about)
         .separator()
@@ -142,6 +171,7 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
 
     menu.append(&gwt)?;
     menu.append(&file)?;
+    menu.append(&edit)?;
     menu.append(&git)?;
     menu.append(&tools)?;
     menu.append(&window)?;

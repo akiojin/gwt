@@ -53,11 +53,16 @@
 
 ## メニュー仕様（ネイティブ）
 
-- トップレベル: gwt / File / Tools / Window
+- トップレベル: gwt / File / Edit / Git / Tools / Window
 - `File`
   - New Window
   - Open Project...
   - Close Project
+- `Edit`
+  - Undo / Redo
+  - Cut / Copy / Paste / Select All
+- `Git`
+  - Cleanup Worktrees...
 - `Tools`
   - Launch Agent...
   - List Terminals
