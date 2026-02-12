@@ -20,6 +20,7 @@ const branchFixture = {
   name: "feature/sidebar-size",
   commit: "1234567",
   is_current: false,
+  is_agent_running: false,
   ahead: 0,
   behind: 0,
   divergence_status: "UpToDate",
@@ -128,7 +129,7 @@ describe("Sidebar", () => {
     );
   });
 
-  it("sets autocapitalize off for the branch filter input", async () => {
+  it("disables capitalization and completion helpers for the branch filter input", async () => {
     const rendered = await renderSidebar({
       projectPath: "/tmp/project",
       onBranchSelect: vi.fn(),
@@ -136,6 +137,9 @@ describe("Sidebar", () => {
 
     const searchInput = rendered.getByPlaceholderText("Filter branches...") as HTMLInputElement;
     expect(searchInput.getAttribute("autocapitalize")).toBe("off");
+    expect(searchInput.getAttribute("autocorrect")).toBe("off");
+    expect(searchInput.getAttribute("autocomplete")).toBe("off");
+    expect(searchInput.getAttribute("spellcheck")).toBe("false");
   });
 
   it("disables Launch Agent menu item when no activation handler is provided", async () => {
@@ -160,5 +164,23 @@ describe("Sidebar", () => {
       name: "Launch Agent...",
     });
     expect((launchMenuButton as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("shows ACTIVE badge for branches with running agents", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") {
+        return [{ ...branchFixture, is_agent_running: true }];
+      }
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await rendered.findByText(branchFixture.name);
+    expect(rendered.getByText("ACTIVE")).toBeTruthy();
   });
 });
