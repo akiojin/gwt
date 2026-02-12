@@ -1,16 +1,36 @@
 # タスクリスト: GUI Session Summary のスクロールバック要約（実行中対応）
 
-## Phase 1: バックエンド（Tauri）
+## 依存関係/並列性
 
-- [ ] T1: `crates/gwt-tauri/src/commands/sessions.rs` に scrollback fallback を追加
-- [ ] T2: latest pane 選定ヘルパと `ScrollbackSummaryJob` を実装
-- [ ] T3: `session-summary-updated` で `pane:` 擬似session_idを通知
+- US1/US2/US3 は `crates/gwt-tauri/src/commands/sessions.rs` を共有するため直列
+- UI 表示変更はバックエンドと並列可能
+- テストは該当実装の後に実施
 
-## Phase 2: フロントエンド（Svelte）
+## Phase 1: セットアップ
 
-- [ ] T4: `gwt-gui/src/lib/components/MainArea.svelte` の表示を `Live (pane summary)` に変更
+- [ ] T001 [共通] 既存の Session Summary フローとキャッシュ/イベントを確認 `crates/gwt-tauri/src/commands/sessions.rs`
 
-## Phase 3: テスト
+## Phase 2: 基盤
 
-- [ ] T5: Rust ユニットテスト追加（latest pane 選定）
-- [ ] T6: Rust ユニットテスト追加（scrollback fallback job 生成）
+- [ ] T002 [共通] scrollback 要約用の pane 選定ヘルパと SummaryJob 型を追加 `crates/gwt-tauri/src/commands/sessions.rs`
+- [ ] T003 [共通] scrollback 取得と要約入力生成を追加 `crates/gwt-tauri/src/commands/sessions.rs`
+
+## Phase 3: ストーリー 1
+
+- [ ] T004 [US1] session_id 未保存時に scrollback fallback を有効化 `crates/gwt-tauri/src/commands/sessions.rs`
+- [ ] T005 [US1] `session-summary-updated` で `pane:` 擬似ID を emit `crates/gwt-tauri/src/commands/sessions.rs`
+- [ ] T006 [P] [US1] `Live (pane summary)` 表示に切り替え `gwt-gui/src/lib/components/MainArea.svelte`
+- [ ] T007 [US1] scrollback fallback job 生成のユニットテスト追加 `crates/gwt-tauri/src/commands/sessions.rs`
+
+## Phase 4: ストーリー 2
+
+- [ ] T008 [US2] 最終出力が最新の pane を選定 `crates/gwt-tauri/src/commands/sessions.rs`
+- [ ] T009 [US2] pane 選定ロジックのユニットテスト追加 `crates/gwt-tauri/src/commands/sessions.rs`
+
+## Phase 5: ストーリー 3
+
+- [ ] T010 [US3] session_id 確定時は既存フローを維持（fallback しない） `crates/gwt-tauri/src/commands/sessions.rs`
+
+## Phase 6: 仕上げ・横断
+
+- [ ] T011 [共通] `cargo test -p gwt-tauri sessions` を実行 `crates/gwt-tauri`

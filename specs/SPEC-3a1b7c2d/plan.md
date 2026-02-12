@@ -12,7 +12,8 @@
 
 - **バックエンド**: Rust 2021 + Tauri v2（`crates/gwt-tauri/`）
 - **フロントエンド**: Svelte 5 + TypeScript（`gwt-gui/`）
-- **要約生成**: `gwt-core::ai::summarize_scrollback` を使用
+- **要約生成**: `gwt-core::ai::summarize_scrollback`
+- **テスト**: `cargo test`（Rust）
 
 ## 実装方針
 
@@ -40,3 +41,7 @@
 
 - latest pane 選定のユニットテスト
 - scrollback fallback の job 生成テスト
+
+### フロントエンド
+
+- 追加テストなし（表示ラベル変更のみ）
