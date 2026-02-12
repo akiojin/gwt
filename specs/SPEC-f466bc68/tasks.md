@@ -24,4 +24,3 @@
 ## Phase 5: 仕上げ・横断
 
 - [x] T010 [共通] Spec Kit スクリプトの Bash 3.2 互換修正 `.specify/scripts/bash/common.sh`
-

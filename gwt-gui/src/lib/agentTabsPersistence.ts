@@ -1,9 +1,18 @@
 import type { Tab, TerminalInfo } from "./types";
 
+/**
+ * localStorage key used to persist agent tab state (per project path).
+ */
 export const PROJECT_AGENT_TABS_STORAGE_KEY = "gwt.projectAgentTabs.v1";
 
+/**
+ * Minimal persisted representation of an agent tab.
+ */
 export type StoredAgentTab = { paneId: string; label: string };
 
+/**
+ * Persisted agent tab state for a single project.
+ */
 export type StoredProjectAgentTabs = {
   tabs: StoredAgentTab[];
   activePaneId: string | null;
@@ -24,6 +33,11 @@ function getStorageSafe(storage?: Storage | null): Storage | null {
   }
 }
 
+/**
+ * Load stored agent tab state for the given project path.
+ *
+ * `storage` is injectable for tests; defaults to `window.localStorage` when available.
+ */
 export function loadStoredProjectAgentTabs(
   projectPath: string,
   storage?: Storage | null,
@@ -73,6 +87,11 @@ export function loadStoredProjectAgentTabs(
   }
 }
 
+/**
+ * Persist agent tab state for the given project path.
+ *
+ * `storage` is injectable for tests; defaults to `window.localStorage` when available.
+ */
 export function persistStoredProjectAgentTabs(
   projectPath: string,
   state: StoredProjectAgentTabs,
@@ -109,6 +128,10 @@ export function persistStoredProjectAgentTabs(
   }
 }
 
+/**
+ * Build the set of agent `Tab`s to restore by intersecting persisted pane ids with
+ * the currently known terminal panes.
+ */
 export function buildRestoredAgentTabs(
   stored: StoredProjectAgentTabs,
   terminals: TerminalInfo[],
@@ -138,4 +161,3 @@ export function buildRestoredAgentTabs(
 
   return { tabs: restoredTabs, activeTabId };
 }
-
