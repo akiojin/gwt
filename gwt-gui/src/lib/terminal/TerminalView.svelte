@@ -112,6 +112,7 @@
   onMount(() => {
     const rootEl = containerEl;
     if (!rootEl) return;
+    let cancelled = false;
 
     const term = new Terminal({
       cursorBlink: true,
@@ -217,8 +218,33 @@
       writeToTerminalBytes(Array.from(bytes));
     });
 
-    // Listen to terminal output from backend
-    setupEventListener();
+    // Best-effort: show recent scrollback so restored tabs aren't blank.
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const text = await invoke<string>("capture_scrollback_tail", {
+          paneId,
+          maxBytes: 64 * 1024,
+        });
+        if (text) {
+          term.write(text);
+        }
+      } catch {
+        // Ignore: not available outside Tauri runtime.
+      }
+
+      // Listen to terminal output from backend.
+      const unlistenFn = await setupEventListener(term);
+      if (cancelled) {
+        if (unlistenFn) {
+          unlistenFn();
+        }
+        return;
+      }
+      if (unlistenFn) {
+        unlisten = unlistenFn;
+      }
+    })();
 
     // ResizeObserver for auto-fitting
     const observer = new ResizeObserver(() => {
@@ -248,6 +274,7 @@
     window.addEventListener("gwt-terminal-font-size", handleFontSizeChange);
 
     return () => {
+      cancelled = true;
       if (unlisten) {
         unlisten();
       }
@@ -259,21 +286,22 @@
     };
   });
 
-  async function setupEventListener() {
+  async function setupEventListener(term: Terminal): Promise<(() => void) | null> {
     try {
       const { listen } = await import("@tauri-apps/api/event");
       const unlistenFn = await listen<{ pane_id: string; data: number[] }>(
         "terminal-output",
         (event) => {
-          if (event.payload.pane_id === paneId && terminal) {
+          if (event.payload.pane_id === paneId) {
             const bytes = new Uint8Array(event.payload.data);
-            terminal.write(bytes);
+            term.write(bytes);
           }
         }
       );
-      unlisten = unlistenFn;
+      return unlistenFn;
     } catch (err) {
       console.error("Failed to setup terminal event listener:", err);
+      return null;
     }
   }
 
