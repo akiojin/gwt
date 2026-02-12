@@ -66,6 +66,37 @@ pub struct ToolSessionEntry {
         alias = "collaborationModes"
     )]
     pub collaboration_modes: Option<bool>,
+    /// Docker service name (compose) for Quick Start
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "dockerService"
+    )]
+    pub docker_service: Option<String>,
+    /// Force host launch (skip docker) for Quick Start
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "dockerForceHost"
+    )]
+    pub docker_force_host: Option<bool>,
+    /// Force recreate containers for Quick Start
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "dockerRecreate"
+    )]
+    pub docker_recreate: Option<bool>,
+    /// Build docker images before launch for Quick Start
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "dockerBuild"
+    )]
+    pub docker_build: Option<bool>,
+    /// Keep containers running after agent exit for Quick Start
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "dockerKeep")]
+    pub docker_keep: Option<bool>,
     /// Unix timestamp in milliseconds
     pub timestamp: i64,
 }
@@ -570,6 +601,11 @@ pub fn get_last_tool_usage_map(repo_root: &Path) -> HashMap<String, ToolSessionE
                 skip_permissions: None,
                 tool_version: session.tool_version,
                 collaboration_modes: None,
+                docker_service: None,
+                docker_force_host: None,
+                docker_recreate: None,
+                docker_build: None,
+                docker_keep: None,
                 timestamp: session.timestamp,
             };
             map.insert(branch, entry);
@@ -663,6 +699,11 @@ pub fn get_branch_tool_history(repo_root: &Path, branch: &str) -> Vec<ToolSessio
                     skip_permissions: None,
                     tool_version,
                     collaboration_modes: None,
+                    docker_service: None,
+                    docker_force_host: None,
+                    docker_recreate: None,
+                    docker_build: None,
+                    docker_keep: None,
                     timestamp,
                 };
                 tool_map.insert(entry.tool_id.clone(), entry);
@@ -680,6 +721,7 @@ pub fn get_branch_tool_history(repo_root: &Path, branch: &str) -> Vec<ToolSessio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use tempfile::TempDir;
 
     #[test]
@@ -803,6 +845,11 @@ mod tests {
                     skip_permissions: None,
                     tool_version: Some("latest".to_string()),
                     collaboration_modes: None,
+                    docker_service: None,
+                    docker_force_host: None,
+                    docker_recreate: None,
+                    docker_build: None,
+                    docker_keep: None,
                     timestamp: 2_000,
                 },
                 ToolSessionEntry {
@@ -817,6 +864,11 @@ mod tests {
                     skip_permissions: None,
                     tool_version: Some("latest".to_string()),
                     collaboration_modes: None,
+                    docker_service: None,
+                    docker_force_host: None,
+                    docker_recreate: None,
+                    docker_build: None,
+                    docker_keep: None,
                     timestamp: 1_000,
                 },
             ],
@@ -867,6 +919,11 @@ mod tests {
                     skip_permissions: Some(true),
                     tool_version: Some("latest".to_string()),
                     collaboration_modes: None,
+                    docker_service: None,
+                    docker_force_host: None,
+                    docker_recreate: None,
+                    docker_build: None,
+                    docker_keep: None,
                     timestamp: 1_000,
                 },
                 ToolSessionEntry {
@@ -881,6 +938,11 @@ mod tests {
                     skip_permissions: None,
                     tool_version: Some("latest".to_string()),
                     collaboration_modes: None,
+                    docker_service: None,
+                    docker_force_host: None,
+                    docker_recreate: None,
+                    docker_build: None,
+                    docker_keep: None,
                     timestamp: 2_000,
                 },
             ],
@@ -939,6 +1001,11 @@ mod tests {
                 skip_permissions: None,
                 tool_version: Some("latest".to_string()),
                 collaboration_modes: None,
+                docker_service: None,
+                docker_force_host: None,
+                docker_recreate: None,
+                docker_build: None,
+                docker_keep: None,
                 timestamp: 2_000,
             }],
         };
@@ -983,6 +1050,11 @@ mod tests {
             skip_permissions: None,
             tool_version: Some("1.0.3".to_string()),
             collaboration_modes: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
             timestamp: 1704067200000,
         };
         let result = entry.format_tool_usage();
@@ -1003,10 +1075,37 @@ mod tests {
             skip_permissions: None,
             tool_version: None,
             collaboration_modes: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
             timestamp: 1704067200000,
         };
         let result = entry.format_tool_usage();
         assert_eq!(result, "Codex@latest");
+    }
+
+    #[test]
+    fn test_tool_session_entry_deserializes_docker_aliases() {
+        let value = json!({
+            "branch": "feature/test",
+            "toolId": "claude-code",
+            "toolLabel": "Claude",
+            "timestamp": 1_700_000_000_000i64,
+            "dockerService": "gwt",
+            "dockerForceHost": false,
+            "dockerRecreate": true,
+            "dockerBuild": false,
+            "dockerKeep": true
+        });
+
+        let entry: ToolSessionEntry = serde_json::from_value(value).unwrap();
+        assert_eq!(entry.docker_service.as_deref(), Some("gwt"));
+        assert_eq!(entry.docker_force_host, Some(false));
+        assert_eq!(entry.docker_recreate, Some(true));
+        assert_eq!(entry.docker_build, Some(false));
+        assert_eq!(entry.docker_keep, Some(true));
     }
 
     #[test]
@@ -1202,6 +1301,11 @@ mod tests {
             skip_permissions: None,
             tool_version: Some("2.0.0".to_string()),
             collaboration_modes: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
             timestamp: 1_800_000_000_000,
         };
 

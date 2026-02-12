@@ -141,6 +141,24 @@ pub fn log_gwt_error(err: &GwtError, details: Option<&str>) {
                 "Web API error"
             );
         }
+        ErrorCategory::Docker => {
+            error!(
+                code = %code,
+                category = "docker",
+                error_message = %message,
+                details = details.unwrap_or(""),
+                "Docker operation error"
+            );
+        }
+        ErrorCategory::Terminal => {
+            error!(
+                code = %code,
+                category = "terminal",
+                error_message = %message,
+                details = details.unwrap_or(""),
+                "Terminal operation error"
+            );
+        }
         ErrorCategory::Internal => {
             error!(
                 code = %code,

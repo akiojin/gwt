@@ -12,6 +12,7 @@ pub enum TaskStatus {
     Pending,
     Ready,
     Running,
+    Paused,
     Completed,
     Failed,
     Cancelled,
@@ -27,6 +28,22 @@ pub enum WorktreeStrategy {
 pub struct PullRequestRef {
     pub number: u64,
     pub url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TestStatus {
+    NotRun,
+    Running,
+    Passed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TestVerification {
+    pub status: TestStatus,
+    pub command: String,
+    pub output: Option<String>,
+    pub attempt: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +68,15 @@ pub struct Task {
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub result: Option<TaskResult>,
+    /// Test verification state for this task
+    #[serde(default)]
+    pub test_status: Option<TestVerification>,
+    /// Number of retry attempts
+    #[serde(default)]
+    pub retry_count: u8,
+    /// Associated pull request (after PR creation)
+    #[serde(default)]
+    pub pull_request: Option<PullRequestRef>,
 }
 
 impl Task {
@@ -68,6 +94,9 @@ impl Task {
             started_at: None,
             completed_at: None,
             result: None,
+            test_status: None,
+            retry_count: 0,
+            pull_request: None,
         }
     }
 }

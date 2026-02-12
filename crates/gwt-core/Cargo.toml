@@ -31,10 +31,12 @@ base64 = "0.22"
 dirs = "6"
 reqwest.workspace = true
 walkdir = "2"
+portable-pty.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 criterion.workspace = true
+serial_test = "3"
 
 [[bench]]
 name = "git_ops"

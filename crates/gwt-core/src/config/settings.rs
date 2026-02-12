@@ -32,10 +32,12 @@ pub struct Settings {
     pub log_dir: Option<PathBuf>,
     /// Log retention days
     pub log_retention_days: u32,
-    /// Web server settings
-    pub web: WebSettings,
     /// Agent settings
     pub agent: AgentSettings,
+    /// Docker settings
+    pub docker: DockerSettings,
+    /// Appearance settings
+    pub appearance: AppearanceSettings,
 }
 
 impl Default for Settings {
@@ -51,30 +53,9 @@ impl Default for Settings {
             debug: false,
             log_dir: None,
             log_retention_days: 7,
-            web: WebSettings::default(),
             agent: AgentSettings::default(),
-        }
-    }
-}
-
-/// Web server settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct WebSettings {
-    /// Server port
-    pub port: u16,
-    /// Bind address
-    pub address: String,
-    /// Enable CORS
-    pub cors: bool,
-}
-
-impl Default for WebSettings {
-    fn default() -> Self {
-        Self {
-            port: 3000,
-            address: "127.0.0.1".to_string(),
-            cors: true,
+            docker: DockerSettings::default(),
+            appearance: AppearanceSettings::default(),
         }
     }
 }
@@ -95,7 +76,41 @@ pub struct AgentSettings {
     pub auto_install_deps: bool,
 }
 
+/// Docker settings
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DockerSettings {
+    /// Force host launch (skip docker) even when Docker files are detected
+    pub force_host: bool,
+}
+
+/// Appearance settings (font sizes)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppearanceSettings {
+    /// UI font size in pixels (8-24, default 13)
+    pub ui_font_size: u32,
+    /// Terminal font size in pixels (8-24, default 13)
+    pub terminal_font_size: u32,
+}
+
+impl Default for AppearanceSettings {
+    fn default() -> Self {
+        Self {
+            ui_font_size: 13,
+            terminal_font_size: 13,
+        }
+    }
+}
+
 impl Settings {
+    fn settings_env_provider() -> Env {
+        // Limit Figment env extraction to scalar keys we actually support via direct mapping.
+        // This avoids runtime variables such as GWT_AGENT (set for terminal panes) from
+        // colliding with nested settings structs during deserialization.
+        Env::prefixed("GWT_").split("_").only(&["debug"])
+    }
+
     /// Load settings from configuration files and environment
     pub fn load(repo_root: &Path) -> Result<Self> {
         debug!(
@@ -140,7 +155,7 @@ impl Settings {
             figment = figment.merge(Toml::file(path));
         }
 
-        figment = figment.merge(Env::prefixed("GWT_").split("_"));
+        figment = figment.merge(Self::settings_env_provider());
 
         let mut settings: Settings = figment.extract().map_err(|e| {
             error!(
@@ -159,9 +174,9 @@ impl Settings {
             }
         }
 
-        if let Ok(value) = std::env::var("PORT") {
-            if let Ok(parsed) = value.trim().parse::<u16>() {
-                settings.web.port = parsed;
+        if let Ok(value) = std::env::var("GWT_DOCKER_FORCE_HOST") {
+            if let Some(parsed) = parse_env_bool(&value) {
+                settings.docker.force_host = parsed;
             }
         }
 
@@ -172,6 +187,88 @@ impl Settings {
             debug = settings.debug,
             worktree_root = %settings.worktree_root,
             "Settings loaded"
+        );
+
+        Ok(settings)
+    }
+
+    /// Load settings from global configuration files and environment.
+    ///
+    /// Priority (highest to lowest):
+    /// 1. ~/.gwt/config.toml (new location)
+    /// 2. ~/.config/gwt/config.toml (legacy fallback)
+    /// 3. Defaults (when no global file exists)
+    pub fn load_global() -> Result<Self> {
+        debug!(category = "config", "Loading global settings");
+
+        // Auto-migrate global path if needed (SPEC-a3f4c9df)
+        if Self::needs_global_path_migration() {
+            match Self::migrate_global_path_if_needed() {
+                Ok(true) => {
+                    info!(
+                        category = "config",
+                        operation = "auto_migrate",
+                        "Auto-migrated global config from ~/.config/gwt/ to ~/.gwt/"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        category = "config",
+                        error = %e,
+                        "Failed to auto-migrate global config path"
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        let config_path = Self::new_global_config_path()
+            .filter(|p| p.exists())
+            .or_else(|| Self::legacy_global_config_path().filter(|p| p.exists()));
+
+        let mut figment = Figment::new().merge(Toml::string(&Self::default_toml()));
+
+        if let Some(ref path) = config_path {
+            debug!(
+                category = "config",
+                config_path = %path.display(),
+                "Merging global config file"
+            );
+            figment = figment.merge(Toml::file(path));
+        }
+
+        figment = figment.merge(Self::settings_env_provider());
+
+        let mut settings: Settings = figment.extract().map_err(|e| {
+            error!(
+                category = "config",
+                error = %e,
+                "Failed to parse global config"
+            );
+            GwtError::ConfigParseError {
+                reason: e.to_string(),
+            }
+        })?;
+
+        if let Ok(value) = std::env::var("GWT_AGENT_AUTO_INSTALL_DEPS") {
+            if let Some(parsed) = parse_env_bool(&value) {
+                settings.agent.auto_install_deps = parsed;
+            }
+        }
+
+        if let Ok(value) = std::env::var("GWT_DOCKER_FORCE_HOST") {
+            if let Some(parsed) = parse_env_bool(&value) {
+                settings.docker.force_host = parsed;
+            }
+        }
+
+        info!(
+            category = "config",
+            operation = "load_global",
+            config_path = config_path.as_ref().map(|p| p.display().to_string()).as_deref(),
+            debug = settings.debug,
+            worktree_root = %settings.worktree_root,
+            "Global settings loaded"
         );
 
         Ok(settings)
@@ -252,6 +349,17 @@ impl Settings {
 
     /// Get the legacy global config path (~/.config/gwt/config.toml)
     pub fn legacy_global_config_path() -> Option<PathBuf> {
+        // Prefer XDG override for deterministic behavior (especially in tests and CI).
+        // On macOS, `ProjectDirs::config_dir()` points to ~/Library/Application Support,
+        // which is a reasonable default but doesn't follow XDG semantics.
+        if let Some(xdg_config_home) = std::env::var_os("XDG_CONFIG_HOME") {
+            return Some(
+                PathBuf::from(xdg_config_home)
+                    .join("gwt")
+                    .join("config.toml"),
+            );
+        }
+
         directories::ProjectDirs::from("", "", "gwt")
             .map(|dirs| dirs.config_dir().join("config.toml"))
     }
@@ -269,6 +377,10 @@ impl Settings {
 
     /// Get the legacy global config directory (~/.config/gwt/)
     pub fn legacy_global_config_dir() -> Option<PathBuf> {
+        if let Some(xdg_config_home) = std::env::var_os("XDG_CONFIG_HOME") {
+            return Some(PathBuf::from(xdg_config_home).join("gwt"));
+        }
+
         directories::ProjectDirs::from("", "", "gwt").map(|dirs| dirs.config_dir().to_path_buf())
     }
 
@@ -436,7 +548,6 @@ mod tests {
         assert!(!settings.protected_branches.is_empty());
         assert!(settings.protected_branches.contains(&"main".to_string()));
         assert!(!settings.debug);
-        assert_eq!(settings.web.port, 3000);
     }
 
     #[test]
@@ -464,10 +575,6 @@ mod tests {
         let settings = Settings {
             protected_branches: vec!["main".to_string(), "release".to_string()],
             debug: true,
-            web: WebSettings {
-                port: 9090,
-                ..Default::default()
-            },
             ..Default::default()
         };
 
@@ -477,7 +584,6 @@ mod tests {
         assert!(loaded.protected_branches.contains(&"main".to_string()));
         assert!(loaded.protected_branches.contains(&"release".to_string()));
         assert!(loaded.debug);
-        assert_eq!(loaded.web.port, 9090);
     }
 
     #[test]
@@ -505,6 +611,17 @@ mod tests {
     }
 
     #[test]
+    fn test_env_override_docker_force_host_accepts_numeric_bool() {
+        let temp = TempDir::new().unwrap();
+
+        std::env::set_var("GWT_DOCKER_FORCE_HOST", "1");
+        let settings = Settings::load(temp.path()).unwrap();
+        std::env::remove_var("GWT_DOCKER_FORCE_HOST");
+
+        assert!(settings.docker.force_host);
+    }
+
+    #[test]
     fn test_env_override_auto_install_deps() {
         let temp = TempDir::new().unwrap();
 
@@ -513,17 +630,6 @@ mod tests {
         std::env::remove_var("GWT_AGENT_AUTO_INSTALL_DEPS");
 
         assert!(settings.agent.auto_install_deps);
-    }
-
-    #[test]
-    fn test_env_override_port() {
-        let temp = TempDir::new().unwrap();
-
-        std::env::set_var("PORT", "4567");
-        let settings = Settings::load(temp.path()).unwrap();
-        std::env::remove_var("PORT");
-
-        assert_eq!(settings.web.port, 4567);
     }
 
     #[test]
@@ -622,6 +728,38 @@ default_base_branch = "legacy-global"
     }
 
     #[test]
+    fn test_appearance_default() {
+        let settings = Settings::default();
+        assert_eq!(settings.appearance.ui_font_size, 13);
+        assert_eq!(settings.appearance.terminal_font_size, 13);
+    }
+
+    #[test]
+    fn test_appearance_backward_compat() {
+        // Config without [appearance] section should deserialize with defaults
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join(".gwt.toml");
+        std::fs::write(&config_path, "debug = true\n").unwrap();
+        let settings = Settings::load(temp.path()).unwrap();
+        assert!(settings.debug);
+        assert_eq!(settings.appearance.ui_font_size, 13);
+        assert_eq!(settings.appearance.terminal_font_size, 13);
+    }
+
+    #[test]
+    fn test_appearance_save_load() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join(".gwt.toml");
+        let mut settings = Settings::default();
+        settings.appearance.ui_font_size = 16;
+        settings.appearance.terminal_font_size = 18;
+        settings.save(&config_path).unwrap();
+        let loaded = Settings::load(temp.path()).unwrap();
+        assert_eq!(loaded.appearance.ui_font_size, 16);
+        assert_eq!(loaded.appearance.terminal_font_size, 18);
+    }
+
+    #[test]
     fn test_save_global() {
         let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
@@ -642,5 +780,57 @@ default_base_branch = "legacy-global"
         let content = std::fs::read_to_string(&new_path).unwrap();
         assert!(content.contains("debug = true"));
         assert!(content.contains("save-global-test"));
+    }
+
+    #[test]
+    fn test_load_global() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+        let prev_gwt_agent = std::env::var_os("GWT_AGENT");
+        std::env::set_var("GWT_AGENT", "Codex");
+
+        let global_dir = temp.path().join(".gwt");
+        std::fs::create_dir_all(&global_dir).unwrap();
+        std::fs::write(
+            global_dir.join("config.toml"),
+            r#"
+debug = true
+default_base_branch = "global-main"
+[appearance]
+ui_font_size = 17
+terminal_font_size = 19
+"#,
+        )
+        .unwrap();
+
+        let loaded = Settings::load_global().unwrap();
+        assert!(loaded.debug);
+        assert_eq!(loaded.default_base_branch, "global-main");
+        assert_eq!(loaded.appearance.ui_font_size, 17);
+        assert_eq!(loaded.appearance.terminal_font_size, 19);
+
+        match prev_gwt_agent {
+            Some(value) => std::env::set_var("GWT_AGENT", value),
+            None => std::env::remove_var("GWT_AGENT"),
+        }
+    }
+
+    #[test]
+    fn test_load_ignores_runtime_gwt_agent_env() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join(".gwt.toml");
+        std::fs::write(&config_path, "debug = true\n").unwrap();
+
+        let prev_gwt_agent = std::env::var_os("GWT_AGENT");
+        std::env::set_var("GWT_AGENT", "Codex");
+
+        let loaded = Settings::load(temp.path()).unwrap();
+        assert!(loaded.debug);
+
+        match prev_gwt_agent {
+            Some(value) => std::env::set_var("GWT_AGENT", value),
+            None => std::env::remove_var("GWT_AGENT"),
+        }
     }
 }

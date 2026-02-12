@@ -9,17 +9,21 @@ jobs:
     name: Clippy & Rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - name: Run Clippy
-        run: cargo clippy -p gwt-cli -p gwt-core -p gwt-web --all-targets --all-features -- -D warnings
+        run: cargo clippy -p gwt-core -p gwt-tauri --all-targets --all-features -- -D warnings
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run Markdownlint
-        uses: nosborn/github-action-markdown-cli@v3.3.0
+        uses: nosborn/github-action-markdown-cli@v3.5.0
         with:
           files: .
           config_file: .markdownlint.json
@@ -32,13 +36,24 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      # actions/setup-node's pnpm cache requires pnpm to be available.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.29.2
+          run_install: false
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
-      - run: npm install -g @commitlint/cli @commitlint/config-conventional
+          cache: 'pnpm'
+          cache-dependency-path: pnpm-lock.yaml
+      - name: Enable Corepack (pnpm)
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.29.2 --activate
+          pnpm --version
       - name: Validate commit messages
         continue-on-error: true
         env:
@@ -47,7 +62,7 @@ jobs:
         run: |
           COMMIT_COUNT=$(git rev-list --count "$BASE_SHA".."$HEAD_SHA")
           if [ "$COMMIT_COUNT" -gt 100 ]; then
-            commitlint --from "HEAD~50" --to "HEAD" --verbose
+            pnpm dlx @commitlint/cli@20.4.1 commitlint --config commitlint.config.cjs --from "HEAD~50" --to "HEAD" --verbose
           else
-            commitlint --from "$BASE_SHA" --to "$HEAD_SHA" --verbose
+            pnpm dlx @commitlint/cli@20.4.1 commitlint --config commitlint.config.cjs --from "$BASE_SHA" --to "$HEAD_SHA" --verbose
           fi
