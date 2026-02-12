@@ -2,6 +2,7 @@ export interface BranchInfo {
   name: string;
   commit: string;
   is_current: boolean;
+  is_agent_running: boolean;
   ahead: number;
   behind: number;
   divergence_status: string; // "UpToDate" | "Ahead" | "Behind" | "Diverged"
