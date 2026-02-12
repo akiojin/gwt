@@ -451,9 +451,15 @@
                   <span class="quick-title">AI Summary</span>
                   {#if sessionSummaryLoading}
                     <span class="quick-subtitle">Loading...</span>
-                  {:else if sessionSummaryStatus === "ok" && sessionSummaryToolId && sessionSummarySessionId}
+                  {:else if sessionSummaryStatus === "ok" && sessionSummaryToolId}
                     <span class="quick-subtitle">
-                      {sessionSummaryToolId} #{sessionSummarySessionId}
+                      {#if sessionSummarySessionId?.startsWith("pane:")}
+                        {sessionSummaryToolId} - Live (pane summary)
+                      {:else if sessionSummarySessionId}
+                        {sessionSummaryToolId} #{sessionSummarySessionId}
+                      {:else}
+                        {sessionSummaryToolId}
+                      {/if}
                       {#if sessionSummaryGenerating}
                         {sessionSummaryMarkdown ? " - Updating..." : " - Generating..."}
                       {/if}
