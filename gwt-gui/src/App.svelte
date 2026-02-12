@@ -5,6 +5,7 @@
     ProjectInfo,
     LaunchAgentRequest,
     TerminalAnsiProbe,
+    SettingsData,
   } from "./lib/types";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import MainArea from "./lib/components/MainArea.svelte";
@@ -122,6 +123,32 @@
     return String(err);
   }
 
+  function clampFontSize(size: number): number {
+    return Math.max(8, Math.min(24, Math.round(size)));
+  }
+
+  function applyUiFontSize(size: number) {
+    document.documentElement.style.setProperty("--ui-font-base", `${size}px`);
+  }
+
+  function applyTerminalFontSize(size: number) {
+    (window as any).__gwtTerminalFontSize = size;
+    window.dispatchEvent(new CustomEvent("gwt-terminal-font-size", { detail: size }));
+  }
+
+  async function applyAppearanceSettings() {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const settings = await invoke<Pick<SettingsData, "ui_font_size" | "terminal_font_size">>(
+        "get_settings"
+      );
+      applyUiFontSize(clampFontSize(settings.ui_font_size ?? 13));
+      applyTerminalFontSize(clampFontSize(settings.terminal_font_size ?? 13));
+    } catch {
+      // Ignore: settings API not available outside Tauri runtime.
+    }
+  }
+
   async function setWindowTitle() {
     const title = projectPath ? `gwt - ${projectPath}` : "gwt";
 
@@ -138,6 +165,7 @@
 
   function handleProjectOpen(path: string) {
     projectPath = path;
+    void applyAppearanceSettings();
     fetchCurrentBranch();
   }
 
@@ -284,6 +312,7 @@
               path: selected as string,
             });
             projectPath = info.path;
+            void applyAppearanceSettings();
             fetchCurrentBranch();
           }
         } catch (err) {
@@ -307,6 +336,7 @@
           selectedBranch = null;
           currentBranch = "";
           sidebarRefreshKey = 0;
+          void applyAppearanceSettings();
         }
         break;
       case "toggle-sidebar":
