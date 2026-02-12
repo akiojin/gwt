@@ -28,7 +28,7 @@
   let aiModels: string[] = $state([]);
   let aiModelsLoading: boolean = $state(false);
   let aiModelsError: string | null = $state(null);
-  let aiModelsLoadedKey: string = $state("");
+  let aiModelsLoadedKey: string = "";
   let aiModelsRequestSeq: number = 0;
 
   function getCurrentProfile(cfg: ProfilesConfig | null, key: string): Profile | null {
@@ -51,6 +51,14 @@
     const current = currentProfile?.ai?.model?.trim() ?? "";
     return current.length > 0 && !aiModels.includes(current);
   });
+
+  function resetAiModelsState() {
+    aiModelsRequestSeq += 1;
+    aiModels = [];
+    aiModelsLoading = false;
+    aiModelsError = null;
+    aiModelsLoadedKey = "";
+  }
 
   $effect(() => {
     loadAll();
@@ -75,17 +83,11 @@
     const apiKey = ai?.api_key?.trim() ?? "";
 
     if (!profileKey || !ai) {
-      aiModels = [];
-      aiModelsLoading = false;
-      aiModelsError = null;
-      aiModelsLoadedKey = "";
+      resetAiModelsState();
       return;
     }
     if (!endpoint) {
-      aiModels = [];
-      aiModelsLoading = false;
-      aiModelsError = null;
-      aiModelsLoadedKey = "";
+      resetAiModelsState();
       return;
     }
 
