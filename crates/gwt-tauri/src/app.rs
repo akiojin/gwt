@@ -4,10 +4,13 @@ use crate::state::AppState;
 use std::sync::atomic::Ordering;
 use tauri::Manager;
 use tauri::{Emitter, WebviewWindowBuilder};
-use tracing::info;
+use tracing::{info, warn};
 
 #[cfg(not(test))]
 use gwt_core::config::os_env;
+
+#[cfg(any(not(test), target_os = "macos"))]
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 fn should_prevent_window_close(is_quitting: bool) -> bool {
     !is_quitting
@@ -17,6 +20,35 @@ fn should_prevent_exit_request(is_quitting: bool) -> bool {
     !is_quitting
 }
 
+#[cfg(any(not(test), target_os = "macos"))]
+fn has_running_agents(state: &AppState) -> bool {
+    let Ok(mut manager) = state.pane_manager.lock() else {
+        return false;
+    };
+
+    for pane in manager.panes_mut() {
+        let _ = pane.check_status();
+        if matches!(pane.status(), gwt_core::terminal::pane::PaneStatus::Running) {
+            return true;
+        }
+    }
+
+    false
+}
+
+#[cfg(any(not(test), target_os = "macos"))]
+fn try_begin_exit_confirm(state: &AppState) -> bool {
+    state
+        .exit_confirm_inflight
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+}
+
+#[cfg(any(not(test), target_os = "macos"))]
+fn end_exit_confirm(state: &AppState) {
+    state.exit_confirm_inflight.store(false, Ordering::SeqCst);
+}
+
 fn menu_action_from_id(id: &str) -> Option<&'static str> {
     match id {
         crate::menu::MENU_ID_FILE_OPEN_PROJECT => Some("open-project"),
@@ -24,7 +56,6 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
         crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES => Some("cleanup-worktrees"),
         crate::menu::MENU_ID_GIT_VERSION_HISTORY => Some("version-history"),
         crate::menu::MENU_ID_TOOLS_LAUNCH_AGENT => Some("launch-agent"),
-        crate::menu::MENU_ID_TOOLS_AGENT_MODE => Some("open-agent-mode"),
         crate::menu::MENU_ID_TOOLS_LIST_TERMINALS => Some("list-terminals"),
         crate::menu::MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS => Some("terminal-diagnostics"),
         crate::menu::MENU_ID_SETTINGS_PREFERENCES => Some("open-settings"),
@@ -36,10 +67,54 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
 #[cfg_attr(test, allow(dead_code))]
 fn show_best_window(app: &tauri::AppHandle<tauri::Wry>) {
     let Some(window) = best_window(app) else {
+        recreate_main_window(app);
         return;
     };
     let _ = window.show();
     let _ = window.set_focus();
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn recreate_main_window(app: &tauri::AppHandle<tauri::Wry>) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.show();
+            let _ = window.set_focus();
+            return;
+        }
+
+        let mut conf = match app.config().app.windows.first() {
+            Some(c) => c.clone(),
+            None => {
+                info!(
+                    category = "tauri",
+                    event = "MainWindowConfigMissing",
+                    "No window config found; skipping main window recreation"
+                );
+                return;
+            }
+        };
+        conf.label = "main".to_string();
+
+        let builder = WebviewWindowBuilder::from_config(&app, &conf);
+        let window = match builder.and_then(|b| b.build()) {
+            Ok(w) => w,
+            Err(err) => {
+                warn!(
+                    category = "tauri",
+                    event = "MainWindowRecreateFailed",
+                    error = %err,
+                    "Failed to recreate main window"
+                );
+                return;
+            }
+        };
+
+        let _ = window.show();
+        let _ = window.set_focus();
+        let _ = crate::menu::rebuild_menu(&app);
+    });
 }
 
 #[cfg_attr(test, allow(dead_code))]
@@ -107,8 +182,33 @@ pub fn build_app(
                             show_best_window(app);
                         }
                         "tray-quit" => {
-                            app.state::<AppState>().request_quit();
-                            app.exit(0);
+                            let state = app.state::<AppState>();
+                            if !has_running_agents(&state) {
+                                state.request_quit();
+                                app.exit(0);
+                                return;
+                            }
+
+                            if !try_begin_exit_confirm(&state) {
+                                return;
+                            }
+
+                            let app_handle = app.clone();
+                            app.dialog()
+                                .message("Agents are still running. Quit gwt anyway?")
+                                .kind(MessageDialogKind::Warning)
+                                .buttons(MessageDialogButtons::OkCancelCustom(
+                                    "Quit".to_string(),
+                                    "Cancel".to_string(),
+                                ))
+                                .show(move |ok| {
+                                    let state = app_handle.state::<AppState>();
+                                    end_exit_confirm(&state);
+                                    if ok {
+                                        state.request_quit();
+                                        app_handle.exit(0);
+                                    }
+                                });
                         }
                         _ => {}
                     })
@@ -254,13 +354,23 @@ pub fn build_app(
                     .filter(|(label, _)| label != &destroyed_label)
                     .count();
                 if remaining_windows == 0 {
-                    info!(
-                        category = "tauri",
-                        event = "AllWindowsClosed",
-                        "All windows closed; exiting app"
-                    );
-                    app_handle.state::<AppState>().request_quit();
-                    app_handle.exit(0);
+                    let state = app_handle.state::<AppState>();
+                    let is_quitting = state.is_quitting.load(Ordering::SeqCst);
+                    if is_quitting {
+                        info!(
+                            category = "tauri",
+                            event = "AllWindowsClosed",
+                            "All windows closed; exiting app"
+                        );
+                        state.request_quit();
+                        app_handle.exit(0);
+                    } else {
+                        info!(
+                            category = "tauri",
+                            event = "AllWindowsClosed",
+                            "All windows closed; keeping app running"
+                        );
+                    }
                 }
             }
         })
@@ -417,16 +527,52 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
                 // macOS: treat Cmd+Q as "close the focused window", not "hide to tray".
                 #[cfg(target_os = "macos")]
                 {
-                    if let Some(window) = best_window(app_handle) {
+                    let Some(window) = best_window(app_handle) else {
+                        info!(
+                            category = "tauri",
+                            event = "ExitPrevented",
+                            "Exit prevented; no windows exist"
+                        );
+                        return;
+                    };
+
+                    let state = app_handle.state::<AppState>();
+                    if has_running_agents(&state) {
+                        if !try_begin_exit_confirm(&state) {
+                            return;
+                        }
+
+                        let app_handle = app_handle.clone();
+                        let window_label = window.label().to_string();
                         app_handle
-                            .state::<AppState>()
-                            .allow_window_close(window.label());
-                        let _ = window.close();
-                    } else {
-                        // No windows exist; allow the process to exit.
-                        app_handle.state::<AppState>().request_quit();
-                        app_handle.exit(0);
+                            .dialog()
+                            .message("Agents are still running. Close this window?")
+                            .kind(MessageDialogKind::Warning)
+                            .buttons(MessageDialogButtons::OkCancelCustom(
+                                "Close Window".to_string(),
+                                "Cancel".to_string(),
+                            ))
+                            .show(move |ok| {
+                                let state = app_handle.state::<AppState>();
+                                end_exit_confirm(&state);
+                                if !ok {
+                                    return;
+                                }
+
+                                if let Some(window) = app_handle.get_webview_window(&window_label) {
+                                    app_handle
+                                        .state::<AppState>()
+                                        .allow_window_close(window.label());
+                                    let _ = window.close();
+                                }
+                            });
+                        return;
                     }
+
+                    app_handle
+                        .state::<AppState>()
+                        .allow_window_close(window.label());
+                    let _ = window.close();
                 }
 
                 // Other OSes: keep current behavior (exit request hides to tray).
@@ -489,14 +635,6 @@ mod tests {
         assert_eq!(
             menu_action_from_id(crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES),
             Some("cleanup-worktrees")
-        );
-    }
-
-    #[test]
-    fn menu_action_from_id_maps_agent_mode() {
-        assert_eq!(
-            menu_action_from_id(crate::menu::MENU_ID_TOOLS_AGENT_MODE),
-            Some("open-agent-mode")
         );
     }
 }

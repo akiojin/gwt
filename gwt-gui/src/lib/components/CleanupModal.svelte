@@ -4,20 +4,36 @@
   let {
     open = false,
     preselectedBranch = null,
+    agentTabBranches = [],
     projectPath,
     onClose,
   }: {
     open: boolean;
     preselectedBranch?: string | null;
+    agentTabBranches?: string[];
     projectPath: string;
     onClose: () => void;
   } = $props();
+
+  function normalizeTabBranch(name: string): string {
+    const trimmed = name.trim();
+    return trimmed.startsWith("origin/") ? trimmed.slice("origin/".length) : trimmed;
+  }
+
+  let agentTabBranchSet = $derived(
+    new Set(
+      agentTabBranches
+        .map((b) => normalizeTabBranch(b))
+        .filter((b) => b && b !== "Worktree" && b !== "Agent")
+    )
+  );
 
   let worktrees: WorktreeInfo[] = $state([]);
   let loading: boolean = $state(false);
   let errorMessage: string | null = $state(null);
   let checked: Set<string> = $state(new Set());
-  let showConfirm: boolean = $state(false);
+  type ConfirmMode = "unsafe" | "active" | "both";
+  let confirmMode: ConfirmMode | null = $state(null);
   let cleaning: boolean = $state(false);
 
   // Failure re-open state
@@ -58,6 +74,17 @@
         (w.safety_level === "warning" || w.safety_level === "danger")
     ).length
   );
+
+  let activeTabCheckedCount = $derived(
+    sortedWorktrees.filter(
+      (w) =>
+        w.branch &&
+        checked.has(w.branch) &&
+        agentTabBranchSet.has(normalizeTabBranch(w.branch))
+    ).length
+  );
+
+  let hasActiveTabChecked = $derived(activeTabCheckedCount > 0);
 
   $effect(() => {
     if (open) {
@@ -127,20 +154,29 @@
 
   function handleCleanup() {
     if (checkedCount === 0) return;
-    if (hasUnsafeChecked) {
-      showConfirm = true;
-    } else {
-      executeCleanup(false);
+    if (hasUnsafeChecked && hasActiveTabChecked) {
+      confirmMode = "both";
+      return;
     }
+    if (hasUnsafeChecked) {
+      confirmMode = "unsafe";
+      return;
+    }
+    if (hasActiveTabChecked) {
+      confirmMode = "active";
+      return;
+    }
+    executeCleanup(false);
   }
 
-  function confirmUnsafe() {
-    showConfirm = false;
-    executeCleanup(true);
+  function confirmCleanup() {
+    const force = hasUnsafeChecked;
+    confirmMode = null;
+    executeCleanup(force);
   }
 
   function cancelConfirm() {
-    showConfirm = false;
+    confirmMode = null;
   }
 
   async function executeCleanup(force: boolean) {
@@ -206,7 +242,7 @@
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") {
-      if (showConfirm) {
+      if (confirmMode) {
         cancelConfirm();
         return;
       }
@@ -258,6 +294,7 @@
                   <th class="col-check"></th>
                   <th class="col-safety"></th>
                   <th class="col-branch">Branch</th>
+                  <th class="col-agent">Agent</th>
                   <th class="col-status">Status</th>
                   <th class="col-markers">Changes</th>
                   <th class="col-sync">Ahead/Behind</th>
@@ -285,6 +322,13 @@
                       <span class="safety-dot {safetyDotClass(wt.safety_level)}"></span>
                     </td>
                     <td class="col-branch mono">{branch}</td>
+                    <td class="col-agent">
+                      {#if wt.branch && agentTabBranchSet.has(normalizeTabBranch(wt.branch))}
+                        <span class="active-badge" title="Agent tab is open for this worktree">
+                          ACTIVE
+                        </span>
+                      {/if}
+                    </td>
                     <td class="col-status">{wt.status}</td>
                     <td class="col-markers">
                       {#if wt.has_changes}
@@ -332,7 +376,7 @@
       {/if}
     </div>
 
-    {#if showConfirm}
+    {#if confirmMode}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <div
@@ -340,19 +384,34 @@
         onclick={(e) => e.stopPropagation()}
       >
         <div class="confirm-dialog">
-          <h3>Unsafe Worktrees Selected</h3>
-          <p>
-            {unsafeCheckedCount} unsafe worktree{unsafeCheckedCount > 1
-              ? "s"
-              : ""} selected. These have uncommitted changes or unpushed commits
-            that will be lost. Continue?
-          </p>
+          {#if confirmMode === "both"}
+            <h3>Active Tabs and Unsafe Worktrees Selected</h3>
+            <p>
+              {unsafeCheckedCount} unsafe worktree{unsafeCheckedCount > 1 ? "s" : ""}
+              and {activeTabCheckedCount} worktree{activeTabCheckedCount > 1 ? "s" : ""}
+              with an open agent tab selected. Uncommitted changes or unpushed commits may be
+              lost, and active sessions may break. Continue?
+            </p>
+          {:else if confirmMode === "unsafe"}
+            <h3>Unsafe Worktrees Selected</h3>
+            <p>
+              {unsafeCheckedCount} unsafe worktree{unsafeCheckedCount > 1 ? "s" : ""}
+              selected. These have uncommitted changes or unpushed commits that will be lost.
+              Continue?
+            </p>
+          {:else}
+            <h3>Active Agent Tabs Detected</h3>
+            <p>
+              {activeTabCheckedCount} selected worktree{activeTabCheckedCount > 1 ? "s" : ""}
+              have an open agent tab. Cleaning them up may break the active session. Continue?
+            </p>
+          {/if}
           <div class="confirm-actions">
             <button class="btn btn-cancel" onclick={cancelConfirm}>
               Cancel
             </button>
-            <button class="btn btn-danger" onclick={confirmUnsafe}>
-              Force Cleanup
+            <button class="btn btn-danger" onclick={confirmCleanup}>
+              {confirmMode === "active" ? "Continue" : "Force Cleanup"}
             </button>
           </div>
         </div>
@@ -594,6 +653,7 @@
   }
 
   .col-status,
+  .col-agent,
   .col-markers,
   .col-sync,
   .col-gone,
@@ -643,6 +703,16 @@
     background: rgba(243, 139, 168, 0.15);
     color: var(--red);
     border: 1px solid rgba(243, 139, 168, 0.3);
+  }
+
+  .active-badge {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: rgba(148, 226, 213, 0.12);
+    color: var(--cyan);
+    border: 1px solid rgba(148, 226, 213, 0.35);
+    font-family: monospace;
   }
 
   .tool-label {
