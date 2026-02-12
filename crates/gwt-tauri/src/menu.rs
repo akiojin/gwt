@@ -15,6 +15,7 @@ pub const MENU_ID_FILE_OPEN_PROJECT: &str = "file-open-project";
 pub const MENU_ID_FILE_CLOSE_PROJECT: &str = "file-close-project";
 
 pub const MENU_ID_TOOLS_LAUNCH_AGENT: &str = "tools-launch-agent";
+pub const MENU_ID_TOOLS_AGENT_MODE: &str = "tools-agent-mode";
 pub const MENU_ID_TOOLS_LIST_TERMINALS: &str = "tools-list-terminals";
 pub const MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS: &str = "tools-terminal-diagnostics";
 
@@ -117,6 +118,7 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         .item(&file_close_project)
         .build()?;
 
+    // Use native predefined Edit actions so Cmd/Ctrl shortcuts work consistently.
     let edit = SubmenuBuilder::new(app, "Edit")
         .undo()
         .redo()
@@ -124,6 +126,7 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         .cut()
         .copy()
         .paste()
+        .separator()
         .select_all()
         .build()?;
 
@@ -156,6 +159,13 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         true,
         None::<&str>,
     )?;
+    let tools_agent_mode = MenuItem::with_id(
+        app,
+        MENU_ID_TOOLS_AGENT_MODE,
+        "Agent Mode",
+        true,
+        None::<&str>,
+    )?;
     let tools_list_terminals = MenuItem::with_id(
         app,
         MENU_ID_TOOLS_LIST_TERMINALS,
@@ -172,6 +182,7 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
     )?;
     let tools = SubmenuBuilder::new(app, "Tools")
         .item(&tools_launch_agent)
+        .item(&tools_agent_mode)
         .item(&tools_list_terminals)
         .item(&tools_terminal_diagnostics)
         .build()?;
@@ -185,6 +196,23 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         true,
         Some("CmdOrCtrl+,"),
     )?;
+
+    #[cfg(target_os = "macos")]
+    let gwt = SubmenuBuilder::new(app, app_menu_label)
+        .item(&help_about)
+        .separator()
+        .item(&settings_prefs)
+        .separator()
+        .services()
+        .separator()
+        .hide()
+        .hide_others()
+        .show_all()
+        .separator()
+        .quit()
+        .build()?;
+
+    #[cfg(not(target_os = "macos"))]
     let gwt = SubmenuBuilder::new(app, app_menu_label)
         .item(&help_about)
         .separator()

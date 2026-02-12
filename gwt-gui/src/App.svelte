@@ -416,7 +416,7 @@
 
   async function handleTabClose(tabId: string) {
     const tab = tabs.find((t) => t.id === tabId);
-    if (tab?.type === "summary" || tab?.type === "agentMode") {
+    if (tab?.type === "summary") {
       return;
     }
     if (tab?.paneId) {
@@ -462,6 +462,25 @@
       type: "versionHistory",
     };
     tabs = [...tabs, tab];
+    activeTabId = tab.id;
+  }
+
+  function openAgentModeTab() {
+    const existing = tabs.find((t) => t.type === "agentMode" || t.id === "agentMode");
+    if (existing) {
+      activeTabId = existing.id;
+      return;
+    }
+
+    const tab: Tab = { id: "agentMode", label: "Agent Mode", type: "agentMode" };
+    const summaryIndex = tabs.findIndex((t) => t.type === "summary" || t.id === "summary");
+    if (summaryIndex >= 0) {
+      const nextTabs = [...tabs];
+      nextTabs.splice(summaryIndex + 1, 0, tab);
+      tabs = nextTabs;
+    } else {
+      tabs = [...tabs, tab];
+    }
     activeTabId = tab.id;
   }
 
@@ -612,6 +631,9 @@
         break;
       case "version-history":
         openVersionHistoryTab();
+        break;
+      case "open-agent-mode":
+        openAgentModeTab();
         break;
       case "about":
         showAbout = true;

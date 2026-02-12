@@ -129,7 +129,7 @@ describe("Sidebar", () => {
     );
   });
 
-  it("sets autocapitalize off for the branch filter input", async () => {
+  it("disables capitalization and completion helpers for the branch filter input", async () => {
     const rendered = await renderSidebar({
       projectPath: "/tmp/project",
       onBranchSelect: vi.fn(),
@@ -137,6 +137,9 @@ describe("Sidebar", () => {
 
     const searchInput = rendered.getByPlaceholderText("Filter branches...") as HTMLInputElement;
     expect(searchInput.getAttribute("autocapitalize")).toBe("off");
+    expect(searchInput.getAttribute("autocorrect")).toBe("off");
+    expect(searchInput.getAttribute("autocomplete")).toBe("off");
+    expect(searchInput.getAttribute("spellcheck")).toBe("false");
   });
 
   it("disables Launch Agent menu item when no activation handler is provided", async () => {

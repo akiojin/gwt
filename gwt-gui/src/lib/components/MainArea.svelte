@@ -40,8 +40,7 @@
   let activeTab = $derived(tabs.find((t) => t.id === activeTabId));
   let agentTabs = $derived(tabs.filter(isAgentTabWithPaneId));
   let showTerminalLayer = $derived(activeTab?.type === "agent");
-  let isPinnedTab = (tabType?: Tab["type"]) =>
-    tabType === "summary" || tabType === "agentMode";
+  let isPinnedTab = (tabType?: Tab["type"]) => tabType === "summary";
 
   let quickStartEntries: ToolSessionEntry[] = $state([]);
   let quickStartLoading: boolean = $state(false);
@@ -738,6 +737,14 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
+  }
+
+  .session-summary-markdown {
+    margin: 0;
+    max-width: 100%;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
 
   .quick-header {
