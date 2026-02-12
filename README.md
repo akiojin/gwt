@@ -64,6 +64,18 @@ cd ..
 cargo tauri build
 ```
 
+## AI Settings
+
+Agent Mode and features like session summaries require AI settings.
+
+Steps:
+
+- Open `Settings`
+- Select a profile in `Profiles`
+- Enable `AI Settings`
+- Set `Endpoint` and `Model` (API key is optional for local LLMs)
+- Click `Save`
+
 ## Repository Layout
 
 - `crates/gwt-core/`: core logic (Git/worktree/config/logs/docker/pty)

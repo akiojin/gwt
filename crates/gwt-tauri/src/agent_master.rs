@@ -51,13 +51,34 @@ pub fn get_agent_mode_state(state: &AppState, window_label: &str) -> AgentModeSt
     guard
         .get(window_label)
         .cloned()
-        .unwrap_or_else(AgentModeState::new)
+        .unwrap_or_else(initial_agent_mode_state)
 }
 
 fn save_agent_mode_state(state: &AppState, window_label: &str, mode_state: &AgentModeState) {
     if let Ok(mut guard) = state.window_agent_modes.lock() {
         guard.insert(window_label.to_string(), mode_state.clone());
     }
+}
+
+fn initial_agent_mode_state() -> AgentModeState {
+    let mut state = AgentModeState::new();
+    match ProfilesConfig::load() {
+        Ok(profiles) => {
+            let ai = profiles.resolve_active_ai_settings();
+            if ai.resolved.is_some() {
+                state.ai_ready = true;
+                state.ai_error = None;
+            } else {
+                state.ai_ready = false;
+                state.ai_error = Some("AI settings are required.".to_string());
+            }
+        }
+        Err(e) => {
+            state.ai_ready = false;
+            state.ai_error = Some(e.to_string());
+        }
+    }
+    state
 }
 
 pub fn send_agent_message(state: &AppState, window_label: &str, input: &str) -> AgentModeState {
