@@ -326,7 +326,7 @@ impl AgentTrait for CodexAgent {
             can_read_files: true,
             can_write_files: true,
             can_use_bash: true,
-            can_use_mcp: false, // Codex doesn't support MCP
+            can_use_mcp: true,
             supports_streaming: true,
             supports_multi_turn: true,
         }
@@ -412,7 +412,7 @@ mod tests {
         let caps = agent.capabilities();
         assert!(caps.can_execute);
         assert!(caps.can_read_files);
-        assert!(!caps.can_use_mcp); // Codex doesn't support MCP
+        assert!(caps.can_use_mcp);
     }
 
     #[test]
