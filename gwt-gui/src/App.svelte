@@ -28,9 +28,11 @@
   }
 
   const SIDEBAR_WIDTH_STORAGE_KEY = "gwt.sidebar.width";
+  const SIDEBAR_MODE_STORAGE_KEY = "gwt.sidebar.mode";
   const DEFAULT_SIDEBAR_WIDTH_PX = 260;
   const MIN_SIDEBAR_WIDTH_PX = 220;
   const MAX_SIDEBAR_WIDTH_PX = 520;
+  type SidebarMode = "branch" | "agent";
 
   function clampSidebarWidth(widthPx: number): number {
     if (!Number.isFinite(widthPx)) return DEFAULT_SIDEBAR_WIDTH_PX;
@@ -60,10 +62,30 @@
     }
   }
 
+  function loadSidebarMode(): SidebarMode {
+    if (typeof window === "undefined") return "branch";
+    try {
+      const raw = window.localStorage.getItem(SIDEBAR_MODE_STORAGE_KEY);
+      return raw === "agent" || raw === "branch" ? raw : "branch";
+    } catch {
+      return "branch";
+    }
+  }
+
+  function persistSidebarMode(mode: SidebarMode) {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(SIDEBAR_MODE_STORAGE_KEY, mode);
+    } catch {
+      // Ignore localStorage failures (e.g., disabled in strict environments).
+    }
+  }
+
   let projectPath: string | null = $state(null);
   let appVersion: string | null = $state(null);
   let sidebarVisible: boolean = $state(true);
   let sidebarWidthPx: number = $state(loadSidebarWidth());
+  let sidebarMode: SidebarMode = $state(loadSidebarMode());
   let showAgentLaunch: boolean = $state(false);
   let showCleanupModal: boolean = $state(false);
   let cleanupPreselectedBranch: string | null = $state(null);
@@ -324,6 +346,12 @@
     persistSidebarWidth(next);
   }
 
+  function handleSidebarModeChange(next: SidebarMode) {
+    if (sidebarMode === next) return;
+    sidebarMode = next;
+    persistSidebarMode(next);
+  }
+
   function handleBranchActivate(branch: BranchInfo) {
     handleBranchSelect(branch);
     requestAgentLaunch();
@@ -465,24 +493,6 @@
     activeTabId = tab.id;
   }
 
-  function openAgentModeTab() {
-    const existing = tabs.find((t) => t.type === "agentMode" || t.id === "agentMode");
-    if (existing) {
-      activeTabId = existing.id;
-      return;
-    }
-
-    const tab: Tab = { id: "agentMode", label: "Agent Mode", type: "agentMode" };
-    const summaryIndex = tabs.findIndex((t) => t.type === "summary" || t.id === "summary");
-    if (summaryIndex >= 0) {
-      const nextTabs = [...tabs];
-      nextTabs.splice(summaryIndex + 1, 0, tab);
-      tabs = nextTabs;
-    } else {
-      tabs = [...tabs, tab];
-    }
-    activeTabId = tab.id;
-  }
 
   async function syncWindowAgentTabs() {
     try {
@@ -631,9 +641,6 @@
         break;
       case "version-history":
         openVersionHistoryTab();
-        break;
-      case "open-agent-mode":
-        openAgentModeTab();
         break;
       case "about":
         showAbout = true;
@@ -796,6 +803,10 @@
           widthPx={sidebarWidthPx}
           minWidthPx={MIN_SIDEBAR_WIDTH_PX}
           maxWidthPx={MAX_SIDEBAR_WIDTH_PX}
+          mode={sidebarMode}
+          onModeChange={handleSidebarModeChange}
+          {selectedBranch}
+          {currentBranch}
           onResize={handleSidebarResize}
           onBranchSelect={handleBranchSelect}
           onBranchActivate={handleBranchActivate}
