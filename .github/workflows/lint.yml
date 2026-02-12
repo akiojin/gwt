@@ -75,7 +75,7 @@ jobs:
           FROM_SHA=${LAST_BASE_MERGE:-$MERGE_BASE}
           COMMIT_COUNT=$(git rev-list --count "$FROM_SHA".."$HEAD_SHA")
           if [ "$COMMIT_COUNT" -gt 100 ]; then
-            pnpm dlx @commitlint/cli@20.4.1 commitlint --config commitlint.config.cjs --from "HEAD~50" --to "HEAD" --verbose
+            pnpm dlx @commitlint/cli@20.4.1 --config commitlint.config.cjs --from "HEAD~50" --to "HEAD" --verbose
           else
-            pnpm dlx @commitlint/cli@20.4.1 commitlint --config commitlint.config.cjs --from "$FROM_SHA" --to "$HEAD_SHA" --verbose
+            pnpm dlx @commitlint/cli@20.4.1 --config commitlint.config.cjs --from "$FROM_SHA" --to "$HEAD_SHA" --verbose
           fi
