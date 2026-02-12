@@ -58,11 +58,14 @@ jobs:
         continue-on-error: true
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          COMMIT_COUNT=$(git rev-list --count "$BASE_SHA".."$HEAD_SHA")
+          git fetch origin "$BASE_REF" --depth=1
+          MERGE_BASE=$(git merge-base "$HEAD_SHA" "origin/$BASE_REF")
+          COMMIT_COUNT=$(git rev-list --count "$MERGE_BASE".."$HEAD_SHA")
           if [ "$COMMIT_COUNT" -gt 100 ]; then
             pnpm dlx @commitlint/cli@20.4.1 commitlint --config commitlint.config.cjs --from "HEAD~50" --to "HEAD" --verbose
           else
-            pnpm dlx @commitlint/cli@20.4.1 commitlint --config commitlint.config.cjs --from "$BASE_SHA" --to "$HEAD_SHA" --verbose
+            pnpm dlx @commitlint/cli@20.4.1 commitlint --config commitlint.config.cjs --from "$MERGE_BASE" --to "$HEAD_SHA" --verbose
           fi
