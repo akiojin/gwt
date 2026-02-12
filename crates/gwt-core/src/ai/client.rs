@@ -340,7 +340,7 @@ impl AIClient {
         tools: Vec<ToolDefinition>,
     ) -> Result<AIResponse, AIError> {
         let url = build_responses_url(&self.endpoint)?;
-        let (instructions, input) = build_responses_input(messages);
+        let (instructions, input) = build_responses_input(&messages);
         if input.is_empty() {
             return Err(AIError::ConfigError("No input messages".to_string()));
         }
