@@ -25,6 +25,7 @@
   function requestTerminalFocus() {
     if (!terminal) return;
     requestAnimationFrame(() => {
+      if (!active) return;
       try {
         terminal?.focus();
       } catch {
