@@ -289,7 +289,8 @@ fn is_latest_scrollback_candidate(
     branch: &str,
     pane_id: &str,
 ) -> bool {
-    let Some(candidate) = latest_scrollback_candidate_for_branch(state, repo_path, branch, None) else {
+    let Some(candidate) = latest_scrollback_candidate_for_branch(state, repo_path, branch, None)
+    else {
         return false;
     };
     candidate.pane_id == pane_id
@@ -365,10 +366,7 @@ fn get_branch_session_summary_immediate(
     let entries = gwt_core::config::get_branch_tool_history(&repo_path, branch);
     let entry = entries.first();
 
-    let tool_id = entry
-        .map(|e| e.tool_id.trim())
-        .unwrap_or("")
-        .to_string();
+    let tool_id = entry.map(|e| e.tool_id.trim()).unwrap_or("").to_string();
     let session_id = entry
         .and_then(|e| e.session_id.as_deref())
         .unwrap_or("")
@@ -380,7 +378,11 @@ fn get_branch_session_summary_immediate(
             state,
             &repo_path,
             branch,
-            if tool_id.is_empty() { None } else { Some(tool_id.as_str()) },
+            if tool_id.is_empty() {
+                None
+            } else {
+                Some(tool_id.as_str())
+            },
         );
         let Some(candidate) = candidate else {
             return Ok((
@@ -403,12 +405,7 @@ fn get_branch_session_summary_immediate(
 
         if !ai.ai_enabled {
             return Ok((
-                summary_status(
-                    "ai-not-configured",
-                    Some(candidate.tool_id),
-                    None,
-                    None,
-                ),
+                summary_status("ai-not-configured", Some(candidate.tool_id), None, None),
                 None,
             ));
         }
@@ -613,8 +610,15 @@ fn start_session_summary_job(job: SessionSummaryJob, state: &AppState, app_handl
     });
 }
 
-fn start_scrollback_summary_job(job: ScrollbackSummaryJob, state: &AppState, app_handle: AppHandle) {
-    let inflight_key = format!("scrollback::{}::{}::{}", job.repo_key, job.branch, job.pane_id);
+fn start_scrollback_summary_job(
+    job: ScrollbackSummaryJob,
+    state: &AppState,
+    app_handle: AppHandle,
+) {
+    let inflight_key = format!(
+        "scrollback::{}::{}::{}",
+        job.repo_key, job.branch, job.pane_id
+    );
     let should_spawn = match state.session_summary_inflight.lock() {
         Ok(mut set) => {
             if set.contains(&inflight_key) {
@@ -798,7 +802,9 @@ fn generate_and_cache_scrollback_summary(
         Err(err) => {
             if let Some(prev) = previous_any.as_ref() {
                 let mut out = ok_summary(&job.tool_id, &pane_session, prev);
-                out.warning = Some(format!("Failed to read scrollback; keeping previous: {err}"));
+                out.warning = Some(format!(
+                    "Failed to read scrollback; keeping previous: {err}"
+                ));
                 return out;
             }
             return summary_status(
