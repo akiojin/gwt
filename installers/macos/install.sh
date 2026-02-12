@@ -1,21 +1,24 @@
 #!/bin/bash
 # gwt installer for macOS
-# Usage: curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash
-# Or with a specific version:
+# Installs gwt.app to /Applications via .pkg from GitHub Releases
+#
+# Usage:
+#   curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash
+#
+# Install a specific version:
 #   curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash -s -- --version 6.30.3
 
 set -euo pipefail
 
 REPO="akiojin/gwt"
-INSTALL_DIR="${GWT_INSTALL_DIR:-/usr/local/bin}"
-BINARY_NAME="gwt"
+APP_NAME="gwt"
 
 # --- helpers ---------------------------------------------------------------
 
-info()  { printf '\033[1;34m%s\033[0m\n' "$*"; }
-ok()    { printf '\033[1;32m%s\033[0m\n' "$*"; }
-err()   { printf '\033[1;31mError: %s\033[0m\n' "$*" >&2; }
-warn()  { printf '\033[1;33m%s\033[0m\n' "$*"; }
+info()  { printf '\033[1;34m[info]\033[0m %s\n' "$*"; }
+ok()    { printf '\033[1;32m[ok]\033[0m %s\n' "$*"; }
+err()   { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; }
+warn()  { printf '\033[1;33m[warn]\033[0m %s\n' "$*"; }
 
 need_cmd() {
   if ! command -v "$1" > /dev/null 2>&1; then
@@ -36,6 +39,8 @@ while [[ $# -gt 0 ]]; do
     --help|-h)
       echo "Usage: install.sh [--version VERSION]"
       echo ""
+      echo "Installs gwt.app to /Applications via .pkg"
+      echo ""
       echo "Options:"
       echo "  --version, -v   Install a specific version (e.g. 6.30.3)"
       echo "  --help, -h      Show this help"
@@ -52,6 +57,7 @@ done
 
 need_cmd curl
 need_cmd uname
+need_cmd installer
 
 # --- detect platform -------------------------------------------------------
 
@@ -65,10 +71,10 @@ fi
 
 case "$ARCH" in
   arm64|aarch64)
-    ARTIFACT="gwt-macos-aarch64"
+    PKG_ARCH="arm64"
     ;;
   x86_64)
-    ARTIFACT="gwt-macos-x86_64"
+    PKG_ARCH="x86_64"
     ;;
   *)
     err "Unsupported architecture: $ARCH"
@@ -90,17 +96,19 @@ fi
 
 # Strip leading 'v' if present
 VERSION="${VERSION#v}"
-DOWNLOAD_URL="https://github.com/${REPO}/releases/download/v${VERSION}/${ARTIFACT}"
+PKG_NAME="gwt-macos-${PKG_ARCH}.pkg"
+DOWNLOAD_URL="https://github.com/${REPO}/releases/download/v${VERSION}/${PKG_NAME}"
 
 # --- download & install ----------------------------------------------------
 
 info "Installing gwt v${VERSION} (${ARCH})..."
-info "Downloading from: ${DOWNLOAD_URL}"
+info "Downloading: ${DOWNLOAD_URL}"
 
 TMPDIR_INSTALL="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_INSTALL"' EXIT
 
-HTTP_CODE=$(curl -fSL -w '%{http_code}' -o "${TMPDIR_INSTALL}/${BINARY_NAME}" "$DOWNLOAD_URL" 2>/dev/null) || true
+PKG_PATH="${TMPDIR_INSTALL}/${PKG_NAME}"
+HTTP_CODE=$(curl -fSL -w '%{http_code}' -o "$PKG_PATH" "$DOWNLOAD_URL" 2>/dev/null) || true
 
 if [[ "$HTTP_CODE" != "200" ]]; then
   err "Download failed (HTTP ${HTTP_CODE})"
@@ -110,33 +118,22 @@ if [[ "$HTTP_CODE" != "200" ]]; then
   exit 1
 fi
 
-chmod +x "${TMPDIR_INSTALL}/${BINARY_NAME}"
-
-# Verify the binary runs
-if ! "${TMPDIR_INSTALL}/${BINARY_NAME}" --version > /dev/null 2>&1; then
-  warn "Binary downloaded but --version check failed (this may be expected for GUI builds)"
+if [[ ! -s "$PKG_PATH" ]]; then
+  err "Downloaded file is empty"
+  exit 1
 fi
 
-# Install
-if [[ ! -d "$INSTALL_DIR" ]]; then
-  mkdir -p "$INSTALL_DIR" 2>/dev/null || sudo mkdir -p "$INSTALL_DIR"
-fi
-
-if [[ -w "$INSTALL_DIR" ]]; then
-  mv "${TMPDIR_INSTALL}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
-else
-  info "Installing to ${INSTALL_DIR} (requires sudo)..."
-  sudo mv "${TMPDIR_INSTALL}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
-fi
+info "Installing to /Applications (requires sudo)..."
+sudo installer -pkg "$PKG_PATH" -target /
 
 # --- verify ----------------------------------------------------------------
 
-if command -v gwt > /dev/null 2>&1; then
-  ok "gwt v${VERSION} installed successfully to ${INSTALL_DIR}/${BINARY_NAME}"
-else
-  warn "gwt installed to ${INSTALL_DIR}/${BINARY_NAME}"
-  warn "${INSTALL_DIR} may not be in your PATH."
+if [[ -d "/Applications/${APP_NAME}.app" ]]; then
+  ok "gwt v${VERSION} installed successfully to /Applications/${APP_NAME}.app"
   echo ""
-  echo "Add it to your PATH:"
-  echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
+  echo "Launch gwt from Applications or run:"
+  echo "  open /Applications/${APP_NAME}.app"
+else
+  warn "Installation completed but ${APP_NAME}.app was not found in /Applications"
+  warn "Check /Applications for the installed application"
 fi
