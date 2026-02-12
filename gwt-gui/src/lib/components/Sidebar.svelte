@@ -502,6 +502,9 @@
     <input
       type="text"
       autocapitalize="off"
+      autocorrect="off"
+      autocomplete="off"
+      spellcheck="false"
       class="search-input"
       placeholder="Filter branches..."
       bind:value={searchQuery}
