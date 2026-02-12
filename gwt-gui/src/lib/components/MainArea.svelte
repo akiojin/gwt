@@ -739,6 +739,14 @@
     gap: 10px;
   }
 
+  .session-summary-markdown {
+    margin: 0;
+    max-width: 100%;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
   .quick-header {
     display: flex;
     align-items: baseline;
