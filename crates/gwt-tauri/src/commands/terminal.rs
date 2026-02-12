@@ -1153,6 +1153,21 @@ mod tests {
         let result = send_keys_to_pane_from_state(&state, pane_id, "hello\n");
         assert!(result.is_err());
 
+        {
+            let mut mgr = state.pane_manager.lock().unwrap();
+            for _ in 0..20 {
+                let status = {
+                    let pane = mgr.pane_mut_by_id(pane_id).expect("missing test pane");
+                    let _ = pane.check_status();
+                    pane.status()
+                };
+                if !matches!(status, PaneStatus::Running) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
         let mut mgr = state.pane_manager.lock().unwrap();
         let _ = mgr.kill_all();
     }
@@ -2703,6 +2718,10 @@ pub(crate) fn send_keys_to_pane_from_state(
         PaneStatus::Completed(_) | PaneStatus::Error(_) => {
             return Err(format!("Pane not running: {}", pane_id));
         }
+    }
+
+    if !matches!(pane.status(), PaneStatus::Running) {
+        return Err(format!("Pane not running: {}", pane_id));
     }
 
     Ok(())
