@@ -107,8 +107,8 @@ pub fn get_settings(window: tauri::Window, state: State<AppState>) -> Result<Set
         let repo_root = match state.project_for_window(window.label()) {
             Some(p) => PathBuf::from(p),
             None => {
-                // Return default settings if no project is opened in this window
-                return Ok(SettingsData::from(&Settings::default()));
+                let settings = Settings::load_global().map_err(|e| e.to_string())?;
+                return Ok(SettingsData::from(&settings));
             }
         };
 
