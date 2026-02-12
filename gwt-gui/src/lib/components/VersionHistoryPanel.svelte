@@ -301,6 +301,7 @@
     border-radius: 12px;
     background: var(--bg-secondary);
     overflow: hidden;
+    flex-shrink: 0;
   }
 
   .vh-card-header {
