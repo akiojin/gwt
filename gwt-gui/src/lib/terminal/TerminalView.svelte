@@ -16,7 +16,11 @@
   let fitAddon: FitAddon | undefined = $state(undefined);
   let resizeObserver: ResizeObserver | undefined = $state(undefined);
   let unlisten: (() => void) | undefined = $state(undefined);
-  let focusedForActive: boolean = $state(false);
+
+  function isTerminalFocused(rootEl: HTMLElement): boolean {
+    const el = document.activeElement;
+    return !!el && rootEl.contains(el);
+  }
 
   function requestTerminalFocus() {
     if (!terminal) return;
@@ -33,16 +37,34 @@
     void active;
     void terminal;
 
-    if (!active) {
-      focusedForActive = false;
-      return;
-    }
+    if (!active) return;
 
-    if (focusedForActive) return;
+    const rootEl = containerEl;
+    if (!rootEl) return;
     if (!terminal) return;
 
-    focusedForActive = true;
-    requestTerminalFocus();
+    // Focus can fail if an overlay/modal is still on-screen when the tab becomes active.
+    // Retry a few times shortly after activation to make trackpad scrolling reliable.
+    const focusIfNeeded = () => {
+      if (!active) return;
+      if (!terminal) return;
+      if (isTerminalFocused(rootEl)) return;
+      requestTerminalFocus();
+    };
+
+    focusIfNeeded();
+
+    const timers = [
+      window.setTimeout(focusIfNeeded, 60),
+      window.setTimeout(focusIfNeeded, 200),
+      window.setTimeout(focusIfNeeded, 500),
+    ];
+
+    return () => {
+      for (const id of timers) {
+        window.clearTimeout(id);
+      }
+    };
   });
 
   function getInitialTerminalFontSize(): number {
@@ -135,6 +157,14 @@
       notifyResize(term.rows, term.cols);
     });
 
+    const handleWheel = () => {
+      if (!active) return;
+      if (!terminal) return;
+      if (isTerminalFocused(rootEl)) return;
+      requestTerminalFocus();
+    };
+    rootEl.addEventListener("wheel", handleWheel, { passive: true });
+
     term.attachCustomKeyEventHandler((event: KeyboardEvent) => {
       if (event.type !== "keydown") return true;
 
@@ -221,6 +251,7 @@
         unlisten();
       }
       rootEl.removeEventListener("paste", handlePaste);
+      rootEl.removeEventListener("wheel", handleWheel);
       window.removeEventListener("gwt-terminal-font-size", handleFontSizeChange);
       observer.disconnect();
       term.dispose();
