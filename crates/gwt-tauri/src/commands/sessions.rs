@@ -1,16 +1,19 @@
 //! Session history commands (Quick Start)
 
 use crate::commands::project::resolve_repo_path_for_project_root;
+use crate::commands::terminal::capture_scrollback_tail_from_state;
 use crate::state::AppState;
 use gwt_core::ai::{
-    format_error_for_display, summarize_session, AIClient, AIError, AgentType as AiAgentType,
-    ClaudeSessionParser, CodexSessionParser, GeminiSessionParser, OpenCodeSessionParser,
-    SessionParseError, SessionParser, SessionSummary,
+    format_error_for_display, summarize_scrollback, summarize_session, AIClient, AIError,
+    AgentType as AiAgentType, ClaudeSessionParser, CodexSessionParser, GeminiSessionParser,
+    OpenCodeSessionParser, SessionParseError, SessionParser, SessionSummary,
 };
 use gwt_core::config::{ProfilesConfig, ResolvedAISettings, ToolSessionEntry};
+use gwt_core::terminal::pane::PaneStatus;
+use gwt_core::terminal::scrollback::ScrollbackFile;
 use serde::Serialize;
 use std::path::Path;
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 /// Return tool-specific latest session entries for a branch (Quick Start).
@@ -126,6 +129,26 @@ fn session_parser_for_tool(tool_id: &str) -> Option<Box<dyn SessionParser>> {
     }
 }
 
+fn tool_id_for_agent(agent_id: &str) -> String {
+    match agent_id {
+        "claude" => "claude-code".to_string(),
+        "codex" => "codex-cli".to_string(),
+        "gemini" => "gemini-cli".to_string(),
+        "opencode" => "opencode".to_string(),
+        _ => agent_id.to_string(),
+    }
+}
+
+fn pane_session_id(pane_id: &str) -> String {
+    format!("pane:{pane_id}")
+}
+
+fn system_time_millis(time: SystemTime) -> u128 {
+    time.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
 #[derive(Debug, Clone)]
 struct SessionSummaryJob {
     project_path: String,
@@ -137,6 +160,30 @@ struct SessionSummaryJob {
     mtime: SystemTime,
 }
 
+#[derive(Debug, Clone)]
+struct ScrollbackSummaryJob {
+    project_path: String,
+    repo_key: String,
+    branch: String,
+    pane_id: String,
+    tool_id: String,
+    settings: ResolvedAISettings,
+    mtime: SystemTime,
+}
+
+#[derive(Debug, Clone)]
+enum SummaryJob {
+    Session(SessionSummaryJob),
+    Scrollback(ScrollbackSummaryJob),
+}
+
+#[derive(Debug, Clone)]
+struct ScrollbackCandidate {
+    pane_id: String,
+    tool_id: String,
+    mtime: SystemTime,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionSummaryUpdatedPayload {
@@ -145,11 +192,168 @@ struct SessionSummaryUpdatedPayload {
     pub result: SessionSummaryResult,
 }
 
+fn scrollback_mtime_for_pane(pane_id: &str) -> Option<SystemTime> {
+    let path = ScrollbackFile::scrollback_path_for_pane(pane_id).ok()?;
+    let metadata = std::fs::metadata(&path).ok()?;
+    metadata.modified().ok()
+}
+
+fn collect_scrollback_candidates(
+    state: &AppState,
+    repo_path: &Path,
+    branch: &str,
+    fallback_tool_id: Option<&str>,
+) -> Vec<ScrollbackCandidate> {
+    let panes = match state.pane_manager.lock() {
+        Ok(manager) => manager
+            .panes()
+            .iter()
+            .map(|pane| {
+                (
+                    pane.pane_id().to_string(),
+                    pane.branch_name().to_string(),
+                    pane.status().clone(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        Err(_) => Vec::new(),
+    };
+
+    let launch_meta = state
+        .pane_launch_meta
+        .lock()
+        .ok()
+        .map(|m| m.clone())
+        .unwrap_or_default();
+
+    let mut out = Vec::new();
+    for (pane_id, pane_branch, status) in panes {
+        if pane_branch != branch {
+            continue;
+        }
+        if !matches!(status, PaneStatus::Running) {
+            continue;
+        }
+
+        let mut tool_id = fallback_tool_id.unwrap_or("").to_string();
+        let mut include = true;
+        if let Some(meta) = launch_meta.get(&pane_id) {
+            if meta.repo_path.as_path() != repo_path {
+                include = false;
+            } else {
+                tool_id = tool_id_for_agent(&meta.agent_id);
+            }
+        }
+        if !include {
+            continue;
+        }
+        if tool_id.trim().is_empty() {
+            tool_id = "unknown".to_string();
+        }
+
+        let Some(mtime) = scrollback_mtime_for_pane(&pane_id) else {
+            continue;
+        };
+
+        out.push(ScrollbackCandidate {
+            pane_id,
+            tool_id,
+            mtime,
+        });
+    }
+
+    out
+}
+
+fn select_latest_scrollback_candidate(
+    candidates: Vec<ScrollbackCandidate>,
+) -> Option<ScrollbackCandidate> {
+    candidates
+        .into_iter()
+        .max_by_key(|c| system_time_millis(c.mtime))
+}
+
+fn latest_scrollback_candidate_for_branch(
+    state: &AppState,
+    repo_path: &Path,
+    branch: &str,
+    fallback_tool_id: Option<&str>,
+) -> Option<ScrollbackCandidate> {
+    let candidates = collect_scrollback_candidates(state, repo_path, branch, fallback_tool_id);
+    select_latest_scrollback_candidate(candidates)
+}
+
+fn is_latest_scrollback_candidate(
+    state: &AppState,
+    repo_path: &Path,
+    branch: &str,
+    pane_id: &str,
+) -> bool {
+    let Some(candidate) = latest_scrollback_candidate_for_branch(state, repo_path, branch, None)
+    else {
+        return false;
+    };
+    candidate.pane_id == pane_id
+}
+
+fn scrollback_summary_immediate(
+    project_path: &str,
+    repo_key: &str,
+    branch: &str,
+    candidate: ScrollbackCandidate,
+    settings: ResolvedAISettings,
+    state: &AppState,
+) -> (SessionSummaryResult, Option<ScrollbackSummaryJob>) {
+    let pane_session = pane_session_id(&candidate.pane_id);
+
+    let (cached_ok, previous_any) = {
+        let cache_guard = match state.session_summary_cache.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                return (
+                    summary_status(
+                        "error",
+                        Some(candidate.tool_id),
+                        Some(pane_session),
+                        Some("Session summary cache lock poisoned".to_string()),
+                    ),
+                    None,
+                )
+            }
+        };
+        let cache = cache_guard.get(repo_key);
+        let cached_ok = cache.and_then(|c| {
+            c.get(branch)
+                .cloned()
+                .filter(|_| !c.is_stale(branch, &pane_session, candidate.mtime))
+        });
+        let previous_any = cache.and_then(|c| c.get(branch).cloned());
+        (cached_ok, previous_any)
+    };
+
+    if let Some(summary) = cached_ok.as_ref() {
+        return (ok_summary(&candidate.tool_id, &pane_session, summary), None);
+    }
+
+    let immediate = generating_summary(&candidate.tool_id, &pane_session, previous_any.as_ref());
+    let job = ScrollbackSummaryJob {
+        project_path: project_path.to_string(),
+        repo_key: repo_key.to_string(),
+        branch: branch.to_string(),
+        pane_id: candidate.pane_id,
+        tool_id: candidate.tool_id,
+        settings,
+        mtime: candidate.mtime,
+    };
+
+    (immediate, Some(job))
+}
+
 fn get_branch_session_summary_immediate(
     project_path: &str,
     branch: &str,
     state: &AppState,
-) -> Result<(SessionSummaryResult, Option<SessionSummaryJob>), String> {
+) -> Result<(SessionSummaryResult, Option<SummaryJob>), String> {
     let project_root = Path::new(project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)?;
     let repo_key = repo_path.to_string_lossy().to_string();
@@ -160,31 +364,72 @@ fn get_branch_session_summary_immediate(
     }
 
     let entries = gwt_core::config::get_branch_tool_history(&repo_path, branch);
-    let Some(entry) = entries.first() else {
-        return Ok((summary_status("no-session", None, None, None), None));
-    };
+    let entry = entries.first();
 
-    let tool_id = entry.tool_id.trim().to_string();
-    let session_id = entry.session_id.as_deref().unwrap_or("").trim().to_string();
+    let tool_id = entry.map(|e| e.tool_id.trim()).unwrap_or("").to_string();
+    let session_id = entry
+        .and_then(|e| e.session_id.as_deref())
+        .unwrap_or("")
+        .trim()
+        .to_string();
 
     if tool_id.is_empty() || session_id.is_empty() {
-        return Ok((
-            summary_status(
-                "no-session",
-                if tool_id.is_empty() {
-                    None
-                } else {
-                    Some(tool_id)
-                },
-                if session_id.is_empty() {
-                    None
-                } else {
-                    Some(session_id)
-                },
+        let candidate = latest_scrollback_candidate_for_branch(
+            state,
+            &repo_path,
+            branch,
+            if tool_id.is_empty() {
+                None
+            } else {
+                Some(tool_id.as_str())
+            },
+        );
+        let Some(candidate) = candidate else {
+            return Ok((
+                summary_status(
+                    "no-session",
+                    if tool_id.is_empty() {
+                        None
+                    } else {
+                        Some(tool_id)
+                    },
+                    None,
+                    None,
+                ),
                 None,
-            ),
-            None,
-        ));
+            ));
+        };
+
+        let profiles = ProfilesConfig::load().map_err(|e| e.to_string())?;
+        let ai = profiles.resolve_active_ai_settings();
+
+        if !ai.ai_enabled {
+            return Ok((
+                summary_status("ai-not-configured", Some(candidate.tool_id), None, None),
+                None,
+            ));
+        }
+        if !ai.summary_enabled {
+            return Ok((
+                summary_status("disabled", Some(candidate.tool_id), None, None),
+                None,
+            ));
+        }
+
+        let settings = ai
+            .resolved
+            .ok_or_else(|| "AI settings are not configured".to_string())?;
+
+        let (immediate, job) = scrollback_summary_immediate(
+            project_path,
+            &repo_key,
+            branch,
+            candidate,
+            settings,
+            state,
+        );
+        let job = job.map(SummaryJob::Scrollback);
+        return Ok((immediate, job));
     }
 
     let profiles = ProfilesConfig::load().map_err(|e| e.to_string())?;
@@ -290,7 +535,7 @@ fn get_branch_session_summary_immediate(
         mtime,
     };
 
-    Ok((immediate, Some(job)))
+    Ok((immediate, Some(SummaryJob::Session(job))))
 }
 
 fn is_latest_branch_session(repo_key: &str, branch: &str, tool_id: &str, session_id: &str) -> bool {
@@ -353,6 +598,69 @@ fn start_session_summary_job(job: SessionSummaryJob, state: &AppState, app_handl
         // If the branch has moved to a different latest session while this job was running,
         // skip emitting an update event to avoid clobbering the UI with stale data.
         if !is_latest_branch_session(&job.repo_key, &job.branch, &job.tool_id, &job.session_id) {
+            return;
+        }
+
+        let payload = SessionSummaryUpdatedPayload {
+            project_path: job.project_path.clone(),
+            branch: job.branch.clone(),
+            result,
+        };
+        let _ = app_handle_clone.emit("session-summary-updated", &payload);
+    });
+}
+
+fn start_scrollback_summary_job(
+    job: ScrollbackSummaryJob,
+    state: &AppState,
+    app_handle: AppHandle,
+) {
+    let inflight_key = format!(
+        "scrollback::{}::{}::{}",
+        job.repo_key, job.branch, job.pane_id
+    );
+    let should_spawn = match state.session_summary_inflight.lock() {
+        Ok(mut set) => {
+            if set.contains(&inflight_key) {
+                false
+            } else {
+                set.insert(inflight_key.clone());
+                true
+            }
+        }
+        Err(_) => false,
+    };
+
+    if !should_spawn {
+        return;
+    }
+
+    let app_handle_clone = app_handle.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle_clone.state::<AppState>();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            generate_and_cache_scrollback_summary(&job, &state)
+        }))
+        .unwrap_or_else(|_| {
+            summary_status(
+                "error",
+                Some(job.tool_id.clone()),
+                Some(pane_session_id(&job.pane_id)),
+                Some("Internal error".to_string()),
+            )
+        });
+
+        if let Ok(mut set) = state.session_summary_inflight.lock() {
+            set.remove(&inflight_key);
+        }
+
+        if !is_latest_scrollback_candidate(
+            &state,
+            Path::new(&job.repo_key),
+            &job.branch,
+            &job.pane_id,
+        ) {
             return;
         }
 
@@ -478,6 +786,106 @@ fn generate_and_cache_session_summary(
     }
 }
 
+fn generate_and_cache_scrollback_summary(
+    job: &ScrollbackSummaryJob,
+    state: &AppState,
+) -> SessionSummaryResult {
+    let previous_any = state.session_summary_cache.lock().ok().and_then(|guard| {
+        guard
+            .get(&job.repo_key)
+            .and_then(|c| c.get(&job.branch).cloned())
+    });
+
+    let pane_session = pane_session_id(&job.pane_id);
+    let scrollback = match capture_scrollback_tail_from_state(state, &job.pane_id, 0) {
+        Ok(text) => text,
+        Err(err) => {
+            if let Some(prev) = previous_any.as_ref() {
+                let mut out = ok_summary(&job.tool_id, &pane_session, prev);
+                out.warning = Some(format!(
+                    "Failed to read scrollback; keeping previous: {err}"
+                ));
+                return out;
+            }
+            return summary_status(
+                "error",
+                Some(job.tool_id.clone()),
+                Some(pane_session),
+                Some(err),
+            );
+        }
+    };
+
+    let client = match AIClient::new(job.settings.clone()) {
+        Ok(client) => client,
+        Err(err) => {
+            if let Some(prev) = previous_any.as_ref() {
+                let mut out = ok_summary(&job.tool_id, &pane_session, prev);
+                out.warning = Some(format!("Failed to initialize AI; keeping previous: {err}"));
+                return out;
+            }
+            return summary_status(
+                "error",
+                Some(job.tool_id.clone()),
+                Some(pane_session),
+                Some(err.to_string()),
+            );
+        }
+    };
+
+    match summarize_scrollback(&client, &scrollback, &job.branch) {
+        Ok(summary) => {
+            if is_latest_scrollback_candidate(
+                state,
+                Path::new(&job.repo_key),
+                &job.branch,
+                &job.pane_id,
+            ) {
+                if let Ok(mut cache_guard) = state.session_summary_cache.lock() {
+                    cache_guard.entry(job.repo_key.clone()).or_default().set(
+                        job.branch.clone(),
+                        pane_session.clone(),
+                        summary.clone(),
+                        job.mtime,
+                    );
+                }
+            }
+            ok_summary(&job.tool_id, &pane_session, &summary)
+        }
+        Err(AIError::IncompleteSummary) => {
+            if let Some(prev) = previous_any.as_ref() {
+                let mut out = ok_summary(&job.tool_id, &pane_session, prev);
+                out.warning = Some("Incomplete summary; keeping previous".to_string());
+                out
+            } else {
+                summary_status(
+                    "error",
+                    Some(job.tool_id.clone()),
+                    Some(pane_session),
+                    Some(format_error_for_display(&AIError::IncompleteSummary)),
+                )
+            }
+        }
+        Err(other) => {
+            if let Some(prev) = previous_any.as_ref() {
+                let mut out = ok_summary(&job.tool_id, &pane_session, prev);
+                out.warning = Some(format!(
+                    "Update failed; keeping previous: {}",
+                    format_error_for_display(&other)
+                ));
+                out
+            } else {
+                summary_status(
+                    "error",
+                    Some(job.tool_id.clone()),
+                    Some(pane_session),
+                    Some(format_error_for_display(&other)),
+                )
+            }
+        }
+    }
+}
+
 /// Return (and cache) an AI session summary for the selected branch.
 ///
 /// - Uses the latest ToolSessionEntry for the branch (most recent tool usage).
@@ -493,7 +901,10 @@ pub fn get_branch_session_summary(
 ) -> Result<SessionSummaryResult, String> {
     let (result, job) = get_branch_session_summary_immediate(&project_path, &branch, &state)?;
     if let Some(job) = job {
-        start_session_summary_job(job, &state, app_handle);
+        match job {
+            SummaryJob::Session(job) => start_session_summary_job(job, &state, app_handle),
+            SummaryJob::Scrollback(job) => start_scrollback_summary_job(job, &state, app_handle),
+        }
     }
     Ok(result)
 }
@@ -505,6 +916,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::process::Command;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn init_git_repo(path: &Path) {
@@ -649,7 +1061,7 @@ mod tests {
         assert!(out.generating);
         assert_eq!(out.tool_id.as_deref(), Some("codex-cli"));
         assert_eq!(out.session_id.as_deref(), Some("sess-123"));
-        assert!(job.is_some());
+        assert!(matches!(job, Some(SummaryJob::Session(_))));
     }
 
     #[test]
@@ -710,5 +1122,56 @@ mod tests {
         assert!(!out.generating);
         assert!(job.is_none());
         assert!(out.markdown.as_deref().unwrap_or("").contains("Cached"));
+    }
+
+    #[test]
+    fn select_latest_scrollback_candidate_picks_latest_mtime() {
+        let base = UNIX_EPOCH + Duration::from_secs(10);
+        let older = UNIX_EPOCH + Duration::from_secs(1);
+
+        let candidates = vec![
+            ScrollbackCandidate {
+                pane_id: "pane-1".to_string(),
+                tool_id: "codex-cli".to_string(),
+                mtime: older,
+            },
+            ScrollbackCandidate {
+                pane_id: "pane-2".to_string(),
+                tool_id: "codex-cli".to_string(),
+                mtime: base,
+            },
+        ];
+
+        let selected = select_latest_scrollback_candidate(candidates).unwrap();
+        assert_eq!(selected.pane_id, "pane-2");
+    }
+
+    #[test]
+    fn scrollback_immediate_returns_job_with_pane_session_id() {
+        let state = AppState::new();
+        let candidate = ScrollbackCandidate {
+            pane_id: "pane-xyz".to_string(),
+            tool_id: "codex-cli".to_string(),
+            mtime: UNIX_EPOCH + Duration::from_secs(5),
+        };
+        let settings = ResolvedAISettings {
+            endpoint: "https://api.openai.com/v1".to_string(),
+            api_key: "".to_string(),
+            model: "gpt-4o-mini".to_string(),
+        };
+
+        let (out, job) = scrollback_summary_immediate(
+            "/tmp/project",
+            "/tmp/repo",
+            "main",
+            candidate,
+            settings,
+            &state,
+        );
+
+        assert_eq!(out.status, "ok");
+        assert!(out.generating);
+        assert!(out.session_id.as_deref().unwrap_or("").starts_with("pane:"));
+        assert!(job.is_some());
     }
 }
