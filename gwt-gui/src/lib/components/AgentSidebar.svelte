@@ -45,7 +45,7 @@
   }
 
   function toolClass(entry: ToolSessionEntry): string {
-    const id = entry.tool_id?.toLowerCase() ?? "";
+    const id = (entry.tool_id ?? entry.tool_label ?? "").toLowerCase();
     if (id.includes("claude")) return "claude";
     if (id.includes("codex")) return "codex";
     if (id.includes("gemini")) return "gemini";
@@ -54,12 +54,12 @@
   }
 
   function displayToolName(entry: ToolSessionEntry): string {
-    const id = entry.tool_id?.toLowerCase() ?? "";
+    const id = (entry.tool_id ?? entry.tool_label ?? "").toLowerCase();
     if (id.includes("claude")) return "Claude";
     if (id.includes("codex")) return "Codex";
     if (id.includes("gemini")) return "Gemini";
     if (id.includes("opencode") || id.includes("open-code")) return "OpenCode";
-    return entry.tool_label || entry.tool_id;
+    return entry.tool_label || entry.tool_id || "Agent";
   }
 
   function displayToolVersion(entry: ToolSessionEntry): string {
@@ -251,7 +251,7 @@
         <div class="agent-muted">No tasks yet.</div>
       {:else if quickStartEntries.length > 0}
         <div class="task-list">
-          {#each quickStartEntries as entry (entry.tool_id)}
+          {#each quickStartEntries as entry (entry.session_id ?? entry.tool_id ?? String(entry.timestamp))}
             <div class="task-item">
               <div class="task-title">
                 <span class="task-tool {toolClass(entry)}">{displayToolName(entry)}</span>

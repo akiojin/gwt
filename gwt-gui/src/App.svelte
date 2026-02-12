@@ -346,8 +346,26 @@
     persistSidebarWidth(next);
   }
 
+  function ensureAgentModeTab() {
+    const existing = tabs.find((t) => t.type === "agentMode" || t.id === "agentMode");
+    if (existing) return;
+
+    const tab: Tab = { id: "agentMode", label: "Agent Mode", type: "agentMode" };
+    const summaryIndex = tabs.findIndex((t) => t.type === "summary" || t.id === "summary");
+    if (summaryIndex >= 0) {
+      const nextTabs = [...tabs];
+      nextTabs.splice(summaryIndex + 1, 0, tab);
+      tabs = nextTabs;
+    } else {
+      tabs = [...tabs, tab];
+    }
+  }
+
   function handleSidebarModeChange(next: SidebarMode) {
     if (sidebarMode === next) return;
+    if (next === "agent") {
+      ensureAgentModeTab();
+    }
     sidebarMode = next;
     persistSidebarMode(next);
   }
