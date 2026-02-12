@@ -518,6 +518,7 @@
             <div class="branch-input-row">
               <input
                 type="text"
+                autocapitalize="off"
                 bind:value={newBranch}
                 placeholder="Add branch..."
                 onkeydown={handleBranchKeydown}
@@ -581,6 +582,7 @@
               <input
                 id="new-profile"
                 type="text"
+                autocapitalize="off"
                 bind:value={newProfileName}
                 placeholder="e.g. development"
               />
@@ -602,6 +604,7 @@
                     <input
                       class="env-value"
                       type="text"
+                      autocapitalize="off"
                       value={currentProfile.env[key]}
                       oninput={(e) => upsertEnvVar(key, (e.target as HTMLInputElement).value)}
                     />
@@ -614,12 +617,14 @@
                 <input
                   class="env-key-input"
                   type="text"
+                  autocapitalize="off"
                   bind:value={newEnvKey}
                   placeholder="KEY"
                 />
                 <input
                   class="env-value-input"
                   type="text"
+                  autocapitalize="off"
                   bind:value={newEnvValue}
                   placeholder="value"
                 />
@@ -652,6 +657,7 @@
                     <span class="ai-label">Endpoint</span>
                     <input
                       type="text"
+                      autocapitalize="off"
                       value={currentProfile.ai.endpoint}
                       oninput={(e) => updateAiField("endpoint", (e.target as HTMLInputElement).value)}
                     />
@@ -660,6 +666,7 @@
                     <span class="ai-label">API Key</span>
                     <input
                       type="text"
+                      autocapitalize="off"
                       value={currentProfile.ai.api_key}
                       oninput={(e) => updateAiField("api_key", (e.target as HTMLInputElement).value)}
                     />
