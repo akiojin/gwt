@@ -23,6 +23,7 @@ TUI/tmux 依存は廃止し、Tauri + GUI内蔵ターミナル（PTY）で完結
 2. マスターエージェント（GUI向け）実装
 3. Agent Mode タブUI
 4. 既存仕様のGUI向け更新
+5. Agent Mode UIの会話表示/IME送信制御/送信中表示
 
 ## 主要コード構成
 
@@ -45,3 +46,6 @@ gwt-gui/src/
 - Agent Mode タブでチャット入力ができる
 - Tool Calling で `send_keys_to_pane` が実行できる
 - `capture_scrollback_tail` がテキストを返せる
+- IME変換中のEnterで送信されない
+- 送信中にスピナーが表示される
+- チャット履歴が会話形式のバブル表示になる
