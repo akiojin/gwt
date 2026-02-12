@@ -974,6 +974,7 @@ mod tests {
     use super::*;
     use gwt_core::terminal::runner::FallbackRunner;
     use std::path::Path;
+    use std::time::Duration;
 
     #[test]
     fn is_node_modules_bin_matches_common_paths() {
@@ -1199,6 +1200,21 @@ mod tests {
             mgr.add_pane(pane_running)
                 .expect("failed to add running pane");
             mgr.add_pane(pane_done).expect("failed to add done pane");
+        }
+
+        {
+            let mut mgr = state.pane_manager.lock().unwrap();
+            for _ in 0..20 {
+                let status = {
+                    let pane = mgr.pane_mut_by_id("pane-done").expect("missing done pane");
+                    let _ = pane.check_status();
+                    pane.status()
+                };
+                if !matches!(status, PaneStatus::Running) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
 
         let sent = send_keys_broadcast_from_state(&state, "ping\n").expect("broadcast failed");

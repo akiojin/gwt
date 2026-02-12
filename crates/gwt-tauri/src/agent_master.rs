@@ -181,9 +181,7 @@ fn apply_ai_response(
 fn execute_tool_calls(state: &AppState, tool_calls: &[ToolCall]) -> Vec<String> {
     let mut results = Vec::new();
     for call in tool_calls {
-        let result = execute_tool_call(state, call)
-            .map(|r| r)
-            .unwrap_or_else(|e| format!("error: {e}"));
+        let result = execute_tool_call(state, call).unwrap_or_else(|e| format!("error: {e}"));
         results.push(format!("{} => {}", call.name, result));
     }
     results
