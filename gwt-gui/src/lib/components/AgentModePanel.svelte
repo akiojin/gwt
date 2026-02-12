@@ -15,6 +15,7 @@
 
   let input = "";
   let sending = false;
+  let isComposing = false;
 
   function toErrorMessage(err: unknown): string {
     if (!err) return "Unknown error";
@@ -58,10 +59,19 @@
   }
 
   function onKeydown(event: KeyboardEvent) {
+    if (isComposing || event.isComposing) return;
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       void sendMessage();
     }
+  }
+
+  function onCompositionStart() {
+    isComposing = true;
+  }
+
+  function onCompositionEnd() {
+    isComposing = false;
   }
 
   onMount(() => {
@@ -104,11 +114,16 @@
       placeholder="Type a task and press Enter..."
       bind:value={input}
       onkeydown={onKeydown}
+      oncompositionstart={onCompositionStart}
+      oncompositionend={onCompositionEnd}
       disabled={sending}
       rows="3"
     ></textarea>
     <button class="send-btn" onclick={sendMessage} disabled={sending || !input.trim()}>
-      {state.is_waiting ? "Working..." : "Send"}
+      {#if sending || state.is_waiting}
+        <span class="spinner" aria-hidden="true"></span>
+      {/if}
+      <span>{state.is_waiting ? "Working..." : "Send"}</span>
     </button>
   </footer>
 </section>
@@ -239,6 +254,9 @@
   }
 
   .send-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
     padding: 0 16px;
     border-radius: 8px;
     border: 1px solid var(--border-color);
@@ -247,8 +265,23 @@
     font-weight: 600;
   }
 
+  .spinner {
+    width: 12px;
+    height: 12px;
+    border: 2px solid rgba(255, 255, 255, 0.4);
+    border-top-color: var(--text-primary);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
   .send-btn:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 </style>
