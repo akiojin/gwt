@@ -19,6 +19,12 @@ Or install a specific version:
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash -s -- --version 6.30.3
 ```
 
+### Uninstall (macOS)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/uninstall.sh | bash
+```
+
 ### Downloads
 
 GitHub Releases are the source of truth for distribution.
