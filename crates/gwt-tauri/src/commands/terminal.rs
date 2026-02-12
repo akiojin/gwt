@@ -14,7 +14,7 @@ use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::terminal::runner::{
     build_fallback_launch, choose_fallback_runner, resolve_command_path,
 };
-use gwt_core::terminal::scrollback::ScrollbackFile;
+use gwt_core::terminal::scrollback::{strip_ansi, ScrollbackFile};
 use gwt_core::terminal::{AgentColor, BuiltinLaunchConfig};
 use gwt_core::worktree::WorktreeManager;
 use serde::Deserialize;
@@ -1119,6 +1119,131 @@ mod tests {
         assert!(!is_enter_only(b""));
         assert!(!is_enter_only(b"a"));
         assert!(!is_enter_only(b"\nq"));
+    }
+
+    #[test]
+    fn send_keys_to_pane_errors_when_pane_not_running() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::commands::TestEnvGuard::new(home.path());
+
+        let state = AppState::new();
+        let pane_id = "pane-send-test";
+        let pane = gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+            pane_id: pane_id.to_string(),
+            command: "/usr/bin/true".to_string(),
+            args: vec![],
+            working_dir: std::env::temp_dir(),
+            branch_name: "test-branch".to_string(),
+            agent_name: "test-agent".to_string(),
+            agent_color: AgentColor::Green,
+            rows: 24,
+            cols: 80,
+            env_vars: HashMap::new(),
+        })
+        .expect("failed to create test pane");
+
+        {
+            let mut mgr = state.pane_manager.lock().unwrap();
+            mgr.add_pane(pane).expect("failed to add test pane");
+        }
+
+        let result = send_keys_to_pane_from_state(&state, pane_id, "hello\n");
+        assert!(result.is_err());
+
+        let mut mgr = state.pane_manager.lock().unwrap();
+        let _ = mgr.kill_all();
+    }
+
+    #[test]
+    fn send_keys_broadcast_counts_running_panes() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::commands::TestEnvGuard::new(home.path());
+
+        let state = AppState::new();
+
+        let pane_running =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: "pane-running".to_string(),
+                command: "/bin/cat".to_string(),
+                args: vec![],
+                working_dir: std::env::temp_dir(),
+                branch_name: "branch-a".to_string(),
+                agent_name: "agent-a".to_string(),
+                agent_color: AgentColor::Green,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+            })
+            .expect("failed to create running pane");
+
+        let pane_done =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: "pane-done".to_string(),
+                command: "/usr/bin/true".to_string(),
+                args: vec![],
+                working_dir: std::env::temp_dir(),
+                branch_name: "branch-b".to_string(),
+                agent_name: "agent-b".to_string(),
+                agent_color: AgentColor::Green,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+            })
+            .expect("failed to create done pane");
+
+        {
+            let mut mgr = state.pane_manager.lock().unwrap();
+            mgr.add_pane(pane_running).expect("failed to add running pane");
+            mgr.add_pane(pane_done).expect("failed to add done pane");
+        }
+
+        let sent = send_keys_broadcast_from_state(&state, "ping\n").expect("broadcast failed");
+        assert_eq!(sent, 1);
+
+        let mut mgr = state.pane_manager.lock().unwrap();
+        let _ = mgr.kill_all();
+    }
+
+    #[test]
+    fn capture_scrollback_tail_returns_plain_text() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::commands::TestEnvGuard::new(home.path());
+
+        let state = AppState::new();
+        let pane_id = "pane-capture-test";
+        let pane =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: pane_id.to_string(),
+                command: "/bin/cat".to_string(),
+                args: vec![],
+                working_dir: std::env::temp_dir(),
+                branch_name: "test-branch".to_string(),
+                agent_name: "test-agent".to_string(),
+                agent_color: AgentColor::Green,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+            })
+            .expect("failed to create test pane");
+
+        {
+            let mut mgr = state.pane_manager.lock().unwrap();
+            mgr.add_pane(pane).expect("failed to add test pane");
+            let pane = mgr.pane_mut_by_id(pane_id).expect("missing test pane");
+            pane.process_bytes(b"hi \x1b[31mred\x1b[0m\n")
+                .expect("failed to write test bytes");
+        }
+
+        let captured = capture_scrollback_tail_from_state(&state, pane_id, 1024)
+            .expect("capture should succeed");
+        assert!(captured.contains("hi red"));
+        assert!(!captured.contains("\x1b"));
+
+        let mut mgr = state.pane_manager.lock().unwrap();
+        let _ = mgr.kill_all();
     }
 
     fn make_request(agent_id: &str) -> LaunchAgentRequest {
@@ -2430,6 +2555,9 @@ fn is_enter_only(data: &[u8]) -> bool {
     matches!(data, [b'\r'] | [b'\n'] | [b'\r', b'\n'])
 }
 
+const DEFAULT_SCROLLBACK_TAIL_BYTES: usize = 256 * 1024;
+const MAX_SCROLLBACK_TAIL_BYTES: usize = 1024 * 1024;
+
 /// Write data to a terminal pane
 #[tauri::command]
 pub fn write_terminal(
@@ -2481,6 +2609,79 @@ pub fn write_terminal(
         },
     );
     Ok(())
+}
+
+pub(crate) fn send_keys_to_pane_from_state(
+    state: &AppState,
+    pane_id: &str,
+    text: &str,
+) -> Result<(), String> {
+    if text.is_empty() {
+        return Ok(());
+    }
+
+    let mut manager = state
+        .pane_manager
+        .lock()
+        .map_err(|e| format!("Failed to lock pane manager: {}", e))?;
+
+    let pane = manager
+        .pane_mut_by_id(pane_id)
+        .ok_or_else(|| format!("Pane not found: {}", pane_id))?;
+
+    let _ = pane.check_status();
+    match pane.status() {
+        PaneStatus::Running => pane
+            .write_input(text.as_bytes())
+            .map_err(|e| format!("Failed to write to terminal: {}", e))?,
+        PaneStatus::Completed(_) | PaneStatus::Error(_) => {
+            return Err(format!("Pane not running: {}", pane_id));
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn send_keys_broadcast_from_state(
+    state: &AppState,
+    text: &str,
+) -> Result<usize, String> {
+    if text.is_empty() {
+        return Ok(0);
+    }
+
+    let mut manager = state
+        .pane_manager
+        .lock()
+        .map_err(|e| format!("Failed to lock pane manager: {}", e))?;
+
+    let mut sent = 0usize;
+    for pane in manager.panes_mut() {
+        let _ = pane.check_status();
+        if matches!(pane.status(), PaneStatus::Running) {
+            pane.write_input(text.as_bytes())
+                .map_err(|e| format!("Failed to write to terminal: {}", e))?;
+            sent += 1;
+        }
+    }
+
+    Ok(sent)
+}
+
+/// Send text to a terminal pane (pane_id required).
+#[tauri::command]
+pub fn send_keys_to_pane(
+    pane_id: String,
+    text: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    send_keys_to_pane_from_state(&state, &pane_id, &text)
+}
+
+/// Broadcast text to all running terminal panes. Returns number of panes sent.
+#[tauri::command]
+pub fn send_keys_broadcast(text: String, state: State<AppState>) -> Result<usize, String> {
+    send_keys_broadcast_from_state(&state, &text)
 }
 
 /// Resize a terminal pane
@@ -2555,6 +2756,33 @@ pub fn list_terminals(state: State<AppState>) -> Vec<TerminalInfo> {
             }
         })
         .collect()
+}
+
+pub(crate) fn capture_scrollback_tail_from_state(
+    state: &AppState,
+    pane_id: &str,
+    max_bytes: usize,
+) -> Result<String, String> {
+    let max_bytes = match max_bytes {
+        0 => DEFAULT_SCROLLBACK_TAIL_BYTES,
+        n if n > MAX_SCROLLBACK_TAIL_BYTES => MAX_SCROLLBACK_TAIL_BYTES,
+        n => n,
+    };
+
+    // Best-effort: flush in-memory scrollback so capture does not read stale data.
+    {
+        let mut mgr = state
+            .pane_manager
+            .lock()
+            .map_err(|e| format!("Failed to lock state: {}", e))?;
+        if let Some(pane) = mgr.pane_mut_by_id(pane_id) {
+            pane.flush_scrollback().map_err(|e| e.to_string())?;
+        }
+    }
+
+    let path = ScrollbackFile::scrollback_path_for_pane(pane_id).map_err(|e| e.to_string())?;
+    let bytes = ScrollbackFile::read_tail_bytes_at(&path, max_bytes).map_err(|e| e.to_string())?;
+    Ok(strip_ansi(&bytes))
 }
 
 fn build_terminal_ansi_probe(pane_id: &str, bytes: &[u8]) -> TerminalAnsiProbe {
@@ -2675,6 +2903,17 @@ pub fn probe_terminal_ansi(
     pane_id: String,
 ) -> Result<TerminalAnsiProbe, String> {
     probe_terminal_ansi_from_state(&state, &pane_id)
+}
+
+/// Capture the scrollback tail for a pane as plain text (ANSI stripped).
+#[tauri::command]
+pub fn capture_scrollback_tail(
+    state: State<AppState>,
+    pane_id: String,
+    max_bytes: Option<usize>,
+) -> Result<String, String> {
+    let max_bytes = max_bytes.unwrap_or(DEFAULT_SCROLLBACK_TAIL_BYTES);
+    capture_scrollback_tail_from_state(&state, &pane_id, max_bytes)
 }
 
 // ---------------------------------------------------------------------------

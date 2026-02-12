@@ -80,6 +80,7 @@
 
   let tabs: Tab[] = $state([
     { id: "summary", label: "Session Summary", type: "summary" },
+    { id: "agentMode", label: "Agent Mode", type: "agentMode" },
   ]);
   let activeTabId: string = $state("summary");
 
@@ -385,6 +386,9 @@
 
   async function handleTabClose(tabId: string) {
     const tab = tabs.find((t) => t.id === tabId);
+    if (tab?.type === "summary" || tab?.type === "agentMode") {
+      return;
+    }
     if (tab?.paneId) {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
