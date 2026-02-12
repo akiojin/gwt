@@ -12,8 +12,8 @@ pub use branch_suggest::{
     parse_branch_suggestions, suggest_branch_names, BRANCH_SUGGEST_SYSTEM_PROMPT,
 };
 pub use client::{
-    format_error_for_display, AIClient, AIError, AIResponse, ChatMessage, ModelInfo,
-    ToolCall, ToolDefinition, ToolFunction,
+    format_error_for_display, AIClient, AIError, AIResponse, ChatMessage, ModelInfo, ToolCall,
+    ToolDefinition, ToolFunction,
 };
 pub use session_converter::{
     convert_session, get_encoder, is_conversion_available, ClaudeEncoder, CodexEncoder,

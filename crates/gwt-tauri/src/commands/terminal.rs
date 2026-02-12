@@ -1129,19 +1129,20 @@ mod tests {
 
         let state = AppState::new();
         let pane_id = "pane-send-test";
-        let pane = gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
-            pane_id: pane_id.to_string(),
-            command: "/usr/bin/true".to_string(),
-            args: vec![],
-            working_dir: std::env::temp_dir(),
-            branch_name: "test-branch".to_string(),
-            agent_name: "test-agent".to_string(),
-            agent_color: AgentColor::Green,
-            rows: 24,
-            cols: 80,
-            env_vars: HashMap::new(),
-        })
-        .expect("failed to create test pane");
+        let pane =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: pane_id.to_string(),
+                command: "/usr/bin/true".to_string(),
+                args: vec![],
+                working_dir: std::env::temp_dir(),
+                branch_name: "test-branch".to_string(),
+                agent_name: "test-agent".to_string(),
+                agent_color: AgentColor::Green,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+            })
+            .expect("failed to create test pane");
 
         {
             let mut mgr = state.pane_manager.lock().unwrap();
@@ -1195,7 +1196,8 @@ mod tests {
 
         {
             let mut mgr = state.pane_manager.lock().unwrap();
-            mgr.add_pane(pane_running).expect("failed to add running pane");
+            mgr.add_pane(pane_running)
+                .expect("failed to add running pane");
             mgr.add_pane(pane_done).expect("failed to add done pane");
         }
 
@@ -2704,16 +2706,27 @@ pub(crate) fn send_keys_broadcast_from_state(
         .map_err(|e| format!("Failed to lock pane manager: {}", e))?;
 
     let mut sent = 0usize;
+    let mut errors: Vec<String> = Vec::new();
     for pane in manager.panes_mut() {
         let _ = pane.check_status();
         if matches!(pane.status(), PaneStatus::Running) {
-            pane.write_input(text.as_bytes())
-                .map_err(|e| format!("Failed to write to terminal: {}", e))?;
+            if let Err(e) = pane.write_input(text.as_bytes()) {
+                errors.push(format!("{}: {}", pane.pane_id(), e));
+                continue;
+            }
             sent += 1;
         }
     }
 
-    Ok(sent)
+    if errors.is_empty() {
+        Ok(sent)
+    } else {
+        Err(format!(
+            "Failed to write to {} pane(s): {}",
+            errors.len(),
+            errors.join("; ")
+        ))
+    }
 }
 
 /// Send text to a terminal pane (pane_id required).

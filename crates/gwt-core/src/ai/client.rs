@@ -14,7 +14,7 @@ use tracing::warn;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 
-const MAX_OUTPUT_TOKENS: u32 = 400;
+const MAX_OUTPUT_TOKENS: u32 = 1024;
 const TEMPERATURE: f32 = 0.3;
 
 const MAX_RETRIES: usize = 5;
@@ -431,6 +431,8 @@ impl AIClient {
                 }
             }
         }
+    }
+
     fn create_chat_completion(&self, messages: &[ChatMessage]) -> Result<String, AIError> {
         let url = build_chat_completions_url(&self.endpoint)?;
         let body_messages = build_chat_completions_messages(messages);
@@ -604,9 +606,7 @@ fn parse_response_with_usage(body: &str) -> Result<(String, Option<u64>), AIErro
     Ok((texts.join(""), usage_tokens))
 }
 
-fn parse_response_with_tools(
-    body: &str,
-) -> Result<(String, Vec<ToolCall>, Option<u64>), AIError> {
+fn parse_response_with_tools(body: &str) -> Result<(String, Vec<ToolCall>, Option<u64>), AIError> {
     let value: Value = serde_json::from_str(body)
         .map_err(|e| AIError::ParseError(format!("Invalid response: {}", e)))?;
     let output = value
@@ -618,25 +618,15 @@ fn parse_response_with_tools(
     let mut tool_calls = Vec::new();
 
     for item in output {
-        let item_type = item
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
         if item_type == "message" {
-            if item
-                .get("role")
-                .and_then(|v| v.as_str())
-                .unwrap_or("") != "assistant"
-            {
+            if item.get("role").and_then(|v| v.as_str()).unwrap_or("") != "assistant" {
                 continue;
             }
             if let Some(contents) = item.get("content").and_then(|v| v.as_array()) {
                 for content in contents {
-                    let content_type = content
-                        .get("type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let content_type = content.get("type").and_then(|v| v.as_str()).unwrap_or("");
                     if content_type == "output_text" || content_type == "text" {
                         if let Some(text) = content.get("text").and_then(|v| v.as_str()) {
                             texts.push(text.to_string());
@@ -715,6 +705,7 @@ fn parse_tool_call(value: &Value) -> Option<ToolCall> {
         arguments,
         call_id,
     })
+}
 fn parse_chat_completion_with_usage(body: &str) -> Result<(String, Option<u64>), AIError> {
     let parsed: ChatCompletionsResponse = serde_json::from_str(body)
         .map_err(|e| AIError::ParseError(format!("Invalid chat completion response: {}", e)))?;
@@ -1444,10 +1435,7 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "send_keys_to_pane");
         assert_eq!(
-            calls[0]
-                .arguments
-                .get("pane_id")
-                .and_then(|v| v.as_str()),
+            calls[0].arguments.get("pane_id").and_then(|v| v.as_str()),
             Some("pane-1")
         );
     }

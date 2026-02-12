@@ -37,7 +37,7 @@ export interface TerminalAnsiProbe {
 }
 
 export interface AgentModeMessage {
-  role: "user" | "assistant" | "system";
+  role: "user" | "assistant" | "system" | "tool";
   kind?: "message" | "thought" | "action" | "observation" | "error";
   content: string;
   timestamp: number;

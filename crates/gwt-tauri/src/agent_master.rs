@@ -9,7 +9,6 @@ const MAX_TOOL_CALL_LOOPS: usize = 3;
 const SYSTEM_PROMPT: &str = "You are the master agent for gwt. Use ReAct and tool calls to send instructions to agent panes and capture output when needed. Keep instructions concise and in English.\n\nReAct format:\nThought: <short reasoning>\nAction: <tool name + short params summary>\nObservation: <tool result>\n\nRules:\n- Use tool calls for actions.\n- Do not fabricate observations; observations come from tool results.\n- Keep Thought to 2-4 lines.\n- When delegating to sub-agents, include a clear task and request a short completion summary.";
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AgentModeMessage {
     pub role: String,
     pub kind: String,
@@ -18,7 +17,6 @@ pub struct AgentModeMessage {
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AgentModeState {
     pub messages: Vec<AgentModeMessage>,
     pub ai_ready: bool,
@@ -45,103 +43,122 @@ impl AgentModeState {
     }
 }
 
-pub fn get_agent_mode_state(state: &AppState) -> AgentModeState {
-    let guard = match state.agent_mode.lock() {
+pub fn get_agent_mode_state(state: &AppState, window_label: &str) -> AgentModeState {
+    let guard = match state.window_agent_modes.lock() {
         Ok(g) => g,
         Err(_) => return AgentModeState::new(),
     };
-    guard.clone()
+    guard
+        .get(window_label)
+        .cloned()
+        .unwrap_or_else(AgentModeState::new)
 }
 
-pub fn send_agent_message(state: &AppState, input: &str) -> AgentModeState {
+fn save_agent_mode_state(state: &AppState, window_label: &str, mode_state: &AgentModeState) {
+    if let Ok(mut guard) = state.window_agent_modes.lock() {
+        guard.insert(window_label.to_string(), mode_state.clone());
+    }
+}
+
+pub fn send_agent_message(state: &AppState, window_label: &str, input: &str) -> AgentModeState {
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return get_agent_mode_state(state);
+        return get_agent_mode_state(state, window_label);
     }
 
-    let mut guard = match state.agent_mode.lock() {
-        Ok(g) => g,
-        Err(_) => return AgentModeState::new(),
-    };
-
-    guard.last_error = None;
-    guard.is_waiting = true;
-    if guard.messages.is_empty() {
-        push_message(&mut guard, "system", "message", SYSTEM_PROMPT);
+    let mut working = get_agent_mode_state(state, window_label);
+    working.last_error = None;
+    working.is_waiting = true;
+    if working.messages.is_empty() {
+        push_message(&mut working, "system", "message", SYSTEM_PROMPT);
     }
-    push_message(&mut guard, "user", "message", trimmed);
+    push_message(&mut working, "user", "message", trimmed);
+    save_agent_mode_state(state, window_label, &working);
 
     let profiles = match ProfilesConfig::load() {
         Ok(p) => p,
         Err(e) => {
-            guard.ai_ready = false;
-            guard.ai_error = Some(e.to_string());
-            guard.is_waiting = false;
-            return guard.clone();
+            working.ai_ready = false;
+            working.ai_error = Some(e.to_string());
+            working.is_waiting = false;
+            save_agent_mode_state(state, window_label, &working);
+            return working;
         }
     };
 
     let ai = profiles.resolve_active_ai_settings();
     let Some(settings) = ai.resolved else {
-        guard.ai_ready = false;
-        guard.ai_error = Some("AI settings are required.".to_string());
-        guard.is_waiting = false;
-        return guard.clone();
+        working.ai_ready = false;
+        working.ai_error = Some("AI settings are required.".to_string());
+        working.is_waiting = false;
+        save_agent_mode_state(state, window_label, &working);
+        return working;
     };
-    guard.ai_ready = true;
-    guard.ai_error = None;
+    working.ai_ready = true;
+    working.ai_error = None;
+    save_agent_mode_state(state, window_label, &working);
 
     let client = match AIClient::new(settings) {
         Ok(c) => c,
         Err(e) => {
-            guard.last_error = Some(e.to_string());
-            guard.is_waiting = false;
-            return guard.clone();
+            working.last_error = Some(e.to_string());
+            working.is_waiting = false;
+            save_agent_mode_state(state, window_label, &working);
+            return working;
         }
     };
 
     let mut loops = 0usize;
-    let mut messages = build_chat_messages(&guard.messages);
-    let mut tool_calls: Vec<ToolCall> = Vec::new();
+    let mut messages = build_chat_messages(&working.messages);
 
     loop {
         loops += 1;
-        let response = match client.create_response_with_tools(
-            messages.clone(),
-            builtin_tool_definitions(),
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                guard.last_error = Some(e.to_string());
-                guard.is_waiting = false;
-                return guard.clone();
-            }
-        };
+        let response =
+            match client.create_response_with_tools(messages.clone(), builtin_tool_definitions()) {
+                Ok(r) => r,
+                Err(e) => {
+                    working.last_error = Some(e.to_string());
+                    working.is_waiting = false;
+                    save_agent_mode_state(state, window_label, &working);
+                    return working;
+                }
+            };
 
         let has_tools = !response.tool_calls.is_empty();
-        let has_action = apply_ai_response(&mut guard, &response, !has_tools);
-        tool_calls = response.tool_calls;
-        if tool_calls.is_empty() || loops >= MAX_TOOL_CALL_LOOPS {
+        let has_action = apply_ai_response(&mut working, &response, !has_tools);
+        save_agent_mode_state(state, window_label, &working);
+
+        if response.tool_calls.is_empty() {
             break;
         }
 
         if !has_action {
-            for call in &tool_calls {
-                push_message(&mut guard, "assistant", "action", &format_tool_call(call));
+            for call in &response.tool_calls {
+                push_message(&mut working, "assistant", "action", &format_tool_call(call));
             }
         }
-        let tool_observations = execute_tool_calls(state, &tool_calls);
+        let tool_observations = execute_tool_calls(state, &response.tool_calls);
         for obs in tool_observations {
-            push_message(&mut guard, "assistant", "observation", &obs);
+            push_message(&mut working, "tool", "observation", &obs);
         }
-        messages = build_chat_messages(&guard.messages);
+        save_agent_mode_state(state, window_label, &working);
+        messages = build_chat_messages(&working.messages);
+
+        if loops >= MAX_TOOL_CALL_LOOPS {
+            break;
+        }
     }
 
-    guard.is_waiting = false;
-    guard.clone()
+    working.is_waiting = false;
+    save_agent_mode_state(state, window_label, &working);
+    working
 }
 
-fn apply_ai_response(state: &mut AgentModeState, response: &AIResponse, allow_observation: bool) -> bool {
+fn apply_ai_response(
+    state: &mut AgentModeState,
+    response: &AIResponse,
+    allow_observation: bool,
+) -> bool {
     let parsed = parse_react_sections(&response.text, allow_observation);
     let mut has_action = false;
     if parsed.is_empty() && !response.text.trim().is_empty() {
@@ -201,17 +218,16 @@ fn parse_react_sections(text: &str, allow_observation: bool) -> Vec<ReactSection
     let mut current_kind: Option<&'static str> = None;
     let mut current_lines: Vec<String> = Vec::new();
 
-    let flush = |kind: Option<&'static str>,
-                 lines: &mut Vec<String>,
-                 out: &mut Vec<ReactSection>| {
-        if let Some(k) = kind {
-            let content = lines.join("\n").trim().to_string();
-            if !content.is_empty() {
-                out.push(ReactSection { kind: k, content });
+    let flush =
+        |kind: Option<&'static str>, lines: &mut Vec<String>, out: &mut Vec<ReactSection>| {
+            if let Some(k) = kind {
+                let content = lines.join("\n").trim().to_string();
+                if !content.is_empty() {
+                    out.push(ReactSection { kind: k, content });
+                }
             }
-        }
-        lines.clear();
-    };
+            lines.clear();
+        };
 
     for raw in text.lines() {
         let line = raw.trim_end();

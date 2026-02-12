@@ -1,7 +1,8 @@
 use serde_json::{json, Value};
 
 use crate::commands::terminal::{
-    capture_scrollback_tail_from_state, send_keys_broadcast_from_state, send_keys_to_pane_from_state,
+    capture_scrollback_tail_from_state, send_keys_broadcast_from_state,
+    send_keys_to_pane_from_state,
 };
 use crate::state::AppState;
 use gwt_core::ai::{ToolCall, ToolDefinition, ToolFunction};
@@ -75,8 +76,8 @@ pub fn execute_tool_call(state: &AppState, call: &ToolCall) -> Result<String, St
         }
         TOOL_CAPTURE_SCROLLBACK_TAIL => {
             let pane_id = get_required_string_any(&args, &["pane_id", "paneId"])?;
-            let max_bytes = get_optional_u64_any(&args, &["max_bytes", "maxBytes"])
-                .map(|v| v as usize);
+            let max_bytes =
+                get_optional_u64_any(&args, &["max_bytes", "maxBytes"]).map(|v| v as usize);
             match max_bytes {
                 Some(limit) => capture_scrollback_tail_from_state(state, pane_id, limit),
                 None => capture_scrollback_tail_from_state(state, pane_id, 0),
@@ -119,8 +120,8 @@ fn get_optional_u64_any(value: &Value, keys: &[&str]) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::ENV_LOCK;
     use crate::commands::TestEnvGuard;
+    use crate::commands::ENV_LOCK;
     use gwt_core::terminal::pane::{PaneConfig, TerminalPane};
     use gwt_core::terminal::AgentColor;
 

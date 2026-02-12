@@ -556,7 +556,10 @@
           }
 
           projectPath = null;
-          tabs = [{ id: "summary", label: "Session Summary", type: "summary" }];
+          tabs = [
+            { id: "summary", label: "Session Summary", type: "summary" },
+            { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+          ];
           activeTabId = "summary";
           selectedBranch = null;
           currentBranch = "";

@@ -187,6 +187,10 @@
     border-color: rgba(240, 200, 90, 0.4);
   }
 
+  .agent-message.tool {
+    border-color: rgba(166, 227, 161, 0.4);
+  }
+
   .agent-message.thought {
     background: rgba(137, 180, 250, 0.12);
   }

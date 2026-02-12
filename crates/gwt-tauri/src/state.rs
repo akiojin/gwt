@@ -1,7 +1,7 @@
+use crate::agent_master::AgentModeState;
 use gwt_core::ai::SessionSummaryCache;
 use gwt_core::config::os_env::EnvSource;
 use gwt_core::terminal::manager::PaneManager;
-use crate::agent_master::AgentModeState;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -73,6 +73,8 @@ pub struct AppState {
     pub windows_allowed_to_close: Mutex<HashSet<String>>,
     /// Agent tab state per window label for native Window menu rendering.
     pub window_agent_tabs: Mutex<HashMap<String, WindowAgentTabsState>>,
+    /// Agent mode conversation state per window label.
+    pub window_agent_modes: Mutex<HashMap<String, AgentModeState>>,
     pub pane_manager: Mutex<PaneManager>,
     pub agent_versions_cache: Mutex<HashMap<String, AgentVersionsCache>>,
     pub session_summary_cache: Mutex<HashMap<String, SessionSummaryCache>>,
@@ -86,7 +88,6 @@ pub struct AppState {
     pub is_quitting: AtomicBool,
     pub os_env: Arc<OnceCell<HashMap<String, String>>>,
     pub os_env_source: Arc<OnceCell<EnvSource>>,
-    pub agent_mode: Mutex<AgentModeState>,
 }
 
 impl AppState {
@@ -95,6 +96,7 @@ impl AppState {
             window_projects: Mutex::new(HashMap::new()),
             windows_allowed_to_close: Mutex::new(HashSet::new()),
             window_agent_tabs: Mutex::new(HashMap::new()),
+            window_agent_modes: Mutex::new(HashMap::new()),
             pane_manager: Mutex::new(PaneManager::new()),
             agent_versions_cache: Mutex::new(HashMap::new()),
             session_summary_cache: Mutex::new(HashMap::new()),
@@ -106,7 +108,6 @@ impl AppState {
             is_quitting: AtomicBool::new(false),
             os_env: Arc::new(OnceCell::new()),
             os_env_source: Arc::new(OnceCell::new()),
-            agent_mode: Mutex::new(AgentModeState::new()),
         }
     }
 
@@ -138,6 +139,9 @@ impl AppState {
             map.remove(window_label);
         }
         if let Ok(mut map) = self.window_agent_tabs.lock() {
+            map.remove(window_label);
+        }
+        if let Ok(mut map) = self.window_agent_modes.lock() {
             map.remove(window_label);
         }
     }
