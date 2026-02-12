@@ -14,7 +14,7 @@ use tracing::warn;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 
-const MAX_OUTPUT_TOKENS: u32 = 400;
+const MAX_OUTPUT_TOKENS: u32 = 1024;
 const TEMPERATURE: f32 = 0.3;
 
 const MAX_RETRIES: usize = 5;
@@ -24,6 +24,35 @@ const BACKOFF_BASE_SECS: u64 = 1;
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolFunction {
+    pub name: String,
+    pub description: String,
+    pub parameters: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolDefinition {
+    #[serde(rename = "type")]
+    pub tool_type: String,
+    pub function: ToolFunction,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ToolCall {
+    pub name: String,
+    pub arguments: Value,
+    #[serde(default)]
+    pub call_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AIResponse {
+    pub text: String,
+    pub tool_calls: Vec<ToolCall>,
+    pub usage_tokens: Option<u64>,
 }
 
 #[derive(Debug, Error)]
@@ -57,6 +86,8 @@ struct ResponsesRequest<'a> {
     input: Vec<ResponseInputItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<ToolDefinition>,
     max_output_tokens: u32,
     temperature: f32,
 }
@@ -194,6 +225,7 @@ impl AIClient {
             model: &self.model,
             input,
             instructions,
+            tools: Vec::new(),
             max_output_tokens: MAX_OUTPUT_TOKENS,
             temperature: TEMPERATURE,
         };
@@ -297,6 +329,105 @@ impl AIClient {
                         return self.create_chat_completion(&messages);
                     }
                     return Err(AIError::NetworkError(err.to_string()));
+                }
+            }
+        }
+    }
+
+    pub fn create_response_with_tools(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<ToolDefinition>,
+    ) -> Result<AIResponse, AIError> {
+        let url = build_responses_url(&self.endpoint)?;
+        let (instructions, input) = build_responses_input(&messages);
+        if input.is_empty() {
+            return Err(AIError::ConfigError("No input messages".to_string()));
+        }
+        let request_body = ResponsesRequest {
+            model: &self.model,
+            input,
+            instructions,
+            tools,
+            max_output_tokens: MAX_OUTPUT_TOKENS,
+            temperature: TEMPERATURE,
+        };
+
+        let mut retries = 0usize;
+
+        loop {
+            let mut headers = HeaderMap::new();
+            if !self.api_key.trim().is_empty() {
+                if is_azure_endpoint(&url) {
+                    headers.insert(
+                        "api-key",
+                        HeaderValue::from_str(self.api_key.trim())
+                            .map_err(|e| AIError::ConfigError(e.to_string()))?,
+                    );
+                } else {
+                    let value = format!("Bearer {}", self.api_key.trim());
+                    headers.insert(
+                        AUTHORIZATION,
+                        HeaderValue::from_str(&value)
+                            .map_err(|e| AIError::ConfigError(e.to_string()))?,
+                    );
+                }
+            }
+
+            let response = self
+                .client
+                .post(url.clone())
+                .headers(headers)
+                .json(&request_body)
+                .send();
+
+            match response {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let resp_headers = resp.headers().clone();
+                    let body = resp.text().unwrap_or_default();
+                    if status == StatusCode::OK {
+                        let (text, tool_calls, usage) = parse_response_with_tools(&body)?;
+                        if let Some(tokens) = usage {
+                            self.cumulative_tokens.fetch_add(tokens, Ordering::Relaxed);
+                        }
+                        return Ok(AIResponse {
+                            text,
+                            tool_calls,
+                            usage_tokens: usage,
+                        });
+                    }
+                    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                        return Err(AIError::Unauthorized);
+                    }
+                    let error = if status == StatusCode::TOO_MANY_REQUESTS {
+                        let retry_after = parse_retry_after(&body, &resp_headers);
+                        AIError::RateLimited { retry_after }
+                    } else if status.is_server_error() {
+                        let message = extract_error_message(&body)
+                            .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
+                        AIError::ServerError(message)
+                    } else {
+                        let message = extract_error_message(&body)
+                            .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
+                        return Err(AIError::ServerError(message));
+                    };
+
+                    if !is_retryable(&error) || retries >= MAX_RETRIES {
+                        return Err(error);
+                    }
+
+                    let delay = backoff_delay(retries);
+                    retries += 1;
+                    std::thread::sleep(delay);
+                }
+                Err(e) => {
+                    if retries >= MAX_RETRIES {
+                        return Err(AIError::NetworkError(e.to_string()));
+                    }
+                    let delay = backoff_delay(retries);
+                    retries += 1;
+                    std::thread::sleep(delay);
                 }
             }
         }
@@ -475,6 +606,106 @@ fn parse_response_with_usage(body: &str) -> Result<(String, Option<u64>), AIErro
     Ok((texts.join(""), usage_tokens))
 }
 
+fn parse_response_with_tools(body: &str) -> Result<(String, Vec<ToolCall>, Option<u64>), AIError> {
+    let value: Value = serde_json::from_str(body)
+        .map_err(|e| AIError::ParseError(format!("Invalid response: {}", e)))?;
+    let output = value
+        .get("output")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| AIError::ParseError("Missing output array".to_string()))?;
+
+    let mut texts = Vec::new();
+    let mut tool_calls = Vec::new();
+
+    for item in output {
+        let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+        if item_type == "message" {
+            if item.get("role").and_then(|v| v.as_str()).unwrap_or("") != "assistant" {
+                continue;
+            }
+            if let Some(contents) = item.get("content").and_then(|v| v.as_array()) {
+                for content in contents {
+                    let content_type = content.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    if content_type == "output_text" || content_type == "text" {
+                        if let Some(text) = content.get("text").and_then(|v| v.as_str()) {
+                            texts.push(text.to_string());
+                        }
+                    }
+                }
+            }
+
+            if let Some(calls) = item.get("tool_calls").and_then(|v| v.as_array()) {
+                for call in calls {
+                    if let Some(parsed) = parse_tool_call(call) {
+                        tool_calls.push(parsed);
+                    }
+                }
+            }
+            continue;
+        }
+
+        if item_type == "tool_call" || item_type == "function_call" {
+            if let Some(parsed) = parse_tool_call(item) {
+                tool_calls.push(parsed);
+            }
+        }
+    }
+
+    if texts.is_empty() && tool_calls.is_empty() {
+        return Err(AIError::ParseError(
+            "No assistant output_text or tool calls in response".to_string(),
+        ));
+    }
+
+    let usage_tokens = value
+        .get("usage")
+        .and_then(|u| u.get("total_tokens"))
+        .and_then(|v| v.as_u64());
+    Ok((texts.join(""), tool_calls, usage_tokens))
+}
+
+fn parse_tool_call(value: &Value) -> Option<ToolCall> {
+    let call_id = value
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            value
+                .get("call_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        });
+
+    let (name, args) = if let Some(func) = value.get("function") {
+        let name = func
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())?;
+        let args = func.get("arguments").cloned().unwrap_or(Value::Null);
+        (name, args)
+    } else {
+        let name = value
+            .get("name")
+            .or_else(|| value.get("tool_name"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())?;
+        let args = value.get("arguments").cloned().unwrap_or(Value::Null);
+        (name, args)
+    };
+
+    let arguments = if let Some(text) = args.as_str() {
+        serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.to_string()))
+    } else {
+        args
+    };
+
+    Some(ToolCall {
+        name,
+        arguments,
+        call_id,
+    })
+}
 fn parse_chat_completion_with_usage(body: &str) -> Result<(String, Option<u64>), AIError> {
     let parsed: ChatCompletionsResponse = serde_json::from_str(body)
         .map_err(|e| AIError::ParseError(format!("Invalid chat completion response: {}", e)))?;
@@ -1181,6 +1412,32 @@ mod tests {
         let (text, usage) = parse_response_with_usage(body).unwrap();
         assert_eq!(text, "Hi");
         assert_eq!(usage, None);
+    }
+
+    #[test]
+    fn test_parse_response_with_tools() {
+        let body = r#"{
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Starting."}],
+                "tool_calls": [{
+                    "id": "call_1",
+                    "name": "send_keys_to_pane",
+                    "arguments": "{\"pane_id\":\"pane-1\",\"text\":\"ls\\n\"}"
+                }]
+            }],
+            "usage": {"total_tokens": 42}
+        }"#;
+        let (text, calls, usage) = parse_response_with_tools(body).unwrap();
+        assert_eq!(text, "Starting.");
+        assert_eq!(usage, Some(42));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "send_keys_to_pane");
+        assert_eq!(
+            calls[0].arguments.get("pane_id").and_then(|v| v.as_str()),
+            Some("pane-1")
+        );
     }
 
     // ========================================

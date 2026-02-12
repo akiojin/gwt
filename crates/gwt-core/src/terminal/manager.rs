@@ -172,6 +172,11 @@ impl PaneManager {
         &self.panes
     }
 
+    /// Mutable slice of all panes.
+    pub fn panes_mut(&mut self) -> &mut [TerminalPane] {
+        &mut self.panes
+    }
+
     /// Current active index.
     pub fn active_index(&self) -> usize {
         self.active_index
