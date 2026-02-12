@@ -165,7 +165,7 @@ describe("Sidebar", () => {
     expect((launchMenuButton as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("shows @ icon for branches with open agent tabs", async () => {
+  it("shows spinner indicator for branches with open agent tabs", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "list_worktree_branches") {
         return [branchFixture];

@@ -43,7 +43,7 @@ describe("CleanupModal", () => {
     listenMock.mockResolvedValue(() => {});
   });
 
-  it("shows @ icon for worktrees with open agent tabs", async () => {
+  it("shows spinner indicator for worktrees with open agent tabs", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "list_worktrees") return [worktreeFixture];
       return [];

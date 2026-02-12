@@ -54,7 +54,7 @@
 | グレードット表示（protected/current） | svelte-check + 手動 | is_protected=true → グレー CSS ドット |
 | 削除中スピナー表示 | svelte-check + 手動 | deleting 状態 → スピナー表示、ドット非表示 |
 | 削除中クリック無効 | svelte-check + 手動 | deleting 状態 → pointer-events: none |
-| agent tab 表示（@） | vitest | agent tab が開いているブランチ名の前に `@` を表示 |
+| agent tab 表示（spinner） | vitest | agent tab が開いているブランチ名の前に ASCII スピナー（`| / - \\`）を表示 |
 
 ### Cleanup モーダル
 
@@ -70,8 +70,8 @@
 | unsafe 選択時は確認あり | svelte-check + 手動 | 確認ダイアログ表示 |
 | モーダル即閉じ | svelte-check + 手動 | Cleanup 実行後モーダル閉じ |
 | 失敗時モーダル再表示 | svelte-check + 手動 | cleanup-completed でエラーあり → 再表示 |
-| agent tab 表示（@） | vitest | agent tab が開いている Worktree のブランチ名の前に `@` を表示 |
-| agent tab を先頭にソート | vitest | `@` 付き Worktree が先頭に来る（disabled を除く） |
+| agent tab 表示（spinner） | vitest | agent tab が開いている Worktree のブランチ名の前に ASCII スピナー（`| / - \\`）を表示 |
+| agent tab を先頭にソート | vitest | スピナー付き Worktree が先頭に来る（disabled を除く） |
 | agent tab 選択時の確認 | vitest | agent tab が選択に含まれる場合に追加確認が表示される |
 
 ### コンテキストメニュー

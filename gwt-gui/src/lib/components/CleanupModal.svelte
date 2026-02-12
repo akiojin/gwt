@@ -367,8 +367,17 @@
                   </td>
                   <td class="col-branch mono">
                     {#if wt.branch && agentTabBranchSet.has(normalizeTabBranch(wt.branch))}
-                      <span class="agent-tab-icon" title="Agent tab is open for this worktree">
-                        @
+                      <span
+                        class="agent-tab-icon"
+                        title="Agent tab is open for this worktree"
+                        role="img"
+                        aria-label="Agent tab is open for this worktree"
+                      >
+                        <span class="agent-tab-frame f0" aria-hidden="true">|</span>
+                        <span class="agent-tab-frame f1" aria-hidden="true">/</span>
+                        <span class="agent-tab-frame f2" aria-hidden="true">-</span>
+                        <span class="agent-tab-frame f3" aria-hidden="true">\</span>
+                        <span class="agent-tab-fallback" aria-hidden="true">@</span>
                       </span>
                     {/if}
                     {wt.branch ?? "(detached)"}
@@ -769,6 +778,107 @@
     color: var(--cyan);
     font-family: monospace;
     text-align: center;
+    position: relative;
+    height: 12px;
+    line-height: 1;
+    vertical-align: middle;
+  }
+
+  .agent-tab-frame,
+  .agent-tab-fallback {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+  }
+
+  .agent-tab-frame {
+    opacity: 0;
+  }
+
+  /* ASCII spinner for worktrees with open agent tabs */
+  @keyframes agentTabFrame0 {
+    0%,
+    24.9% {
+      opacity: 1;
+    }
+    25%,
+    100% {
+      opacity: 0;
+    }
+  }
+
+  @keyframes agentTabFrame1 {
+    0%,
+    24.9% {
+      opacity: 0;
+    }
+    25%,
+    49.9% {
+      opacity: 1;
+    }
+    50%,
+    100% {
+      opacity: 0;
+    }
+  }
+
+  @keyframes agentTabFrame2 {
+    0%,
+    49.9% {
+      opacity: 0;
+    }
+    50%,
+    74.9% {
+      opacity: 1;
+    }
+    75%,
+    100% {
+      opacity: 0;
+    }
+  }
+
+  @keyframes agentTabFrame3 {
+    0%,
+    74.9% {
+      opacity: 0;
+    }
+    75%,
+    99.9% {
+      opacity: 1;
+    }
+    100% {
+      opacity: 0;
+    }
+  }
+
+  .agent-tab-frame.f0 {
+    animation: agentTabFrame0 0.8s linear infinite;
+  }
+  .agent-tab-frame.f1 {
+    animation: agentTabFrame1 0.8s linear infinite;
+  }
+  .agent-tab-frame.f2 {
+    animation: agentTabFrame2 0.8s linear infinite;
+  }
+  .agent-tab-frame.f3 {
+    animation: agentTabFrame3 0.8s linear infinite;
+  }
+
+  .agent-tab-fallback {
+    display: none;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .agent-tab-frame {
+      display: none;
+      animation: none;
+    }
+    .agent-tab-fallback {
+      display: flex;
+    }
   }
 
   .tool-label {
