@@ -38,4 +38,4 @@
 - [x] T19: Sidebar（Local）で agent tab が開いているブランチに `@` アイコンを表示
 - [x] T20: Cleanup モーダルで `@` アイコンを表示し、`@` 付き Worktree を先頭にソート
 - [x] T21: Cleanup モーダルを開いたまま Worktree が更新された場合に一覧をリフレッシュ（選択維持）
-- [x] T22: agent tab が開いている場合のアイコンを ASCII スピナーとしてアニメーション表示（reduced-motion は `@` 固定表示）
+- [x] T22: agent tab が開いている場合のアイコンをグラフィカルなアクティビティインジケーター（アニメーションする3本バー）として表示（reduced-motion は `@` 固定表示）

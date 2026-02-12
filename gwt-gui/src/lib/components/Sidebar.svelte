@@ -622,10 +622,11 @@
                 role="img"
                 aria-label="Agent tab is open for this branch"
               >
-                <span class="agent-tab-frame f0" aria-hidden="true">|</span>
-                <span class="agent-tab-frame f1" aria-hidden="true">/</span>
-                <span class="agent-tab-frame f2" aria-hidden="true">-</span>
-                <span class="agent-tab-frame f3" aria-hidden="true">\</span>
+                <span class="agent-tab-bars" aria-hidden="true">
+                  <span class="agent-tab-bar b1"></span>
+                  <span class="agent-tab-bar b2"></span>
+                  <span class="agent-tab-bar b3"></span>
+                </span>
                 <span class="agent-tab-fallback" aria-hidden="true">@</span>
               </span>
             {/if}
@@ -1033,13 +1034,10 @@
   }
 
   .agent-tab-icon {
-    font-size: var(--ui-font-md);
-    font-family: monospace;
     color: var(--cyan);
     width: 12px;
     text-align: center;
     flex-shrink: 0;
-    position: relative;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -1047,98 +1045,64 @@
     line-height: 1;
   }
 
-  .agent-tab-frame,
-  .agent-tab-fallback {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
+  .agent-tab-bars {
+    display: inline-flex;
+    align-items: flex-end;
     justify-content: center;
-    line-height: 1;
+    gap: 1px;
+    height: 10px;
   }
 
-  .agent-tab-frame {
-    opacity: 0;
+  .agent-tab-bar {
+    width: 2px;
+    height: 4px;
+    border-radius: 1px;
+    background: var(--cyan);
+    opacity: 0.85;
+    transform-origin: bottom;
+    animation: agentTabBars 0.9s ease-in-out infinite;
   }
 
-  /* ASCII spinner for branches with open agent tabs */
-  @keyframes agentTabFrame0 {
+  .agent-tab-bar.b1 {
+    animation-delay: 0ms;
+  }
+
+  .agent-tab-bar.b2 {
+    animation-delay: 150ms;
+  }
+
+  .agent-tab-bar.b3 {
+    animation-delay: 300ms;
+  }
+
+  /* Graphical activity indicator for branches with open agent tabs */
+  @keyframes agentTabBars {
     0%,
-    24.9% {
+    100% {
+      transform: scaleY(0.35);
+      opacity: 0.55;
+    }
+    50% {
+      transform: scaleY(1);
       opacity: 1;
     }
-    25%,
-    100% {
-      opacity: 0;
-    }
-  }
-
-  @keyframes agentTabFrame1 {
-    0%,
-    24.9% {
-      opacity: 0;
-    }
-    25%,
-    49.9% {
-      opacity: 1;
-    }
-    50%,
-    100% {
-      opacity: 0;
-    }
-  }
-
-  @keyframes agentTabFrame2 {
-    0%,
-    49.9% {
-      opacity: 0;
-    }
-    50%,
-    74.9% {
-      opacity: 1;
-    }
-    75%,
-    100% {
-      opacity: 0;
-    }
-  }
-
-  @keyframes agentTabFrame3 {
-    0%,
-    74.9% {
-      opacity: 0;
-    }
-    75%,
-    99.9% {
-      opacity: 1;
-    }
-    100% {
-      opacity: 0;
-    }
-  }
-
-  .agent-tab-frame.f0 {
-    animation: agentTabFrame0 0.8s linear infinite;
-  }
-  .agent-tab-frame.f1 {
-    animation: agentTabFrame1 0.8s linear infinite;
-  }
-  .agent-tab-frame.f2 {
-    animation: agentTabFrame2 0.8s linear infinite;
-  }
-  .agent-tab-frame.f3 {
-    animation: agentTabFrame3 0.8s linear infinite;
   }
 
   .agent-tab-fallback {
     display: none;
+    font-size: var(--ui-font-md);
+    font-family: monospace;
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .agent-tab-frame {
+    .agent-tab-bars {
       display: none;
+    }
+
+    .agent-tab-bar {
       animation: none;
     }
+
     .agent-tab-fallback {
       display: flex;
     }
