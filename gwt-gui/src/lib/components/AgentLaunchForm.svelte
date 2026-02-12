@@ -764,6 +764,9 @@
                 id="opencode-model-input"
                 type="text"
                 autocapitalize="off"
+                autocorrect="off"
+                autocomplete="off"
+                spellcheck="false"
                 bind:value={model}
                 placeholder="provider/model (optional)"
               />
@@ -812,6 +815,9 @@
                     id="glm-base-url"
                     type="text"
                     autocapitalize="off"
+                    autocorrect="off"
+                    autocomplete="off"
+                    spellcheck="false"
                     value={agentConfig.claude.glm.base_url}
                     placeholder="https://api.z.ai/api/anthropic"
                     oninput={(e) =>
@@ -827,6 +833,9 @@
                     id="glm-api-token"
                     type="password"
                     autocapitalize="off"
+                    autocorrect="off"
+                    autocomplete="off"
+                    spellcheck="false"
                     value={agentConfig.claude.glm.auth_token}
                     placeholder="Required"
                     oninput={(e) =>
@@ -842,6 +851,9 @@
                     id="glm-timeout-ms"
                     type="text"
                     autocapitalize="off"
+                    autocorrect="off"
+                    autocomplete="off"
+                    spellcheck="false"
                     value={agentConfig.claude.glm.api_timeout_ms}
                     placeholder="e.g. 3000000"
                     oninput={(e) =>
@@ -857,6 +869,9 @@
                     id="glm-opus-model"
                     type="text"
                     autocapitalize="off"
+                    autocorrect="off"
+                    autocomplete="off"
+                    spellcheck="false"
                     value={agentConfig.claude.glm.default_opus_model}
                     placeholder="e.g. glm-4.7"
                     oninput={(e) =>
@@ -872,6 +887,9 @@
                     id="glm-sonnet-model"
                     type="text"
                     autocapitalize="off"
+                    autocorrect="off"
+                    autocomplete="off"
+                    spellcheck="false"
                     value={agentConfig.claude.glm.default_sonnet_model}
                     placeholder="e.g. glm-4.7"
                     oninput={(e) =>
@@ -887,6 +905,9 @@
                     id="glm-haiku-model"
                     type="text"
                     autocapitalize="off"
+                    autocorrect="off"
+                    autocomplete="off"
+                    spellcheck="false"
                     value={agentConfig.claude.glm.default_haiku_model}
                     placeholder="e.g. glm-4.5-air"
                     oninput={(e) =>
@@ -972,6 +993,9 @@
               id="resume-session-input"
               type="text"
               autocapitalize="off"
+              autocorrect="off"
+              autocomplete="off"
+              spellcheck="false"
               bind:value={resumeSessionId}
               placeholder={needsResumeSessionId ? "Required" : "Optional"}
             />
@@ -1005,6 +1029,9 @@
             <textarea
               id="extra-args-input"
               autocapitalize="off"
+              autocorrect="off"
+              autocomplete="off"
+              spellcheck="false"
               rows="3"
               bind:value={extraArgsText}
               placeholder="One argument per line"
@@ -1016,6 +1043,9 @@
             <textarea
               id="env-overrides-input"
               autocapitalize="off"
+              autocorrect="off"
+              autocomplete="off"
+              spellcheck="false"
               rows="4"
               bind:value={envOverridesText}
               placeholder="KEY=VALUE (one per line)"
@@ -1053,6 +1083,9 @@
               id="branch-input"
               type="text"
               autocapitalize="off"
+              autocorrect="off"
+              autocomplete="off"
+              spellcheck="false"
               value={existingBranch}
               readonly
             />
@@ -1105,6 +1138,9 @@
                 id="new-branch-suffix-input"
                 type="text"
                 autocapitalize="off"
+                autocorrect="off"
+                autocomplete="off"
+                spellcheck="false"
                 value={newBranchSuffix}
                 oninput={(e) =>
                   handleNewBranchSuffixInput((e.target as HTMLInputElement).value)}
@@ -1254,6 +1290,9 @@
             <textarea
               id="suggest-desc-input"
               autocapitalize="off"
+              autocorrect="off"
+              autocomplete="off"
+              spellcheck="false"
               rows="3"
               bind:value={suggestDescription}
               placeholder="What is this branch for?"

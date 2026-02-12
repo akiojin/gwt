@@ -519,6 +519,9 @@ fn build_chat_completions_url(endpoint: &str) -> Result<Url, AIError> {
     let mut url = Url::parse(endpoint)
         .map_err(|e| AIError::ConfigError(format!("Invalid endpoint: {}", e)))?;
     let mut path = url.path().trim_end_matches('/').to_string();
+    if path.ends_with("/responses") {
+        path = path.trim_end_matches("/responses").to_string();
+    }
     if !path.ends_with("/chat/completions") {
         if path.is_empty() {
             path = "/chat/completions".to_string();
@@ -1067,6 +1070,12 @@ mod tests {
     #[test]
     fn test_build_chat_completions_url_already_has_path() {
         let url = build_chat_completions_url("https://api.openai.com/v1/chat/completions").unwrap();
+        assert_eq!(url.as_str(), "https://api.openai.com/v1/chat/completions");
+    }
+
+    #[test]
+    fn test_build_chat_completions_url_strips_responses_path() {
+        let url = build_chat_completions_url("https://api.openai.com/v1/responses").unwrap();
         assert_eq!(url.as_str(), "https://api.openai.com/v1/chat/completions");
     }
 

@@ -493,7 +493,6 @@
     activeTabId = tab.id;
   }
 
-
   async function syncWindowAgentTabs() {
     try {
       const { invoke } = await import("@tauri-apps/api/core");

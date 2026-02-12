@@ -28,7 +28,7 @@
   let aiModels: string[] = $state([]);
   let aiModelsLoading: boolean = $state(false);
   let aiModelsError: string | null = $state(null);
-  let aiModelsLoadedKey: string = $state("");
+  let aiModelsLoadedKey: string = "";
   let aiModelsRequestSeq: number = 0;
 
   function getCurrentProfile(cfg: ProfilesConfig | null, key: string): Profile | null {
@@ -51,6 +51,14 @@
     const current = currentProfile?.ai?.model?.trim() ?? "";
     return current.length > 0 && !aiModels.includes(current);
   });
+
+  function resetAiModelsState() {
+    aiModelsRequestSeq += 1;
+    aiModels = [];
+    aiModelsLoading = false;
+    aiModelsError = null;
+    aiModelsLoadedKey = "";
+  }
 
   $effect(() => {
     loadAll();
@@ -75,17 +83,11 @@
     const apiKey = ai?.api_key?.trim() ?? "";
 
     if (!profileKey || !ai) {
-      aiModels = [];
-      aiModelsLoading = false;
-      aiModelsError = null;
-      aiModelsLoadedKey = "";
+      resetAiModelsState();
       return;
     }
     if (!endpoint) {
-      aiModels = [];
-      aiModelsLoading = false;
-      aiModelsError = null;
-      aiModelsLoadedKey = "";
+      resetAiModelsState();
       return;
     }
 
@@ -519,6 +521,9 @@
               <input
                 type="text"
                 autocapitalize="off"
+                autocorrect="off"
+                autocomplete="off"
+                spellcheck="false"
                 bind:value={newBranch}
                 placeholder="Add branch..."
                 onkeydown={handleBranchKeydown}
@@ -583,6 +588,9 @@
                 id="new-profile"
                 type="text"
                 autocapitalize="off"
+                autocorrect="off"
+                autocomplete="off"
+                spellcheck="false"
                 bind:value={newProfileName}
                 placeholder="e.g. development"
               />
@@ -605,6 +613,9 @@
                       class="env-value"
                       type="text"
                       autocapitalize="off"
+                      autocorrect="off"
+                      autocomplete="off"
+                      spellcheck="false"
                       value={currentProfile.env[key]}
                       oninput={(e) => upsertEnvVar(key, (e.target as HTMLInputElement).value)}
                     />
@@ -618,6 +629,9 @@
                   class="env-key-input"
                   type="text"
                   autocapitalize="off"
+                  autocorrect="off"
+                  autocomplete="off"
+                  spellcheck="false"
                   bind:value={newEnvKey}
                   placeholder="KEY"
                 />
@@ -625,6 +639,9 @@
                   class="env-value-input"
                   type="text"
                   autocapitalize="off"
+                  autocorrect="off"
+                  autocomplete="off"
+                  spellcheck="false"
                   bind:value={newEnvValue}
                   placeholder="value"
                 />
@@ -658,6 +675,9 @@
                     <input
                       type="text"
                       autocapitalize="off"
+                      autocorrect="off"
+                      autocomplete="off"
+                      spellcheck="false"
                       value={currentProfile.ai.endpoint}
                       oninput={(e) => updateAiField("endpoint", (e.target as HTMLInputElement).value)}
                     />
@@ -667,6 +687,9 @@
                     <input
                       type="text"
                       autocapitalize="off"
+                      autocorrect="off"
+                      autocomplete="off"
+                      spellcheck="false"
                       value={currentProfile.ai.api_key}
                       oninput={(e) => updateAiField("api_key", (e.target as HTMLInputElement).value)}
                     />

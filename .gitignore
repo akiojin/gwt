@@ -17,6 +17,7 @@ PLANS.md
 # npm wrapper (for bunx distribution)
 node_modules/
 bun.lock
+.pnpm-store/
 
 # Legacy npm lockfile (gwt-gui migrated to pnpm)
 gwt-gui/package-lock.json

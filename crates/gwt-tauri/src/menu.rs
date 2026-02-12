@@ -117,6 +117,7 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         .item(&file_close_project)
         .build()?;
 
+    // Use native predefined Edit actions so Cmd/Ctrl shortcuts work consistently.
     let edit = SubmenuBuilder::new(app, "Edit")
         .undo()
         .redo()
@@ -124,6 +125,7 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         .cut()
         .copy()
         .paste()
+        .separator()
         .select_all()
         .build()?;
 
@@ -185,6 +187,23 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         true,
         Some("CmdOrCtrl+,"),
     )?;
+
+    #[cfg(target_os = "macos")]
+    let gwt = SubmenuBuilder::new(app, app_menu_label)
+        .item(&help_about)
+        .separator()
+        .item(&settings_prefs)
+        .separator()
+        .services()
+        .separator()
+        .hide()
+        .hide_others()
+        .show_all()
+        .separator()
+        .quit()
+        .build()?;
+
+    #[cfg(not(target_os = "macos"))]
     let gwt = SubmenuBuilder::new(app, app_menu_label)
         .item(&help_about)
         .separator()

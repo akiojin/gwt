@@ -528,7 +528,6 @@
       <span class="mode-label">Agent</span>
     </button>
   </div>
-
   {#if mode === "branch"}
     <div class="filter-bar">
       {#each filters as filter}
@@ -552,6 +551,9 @@
       <input
         type="text"
         autocapitalize="off"
+        autocorrect="off"
+        autocomplete="off"
+        spellcheck="false"
         class="search-input"
         placeholder="Filter branches..."
         bind:value={searchQuery}
@@ -569,6 +571,7 @@
           <button
             class="branch-item"
             class:active={branch.is_current}
+            class:agent-active={branch.is_agent_running}
             class:deleting={deletingBranches.has(branch.name)}
             onclick={() => {
               if (!deletingBranches.has(branch.name)) onBranchSelect(branch);
@@ -589,6 +592,14 @@
               ></span>
             {/if}
             <span class="branch-name">{branch.name}</span>
+            {#if branch.is_agent_running}
+              <span
+                class="agent-running-badge"
+                title="Agent is running on this branch"
+              >
+                ACTIVE
+              </span>
+            {/if}
             {#if branch.last_tool_usage}
               <span
                 class="tool-usage {toolUsageClass(branch.last_tool_usage)}"
@@ -921,6 +932,10 @@
     color: var(--accent);
   }
 
+  .branch-item.agent-active:not(.active) {
+    background-color: rgba(148, 226, 213, 0.08);
+  }
+
   .branch-item.deleting {
     opacity: 0.5;
     cursor: default;
@@ -985,6 +1000,16 @@
     overflow: hidden;
     text-overflow: ellipsis;
     flex: 1;
+  }
+
+  .agent-running-badge {
+    font-size: var(--ui-font-xs);
+    font-family: monospace;
+    color: var(--cyan);
+    border: 1px solid rgba(148, 226, 213, 0.45);
+    border-radius: 999px;
+    padding: 1px 6px;
+    flex-shrink: 0;
   }
 
   .tool-usage {
