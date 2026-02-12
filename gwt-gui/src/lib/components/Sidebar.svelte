@@ -64,7 +64,11 @@
   );
 
   function hasActiveAgentTab(branch: BranchInfo): boolean {
+    // Local view only includes branches that have an active local worktree.
+    if (activeFilter === "Local") return agentTabBranchSet.has(branch.name);
+
     // Only mark actual worktrees as active to avoid noise in Remote-only lists.
+    if (activeFilter === "Remote") return false;
     if (!worktreeMap.get(branch.name)) return false;
     return agentTabBranchSet.has(branch.name);
   }
@@ -238,10 +242,9 @@
         if (token !== fetchToken) return;
         branches = next;
 
-        // Worktree safety info is relatively expensive and does not need to be refreshed
-        // for every "branch list refresh" (refreshKey). Refresh it only when requested
-        // via localRefreshKey or when we currently have no safety data.
-        const wtKey = `${projectPath}::${localRefreshKey}`;
+        // Worktree safety info is relatively expensive, but it must refresh when worktrees
+        // change (refreshKey) and when explicitly requested (localRefreshKey).
+        const wtKey = `${projectPath}::${localRefreshKey}::${refreshKey}`;
         const shouldFetchWorktrees = wtKey !== lastWorktreesFetchKey;
         if (shouldFetchWorktrees) {
           const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", { projectPath }).catch(
@@ -280,7 +283,7 @@
         }
         branches = merged;
 
-        const wtKey = `${projectPath}::${localRefreshKey}`;
+        const wtKey = `${projectPath}::${localRefreshKey}::${refreshKey}`;
         const shouldFetchWorktrees = wtKey !== lastWorktreesFetchKey;
         if (shouldFetchWorktrees) {
           const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", { projectPath }).catch(
@@ -612,15 +615,22 @@
                 title={getSafetyTitle(branch)}
               ></span>
             {/if}
-            <span class="branch-name">{branch.name}</span>
             {#if hasActiveAgentTab(branch)}
               <span
-                class="agent-active-badge"
+                class="agent-tab-icon"
                 title="Agent tab is open for this branch"
+                role="img"
+                aria-label="Agent tab is open for this branch"
               >
-                ACTIVE
+                <span class="agent-tab-bars" aria-hidden="true">
+                  <span class="agent-tab-bar b1"></span>
+                  <span class="agent-tab-bar b2"></span>
+                  <span class="agent-tab-bar b3"></span>
+                </span>
+                <span class="agent-tab-fallback" aria-hidden="true">@</span>
               </span>
             {/if}
+            <span class="branch-name">{branch.name}</span>
             {#if branch.last_tool_usage}
               <span
                 class="tool-usage {toolUsageClass(branch.last_tool_usage)}"
@@ -1023,14 +1033,79 @@
     flex: 1;
   }
 
-  .agent-active-badge {
-    font-size: var(--ui-font-xs);
-    font-family: monospace;
+  .agent-tab-icon {
     color: var(--cyan);
-    border: 1px solid rgba(148, 226, 213, 0.45);
-    border-radius: 999px;
-    padding: 1px 6px;
+    width: 12px;
+    text-align: center;
     flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 12px;
+    line-height: 1;
+  }
+
+  .agent-tab-bars {
+    display: inline-flex;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 1px;
+    height: 10px;
+  }
+
+  .agent-tab-bar {
+    width: 2px;
+    height: 4px;
+    border-radius: 1px;
+    background: var(--cyan);
+    opacity: 0.85;
+    transform-origin: bottom;
+    animation: agentTabBars 0.9s ease-in-out infinite;
+  }
+
+  .agent-tab-bar.b1 {
+    animation-delay: 0ms;
+  }
+
+  .agent-tab-bar.b2 {
+    animation-delay: 150ms;
+  }
+
+  .agent-tab-bar.b3 {
+    animation-delay: 300ms;
+  }
+
+  /* Graphical activity indicator for branches with open agent tabs */
+  @keyframes agentTabBars {
+    0%,
+    100% {
+      transform: scaleY(0.35);
+      opacity: 0.55;
+    }
+    50% {
+      transform: scaleY(1);
+      opacity: 1;
+    }
+  }
+
+  .agent-tab-fallback {
+    display: none;
+    font-size: var(--ui-font-md);
+    font-family: monospace;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .agent-tab-bars {
+      display: none;
+    }
+
+    .agent-tab-bar {
+      animation: none;
+    }
+
+    .agent-tab-fallback {
+      display: flex;
+    }
   }
 
   .tool-usage {
