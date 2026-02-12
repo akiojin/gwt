@@ -763,6 +763,7 @@
               <input
                 id="opencode-model-input"
                 type="text"
+                autocapitalize="off"
                 bind:value={model}
                 placeholder="provider/model (optional)"
               />
@@ -810,6 +811,7 @@
                   <input
                     id="glm-base-url"
                     type="text"
+                    autocapitalize="off"
                     value={agentConfig.claude.glm.base_url}
                     placeholder="https://api.z.ai/api/anthropic"
                     oninput={(e) =>
@@ -824,6 +826,7 @@
                   <input
                     id="glm-api-token"
                     type="password"
+                    autocapitalize="off"
                     value={agentConfig.claude.glm.auth_token}
                     placeholder="Required"
                     oninput={(e) =>
@@ -838,6 +841,7 @@
                   <input
                     id="glm-timeout-ms"
                     type="text"
+                    autocapitalize="off"
                     value={agentConfig.claude.glm.api_timeout_ms}
                     placeholder="e.g. 3000000"
                     oninput={(e) =>
@@ -852,6 +856,7 @@
                   <input
                     id="glm-opus-model"
                     type="text"
+                    autocapitalize="off"
                     value={agentConfig.claude.glm.default_opus_model}
                     placeholder="e.g. glm-4.7"
                     oninput={(e) =>
@@ -866,6 +871,7 @@
                   <input
                     id="glm-sonnet-model"
                     type="text"
+                    autocapitalize="off"
                     value={agentConfig.claude.glm.default_sonnet_model}
                     placeholder="e.g. glm-4.7"
                     oninput={(e) =>
@@ -880,6 +886,7 @@
                   <input
                     id="glm-haiku-model"
                     type="text"
+                    autocapitalize="off"
                     value={agentConfig.claude.glm.default_haiku_model}
                     placeholder="e.g. glm-4.5-air"
                     oninput={(e) =>
@@ -964,6 +971,7 @@
             <input
               id="resume-session-input"
               type="text"
+              autocapitalize="off"
               bind:value={resumeSessionId}
               placeholder={needsResumeSessionId ? "Required" : "Optional"}
             />
@@ -996,6 +1004,7 @@
             <label for="extra-args-input">Extra Args</label>
             <textarea
               id="extra-args-input"
+              autocapitalize="off"
               rows="3"
               bind:value={extraArgsText}
               placeholder="One argument per line"
@@ -1006,6 +1015,7 @@
             <label for="env-overrides-input">Env Overrides</label>
             <textarea
               id="env-overrides-input"
+              autocapitalize="off"
               rows="4"
               bind:value={envOverridesText}
               placeholder="KEY=VALUE (one per line)"
@@ -1039,7 +1049,13 @@
         {#if branchMode === "existing"}
           <div class="field">
             <label for="branch-input">Branch</label>
-            <input id="branch-input" type="text" value={existingBranch} readonly />
+            <input
+              id="branch-input"
+              type="text"
+              autocapitalize="off"
+              value={existingBranch}
+              readonly
+            />
             {#if !existingBranch.trim()}
               <span class="field-hint warn">No branch selected.</span>
             {/if}
@@ -1088,6 +1104,7 @@
               <input
                 id="new-branch-suffix-input"
                 type="text"
+                autocapitalize="off"
                 value={newBranchSuffix}
                 oninput={(e) =>
                   handleNewBranchSuffixInput((e.target as HTMLInputElement).value)}
@@ -1236,6 +1253,7 @@
             <label for="suggest-desc-input">Description</label>
             <textarea
               id="suggest-desc-input"
+              autocapitalize="off"
               rows="3"
               bind:value={suggestDescription}
               placeholder="What is this branch for?"

@@ -128,6 +128,16 @@ describe("Sidebar", () => {
     );
   });
 
+  it("sets autocapitalize off for the branch filter input", async () => {
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    const searchInput = rendered.getByPlaceholderText("Filter branches...") as HTMLInputElement;
+    expect(searchInput.getAttribute("autocapitalize")).toBe("off");
+  });
+
   it("disables Launch Agent menu item when no activation handler is provided", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "list_worktree_branches") return [branchFixture];
