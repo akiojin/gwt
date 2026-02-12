@@ -2,7 +2,7 @@
   import type { AgentModeState } from "../types";
   import { onMount } from "svelte";
 
-  let state: AgentModeState = $state({
+  let state: AgentModeState = {
     messages: [],
     ai_ready: false,
     ai_error: null,
@@ -11,10 +11,10 @@
     session_name: "Agent Mode",
     llm_call_count: 0,
     estimated_tokens: 0,
-  });
+  };
 
-  let input = $state("");
-  let sending = $state(false);
+  let input = "";
+  let sending = false;
 
   function toErrorMessage(err: unknown): string {
     if (!err) return "Unknown error";
