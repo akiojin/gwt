@@ -54,7 +54,11 @@
   );
 
   function hasActiveAgentTab(branch: BranchInfo): boolean {
+    // Local view only includes branches that have an active local worktree.
+    if (activeFilter === "Local") return agentTabBranchSet.has(branch.name);
+
     // Only mark actual worktrees as active to avoid noise in Remote-only lists.
+    if (activeFilter === "Remote") return false;
     if (!worktreeMap.get(branch.name)) return false;
     return agentTabBranchSet.has(branch.name);
   }
@@ -212,10 +216,9 @@
         if (token !== fetchToken) return;
         branches = next;
 
-        // Worktree safety info is relatively expensive and does not need to be refreshed
-        // for every "branch list refresh" (refreshKey). Refresh it only when requested
-        // via localRefreshKey or when we currently have no safety data.
-        const wtKey = `${projectPath}::${localRefreshKey}`;
+        // Worktree safety info is relatively expensive, but it must refresh when worktrees
+        // change (refreshKey) and when explicitly requested (localRefreshKey).
+        const wtKey = `${projectPath}::${localRefreshKey}::${refreshKey}`;
         const shouldFetchWorktrees = wtKey !== lastWorktreesFetchKey;
         if (shouldFetchWorktrees) {
           const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", { projectPath }).catch(
@@ -254,7 +257,7 @@
         }
         branches = merged;
 
-        const wtKey = `${projectPath}::${localRefreshKey}`;
+        const wtKey = `${projectPath}::${localRefreshKey}::${refreshKey}`;
         const shouldFetchWorktrees = wtKey !== lastWorktreesFetchKey;
         if (shouldFetchWorktrees) {
           const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", { projectPath }).catch(
@@ -563,12 +566,12 @@
               title={getSafetyTitle(branch)}
             ></span>
           {/if}
-          <span class="branch-name">{branch.name}</span>
           {#if hasActiveAgentTab(branch)}
-            <span class="agent-active-badge" title="Agent tab is open for this branch">
-              ACTIVE
+            <span class="agent-tab-icon" title="Agent tab is open for this branch">
+              @
             </span>
           {/if}
+          <span class="branch-name">{branch.name}</span>
           {#if branch.last_tool_usage}
             <span
               class="tool-usage {toolUsageClass(branch.last_tool_usage)}"
@@ -907,13 +910,12 @@
     flex: 1;
   }
 
-  .agent-active-badge {
-    font-size: var(--ui-font-xs);
+  .agent-tab-icon {
+    font-size: var(--ui-font-md);
     font-family: monospace;
     color: var(--cyan);
-    border: 1px solid rgba(148, 226, 213, 0.45);
-    border-radius: 999px;
-    padding: 1px 6px;
+    width: 12px;
+    text-align: center;
     flex-shrink: 0;
   }
 
