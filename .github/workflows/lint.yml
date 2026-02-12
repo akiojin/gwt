@@ -63,9 +63,19 @@ jobs:
         run: |
           git fetch origin "$BASE_REF" --depth=1
           MERGE_BASE=$(git merge-base "$HEAD_SHA" "origin/$BASE_REF")
-          COMMIT_COUNT=$(git rev-list --count "$MERGE_BASE".."$HEAD_SHA")
+          LAST_BASE_MERGE=$(
+            git rev-list --merges --first-parent "$HEAD_SHA" | while read -r merge; do
+              p2=$(git rev-parse "$merge^2" 2>/dev/null) || continue
+              if git merge-base --is-ancestor "$p2" "origin/$BASE_REF"; then
+                echo "$merge"
+                break
+              fi
+            done
+          )
+          FROM_SHA=${LAST_BASE_MERGE:-$MERGE_BASE}
+          COMMIT_COUNT=$(git rev-list --count "$FROM_SHA".."$HEAD_SHA")
           if [ "$COMMIT_COUNT" -gt 100 ]; then
             pnpm dlx @commitlint/cli@20.4.1 commitlint --config commitlint.config.cjs --from "HEAD~50" --to "HEAD" --verbose
           else
-            pnpm dlx @commitlint/cli@20.4.1 commitlint --config commitlint.config.cjs --from "$MERGE_BASE" --to "$HEAD_SHA" --verbose
+            pnpm dlx @commitlint/cli@20.4.1 commitlint --config commitlint.config.cjs --from "$FROM_SHA" --to "$HEAD_SHA" --verbose
           fi
