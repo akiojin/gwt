@@ -20,7 +20,7 @@ fn run_git_with_timeout(
     let mut child = Command::new("git")
         .args(args)
         .current_dir(repo_path)
-        // Avoid hanging on interactive auth prompts in TUI.
+        // Avoid hanging on interactive auth prompts.
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -894,6 +894,43 @@ mod tests {
         let branch_basic = branches_basic.iter().find(|b| b.name == branch).unwrap();
         assert_eq!(branch_basic.ahead, 0);
         assert_eq!(branch_basic.behind, 0);
+    }
+
+    #[test]
+    fn test_list_remote_from_origin_uses_origin_prefix() {
+        // Keep the origin TempDir alive so `git ls-remote origin` can read from it.
+        let temp = create_test_repo();
+        let origin = TempDir::new().unwrap();
+
+        Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(origin.path())
+            .output()
+            .unwrap();
+
+        let branch = Branch::current(temp.path()).unwrap().unwrap().name;
+
+        Command::new("git")
+            .args(["remote", "add", "origin", origin.path().to_str().unwrap()])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        Command::new("git")
+            .args(["push", "-u", "origin", &branch])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        let remotes = Branch::list_remote_from_origin(temp.path()).unwrap();
+        let expected = format!("origin/{}", branch);
+
+        assert!(
+            remotes.iter().any(|b| b.name == expected),
+            "Expected {expected} in list_remote_from_origin result"
+        );
+        // ls-remote doesn't provide committer timestamp
+        assert!(remotes.iter().all(|b| b.commit_timestamp.is_none()));
     }
 
     #[test]

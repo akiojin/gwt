@@ -1,13 +1,12 @@
 {
-  "name": "@akiojin/gwt",
-  "version": "6.29.0",
-  "description": "Interactive Git worktree manager with Coding Agent selection (Claude Code / Codex CLI / Gemini CLI)",
-  "bin": {
-    "gwt": "bin/gwt.js"
-  },
+  "name": "gwt",
+  "version": "6.30.3",
+  "private": true,
+  "description": "Tauri desktop GUI for Git worktree management and coding agent launch",
   "type": "module",
   "scripts": {
-    "postinstall": "node scripts/postinstall.js",
+    "dev": "cargo tauri dev",
+    "build": "cargo tauri build",
     "prepare": "test -n \"$CI\" || bunx husky install",
     "lint:husky": "bash scripts/verify-husky-hooks.sh"
   },
@@ -30,25 +29,10 @@
     "type": "git",
     "url": "https://github.com/akiojin/gwt.git"
   },
-  "publishConfig": {
-    "access": "public"
-  },
-  "files": [
-    "bin/",
-    "scripts/"
-  ],
   "engines": {
     "node": ">=18"
   },
-  "os": [
-    "darwin",
-    "linux",
-    "win32"
-  ],
-  "cpu": [
-    "x64",
-    "arm64"
-  ],
+  "packageManager": "pnpm@10.29.2",
   "devDependencies": {
     "@commitlint/cli": "^20.4.1",
     "@commitlint/config-conventional": "^20.4.1"

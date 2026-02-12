@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product
+    Id="*"
+    Name="gwt"
+    Language="1033"
+    Version="$(var.ProductVersion)"
+    Manufacturer="akiojin"
+    Codepage="65001"
+    UpgradeCode="{6E25B0A8-51D3-4C8A-9C1D-5F6D4B4F6A1E}"
+  >
+    <Package
+      InstallerVersion="500"
+      Compressed="yes"
+      InstallScope="perMachine"
+      Platform="x64"
+    />
+
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <MajorUpgrade
+      AllowDowngrades="no"
+      DowngradeErrorMessage="A newer version of gwt is already installed."
+    />
+
+    <Feature Id="MainFeature" Title="gwt" Level="1">
+      <ComponentGroupRef Id="RuntimeComponents" />
+    </Feature>
+  </Product>
+
+  <Fragment>
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="gwt" />
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="gwt" />
+      </Directory>
+    </Directory>
+  </Fragment>
+
+  <Fragment>
+    <ComponentGroup Id="RuntimeComponents">
+      <Component Id="AppBinary" Directory="INSTALLFOLDER" Guid="{D5C9E7C2-7E5D-4A54-9F24-A23A8F9B3F70}" Win64="yes">
+        <File
+          Id="AppExe"
+          KeyPath="yes"
+          Source="$(var.BinariesDir)\\gwt.exe"
+        />
+      </Component>
+
+      <Component Id="AppStartMenuShortcut" Directory="ApplicationProgramsFolder" Guid="{B7A2D69F-3B6C-4B42-9B9E-19B8E05F88AE}" Win64="yes">
+        <Shortcut
+          Id="AppShortcut"
+          Name="gwt"
+          Description="Launch gwt"
+          Target="[INSTALLFOLDER]gwt.exe"
+          WorkingDirectory="INSTALLFOLDER"
+        />
+        <RemoveFolder Id="RemoveAppProgramsFolder" Directory="ApplicationProgramsFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\\gwt" Name="AppShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+
+    </ComponentGroup>
+  </Fragment>
+</Wix>

@@ -1,6 +1,36 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [6.30.3] - 2026-02-09
+
+### Bug Fixes
+
+- Make worktree add idempotent (#918)
+- Recover from missing registered worktree paths (#920)
+
+## [6.30.2] - 2026-02-09
+
+### Bug Fixes
+
+- Make worktree add idempotent (#918)
+
+## [6.30.1] - 2026-02-09
+
+### Bug Fixes
+
+- 進捗モーダルのエラーメッセージを複数行折り返しで全文表示 (FR-052a) (#916)
+
+## [6.30.0] - 2026-02-08
+
+### Bug Fixes
+
+- 進捗モーダルのエラーメッセージ見切れを修正 (FR-052a) (#911)
+- Include missing remote branches in list (#912)
+
+### Features
+
+- **tui:** AIによるブランチ名自動生成を追加 (SPEC-1ad9c07d) (#913)
+
 ## [6.29.0] - 2026-02-07
 
 ### Bug Fixes

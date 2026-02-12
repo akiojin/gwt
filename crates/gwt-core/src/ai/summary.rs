@@ -170,6 +170,79 @@ pub fn build_session_prompt(parsed: &ParsedSession) -> Vec<ChatMessage> {
     ]
 }
 
+/// Summarizes a terminal scrollback as plain text, bypassing session parsers.
+///
+/// The scrollback text should already have ANSI sequences stripped.
+/// Large texts are sampled (first 40% + last 60%) to fit within MAX_PROMPT_CHARS.
+pub fn summarize_scrollback(
+    client: &AIClient,
+    scrollback_text: &str,
+    branch_name: &str,
+) -> Result<SessionSummary, AIError> {
+    let sampled = sample_scrollback_text(scrollback_text);
+    let user_prompt = format!("Branch: {branch_name}\nTerminal session output:\n{sampled}");
+    let messages = vec![
+        ChatMessage {
+            role: "system".to_string(),
+            content: SESSION_SYSTEM_PROMPT_BASE.to_string(),
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: user_prompt,
+        },
+    ];
+    let content = client.create_response(messages)?;
+    let fields = parse_session_summary_fields(&content).unwrap_or_default();
+    let markdown = normalize_session_summary_markdown(&content, &fields)?;
+    validate_session_summary_markdown(&markdown)?;
+
+    let token_count = scrollback_text.chars().count() / 4;
+    let metrics = SessionMetrics {
+        token_count: if token_count > 0 {
+            Some(token_count)
+        } else {
+            None
+        },
+        tool_execution_count: 0,
+        elapsed_seconds: None,
+        turn_count: 0,
+    };
+
+    Ok(SessionSummary {
+        task_overview: fields.task_overview,
+        short_summary: fields.short_summary,
+        bullet_points: fields.bullet_points,
+        markdown: Some(markdown),
+        metrics,
+        last_updated: Some(SystemTime::now()),
+    })
+}
+
+/// Samples scrollback text to fit within MAX_PROMPT_CHARS.
+///
+/// If the text fits, returns it as-is. Otherwise, takes the first 40%
+/// and last 60% of the allowed characters, with a separator in between.
+fn sample_scrollback_text(text: &str) -> String {
+    let char_count = text.chars().count();
+    if char_count <= MAX_PROMPT_CHARS {
+        return text.to_string();
+    }
+    let head_chars = MAX_PROMPT_CHARS * 2 / 5; // 40%
+    let separator = "\n...[truncated]...\n";
+    let tail_chars = MAX_PROMPT_CHARS - head_chars - separator.len();
+
+    let head: String = text.chars().take(head_chars).collect();
+    let tail: String = text
+        .chars()
+        .rev()
+        .take(tail_chars)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{head}{separator}{tail}")
+}
+
 pub fn summarize_session(
     client: &AIClient,
     parsed: &ParsedSession,
@@ -659,5 +732,31 @@ mod tests {
         let content = "## 目的\nA\n\n## 要約\nB\n\n## ハイライト\n";
         let result = validate_session_summary_markdown(content);
         assert!(matches!(result, Err(AIError::IncompleteSummary)));
+    }
+
+    // --- sample_scrollback_text tests ---
+
+    #[test]
+    fn test_sample_scrollback_within_limit() {
+        let text = "a".repeat(100);
+        let result = sample_scrollback_text(&text);
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn test_sample_scrollback_large_text() {
+        let text = "x".repeat(MAX_PROMPT_CHARS * 2);
+        let result = sample_scrollback_text(&text);
+        assert!(result.chars().count() <= MAX_PROMPT_CHARS);
+        assert!(result.contains("...[truncated]..."));
+        assert!(result.starts_with('x'));
+        assert!(result.ends_with('x'));
+    }
+
+    #[test]
+    fn test_sample_scrollback_exact_limit() {
+        let text = "y".repeat(MAX_PROMPT_CHARS);
+        let result = sample_scrollback_text(&text);
+        assert_eq!(result, text);
     }
 }

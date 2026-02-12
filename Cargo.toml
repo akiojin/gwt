@@ -2,16 +2,14 @@
 resolver = "2"
 members = [
     "crates/gwt-core",
-    "crates/gwt-cli",
-    "crates/gwt-web",
-    "crates/gwt-frontend",
+    "crates/gwt-tauri",
 ]
 default-members = [
-    "crates/gwt-cli",
+    "crates/gwt-tauri",
 ]
 
 [workspace.package]
-version = "6.29.0"
+version = "6.30.3"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/akiojin/gwt"
@@ -20,7 +18,6 @@ authors = ["akiojin"]
 [workspace.dependencies]
 # Internal crates
 gwt-core = { path = "crates/gwt-core" }
-gwt-web = { path = "crates/gwt-web" }
 
 # Error handling
 thiserror = "2"
@@ -49,32 +46,8 @@ tracing-appender = "0.2"
 # File locking
 fs2 = "0.4"
 
-# CLI
-clap = { version = "4", features = ["derive", "env"] }
-
-# TUI
-ratatui = "0.30"
-crossterm = "0.29"
-
-# Web server
-axum = "0.8"
-tower = "0.5"
-tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
-rust-embed = "8"
-
-# WebSocket
-tokio-tungstenite = "0.28"
-futures-util = "0.3"
+# Terminal
 portable-pty = "0.9"
-
-# Leptos (WASM frontend)
-leptos = { version = "0.7", features = ["csr"] }
-leptos_router = "0.7"
-gloo-net = "0.6"
-wasm-bindgen = "0.2"
-js-sys = "0.3"
-web-sys = { version = "0.3", features = ["CloseEvent", "Document", "Element", "Event", "HtmlElement", "MessageEvent", "Node", "Window", "WebSocket"] }
-console_error_panic_hook = "0.1"
 
 # Testing
 tempfile = "3"
@@ -89,11 +62,7 @@ uuid = { version = "1", features = ["v4"] }
 libc = "0.2"
 
 # HTTP client (blocking)
-ureq = { version = "3", features = ["json"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-
-# URL encoding
-urlencoding = "2"
 
 # Base64 encoding
 base64 = "0.22"

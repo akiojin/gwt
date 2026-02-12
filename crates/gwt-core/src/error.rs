@@ -7,6 +7,7 @@
 //! - E4xxx: Agent launch errors
 //! - E5xxx: Web API errors
 //! - E6xxx: Docker operation errors
+//! - E7xxx: Terminal operation errors
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -180,6 +181,10 @@ pub enum GwtError {
     #[error("[E6007] Docker operation timeout")]
     DockerTimeout,
 
+    // E7xxx: Terminal operation errors
+    #[error("{0}")]
+    Terminal(#[from] crate::terminal::TerminalError),
+
     // Generic errors
     #[error("[E9001] IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -244,6 +249,15 @@ impl GwtError {
             Self::DockerContainerNotFound { .. } => "E6005",
             Self::DockerPortConflict { .. } => "E6006",
             Self::DockerTimeout => "E6007",
+            // E7xxx
+            Self::Terminal(ref e) => match e {
+                crate::terminal::TerminalError::PtyCreationFailed { .. } => "E7001",
+                crate::terminal::TerminalError::PtyIoError { .. } => "E7002",
+                crate::terminal::TerminalError::EmulatorError { .. } => "E7003",
+                crate::terminal::TerminalError::ScrollbackError { .. } => "E7004",
+                crate::terminal::TerminalError::IpcError { .. } => "E7005",
+                crate::terminal::TerminalError::PaneLimitReached { .. } => "E7006",
+            },
             // E9xxx
             Self::Io(_) => "E9001",
             Self::Internal(_) => "E9002",
@@ -291,6 +305,7 @@ impl GwtError {
             Some(4) => ErrorCategory::Agent,
             Some(5) => ErrorCategory::WebApi,
             Some(6) => ErrorCategory::Docker,
+            Some(7) => ErrorCategory::Terminal,
             _ => ErrorCategory::Internal,
         }
     }
@@ -305,6 +320,7 @@ pub enum ErrorCategory {
     Agent,
     WebApi,
     Docker,
+    Terminal,
     Internal,
 }
 
@@ -317,6 +333,7 @@ impl std::fmt::Display for ErrorCategory {
             Self::Agent => write!(f, "Agent"),
             Self::WebApi => write!(f, "WebApi"),
             Self::Docker => write!(f, "Docker"),
+            Self::Terminal => write!(f, "Terminal"),
             Self::Internal => write!(f, "Internal"),
         }
     }

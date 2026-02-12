@@ -128,9 +128,9 @@ fn test_detection_priority_all_present() {
     assert!(docker_type.is_compose());
 }
 
-/// Test priority: Dockerfile > devcontainer (no compose)
+/// Test priority: devcontainer > Dockerfile (no compose)
 #[test]
-fn test_detection_priority_dockerfile_over_devcontainer() {
+fn test_detection_priority_devcontainer_over_dockerfile() {
     let temp_dir = TempDir::new().unwrap();
     let worktree_path = temp_dir.path();
 
@@ -145,9 +145,9 @@ fn test_detection_priority_dockerfile_over_devcontainer() {
     )
     .unwrap();
 
-    // Dockerfile should have priority over devcontainer
+    // devcontainer should have priority over Dockerfile
     let docker_type = detect_docker_files(worktree_path).unwrap();
-    assert!(docker_type.is_dockerfile());
+    assert!(docker_type.is_devcontainer());
 }
 
 // =============================================================================
