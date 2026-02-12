@@ -521,6 +521,9 @@
               <input
                 type="text"
                 autocapitalize="off"
+                autocorrect="off"
+                autocomplete="off"
+                spellcheck="false"
                 bind:value={newBranch}
                 placeholder="Add branch..."
                 onkeydown={handleBranchKeydown}
@@ -585,6 +588,9 @@
                 id="new-profile"
                 type="text"
                 autocapitalize="off"
+                autocorrect="off"
+                autocomplete="off"
+                spellcheck="false"
                 bind:value={newProfileName}
                 placeholder="e.g. development"
               />
@@ -607,6 +613,9 @@
                       class="env-value"
                       type="text"
                       autocapitalize="off"
+                      autocorrect="off"
+                      autocomplete="off"
+                      spellcheck="false"
                       value={currentProfile.env[key]}
                       oninput={(e) => upsertEnvVar(key, (e.target as HTMLInputElement).value)}
                     />
@@ -620,6 +629,9 @@
                   class="env-key-input"
                   type="text"
                   autocapitalize="off"
+                  autocorrect="off"
+                  autocomplete="off"
+                  spellcheck="false"
                   bind:value={newEnvKey}
                   placeholder="KEY"
                 />
@@ -627,6 +639,9 @@
                   class="env-value-input"
                   type="text"
                   autocapitalize="off"
+                  autocorrect="off"
+                  autocomplete="off"
+                  spellcheck="false"
                   bind:value={newEnvValue}
                   placeholder="value"
                 />
@@ -660,6 +675,9 @@
                     <input
                       type="text"
                       autocapitalize="off"
+                      autocorrect="off"
+                      autocomplete="off"
+                      spellcheck="false"
                       value={currentProfile.ai.endpoint}
                       oninput={(e) => updateAiField("endpoint", (e.target as HTMLInputElement).value)}
                     />
@@ -669,6 +687,9 @@
                     <input
                       type="text"
                       autocapitalize="off"
+                      autocorrect="off"
+                      autocomplete="off"
+                      spellcheck="false"
                       value={currentProfile.ai.api_key}
                       oninput={(e) => updateAiField("api_key", (e.target as HTMLInputElement).value)}
                     />

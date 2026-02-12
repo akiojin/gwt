@@ -214,6 +214,9 @@
             class="input"
             type="text"
             autocapitalize="off"
+            autocorrect="off"
+            autocomplete="off"
+            spellcheck="false"
             placeholder="https://github.com/owner/repo"
             bind:value={repoUrl}
             disabled={creating}
@@ -227,6 +230,9 @@
               class="input"
               type="text"
               autocapitalize="off"
+              autocorrect="off"
+              autocomplete="off"
+              spellcheck="false"
               placeholder="Choose a folder..."
               value={parentDir}
               readonly
