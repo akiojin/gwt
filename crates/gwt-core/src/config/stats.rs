@@ -7,7 +7,10 @@ use crate::error::{GwtError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use tracing::{debug, info, warn};
+
+static STATS_UPDATE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Per-scope statistics entry (used for both global and per-repo).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -93,6 +96,19 @@ impl Stats {
             "Saved stats (TOML)"
         );
         Ok(())
+    }
+
+    /// Load, mutate, and save stats under a process-wide lock.
+    ///
+    /// This prevents lost updates when multiple launches update stats concurrently.
+    pub fn update<F>(mutate: F) -> Result<()>
+    where
+        F: FnOnce(&mut Self),
+    {
+        let _guard = STATS_UPDATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stats = Self::load()?;
+        mutate(&mut stats);
+        stats.save()
     }
 
     /// Increment agent launch count for both global and repo-specific stats.
@@ -314,5 +330,42 @@ mod tests {
         let broken = path.with_extension("broken");
         assert!(broken.exists());
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn update_serializes_concurrent_read_modify_write() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let thread_count: usize = 8;
+        let updates_per_thread: usize = 20;
+
+        let handles: Vec<_> = (0..thread_count)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    for _ in 0..updates_per_thread {
+                        Stats::update(|stats| {
+                            stats.increment_agent_launch("codex", "o3", "/repo/race");
+                            stats.increment_worktree_created("/repo/race");
+                        })
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let expected = (thread_count * updates_per_thread) as u64;
+        let loaded = Stats::load().unwrap();
+        assert_eq!(loaded.global.agents.get("codex.o3"), Some(&expected));
+        assert_eq!(loaded.global.worktrees_created, expected);
+        assert_eq!(
+            loaded.repos.get("/repo/race").unwrap().worktrees_created,
+            expected
+        );
     }
 }

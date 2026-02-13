@@ -2261,18 +2261,15 @@ fn launch_agent_for_project_root(
         let stat_model = request.model.as_deref().unwrap_or("").to_string();
         let stat_repo = repo_path.to_string_lossy().to_string();
         let stat_wt_created = worktree_created;
-        std::thread::spawn(move || match Stats::load() {
-            Ok(mut stats) => {
+        std::thread::spawn(move || {
+            let result = Stats::update(|stats| {
                 stats.increment_agent_launch(&stat_agent_id, &stat_model, &stat_repo);
                 if stat_wt_created {
                     stats.increment_worktree_created(&stat_repo);
                 }
-                if let Err(e) = stats.save() {
-                    tracing::warn!(error = %e, "Failed to save stats");
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to load stats for recording");
+            });
+            if let Err(e) = result {
+                tracing::warn!(error = %e, "Failed to record stats");
             }
         });
     }

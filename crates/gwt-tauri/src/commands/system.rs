@@ -2,6 +2,7 @@
 
 use crate::state::AppState;
 use gwt_core::config::stats::Stats;
+use gwt_core::system_info::{GpuDynamicInfo, GpuStaticInfo};
 use serde::Serialize;
 use tauri::State;
 
@@ -21,6 +22,27 @@ pub struct SystemInfoResponse {
     pub memory_used_bytes: u64,
     pub memory_total_bytes: u64,
     pub gpu: Option<GpuInfo>,
+}
+
+fn build_gpu_info(
+    static_info: Option<GpuStaticInfo>,
+    dynamic_info: Option<GpuDynamicInfo>,
+) -> Option<GpuInfo> {
+    match (static_info, dynamic_info) {
+        (None, None) => None,
+        (static_info, dynamic_info) => Some(GpuInfo {
+            name: static_info
+                .as_ref()
+                .map(|info| info.name.clone())
+                .unwrap_or_else(|| "NVIDIA GPU".to_string()),
+            vram_total_bytes: static_info
+                .as_ref()
+                .and_then(|info| info.vram_total_bytes)
+                .or(dynamic_info.as_ref().map(|info| info.vram_total_bytes)),
+            vram_used_bytes: dynamic_info.as_ref().map(|info| info.vram_used_bytes),
+            usage_percent: dynamic_info.as_ref().map(|info| info.usage_percent),
+        }),
+    }
 }
 
 // --- T031: StatsResponse / StatsEntryResponse / AgentStatEntry / RepoStatsEntry ---
@@ -58,17 +80,7 @@ pub fn get_system_info(state: State<'_, AppState>) -> SystemInfoResponse {
     monitor.refresh();
     let cpu = monitor.cpu_usage();
     let (mem_used, mem_total) = monitor.memory_info();
-    let gpu = monitor.gpu_static_info().map(|static_info| {
-        let dynamic = monitor.gpu_dynamic_info();
-        GpuInfo {
-            name: static_info.name,
-            vram_total_bytes: static_info
-                .vram_total_bytes
-                .or(dynamic.as_ref().map(|d| d.vram_total_bytes)),
-            vram_used_bytes: dynamic.as_ref().map(|d| d.vram_used_bytes),
-            usage_percent: dynamic.as_ref().map(|d| d.usage_percent),
-        }
-    });
+    let gpu = build_gpu_info(monitor.gpu_static_info(), monitor.gpu_dynamic_info());
     SystemInfoResponse {
         cpu_usage_percent: cpu,
         memory_used_bytes: mem_used,
@@ -126,5 +138,33 @@ pub fn get_stats() -> StatsResponse {
     StatsResponse {
         global: stats_entry_to_response(&stats.global),
         repos,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_gpu_info_returns_dynamic_payload_without_static_info() {
+        let gpu = build_gpu_info(
+            None,
+            Some(GpuDynamicInfo {
+                usage_percent: 71.0,
+                vram_used_bytes: 1024,
+                vram_total_bytes: 2048,
+            }),
+        )
+        .expect("dynamic GPU info should produce payload");
+
+        assert_eq!(gpu.name, "NVIDIA GPU");
+        assert_eq!(gpu.vram_total_bytes, Some(2048));
+        assert_eq!(gpu.vram_used_bytes, Some(1024));
+        assert_eq!(gpu.usage_percent, Some(71.0));
+    }
+
+    #[test]
+    fn build_gpu_info_returns_none_without_any_gpu_data() {
+        assert!(build_gpu_info(None, None).is_none());
     }
 }
