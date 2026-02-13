@@ -110,6 +110,14 @@ export interface SettingsData {
   docker_force_host: boolean;
   ui_font_size: number;
   terminal_font_size: number;
+  voice_input: VoiceInputSettings;
+}
+
+export interface VoiceInputSettings {
+  enabled: boolean;
+  hotkey: string;
+  language: "auto" | "ja" | "en" | (string & {});
+  model: string;
 }
 
 export interface AISettings {
@@ -137,7 +145,7 @@ export interface ProfilesConfig {
 export interface Tab {
   id: string;
   label: string;
-  type: "summary" | "agent" | "settings" | "versionHistory" | "agentMode";
+  type: "agent" | "settings" | "versionHistory" | "agentMode";
   paneId?: string;
 }
 
@@ -337,6 +345,31 @@ export interface GitChangeSummary {
   base_branch: string;
 }
 
+// GitHub Issue types (SPEC-c6ba640a)
+
+export interface GitHubIssueInfo {
+  number: number;
+  title: string;
+  updatedAt: string;
+  labels: string[];
+}
+
+export interface GhCliStatus {
+  available: boolean;
+  authenticated: boolean;
+}
+
+export interface FetchIssuesResponse {
+  issues: GitHubIssueInfo[];
+  hasNextPage: boolean;
+}
+
+export interface RollbackResult {
+  localDeleted: boolean;
+  remoteDeleted: boolean;
+  error: string | null;
+}
+
 export interface LaunchAgentRequest {
   agentId: string;
   branch: string;
@@ -355,4 +388,5 @@ export interface LaunchAgentRequest {
   dockerRecreate?: boolean;
   dockerBuild?: boolean;
   dockerKeep?: boolean;
+  issueNumber?: number;
 }

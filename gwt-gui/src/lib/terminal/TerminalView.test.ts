@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, waitFor, cleanup } from "@testing-library/svelte";
+import { fireEvent, render, waitFor, cleanup } from "@testing-library/svelte";
 
 const invokeMock = vi.fn();
 const listenMock = vi.fn();
@@ -170,5 +170,25 @@ describe("TerminalView", () => {
 
     expect(result).toBe(false);
     expect(preventDefaultMock).toHaveBeenCalled();
+  });
+
+  it("scrolls terminal viewport when wheel is used while not focused", async () => {
+    const { container } = await renderTerminalView({ paneId: "pane-2", active: true });
+    const rootEl = container.querySelector(".terminal-container");
+    expect(rootEl).not.toBeNull();
+
+    const viewport = document.createElement("div");
+    viewport.className = "xterm-viewport";
+    viewport.style.overflow = "auto";
+    viewport.scrollTop = 5;
+    rootEl!.appendChild(viewport);
+
+    expect(terminalInstances.length).toBeGreaterThan(0);
+    const term = terminalInstances[0];
+
+    await fireEvent.wheel(rootEl!, { deltaY: 20, bubbles: true });
+
+    expect(term.focus).toHaveBeenCalled();
+    expect(viewport.scrollTop).toBeGreaterThan(5);
   });
 });

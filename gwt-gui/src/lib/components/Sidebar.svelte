@@ -1,6 +1,12 @@
 <script lang="ts">
-  import type { BranchInfo, WorktreeInfo, CleanupProgress } from "../types";
+  import type {
+    BranchInfo,
+    WorktreeInfo,
+    CleanupProgress,
+    LaunchAgentRequest,
+  } from "../types";
   import AgentSidebar from "./AgentSidebar.svelte";
+  import WorktreeSummaryPanel from "./WorktreeSummaryPanel.svelte";
 
   type FilterType = "Local" | "Remote" | "All";
   type SidebarMode = "branch" | "agent";
@@ -10,6 +16,8 @@
     onBranchSelect,
     onBranchActivate,
     onCleanupRequest,
+    onLaunchAgent,
+    onQuickLaunch,
     onResize,
     widthPx = 260,
     minWidthPx = 220,
@@ -25,6 +33,8 @@
     onBranchSelect: (branch: BranchInfo) => void;
     onBranchActivate?: (branch: BranchInfo) => void;
     onCleanupRequest?: (preSelectedBranch?: string) => void;
+    onLaunchAgent?: () => void;
+    onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
     onResize?: (nextWidthPx: number) => void;
     widthPx?: number;
     minWidthPx?: number;
@@ -649,6 +659,14 @@
         {/each}
       {/if}
     </div>
+    <div class="worktree-summary-wrap">
+      <WorktreeSummaryPanel
+        {projectPath}
+        {selectedBranch}
+        onLaunchAgent={onLaunchAgent}
+        onQuickLaunch={onQuickLaunch}
+      />
+    </div>
   {:else}
     <AgentSidebar
       {projectPath}
@@ -925,6 +943,14 @@
     flex: 1;
     overflow-y: auto;
     padding: 4px 0;
+  }
+
+  .worktree-summary-wrap {
+    border-top: 1px solid var(--border-color);
+    overflow-y: auto;
+    max-height: 52%;
+    min-height: 160px;
+    background: var(--bg-primary);
   }
 
   .loading-indicator,

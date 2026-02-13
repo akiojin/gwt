@@ -118,22 +118,38 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Import macOS signing certificate
+        if: matrix.platform == 'macos'
+        env:
+          APPLE_CERT_APP_BASE64: ${{ secrets.APPLE_CERT_APP_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          echo "$APPLE_CERT_APP_BASE64" | base64 --decode > "$RUNNER_TEMP/app.p12"
+
+          security import "$RUNNER_TEMP/app.p12" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
       - name: Install frontend dependencies
         run: cd gwt-gui && pnpm install --frozen-lockfile
+      - name: Install MCP bridge dependencies
+        run: cd gwt-mcp-bridge && pnpm install --no-frozen-lockfile
+      - name: Build MCP bridge
+        run: cd gwt-mcp-bridge && pnpm run build
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2"
       - name: Build Tauri
         run: cargo tauri build
-      - name: Build macOS installer (.pkg)
-        if: matrix.platform == 'macos'
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -z "${RELEASE_VERSION}" ]]; then
-            echo "::error::Release version is not available."
-            exit 1
-          fi
-          bash installers/macos/build-pkg.sh --version "${RELEASE_VERSION}"
       - name: Install WiX Toolset
         if: matrix.platform == 'windows'
         shell: pwsh
@@ -191,12 +207,6 @@ jobs:
         with:
           name: gwt-macos
           path: target/release/bundle/dmg/*.dmg
-      - name: Upload macOS installer (.pkg)
-        if: matrix.platform == 'macos'
-        uses: actions/upload-artifact@v6
-        with:
-          name: gwt-macos-pkg
-          path: target/release/bundle/pkg/*.pkg
       - name: Upload artifacts (Windows)
         if: matrix.platform == 'windows'
         uses: actions/upload-artifact@v6
