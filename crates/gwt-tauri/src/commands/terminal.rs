@@ -1034,6 +1034,7 @@ fn launch_with_config(
     state: &AppState,
     app_handle: AppHandle,
 ) -> Result<String, String> {
+    let agent_name_for_stream = config.agent_name.clone();
     let pane_id = {
         let mut manager = state
             .pane_manager
@@ -1067,7 +1068,7 @@ fn launch_with_config(
 
     let pane_id_clone = pane_id.clone();
     std::thread::spawn(move || {
-        stream_pty_output(reader, pane_id_clone, app_handle);
+        stream_pty_output(reader, pane_id_clone, app_handle, agent_name_for_stream);
     });
 
     Ok(pane_id)
@@ -1103,6 +1104,66 @@ pub fn launch_terminal(
     };
 
     launch_with_config(&repo_path, config, None, &state, app_handle)
+}
+
+/// Spawn a plain shell terminal (not an agent).
+#[tauri::command]
+pub fn spawn_shell(
+    working_dir: Option<String>,
+    state: State<AppState>,
+    app_handle: AppHandle,
+) -> Result<String, String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/"));
+
+    let resolved_dir = working_dir
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| home.clone());
+
+    let config = BuiltinLaunchConfig {
+        command: shell,
+        args: vec!["-l".to_string()],
+        working_dir: resolved_dir,
+        branch_name: "terminal".to_string(),
+        agent_name: "terminal".to_string(),
+        agent_color: AgentColor::White,
+        env_vars: HashMap::new(),
+    };
+
+    let pane_id = {
+        let mut manager = state
+            .pane_manager
+            .lock()
+            .map_err(|e| format!("Failed to lock pane manager: {}", e))?;
+        manager
+            .spawn_shell(config, 24, 80)
+            .map_err(|e| format!("Failed to spawn shell: {}", e))?
+    };
+
+    let reader = {
+        let manager = state
+            .pane_manager
+            .lock()
+            .map_err(|e| format!("Failed to lock pane manager: {}", e))?;
+        let pane = manager
+            .panes()
+            .iter()
+            .find(|p| p.pane_id() == pane_id)
+            .ok_or_else(|| "Pane not found after creation".to_string())?;
+        pane.take_reader()
+            .map_err(|e| format!("Failed to take reader: {}", e))?
+    };
+
+    let pane_id_clone = pane_id.clone();
+    std::thread::spawn(move || {
+        stream_pty_output(reader, pane_id_clone, app_handle, "terminal".to_string());
+    });
+
+    Ok(pane_id)
 }
 
 #[cfg(test)]
@@ -2592,11 +2653,24 @@ pub fn cancel_launch_job(job_id: String, state: State<AppState>) -> Result<(), S
     Ok(())
 }
 
+/// Terminal cwd changed event payload sent to the frontend
+#[derive(Debug, Clone, Serialize)]
+pub struct TerminalCwdChangedPayload {
+    pub pane_id: String,
+    pub cwd: String,
+}
+
 /// Stream PTY output to the frontend via Tauri events
-fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_handle: AppHandle) {
+fn stream_pty_output(
+    mut reader: Box<dyn Read + Send>,
+    pane_id: String,
+    app_handle: AppHandle,
+    agent_name: String,
+) {
     let state = app_handle.state::<AppState>();
     let mut buf = [0u8; 4096];
     let mut stream_error: Option<String> = None;
+    let mut last_cwd = String::new();
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break, // EOF
@@ -2605,6 +2679,20 @@ fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_hand
                 if let Ok(mut manager) = state.pane_manager.lock() {
                     if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
                         let _ = pane.process_bytes(&buf[..n]);
+                    }
+                }
+
+                // Detect OSC 7 cwd changes for terminal tabs
+                if agent_name == "terminal" {
+                    if let Some(cwd) = gwt_core::terminal::osc::extract_osc7_cwd(&buf[..n]) {
+                        if cwd != last_cwd {
+                            last_cwd.clone_from(&cwd);
+                            let payload = TerminalCwdChangedPayload {
+                                pane_id: pane_id.clone(),
+                                cwd,
+                            };
+                            let _ = app_handle.emit("terminal-cwd-changed", &payload);
+                        }
                     }
                 }
 

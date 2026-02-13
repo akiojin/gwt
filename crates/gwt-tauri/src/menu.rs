@@ -14,6 +14,7 @@ pub const MENU_ID_FILE_NEW_WINDOW: &str = "file-new-window";
 pub const MENU_ID_FILE_OPEN_PROJECT: &str = "file-open-project";
 pub const MENU_ID_FILE_CLOSE_PROJECT: &str = "file-close-project";
 
+pub const MENU_ID_TOOLS_NEW_TERMINAL: &str = "tools-new-terminal";
 pub const MENU_ID_TOOLS_LAUNCH_AGENT: &str = "tools-launch-agent";
 pub const MENU_ID_TOOLS_LIST_TERMINALS: &str = "tools-list-terminals";
 pub const MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS: &str = "tools-terminal-diagnostics";
@@ -160,6 +161,13 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
 
     let git = git_builder.item(&git_cleanup_worktrees).build()?;
 
+    let tools_new_terminal = MenuItem::with_id(
+        app,
+        MENU_ID_TOOLS_NEW_TERMINAL,
+        "New Terminal",
+        true,
+        None::<&str>,
+    )?;
     let tools_launch_agent = MenuItem::with_id(
         app,
         MENU_ID_TOOLS_LAUNCH_AGENT,
@@ -182,6 +190,8 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         None::<&str>,
     )?;
     let tools = SubmenuBuilder::new(app, "Tools")
+        .item(&tools_new_terminal)
+        .separator()
         .item(&tools_launch_agent)
         .item(&tools_list_terminals)
         .item(&tools_terminal_diagnostics)
