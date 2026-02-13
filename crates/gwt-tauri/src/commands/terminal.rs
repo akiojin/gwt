@@ -543,6 +543,65 @@ fn build_docker_compose_down_args(compose_args: &[String]) -> Vec<String> {
     args
 }
 
+fn is_valid_docker_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+const DOCKER_ENV_MERGE_PREFIX_ALLOWLIST: &[&str] = &[
+    "ANTHROPIC_",
+    "OPENAI_",
+    "GEMINI_",
+    "GOOGLE_",
+    "GITHUB_",
+    "GH_",
+    "GIT_",
+    "NPM_",
+    "HF_",
+    "COORDINATOR_",
+    "GWT_",
+    "CLAUDE_",
+    "CODEX_",
+    "OLLAMA_",
+    "OPENROUTER_",
+];
+
+const DOCKER_ENV_MERGE_KEY_ALLOWLIST: &[&str] = &[
+    "TERM",
+    "COLORTERM",
+    "IS_SANDBOX",
+    "HOST_GIT_COMMON_DIR",
+    "HOST_GIT_WORKTREE_DIR",
+];
+
+fn should_merge_profile_env_for_docker(key: &str) -> bool {
+    let k = key.trim();
+    if k.is_empty() || !is_valid_docker_env_key(k) {
+        return false;
+    }
+    DOCKER_ENV_MERGE_KEY_ALLOWLIST.contains(&k)
+        || DOCKER_ENV_MERGE_PREFIX_ALLOWLIST
+            .iter()
+            .any(|prefix| k.starts_with(prefix))
+}
+
+fn merge_profile_env_for_docker(
+    base_env: &mut HashMap<String, String>,
+    merged_profile_env: &HashMap<String, String>,
+) {
+    for (key, value) in merged_profile_env {
+        let k = key.trim();
+        if !should_merge_profile_env_for_docker(k) {
+            continue;
+        }
+        base_env.insert(k.to_string(), value.to_string());
+    }
+}
+
 fn build_docker_compose_exec_args(
     compose_args: &[String],
     service: &str,
@@ -564,7 +623,7 @@ fn build_docker_compose_exec_args(
     keys.sort();
     for key in keys {
         let k = key.trim();
-        if k.is_empty() {
+        if k.is_empty() || !is_valid_docker_env_key(k) {
             continue;
         }
         let v = env_vars.get(key).map(|s| s.as_str()).unwrap_or_default();
@@ -1633,6 +1692,40 @@ mod tests {
     }
 
     #[test]
+    fn build_docker_compose_exec_args_skips_invalid_env_names() {
+        let mut env = HashMap::new();
+        env.insert("=::".to_string(), "bad".to_string());
+        env.insert("VALID_KEY".to_string(), "ok".to_string());
+
+        let args = build_docker_compose_exec_args(&[], "app", "", &env, "npx", &[]);
+        assert!(args.contains(&"VALID_KEY=ok".to_string()));
+        assert!(!args.iter().any(|a| a.contains("=::")));
+    }
+
+    #[test]
+    fn merge_profile_env_for_docker_filters_non_passthrough_keys() {
+        let mut base = HashMap::new();
+        base.insert("GITHUB_TOKEN".to_string(), "old".to_string());
+
+        let mut merged = HashMap::new();
+        merged.insert("GITHUB_TOKEN".to_string(), "new".to_string());
+        merged.insert("GH_TOKEN".to_string(), "gh".to_string());
+        merged.insert("TERM".to_string(), "xterm-256color".to_string());
+        merged.insert("Path".to_string(), "C:\\Windows\\System32".to_string());
+        merged.insert("RANDOM_KEY".to_string(), "ignored".to_string());
+        merged.insert("=C:".to_string(), "C:\\tmp".to_string());
+
+        merge_profile_env_for_docker(&mut base, &merged);
+
+        assert_eq!(base.get("GITHUB_TOKEN"), Some(&"new".to_string()));
+        assert_eq!(base.get("GH_TOKEN"), Some(&"gh".to_string()));
+        assert_eq!(base.get("TERM"), Some(&"xterm-256color".to_string()));
+        assert!(!base.contains_key("Path"));
+        assert!(!base.contains_key("RANDOM_KEY"));
+        assert!(!base.contains_key("=C:"));
+    }
+
+    #[test]
     fn docker_compose_exec_workdir_is_empty_without_workspace_folder() {
         assert_eq!(docker_compose_exec_workdir(None), "");
     }
@@ -2130,10 +2223,9 @@ fn launch_agent_for_project_root(
                 );
 
                 let mut env = manager.collect_passthrough_env();
-                // Merge profile/env overrides so compose interpolation and container env inherit them.
-                for (k, v) in &env_vars {
-                    env.insert(k.to_string(), v.to_string());
-                }
+                // Merge only docker-relevant profile/env keys to avoid oversized command lines
+                // and invalid Windows pseudo env keys (e.g. "=C:").
+                merge_profile_env_for_docker(&mut env, &env_vars);
                 env.insert("COMPOSE_PROJECT_NAME".to_string(), container_name.clone());
                 apply_translated_git_env(&mut env);
 
@@ -2224,9 +2316,7 @@ fn launch_agent_for_project_root(
                     );
 
                     let mut env = manager.collect_passthrough_env();
-                    for (k, v) in &env_vars {
-                        env.insert(k.to_string(), v.to_string());
-                    }
+                    merge_profile_env_for_docker(&mut env, &env_vars);
                     env.insert("COMPOSE_PROJECT_NAME".to_string(), container_name.clone());
                     apply_translated_git_env(&mut env);
 
@@ -2504,9 +2594,7 @@ fn launch_agent_for_project_root(
 
             let manager = DockerManager::new(&working_dir, &branch_name, docker_file_type);
             let mut container_env = manager.collect_passthrough_env();
-            for (k, v) in &env_vars {
-                container_env.insert(k.to_string(), v.to_string());
-            }
+            merge_profile_env_for_docker(&mut container_env, &env_vars);
             apply_translated_git_env(&mut container_env);
             let git_mounts = build_git_bind_mounts(&container_env);
 
@@ -2532,7 +2620,7 @@ fn launch_agent_for_project_root(
             keys.sort();
             for key in keys {
                 let k = key.trim();
-                if k.is_empty() {
+                if k.is_empty() || !is_valid_docker_env_key(k) {
                     continue;
                 }
                 let v = container_env
