@@ -2,10 +2,11 @@ import { describe, it, expect, beforeEach } from "vitest";
 import {
   AGENT_TAB_RESTORE_MAX_RETRIES,
   shouldRetryAgentTabRestore,
+  PROJECT_TABS_STORAGE_KEY,
   PROJECT_AGENT_TABS_STORAGE_KEY,
-  loadStoredProjectAgentTabs,
-  persistStoredProjectAgentTabs,
-  buildRestoredAgentTabs,
+  loadStoredProjectTabs,
+  persistStoredProjectTabs,
+  buildRestoredProjectTabs,
 } from "./agentTabsPersistence";
 
 class MemoryStorage implements Storage {
@@ -52,81 +53,122 @@ describe("agentTabsPersistence", () => {
     store = new MemoryStorage();
   });
 
-  it("loadStoredProjectAgentTabs returns null for missing entry", () => {
-    expect(loadStoredProjectAgentTabs("/repo", store)).toBeNull();
+  it("loadStoredProjectTabs returns null for missing entry", () => {
+    expect(loadStoredProjectTabs("/repo", store)).toBeNull();
   });
 
-  it("loadStoredProjectAgentTabs trims and deduplicates paneIds", () => {
+  it("loadStoredProjectTabs trims and deduplicates tabs in v2 format", () => {
+    store.setItem(
+      PROJECT_TABS_STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        byProjectPath: {
+          "/repo": {
+            tabs: [
+              { type: "agent", paneId: " p1 ", label: "one" },
+              { type: "agent", paneId: "p1", label: "dup" },
+              { type: "settings", id: "settings", label: "Settings" },
+              { type: "settings", id: "settings", label: "dup settings" },
+              { type: "versionHistory", id: "", label: 123 },
+              "invalid",
+            ],
+            activeTabId: " settings ",
+          },
+        },
+      }),
+    );
+
+    const loaded = loadStoredProjectTabs("/repo", store);
+    expect(loaded).toEqual({
+      tabs: [
+        { type: "agent", paneId: "p1", label: "one" },
+        { type: "settings", id: "settings", label: "Settings" },
+        { type: "versionHistory", id: "versionHistory", label: "Version History" },
+      ],
+      activeTabId: "settings",
+    });
+  });
+
+  it("loadStoredProjectTabs falls back to legacy v1 agent-tab state", () => {
     store.setItem(
       PROJECT_AGENT_TABS_STORAGE_KEY,
       JSON.stringify({
         version: 1,
         byProjectPath: {
           "/repo": {
-            tabs: [
-              { paneId: " p1 ", label: "one" },
-              { paneId: "p1", label: "dup" },
-              { paneId: "", label: "empty" },
-              { paneId: "p2", label: 123 },
-              "invalid",
-            ],
-            activePaneId: " p2 ",
+            tabs: [{ paneId: " p1 ", label: "one" }, { paneId: "p1", label: "dup" }],
+            activePaneId: " p1 ",
           },
         },
       }),
     );
 
-    const loaded = loadStoredProjectAgentTabs("/repo", store);
+    const loaded = loadStoredProjectTabs("/repo", store);
     expect(loaded).toEqual({
-      tabs: [
-        { paneId: "p1", label: "one" },
-        { paneId: "p2", label: "" },
-      ],
-      activePaneId: "p2",
+      tabs: [{ type: "agent", paneId: "p1", label: "one" }],
+      activeTabId: "agent-p1",
     });
   });
 
-  it("persistStoredProjectAgentTabs merges by projectPath", () => {
+  it("persistStoredProjectTabs merges by projectPath in v2 storage", () => {
     store.setItem(
-      PROJECT_AGENT_TABS_STORAGE_KEY,
+      PROJECT_TABS_STORAGE_KEY,
       JSON.stringify({
-        version: 1,
+        version: 2,
         byProjectPath: {
-          "/a": { tabs: [{ paneId: "pa", label: "A" }], activePaneId: "pa" },
+          "/a": {
+            tabs: [{ type: "agentMode", id: "agentMode", label: "Agent Mode" }],
+            activeTabId: "agentMode",
+          },
         },
       }),
     );
 
-    persistStoredProjectAgentTabs("/b", {
-      tabs: [{ paneId: "pb", label: "B" }],
-      activePaneId: null,
-    }, store);
+    persistStoredProjectTabs(
+      "/b",
+      {
+        tabs: [{ type: "settings", id: "settings", label: "Settings" }],
+        activeTabId: "settings",
+      },
+      store,
+    );
 
-    const raw = store.getItem(PROJECT_AGENT_TABS_STORAGE_KEY);
+    const raw = store.getItem(PROJECT_TABS_STORAGE_KEY);
     expect(raw).toBeTruthy();
     const parsed = JSON.parse(raw || "{}");
     expect(parsed).toEqual({
-      version: 1,
+      version: 2,
       byProjectPath: {
-        "/a": { tabs: [{ paneId: "pa", label: "A" }], activePaneId: "pa" },
-        "/b": { tabs: [{ paneId: "pb", label: "B" }], activePaneId: null },
+        "/a": {
+          tabs: [{ type: "agentMode", id: "agentMode", label: "Agent Mode" }],
+          activeTabId: "agentMode",
+        },
+        "/b": {
+          tabs: [{ type: "settings", id: "settings", label: "Settings" }],
+          activeTabId: "settings",
+        },
       },
     });
   });
 
-  it("buildRestoredAgentTabs restores only existing panes and clears missing active", () => {
-    const restored = buildRestoredAgentTabs(
+  it("buildRestoredProjectTabs restores in stored order and filters missing panes", () => {
+    const restored = buildRestoredProjectTabs(
       {
         tabs: [
-          { paneId: "p1", label: "one" },
-          { paneId: "p2", label: "two" },
+          { type: "agentMode", id: "agentMode", label: "Agent Mode" },
+          { type: "settings", id: "settings", label: "Settings" },
+          { type: "agent", paneId: "p1", label: "one" },
+          { type: "versionHistory", id: "versionHistory", label: "Version History" },
+          { type: "agent", paneId: "p2", label: "two" },
         ],
-        activePaneId: "p2",
+        activeTabId: "agent-p2",
       },
       [makeTerminal("p1")],
     );
 
     expect(restored.tabs).toEqual([
+      { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+      { id: "settings", label: "Settings", type: "settings" },
       {
         id: "agent-p1",
         label: "one",
@@ -134,25 +176,33 @@ describe("agentTabsPersistence", () => {
         paneId: "p1",
         agentId: "codex",
       },
+      { id: "versionHistory", label: "Version History", type: "versionHistory" },
     ]);
     expect(restored.activeTabId).toBeNull();
   });
 
-  it("buildRestoredAgentTabs restores active when it exists", () => {
-    const restored = buildRestoredAgentTabs(
+  it("buildRestoredProjectTabs restores active when it exists", () => {
+    const restored = buildRestoredProjectTabs(
       {
         tabs: [
-          { paneId: "p1", label: "one" },
-          { paneId: "p2", label: "two" },
+          { type: "settings", id: "settings", label: "Settings" },
+          { type: "agent", paneId: "p1", label: "one" },
+          { type: "agent", paneId: "p2", label: "two" },
         ],
-        activePaneId: "p2",
+        activeTabId: "settings",
       },
       [makeTerminal("p1"), makeTerminal("p2")],
     );
 
-    expect(restored.tabs.length).toBe(2);
-    expect(restored.activeTabId).toBe("agent-p2");
+    expect(restored.tabs.length).toBe(4);
+    expect(restored.activeTabId).toBe("settings");
     expect(restored.tabs).toEqual([
+      { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+      {
+        id: "settings",
+        label: "Settings",
+        type: "settings",
+      },
       {
         id: "agent-p1",
         label: "one",
@@ -170,25 +220,19 @@ describe("agentTabsPersistence", () => {
     ]);
   });
 
-  it("buildRestoredAgentTabs leaves unknown agent names without agentId", () => {
-    const restored = buildRestoredAgentTabs(
+  it("buildRestoredProjectTabs leaves unknown agent names without agentId", () => {
+    const restored = buildRestoredProjectTabs(
       {
-        tabs: [{ paneId: "p1", label: "one" }],
-        activePaneId: null,
+        tabs: [{ type: "agent", paneId: "p1", label: "one" }],
+        activeTabId: null,
       },
       [makeTerminal("p1", "unknown-agent")],
     );
 
     expect(restored.tabs).toEqual([
+      { id: "agentMode", label: "Agent Mode", type: "agentMode" },
       { id: "agent-p1", label: "one", type: "agent", paneId: "p1" },
     ]);
-  });
-
-  it("shouldRetryAgentTabRestore handles transient empty matches", () => {
-    expect(shouldRetryAgentTabRestore(2, 0, 0)).toBe(true);
-    expect(shouldRetryAgentTabRestore(2, 1, 0)).toBe(false);
-    expect(shouldRetryAgentTabRestore(0, 0, 0)).toBe(false);
-    expect(shouldRetryAgentTabRestore(2, 0, AGENT_TAB_RESTORE_MAX_RETRIES - 1)).toBe(false);
   });
 
   it("shouldRetryAgentTabRestore handles transient empty matches", () => {

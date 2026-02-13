@@ -5,6 +5,7 @@ use chrono::Utc;
 use gwt_core::update::PreparedPayload;
 use gwt_core::update::UpdateState;
 use tauri::{AppHandle, State};
+use tracing::warn;
 
 #[tauri::command]
 pub async fn check_app_update(
@@ -21,6 +22,15 @@ pub async fn check_app_update(
         message: format!("Update check failed: {e}"),
         failed_at: Utc::now(),
     });
+
+    if let UpdateState::Failed { message, .. } = &state {
+        warn!(
+            category = "update",
+            force,
+            error = %message,
+            "Update check failed"
+        );
+    }
     Ok(state)
 }
 
