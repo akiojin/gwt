@@ -1,5 +1,11 @@
 <script lang="ts">
-  import type { BranchInfo, ToolSessionEntry, SessionSummaryResult } from "../types";
+  import type {
+    BranchInfo,
+    SessionSummaryResult,
+    AgentSidebarView,
+    AgentSidebarTask,
+    AgentSidebarSubAgent,
+  } from "../types";
 
   let {
     projectPath,
@@ -11,9 +17,10 @@
     currentBranch?: string;
   } = $props();
 
-  let quickStartEntries: ToolSessionEntry[] = $state([]);
-  let quickStartLoading: boolean = $state(false);
-  let quickStartError: string | null = $state(null);
+  let sidebarView: AgentSidebarView = $state({ spec_id: null, tasks: [] });
+  let sidebarLoading = $state(false);
+  let sidebarError: string | null = $state(null);
+  let selectedTaskId: string | null = $state(null);
 
   let sessionSummaryLoading: boolean = $state(false);
   let sessionSummaryGenerating: boolean = $state(false);
@@ -21,7 +28,7 @@
   let sessionSummaryWarning: string | null = $state(null);
   let sessionSummaryError: string | null = $state(null);
   let sessionSummaryToolId: string | null = $state(null);
-  let sessionSummarySessionId: string | null = $state(null);
+  const SIDEBAR_POLL_INTERVAL_MS = 5000;
   const SESSION_SUMMARY_POLL_INTERVAL_MS = 5000;
 
   function normalizeBranchName(name: string): string {
@@ -34,7 +41,25 @@
     return normalizeBranchName(raw);
   }
 
+  function taskStatusRank(status: AgentSidebarTask["status"]): number {
+    if (status === "running") return 0;
+    if (status === "pending") return 1;
+    if (status === "failed") return 2;
+    if (status === "completed") return 3;
+    return 4;
+  }
+
   let activeBranch = $derived(activeBranchName());
+  let tasks = $derived(
+    [...(sidebarView.tasks ?? [])].sort((a, b) => {
+      const byStatus = taskStatusRank(a.status) - taskStatusRank(b.status);
+      if (byStatus !== 0) return byStatus;
+      return a.id.localeCompare(b.id);
+    }),
+  );
+  let selectedTask = $derived(
+    tasks.find((task) => task.id === selectedTaskId) ?? tasks[0] ?? null,
+  );
 
   function toErrorMessage(err: unknown): string {
     if (typeof err === "string") return err;
@@ -43,29 +68,6 @@
       if (typeof msg === "string") return msg;
     }
     return String(err);
-  }
-
-  function toolClass(entry: ToolSessionEntry): string {
-    const id = (entry.tool_id ?? entry.tool_label ?? "").toLowerCase();
-    if (id.includes("claude")) return "claude";
-    if (id.includes("codex")) return "codex";
-    if (id.includes("gemini")) return "gemini";
-    if (id.includes("opencode") || id.includes("open-code")) return "opencode";
-    return "";
-  }
-
-  function displayToolName(entry: ToolSessionEntry): string {
-    const id = (entry.tool_id ?? entry.tool_label ?? "").toLowerCase();
-    if (id.includes("claude")) return "Claude";
-    if (id.includes("codex")) return "Codex";
-    if (id.includes("gemini")) return "Gemini";
-    if (id.includes("opencode") || id.includes("open-code")) return "OpenCode";
-    return entry.tool_label || entry.tool_id || "Agent";
-  }
-
-  function displayToolVersion(entry: ToolSessionEntry): string {
-    const v = entry.tool_version?.trim();
-    return v && v.length > 0 ? v : "latest";
   }
 
   function summaryStatusLabel(
@@ -108,33 +110,41 @@
     }
   }
 
-  async function loadQuickStart() {
-    quickStartError = null;
-    const branch = activeBranchName();
-    if (!branch) {
-      quickStartEntries = [];
-      quickStartLoading = false;
-      return;
-    }
+  function taskStatusClass(status: AgentSidebarTask["status"]): string {
+    if (status === "running") return "running";
+    if (status === "pending") return "pending";
+    if (status === "failed") return "failed";
+    if (status === "completed") return "completed";
+    return "pending";
+  }
 
-    const key = `${projectPath}::${branch}`;
-    quickStartLoading = true;
+  function subAgentStatusClass(status: AgentSidebarSubAgent["status"]): string {
+    if (status === "running") return "running";
+    if (status === "failed") return "failed";
+    return "completed";
+  }
+
+  async function loadSidebarView() {
+    sidebarLoading = true;
+    sidebarError = null;
 
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      const entries = await invoke<ToolSessionEntry[]>("get_branch_quick_start", {
+      const view = await invoke<AgentSidebarView>("get_agent_sidebar_view", {
         projectPath,
-        branch,
       });
-      if (`${projectPath}::${activeBranchName()}` !== key) return;
-      quickStartEntries = entries ?? [];
-    } catch (err) {
-      quickStartEntries = [];
-      quickStartError = `Failed to load tasks: ${toErrorMessage(err)}`;
-    } finally {
-      if (`${projectPath}::${activeBranchName()}` === key) {
-        quickStartLoading = false;
+      sidebarView = view ?? { spec_id: null, tasks: [] };
+      const hasSelected =
+        !!selectedTaskId && sidebarView.tasks.some((t) => t.id === selectedTaskId);
+      if (!hasSelected) {
+        selectedTaskId = sidebarView.tasks[0]?.id ?? null;
       }
+    } catch (err) {
+      sidebarView = { spec_id: null, tasks: [] };
+      sidebarError = `Failed to load tasks: ${toErrorMessage(err)}`;
+      selectedTaskId = null;
+    } finally {
+      sidebarLoading = false;
     }
   }
 
@@ -149,7 +159,6 @@
       sessionSummaryGenerating = false;
       sessionSummaryStatus = "";
       sessionSummaryToolId = null;
-      sessionSummarySessionId = null;
       return;
     }
 
@@ -159,7 +168,6 @@
       sessionSummaryGenerating = false;
       sessionSummaryStatus = "";
       sessionSummaryToolId = null;
-      sessionSummarySessionId = null;
     }
 
     try {
@@ -174,12 +182,10 @@
       sessionSummaryWarning = result.warning ?? null;
       sessionSummaryError = result.error ?? null;
       sessionSummaryToolId = result.toolId ?? null;
-      sessionSummarySessionId = result.sessionId ?? null;
     } catch (err) {
       sessionSummaryStatus = "error";
       sessionSummaryGenerating = false;
       sessionSummaryToolId = null;
-      sessionSummarySessionId = null;
       sessionSummaryError = `Failed to load summary: ${toErrorMessage(err)}`;
     } finally {
       if (`${projectPath}::${activeBranchName()}` === key && !silent) {
@@ -192,7 +198,15 @@
     void projectPath;
     void selectedBranch;
     void currentBranch;
-    loadQuickStart();
+    loadSidebarView();
+
+    const timer = window.setInterval(() => {
+      loadSidebarView();
+    }, SIDEBAR_POLL_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(timer);
+    };
   });
 
   $effect(() => {
@@ -235,61 +249,107 @@
         {/if}
       </div>
     </div>
+    {#if sidebarView.spec_id}
+      <div class="spec-id">{sidebarView.spec_id}</div>
+    {/if}
   </div>
 
-  {#if activeBranch}
-    <div class="agent-section">
-      <div class="section-header">
-        <span>Summary</span>
-        <span class="status-pill {summaryStatusClass(sessionSummaryStatus, sessionSummaryGenerating)}">
-          {summaryStatusLabel(sessionSummaryStatus, sessionSummaryGenerating)}
-        </span>
-      </div>
-      {#if sessionSummaryLoading}
-        <div class="agent-muted">Loading summary...</div>
-      {:else if sessionSummaryError}
-        <div class="agent-error">{sessionSummaryError}</div>
-      {:else if sessionSummaryWarning}
-        <div class="agent-warning">{sessionSummaryWarning}</div>
-      {:else if sessionSummaryToolId}
-        <div class="agent-muted">Latest tool: {sessionSummaryToolId}</div>
-      {:else if sessionSummaryStatus === "ok"}
-        <div class="agent-muted">Latest summary ready.</div>
-      {:else if sessionSummaryStatus === "no-session"}
-        <div class="agent-muted">No summary yet.</div>
+  <div class="agent-section">
+    <div class="section-header">
+      <span>Summary</span>
+      <span class="status-pill {summaryStatusClass(sessionSummaryStatus, sessionSummaryGenerating)}">
+        {summaryStatusLabel(sessionSummaryStatus, sessionSummaryGenerating)}
+      </span>
+    </div>
+    {#if !activeBranch}
+      <div class="agent-muted">No branch context.</div>
+    {:else if sessionSummaryLoading}
+      <div class="agent-muted">Loading summary...</div>
+    {:else if sessionSummaryError}
+      <div class="agent-error">{sessionSummaryError}</div>
+    {:else if sessionSummaryWarning}
+      <div class="agent-warning">{sessionSummaryWarning}</div>
+    {:else if sessionSummaryToolId}
+      <div class="agent-muted">Latest tool: {sessionSummaryToolId}</div>
+    {:else if sessionSummaryStatus === "ok"}
+      <div class="agent-muted">Latest summary ready.</div>
+    {:else if sessionSummaryStatus === "no-session"}
+      <div class="agent-muted">No summary yet.</div>
+    {/if}
+  </div>
+
+  <div class="agent-section">
+    <div class="section-header">
+      <span>Tasks</span>
+      {#if sidebarLoading}
+        <span class="section-meta">Loading...</span>
+      {:else}
+        <span class="section-meta">{tasks.length}</span>
       {/if}
     </div>
-
-    <div class="agent-section">
-      <div class="section-header">
-        <span>Tasks</span>
-        {#if quickStartLoading}
-          <span class="section-meta">Loading...</span>
-        {:else if quickStartEntries.length > 0}
-          <span class="section-meta">{quickStartEntries.length}</span>
-        {/if}
+    {#if sidebarError}
+      <div class="agent-error">{sidebarError}</div>
+    {:else if !sidebarLoading && tasks.length === 0}
+      <div class="agent-muted">No tasks yet.</div>
+    {:else if tasks.length > 0}
+      <div class="task-list">
+        {#each tasks as task}
+          <button
+            type="button"
+            class="task-row"
+            class:selected={selectedTask?.id === task.id}
+            onclick={() => (selectedTaskId = task.id)}
+            data-testid={`agent-task-${task.id}`}
+          >
+            <div class="task-row-title">{task.title}</div>
+            <div class="task-row-meta">
+              <span class="task-status {taskStatusClass(task.status)}">{task.status}</span>
+              <span class="task-count">{task.sub_agents.length}</span>
+            </div>
+          </button>
+        {/each}
       </div>
-      {#if quickStartError}
-        <div class="agent-error">{quickStartError}</div>
-      {:else if !quickStartLoading && quickStartEntries.length === 0}
-        <div class="agent-muted">No tasks yet.</div>
-      {:else if quickStartEntries.length > 0}
-        <div class="task-list">
-          {#each quickStartEntries as entry (entry.session_id ?? entry.tool_id ?? String(entry.timestamp))}
-            <div class="task-item">
-              <div class="task-title">
-                <span class="task-tool {toolClass(entry)}">{displayToolName(entry)}</span>
-                <span class="task-version">@{displayToolVersion(entry)}</span>
-              </div>
-              {#if entry.model}
-                <div class="task-meta">model: {entry.model}</div>
+    {/if}
+  </div>
+
+  <div class="agent-section">
+    <div class="section-header">
+      <span>Assigned Agents</span>
+      <span class="section-meta">
+        {selectedTask ? selectedTask.sub_agents.length : 0}
+      </span>
+    </div>
+    {#if !selectedTask}
+      <div class="agent-muted">Select a task to view assigned agents.</div>
+    {:else if selectedTask.sub_agents.length === 0}
+      <div class="agent-muted">No assigned agents.</div>
+    {:else}
+      <div class="assigned-list">
+        {#each selectedTask.sub_agents as assignee}
+          <div class="assigned-item">
+            <div class="assigned-title">
+              <span class="assigned-name">{assignee.name}</span>
+              <span class="assigned-status {subAgentStatusClass(assignee.status)}"
+                >{assignee.status}</span
+              >
+            </div>
+            <div class="assigned-meta">
+              <span class="mono">{assignee.branch}</span>
+              {#if assignee.model}
+                <span class="mono">{assignee.model}</span>
               {/if}
             </div>
-          {/each}
-        </div>
-      {/if}
-    </div>
-  {/if}
+            <div
+              class="assigned-path mono"
+              title={assignee.worktree_abs_path ?? assignee.worktree_rel_path}
+            >
+              {assignee.worktree_rel_path}
+            </div>
+          </div>
+        {/each}
+      </div>
+    {/if}
+  </div>
 </div>
 
 <style>
@@ -305,7 +365,8 @@
   .agent-header {
     display: flex;
     justify-content: space-between;
-    align-items: center;
+    align-items: start;
+    gap: 8px;
   }
 
   .agent-title {
@@ -319,6 +380,12 @@
     font-size: var(--ui-font-xs);
     color: var(--text-muted);
     word-break: break-word;
+  }
+
+  .spec-id {
+    font-size: var(--ui-font-xs);
+    color: var(--text-muted);
+    font-family: monospace;
   }
 
   .agent-section {
@@ -392,54 +459,132 @@
   .task-list {
     display: flex;
     flex-direction: column;
+    gap: 6px;
+  }
+
+  .task-row {
+    width: 100%;
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    padding: 8px;
+    border-radius: 6px;
+    text-align: left;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .task-row.selected {
+    border-color: rgba(137, 180, 250, 0.5);
+    background: rgba(137, 180, 250, 0.12);
+  }
+
+  .task-row-title {
+    font-size: var(--ui-font-sm);
+    line-height: 1.3;
+    word-break: break-word;
+  }
+
+  .task-row-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     gap: 8px;
   }
 
-  .task-item {
+  .task-status {
+    font-size: var(--ui-font-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .task-status.running {
+    color: var(--cyan);
+  }
+
+  .task-status.pending {
+    color: var(--yellow);
+  }
+
+  .task-status.failed {
+    color: var(--red);
+  }
+
+  .task-status.completed {
+    color: var(--green);
+  }
+
+  .task-count {
+    font-size: var(--ui-font-xs);
+    color: var(--text-muted);
+  }
+
+  .assigned-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .assigned-item {
     padding: 8px;
     border-radius: 6px;
     border: 1px solid var(--border-color);
     background: var(--bg-secondary);
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
   }
 
-  .task-title {
+  .assigned-title {
     display: flex;
     align-items: baseline;
-    gap: 6px;
-    font-size: var(--ui-font-sm);
-    color: var(--text-primary);
+    justify-content: space-between;
+    gap: 8px;
   }
 
-  .task-tool {
+  .assigned-name {
+    font-size: var(--ui-font-sm);
+    color: var(--text-primary);
     font-weight: 600;
   }
 
-  .task-tool.claude {
-    color: var(--yellow);
+  .assigned-status {
+    font-size: var(--ui-font-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
   }
 
-  .task-tool.codex {
+  .assigned-status.running {
     color: var(--cyan);
   }
 
-  .task-tool.gemini {
-    color: var(--magenta);
-  }
-
-  .task-tool.opencode {
+  .assigned-status.completed {
     color: var(--green);
   }
 
-  .task-version {
-    font-size: var(--ui-font-xs);
-    color: var(--text-muted);
-    font-family: monospace;
+  .assigned-status.failed {
+    color: var(--red);
   }
 
-  .task-meta {
-    margin-top: 4px;
-    font-size: var(--ui-font-xs);
+  .assigned-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
     color: var(--text-muted);
+    font-size: var(--ui-font-xs);
+  }
+
+  .assigned-path {
+    color: var(--text-secondary);
+    font-size: var(--ui-font-xs);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .mono {
     font-family: monospace;
   }
 </style>
