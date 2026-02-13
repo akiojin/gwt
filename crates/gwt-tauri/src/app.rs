@@ -265,9 +265,10 @@ pub fn build_app(
                 // MCP bridge: cleanup stale registrations then register for all agents (T21).
                 // Delay briefly so login-shell PATH capture can complete first.
                 {
-                    let state = _app.state::<AppState>();
-                    let resource_dir = _app.path().resource_dir().ok();
+                    let app_handle = _app.handle().clone();
                     tauri::async_runtime::spawn(async move {
+                        let state = app_handle.state::<AppState>();
+                        let resource_dir = app_handle.path().resource_dir().ok();
                         let _ = state.wait_os_env_ready(std::time::Duration::from_secs(2));
 
                         if let Err(e) = mcp_registration::cleanup_stale_registrations() {

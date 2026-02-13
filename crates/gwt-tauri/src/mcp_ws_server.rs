@@ -197,10 +197,10 @@ fn process_is_alive(pid: u32) -> bool {
 
     match unsafe { libc::kill(pid, 0) } {
         0 => true,
-        -1 => match std::io::Error::last_os_error().raw_os_error() {
-            Some(err) if err == libc::EPERM => true,
-            _ => false,
-        },
+        -1 => matches!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(err) if err == libc::EPERM
+        ),
         _ => false,
     }
 }
