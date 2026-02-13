@@ -181,7 +181,6 @@ impl AppState {
         map.get(window_label).cloned().unwrap_or_default()
     }
 
-    #[allow(dead_code)]
     pub fn allow_window_close(&self, window_label: &str) {
         if let Ok(mut set) = self.windows_allowed_to_close.lock() {
             set.insert(window_label.to_string());

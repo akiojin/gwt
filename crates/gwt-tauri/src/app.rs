@@ -524,22 +524,33 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
             if should_prevent_exit_request(is_quitting) {
                 api.prevent_exit();
 
-                // macOS: Cmd+Q is treated as explicit app quit (with agent confirmation).
+                // macOS: Cmd+Q is treated as explicit window close, not process exit.
                 #[cfg(target_os = "macos")]
                 {
                     let state = app_handle.state::<AppState>();
+                    let Some(window) = best_window(app_handle) else {
+                        info!(
+                            category = "tauri",
+                            event = "ExitPrevented",
+                            "Exit prevented; no windows exist"
+                        );
+                        return;
+                    };
+
+                    let window_label = window.label().to_string();
                     if has_running_agents(&state) {
                         if !try_begin_exit_confirm(&state) {
                             return;
                         }
 
                         let app_handle = app_handle.clone();
+                        let window_label = window_label.clone();
                         app_handle
                             .dialog()
-                            .message("Agents are still running. Quit gwt anyway?")
+                            .message("Agents are still running. Close this window?")
                             .kind(MessageDialogKind::Warning)
                             .buttons(MessageDialogButtons::OkCancelCustom(
-                                "Quit".to_string(),
+                                "Close Window".to_string(),
                                 "Cancel".to_string(),
                             ))
                             .show(move |ok| {
@@ -548,14 +559,17 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
                                 if !ok {
                                     return;
                                 }
-                                state.request_quit();
-                                app_handle.exit(0);
+
+                                state.allow_window_close(&window_label);
+                                if let Some(window) = app_handle.get_webview_window(&window_label) {
+                                    let _ = window.close();
+                                }
                             });
                         return;
                     }
 
-                    app_handle.state::<AppState>().request_quit();
-                    app_handle.exit(0);
+                    state.allow_window_close(&window_label);
+                    let _ = window.close();
                 }
 
                 // Other OSes: keep current behavior (exit request hides to tray).
