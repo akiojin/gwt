@@ -1,6 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+fn normalize_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -27,7 +31,7 @@ fn find_violations(root: &Path, files: &[PathBuf]) -> Vec<String> {
             || src.contains("std::process::Command::new(\"git\")")
         {
             let rel = path.strip_prefix(root).unwrap_or(path);
-            violations.push(rel.display().to_string());
+            violations.push(normalize_path(rel));
         }
     }
     violations.sort();
@@ -38,7 +42,7 @@ fn find_process_constructor_violations(root: &Path, files: &[PathBuf]) -> Vec<St
     let mut violations = Vec::new();
     for path in files {
         let rel = path.strip_prefix(root).unwrap_or(path);
-        let rel_display = rel.display().to_string();
+        let rel_display = normalize_path(rel);
         if rel_display == "crates/gwt-core/src/process.rs"
             || rel_display == "crates/gwt-core/tests/no_direct_git_command.rs"
         {

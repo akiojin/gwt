@@ -1168,7 +1168,6 @@ fn resolve_remote_branch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
     use tempfile::TempDir;
 
     fn canonicalize_or_self(path: &Path) -> PathBuf {

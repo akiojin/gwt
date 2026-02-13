@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { AgentModeState } from "../types";
-  import { onMount } from "svelte";
+  import { afterUpdate, onMount } from "svelte";
 
   let state: AgentModeState = {
     messages: [],
@@ -16,6 +16,9 @@
   let input = "";
   let sending = false;
   let isComposing = false;
+  let ignoreEnterAfterComposition = false;
+  let chatEl: HTMLDivElement | null = null;
+  let lastMessageCount = 0;
 
   function toErrorMessage(err: unknown): string {
     if (!err) return "Unknown error";
@@ -59,20 +62,42 @@
   }
 
   function onKeydown(event: KeyboardEvent) {
-    if (isComposing || event.isComposing) return;
-    if (event.key === "Enter" && !event.shiftKey) {
+    if (event.key === "Enter") {
+      if (isComposing || ignoreEnterAfterComposition || event.isComposing) {
+        event.preventDefault();
+        return;
+      }
+      if (!event.shiftKey) {
+        event.preventDefault();
+        void sendMessage();
+      }
+      return;
+    }
+    if (event.key === "Process" && (isComposing || event.isComposing)) {
       event.preventDefault();
-      void sendMessage();
     }
   }
 
   function onCompositionStart() {
     isComposing = true;
+    ignoreEnterAfterComposition = false;
   }
 
   function onCompositionEnd() {
     isComposing = false;
+    ignoreEnterAfterComposition = true;
+    setTimeout(() => {
+      ignoreEnterAfterComposition = false;
+    }, 0);
   }
+
+  afterUpdate(() => {
+    if (!chatEl) return;
+    if (state.messages.length !== lastMessageCount) {
+      chatEl.scrollTop = chatEl.scrollHeight;
+      lastMessageCount = state.messages.length;
+    }
+  });
 
   onMount(() => {
     void refreshState();
@@ -88,7 +113,7 @@
     </div>
   </header>
 
-  <div class="agent-chat">
+  <div class="agent-chat" bind:this={chatEl}>
     {#if state.last_error}
       <div class="agent-alert warn">{state.last_error}</div>
     {/if}
@@ -101,7 +126,9 @@
       <div class="agent-empty">Describe your task to start.</div>
     {:else}
       {#each state.messages as msg}
-        <div class={`agent-message ${msg.role} ${msg.kind ?? "message"}`}>
+        <div
+          class={`agent-message ${msg.role} ${msg.kind ?? "message"} ${msg.role === "assistant" && (msg.kind === null || msg.kind === "message" || typeof msg.kind === "undefined") ? "meta-hidden" : ""}`}
+        >
           <div class="agent-bubble">
             <div class="agent-meta">{msg.kind ?? msg.role}</div>
             <div class="agent-content">{msg.content}</div>
@@ -268,7 +295,7 @@
   }
 
   .agent-message.user .agent-meta,
-  .agent-message.assistant .agent-meta {
+  .agent-message.meta-hidden .agent-meta {
     display: none;
   }
 

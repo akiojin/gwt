@@ -5,6 +5,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use super::gh_cli::{gh_command, is_gh_available};
+
 /// Pull Request information
 #[derive(Debug, Clone)]
 pub struct PullRequest {
@@ -100,7 +102,7 @@ impl PrCache {
             return None;
         }
 
-        let output = crate::process::command("gh")
+        let output = gh_command()
             .args([
                 "pr",
                 "list",
@@ -128,15 +130,6 @@ impl PrCache {
     }
 }
 
-/// Check if GitHub CLI (gh) is available
-fn is_gh_available() -> bool {
-    crate::process::command("gh")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 /// Fetch PRs using GitHub CLI
 fn fetch_prs(repo_path: &Path) -> Result<Vec<PullRequest>, std::io::Error> {
     let mut prs = Vec::new();
@@ -157,7 +150,7 @@ fn fetch_prs(repo_path: &Path) -> Result<Vec<PullRequest>, std::io::Error> {
 /// Fetch PRs by state using GitHub CLI
 fn fetch_prs_by_state(repo_path: &Path, state: &str) -> Result<Vec<PullRequest>, std::io::Error> {
     // gh pr list --state open --json number,title,headRefName,state --limit 100
-    let output = crate::process::command("gh")
+    let output = gh_command()
         .args([
             "pr",
             "list",
