@@ -1106,6 +1106,44 @@ pub fn launch_terminal(
     launch_with_config(&repo_path, config, None, &state, app_handle)
 }
 
+fn non_empty_env_var(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn resolve_shell_launch_spec(is_windows: bool) -> (String, Vec<String>) {
+    let shell = non_empty_env_var("SHELL")
+        .or_else(|| {
+            if is_windows {
+                non_empty_env_var("COMSPEC")
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| {
+            if is_windows {
+                "cmd.exe".to_string()
+            } else {
+                "/bin/sh".to_string()
+            }
+        });
+
+    let lower = shell.to_ascii_lowercase();
+    let requires_plain_launch = lower.ends_with("cmd.exe")
+        || lower.ends_with("powershell.exe")
+        || lower.ends_with("pwsh.exe");
+
+    let args = if requires_plain_launch {
+        Vec::new()
+    } else {
+        vec!["-l".to_string()]
+    };
+
+    (shell, args)
+}
+
 /// Spawn a plain shell terminal (not an agent).
 #[tauri::command]
 pub fn spawn_shell(
@@ -1113,7 +1151,7 @@ pub fn spawn_shell(
     state: State<AppState>,
     app_handle: AppHandle,
 ) -> Result<String, String> {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    let (shell, shell_args) = resolve_shell_launch_spec(cfg!(windows));
 
     let home = std::env::var("HOME")
         .map(PathBuf::from)
@@ -1126,7 +1164,7 @@ pub fn spawn_shell(
 
     let config = BuiltinLaunchConfig {
         command: shell,
-        args: vec!["-l".to_string()],
+        args: shell_args,
         working_dir: resolved_dir,
         branch_name: "terminal".to_string(),
         agent_name: "terminal".to_string(),
@@ -1170,8 +1208,81 @@ pub fn spawn_shell(
 mod tests {
     use super::*;
     use gwt_core::terminal::runner::FallbackRunner;
+    use std::ffi::OsString;
     use std::path::Path;
     use std::time::Duration;
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_shell_launch_spec_prefers_shell_env_with_login_arg() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let _shell = ScopedEnvVar::set("SHELL", "/usr/bin/zsh");
+        let _comspec = ScopedEnvVar::set("COMSPEC", "C:\\Windows\\System32\\cmd.exe");
+
+        let (shell, args) = resolve_shell_launch_spec(false);
+        assert_eq!(shell, "/usr/bin/zsh");
+        assert_eq!(args, vec!["-l".to_string()]);
+    }
+
+    #[test]
+    fn resolve_shell_launch_spec_windows_falls_back_to_comspec_without_login_arg() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let _shell = ScopedEnvVar::remove("SHELL");
+        let _comspec = ScopedEnvVar::set("COMSPEC", "C:\\Windows\\System32\\cmd.exe");
+
+        let (shell, args) = resolve_shell_launch_spec(true);
+        assert_eq!(shell, "C:\\Windows\\System32\\cmd.exe");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn resolve_shell_launch_spec_windows_defaults_to_cmd_when_env_missing() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let _shell = ScopedEnvVar::remove("SHELL");
+        let _comspec = ScopedEnvVar::remove("COMSPEC");
+
+        let (shell, args) = resolve_shell_launch_spec(true);
+        assert_eq!(shell, "cmd.exe");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn resolve_shell_launch_spec_disables_login_arg_for_pwsh() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let _shell = ScopedEnvVar::set("SHELL", "/opt/homebrew/bin/pwsh.exe");
+        let _comspec = ScopedEnvVar::remove("COMSPEC");
+
+        let (shell, args) = resolve_shell_launch_spec(false);
+        assert_eq!(shell, "/opt/homebrew/bin/pwsh.exe");
+        assert!(args.is_empty());
+    }
 
     #[test]
     fn consume_osc7_cwd_updates_buffers_fragmented_sequences() {
