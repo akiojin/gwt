@@ -8,6 +8,15 @@ use std::process::Command;
 use super::remote::Remote;
 use super::repository::{find_bare_repo_in_dir, is_git_repo};
 
+/// Result of fetching issues with pagination info
+#[derive(Debug, Clone)]
+pub struct FetchIssuesResult {
+    /// Fetched issues
+    pub issues: Vec<GitHubIssue>,
+    /// Whether there are more issues available on the next page
+    pub has_next_page: bool,
+}
+
 /// GitHub Issue information
 #[derive(Debug, Clone)]
 pub struct GitHubIssue {
@@ -70,12 +79,19 @@ pub fn is_gh_cli_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Fetch open issues from GitHub using gh CLI
-/// Returns issues sorted by updated_at descending (most recently updated first)
-/// Limited to 50 issues per FR-005a
-pub fn fetch_open_issues(repo_path: &Path) -> Result<Vec<GitHubIssue>, String> {
+/// Fetch open issues from GitHub using gh CLI with pagination support (FR-001)
+///
+/// Returns issues sorted by updated_at descending (most recently updated first).
+/// Uses `page` and `per_page` to control pagination.
+/// `has_next_page` is determined by requesting `per_page * page + 1` items
+/// and checking if more exist beyond the current page.
+pub fn fetch_open_issues(
+    repo_path: &Path,
+    page: u32,
+    per_page: u32,
+) -> Result<FetchIssuesResult, String> {
     let repo_slug = resolve_repo_slug(repo_path);
-    let args = issue_list_args(repo_slug.as_deref());
+    let args = issue_list_args(repo_slug.as_deref(), page, per_page);
 
     let output = Command::new("gh")
         .args(args)
@@ -89,10 +105,27 @@ pub fn fetch_open_issues(repo_path: &Path) -> Result<Vec<GitHubIssue>, String> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_gh_issues_json(&stdout)
+    let all_issues = parse_gh_issues_json(&stdout)?;
+
+    // Skip items from previous pages
+    let skip = ((page - 1) * per_page) as usize;
+    let remaining: Vec<GitHubIssue> = all_issues.into_iter().skip(skip).collect();
+
+    // If we got more than per_page items after skipping, there's a next page
+    let has_next_page = remaining.len() > per_page as usize;
+    let issues: Vec<GitHubIssue> = remaining.into_iter().take(per_page as usize).collect();
+
+    Ok(FetchIssuesResult {
+        issues,
+        has_next_page,
+    })
 }
 
-fn issue_list_args(repo_slug: Option<&str>) -> Vec<String> {
+fn issue_list_args(repo_slug: Option<&str>, page: u32, per_page: u32) -> Vec<String> {
+    // Request enough items to cover the current page plus one extra to detect next page
+    let limit = per_page * page + 1;
+
+    let limit_str = limit.to_string();
     let mut args = vec![
         "issue",
         "list",
@@ -101,7 +134,7 @@ fn issue_list_args(repo_slug: Option<&str>) -> Vec<String> {
         "--json",
         "number,title,updatedAt",
         "--limit",
-        "50",
+        &limit_str,
     ]
     .into_iter()
     .map(String::from)
@@ -574,8 +607,9 @@ mod tests {
     // ==========================================================
 
     #[test]
-    fn test_issue_list_args_without_repo() {
-        let args = issue_list_args(None);
+    fn test_issue_list_args_without_repo_page1() {
+        // page=1, per_page=50 → limit = 50*1+1 = 51
+        let args = issue_list_args(None, 1, 50);
         assert_eq!(
             args,
             vec![
@@ -586,7 +620,7 @@ mod tests {
                 "--json",
                 "number,title,updatedAt",
                 "--limit",
-                "50"
+                "51"
             ]
             .into_iter()
             .map(String::from)
@@ -595,8 +629,8 @@ mod tests {
     }
 
     #[test]
-    fn test_issue_list_args_with_repo() {
-        let args = issue_list_args(Some("owner/repo"));
+    fn test_issue_list_args_with_repo_page1() {
+        let args = issue_list_args(Some("owner/repo"), 1, 50);
         assert_eq!(
             args,
             vec![
@@ -607,9 +641,53 @@ mod tests {
                 "--json",
                 "number,title,updatedAt",
                 "--limit",
-                "50",
+                "51",
                 "--repo",
                 "owner/repo"
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<String>>()
+        );
+    }
+
+    #[test]
+    fn test_issue_list_args_page2() {
+        // page=2, per_page=50 → limit = 50*2+1 = 101
+        let args = issue_list_args(None, 2, 50);
+        assert_eq!(
+            args,
+            vec![
+                "issue",
+                "list",
+                "--state",
+                "open",
+                "--json",
+                "number,title,updatedAt",
+                "--limit",
+                "101"
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<String>>()
+        );
+    }
+
+    #[test]
+    fn test_issue_list_args_custom_per_page() {
+        // page=1, per_page=10 → limit = 10*1+1 = 11
+        let args = issue_list_args(None, 1, 10);
+        assert_eq!(
+            args,
+            vec![
+                "issue",
+                "list",
+                "--state",
+                "open",
+                "--json",
+                "number,title,updatedAt",
+                "--limit",
+                "11"
             ]
             .into_iter()
             .map(String::from)
