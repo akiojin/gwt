@@ -208,10 +208,7 @@ pub fn fetch_pr_status(
 
     if !available || !authenticated {
         // Return empty statuses with gh_status indicating the problem
-        let statuses = branches
-            .into_iter()
-            .map(|branch| (branch, None))
-            .collect();
+        let statuses = branches.into_iter().map(|branch| (branch, None)).collect();
         return Ok(PrStatusResponse {
             statuses,
             gh_status,
@@ -236,10 +233,7 @@ pub fn fetch_pr_status(
 
 /// Fetch detailed PR information for a single PR (T010)
 #[tauri::command]
-pub fn fetch_pr_detail(
-    project_path: String,
-    pr_number: u64,
-) -> Result<PrDetailResponse, String> {
+pub fn fetch_pr_detail(project_path: String, pr_number: u64) -> Result<PrDetailResponse, String> {
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)?;
 

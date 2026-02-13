@@ -176,7 +176,11 @@ fn parse_pr_node(node: &serde_json::Value, _branch: &str) -> Option<PrStatusInfo
         .get("closingIssuesReferences")
         .and_then(|c| c.get("nodes"))
         .and_then(|n| n.as_array())
-        .map(|arr| arr.iter().filter_map(|i| i.get("number")?.as_u64()).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|i| i.get("number")?.as_u64())
+                .collect()
+        })
         .unwrap_or_default();
 
     let check_suites = parse_check_suites(node);
@@ -198,7 +202,10 @@ fn parse_pr_node(node: &serde_json::Value, _branch: &str) -> Option<PrStatusInfo
         check_suites,
         reviews,
         review_comments: vec![],
-        changed_files_count: node.get("changedFiles").and_then(|v| v.as_u64()).unwrap_or(0),
+        changed_files_count: node
+            .get("changedFiles")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
         additions: node.get("additions").and_then(|v| v.as_u64()).unwrap_or(0),
         deletions: node.get("deletions").and_then(|v| v.as_u64()).unwrap_or(0),
     })
@@ -218,7 +225,10 @@ fn parse_check_suites(node: &serde_json::Value) -> Vec<WorkflowRunInfo> {
             arr.iter()
                 .filter_map(|check| {
                     let workflow_name = check.get("name")?.as_str()?.to_string();
-                    let run_id = check.get("databaseId").and_then(|d| d.as_u64()).unwrap_or(0);
+                    let run_id = check
+                        .get("databaseId")
+                        .and_then(|d| d.as_u64())
+                        .unwrap_or(0);
                     let status = check
                         .get("status")
                         .and_then(|s| s.as_str())
@@ -380,14 +390,12 @@ fn parse_review_comments(node: &serde_json::Value) -> Vec<ReviewComment> {
                                         .and_then(|l| l.as_str())
                                         .unwrap_or("unknown")
                                         .to_string();
-                                    let body =
-                                        comment.get("body")?.as_str()?.to_string();
+                                    let body = comment.get("body")?.as_str()?.to_string();
                                     let file_path = comment
                                         .get("path")
                                         .and_then(|p| p.as_str())
                                         .map(String::from);
-                                    let line =
-                                        comment.get("line").and_then(|l| l.as_u64());
+                                    let line = comment.get("line").and_then(|l| l.as_u64());
                                     let created_at = comment
                                         .get("createdAt")
                                         .and_then(|c| c.as_str())
@@ -445,10 +453,7 @@ pub fn fetch_pr_statuses(
 }
 
 /// Fetch detailed PR information for a single PR using `gh api graphql`.
-pub fn fetch_pr_detail(
-    repo_path: &Path,
-    pr_number: u64,
-) -> Result<PrStatusInfo, String> {
+pub fn fetch_pr_detail(repo_path: &Path, pr_number: u64) -> Result<PrStatusInfo, String> {
     let slug = resolve_repo_slug(repo_path)
         .ok_or_else(|| "Failed to resolve repository slug".to_string())?;
     let parts: Vec<&str> = slug.split('/').collect();
@@ -507,7 +512,11 @@ mod tests {
 
     #[test]
     fn test_build_pr_status_query_multiple_branches() {
-        let branches = vec!["main".to_string(), "dev".to_string(), "feature/y".to_string()];
+        let branches = vec![
+            "main".to_string(),
+            "dev".to_string(),
+            "feature/y".to_string(),
+        ];
         let query = build_pr_status_query("org", "project", &branches);
         assert!(query.contains("b0: pullRequests(headRefName: \"main\""));
         assert!(query.contains("b1: pullRequests(headRefName: \"dev\""));
@@ -637,7 +646,9 @@ mod tests {
         let branches = vec!["main".to_string()];
         let result = parse_pr_status_response(json, &branches);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Could not resolve to a Repository"));
+        assert!(result
+            .unwrap_err()
+            .contains("Could not resolve to a Repository"));
     }
 
     #[test]
@@ -803,7 +814,10 @@ mod tests {
         assert_eq!(info.review_comments.len(), 1);
         assert_eq!(info.review_comments[0].author, "bob");
         assert_eq!(info.review_comments[0].body, "Fix this line");
-        assert_eq!(info.review_comments[0].file_path, Some("src/main.rs".to_string()));
+        assert_eq!(
+            info.review_comments[0].file_path,
+            Some("src/main.rs".to_string())
+        );
         assert_eq!(info.review_comments[0].line, Some(42));
         assert_eq!(info.changed_files_count, 3);
     }

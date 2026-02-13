@@ -66,6 +66,88 @@
   // PR Status tree expand state
   let expandedBranches: Set<string> = $state(new Set());
 
+  // PR Polling — inline to avoid .svelte.ts import issues in tests
+  const PR_POLL_INTERVAL_MS = 30_000;
+  let pollingStatuses: Record<string, PrStatusInfo | null> = $state({});
+  let pollingGhCliStatus: GhCliStatus | null = $state(null);
+
+  $effect(() => {
+    const path = projectPath;
+    if (!path) return;
+
+    let destroyed = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    async function refresh() {
+      if (destroyed) return;
+      try {
+        const branchNames = branches.map((b) => b.name);
+        if (branchNames.length === 0) {
+          pollingStatuses = {};
+          return;
+        }
+        const { invoke } = await import("@tauri-apps/api/core");
+        const result = await invoke<{
+          statuses: Record<string, PrStatusInfo | null>;
+          ghStatus: GhCliStatus;
+        }>("fetch_pr_status", { projectPath: path, branches: branchNames });
+        if (!destroyed) {
+          pollingStatuses = result.statuses ?? {};
+          pollingGhCliStatus = result.ghStatus ?? null;
+        }
+      } catch {
+        // Polling failure is silent — keep stale data
+      }
+    }
+
+    function start() {
+      if (destroyed) return;
+      stop();
+      refresh();
+      timer = setInterval(refresh, PR_POLL_INTERVAL_MS);
+    }
+
+    function stop() {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+    }
+
+    function onVisibility() {
+      if (document.hidden) {
+        stop();
+      } else {
+        start();
+      }
+    }
+
+    document.addEventListener("visibilitychange", onVisibility);
+    start();
+
+    return () => {
+      destroyed = true;
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  });
+
+  // Effective values: prefer polling data, fall back to props
+  let activePrStatuses = $derived.by(() => {
+    if (pollingStatuses && Object.keys(pollingStatuses).length > 0) {
+      return pollingStatuses;
+    }
+    return prStatuses;
+  });
+  let activeGhCliStatus = $derived(pollingGhCliStatus ?? ghCliStatus);
+
+  // Derived prNumber for WorktreeSummaryPanel
+  let selectedPrNumber = $derived.by(() => {
+    if (!selectedBranch) return null;
+    const status = activePrStatuses[selectedBranch.name];
+    return status?.number ?? null;
+  });
+
   function toggleBranch(branchName: string) {
     const next = new Set(expandedBranches);
     if (next.has(branchName)) {
@@ -776,7 +858,7 @@
         {:else}
           {#each filteredBranches as branch}
             <div class="branch-tree-item">
-              {#if activeFilter !== "Remote" && prStatuses[branch.name]}
+              {#if activeFilter !== "Remote" && activePrStatuses[branch.name]}
                 <button
                   class="tree-toggle"
                   class:expanded={expandedBranches.has(branch.name)}
@@ -827,14 +909,14 @@
                   </span>
                 {/if}
                 <span class="branch-name">{branch.name}</span>
-                {#if ghCliStatus && !ghCliStatus.authenticated}
+                {#if activeGhCliStatus && !activeGhCliStatus.authenticated}
                   <span class="pr-badge disconnected">GitHub not connected</span>
-                {:else if prStatuses[branch.name]}
-                  {@const pr = prStatuses[branch.name]!}
+                {:else if activePrStatuses[branch.name]}
+                  {@const pr = activePrStatuses[branch.name]!}
                   <span class="pr-badge {pr.state.toLowerCase()}">
                     #{pr.number} {pr.state === "OPEN" ? "Open" : pr.state === "MERGED" ? "Merged" : "Closed"}
                   </span>
-                {:else if ghCliStatus?.authenticated}
+                {:else if activeGhCliStatus?.authenticated}
                   <span class="pr-badge no-pr">No PR</span>
                 {/if}
                 {#if branch.last_tool_usage}
@@ -853,9 +935,9 @@
                 {/if}
               </button>
             </div>
-            {#if expandedBranches.has(branch.name) && prStatuses[branch.name]}
+            {#if expandedBranches.has(branch.name) && activePrStatuses[branch.name]}
               <div class="workflow-runs">
-                {#each prStatuses[branch.name]!.checkSuites as run}
+                {#each activePrStatuses[branch.name]!.checkSuites as run}
                   <button class="workflow-run-item" onclick={() => openCiLog(run)}>
                     <span class="workflow-status {workflowStatusClass(run)}">{workflowStatusIcon(run)}</span>
                     <span class="workflow-name">{run.workflowName}</span>
@@ -883,6 +965,7 @@
         <WorktreeSummaryPanel
           {projectPath}
           {selectedBranch}
+          prNumber={selectedPrNumber}
           onLaunchAgent={onLaunchAgent}
           onQuickLaunch={onQuickLaunch}
         />

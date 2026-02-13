@@ -745,6 +745,31 @@
     showCleanupModal = true;
   }
 
+  async function handleOpenCiLog(runId: number) {
+    try {
+      const workingDir = projectPath || undefined;
+      const { invoke } = await import("@tauri-apps/api/core");
+      const paneId = await invoke<string>("spawn_shell", { workingDir });
+
+      const label = `CI #${runId}`;
+      const newTab: Tab = {
+        id: `terminal-${paneId}`,
+        label,
+        type: "terminal",
+        paneId,
+        cwd: workingDir || undefined,
+      };
+      tabs = [...tabs, newTab];
+      activeTabId = newTab.id;
+
+      const cmd = `gh run view ${runId} --log\n`;
+      const data = Array.from(new TextEncoder().encode(cmd));
+      await invoke("write_terminal", { paneId, data });
+    } catch (err) {
+      console.error("Failed to open CI log:", err);
+    }
+  }
+
   async function fetchCurrentBranch() {
     if (!projectPath) return;
     try {
@@ -1759,6 +1784,7 @@
           onCleanupRequest={handleCleanupRequest}
           onLaunchAgent={requestAgentLaunch}
           onQuickLaunch={handleAgentLaunch}
+          onOpenCiLog={handleOpenCiLog}
         />
       {/if}
       <MainArea

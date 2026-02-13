@@ -537,11 +537,17 @@ mod tests {
         assert_eq!(deserialized.linked_issues, vec![10, 20]);
         assert_eq!(deserialized.check_suites.len(), 1);
         assert_eq!(deserialized.check_suites[0].workflow_name, "CI");
-        assert_eq!(deserialized.check_suites[0].conclusion, Some("success".to_string()));
+        assert_eq!(
+            deserialized.check_suites[0].conclusion,
+            Some("success".to_string())
+        );
         assert_eq!(deserialized.reviews.len(), 1);
         assert_eq!(deserialized.reviews[0].reviewer, "charlie");
         assert_eq!(deserialized.review_comments.len(), 1);
-        assert_eq!(deserialized.review_comments[0].file_path, Some("src/main.rs".to_string()));
+        assert_eq!(
+            deserialized.review_comments[0].file_path,
+            Some("src/main.rs".to_string())
+        );
         assert_eq!(deserialized.changed_files_count, 5);
         assert_eq!(deserialized.additions, 100);
         assert_eq!(deserialized.deletions, 20);
