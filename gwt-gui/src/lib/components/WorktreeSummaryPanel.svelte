@@ -25,6 +25,7 @@
   let quickStartError: string | null = $state(null);
   let quickLaunchError: string | null = $state(null);
   let quickLaunching: boolean = $state(false);
+  let quickLaunchingKey: string | null = $state(null);
 
   let sessionSummaryLoading: boolean = $state(false);
   let sessionSummaryGenerating: boolean = $state(false);
@@ -106,6 +107,12 @@
       return "default";
     }
     return null;
+  }
+
+  function quickStartEntryKey(entry: ToolSessionEntry): string {
+    const session = entry.session_id?.trim();
+    if (session) return session;
+    return `${entry.tool_id}-${entry.timestamp}`;
   }
 
   async function loadQuickStart() {
@@ -242,10 +249,11 @@
 
   onMount(() => {
     let unlisten: null | (() => void) = null;
+    let cancelled = false;
     (async () => {
       try {
         const { listen } = await import("@tauri-apps/api/event");
-        unlisten = await listen<SessionSummaryUpdatedPayload>(
+        const unlistenFn = await listen<SessionSummaryUpdatedPayload>(
           "session-summary-updated",
           (event) => {
             const payload = event.payload;
@@ -271,12 +279,18 @@
             sessionSummarySessionId = result.sessionId ?? null;
           }
         );
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
       } catch (err) {
         // Ignore when Tauri event bridge is unavailable (e.g., tests/web preview).
       }
     })();
 
     return () => {
+      cancelled = true;
       if (unlisten) {
         unlisten();
       }
@@ -290,6 +304,7 @@
 
     quickLaunchError = null;
     quickLaunching = true;
+    quickLaunchingKey = quickStartEntryKey(entry);
     try {
       const agentId = agentIdForToolId(entry.tool_id);
       const mode = action === "continue" ? "continue" : "normal";
@@ -319,6 +334,7 @@
       quickLaunchError = `Failed to launch: ${toErrorMessage(err)}`;
     } finally {
       quickLaunching = false;
+      quickLaunchingKey = null;
     }
   }
 </script>
@@ -384,7 +400,7 @@
           </div>
         {:else if quickStartEntries.length > 0}
           <div class="quick-list">
-            {#each quickStartEntries as entry (entry.tool_id)}
+            {#each quickStartEntries as entry (quickStartEntryKey(entry))}
               <div class="quick-row">
                 <div class="quick-info">
                   <div class="quick-tool {toolClass(entry)}">
@@ -413,7 +429,9 @@
                     disabled={quickLaunching}
                     onclick={() => quickLaunch(entry, "continue")}
                   >
-                    {quickLaunching ? "Launching..." : "Continue"}
+                    {quickLaunching && quickLaunchingKey === quickStartEntryKey(entry)
+                      ? "Launching..."
+                      : "Continue"}
                   </button>
                   <button
                     class="quick-btn ghost"
