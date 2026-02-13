@@ -68,6 +68,103 @@ describe("AgentLaunchForm", () => {
     ).toBe(true);
   });
 
+  it("shows only agent names in the agent dropdown", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.0.0",
+            authenticated: true,
+            available: true,
+          },
+          {
+            id: "claude",
+            name: "Claude Code",
+            version: "bunx",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "get_agent_config") {
+        return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      }
+      return [];
+    });
+
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "",
+      onLaunch,
+      onClose,
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    const agentSelect = rendered.getByLabelText("Agent") as HTMLSelectElement;
+    const optionLabels = Array.from(agentSelect.options).map(
+      (option) => option.textContent?.trim() ?? ""
+    );
+
+    expect(optionLabels).toEqual(["Select an agent...", "Codex", "Claude Code"]);
+    expect(optionLabels.some((label) => label.includes("("))).toBe(false);
+    expect(optionLabels.some((label) => label.includes("bunx"))).toBe(false);
+    expect(optionLabels.some((label) => label.includes("npx"))).toBe(false);
+    expect(optionLabels.some((label) => label.includes("Unavailable"))).toBe(false);
+  });
+
+  it("does not show bunx/npx in fallback hints", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "bunx",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "get_agent_config") {
+        return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      }
+      return [];
+    });
+
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "",
+      onLaunch,
+      onClose,
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    const fallbackNotice = rendered.getByText("Not installed. Launch will use a fallback runner.");
+    expect(fallbackNotice).toBeTruthy();
+
+    const binaryFallbackNotice = rendered.getByText(
+      "Installed binary not found. Launch will use fallback runner."
+    );
+    expect(binaryFallbackNotice).toBeTruthy();
+
+    expect(rendered.queryByText(/bunx/)).toBeNull();
+    expect(rendered.queryByText(/npx/)).toBeNull();
+  });
+
   it("does not close suggest modal when applying an invalid suggestion", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "detect_agents") {

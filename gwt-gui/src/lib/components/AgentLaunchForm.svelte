@@ -1135,7 +1135,7 @@
             <option value="" disabled>Select an agent...</option>
             {#each agents as agent (agent.id)}
               <option value={agent.id} disabled={!agent.available}>
-                {agent.name} ({agent.version}{agent.available ? "" : ", Unavailable"})
+                {agent.name}
               </option>
             {/each}
           </select>
@@ -1144,7 +1144,7 @@
               <span class="field-hint warn">Unavailable</span>
             {:else if selectedAgentInfo.version === "bunx" || selectedAgentInfo.version === "npx"}
               <span class="field-hint warn">
-                Not installed. Launch will use {selectedAgentInfo.version}.
+                Not installed. Launch will use a fallback runner.
               </span>
             {:else if !selectedAgentInfo.authenticated}
               <span class="field-hint warn">Not authenticated</span>
@@ -1330,7 +1330,7 @@
           </select>
           {#if agentNotInstalled}
             <span class="field-hint">
-              Installed binary not found. Launch will use bunx/npx.
+              Installed binary not found. Launch will use fallback runner.
             </span>
           {/if}
           {#if versionsLoading}
