@@ -20,6 +20,27 @@ pub struct PtyConfig {
     pub cols: u16,
 }
 
+fn is_windows_batch_script(command: &str) -> bool {
+    let lower = command.trim().to_ascii_lowercase();
+    lower.ends_with(".cmd") || lower.ends_with(".bat")
+}
+
+fn resolve_spawn_command(command: &str, args: &[String]) -> (String, Vec<String>) {
+    if cfg!(windows) && is_windows_batch_script(command) {
+        // On Windows, .cmd/.bat scripts must be launched through cmd.exe in PTY contexts.
+        let mut wrapped_args = vec![
+            "/d".to_string(),
+            "/s".to_string(),
+            "/c".to_string(),
+            command.to_string(),
+        ];
+        wrapped_args.extend(args.iter().cloned());
+        return ("cmd.exe".to_string(), wrapped_args);
+    }
+
+    (command.to_string(), args.to_vec())
+}
+
 /// Handle to a PTY instance with its child process.
 pub struct PtyHandle {
     master: Box<dyn MasterPty + Send>,
@@ -44,8 +65,10 @@ impl PtyHandle {
                 reason: e.to_string(),
             })?;
 
-        let mut cmd = CommandBuilder::new(&config.command);
-        for arg in &config.args {
+        let (spawn_command, spawn_args) = resolve_spawn_command(&config.command, &config.args);
+
+        let mut cmd = CommandBuilder::new(&spawn_command);
+        for arg in &spawn_args {
             cmd.arg(arg);
         }
         cmd.cwd(&config.working_dir);
@@ -129,6 +152,46 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    #[test]
+    fn is_windows_batch_script_detects_cmd_and_bat() {
+        assert!(is_windows_batch_script("npx.cmd"));
+        assert!(is_windows_batch_script("C:\\Tools\\runner.BAT"));
+        assert!(!is_windows_batch_script("codex"));
+        assert!(!is_windows_batch_script("/usr/bin/codex"));
+    }
+
+    #[test]
+    fn resolve_spawn_command_wraps_batch_script_only_on_windows() {
+        let args = vec!["--yes".to_string(), "@openai/codex@latest".to_string()];
+        let (program, resolved_args) = resolve_spawn_command("C:\\Tools\\npx.cmd", &args);
+
+        if cfg!(windows) {
+            assert_eq!(program, "cmd.exe");
+            assert_eq!(
+                resolved_args,
+                vec![
+                    "/d".to_string(),
+                    "/s".to_string(),
+                    "/c".to_string(),
+                    "C:\\Tools\\npx.cmd".to_string(),
+                    "--yes".to_string(),
+                    "@openai/codex@latest".to_string()
+                ]
+            );
+        } else {
+            assert_eq!(program, "C:\\Tools\\npx.cmd");
+            assert_eq!(resolved_args, args);
+        }
+    }
+
+    #[test]
+    fn resolve_spawn_command_keeps_non_batch_command() {
+        let args = vec!["--version".to_string()];
+        let (program, resolved_args) = resolve_spawn_command("codex", &args);
+        assert_eq!(program, "codex");
+        assert_eq!(resolved_args, args);
+    }
 
     /// Helper: read from PTY reader in a separate thread with timeout.
     fn read_with_timeout(

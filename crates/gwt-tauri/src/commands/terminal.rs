@@ -2583,6 +2583,7 @@ pub fn cancel_launch_job(job_id: String, state: State<AppState>) -> Result<(), S
 fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_handle: AppHandle) {
     let state = app_handle.state::<AppState>();
     let mut buf = [0u8; 4096];
+    let mut stream_error: Option<String> = None;
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break, // EOF
@@ -2602,14 +2603,39 @@ fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_hand
                 // the frontend isn't ready (tab switch, hot reload, etc.).
                 let _ = app_handle.emit("terminal-output", &payload);
             }
-            Err(_) => break,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => {
+                stream_error = Some(err.to_string());
+                break;
+            }
         }
+    }
+
+    if let Some(details) = stream_error.as_deref() {
+        let status_message = format!("PTY stream error: {details}");
+        let output_message = format!("\r\n[{status_message}]\r\n");
+        let bytes = output_message.as_bytes();
+
+        if let Ok(mut manager) = state.pane_manager.lock() {
+            if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
+                pane.mark_error(status_message);
+                let _ = pane.process_bytes(bytes);
+            }
+        }
+
+        let payload = TerminalOutputPayload {
+            pane_id: pane_id.clone(),
+            data: bytes.to_vec(),
+        };
+        let _ = app_handle.emit("terminal-output", &payload);
     }
 
     // Update pane status after the PTY stream ends.
     let (exit_code, ended) = if let Ok(mut manager) = state.pane_manager.lock() {
         if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
-            let _ = pane.check_status();
+            if stream_error.is_none() {
+                let _ = pane.check_status();
+            }
             let exit_code = match pane.status() {
                 PaneStatus::Completed(code) => Some(*code),
                 _ => None,
