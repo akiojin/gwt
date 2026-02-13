@@ -78,6 +78,10 @@ base64 = "0.22"
 # Home directory
 dirs = "6"
 
+# System information
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+nvml-wrapper = "0.10"
+
 [profile.release]
 lto = true
 codegen-units = 1
