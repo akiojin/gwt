@@ -10,6 +10,11 @@
     GitHubIssueInfo,
     LaunchAgentRequest,
   } from "../types";
+  import {
+    loadLaunchDefaults,
+    saveLaunchDefaults,
+    type LaunchDefaults,
+  } from "../agentLaunchDefaults";
 
   let {
     projectPath,
@@ -89,6 +94,8 @@
   let dockerBuild: boolean = $state(false);
   let dockerRecreate: boolean = $state(false);
   let dockerKeep: boolean = $state(false);
+  let pendingRuntimePreference: RuntimeTarget | null = null;
+  let pendingDockerServicePreference: string = "";
 
   let versionsLoading: boolean = $state(false);
   let versionTags: string[] = $state([]);
@@ -249,6 +256,62 @@
       return opts;
     })()
   );
+
+  function applySavedLaunchDefaults(defaults: LaunchDefaults) {
+    selectedAgent = defaults.selectedAgent;
+    sessionMode = defaults.sessionMode;
+    modelByAgent = { ...defaults.modelByAgent };
+    agentVersionByAgent = { ...defaults.agentVersionByAgent };
+    skipPermissions = defaults.skipPermissions;
+    reasoningLevel = defaults.reasoningLevel;
+    resumeSessionId = defaults.resumeSessionId;
+    showAdvanced = defaults.showAdvanced;
+    extraArgsText = defaults.extraArgsText;
+    envOverridesText = defaults.envOverridesText;
+    runtimeTarget = defaults.runtimeTarget === "docker" ? "docker" : "host";
+    dockerService = defaults.dockerService;
+    dockerBuild = defaults.dockerBuild;
+    dockerRecreate = defaults.dockerRecreate;
+    dockerKeep = defaults.dockerKeep;
+    pendingRuntimePreference = runtimeTarget;
+    pendingDockerServicePreference = dockerService;
+  }
+
+  function persistLaunchDefaultsAfterSuccess() {
+    const nextModelByAgent = { ...modelByAgent };
+    const nextAgentVersionByAgent = { ...agentVersionByAgent };
+    const currentAgent = selectedAgent.trim();
+
+    if (currentAgent) {
+      nextAgentVersionByAgent[currentAgent] = agentVersion;
+      if (supportsModelFor(currentAgent)) {
+        nextModelByAgent[currentAgent] = model;
+      }
+    }
+
+    saveLaunchDefaults({
+      selectedAgent: currentAgent,
+      sessionMode,
+      modelByAgent: nextModelByAgent,
+      agentVersionByAgent: nextAgentVersionByAgent,
+      skipPermissions,
+      reasoningLevel,
+      resumeSessionId,
+      showAdvanced,
+      extraArgsText,
+      envOverridesText,
+      runtimeTarget,
+      dockerService,
+      dockerBuild,
+      dockerRecreate,
+      dockerKeep,
+    });
+  }
+
+  const savedLaunchDefaults = loadLaunchDefaults();
+  if (savedLaunchDefaults) {
+    applySavedLaunchDefaults(savedLaunchDefaults);
+  }
 
   $effect(() => {
     detectAgents();
@@ -677,6 +740,8 @@
       if (!ctx || ctx.force_host || ctx.file_type === "none") {
         runtimeTarget = "host" as RuntimeTarget;
         dockerService = "";
+        pendingRuntimePreference = null;
+        pendingDockerServicePreference = "";
         return;
       }
 
@@ -687,24 +752,43 @@
         (ctx.file_type === "devcontainer" && services.length > 0);
 
       if (composeLike) {
-        runtimeTarget =
-          ctx.docker_available && ctx.compose_available
-            ? ("docker" as RuntimeTarget)
-            : ("host" as RuntimeTarget);
+        const canUseDocker = ctx.docker_available && ctx.compose_available;
+        if (pendingRuntimePreference === "host") {
+          runtimeTarget = "host";
+        } else if (pendingRuntimePreference === "docker" && canUseDocker) {
+          runtimeTarget = "docker";
+        } else {
+          runtimeTarget = canUseDocker ? ("docker" as RuntimeTarget) : ("host" as RuntimeTarget);
+        }
 
         if (services.length === 0) {
           dockerService = "";
+          pendingRuntimePreference = null;
+          pendingDockerServicePreference = "";
           return;
         }
-        if (!services.includes(dockerService)) {
+        const preferredService = pendingDockerServicePreference.trim();
+        if (preferredService && services.includes(preferredService)) {
+          dockerService = preferredService;
+        } else if (!services.includes(dockerService)) {
           dockerService = services[0];
         }
+        pendingRuntimePreference = null;
+        pendingDockerServicePreference = "";
         return;
       }
 
       // Dockerfile / image-based devcontainer.
-      runtimeTarget = ctx.docker_available ? ("docker" as RuntimeTarget) : ("host" as RuntimeTarget);
+      if (pendingRuntimePreference === "host") {
+        runtimeTarget = "host";
+      } else if (pendingRuntimePreference === "docker" && ctx.docker_available) {
+        runtimeTarget = "docker";
+      } else {
+        runtimeTarget = ctx.docker_available ? ("docker" as RuntimeTarget) : ("host" as RuntimeTarget);
+      }
       dockerService = "";
+      pendingRuntimePreference = null;
+      pendingDockerServicePreference = "";
     } catch (err) {
       const key = `${projectPath}::${refBranch}`;
       if (dockerContextKey !== key) return;
@@ -712,6 +796,8 @@
       dockerError = toErrorMessage(err);
       runtimeTarget = "host" as RuntimeTarget;
       dockerService = "";
+      pendingRuntimePreference = null;
+      pendingDockerServicePreference = "";
     } finally {
       const key = `${projectPath}::${refBranch}`;
       if (dockerContextKey === key) {
@@ -725,11 +811,17 @@
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       agents = await invoke<AgentInfo[]>("detect_agents");
-      const available = agents.find((a) => a.available);
-      if (available) selectedAgent = available.id;
+      const preferred = selectedAgent.trim();
+      if (preferred && agents.some((a) => a.id === preferred && a.available)) {
+        selectedAgent = preferred;
+      } else {
+        const available = agents.find((a) => a.available);
+        selectedAgent = available?.id ?? "";
+      }
     } catch (err) {
       console.error("Failed to detect agents:", err);
       agents = [];
+      selectedAgent = "";
     }
     loading = false;
   }
@@ -855,6 +947,7 @@
         await onLaunch({
           ...request,
         });
+        persistLaunchDefaultsAfterSuccess();
         onClose();
         return;
       }
@@ -878,6 +971,7 @@
           : undefined,
       });
 
+      persistLaunchDefaultsAfterSuccess();
       onClose();
     } catch (err) {
       errorMessage = `Failed to launch agent: ${toErrorMessage(err)}`;
