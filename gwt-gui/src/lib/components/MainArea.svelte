@@ -56,6 +56,7 @@
   let sessionSummaryError: string | null = $state(null);
   let sessionSummaryToolId: string | null = $state(null);
   let sessionSummarySessionId: string | null = $state(null);
+  const SESSION_SUMMARY_POLL_INTERVAL_MS = 5000;
 
   type SessionSummaryUpdatedPayload = {
     projectPath: string;
@@ -168,7 +169,8 @@
     loadQuickStart();
   });
 
-  async function loadSessionSummary() {
+  async function loadSessionSummary(options: { silent?: boolean } = {}) {
+    const silent = options.silent === true;
     sessionSummaryError = null;
     sessionSummaryWarning = null;
 
@@ -185,12 +187,14 @@
     }
 
     const key = `${projectPath}::${branch}`;
-    sessionSummaryLoading = true;
-    sessionSummaryGenerating = false;
-    sessionSummaryStatus = "";
-    sessionSummaryMarkdown = null;
-    sessionSummaryToolId = null;
-    sessionSummarySessionId = null;
+    if (!silent) {
+      sessionSummaryLoading = true;
+      sessionSummaryGenerating = false;
+      sessionSummaryStatus = "";
+      sessionSummaryMarkdown = null;
+      sessionSummaryToolId = null;
+      sessionSummarySessionId = null;
+    }
 
     try {
       const { invoke } = await import("@tauri-apps/api/core");
@@ -205,7 +209,12 @@
 
       sessionSummaryStatus = result.status;
       sessionSummaryGenerating = !!result.generating;
-      sessionSummaryMarkdown = result.markdown ?? null;
+      const nextMarkdown = result.markdown ?? null;
+      if (nextMarkdown !== null) {
+        sessionSummaryMarkdown = nextMarkdown;
+      } else if (!silent || result.status !== "ok") {
+        sessionSummaryMarkdown = null;
+      }
       sessionSummaryWarning = result.warning ?? null;
       sessionSummaryError = result.error ?? null;
       sessionSummaryToolId = result.toolId ?? null;
@@ -213,14 +222,16 @@
     } catch (err) {
       sessionSummaryStatus = "error";
       sessionSummaryGenerating = false;
-      sessionSummaryMarkdown = null;
+      if (!silent) {
+        sessionSummaryMarkdown = null;
+      }
       sessionSummaryToolId = null;
       sessionSummarySessionId = null;
       sessionSummaryError = `Failed to generate session summary: ${toErrorMessage(err)}`;
     } finally {
       const currentBranch = normalizeBranchName(selectedBranch?.name?.trim() ?? "");
       const currentKey = `${projectPath}::${currentBranch}`;
-      if (currentKey === key) {
+      if (currentKey === key && !silent) {
         sessionSummaryLoading = false;
       }
     }
@@ -231,7 +242,27 @@
     void projectPath;
     void activeTabId;
     if (activeTab?.type !== "summary") return;
+    const branch = normalizeBranchName(selectedBranch?.name?.trim() ?? "");
+    if (!branch) {
+      loadSessionSummary();
+      return;
+    }
+
     loadSessionSummary();
+
+    const timer = window.setInterval(() => {
+      if (
+        sessionSummaryStatus === "disabled" ||
+        sessionSummaryStatus === "ai-not-configured"
+      ) {
+        return;
+      }
+      loadSessionSummary({ silent: true });
+    }, SESSION_SUMMARY_POLL_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(timer);
+    };
   });
 
   onMount(() => {
