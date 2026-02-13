@@ -5,6 +5,7 @@ use crate::error::{GwtError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const DIFF_LINE_LIMIT: usize = 1000;
 
@@ -116,7 +117,7 @@ pub struct GitChangeSummary {
 
 /// Detect the base branch for comparison by checking upstream, falling back to "main"
 pub fn detect_base_branch(repo_path: &Path, branch: &str) -> Result<String> {
-    let output = crate::process::git_command()
+    let output = Command::new("git")
         .args([
             "rev-parse",
             "--abbrev-ref",
@@ -147,7 +148,7 @@ pub fn list_base_branch_candidates(repo_path: &Path) -> Result<Vec<String>> {
     let mut result = Vec::new();
 
     for name in &candidates {
-        let output = crate::process::git_command()
+        let output = Command::new("git")
             .args(["rev-parse", "--verify", &format!("refs/heads/{}", name)])
             .current_dir(repo_path)
             .output()
@@ -173,7 +174,7 @@ pub fn get_branch_diff_files(
     let range = format!("{}...{}", base_branch, branch);
 
     // Get numstat for additions/deletions and binary detection
-    let numstat_output = crate::process::git_command()
+    let numstat_output = Command::new("git")
         .args(["diff", "--numstat", &range])
         .current_dir(repo_path)
         .output()
@@ -190,7 +191,7 @@ pub fn get_branch_diff_files(
     }
 
     // Get name-status for change kind
-    let status_output = crate::process::git_command()
+    let status_output = Command::new("git")
         .args(["diff", "--name-status", &range])
         .current_dir(repo_path)
         .output()
@@ -274,7 +275,7 @@ pub fn get_file_diff(
     file_path: &str,
 ) -> Result<FileDiff> {
     let range = format!("{}...{}", base_branch, branch);
-    let output = crate::process::git_command()
+    let output = Command::new("git")
         .args(["diff", &range, "--", file_path])
         .current_dir(repo_path)
         .output()
@@ -317,7 +318,7 @@ pub fn get_file_diff(
 
 /// Get working tree status (staged and unstaged changes)
 pub fn get_working_tree_status(repo_path: &Path) -> Result<Vec<WorkingTreeEntry>> {
-    let output = crate::process::git_command()
+    let output = Command::new("git")
         .args(["status", "--porcelain"])
         .current_dir(repo_path)
         .output()
@@ -397,7 +398,7 @@ pub fn get_branch_commits(
     limit: usize,
 ) -> Result<Vec<GitViewCommit>> {
     let range = format!("{}..{}", base_branch, branch);
-    let output = crate::process::git_command()
+    let output = Command::new("git")
         .args([
             "log",
             &range,
@@ -450,7 +451,7 @@ pub fn get_git_change_summary(
     let commit_range = format!("{}..{}", base_branch, branch);
 
     // File count via --name-only
-    let file_output = crate::process::git_command()
+    let file_output = Command::new("git")
         .args(["diff", "--name-only", &diff_range])
         .current_dir(repo_path)
         .output()
@@ -469,7 +470,7 @@ pub fn get_git_change_summary(
     };
 
     // Commit count via rev-list --count
-    let commit_output = crate::process::git_command()
+    let commit_output = Command::new("git")
         .args(["rev-list", "--count", &commit_range])
         .current_dir(repo_path)
         .output()
@@ -489,7 +490,7 @@ pub fn get_git_change_summary(
 
     // Stash count
     let mut stash_exec_path = repo_path.to_path_buf();
-    let mut stash_output = crate::process::git_command()
+    let mut stash_output = Command::new("git")
         .args(["stash", "list"])
         .current_dir(&stash_exec_path)
         .output()
@@ -502,7 +503,7 @@ pub fn get_git_change_summary(
     if !stash_output.status.success() && is_bare_repository(repo_path) {
         if let Some(wt_path) = find_any_worktree_path(repo_path) {
             stash_exec_path = wt_path;
-            if let Ok(o2) = crate::process::git_command()
+            if let Ok(o2) = Command::new("git")
                 .args(["stash", "list"])
                 .current_dir(&stash_exec_path)
                 .output()
@@ -536,7 +537,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn run_git(repo_path: &Path, args: &[&str]) {
-        let output = crate::process::git_command()
+        let output = Command::new("git")
             .args(args)
             .current_dir(repo_path)
             .output()
@@ -550,7 +551,7 @@ mod tests {
     }
 
     fn get_current_branch_name(repo_path: &Path) -> String {
-        let output = crate::process::git_command()
+        let output = Command::new("git")
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
             .current_dir(repo_path)
             .output()
@@ -937,7 +938,7 @@ mod tests {
 
         // Clone as bare repo
         let bare = temp.path().join("repo.git");
-        let status = crate::process::git_command()
+        let status = Command::new("git")
             .args(["clone", "--bare"])
             .arg(&src)
             .arg(&bare)
@@ -947,7 +948,7 @@ mod tests {
 
         // Create a worktree so stash operations are possible
         let wt = temp.path().join("wt");
-        let status = crate::process::git_command()
+        let status = Command::new("git")
             .args(["worktree", "add"])
             .arg(&wt)
             .arg(&base)
