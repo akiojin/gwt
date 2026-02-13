@@ -25,9 +25,11 @@
     getAppVersionSafe,
   } from "./lib/windowTitle";
   import {
+    AGENT_TAB_RESTORE_MAX_RETRIES,
     loadStoredProjectAgentTabs,
     persistStoredProjectAgentTabs,
     buildRestoredAgentTabs,
+    shouldRetryAgentTabRestore,
   } from "./lib/agentTabsPersistence";
   import {
     VoiceInputController,
@@ -137,6 +139,7 @@
 
   let agentTabsHydratedProjectPath: string | null = $state(null);
   let agentTabsRestoreToken = 0;
+  const AGENT_TAB_RESTORE_RETRY_DELAY_MS = 150;
 
   let terminalCount = $derived(tabs.filter((t) => t.type === "agent").length);
 
@@ -805,7 +808,11 @@
     void syncWindowAgentTabs();
   });
 
-  async function restoreProjectAgentTabs(targetProjectPath: string, token: number) {
+  async function restoreProjectAgentTabs(
+    targetProjectPath: string,
+    token: number,
+    attempt = 0,
+  ) {
     const stored = loadStoredProjectAgentTabs(targetProjectPath);
 
     // Even if no stored state exists, mark hydrated so persistence can proceed.
@@ -829,6 +836,20 @@
     }
 
     const restored = buildRestoredAgentTabs(stored, terminals);
+    const shouldRetry = shouldRetryAgentTabRestore(
+      stored.tabs.length,
+      restored.tabs.length,
+      attempt,
+      AGENT_TAB_RESTORE_MAX_RETRIES,
+    );
+
+    if (shouldRetry && projectPath === targetProjectPath && agentTabsRestoreToken === token) {
+      setTimeout(() => {
+        void restoreProjectAgentTabs(targetProjectPath, token, attempt + 1);
+      }, AGENT_TAB_RESTORE_RETRY_DELAY_MS);
+      return;
+    }
+
     const restoredTabs = restored.tabs;
 
     const preserved = tabs.filter((t) => t.type !== "agent");

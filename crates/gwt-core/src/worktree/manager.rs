@@ -450,7 +450,18 @@ impl WorktreeManager {
             WorktreePath::generate_with_location(&self.repo_root, &resolved_branch, self.location);
 
         // Git can still have this path registered even when the directory is missing.
-        // In that case, git worktree add fails with "missing but already registered worktree".
+        // Reuse an existing active worktree only when it points to the same branch.
+        // This avoids returning another branch's worktree when path sanitization
+        // collides (for example, "feature/foo" vs "feature-foo" in Subdir mode).
+        if let Some(wt) = self.get_registered_worktree_by_path_basic(&path)? {
+            if wt.status == WorktreeStatus::Active
+                && wt.branch.as_deref() == Some(resolved_branch.as_str())
+            {
+                return Ok(wt);
+            }
+        }
+
+        // In case only metadata is stale (missing/prunable), remove stale metadata if safe.
         self.handle_registered_worktree_path_conflict(&path, &mut did_prune)?;
 
         // FR-038-040: Handle existing path (auto-recovery disabled)
@@ -1285,6 +1296,53 @@ mod tests {
         // Should not create a second worktree for the same branch.
         let worktrees = manager.list().unwrap();
         assert_eq!(worktrees.len(), 2);
+    }
+
+    #[test]
+    fn test_create_for_branch_does_not_reuse_detached_registered_worktree_path() {
+        let temp = create_test_repo();
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+
+        let branch = "feature/reuse-path";
+        Branch::create(temp.path(), branch, "HEAD").unwrap();
+
+        // Register the expected worktree path as a detached active worktree.
+        let wt_path = WorktreePath::generate(temp.path(), branch);
+        run_git_in(
+            temp.path(),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                wt_path.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+
+        let result = manager.create_for_branch(branch);
+        assert!(matches!(
+            result,
+            Err(GwtError::WorktreeAlreadyExists { .. })
+        ));
+    }
+
+    #[test]
+    fn test_create_for_branch_does_not_reuse_active_registered_path_for_other_branch() {
+        let temp = create_test_repo();
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+
+        Branch::create(temp.path(), "feature-foo", "HEAD").unwrap();
+        Branch::create(temp.path(), "feature/foo", "HEAD").unwrap();
+
+        // In Subdir mode both names map to ".worktrees/feature-foo".
+        let existing = manager.create_for_branch("feature-foo").unwrap();
+        assert_eq!(existing.branch.as_deref(), Some("feature-foo"));
+
+        let result = manager.create_for_branch("feature/foo");
+        assert!(matches!(
+            result,
+            Err(GwtError::WorktreeAlreadyExists { .. })
+        ));
     }
 
     #[test]
