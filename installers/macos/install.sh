@@ -1,12 +1,17 @@
 #!/bin/bash
 # gwt installer for macOS
-# Installs gwt.app to /Applications via .pkg from GitHub Releases
+# Installs gwt.app to /Applications via:
+# - .pkg from GitHub Releases (default)
+# - local .pkg file via --pkg
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash
 #
 # Install a specific version:
 #   curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash -s -- --version 6.30.3
+#
+# Install from local .pkg:
+#   ./installers/macos/install.sh --pkg ./target/release/bundle/pkg/gwt-macos-$(uname -m).pkg
 
 set -euo pipefail
 
@@ -30,19 +35,33 @@ need_cmd() {
 # --- argument parsing ------------------------------------------------------
 
 VERSION=""
+LOCAL_PKG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version|-v)
+      if [[ $# -lt 2 ]]; then
+        err "Missing value for $1"
+        exit 1
+      fi
       VERSION="$2"
       shift 2
       ;;
+    --pkg|-p)
+      if [[ $# -lt 2 ]]; then
+        err "Missing value for $1"
+        exit 1
+      fi
+      LOCAL_PKG="$2"
+      shift 2
+      ;;
     --help|-h)
-      echo "Usage: install.sh [--version VERSION]"
+      echo "Usage: install.sh [--version VERSION] [--pkg PKG_PATH]"
       echo ""
       echo "Installs gwt.app to /Applications via .pkg"
       echo ""
       echo "Options:"
       echo "  --version, -v   Install a specific version (e.g. 6.30.3)"
+      echo "  --pkg, -p       Install from local .pkg path"
       echo "  --help, -h      Show this help"
       exit 0
       ;;
@@ -53,11 +72,18 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -n "$VERSION" && -n "$LOCAL_PKG" ]]; then
+  err "--version and --pkg cannot be used together"
+  exit 1
+fi
+
 # --- prerequisites ---------------------------------------------------------
 
-need_cmd curl
 need_cmd uname
 need_cmd installer
+if [[ -z "$LOCAL_PKG" ]]; then
+  need_cmd curl
+fi
 
 # --- detect platform -------------------------------------------------------
 
@@ -82,46 +108,76 @@ case "$ARCH" in
     ;;
 esac
 
-# --- resolve version -------------------------------------------------------
+# --- resolve installer source ----------------------------------------------
 
-if [[ -z "$VERSION" ]]; then
-  info "Fetching latest release version..."
-  VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
-    | grep '"tag_name"' | head -1 | sed 's/.*"v\([^"]*\)".*/\1/')
-  if [[ -z "$VERSION" ]]; then
-    err "Failed to determine latest version"
+PKG_PATH=""
+INSTALL_LABEL=""
+
+if [[ -n "$LOCAL_PKG" ]]; then
+  PKG_PATH="$LOCAL_PKG"
+  if [[ ! -f "$PKG_PATH" ]]; then
+    err "Local package not found: ${PKG_PATH}"
     exit 1
   fi
+  if [[ ! -s "$PKG_PATH" ]]; then
+    err "Local package is empty: ${PKG_PATH}"
+    exit 1
+  fi
+  INSTALL_LABEL="from local package"
+  info "Installing gwt from local package: ${PKG_PATH}"
+else
+  if [[ -z "$VERSION" ]]; then
+    info "Fetching latest release version..."
+    VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+      | grep '"tag_name"' | head -1 | sed 's/.*"v\([^"]*\)".*/\1/')
+    if [[ -z "$VERSION" ]]; then
+      err "Failed to determine latest version"
+      exit 1
+    fi
+  fi
+
+  # Strip leading 'v' if present
+  VERSION="${VERSION#v}"
+  PKG_NAME="gwt-macos-${PKG_ARCH}.pkg"
+  DOWNLOAD_URL="https://github.com/${REPO}/releases/download/v${VERSION}/${PKG_NAME}"
+
+  # --- download ------------------------------------------------------------
+
+  info "Installing gwt v${VERSION} (${ARCH})..."
+  info "Downloading: ${DOWNLOAD_URL}"
+
+  TMPDIR_INSTALL="$(mktemp -d)"
+  trap 'rm -rf "$TMPDIR_INSTALL"' EXIT
+
+  PKG_PATH="${TMPDIR_INSTALL}/${PKG_NAME}"
+  HTTP_CODE=$(curl -fSL -w '%{http_code}' -o "$PKG_PATH" "$DOWNLOAD_URL" 2>/dev/null) || true
+
+  if [[ "$HTTP_CODE" != "200" ]]; then
+    err "Download failed (HTTP ${HTTP_CODE})"
+    err "URL: ${DOWNLOAD_URL}"
+    echo ""
+    echo "Available releases: https://github.com/${REPO}/releases"
+    exit 1
+  fi
+
+  if [[ ! -s "$PKG_PATH" ]]; then
+    err "Downloaded file is empty"
+    exit 1
+  fi
+
+  INSTALL_LABEL="v${VERSION}"
 fi
 
-# Strip leading 'v' if present
-VERSION="${VERSION#v}"
-PKG_NAME="gwt-macos-${PKG_ARCH}.pkg"
-DOWNLOAD_URL="https://github.com/${REPO}/releases/download/v${VERSION}/${PKG_NAME}"
-
-# --- download & install ----------------------------------------------------
-
-info "Installing gwt v${VERSION} (${ARCH})..."
-info "Downloading: ${DOWNLOAD_URL}"
-
-TMPDIR_INSTALL="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR_INSTALL"' EXIT
-
-PKG_PATH="${TMPDIR_INSTALL}/${PKG_NAME}"
-HTTP_CODE=$(curl -fSL -w '%{http_code}' -o "$PKG_PATH" "$DOWNLOAD_URL" 2>/dev/null) || true
-
-if [[ "$HTTP_CODE" != "200" ]]; then
-  err "Download failed (HTTP ${HTTP_CODE})"
-  err "URL: ${DOWNLOAD_URL}"
-  echo ""
-  echo "Available releases: https://github.com/${REPO}/releases"
-  exit 1
+if [[ -z "$INSTALL_LABEL" ]]; then
+  INSTALL_LABEL="from package"
 fi
 
 if [[ ! -s "$PKG_PATH" ]]; then
-  err "Downloaded file is empty"
+  err "Installer package is empty: ${PKG_PATH}"
   exit 1
 fi
+
+# --- install ---------------------------------------------------------------
 
 info "Installing to /Applications (requires sudo)..."
 sudo installer -pkg "$PKG_PATH" -target /
@@ -129,7 +185,7 @@ sudo installer -pkg "$PKG_PATH" -target /
 # --- verify ----------------------------------------------------------------
 
 if [[ -d "/Applications/${APP_NAME}.app" ]]; then
-  ok "gwt v${VERSION} installed successfully to /Applications/${APP_NAME}.app"
+  ok "gwt ${INSTALL_LABEL} installed successfully to /Applications/${APP_NAME}.app"
   echo ""
   echo "Launch gwt from Applications or run:"
   echo "  open /Applications/${APP_NAME}.app"
