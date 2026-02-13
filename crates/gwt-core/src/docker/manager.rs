@@ -7,7 +7,6 @@ use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::SystemTime;
 use tracing::{debug, info, warn};
 
@@ -130,7 +129,7 @@ fn parse_docker_ps_ports(output: &str) -> HashSet<u16> {
 }
 
 fn docker_ports_in_use() -> HashSet<u16> {
-    let output = Command::new("docker")
+    let output = crate::process::command("docker")
         .args(["ps", "--format", "{{.Ports}}"])
         .output();
     match output {
@@ -462,7 +461,7 @@ impl DockerManager {
     /// Check if the container is currently running
     pub fn is_running(&self) -> bool {
         let env_vars = self.collect_passthrough_env();
-        let output = Command::new("docker")
+        let output = crate::process::command("docker")
             .args(["compose", "ps", "-q"])
             .current_dir(&self.worktree_path)
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
@@ -494,14 +493,14 @@ impl DockerManager {
     /// Get the status of the container
     pub fn get_status(&self) -> ContainerStatus {
         let env_vars = self.collect_passthrough_env();
-        let running_output = Command::new("docker")
+        let running_output = crate::process::command("docker")
             .args(["compose", "ps", "-q"])
             .current_dir(&self.worktree_path)
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
             .envs(&env_vars)
             .output();
 
-        let all_output = Command::new("docker")
+        let all_output = crate::process::command("docker")
             .args(["compose", "ps", "-a", "-q"])
             .current_dir(&self.worktree_path)
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
@@ -555,7 +554,7 @@ impl DockerManager {
 
         // Run docker compose up -d
         let env_vars = self.collect_passthrough_env();
-        let mut command = Command::new("docker");
+        let mut command = crate::process::command("docker");
         command
             .args(["compose", "up", "-d", "--build"])
             .current_dir(&self.worktree_path)
@@ -613,7 +612,7 @@ impl DockerManager {
         );
 
         let env_vars = self.collect_passthrough_env();
-        let output = Command::new("docker")
+        let output = crate::process::command("docker")
             .args(["compose", "down"])
             .current_dir(&self.worktree_path)
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
@@ -647,7 +646,7 @@ impl DockerManager {
     /// Get the container ID (short form)
     fn get_container_id(&self) -> Option<String> {
         let env_vars = self.collect_passthrough_env();
-        let output = Command::new("docker")
+        let output = crate::process::command("docker")
             .args(["compose", "ps", "-q"])
             .current_dir(&self.worktree_path)
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
@@ -670,7 +669,7 @@ impl DockerManager {
     /// List services defined in the compose file
     fn list_services_internal(&self) -> Option<Vec<String>> {
         let env_vars = self.collect_passthrough_env();
-        let output = Command::new("docker")
+        let output = crate::process::command("docker")
             .args(["compose", "config", "--services"])
             .current_dir(&self.worktree_path)
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
@@ -891,7 +890,7 @@ impl DockerManager {
 
     fn container_created_time(&self) -> Option<SystemTime> {
         let container_id = self.get_container_id()?;
-        let output = Command::new("docker")
+        let output = crate::process::command("docker")
             .args(["inspect", "-f", "{{.Created}}", &container_id])
             .output()
             .ok()?;
@@ -917,7 +916,7 @@ impl DockerManager {
         );
 
         let env_vars = self.collect_passthrough_env();
-        let output = Command::new("docker")
+        let output = crate::process::command("docker")
             .args(["compose", "build"])
             .current_dir(&self.worktree_path)
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
@@ -977,7 +976,7 @@ impl DockerManager {
         let env_vars = self.collect_passthrough_env();
 
         // Build the exec command
-        let mut cmd = Command::new("docker");
+        let mut cmd = crate::process::command("docker");
         cmd.args(["compose", "exec"]);
 
         // Add -T flag for non-interactive mode (when running programmatically)

@@ -411,6 +411,134 @@ describe("AgentLaunchForm", () => {
     expect(request.dockerForceHost).toBe(true);
   });
 
+  it("defers gh CLI check until osEnvReady is true", async () => {
+    let ghCheckCount = 0;
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.0.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "check_gh_cli_status") {
+        ghCheckCount += 1;
+        return { available: true, authenticated: true };
+      }
+      if (cmd === "list_worktree_branches") return [];
+      if (cmd === "list_remote_branches") return [];
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "none",
+          compose_services: [],
+          docker_available: false,
+          compose_available: false,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+    const props = {
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      osEnvReady: false,
+      onLaunch,
+      onClose,
+    };
+
+    const rendered = await renderLaunchForm(props);
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "New Branch" }));
+    const fromIssueButton = rendered.getByRole("button", { name: "From Issue" }) as HTMLButtonElement;
+    expect(fromIssueButton.disabled).toBe(true);
+    expect(ghCheckCount).toBe(0);
+    rendered.getByText("Loading shell environment...");
+
+    await rendered.rerender({ ...props, osEnvReady: true });
+
+    await waitFor(() => {
+      expect(ghCheckCount).toBe(1);
+    });
+    await waitFor(() => {
+      expect((rendered.getByRole("button", { name: "From Issue" }) as HTMLButtonElement).disabled).toBe(
+        false
+      );
+    });
+  });
+
+  it("shows gh missing message only after osEnvReady", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.0.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "check_gh_cli_status") {
+        return { available: false, authenticated: false };
+      }
+      if (cmd === "list_worktree_branches") return [];
+      if (cmd === "list_remote_branches") return [];
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "none",
+          compose_services: [],
+          docker_available: false,
+          compose_available: false,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+    const props = {
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      osEnvReady: false,
+      onLaunch,
+      onClose,
+    };
+
+    const rendered = await renderLaunchForm(props);
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "New Branch" }));
+    expect(rendered.queryByText("GitHub CLI (gh) is not installed.")).toBeNull();
+    rendered.getByText("Loading shell environment...");
+
+    await rendered.rerender({ ...props, osEnvReady: true });
+
+    await waitFor(() => {
+      expect(rendered.queryByText("Loading shell environment...")).toBeNull();
+    });
+    await waitFor(() => {
+      expect(rendered.getByText("GitHub CLI (gh) is not installed.")).toBeTruthy();
+    });
+  });
+
   it("keeps issue selection disabled while duplicate-branch check is pending", async () => {
     let resolveBranchCheck!: (value: string | null) => void;
     const branchCheck = new Promise<string | null>((resolve) => {

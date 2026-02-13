@@ -1,27 +1,25 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
 ## [7.1.0] - 2026-02-13
 
 ### Bug Fixes
 
-- **build:** Correct WiX binary source path for gwt-tauri crate name by @akiojin
-- **gui:** Prewarm worktree summaries and move summary panel to sidebar (#1005) by @akiojin
-- MacOS PKGインストーラーのリロケーション問題を修正 by @akiojin
-- **ci:** MacOS署名で Application/Installer 両証明書をインポート by @akiojin
-- Tauri.conf.json のバージョンを 7.1.0 に同期し、リリースコマンドに更新ステップを追加
-- **windows:** Suppress transient git console windows (#1008)
-- MacOS配布をDMG一本化し、PKG関連を全削除
-
-### Documentation
-
-- SPEC-c6ba640a GitHub Issue連携（GUI版）仕様策定 (#1004) by @akiojin
+- Tauri.conf.json のバージョンを 7.1.0 に同期し、リリースコマンドに更新ステップを追加 by @akiojin
+- **windows:** Suppress transient git console windows (#1008) by @akiojin
+- MacOS配布をDMG一本化し、PKG関連を全削除 by @akiojin
+- Cleanup「Select All Safe」が機能しないserde不整合を修正 (#1014)
+- **tauri:** Handle Cmd+Q and Cmd/Ctrl+C V menu actions (#1011)
+- Improve agent mode ime and scroll (#1013)
+- **windows:** Complete no-window process helper migration (#1017)
+- Re-enable app self-update flow with dmg support (#1016)
 
 ### Features
 
-- Add voice input mode for GUI keyboard inputs (#1002) by @akiojin
-- MacOSインストーラーにコード署名と公証を追加 by @akiojin
-- Add MCP server bridge for agent tab communication (#992)
+- Add MCP server bridge for agent tab communication (#992) by @akiojin
+- **gui:** Make worktree summary panel height resizable (#1010)
+- Add GitHub Issue launch flow and stabilize gh detection (#1012)
 
 
 ## [7.0.0] - 2026-02-13

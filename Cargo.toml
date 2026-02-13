@@ -22,6 +22,14 @@ gwt-core = { path = "crates/gwt-core" }
 # Error handling
 thiserror = "2"
 
+# Semver
+semver = "1"
+
+# Self-update payload extraction
+flate2 = "1.0"
+tar = "0.4"
+zip = "2.4"
+
 # Git operations
 gix = { version = "0.78", default-features = false, features = [
     "blocking-network-client",
@@ -63,10 +71,6 @@ libc = "0.2"
 
 # HTTP client (blocking)
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-
-# WebSocket
-tokio-tungstenite = "0.26"
-futures-util = "0.3"
 
 # Base64 encoding
 base64 = "0.22"

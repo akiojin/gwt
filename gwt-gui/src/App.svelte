@@ -11,6 +11,7 @@
     TerminalAnsiProbe,
     CapturedEnvInfo,
     SettingsData,
+    UpdateState,
     VoiceInputSettings,
   } from "./lib/types";
   import Sidebar from "./lib/components/Sidebar.svelte";
@@ -140,9 +141,10 @@
   let migrationSourceRoot: string = $state("");
 
   let tabs: Tab[] = $state([
+    { id: "summary", label: "Session Summary", type: "summary" },
     { id: "agentMode", label: "Agent Mode", type: "agentMode" },
   ]);
-  let activeTabId: string = $state("agentMode");
+  let activeTabId: string = $state("summary");
 
   let agentTabsHydratedProjectPath: string | null = $state(null);
   let agentTabsRestoreToken = 0;
@@ -170,16 +172,51 @@
 
   let toastMessage = $state<string | null>(null);
   let toastTimeout: ReturnType<typeof setTimeout> | null = null;
+  type ToastAction = { kind: "apply-update"; latest: string } | null;
+  let toastAction = $state<ToastAction>(null);
+  let lastUpdateToastVersion = $state<string | null>(null);
 
   let showOsEnvDebug = $state(false);
   let osEnvDebugData = $state<CapturedEnvInfo | null>(null);
   let osEnvDebugLoading = $state(false);
   let osEnvDebugError = $state<string | null>(null);
 
-  function showToast(message: string, durationMs = 8000) {
+  function showToast(message: string, durationMs = 8000, action: ToastAction = null) {
     toastMessage = message;
+    toastAction = action;
     if (toastTimeout) clearTimeout(toastTimeout);
-    toastTimeout = setTimeout(() => { toastMessage = null; }, durationMs);
+    toastTimeout = null;
+    if (durationMs > 0) {
+      toastTimeout = setTimeout(() => {
+        toastMessage = null;
+        toastAction = null;
+      }, durationMs);
+    }
+  }
+
+  async function confirmAndApplyUpdate(latest: string) {
+    try {
+      const { confirm } = await import("@tauri-apps/plugin-dialog");
+      const ok = await confirm(
+        `Update available: v${latest}\nRestart to update now?`,
+        { title: "gwt", kind: "info" },
+      );
+      if (!ok) return;
+
+      showToast(`Updating to v${latest}...`, 0);
+
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("apply_app_update");
+    } catch (err) {
+      showToast(`Failed to apply update: ${toErrorMessage(err)}`);
+    }
+  }
+
+  async function handleToastClick() {
+    if (!toastAction) return;
+    if (toastAction.kind === "apply-update") {
+      await confirmAndApplyUpdate(toastAction.latest);
+    }
   }
 
   function queueIssueLaunchFollowup(jobId: string, request: LaunchAgentRequest) {
@@ -216,7 +253,9 @@
       const rollback = await invoke<RollbackResult>("rollback_issue_branch", {
         projectPath: followup.projectPath,
         branchName: followup.branchName,
-        deleteRemote: true,
+        // Only rollback local artifacts on launch failure.
+        // Remote deletion is unsafe here because the branch may have pre-existed remotely.
+        deleteRemote: false,
       });
 
       sidebarRefreshKey++;
@@ -288,6 +327,69 @@
       appVersion = v;
     })();
     return () => { cancelled = true; };
+  });
+
+  // Best-effort: request update state once on startup.
+  $effect(() => {
+    if (lastUpdateToastVersion !== null) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const s = await invoke<UpdateState>("check_app_update", { force: false });
+        if (cancelled) return;
+        if (s.state !== "available") return;
+
+        lastUpdateToastVersion = s.latest;
+        if (s.asset_url) {
+          showToast(
+            `Update available: v${s.latest} (click update)`,
+            0,
+            { kind: "apply-update", latest: s.latest },
+          );
+        } else {
+          showToast(`Update available: v${s.latest}. Manual download required.`, 15000);
+        }
+      } catch {
+        // Ignore: update check should not block UI startup.
+      }
+    })();
+    return () => { cancelled = true; };
+  });
+
+  // Listen for app update state notifications from backend startup checks.
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen<UpdateState>("app-update-state", (event) => {
+          const s = event.payload;
+          if (s.state !== "available") return;
+          if (lastUpdateToastVersion === s.latest) return;
+          lastUpdateToastVersion = s.latest;
+
+          if (s.asset_url) {
+            showToast(
+              `Update available: v${s.latest} (click update)`,
+              0,
+              { kind: "apply-update", latest: s.latest },
+            );
+          } else {
+            showToast(`Update available: v${s.latest}. Manual download required.`, 15000);
+          }
+        });
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+      } catch {
+        // Ignore when event API is unavailable.
+      }
+    })();
+    return () => { cancelled = true; if (unlisten) unlisten(); };
   });
 
   $effect(() => {
@@ -499,11 +601,25 @@
     fetchCurrentBranch();
   }
 
+  function openSessionSummaryTab() {
+    const existing = tabs.find((t) => t.type === "summary" || t.id === "summary");
+    if (existing) {
+      activeTabId = existing.id;
+      return;
+    }
+
+    const tab: Tab = { id: "summary", label: "Session Summary", type: "summary" };
+    tabs = [tab, ...tabs];
+    activeTabId = tab.id;
+  }
+
   function handleBranchSelect(branch: BranchInfo) {
     selectedBranch = branch;
     if (branch.is_current) {
       currentBranch = branch.name;
     }
+    // Switch to session summary (re-open tab if it was closed).
+    openSessionSummaryTab();
   }
 
   function requestAgentLaunch() {
@@ -522,7 +638,14 @@
     if (existing) return;
 
     const tab: Tab = { id: "agentMode", label: "Agent Mode", type: "agentMode" };
-    tabs = [tab, ...tabs];
+    const summaryIndex = tabs.findIndex((t) => t.type === "summary" || t.id === "summary");
+    if (summaryIndex >= 0) {
+      const nextTabs = [...tabs];
+      nextTabs.splice(summaryIndex + 1, 0, tab);
+      tabs = nextTabs;
+    } else {
+      tabs = [...tabs, tab];
+    }
   }
 
   function handleSidebarModeChange(next: SidebarMode) {
@@ -627,7 +750,7 @@
 
   async function handleTabClose(tabId: string) {
     const tab = tabs.find((t) => t.id === tabId);
-    if (tab?.type === "agentMode") {
+    if (tab?.type === "summary") {
       return;
     }
     if (tab?.paneId) {
@@ -674,6 +797,89 @@
     };
     tabs = [...tabs, tab];
     activeTabId = tab.id;
+  }
+
+  function getActiveTerminalPaneId(): string | null {
+    const active = tabs.find((t) => t.id === activeTabId);
+    if (!active || active.type !== "agent") {
+      return null;
+    }
+    return active.paneId && active.paneId.length > 0 ? active.paneId : null;
+  }
+
+  function getActiveEditableElement():
+    | HTMLInputElement
+    | HTMLTextAreaElement
+    | HTMLElement
+    | null {
+    if (typeof document === "undefined") return null;
+    const el = document.activeElement;
+    if (!el) return null;
+
+    if (el instanceof HTMLInputElement && !el.readOnly && !el.disabled) {
+      return el;
+    }
+    if (el instanceof HTMLTextAreaElement && !el.readOnly && !el.disabled) {
+      return el;
+    }
+    if (el instanceof HTMLElement && el.isContentEditable) {
+      return el;
+    }
+
+    return null;
+  }
+
+  async function fallbackMenuEditAction(action: "copy" | "paste") {
+    const target = getActiveEditableElement();
+    if (!target) {
+      // Let browser/editor defaults decide when there is no editable target.
+      if (action === "copy") {
+        document.execCommand("copy");
+      }
+      return;
+    }
+
+    if (action === "copy") {
+      document.execCommand("copy");
+      return;
+    }
+
+    if (!navigator.clipboard?.readText) return;
+    let text: string;
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      return;
+    }
+    if (!text) return;
+
+    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+      const start = target.selectionStart ?? target.value.length;
+      const end = target.selectionEnd ?? target.value.length;
+      target.setRangeText(text, start, end, "end");
+      return;
+    }
+
+    if (target.isContentEditable) {
+      target.focus();
+      document.execCommand("insertText", false, text);
+    }
+  }
+
+  function emitTerminalEditAction(action: "copy" | "paste") {
+    const paneId = getActiveTerminalPaneId();
+    if (!paneId) {
+      void fallbackMenuEditAction(action);
+      return;
+    }
+
+    if (typeof window === "undefined") return;
+
+    window.dispatchEvent(
+      new CustomEvent("gwt-terminal-edit-action", {
+        detail: { action, paneId },
+      })
+    );
   }
 
   async function syncWindowAgentTabs() {
@@ -796,9 +1002,10 @@
 
           projectPath = null;
           tabs = [
+            { id: "summary", label: "Session Summary", type: "summary" },
             { id: "agentMode", label: "Agent Mode", type: "agentMode" },
           ];
-          activeTabId = "agentMode";
+          activeTabId = "summary";
           selectedBranch = null;
           currentBranch = "";
         }
@@ -823,6 +1030,36 @@
       case "version-history":
         openVersionHistoryTab();
         break;
+      case "check-updates":
+        {
+          try {
+            const { invoke } = await import("@tauri-apps/api/core");
+            const s = await invoke<UpdateState>("check_app_update", { force: true });
+            switch (s.state) {
+              case "up_to_date":
+                showToast("Up to date.");
+                break;
+              case "available":
+                lastUpdateToastVersion = s.latest;
+                if (s.asset_url) {
+                  showToast(
+                    `Update available: v${s.latest} (click update)`,
+                    0,
+                    { kind: "apply-update", latest: s.latest },
+                  );
+                } else {
+                  showToast(`Update available: v${s.latest}. Manual download required.`, 15000);
+                }
+                break;
+              case "failed":
+                showToast(`Update check failed: ${s.message}`);
+                break;
+            }
+          } catch (err) {
+            showToast(`Update check failed: ${toErrorMessage(err)}`);
+          }
+        }
+        break;
       case "about":
         showAbout = true;
         break;
@@ -834,6 +1071,12 @@
             activeTabId = firstAgent.id;
           }
         }
+        break;
+      case "edit-copy":
+        emitTerminalEditAction("copy");
+        break;
+      case "edit-paste":
+        emitTerminalEditAction("paste");
         break;
       case "debug-os-env":
         showOsEnvDebug = true;
@@ -931,7 +1174,8 @@
     const preserved = tabs.filter((t) => t.type !== "agent");
     tabs = [...preserved, ...restoredTabs];
 
-    const allowOverrideActive = activeTabId === "agentMode";
+    const allowOverrideActive =
+      activeTabId === "summary" || activeTabId === "agentMode";
     if (allowOverrideActive && restored.activeTabId) {
       activeTabId = restored.activeTabId;
     }
@@ -1132,14 +1376,15 @@
           onBranchSelect={handleBranchSelect}
           onBranchActivate={handleBranchActivate}
           onCleanupRequest={handleCleanupRequest}
-          onLaunchAgent={requestAgentLaunch}
-          onQuickLaunch={handleAgentLaunch}
         />
       {/if}
       <MainArea
         {tabs}
         {activeTabId}
+        {selectedBranch}
         projectPath={projectPath as string}
+        onLaunchAgent={requestAgentLaunch}
+        onQuickLaunch={handleAgentLaunch}
         onTabSelect={handleTabSelect}
         onTabClose={handleTabClose}
       />
@@ -1354,7 +1599,15 @@
   <div class="toast-container">
     <div class="toast-message">
       <span>{toastMessage}</span>
-      <button class="toast-close" onclick={() => (toastMessage = null)}>[x]</button>
+      {#if toastAction?.kind === "apply-update"}
+        <button class="toast-action" onclick={handleToastClick}>Update</button>
+      {/if}
+      <button
+        class="toast-close"
+        onclick={() => { toastMessage = null; toastAction = null; }}
+      >
+        [x]
+      </button>
     </div>
   </div>
 {/if}
@@ -1562,6 +1815,20 @@
     align-items: center;
     gap: 12px;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  }
+
+  .toast-action {
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .toast-action:hover {
+    background: var(--bg-hover, rgba(255, 255, 255, 0.08));
   }
 
   .toast-close {

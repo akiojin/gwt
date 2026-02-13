@@ -22,7 +22,6 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -330,7 +329,7 @@ fn get_command_version_with_timeout(command: &str) -> Option<String> {
     let command = command.to_string();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let out = std::process::Command::new(command)
+        let out = gwt_core::process::command(&command)
             .arg("--version")
             .output();
         let _ = tx.send(out);
@@ -597,7 +596,7 @@ fn docker_compose_up(
 ) -> Result<(), String> {
     ensure_docker_compose_ready()?;
 
-    let output = Command::new("docker")
+    let output = gwt_core::process::command("docker")
         .args(build_docker_compose_up_args(compose_args, build, recreate))
         .current_dir(worktree_path)
         .env("COMPOSE_PROJECT_NAME", container_name)
@@ -624,7 +623,7 @@ fn docker_compose_down(
 ) -> Result<(), String> {
     ensure_docker_compose_ready()?;
 
-    let output = Command::new("docker")
+    let output = gwt_core::process::command("docker")
         .args(build_docker_compose_down_args(compose_args))
         .current_dir(worktree_path)
         .env("COMPOSE_PROJECT_NAME", container_name)
@@ -662,7 +661,7 @@ fn ensure_docker_ready() -> Result<(), String> {
 }
 
 fn docker_image_exists(image: &str) -> bool {
-    Command::new("docker")
+    gwt_core::process::command("docker")
         .args(["image", "inspect", image])
         .output()
         .map(|o| o.status.success())
@@ -670,7 +669,7 @@ fn docker_image_exists(image: &str) -> bool {
 }
 
 fn docker_image_created_time(image: &str) -> Option<SystemTime> {
-    let output = Command::new("docker")
+    let output = gwt_core::process::command("docker")
         .args(["image", "inspect", "-f", "{{.Created}}", image])
         .output()
         .ok()?;
@@ -711,7 +710,7 @@ fn docker_build_image(
     dockerfile_path: &std::path::Path,
     context_dir: &std::path::Path,
 ) -> Result<(), String> {
-    let output = Command::new("docker")
+    let output = gwt_core::process::command("docker")
         .args(["build", "-t", image, "-f"])
         .arg(dockerfile_path)
         .arg(context_dir)
@@ -1599,7 +1598,7 @@ fn report_launch_progress(
     let _ = app_handle.emit("launch-progress", &payload);
 }
 
-pub(crate) fn launch_agent_for_project_root(
+fn launch_agent_for_project_root(
     project_root: PathBuf,
     request: LaunchAgentRequest,
     state: &AppState,

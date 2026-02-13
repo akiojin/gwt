@@ -45,7 +45,7 @@ git pull origin develop
 ### 3. リリース対象コミット確認
 
 ```bash
-PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+PREV_TAG=$(git tag --list 'v[0-9]*' --sort=-version:refname | head -1)
 ```
 
 上記で取得したタグから現在までのコミット数を確認:
@@ -66,12 +66,21 @@ git rev-list --count HEAD
 ### 4. バージョン判定
 
 ```bash
-git-cliff --bumped-version
+GITHUB_TOKEN=$(gh auth token) git-cliff --bumped-version
 ```
 
 **出力例**: `v6.5.2`
 
 このバージョンを `NEW_VERSION` として記録（例: `6.5.2`、`v` は除去）。
+
+**重複チェック**: バージョン判定後、既存タグとの重複を確認：
+
+```bash
+git tag --list "v{NEW_VERSION}"
+```
+
+**判定**: タグが既に存在する場合、以下のメッセージを表示して中断：
+> 「エラー: タグ v{NEW_VERSION} は既に存在します。コミット履歴を確認してください。」
 
 ### 5. ファイル更新
 
@@ -100,7 +109,7 @@ cargo update -w
 前回リリースタグ以降の変更のみを追加してください。git-cliffが過去の変更を含める場合は、手動でv{PREV_TAG}以降の変更のみを追加してください。
 
 ```bash
-git-cliff --unreleased --tag v{NEW_VERSION} --prepend CHANGELOG.md
+GITHUB_TOKEN=$(gh auth token) git-cliff --unreleased --tag v{NEW_VERSION} --prepend CHANGELOG.md
 ```
 
 **注意**: CHANGELOGに既に含まれている変更が重複しないよう確認してください。
@@ -108,7 +117,7 @@ git-cliff --unreleased --tag v{NEW_VERSION} --prepend CHANGELOG.md
 ### 6. リリースコミット作成
 
 ```bash
-git add -A
+git add Cargo.toml Cargo.lock package.json crates/gwt-tauri/tauri.conf.json CHANGELOG.md
 git commit -m "chore(release): v{NEW_VERSION}"
 ```
 

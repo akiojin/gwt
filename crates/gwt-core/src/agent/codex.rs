@@ -70,7 +70,7 @@ impl CodexAgent {
 
     /// Build command with common arguments
     fn build_command(&self, prompt: &str, directory: &Path) -> Command {
-        let mut cmd = Command::new("codex");
+        let mut cmd = crate::process::tokio_command("codex");
         let version = get_command_version("codex", "--version");
         cmd.arg("--quiet")
             .args(codex_default_args(
@@ -326,7 +326,7 @@ impl AgentTrait for CodexAgent {
             can_read_files: true,
             can_write_files: true,
             can_use_bash: true,
-            can_use_mcp: true,
+            can_use_mcp: false, // Codex doesn't support MCP
             supports_streaming: true,
             supports_multi_turn: true,
         }
@@ -412,7 +412,7 @@ mod tests {
         let caps = agent.capabilities();
         assert!(caps.can_execute);
         assert!(caps.can_read_files);
-        assert!(caps.can_use_mcp);
+        assert!(!caps.can_use_mcp); // Codex doesn't support MCP
     }
 
     #[test]

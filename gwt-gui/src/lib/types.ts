@@ -145,7 +145,7 @@ export interface ProfilesConfig {
 export interface Tab {
   id: string;
   label: string;
-  type: "agent" | "settings" | "versionHistory" | "agentMode";
+  type: "summary" | "agent" | "settings" | "versionHistory" | "agentMode";
   paneId?: string;
 }
 
@@ -303,6 +303,25 @@ export interface CapturedEnvInfo {
   reason: string | null;
   ready: boolean;
 }
+
+export type UpdateState =
+  | {
+      state: "up_to_date";
+      checked_at?: string | null;
+    }
+  | {
+      state: "available";
+      current: string;
+      latest: string;
+      release_url: string;
+      asset_url?: string | null;
+      checked_at: string;
+    }
+  | {
+      state: "failed";
+      message: string;
+      failed_at: string;
+    };
 
 export type FileChangeKind = "Added" | "Modified" | "Deleted" | "Renamed";
 

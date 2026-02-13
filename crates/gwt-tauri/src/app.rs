@@ -1,6 +1,7 @@
 //! Tauri app wiring (builder configuration + run event handling)
 
 use crate::state::AppState;
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use tauri::Manager;
 use tauri::{Emitter, WebviewWindowBuilder};
@@ -8,9 +9,6 @@ use tracing::{info, warn};
 
 #[cfg(not(test))]
 use gwt_core::config::os_env;
-
-#[cfg(not(test))]
-use gwt_core::config::mcp_registration;
 
 #[cfg(any(not(test), target_os = "macos"))]
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -21,6 +19,22 @@ fn should_prevent_window_close(is_quitting: bool) -> bool {
 
 fn should_prevent_exit_request(is_quitting: bool) -> bool {
     !is_quitting
+}
+
+fn captured_path_from_env(env: &HashMap<String, String>) -> Option<String> {
+    env.get("PATH")
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn apply_captured_path_to_process_env(env: &HashMap<String, String>) -> bool {
+    let Some(path) = captured_path_from_env(env) else {
+        return false;
+    };
+    std::env::set_var("PATH", path);
+    true
 }
 
 #[cfg(any(not(test), target_os = "macos"))]
@@ -58,11 +72,14 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
         crate::menu::MENU_ID_FILE_CLOSE_PROJECT => Some("close-project"),
         crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES => Some("cleanup-worktrees"),
         crate::menu::MENU_ID_GIT_VERSION_HISTORY => Some("version-history"),
+        crate::menu::MENU_ID_EDIT_COPY => Some("edit-copy"),
+        crate::menu::MENU_ID_EDIT_PASTE => Some("edit-paste"),
         crate::menu::MENU_ID_TOOLS_LAUNCH_AGENT => Some("launch-agent"),
         crate::menu::MENU_ID_TOOLS_LIST_TERMINALS => Some("list-terminals"),
         crate::menu::MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS => Some("terminal-diagnostics"),
         crate::menu::MENU_ID_SETTINGS_PREFERENCES => Some("open-settings"),
         crate::menu::MENU_ID_HELP_ABOUT => Some("about"),
+        crate::menu::MENU_ID_HELP_CHECK_UPDATES => Some("check-updates"),
         _ => None,
     }
 }
@@ -156,37 +173,6 @@ pub fn build_app(
         .setup(|_app| {
             #[cfg(not(test))]
             {
-                // Clean up stale MCP state from a previous crash (FR-019)
-                crate::mcp_ws_server::cleanup_stale_state_file();
-
-                // Start MCP WebSocket server (FR-001, FR-005)
-                {
-                    let app_handle = _app.handle().clone();
-                    let state = _app.state::<AppState>();
-                    let mcp_handle_slot = state.mcp_ws_handle.clone();
-                    tauri::async_runtime::spawn(async move {
-                        match crate::mcp_ws_server::start(app_handle).await {
-                            Ok(handle) => {
-                                tracing::info!(
-                                    category = "mcp",
-                                    port = handle.port,
-                                    "MCP WebSocket server ready"
-                                );
-                                if let Ok(mut slot) = mcp_handle_slot.lock() {
-                                    *slot = Some(handle);
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    category = "mcp",
-                                    error = %e,
-                                    "Failed to start MCP WebSocket server"
-                                );
-                            }
-                        }
-                    });
-                }
-
                 // Native menubar (SPEC-4470704f)
                 let _ = crate::menu::rebuild_menu(_app.handle());
 
@@ -262,66 +248,6 @@ pub fn build_app(
                 #[cfg(target_os = "macos")]
                 _tray.set_icon_as_template(true)?;
 
-                // MCP bridge: cleanup stale registrations then register for all agents (T21).
-                // Delay briefly so login-shell PATH capture can complete first.
-                {
-                    let app_handle = _app.handle().clone();
-                    tauri::async_runtime::spawn(async move {
-                        let state = app_handle.state::<AppState>();
-                        let resource_dir = app_handle.path().resource_dir().ok();
-                        let _ = state.wait_os_env_ready(std::time::Duration::from_secs(2));
-
-                        if let Err(e) = mcp_registration::cleanup_stale_registrations() {
-                            warn!(
-                                category = "mcp",
-                                error = %e,
-                                "Failed to cleanup stale MCP registrations"
-                            );
-                        }
-
-                        match mcp_registration::detect_runtime() {
-                            Ok(runtime) => {
-                                match mcp_registration::resolve_bridge_path(resource_dir.as_deref())
-                                {
-                                    Ok(bridge_path) => {
-                                        let config = mcp_registration::McpBridgeConfig {
-                                            command: runtime,
-                                            args: vec![bridge_path.to_string_lossy().into_owned()],
-                                            env: std::collections::HashMap::new(),
-                                        };
-                                        if let Err(e) = mcp_registration::register_all(&config) {
-                                            warn!(
-                                                category = "mcp",
-                                                error = %e,
-                                                "Failed to register MCP server in agent configs"
-                                            );
-                                        } else {
-                                            info!(
-                                                category = "mcp",
-                                                "MCP bridge server registered in all agent configs"
-                                            );
-                                        }
-                                    }
-                                    Err(e) => {
-                                        info!(
-                                            category = "mcp",
-                                            error = %e,
-                                            "MCP bridge JS not found; skipping registration"
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                info!(
-                                    category = "mcp",
-                                    error = %e,
-                                    "No JS runtime found; skipping MCP registration"
-                                );
-                            }
-                        }
-                    });
-                }
-
                 // Background task: capture login shell environment
                 {
                     let state = _app.state::<AppState>();
@@ -357,8 +283,26 @@ pub fn build_app(
                             }
                         };
 
+                        if apply_captured_path_to_process_env(&result.env) {
+                            tracing::info!(
+                                category = "os_env",
+                                "Updated process PATH from captured environment"
+                            );
+                        }
+
                         let _ = os_env_source_cell.set(result.source);
                         let _ = os_env_cell.set(result.env);
+                    });
+                }
+
+                // Background task: check app update (best-effort, TTL cached).
+                {
+                    let mgr = _app.state::<AppState>().update_manager.clone();
+                    let app_handle_clone = _app.handle().clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        let current_exe = std::env::current_exe().ok();
+                        let state = mgr.check_for_executable(false, current_exe.as_deref());
+                        let _ = app_handle_clone.emit("app-update-state", &state);
                     });
                 }
             }
@@ -413,7 +357,7 @@ pub fn build_app(
                     return;
                 }
 
-                // Allow specific windows to actually close (used for macOS Cmd+Q behavior).
+                // Allow explicit close requests from trusted flows if explicitly permitted.
                 if state.consume_window_close_permission(window.label()) {
                     info!(
                         category = "tauri",
@@ -514,6 +458,8 @@ pub fn build_app(
             crate::commands::cleanup::cleanup_single_worktree,
             crate::commands::hooks::check_and_update_hooks,
             crate::commands::hooks::register_hooks,
+            crate::commands::update::check_app_update,
+            crate::commands::update::apply_app_update,
             crate::commands::terminal::get_captured_environment,
             crate::commands::terminal::is_os_env_ready,
             crate::commands::git_view::get_git_change_summary,
@@ -623,16 +569,28 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
             if should_prevent_exit_request(is_quitting) {
                 api.prevent_exit();
 
-                // macOS: Cmd+Q is treated as explicit app quit (with agent confirmation).
+                // macOS: Cmd+Q is treated as explicit window close, not process exit.
                 #[cfg(target_os = "macos")]
                 {
                     let state = app_handle.state::<AppState>();
+                    let window = best_window(app_handle);
+                    let Some(window) = window else {
+                        info!(
+                            category = "tauri",
+                            event = "ExitPrevented",
+                            "Exit prevented; no windows exist"
+                        );
+                        return;
+                    };
+
+                    let window_label = window.label().to_string();
                     if has_running_agents(&state) {
                         if !try_begin_exit_confirm(&state) {
                             return;
                         }
 
                         let app_handle = app_handle.clone();
+                        let window_label = window_label.clone();
                         app_handle
                             .dialog()
                             .message("Agents are still running. Quit gwt anyway?")
@@ -647,14 +605,15 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
                                 if !ok {
                                     return;
                                 }
-                                state.request_quit();
-                                app_handle.exit(0);
+
+                                if let Some(window) = app_handle.get_webview_window(&window_label) {
+                                    let _ = window.hide();
+                                }
                             });
                         return;
                     }
 
-                    app_handle.state::<AppState>().request_quit();
-                    app_handle.exit(0);
+                    let _ = window.hide();
                 }
 
                 // Other OSes: keep current behavior (exit request hides to tray).
@@ -673,16 +632,6 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
         }
         tauri::RunEvent::Exit => {
             info!(category = "tauri", event = "Exit", "App exiting");
-
-            // T22: Unregister MCP bridge from all agent configs on exit
-            #[cfg(not(test))]
-            if let Err(e) = gwt_core::config::unregister_all_mcp() {
-                warn!(
-                    category = "mcp",
-                    error = %e,
-                    "Failed to unregister MCP server on exit"
-                );
-            }
         }
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen {
@@ -728,5 +677,43 @@ mod tests {
             menu_action_from_id(crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES),
             Some("cleanup-worktrees")
         );
+        assert_eq!(
+            menu_action_from_id(crate::menu::MENU_ID_HELP_CHECK_UPDATES),
+            Some("check-updates")
+        );
+    }
+
+    #[test]
+    fn menu_action_from_id_maps_edit_copy() {
+        assert_eq!(
+            menu_action_from_id(crate::menu::MENU_ID_EDIT_COPY),
+            Some("edit-copy")
+        );
+    }
+
+    #[test]
+    fn menu_action_from_id_maps_edit_paste() {
+        assert_eq!(
+            menu_action_from_id(crate::menu::MENU_ID_EDIT_PASTE),
+            Some("edit-paste")
+        );
+    }
+
+    #[test]
+    fn captured_path_from_env_returns_trimmed_path() {
+        let env = HashMap::from([("PATH".to_string(), "  /usr/local/bin  ".to_string())]);
+        assert_eq!(
+            captured_path_from_env(&env),
+            Some("/usr/local/bin".to_string())
+        );
+    }
+
+    #[test]
+    fn captured_path_from_env_rejects_missing_or_empty_path() {
+        let no_path = HashMap::from([("HOME".to_string(), "/tmp".to_string())]);
+        assert_eq!(captured_path_from_env(&no_path), None);
+
+        let empty_path = HashMap::from([("PATH".to_string(), "   ".to_string())]);
+        assert_eq!(captured_path_from_env(&empty_path), None);
     }
 }

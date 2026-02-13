@@ -6,7 +6,7 @@
     "frontendDist": "../../gwt-gui/dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "cd gwt-gui && pnpm run dev",
-    "beforeBuildCommand": "cd gwt-gui && pnpm run build && cd ../gwt-mcp-bridge && pnpm install && pnpm run build"
+    "beforeBuildCommand": "cd gwt-gui && pnpm run build"
   },
   "bundle": {
     "active": true,
@@ -14,9 +14,6 @@
       "icons/icon.png",
       "icons/icon.ico",
       "icons/icon.icns"
-    ],
-    "resources": [
-      "../../gwt-mcp-bridge/dist"
     ]
   },
   "app": {

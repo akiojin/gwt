@@ -53,7 +53,7 @@ impl GeminiAgent {
 
     /// Build command with common arguments
     fn build_command(&self, prompt: &str, directory: &Path) -> Command {
-        let mut cmd = Command::new("gemini");
+        let mut cmd = crate::process::tokio_command("gemini");
         cmd.arg("--non-interactive")
             .arg(prompt)
             .current_dir(directory)
@@ -81,7 +81,7 @@ impl AgentTrait for GeminiAgent {
             can_read_files: true,
             can_write_files: true,
             can_use_bash: true,
-            can_use_mcp: true,
+            can_use_mcp: false, // Gemini CLI doesn't support MCP yet
             supports_streaming: true,
             supports_multi_turn: true,
         }
@@ -167,6 +167,6 @@ mod tests {
         let caps = agent.capabilities();
         assert!(caps.can_execute);
         assert!(caps.can_read_files);
-        assert!(caps.can_use_mcp);
+        assert!(!caps.can_use_mcp); // Gemini doesn't support MCP yet
     }
 }
