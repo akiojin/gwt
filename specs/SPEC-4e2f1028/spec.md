@@ -37,6 +37,9 @@ Windows ユーザーとして、Build Images / Force Recreate を有効にして
 
 **独立したテスト**: POSIX パス入力で既存どおりの mount target になることを単体テストで確認する。
 
+**受け入れシナリオ**:
+
+1. **前提条件** composeサービスが `/workspace` を持たない、**操作** Docker起動後に `docker compose exec` を実行、**期待結果** 固定 `-w /workspace` を強制せず起動できる。
 ---
 
 ## エッジケース
@@ -51,6 +54,7 @@ Windows ユーザーとして、Build Images / Force Recreate を有効にして
 - **FR-001**: システムは Git 用 bind mount 生成時に、container target へ Windows ドライブレター付きパスを直接使用しない。
 - **FR-002**: システムは common dir 配下にある worktree gitdir の重複マウントを追加しない。
 - **FR-003**: システムは compose override を long syntax bind mount で生成し、短縮記法でのコロン解釈破綻を回避する。
+- **FR-004**: システムは通常の compose 起動時に、workdir が未確定なら `docker compose exec` へ `-w` を付与しない。
 
 ### 非機能要件
 

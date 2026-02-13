@@ -545,7 +545,12 @@ fn build_docker_compose_exec_args(
 ) -> Vec<String> {
     let mut args = vec!["compose".to_string()];
     args.extend(compose_args.iter().cloned());
-    args.extend(["exec".to_string(), "-w".to_string(), workdir.to_string()]);
+    args.push("exec".to_string());
+    let workdir = workdir.trim();
+    if !workdir.is_empty() {
+        args.push("-w".to_string());
+        args.push(workdir.to_string());
+    }
 
     let mut keys: Vec<&String> = env_vars.keys().collect();
     keys.sort();
@@ -1560,6 +1565,14 @@ mod tests {
     }
 
     #[test]
+    fn build_docker_compose_exec_args_omits_workdir_when_empty() {
+        let env = HashMap::new();
+        let args = build_docker_compose_exec_args(&[], "app", "", &env, "npx", &[]);
+
+        assert!(!args.contains(&"-w".to_string()));
+    }
+
+    #[test]
     fn docker_mount_target_path_converts_windows_drive_style() {
         assert_eq!(
             docker_mount_target_path("D:/Repository/GE/GrimoireEngine.git"),
@@ -2065,7 +2078,7 @@ fn launch_agent_for_project_root(
                 docker_env = Some(env);
                 docker_mode = DockerExecMode::Compose {
                     service,
-                    workdir: DOCKER_WORKDIR.to_string(),
+                    workdir: String::new(),
                     compose_args,
                 };
             }
