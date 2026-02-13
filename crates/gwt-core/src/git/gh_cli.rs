@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[cfg(target_os = "windows")]
 const GH_FALLBACK_PATHS: &[&str] = &[
@@ -27,10 +26,13 @@ pub fn resolve_gh_path() -> Option<PathBuf> {
     which::which("gh").ok().or_else(fallback_gh_path)
 }
 
-pub fn gh_command() -> Command {
+pub fn gh_command() -> std::process::Command {
     match resolve_gh_path() {
-        Some(path) => Command::new(path),
-        None => Command::new("gh"),
+        Some(path) => {
+            let program = path.to_string_lossy().into_owned();
+            crate::process::command(&program)
+        }
+        None => crate::process::command("gh"),
     }
 }
 

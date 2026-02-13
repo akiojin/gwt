@@ -141,7 +141,6 @@ pub fn build_env_capture_command(shell_type: ShellType, shell_path: &str) -> (St
 #[cfg(unix)]
 pub async fn capture_login_shell_env() -> OsEnvResult {
     use std::time::Duration;
-    use tokio::process::Command;
 
     let shell_path = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
     let shell_type = detect_shell_type(&shell_path);
@@ -151,7 +150,7 @@ pub async fn capture_login_shell_env() -> OsEnvResult {
 
     let result = tokio::time::timeout(
         Duration::from_secs(5),
-        Command::new(&prog).args(&args).output(),
+        crate::process::tokio_command(&prog).args(&args).output(),
     )
     .await;
 

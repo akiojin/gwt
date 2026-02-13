@@ -3,7 +3,6 @@
 //! Provides Issue information using GitHub CLI (gh) for branch creation from issues.
 
 use std::path::Path;
-use std::process::Command;
 
 use super::gh_cli::{gh_command, is_gh_available};
 use super::remote::Remote;
@@ -295,7 +294,7 @@ pub fn find_branch_for_issue(
 ) -> Result<Option<String>, String> {
     let pattern = format!("issue-{}", issue_number);
 
-    let output = Command::new("git")
+    let output = crate::process::git_command()
         .args(["branch", "--list", &format!("*{}*", pattern)])
         .current_dir(repo_path)
         .output()
