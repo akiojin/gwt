@@ -473,6 +473,22 @@ pub fn fetch_pr_detail(
     parse_pr_detail_response(&stdout)
 }
 
+/// Fetch CI workflow run log via `gh run view <run_id> --log` (T011).
+pub fn gh_run_view_log(repo_path: &Path, run_id: u64) -> Result<String, String> {
+    let output = gh_command()
+        .args(["run", "view", &run_id.to_string(), "--log"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to execute gh run view: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh run view failed: {}", stderr));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
