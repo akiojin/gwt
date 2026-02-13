@@ -49,24 +49,33 @@ function readMcpState(): McpState {
 function connectWebSocket(port: number): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(`ws://localhost:${port}`);
+    let settled = false;
+
+    const fail = (reason: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      reject(reason);
+    };
 
     const timeout = setTimeout(() => {
       socket.terminate();
-      reject(new Error("WebSocket connection timeout"));
+      fail(new Error("WebSocket connection timeout"));
     }, 5000);
 
     socket.on("open", () => {
+      settled = true;
       clearTimeout(timeout);
       connected = true;
       resolve(socket);
     });
 
     socket.on("error", (err) => {
-      clearTimeout(timeout);
-      reject(err);
+      fail(err instanceof Error ? err : new Error(String(err)));
     });
 
     socket.on("message", (data) => {
+      if (settled && socket.readyState !== WebSocket.OPEN) return;
       try {
         const msg = JSON.parse(data.toString()) as JsonRpcResponse;
         const entry = pending.get(msg.id);
@@ -84,6 +93,11 @@ function connectWebSocket(port: number): Promise<WebSocket> {
     });
 
     socket.on("close", () => {
+      if (!settled) {
+        fail(new Error("WebSocket closed during handshake"));
+        return;
+      }
+
       cleanupAgentConfigs();
       if (connected) {
         process.exit(0);
@@ -118,14 +132,15 @@ function sendRpc(method: string, params: Record<string, unknown>): Promise<unkno
       },
     });
 
-    try {
-      ws.send(JSON.stringify(req));
-    } catch (err) {
+    ws.send(JSON.stringify(req), (err) => {
+      if (!err) {
+        return;
+      }
       pending.delete(id);
       clearTimeout(timeout);
       const message = err instanceof Error ? err.message : String(err);
       reject(new Error(`Failed to send RPC request: ${message}`));
-    }
+    });
   });
 }
 

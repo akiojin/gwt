@@ -348,7 +348,7 @@ fn unregister_json_agent(path: &Path) -> Result<(), GwtError> {
 }
 
 fn is_registered_json(path: &Path) -> Result<bool, GwtError> {
-    let root = load_json(path).unwrap_or_else(|_| serde_json::json!({}));
+    let root = load_json(path)?;
     Ok(root
         .get("mcpServers")
         .and_then(|v| v.get(MCP_SERVER_NAME))
@@ -456,16 +456,12 @@ fn unregister_codex_agent(path: &Path) -> Result<(), GwtError> {
 }
 
 fn is_registered_codex(path: &Path) -> Result<bool, GwtError> {
-    let root = load_toml_table(path).unwrap_or_default();
+    let root = load_toml_table(path)?;
     Ok(root
         .get("mcp_servers")
         .and_then(|v| v.get(MCP_SERVER_NAME))
         .is_some())
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -692,6 +688,32 @@ args = ["bridge.js"]
 
         unregister_mcp_server_at(McpAgentType::Codex, &path).unwrap();
         assert!(!is_registered_at(McpAgentType::Codex, &path).unwrap());
+    }
+
+    #[test]
+    fn claude_is_registered_invalid_json_returns_error() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(".claude.json");
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, "not valid json {{").unwrap();
+
+        assert!(is_registered_at(McpAgentType::Claude, &path).is_err());
+    }
+
+    #[test]
+    fn codex_is_registered_invalid_toml_returns_error() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(".codex").join("config.toml");
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, "not valid toml = = =").unwrap();
+
+        assert!(is_registered_at(McpAgentType::Codex, &path).is_err());
     }
 
     #[test]
