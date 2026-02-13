@@ -3,6 +3,8 @@ import { render, waitFor, cleanup } from "@testing-library/svelte";
 
 const invokeMock = vi.fn();
 const listenMock = vi.fn();
+const writeTextMock = vi.fn();
+const readTextMock = vi.fn();
 
 const terminalInstances: any[] = [];
 
@@ -65,8 +67,18 @@ describe("TerminalView", () => {
     terminalInstances.length = 0;
     invokeMock.mockReset();
     listenMock.mockReset();
+    writeTextMock.mockReset();
+    readTextMock.mockReset();
 
     listenMock.mockResolvedValue(() => {});
+
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: writeTextMock,
+        readText: readTextMock,
+      },
+    });
 
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "capture_scrollback_tail") return "hello\n";
@@ -94,5 +106,41 @@ describe("TerminalView", () => {
       ).toBe(true);
     });
   });
-});
 
+  it("handles gwt-terminal-edit-action copy/paste events", async () => {
+    writeTextMock.mockResolvedValue(undefined);
+    readTextMock.mockResolvedValue("hello from clipboard");
+
+    await renderTerminalView({ paneId: "pane-1", active: true });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    const term = terminalInstances[0];
+    term.getSelection = vi.fn(() => "copied text");
+
+    window.dispatchEvent(
+      new CustomEvent("gwt-terminal-edit-action", {
+        detail: { action: "copy", paneId: "pane-1" },
+      }),
+    );
+
+    await waitFor(() => {
+      expect(writeTextMock).toHaveBeenCalledWith("copied text");
+    });
+
+    window.dispatchEvent(
+      new CustomEvent("gwt-terminal-edit-action", {
+        detail: { action: "paste", paneId: "pane-1" },
+      }),
+    );
+
+    await waitFor(() => {
+      expect(readTextMock).toHaveBeenCalledTimes(1);
+      expect(
+        invokeMock.mock.calls.some((c) => c[0] === "write_terminal"),
+      ).toBe(true);
+    });
+  });
+});

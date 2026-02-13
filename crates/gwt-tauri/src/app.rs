@@ -55,6 +55,8 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
         crate::menu::MENU_ID_FILE_CLOSE_PROJECT => Some("close-project"),
         crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES => Some("cleanup-worktrees"),
         crate::menu::MENU_ID_GIT_VERSION_HISTORY => Some("version-history"),
+        crate::menu::MENU_ID_EDIT_COPY => Some("edit-copy"),
+        crate::menu::MENU_ID_EDIT_PASTE => Some("edit-paste"),
         crate::menu::MENU_ID_TOOLS_LAUNCH_AGENT => Some("launch-agent"),
         crate::menu::MENU_ID_TOOLS_LIST_TERMINALS => Some("list-terminals"),
         crate::menu::MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS => Some("terminal-diagnostics"),
@@ -319,7 +321,7 @@ pub fn build_app(
                     return;
                 }
 
-                // Allow specific windows to actually close (used for macOS Cmd+Q behavior).
+                // Allow explicit close requests from trusted flows if explicitly permitted.
                 if state.consume_window_close_permission(window.label()) {
                     info!(
                         category = "tauri",
@@ -560,16 +562,14 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
                                     return;
                                 }
 
-                                state.allow_window_close(&window_label);
                                 if let Some(window) = app_handle.get_webview_window(&window_label) {
-                                    let _ = window.close();
+                                    let _ = window.hide();
                                 }
                             });
                         return;
                     }
 
-                    state.allow_window_close(&window_label);
-                    let _ = window.close();
+                    let _ = window.hide();
                 }
 
                 // Other OSes: keep current behavior (exit request hides to tray).
@@ -632,6 +632,22 @@ mod tests {
         assert_eq!(
             menu_action_from_id(crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES),
             Some("cleanup-worktrees")
+        );
+    }
+
+    #[test]
+    fn menu_action_from_id_maps_edit_copy() {
+        assert_eq!(
+            menu_action_from_id(crate::menu::MENU_ID_EDIT_COPY),
+            Some("edit-copy")
+        );
+    }
+
+    #[test]
+    fn menu_action_from_id_maps_edit_paste() {
+        assert_eq!(
+            menu_action_from_id(crate::menu::MENU_ID_EDIT_PASTE),
+            Some("edit-paste")
         );
     }
 }

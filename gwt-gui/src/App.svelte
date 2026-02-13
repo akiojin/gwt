@@ -527,6 +527,27 @@
     activeTabId = tab.id;
   }
 
+  function getActiveTerminalPaneId(): string | null {
+    const active = tabs.find((t) => t.id === activeTabId);
+    if (!active || active.type !== "agent") {
+      return null;
+    }
+    return active.paneId && active.paneId.length > 0 ? active.paneId : null;
+  }
+
+  function emitTerminalEditAction(action: "copy" | "paste") {
+    const paneId = getActiveTerminalPaneId();
+    if (!paneId) return;
+
+    if (typeof window === "undefined") return;
+
+    window.dispatchEvent(
+      new CustomEvent("gwt-terminal-edit-action", {
+        detail: { action, paneId },
+      })
+    );
+  }
+
   async function syncWindowAgentTabs() {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
@@ -686,6 +707,12 @@
             activeTabId = firstAgent.id;
           }
         }
+        break;
+      case "edit-copy":
+        emitTerminalEditAction("copy");
+        break;
+      case "edit-paste":
+        emitTerminalEditAction("paste");
         break;
       case "debug-os-env":
         showOsEnvDebug = true;
