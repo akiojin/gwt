@@ -165,7 +165,7 @@ describe("Sidebar", () => {
     expect((launchMenuButton as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("shows ACTIVE badge for branches with open agent tabs", async () => {
+  it("shows spinner indicator for branches with open agent tabs", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "list_worktree_branches") {
         return [branchFixture];
@@ -201,6 +201,6 @@ describe("Sidebar", () => {
     });
 
     await rendered.findByText(branchFixture.name);
-    expect(rendered.getByText("ACTIVE")).toBeTruthy();
+    expect(rendered.getByTitle("Agent tab is open for this branch")).toBeTruthy();
   });
 });

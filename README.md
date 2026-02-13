@@ -19,6 +19,27 @@ Or install a specific version:
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash -s -- --version 6.30.3
 ```
 
+### macOS (local `.pkg` installer)
+
+Build a local package:
+
+```bash
+cargo tauri build
+./installers/macos/build-pkg.sh
+```
+
+Install from local package:
+
+```bash
+./installers/macos/install.sh --pkg ./target/release/bundle/pkg/gwt-macos-$(uname -m).pkg
+```
+
+Or run both steps at once:
+
+```bash
+./installers/macos/install-local.sh
+```
+
 ### Uninstall (macOS)
 
 ```bash

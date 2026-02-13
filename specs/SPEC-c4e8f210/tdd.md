@@ -41,8 +41,8 @@
 
 ## フロントエンドテスト（TypeScript / Svelte）
 
-フロントエンドテストフレームワーク未導入のため、以下は仕様として記載。
-`svelte-check` による型チェック（0 errors, 0 warnings）で静的検証済み。
+フロントエンドは `vitest` + `@testing-library/svelte` により主要なUIロジックをユニットテストする。
+加えて `pnpm check`（svelte-check）で型/静的検証する。
 
 ### Sidebar 安全性インジケーター
 
@@ -54,6 +54,7 @@
 | グレードット表示（protected/current） | svelte-check + 手動 | is_protected=true → グレー CSS ドット |
 | 削除中スピナー表示 | svelte-check + 手動 | deleting 状態 → スピナー表示、ドット非表示 |
 | 削除中クリック無効 | svelte-check + 手動 | deleting 状態 → pointer-events: none |
+| agent tab 表示（indicator） | vitest | agent tab が開いているブランチ名の前にグラフィカルなアクティビティインジケーター（アニメーションする3本バー）を表示 |
 
 ### Cleanup モーダル
 
@@ -69,6 +70,9 @@
 | unsafe 選択時は確認あり | svelte-check + 手動 | 確認ダイアログ表示 |
 | モーダル即閉じ | svelte-check + 手動 | Cleanup 実行後モーダル閉じ |
 | 失敗時モーダル再表示 | svelte-check + 手動 | cleanup-completed でエラーあり → 再表示 |
+| agent tab 表示（indicator） | vitest | agent tab が開いている Worktree のブランチ名の前にグラフィカルなアクティビティインジケーター（アニメーションする3本バー）を表示 |
+| agent tab を先頭にソート | vitest | スピナー付き Worktree が先頭に来る（disabled を除く） |
+| agent tab 選択時の確認 | vitest | agent tab が選択に含まれる場合に追加確認が表示される |
 
 ### コンテキストメニュー
 
@@ -94,8 +98,11 @@ cargo test
 # Lint
 cargo clippy --all-targets --all-features -- -D warnings
 
-# フロントエンドチェック
-cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json
+# フロントエンドテスト
+cd gwt-gui && pnpm test
+
+# フロントエンドチェック（型/静的）
+cd gwt-gui && pnpm check
 ```
 
 ## テストカバレッジサマリー
