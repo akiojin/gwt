@@ -7,6 +7,7 @@
     SessionSummaryResult,
   } from "../types";
   import GitSection from "./GitSection.svelte";
+  import MarkdownRenderer from "./MarkdownRenderer.svelte";
 
   let {
     projectPath,
@@ -499,7 +500,10 @@
             {sessionSummaryError ?? "Failed to generate session summary."}
           </div>
         {:else if sessionSummaryStatus === "ok" && sessionSummaryMarkdown}
-          <pre class="session-summary-markdown">{sessionSummaryMarkdown}</pre>
+          <MarkdownRenderer
+            className="session-summary-markdown"
+            text={sessionSummaryMarkdown}
+          />
         {:else}
           <div class="session-summary-placeholder">No summary.</div>
         {/if}
@@ -792,11 +796,11 @@
   }
 
   .session-summary-markdown {
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: var(--bg-primary);
+    padding: 10px 12px;
+    overflow: hidden;
     margin: 0;
-    max-width: 100%;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    word-break: break-word;
-    font-size: var(--ui-font-sm);
   }
 </style>

@@ -155,7 +155,7 @@ struct ChatCompletionsReasoning<'a> {
     effort: &'a str,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct ChatCompletionsInputMessage<'a> {
     role: &'a str,
     content: &'a str,

@@ -168,6 +168,10 @@ fn is_operational_status_noise(text: &str) -> bool {
         return false;
     }
 
+    if should_preserve_short_status_message(trimmed) {
+        return false;
+    }
+
     let trimmed_len = trimmed.chars().count();
     if trimmed_len <= 12 {
         return true;
@@ -181,6 +185,38 @@ fn is_operational_status_noise(text: &str) -> bool {
     }
 
     false
+}
+
+fn should_preserve_short_status_message(text: &str) -> bool {
+    if text.ends_with('?') || text.ends_with('？') {
+        return true;
+    }
+
+    let lowered = text.to_lowercase();
+    const IMPORTANT_KEYWORDS: [&str; 19] = [
+        "error",
+        "errors",
+        "failed",
+        "fail",
+        "failure",
+        "blocked",
+        "blocking",
+        "blocker",
+        "unable",
+        "cannot",
+        "can't",
+        "need",
+        "required",
+        "attention",
+        "please",
+        "warn",
+        "warning",
+        "stop",
+        "wait",
+        "update",
+    ];
+
+    IMPORTANT_KEYWORDS.iter().any(|keyword| lowered.contains(keyword))
 }
 
 /// Summarizes a terminal scrollback as plain text, bypassing session parsers.
@@ -790,6 +826,54 @@ mod tests {
         assert!(!user_prompt.contains("$gh-pr"));
         assert!(user_prompt.contains("Implemented the plan to compress summary input and keep only meaningful messages."));
         assert!(!user_prompt.contains("Implemented."));
+    }
+
+    #[test]
+    fn test_build_session_prompt_keeps_short_assistant_blocker_or_question() {
+        let messages = vec![
+            SessionMessage {
+                role: MessageRole::User,
+                content: "テストを続けます。".to_string(),
+                timestamp: None,
+            },
+            SessionMessage {
+                role: MessageRole::Assistant,
+                content: "Error: build blocked.".to_string(),
+                timestamp: None,
+            },
+            SessionMessage {
+                role: MessageRole::Assistant,
+                content: "Need confirmation?".to_string(),
+                timestamp: None,
+            },
+            SessionMessage {
+                role: MessageRole::Assistant,
+                content: "go".to_string(),
+                timestamp: None,
+            },
+        ];
+
+        let parsed = ParsedSession {
+            session_id: "sess-blocker".to_string(),
+            agent_type: crate::ai::AgentType::CodexCli,
+            messages,
+            tool_executions: vec![],
+            started_at: None,
+            last_updated_at: None,
+            total_turns: 4,
+        };
+
+        let prompt = build_session_prompt(&parsed);
+        let user_prompt = prompt
+            .iter()
+            .find(|msg| msg.role == "user")
+            .expect("user prompt")
+            .content
+            .clone();
+
+        assert!(user_prompt.contains("Error: build blocked."));
+        assert!(user_prompt.contains("Need confirmation?"));
+        assert!(!user_prompt.contains("go"));
     }
 
     #[test]
