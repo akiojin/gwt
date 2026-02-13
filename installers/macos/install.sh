@@ -36,8 +36,28 @@ need_cmd() {
 
 warn_if_pkg_stale() {
   local pkg_path="$1"
-  local gui_source_file="${REPO_ROOT}/gwt-gui/src/lib/components/AgentLaunchForm.svelte"
   local pkg_prefix="${REPO_ROOT}/target/release/bundle/pkg/"
+  local latest_source_file=""
+  local source_paths=(
+    "${REPO_ROOT}/gwt-gui/src"
+    "${REPO_ROOT}/gwt-gui/package.json"
+    "${REPO_ROOT}/gwt-gui/pnpm-lock.yaml"
+    "${REPO_ROOT}/gwt-gui/svelte.config.js"
+    "${REPO_ROOT}/gwt-gui/vite.config.ts"
+    "${REPO_ROOT}/gwt-gui/tsconfig.json"
+    "${REPO_ROOT}/gwt-gui/tsconfig.node.json"
+    "${REPO_ROOT}/crates/gwt-tauri/src"
+    "${REPO_ROOT}/crates/gwt-tauri/Cargo.toml"
+    "${REPO_ROOT}/crates/gwt-core/src"
+    "${REPO_ROOT}/crates/gwt-core/Cargo.toml"
+    "${REPO_ROOT}/crates/gwt-tauri/Cargo.lock"
+    "${REPO_ROOT}/crates/gwt-core/Cargo.lock"
+    "${REPO_ROOT}/Cargo.toml"
+    "${REPO_ROOT}/Cargo.lock"
+    "${REPO_ROOT}/installers/macos/install.sh"
+    "${REPO_ROOT}/installers/macos/install-local.sh"
+    "${REPO_ROOT}/installers/macos/build-pkg.sh"
+  )
 
   pkg_path="$(cd "$(dirname "$pkg_path")" && pwd)/$(basename "$pkg_path")"
 
@@ -49,12 +69,31 @@ warn_if_pkg_stale() {
       ;;
   esac
 
-  if [[ -f "$gui_source_file" && "$gui_source_file" -nt "$pkg_path" ]]; then
+  for path in "${source_paths[@]}"; do
+    if [[ -f "$path" ]]; then
+      if [[ "$path" -nt "$pkg_path" ]]; then
+        latest_source_file="$path"
+        break
+      fi
+      continue
+    fi
+
+    if [[ -d "$path" ]]; then
+      while IFS= read -r -d "" src; do
+        if [[ "$src" -nt "$pkg_path" ]]; then
+          latest_source_file="$src"
+          break 2
+        fi
+      done < <(find "$path" -type f -print0)
+    fi
+  done
+
+  if [[ -n "$latest_source_file" ]]; then
     warn "Local package appears older than GUI source change:"
-    warn "  source: ${gui_source_file}"
+    warn "  source: ${latest_source_file}"
     warn "  package: ${pkg_path}"
     warn "Rebuild it with: ./installers/macos/install-local.sh"
-    warn "If you installed this package already, old model options may remain visible."
+    warn "If you installed this package already, some app changes may not be included."
   fi
 }
 
