@@ -183,7 +183,7 @@
   - stash 一覧（`stash@{N}: メッセージ (X files)`）
   - 0 件時: タブ自体を非表示（GitSection 側で制御）
 
-### Session Summary 統合
+### Worktree Summary 統合
 
 - [ ] **T506** [共通] T501〜T505 の後に `MainArea.svelte` に GitSection を統合:
   - Quick Start セクションの下に配置
@@ -192,7 +192,7 @@
 ### データ取得ロジック
 
 - [ ] **T507** [共通] T506 の後にタブ表示時の自動取得ロジックを実装:
-  - Summary タブ表示時に `get_git_change_summary` を呼び出し
+  - Worktree Summary パネル表示時に `get_git_change_summary` を呼び出し
   - 各タブ切り替え時に対応データを遅延取得
 - [ ] **T508** [共通] T507 の後にリフレッシュボタンの再取得ロジックを実装:
   - 全データをクリアして再取得
