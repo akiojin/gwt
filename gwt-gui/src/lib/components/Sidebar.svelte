@@ -99,19 +99,19 @@
   }
 
   function clampSummaryHeight(nextHeightPx: number): number {
-    const sidebarHeight = sidebarEl?.clientHeight ?? 0;
+    const stackHeight = branchSummaryStackEl?.clientHeight ?? 0;
     const minSummaryHeight = Math.max(
       MIN_WORKTREE_SUMMARY_HEIGHT_PX,
       Math.round(nextHeightPx)
     );
 
-    if (!Number.isFinite(sidebarHeight) || sidebarHeight <= 0) {
+    if (!Number.isFinite(stackHeight) || stackHeight <= 0) {
       return minSummaryHeight;
     }
 
     const availableSummaryHeight = Math.max(
       0,
-      sidebarHeight - MIN_BRANCH_LIST_HEIGHT_PX - SUMMARY_RESIZE_HANDLE_HEIGHT_PX
+      stackHeight - MIN_BRANCH_LIST_HEIGHT_PX - SUMMARY_RESIZE_HANDLE_HEIGHT_PX
     );
 
     if (availableSummaryHeight < MIN_WORKTREE_SUMMARY_HEIGHT_PX) {
@@ -149,7 +149,7 @@
 
   // Branches currently being deleted
   let deletingBranches: Set<string> = $state(new Set());
-  let sidebarEl: HTMLElement | null = $state(null);
+  let branchSummaryStackEl: HTMLElement | null = $state(null);
   let summaryHeightPx = $state(loadSummaryHeight());
   let summaryResizing = $state(false);
   let summaryResizePointerId: number | null = $state(null);
@@ -185,7 +185,7 @@
   let clampedWidthPx = $derived(clampSidebarWidth(widthPx));
 
   $effect(() => {
-    if (!sidebarEl) return;
+    if (!branchSummaryStackEl) return;
     setSummaryHeight(summaryHeightPx, false);
   });
 
@@ -550,7 +550,7 @@
     if (!summaryResizing) return;
     if (summaryResizePointerId !== null && event.pointerId !== summaryResizePointerId) return;
     const delta = event.clientY - summaryResizeStartY;
-    setSummaryHeight(summaryResizeStartHeight + delta);
+    setSummaryHeight(summaryResizeStartHeight - delta);
   }
 
   function handleSummaryResizePointerUp(event: PointerEvent) {
@@ -582,7 +582,7 @@
     if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
     event.preventDefault();
     const step = event.shiftKey ? 32 : 16;
-    const delta = event.key === "ArrowDown" ? step : -step;
+    const delta = event.key === "ArrowDown" ? -step : step;
     setSummaryHeight(summaryHeightPx + delta);
   }
 
@@ -683,7 +683,6 @@
 
 <aside
   class="sidebar"
-  bind:this={sidebarEl}
   style="width: {clampedWidthPx}px; min-width: {clampedWidthPx}px;"
 >
   <div class="mode-toggle">
@@ -739,7 +738,7 @@
         bind:value={searchQuery}
       />
     </div>
-    <div class="branch-summary-stack">
+    <div class="branch-summary-stack" bind:this={branchSummaryStackEl}>
       <div class="branch-list">
         {#if loading}
           <div class="loading-indicator">Loading...</div>
