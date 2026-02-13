@@ -201,8 +201,8 @@
     }
   }
 
-  function showAvailableUpdateToast(s: AvailableUpdateState) {
-    if (lastUpdateToastVersion === s.latest) return;
+  function showAvailableUpdateToast(s: AvailableUpdateState, force = false) {
+    if (!force && lastUpdateToastVersion === s.latest) return;
     lastUpdateToastVersion = s.latest;
 
     if (s.asset_url) {
@@ -1074,7 +1074,8 @@
                 showToast("Up to date.");
                 break;
               case "available":
-                showAvailableUpdateToast(s);
+                // Manual check should surface availability even when startup already notified.
+                showAvailableUpdateToast(s, true);
                 break;
               case "failed":
                 showToast(`Update check failed: ${s.message}`);
