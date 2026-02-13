@@ -5,6 +5,7 @@
     ProjectInfo,
     LaunchAgentRequest,
     ProbePathResult,
+    TerminalInfo,
     TerminalAnsiProbe,
     CapturedEnvInfo,
     SettingsData,
@@ -22,15 +23,22 @@
     formatWindowTitle,
     getAppVersionSafe,
   } from "./lib/windowTitle";
+  import {
+    loadStoredProjectAgentTabs,
+    persistStoredProjectAgentTabs,
+    buildRestoredAgentTabs,
+  } from "./lib/agentTabsPersistence";
 
   interface MenuActionPayload {
     action: string;
   }
 
   const SIDEBAR_WIDTH_STORAGE_KEY = "gwt.sidebar.width";
+  const SIDEBAR_MODE_STORAGE_KEY = "gwt.sidebar.mode";
   const DEFAULT_SIDEBAR_WIDTH_PX = 260;
   const MIN_SIDEBAR_WIDTH_PX = 220;
   const MAX_SIDEBAR_WIDTH_PX = 520;
+  type SidebarMode = "branch" | "agent";
 
   function clampSidebarWidth(widthPx: number): number {
     if (!Number.isFinite(widthPx)) return DEFAULT_SIDEBAR_WIDTH_PX;
@@ -60,10 +68,30 @@
     }
   }
 
+  function loadSidebarMode(): SidebarMode {
+    if (typeof window === "undefined") return "branch";
+    try {
+      const raw = window.localStorage.getItem(SIDEBAR_MODE_STORAGE_KEY);
+      return raw === "agent" || raw === "branch" ? raw : "branch";
+    } catch {
+      return "branch";
+    }
+  }
+
+  function persistSidebarMode(mode: SidebarMode) {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(SIDEBAR_MODE_STORAGE_KEY, mode);
+    } catch {
+      // Ignore localStorage failures (e.g., disabled in strict environments).
+    }
+  }
+
   let projectPath: string | null = $state(null);
   let appVersion: string | null = $state(null);
   let sidebarVisible: boolean = $state(true);
   let sidebarWidthPx: number = $state(loadSidebarWidth());
+  let sidebarMode: SidebarMode = $state(loadSidebarMode());
   let showAgentLaunch: boolean = $state(false);
   let showCleanupModal: boolean = $state(false);
   let cleanupPreselectedBranch: string | null = $state(null);
@@ -89,7 +117,17 @@
   ]);
   let activeTabId: string = $state("summary");
 
+  let agentTabsHydratedProjectPath: string | null = $state(null);
+  let agentTabsRestoreToken = 0;
+
   let terminalCount = $derived(tabs.filter((t) => t.type === "agent").length);
+
+  let agentTabBranches = $derived(
+    tabs
+      .filter((t) => t.type === "agent")
+      .map((t) => normalizeBranchName(t.label))
+      .filter((b) => b && b !== "Worktree" && b !== "Agent")
+  );
 
   let terminalDiagnosticsLoading: boolean = $state(false);
   let terminalDiagnostics: TerminalAnsiProbe | null = $state(null);
@@ -324,6 +362,30 @@
     persistSidebarWidth(next);
   }
 
+  function ensureAgentModeTab() {
+    const existing = tabs.find((t) => t.type === "agentMode" || t.id === "agentMode");
+    if (existing) return;
+
+    const tab: Tab = { id: "agentMode", label: "Agent Mode", type: "agentMode" };
+    const summaryIndex = tabs.findIndex((t) => t.type === "summary" || t.id === "summary");
+    if (summaryIndex >= 0) {
+      const nextTabs = [...tabs];
+      nextTabs.splice(summaryIndex + 1, 0, tab);
+      tabs = nextTabs;
+    } else {
+      tabs = [...tabs, tab];
+    }
+  }
+
+  function handleSidebarModeChange(next: SidebarMode) {
+    if (sidebarMode === next) return;
+    if (next === "agent") {
+      ensureAgentModeTab();
+    }
+    sidebarMode = next;
+    persistSidebarMode(next);
+  }
+
   function handleBranchActivate(branch: BranchInfo) {
     handleBranchSelect(branch);
     requestAgentLaunch();
@@ -462,25 +524,6 @@
       type: "versionHistory",
     };
     tabs = [...tabs, tab];
-    activeTabId = tab.id;
-  }
-
-  function openAgentModeTab() {
-    const existing = tabs.find((t) => t.type === "agentMode" || t.id === "agentMode");
-    if (existing) {
-      activeTabId = existing.id;
-      return;
-    }
-
-    const tab: Tab = { id: "agentMode", label: "Agent Mode", type: "agentMode" };
-    const summaryIndex = tabs.findIndex((t) => t.type === "summary" || t.id === "summary");
-    if (summaryIndex >= 0) {
-      const nextTabs = [...tabs];
-      nextTabs.splice(summaryIndex + 1, 0, tab);
-      tabs = nextTabs;
-    } else {
-      tabs = [...tabs, tab];
-    }
     activeTabId = tab.id;
   }
 
@@ -632,9 +675,6 @@
       case "version-history":
         openVersionHistoryTab();
         break;
-      case "open-agent-mode":
-        openAgentModeTab();
-        break;
       case "about":
         showAbout = true;
         break;
@@ -694,6 +734,85 @@
     void tabs;
     void activeTabId;
     void syncWindowAgentTabs();
+  });
+
+  async function restoreProjectAgentTabs(targetProjectPath: string, token: number) {
+    const stored = loadStoredProjectAgentTabs(targetProjectPath);
+
+    // Even if no stored state exists, mark hydrated so persistence can proceed.
+    if (!stored) {
+      if (projectPath === targetProjectPath && agentTabsRestoreToken === token) {
+        agentTabsHydratedProjectPath = targetProjectPath;
+      }
+      return;
+    }
+
+    let terminals: TerminalInfo[] = [];
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      terminals = await invoke<TerminalInfo[]>("list_terminals");
+    } catch {
+      // Ignore: not available outside Tauri runtime.
+    }
+
+    if (projectPath !== targetProjectPath || agentTabsRestoreToken !== token) {
+      return;
+    }
+
+    const restored = buildRestoredAgentTabs(stored, terminals);
+    const restoredTabs = restored.tabs;
+
+    const preserved = tabs.filter((t) => t.type !== "agent");
+    tabs = [...preserved, ...restoredTabs];
+
+    const allowOverrideActive =
+      activeTabId === "summary" || activeTabId === "agentMode";
+    if (allowOverrideActive && restored.activeTabId) {
+      activeTabId = restored.activeTabId;
+    }
+
+    agentTabsHydratedProjectPath = targetProjectPath;
+  }
+
+  // Restore persisted agent tabs when a project is opened.
+  $effect(() => {
+    void projectPath;
+
+    if (!projectPath) {
+      agentTabsHydratedProjectPath = null;
+      return;
+    }
+
+    agentTabsHydratedProjectPath = null;
+    const target = projectPath;
+    const token = ++agentTabsRestoreToken;
+    void restoreProjectAgentTabs(target, token);
+  });
+
+  // Persist agent tabs per project (best-effort).
+  $effect(() => {
+    void projectPath;
+    void tabs;
+    void activeTabId;
+    void agentTabsHydratedProjectPath;
+
+    if (!projectPath) return;
+    if (agentTabsHydratedProjectPath !== projectPath) return;
+
+    const agentTabs: Array<{ paneId: string; label: string }> = tabs
+      .filter((t) => t.type === "agent" && typeof t.paneId === "string" && t.paneId.length > 0)
+      .map((t) => ({ paneId: t.paneId as string, label: t.label }));
+
+    const active = tabs.find((t) => t.id === activeTabId);
+    const activePaneId =
+      active?.type === "agent" && typeof active.paneId === "string" && active.paneId.length > 0
+        ? active.paneId
+        : null;
+
+    persistStoredProjectAgentTabs(projectPath, {
+      tabs: agentTabs,
+      activePaneId,
+    });
   });
 
   // Claude Code Hooks: check & register on startup
@@ -796,6 +915,11 @@
           widthPx={sidebarWidthPx}
           minWidthPx={MIN_SIDEBAR_WIDTH_PX}
           maxWidthPx={MAX_SIDEBAR_WIDTH_PX}
+          mode={sidebarMode}
+          onModeChange={handleSidebarModeChange}
+          {selectedBranch}
+          {currentBranch}
+          {agentTabBranches}
           onResize={handleSidebarResize}
           onBranchSelect={handleBranchSelect}
           onBranchActivate={handleBranchActivate}
@@ -830,7 +954,9 @@
 <CleanupModal
   open={showCleanupModal}
   preselectedBranch={cleanupPreselectedBranch}
+  refreshKey={sidebarRefreshKey}
   projectPath={projectPath ?? ""}
+  {agentTabBranches}
   onClose={() => (showCleanupModal = false)}
 />
 

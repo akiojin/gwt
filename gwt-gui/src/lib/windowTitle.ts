@@ -3,7 +3,7 @@ export function formatWindowTitle(opts: {
   projectPath: string | null;
 }): string {
   if (opts.projectPath) {
-    return `${opts.appName} - ${opts.projectPath}`;
+    return opts.projectPath;
   }
   return opts.appName;
 }

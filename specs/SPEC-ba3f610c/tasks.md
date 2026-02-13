@@ -1,17 +1,19 @@
-# タスク一覧: エージェントモード（GUI版）
+# タスクリスト: エージェントモードUI改善
 
-## 実装タスク
+## Phase 1: セットアップ
 
-- **T001** Tool Calling基盤を追加（OpenAI互換レスポンスから tool_calls 抽出）
-- **T002** Tool Calling実行ルータ追加（send_keys / broadcast / capture）
-- **T003** マスターエージェント（GUI向け）追加
-- **T004** Agent Mode タブUI追加
-- **T005** 仕様文書のGUI向け更新
+- [ ] T001 [P] [US1] [準備タスク] 既存Agent Mode UI要件と仕様差分の確認 specs/SPEC-ba3f610c/spec.md
 
-## 完了状況
+## Phase 2: 基盤
 
-- T001: 完了
-- T002: 完了
-- T003: 完了
-- T004: 完了
-- T005: 作業中
+- [ ] T002 [US1] [基盤実装] AgentModePanelの入力/送信状態の現状整理 gwt-gui/src/lib/components/AgentModePanel.svelte
+
+## Phase 3: ストーリー 1
+
+- [ ] T003 [US1] [テスト] IME送信抑止と送信中スピナーのテスト追加 gwt-gui/src/lib/components/AgentModePanel.test.ts
+- [ ] T004 [US1] [実装] IME変換中のEnter送信抑止を追加 gwt-gui/src/lib/components/AgentModePanel.svelte
+- [ ] T005 [US1] [実装] チャットバブル表示と送信中スピナーを追加 gwt-gui/src/lib/components/AgentModePanel.svelte
+
+## Phase 4: 仕上げ・横断
+
+- [ ] T006 [P] [共通] 仕様・計画・タスクの更新 specs/SPEC-ba3f610c/spec.md

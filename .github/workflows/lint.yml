@@ -54,15 +54,33 @@ jobs:
           corepack enable
           corepack prepare pnpm@10.29.2 --activate
           pnpm --version
+      - name: Ensure pnpm store dir exists (for setup-node cache)
+        run: |
+          STORE_PATH="$(pnpm store path --silent || true)"
+          if [ -n "$STORE_PATH" ]; then
+            mkdir -p "$STORE_PATH"
+            echo "pnpm store: $STORE_PATH"
+          fi
       - name: Validate commit messages
         continue-on-error: true
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          COMMIT_COUNT=$(git rev-list --count "$BASE_SHA".."$HEAD_SHA")
+          MERGE_BASE=$(git merge-base "$HEAD_SHA" "$BASE_SHA" || true)
+          LAST_BASE_MERGE=$(
+            git rev-list --merges --first-parent "$HEAD_SHA" | while read -r merge; do
+              p2=$(git rev-parse "$merge^2" 2>/dev/null) || continue
+              if git merge-base --is-ancestor "$p2" "$BASE_SHA"; then
+                echo "$merge"
+                break
+              fi
+            done
+          )
+          FROM_SHA=${LAST_BASE_MERGE:-${MERGE_BASE:-$BASE_SHA}}
+          COMMIT_COUNT=$(git rev-list --count "$FROM_SHA".."$HEAD_SHA")
           if [ "$COMMIT_COUNT" -gt 100 ]; then
-            pnpm dlx @commitlint/cli@20.4.1 commitlint --config commitlint.config.cjs --from "HEAD~50" --to "HEAD" --verbose
+            pnpm dlx @commitlint/cli@20.4.1 --config commitlint.config.cjs --from "HEAD~50" --to "HEAD" --verbose
           else
-            pnpm dlx @commitlint/cli@20.4.1 commitlint --config commitlint.config.cjs --from "$BASE_SHA" --to "$HEAD_SHA" --verbose
+            pnpm dlx @commitlint/cli@20.4.1 --config commitlint.config.cjs --from "$FROM_SHA" --to "$HEAD_SHA" --verbose
           fi

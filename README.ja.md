@@ -17,6 +17,27 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/i
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash -s -- --version 6.30.3
 ```
 
+### macOS（ローカル `.pkg` インストーラー）
+
+ローカル `.pkg` を作成:
+
+```bash
+cargo tauri build
+./installers/macos/build-pkg.sh
+```
+
+ローカル `.pkg` からインストール:
+
+```bash
+./installers/macos/install.sh --pkg ./target/release/bundle/pkg/gwt-macos-$(uname -m).pkg
+```
+
+または、上記を1コマンドで実行:
+
+```bash
+./installers/macos/install-local.sh
+```
+
 ### アンインストール（macOS）
 
 ```bash
@@ -61,6 +82,18 @@ pnpm install --frozen-lockfile
 cd ..
 cargo tauri build
 ```
+
+## AI 設定
+
+Agent Mode やセッション要約を使うには AI 設定が必要です。
+
+手順:
+
+- `Settings` を開く
+- `Profiles` でプロファイルを選択
+- `AI Settings` を有効化
+- `Endpoint` と `Model` を設定（ローカル LLM の場合は API Key 省略可）
+- `Save` をクリック
 
 ## ディレクトリ構成
 

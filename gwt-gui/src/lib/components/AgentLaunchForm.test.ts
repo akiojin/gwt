@@ -183,6 +183,99 @@ describe("AgentLaunchForm", () => {
     expect(rendered.queryByText("feature/a")).toBeNull();
   });
 
+  it("displays new codex model options including gpt-5.3-codex-spark", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.0.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "get_agent_config") {
+        return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      }
+      return [];
+    });
+
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "",
+      onLaunch,
+      onClose,
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    const modelSelect = rendered.getByLabelText("Model") as HTMLSelectElement;
+    const options = Array.from(modelSelect.options).map((option) => option.value);
+    expect(options).toEqual([
+      "gpt-5.3-codex",
+      "gpt-5.3-codex-spark",
+      "gpt-5.2-codex",
+      "gpt-5.1-codex-max",
+      "gpt-5.2",
+      "gpt-5.1-codex-mini",
+    ]);
+  });
+
+  it("passes selected codex model to launch request", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.0.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "get_agent_config") {
+        return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      }
+      return [];
+    });
+
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "",
+      onLaunch,
+      onClose,
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    const modelSelect = rendered.getByLabelText("Model") as HTMLSelectElement;
+    await fireEvent.change(modelSelect, { target: { value: "gpt-5.3-codex-spark" } });
+
+    const launchBtn = rendered.getByRole("button", { name: "Launch" });
+    await fireEvent.click(launchBtn);
+
+    await waitFor(() => {
+      expect(onLaunch).toHaveBeenCalledTimes(1);
+    });
+
+    const request = onLaunch.mock.calls[0][0] as any;
+    expect(request.agentId).toBe("codex");
+    expect(request.model).toBe("gpt-5.3-codex-spark");
+  });
+
   it("disables capitalization and completion helpers for text and textarea inputs", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "detect_agents") {
@@ -246,5 +339,74 @@ describe("AgentLaunchForm", () => {
     await fireEvent.click(rendered.getByRole("button", { name: "New Branch" }));
     const newBranchInput = rendered.getByLabelText("New Branch Name") as HTMLInputElement;
     expectInputNormalizationDisabled(newBranchInput);
+  });
+
+  it("forces host launch even when docker context is not detected (e.g., remote-only branch without worktree)", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.0.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "list_agent_versions") {
+        return {
+          agentId: "codex",
+          package: "@openai/codex",
+          tags: ["latest"],
+          versions: ["0.0.0"],
+          source: "cache",
+        };
+      }
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "none",
+          compose_services: [],
+          docker_available: false,
+          compose_available: false,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    // Some codepaths can end up calling the real Tauri invoke implementation in tests.
+    // Provide a minimal stub so it routes to our mock instead of crashing on
+    // `window.__TAURI_INTERNALS__` being undefined.
+    (window as any).__TAURI_INTERNALS__ = {
+      ...(window as any).__TAURI_INTERNALS__,
+      invoke: (cmd: string, args?: any) => invokeMock(cmd, args),
+    };
+
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "origin/remote-only",
+      onLaunch,
+      onClose,
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    const launchBtn = rendered.getByRole("button", { name: "Launch" });
+    await fireEvent.click(launchBtn);
+
+    await waitFor(() => {
+      expect(onLaunch).toHaveBeenCalledTimes(1);
+    });
+
+    const request = onLaunch.mock.calls[0][0] as any;
+    expect(request.dockerForceHost).toBe(true);
   });
 });

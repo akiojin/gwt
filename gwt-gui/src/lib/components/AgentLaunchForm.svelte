@@ -160,6 +160,7 @@
     selectedAgent === "codex"
       ? [
           "gpt-5.3-codex",
+          "gpt-5.3-codex-spark",
           "gpt-5.2-codex",
           "gpt-5.1-codex-max",
           "gpt-5.2",
@@ -240,6 +241,14 @@
     const key = `${projectPath}::${refBranch}`;
     if (dockerContextKey === key) return;
     dockerContextKey = key;
+
+    // Reset stale state while async detection runs (branch switches can otherwise
+    // briefly show the previous branch's Docker context).
+    dockerContext = null;
+    dockerError = null;
+    runtimeTarget = "host" as RuntimeTarget;
+    dockerService = "";
+
     loadDockerContext(refBranch);
   });
 
@@ -654,28 +663,29 @@
         request.envOverrides = mergedEnv;
       }
 
-      if (dockerDetected) {
-        if (runtimeTarget === "host") {
-          request.dockerForceHost = true;
-        } else if (runtimeTarget === "docker") {
-          if (!dockerSelectable) {
-            errorMessage = "Docker is not available on this system.";
+      // Honor explicit runtime selection. HostOS must always force host launch,
+      // even when Docker context cannot be detected yet (e.g., remote-only branch
+      // without an existing worktree).
+      if (runtimeTarget === "host") {
+        request.dockerForceHost = true;
+      } else if (dockerDetected && runtimeTarget === "docker") {
+        if (!dockerSelectable) {
+          errorMessage = "Docker is not available on this system.";
+          return;
+        }
+
+        if (dockerComposeLike) {
+          const service = dockerService.trim();
+          if (!service) {
+            errorMessage = "Docker service is required.";
             return;
           }
-
-          if (dockerComposeLike) {
-            const service = dockerService.trim();
-            if (!service) {
-              errorMessage = "Docker service is required.";
-              return;
-            }
-            request.dockerService = service;
-            request.dockerRecreate = dockerRecreate;
-            request.dockerKeep = dockerKeep;
-          }
-
-          request.dockerBuild = dockerBuild;
+          request.dockerService = service;
+          request.dockerRecreate = dockerRecreate;
+          request.dockerKeep = dockerKeep;
         }
+
+        request.dockerBuild = dockerBuild;
       }
 
       if (branchMode === "existing") {
