@@ -18,6 +18,21 @@ export type StoredProjectAgentTabs = {
   activePaneId: string | null;
 };
 
+export const AGENT_TAB_RESTORE_MAX_RETRIES = 8;
+
+export function shouldRetryAgentTabRestore(
+  storedTabsCount: number,
+  restoredTabsCount: number,
+  attempt: number,
+  maxRetries = AGENT_TAB_RESTORE_MAX_RETRIES,
+): boolean {
+  return (
+    storedTabsCount > 0 &&
+    restoredTabsCount === 0 &&
+    attempt < maxRetries - 1
+  );
+}
+
 type StoredProjectAgentTabsRoot = {
   version: 1;
   byProjectPath: Record<string, StoredProjectAgentTabs>;
