@@ -671,7 +671,16 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     ));
     let bytes = serde_json::to_vec(value).map_err(|e| io::Error::other(e.to_string()))?;
     fs::write(&tmp, bytes)?;
-    fs::rename(&tmp, path)?;
+    if let Err(err) = fs::rename(&tmp, path) {
+        // Windows cannot atomically rename over an existing file.
+        // Fallback to remove+rename when the destination already exists.
+        if err.kind() == io::ErrorKind::AlreadyExists && path.exists() {
+            fs::remove_file(path)?;
+            fs::rename(&tmp, path)?;
+        } else {
+            return Err(err);
+        }
+    }
     Ok(())
 }
 
@@ -1198,6 +1207,18 @@ mod tests {
             asset_name_from_url("https://example.com/a/b/c.exe"),
             Some("c.exe".to_string())
         );
+    }
+
+    #[test]
+    fn write_json_atomic_overwrites_existing_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("test.json");
+
+        write_json_atomic(&path, &serde_json::json!({"v": 1})).unwrap();
+        write_json_atomic(&path, &serde_json::json!({"v": 2})).unwrap();
+
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(value["v"], serde_json::json!(2));
     }
 
     #[test]

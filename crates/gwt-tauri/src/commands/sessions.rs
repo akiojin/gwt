@@ -13,6 +13,7 @@ use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::terminal::scrollback::ScrollbackFile;
 use serde::Serialize;
 use std::collections::HashSet;
+use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -36,6 +37,471 @@ pub fn get_branch_quick_start(
     Ok(gwt_core::config::get_branch_tool_history(
         &repo_path, branch,
     ))
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSidebarSubAgent {
+    pub id: String,
+    pub name: String,
+    pub tool_id: String,
+    pub status: String, // "running" | "completed" | "failed"
+    pub model: Option<String>,
+    pub branch: String,
+    pub worktree_rel_path: String,
+    pub worktree_abs_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSidebarTask {
+    pub id: String,
+    pub title: String,
+    pub status: String, // "running" | "pending" | "failed" | "completed"
+    pub sub_agents: Vec<AgentSidebarSubAgent>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSidebarView {
+    pub spec_id: Option<String>,
+    pub tasks: Vec<AgentSidebarTask>,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedTask {
+    id: String,
+    title: String,
+    base_status: String, // "pending" | "completed"
+}
+
+#[derive(Debug, Clone)]
+struct ParsedTaskSet {
+    spec_id: Option<String>,
+    tasks: Vec<ParsedTask>,
+}
+
+#[derive(Debug, Clone)]
+struct RunningPaneRef {
+    branch: String,
+    tool_id: String,
+}
+
+#[tauri::command]
+pub fn get_agent_sidebar_view(
+    project_path: String,
+    state: State<AppState>,
+) -> Result<AgentSidebarView, String> {
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+
+    let parsed = parse_latest_spec_tasks(project_root)?;
+    let entries = load_recent_sub_agents(&repo_path);
+    let running_refs = collect_running_pane_refs(&state, &repo_path);
+
+    let mut tasks: Vec<AgentSidebarTask> = parsed
+        .tasks
+        .into_iter()
+        .map(|t| AgentSidebarTask {
+            id: t.id,
+            title: t.title,
+            status: t.base_status,
+            sub_agents: Vec::new(),
+        })
+        .collect();
+
+    if tasks.is_empty() && !entries.is_empty() {
+        for (idx, entry) in entries.iter().enumerate() {
+            tasks.push(AgentSidebarTask {
+                id: format!("TASK-{}", idx + 1),
+                title: format!(
+                    "{} ({})",
+                    display_tool_name(entry),
+                    normalize_branch_name(&entry.branch)
+                ),
+                status: "pending".to_string(),
+                sub_agents: Vec::new(),
+            });
+        }
+    }
+    for (idx, entry) in entries.iter().enumerate() {
+        let sub = map_entry_to_sub_agent(entry, idx, project_root, &repo_path, &running_refs);
+        let task_idx = detect_task_index_for_entry(entry, &tasks)
+            .unwrap_or_else(|| fallback_task_index(&tasks));
+        if let Some(task) = tasks.get_mut(task_idx) {
+            task.sub_agents.push(sub);
+        }
+    }
+
+    for task in &mut tasks {
+        let has_running = task.sub_agents.iter().any(|a| a.status == "running");
+        let has_failed = task.sub_agents.iter().any(|a| a.status == "failed");
+        let next_status = if has_running {
+            "running"
+        } else if task.status == "completed" {
+            "completed"
+        } else if has_failed {
+            "failed"
+        } else {
+            "pending"
+        };
+        task.status = next_status.to_string();
+    }
+
+    tasks.sort_by(|a, b| {
+        task_status_rank(&a.status)
+            .cmp(&task_status_rank(&b.status))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    Ok(AgentSidebarView {
+        spec_id: parsed.spec_id,
+        tasks,
+    })
+}
+
+fn parse_latest_spec_tasks(project_root: &Path) -> Result<ParsedTaskSet, String> {
+    let specs_root = project_root.join("specs");
+    if !specs_root.exists() {
+        return Ok(ParsedTaskSet {
+            spec_id: None,
+            tasks: Vec::new(),
+        });
+    }
+
+    let mut newest: Option<(SystemTime, String, std::path::PathBuf)> = None;
+    let entries = fs::read_dir(&specs_root).map_err(|e| format!("Failed to read specs/: {e}"))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read specs entry: {e}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("Failed to read specs entry type: {e}"))?;
+        if !file_type.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("SPEC-") {
+            continue;
+        }
+
+        let tasks_path = entry.path().join("tasks.md");
+        if !tasks_path.exists() {
+            continue;
+        }
+
+        let modified = fs::metadata(&tasks_path)
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        match &newest {
+            Some((current, _, _)) if &modified <= current => {}
+            _ => newest = Some((modified, name, tasks_path)),
+        }
+    }
+
+    let Some((_, spec_id, tasks_path)) = newest else {
+        return Ok(ParsedTaskSet {
+            spec_id: None,
+            tasks: Vec::new(),
+        });
+    };
+
+    let content =
+        fs::read_to_string(&tasks_path).map_err(|e| format!("Failed to read tasks.md: {e}"))?;
+    let tasks = parse_tasks_markdown(&content);
+
+    Ok(ParsedTaskSet {
+        spec_id: Some(spec_id),
+        tasks,
+    })
+}
+
+fn parse_tasks_markdown(content: &str) -> Vec<ParsedTask> {
+    let mut out = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        let (is_completed, body) = if let Some(rest) = trimmed.strip_prefix("- [ ]") {
+            (false, rest.trim())
+        } else if let Some(rest) = trimmed.strip_prefix("- [x]") {
+            (true, rest.trim())
+        } else if let Some(rest) = trimmed.strip_prefix("- [X]") {
+            (true, rest.trim())
+        } else {
+            continue;
+        };
+
+        if body.is_empty() {
+            continue;
+        }
+
+        let mut id: Option<String> = None;
+        for token in body.split_whitespace() {
+            let normalized = token.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+            if looks_like_task_id(normalized) {
+                id = Some(normalized.to_ascii_uppercase());
+                break;
+            }
+        }
+        let id = id.unwrap_or_else(|| format!("TASK-{}", out.len() + 1));
+
+        out.push(ParsedTask {
+            id,
+            title: body.to_string(),
+            base_status: if is_completed {
+                "completed".to_string()
+            } else {
+                "pending".to_string()
+            },
+        });
+    }
+
+    out
+}
+
+fn looks_like_task_id(token: &str) -> bool {
+    if token.len() < 2 {
+        return false;
+    }
+    if !token.starts_with('T') {
+        return false;
+    }
+    token[1..].chars().all(|c| c.is_ascii_digit())
+}
+
+fn load_recent_sub_agents(repo_path: &Path) -> Vec<ToolSessionEntry> {
+    let out = gwt_core::config::load_ts_session(repo_path)
+        .map(|s| s.history)
+        .unwrap_or_default();
+    dedupe_current_sub_agents(out)
+}
+
+fn dedupe_current_sub_agents(mut entries: Vec<ToolSessionEntry>) -> Vec<ToolSessionEntry> {
+    // Keep only the latest assignment per (tool, branch).
+    entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+    let mut deduped = Vec::new();
+    let mut seen = HashSet::new();
+    for entry in entries {
+        let key = format!(
+            "{}::{}",
+            normalize_tool_id(&entry.tool_id),
+            normalize_branch_name(&entry.branch)
+        );
+        if seen.insert(key) {
+            deduped.push(entry);
+        }
+    }
+    deduped
+}
+
+fn collect_running_pane_refs(state: &AppState, repo_path: &Path) -> Vec<RunningPaneRef> {
+    let panes = match state.pane_manager.lock() {
+        Ok(manager) => manager
+            .panes()
+            .iter()
+            .map(|p| {
+                (
+                    p.pane_id().to_string(),
+                    p.branch_name().to_string(),
+                    p.status().clone(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        Err(_) => Vec::new(),
+    };
+    let meta = state
+        .pane_launch_meta
+        .lock()
+        .ok()
+        .map(|m| m.clone())
+        .unwrap_or_default();
+
+    let mut out = Vec::new();
+    for (pane_id, pane_branch, pane_status) in panes {
+        if !matches!(pane_status, PaneStatus::Running) {
+            continue;
+        }
+        let Some(m) = meta.get(&pane_id) else {
+            continue;
+        };
+        if m.repo_path.as_path() != repo_path {
+            continue;
+        }
+        let branch = if m.branch.trim().is_empty() {
+            normalize_branch_name(&pane_branch)
+        } else {
+            normalize_branch_name(&m.branch)
+        };
+        out.push(RunningPaneRef {
+            branch,
+            tool_id: normalize_tool_id(&tool_id_for_agent(&m.agent_id)),
+        });
+    }
+    out
+}
+
+fn map_entry_to_sub_agent(
+    entry: &ToolSessionEntry,
+    idx: usize,
+    project_root: &Path,
+    repo_path: &Path,
+    running_refs: &[RunningPaneRef],
+) -> AgentSidebarSubAgent {
+    let tool_id = normalize_tool_id(&entry.tool_id);
+    let branch = normalize_branch_name(&entry.branch);
+    let running = running_refs
+        .iter()
+        .any(|r| r.branch == branch && r.tool_id == tool_id);
+    let mut status = if running { "running" } else { "completed" }.to_string();
+    if !running {
+        if let Some(mode) = entry.mode.as_deref() {
+            let m = mode.to_ascii_lowercase();
+            if m == "error" || m == "failed" {
+                status = "failed".to_string();
+            }
+        }
+    }
+
+    let (worktree_rel_path, worktree_abs_path) =
+        derive_worktree_paths(entry.worktree_path.as_deref(), project_root, repo_path);
+
+    AgentSidebarSubAgent {
+        id: entry
+            .session_id
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| format!("sub-agent-{}", idx + 1)),
+        name: display_tool_name(entry),
+        tool_id,
+        status,
+        model: entry.model.clone().filter(|m| !m.trim().is_empty()),
+        branch,
+        worktree_rel_path,
+        worktree_abs_path,
+    }
+}
+
+fn detect_task_index_for_entry(
+    entry: &ToolSessionEntry,
+    tasks: &[AgentSidebarTask],
+) -> Option<usize> {
+    let mut haystack = String::new();
+    haystack.push_str(&entry.branch.to_ascii_lowercase());
+    haystack.push(' ');
+    haystack.push_str(
+        &entry
+            .worktree_path
+            .as_deref()
+            .unwrap_or("")
+            .to_ascii_lowercase(),
+    );
+    haystack.push(' ');
+    haystack.push_str(
+        &entry
+            .session_id
+            .as_deref()
+            .unwrap_or("")
+            .to_ascii_lowercase(),
+    );
+    haystack.push(' ');
+    haystack.push_str(&entry.model.as_deref().unwrap_or("").to_ascii_lowercase());
+
+    for (idx, task) in tasks.iter().enumerate() {
+        if haystack.contains(&task.id.to_ascii_lowercase()) {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+fn fallback_task_index(tasks: &[AgentSidebarTask]) -> usize {
+    tasks
+        .iter()
+        .position(|t| t.status != "completed")
+        .unwrap_or(0)
+}
+
+fn derive_worktree_paths(
+    maybe_abs: Option<&str>,
+    project_root: &Path,
+    repo_path: &Path,
+) -> (String, Option<String>) {
+    let Some(abs) = maybe_abs.map(str::trim).filter(|s| !s.is_empty()) else {
+        return ("-".to_string(), None);
+    };
+    let abs_path = Path::new(abs);
+
+    if let Ok(rel) = abs_path.strip_prefix(project_root) {
+        let rel_text = rel.to_string_lossy().to_string();
+        return (
+            if rel_text.is_empty() {
+                ".".to_string()
+            } else {
+                rel_text
+            },
+            Some(abs.to_string()),
+        );
+    }
+
+    if let Ok(rel) = abs_path.strip_prefix(repo_path) {
+        let rel_text = rel.to_string_lossy().to_string();
+        return (
+            if rel_text.is_empty() {
+                ".".to_string()
+            } else {
+                rel_text
+            },
+            Some(abs.to_string()),
+        );
+    }
+
+    (abs.to_string(), Some(abs.to_string()))
+}
+
+fn display_tool_name(entry: &ToolSessionEntry) -> String {
+    let id = normalize_tool_id(&entry.tool_id);
+    if id == "claude-code" {
+        return "Claude".to_string();
+    }
+    if id == "codex-cli" {
+        return "Codex".to_string();
+    }
+    if id == "gemini-cli" {
+        return "Gemini".to_string();
+    }
+    if id == "opencode" {
+        return "OpenCode".to_string();
+    }
+    entry.tool_label.clone()
+}
+
+fn normalize_tool_id(tool_id: &str) -> String {
+    let id = tool_id.trim().to_ascii_lowercase();
+    match id.as_str() {
+        "claude" | "claude-code" => "claude-code".to_string(),
+        "codex" | "codex-cli" => "codex-cli".to_string(),
+        "gemini" | "gemini-cli" => "gemini-cli".to_string(),
+        "opencode" | "open-code" => "opencode".to_string(),
+        _ => id,
+    }
+}
+
+fn normalize_branch_name(branch: &str) -> String {
+    let trimmed = branch.trim();
+    if let Some(rest) = trimmed.strip_prefix("origin/") {
+        return rest.to_string();
+    }
+    trimmed.to_string()
+}
+
+fn task_status_rank(status: &str) -> u8 {
+    match status {
+        "running" => 0,
+        "pending" => 1,
+        "failed" => 2,
+        "completed" => 3,
+        _ => 4,
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -989,6 +1455,81 @@ mod tests {
         };
 
         gwt_core::config::save_session_entry(repo_root, entry).expect("save session entry");
+    }
+
+    #[test]
+    fn parse_tasks_markdown_extracts_status_and_ids() {
+        let tasks = parse_tasks_markdown(
+            r#"
+# タスク
+- [ ] T001 [US1] implement api
+- [x] T002 [US2] add tests
+- [ ] no-id fallback task
+"#,
+        );
+        assert_eq!(tasks.len(), 3);
+        assert_eq!(tasks[0].id, "T001");
+        assert_eq!(tasks[0].base_status, "pending");
+        assert_eq!(tasks[1].id, "T002");
+        assert_eq!(tasks[1].base_status, "completed");
+        assert_eq!(tasks[2].id, "TASK-3");
+    }
+
+    #[test]
+    fn derive_worktree_paths_prefers_project_relative() {
+        let project_root = Path::new("/repo");
+        let repo_path = Path::new("/repo/bare.git");
+        let (rel, abs) =
+            derive_worktree_paths(Some("/repo/.worktrees/agent-auth"), project_root, repo_path);
+        assert_eq!(rel, ".worktrees/agent-auth");
+        assert_eq!(abs.as_deref(), Some("/repo/.worktrees/agent-auth"));
+    }
+
+    #[test]
+    fn task_status_rank_matches_spec_order() {
+        assert!(task_status_rank("running") < task_status_rank("pending"));
+        assert!(task_status_rank("pending") < task_status_rank("failed"));
+        assert!(task_status_rank("failed") < task_status_rank("completed"));
+    }
+
+    #[test]
+    fn dedupe_current_sub_agents_keeps_latest_per_tool_and_branch() {
+        let mk = |tool_id: &str, branch: &str, session_id: &str, timestamp: i64| ToolSessionEntry {
+            branch: branch.to_string(),
+            worktree_path: None,
+            tool_id: tool_id.to_string(),
+            tool_label: "Agent".to_string(),
+            session_id: Some(session_id.to_string()),
+            mode: None,
+            model: None,
+            reasoning_level: None,
+            skip_permissions: None,
+            tool_version: None,
+            collaboration_modes: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
+            timestamp,
+        };
+
+        let out = dedupe_current_sub_agents(vec![
+            mk("codex-cli", "feature/a", "s-old", 10),
+            mk("codex-cli", "feature/a", "s-new", 20),
+            mk("claude-code", "feature/a", "s-claude", 15),
+            mk("codex-cli", "feature/b", "s-b", 18),
+        ]);
+
+        assert_eq!(out.len(), 3);
+        let ids: Vec<String> = out
+            .iter()
+            .map(|e| e.session_id.clone().unwrap_or_default())
+            .collect();
+        assert!(ids.contains(&"s-new".to_string()));
+        assert!(ids.contains(&"s-claude".to_string()));
+        assert!(ids.contains(&"s-b".to_string()));
+        assert!(!ids.contains(&"s-old".to_string()));
     }
 
     #[test]

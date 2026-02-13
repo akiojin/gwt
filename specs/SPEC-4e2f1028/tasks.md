@@ -17,6 +17,8 @@
 ## Phase 4: ストーリー 2
 
 - [x] T006 [US2] POSIX パス互換性テストを追加する `crates/gwt-tauri/src/commands/terminal.rs`
+- [x] T008 [US2] compose実行時にworkdir未指定なら`-w`を省略するテストを追加する `crates/gwt-tauri/src/commands/terminal.rs`
+- [x] T009 [US2] 通常compose起動で固定`/workspace`を強制しないよう実装する `crates/gwt-tauri/src/commands/terminal.rs`
 
 ## Phase 5: 仕上げ・横断
 
