@@ -9,6 +9,7 @@
     GhCliStatus,
     GitHubIssueInfo,
     LaunchAgentRequest,
+    RollbackResult,
   } from "../types";
 
   let {
@@ -134,6 +135,8 @@
   let selectedIssue: GitHubIssueInfo | null = $state(null as GitHubIssueInfo | null);
   let issueBranchMap: Map<number, string | null> = $state(new Map());
   let issueRateLimited: boolean = $state(false);
+  let rollbackSteps: string[] = $state([]);
+  let rollbackError: string | null = $state(null);
 
   let filteredIssues = $derived(
     (() => {
@@ -831,21 +834,70 @@
         return;
       }
 
-      const fullName =
-        newBranchTab === "fromIssue" && selectedIssue
-          ? issueBranchName
-          : newBranchFullName.trim();
+      const issueForLaunch =
+        newBranchTab === "fromIssue" ? selectedIssue : null;
+      const fullName = issueForLaunch
+        ? issueBranchName
+        : newBranchFullName.trim();
       if (!baseBranch.trim() || !fullName) return;
       request.branch = fullName;
-      await onLaunch({
-        ...request,
-        createBranch: { name: fullName, base: baseBranch.trim() },
-        issueNumber:
-          newBranchTab === "fromIssue" && selectedIssue
-            ? selectedIssue.number
+
+      rollbackSteps = [];
+      rollbackError = null;
+
+      try {
+        await onLaunch({
+          ...request,
+          createBranch: { name: fullName, base: baseBranch.trim() },
+          issueNumber: issueForLaunch
+            ? issueForLaunch.number
             : undefined,
-      });
-      onClose();
+        });
+
+        // Link branch to issue after successful worktree creation
+        if (issueForLaunch) {
+          const { invoke } = await import("@tauri-apps/api/core");
+          await invoke("link_branch_to_issue", {
+            projectPath,
+            issueNumber: issueForLaunch.number,
+            branchName: fullName,
+          });
+        }
+
+        onClose();
+      } catch (launchErr) {
+        // Rollback on failure if this was a From Issue launch
+        if (issueForLaunch) {
+          rollbackSteps = ["Launch failed. Rolling back..."];
+          try {
+            const { invoke } = await import("@tauri-apps/api/core");
+            const result = await invoke<RollbackResult>(
+              "rollback_issue_branch",
+              {
+                projectPath,
+                branchName: fullName,
+                deleteRemote: true,
+              }
+            );
+            if (result.localDeleted) {
+              rollbackSteps = [...rollbackSteps, "Local branch deleted."];
+            }
+            if (result.remoteDeleted) {
+              rollbackSteps = [...rollbackSteps, "Remote branch deleted."];
+            }
+            if (result.error) {
+              rollbackSteps = [
+                ...rollbackSteps,
+                `Remote cleanup warning: ${result.error}`,
+              ];
+            }
+            rollbackSteps = [...rollbackSteps, "Rollback complete."];
+          } catch (rbErr) {
+            rollbackError = `Rollback failed: ${toErrorMessage(rbErr)}`;
+          }
+        }
+        throw launchErr;
+      }
     } catch (err) {
       errorMessage = `Failed to launch agent: ${toErrorMessage(err)}`;
     } finally {
@@ -881,6 +933,17 @@
       <div class="dialog-body">
         {#if errorMessage}
           <div class="error">{errorMessage}</div>
+        {/if}
+
+        {#if rollbackSteps.length > 0}
+          <div class="rollback-info">
+            {#each rollbackSteps as step}
+              <div class="rollback-step">{step}</div>
+            {/each}
+            {#if rollbackError}
+              <div class="rollback-step warn">{rollbackError}</div>
+            {/if}
+          </div>
         {/if}
 
         <div class="field">
@@ -2046,5 +2109,25 @@
     text-align: center;
     color: var(--text-muted);
     font-size: var(--ui-font-md);
+  }
+
+  .rollback-info {
+    padding: 10px 12px;
+    border: 1px solid rgba(255, 180, 0, 0.35);
+    background: rgba(255, 180, 0, 0.08);
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .rollback-step {
+    font-size: var(--ui-font-md);
+    color: var(--text-primary);
+    line-height: 1.4;
+  }
+
+  .rollback-step.warn {
+    color: rgb(255, 160, 160);
   }
 </style>
