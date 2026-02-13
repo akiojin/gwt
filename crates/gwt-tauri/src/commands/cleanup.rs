@@ -328,6 +328,63 @@ fn build_last_tool_usage_map(repo_path: &Path) -> std::collections::HashMap<Stri
 mod tests {
     use super::*;
 
+    // -- Serialization contract tests (SPEC-d7f2a1b3) --
+
+    #[test]
+    fn worktree_info_serializes_with_snake_case_keys() {
+        let info = WorktreeInfo {
+            path: "/tmp/wt".to_string(),
+            branch: "feature/test".to_string(),
+            commit: "abc1234".to_string(),
+            status: "active".to_string(),
+            is_main: false,
+            has_changes: true,
+            has_unpushed: false,
+            is_current: false,
+            is_protected: false,
+            is_agent_running: false,
+            ahead: 1,
+            behind: 0,
+            is_gone: true,
+            last_tool_usage: Some("Claude 2m ago".to_string()),
+            safety_level: SafetyLevel::Warning,
+        };
+        let json = serde_json::to_value(&info).unwrap();
+        let obj = json.as_object().unwrap();
+
+        // All multi-word fields must be snake_case (matching TypeScript types.ts)
+        assert!(obj.contains_key("safety_level"), "expected snake_case key 'safety_level'");
+        assert!(obj.contains_key("has_changes"), "expected snake_case key 'has_changes'");
+        assert!(obj.contains_key("has_unpushed"), "expected snake_case key 'has_unpushed'");
+        assert!(obj.contains_key("is_main"), "expected snake_case key 'is_main'");
+        assert!(obj.contains_key("is_current"), "expected snake_case key 'is_current'");
+        assert!(obj.contains_key("is_protected"), "expected snake_case key 'is_protected'");
+        assert!(obj.contains_key("is_agent_running"), "expected snake_case key 'is_agent_running'");
+        assert!(obj.contains_key("is_gone"), "expected snake_case key 'is_gone'");
+        assert!(obj.contains_key("last_tool_usage"), "expected snake_case key 'last_tool_usage'");
+
+        // camelCase keys must NOT exist
+        assert!(!obj.contains_key("safetyLevel"), "unexpected camelCase key 'safetyLevel'");
+        assert!(!obj.contains_key("hasChanges"), "unexpected camelCase key 'hasChanges'");
+        assert!(!obj.contains_key("isGone"), "unexpected camelCase key 'isGone'");
+
+        // SafetyLevel enum value must be lowercase
+        assert_eq!(json["safety_level"], "warning");
+    }
+
+    #[test]
+    fn worktrees_changed_payload_serializes_with_snake_case_keys() {
+        let payload = WorktreesChangedPayload {
+            project_path: "/tmp/project".to_string(),
+            branch: "main".to_string(),
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        let obj = json.as_object().unwrap();
+
+        assert!(obj.contains_key("project_path"), "expected snake_case key 'project_path'");
+        assert!(!obj.contains_key("projectPath"), "unexpected camelCase key 'projectPath'");
+    }
+
     // -- SafetyLevel computation tests (T1) --
 
     #[test]
