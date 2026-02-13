@@ -75,6 +75,7 @@
   let modelByAgent: Record<string, string> = $state({});
   let agentVersionByAgent: Record<string, string> = $state({});
   let lastAgent: string = $state("");
+  let lastAgentNotInstalled: boolean = $state(false);
 
   let resumeSessionId: string = $state("");
   let skipPermissions: boolean = $state(false);
@@ -353,26 +354,35 @@
   });
 
   $effect(() => {
-    if (selectedAgent === lastAgent) return;
+    const currentAgent = selectedAgent;
+    const currentAgentNotInstalled = agentNotInstalled;
 
-    if (lastAgent && supportsModelFor(lastAgent)) {
-      modelByAgent = { ...modelByAgent, [lastAgent]: model };
-    }
-    if (lastAgent) {
-      agentVersionByAgent = { ...agentVersionByAgent, [lastAgent]: agentVersion };
+    if (currentAgent === lastAgent && currentAgentNotInstalled === lastAgentNotInstalled) {
+      return;
     }
 
-    lastAgent = selectedAgent;
-    model = modelByAgent[selectedAgent] ?? "";
+    if (currentAgent !== lastAgent) {
+      if (lastAgent && supportsModelFor(lastAgent)) {
+        modelByAgent = { ...modelByAgent, [lastAgent]: model };
+      }
+      if (lastAgent) {
+        agentVersionByAgent = { ...agentVersionByAgent, [lastAgent]: agentVersion };
+      }
 
-    const storedVersion = agentVersionByAgent[selectedAgent];
+      lastAgent = currentAgent;
+      model = modelByAgent[currentAgent] ?? "";
+    }
+
+    lastAgentNotInstalled = currentAgentNotInstalled;
+
+    const storedVersion = agentVersionByAgent[currentAgent];
     if (storedVersion) {
       agentVersion =
-        storedVersion === "installed" && agentNotInstalled
+        storedVersion === "installed" && currentAgentNotInstalled
           ? "latest"
           : storedVersion;
     } else {
-      agentVersion = agentNotInstalled ? "latest" : "installed";
+      agentVersion = currentAgentNotInstalled ? "latest" : "installed";
     }
   });
 

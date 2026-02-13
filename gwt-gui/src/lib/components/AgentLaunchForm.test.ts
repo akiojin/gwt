@@ -1034,6 +1034,88 @@ describe("AgentLaunchForm", () => {
     expect(reopened.queryByLabelText("Session ID")).toBeNull();
   });
 
+  it("re-evaluates installed fallback when preferred agent stays the same", async () => {
+    saveLaunchDefaults({
+      selectedAgent: "codex",
+      sessionMode: "normal",
+      modelByAgent: { codex: "gpt-5.3-codex-spark" },
+      agentVersionByAgent: { codex: "installed" },
+      skipPermissions: false,
+      reasoningLevel: "",
+      resumeSessionId: "",
+      showAdvanced: false,
+      extraArgsText: "",
+      envOverridesText: "",
+      runtimeTarget: "host",
+      dockerService: "",
+      dockerBuild: false,
+      dockerRecreate: false,
+      dockerKeep: false,
+    });
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "bunx",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "list_agent_versions") {
+        return {
+          agentId: "codex",
+          package: "@openai/codex",
+          tags: ["latest"],
+          versions: ["0.90.0"],
+          source: "cache",
+        };
+      }
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "none",
+          compose_services: [],
+          docker_available: false,
+          compose_available: false,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") {
+        return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      }
+      return [];
+    });
+
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch,
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await waitFor(() => {
+      expect((rendered.getByLabelText("Agent Version") as HTMLSelectElement).value).toBe(
+        "latest"
+      );
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Launch" }));
+
+    await waitFor(() => {
+      expect(onLaunch).toHaveBeenCalledTimes(1);
+    });
+    expect((onLaunch.mock.calls[0][0] as any).agentVersion).toBe("latest");
+  });
+
   it("falls back when saved defaults contain unavailable agent or invalid runtime/version", async () => {
     saveLaunchDefaults({
       selectedAgent: "unknown-agent",
