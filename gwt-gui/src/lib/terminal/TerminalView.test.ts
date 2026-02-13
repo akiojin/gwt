@@ -198,7 +198,7 @@ describe("TerminalView", () => {
     });
   });
 
-  it("scrolls terminal viewport when wheel is used while not focused", async () => {
+  it("scrolls terminal viewport when wheel is used", async () => {
     const { container } = await renderTerminalView({ paneId: "pane-2", active: true });
     const rootEl = container.querySelector(".terminal-container");
     expect(rootEl).not.toBeNull();
@@ -206,6 +206,8 @@ describe("TerminalView", () => {
     const viewport = document.createElement("div");
     viewport.className = "xterm-viewport";
     viewport.style.overflow = "auto";
+    Object.defineProperty(viewport, "clientHeight", { value: 100, configurable: true });
+    Object.defineProperty(viewport, "scrollHeight", { value: 200, configurable: true });
     viewport.scrollTop = 5;
     rootEl!.appendChild(viewport);
 
@@ -216,5 +218,27 @@ describe("TerminalView", () => {
 
     expect(term.focus).toHaveBeenCalled();
     expect(viewport.scrollTop).toBeGreaterThan(5);
+  });
+
+  it("clamps terminal viewport scroll within bounds on wheel", async () => {
+    const { container } = await renderTerminalView({ paneId: "pane-3", active: true });
+    const rootEl = container.querySelector(".terminal-container");
+    expect(rootEl).not.toBeNull();
+
+    const viewport = document.createElement("div");
+    viewport.className = "xterm-viewport";
+    viewport.style.overflow = "auto";
+    Object.defineProperty(viewport, "clientHeight", { value: 100, configurable: true });
+    Object.defineProperty(viewport, "scrollHeight", { value: 250, configurable: true });
+    viewport.scrollTop = 30;
+    rootEl!.appendChild(viewport);
+
+    expect(terminalInstances.length).toBeGreaterThan(0);
+    const term = terminalInstances[0];
+
+    await fireEvent.wheel(rootEl!, { deltaY: 10000, bubbles: true });
+
+    expect(term.focus).toHaveBeenCalled();
+    expect(viewport.scrollTop).toBe(150);
   });
 });
