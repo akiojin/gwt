@@ -1,6 +1,136 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+## [7.1.0] - 2026-02-13
+
+### Bug Fixes
+
+- Tauri.conf.json のバージョンを 7.1.0 に同期し、リリースコマンドに更新ステップを追加 by @akiojin
+- **windows:** Suppress transient git console windows (#1008) by @akiojin
+- MacOS配布をDMG一本化し、PKG関連を全削除 by @akiojin
+- Cleanup「Select All Safe」が機能しないserde不整合を修正 (#1014)
+- **tauri:** Handle Cmd+Q and Cmd/Ctrl+C V menu actions (#1011)
+- Improve agent mode ime and scroll (#1013)
+- **windows:** Complete no-window process helper migration (#1017)
+- Re-enable app self-update flow with dmg support (#1016)
+
+### Features
+
+- Add MCP server bridge for agent tab communication (#992) by @akiojin
+- **gui:** Make worktree summary panel height resizable (#1010)
+- Add GitHub Issue launch flow and stabilize gh detection (#1012)
+
+
+## [7.0.0] - 2026-02-13
+
+### Bug Fixes
+
+- **gui:** Refresh sidebar after worktree creation (#926)
+- **gui:** Agentタブ切替時にターミナルへ自動フォーカス (#927)
+- **gui:** Keep finished agent tabs open until Enter closes (#930)
+- **gui:** Allow agent selection via bunx/npx fallback (#931)
+- **gui:** Keep finished agent tabs open until Enter closes (#934)
+- **gui:** Async session summary generation (#936)
+- **core:** Prefer global bunx over node_modules shims (#939)
+- **terminal:** Propagate TERM/COLORTERM for colors (#940)
+- **gui:** Adjust font size input and startup apply (#945)
+- Make GitView work in bare projects (#946)
+- **build:** Use pnpm in tauri build commands and sync version
+- **gui:** Hide closed windows from menu (#949)
+- **gui:** Guard Session Summary Git branch switch (#953)
+- **gui:** Show Git menu in native menubar
+- **hooks:** Avoid launching GUI when running Claude Code hooks (#959)
+- **gui:** Harden version history generation (#961)
+- **gui:** Allow scrolling in version history (#962)
+- **gui:** Restore terminal ctrl+c and paste shortcuts (#965)
+- Stabilize ai processing and model selection (#969)
+- MacOSシェルインストーラーをGUIアプリ対応に修正
+- テキスト入力の先頭大文字化を無効化 (#973)
+- **gui:** Apply persisted font settings immediately on startup (#972)
+- Wrap session summary text (#975)
+- テキスト入力の自動大文字化と補完を無効化 (#976)
+- **tauri:** Restore Cmd shortcuts via native menus (#977)
+- Show default model in quick start (#979)
+- **tauri:** Keep app resident on Cmd+Q and confirm quit when agents run (#981)
+- **wizard:** Worktree未作成でもHostOS指定を尊重 (#983)
+- Indicate active worktrees by agent tab presence (#982)
+- Enable live session summary via scrollback (#984)
+- Reflect ai readiness in agent mode (#986)
+- **gui:** Keep trackpad scroll working in agent tabs (#985)
+- Polish agent mode chat UI (#988)
+- **installer:** Support non-tty auth for macOS local pkg install
+- Warn when local macOS pkg is stale
+- **installer:** Broaden local pkg stale check
+- **gui:** Retry agent tab restore when panes are not ready (#994)
+- **tauri:** Make Cmd+Q explicit quit (#993)
+- **gui:** Stabilize terminal focus for trackpad scroll (#995)
+- **gui:** Stabilize agent tab restore when terminals mount late (#997)
+- **gui:** Fallback terminal wheel scroll when focus is missing (#996)
+- **gui:** Poll ai summary periodically in web ui (#999)
+- Reuse active registered worktree path for remote launch (#998)
+
+### Documentation
+
+- **spec:** Mention Debug menu in SPEC-4470704f (#948)
+- **spec:** Add spec + tests for agent tab restore (#989)
+- CLAUDE.mdに仕様策定+TDD必須化ルールを追加
+
+### Features
+
+- **gui:** Multi-window with native Window menu (#935)
+- **gui:** Add terminal ANSI diagnostics (#933)
+- Add GLM provider config for Claude Code (#937)
+- **gui:** Add GitView section to Session Summary (#942)
+- **gui:** Add font size settings for terminal and UI (#943)
+- Add OS environment variable auto-inheritance (#944)
+- **gui:** Reorganize native menu (#947)
+- **gui:** Add worktree cleanup with safety indicators (#950)
+- **gui:** Add Claude Code Hooks auto-update on startup (#951)
+- **gui:** Update native menu structure (#952)
+- **tauri:** Close focused window on macOS Cmd+Q (#955)
+- **gui:** Collapse settings sections by category (#956)
+- **gui:** Show app version in window title (#958)
+- **gui:** Add project version history summaries (#960)
+- **gui:** Make sidebar resizable and add context launch action (#964)
+- **gui:** Add recent projects history with Open Recent menu (#963)
+- Remove pane cap and list agent tabs in Window menu (#966)
+- Claude Code起動時にAgent Teams環境変数を自動設定 (#968)
+- **gui:** Show app version in about dialog (#967)
+- Claude Code Agent Teams環境変数の自動設定 (#970)
+- **gui:** Always enable collaboration_modes for Codex
+- Add macOS shell installer script
+- MacOS PKGビルドスクリプトとアンインストーラーを追加
+- **gui:** Add agent mode master with ReAct tooling (#971)
+- エージェントモード実装 (SPEC-ba3f610c T001-T100) (#908)
+- **gui:** About版バージョン表示 + Version History展開コンテンツ切れ修正 (#974)
+- Indicate active agent branches in sidebar list (#978)
+- Add sidebar mode toggle for agent tasks (#980)
+- **gui:** Restore agent tabs on project open (#987)
+- **gui:** Animate active agent tab indicator (#990)
+- Show project path in window title (#991)
+- **installer:** Support macOS local pkg installation
+
+### GUI
+
+- Enforce bare migration and show launch progress (#954)
+
+### Miscellaneous Tasks
+
+- **assets:** Add app and tray icons (#924)
+- Ignore generated linux-schema.json (#932)
+- **ci:** Migrate gwt-gui + commitlint from npm to pnpm (#941)
+- **core:** Remove legacy tmux backend (#957)
+
+### Refactor
+
+- Remove legacy TUI/WebUI and archive specs (#928)
+
+### CI
+
+- **release:** Add installers to release workflow (#922)
+- **release:** Remove npm publish (#923)
+
 ## [6.30.3] - 2026-02-09
 
 ### Bug Fixes

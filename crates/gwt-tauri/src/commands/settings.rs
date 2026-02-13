@@ -24,6 +24,26 @@ fn with_panic_guard<T>(context: &str, f: impl FnOnce() -> Result<T, String>) -> 
 
 /// Serializable settings data for the frontend
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoiceInputSettingsData {
+    pub enabled: bool,
+    pub hotkey: String,
+    pub language: String,
+    pub model: String,
+}
+
+impl Default for VoiceInputSettingsData {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hotkey: "Mod+Shift+M".to_string(),
+            language: "auto".to_string(),
+            model: "base".to_string(),
+        }
+    }
+}
+
+/// Serializable settings data for the frontend
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettingsData {
     pub protected_branches: Vec<String>,
     pub default_base_branch: String,
@@ -39,6 +59,8 @@ pub struct SettingsData {
     pub docker_force_host: bool,
     pub ui_font_size: u32,
     pub terminal_font_size: u32,
+    #[serde(default)]
+    pub voice_input: VoiceInputSettingsData,
 }
 
 impl From<&Settings> for SettingsData {
@@ -70,6 +92,12 @@ impl From<&Settings> for SettingsData {
             docker_force_host: s.docker.force_host,
             ui_font_size: s.appearance.ui_font_size,
             terminal_font_size: s.appearance.terminal_font_size,
+            voice_input: VoiceInputSettingsData {
+                enabled: s.voice_input.enabled,
+                hotkey: s.voice_input.hotkey.clone(),
+                language: s.voice_input.language.clone(),
+                model: s.voice_input.model.clone(),
+            },
         }
     }
 }
@@ -96,6 +124,10 @@ impl SettingsData {
         s.docker.force_host = self.docker_force_host;
         s.appearance.ui_font_size = self.ui_font_size;
         s.appearance.terminal_font_size = self.terminal_font_size;
+        s.voice_input.enabled = self.voice_input.enabled;
+        s.voice_input.hotkey = self.voice_input.hotkey.trim().to_string();
+        s.voice_input.language = self.voice_input.language.trim().to_string();
+        s.voice_input.model = self.voice_input.model.trim().to_string();
         Ok(s)
     }
 }
@@ -153,11 +185,23 @@ mod tests {
         let mut core = Settings::default();
         core.appearance.ui_font_size = 16;
         core.appearance.terminal_font_size = 20;
+        core.voice_input.enabled = true;
+        core.voice_input.hotkey = "Mod+Shift+V".to_string();
+        core.voice_input.language = "ja".to_string();
+        core.voice_input.model = "base".to_string();
         let data = SettingsData::from(&core);
         assert_eq!(data.ui_font_size, 16);
         assert_eq!(data.terminal_font_size, 20);
+        assert!(data.voice_input.enabled);
+        assert_eq!(data.voice_input.hotkey, "Mod+Shift+V");
+        assert_eq!(data.voice_input.language, "ja");
+        assert_eq!(data.voice_input.model, "base");
         let back = data.to_settings().unwrap();
         assert_eq!(back.appearance.ui_font_size, 16);
         assert_eq!(back.appearance.terminal_font_size, 20);
+        assert!(back.voice_input.enabled);
+        assert_eq!(back.voice_input.hotkey, "Mod+Shift+V");
+        assert_eq!(back.voice_input.language, "ja");
+        assert_eq!(back.voice_input.model, "base");
     }
 }

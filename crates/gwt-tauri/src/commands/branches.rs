@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
-use tauri::State;
+use tauri::{AppHandle, State};
 use tracing::error;
 
 /// Serializable branch info for the frontend
@@ -141,6 +141,7 @@ pub fn list_branches(
 pub fn list_worktree_branches(
     project_path: String,
     state: State<AppState>,
+    app_handle: AppHandle,
 ) -> Result<Vec<BranchInfo>, String> {
     with_panic_guard("listing worktree branches", || {
         let project_root = Path::new(&project_path);
@@ -161,6 +162,8 @@ pub fn list_worktree_branches(
             return Ok(Vec::new());
         }
 
+        let branch_names = names.iter().cloned().collect::<Vec<_>>();
+
         let branches = Branch::list(&repo_path).map_err(|e| e.to_string())?;
         let mut infos: Vec<BranchInfo> = branches
             .into_iter()
@@ -171,6 +174,16 @@ pub fn list_worktree_branches(
             info.last_tool_usage = last_tool.get(&info.name).cloned();
             info.is_agent_running = running_branches.contains(&info.name);
         }
+
+        let prewarm_project_path = project_path.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            crate::commands::sessions::prewarm_missing_worktree_summaries(
+                prewarm_project_path,
+                branch_names,
+                app_handle.clone(),
+            );
+        });
+
         Ok(infos)
     })
 }

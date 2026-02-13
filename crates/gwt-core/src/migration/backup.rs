@@ -2,7 +2,6 @@
 
 use super::MigrationError;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use tracing::{debug, info};
 
 /// Information about a created backup
@@ -139,7 +138,7 @@ pub fn restore_backup(backup_dir: &Path, target: &Path) -> Result<(), MigrationE
 /// Copy directory recursively, preserving permissions (FR-214)
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), MigrationError> {
     // Use cp -a to preserve permissions, timestamps, and symlinks
-    let output = Command::new("cp")
+    let output = crate::process::command("cp")
         .args(["-a", "--"])
         .arg(src)
         .arg(dst)

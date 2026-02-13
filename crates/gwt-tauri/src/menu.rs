@@ -21,8 +21,12 @@ pub const MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS: &str = "tools-terminal-diagnostics
 pub const MENU_ID_GIT_CLEANUP_WORKTREES: &str = "git-cleanup-worktrees";
 pub const MENU_ID_GIT_VERSION_HISTORY: &str = "git-version-history";
 
+pub const MENU_ID_EDIT_COPY: &str = "edit-copy";
+pub const MENU_ID_EDIT_PASTE: &str = "edit-paste";
+
 pub const MENU_ID_SETTINGS_PREFERENCES: &str = "settings-preferences";
 pub const MENU_ID_HELP_ABOUT: &str = "help-about";
+pub const MENU_ID_HELP_CHECK_UPDATES: &str = "help-check-updates";
 
 pub const RECENT_PROJECT_PREFIX: &str = "recent-project::";
 pub const WINDOW_FOCUS_MENU_PREFIX: &str = "window-focus::";
@@ -117,14 +121,19 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         .item(&file_close_project)
         .build()?;
 
-    // Use native predefined Edit actions so Cmd/Ctrl shortcuts work consistently.
+    let edit_copy = MenuItem::with_id(app, MENU_ID_EDIT_COPY, "Copy", true, Some("CmdOrCtrl+C"))?;
+    let edit_paste =
+        MenuItem::with_id(app, MENU_ID_EDIT_PASTE, "Paste", true, Some("CmdOrCtrl+V"))?;
+
+    // Keep Undo/Redo/Cut/Select All as native actions and custom-bind Copy/Paste
+    // so keyboard events can be handled by the app.
     let edit = SubmenuBuilder::new(app, "Edit")
         .undo()
         .redo()
         .separator()
         .cut()
-        .copy()
-        .paste()
+        .item(&edit_copy)
+        .item(&edit_paste)
         .separator()
         .select_all()
         .build()?;
@@ -180,6 +189,13 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
 
     let window = build_window_submenu(app, state)?;
     let help_about = MenuItem::with_id(app, MENU_ID_HELP_ABOUT, "About gwt", true, None::<&str>)?;
+    let help_check_updates = MenuItem::with_id(
+        app,
+        MENU_ID_HELP_CHECK_UPDATES,
+        "Check for Updates...",
+        true,
+        None::<&str>,
+    )?;
     let settings_prefs = MenuItem::with_id(
         app,
         MENU_ID_SETTINGS_PREFERENCES,
@@ -191,6 +207,7 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
     #[cfg(target_os = "macos")]
     let gwt = SubmenuBuilder::new(app, app_menu_label)
         .item(&help_about)
+        .item(&help_check_updates)
         .separator()
         .item(&settings_prefs)
         .separator()
@@ -206,6 +223,7 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
     #[cfg(not(target_os = "macos"))]
     let gwt = SubmenuBuilder::new(app, app_menu_label)
         .item(&help_about)
+        .item(&help_check_updates)
         .separator()
         .item(&settings_prefs)
         .build()?;

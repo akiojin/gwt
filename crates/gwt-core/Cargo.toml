@@ -32,6 +32,10 @@ dirs = "6"
 reqwest.workspace = true
 walkdir = "2"
 portable-pty.workspace = true
+semver.workspace = true
+flate2.workspace = true
+tar.workspace = true
+zip.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

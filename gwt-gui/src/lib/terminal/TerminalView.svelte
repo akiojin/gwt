@@ -4,7 +4,8 @@
   import { WebLinksAddon } from "@xterm/addon-web-links";
   import "@xterm/xterm/css/xterm.css";
   import { onMount } from "svelte";
-  import { isCtrlCShortcut, isPasteShortcut } from "./shortcuts";
+  import { isCopyShortcut, isPasteShortcut } from "./shortcuts";
+  import { registerTerminalInputTarget } from "../voice/inputTargetRegistry";
 
   let {
     paneId,
@@ -16,6 +17,11 @@
   let fitAddon: FitAddon | undefined = $state(undefined);
   let resizeObserver: ResizeObserver | undefined = $state(undefined);
   let unlisten: (() => void) | undefined = $state(undefined);
+
+  type TerminalEditAction = {
+    action: "copy" | "paste";
+    paneId: string;
+  };
 
   function isTerminalFocused(rootEl: HTMLElement): boolean {
     const el = document.activeElement;
@@ -144,6 +150,7 @@
     const rootEl = containerEl;
     if (!rootEl) return;
     let cancelled = false;
+    const unregisterVoiceInputTarget = registerTerminalInputTarget(paneId, rootEl);
 
     const term = new Terminal({
       cursorBlink: true,
@@ -205,11 +212,18 @@
     term.attachCustomKeyEventHandler((event: KeyboardEvent) => {
       if (event.type !== "keydown") return true;
 
-      if (isCtrlCShortcut(event)) {
+      if (isCopyShortcut(event)) {
         const selection = term.getSelection();
         if (selection.length > 0) {
           event.preventDefault();
           void copyTextToClipboard(selection);
+          return false;
+        }
+
+        // On macOS `Cmd+C` should only copy when text is selected; do not
+        // send SIGINT when there is no active selection.
+        if (event.metaKey && !event.ctrlKey) {
+          event.preventDefault();
           return false;
         }
 
@@ -238,6 +252,24 @@
       void writeToTerminal(text);
     };
     rootEl.addEventListener("paste", handlePaste);
+
+    const handleTerminalEditAction = (event: Event) => {
+      const detail = (event as CustomEvent<TerminalEditAction>).detail;
+      if (!detail || detail.paneId !== paneId) return;
+
+      if (detail.action === "copy") {
+        const selection = term.getSelection();
+        if (selection.length > 0) {
+          void copyTextToClipboard(selection);
+        }
+        return;
+      }
+
+      if (detail.action === "paste") {
+        void pasteFromClipboard();
+      }
+    };
+    window.addEventListener("gwt-terminal-edit-action", handleTerminalEditAction);
 
     // Handle user input -> send to PTY backend
     term.onData((data: string) => {
@@ -315,9 +347,11 @@
       }
       rootEl.removeEventListener("paste", handlePaste);
       rootEl.removeEventListener("wheel", handleWheel, true);
+      window.removeEventListener("gwt-terminal-edit-action", handleTerminalEditAction);
       window.removeEventListener("gwt-terminal-font-size", handleFontSizeChange);
       observer.disconnect();
       term.dispose();
+      unregisterVoiceInputTarget();
     };
   });
 

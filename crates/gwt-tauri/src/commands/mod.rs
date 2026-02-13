@@ -7,12 +7,14 @@ pub mod cleanup;
 pub mod docker;
 pub mod git_view;
 pub mod hooks;
+pub mod issue;
 pub mod profiles;
 pub mod project;
 pub mod recent_projects;
 pub mod sessions;
 pub mod settings;
 pub mod terminal;
+pub mod update;
 pub mod version_history;
 pub mod window_tabs;
 

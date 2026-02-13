@@ -219,6 +219,7 @@ describe("AgentLaunchForm", () => {
     const modelSelect = rendered.getByLabelText("Model") as HTMLSelectElement;
     const options = Array.from(modelSelect.options).map((option) => option.value);
     expect(options).toEqual([
+      "",
       "gpt-5.3-codex",
       "gpt-5.3-codex-spark",
       "gpt-5.2-codex",
@@ -252,7 +253,7 @@ describe("AgentLaunchForm", () => {
 
     const rendered = await renderLaunchForm({
       projectPath: "/tmp/project",
-      selectedBranch: "",
+      selectedBranch: "main",
       onLaunch,
       onClose,
     });
@@ -408,5 +409,310 @@ describe("AgentLaunchForm", () => {
 
     const request = onLaunch.mock.calls[0][0] as any;
     expect(request.dockerForceHost).toBe(true);
+  });
+
+  it("defers gh CLI check until osEnvReady is true", async () => {
+    let ghCheckCount = 0;
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.0.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "check_gh_cli_status") {
+        ghCheckCount += 1;
+        return { available: true, authenticated: true };
+      }
+      if (cmd === "list_worktree_branches") return [];
+      if (cmd === "list_remote_branches") return [];
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "none",
+          compose_services: [],
+          docker_available: false,
+          compose_available: false,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+    const props = {
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      osEnvReady: false,
+      onLaunch,
+      onClose,
+    };
+
+    const rendered = await renderLaunchForm(props);
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "New Branch" }));
+    const fromIssueButton = rendered.getByRole("button", { name: "From Issue" }) as HTMLButtonElement;
+    expect(fromIssueButton.disabled).toBe(true);
+    expect(ghCheckCount).toBe(0);
+    rendered.getByText("Loading shell environment...");
+
+    await rendered.rerender({ ...props, osEnvReady: true });
+
+    await waitFor(() => {
+      expect(ghCheckCount).toBe(1);
+    });
+    await waitFor(() => {
+      expect((rendered.getByRole("button", { name: "From Issue" }) as HTMLButtonElement).disabled).toBe(
+        false
+      );
+    });
+  });
+
+  it("shows gh missing message only after osEnvReady", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.0.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "check_gh_cli_status") {
+        return { available: false, authenticated: false };
+      }
+      if (cmd === "list_worktree_branches") return [];
+      if (cmd === "list_remote_branches") return [];
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "none",
+          compose_services: [],
+          docker_available: false,
+          compose_available: false,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+    const props = {
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      osEnvReady: false,
+      onLaunch,
+      onClose,
+    };
+
+    const rendered = await renderLaunchForm(props);
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "New Branch" }));
+    expect(rendered.queryByText("GitHub CLI (gh) is not installed.")).toBeNull();
+    rendered.getByText("Loading shell environment...");
+
+    await rendered.rerender({ ...props, osEnvReady: true });
+
+    await waitFor(() => {
+      expect(rendered.queryByText("Loading shell environment...")).toBeNull();
+    });
+    await waitFor(() => {
+      expect(rendered.getByText("GitHub CLI (gh) is not installed.")).toBeTruthy();
+    });
+  });
+
+  it("keeps issue selection disabled while duplicate-branch check is pending", async () => {
+    let resolveBranchCheck!: (value: string | null) => void;
+    const branchCheck = new Promise<string | null>((resolve) => {
+      resolveBranchCheck = resolve;
+    });
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.0.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "check_gh_cli_status") {
+        return { available: true, authenticated: true };
+      }
+      if (cmd === "fetch_github_issues") {
+        return {
+          issues: [
+            {
+              number: 42,
+              title: "Issue 42",
+              updatedAt: "2026-02-13T00:00:00Z",
+              labels: [],
+            },
+          ],
+          hasNextPage: false,
+        };
+      }
+      if (cmd === "find_existing_issue_branch") {
+        return branchCheck;
+      }
+      if (cmd === "list_worktree_branches") return [];
+      if (cmd === "list_remote_branches") return [];
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "none",
+          compose_services: [],
+          docker_available: false,
+          compose_available: false,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch,
+      onClose,
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "New Branch" }));
+    await fireEvent.click(rendered.getByRole("button", { name: "From Issue" }));
+
+    const issueTitle = await waitFor(() => rendered.getByText("Issue 42"));
+    const issueButton = issueTitle.closest("button") as HTMLButtonElement;
+    expect(issueButton.disabled).toBe(true);
+
+    await fireEvent.click(issueButton);
+    expect(rendered.queryByText("Auto-generated from issue #42")).toBeNull();
+    expect((rendered.getByRole("button", { name: "Launch" }) as HTMLButtonElement).disabled).toBe(
+      true
+    );
+
+    resolveBranchCheck(null);
+
+    await waitFor(() => {
+      expect((rendered.getByRole("button", { name: /#42/i }) as HTMLButtonElement).disabled).toBe(
+        false
+      );
+    });
+  });
+
+  it("does not link or rollback issue branch before async launch job completion", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.0.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "check_gh_cli_status") {
+        return { available: true, authenticated: true };
+      }
+      if (cmd === "fetch_github_issues") {
+        return {
+          issues: [
+            {
+              number: 99,
+              title: "Issue 99",
+              updatedAt: "2026-02-13T00:00:00Z",
+              labels: [],
+            },
+          ],
+          hasNextPage: false,
+        };
+      }
+      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "list_worktree_branches") return [];
+      if (cmd === "list_remote_branches") return [];
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "none",
+          compose_services: [],
+          docker_available: false,
+          compose_available: false,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch,
+      onClose,
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "New Branch" }));
+    await fireEvent.click(rendered.getByRole("button", { name: "From Issue" }));
+
+    await waitFor(() => {
+      expect((rendered.getByRole("button", { name: /#99/i }) as HTMLButtonElement).disabled).toBe(
+        false
+      );
+    });
+    const issueButton = rendered.getByRole("button", { name: /#99/i });
+    await fireEvent.click(issueButton);
+
+    const launchButton = rendered.getByRole("button", { name: "Launch" });
+    await fireEvent.click(launchButton);
+
+    await waitFor(() => {
+      expect(onLaunch).toHaveBeenCalledTimes(1);
+    });
+
+    const request = onLaunch.mock.calls[0][0] as any;
+    expect(request.issueNumber).toBe(99);
+    expect(
+      invokeMock.mock.calls.some((call: any[]) => call[0] === "link_branch_to_issue")
+    ).toBe(false);
+    expect(
+      invokeMock.mock.calls.some((call: any[]) => call[0] === "rollback_issue_branch")
+    ).toBe(false);
   });
 });
