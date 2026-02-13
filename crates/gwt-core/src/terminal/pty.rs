@@ -20,22 +20,51 @@ pub struct PtyConfig {
     pub cols: u16,
 }
 
-fn is_windows_batch_script(command: &str) -> bool {
-    let lower = command.trim().to_ascii_lowercase();
-    lower.ends_with(".cmd") || lower.ends_with(".bat")
+fn escape_powershell_single_quoted(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+fn build_windows_powershell_command_expression(command: &str, args: &[String]) -> String {
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push(format!("'{}'", escape_powershell_single_quoted(command)));
+    parts.extend(
+        args.iter()
+            .map(|arg| format!("'{}'", escape_powershell_single_quoted(arg))),
+    );
+    format!("& {}", parts.join(" "))
+}
+
+fn resolve_windows_shell_with<F>(mut command_exists: F) -> String
+where
+    F: FnMut(&str) -> bool,
+{
+    if command_exists("pwsh") || command_exists("pwsh.exe") {
+        "pwsh".to_string()
+    } else {
+        "powershell.exe".to_string()
+    }
+}
+
+fn resolve_windows_shell() -> String {
+    resolve_windows_shell_with(|command| which::which(command).is_ok())
 }
 
 fn resolve_spawn_command(command: &str, args: &[String]) -> (String, Vec<String>) {
-    if cfg!(windows) && is_windows_batch_script(command) {
-        // On Windows, .cmd/.bat scripts must be launched through cmd.exe in PTY contexts.
-        let mut wrapped_args = vec![
-            "/d".to_string(),
-            "/s".to_string(),
-            "/c".to_string(),
-            command.to_string(),
-        ];
-        wrapped_args.extend(args.iter().cloned());
-        return ("cmd.exe".to_string(), wrapped_args);
+    if cfg!(windows) {
+        let shell = resolve_windows_shell();
+        let expression = build_windows_powershell_command_expression(command, args);
+        return (
+            shell,
+            vec![
+                "-NoLogo".to_string(),
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-Command".to_string(),
+                expression,
+            ],
+        );
     }
 
     (command.to_string(), args.to_vec())
@@ -154,29 +183,55 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn is_windows_batch_script_detects_cmd_and_bat() {
-        assert!(is_windows_batch_script("npx.cmd"));
-        assert!(is_windows_batch_script("C:\\Tools\\runner.BAT"));
-        assert!(!is_windows_batch_script("codex"));
-        assert!(!is_windows_batch_script("/usr/bin/codex"));
+    fn escape_powershell_single_quoted_duplicates_single_quotes() {
+        assert_eq!(
+            escape_powershell_single_quoted("C:\\Tools\\it's\\npx.cmd"),
+            "C:\\Tools\\it''s\\npx.cmd"
+        );
     }
 
     #[test]
-    fn resolve_spawn_command_wraps_batch_script_only_on_windows() {
+    fn build_windows_powershell_command_expression_quotes_command_and_args() {
+        let args = vec!["--yes".to_string(), "@openai/codex@latest".to_string()];
+        let expr = build_windows_powershell_command_expression("C:\\Tools\\npx.cmd", &args);
+        assert_eq!(
+            expr,
+            "& 'C:\\Tools\\npx.cmd' '--yes' '@openai/codex@latest'"
+        );
+    }
+
+    #[test]
+    fn resolve_windows_shell_prefers_pwsh_when_available() {
+        let shell = resolve_windows_shell_with(|name| name == "pwsh");
+        assert_eq!(shell, "pwsh");
+    }
+
+    #[test]
+    fn resolve_windows_shell_falls_back_to_windows_powershell() {
+        let shell = resolve_windows_shell_with(|_| false);
+        assert_eq!(shell, "powershell.exe");
+    }
+
+    #[test]
+    fn resolve_spawn_command_uses_powershell_on_windows() {
         let args = vec!["--yes".to_string(), "@openai/codex@latest".to_string()];
         let (program, resolved_args) = resolve_spawn_command("C:\\Tools\\npx.cmd", &args);
 
         if cfg!(windows) {
-            assert_eq!(program, "cmd.exe");
+            assert!(
+                program.eq_ignore_ascii_case("pwsh")
+                    || program.eq_ignore_ascii_case("powershell.exe")
+            );
             assert_eq!(
                 resolved_args,
                 vec![
-                    "/d".to_string(),
-                    "/s".to_string(),
-                    "/c".to_string(),
-                    "C:\\Tools\\npx.cmd".to_string(),
-                    "--yes".to_string(),
-                    "@openai/codex@latest".to_string()
+                    "-NoLogo".to_string(),
+                    "-NoProfile".to_string(),
+                    "-NonInteractive".to_string(),
+                    "-ExecutionPolicy".to_string(),
+                    "Bypass".to_string(),
+                    "-Command".to_string(),
+                    "& 'C:\\Tools\\npx.cmd' '--yes' '@openai/codex@latest'".to_string(),
                 ]
             );
         } else {
@@ -189,8 +244,27 @@ mod tests {
     fn resolve_spawn_command_keeps_non_batch_command() {
         let args = vec!["--version".to_string()];
         let (program, resolved_args) = resolve_spawn_command("codex", &args);
-        assert_eq!(program, "codex");
-        assert_eq!(resolved_args, args);
+        if cfg!(windows) {
+            assert!(
+                program.eq_ignore_ascii_case("pwsh")
+                    || program.eq_ignore_ascii_case("powershell.exe")
+            );
+            assert_eq!(
+                resolved_args,
+                vec![
+                    "-NoLogo".to_string(),
+                    "-NoProfile".to_string(),
+                    "-NonInteractive".to_string(),
+                    "-ExecutionPolicy".to_string(),
+                    "Bypass".to_string(),
+                    "-Command".to_string(),
+                    "& 'codex' '--version'".to_string(),
+                ]
+            );
+        } else {
+            assert_eq!(program, "codex");
+            assert_eq!(resolved_args, args);
+        }
     }
 
     /// Helper: read from PTY reader in a separate thread with timeout.
