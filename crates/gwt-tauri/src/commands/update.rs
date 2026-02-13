@@ -31,7 +31,6 @@ pub async fn check_app_update(
             "Update check failed"
         );
     }
-
     Ok(state)
 }
 

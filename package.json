@@ -1,6 +1,6 @@
 {
   "name": "gwt",
-  "version": "7.0.0",
+  "version": "7.2.1",
   "private": true,
   "description": "Tauri desktop GUI for Git worktree management and coding agent launch",
   "type": "module",

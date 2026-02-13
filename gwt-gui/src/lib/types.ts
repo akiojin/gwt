@@ -55,6 +55,29 @@ export interface AgentModeState {
   estimated_tokens: number;
 }
 
+export interface AgentSidebarSubAgent {
+  id: string;
+  name: string;
+  toolId: string;
+  status: "running" | "completed" | "failed" | (string & {});
+  model?: string | null;
+  branch: string;
+  worktreeRelPath: string;
+  worktreeAbsPath?: string | null;
+}
+
+export interface AgentSidebarTask {
+  id: string;
+  title: string;
+  status: "running" | "pending" | "failed" | "completed" | (string & {});
+  subAgents: AgentSidebarSubAgent[];
+}
+
+export interface AgentSidebarView {
+  specId?: string | null;
+  tasks: AgentSidebarTask[];
+}
+
 export interface SendKeysRequest {
   paneId: string;
   text: string;
@@ -145,6 +168,7 @@ export interface ProfilesConfig {
 export interface Tab {
   id: string;
   label: string;
+  agentId?: "claude" | "codex" | "gemini" | "opencode";
   type: "summary" | "agent" | "settings" | "versionHistory" | "agentMode";
   paneId?: string;
 }

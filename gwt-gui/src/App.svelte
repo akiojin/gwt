@@ -27,6 +27,7 @@
     formatWindowTitle,
     getAppVersionSafe,
   } from "./lib/windowTitle";
+  import { inferAgentId } from "./lib/agentUtils";
   import {
     AGENT_TAB_RESTORE_MAX_RETRIES,
     loadStoredProjectAgentTabs,
@@ -34,6 +35,7 @@
     buildRestoredAgentTabs,
     shouldRetryAgentTabRestore,
   } from "./lib/agentTabsPersistence";
+  import { defaultAppTabs, shouldAllowRestoredActiveTab } from "./lib/appTabs";
   import {
     runStartupUpdateCheck,
     STARTUP_UPDATE_INITIAL_DELAY_MS,
@@ -146,15 +148,13 @@
   let migrationOpen: boolean = $state(false);
   let migrationSourceRoot: string = $state("");
 
-  let tabs: Tab[] = $state([
-    { id: "summary", label: "Session Summary", type: "summary" },
-    { id: "agentMode", label: "Agent Mode", type: "agentMode" },
-  ]);
-  let activeTabId: string = $state("summary");
+  let tabs: Tab[] = $state(defaultAppTabs());
+  let activeTabId: string = $state("agentMode");
 
   let agentTabsHydratedProjectPath: string | null = $state(null);
   let agentTabsRestoreToken = 0;
   const AGENT_TAB_RESTORE_RETRY_DELAY_MS = 150;
+  const AGENT_TAB_RESTORE_RETRY_MAX_DELAY_MS = 1200;
 
   let terminalCount = $derived(tabs.filter((t) => t.type === "agent").length);
 
@@ -215,7 +215,6 @@
       showToast(`Update available: v${s.latest}. Manual download required.`, 15000);
     }
   }
-
   async function confirmAndApplyUpdate(latest: string) {
     try {
       const { confirm } = await import("@tauri-apps/plugin-dialog");
@@ -606,25 +605,11 @@
     fetchCurrentBranch();
   }
 
-  function openSessionSummaryTab() {
-    const existing = tabs.find((t) => t.type === "summary" || t.id === "summary");
-    if (existing) {
-      activeTabId = existing.id;
-      return;
-    }
-
-    const tab: Tab = { id: "summary", label: "Session Summary", type: "summary" };
-    tabs = [tab, ...tabs];
-    activeTabId = tab.id;
-  }
-
   function handleBranchSelect(branch: BranchInfo) {
     selectedBranch = branch;
     if (branch.is_current) {
       currentBranch = branch.name;
     }
-    // Switch to session summary (re-open tab if it was closed).
-    openSessionSummaryTab();
   }
 
   function requestAgentLaunch() {
@@ -643,14 +628,7 @@
     if (existing) return;
 
     const tab: Tab = { id: "agentMode", label: "Agent Mode", type: "agentMode" };
-    const summaryIndex = tabs.findIndex((t) => t.type === "summary" || t.id === "summary");
-    if (summaryIndex >= 0) {
-      const nextTabs = [...tabs];
-      nextTabs.splice(summaryIndex + 1, 0, tab);
-      tabs = nextTabs;
-    } else {
-      tabs = [...tabs, tab];
-    }
+    tabs = [...tabs, tab];
   }
 
   function handleSidebarModeChange(next: SidebarMode) {
@@ -710,6 +688,36 @@
     return b ? normalizeBranchName(b) : "Worktree";
   }
 
+  function mergeRestoredAgentTabs(existingTabs: Tab[], restoredTabs: Tab[]): Tab[] {
+    const nonAgentTabs = existingTabs.filter((t) => t.type !== "agent");
+    const restoredAgentPaneIds = new Set(restoredTabs.map((t) => t.paneId));
+    const preservedAgentTabs = existingTabs.filter((t) => {
+      return t.type === "agent" && typeof t.paneId === "string" && !restoredAgentPaneIds.has(t.paneId);
+    });
+
+    const dedupedPreserved: Tab[] = [];
+    const seen = new Set<string>();
+    for (const tab of preservedAgentTabs) {
+      if (!tab.paneId || seen.has(tab.paneId)) continue;
+      seen.add(tab.paneId);
+      dedupedPreserved.push(tab);
+    }
+
+    return [...nonAgentTabs, ...restoredTabs, ...dedupedPreserved];
+  }
+
+  function getAgentTabRestoreDelayMs(attempt: number): number {
+    return Math.min(
+      AGENT_TAB_RESTORE_RETRY_MAX_DELAY_MS,
+      AGENT_TAB_RESTORE_RETRY_DELAY_MS * 2 ** Math.min(attempt, 8),
+    );
+  }
+
+  function triggerRestoreProjectAgentTabs(targetProjectPath: string) {
+    const token = ++agentTabsRestoreToken;
+    void restoreProjectAgentTabs(targetProjectPath, token);
+  }
+
   async function handleAgentLaunch(request: LaunchAgentRequest) {
     const { invoke } = await import("@tauri-apps/api/core");
     const jobId = await invoke<string>("start_launch_job", { request });
@@ -723,6 +731,7 @@
   function handleLaunchSuccess(paneId: string) {
     const req = pendingLaunchRequest;
     const label = req ? worktreeTabLabel(req.branch) : "Worktree";
+    const requestedAgentId = inferAgentId(req?.agentId);
 
     const newTab: Tab = {
       id: `agent-${paneId}`,
@@ -731,8 +740,34 @@
       paneId,
     };
 
+    if (requestedAgentId) {
+      newTab.agentId = requestedAgentId;
+    }
+
     tabs = [...tabs, newTab];
     activeTabId = newTab.id;
+    if (projectPath) {
+      agentTabsHydratedProjectPath = null;
+      triggerRestoreProjectAgentTabs(projectPath);
+    }
+
+    if (!newTab.agentId) {
+      void (async () => {
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const terminals = await invoke<TerminalInfo[]>("list_terminals");
+          const terminal = terminals.find((t) => t.pane_id === paneId);
+          const terminalAgentId = inferAgentId(terminal?.agent_name);
+          if (!terminalAgentId) return;
+
+          tabs = tabs.map((t) =>
+            t.id === newTab.id ? { ...t, agentId: terminalAgentId } : t
+          );
+        } catch {
+          // Ignore: fallback color is used when terminal metadata is unavailable.
+        }
+      })();
+    }
 
     // Fallback: if the event API is not available, trigger a best-effort refresh.
     if (!worktreesEventAvailable) {
@@ -755,9 +790,6 @@
 
   async function handleTabClose(tabId: string) {
     const tab = tabs.find((t) => t.id === tabId);
-    if (tab?.type === "summary") {
-      return;
-    }
     if (tab?.paneId) {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -1006,11 +1038,8 @@
           }
 
           projectPath = null;
-          tabs = [
-            { id: "summary", label: "Session Summary", type: "summary" },
-            { id: "agentMode", label: "Agent Mode", type: "agentMode" },
-          ];
-          activeTabId = "summary";
+          tabs = defaultAppTabs();
+          activeTabId = "agentMode";
           selectedBranch = null;
           currentBranch = "";
         }
@@ -1161,17 +1190,20 @@
     if (shouldRetry && projectPath === targetProjectPath && agentTabsRestoreToken === token) {
       setTimeout(() => {
         void restoreProjectAgentTabs(targetProjectPath, token, attempt + 1);
-      }, AGENT_TAB_RESTORE_RETRY_DELAY_MS);
+      }, getAgentTabRestoreDelayMs(attempt));
+      return;
+    }
+
+    // Wait for terminal list to become available before persisting and wiping state.
+    if (stored.tabs.length > 0 && restored.tabs.length === 0) {
       return;
     }
 
     const restoredTabs = restored.tabs;
+    const mergedTabs = mergeRestoredAgentTabs(tabs, restoredTabs);
+    tabs = mergedTabs;
 
-    const preserved = tabs.filter((t) => t.type !== "agent");
-    tabs = [...preserved, ...restoredTabs];
-
-    const allowOverrideActive =
-      activeTabId === "summary" || activeTabId === "agentMode";
+    const allowOverrideActive = shouldAllowRestoredActiveTab(activeTabId);
     if (allowOverrideActive && restored.activeTabId) {
       activeTabId = restored.activeTabId;
     }
@@ -1190,8 +1222,7 @@
 
     agentTabsHydratedProjectPath = null;
     const target = projectPath;
-    const token = ++agentTabsRestoreToken;
-    void restoreProjectAgentTabs(target, token);
+    triggerRestoreProjectAgentTabs(target);
   });
 
   // Persist agent tabs per project (best-effort).
@@ -1372,6 +1403,8 @@
           onBranchSelect={handleBranchSelect}
           onBranchActivate={handleBranchActivate}
           onCleanupRequest={handleCleanupRequest}
+          onLaunchAgent={requestAgentLaunch}
+          onQuickLaunch={handleAgentLaunch}
         />
       {/if}
       <MainArea

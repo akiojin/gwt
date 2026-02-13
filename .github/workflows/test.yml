@@ -55,3 +55,41 @@ jobs:
         run: cd gwt-gui && pnpm run build
       - name: Build check
         run: cargo check --workspace
+
+  e2e:
+    name: E2E (Playwright)
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      # actions/setup-node's pnpm cache requires pnpm to be available.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.29.2
+          run_install: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: 'pnpm'
+          cache-dependency-path: gwt-gui/pnpm-lock.yaml
+      - name: Enable Corepack (pnpm)
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.29.2 --activate
+          pnpm --version
+      - name: Install frontend dependencies
+        run: cd gwt-gui && pnpm install --frozen-lockfile
+      - name: Install Playwright browser
+        run: cd gwt-gui && pnpm exec playwright install --with-deps chromium
+      - name: Run Playwright E2E
+        run: cd gwt-gui && pnpm run test:e2e
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: playwright-report
+          path: |
+            gwt-gui/playwright-report
+            gwt-gui/test-results
+          if-no-files-found: ignore
