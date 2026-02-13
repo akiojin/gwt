@@ -380,4 +380,5 @@ export interface LaunchAgentRequest {
   dockerRecreate?: boolean;
   dockerBuild?: boolean;
   dockerKeep?: boolean;
+  issueNumber?: number;
 }
