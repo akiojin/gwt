@@ -1277,4 +1277,25 @@ mod tests {
         let url = find_installer_asset_url(&platform, &assets);
         assert_eq!(url.as_deref(), Some("https://example.com/wix.msi"));
     }
+
+    #[test]
+    fn find_installer_asset_url_prefers_macos_arch_specific_dmg() {
+        let platform = Platform {
+            os: "macos".to_string(),
+            arch: "aarch64".to_string(),
+        };
+        let assets = vec![
+            GitHubAsset {
+                name: "gwt_7.1.0_x64.dmg".to_string(),
+                browser_download_url: "https://example.com/macos-x64.dmg".to_string(),
+            },
+            GitHubAsset {
+                name: "gwt_7.1.0_aarch64.dmg".to_string(),
+                browser_download_url: "https://example.com/macos-arm64.dmg".to_string(),
+            },
+        ];
+
+        let url = find_installer_asset_url(&platform, &assets);
+        assert_eq!(url.as_deref(), Some("https://example.com/macos-arm64.dmg"));
+    }
 }
