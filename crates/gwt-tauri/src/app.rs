@@ -428,6 +428,7 @@ pub fn build_app(
             crate::commands::project::quit_app,
             crate::commands::docker::detect_docker_context,
             crate::commands::sessions::get_branch_quick_start,
+            crate::commands::sessions::get_agent_sidebar_view,
             crate::commands::sessions::get_branch_session_summary,
             crate::commands::branch_suggest::suggest_branch_names,
             crate::commands::terminal::launch_terminal,

@@ -257,6 +257,32 @@ fn resolve_compose_status(running_output: &str, all_output: &str) -> ContainerSt
     ContainerStatus::NotFound
 }
 
+fn build_docker_compose_exec_args(
+    service: &str,
+    command: &str,
+    command_args: &[String],
+    env_vars: &HashMap<String, String>,
+    use_no_tty: bool,
+) -> Vec<String> {
+    let mut args = vec!["compose".to_string(), "exec".to_string()];
+    if use_no_tty {
+        args.push("-T".to_string());
+    }
+
+    let mut keys: Vec<&String> = env_vars.keys().collect();
+    keys.sort();
+    for key in keys {
+        let value = env_vars.get(key).map(|s| s.as_str()).unwrap_or_default();
+        args.push("-e".to_string());
+        args.push(format!("{key}={value}"));
+    }
+
+    args.push(service.to_string());
+    args.push(command.to_string());
+    args.extend(command_args.iter().cloned());
+    args
+}
+
 /// Environment variable prefixes to pass through to containers
 const ENV_PASSTHROUGH_PREFIXES: &[&str] = &[
     "ANTHROPIC_",
@@ -975,38 +1001,18 @@ impl DockerManager {
         // Collect environment variables to pass through
         let env_vars = self.collect_passthrough_env();
 
-        // Build the exec command
-        let mut cmd = crate::process::command("docker");
-        cmd.args(["compose", "exec"]);
-
-        // Add -T flag for non-interactive mode (when running programmatically)
-        // This prevents TTY allocation issues when not running from a terminal
+        // Add -T flag for non-interactive mode (when running programmatically).
+        // This prevents TTY allocation issues when not running from a terminal.
         #[cfg(unix)]
-        {
-            // Check if stdin is a TTY using libc
-            let is_tty = unsafe { libc::isatty(libc::STDIN_FILENO) } != 0;
-            if !is_tty {
-                cmd.arg("-T");
-            }
-        }
+        let use_no_tty = unsafe { libc::isatty(libc::STDIN_FILENO) } == 0;
         #[cfg(not(unix))]
-        {
-            // On non-Unix platforms, default to non-TTY mode
-            cmd.arg("-T");
-        }
+        let use_no_tty = true;
 
-        // Add working directory
-        cmd.args(["-w", "/workspace"]);
-
-        // Add environment variables
-        for (key, value) in &env_vars {
-            cmd.args(["-e", &format!("{}={}", key, value)]);
-        }
-
-        // Add service name and command
-        cmd.arg(service);
-        cmd.arg(command);
-        cmd.args(args);
+        // Build the exec command without forcing -w to preserve service defaults.
+        let mut cmd = crate::process::command("docker");
+        cmd.args(build_docker_compose_exec_args(
+            service, command, args, &env_vars, use_no_tty,
+        ));
 
         cmd.current_dir(&self.worktree_path)
             .env("COMPOSE_PROJECT_NAME", &self.container_name)
@@ -1103,6 +1109,34 @@ mod tests {
         assert!(ports.contains(&3000));
         assert!(ports.contains(&3001));
         assert!(ports.contains(&3002));
+    }
+
+    #[test]
+    fn test_build_docker_compose_exec_args_omits_workdir_flag() {
+        let mut env = HashMap::new();
+        env.insert("B".to_string(), "2".to_string());
+        env.insert("A".to_string(), "1".to_string());
+        let command_args = vec!["--version".to_string()];
+
+        let args = build_docker_compose_exec_args("app", "node", &command_args, &env, true);
+
+        assert!(!args.contains(&"-w".to_string()));
+        assert!(args.contains(&"-T".to_string()));
+
+        let pos_a = args.iter().position(|s| s == "A=1").unwrap();
+        let pos_b = args.iter().position(|s| s == "B=2").unwrap();
+        assert!(pos_a < pos_b);
+
+        let pos_service = args.iter().position(|s| s == "app").unwrap();
+        let pos_command = args.iter().position(|s| s == "node").unwrap();
+        assert!(pos_service < pos_command);
+        assert!(args.ends_with(&command_args));
+    }
+
+    #[test]
+    fn test_build_docker_compose_exec_args_skips_no_tty_flag_when_interactive() {
+        let args = build_docker_compose_exec_args("app", "bash", &[], &HashMap::new(), false);
+        assert!(!args.contains(&"-T".to_string()));
     }
 
     #[test]
