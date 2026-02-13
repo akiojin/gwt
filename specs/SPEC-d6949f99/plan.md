@@ -6,7 +6,7 @@
 
 - GitHub Webを開かずにgwt上でPR/CIステータスを確認可能にする
 - Worktreeツリーの展開式UIでCI Workflow Run一覧を視覚的に表示
-- Session SummaryにPR詳細（メタデータ・レビューコメント・変更サマリー）セクションを追加
+- WorktreeSummaryPanel内の「Summary」「PR」サブタブ切替えでPR詳細（メタデータ・レビューコメント・変更サマリー）を表示
 
 ## 技術コンテキスト
 
@@ -38,9 +38,9 @@
    - Review コメント: inline comments (file path, line, body, code snippet)
    - 変更サマリー: changed files count, additions, deletions
 
-2. `graphql.rs`（新規）: GraphQLクエリビルダー
-   - ブランチ名リストを受け取り、1回のGraphQLクエリで全PRの情報を一括取得
-   - クエリ: `repository > pullRequests(headRefName)` + `commits > checkSuites > checkRuns` + `reviews` + `reviewThreads`
+2. `graphql.rs`（新規）: GraphQLクエリビルダー（段階取得）
+   - **軽量クエリ**（ツリー表示用）: ブランチ名リストを受け取り、1回のGraphQLクエリで全PRのステータス + 各Workflowの最新1 Runを一括取得。N+1問題を回避
+   - **詳細クエリ**（PRサブタブ用）: 選択中ブランチのPRに対してのみ、レビューコメント・inline comments・変更サマリーを取得
    - `gh api graphql -f query='...'` を `gh_command()` 経由で実行
 
 3. `pullrequest.rs` の `PrCache` を拡張
@@ -73,7 +73,7 @@
    - 既存のタブシステム（`Tab` 型の `type: "terminal"`）を活用
    - `gh run view <run_id> --log` を実行するPTYセッションを起動
 
-### Phase 4: フロントエンド — Session Summary PRセクション
+### Phase 4: フロントエンド — Session Summary PRサブタブ
 
 **対象ファイル**: `gwt-gui/src/lib/components/`
 
@@ -84,9 +84,10 @@
    - コードスニペットのシンタックスハイライト（フロントエンド処理）
    - Changes サブセクション: ファイル一覧、追加/削除行数、コミット一覧
 
-2. `WorktreeSummaryPanel.svelte` にPR Statusセクションを統合
-   - 既存の AI Summary セクションと並列で「PR Status」セクションを追加
-   - `selectedBranch` に紐づくPR情報を表示
+2. `WorktreeSummaryPanel.svelte` にサブタブUI（「Summary」「PR」）を追加
+   - 「Summary」タブ: 既存のAI Summaryを表示（デフォルト）
+   - 「PR」タブ: 選択中ブランチに紐づくPR詳細（`PrStatusSection`）を表示
+   - タブ切替え時に `fetch_pr_detail` で詳細データをオンデマンド取得
 
 ### Phase 5: ポーリング + フォーカス管理
 

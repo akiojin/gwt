@@ -3,7 +3,7 @@
 **仕様ID**: `SPEC-d6949f99`
 **作成日**: 2026-02-14
 **更新日**: 2026-02-14
-**ステータス**: ドラフト
+**ステータス**: レビュー済み
 **カテゴリ**: GUI
 
 **入力**: ユーザー説明: "PRの状態をわざわざGitHub Webを見に行かなくても良いように、gwt上で見れるようにしたい"
@@ -24,10 +24,11 @@
 
 **受け入れシナリオ**:
 
-1. **前提条件** gh CLIが認証済みでPRが存在するWorktreeがある、**操作** Worktree一覧を表示する、**期待結果** 各Worktree行にPRステータス（Open/Merged/Closed + PR番号）が表示される
-2. **前提条件** PRにCI Workflow Runが紐づいている、**操作** Worktree行の左にある専用トグルアイコン（▶）をクリックする、**期待結果** ツリーが展開されWorkflow Run一覧がWorkflow名とステータス（pass/fail/running/pending）付きで表示される
+1. **前提条件** gh CLIが認証済みでPRが存在するWorktreeがある、**操作** Worktree一覧をLocalまたはAllフィルターで表示する、**期待結果** 各Worktree行にPRステータス（Open/Merged/Closed + PR番号）が表示される
+2. **前提条件** PRにCI Workflow Runが紐づいている、**操作** Worktree行の左にある専用トグルアイコン（▶）をクリックする、**期待結果** ツリーが展開され各Workflowの最新1 Runがワークフロー名とステータス（pass/fail/running/pending）付きで表示される
 3. **前提条件** ブランチにPRが存在しない、**操作** Worktree一覧を表示する、**期待結果** 当該Worktree行に「No PR」と表示される
 4. **前提条件** gh CLIが未インストールまたは未認証、**操作** Worktree一覧を表示する、**期待結果** PR関連のUI要素が「GitHub not connected」とグレースフルに表示される
+5. **前提条件** Remoteフィルターが選択されている、**操作** Worktree一覧を表示する、**期待結果** PRステータスバッジのみ表示（ツリー展開なし）。AllフィルターでRemoteのみのブランチも同様
 
 ---
 
@@ -39,7 +40,7 @@
 
 **受け入れシナリオ**:
 
-1. **前提条件** 選択中のWorktreeのブランチにOpen PRがある、**操作** Session Summaryタブを表示する、**期待結果** AI Summaryセクションとは別にPR Statusセクションが表示され、PRタイトル・作成者・base/head branch・ラベル・アサイニー・マイルストーン・リンクIssue・mergeableステータスが表示される
+1. **前提条件** 選択中のWorktreeのブランチにOpen PRがある、**操作** WorktreeSummaryPanel内の「PR」サブタブをクリックする、**期待結果** AI Summaryとは別のタブビューでPR Statusが表示され、PRタイトル・作成者・base/head branch・ラベル・アサイニー・マイルストーン・リンクIssue・mergeableステータスが表示される
 2. **前提条件** PRにレビューコメントがある、**操作** PR StatusセクションのReviewsサブセクションを確認する、**期待結果** レビューアーの承認/要変更状態とレビューコメント（inline commentはファイルパス・行番号・コードスニペット・シンタックスハイライト付き）が表示される
 3. **前提条件** PRに変更ファイルがある、**操作** PR StatusセクションのChangesサブセクションを確認する、**期待結果** 変更ファイル一覧・追加/削除行数・コミット一覧が表示される
 
@@ -84,12 +85,12 @@
 
 ### 機能要件
 
-- **FR-001**: Worktree一覧の各行にPRステータスバッジ（PR番号 + Open/Merged/Closed）を表示する
+- **FR-001**: Worktree一覧の各行にPRステータスバッジ（PR番号 + Open/Merged/Closed）を表示する。LocalおよびAllフィルター時に有効。Remoteフィルター時はバッジのみ表示（ツリー展開なし）
 - **FR-002**: Worktree行の左に専用トグルアイコン（▶/▼）を設け、クリックで展開/折りたたみする。ブランチ名クリックの既存操作（エージェント起動）は維持する
-- **FR-003**: ツリー展開時にWorkflow Run一覧をWorkflow Run単位（workflow名 + ステータス）で表示する
+- **FR-003**: ツリー展開時に各Workflowの最新1 Runのみを表示する（workflow名 + ステータス）。過去のRunは表示しない
 - **FR-004**: Workflow Runのステータスを視覚的アイコン＋色で表示する（pass=緑, fail=赤, running=黄, pending=グレー）
 - **FR-005**: Workflow Run項目をクリックするとxterm.jsターミナルタブが開き、`gh run view <run_id> --log`のANSIログを表示する
-- **FR-006**: Session Summary内に「PR Status」セクションを追加し、既存のAI Summaryセクションと並列に表示する
+- **FR-006**: WorktreeSummaryPanel内に「Summary」「PR」のサブタブ切替えを追加する。「Summary」は既存のAI Summary、「PR」はPR Status詳細を表示する
 - **FR-007**: PR Statusセクションにメタデータ（タイトル、作成者、base/head branch、ラベル、アサイニー、マイルストーン、リンクIssue）を表示する
 - **FR-008**: PR Statusセクションにレビュー情報（レビューアー名、承認/要変更ステータス）を表示する
 - **FR-009**: レビューコメント（inline含む）をファイルパス・行番号・コードスニペット（シンタックスハイライト付き）・コメント本文のフルレンダリングで表示する（読み取り専用、返信機能なし）
@@ -97,7 +98,7 @@
 - **FR-011**: GitHubの `mergeable` フィールドをそのまま表示する（MERGEABLE / CONFLICTING / UNKNOWN）
 - **FR-012**: PRが存在しないブランチには「No PR」を表示する
 - **FR-013**: gh CLIが未認証の場合、PR関連UIで「GitHub not connected」と表示するグレースフルデグレード（既存の `GhCliStatus` パターンを流用）
-- **FR-014**: PR一覧取得にGraphQL API（`gh api graphql`）を使用し、リポジトリ全体のPR + Check Suites + Check Runsを1回のAPIコールで一括取得する
+- **FR-014**: GraphQL APIを段階取得する。ツリー用は軽量クエリ（PRステータス + 最新CI結果のみ）、PRサブタブ用は詳細クエリ（レビューコメント、変更サマリー等）を選択中ブランチのPRに対してのみ取得する
 - **FR-015**: CIログ取得にはCLI（`gh run view --log`）を使用するハイブリッドアプローチ
 - **FR-016**: 30秒固定間隔のポーリングでPR/CIステータスを自動更新する
 - **FR-017**: アプリがバックグラウンド（フォーカスロス）時にはポーリングを停止する
@@ -105,7 +106,7 @@
 
 ### 非機能要件
 
-- **NFR-001**: GraphQLクエリは1回のAPI呼び出しで全Worktreeブランチ分のPR + CI情報を取得し、N+1問題を回避する
+- **NFR-001**: GraphQLクエリは段階取得とする。ツリー表示用の軽量クエリ（全ブランチ分のPRステータス + 最新CI）は1回のAPI呼び出しで一括取得しN+1問題を回避する。詳細クエリ（レビュー、変更サマリー）は選択時にのみ発行する
 - **NFR-002**: ポーリング中のレートリミットエラーはリトライせずキャッシュを維持する
 - **NFR-003**: PR/CI情報の取得はバックエンド（Rust gwt-core）で実行し、フロントエンドはTauri IPC経由でデータを受け取る
 - **NFR-004**: コードスニペットのシンタックスハイライトはフロントエンド側で処理する
