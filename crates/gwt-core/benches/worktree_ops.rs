@@ -2,34 +2,33 @@
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use gwt_core::worktree::WorktreeManager;
-use std::process::Command;
 use tempfile::TempDir;
 
 fn create_test_repo() -> TempDir {
     let temp = TempDir::new().unwrap();
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["init"])
         .current_dir(temp.path())
         .output()
         .unwrap();
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["config", "user.email", "test@test.com"])
         .current_dir(temp.path())
         .output()
         .unwrap();
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["config", "user.name", "Test User"])
         .current_dir(temp.path())
         .output()
         .unwrap();
     // Create initial commit
     std::fs::write(temp.path().join("README.md"), "# Test").unwrap();
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["add", "."])
         .current_dir(temp.path())
         .output()
         .unwrap();
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["commit", "-m", "Initial commit"])
         .current_dir(temp.path())
         .output()

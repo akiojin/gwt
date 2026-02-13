@@ -17,6 +17,9 @@
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
+| [SPEC-6e2a9d4c](SPEC-6e2a9d4c/spec.md) | 機能仕様: Host OS 起動時の空タブ防止（Issue #1029） | 2026-02-13 |
+| [SPEC-7d1a4b2e](SPEC-7d1a4b2e/spec.md) | 機能仕様: Playwrightベースの実装テスト基盤整備（WebView UI） | 2026-02-13 |
+| [SPEC-8c6f4a21](SPEC-8c6f4a21/spec.md) | 機能仕様: Windows での外部プロセス実行時コンソール点滅抑止 | 2026-02-13 |
 | [SPEC-9f3c2a11](SPEC-9f3c2a11/spec.md) | 機能仕様: Voice Input Mode（GUI 全入力対応） | 2026-02-13 |
 | [SPEC-f466bc68](SPEC-f466bc68/spec.md) | 機能仕様: プロジェクトを開いたときに前回のエージェントタブを復元する | 2026-02-13 |
 | [SPEC-3a1b7c2d](SPEC-3a1b7c2d/spec.md) | 機能仕様: GUI Worktree Summary のスクロールバック要約（実行中対応） | 2026-02-12 |
@@ -24,6 +27,7 @@
 | [SPEC-1b98b6d7](SPEC-1b98b6d7/spec.md) | 機能仕様: Claude Code Hooks 経由の gwt-tauri hook 実行で GUI を起動しない | 2026-02-10 |
 | [SPEC-ab9b7d08](SPEC-ab9b7d08/spec.md) | 機能仕様: Aboutダイアログにバージョン表示 + タイトルにプロジェクトパス表示（GUI） | 2026-02-10 |
 | [SPEC-b28ab8d9](SPEC-b28ab8d9/spec.md) | 機能仕様: CI の Node ツールチェーンを pnpm に統一する（gwt-gui + commitlint） | 2026-02-10 |
+| [SPEC-b7f7b9ad](SPEC-b7f7b9ad/spec.md) | 機能仕様: gwt メニューショートカットと終了保護 | 2026-02-13 |
 | [SPEC-c4e8f210](SPEC-c4e8f210/spec.md) | 機能仕様: Worktree Cleanup（GUI） | 2026-02-10 |
 | [SPEC-4470704f](SPEC-4470704f/spec.md) | 機能仕様: gwt GUI マルチウィンドウ + Native Windowメニュー | 2026-02-09 |
 | [SPEC-5b7a0f9c](SPEC-5b7a0f9c/spec.md) | 機能仕様: Terminal ANSI Diagnostics（GUI） | 2026-02-09 |

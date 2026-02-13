@@ -55,6 +55,29 @@ export interface AgentModeState {
   estimated_tokens: number;
 }
 
+export interface AgentSidebarSubAgent {
+  id: string;
+  name: string;
+  toolId: string;
+  status: "running" | "completed" | "failed" | (string & {});
+  model?: string | null;
+  branch: string;
+  worktreeRelPath: string;
+  worktreeAbsPath?: string | null;
+}
+
+export interface AgentSidebarTask {
+  id: string;
+  title: string;
+  status: "running" | "pending" | "failed" | "completed" | (string & {});
+  subAgents: AgentSidebarSubAgent[];
+}
+
+export interface AgentSidebarView {
+  specId?: string | null;
+  tasks: AgentSidebarTask[];
+}
+
 export interface SendKeysRequest {
   paneId: string;
   text: string;
@@ -145,7 +168,8 @@ export interface ProfilesConfig {
 export interface Tab {
   id: string;
   label: string;
-  type: "agent" | "settings" | "versionHistory" | "agentMode";
+  agentId?: "claude" | "codex" | "gemini" | "opencode";
+  type: "summary" | "agent" | "settings" | "versionHistory" | "agentMode";
   paneId?: string;
 }
 
@@ -303,6 +327,25 @@ export interface CapturedEnvInfo {
   reason: string | null;
   ready: boolean;
 }
+
+export type UpdateState =
+  | {
+      state: "up_to_date";
+      checked_at?: string | null;
+    }
+  | {
+      state: "available";
+      current: string;
+      latest: string;
+      release_url: string;
+      asset_url?: string | null;
+      checked_at: string;
+    }
+  | {
+      state: "failed";
+      message: string;
+      failed_at: string;
+    };
 
 export type FileChangeKind = "Added" | "Modified" | "Deleted" | "Renamed";
 

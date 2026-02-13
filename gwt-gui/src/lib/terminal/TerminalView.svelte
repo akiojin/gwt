@@ -4,7 +4,7 @@
   import { WebLinksAddon } from "@xterm/addon-web-links";
   import "@xterm/xterm/css/xterm.css";
   import { onMount } from "svelte";
-  import { isCtrlCShortcut, isPasteShortcut } from "./shortcuts";
+  import { isCopyShortcut, isPasteShortcut } from "./shortcuts";
   import { registerTerminalInputTarget } from "../voice/inputTargetRegistry";
 
   let {
@@ -17,6 +17,11 @@
   let fitAddon: FitAddon | undefined = $state(undefined);
   let resizeObserver: ResizeObserver | undefined = $state(undefined);
   let unlisten: (() => void) | undefined = $state(undefined);
+
+  type TerminalEditAction = {
+    action: "copy" | "paste";
+    paneId: string;
+  };
 
   function isTerminalFocused(rootEl: HTMLElement): boolean {
     const el = document.activeElement;
@@ -125,6 +130,8 @@
     const viewport = rootEl.querySelector<HTMLElement>(".xterm-viewport");
     if (!viewport) return;
 
+    if (event.deltaY === 0) return;
+
     const fontSize =
       typeof terminal?.options.fontSize === "number" ? terminal.options.fontSize : 13;
     const lineHeight =
@@ -138,7 +145,8 @@
       delta *= viewport.clientHeight;
     }
 
-    viewport.scrollTop += delta;
+    const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+    viewport.scrollTop = Math.min(Math.max(viewport.scrollTop + delta, 0), maxScrollTop);
   }
 
   onMount(() => {
@@ -194,10 +202,9 @@
 
     const handleWheel = (event: WheelEvent) => {
       if (!active || !terminal) return;
+      if (event.deltaY === 0) return;
 
       focusTerminalIfNeeded(rootEl, true);
-      if (isTerminalFocused(rootEl)) return;
-
       event.preventDefault();
       event.stopImmediatePropagation();
       scrollViewportByWheel(rootEl, event);
@@ -207,11 +214,18 @@
     term.attachCustomKeyEventHandler((event: KeyboardEvent) => {
       if (event.type !== "keydown") return true;
 
-      if (isCtrlCShortcut(event)) {
+      if (isCopyShortcut(event)) {
         const selection = term.getSelection();
         if (selection.length > 0) {
           event.preventDefault();
           void copyTextToClipboard(selection);
+          return false;
+        }
+
+        // On macOS `Cmd+C` should only copy when text is selected; do not
+        // send SIGINT when there is no active selection.
+        if (event.metaKey && !event.ctrlKey) {
+          event.preventDefault();
           return false;
         }
 
@@ -240,6 +254,24 @@
       void writeToTerminal(text);
     };
     rootEl.addEventListener("paste", handlePaste);
+
+    const handleTerminalEditAction = (event: Event) => {
+      const detail = (event as CustomEvent<TerminalEditAction>).detail;
+      if (!detail || detail.paneId !== paneId) return;
+
+      if (detail.action === "copy") {
+        const selection = term.getSelection();
+        if (selection.length > 0) {
+          void copyTextToClipboard(selection);
+        }
+        return;
+      }
+
+      if (detail.action === "paste") {
+        void pasteFromClipboard();
+      }
+    };
+    window.addEventListener("gwt-terminal-edit-action", handleTerminalEditAction);
 
     // Handle user input -> send to PTY backend
     term.onData((data: string) => {
@@ -317,6 +349,7 @@
       }
       rootEl.removeEventListener("paste", handlePaste);
       rootEl.removeEventListener("wheel", handleWheel, true);
+      window.removeEventListener("gwt-terminal-edit-action", handleTerminalEditAction);
       window.removeEventListener("gwt-terminal-font-size", handleFontSizeChange);
       observer.disconnect();
       term.dispose();

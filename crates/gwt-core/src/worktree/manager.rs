@@ -583,12 +583,17 @@ impl WorktreeManager {
         }
 
         let normalized_base = base_branch.map(|base| normalize_remote_ref(base).to_string());
+        let mut resolved_base = normalized_base.clone();
         // If base branch specified, validate it and ensure it's locally resolvable.
         if let Some(base) = normalized_base.as_deref() {
             // Verify base branch exists
             if !Branch::exists(&self.repo_root, base)? {
                 if let Some((remote, branch)) = split_remote_ref(base) {
-                    if !Branch::remote_exists(&self.repo_root, remote, branch)? {
+                    // Bare clones commonly keep fetched branches in refs/heads/* without
+                    // refs/remotes/*, so allow remote-like bases to fall back to local refs.
+                    if Branch::exists(&self.repo_root, branch)? {
+                        resolved_base = Some(branch.to_string());
+                    } else if !Branch::remote_exists(&self.repo_root, remote, branch)? {
                         error!(
                             category = "worktree",
                             branch = base,
@@ -597,39 +602,24 @@ impl WorktreeManager {
                         return Err(GwtError::BranchNotFound {
                             name: base.to_string(),
                         });
-                    }
+                    } else {
+                        // remote_exists may succeed via ls-remote (bare repo), but the ref still
+                        // needs to exist locally for `git reset --hard origin/<branch>` to work.
+                        let mut local_remote_ref_present =
+                            has_local_remote_ref(&self.repo_root, remote, branch);
+                        if !local_remote_ref_present {
+                            // Fetch once to materialize refs/remotes/* locally.
+                            self.repo.fetch_all()?;
+                            local_remote_ref_present =
+                                has_local_remote_ref(&self.repo_root, remote, branch);
+                        }
 
-                    // remote_exists may succeed via ls-remote (bare repo), but the ref still needs
-                    // to exist locally for `git reset --hard origin/<branch>` to work.
-                    let has_local_remote_ref = std::process::Command::new("git")
-                        .args([
-                            "show-ref",
-                            "--verify",
-                            "--quiet",
-                            &format!("refs/remotes/{}/{}", remote, branch),
-                        ])
-                        .current_dir(&self.repo_root)
-                        .output()
-                        .map(|o| o.status.success())
-                        .unwrap_or(false);
-
-                    if !has_local_remote_ref {
-                        // Fetch once to materialize refs/remotes/* locally.
-                        self.repo.fetch_all()?;
-
-                        let has_local_remote_ref_after = std::process::Command::new("git")
-                            .args([
-                                "show-ref",
-                                "--verify",
-                                "--quiet",
-                                &format!("refs/remotes/{}/{}", remote, branch),
-                            ])
-                            .current_dir(&self.repo_root)
-                            .output()
-                            .map(|o| o.status.success())
-                            .unwrap_or(false);
-
-                        if !has_local_remote_ref_after {
+                        if local_remote_ref_present {
+                            resolved_base = Some(base.to_string());
+                        } else if Branch::exists(&self.repo_root, branch)? {
+                            // Keep going with the local branch when only refs/heads/* exists.
+                            resolved_base = Some(branch.to_string());
+                        } else {
                             error!(
                                 category = "worktree",
                                 branch = base,
@@ -682,7 +672,7 @@ impl WorktreeManager {
         }
 
         // If base branch specified, reset to it
-        if let Some(base) = normalized_base.as_deref() {
+        if let Some(base) = resolved_base.as_deref() {
             let wt_repo = Repository::open(&path)?;
             let reset_output = std::process::Command::new("git")
                 .args(["reset", "--hard", base])
@@ -719,6 +709,7 @@ impl WorktreeManager {
             operation = "create_new_branch",
             branch = branch_name,
             base = normalized_base.as_deref().unwrap_or("HEAD"),
+            resolved_base = resolved_base.as_deref().unwrap_or("HEAD"),
             path = %worktree.path.display(),
             "Worktree created with new branch"
         );
@@ -1028,6 +1019,20 @@ fn normalize_remote_ref(name: &str) -> &str {
 
 fn split_remote_ref(name: &str) -> Option<(&str, &str)> {
     name.split_once('/')
+}
+
+fn has_local_remote_ref(repo_root: &Path, remote: &str, branch: &str) -> bool {
+    crate::process::git_command()
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/remotes/{}/{}", remote, branch),
+        ])
+        .current_dir(repo_root)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn parse_already_checked_out_path(details: &str) -> Option<PathBuf> {
@@ -1890,6 +1895,36 @@ mod tests {
             "Parent directory 'bugfix/' should exist"
         );
         assert!(bugfix_dir.is_dir(), "'bugfix/' should be a directory");
+    }
+
+    #[test]
+    fn test_bare_repo_create_new_branch_from_remote_like_base_without_tracking_ref() {
+        let (_temp, bare_path, base_branch) = create_bare_test_repo();
+        let manager = WorktreeManager::new(&bare_path).unwrap();
+        let remote_like_base = format!("origin/{}", base_branch);
+
+        let has_remote_tracking_ref = crate::process::git_command()
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/remotes/origin/{}", base_branch),
+            ])
+            .current_dir(&bare_path)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        assert!(
+            !has_remote_tracking_ref,
+            "bare clones should not require refs/remotes/origin/* to resolve base branches"
+        );
+
+        let expected = git_stdout(&bare_path, &["rev-parse", &base_branch]);
+        let wt = manager
+            .create_new_branch("feature/from-origin-base", Some(&remote_like_base))
+            .unwrap();
+        let actual = git_stdout(&wt.path, &["rev-parse", "HEAD"]);
+        assert_eq!(actual, expected);
     }
 
     #[test]

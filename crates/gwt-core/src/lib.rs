@@ -14,6 +14,7 @@ pub mod lock;
 pub mod logging;
 pub mod migration;
 pub mod terminal;
+pub mod update;
 pub mod worktree;
 
 pub use error::{GwtError, Result};

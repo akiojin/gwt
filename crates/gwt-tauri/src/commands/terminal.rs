@@ -22,7 +22,6 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -330,7 +329,7 @@ fn get_command_version_with_timeout(command: &str) -> Option<String> {
     let command = command.to_string();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let out = std::process::Command::new(command)
+        let out = gwt_core::process::command(&command)
             .arg("--version")
             .output();
         let _ = tx.send(out);
@@ -507,6 +506,14 @@ fn now_millis() -> i64 {
 
 const DOCKER_WORKDIR: &str = "/workspace";
 
+fn docker_compose_exec_workdir(workspace_folder: Option<&str>) -> String {
+    workspace_folder
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_default()
+}
+
 fn build_docker_compose_up_args(
     compose_args: &[String],
     build: bool,
@@ -546,7 +553,12 @@ fn build_docker_compose_exec_args(
 ) -> Vec<String> {
     let mut args = vec!["compose".to_string()];
     args.extend(compose_args.iter().cloned());
-    args.extend(["exec".to_string(), "-w".to_string(), workdir.to_string()]);
+    args.push("exec".to_string());
+    let workdir = workdir.trim();
+    if !workdir.is_empty() {
+        args.push("-w".to_string());
+        args.push(workdir.to_string());
+    }
 
     let mut keys: Vec<&String> = env_vars.keys().collect();
     keys.sort();
@@ -597,7 +609,7 @@ fn docker_compose_up(
 ) -> Result<(), String> {
     ensure_docker_compose_ready()?;
 
-    let output = Command::new("docker")
+    let output = gwt_core::process::command("docker")
         .args(build_docker_compose_up_args(compose_args, build, recreate))
         .current_dir(worktree_path)
         .env("COMPOSE_PROJECT_NAME", container_name)
@@ -624,7 +636,7 @@ fn docker_compose_down(
 ) -> Result<(), String> {
     ensure_docker_compose_ready()?;
 
-    let output = Command::new("docker")
+    let output = gwt_core::process::command("docker")
         .args(build_docker_compose_down_args(compose_args))
         .current_dir(worktree_path)
         .env("COMPOSE_PROJECT_NAME", container_name)
@@ -662,7 +674,7 @@ fn ensure_docker_ready() -> Result<(), String> {
 }
 
 fn docker_image_exists(image: &str) -> bool {
-    Command::new("docker")
+    gwt_core::process::command("docker")
         .args(["image", "inspect", image])
         .output()
         .map(|o| o.status.success())
@@ -670,7 +682,7 @@ fn docker_image_exists(image: &str) -> bool {
 }
 
 fn docker_image_created_time(image: &str) -> Option<SystemTime> {
-    let output = Command::new("docker")
+    let output = gwt_core::process::command("docker")
         .args(["image", "inspect", "-f", "{{.Created}}", image])
         .output()
         .ok()?;
@@ -711,7 +723,7 @@ fn docker_build_image(
     dockerfile_path: &std::path::Path,
     context_dir: &std::path::Path,
 ) -> Result<(), String> {
-    let output = Command::new("docker")
+    let output = gwt_core::process::command("docker")
         .args(["build", "-t", image, "-f"])
         .arg(dockerfile_path)
         .arg(context_dir)
@@ -730,11 +742,147 @@ fn docker_build_image(
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DockerBindMount {
+    source: String,
+    target: String,
+}
+
+fn normalize_mount_path(path: &str) -> String {
+    path.trim().replace('\\', "/")
+}
+
+fn is_windows_drive_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'/' || bytes[2] == b'\\')
+}
+
+fn docker_mount_target_path(path: &str) -> String {
+    let normalized = normalize_mount_path(path);
+    if !is_windows_drive_path(&normalized) {
+        return normalized;
+    }
+
+    let rest = normalized[2..].trim_start_matches('/');
+    if rest.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", rest)
+    }
+}
+
+fn path_is_same_or_within(base: &str, child: &str) -> bool {
+    let base_norm = normalize_mount_path(base);
+    let child_norm = normalize_mount_path(child);
+    let base_path = std::path::Path::new(base_norm.as_str());
+    let child_path = std::path::Path::new(child_norm.as_str());
+    child_path == base_path || child_path.starts_with(base_path)
+}
+
+fn build_git_bind_mounts(env_vars: &HashMap<String, String>) -> Vec<DockerBindMount> {
+    let common_source = env_vars
+        .get("HOST_GIT_COMMON_DIR")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(normalize_mount_path);
+
+    let Some(common_source) = common_source else {
+        return Vec::new();
+    };
+
+    let common_target = docker_mount_target_path(&common_source);
+    let mut mounts = vec![DockerBindMount {
+        source: common_source.clone(),
+        target: common_target.clone(),
+    }];
+
+    let worktree_source = env_vars
+        .get("HOST_GIT_WORKTREE_DIR")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(normalize_mount_path);
+
+    let Some(worktree_source) = worktree_source else {
+        return mounts;
+    };
+
+    let worktree_target = docker_mount_target_path(&worktree_source);
+    if worktree_target.is_empty() || path_is_same_or_within(&common_target, &worktree_target) {
+        return mounts;
+    }
+
+    mounts.push(DockerBindMount {
+        source: worktree_source,
+        target: worktree_target,
+    });
+    mounts
+}
+
+fn apply_translated_git_env(env_vars: &mut HashMap<String, String>) {
+    let common_source = env_vars
+        .get("HOST_GIT_COMMON_DIR")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(normalize_mount_path);
+    if let Some(common_source) = common_source {
+        let common_target = docker_mount_target_path(&common_source);
+        if common_target != common_source {
+            env_vars.insert("GIT_COMMON_DIR".to_string(), common_target);
+        }
+    }
+
+    let worktree_source = env_vars
+        .get("HOST_GIT_WORKTREE_DIR")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(normalize_mount_path);
+    if let Some(worktree_source) = worktree_source {
+        let worktree_target = docker_mount_target_path(&worktree_source);
+        if worktree_target != worktree_source {
+            env_vars.insert("GIT_DIR".to_string(), worktree_target);
+        }
+    }
+}
+
+fn yaml_single_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn render_docker_compose_override(service: &str, mounts: &[DockerBindMount]) -> String {
+    let mut content = format!("services:\n  {service}:\n");
+    if mounts.is_empty() {
+        return content;
+    }
+
+    content.push_str("    volumes:\n");
+    for mount in mounts {
+        content.push_str("      - type: bind\n");
+        content.push_str(&format!(
+            "        source: {}\n",
+            yaml_single_quoted(&mount.source)
+        ));
+        content.push_str(&format!(
+            "        target: {}\n",
+            yaml_single_quoted(&mount.target)
+        ));
+    }
+
+    content
+}
+
 fn write_docker_compose_override(
     project_root: &std::path::Path,
     container_name: &str,
     service: &str,
-) -> Result<std::path::PathBuf, String> {
+    mounts: &[DockerBindMount],
+) -> Result<Option<std::path::PathBuf>, String> {
+    if mounts.is_empty() {
+        return Ok(None);
+    }
+
     let gwt_dir = project_root.join(".gwt");
     std::fs::create_dir_all(&gwt_dir)
         .map_err(|e| format!("Failed to create .gwt directory: {e}"))?;
@@ -742,14 +890,10 @@ fn write_docker_compose_override(
     let filename = format!("docker-compose.gwt.override.{container_name}.yml");
     let path = gwt_dir.join(filename);
 
-    // Use env var interpolation so the override remains stable even if paths change.
-    // These env vars are set by DockerManager::collect_passthrough_env.
-    let content = format!(
-        "services:\n  {service}:\n    volumes:\n      - \"${{HOST_GIT_COMMON_DIR}}:${{HOST_GIT_COMMON_DIR}}\"\n      - \"${{HOST_GIT_WORKTREE_DIR}}:${{HOST_GIT_WORKTREE_DIR}}\"\n"
-    );
+    let content = render_docker_compose_override(service, mounts);
 
     std::fs::write(&path, content).map_err(|e| format!("Failed to write override file: {e}"))?;
-    Ok(path)
+    Ok(Some(path))
 }
 
 fn codex_supports_collaboration_modes(version_for_gates: Option<&str>) -> bool {
@@ -1429,6 +1573,76 @@ mod tests {
     }
 
     #[test]
+    fn build_docker_compose_exec_args_omits_workdir_when_empty() {
+        let env = HashMap::new();
+        let args = build_docker_compose_exec_args(&[], "app", "", &env, "npx", &[]);
+
+        assert!(!args.contains(&"-w".to_string()));
+    }
+
+    #[test]
+    fn docker_compose_exec_workdir_is_empty_without_workspace_folder() {
+        assert_eq!(docker_compose_exec_workdir(None), "");
+    }
+
+    #[test]
+    fn docker_compose_exec_workdir_uses_workspace_folder_when_present() {
+        assert_eq!(
+            docker_compose_exec_workdir(Some("/workspace")),
+            "/workspace"
+        );
+        assert_eq!(docker_compose_exec_workdir(Some("  /app  ")), "/app");
+    }
+
+    #[test]
+    fn docker_mount_target_path_converts_windows_drive_style() {
+        assert_eq!(
+            docker_mount_target_path("D:/Repository/GE/GrimoireEngine.git"),
+            "/Repository/GE/GrimoireEngine.git"
+        );
+        assert_eq!(
+            docker_mount_target_path("d:\\Repository\\GE\\GrimoireEngine.git"),
+            "/Repository/GE/GrimoireEngine.git"
+        );
+        assert_eq!(
+            docker_mount_target_path("/Repository/GE/GrimoireEngine.git"),
+            "/Repository/GE/GrimoireEngine.git"
+        );
+    }
+
+    #[test]
+    fn build_git_bind_mounts_skips_nested_worktree_mount_even_with_mixed_paths() {
+        let mut env = HashMap::new();
+        env.insert(
+            "HOST_GIT_COMMON_DIR".to_string(),
+            "/Repository/GE/GrimoireEngine.git".to_string(),
+        );
+        env.insert(
+            "HOST_GIT_WORKTREE_DIR".to_string(),
+            "D:/Repository/GE/GrimoireEngine.git/worktrees/feature-refactor".to_string(),
+        );
+
+        let mounts = build_git_bind_mounts(&env);
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].source, "/Repository/GE/GrimoireEngine.git");
+        assert_eq!(mounts[0].target, "/Repository/GE/GrimoireEngine.git");
+    }
+
+    #[test]
+    fn render_docker_compose_override_uses_long_syntax_bind_mounts() {
+        let mounts = vec![DockerBindMount {
+            source: "D:/Repository/GE/GrimoireEngine.git".to_string(),
+            target: "/Repository/GE/GrimoireEngine.git".to_string(),
+        }];
+
+        let yaml = render_docker_compose_override("app", &mounts);
+        assert!(yaml.contains("type: bind"));
+        assert!(yaml.contains("source: 'D:/Repository/GE/GrimoireEngine.git'"));
+        assert!(yaml.contains("target: '/Repository/GE/GrimoireEngine.git'"));
+        assert!(!yaml.contains("${HOST_GIT_WORKTREE_DIR}:${HOST_GIT_WORKTREE_DIR}"));
+    }
+
+    #[test]
     fn build_terminal_ansi_probe_counts_basic_color_sgr() {
         let bytes = b"hi \x1b[31mred\x1b[0m\n";
         let probe = build_terminal_ansi_probe("pane-x", bytes);
@@ -1857,15 +2071,20 @@ fn launch_agent_for_project_root(
                     env.insert(k.to_string(), v.to_string());
                 }
                 env.insert("COMPOSE_PROJECT_NAME".to_string(), container_name.clone());
+                apply_translated_git_env(&mut env);
 
-                let override_path =
-                    write_docker_compose_override(&project_root, &container_name, &service)?;
-                let compose_args = vec![
-                    "-f".to_string(),
-                    compose_path.to_string_lossy().to_string(),
-                    "-f".to_string(),
-                    override_path.to_string_lossy().to_string(),
-                ];
+                let mounts = build_git_bind_mounts(&env);
+                let mut compose_args =
+                    vec!["-f".to_string(), compose_path.to_string_lossy().to_string()];
+                if let Some(override_path) = write_docker_compose_override(
+                    &project_root,
+                    &container_name,
+                    &service,
+                    &mounts,
+                )? {
+                    compose_args.push("-f".to_string());
+                    compose_args.push(override_path.to_string_lossy().to_string());
+                }
 
                 docker_compose_up(
                     &working_dir,
@@ -1881,7 +2100,7 @@ fn launch_agent_for_project_root(
                 docker_env = Some(env);
                 docker_mode = DockerExecMode::Compose {
                     service,
-                    workdir: DOCKER_WORKDIR.to_string(),
+                    workdir: docker_compose_exec_workdir(None),
                     compose_args,
                 };
             }
@@ -1944,11 +2163,18 @@ fn launch_agent_for_project_root(
                         env.insert(k.to_string(), v.to_string());
                     }
                     env.insert("COMPOSE_PROJECT_NAME".to_string(), container_name.clone());
+                    apply_translated_git_env(&mut env);
 
-                    let override_path =
-                        write_docker_compose_override(&project_root, &container_name, &service)?;
-                    compose_args.push("-f".to_string());
-                    compose_args.push(override_path.to_string_lossy().to_string());
+                    let mounts = build_git_bind_mounts(&env);
+                    if let Some(override_path) = write_docker_compose_override(
+                        &project_root,
+                        &container_name,
+                        &service,
+                        &mounts,
+                    )? {
+                        compose_args.push("-f".to_string());
+                        compose_args.push(override_path.to_string_lossy().to_string());
+                    }
 
                     docker_compose_up(
                         &working_dir,
@@ -1962,16 +2188,9 @@ fn launch_agent_for_project_root(
                     docker_container_name = Some(container_name);
                     docker_compose_args = Some(compose_args.clone());
                     docker_env = Some(env);
-                    let workdir = cfg
-                        .workspace_folder
-                        .as_deref()
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| DOCKER_WORKDIR.to_string());
-
                     docker_mode = DockerExecMode::Compose {
                         service,
-                        workdir,
+                        workdir: docker_compose_exec_workdir(cfg.workspace_folder.as_deref()),
                         compose_args,
                     };
                 } else if let Some(image) = cfg
@@ -2222,6 +2441,8 @@ fn launch_agent_for_project_root(
             for (k, v) in &env_vars {
                 container_env.insert(k.to_string(), v.to_string());
             }
+            apply_translated_git_env(&mut container_env);
+            let git_mounts = build_git_bind_mounts(&container_env);
 
             // Mount the selected worktree and required git dirs, then run the agent in the container.
             let mount_target = workdir.clone();
@@ -2236,20 +2457,9 @@ fn launch_agent_for_project_root(
                 format!("{}:{}", working_dir.to_string_lossy(), mount_target),
             ];
 
-            if let (Some(common_dir), Some(worktree_gitdir)) = (
-                container_env
-                    .get("HOST_GIT_COMMON_DIR")
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty()),
-                container_env
-                    .get("HOST_GIT_WORKTREE_DIR")
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty()),
-            ) {
+            for mount in &git_mounts {
                 run_args.push("-v".to_string());
-                run_args.push(format!("{common_dir}:{common_dir}"));
-                run_args.push("-v".to_string());
-                run_args.push(format!("{worktree_gitdir}:{worktree_gitdir}"));
+                run_args.push(format!("{}:{}", mount.source, mount.target));
             }
 
             let mut keys: Vec<&String> = container_env.keys().collect();
@@ -2401,6 +2611,7 @@ pub fn cancel_launch_job(job_id: String, state: State<AppState>) -> Result<(), S
 fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_handle: AppHandle) {
     let state = app_handle.state::<AppState>();
     let mut buf = [0u8; 4096];
+    let mut stream_error: Option<String> = None;
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break, // EOF
@@ -2420,14 +2631,39 @@ fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_hand
                 // the frontend isn't ready (tab switch, hot reload, etc.).
                 let _ = app_handle.emit("terminal-output", &payload);
             }
-            Err(_) => break,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => {
+                stream_error = Some(err.to_string());
+                break;
+            }
         }
+    }
+
+    if let Some(details) = stream_error.as_deref() {
+        let status_message = format!("PTY stream error: {details}");
+        let output_message = format!("\r\n[{status_message}]\r\n");
+        let bytes = output_message.as_bytes();
+
+        if let Ok(mut manager) = state.pane_manager.lock() {
+            if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
+                pane.mark_error(status_message);
+                let _ = pane.process_bytes(bytes);
+            }
+        }
+
+        let payload = TerminalOutputPayload {
+            pane_id: pane_id.clone(),
+            data: bytes.to_vec(),
+        };
+        let _ = app_handle.emit("terminal-output", &payload);
     }
 
     // Update pane status after the PTY stream ends.
     let (exit_code, ended) = if let Ok(mut manager) = state.pane_manager.lock() {
         if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
-            let _ = pane.check_status();
+            if stream_error.is_none() {
+                let _ = pane.check_status();
+            }
             let exit_code = match pane.status() {
                 PaneStatus::Completed(code) => Some(*code),
                 _ => None,

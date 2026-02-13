@@ -9,7 +9,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "7.0.0"
+version = "7.2.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/akiojin/gwt"
@@ -21,6 +21,14 @@ gwt-core = { path = "crates/gwt-core" }
 
 # Error handling
 thiserror = "2"
+
+# Semver
+semver = "1"
+
+# Self-update payload extraction
+flate2 = "1.0"
+tar = "0.4"
+zip = "2.4"
 
 # Git operations
 gix = { version = "0.78", default-features = false, features = [

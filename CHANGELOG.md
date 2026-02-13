@@ -1,6 +1,61 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.2.0] - 2026-02-13
+
+### Bug Fixes
+
+- AI設定が無効/未設定時はVersion Historyの要約を実行しない (#1033)
+- **docker:** Stop forcing /workspace for compose exec (#1036)
+
+### Features
+
+- **agent-mode:** Enforce spec-kit gate and task assignee sidebar (#1035)
+
+## [7.1.2] - 2026-02-13
+
+### Bug Fixes
+
+- **gui:** Restore agent tabs without dropping live sessions (#1023)
+- Bare repo で origin/base 指定時の worktree base 解決を修正 (#1024)
+- **gui:** Strengthen terminal trackpad scroll fallback (#1025)
+- **migration:** Add cp fallback for backup copy on Windows (#1006) (#1026)
+- Docker起動時のWindows混在パスmountエラーを修正 (#1028) (#1030)
+- **windows:** Host OS起動時の空タブを防止 (#1029) (#1031)
+- Compose execで/workspaceを固定しない (#1032)
+
+### Testing
+
+- **gui:** Add Playwright WebView UI E2E baseline (#1001) (#1027)
+
+## [7.1.1] - 2026-02-13
+
+### Bug Fixes
+
+- リリースコマンドのタグ検出・バージョン重複・ステージング問題を修正 by @akiojin
+- **gui:** Wire sidebar launch and quick-start actions (#1020)
+- **gui:** Session Summaryタブの残存表示を削除 (#1019)
+- Color agent tabs by inferred agent (#1021)
+
+## [7.1.0] - 2026-02-13
+
+### Bug Fixes
+
+- Tauri.conf.json のバージョンを 7.1.0 に同期し、リリースコマンドに更新ステップを追加 by @akiojin
+- **windows:** Suppress transient git console windows (#1008) by @akiojin
+- MacOS配布をDMG一本化し、PKG関連を全削除 by @akiojin
+- Cleanup「Select All Safe」が機能しないserde不整合を修正 (#1014)
+- **tauri:** Handle Cmd+Q and Cmd/Ctrl+C V menu actions (#1011)
+- Improve agent mode ime and scroll (#1013)
+- **windows:** Complete no-window process helper migration (#1017)
+- Re-enable app self-update flow with dmg support (#1016)
+
+### Features
+
+- Add MCP server bridge for agent tab communication (#992) by @akiojin
+- **gui:** Make worktree summary panel height resizable (#1010)
+- Add GitHub Issue launch flow and stabilize gh detection (#1012)
+
 
 ## [7.0.0] - 2026-02-13
 

@@ -2,7 +2,6 @@
 
 use super::{MigrationConfig, MigrationError};
 use std::path::Path;
-use std::process::Command;
 use tracing::debug;
 
 /// Validation result
@@ -47,7 +46,7 @@ impl ValidationResult {
 /// Check available disk space (SPEC-a70a1ece T801, FR-212)
 pub fn check_disk_space(path: &Path) -> Result<(u64, u64), MigrationError> {
     // Get available space using df command
-    let output = Command::new("df")
+    let output = crate::process::command("df")
         .args(["-B1", "--output=avail"])
         .arg(path)
         .output()
@@ -79,7 +78,7 @@ pub fn check_disk_space(path: &Path) -> Result<(u64, u64), MigrationError> {
 
 /// Get directory size recursively
 fn get_directory_size(path: &Path) -> Result<u64, MigrationError> {
-    let output = Command::new("du")
+    let output = crate::process::command("du")
         .args(["-sb"])
         .arg(path)
         .output()

@@ -1,4 +1,5 @@
 import type { Tab, TerminalInfo } from "./types";
+import { inferAgentId } from "./agentUtils";
 
 /**
  * localStorage key used to persist agent tab state (per project path).
@@ -152,15 +153,21 @@ export function buildRestoredAgentTabs(
   terminals: TerminalInfo[],
 ): { tabs: Tab[]; activeTabId: string | null } {
   const existingPaneIds = new Set(terminals.map((t) => t.pane_id));
+  const terminalByPaneId = new Map(terminals.map((terminal) => [terminal.pane_id, terminal]));
 
   const restoredTabs: Tab[] = [];
   for (const t of stored.tabs) {
     if (!existingPaneIds.has(t.paneId)) continue;
+
+    const terminal = terminalByPaneId.get(t.paneId);
+    const agentId = inferAgentId(terminal?.agent_name);
+
     restoredTabs.push({
       id: `agent-${t.paneId}`,
       label: t.label,
       type: "agent",
       paneId: t.paneId,
+      ...(agentId ? { agentId } : {}),
     });
   }
 
