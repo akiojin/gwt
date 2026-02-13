@@ -219,6 +219,7 @@ describe("AgentLaunchForm", () => {
     const modelSelect = rendered.getByLabelText("Model") as HTMLSelectElement;
     const options = Array.from(modelSelect.options).map((option) => option.value);
     expect(options).toEqual([
+      "",
       "gpt-5.3-codex",
       "gpt-5.3-codex-spark",
       "gpt-5.2-codex",
@@ -252,7 +253,7 @@ describe("AgentLaunchForm", () => {
 
     const rendered = await renderLaunchForm({
       projectPath: "/tmp/project",
-      selectedBranch: "",
+      selectedBranch: "feature/main",
       onLaunch,
       onClose,
     });

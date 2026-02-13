@@ -122,6 +122,7 @@
   let agentTabsHydratedProjectPath: string | null = $state(null);
   let agentTabsRestoreToken = 0;
   const AGENT_TAB_RESTORE_RETRY_DELAY_MS = 150;
+  const AGENT_TAB_RESTORE_RETRY_MAX_DELAY_MS = 1200;
 
   let terminalCount = $derived(tabs.filter((t) => t.type === "agent").length);
 
@@ -437,6 +438,36 @@
     return b ? normalizeBranchName(b) : "Worktree";
   }
 
+  function mergeRestoredAgentTabs(existingTabs: Tab[], restoredTabs: Tab[]): Tab[] {
+    const nonAgentTabs = existingTabs.filter((t) => t.type !== "agent");
+    const restoredAgentPaneIds = new Set(restoredTabs.map((t) => t.paneId));
+    const preservedAgentTabs = existingTabs.filter((t) => {
+      return t.type === "agent" && typeof t.paneId === "string" && !restoredAgentPaneIds.has(t.paneId);
+    });
+
+    const dedupedPreserved: Tab[] = [];
+    const seen = new Set<string>();
+    for (const tab of preservedAgentTabs) {
+      if (!tab.paneId || seen.has(tab.paneId)) continue;
+      seen.add(tab.paneId);
+      dedupedPreserved.push(tab);
+    }
+
+    return [...nonAgentTabs, ...restoredTabs, ...dedupedPreserved];
+  }
+
+  function getAgentTabRestoreDelayMs(attempt: number): number {
+    return Math.min(
+      AGENT_TAB_RESTORE_RETRY_MAX_DELAY_MS,
+      AGENT_TAB_RESTORE_RETRY_DELAY_MS * 2 ** Math.min(attempt, 8),
+    );
+  }
+
+  function triggerRestoreProjectAgentTabs(targetProjectPath: string) {
+    const token = ++agentTabsRestoreToken;
+    void restoreProjectAgentTabs(targetProjectPath, token);
+  }
+
   async function handleAgentLaunch(request: LaunchAgentRequest) {
     const { invoke } = await import("@tauri-apps/api/core");
     const jobId = await invoke<string>("start_launch_job", { request });
@@ -459,6 +490,10 @@
 
     tabs = [...tabs, newTab];
     activeTabId = newTab.id;
+    if (projectPath) {
+      agentTabsHydratedProjectPath = null;
+      triggerRestoreProjectAgentTabs(projectPath);
+    }
 
     // Fallback: if the event API is not available, trigger a best-effort refresh.
     if (!worktreesEventAvailable) {
@@ -777,14 +812,18 @@
     if (shouldRetry && projectPath === targetProjectPath && agentTabsRestoreToken === token) {
       setTimeout(() => {
         void restoreProjectAgentTabs(targetProjectPath, token, attempt + 1);
-      }, AGENT_TAB_RESTORE_RETRY_DELAY_MS);
+      }, getAgentTabRestoreDelayMs(attempt));
+      return;
+    }
+
+    // Wait for terminal list to become available before persisting and wiping state.
+    if (stored.tabs.length > 0 && restored.tabs.length === 0) {
       return;
     }
 
     const restoredTabs = restored.tabs;
-
-    const preserved = tabs.filter((t) => t.type !== "agent");
-    tabs = [...preserved, ...restoredTabs];
+    const mergedTabs = mergeRestoredAgentTabs(tabs, restoredTabs);
+    tabs = mergedTabs;
 
     const allowOverrideActive =
       activeTabId === "summary" || activeTabId === "agentMode";
@@ -806,8 +845,7 @@
 
     agentTabsHydratedProjectPath = null;
     const target = projectPath;
-    const token = ++agentTabsRestoreToken;
-    void restoreProjectAgentTabs(target, token);
+    triggerRestoreProjectAgentTabs(target);
   });
 
   // Persist agent tabs per project (best-effort).
