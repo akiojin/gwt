@@ -450,7 +450,16 @@ impl WorktreeManager {
             WorktreePath::generate_with_location(&self.repo_root, &resolved_branch, self.location);
 
         // Git can still have this path registered even when the directory is missing.
-        // In that case, git worktree add fails with "missing but already registered worktree".
+        // If the path is already occupied by an active worktree, reuse it to keep
+        // branch resolution idempotent (for example, when an existing detached
+        // worktree is registered at the expected path).
+        if let Some(wt) = self.get_registered_worktree_by_path_basic(&path)? {
+            if wt.status == WorktreeStatus::Active {
+                return Ok(wt);
+            }
+        }
+
+        // In case only metadata is stale (missing/prunable), remove stale metadata if safe.
         self.handle_registered_worktree_path_conflict(&path, &mut did_prune)?;
 
         // FR-038-040: Handle existing path (auto-recovery disabled)
@@ -1283,6 +1292,30 @@ mod tests {
         );
 
         // Should not create a second worktree for the same branch.
+        let worktrees = manager.list().unwrap();
+        assert_eq!(worktrees.len(), 2);
+    }
+
+    #[test]
+    fn test_create_for_branch_reuses_active_registered_worktree_path() {
+        let temp = create_test_repo();
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+
+        let branch = "feature/reuse-path";
+        Branch::create(temp.path(), branch, "HEAD").unwrap();
+
+        // Register the expected worktree path as a detached active worktree.
+        let wt_path = WorktreePath::generate(temp.path(), branch);
+        run_git_in(
+            temp.path(),
+            &["worktree", "add", "--detach", wt_path.to_str().unwrap(), "HEAD"],
+        );
+
+        let wt = manager.create_for_branch(branch).unwrap();
+        assert_eq!(canonicalize_or_self(&wt.path), canonicalize_or_self(&wt_path));
+        assert!(wt.path.exists());
+
+        // Should not create a new worktree, only the existing main + detached worktree.
         let worktrees = manager.list().unwrap();
         assert_eq!(worktrees.len(), 2);
     }
