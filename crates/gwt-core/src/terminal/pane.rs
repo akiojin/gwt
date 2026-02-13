@@ -134,6 +134,11 @@ impl TerminalPane {
         Ok(&self.status)
     }
 
+    /// Mark this pane as errored.
+    pub fn mark_error(&mut self, message: impl Into<String>) {
+        self.status = PaneStatus::Error(message.into());
+    }
+
     /// Get the pane ID.
     pub fn pane_id(&self) -> &str {
         &self.pane_id
@@ -326,7 +331,22 @@ mod tests {
         assert_eq!(pane.status(), &PaneStatus::Completed(0));
     }
 
-    // 6. Accessor tests
+    // 6. Explicit error state test
+    #[test]
+    fn test_mark_error_sets_error_status() {
+        let config = make_config("/bin/sleep", vec!["60"]);
+        let mut pane = TerminalPane::new(config).expect("Failed to create pane");
+
+        pane.mark_error("pty read failed");
+        assert_eq!(
+            pane.status(),
+            &PaneStatus::Error("pty read failed".to_string())
+        );
+
+        let _ = pane.kill();
+    }
+
+    // 7. Accessor tests
     #[test]
     fn test_accessors() {
         let config = make_config("/bin/sleep", vec!["1"]);
@@ -340,7 +360,7 @@ mod tests {
         assert!(pane.started_at() <= chrono::Utc::now());
     }
 
-    // 7. Kill test
+    // 8. Kill test
     #[test]
     fn test_kill() {
         let config = make_config("/bin/sleep", vec!["60"]);

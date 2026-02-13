@@ -40,7 +40,6 @@ Windows ユーザーとして、Build Images / Force Recreate を有効にして
 **受け入れシナリオ**:
 
 1. **前提条件** composeサービスが `/workspace` を持たない、**操作** Docker起動後に `docker compose exec` を実行、**期待結果** 固定 `-w /workspace` を強制せず起動できる。
-
 ---
 
 ## エッジケース
