@@ -26,9 +26,34 @@ const branchFixture = {
   last_tool_usage: null,
 };
 
+const makeLocalStorageMock = () => {
+  const store = new Map<string, string>();
+  return {
+    getItem: (key: string) => (store.has(key) ? store.get(key) : null),
+    setItem: (key: string, value: string) => {
+      store.set(key, String(value));
+    },
+    removeItem: (key: string) => {
+      store.delete(key);
+    },
+    clear: () => {
+      store.clear();
+    },
+    key: (index: number) => Array.from(store.keys())[index] ?? null,
+    get length() {
+      return store.size;
+    },
+  };
+};
+
 describe("Sidebar", () => {
   beforeEach(() => {
     cleanup();
+    const mockLocalStorage = makeLocalStorageMock();
+    Object.defineProperty(globalThis, "localStorage", {
+      value: mockLocalStorage,
+      configurable: true,
+    });
     invokeMock.mockReset();
     invokeMock.mockResolvedValue([]);
   });
@@ -165,7 +190,55 @@ describe("Sidebar", () => {
     expect((launchMenuButton as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("shows ACTIVE badge for branches with open agent tabs", async () => {
+  it("uses default summary panel height when no persisted value exists", async () => {
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    const summaryWrap = rendered.container.querySelector(".worktree-summary-wrap");
+    expect(summaryWrap).toBeTruthy();
+    expect(summaryWrap?.getAttribute("style")).toContain("height: 360px");
+  });
+
+  it("restores summary panel height from localStorage", async () => {
+    window.localStorage.setItem("gwt.sidebar.worktreeSummaryHeight", "420");
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    const summaryWrap = rendered.container.querySelector(".worktree-summary-wrap");
+    expect(summaryWrap).toBeTruthy();
+    expect(summaryWrap?.getAttribute("style")).toContain("height: 420px");
+  });
+
+  it("falls back to default height when persisted value is invalid", async () => {
+    window.localStorage.setItem("gwt.sidebar.worktreeSummaryHeight", "invalid");
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    const summaryWrap = rendered.container.querySelector(".worktree-summary-wrap");
+    expect(summaryWrap).toBeTruthy();
+    expect(summaryWrap?.getAttribute("style")).toContain("height: 360px");
+  });
+
+  it("renders summary resize handle in branch mode", async () => {
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    const resizeHandle = rendered.container.querySelector(".summary-resize-handle");
+    expect(resizeHandle).toBeTruthy();
+    expect(resizeHandle?.getAttribute("aria-label")).toBe("Resize session summary");
+  });
+
+  it("shows spinner indicator for branches with open agent tabs", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "list_worktree_branches") {
         return [branchFixture];
@@ -201,6 +274,6 @@ describe("Sidebar", () => {
     });
 
     await rendered.findByText(branchFixture.name);
-    expect(rendered.getByText("ACTIVE")).toBeTruthy();
+    expect(rendered.getByTitle("Agent tab is open for this branch")).toBeTruthy();
   });
 });

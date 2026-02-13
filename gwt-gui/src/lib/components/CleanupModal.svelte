@@ -1,15 +1,19 @@
 <script lang="ts">
   import type { WorktreeInfo, CleanupResult } from "../types";
+  import { untrack } from "svelte";
+  import { flip } from "svelte/animate";
 
   let {
     open = false,
     preselectedBranch = null,
+    refreshKey = 0,
     agentTabBranches = [],
     projectPath,
     onClose,
   }: {
     open: boolean;
     preselectedBranch?: string | null;
+    refreshKey?: number;
     agentTabBranches?: string[];
     projectPath: string;
     onClose: () => void;
@@ -47,11 +51,24 @@
     disabled: 3,
   };
 
+  const isVitest = typeof (import.meta as unknown as { vitest?: unknown }).vitest !== "undefined";
+
+  const flipEnabled =
+    !isVitest &&
+    typeof navigator !== "undefined" &&
+    typeof navigator.userAgent === "string" &&
+    !navigator.userAgent.toLowerCase().includes("jsdom") &&
+    typeof (Element.prototype as unknown as { animate?: unknown }).animate === "function" &&
+    typeof (Element.prototype as unknown as { getAnimations?: unknown }).getAnimations === "function";
+
   let sortedWorktrees = $derived(
     [...worktrees].sort(
       (a, b) =>
-        (SAFETY_ORDER[a.safety_level] ?? 99) -
-        (SAFETY_ORDER[b.safety_level] ?? 99)
+        (isDisabled(a) ? 1 : 0) - (isDisabled(b) ? 1 : 0) ||
+        (a.branch && agentTabBranchSet.has(normalizeTabBranch(a.branch)) ? -1 : 0) -
+          (b.branch && agentTabBranchSet.has(normalizeTabBranch(b.branch)) ? -1 : 0) ||
+        (SAFETY_ORDER[a.safety_level] ?? 99) - (SAFETY_ORDER[b.safety_level] ?? 99) ||
+        (a.branch ?? a.path).localeCompare(b.branch ?? b.path)
     )
   );
 
@@ -86,18 +103,42 @@
 
   let hasActiveTabChecked = $derived(activeTabCheckedCount > 0);
 
+  let wasOpen = false;
+  let lastRefreshKey = -1;
+
   $effect(() => {
-    if (open) {
+    if (!open) {
+      wasOpen = false;
+      lastRefreshKey = -1;
+      return;
+    }
+
+    // Depend on refreshKey while open so the list updates when worktrees change.
+    const rk = refreshKey;
+
+    if (!wasOpen) {
+      wasOpen = true;
+      lastRefreshKey = rk;
       showFailures = false;
       failures = [];
-      fetchWorktrees();
+      untrack(() => {
+        fetchWorktrees({ preserveChecked: false });
+      });
+      return;
     }
+
+    if (rk === lastRefreshKey) return;
+    lastRefreshKey = rk;
+    untrack(() => {
+      fetchWorktrees({ preserveChecked: true });
+    });
   });
 
-  async function fetchWorktrees() {
+  async function fetchWorktrees({ preserveChecked }: { preserveChecked: boolean }) {
     loading = true;
     errorMessage = null;
-    checked = new Set();
+    const previouslyChecked = new Set(checked);
+    if (!preserveChecked) checked = new Set();
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       worktrees = await invoke<WorktreeInfo[]>("list_worktrees", {
@@ -105,11 +146,18 @@
       });
 
       // Pre-select branch if provided
-      if (preselectedBranch) {
+      if (!preserveChecked && preselectedBranch) {
         const wt = worktrees.find((w) => w.branch === preselectedBranch);
         if (wt && wt.safety_level !== "disabled") {
           checked = new Set([preselectedBranch]);
         }
+      } else if (preserveChecked) {
+        const allowed = new Set(
+          worktrees
+            .filter((w) => w.branch && w.safety_level !== "disabled")
+            .map((w) => w.branch as string)
+        );
+        checked = new Set([...previouslyChecked].filter((b) => allowed.has(b)));
       }
     } catch (err) {
       errorMessage = `Failed to list worktrees: ${toErrorMessage(err)}`;
@@ -294,7 +342,6 @@
                   <th class="col-check"></th>
                   <th class="col-safety"></th>
                   <th class="col-branch">Branch</th>
-                  <th class="col-agent">Agent</th>
                   <th class="col-status">Status</th>
                   <th class="col-markers">Changes</th>
                   <th class="col-sync">Ahead/Behind</th>
@@ -303,61 +350,82 @@
                 </tr>
               </thead>
               <tbody>
-                {#each sortedWorktrees as wt (wt.path)}
-                  {@const branch = wt.branch ?? "(detached)"}
-                  {@const disabled = isDisabled(wt)}
-                  <tr class:disabled>
-                    <td class="col-check">
-                      {#if wt.branch && !disabled}
-                        <input
-                          type="checkbox"
-                          checked={checked.has(wt.branch)}
-                          onchange={() => toggleCheck(wt.branch!)}
-                        />
-                      {:else}
-                        <input type="checkbox" disabled checked={false} />
-                      {/if}
-                    </td>
-                    <td class="col-safety">
-                      <span class="safety-dot {safetyDotClass(wt.safety_level)}"></span>
-                    </td>
-                    <td class="col-branch mono">{branch}</td>
-                    <td class="col-agent">
-                      {#if wt.branch && agentTabBranchSet.has(normalizeTabBranch(wt.branch))}
-                        <span class="active-badge" title="Agent tab is open for this worktree">
-                          ACTIVE
+                {#snippet renderRowCells(wt: WorktreeInfo, disabled: boolean)}
+                  <td class="col-check">
+                    {#if wt.branch && !disabled}
+                      <input
+                        type="checkbox"
+                        checked={checked.has(wt.branch)}
+                        onchange={() => toggleCheck(wt.branch!)}
+                      />
+                    {:else}
+                      <input type="checkbox" disabled checked={false} />
+                    {/if}
+                  </td>
+                  <td class="col-safety">
+                    <span class="safety-dot {safetyDotClass(wt.safety_level)}"></span>
+                  </td>
+                  <td class="col-branch mono">
+                    {#if wt.branch && agentTabBranchSet.has(normalizeTabBranch(wt.branch))}
+                      <span
+                        class="agent-tab-icon"
+                        title="Agent tab is open for this worktree"
+                        role="img"
+                        aria-label="Agent tab is open for this worktree"
+                      >
+                        <span class="agent-tab-bars" aria-hidden="true">
+                          <span class="agent-tab-bar b1"></span>
+                          <span class="agent-tab-bar b2"></span>
+                          <span class="agent-tab-bar b3"></span>
                         </span>
-                      {/if}
-                    </td>
-                    <td class="col-status">{wt.status}</td>
-                    <td class="col-markers">
-                      {#if wt.has_changes}
-                        <span class="marker marker-changes" title="Uncommitted changes">M</span>
-                      {/if}
-                      {#if wt.has_unpushed}
-                        <span class="marker marker-unpushed" title="Unpushed commits">U</span>
-                      {/if}
-                    </td>
-                    <td class="col-sync">
-                      {#if wt.ahead > 0}
-                        <span class="sync-ahead">+{wt.ahead}</span>
-                      {/if}
-                      {#if wt.behind > 0}
-                        <span class="sync-behind">-{wt.behind}</span>
-                      {/if}
-                    </td>
-                    <td class="col-gone">
-                      {#if wt.is_gone}
-                        <span class="gone-badge">gone</span>
-                      {/if}
-                    </td>
-                    <td class="col-tool">
-                      {#if wt.last_tool_usage}
-                        <span class="tool-label">{wt.last_tool_usage}</span>
-                      {/if}
-                    </td>
-                  </tr>
-                {/each}
+                        <span class="agent-tab-fallback" aria-hidden="true">@</span>
+                      </span>
+                    {/if}
+                    {wt.branch ?? "(detached)"}
+                  </td>
+                  <td class="col-status">{wt.status}</td>
+                  <td class="col-markers">
+                    {#if wt.has_changes}
+                      <span class="marker marker-changes" title="Uncommitted changes">M</span>
+                    {/if}
+                    {#if wt.has_unpushed}
+                      <span class="marker marker-unpushed" title="Unpushed commits">U</span>
+                    {/if}
+                  </td>
+                  <td class="col-sync">
+                    {#if wt.ahead > 0}
+                      <span class="sync-ahead">+{wt.ahead}</span>
+                    {/if}
+                    {#if wt.behind > 0}
+                      <span class="sync-behind">-{wt.behind}</span>
+                    {/if}
+                  </td>
+                  <td class="col-gone">
+                    {#if wt.is_gone}
+                      <span class="gone-badge">gone</span>
+                    {/if}
+                  </td>
+                  <td class="col-tool">
+                    {#if wt.last_tool_usage}
+                      <span class="tool-label">{wt.last_tool_usage}</span>
+                    {/if}
+                  </td>
+                {/snippet}
+                {#if flipEnabled}
+                  {#each sortedWorktrees as wt (wt.path)}
+                    {@const disabled = isDisabled(wt)}
+                    <tr class:disabled animate:flip={{ duration: 220 }}>
+                      {@render renderRowCells(wt, disabled)}
+                    </tr>
+                  {/each}
+                {:else}
+                  {#each sortedWorktrees as wt (wt.path)}
+                    {@const disabled = isDisabled(wt)}
+                    <tr class:disabled>
+                      {@render renderRowCells(wt, disabled)}
+                    </tr>
+                  {/each}
+                {/if}
               </tbody>
             </table>
           </div>
@@ -653,7 +721,6 @@
   }
 
   .col-status,
-  .col-agent,
   .col-markers,
   .col-sync,
   .col-gone,
@@ -705,14 +772,80 @@
     border: 1px solid rgba(243, 139, 168, 0.3);
   }
 
-  .active-badge {
-    font-size: 10px;
-    padding: 1px 6px;
-    border-radius: 999px;
-    background: rgba(148, 226, 213, 0.12);
+  .agent-tab-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 12px;
+    margin-right: 4px;
     color: var(--cyan);
-    border: 1px solid rgba(148, 226, 213, 0.35);
+    text-align: center;
+    height: 12px;
+    line-height: 1;
+    vertical-align: middle;
+  }
+
+  .agent-tab-bars {
+    display: inline-flex;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 1px;
+    height: 10px;
+  }
+
+  .agent-tab-bar {
+    width: 2px;
+    height: 4px;
+    border-radius: 1px;
+    background: var(--cyan);
+    opacity: 0.85;
+    transform-origin: bottom;
+    animation: agentTabBars 0.9s ease-in-out infinite;
+  }
+
+  .agent-tab-bar.b1 {
+    animation-delay: 0ms;
+  }
+
+  .agent-tab-bar.b2 {
+    animation-delay: 150ms;
+  }
+
+  .agent-tab-bar.b3 {
+    animation-delay: 300ms;
+  }
+
+  /* Graphical activity indicator for worktrees with open agent tabs */
+  @keyframes agentTabBars {
+    0%,
+    100% {
+      transform: scaleY(0.35);
+      opacity: 0.55;
+    }
+    50% {
+      transform: scaleY(1);
+      opacity: 1;
+    }
+  }
+
+  .agent-tab-fallback {
+    display: none;
+    font-size: 11px;
     font-family: monospace;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .agent-tab-bars {
+      display: none;
+    }
+
+    .agent-tab-bar {
+      animation: none;
+    }
+
+    .agent-tab-fallback {
+      display: flex;
+    }
   }
 
   .tool-label {

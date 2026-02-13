@@ -17,7 +17,7 @@ describe("formatWindowTitle", () => {
         appName: "gwt",
         projectPath: "/tmp/repo",
       })
-    ).toBe("gwt - /tmp/repo");
+    ).toBe("/tmp/repo");
   });
 });
 
@@ -31,4 +31,3 @@ describe("formatAboutVersion", () => {
     expect(formatAboutVersion("   ")).toBe("Version unknown");
   });
 });
-

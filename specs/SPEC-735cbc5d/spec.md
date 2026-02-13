@@ -1,4 +1,4 @@
-# GitView in Session Summary
+# GitView in Worktree Summary Panel
 
 **SPEC ID**: `SPEC-735cbc5d`
 **Created**: 2026-02-10
@@ -9,7 +9,7 @@
 
 ## 概要
 
-Session Summary タブ内に折りたたみ式の Git セクションを追加し、
+Worktree一覧下部の Worktree Summary パネル内に折りたたみ式の Git セクションを追加し、
 ブランチの変更状況（Changes / Commits / Stash）を視覚的に確認できるようにする。
 TUI 版 GitView の GUI 移植として、エージェントがブランチで何を変えたかの
 全体像を把握するための機能。
@@ -20,26 +20,28 @@ TUI 版 GitView の GUI 移植として、エージェントがブランチで�
 ## UI レイアウト概要
 
 ```text
-Session Summary タブ
-├── AI Summary セクション（既存）
-├── Quick Start セクション（既存）
-└── Git セクション（新規・折りたたみ式）  ← Quick Start の下に配置
-    ├── ヘッダー: [v] Git  5 files, 3 commits, 1 stash  [Refresh]
-    ├── 基準ブランチドロップダウン: [main v]
-    └── タブ: [Changes] [Commits] [Stash]
-        ├── Changes タブ（デフォルト）
-        │   ├── フィルター: [Committed] [Uncommitted]
-        │   └── ディレクトリツリー（全展開）
-        │       ├── src/
-        │       │   ├── main.rs  ████░  +45 -12
-        │       │   └── lib.rs   █████  +8 -0
-        │       └── Cargo.toml   ██░░░  +3 -5
-        ├── Commits タブ
-        │   ├── a1b2c3d feat: add login  2 hours ago
-        │   ├── d4e5f6g fix: typo        3 hours ago
-        │   └── [Show more]
-        └── Stash タブ（0件なら非表示）
-            └── stash@{0}: WIP on feature (3 files)
+Sidebar（Branch Mode）
+├── Worktree一覧（既存）
+└── Worktree Summary パネル（新規配置）
+    ├── AI Summary セクション（既存内容を移設）
+    ├── Quick Start セクション（既存内容を移設）
+    └── Git セクション（新規・折りたたみ式）
+        ├── ヘッダー: [v] Git  5 files, 3 commits, 1 stash  [Refresh]
+        ├── 基準ブランチドロップダウン: [main v]
+        └── タブ: [Changes] [Commits] [Stash]
+            ├── Changes タブ（デフォルト）
+            │   ├── フィルター: [Committed] [Uncommitted]
+            │   └── ディレクトリツリー（全展開）
+            │       ├── src/
+            │       │   ├── main.rs  ████░  +45 -12
+            │       │   └── lib.rs   █████  +8 -0
+            │       └── Cargo.toml   ██░░░  +3 -5
+            ├── Commits タブ
+            │   ├── a1b2c3d feat: add login  2 hours ago
+            │   ├── d4e5f6g fix: typo        3 hours ago
+            │   └── [Show more]
+            └── Stash タブ（0件なら非表示）
+                └── stash@{0}: WIP on feature (3 files)
 ```
 
 ## User Scenarios and Tests
@@ -153,7 +155,7 @@ Git セクションが折りたたまれた状態でも、ヘッダーにサマ�
 
 **Acceptance scenarios**:
 
-1. **Given** Session Summary 表示中, **When** Git セクションが折りたたまれている,
+1. **Given** Worktree Summary パネル表示中, **When** Git セクションが折りたたまれている,
    **Then** ヘッダーに "X files, Y commits, Z stash" のサマリーが表示される。
 2. **Given** Git セクションヘッダー, **When** リフレッシュアイコンをクリック,
    **Then** Git 情報が再取得され、スピナー + "Loading git info..." が表示される。
@@ -195,7 +197,7 @@ diff が develop との比較に切り替わる。
 
 ### Functional Requirements
 
-- **FR-001**: Session Summary タブ内の Quick Start セクションの下に
+- **FR-001**: Worktree一覧下部の Worktree Summary パネル内で、Quick Start セクションの下に
   折りたたみ式の Git セクションを表示する。デフォルトは折りたたみ状態。
 - **FR-002**: Git セクションヘッダーにサマリー情報（ファイル数、コミット数、
   stash 数）を "X files, Y commits, Z stash" 形式で表示する。
@@ -227,7 +229,7 @@ diff が develop との比較に切り替わる。
   diff 展開を不可にする。
 - **FR-015**: 1 ファイルあたり 1000 行を超える diff は切り詰めて
   "Too large to display" と表示する。
-- **FR-016**: Git 情報はタブ表示時に取得し、リフレッシュボタンで手動更新する。
+- **FR-016**: Git 情報は Worktree Summary パネル表示時に取得し、リフレッシュボタンで手動更新する。
   取得中はスピナー + "Loading git info..." を表示する。
 - **FR-017**: Git リポジトリでないプロジェクトでは Git セクションを非表示にする。
 

@@ -12,6 +12,7 @@ use gwt_core::config::{ProfilesConfig, ResolvedAISettings, ToolSessionEntry};
 use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::terminal::scrollback::ScrollbackFile;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -536,6 +537,42 @@ fn get_branch_session_summary_immediate(
     };
 
     Ok((immediate, Some(SummaryJob::Session(job))))
+}
+
+pub(crate) fn prewarm_missing_worktree_summaries(
+    project_path: String,
+    branches: Vec<String>,
+    app_handle: AppHandle,
+) {
+    if branches.is_empty() {
+        return;
+    }
+
+    let state = app_handle.state::<AppState>();
+    let mut seen = HashSet::new();
+
+    for branch in branches {
+        let branch = branch.trim().to_string();
+        if branch.is_empty() || !seen.insert(branch.clone()) {
+            continue;
+        }
+
+        let Ok((_, maybe_job)) =
+            get_branch_session_summary_immediate(&project_path, &branch, &state)
+        else {
+            continue;
+        };
+
+        match maybe_job {
+            Some(SummaryJob::Session(job)) => {
+                start_session_summary_job(job, &state, app_handle.clone())
+            }
+            Some(SummaryJob::Scrollback(job)) => {
+                start_scrollback_summary_job(job, &state, app_handle.clone())
+            }
+            None => {}
+        }
+    }
 }
 
 fn is_latest_branch_session(repo_key: &str, branch: &str, tool_id: &str, session_id: &str) -> bool {

@@ -67,9 +67,8 @@ pub struct AppState {
     ///
     /// Only stores windows that currently have a project opened.
     pub window_projects: Mutex<HashMap<String, String>>,
-    /// One-shot permission to allow a window to actually close (instead of hiding to tray).
-    ///
-    /// Used to implement macOS Cmd+Q as "close the focused window" while keeping (x) as "hide".
+    /// One-shot permission to allow a window to actually close (instead of always hiding it).
+    /// Used by close-event flows that explicitly permit destruction.
     pub windows_allowed_to_close: Mutex<HashSet<String>>,
     /// Agent tab state per window label for native Window menu rendering.
     pub window_agent_tabs: Mutex<HashMap<String, WindowAgentTabsState>>,
@@ -182,7 +181,7 @@ impl AppState {
         map.get(window_label).cloned().unwrap_or_default()
     }
 
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[allow(dead_code)]
     pub fn allow_window_close(&self, window_label: &str) {
         if let Ok(mut set) = self.windows_allowed_to_close.lock() {
             set.insert(window_label.to_string());

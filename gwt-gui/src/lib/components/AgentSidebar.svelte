@@ -22,6 +22,7 @@
   let sessionSummaryError: string | null = $state(null);
   let sessionSummaryToolId: string | null = $state(null);
   let sessionSummarySessionId: string | null = $state(null);
+  const SESSION_SUMMARY_POLL_INTERVAL_MS = 5000;
 
   function normalizeBranchName(name: string): string {
     const trimmed = name.trim();
@@ -137,7 +138,8 @@
     }
   }
 
-  async function loadSessionSummary() {
+  async function loadSessionSummary(options: { silent?: boolean } = {}) {
+    const silent = options.silent === true;
     sessionSummaryError = null;
     sessionSummaryWarning = null;
 
@@ -152,11 +154,13 @@
     }
 
     const key = `${projectPath}::${branch}`;
-    sessionSummaryLoading = true;
-    sessionSummaryGenerating = false;
-    sessionSummaryStatus = "";
-    sessionSummaryToolId = null;
-    sessionSummarySessionId = null;
+    if (!silent) {
+      sessionSummaryLoading = true;
+      sessionSummaryGenerating = false;
+      sessionSummaryStatus = "";
+      sessionSummaryToolId = null;
+      sessionSummarySessionId = null;
+    }
 
     try {
       const { invoke } = await import("@tauri-apps/api/core");
@@ -178,7 +182,7 @@
       sessionSummarySessionId = null;
       sessionSummaryError = `Failed to load summary: ${toErrorMessage(err)}`;
     } finally {
-      if (`${projectPath}::${activeBranchName()}` === key) {
+      if (`${projectPath}::${activeBranchName()}` === key && !silent) {
         sessionSummaryLoading = false;
       }
     }
@@ -195,7 +199,27 @@
     void projectPath;
     void selectedBranch;
     void currentBranch;
+    const branch = activeBranchName();
+    if (!branch) {
+      loadSessionSummary();
+      return;
+    }
+
     loadSessionSummary();
+
+    const timer = window.setInterval(() => {
+      if (
+        sessionSummaryStatus === "disabled" ||
+        sessionSummaryStatus === "ai-not-configured"
+      ) {
+        return;
+      }
+      loadSessionSummary({ silent: true });
+    }, SESSION_SUMMARY_POLL_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(timer);
+    };
   });
 </script>
 

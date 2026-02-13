@@ -62,17 +62,19 @@
   }
 
   function onKeydown(event: KeyboardEvent) {
-    if (
-      isComposing ||
-      ignoreEnterAfterComposition ||
-      event.isComposing ||
-      event.key === "Process"
-    ) {
+    if (event.key === "Enter") {
+      if (isComposing || ignoreEnterAfterComposition || event.isComposing) {
+        event.preventDefault();
+        return;
+      }
+      if (!event.shiftKey) {
+        event.preventDefault();
+        void sendMessage();
+      }
       return;
     }
-    if (event.key === "Enter" && !event.shiftKey) {
+    if (event.key === "Process" && (isComposing || event.isComposing)) {
       event.preventDefault();
-      void sendMessage();
     }
   }
 
@@ -124,7 +126,9 @@
       <div class="agent-empty">Describe your task to start.</div>
     {:else}
       {#each state.messages as msg}
-        <div class={`agent-message ${msg.role} ${msg.kind ?? "message"}`}>
+        <div
+          class={`agent-message ${msg.role} ${msg.kind ?? "message"} ${msg.role === "assistant" && (msg.kind === null || msg.kind === "message" || typeof msg.kind === "undefined") ? "meta-hidden" : ""}`}
+        >
           <div class="agent-bubble">
             <div class="agent-meta">{msg.kind ?? msg.role}</div>
             <div class="agent-content">{msg.content}</div>
@@ -291,7 +295,7 @@
   }
 
   .agent-message.user .agent-meta,
-  .agent-message.assistant .agent-meta {
+  .agent-message.meta-hidden .agent-meta {
     display: none;
   }
 
