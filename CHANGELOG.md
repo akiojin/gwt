@@ -6,18 +6,22 @@ All notable changes to this project will be documented in this file.
 ### Bug Fixes
 
 - **build:** Correct WiX binary source path for gwt-tauri crate name by @akiojin
-- **gui:** Prewarm worktree summaries and move summary panel to sidebar (#1005)
-- MacOS PKGインストーラーのリロケーション問題を修正
-- **ci:** MacOS署名で Application/Installer 両証明書をインポート
+- **gui:** Prewarm worktree summaries and move summary panel to sidebar (#1005) by @akiojin
+- MacOS PKGインストーラーのリロケーション問題を修正 by @akiojin
+- **ci:** MacOS署名で Application/Installer 両証明書をインポート by @akiojin
+- Tauri.conf.json のバージョンを 7.1.0 に同期し、リリースコマンドに更新ステップを追加
+- **windows:** Suppress transient git console windows (#1008)
+- MacOS配布をDMG一本化し、PKG関連を全削除
 
 ### Documentation
 
-- SPEC-c6ba640a GitHub Issue連携（GUI版）仕様策定 (#1004)
+- SPEC-c6ba640a GitHub Issue連携（GUI版）仕様策定 (#1004) by @akiojin
 
 ### Features
 
 - Add voice input mode for GUI keyboard inputs (#1002) by @akiojin
-- MacOSインストーラーにコード署名と公証を追加
+- MacOSインストーラーにコード署名と公証を追加 by @akiojin
+- Add MCP server bridge for agent tab communication (#992)
 
 
 ## [7.0.0] - 2026-02-13
