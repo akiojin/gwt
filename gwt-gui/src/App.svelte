@@ -31,13 +31,25 @@
   import { inferAgentId } from "./lib/agentUtils";
   import {
     AGENT_TAB_RESTORE_MAX_RETRIES,
-    loadStoredProjectAgentTabs,
-    persistStoredProjectAgentTabs,
-    buildRestoredAgentTabs,
+    loadStoredProjectTabs,
+    persistStoredProjectTabs,
+    buildRestoredProjectTabs,
     shouldRetryAgentTabRestore,
+    type StoredProjectTab,
+    type StoredTerminalTab,
   } from "./lib/agentTabsPersistence";
-  import type { StoredAgentTab } from "./lib/agentTabsPersistence";
-  import { defaultAppTabs, shouldAllowRestoredActiveTab } from "./lib/appTabs";
+  import {
+    defaultAppTabs,
+    reorderTabsByDrop,
+    shouldAllowRestoredActiveTab,
+    type TabDropPosition,
+  } from "./lib/appTabs";
+  import {
+    runStartupUpdateCheck,
+    STARTUP_UPDATE_INITIAL_DELAY_MS,
+    STARTUP_UPDATE_RETRY_DELAY_MS,
+    STARTUP_UPDATE_MAX_RETRIES,
+  } from "./lib/update/startupUpdate";
   import {
     VoiceInputController,
     type VoiceControllerState,
@@ -188,6 +200,7 @@
   let osEnvDebugData = $state<CapturedEnvInfo | null>(null);
   let osEnvDebugLoading = $state(false);
   let osEnvDebugError = $state<string | null>(null);
+  type AvailableUpdateState = Extract<UpdateState, { state: "available" }>;
 
   function showToast(
     message: string,
@@ -206,6 +219,22 @@
     }
   }
 
+  function showAvailableUpdateToast(s: AvailableUpdateState, force = false) {
+    if (!force && lastUpdateToastVersion === s.latest) return;
+    lastUpdateToastVersion = s.latest;
+
+    if (s.asset_url) {
+      showToast(`Update available: v${s.latest} (click update)`, 0, {
+        kind: "apply-update",
+        latest: s.latest,
+      });
+    } else {
+      showToast(
+        `Update available: v${s.latest}. Manual download required.`,
+        15000,
+      );
+    }
+  }
   async function confirmAndApplyUpdate(latest: string) {
     try {
       const { confirm } = await import("@tauri-apps/plugin-dialog");
@@ -360,34 +389,22 @@
   // Best-effort: request update state once on startup.
   $effect(() => {
     if (lastUpdateToastVersion !== null) return;
-    let cancelled = false;
-    (async () => {
-      try {
+    const controller = new AbortController();
+    void runStartupUpdateCheck({
+      signal: controller.signal,
+      initialDelayMs: STARTUP_UPDATE_INITIAL_DELAY_MS,
+      retryDelayMs: STARTUP_UPDATE_RETRY_DELAY_MS,
+      maxRetries: STARTUP_UPDATE_MAX_RETRIES,
+      checkUpdate: async () => {
         const { invoke } = await import("@tauri-apps/api/core");
-        const s = await invoke<UpdateState>("check_app_update", {
-          force: false,
-        });
-        if (cancelled) return;
-        if (s.state !== "available") return;
-
-        lastUpdateToastVersion = s.latest;
-        if (s.asset_url) {
-          showToast(`Update available: v${s.latest} (click update)`, 0, {
-            kind: "apply-update",
-            latest: s.latest,
-          });
-        } else {
-          showToast(
-            `Update available: v${s.latest}. Manual download required.`,
-            15000,
-          );
-        }
-      } catch {
-        // Ignore: update check should not block UI startup.
-      }
-    })();
+        return invoke<UpdateState>("check_app_update", { force: false });
+      },
+      onAvailable: (s) => {
+        showAvailableUpdateToast(s);
+      },
+    });
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   });
 
@@ -403,20 +420,7 @@
           (event) => {
             const s = event.payload;
             if (s.state !== "available") return;
-            if (lastUpdateToastVersion === s.latest) return;
-            lastUpdateToastVersion = s.latest;
-
-            if (s.asset_url) {
-              showToast(`Update available: v${s.latest} (click update)`, 0, {
-                kind: "apply-update",
-                latest: s.latest,
-              });
-            } else {
-              showToast(
-                `Update available: v${s.latest}. Manual download required.`,
-                15000,
-              );
-            }
+            showAvailableUpdateToast(s);
           },
         );
         if (cancelled) {
@@ -821,7 +825,7 @@
   }
 
   async function respawnStoredTerminalTabs(
-    storedTabs: StoredAgentTab[],
+    storedTabs: StoredTerminalTab[],
     targetProjectPath: string,
     token: number,
   ): Promise<{ tabs: Tab[]; paneIdMap: Map<string, string> }> {
@@ -865,31 +869,37 @@
     return { tabs: restoredTabs, paneIdMap };
   }
 
-  function mergeRestoredAgentTabs(
-    existingTabs: Tab[],
-    restoredTabs: Tab[],
-  ): Tab[] {
-    const nonAgentTabs = existingTabs.filter(
-      (t) => t.type !== "agent" && t.type !== "terminal",
-    );
-    const restoredAgentPaneIds = new Set(restoredTabs.map((t) => t.paneId));
-    const preservedAgentTabs = existingTabs.filter((t) => {
-      return (
-        (t.type === "agent" || t.type === "terminal") &&
-        typeof t.paneId === "string" &&
-        !restoredAgentPaneIds.has(t.paneId)
-      );
-    });
+  function tabMergeKey(tab: Tab): string {
+    if (
+      (tab.type === "agent" || tab.type === "terminal") &&
+      typeof tab.paneId === "string" &&
+      tab.paneId.length > 0
+    ) {
+      return `pane:${tab.paneId}`;
+    }
+    return `id:${tab.id}`;
+  }
 
-    const dedupedPreserved: Tab[] = [];
-    const seen = new Set<string>();
-    for (const tab of preservedAgentTabs) {
-      if (!tab.paneId || seen.has(tab.paneId)) continue;
-      seen.add(tab.paneId);
-      dedupedPreserved.push(tab);
+  function mergeRestoredTabs(existingTabs: Tab[], restoredTabs: Tab[]): Tab[] {
+    const merged = [...restoredTabs];
+    const seen = new Set(merged.map(tabMergeKey));
+
+    for (const tab of existingTabs) {
+      const key = tabMergeKey(tab);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(tab);
     }
 
-    return [...nonAgentTabs, ...restoredTabs, ...dedupedPreserved];
+    if (!merged.some((tab) => tab.id === "agentMode")) {
+      merged.unshift({
+        id: "agentMode",
+        label: "Agent Mode",
+        type: "agentMode",
+      });
+    }
+
+    return merged;
   }
 
   function getAgentTabRestoreDelayMs(attempt: number): number {
@@ -993,6 +1003,16 @@
 
   function handleTabSelect(tabId: string) {
     activeTabId = tabId;
+  }
+
+  function handleTabReorder(
+    dragTabId: string,
+    overTabId: string,
+    position: TabDropPosition,
+  ) {
+    const nextTabs = reorderTabsByDrop(tabs, dragTabId, overTabId, position);
+    if (nextTabs === tabs) return;
+    tabs = nextTabs;
   }
 
   function openSettingsTab() {
@@ -1231,7 +1251,7 @@
       }
       case "close-project":
         {
-          // Kill all terminal tab PTYs before clearing state.
+          // Kill plain terminal tab PTYs before clearing state.
           const terminalPanes = tabs
             .filter((t) => t.type === "terminal" && t.paneId)
             .map((t) => t.paneId as string);
@@ -1295,19 +1315,8 @@
                 showToast("Up to date.");
                 break;
               case "available":
-                lastUpdateToastVersion = s.latest;
-                if (s.asset_url) {
-                  showToast(
-                    `Update available: v${s.latest} (click update)`,
-                    0,
-                    { kind: "apply-update", latest: s.latest },
-                  );
-                } else {
-                  showToast(
-                    `Update available: v${s.latest}. Manual download required.`,
-                    15000,
-                  );
-                }
+                // Manual check should surface availability even when startup already notified.
+                showAvailableUpdateToast(s, true);
                 break;
               case "failed":
                 showToast(`Update check failed: ${s.message}`);
@@ -1324,7 +1333,9 @@
       case "list-terminals":
         // Just switch to first terminal tab if any
         {
-          const firstAgent = tabs.find((t) => t.type === "agent");
+          const firstAgent = tabs.find(
+            (t) => t.type === "agent" || t.type === "terminal",
+          );
           if (firstAgent) {
             activeTabId = firstAgent.id;
           }
@@ -1416,7 +1427,7 @@
     token: number,
     attempt = 0,
   ) {
-    const stored = loadStoredProjectAgentTabs(targetProjectPath);
+    const stored = loadStoredProjectTabs(targetProjectPath);
 
     // Even if no stored state exists, mark hydrated so persistence can proceed.
     if (!stored) {
@@ -1441,9 +1452,9 @@
       return;
     }
 
-    const restored = buildRestoredAgentTabs(stored, terminals);
+    const restored = buildRestoredProjectTabs(stored, terminals);
     const storedAgentTabsCount = stored.tabs.filter(
-      (t) => t.type !== "terminal",
+      (t) => t.type === "agent",
     ).length;
     const restoredAgentTabsCount = restored.tabs.filter(
       (t) => t.type === "agent",
@@ -1476,13 +1487,18 @@
       return;
     }
 
-    const restoredTabs = [...restored.tabs, ...respawnedTerminalResult.tabs];
-    const mergedTabs = mergeRestoredAgentTabs(tabs, restoredTabs);
+    const mergedTabs = mergeRestoredTabs(tabs, [
+      ...restored.tabs,
+      ...respawnedTerminalResult.tabs,
+    ]);
     tabs = mergedTabs;
 
     const allowOverrideActive = shouldAllowRestoredActiveTab(activeTabId);
     if (allowOverrideActive) {
-      if (restored.activeTabId) {
+      if (
+        restored.activeTabId &&
+        mergedTabs.some((tab) => tab.id === restored.activeTabId)
+      ) {
         activeTabId = restored.activeTabId;
       } else if (restored.activeTerminalPaneIdToRespawn) {
         const paneId = respawnedTerminalResult.paneIdMap.get(
@@ -1492,12 +1508,14 @@
           activeTabId = `terminal-${paneId}`;
         }
       }
+    } else if (!mergedTabs.some((tab) => tab.id === activeTabId)) {
+      activeTabId = mergedTabs[0]?.id ?? "agentMode";
     }
 
     agentTabsHydratedProjectPath = targetProjectPath;
   }
 
-  // Restore persisted agent tabs when a project is opened.
+  // Restore persisted tabs when a project is opened.
   $effect(() => {
     void projectPath;
 
@@ -1511,7 +1529,7 @@
     triggerRestoreProjectAgentTabs(target);
   });
 
-  // Persist agent tabs per project (best-effort).
+  // Persist tabs per project (best-effort).
   $effect(() => {
     void projectPath;
     void tabs;
@@ -1521,36 +1539,53 @@
     if (!projectPath) return;
     if (agentTabsHydratedProjectPath !== projectPath) return;
 
-    const agentTabs = tabs
-      .filter(
-        (t) =>
-          (t.type === "agent" || t.type === "terminal") &&
-          typeof t.paneId === "string" &&
-          t.paneId.length > 0,
-      )
-      .map((t) => {
-        if (t.type === "terminal") {
-          return {
-            paneId: t.paneId as string,
-            label: t.label,
-            type: "terminal" as const,
-            cwd: t.cwd,
-          };
-        }
-        return { paneId: t.paneId as string, label: t.label };
-      });
+    const storedTabs: StoredProjectTab[] = [];
+    for (const tab of tabs) {
+      if (tab.type === "agent") {
+        if (typeof tab.paneId !== "string" || tab.paneId.length === 0) continue;
+        storedTabs.push({
+          type: "agent",
+          paneId: tab.paneId,
+          label: tab.label,
+          ...(tab.agentId ? { agentId: tab.agentId } : {}),
+        });
+        continue;
+      }
+      if (tab.type === "terminal") {
+        if (typeof tab.paneId !== "string" || tab.paneId.length === 0) continue;
+        storedTabs.push({
+          type: "terminal",
+          paneId: tab.paneId,
+          label: tab.label,
+          ...(tab.cwd ? { cwd: tab.cwd } : {}),
+        });
+        continue;
+      }
+      if (
+        tab.type === "agentMode" ||
+        tab.type === "settings" ||
+        tab.type === "versionHistory"
+      ) {
+        storedTabs.push({
+          type: tab.type,
+          id: tab.id,
+          label: tab.label,
+        });
+      }
+    }
 
-    const active = tabs.find((t) => t.id === activeTabId);
-    const activePaneId =
-      (active?.type === "agent" || active?.type === "terminal") &&
-      typeof active.paneId === "string" &&
-      active.paneId.length > 0
-        ? active.paneId
-        : null;
+    const storedActiveTabId = storedTabs.some((tab) => {
+      if (tab.type === "agent") return `agent-${tab.paneId}` === activeTabId;
+      if (tab.type === "terminal")
+        return `terminal-${tab.paneId}` === activeTabId;
+      return tab.id === activeTabId;
+    })
+      ? activeTabId
+      : null;
 
-    persistStoredProjectAgentTabs(projectPath, {
-      tabs: agentTabs,
-      activePaneId,
+    persistStoredProjectTabs(projectPath, {
+      tabs: storedTabs,
+      activeTabId: storedActiveTabId,
     });
   });
 
@@ -1735,6 +1770,7 @@
         onQuickLaunch={handleAgentLaunch}
         onTabSelect={handleTabSelect}
         onTabClose={handleTabClose}
+        onTabReorder={handleTabReorder}
       />
     </div>
     <StatusBar
