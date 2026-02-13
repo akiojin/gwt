@@ -177,8 +177,7 @@ pub fn cleanup_stale_state_file() {
         }
     };
 
-    // Check if the old process is still running.
-    let alive = unsafe { libc::kill(state.pid as i32, 0) == 0 };
+    let alive = process_is_alive(state.pid);
     if !alive {
         info!(
             category = "mcp",
@@ -188,6 +187,27 @@ pub fn cleanup_stale_state_file() {
         );
         let _ = std::fs::remove_file(&path);
     }
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+
+    match unsafe { libc::kill(pid, 0) } {
+        0 => true,
+        -1 => match std::io::Error::last_os_error().raw_os_error() {
+            Some(err) if err == libc::EPERM => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn process_is_alive(_pid: u32) -> bool {
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -283,7 +303,7 @@ async fn handle_connection(
         let msg = msg?;
         match msg {
             Message::Text(text) => {
-                let response = route_request(&text, &ctx);
+                let response = route_request(&text, &ctx).await;
                 let json = serde_json::to_string(&response)?;
                 writer.send(Message::Text(json.into())).await?;
             }
@@ -306,7 +326,7 @@ async fn handle_connection(
 // JSON-RPC routing
 // ---------------------------------------------------------------------------
 
-fn route_request(text: &str, ctx: &WsContext) -> JsonRpcResponse {
+async fn route_request(text: &str, ctx: &WsContext) -> JsonRpcResponse {
     let req: JsonRpcRequest = match serde_json::from_str(text) {
         Ok(r) => r,
         Err(e) => {
@@ -329,8 +349,8 @@ fn route_request(text: &str, ctx: &WsContext) -> JsonRpcResponse {
         "gwt_broadcast_message" => mcp_handlers::handle_broadcast_message(id, params, ctx),
         "gwt_launch_agent" => mcp_handlers::handle_launch_agent(id, params, ctx),
         "gwt_stop_tab" => mcp_handlers::handle_stop_tab(id, params, ctx),
-        "gwt_get_worktree_diff" => mcp_handlers::handle_get_worktree_diff(id, params, ctx),
-        "gwt_get_changed_files" => mcp_handlers::handle_get_changed_files(id, params, ctx),
+        "gwt_get_worktree_diff" => mcp_handlers::handle_get_worktree_diff(id, params, ctx).await,
+        "gwt_get_changed_files" => mcp_handlers::handle_get_changed_files(id, params, ctx).await,
         _ => JsonRpcResponse::error(
             id,
             METHOD_NOT_FOUND,

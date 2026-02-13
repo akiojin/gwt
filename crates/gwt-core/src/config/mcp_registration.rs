@@ -263,12 +263,16 @@ fn ensure_parent_dir(path: &Path) -> Result<(), GwtError> {
     Ok(())
 }
 
-fn load_json(path: &Path) -> serde_json::Value {
+fn load_json(path: &Path) -> Result<serde_json::Value, GwtError> {
     if !path.exists() {
-        return serde_json::json!({});
+        return Ok(serde_json::json!({}));
     }
-    let content = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".to_string());
-    serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+    let content = std::fs::read_to_string(path).map_err(|e| GwtError::ConfigParseError {
+        reason: format!("Failed to read {}: {}", path.display(), e),
+    })?;
+    serde_json::from_str(&content).map_err(|e| GwtError::ConfigParseError {
+        reason: format!("Failed to parse {}: {}", path.display(), e),
+    })
 }
 
 fn write_json(path: &Path, value: &serde_json::Value) -> Result<(), GwtError> {
@@ -283,7 +287,7 @@ fn write_json(path: &Path, value: &serde_json::Value) -> Result<(), GwtError> {
 fn register_json_agent(config: &McpBridgeConfig, path: &Path) -> Result<(), GwtError> {
     ensure_parent_dir(path)?;
 
-    let mut root = load_json(path);
+    let mut root = load_json(path)?;
 
     if root.get("mcpServers").is_none() {
         root["mcpServers"] = serde_json::json!({});
@@ -297,7 +301,16 @@ fn register_json_agent(config: &McpBridgeConfig, path: &Path) -> Result<(), GwtE
         entry["env"] = serde_json::to_value(&config.env).unwrap_or(serde_json::json!({}));
     }
 
-    root["mcpServers"][MCP_SERVER_NAME] = entry;
+    match root.get_mut("mcpServers").and_then(|servers| servers.as_object_mut()) {
+        Some(servers) => {
+            servers.insert(MCP_SERVER_NAME.to_string(), entry);
+        }
+        None => {
+            let mut servers = serde_json::Map::new();
+            servers.insert(MCP_SERVER_NAME.to_string(), entry);
+            root["mcpServers"] = serde_json::Value::Object(servers);
+        }
+    }
 
     write_json(path, &root)?;
 
@@ -314,7 +327,7 @@ fn unregister_json_agent(path: &Path) -> Result<(), GwtError> {
         return Ok(());
     }
 
-    let mut root = load_json(path);
+    let mut root = load_json(path)?;
 
     if let Some(servers) = root.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
         if servers.remove(MCP_SERVER_NAME).is_some() {
@@ -331,7 +344,7 @@ fn unregister_json_agent(path: &Path) -> Result<(), GwtError> {
 }
 
 fn is_registered_json(path: &Path) -> Result<bool, GwtError> {
-    let root = load_json(path);
+    let root = load_json(path).unwrap_or_else(|_| serde_json::json!({}));
     Ok(root
         .get("mcpServers")
         .and_then(|v| v.get(MCP_SERVER_NAME))
@@ -535,11 +548,11 @@ mod tests {
 
         std::fs::write(&path, "not valid json {{").unwrap();
 
-        register_mcp_server_at(McpAgentType::Claude, &sample_config(), &path).unwrap();
+        let result = register_mcp_server_at(McpAgentType::Claude, &sample_config(), &path);
+        assert!(result.is_err());
 
-        let root: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert!(root["mcpServers"][MCP_SERVER_NAME].is_object());
+        let original = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(original, "not valid json {{");
     }
 
     #[test]

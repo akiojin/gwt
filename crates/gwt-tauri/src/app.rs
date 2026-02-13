@@ -262,56 +262,62 @@ pub fn build_app(
                 #[cfg(target_os = "macos")]
                 _tray.set_icon_as_template(true)?;
 
-                // MCP bridge: cleanup stale registrations then register for all agents (T21)
+                // MCP bridge: cleanup stale registrations then register for all agents (T21).
+                // Delay briefly so login-shell PATH capture can complete first.
                 {
-                    if let Err(e) = mcp_registration::cleanup_stale_registrations() {
-                        warn!(
-                            category = "mcp",
-                            error = %e,
-                            "Failed to cleanup stale MCP registrations"
-                        );
-                    }
-
+                    let state = _app.state::<AppState>();
                     let resource_dir = _app.path().resource_dir().ok();
-                    match mcp_registration::detect_runtime() {
-                        Ok(runtime) => {
-                            match mcp_registration::resolve_bridge_path(resource_dir.as_deref()) {
-                                Ok(bridge_path) => {
-                                    let config = mcp_registration::McpBridgeConfig {
-                                        command: runtime,
-                                        args: vec![bridge_path.to_string_lossy().into_owned()],
-                                        env: std::collections::HashMap::new(),
-                                    };
-                                    if let Err(e) = mcp_registration::register_all(&config) {
-                                        warn!(
-                                            category = "mcp",
-                                            error = %e,
-                                            "Failed to register MCP server in agent configs"
-                                        );
-                                    } else {
+                    tauri::async_runtime::spawn(async move {
+                        let _ = state.wait_os_env_ready(std::time::Duration::from_secs(2));
+
+                        if let Err(e) = mcp_registration::cleanup_stale_registrations() {
+                            warn!(
+                                category = "mcp",
+                                error = %e,
+                                "Failed to cleanup stale MCP registrations"
+                            );
+                        }
+
+                        match mcp_registration::detect_runtime() {
+                            Ok(runtime) => {
+                                match mcp_registration::resolve_bridge_path(resource_dir.as_deref()) {
+                                    Ok(bridge_path) => {
+                                        let config = mcp_registration::McpBridgeConfig {
+                                            command: runtime,
+                                            args: vec![bridge_path.to_string_lossy().into_owned()],
+                                            env: std::collections::HashMap::new(),
+                                        };
+                                        if let Err(e) = mcp_registration::register_all(&config) {
+                                            warn!(
+                                                category = "mcp",
+                                                error = %e,
+                                                "Failed to register MCP server in agent configs"
+                                            );
+                                        } else {
+                                            info!(
+                                                category = "mcp",
+                                                "MCP bridge server registered in all agent configs"
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
                                         info!(
                                             category = "mcp",
-                                            "MCP bridge server registered in all agent configs"
+                                            error = %e,
+                                            "MCP bridge JS not found; skipping registration"
                                         );
                                     }
                                 }
-                                Err(e) => {
-                                    info!(
-                                        category = "mcp",
-                                        error = %e,
-                                        "MCP bridge JS not found; skipping registration"
-                                    );
-                                }
+                            }
+                            Err(e) => {
+                                info!(
+                                    category = "mcp",
+                                    error = %e,
+                                    "No JS runtime found; skipping MCP registration"
+                                );
                             }
                         }
-                        Err(e) => {
-                            info!(
-                                category = "mcp",
-                                error = %e,
-                                "No JS runtime found; skipping MCP registration"
-                            );
-                        }
-                    }
+                    });
                 }
 
                 // Background task: capture login shell environment

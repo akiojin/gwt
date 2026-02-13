@@ -4,12 +4,14 @@
 //! a JSON-RPC response value or error.
 
 use crate::mcp_ws_server::{JsonRpcResponse, WsContext};
+use crate::commands::terminal::{launch_agent_for_project_root, LaunchAgentRequest};
 use crate::state::AppState;
 use gwt_core::terminal::pane::PaneStatus;
+use std::path::PathBuf;
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 use tracing::{info, warn};
 
 // ---------------------------------------------------------------------------
@@ -191,6 +193,7 @@ pub fn handle_send_message(id: Value, params: &Value, ctx: &WsContext) -> JsonRp
         .get("sender")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
+    let sender = sanitize_message(sender);
 
     let formatted = format!("[gwt msg from {sender}]: {sanitized}\n");
 
@@ -246,6 +249,7 @@ pub fn handle_broadcast_message(id: Value, params: &Value, ctx: &WsContext) -> J
         .get("sender")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
+    let sender = sanitize_message(sender);
 
     let formatted = format!("[gwt msg from {sender}]: {sanitized}\n");
 
@@ -346,31 +350,102 @@ pub fn handle_launch_agent(id: Value, params: &Value, ctx: &WsContext) -> JsonRp
         event = "LaunchAgentRequested",
         agent_id = %agent_id,
         branch = %branch,
-        "MCP launch agent request"
+        "MCP launch agent requested"
     );
 
-    // Return a placeholder response. The actual launch requires the frontend
-    // to orchestrate worktree resolution, Docker checks, etc. via the existing
-    // launch_agent / start_launch_job flow. MCP can trigger this by emitting
-    // an event that the frontend handles.
-    //
-    // For now, emit the event and return the request acknowledgement.
-    let _ = ctx.app_handle.emit(
-        "mcp-launch-agent",
-        serde_json::json!({
-            "agent_id": agent_id,
-            "branch": branch,
-        }),
+    let state = ctx.app_handle.state::<AppState>();
+
+    // Resolve a project context from the active/known windows.
+    let maybe_project_root = {
+        let focused_label = ctx
+            .app_handle
+            .webview_windows()
+            .into_iter()
+            .find_map(|(label, window)| {
+                window
+                    .is_focused()
+                    .ok()
+                    .and_then(|focused| focused.then_some(label))
+            });
+
+        focused_label
+            .as_ref()
+            .and_then(|label| state.project_for_window(label))
+            .or_else(|| state.project_for_window("main"))
+            .or_else(|| {
+                state
+                    .window_projects
+                    .lock()
+                    .ok()
+                    .and_then(|projects| projects.values().next().cloned())
+            })
+    };
+
+    let project_root = match maybe_project_root {
+        Some(path) => PathBuf::from(path),
+        None => {
+            return JsonRpcResponse::error(
+                id,
+                -32608,
+                "No project opened for MCP launch".to_string(),
+            );
+        }
+    };
+
+    let request = LaunchAgentRequest {
+        agent_id: agent_id.clone(),
+        branch: branch.clone(),
+        profile: None,
+        model: None,
+        agent_version: None,
+        mode: None,
+        skip_permissions: None,
+        reasoning_level: None,
+        collaboration_modes: None,
+        extra_args: None,
+        env_overrides: None,
+        docker_service: None,
+        docker_force_host: None,
+        docker_recreate: None,
+        docker_build: None,
+        docker_keep: None,
+        resume_session_id: None,
+        create_branch: None,
+    };
+
+    let tab_id = match launch_agent_for_project_root(
+        project_root,
+        request,
+        &state,
+        ctx.app_handle.clone(),
+        None,
+        None,
+    ) {
+        Ok(tab_id) => tab_id,
+        Err(err) => {
+            warn!(
+                category = "mcp",
+                event = "LaunchAgentFailed",
+                agent_id = %agent_id,
+                branch = %branch,
+                error = %err,
+                "Failed to launch via MCP"
+            );
+            return JsonRpcResponse::error(id, -32603, format!("Failed to launch agent: {err}"));
+        }
+    };
+
+    info!(
+        category = "mcp",
+        event = "LaunchAgentStarted",
+        agent_id = %agent_id,
+        branch = %branch,
+        tab_id = %tab_id,
+        "MCP launch agent started"
     );
 
-    JsonRpcResponse::success(
-        id,
-        serde_json::json!({
-            "status": "requested",
-            "agent_id": agent_id,
-            "branch": branch,
-        }),
-    )
+    // NOTE: keep "tab_id" for compatibility with MCP tool contract.
+    JsonRpcResponse::success(id, serde_json::json!({ "tab_id": tab_id }))
 }
 
 // ---------------------------------------------------------------------------
@@ -431,7 +506,11 @@ pub fn handle_stop_tab(id: Value, params: &Value, ctx: &WsContext) -> JsonRpcRes
 // gwt_get_worktree_diff (FR-013)
 // ---------------------------------------------------------------------------
 
-pub fn handle_get_worktree_diff(id: Value, params: &Value, ctx: &WsContext) -> JsonRpcResponse {
+pub async fn handle_get_worktree_diff(
+    id: Value,
+    params: &Value,
+    ctx: &WsContext,
+) -> JsonRpcResponse {
     let tab_id = match get_string_param(params, "tab_id") {
         Ok(v) => v.to_string(),
         Err(mut e) => {
@@ -445,15 +524,20 @@ pub fn handle_get_worktree_diff(id: Value, params: &Value, ctx: &WsContext) -> J
         Err(e) => return JsonRpcResponse::error(id, -32604, e),
     };
 
-    // Run `git diff` in the worktree directory
-    let output = match std::process::Command::new("git")
-        .args(["diff"])
-        .current_dir(&worktree_path)
-        .output()
+    let output = match tokio::task::spawn_blocking(move || {
+        std::process::Command::new("git")
+            .args(["diff"])
+            .current_dir(&worktree_path)
+            .output()
+    })
+    .await
     {
-        Ok(o) => o,
-        Err(e) => {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
             return JsonRpcResponse::error(id, -32603, format!("Failed to run git diff: {e}"));
+        }
+        Err(e) => {
+            return JsonRpcResponse::error(id, -32603, format!("Git diff task failed: {e}"));
         }
     };
 
@@ -465,7 +549,11 @@ pub fn handle_get_worktree_diff(id: Value, params: &Value, ctx: &WsContext) -> J
 // gwt_get_changed_files (FR-014)
 // ---------------------------------------------------------------------------
 
-pub fn handle_get_changed_files(id: Value, params: &Value, ctx: &WsContext) -> JsonRpcResponse {
+pub async fn handle_get_changed_files(
+    id: Value,
+    params: &Value,
+    ctx: &WsContext,
+) -> JsonRpcResponse {
     let tab_id = match get_string_param(params, "tab_id") {
         Ok(v) => v.to_string(),
         Err(mut e) => {
@@ -479,22 +567,39 @@ pub fn handle_get_changed_files(id: Value, params: &Value, ctx: &WsContext) -> J
         Err(e) => return JsonRpcResponse::error(id, -32604, e),
     };
 
-    match gwt_core::git::get_working_tree_status(&worktree_path) {
-        Ok(entries) => {
-            let files: Vec<Value> = entries
-                .iter()
-                .map(|e| {
-                    serde_json::json!({
-                        "path": e.path,
-                        "status": format!("{:?}", e.status).to_lowercase(),
-                        "is_staged": e.is_staged,
-                    })
-                })
-                .collect();
-            JsonRpcResponse::success(id, Value::Array(files))
+    let entries = match tokio::task::spawn_blocking(move || {
+        gwt_core::git::get_working_tree_status(&worktree_path)
+    })
+    .await
+    {
+        Ok(Ok(entries)) => entries,
+        Ok(Err(e)) => {
+            return JsonRpcResponse::error(
+                id,
+                -32603,
+                format!("Failed to get changed files: {e}"),
+            );
         }
-        Err(e) => JsonRpcResponse::error(id, -32603, format!("Failed to get changed files: {e}")),
-    }
+        Err(e) => {
+            return JsonRpcResponse::error(
+                id,
+                -32603,
+                format!("Changed files task failed: {e}"),
+            );
+        }
+    };
+
+    let files: Vec<Value> = entries
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "path": e.path,
+                "status": format!("{:?}", e.status).to_lowercase(),
+                "is_staged": e.is_staged,
+            })
+        })
+        .collect();
+    JsonRpcResponse::success(id, Value::Array(files))
 }
 
 // ---------------------------------------------------------------------------

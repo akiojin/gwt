@@ -34,6 +34,7 @@ interface JsonRpcResponse {
 
 let ws: WebSocket | null = null;
 let rpcId = 0;
+let connected = false;
 const pending = new Map<
   number,
   { resolve: (v: unknown) => void; reject: (e: Error) => void }
@@ -56,6 +57,7 @@ function connectWebSocket(port: number): Promise<WebSocket> {
 
     socket.on("open", () => {
       clearTimeout(timeout);
+      connected = true;
       resolve(socket);
     });
 
@@ -83,7 +85,9 @@ function connectWebSocket(port: number): Promise<WebSocket> {
 
     socket.on("close", () => {
       cleanupAgentConfigs();
-      process.exit(0);
+      if (connected) {
+        process.exit(0);
+      }
     });
   });
 }
