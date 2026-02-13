@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::{Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 const LS_REMOTE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -107,6 +107,23 @@ pub struct Branch {
 }
 
 impl Branch {
+    fn delete_with_flag(repo_path: &Path, name: &str, flag: &str) -> Result<Output> {
+        crate::process::git_command()
+            .args(["branch", flag, name])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| GwtError::GitOperationFailed {
+                operation: "branch delete".to_string(),
+                details: e.to_string(),
+            })
+    }
+
+    fn is_not_fully_merged_error(stderr: &str) -> bool {
+        let lower = stderr.to_lowercase();
+        // English and Japanese Git messages for unmerged branch deletion.
+        lower.contains("not fully merged") || stderr.contains("完全にマージされていません")
+    }
+
     /// Create a new branch instance
     pub fn new(name: impl Into<String>, commit: impl Into<String>) -> Self {
         Self {
@@ -509,14 +526,7 @@ impl Branch {
         debug!(category = "git", branch = name, force, "Deleting branch");
 
         let flag = if force { "-D" } else { "-d" };
-        let output = crate::process::git_command()
-            .args(["branch", flag, name])
-            .current_dir(repo_path)
-            .output()
-            .map_err(|e| GwtError::GitOperationFailed {
-                operation: "branch delete".to_string(),
-                details: e.to_string(),
-            })?;
+        let output = Self::delete_with_flag(repo_path, name, flag)?;
 
         if output.status.success() {
             info!(
@@ -529,6 +539,46 @@ impl Branch {
             Ok(())
         } else {
             let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+
+            if !force && Self::is_not_fully_merged_error(&err_msg) {
+                warn!(
+                    category = "git",
+                    branch = name,
+                    error = err_msg.as_str(),
+                    "Branch delete with -d failed due to unmerged commits, retrying with -D"
+                );
+
+                let forced_output = Self::delete_with_flag(repo_path, name, "-D")?;
+                if forced_output.status.success() {
+                    info!(
+                        category = "git",
+                        operation = "branch_delete",
+                        branch = name,
+                        force = true,
+                        fallback = true,
+                        "Branch deleted via automatic force fallback"
+                    );
+                    return Ok(());
+                }
+
+                let forced_err = String::from_utf8_lossy(&forced_output.stderr).to_string();
+                let combined_err = format!(
+                    "branch -d failed: {}\nbranch -D fallback failed: {}",
+                    err_msg, forced_err
+                );
+                error!(
+                    category = "git",
+                    branch = name,
+                    force,
+                    error = combined_err.as_str(),
+                    "Failed to delete branch after fallback"
+                );
+                return Err(GwtError::BranchDeleteFailed {
+                    name: name.to_string(),
+                    details: combined_err,
+                });
+            }
+
             error!(
                 category = "git",
                 branch = name,
@@ -961,6 +1011,30 @@ mod tests {
         assert!(Branch::exists(temp.path(), "feature/test").unwrap());
         Branch::delete(temp.path(), "feature/test", false).unwrap();
         assert!(!Branch::exists(temp.path(), "feature/test").unwrap());
+    }
+
+    #[test]
+    fn test_delete_branch_auto_forces_unmerged_when_not_fully_merged() {
+        let temp = create_test_repo();
+        let base = Branch::current(temp.path()).unwrap().unwrap().name;
+
+        run_git(temp.path(), &["checkout", "-b", "feature/unmerged"]);
+        commit_file(temp.path(), "feature.txt", "feature", "feature commit");
+        run_git(temp.path(), &["checkout", &base]);
+
+        assert!(Branch::exists(temp.path(), "feature/unmerged").unwrap());
+        Branch::delete(temp.path(), "feature/unmerged", false).unwrap();
+        assert!(!Branch::exists(temp.path(), "feature/unmerged").unwrap());
+    }
+
+    #[test]
+    fn test_delete_current_branch_still_fails_without_force() {
+        let temp = create_test_repo();
+        let current = Branch::current(temp.path()).unwrap().unwrap();
+
+        let result = Branch::delete(temp.path(), &current.name, false);
+        assert!(result.is_err());
+        assert!(Branch::exists(temp.path(), &current.name).unwrap());
     }
 
     #[test]
