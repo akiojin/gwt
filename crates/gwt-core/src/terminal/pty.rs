@@ -194,7 +194,10 @@ mod tests {
     fn build_windows_powershell_command_expression_quotes_command_and_args() {
         let args = vec!["--yes".to_string(), "@openai/codex@latest".to_string()];
         let expr = build_windows_powershell_command_expression("C:\\Tools\\npx.cmd", &args);
-        assert_eq!(expr, "& 'C:\\Tools\\npx.cmd' '--yes' '@openai/codex@latest'");
+        assert_eq!(
+            expr,
+            "& 'C:\\Tools\\npx.cmd' '--yes' '@openai/codex@latest'"
+        );
     }
 
     #[test]
@@ -215,7 +218,10 @@ mod tests {
         let (program, resolved_args) = resolve_spawn_command("C:\\Tools\\npx.cmd", &args);
 
         if cfg!(windows) {
-            assert!(program.eq_ignore_ascii_case("pwsh") || program.eq_ignore_ascii_case("powershell.exe"));
+            assert!(
+                program.eq_ignore_ascii_case("pwsh")
+                    || program.eq_ignore_ascii_case("powershell.exe")
+            );
             assert_eq!(
                 resolved_args,
                 vec![
@@ -239,7 +245,10 @@ mod tests {
         let args = vec!["--version".to_string()];
         let (program, resolved_args) = resolve_spawn_command("codex", &args);
         if cfg!(windows) {
-            assert!(program.eq_ignore_ascii_case("pwsh") || program.eq_ignore_ascii_case("powershell.exe"));
+            assert!(
+                program.eq_ignore_ascii_case("pwsh")
+                    || program.eq_ignore_ascii_case("powershell.exe")
+            );
             assert_eq!(
                 resolved_args,
                 vec![
