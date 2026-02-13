@@ -70,6 +70,8 @@ pub struct WindowMigrationState {
 }
 
 pub struct AppState {
+    /// System resource monitor for CPU/memory/GPU queries.
+    pub system_monitor: Mutex<gwt_core::system_info::SystemMonitor>,
     /// Project root path per window label.
     ///
     /// Only stores windows that currently have a project opened.
@@ -105,6 +107,7 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
+            system_monitor: Mutex::new(gwt_core::system_info::SystemMonitor::new()),
             window_projects: Mutex::new(HashMap::new()),
             windows_allowed_to_close: Mutex::new(HashSet::new()),
             window_agent_tabs: Mutex::new(HashMap::new()),

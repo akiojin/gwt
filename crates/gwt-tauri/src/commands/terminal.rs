@@ -4,6 +4,7 @@ use crate::commands::project::resolve_repo_path_for_project_root;
 use crate::state::{AppState, PaneLaunchMeta};
 use chrono::Utc;
 use gwt_core::ai::SessionParser;
+use gwt_core::config::stats::Stats;
 use gwt_core::config::{AgentConfig, ClaudeAgentProvider, ProfilesConfig, Settings};
 use gwt_core::docker::{
     compose_available, daemon_running, detect_docker_files, docker_available, try_start_daemon,
@@ -2341,6 +2342,25 @@ fn launch_agent_for_project_root(
             branch: branch_name.clone(),
         };
         let _ = app_handle.emit("worktrees-changed", &payload);
+    }
+
+    // Record stats (agent launch + optional worktree creation) non-blocking.
+    {
+        let stat_agent_id = agent_id.to_string();
+        let stat_model = request.model.as_deref().unwrap_or("").to_string();
+        let stat_repo = repo_path.to_string_lossy().to_string();
+        let stat_wt_created = worktree_created;
+        std::thread::spawn(move || {
+            let result = Stats::update(|stats| {
+                stats.increment_agent_launch(&stat_agent_id, &stat_model, &stat_repo);
+                if stat_wt_created {
+                    stats.increment_worktree_created(&stat_repo);
+                }
+            });
+            if let Err(e) = result {
+                tracing::warn!(error = %e, "Failed to record stats");
+            }
+        });
     }
 
     report_launch_progress(job_id, &app_handle, "deps", Some("Waiting for environment"));

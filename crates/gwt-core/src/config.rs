@@ -13,6 +13,7 @@ mod profile;
 mod recent_projects;
 mod session;
 mod settings;
+pub mod stats;
 pub mod tools;
 mod ts_session;
 
