@@ -818,7 +818,9 @@ mod tests {
         let args = issue_list_args(None, u32::MAX, u32::MAX);
         let expected_limit = (u64::from(u32::MAX) * u64::from(u32::MAX) + 1).to_string();
 
-        assert!(args.windows(2).any(|w| w[0] == "--limit" && w[1] == expected_limit));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--limit" && w[1] == expected_limit));
     }
 
     #[test]
