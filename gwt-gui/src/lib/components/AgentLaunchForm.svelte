@@ -744,6 +744,106 @@
         {/if}
 
         <div class="field">
+          <span class="field-label" id="branch-mode-label">Branch</span>
+          <div class="mode-toggle" role="group" aria-labelledby="branch-mode-label">
+            <button
+              class="mode-btn"
+              class:active={branchMode === "existing"}
+              onclick={() => (branchMode = "existing")}
+            >
+              Existing Branch
+            </button>
+            <button
+              class="mode-btn"
+              class:active={branchMode === "new"}
+              onclick={() => (branchMode = "new")}
+            >
+              New Branch
+            </button>
+          </div>
+        </div>
+
+        {#if branchMode === "existing"}
+          <div class="field">
+            <label for="branch-input">Branch</label>
+            <input
+              id="branch-input"
+              type="text"
+              autocapitalize="off"
+              autocorrect="off"
+              autocomplete="off"
+              spellcheck="false"
+              value={existingBranch}
+              readonly
+            />
+            {#if !existingBranch.trim()}
+              <span class="field-hint warn">No branch selected.</span>
+            {/if}
+          </div>
+        {:else}
+          <div class="field">
+            <label for="base-branch-select">Base Branch</label>
+            <select
+              id="base-branch-select"
+              bind:value={baseBranch}
+              disabled={baseBranchOptionsLoading}
+            >
+              {#if !baseBranch.trim()}
+                <option value="" disabled>Select base branch...</option>
+              {/if}
+              {#if baseBranch.trim() &&
+                !baseBranchLocalOptions.includes(baseBranch) &&
+                !baseBranchRemoteOptions.includes(baseBranch)}
+                <option value={baseBranch}>{baseBranch}</option>
+              {/if}
+              <optgroup label="Local (Worktrees)">
+                {#each baseBranchLocalOptions as name (name)}
+                  <option value={name}>{name}</option>
+                {/each}
+              </optgroup>
+              <optgroup label="Remote">
+                {#each baseBranchRemoteOptions as name (name)}
+                  <option value={name}>{name}</option>
+                {/each}
+              </optgroup>
+            </select>
+            {#if baseBranchOptionsLoading}
+              <span class="field-hint">Loading branches...</span>
+            {:else if baseBranchOptionsError}
+              <span class="field-hint warn">{baseBranchOptionsError}</span>
+            {/if}
+          </div>
+          <div class="field">
+            <label for="new-branch-suffix-input">New Branch Name</label>
+            <div class="branch-name-row">
+              <select id="new-branch-prefix-select" bind:value={newBranchPrefix}>
+                {#each BRANCH_PREFIXES as p (p)}
+                  <option value={p}>{p}</option>
+                {/each}
+              </select>
+              <input
+                id="new-branch-suffix-input"
+                type="text"
+                autocapitalize="off"
+                autocorrect="off"
+                autocomplete="off"
+                spellcheck="false"
+                value={newBranchSuffix}
+                oninput={(e) =>
+                  handleNewBranchSuffixInput((e.target as HTMLInputElement).value)}
+                placeholder="e.g., my-change"
+              />
+              <button class="suggest-btn" type="button" onclick={openSuggestModal}>
+                Suggest...
+              </button>
+            </div>
+            <span class="field-hint">
+              Full name: {newBranchFullName.trim() ? newBranchFullName : "(empty)"}
+            </span>
+          </div>
+        {/if}
+
+        <div class="field">
           <label for="agent-select">Agent</label>
           <select id="agent-select" bind:value={selectedAgent}>
             <option value="" disabled>Select an agent...</option>
@@ -1062,106 +1162,6 @@
             ></textarea>
             <span class="field-hint">
               These variables are applied only for this launch.
-            </span>
-          </div>
-        {/if}
-
-        <div class="field">
-          <span class="field-label" id="branch-mode-label">Branch</span>
-          <div class="mode-toggle" role="group" aria-labelledby="branch-mode-label">
-            <button
-              class="mode-btn"
-              class:active={branchMode === "existing"}
-              onclick={() => (branchMode = "existing")}
-            >
-              Existing Branch
-            </button>
-            <button
-              class="mode-btn"
-              class:active={branchMode === "new"}
-              onclick={() => (branchMode = "new")}
-            >
-              New Branch
-            </button>
-          </div>
-        </div>
-
-        {#if branchMode === "existing"}
-          <div class="field">
-            <label for="branch-input">Branch</label>
-            <input
-              id="branch-input"
-              type="text"
-              autocapitalize="off"
-              autocorrect="off"
-              autocomplete="off"
-              spellcheck="false"
-              value={existingBranch}
-              readonly
-            />
-            {#if !existingBranch.trim()}
-              <span class="field-hint warn">No branch selected.</span>
-            {/if}
-          </div>
-        {:else}
-          <div class="field">
-            <label for="base-branch-select">Base Branch</label>
-            <select
-              id="base-branch-select"
-              bind:value={baseBranch}
-              disabled={baseBranchOptionsLoading}
-            >
-              {#if !baseBranch.trim()}
-                <option value="" disabled>Select base branch...</option>
-              {/if}
-              {#if baseBranch.trim() &&
-                !baseBranchLocalOptions.includes(baseBranch) &&
-                !baseBranchRemoteOptions.includes(baseBranch)}
-                <option value={baseBranch}>{baseBranch}</option>
-              {/if}
-              <optgroup label="Local (Worktrees)">
-                {#each baseBranchLocalOptions as name (name)}
-                  <option value={name}>{name}</option>
-                {/each}
-              </optgroup>
-              <optgroup label="Remote">
-                {#each baseBranchRemoteOptions as name (name)}
-                  <option value={name}>{name}</option>
-                {/each}
-              </optgroup>
-            </select>
-            {#if baseBranchOptionsLoading}
-              <span class="field-hint">Loading branches...</span>
-            {:else if baseBranchOptionsError}
-              <span class="field-hint warn">{baseBranchOptionsError}</span>
-            {/if}
-          </div>
-          <div class="field">
-            <label for="new-branch-suffix-input">New Branch Name</label>
-            <div class="branch-name-row">
-              <select id="new-branch-prefix-select" bind:value={newBranchPrefix}>
-                {#each BRANCH_PREFIXES as p (p)}
-                  <option value={p}>{p}</option>
-                {/each}
-              </select>
-              <input
-                id="new-branch-suffix-input"
-                type="text"
-                autocapitalize="off"
-                autocorrect="off"
-                autocomplete="off"
-                spellcheck="false"
-                value={newBranchSuffix}
-                oninput={(e) =>
-                  handleNewBranchSuffixInput((e.target as HTMLInputElement).value)}
-                placeholder="e.g., my-change"
-              />
-              <button class="suggest-btn" type="button" onclick={openSuggestModal}>
-                Suggest...
-              </button>
-            </div>
-            <span class="field-hint">
-              Full name: {newBranchFullName.trim() ? newBranchFullName : "(empty)"}
             </span>
           </div>
         {/if}
