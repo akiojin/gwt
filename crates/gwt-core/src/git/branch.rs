@@ -118,10 +118,32 @@ impl Branch {
             })
     }
 
-    fn is_not_fully_merged_error(stderr: &str) -> bool {
-        let lower = stderr.to_lowercase();
-        // English and Japanese Git messages for unmerged branch deletion.
-        lower.contains("not fully merged") || stderr.contains("完全にマージされていません")
+    fn merge_target_for_safe_delete(repo_path: &Path, name: &str) -> String {
+        Self::list_basic(repo_path)
+            .ok()
+            .and_then(|branches| {
+                branches
+                    .into_iter()
+                    .find(|branch| branch.name == name)
+                    .and_then(|branch| branch.upstream)
+            })
+            .unwrap_or_else(|| "HEAD".to_string())
+    }
+
+    fn should_force_delete_after_safe_delete_failure(repo_path: &Path, name: &str) -> bool {
+        if let Ok(Some(current)) = Self::current(repo_path) {
+            if current.name == name {
+                return false;
+            }
+        }
+
+        if let Ok(false) = Self::exists(repo_path, name) {
+            return false;
+        }
+
+        let target = Self::merge_target_for_safe_delete(repo_path, name);
+
+        matches!(Self::is_merged_into(repo_path, name, &target), Ok(false))
     }
 
     /// Create a new branch instance
@@ -540,12 +562,12 @@ impl Branch {
         } else {
             let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
 
-            if !force && Self::is_not_fully_merged_error(&err_msg) {
+            if !force && Self::should_force_delete_after_safe_delete_failure(repo_path, name) {
                 warn!(
                     category = "git",
                     branch = name,
                     error = err_msg.as_str(),
-                    "Branch delete with -d failed due to unmerged commits, retrying with -D"
+                    "Branch delete with -d failed and branch is not merged, retrying with -D"
                 );
 
                 let forced_output = Self::delete_with_flag(repo_path, name, "-D")?;
