@@ -2,24 +2,28 @@
 
 use crate::commands::project::resolve_repo_path_for_project_root;
 use gwt_core::git::graphql;
-use gwt_core::git::{PrStatusInfo, ReviewComment, ReviewInfo, WorkflowRunInfo};
+use gwt_core::git::{
+    is_gh_cli_authenticated, is_gh_cli_available, PrStatusInfo, ReviewComment, ReviewInfo,
+    WorkflowRunInfo,
+};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::Path;
 
-/// Response for fetch_pr_statuses (T009)
+/// gh CLI availability and authentication status
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GhCliStatusInfo {
+    pub available: bool,
+    pub authenticated: bool,
+}
+
+/// Response for fetch_pr_status (T009)
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrStatusResponse {
-    /// List of (branch_name, pr_status) pairs
-    pub statuses: Vec<BranchPrStatus>,
-}
-
-/// PR status for a single branch
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BranchPrStatus {
-    pub branch: String,
-    pub pr: Option<PrStatusSummary>,
+    pub statuses: HashMap<String, Option<PrStatusSummary>>,
+    pub gh_status: GhCliStatusInfo,
 }
 
 /// Serializable PR status summary for the frontend
@@ -140,7 +144,11 @@ fn to_pr_status_summary(info: &PrStatusInfo) -> PrStatusSummary {
         assignees: info.assignees.clone(),
         milestone: info.milestone.clone(),
         linked_issues: info.linked_issues.clone(),
-        check_suites: info.check_suites.iter().map(to_workflow_run_summary).collect(),
+        check_suites: info
+            .check_suites
+            .iter()
+            .map(to_workflow_run_summary)
+            .collect(),
         reviews: info.reviews.iter().map(to_review_summary).collect(),
         changed_files_count: info.changed_files_count,
         additions: info.additions,
@@ -162,7 +170,11 @@ fn to_pr_detail_response(info: &PrStatusInfo) -> PrDetailResponse {
         assignees: info.assignees.clone(),
         milestone: info.milestone.clone(),
         linked_issues: info.linked_issues.clone(),
-        check_suites: info.check_suites.iter().map(to_workflow_run_summary).collect(),
+        check_suites: info
+            .check_suites
+            .iter()
+            .map(to_workflow_run_summary)
+            .collect(),
         reviews: info.reviews.iter().map(to_review_summary).collect(),
         review_comments: info
             .review_comments
@@ -176,25 +188,50 @@ fn to_pr_detail_response(info: &PrStatusInfo) -> PrDetailResponse {
 }
 
 /// Fetch PR statuses for all given branches via GraphQL (T009)
+///
+/// Also returns gh CLI availability/authentication status.
 #[tauri::command]
-pub fn fetch_pr_statuses(
+pub fn fetch_pr_status(
     project_path: String,
-    branch_names: Vec<String>,
+    branches: Vec<String>,
 ) -> Result<PrStatusResponse, String> {
+    let available = is_gh_cli_available();
+    let authenticated = if available {
+        is_gh_cli_authenticated()
+    } else {
+        false
+    };
+    let gh_status = GhCliStatusInfo {
+        available,
+        authenticated,
+    };
+
+    if !available || !authenticated {
+        // Return empty statuses with gh_status indicating the problem
+        let statuses = branches
+            .into_iter()
+            .map(|branch| (branch, None))
+            .collect();
+        return Ok(PrStatusResponse {
+            statuses,
+            gh_status,
+        });
+    }
+
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)?;
 
-    let results = graphql::fetch_pr_statuses(&repo_path, &branch_names)?;
+    let results = graphql::fetch_pr_statuses(&repo_path, &branches)?;
 
     let statuses = results
         .into_iter()
-        .map(|(branch, info)| BranchPrStatus {
-            branch,
-            pr: info.as_ref().map(to_pr_status_summary),
-        })
+        .map(|(branch, info)| (branch, info.as_ref().map(to_pr_status_summary)))
         .collect();
 
-    Ok(PrStatusResponse { statuses })
+    Ok(PrStatusResponse {
+        statuses,
+        gh_status,
+    })
 }
 
 /// Fetch detailed PR information for a single PR (T010)
@@ -212,10 +249,7 @@ pub fn fetch_pr_detail(
 
 /// Fetch CI run log for a specific workflow run (T011)
 #[tauri::command]
-pub fn fetch_ci_log(
-    project_path: String,
-    run_id: u64,
-) -> Result<String, String> {
+pub fn fetch_ci_log(project_path: String, run_id: u64) -> Result<String, String> {
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)?;
 
@@ -228,68 +262,102 @@ mod tests {
     use super::*;
 
     // ==========================================================
+    // T012: GhCliStatusInfo serialization tests
+    // ==========================================================
+
+    #[test]
+    fn test_gh_cli_status_info_serialization() {
+        let status = GhCliStatusInfo {
+            available: true,
+            authenticated: true,
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("\"available\":true"));
+        assert!(json.contains("\"authenticated\":true"));
+    }
+
+    #[test]
+    fn test_gh_cli_status_info_unavailable() {
+        let status = GhCliStatusInfo {
+            available: false,
+            authenticated: false,
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("\"available\":false"));
+        assert!(json.contains("\"authenticated\":false"));
+    }
+
+    // ==========================================================
     // T012: PrStatusResponse serialization tests
     // ==========================================================
 
     #[test]
     fn test_pr_status_response_serialization() {
+        let mut statuses = HashMap::new();
+        statuses.insert(
+            "feature/x".to_string(),
+            Some(PrStatusSummary {
+                number: 42,
+                title: "Add feature X".to_string(),
+                state: "OPEN".to_string(),
+                url: "https://github.com/o/r/pull/42".to_string(),
+                mergeable: "MERGEABLE".to_string(),
+                author: "alice".to_string(),
+                base_branch: "main".to_string(),
+                head_branch: "feature/x".to_string(),
+                labels: vec!["enhancement".to_string()],
+                assignees: vec!["bob".to_string()],
+                milestone: Some("v2.0".to_string()),
+                linked_issues: vec![10],
+                check_suites: vec![WorkflowRunSummary {
+                    workflow_name: "CI".to_string(),
+                    run_id: 12345,
+                    status: "completed".to_string(),
+                    conclusion: Some("success".to_string()),
+                }],
+                reviews: vec![ReviewSummary {
+                    reviewer: "charlie".to_string(),
+                    state: "APPROVED".to_string(),
+                }],
+                changed_files_count: 5,
+                additions: 100,
+                deletions: 20,
+            }),
+        );
+        statuses.insert("feature/y".to_string(), None);
+
         let response = PrStatusResponse {
-            statuses: vec![
-                BranchPrStatus {
-                    branch: "feature/x".to_string(),
-                    pr: Some(PrStatusSummary {
-                        number: 42,
-                        title: "Add feature X".to_string(),
-                        state: "OPEN".to_string(),
-                        url: "https://github.com/o/r/pull/42".to_string(),
-                        mergeable: "MERGEABLE".to_string(),
-                        author: "alice".to_string(),
-                        base_branch: "main".to_string(),
-                        head_branch: "feature/x".to_string(),
-                        labels: vec!["enhancement".to_string()],
-                        assignees: vec!["bob".to_string()],
-                        milestone: Some("v2.0".to_string()),
-                        linked_issues: vec![10],
-                        check_suites: vec![WorkflowRunSummary {
-                            workflow_name: "CI".to_string(),
-                            run_id: 12345,
-                            status: "completed".to_string(),
-                            conclusion: Some("success".to_string()),
-                        }],
-                        reviews: vec![ReviewSummary {
-                            reviewer: "charlie".to_string(),
-                            state: "APPROVED".to_string(),
-                        }],
-                        changed_files_count: 5,
-                        additions: 100,
-                        deletions: 20,
-                    }),
-                },
-                BranchPrStatus {
-                    branch: "feature/y".to_string(),
-                    pr: None,
-                },
-            ],
+            statuses,
+            gh_status: GhCliStatusInfo {
+                available: true,
+                authenticated: true,
+            },
         };
 
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("\"statuses\""));
-        assert!(json.contains("\"branch\":\"feature/x\""));
+        assert!(json.contains("\"ghStatus\""));
+        assert!(json.contains("\"available\":true"));
         assert!(json.contains("\"number\":42"));
         assert!(json.contains("\"baseBranch\":\"main\""));
-        assert!(json.contains("\"headBranch\":\"feature/x\""));
         assert!(json.contains("\"checkSuites\""));
         assert!(json.contains("\"workflowName\":\"CI\""));
         assert!(json.contains("\"changedFilesCount\":5"));
-        assert!(json.contains("\"branch\":\"feature/y\""));
-        assert!(json.contains("\"pr\":null"));
     }
 
     #[test]
     fn test_pr_status_response_empty() {
-        let response = PrStatusResponse { statuses: vec![] };
+        let response = PrStatusResponse {
+            statuses: HashMap::new(),
+            gh_status: GhCliStatusInfo {
+                available: false,
+                authenticated: false,
+            },
+        };
         let json = serde_json::to_string(&response).unwrap();
-        assert!(json.contains("\"statuses\":[]"));
+        assert!(json.contains("\"statuses\":{}"));
+        assert!(json.contains("\"ghStatus\""));
+        assert!(json.contains("\"available\":false"));
     }
 
     // ==========================================================
@@ -414,6 +482,9 @@ mod tests {
         assert_eq!(detail.number, 10);
         assert_eq!(detail.review_comments.len(), 1);
         assert_eq!(detail.review_comments[0].author, "reviewer");
-        assert_eq!(detail.review_comments[0].file_path, Some("file.rs".to_string()));
+        assert_eq!(
+            detail.review_comments[0].file_path,
+            Some("file.rs".to_string())
+        );
     }
 }
