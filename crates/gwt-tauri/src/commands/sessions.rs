@@ -557,7 +557,8 @@ pub(crate) fn prewarm_missing_worktree_summaries(
             continue;
         }
 
-        let Ok((_, maybe_job)) = get_branch_session_summary_immediate(&project_path, &branch, &state)
+        let Ok((_, maybe_job)) =
+            get_branch_session_summary_immediate(&project_path, &branch, &state)
         else {
             continue;
         };
