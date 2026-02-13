@@ -5,6 +5,9 @@
     BranchInfo,
     BranchSuggestResult,
     DockerContext,
+    FetchIssuesResponse,
+    GhCliStatus,
+    GitHubIssueInfo,
     LaunchAgentRequest,
   } from "../types";
 
@@ -71,7 +74,6 @@
   let resumeSessionId: string = $state("");
   let skipPermissions: boolean = $state(false);
   let reasoningLevel: string = $state("");
-  let collaborationModes: boolean = $state(false);
 
   let showAdvanced: boolean = $state(false);
   let extraArgsText: string = $state("");
@@ -111,12 +113,46 @@
   let baseBranchOptionsLoading: boolean = $state(false);
   let baseBranchOptionsError: string | null = $state(null);
 
-  // AI Branch Suggest modal (TUI parity)
+  // AI Branch Suggest modal (parity)
   let suggestOpen: boolean = $state(false);
   let suggestDescription: string = $state("");
   let suggestLoading: boolean = $state(false);
   let suggestError: string | null = $state(null);
   let suggestSuggestions: string[] = $state([]);
+
+  // From Issue state (SPEC-c6ba640a)
+  type NewBranchTab = "manual" | "fromIssue";
+  let newBranchTab: NewBranchTab = $state("manual" as NewBranchTab);
+  let ghCliStatus: GhCliStatus | null = $state(null as GhCliStatus | null);
+  let ghCliChecked: boolean = $state(false);
+  let issues: GitHubIssueInfo[] = $state([]);
+  let issuesLoading: boolean = $state(false);
+  let issuesError: string | null = $state(null);
+  let issuesPage: number = $state(1);
+  let issuesHasNextPage: boolean = $state(false);
+  let issueSearchQuery: string = $state("");
+  let selectedIssue: GitHubIssueInfo | null = $state(null as GitHubIssueInfo | null);
+  let issueBranchMap: Map<number, string | null> = $state(new Map());
+  let issueBranchChecksInFlight: Set<number> = $state(new Set());
+  let issueRateLimited: boolean = $state(false);
+
+  let filteredIssues = $derived(
+    (() => {
+      const q = issueSearchQuery.trim().toLowerCase();
+      if (!q) return issues;
+      return issues.filter((i) => i.title.toLowerCase().includes(q));
+    })()
+  );
+
+  let issueBranchName = $derived(
+    selectedIssue
+      ? `${newBranchPrefix}issue-${selectedIssue.number}`
+      : ""
+  );
+
+  let ghCliAvailable = $derived(
+    ghCliStatus !== null && ghCliStatus.available && ghCliStatus.authenticated
+  );
 
   let loading: boolean = $state(true);
   let launching: boolean = $state(false);
@@ -153,7 +189,6 @@
 
   let supportsModel = $derived(supportsModelFor(selectedAgent));
   let supportsReasoning = $derived(selectedAgent === "codex");
-  let supportsCollaboration = $derived(selectedAgent === "codex");
   let needsResumeSessionId = $derived(
     selectedAgent === "opencode" && sessionMode === "resume"
   );
@@ -162,6 +197,7 @@
     selectedAgent === "codex"
       ? [
           "gpt-5.3-codex",
+          "gpt-5.3-codex-spark",
           "gpt-5.2-codex",
           "gpt-5.1-codex-max",
           "gpt-5.2",
@@ -242,6 +278,14 @@
     const key = `${projectPath}::${refBranch}`;
     if (dockerContextKey === key) return;
     dockerContextKey = key;
+
+    // Reset stale state while async detection runs (branch switches can otherwise
+    // briefly show the previous branch's Docker context).
+    dockerContext = null;
+    dockerError = null;
+    runtimeTarget = "host" as RuntimeTarget;
+    dockerService = "";
+
     loadDockerContext(refBranch);
   });
 
@@ -422,6 +466,123 @@
     void loadBaseBranchOptions();
   });
 
+  // Check gh CLI on mount
+  $effect(() => {
+    void projectPath;
+    if (!projectPath || ghCliChecked) return;
+    ghCliChecked = true;
+    void checkGhCli();
+  });
+
+  // Load issues when switching to fromIssue tab
+  $effect(() => {
+    void newBranchTab;
+    void branchMode;
+    void projectPath;
+    if (branchMode !== "new" || newBranchTab !== "fromIssue") return;
+    if (!ghCliAvailable || !projectPath) return;
+    if (issues.length > 0 || issuesLoading) return;
+    void loadIssues(1);
+  });
+
+  async function checkGhCli() {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      ghCliStatus = await invoke<GhCliStatus>("check_gh_cli_status", {
+        projectPath,
+      });
+    } catch {
+      ghCliStatus = { available: false, authenticated: false };
+    }
+  }
+
+  async function loadIssues(page: number) {
+    if (issueRateLimited) return;
+    issuesLoading = true;
+    issuesError = null;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const resp = await invoke<FetchIssuesResponse>("fetch_github_issues", {
+        projectPath,
+        page,
+        perPage: 30,
+      });
+      if (page === 1) {
+        issues = resp.issues;
+      } else {
+        issues = [...issues, ...resp.issues];
+      }
+      issuesPage = page;
+      issuesHasNextPage = resp.hasNextPage;
+
+      // Check existing branches for newly loaded issues
+      for (const issue of resp.issues) {
+        if (!issueBranchMap.has(issue.number)) {
+          void checkExistingBranch(issue.number);
+        }
+      }
+    } catch (err) {
+      const msg = toErrorMessage(err);
+      if (msg.toLowerCase().includes("rate limit")) {
+        issueRateLimited = true;
+        issuesError = "GitHub API rate limit reached. Please try again later.";
+      } else {
+        issuesError = msg;
+      }
+    } finally {
+      issuesLoading = false;
+    }
+  }
+
+  async function checkExistingBranch(issueNumber: number) {
+    issueBranchChecksInFlight = new Set(issueBranchChecksInFlight).add(issueNumber);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const branch = await invoke<string | null>("find_existing_issue_branch", {
+        projectPath,
+        issueNumber,
+      });
+      const existingBranch = branch ?? null;
+      issueBranchMap = new Map(issueBranchMap).set(issueNumber, existingBranch);
+      if (existingBranch && selectedIssue?.number === issueNumber) {
+        selectedIssue = null;
+      }
+    } catch {
+      // Treat as "not found" so the issue is not blocked forever.
+      issueBranchMap = new Map(issueBranchMap).set(issueNumber, null);
+    } finally {
+      const next = new Set(issueBranchChecksInFlight);
+      next.delete(issueNumber);
+      issueBranchChecksInFlight = next;
+    }
+  }
+
+  function isIssueSelectable(issueNumber: number): boolean {
+    if (issueBranchChecksInFlight.has(issueNumber)) return false;
+    if (!issueBranchMap.has(issueNumber)) return false;
+    return !issueBranchMap.get(issueNumber);
+  }
+
+  function canLaunchFromIssue(issue: GitHubIssueInfo | null): boolean {
+    if (!issue) return false;
+    return isIssueSelectable(issue.number);
+  }
+
+  function selectIssue(issue: GitHubIssueInfo) {
+    if (!isIssueSelectable(issue.number)) return;
+    selectedIssue = issue;
+  }
+
+  function handleIssueListScroll(e: Event) {
+    const el = e.target as HTMLElement;
+    if (!el) return;
+    const threshold = 50;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+    if (atBottom && issuesHasNextPage && !issuesLoading && !issueRateLimited) {
+      void loadIssues(issuesPage + 1);
+    }
+  }
+
   function openSuggestModal() {
     suggestError = null;
     suggestSuggestions = [];
@@ -599,10 +760,6 @@
         request.reasoningLevel = reasoningLevel.trim();
       }
 
-      if (supportsCollaboration) {
-        request.collaborationModes = collaborationModes;
-      }
-
       const extraArgs = parseExtraArgs(extraArgsText);
       if (extraArgs.length > 0) {
         request.extraArgs = extraArgs;
@@ -660,28 +817,29 @@
         request.envOverrides = mergedEnv;
       }
 
-      if (dockerDetected) {
-        if (runtimeTarget === "host") {
-          request.dockerForceHost = true;
-        } else if (runtimeTarget === "docker") {
-          if (!dockerSelectable) {
-            errorMessage = "Docker is not available on this system.";
+      // Honor explicit runtime selection. HostOS must always force host launch,
+      // even when Docker context cannot be detected yet (e.g., remote-only branch
+      // without an existing worktree).
+      if (runtimeTarget === "host") {
+        request.dockerForceHost = true;
+      } else if (dockerDetected && runtimeTarget === "docker") {
+        if (!dockerSelectable) {
+          errorMessage = "Docker is not available on this system.";
+          return;
+        }
+
+        if (dockerComposeLike) {
+          const service = dockerService.trim();
+          if (!service) {
+            errorMessage = "Docker service is required.";
             return;
           }
-
-          if (dockerComposeLike) {
-            const service = dockerService.trim();
-            if (!service) {
-              errorMessage = "Docker service is required.";
-              return;
-            }
-            request.dockerService = service;
-            request.dockerRecreate = dockerRecreate;
-            request.dockerKeep = dockerKeep;
-          }
-
-          request.dockerBuild = dockerBuild;
+          request.dockerService = service;
+          request.dockerRecreate = dockerRecreate;
+          request.dockerKeep = dockerKeep;
         }
+
+        request.dockerBuild = dockerBuild;
       }
 
       if (branchMode === "existing") {
@@ -694,13 +852,25 @@
         return;
       }
 
-      const fullName = newBranchFullName.trim();
+      const issueForLaunch =
+        newBranchTab === "fromIssue" ? selectedIssue : null;
+      if (issueForLaunch && !canLaunchFromIssue(issueForLaunch)) {
+        errorMessage = "Selected issue is no longer available. Please select another issue.";
+        return;
+      }
+      const fullName = issueForLaunch
+        ? issueBranchName
+        : newBranchFullName.trim();
       if (!baseBranch.trim() || !fullName) return;
       request.branch = fullName;
       await onLaunch({
         ...request,
         createBranch: { name: fullName, base: baseBranch.trim() },
+        issueNumber: issueForLaunch
+          ? issueForLaunch.number
+          : undefined,
       });
+
       onClose();
     } catch (err) {
       errorMessage = `Failed to launch agent: ${toErrorMessage(err)}`;
@@ -740,6 +910,213 @@
         {/if}
 
         <div class="field">
+          <span class="field-label" id="branch-mode-label">Branch</span>
+          <div class="mode-toggle" role="group" aria-labelledby="branch-mode-label">
+            <button
+              class="mode-btn"
+              class:active={branchMode === "existing"}
+              onclick={() => (branchMode = "existing")}
+            >
+              Existing Branch
+            </button>
+            <button
+              class="mode-btn"
+              class:active={branchMode === "new"}
+              onclick={() => (branchMode = "new")}
+            >
+              New Branch
+            </button>
+          </div>
+        </div>
+
+        {#if branchMode === "existing"}
+          <div class="field">
+            <label for="branch-input">Branch</label>
+            <input
+              id="branch-input"
+              type="text"
+              autocapitalize="off"
+              autocorrect="off"
+              autocomplete="off"
+              spellcheck="false"
+              value={existingBranch}
+              readonly
+            />
+            {#if !existingBranch.trim()}
+              <span class="field-hint warn">No branch selected.</span>
+            {/if}
+          </div>
+        {:else}
+          <div class="field">
+            <label for="base-branch-select">Base Branch</label>
+            <select
+              id="base-branch-select"
+              bind:value={baseBranch}
+              disabled={baseBranchOptionsLoading}
+            >
+              {#if !baseBranch.trim()}
+                <option value="" disabled>Select base branch...</option>
+              {/if}
+              {#if baseBranch.trim() &&
+                !baseBranchLocalOptions.includes(baseBranch) &&
+                !baseBranchRemoteOptions.includes(baseBranch)}
+                <option value={baseBranch}>{baseBranch}</option>
+              {/if}
+              <optgroup label="Local (Worktrees)">
+                {#each baseBranchLocalOptions as name (name)}
+                  <option value={name}>{name}</option>
+                {/each}
+              </optgroup>
+              <optgroup label="Remote">
+                {#each baseBranchRemoteOptions as name (name)}
+                  <option value={name}>{name}</option>
+                {/each}
+              </optgroup>
+            </select>
+            {#if baseBranchOptionsLoading}
+              <span class="field-hint">Loading branches...</span>
+            {:else if baseBranchOptionsError}
+              <span class="field-hint warn">{baseBranchOptionsError}</span>
+            {/if}
+          </div>
+          <div class="field">
+            <span class="field-label" id="new-branch-tab-label">Source</span>
+            <div class="mode-toggle" role="group" aria-labelledby="new-branch-tab-label">
+              <button
+                class="mode-btn"
+                class:active={newBranchTab === "manual"}
+                onclick={() => { newBranchTab = "manual"; selectedIssue = null; }}
+              >
+                Manual
+              </button>
+              <button
+                class="mode-btn"
+                class:active={newBranchTab === "fromIssue"}
+                disabled={!ghCliAvailable}
+                title={!ghCliAvailable ? "GitHub CLI (gh) is required" : ""}
+                onclick={() => (newBranchTab = "fromIssue")}
+              >
+                From Issue
+              </button>
+            </div>
+            {#if ghCliStatus && !ghCliStatus.available}
+              <span class="field-hint warn">GitHub CLI (gh) is not installed.</span>
+            {:else if ghCliStatus && !ghCliStatus.authenticated}
+              <span class="field-hint warn">GitHub CLI (gh) is not authenticated. Run: gh auth login</span>
+            {/if}
+          </div>
+
+          {#if newBranchTab === "manual"}
+            <div class="field">
+              <label for="new-branch-suffix-input">New Branch Name</label>
+              <div class="branch-name-row">
+                <select id="new-branch-prefix-select" bind:value={newBranchPrefix}>
+                  {#each BRANCH_PREFIXES as p (p)}
+                    <option value={p}>{p}</option>
+                  {/each}
+                </select>
+                <input
+                  id="new-branch-suffix-input"
+                  type="text"
+                  autocapitalize="off"
+                  autocorrect="off"
+                  autocomplete="off"
+                  spellcheck="false"
+                  value={newBranchSuffix}
+                  oninput={(e) =>
+                    handleNewBranchSuffixInput((e.target as HTMLInputElement).value)}
+                  placeholder="e.g., my-change"
+                />
+                <button class="suggest-btn" type="button" onclick={openSuggestModal}>
+                  Suggest...
+                </button>
+              </div>
+              <span class="field-hint">
+                Full name: {newBranchFullName.trim() ? newBranchFullName : "(empty)"}
+              </span>
+            </div>
+          {:else}
+            <div class="field">
+              <label for="issue-search-input">Search Issues</label>
+              <input
+                id="issue-search-input"
+                type="text"
+                autocapitalize="off"
+                autocorrect="off"
+                autocomplete="off"
+                spellcheck="false"
+                bind:value={issueSearchQuery}
+                placeholder="Filter by title..."
+              />
+            </div>
+
+            {#if issuesError}
+              <div class="field">
+                <span class="field-hint warn">{issuesError}</span>
+              </div>
+            {/if}
+
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div class="issue-list" onscroll={handleIssueListScroll}>
+              {#if filteredIssues.length === 0 && !issuesLoading}
+                <div class="issue-empty">No issues found.</div>
+              {/if}
+              {#each filteredIssues as issue (issue.number)}
+                {@const existingBranchName = issueBranchMap.get(issue.number)}
+                {@const isChecking = issueBranchChecksInFlight.has(issue.number) || !issueBranchMap.has(issue.number)}
+                {@const isDisabled = isChecking || !!existingBranchName}
+                {@const isSelected = selectedIssue?.number === issue.number}
+                <button
+                  class="issue-item"
+                  class:selected={isSelected}
+                  class:disabled={isDisabled}
+                  disabled={isDisabled}
+                  type="button"
+                  onclick={() => selectIssue(issue)}
+                  title={isChecking
+                    ? "Checking existing branch..."
+                    : isDisabled
+                      ? `Branch exists: ${existingBranchName}`
+                      : ""}
+                >
+                  <span class="issue-number">#{issue.number}</span>
+                  <span class="issue-title">{issue.title}</span>
+                  {#if issue.labels.length > 0}
+                    <span class="issue-labels">
+                      {#each issue.labels as lbl (lbl)}
+                        <span class="issue-label">{lbl}</span>
+                      {/each}
+                    </span>
+                  {/if}
+                  {#if isChecking}
+                    <span class="issue-existing">Checking...</span>
+                  {:else if isDisabled}
+                    <span class="issue-existing">Branch exists</span>
+                  {/if}
+                </button>
+              {/each}
+              {#if issuesLoading}
+                <div class="issue-loading">Loading issues...</div>
+              {/if}
+            </div>
+
+            {#if selectedIssue}
+              <div class="field">
+                <span class="field-label">Branch Name</span>
+                <input
+                  type="text"
+                  value={issueBranchName}
+                  readonly
+                />
+                <span class="field-hint">
+                  Auto-generated from issue #{selectedIssue.number}
+                </span>
+              </div>
+            {/if}
+          {/if}
+        {/if}
+
+        <div class="field">
           <label for="agent-select">Agent</label>
           <select id="agent-select" bind:value={selectedAgent}>
             <option value="" disabled>Select an agent...</option>
@@ -769,6 +1146,10 @@
               <input
                 id="opencode-model-input"
                 type="text"
+                autocapitalize="off"
+                autocorrect="off"
+                autocomplete="off"
+                spellcheck="false"
                 bind:value={model}
                 placeholder="provider/model (optional)"
               />
@@ -816,6 +1197,10 @@
                   <input
                     id="glm-base-url"
                     type="text"
+                    autocapitalize="off"
+                    autocorrect="off"
+                    autocomplete="off"
+                    spellcheck="false"
                     value={agentConfig.claude.glm.base_url}
                     placeholder="https://api.z.ai/api/anthropic"
                     oninput={(e) =>
@@ -830,6 +1215,10 @@
                   <input
                     id="glm-api-token"
                     type="password"
+                    autocapitalize="off"
+                    autocorrect="off"
+                    autocomplete="off"
+                    spellcheck="false"
                     value={agentConfig.claude.glm.auth_token}
                     placeholder="Required"
                     oninput={(e) =>
@@ -844,6 +1233,10 @@
                   <input
                     id="glm-timeout-ms"
                     type="text"
+                    autocapitalize="off"
+                    autocorrect="off"
+                    autocomplete="off"
+                    spellcheck="false"
                     value={agentConfig.claude.glm.api_timeout_ms}
                     placeholder="e.g. 3000000"
                     oninput={(e) =>
@@ -858,6 +1251,10 @@
                   <input
                     id="glm-opus-model"
                     type="text"
+                    autocapitalize="off"
+                    autocorrect="off"
+                    autocomplete="off"
+                    spellcheck="false"
                     value={agentConfig.claude.glm.default_opus_model}
                     placeholder="e.g. glm-4.7"
                     oninput={(e) =>
@@ -872,6 +1269,10 @@
                   <input
                     id="glm-sonnet-model"
                     type="text"
+                    autocapitalize="off"
+                    autocorrect="off"
+                    autocomplete="off"
+                    spellcheck="false"
                     value={agentConfig.claude.glm.default_sonnet_model}
                     placeholder="e.g. glm-4.7"
                     oninput={(e) =>
@@ -886,6 +1287,10 @@
                   <input
                     id="glm-haiku-model"
                     type="text"
+                    autocapitalize="off"
+                    autocorrect="off"
+                    autocomplete="off"
+                    spellcheck="false"
                     value={agentConfig.claude.glm.default_haiku_model}
                     placeholder="e.g. glm-4.5-air"
                     oninput={(e) =>
@@ -970,6 +1375,10 @@
             <input
               id="resume-session-input"
               type="text"
+              autocapitalize="off"
+              autocorrect="off"
+              autocomplete="off"
+              spellcheck="false"
               bind:value={resumeSessionId}
               placeholder={needsResumeSessionId ? "Required" : "Optional"}
             />
@@ -987,16 +1396,6 @@
           </label>
         </div>
 
-        {#if supportsCollaboration}
-          <div class="field">
-            <span class="field-label">Codex</span>
-            <label class="check-row">
-              <input type="checkbox" bind:checked={collaborationModes} />
-              <span>Enable collaboration_modes</span>
-            </label>
-          </div>
-        {/if}
-
         <div class="field">
           <button
             class="advanced-btn"
@@ -1012,6 +1411,10 @@
             <label for="extra-args-input">Extra Args</label>
             <textarea
               id="extra-args-input"
+              autocapitalize="off"
+              autocorrect="off"
+              autocomplete="off"
+              spellcheck="false"
               rows="3"
               bind:value={extraArgsText}
               placeholder="One argument per line"
@@ -1022,99 +1425,16 @@
             <label for="env-overrides-input">Env Overrides</label>
             <textarea
               id="env-overrides-input"
+              autocapitalize="off"
+              autocorrect="off"
+              autocomplete="off"
+              spellcheck="false"
               rows="4"
               bind:value={envOverridesText}
               placeholder="KEY=VALUE (one per line)"
             ></textarea>
             <span class="field-hint">
               These variables are applied only for this launch.
-            </span>
-          </div>
-        {/if}
-
-        <div class="field">
-          <span class="field-label" id="branch-mode-label">Branch</span>
-          <div class="mode-toggle" role="group" aria-labelledby="branch-mode-label">
-            <button
-              class="mode-btn"
-              class:active={branchMode === "existing"}
-              onclick={() => (branchMode = "existing")}
-            >
-              Existing Branch
-            </button>
-            <button
-              class="mode-btn"
-              class:active={branchMode === "new"}
-              onclick={() => (branchMode = "new")}
-            >
-              New Branch
-            </button>
-          </div>
-        </div>
-
-        {#if branchMode === "existing"}
-          <div class="field">
-            <label for="branch-input">Branch</label>
-            <input id="branch-input" type="text" value={existingBranch} readonly />
-            {#if !existingBranch.trim()}
-              <span class="field-hint warn">No branch selected.</span>
-            {/if}
-          </div>
-        {:else}
-          <div class="field">
-            <label for="base-branch-select">Base Branch</label>
-            <select
-              id="base-branch-select"
-              bind:value={baseBranch}
-              disabled={baseBranchOptionsLoading}
-            >
-              {#if !baseBranch.trim()}
-                <option value="" disabled>Select base branch...</option>
-              {/if}
-              {#if baseBranch.trim() &&
-                !baseBranchLocalOptions.includes(baseBranch) &&
-                !baseBranchRemoteOptions.includes(baseBranch)}
-                <option value={baseBranch}>{baseBranch}</option>
-              {/if}
-              <optgroup label="Local (Worktrees)">
-                {#each baseBranchLocalOptions as name (name)}
-                  <option value={name}>{name}</option>
-                {/each}
-              </optgroup>
-              <optgroup label="Remote">
-                {#each baseBranchRemoteOptions as name (name)}
-                  <option value={name}>{name}</option>
-                {/each}
-              </optgroup>
-            </select>
-            {#if baseBranchOptionsLoading}
-              <span class="field-hint">Loading branches...</span>
-            {:else if baseBranchOptionsError}
-              <span class="field-hint warn">{baseBranchOptionsError}</span>
-            {/if}
-          </div>
-          <div class="field">
-            <label for="new-branch-suffix-input">New Branch Name</label>
-            <div class="branch-name-row">
-              <select id="new-branch-prefix-select" bind:value={newBranchPrefix}>
-                {#each BRANCH_PREFIXES as p (p)}
-                  <option value={p}>{p}</option>
-                {/each}
-              </select>
-              <input
-                id="new-branch-suffix-input"
-                type="text"
-                value={newBranchSuffix}
-                oninput={(e) =>
-                  handleNewBranchSuffixInput((e.target as HTMLInputElement).value)}
-                placeholder="e.g., my-change"
-              />
-              <button class="suggest-btn" type="button" onclick={openSuggestModal}>
-                Suggest...
-              </button>
-            </div>
-            <span class="field-hint">
-              Full name: {newBranchFullName.trim() ? newBranchFullName : "(empty)"}
             </span>
           </div>
         {/if}
@@ -1214,7 +1534,10 @@
             (needsResumeSessionId && !resumeSessionId.trim()) ||
             (branchMode === "existing"
               ? !existingBranch.trim()
-              : !baseBranch.trim() || !newBranchFullName.trim())
+              : !baseBranch.trim() ||
+                (newBranchTab === "fromIssue"
+                  ? !canLaunchFromIssue(selectedIssue)
+                  : !newBranchFullName.trim()))
           }
           onclick={handleLaunch}
         >
@@ -1252,6 +1575,10 @@
             <label for="suggest-desc-input">Description</label>
             <textarea
               id="suggest-desc-input"
+              autocapitalize="off"
+              autocorrect="off"
+              autocomplete="off"
+              spellcheck="false"
               rows="3"
               bind:value={suggestDescription}
               placeholder="What is this branch for?"
@@ -1661,5 +1988,96 @@
   .btn-launch:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+
+  .issue-list {
+    max-height: 240px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 6px;
+    background: var(--bg-primary);
+  }
+
+  .issue-item {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px;
+    padding: 8px 10px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    cursor: pointer;
+    text-align: left;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: var(--ui-font-md);
+    transition: border-color 0.15s, background 0.15s;
+  }
+
+  .issue-item:hover:not(:disabled) {
+    border-color: var(--border-color);
+    background: var(--bg-surface);
+  }
+
+  .issue-item.selected {
+    border-color: var(--accent);
+    background: var(--bg-surface);
+  }
+
+  .issue-item.disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .issue-number {
+    font-family: monospace;
+    font-weight: 600;
+    color: var(--text-muted);
+    flex: 0 0 auto;
+  }
+
+  .issue-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .issue-labels {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+    flex: 0 0 auto;
+  }
+
+  .issue-label {
+    font-size: var(--ui-font-sm);
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    white-space: nowrap;
+  }
+
+  .issue-existing {
+    font-size: var(--ui-font-sm);
+    color: var(--text-muted);
+    font-style: italic;
+    flex: 0 0 auto;
+  }
+
+  .issue-empty,
+  .issue-loading {
+    padding: 12px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: var(--ui-font-md);
   }
 </style>

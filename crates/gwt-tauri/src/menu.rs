@@ -1,6 +1,7 @@
 //! Native menubar wiring (Tauri menu).
 
 use crate::state::AppState;
+use gwt_core::config::ProfilesConfig;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -18,12 +19,15 @@ pub const MENU_ID_TOOLS_LIST_TERMINALS: &str = "tools-list-terminals";
 pub const MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS: &str = "tools-terminal-diagnostics";
 
 pub const MENU_ID_GIT_CLEANUP_WORKTREES: &str = "git-cleanup-worktrees";
+pub const MENU_ID_GIT_VERSION_HISTORY: &str = "git-version-history";
 
 pub const MENU_ID_SETTINGS_PREFERENCES: &str = "settings-preferences";
 pub const MENU_ID_HELP_ABOUT: &str = "help-about";
 pub const MENU_ID_HELP_CHECK_UPDATES: &str = "help-check-updates";
 
+pub const RECENT_PROJECT_PREFIX: &str = "recent-project::";
 pub const WINDOW_FOCUS_MENU_PREFIX: &str = "window-focus::";
+pub const WINDOW_TAB_FOCUS_MENU_PREFIX: &str = "window-tab-focus::";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MenuActionPayload {
@@ -38,12 +42,35 @@ pub struct WindowMenuEntry {
     pub focused: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowTabMenuEntry {
+    pub tab_id: String,
+    pub label: String,
+    pub active: bool,
+}
+
 pub fn window_focus_menu_id(window_label: &str) -> String {
     format!("{WINDOW_FOCUS_MENU_PREFIX}{window_label}")
 }
 
+pub fn window_tab_focus_menu_id(tab_id: &str) -> String {
+    format!("{WINDOW_TAB_FOCUS_MENU_PREFIX}{tab_id}")
+}
+
+pub fn parse_recent_project_menu_id(id: &str) -> Option<&str> {
+    id.strip_prefix(RECENT_PROJECT_PREFIX)
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+}
+
 pub fn parse_window_focus_menu_id(id: &str) -> Option<&str> {
     id.strip_prefix(WINDOW_FOCUS_MENU_PREFIX)
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+}
+
+pub fn parse_window_tab_focus_menu_id(id: &str) -> Option<&str> {
+    id.strip_prefix(WINDOW_TAB_FOCUS_MENU_PREFIX)
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
 }
@@ -81,11 +108,26 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         true,
         None::<&str>,
     )?;
+    let open_recent = build_open_recent_submenu(app)?;
     let file = SubmenuBuilder::new(app, "File")
         .item(&file_new_window)
         .separator()
         .item(&file_open_project)
+        .item(&open_recent)
+        .separator()
         .item(&file_close_project)
+        .build()?;
+
+    // Use native predefined Edit actions so Cmd/Ctrl shortcuts work consistently.
+    let edit = SubmenuBuilder::new(app, "Edit")
+        .undo()
+        .redo()
+        .separator()
+        .cut()
+        .copy()
+        .paste()
+        .separator()
+        .select_all()
         .build()?;
 
     let git_cleanup_worktrees = MenuItem::with_id(
@@ -95,9 +137,20 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         true,
         Some("CmdOrCtrl+Shift+K"),
     )?;
-    let git = SubmenuBuilder::new(app, "Git")
-        .item(&git_cleanup_worktrees)
-        .build()?;
+    let mut git_builder = SubmenuBuilder::new(app, "Git");
+
+    if should_show_version_history_menu(app, state) {
+        let version_history = MenuItem::with_id(
+            app,
+            MENU_ID_GIT_VERSION_HISTORY,
+            "Version History...",
+            true,
+            None::<&str>,
+        )?;
+        git_builder = git_builder.item(&version_history).separator();
+    }
+
+    let git = git_builder.item(&git_cleanup_worktrees).build()?;
 
     let tools_launch_agent = MenuItem::with_id(
         app,
@@ -142,6 +195,23 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         true,
         Some("CmdOrCtrl+,"),
     )?;
+
+    #[cfg(target_os = "macos")]
+    let gwt = SubmenuBuilder::new(app, app_menu_label)
+        .item(&help_about)
+        .separator()
+        .item(&settings_prefs)
+        .separator()
+        .services()
+        .separator()
+        .hide()
+        .hide_others()
+        .show_all()
+        .separator()
+        .quit()
+        .build()?;
+
+    #[cfg(not(target_os = "macos"))]
     let gwt = SubmenuBuilder::new(app, app_menu_label)
         .item(&help_about)
         .item(&help_check_updates)
@@ -151,31 +221,98 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
 
     menu.append(&gwt)?;
     menu.append(&file)?;
+    menu.append(&edit)?;
     menu.append(&git)?;
     menu.append(&tools)?;
     menu.append(&window)?;
     Ok(menu)
 }
 
+fn build_open_recent_submenu(app: &AppHandle<Wry>) -> tauri::Result<tauri::menu::Submenu<Wry>> {
+    let projects = gwt_core::config::load_recent_projects();
+    let mut builder = SubmenuBuilder::new(app, "Open Recent");
+
+    if projects.is_empty() {
+        let none = MenuItem::with_id(
+            app,
+            "recent-none",
+            "No Recent Projects",
+            false,
+            None::<&str>,
+        )?;
+        builder = builder.item(&none);
+    } else {
+        for entry in projects.into_iter().take(10) {
+            let id = format!("{}{}", RECENT_PROJECT_PREFIX, entry.path);
+            let item = MenuItem::with_id(app, id, &entry.path, true, None::<&str>)?;
+            builder = builder.item(&item);
+        }
+    }
+
+    builder.build()
+}
+
+fn should_show_version_history_menu(app: &AppHandle<Wry>, state: &AppState) -> bool {
+    // Only show when there is an open project in the currently focused window
+    // and AI settings are configured.
+    let focused_label = focused_window_label(app);
+
+    if state.project_for_window(&focused_label).is_none() {
+        return false;
+    }
+
+    let Ok(profiles) = ProfilesConfig::load() else {
+        return false;
+    };
+    let ai = profiles.resolve_active_ai_settings();
+    ai.resolved.is_some()
+}
+
 fn build_window_submenu(
     app: &AppHandle<Wry>,
     state: &AppState,
 ) -> tauri::Result<tauri::menu::Submenu<Wry>> {
-    let entries = collect_window_entries(app, state);
+    let tab_entries = collect_agent_tab_entries(app, state);
+    let window_entries = collect_window_entries(app, state);
 
     let mut builder = SubmenuBuilder::new(app, "Window");
 
-    if entries.is_empty() {
-        let none = MenuItem::with_id(
+    if tab_entries.is_empty() {
+        let none_tabs = MenuItem::with_id(
+            app,
+            "window-tabs-none",
+            "No Agent Tabs",
+            false,
+            None::<&str>,
+        )?;
+        builder = builder.item(&none_tabs);
+    } else {
+        for e in tab_entries {
+            let item = CheckMenuItem::with_id(
+                app,
+                window_tab_focus_menu_id(&e.tab_id),
+                &e.label,
+                true,
+                e.active,
+                None::<&str>,
+            )?;
+            builder = builder.item(&item);
+        }
+    }
+
+    builder = builder.separator();
+
+    if window_entries.is_empty() {
+        let none_windows = MenuItem::with_id(
             app,
             "window-none",
             "No Project Windows",
             false,
             None::<&str>,
         )?;
-        builder = builder.item(&none);
+        builder = builder.item(&none_windows);
     } else {
-        let mut sorted = entries;
+        let mut sorted = window_entries;
         sorted.sort_by(|a, b| a.display.cmp(&b.display));
 
         for e in sorted {
@@ -194,6 +331,25 @@ fn build_window_submenu(
     builder.build()
 }
 
+fn collect_agent_tab_entries(app: &AppHandle<Wry>, state: &AppState) -> Vec<WindowTabMenuEntry> {
+    let focused_label = focused_window_label(app);
+    let window_tabs = state.window_agent_tabs_for_window(&focused_label);
+    let active_tab_id = window_tabs.active_tab_id;
+
+    window_tabs
+        .tabs
+        .into_iter()
+        .map(|tab| {
+            let active = active_tab_id.as_deref() == Some(tab.id.as_str());
+            WindowTabMenuEntry {
+                tab_id: tab.id,
+                label: tab.label,
+                active,
+            }
+        })
+        .collect()
+}
+
 fn collect_window_entries(app: &AppHandle<Wry>, state: &AppState) -> Vec<WindowMenuEntry> {
     let projects = match state.window_projects.lock() {
         Ok(m) => m.clone(),
@@ -205,11 +361,7 @@ fn collect_window_entries(app: &AppHandle<Wry>, state: &AppState) -> Vec<WindowM
     }
 
     // Determine focused window by scanning (stable API).
-    let focused_label = app
-        .webview_windows()
-        .into_iter()
-        .find_map(|(label, w)| w.is_focused().ok().and_then(|f| f.then_some(label)))
-        .unwrap_or_else(|| "main".to_string());
+    let focused_label = focused_window_label(app);
 
     let mut raw: Vec<(String, String)> = Vec::new();
     for (label, path) in projects {
@@ -234,6 +386,13 @@ fn collect_window_entries(app: &AppHandle<Wry>, state: &AppState) -> Vec<WindowM
             project_path: path,
         })
         .collect()
+}
+
+fn focused_window_label(app: &AppHandle<Wry>) -> String {
+    app.webview_windows()
+        .into_iter()
+        .find_map(|(label, w)| w.is_focused().ok().and_then(|f| f.then_some(label)))
+        .unwrap_or_else(|| "main".to_string())
 }
 
 fn fallback_display_from_path(project_path: &str) -> String {
@@ -291,6 +450,21 @@ mod tests {
         assert_eq!(
             parse_window_focus_menu_id("window-focus::project-123"),
             Some("project-123")
+        );
+    }
+
+    #[test]
+    fn parse_window_tab_focus_menu_id_rejects_non_matching() {
+        assert_eq!(parse_window_tab_focus_menu_id("window-focus::main"), None);
+        assert_eq!(parse_window_tab_focus_menu_id("window-tab-focus::"), None);
+        assert_eq!(parse_window_tab_focus_menu_id("window-tab-focus::  "), None);
+    }
+
+    #[test]
+    fn parse_window_tab_focus_menu_id_extracts_id() {
+        assert_eq!(
+            parse_window_tab_focus_menu_id("window-tab-focus::agent-pane-1"),
+            Some("agent-pane-1")
         );
     }
 

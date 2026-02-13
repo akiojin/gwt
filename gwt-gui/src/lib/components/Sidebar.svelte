@@ -1,20 +1,50 @@
 <script lang="ts">
-  import type { BranchInfo, WorktreeInfo, CleanupProgress } from "../types";
+  import type {
+    BranchInfo,
+    WorktreeInfo,
+    CleanupProgress,
+    LaunchAgentRequest,
+  } from "../types";
+  import AgentSidebar from "./AgentSidebar.svelte";
+  import WorktreeSummaryPanel from "./WorktreeSummaryPanel.svelte";
 
   type FilterType = "Local" | "Remote" | "All";
+  type SidebarMode = "branch" | "agent";
 
   let {
     projectPath,
     onBranchSelect,
     onBranchActivate,
     onCleanupRequest,
+    onLaunchAgent,
+    onQuickLaunch,
+    onResize,
+    widthPx = 260,
+    minWidthPx = 220,
+    maxWidthPx = 520,
     refreshKey = 0,
+    mode = "branch",
+    onModeChange,
+    selectedBranch = null,
+    currentBranch = "",
+    agentTabBranches = [],
   }: {
     projectPath: string;
     onBranchSelect: (branch: BranchInfo) => void;
     onBranchActivate?: (branch: BranchInfo) => void;
     onCleanupRequest?: (preSelectedBranch?: string) => void;
+    onLaunchAgent?: () => void;
+    onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
+    onResize?: (nextWidthPx: number) => void;
+    widthPx?: number;
+    minWidthPx?: number;
+    maxWidthPx?: number;
     refreshKey?: number;
+    mode?: SidebarMode;
+    onModeChange?: (next: SidebarMode) => void;
+    selectedBranch?: BranchInfo | null;
+    currentBranch?: string;
+    agentTabBranches?: string[];
   } = $props();
 
   let activeFilter: FilterType = $state("Local");
@@ -23,11 +53,35 @@
   let searchQuery: string = $state("");
   let errorMessage: string | null = $state(null);
   let lastFetchKey = "";
+  let lastWorktreesFetchKey = "";
   let fetchToken = 0;
   let localRefreshKey = $state(0);
 
   // Worktree safety info
   let worktreeMap: Map<string, WorktreeInfo> = $state(new Map());
+
+  function normalizeTabBranch(name: string): string {
+    const trimmed = name.trim();
+    return trimmed.startsWith("origin/") ? trimmed.slice("origin/".length) : trimmed;
+  }
+
+  let agentTabBranchSet = $derived(
+    new Set(
+      agentTabBranches
+        .map((b) => normalizeTabBranch(b))
+        .filter((b) => b && b !== "Worktree" && b !== "Agent")
+    )
+  );
+
+  function hasActiveAgentTab(branch: BranchInfo): boolean {
+    // Local view only includes branches that have an active local worktree.
+    if (activeFilter === "Local") return agentTabBranchSet.has(branch.name);
+
+    // Only mark actual worktrees as active to avoid noise in Remote-only lists.
+    if (activeFilter === "Remote") return false;
+    if (!worktreeMap.get(branch.name)) return false;
+    return agentTabBranchSet.has(branch.name);
+  }
 
   // Branches currently being deleted
   let deletingBranches: Set<string> = $state(new Set());
@@ -40,6 +94,12 @@
   let confirmDelete: { branch: string; safetyLevel: string } | null =
     $state(null);
   let confirmDeleteError: string | null = $state(null);
+  let resizing = false;
+  let resizePointerId: number | null = null;
+  let resizeStartX = 0;
+  let resizeStartWidth = 0;
+  let previousBodyCursor = "";
+  let previousBodyUserSelect = "";
 
   const filters: FilterType[] = ["Local", "Remote", "All"];
 
@@ -50,14 +110,37 @@
         )
       : branches
   );
+  let clampedWidthPx = $derived(clampSidebarWidth(widthPx));
+
+  $effect(() => {
+    return () => {
+      stopResizing();
+    };
+  });
 
   $effect(() => {
     // Re-fetch when filter/projectPath changes and when explicitly requested.
+    if (mode !== "branch") {
+      lastFetchKey = "";
+      return;
+    }
     const key = `${projectPath}::${activeFilter}::${refreshKey}::${localRefreshKey}`;
     if (key === lastFetchKey) return;
     lastFetchKey = key;
     fetchBranches();
   });
+
+  $effect(() => {
+    if (mode === "branch") return;
+    contextMenu = null;
+    confirmDelete = null;
+    confirmDeleteError = null;
+  });
+
+  function handleModeChange(next: SidebarMode) {
+    if (mode === next) return;
+    onModeChange?.(next);
+  }
 
   // Listen to cleanup-progress events for deletion state tracking
   $effect(() => {
@@ -165,15 +248,22 @@
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       if (activeFilter === "Local") {
-        const [next, worktrees] = await Promise.all([
-          invoke<BranchInfo[]>("list_worktree_branches", { projectPath }),
-          invoke<WorktreeInfo[]>("list_worktrees", { projectPath }).catch(
-            () => [] as WorktreeInfo[]
-          ),
-        ]);
+        const next = await invoke<BranchInfo[]>("list_worktree_branches", { projectPath });
         if (token !== fetchToken) return;
         branches = next;
-        updateWorktreeMap(worktrees);
+
+        // Worktree safety info is relatively expensive, but it must refresh when worktrees
+        // change (refreshKey) and when explicitly requested (localRefreshKey).
+        const wtKey = `${projectPath}::${localRefreshKey}::${refreshKey}`;
+        const shouldFetchWorktrees = wtKey !== lastWorktreesFetchKey;
+        if (shouldFetchWorktrees) {
+          const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", { projectPath }).catch(
+            () => [] as WorktreeInfo[]
+          );
+          if (token !== fetchToken) return;
+          updateWorktreeMap(worktrees);
+          lastWorktreesFetchKey = wtKey;
+        }
       } else if (activeFilter === "Remote") {
         const next = await invoke<BranchInfo[]>("list_remote_branches", {
           projectPath,
@@ -181,14 +271,12 @@
         if (token !== fetchToken) return;
         branches = next;
         worktreeMap = new Map();
+        lastWorktreesFetchKey = "";
       } else {
         // All: merge local + remote
-        const [local, remote, worktrees] = await Promise.all([
+        const [local, remote] = await Promise.all([
           invoke<BranchInfo[]>("list_worktree_branches", { projectPath }),
           invoke<BranchInfo[]>("list_remote_branches", { projectPath }),
-          invoke<WorktreeInfo[]>("list_worktrees", { projectPath }).catch(
-            () => [] as WorktreeInfo[]
-          ),
         ]);
         if (token !== fetchToken) return;
         // Deduplicate by name
@@ -204,7 +292,17 @@
           }
         }
         branches = merged;
-        updateWorktreeMap(worktrees);
+
+        const wtKey = `${projectPath}::${localRefreshKey}::${refreshKey}`;
+        const shouldFetchWorktrees = wtKey !== lastWorktreesFetchKey;
+        if (shouldFetchWorktrees) {
+          const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", { projectPath }).catch(
+            () => [] as WorktreeInfo[]
+          );
+          if (token !== fetchToken) return;
+          updateWorktreeMap(worktrees);
+          lastWorktreesFetchKey = wtKey;
+        }
       }
     } catch (err) {
       const msg =
@@ -294,10 +392,96 @@
 
   // --- Context menu ---
 
+  function clampSidebarWidth(width: number): number {
+    const min = Number.isFinite(minWidthPx) ? minWidthPx : 220;
+    const maxCandidate = Number.isFinite(maxWidthPx) ? maxWidthPx : 520;
+    const max = Math.max(min, maxCandidate);
+    if (!Number.isFinite(width)) return min;
+    return Math.max(min, Math.min(max, Math.round(width)));
+  }
+
+  function emitSidebarWidth(nextWidthPx: number) {
+    onResize?.(clampSidebarWidth(nextWidthPx));
+  }
+
+  function stopResizing() {
+    if (!resizing) return;
+    resizing = false;
+    resizePointerId = null;
+    window.removeEventListener("pointermove", handleResizePointerMove);
+    window.removeEventListener("pointerup", handleResizePointerUp);
+    window.removeEventListener("pointercancel", handleResizePointerUp);
+    document.body.style.cursor = previousBodyCursor;
+    document.body.style.userSelect = previousBodyUserSelect;
+  }
+
+  function handleResizePointerMove(event: PointerEvent) {
+    if (!resizing) return;
+    if (resizePointerId !== null && event.pointerId !== resizePointerId) return;
+    const delta = event.clientX - resizeStartX;
+    emitSidebarWidth(resizeStartWidth + delta);
+  }
+
+  function handleResizePointerUp(event: PointerEvent) {
+    if (resizePointerId !== null && event.pointerId !== resizePointerId) return;
+    stopResizing();
+  }
+
+  function handleResizePointerDown(event: PointerEvent) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+
+    resizeStartX = event.clientX;
+    resizeStartWidth = clampedWidthPx;
+    resizePointerId = event.pointerId;
+    resizing = true;
+
+    previousBodyCursor = document.body.style.cursor;
+    previousBodyUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    window.addEventListener("pointermove", handleResizePointerMove);
+    window.addEventListener("pointerup", handleResizePointerUp);
+    window.addEventListener("pointercancel", handleResizePointerUp);
+  }
+
+  function handleResizeKeydown(event: KeyboardEvent) {
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      const step = event.shiftKey ? 24 : 12;
+      const delta = event.key === "ArrowRight" ? step : -step;
+      emitSidebarWidth(clampedWidthPx + delta);
+      return;
+    }
+    if (event.key === "Home") {
+      event.preventDefault();
+      emitSidebarWidth(minWidthPx);
+      return;
+    }
+    if (event.key === "End") {
+      event.preventDefault();
+      emitSidebarWidth(maxWidthPx);
+    }
+  }
+
+  function canLaunchBranch(branch: BranchInfo): boolean {
+    return !deletingBranches.has(branch.name) && !!onBranchActivate;
+  }
+
   function handleContextMenu(e: MouseEvent, branch: BranchInfo) {
     if (deletingBranches.has(branch.name)) return;
     e.preventDefault();
     contextMenu = { x: e.clientX, y: e.clientY, branch };
+  }
+
+  function handleLaunchAgent() {
+    if (!contextMenu) return;
+    const branch = contextMenu.branch;
+    contextMenu = null;
+    if (!canLaunchBranch(branch)) return;
+    onBranchActivate?.(branch);
   }
 
   function handleCleanupThisBranch() {
@@ -352,168 +536,250 @@
   }
 </script>
 
-<aside class="sidebar">
-  <div class="filter-bar">
-    {#each filters as filter}
-      <button
-        class="filter-btn"
-        class:active={activeFilter === filter}
-        onclick={() => (activeFilter = filter)}
-      >
-        {filter}
-      </button>
-    {/each}
+<aside
+  class="sidebar"
+  style="width: {clampedWidthPx}px; min-width: {clampedWidthPx}px;"
+>
+  <div class="mode-toggle">
     <button
-      class="cleanup-btn"
-      onclick={() => onCleanupRequest?.()}
-      title="Cleanup Worktrees..."
+      class="mode-btn"
+      class:active={mode === "branch"}
+      aria-pressed={mode === "branch"}
+      title="Branch Mode"
+      onclick={() => handleModeChange("branch")}
     >
-      Cleanup
+      <span class="mode-icon">B</span>
+      <span class="mode-label">Branch</span>
+    </button>
+    <button
+      class="mode-btn"
+      class:active={mode === "agent"}
+      aria-pressed={mode === "agent"}
+      title="Agent Mode"
+      onclick={() => handleModeChange("agent")}
+    >
+      <span class="mode-icon">A</span>
+      <span class="mode-label">Agent</span>
     </button>
   </div>
-  <div class="search-bar">
-    <input
-      type="text"
-      class="search-input"
-      placeholder="Filter branches..."
-      bind:value={searchQuery}
-    />
-  </div>
-  <div class="branch-list">
-    {#if loading}
-      <div class="loading-indicator">Loading...</div>
-    {:else if errorMessage}
-      <div class="error-indicator">{errorMessage}</div>
-    {:else if filteredBranches.length === 0}
-      <div class="empty-indicator">No branches found.</div>
-    {:else}
-      {#each filteredBranches as branch}
+  {#if mode === "branch"}
+    <div class="filter-bar">
+      {#each filters as filter}
         <button
-          class="branch-item"
-          class:active={branch.is_current}
-          class:deleting={deletingBranches.has(branch.name)}
-          onclick={() => {
-            if (!deletingBranches.has(branch.name)) onBranchSelect(branch);
-          }}
-          ondblclick={() => {
-            if (!deletingBranches.has(branch.name))
-              onBranchActivate?.(branch);
-          }}
-          oncontextmenu={(e) => handleContextMenu(e, branch)}
+          class="filter-btn"
+          class:active={activeFilter === filter}
+          onclick={() => (activeFilter = filter)}
         >
-          <span class="branch-icon">{branch.is_current ? "*" : " "}</span>
-          {#if deletingBranches.has(branch.name)}
-            <span class="safety-spinner"></span>
-          {:else if getSafetyLevel(branch)}
-            <span
-              class="safety-dot {getSafetyLevel(branch)}"
-              title={getSafetyTitle(branch)}
-            ></span>
-          {/if}
-          <span class="branch-name">{branch.name}</span>
-          {#if branch.last_tool_usage}
-            <span
-              class="tool-usage {toolUsageClass(branch.last_tool_usage)}"
-            >
-              {branch.last_tool_usage}
-            </span>
-          {/if}
-          {#if divergenceIndicator(branch)}
-            <span
-              class="divergence {divergenceClass(branch.divergence_status)}"
-            >
-              {divergenceIndicator(branch)}
-            </span>
-          {/if}
+          {filter}
         </button>
       {/each}
-    {/if}
-  </div>
+      <button
+        class="cleanup-btn"
+        onclick={() => onCleanupRequest?.()}
+        title="Cleanup Worktrees..."
+      >
+        Cleanup
+      </button>
+    </div>
+    <div class="search-bar">
+      <input
+        type="text"
+        autocapitalize="off"
+        autocorrect="off"
+        autocomplete="off"
+        spellcheck="false"
+        class="search-input"
+        placeholder="Filter branches..."
+        bind:value={searchQuery}
+      />
+    </div>
+    <div class="branch-list">
+      {#if loading}
+        <div class="loading-indicator">Loading...</div>
+      {:else if errorMessage}
+        <div class="error-indicator">{errorMessage}</div>
+      {:else if filteredBranches.length === 0}
+        <div class="empty-indicator">No branches found.</div>
+      {:else}
+        {#each filteredBranches as branch}
+          <button
+            class="branch-item"
+            class:active={branch.is_current}
+            class:agent-active={hasActiveAgentTab(branch)}
+            class:deleting={deletingBranches.has(branch.name)}
+            onclick={() => {
+              if (!deletingBranches.has(branch.name)) onBranchSelect(branch);
+            }}
+            ondblclick={() => {
+              if (!deletingBranches.has(branch.name))
+                onBranchActivate?.(branch);
+            }}
+            oncontextmenu={(e) => handleContextMenu(e, branch)}
+          >
+            <span class="branch-icon">{branch.is_current ? "*" : " "}</span>
+            {#if deletingBranches.has(branch.name)}
+              <span class="safety-spinner"></span>
+            {:else if getSafetyLevel(branch)}
+              <span
+                class="safety-dot {getSafetyLevel(branch)}"
+                title={getSafetyTitle(branch)}
+              ></span>
+            {/if}
+            {#if hasActiveAgentTab(branch)}
+              <span
+                class="agent-tab-icon"
+                title="Agent tab is open for this branch"
+                role="img"
+                aria-label="Agent tab is open for this branch"
+              >
+                <span class="agent-tab-bars" aria-hidden="true">
+                  <span class="agent-tab-bar b1"></span>
+                  <span class="agent-tab-bar b2"></span>
+                  <span class="agent-tab-bar b3"></span>
+                </span>
+                <span class="agent-tab-fallback" aria-hidden="true">@</span>
+              </span>
+            {/if}
+            <span class="branch-name">{branch.name}</span>
+            {#if branch.last_tool_usage}
+              <span
+                class="tool-usage {toolUsageClass(branch.last_tool_usage)}"
+              >
+                {branch.last_tool_usage}
+              </span>
+            {/if}
+            {#if divergenceIndicator(branch)}
+              <span
+                class="divergence {divergenceClass(branch.divergence_status)}"
+              >
+                {divergenceIndicator(branch)}
+              </span>
+            {/if}
+          </button>
+        {/each}
+      {/if}
+    </div>
+    <div class="worktree-summary-wrap">
+      <WorktreeSummaryPanel
+        {projectPath}
+        {selectedBranch}
+        onLaunchAgent={onLaunchAgent}
+        onQuickLaunch={onQuickLaunch}
+      />
+    </div>
+  {:else}
+    <AgentSidebar
+      {projectPath}
+      selectedBranch={selectedBranch}
+      currentBranch={currentBranch}
+    />
+  {/if}
+  <button
+    type="button"
+    class="resize-handle"
+    aria-label="Resize sidebar"
+    onpointerdown={handleResizePointerDown}
+    onkeydown={handleResizeKeydown}
+  ></button>
 </aside>
 
 <!-- Context menu (fixed position, outside sidebar overflow) -->
-{#if contextMenu}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    class="context-menu"
-    style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
-    onclick={(e) => e.stopPropagation()}
-  >
-    <button
-      class="context-menu-item"
-      class:disabled={isBranchProtected(contextMenu.branch)}
-      onclick={() => {
-        if (contextMenu && !isBranchProtected(contextMenu.branch))
-          handleCleanupThisBranch();
-      }}
+{#if mode === "branch"}
+  {#if contextMenu}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="context-menu"
+      style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
+      onclick={(e) => e.stopPropagation()}
     >
-      Cleanup this branch
-    </button>
-    <button class="context-menu-item" onclick={handleCleanupWorktrees}>
-      Cleanup Worktrees...
-    </button>
-  </div>
+      <button
+        class="context-menu-item"
+        class:disabled={!canLaunchBranch(contextMenu.branch)}
+        disabled={!canLaunchBranch(contextMenu.branch)}
+        onclick={handleLaunchAgent}
+      >
+        Launch Agent...
+      </button>
+      <button
+        class="context-menu-item"
+        class:disabled={isBranchProtected(contextMenu.branch)}
+        onclick={() => {
+          if (contextMenu && !isBranchProtected(contextMenu.branch))
+            handleCleanupThisBranch();
+        }}
+      >
+        Cleanup this branch
+      </button>
+      <button class="context-menu-item" onclick={handleCleanupWorktrees}>
+        Cleanup Worktrees...
+      </button>
+    </div>
+  {/if}
 {/if}
 
 <!-- Single delete confirmation dialog -->
-{#if confirmDelete}
-  {@const wt = worktreeMap.get(confirmDelete.branch)}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="overlay" onclick={() => (confirmDelete = null)}>
-    <div class="confirm-dialog" onclick={(e) => e.stopPropagation()}>
-      <h3>Delete Worktree</h3>
-      <p class="confirm-text">
-        {#if confirmDelete.safetyLevel === "danger"}
-          Branch <strong>{confirmDelete.branch}</strong> has uncommitted changes
-          and unpushed commits. This cannot be undone.
-        {:else if confirmDelete.safetyLevel === "warning" && wt?.has_changes}
-          Branch <strong>{confirmDelete.branch}</strong> has uncommitted changes.
-        {:else if confirmDelete.safetyLevel === "warning" && wt?.has_unpushed}
-          Branch <strong>{confirmDelete.branch}</strong> has unpushed commits.
-        {:else}
-          Delete worktree and local branch <strong
-            >{confirmDelete.branch}</strong
-          >?
-        {/if}
-      </p>
-      <div class="confirm-actions">
-        <button class="confirm-cancel" onclick={() => (confirmDelete = null)}>
-          Cancel
-        </button>
-        <button class="confirm-delete" onclick={handleConfirmDelete}>
-          Delete
-        </button>
+{#if mode === "branch"}
+  {#if confirmDelete}
+    {@const wt = worktreeMap.get(confirmDelete.branch)}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="overlay" onclick={() => (confirmDelete = null)}>
+      <div class="confirm-dialog" onclick={(e) => e.stopPropagation()}>
+        <h3>Delete Worktree</h3>
+        <p class="confirm-text">
+          {#if confirmDelete.safetyLevel === "danger"}
+            Branch <strong>{confirmDelete.branch}</strong> has uncommitted changes
+            and unpushed commits. This cannot be undone.
+          {:else if confirmDelete.safetyLevel === "warning" && wt?.has_changes}
+            Branch <strong>{confirmDelete.branch}</strong> has uncommitted changes.
+          {:else if confirmDelete.safetyLevel === "warning" && wt?.has_unpushed}
+            Branch <strong>{confirmDelete.branch}</strong> has unpushed commits.
+          {:else}
+            Delete worktree and local branch <strong
+              >{confirmDelete.branch}</strong
+            >?
+          {/if}
+        </p>
+        <div class="confirm-actions">
+          <button class="confirm-cancel" onclick={() => (confirmDelete = null)}>
+            Cancel
+          </button>
+          <button class="confirm-delete" onclick={handleConfirmDelete}>
+            Delete
+          </button>
+        </div>
       </div>
     </div>
-  </div>
+  {/if}
 {/if}
 
 <!-- Delete error dialog -->
-{#if confirmDeleteError}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="overlay" onclick={() => (confirmDeleteError = null)}>
-    <div class="confirm-dialog" onclick={(e) => e.stopPropagation()}>
-      <h3>Delete Failed</h3>
-      <p class="confirm-error">{confirmDeleteError}</p>
-      <div class="confirm-actions">
-        <button
-          class="confirm-cancel"
-          onclick={() => (confirmDeleteError = null)}
-        >
-          Close
-        </button>
+{#if mode === "branch"}
+  {#if confirmDeleteError}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="overlay" onclick={() => (confirmDeleteError = null)}>
+      <div class="confirm-dialog" onclick={(e) => e.stopPropagation()}>
+        <h3>Delete Failed</h3>
+        <p class="confirm-error">{confirmDeleteError}</p>
+        <div class="confirm-actions">
+          <button
+            class="confirm-cancel"
+            onclick={() => (confirmDeleteError = null)}
+          >
+            Close
+          </button>
+        </div>
       </div>
     </div>
-  </div>
+  {/if}
 {/if}
 
 <style>
   .sidebar {
-    width: var(--sidebar-width);
-    min-width: var(--sidebar-width);
+    position: relative;
+    flex-shrink: 0;
     background-color: var(--bg-secondary);
     border-right: 1px solid var(--border-color);
     display: flex;
@@ -521,11 +787,96 @@
     overflow: hidden;
   }
 
+  .resize-handle {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 8px;
+    height: 100%;
+    border: none;
+    background: transparent;
+    cursor: col-resize;
+    padding: 0;
+    touch-action: none;
+    z-index: 1;
+  }
+
+  .resize-handle::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 3px;
+    width: 2px;
+    background: transparent;
+    transition: background-color 120ms ease;
+  }
+
+  .sidebar:hover .resize-handle::after,
+  .resize-handle:focus-visible::after {
+    background: var(--border-color);
+  }
+
+  .resize-handle:focus-visible {
+    outline: none;
+  }
+
   .filter-bar {
     display: flex;
     padding: 8px;
     gap: 4px;
     border-bottom: 1px solid var(--border-color);
+  }
+
+  .mode-toggle {
+    display: flex;
+    gap: 6px;
+    padding: 10px 8px 8px;
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  .mode-btn {
+    flex: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    background: none;
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    padding: 6px 8px;
+    font-size: var(--ui-font-sm);
+    cursor: pointer;
+    border-radius: 6px;
+    font-family: inherit;
+  }
+
+  .mode-btn.active {
+    background-color: var(--accent);
+    color: var(--bg-primary);
+    border-color: var(--accent);
+  }
+
+  .mode-icon {
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    border: 1px solid var(--border-color);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: var(--ui-font-xs);
+    font-family: monospace;
+  }
+
+  .mode-btn.active .mode-icon {
+    border-color: rgba(0, 0, 0, 0.15);
+  }
+
+  .mode-label {
+    font-size: var(--ui-font-xs);
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
   }
 
   .filter-btn {
@@ -594,6 +945,14 @@
     padding: 4px 0;
   }
 
+  .worktree-summary-wrap {
+    border-top: 1px solid var(--border-color);
+    overflow-y: auto;
+    max-height: 52%;
+    min-height: 160px;
+    background: var(--bg-primary);
+  }
+
   .loading-indicator,
   .error-indicator,
   .empty-indicator {
@@ -628,6 +987,10 @@
   .branch-item.active {
     background-color: var(--bg-surface);
     color: var(--accent);
+  }
+
+  .branch-item.agent-active:not(.active) {
+    background-color: rgba(148, 226, 213, 0.08);
   }
 
   .branch-item.deleting {
@@ -694,6 +1057,81 @@
     overflow: hidden;
     text-overflow: ellipsis;
     flex: 1;
+  }
+
+  .agent-tab-icon {
+    color: var(--cyan);
+    width: 12px;
+    text-align: center;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 12px;
+    line-height: 1;
+  }
+
+  .agent-tab-bars {
+    display: inline-flex;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 1px;
+    height: 10px;
+  }
+
+  .agent-tab-bar {
+    width: 2px;
+    height: 4px;
+    border-radius: 1px;
+    background: var(--cyan);
+    opacity: 0.85;
+    transform-origin: bottom;
+    animation: agentTabBars 0.9s ease-in-out infinite;
+  }
+
+  .agent-tab-bar.b1 {
+    animation-delay: 0ms;
+  }
+
+  .agent-tab-bar.b2 {
+    animation-delay: 150ms;
+  }
+
+  .agent-tab-bar.b3 {
+    animation-delay: 300ms;
+  }
+
+  /* Graphical activity indicator for branches with open agent tabs */
+  @keyframes agentTabBars {
+    0%,
+    100% {
+      transform: scaleY(0.35);
+      opacity: 0.55;
+    }
+    50% {
+      transform: scaleY(1);
+      opacity: 1;
+    }
+  }
+
+  .agent-tab-fallback {
+    display: none;
+    font-size: var(--ui-font-md);
+    font-family: monospace;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .agent-tab-bars {
+      display: none;
+    }
+
+    .agent-tab-bar {
+      animation: none;
+    }
+
+    .agent-tab-fallback {
+      display: flex;
+    }
   }
 
   .tool-usage {

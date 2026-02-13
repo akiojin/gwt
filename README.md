@@ -5,13 +5,33 @@
 gwt is a desktop GUI app for managing Git worktrees and launching coding agents
 (Claude Code, Codex, Gemini, OpenCode).
 
-## Downloads
+## Install
+
+### macOS (shell installer)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash
+```
+
+Or install a specific version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash -s -- --version 6.30.3
+```
+
+### Uninstall (macOS)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/uninstall.sh | bash
+```
+
+### Downloads
 
 GitHub Releases are the source of truth for distribution.
 
 Typical assets:
 
-- macOS: `.dmg`, `.pkg`
+- macOS: `.dmg`
 - Windows: `.msi`
 - Linux: `.AppImage`, `.deb`
 
@@ -43,6 +63,18 @@ pnpm install --frozen-lockfile
 cd ..
 cargo tauri build
 ```
+
+## AI Settings
+
+Agent Mode and features like session summaries require AI settings.
+
+Steps:
+
+- Open `Settings`
+- Select a profile in `Profiles`
+- Enable `AI Settings`
+- Set `Endpoint` and `Model` (API key is optional for local LLMs)
+- Click `Save`
 
 ## Repository Layout
 

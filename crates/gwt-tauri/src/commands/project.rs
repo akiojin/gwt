@@ -7,7 +7,7 @@ use gwt_core::migration::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::{fs, io::Read};
 use tauri::Manager;
 use tauri::State;
@@ -228,6 +228,10 @@ pub fn open_project(
 
     // Update window-scoped state
     state.set_project_for_window(window.label(), project_root_str.clone());
+
+    // Record to recent projects history
+    let _ = gwt_core::config::record_recent_project(&project_root_str);
+
     let _ = crate::menu::rebuild_menu(window.app_handle());
 
     Ok(ProjectInfo {
@@ -410,7 +414,7 @@ pub fn create_project(
     args.push(request.repo_url.clone());
     args.push(target.to_string_lossy().to_string());
 
-    let mut child = Command::new("git")
+    let mut child = gwt_core::process::git_command()
         .args(args)
         .current_dir(&parent)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -691,7 +695,7 @@ mod tests {
         .expect("write project.json");
 
         let bare = root.join("repo.git");
-        let status = Command::new("git")
+        let status = gwt_core::process::git_command()
             .args(["init", "--bare"])
             .arg(&bare)
             .status()
@@ -709,7 +713,7 @@ mod tests {
         let root = temp.path();
 
         let bare = root.join("repo.git");
-        let status = Command::new("git")
+        let status = gwt_core::process::git_command()
             .args(["init", "--bare"])
             .arg(&bare)
             .status()

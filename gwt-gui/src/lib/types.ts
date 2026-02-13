@@ -2,6 +2,7 @@ export interface BranchInfo {
   name: string;
   commit: string;
   is_current: boolean;
+  is_agent_running: boolean;
   ahead: number;
   behind: number;
   divergence_status: string; // "UpToDate" | "Ahead" | "Behind" | "Diverged"
@@ -34,6 +35,34 @@ export interface TerminalAnsiProbe {
   color_sgr_count: number;
   has_256_color: boolean;
   has_true_color: boolean;
+}
+
+export interface AgentModeMessage {
+  role: "user" | "assistant" | "system" | "tool";
+  kind?: "message" | "thought" | "action" | "observation" | "error";
+  content: string;
+  timestamp: number;
+}
+
+export interface AgentModeState {
+  messages: AgentModeMessage[];
+  ai_ready: boolean;
+  ai_error?: string | null;
+  last_error?: string | null;
+  is_waiting: boolean;
+  session_name?: string | null;
+  llm_call_count: number;
+  estimated_tokens: number;
+}
+
+export interface SendKeysRequest {
+  paneId: string;
+  text: string;
+}
+
+export interface CaptureScrollbackRequest {
+  paneId: string;
+  maxBytes?: number;
 }
 
 export interface AgentInfo {
@@ -81,6 +110,14 @@ export interface SettingsData {
   docker_force_host: boolean;
   ui_font_size: number;
   terminal_font_size: number;
+  voice_input: VoiceInputSettings;
+}
+
+export interface VoiceInputSettings {
+  enabled: boolean;
+  hotkey: string;
+  language: "auto" | "ja" | "en" | (string & {});
+  model: string;
 }
 
 export interface AISettings {
@@ -108,7 +145,7 @@ export interface ProfilesConfig {
 export interface Tab {
   id: string;
   label: string;
-  type: "summary" | "agent" | "settings";
+  type: "agent" | "settings" | "versionHistory" | "agentMode";
   paneId?: string;
 }
 
@@ -130,6 +167,30 @@ export interface ToolSessionEntry {
   docker_build?: boolean | null;
   docker_keep?: boolean | null;
   timestamp: number;
+}
+
+export interface ProjectVersions {
+  items: VersionItem[];
+}
+
+export interface VersionItem {
+  id: string; // "unreleased" | "vX.Y.Z"
+  label: string;
+  range_from?: string | null;
+  range_to: string; // "HEAD" | "vX.Y.Z"
+  commit_count: number;
+}
+
+export interface VersionHistoryResult {
+  status: "ok" | "generating" | "error" | "disabled";
+  version_id: string;
+  label: string;
+  range_from?: string | null;
+  range_to: string;
+  commit_count: number;
+  summary_markdown?: string | null;
+  changelog_markdown?: string | null;
+  error?: string | null;
 }
 
 export interface SessionSummaryResult {
@@ -303,6 +364,31 @@ export interface GitChangeSummary {
   base_branch: string;
 }
 
+// GitHub Issue types (SPEC-c6ba640a)
+
+export interface GitHubIssueInfo {
+  number: number;
+  title: string;
+  updatedAt: string;
+  labels: string[];
+}
+
+export interface GhCliStatus {
+  available: boolean;
+  authenticated: boolean;
+}
+
+export interface FetchIssuesResponse {
+  issues: GitHubIssueInfo[];
+  hasNextPage: boolean;
+}
+
+export interface RollbackResult {
+  localDeleted: boolean;
+  remoteDeleted: boolean;
+  error: string | null;
+}
+
 export interface LaunchAgentRequest {
   agentId: string;
   branch: string;
@@ -312,7 +398,6 @@ export interface LaunchAgentRequest {
   mode?: "normal" | "continue" | "resume";
   skipPermissions?: boolean;
   reasoningLevel?: string;
-  collaborationModes?: boolean;
   extraArgs?: string[];
   envOverrides?: Record<string, string>;
   resumeSessionId?: string;
@@ -322,4 +407,5 @@ export interface LaunchAgentRequest {
   dockerRecreate?: boolean;
   dockerBuild?: boolean;
   dockerKeep?: boolean;
+  issueNumber?: number;
 }

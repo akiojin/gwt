@@ -1,6 +1,7 @@
 //! Branch management commands
 
 use crate::commands::project::resolve_repo_path_for_project_root;
+use crate::state::AppState;
 use gwt_core::git::{is_bare_repository, Branch, Remote};
 use gwt_core::worktree::WorktreeManager;
 use serde::Serialize;
@@ -8,6 +9,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
+use tauri::{AppHandle, State};
 use tracing::error;
 
 /// Serializable branch info for the frontend
@@ -16,6 +18,7 @@ pub struct BranchInfo {
     pub name: String,
     pub commit: String,
     pub is_current: bool,
+    pub is_agent_running: bool,
     pub has_remote: bool,
     pub upstream: Option<String>,
     pub ahead: usize,
@@ -33,6 +36,7 @@ impl From<Branch> for BranchInfo {
             name: b.name,
             commit: b.commit,
             is_current: b.is_current,
+            is_agent_running: false,
             has_remote: b.has_remote,
             upstream: b.upstream,
             ahead: b.ahead,
@@ -62,6 +66,40 @@ fn build_last_tool_usage_map(repo_path: &Path) -> HashMap<String, String> {
         .collect()
 }
 
+fn running_agent_branches(state: &AppState, repo_path: &Path) -> HashSet<String> {
+    let running: Vec<(String, String)> = match state.pane_manager.lock() {
+        Ok(manager) => manager
+            .panes()
+            .iter()
+            .filter(|pane| matches!(pane.status(), gwt_core::terminal::pane::PaneStatus::Running))
+            .map(|pane| (pane.pane_id().to_string(), pane.branch_name().to_string()))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+
+    if running.is_empty() {
+        return HashSet::new();
+    }
+
+    let Ok(launch_meta) = state.pane_launch_meta.lock() else {
+        return running.into_iter().map(|(_, branch)| branch).collect();
+    };
+
+    running
+        .into_iter()
+        .filter_map(|(pane_id, branch)| {
+            let Some(meta) = launch_meta.get(&pane_id) else {
+                return Some(branch);
+            };
+            if meta.repo_path.as_path() == repo_path {
+                Some(branch)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 fn with_panic_guard<T>(context: &str, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(result) => result,
@@ -78,16 +116,21 @@ fn with_panic_guard<T>(context: &str, f: impl FnOnce() -> Result<T, String>) -> 
 
 /// List all local branches in a repository
 #[tauri::command]
-pub fn list_branches(project_path: String) -> Result<Vec<BranchInfo>, String> {
+pub fn list_branches(
+    project_path: String,
+    state: State<AppState>,
+) -> Result<Vec<BranchInfo>, String> {
     with_panic_guard("listing branches", || {
         let project_root = Path::new(&project_path);
         let repo_path = resolve_repo_path_for_project_root(project_root)?;
         let last_tool = build_last_tool_usage_map(&repo_path);
+        let running_branches = running_agent_branches(&state, &repo_path);
 
         let branches = Branch::list(&repo_path).map_err(|e| e.to_string())?;
         let mut infos: Vec<BranchInfo> = branches.into_iter().map(BranchInfo::from).collect();
         for info in &mut infos {
             info.last_tool_usage = last_tool.get(&info.name).cloned();
+            info.is_agent_running = running_branches.contains(&info.name);
         }
         Ok(infos)
     })
@@ -95,11 +138,16 @@ pub fn list_branches(project_path: String) -> Result<Vec<BranchInfo>, String> {
 
 /// List branches that currently have a local worktree (gwt "Local" view)
 #[tauri::command]
-pub fn list_worktree_branches(project_path: String) -> Result<Vec<BranchInfo>, String> {
+pub fn list_worktree_branches(
+    project_path: String,
+    state: State<AppState>,
+    app_handle: AppHandle,
+) -> Result<Vec<BranchInfo>, String> {
     with_panic_guard("listing worktree branches", || {
         let project_root = Path::new(&project_path);
         let repo_path = resolve_repo_path_for_project_root(project_root)?;
         let last_tool = build_last_tool_usage_map(&repo_path);
+        let running_branches = running_agent_branches(&state, &repo_path);
 
         let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
         let worktrees = manager.list_basic().map_err(|e| e.to_string())?;
@@ -114,6 +162,8 @@ pub fn list_worktree_branches(project_path: String) -> Result<Vec<BranchInfo>, S
             return Ok(Vec::new());
         }
 
+        let branch_names = names.iter().cloned().collect::<Vec<_>>();
+
         let branches = Branch::list(&repo_path).map_err(|e| e.to_string())?;
         let mut infos: Vec<BranchInfo> = branches
             .into_iter()
@@ -122,18 +172,33 @@ pub fn list_worktree_branches(project_path: String) -> Result<Vec<BranchInfo>, S
             .collect();
         for info in &mut infos {
             info.last_tool_usage = last_tool.get(&info.name).cloned();
+            info.is_agent_running = running_branches.contains(&info.name);
         }
+
+        let prewarm_project_path = project_path.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            crate::commands::sessions::prewarm_missing_worktree_summaries(
+                prewarm_project_path,
+                branch_names,
+                app_handle.clone(),
+            );
+        });
+
         Ok(infos)
     })
 }
 
 /// List all remote branches in a repository
 #[tauri::command]
-pub fn list_remote_branches(project_path: String) -> Result<Vec<BranchInfo>, String> {
+pub fn list_remote_branches(
+    project_path: String,
+    state: State<AppState>,
+) -> Result<Vec<BranchInfo>, String> {
     with_panic_guard("listing remote branches", || {
         let project_root = Path::new(&project_path);
         let repo_path = resolve_repo_path_for_project_root(project_root)?;
         let last_tool = build_last_tool_usage_map(&repo_path);
+        let running_branches = running_agent_branches(&state, &repo_path);
         let remotes = Remote::list(&repo_path).unwrap_or_default();
 
         let branches = if is_bare_repository(&repo_path) {
@@ -145,6 +210,7 @@ pub fn list_remote_branches(project_path: String) -> Result<Vec<BranchInfo>, Str
         for info in &mut infos {
             let normalized = strip_known_remote_prefix(&info.name, &remotes);
             info.last_tool_usage = last_tool.get(normalized).cloned();
+            info.is_agent_running = running_branches.contains(normalized);
         }
         Ok(infos)
     })
@@ -152,15 +218,20 @@ pub fn list_remote_branches(project_path: String) -> Result<Vec<BranchInfo>, Str
 
 /// Get the current branch
 #[tauri::command]
-pub fn get_current_branch(project_path: String) -> Result<Option<BranchInfo>, String> {
+pub fn get_current_branch(
+    project_path: String,
+    state: State<AppState>,
+) -> Result<Option<BranchInfo>, String> {
     with_panic_guard("getting current branch", || {
         let project_root = Path::new(&project_path);
         let repo_path = resolve_repo_path_for_project_root(project_root)?;
         let branch = Branch::current(&repo_path).map_err(|e| e.to_string())?;
         let last_tool = build_last_tool_usage_map(&repo_path);
+        let running_branches = running_agent_branches(&state, &repo_path);
         Ok(branch.map(|b| {
             let mut info = BranchInfo::from(b);
             info.last_tool_usage = last_tool.get(&info.name).cloned();
+            info.is_agent_running = running_branches.contains(&info.name);
             info
         }))
     })

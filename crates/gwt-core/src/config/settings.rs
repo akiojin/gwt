@@ -38,6 +38,8 @@ pub struct Settings {
     pub docker: DockerSettings,
     /// Appearance settings
     pub appearance: AppearanceSettings,
+    /// Voice input settings
+    pub voice_input: VoiceInputSettings,
 }
 
 impl Default for Settings {
@@ -56,6 +58,7 @@ impl Default for Settings {
             agent: AgentSettings::default(),
             docker: DockerSettings::default(),
             appearance: AppearanceSettings::default(),
+            voice_input: VoiceInputSettings::default(),
         }
     }
 }
@@ -103,7 +106,39 @@ impl Default for AppearanceSettings {
     }
 }
 
+/// Voice input settings
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VoiceInputSettings {
+    /// Enable voice input hotkey support
+    pub enabled: bool,
+    /// Global hotkey string (e.g., "Mod+Shift+M")
+    pub hotkey: String,
+    /// Recognition language ("auto" | "ja" | "en")
+    pub language: String,
+    /// Local STT model tier hint
+    pub model: String,
+}
+
+impl Default for VoiceInputSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hotkey: "Mod+Shift+M".to_string(),
+            language: "auto".to_string(),
+            model: "base".to_string(),
+        }
+    }
+}
+
 impl Settings {
+    fn settings_env_provider() -> Env {
+        // Limit Figment env extraction to scalar keys we actually support via direct mapping.
+        // This avoids runtime variables such as GWT_AGENT (set for terminal panes) from
+        // colliding with nested settings structs during deserialization.
+        Env::prefixed("GWT_").split("_").only(&["debug"])
+    }
+
     /// Load settings from configuration files and environment
     pub fn load(repo_root: &Path) -> Result<Self> {
         debug!(
@@ -148,7 +183,7 @@ impl Settings {
             figment = figment.merge(Toml::file(path));
         }
 
-        figment = figment.merge(Env::prefixed("GWT_").split("_"));
+        figment = figment.merge(Self::settings_env_provider());
 
         let mut settings: Settings = figment.extract().map_err(|e| {
             error!(
@@ -180,6 +215,88 @@ impl Settings {
             debug = settings.debug,
             worktree_root = %settings.worktree_root,
             "Settings loaded"
+        );
+
+        Ok(settings)
+    }
+
+    /// Load settings from global configuration files and environment.
+    ///
+    /// Priority (highest to lowest):
+    /// 1. ~/.gwt/config.toml (new location)
+    /// 2. ~/.config/gwt/config.toml (legacy fallback)
+    /// 3. Defaults (when no global file exists)
+    pub fn load_global() -> Result<Self> {
+        debug!(category = "config", "Loading global settings");
+
+        // Auto-migrate global path if needed (SPEC-a3f4c9df)
+        if Self::needs_global_path_migration() {
+            match Self::migrate_global_path_if_needed() {
+                Ok(true) => {
+                    info!(
+                        category = "config",
+                        operation = "auto_migrate",
+                        "Auto-migrated global config from ~/.config/gwt/ to ~/.gwt/"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        category = "config",
+                        error = %e,
+                        "Failed to auto-migrate global config path"
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        let config_path = Self::new_global_config_path()
+            .filter(|p| p.exists())
+            .or_else(|| Self::legacy_global_config_path().filter(|p| p.exists()));
+
+        let mut figment = Figment::new().merge(Toml::string(&Self::default_toml()));
+
+        if let Some(ref path) = config_path {
+            debug!(
+                category = "config",
+                config_path = %path.display(),
+                "Merging global config file"
+            );
+            figment = figment.merge(Toml::file(path));
+        }
+
+        figment = figment.merge(Self::settings_env_provider());
+
+        let mut settings: Settings = figment.extract().map_err(|e| {
+            error!(
+                category = "config",
+                error = %e,
+                "Failed to parse global config"
+            );
+            GwtError::ConfigParseError {
+                reason: e.to_string(),
+            }
+        })?;
+
+        if let Ok(value) = std::env::var("GWT_AGENT_AUTO_INSTALL_DEPS") {
+            if let Some(parsed) = parse_env_bool(&value) {
+                settings.agent.auto_install_deps = parsed;
+            }
+        }
+
+        if let Ok(value) = std::env::var("GWT_DOCKER_FORCE_HOST") {
+            if let Some(parsed) = parse_env_bool(&value) {
+                settings.docker.force_host = parsed;
+            }
+        }
+
+        info!(
+            category = "config",
+            operation = "load_global",
+            config_path = config_path.as_ref().map(|p| p.display().to_string()).as_deref(),
+            debug = settings.debug,
+            worktree_root = %settings.worktree_root,
+            "Global settings loaded"
         );
 
         Ok(settings)
@@ -459,6 +576,10 @@ mod tests {
         assert!(!settings.protected_branches.is_empty());
         assert!(settings.protected_branches.contains(&"main".to_string()));
         assert!(!settings.debug);
+        assert!(!settings.voice_input.enabled);
+        assert_eq!(settings.voice_input.hotkey, "Mod+Shift+M");
+        assert_eq!(settings.voice_input.language, "auto");
+        assert_eq!(settings.voice_input.model, "base");
     }
 
     #[test]
@@ -647,7 +768,7 @@ default_base_branch = "legacy-global"
 
     #[test]
     fn test_appearance_backward_compat() {
-        // Config without [appearance] section should deserialize with defaults
+        // Config without [appearance]/[voice_input] sections should deserialize with defaults
         let temp = TempDir::new().unwrap();
         let config_path = temp.path().join(".gwt.toml");
         std::fs::write(&config_path, "debug = true\n").unwrap();
@@ -655,6 +776,10 @@ default_base_branch = "legacy-global"
         assert!(settings.debug);
         assert_eq!(settings.appearance.ui_font_size, 13);
         assert_eq!(settings.appearance.terminal_font_size, 13);
+        assert!(!settings.voice_input.enabled);
+        assert_eq!(settings.voice_input.hotkey, "Mod+Shift+M");
+        assert_eq!(settings.voice_input.language, "auto");
+        assert_eq!(settings.voice_input.model, "base");
     }
 
     #[test]
@@ -691,5 +816,66 @@ default_base_branch = "legacy-global"
         let content = std::fs::read_to_string(&new_path).unwrap();
         assert!(content.contains("debug = true"));
         assert!(content.contains("save-global-test"));
+    }
+
+    #[test]
+    fn test_load_global() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+        let prev_gwt_agent = std::env::var_os("GWT_AGENT");
+        std::env::set_var("GWT_AGENT", "Codex");
+
+        let global_dir = temp.path().join(".gwt");
+        std::fs::create_dir_all(&global_dir).unwrap();
+        std::fs::write(
+            global_dir.join("config.toml"),
+            r#"
+debug = true
+default_base_branch = "global-main"
+[appearance]
+ui_font_size = 17
+terminal_font_size = 19
+[voice_input]
+enabled = true
+hotkey = "Mod+Shift+V"
+language = "ja"
+model = "base"
+"#,
+        )
+        .unwrap();
+
+        let loaded = Settings::load_global().unwrap();
+        assert!(loaded.debug);
+        assert_eq!(loaded.default_base_branch, "global-main");
+        assert_eq!(loaded.appearance.ui_font_size, 17);
+        assert_eq!(loaded.appearance.terminal_font_size, 19);
+        assert!(loaded.voice_input.enabled);
+        assert_eq!(loaded.voice_input.hotkey, "Mod+Shift+V");
+        assert_eq!(loaded.voice_input.language, "ja");
+        assert_eq!(loaded.voice_input.model, "base");
+
+        match prev_gwt_agent {
+            Some(value) => std::env::set_var("GWT_AGENT", value),
+            None => std::env::remove_var("GWT_AGENT"),
+        }
+    }
+
+    #[test]
+    fn test_load_ignores_runtime_gwt_agent_env() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join(".gwt.toml");
+        std::fs::write(&config_path, "debug = true\n").unwrap();
+
+        let prev_gwt_agent = std::env::var_os("GWT_AGENT");
+        std::env::set_var("GWT_AGENT", "Codex");
+
+        let loaded = Settings::load(temp.path()).unwrap();
+        assert!(loaded.debug);
+
+        match prev_gwt_agent {
+            Some(value) => std::env::set_var("GWT_AGENT", value),
+            None => std::env::remove_var("GWT_AGENT"),
+        }
     }
 }

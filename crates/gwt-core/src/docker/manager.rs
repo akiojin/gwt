@@ -156,7 +156,7 @@ fn parse_port_env_default(value: &str) -> Option<(String, u16)> {
 }
 
 fn detect_git_common_dir(worktree_path: &Path) -> Option<PathBuf> {
-    if let Ok(output) = std::process::Command::new("git")
+    if let Ok(output) = crate::process::git_command()
         .args([
             "-C",
             &worktree_path.to_string_lossy(),
@@ -215,7 +215,7 @@ fn detect_git_common_dir(worktree_path: &Path) -> Option<PathBuf> {
 }
 
 fn detect_git_dir(worktree_path: &Path) -> Option<PathBuf> {
-    if let Ok(output) = std::process::Command::new("git")
+    if let Ok(output) = crate::process::git_command()
         .args([
             "-C",
             &worktree_path.to_string_lossy(),

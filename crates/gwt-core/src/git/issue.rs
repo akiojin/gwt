@@ -8,6 +8,15 @@ use std::process::Command;
 use super::remote::Remote;
 use super::repository::{find_bare_repo_in_dir, is_git_repo};
 
+/// Result of fetching issues with pagination info
+#[derive(Debug, Clone)]
+pub struct FetchIssuesResult {
+    /// Fetched issues
+    pub issues: Vec<GitHubIssue>,
+    /// Whether there are more issues available on the next page
+    pub has_next_page: bool,
+}
+
 /// GitHub Issue information
 #[derive(Debug, Clone)]
 pub struct GitHubIssue {
@@ -17,6 +26,8 @@ pub struct GitHubIssue {
     pub title: String,
     /// Issue updatedAt timestamp (ISO-8601)
     pub updated_at: String,
+    /// Issue labels (FR-002)
+    pub labels: Vec<String>,
 }
 
 impl GitHubIssue {
@@ -26,6 +37,22 @@ impl GitHubIssue {
             number,
             title,
             updated_at,
+            labels: Vec::new(),
+        }
+    }
+
+    /// Create a new GitHubIssue with labels
+    pub fn with_labels(
+        number: u64,
+        title: String,
+        updated_at: String,
+        labels: Vec<String>,
+    ) -> Self {
+        Self {
+            number,
+            title,
+            updated_at,
+            labels,
         }
     }
 
@@ -70,12 +97,30 @@ pub fn is_gh_cli_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Fetch open issues from GitHub using gh CLI
-/// Returns issues sorted by updated_at descending (most recently updated first)
-/// Limited to 50 issues per FR-005a
-pub fn fetch_open_issues(repo_path: &Path) -> Result<Vec<GitHubIssue>, String> {
+/// Check if GitHub CLI (gh) is authenticated (FR-003)
+///
+/// Runs `gh auth status` and returns true if the exit code is 0.
+pub fn is_gh_cli_authenticated() -> bool {
+    Command::new("gh")
+        .args(["auth", "status"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+/// Fetch open issues from GitHub using gh CLI with pagination support (FR-001)
+///
+/// Returns issues sorted by updated_at descending (most recently updated first).
+/// Uses `page` and `per_page` to control pagination.
+/// `has_next_page` is determined by requesting `per_page * page + 1` items
+/// and checking if more exist beyond the current page.
+pub fn fetch_open_issues(
+    repo_path: &Path,
+    page: u32,
+    per_page: u32,
+) -> Result<FetchIssuesResult, String> {
     let repo_slug = resolve_repo_slug(repo_path);
-    let args = issue_list_args(repo_slug.as_deref());
+    let args = issue_list_args(repo_slug.as_deref(), page, per_page);
 
     let output = Command::new("gh")
         .args(args)
@@ -89,19 +134,36 @@ pub fn fetch_open_issues(repo_path: &Path) -> Result<Vec<GitHubIssue>, String> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_gh_issues_json(&stdout)
+    let all_issues = parse_gh_issues_json(&stdout)?;
+
+    // Skip items from previous pages
+    let skip = ((page - 1) * per_page) as usize;
+    let remaining: Vec<GitHubIssue> = all_issues.into_iter().skip(skip).collect();
+
+    // If we got more than per_page items after skipping, there's a next page
+    let has_next_page = remaining.len() > per_page as usize;
+    let issues: Vec<GitHubIssue> = remaining.into_iter().take(per_page as usize).collect();
+
+    Ok(FetchIssuesResult {
+        issues,
+        has_next_page,
+    })
 }
 
-fn issue_list_args(repo_slug: Option<&str>) -> Vec<String> {
+fn issue_list_args(repo_slug: Option<&str>, page: u32, per_page: u32) -> Vec<String> {
+    // Request enough items to cover the current page plus one extra to detect next page
+    let limit = per_page * page + 1;
+
+    let limit_str = limit.to_string();
     let mut args = vec![
         "issue",
         "list",
         "--state",
         "open",
         "--json",
-        "number,title,updatedAt",
+        "number,title,updatedAt,labels",
         "--limit",
-        "50",
+        &limit_str,
     ]
     .into_iter()
     .map(String::from)
@@ -187,7 +249,16 @@ pub fn parse_gh_issues_json(json: &str) -> Result<Vec<GitHubIssue>, String> {
             let number = item.get("number")?.as_u64()?;
             let title = item.get("title")?.as_str()?.to_string();
             let updated_at = item.get("updatedAt")?.as_str()?.to_string();
-            Some(GitHubIssue::new(number, title, updated_at))
+            let labels = item
+                .get("labels")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|label| label.get("name")?.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(GitHubIssue::with_labels(number, title, updated_at, labels))
         })
         .collect();
 
@@ -218,7 +289,7 @@ pub fn find_branch_for_issue(
 ) -> Result<Option<String>, String> {
     let pattern = format!("issue-{}", issue_number);
 
-    let output = Command::new("git")
+    let output = crate::process::git_command()
         .args(["branch", "--list", &format!("*{}*", pattern)])
         .current_dir(repo_path)
         .output()
@@ -388,6 +459,21 @@ mod tests {
     // FR-016b: gh issue develop args tests
     // ==========================================================
 
+    // ==========================================================
+    // FR-003: gh CLI authentication tests
+    // ==========================================================
+
+    #[test]
+    fn test_is_gh_cli_authenticated_returns_bool() {
+        // This test verifies the function runs without panic.
+        // The actual return value depends on the environment.
+        let _result: bool = is_gh_cli_authenticated();
+    }
+
+    // ==========================================================
+    // FR-016b: gh issue develop args tests
+    // ==========================================================
+
     #[test]
     fn test_issue_develop_args_includes_checkout_false() {
         let args = issue_develop_args(42, "feature/issue-42");
@@ -436,6 +522,65 @@ mod tests {
         assert_eq!(issues[0].number, 2); // Newest first
         assert_eq!(issues[1].number, 3); // Middle
         assert_eq!(issues[2].number, 1); // Oldest last
+    }
+
+    #[test]
+    fn test_parse_gh_issues_json_with_labels() {
+        let json = r#"[
+            {
+                "number": 42,
+                "title": "Fix login bug",
+                "updatedAt": "2025-01-25T10:00:00Z",
+                "labels": [
+                    {"name": "bug", "color": "d73a4a"},
+                    {"name": "priority: high", "color": "ff0000"}
+                ]
+            }
+        ]"#;
+
+        let issues = parse_gh_issues_json(json).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].labels, vec!["bug", "priority: high"]);
+    }
+
+    #[test]
+    fn test_parse_gh_issues_json_without_labels_field() {
+        let json = r#"[
+            {"number": 42, "title": "Fix login bug", "updatedAt": "2025-01-25T10:00:00Z"}
+        ]"#;
+
+        let issues = parse_gh_issues_json(json).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].labels.is_empty());
+    }
+
+    #[test]
+    fn test_parse_gh_issues_json_empty_labels() {
+        let json = r#"[
+            {"number": 42, "title": "Fix login bug", "updatedAt": "2025-01-25T10:00:00Z", "labels": []}
+        ]"#;
+
+        let issues = parse_gh_issues_json(json).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].labels.is_empty());
+    }
+
+    #[test]
+    fn test_github_issue_with_labels_constructor() {
+        let issue = GitHubIssue::with_labels(
+            42,
+            "Fix bug".to_string(),
+            "2025-01-25T10:00:00Z".to_string(),
+            vec!["bug".to_string(), "urgent".to_string()],
+        );
+        assert_eq!(issue.number, 42);
+        assert_eq!(issue.labels, vec!["bug", "urgent"]);
+    }
+
+    #[test]
+    fn test_github_issue_new_has_empty_labels() {
+        let issue = GitHubIssue::new(1, "Test".to_string(), "2025-01-25T10:00:00Z".to_string());
+        assert!(issue.labels.is_empty());
     }
 
     #[test]
@@ -574,8 +719,9 @@ mod tests {
     // ==========================================================
 
     #[test]
-    fn test_issue_list_args_without_repo() {
-        let args = issue_list_args(None);
+    fn test_issue_list_args_without_repo_page1() {
+        // page=1, per_page=50 → limit = 50*1+1 = 51
+        let args = issue_list_args(None, 1, 50);
         assert_eq!(
             args,
             vec![
@@ -584,9 +730,9 @@ mod tests {
                 "--state",
                 "open",
                 "--json",
-                "number,title,updatedAt",
+                "number,title,updatedAt,labels",
                 "--limit",
-                "50"
+                "51"
             ]
             .into_iter()
             .map(String::from)
@@ -595,8 +741,8 @@ mod tests {
     }
 
     #[test]
-    fn test_issue_list_args_with_repo() {
-        let args = issue_list_args(Some("owner/repo"));
+    fn test_issue_list_args_with_repo_page1() {
+        let args = issue_list_args(Some("owner/repo"), 1, 50);
         assert_eq!(
             args,
             vec![
@@ -605,11 +751,55 @@ mod tests {
                 "--state",
                 "open",
                 "--json",
-                "number,title,updatedAt",
+                "number,title,updatedAt,labels",
                 "--limit",
-                "50",
+                "51",
                 "--repo",
                 "owner/repo"
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<String>>()
+        );
+    }
+
+    #[test]
+    fn test_issue_list_args_page2() {
+        // page=2, per_page=50 → limit = 50*2+1 = 101
+        let args = issue_list_args(None, 2, 50);
+        assert_eq!(
+            args,
+            vec![
+                "issue",
+                "list",
+                "--state",
+                "open",
+                "--json",
+                "number,title,updatedAt,labels",
+                "--limit",
+                "101"
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<String>>()
+        );
+    }
+
+    #[test]
+    fn test_issue_list_args_custom_per_page() {
+        // page=1, per_page=10 → limit = 10*1+1 = 11
+        let args = issue_list_args(None, 1, 10);
+        assert_eq!(
+            args,
+            vec![
+                "issue",
+                "list",
+                "--state",
+                "open",
+                "--json",
+                "number,title,updatedAt,labels",
+                "--limit",
+                "11"
             ]
             .into_iter()
             .map(String::from)

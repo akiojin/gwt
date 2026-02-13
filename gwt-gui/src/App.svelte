@@ -4,10 +4,14 @@
     BranchInfo,
     ProjectInfo,
     LaunchAgentRequest,
+    LaunchFinishedPayload,
     ProbePathResult,
+    RollbackResult,
+    TerminalInfo,
     TerminalAnsiProbe,
     CapturedEnvInfo,
-    UpdateState,
+    SettingsData,
+    VoiceInputSettings,
   } from "./lib/types";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import MainArea from "./lib/components/MainArea.svelte";
@@ -17,19 +21,104 @@
   import LaunchProgressModal from "./lib/components/LaunchProgressModal.svelte";
   import MigrationModal from "./lib/components/MigrationModal.svelte";
   import CleanupModal from "./lib/components/CleanupModal.svelte";
+  import {
+    formatAboutVersion,
+    formatWindowTitle,
+    getAppVersionSafe,
+  } from "./lib/windowTitle";
+  import {
+    AGENT_TAB_RESTORE_MAX_RETRIES,
+    loadStoredProjectAgentTabs,
+    persistStoredProjectAgentTabs,
+    buildRestoredAgentTabs,
+    shouldRetryAgentTabRestore,
+  } from "./lib/agentTabsPersistence";
+  import {
+    VoiceInputController,
+    type VoiceControllerState,
+  } from "./lib/voice/voiceInputController";
 
   interface MenuActionPayload {
     action: string;
   }
 
+  interface SettingsUpdatedPayload {
+    uiFontSize?: number;
+    terminalFontSize?: number;
+    voiceInput?: VoiceInputSettings;
+  }
+
+  const SIDEBAR_WIDTH_STORAGE_KEY = "gwt.sidebar.width";
+  const SIDEBAR_MODE_STORAGE_KEY = "gwt.sidebar.mode";
+  const DEFAULT_SIDEBAR_WIDTH_PX = 260;
+  const MIN_SIDEBAR_WIDTH_PX = 220;
+  const MAX_SIDEBAR_WIDTH_PX = 520;
+  type SidebarMode = "branch" | "agent";
+
+  const DEFAULT_VOICE_INPUT_SETTINGS: VoiceInputSettings = {
+    enabled: false,
+    hotkey: "Mod+Shift+M",
+    language: "auto",
+    model: "base",
+  };
+
+  function clampSidebarWidth(widthPx: number): number {
+    if (!Number.isFinite(widthPx)) return DEFAULT_SIDEBAR_WIDTH_PX;
+    return Math.max(
+      MIN_SIDEBAR_WIDTH_PX,
+      Math.min(MAX_SIDEBAR_WIDTH_PX, Math.round(widthPx))
+    );
+  }
+
+  function loadSidebarWidth(): number {
+    if (typeof window === "undefined") return DEFAULT_SIDEBAR_WIDTH_PX;
+    try {
+      const raw = window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
+      if (!raw) return DEFAULT_SIDEBAR_WIDTH_PX;
+      return clampSidebarWidth(Number(raw));
+    } catch {
+      return DEFAULT_SIDEBAR_WIDTH_PX;
+    }
+  }
+
+  function persistSidebarWidth(widthPx: number) {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(widthPx));
+    } catch {
+      // Ignore localStorage failures (e.g., disabled in strict environments).
+    }
+  }
+
+  function loadSidebarMode(): SidebarMode {
+    if (typeof window === "undefined") return "branch";
+    try {
+      const raw = window.localStorage.getItem(SIDEBAR_MODE_STORAGE_KEY);
+      return raw === "agent" || raw === "branch" ? raw : "branch";
+    } catch {
+      return "branch";
+    }
+  }
+
+  function persistSidebarMode(mode: SidebarMode) {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(SIDEBAR_MODE_STORAGE_KEY, mode);
+    } catch {
+      // Ignore localStorage failures (e.g., disabled in strict environments).
+    }
+  }
+
   let projectPath: string | null = $state(null);
+  let appVersion: string | null = $state(null);
   let sidebarVisible: boolean = $state(true);
+  let sidebarWidthPx: number = $state(loadSidebarWidth());
+  let sidebarMode: SidebarMode = $state(loadSidebarMode());
   let showAgentLaunch: boolean = $state(false);
   let showCleanupModal: boolean = $state(false);
   let cleanupPreselectedBranch: string | null = $state(null);
   let showAbout: boolean = $state(false);
   let showTerminalDiagnostics: boolean = $state(false);
-  let appVersion: string | null = $state(null);
   let appError: string | null = $state(null);
   let sidebarRefreshKey: number = $state(0);
   let worktreesEventAvailable: boolean = $state(false);
@@ -40,69 +129,115 @@
   let launchProgressOpen: boolean = $state(false);
   let launchJobId: string = $state("");
   let pendingLaunchRequest: LaunchAgentRequest | null = $state(null);
+  type IssueLaunchFollowup = {
+    projectPath: string;
+    issueNumber: number;
+    branchName: string;
+  };
+  let issueLaunchFollowups: Map<string, IssueLaunchFollowup> = $state(new Map());
 
   let migrationOpen: boolean = $state(false);
   let migrationSourceRoot: string = $state("");
 
   let tabs: Tab[] = $state([
-    { id: "summary", label: "Session Summary", type: "summary" },
+    { id: "agentMode", label: "Agent Mode", type: "agentMode" },
   ]);
-  let activeTabId: string = $state("summary");
+  let activeTabId: string = $state("agentMode");
+
+  let agentTabsHydratedProjectPath: string | null = $state(null);
+  let agentTabsRestoreToken = 0;
+  const AGENT_TAB_RESTORE_RETRY_DELAY_MS = 150;
 
   let terminalCount = $derived(tabs.filter((t) => t.type === "agent").length);
+
+  let agentTabBranches = $derived(
+    tabs
+      .filter((t) => t.type === "agent")
+      .map((t) => normalizeBranchName(t.label))
+      .filter((b) => b && b !== "Worktree" && b !== "Agent")
+  );
 
   let terminalDiagnosticsLoading: boolean = $state(false);
   let terminalDiagnostics: TerminalAnsiProbe | null = $state(null);
   let terminalDiagnosticsError: string | null = $state(null);
 
   let osEnvReady = $state(false);
+  let voiceInputSettings: VoiceInputSettings = $state(DEFAULT_VOICE_INPUT_SETTINGS);
+  let voiceInputListening = $state(false);
+  let voiceInputSupported = $state(true);
+  let voiceInputError: string | null = $state(null);
+  let voiceController: VoiceInputController | null = null;
 
   let toastMessage = $state<string | null>(null);
   let toastTimeout: ReturnType<typeof setTimeout> | null = null;
-  type ToastAction = { kind: "apply-update"; latest: string } | null;
-  let toastAction = $state<ToastAction>(null);
-  let lastUpdateToastVersion = $state<string | null>(null);
 
   let showOsEnvDebug = $state(false);
   let osEnvDebugData = $state<CapturedEnvInfo | null>(null);
   let osEnvDebugLoading = $state(false);
   let osEnvDebugError = $state<string | null>(null);
 
-  function showToast(message: string, durationMs = 8000, action: ToastAction = null) {
+  function showToast(message: string, durationMs = 8000) {
     toastMessage = message;
-    toastAction = action;
     if (toastTimeout) clearTimeout(toastTimeout);
-    toastTimeout = null;
-    if (durationMs > 0) {
-      toastTimeout = setTimeout(() => {
-        toastMessage = null;
-        toastAction = null;
-      }, durationMs);
-    }
+    toastTimeout = setTimeout(() => { toastMessage = null; }, durationMs);
   }
 
-  async function confirmAndApplyUpdate(latest: string) {
+  function queueIssueLaunchFollowup(jobId: string, request: LaunchAgentRequest) {
+    const issueNumber = request.issueNumber;
+    const branchName = request.createBranch?.name?.trim();
+    if (!projectPath || !issueNumber || !branchName) return;
+    issueLaunchFollowups = new Map(issueLaunchFollowups).set(jobId, {
+      projectPath,
+      issueNumber,
+      branchName,
+    });
+  }
+
+  async function handleIssueLaunchFinished(payload: LaunchFinishedPayload) {
+    const followup = issueLaunchFollowups.get(payload.jobId);
+    if (!followup) return;
+
+    const next = new Map(issueLaunchFollowups);
+    next.delete(payload.jobId);
+    issueLaunchFollowups = next;
+
     try {
-      const { confirm } = await import("@tauri-apps/plugin-dialog");
-      const ok = await confirm(
-        `Update available: v${latest}\nRestart to update now?`,
-        { title: "gwt", kind: "info" },
-      );
-      if (!ok) return;
-
-      showToast(`Updating to v${latest}...`, 0, null);
-
       const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("apply_app_update");
-    } catch (err) {
-      showToast(`Failed to apply update: ${toErrorMessage(err)}`);
-    }
-  }
 
-  async function handleToastClick() {
-    if (!toastAction) return;
-    if (toastAction.kind === "apply-update") {
-      await confirmAndApplyUpdate(toastAction.latest);
+      if (payload.status === "ok") {
+        await invoke("link_branch_to_issue", {
+          projectPath: followup.projectPath,
+          issueNumber: followup.issueNumber,
+          branchName: followup.branchName,
+        });
+        return;
+      }
+
+      const rollback = await invoke<RollbackResult>("rollback_issue_branch", {
+        projectPath: followup.projectPath,
+        branchName: followup.branchName,
+        deleteRemote: true,
+      });
+
+      sidebarRefreshKey++;
+
+      const warnings: string[] = [];
+      if (!rollback.localDeleted) {
+        warnings.push("Local rollback was incomplete.");
+      }
+      if (rollback.error) {
+        warnings.push(rollback.error.trim());
+      }
+
+      if (warnings.length > 0) {
+        const verb = payload.status === "cancelled" ? "cancelled" : "failed";
+        showToast(
+          `Issue launch ${verb}. ${warnings.join(" ")}`,
+          12000,
+        );
+      }
+    } catch (err) {
+      showToast(`Issue launch cleanup failed: ${toErrorMessage(err)}`, 12000);
     }
   }
 
@@ -144,81 +279,21 @@
     return () => { cancelled = true; if (unlisten) unlisten(); };
   });
 
-  // Best-effort: capture app version for About dialog.
+  // Best-effort: read app version from Tauri runtime (web preview will ignore).
   $effect(() => {
-    if (appVersion) return;
     let cancelled = false;
     (async () => {
-      try {
-        const { getVersion } = await import("@tauri-apps/api/app");
-        const v = await getVersion();
-        if (cancelled) return;
-        appVersion = v;
-      } catch { /* ignore */ }
+      const v = await getAppVersionSafe();
+      if (cancelled) return;
+      appVersion = v;
     })();
     return () => { cancelled = true; };
-  });
-
-  // Best-effort: request update state once on startup (covers early event timing).
-  $effect(() => {
-    if (lastUpdateToastVersion !== null) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const s = await invoke<UpdateState>("check_app_update", { force: false });
-        if (cancelled) return;
-        if (s.state !== "available") return;
-        if (s.asset_url) {
-          lastUpdateToastVersion = s.latest;
-          showToast(
-            `Update available: v${s.latest} (click to update)`,
-            0,
-            { kind: "apply-update", latest: s.latest },
-          );
-        }
-      } catch { /* ignore */ }
-    })();
-    return () => { cancelled = true; };
-  });
-
-  // Listen for app update state and show toast (click to apply).
-  $effect(() => {
-    let unlisten: null | (() => void) = null;
-    let cancelled = false;
-    (async () => {
-      try {
-        const { listen } = await import("@tauri-apps/api/event");
-        const unlistenFn = await listen<UpdateState>("app-update-state", (event) => {
-          const s = event.payload;
-          if (s.state !== "available") return;
-          if (lastUpdateToastVersion === s.latest) return;
-          lastUpdateToastVersion = s.latest;
-
-          if (s.asset_url) {
-            showToast(
-              `Update available: v${s.latest} (click to update)`,
-              0,
-              { kind: "apply-update", latest: s.latest },
-            );
-          } else {
-            showToast(
-              `Update available: v${s.latest}. Manual download required.`,
-              15000,
-              null,
-            );
-          }
-        });
-        if (cancelled) { unlistenFn(); return; }
-        unlisten = unlistenFn;
-      } catch { /* ignore */ }
-    })();
-    return () => { cancelled = true; if (unlisten) unlisten(); };
   });
 
   $effect(() => {
     void projectPath;
     void setWindowTitle();
+    void applyAppearanceSettings();
   });
 
   // Best-effort: subscribe once and refresh Sidebar when worktrees change.
@@ -290,6 +365,37 @@
     };
   });
 
+  // Handle issue-linking/rollback on actual launch completion.
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen<LaunchFinishedPayload>(
+          "launch-finished",
+          (event) => {
+            void handleIssueLaunchFinished(event.payload);
+          }
+        );
+
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+      } catch (err) {
+        console.error("Failed to setup launch finished listener:", err);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  });
+
   function toErrorMessage(err: unknown): string {
     if (typeof err === "string") return err;
     if (err && typeof err === "object" && "message" in err) {
@@ -299,8 +405,83 @@
     return String(err);
   }
 
+  function clampFontSize(size: number): number {
+    return Math.max(8, Math.min(24, Math.round(size)));
+  }
+
+  function normalizeVoiceInputSettings(
+    value: Partial<VoiceInputSettings> | null | undefined
+  ): VoiceInputSettings {
+    const hotkey = (value?.hotkey ?? "").trim();
+    const language = (value?.language ?? "").trim().toLowerCase();
+    const model = (value?.model ?? "").trim();
+
+    return {
+      enabled: !!value?.enabled,
+      hotkey: hotkey.length > 0 ? hotkey : DEFAULT_VOICE_INPUT_SETTINGS.hotkey,
+      language:
+        language === "ja" || language === "en" || language === "auto"
+          ? (language as VoiceInputSettings["language"])
+          : DEFAULT_VOICE_INPUT_SETTINGS.language,
+      model: model.length > 0 ? model : DEFAULT_VOICE_INPUT_SETTINGS.model,
+    };
+  }
+
+  function applyUiFontSize(size: number) {
+    document.documentElement.style.setProperty("--ui-font-base", `${size}px`);
+  }
+
+  function applyTerminalFontSize(size: number) {
+    (window as any).__gwtTerminalFontSize = size;
+    window.dispatchEvent(new CustomEvent("gwt-terminal-font-size", { detail: size }));
+  }
+
+  function applyVoiceInputSettings(value: Partial<VoiceInputSettings> | null | undefined) {
+    voiceInputSettings = normalizeVoiceInputSettings(value);
+    voiceController?.updateSettings();
+  }
+
+  function activeAgentPaneId(): string | null {
+    const active = tabs.find((t) => t.id === activeTabId);
+    if (
+      active?.type === "agent" &&
+      typeof active.paneId === "string" &&
+      active.paneId.length > 0
+    ) {
+      return active.paneId;
+    }
+    return null;
+  }
+
+  function readVoiceInputSettingsForController(): VoiceInputSettings {
+    return voiceInputSettings;
+  }
+
+  function readVoiceFallbackTerminalPaneId(): string | null {
+    return activeAgentPaneId();
+  }
+
+  async function applyAppearanceSettings() {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const settings = await invoke<
+        Pick<SettingsData, "ui_font_size" | "terminal_font_size" | "voice_input">
+      >(
+        "get_settings"
+      );
+      applyUiFontSize(clampFontSize(settings.ui_font_size ?? 13));
+      applyTerminalFontSize(clampFontSize(settings.terminal_font_size ?? 13));
+      applyVoiceInputSettings(settings.voice_input);
+    } catch {
+      // Ignore: settings API not available outside Tauri runtime.
+    }
+  }
+
   async function setWindowTitle() {
-    const title = projectPath ? `gwt - ${projectPath}` : "gwt";
+    const title = formatWindowTitle({
+      appName: "gwt",
+      projectPath,
+    });
 
     // Document title also covers non-tauri contexts (e.g. web preview).
     document.title = title;
@@ -318,29 +499,39 @@
     fetchCurrentBranch();
   }
 
-  function openSessionSummaryTab() {
-    const existing = tabs.find((t) => t.type === "summary" || t.id === "summary");
-    if (existing) {
-      activeTabId = existing.id;
-      return;
-    }
-
-    const tab: Tab = { id: "summary", label: "Session Summary", type: "summary" };
-    tabs = [tab, ...tabs];
-    activeTabId = tab.id;
-  }
-
   function handleBranchSelect(branch: BranchInfo) {
     selectedBranch = branch;
     if (branch.is_current) {
       currentBranch = branch.name;
     }
-    // Switch to session summary (re-open tab if it was closed).
-    openSessionSummaryTab();
   }
 
   function requestAgentLaunch() {
     showAgentLaunch = true;
+  }
+
+  function handleSidebarResize(nextWidthPx: number) {
+    const next = clampSidebarWidth(nextWidthPx);
+    if (next === sidebarWidthPx) return;
+    sidebarWidthPx = next;
+    persistSidebarWidth(next);
+  }
+
+  function ensureAgentModeTab() {
+    const existing = tabs.find((t) => t.type === "agentMode" || t.id === "agentMode");
+    if (existing) return;
+
+    const tab: Tab = { id: "agentMode", label: "Agent Mode", type: "agentMode" };
+    tabs = [tab, ...tabs];
+  }
+
+  function handleSidebarModeChange(next: SidebarMode) {
+    if (sidebarMode === next) return;
+    if (next === "agent") {
+      ensureAgentModeTab();
+    }
+    sidebarMode = next;
+    persistSidebarMode(next);
   }
 
   function handleBranchActivate(branch: BranchInfo) {
@@ -395,6 +586,7 @@
     const { invoke } = await import("@tauri-apps/api/core");
     const jobId = await invoke<string>("start_launch_job", { request });
 
+    queueIssueLaunchFollowup(jobId, request);
     pendingLaunchRequest = request;
     launchJobId = jobId;
     launchProgressOpen = true;
@@ -435,6 +627,9 @@
 
   async function handleTabClose(tabId: string) {
     const tab = tabs.find((t) => t.id === tabId);
+    if (tab?.type === "agentMode") {
+      return;
+    }
     if (tab?.paneId) {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -463,7 +658,87 @@
     activeTabId = tab.id;
   }
 
+  function openVersionHistoryTab() {
+    const existing = tabs.find(
+      (t) => t.type === "versionHistory" || t.id === "versionHistory",
+    );
+    if (existing) {
+      activeTabId = existing.id;
+      return;
+    }
+
+    const tab: Tab = {
+      id: "versionHistory",
+      label: "Version History",
+      type: "versionHistory",
+    };
+    tabs = [...tabs, tab];
+    activeTabId = tab.id;
+  }
+
+  async function syncWindowAgentTabs() {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const agentTabs = tabs
+        .filter((t) => t.type === "agent")
+        .map((t) => ({ id: t.id, label: t.label }));
+      const activeAgentTabId = agentTabs.some((t) => t.id === activeTabId)
+        ? activeTabId
+        : null;
+      await invoke("sync_window_agent_tabs", {
+        request: {
+          tabs: agentTabs,
+          activeTabId: activeAgentTabId,
+        },
+      });
+    } catch {
+      // Ignore: not available outside Tauri runtime.
+    }
+  }
+
   async function handleMenuAction(action: string) {
+    if (action.startsWith("focus-agent-tab::")) {
+      const tabId = action.slice("focus-agent-tab::".length).trim();
+      if (tabId && tabs.some((t) => t.id === tabId && t.type === "agent")) {
+        activeTabId = tabId;
+      }
+      return;
+    }
+
+    // Handle dynamic "open-recent-project::<path>" actions before the switch.
+    if (action.startsWith("open-recent-project::")) {
+      const recentPath = action.slice("open-recent-project::".length);
+      if (recentPath) {
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const probe = await invoke<ProbePathResult>("probe_path", {
+            path: recentPath,
+          });
+
+          if (probe.kind === "gwtProject" && probe.projectPath) {
+            const info = await invoke<ProjectInfo>("open_project", {
+              path: probe.projectPath,
+            });
+            projectPath = info.path;
+            fetchCurrentBranch();
+            return;
+          }
+
+          if (probe.kind === "migrationRequired" && probe.migrationSourceRoot) {
+            migrationSourceRoot = probe.migrationSourceRoot;
+            migrationOpen = true;
+            return;
+          }
+
+          appError =
+            probe.message || "Failed to open recent project.";
+        } catch (err) {
+          appError = `Failed to open project: ${toErrorMessage(err)}`;
+        }
+      }
+      return;
+    }
+
     switch (action) {
       case "open-project": {
         try {
@@ -520,8 +795,10 @@
           }
 
           projectPath = null;
-          tabs = [{ id: "summary", label: "Session Summary", type: "summary" }];
-          activeTabId = "summary";
+          tabs = [
+            { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+          ];
+          activeTabId = "agentMode";
           selectedBranch = null;
           currentBranch = "";
         }
@@ -543,38 +820,11 @@
       case "open-settings":
         openSettingsTab();
         break;
+      case "version-history":
+        openVersionHistoryTab();
+        break;
       case "about":
         showAbout = true;
-        break;
-      case "check-updates":
-        {
-          try {
-            const { invoke } = await import("@tauri-apps/api/core");
-            const s = await invoke<UpdateState>("check_app_update", { force: true });
-            switch (s.state) {
-              case "up_to_date":
-                showToast("Up to date.");
-                break;
-              case "available":
-                lastUpdateToastVersion = s.latest;
-                if (s.asset_url) {
-                  showToast(
-                    `Update available: v${s.latest} (click to update)`,
-                    0,
-                    { kind: "apply-update", latest: s.latest },
-                  );
-                } else {
-                  showToast(`Update available: v${s.latest}. Manual download required.`, 15000);
-                }
-                break;
-              case "failed":
-                showToast(`Update check failed: ${s.message}`);
-                break;
-            }
-          } catch (err) {
-            showToast(`Update check failed: ${toErrorMessage(err)}`);
-          }
-        }
         break;
       case "list-terminals":
         // Just switch to first terminal tab if any
@@ -627,6 +877,108 @@
       }
     }
   }
+
+  $effect(() => {
+    void tabs;
+    void activeTabId;
+    void syncWindowAgentTabs();
+  });
+
+  async function restoreProjectAgentTabs(
+    targetProjectPath: string,
+    token: number,
+    attempt = 0,
+  ) {
+    const stored = loadStoredProjectAgentTabs(targetProjectPath);
+
+    // Even if no stored state exists, mark hydrated so persistence can proceed.
+    if (!stored) {
+      if (projectPath === targetProjectPath && agentTabsRestoreToken === token) {
+        agentTabsHydratedProjectPath = targetProjectPath;
+      }
+      return;
+    }
+
+    let terminals: TerminalInfo[] = [];
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      terminals = await invoke<TerminalInfo[]>("list_terminals");
+    } catch {
+      // Ignore: not available outside Tauri runtime.
+    }
+
+    if (projectPath !== targetProjectPath || agentTabsRestoreToken !== token) {
+      return;
+    }
+
+    const restored = buildRestoredAgentTabs(stored, terminals);
+    const shouldRetry = shouldRetryAgentTabRestore(
+      stored.tabs.length,
+      restored.tabs.length,
+      attempt,
+      AGENT_TAB_RESTORE_MAX_RETRIES,
+    );
+
+    if (shouldRetry && projectPath === targetProjectPath && agentTabsRestoreToken === token) {
+      setTimeout(() => {
+        void restoreProjectAgentTabs(targetProjectPath, token, attempt + 1);
+      }, AGENT_TAB_RESTORE_RETRY_DELAY_MS);
+      return;
+    }
+
+    const restoredTabs = restored.tabs;
+
+    const preserved = tabs.filter((t) => t.type !== "agent");
+    tabs = [...preserved, ...restoredTabs];
+
+    const allowOverrideActive = activeTabId === "agentMode";
+    if (allowOverrideActive && restored.activeTabId) {
+      activeTabId = restored.activeTabId;
+    }
+
+    agentTabsHydratedProjectPath = targetProjectPath;
+  }
+
+  // Restore persisted agent tabs when a project is opened.
+  $effect(() => {
+    void projectPath;
+
+    if (!projectPath) {
+      agentTabsHydratedProjectPath = null;
+      return;
+    }
+
+    agentTabsHydratedProjectPath = null;
+    const target = projectPath;
+    const token = ++agentTabsRestoreToken;
+    void restoreProjectAgentTabs(target, token);
+  });
+
+  // Persist agent tabs per project (best-effort).
+  $effect(() => {
+    void projectPath;
+    void tabs;
+    void activeTabId;
+    void agentTabsHydratedProjectPath;
+
+    if (!projectPath) return;
+    if (agentTabsHydratedProjectPath !== projectPath) return;
+
+    const agentTabs: Array<{ paneId: string; label: string }> = tabs
+      .filter((t) => t.type === "agent" && typeof t.paneId === "string" && t.paneId.length > 0)
+      .map((t) => ({ paneId: t.paneId as string, label: t.label }));
+
+    const active = tabs.find((t) => t.id === activeTabId);
+    const activePaneId =
+      active?.type === "agent" && typeof active.paneId === "string" && active.paneId.length > 0
+        ? active.paneId
+        : null;
+
+    persistStoredProjectAgentTabs(projectPath, {
+      tabs: agentTabs,
+      activePaneId,
+    });
+  });
 
   // Claude Code Hooks: check & register on startup
   $effect(() => {
@@ -696,6 +1048,49 @@
     };
   });
 
+  $effect(() => {
+    const controller = new VoiceInputController({
+      getSettings: readVoiceInputSettingsForController,
+      getFallbackTerminalPaneId: readVoiceFallbackTerminalPaneId,
+      onStateChange: (state: VoiceControllerState) => {
+        voiceInputListening = state.listening;
+        voiceInputSupported = state.supported;
+        voiceInputError = state.error;
+      },
+    });
+    voiceController = controller;
+    controller.updateSettings();
+
+    return () => {
+      controller.dispose();
+      if (voiceController === controller) {
+        voiceController = null;
+      }
+      voiceInputListening = false;
+      voiceInputError = null;
+      voiceInputSupported = true;
+    };
+  });
+
+  $effect(() => {
+    function onSettingsUpdated(event: Event) {
+      const detail = (event as CustomEvent<SettingsUpdatedPayload>).detail;
+      if (!detail) return;
+      if (typeof detail.uiFontSize === "number") {
+        applyUiFontSize(clampFontSize(detail.uiFontSize));
+      }
+      if (typeof detail.terminalFontSize === "number") {
+        applyTerminalFontSize(clampFontSize(detail.terminalFontSize));
+      }
+      if (detail.voiceInput) {
+        applyVoiceInputSettings(detail.voiceInput);
+      }
+    }
+
+    window.addEventListener("gwt-settings-updated", onSettingsUpdated);
+    return () => window.removeEventListener("gwt-settings-updated", onSettingsUpdated);
+  });
+
   // Global keyboard shortcut: Cmd+Shift+K / Ctrl+Shift+K to open Cleanup modal.
   // The native menu accelerator handles this on macOS, but this provides a
   // fallback for web-preview and non-Tauri contexts.
@@ -725,23 +1120,40 @@
         <Sidebar
           {projectPath}
           refreshKey={sidebarRefreshKey}
+          widthPx={sidebarWidthPx}
+          minWidthPx={MIN_SIDEBAR_WIDTH_PX}
+          maxWidthPx={MAX_SIDEBAR_WIDTH_PX}
+          mode={sidebarMode}
+          onModeChange={handleSidebarModeChange}
+          {selectedBranch}
+          {currentBranch}
+          {agentTabBranches}
+          onResize={handleSidebarResize}
           onBranchSelect={handleBranchSelect}
           onBranchActivate={handleBranchActivate}
           onCleanupRequest={handleCleanupRequest}
+          onLaunchAgent={requestAgentLaunch}
+          onQuickLaunch={handleAgentLaunch}
         />
       {/if}
       <MainArea
         {tabs}
         {activeTabId}
-        {selectedBranch}
         projectPath={projectPath as string}
-        onLaunchAgent={requestAgentLaunch}
-        onQuickLaunch={handleAgentLaunch}
         onTabSelect={handleTabSelect}
         onTabClose={handleTabClose}
       />
     </div>
-    <StatusBar {projectPath} {currentBranch} {terminalCount} {osEnvReady} />
+    <StatusBar
+      {projectPath}
+      {currentBranch}
+      {terminalCount}
+      {osEnvReady}
+      voiceInputEnabled={voiceInputSettings.enabled}
+      voiceInputListening={voiceInputListening}
+      voiceInputSupported={voiceInputSupported}
+      voiceInputError={voiceInputError}
+    />
   </div>
 {/if}
 
@@ -758,7 +1170,9 @@
 <CleanupModal
   open={showCleanupModal}
   preselectedBranch={cleanupPreselectedBranch}
+  refreshKey={sidebarRefreshKey}
   projectPath={projectPath ?? ""}
+  {agentTabBranches}
   onClose={() => (showCleanupModal = false)}
 />
 
@@ -770,7 +1184,7 @@
       <h2>gwt</h2>
       <p>Git Worktree Manager</p>
       <p class="about-version">GUI Edition</p>
-      <p class="about-version">Version {appVersion ?? "unknown"}</p>
+      <p class="about-version">{formatAboutVersion(appVersion)}</p>
       <button class="about-close" onclick={() => (showAbout = false)}>
         Close
       </button>
@@ -938,20 +1352,9 @@
 
 {#if toastMessage}
   <div class="toast-container">
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      class="toast-message"
-      class:toast-clickable={toastAction !== null}
-      onclick={() => void handleToastClick()}
-    >
+    <div class="toast-message">
       <span>{toastMessage}</span>
-      <button
-        class="toast-close"
-        onclick={(e) => { e.stopPropagation(); toastMessage = null; toastAction = null; }}
-      >
-        [x]
-      </button>
+      <button class="toast-close" onclick={() => (toastMessage = null)}>[x]</button>
     </div>
   </div>
 {/if}
@@ -1159,14 +1562,6 @@
     align-items: center;
     gap: 12px;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-  }
-
-  .toast-message.toast-clickable {
-    cursor: pointer;
-  }
-
-  .toast-message.toast-clickable:hover {
-    background: var(--bg-hover, #4b4d63);
   }
 
   .toast-close {
