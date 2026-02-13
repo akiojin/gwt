@@ -64,6 +64,10 @@ libc = "0.2"
 # HTTP client (blocking)
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
+# WebSocket
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
+
 # Base64 encoding
 base64 = "0.22"
 

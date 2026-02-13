@@ -1,4 +1,5 @@
 use crate::agent_master::AgentModeState;
+use crate::mcp_ws_server::McpWsHandle;
 use gwt_core::ai::SessionSummaryCache;
 use gwt_core::config::os_env::EnvSource;
 use gwt_core::terminal::manager::PaneManager;
@@ -90,6 +91,9 @@ pub struct AppState {
     pub exit_confirm_inflight: AtomicBool,
     pub os_env: Arc<OnceCell<HashMap<String, String>>>,
     pub os_env_source: Arc<OnceCell<EnvSource>>,
+    /// Handle to the MCP WebSocket server (started during setup).
+    #[cfg_attr(test, allow(dead_code))]
+    pub mcp_ws_handle: Arc<Mutex<Option<McpWsHandle>>>,
 }
 
 impl AppState {
@@ -112,6 +116,7 @@ impl AppState {
             exit_confirm_inflight: AtomicBool::new(false),
             os_env: Arc::new(OnceCell::new()),
             os_env_source: Arc::new(OnceCell::new()),
+            mcp_ws_handle: Arc::new(Mutex::new(None)),
         }
     }
 

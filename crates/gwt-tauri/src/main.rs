@@ -4,6 +4,10 @@ mod agent_master;
 mod agent_tools;
 mod app;
 mod commands;
+#[cfg_attr(test, allow(dead_code))]
+mod mcp_handlers;
+#[cfg_attr(test, allow(dead_code))]
+mod mcp_ws_server;
 mod menu;
 mod state;
 
