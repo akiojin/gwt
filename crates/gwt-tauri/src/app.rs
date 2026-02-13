@@ -74,6 +74,7 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
         crate::menu::MENU_ID_GIT_VERSION_HISTORY => Some("version-history"),
         crate::menu::MENU_ID_EDIT_COPY => Some("edit-copy"),
         crate::menu::MENU_ID_EDIT_PASTE => Some("edit-paste"),
+        crate::menu::MENU_ID_TOOLS_NEW_TERMINAL => Some("new-terminal"),
         crate::menu::MENU_ID_TOOLS_LAUNCH_AGENT => Some("launch-agent"),
         crate::menu::MENU_ID_TOOLS_LIST_TERMINALS => Some("list-terminals"),
         crate::menu::MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS => Some("terminal-diagnostics"),
@@ -302,6 +303,15 @@ pub fn build_app(
                     tauri::async_runtime::spawn_blocking(move || {
                         let current_exe = std::env::current_exe().ok();
                         let state = mgr.check_for_executable(false, current_exe.as_deref());
+                        if let gwt_core::update::UpdateState::Failed { message, .. } = &state {
+                            warn!(
+                                category = "update",
+                                force = false,
+                                source = "startup-event",
+                                error = %message,
+                                "Startup update check failed"
+                            );
+                        }
                         let _ = app_handle_clone.emit("app-update-state", &state);
                     });
                 }
@@ -380,7 +390,7 @@ pub fn build_app(
                 window
                     .app_handle()
                     .state::<AppState>()
-                    .clear_project_for_window(window.label());
+                    .clear_window_state(window.label());
                 let _ = crate::menu::rebuild_menu(window.app_handle());
 
                 // Exit the app when all windows are truly closed (hidden windows still count as open).
@@ -432,6 +442,7 @@ pub fn build_app(
             crate::commands::sessions::get_branch_session_summary,
             crate::commands::branch_suggest::suggest_branch_names,
             crate::commands::terminal::launch_terminal,
+            crate::commands::terminal::spawn_shell,
             crate::commands::terminal::launch_agent,
             crate::commands::terminal::start_launch_job,
             crate::commands::terminal::cancel_launch_job,

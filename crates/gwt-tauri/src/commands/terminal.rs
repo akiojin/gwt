@@ -506,6 +506,14 @@ fn now_millis() -> i64 {
 
 const DOCKER_WORKDIR: &str = "/workspace";
 
+fn docker_compose_exec_workdir(workspace_folder: Option<&str>) -> String {
+    workspace_folder
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_default()
+}
+
 fn build_docker_compose_up_args(
     compose_args: &[String],
     build: bool,
@@ -843,23 +851,73 @@ fn yaml_single_quoted(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-fn render_docker_compose_override(service: &str, mounts: &[DockerBindMount]) -> String {
-    let mut content = format!("services:\n  {service}:\n");
-    if mounts.is_empty() {
-        return content;
+fn compose_service_container_name(container_name_prefix: &str, service: &str) -> String {
+    let mut suffix = String::new();
+    for c in service.trim().chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+            suffix.push(c.to_ascii_lowercase());
+        } else {
+            suffix.push('-');
+        }
+    }
+    while suffix.contains("--") {
+        suffix = suffix.replace("--", "-");
+    }
+    let suffix = suffix.trim_matches('-');
+    if suffix.is_empty() {
+        container_name_prefix.to_string()
+    } else {
+        format!("{container_name_prefix}-{suffix}")
+    }
+}
+
+fn render_docker_compose_override(
+    selected_service: &str,
+    services: &[String],
+    container_name_prefix: &str,
+    mounts: &[DockerBindMount],
+) -> String {
+    let mut content = "services:\n".to_string();
+    let selected = selected_service.trim();
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut ordered: Vec<String> = Vec::new();
+    for service in services {
+        let name = service.trim();
+        if name.is_empty() || !seen.insert(name.to_string()) {
+            continue;
+        }
+        ordered.push(name.to_string());
+    }
+    if !selected.is_empty() && seen.insert(selected.to_string()) {
+        ordered.push(selected.to_string());
     }
 
-    content.push_str("    volumes:\n");
-    for mount in mounts {
-        content.push_str("      - type: bind\n");
+    for service in ordered {
+        content.push_str(&format!("  {service}:\n"));
+        let resolved_container_name =
+            compose_service_container_name(container_name_prefix, &service);
         content.push_str(&format!(
-            "        source: {}\n",
-            yaml_single_quoted(&mount.source)
+            "    container_name: {}\n",
+            yaml_single_quoted(&resolved_container_name)
         ));
-        content.push_str(&format!(
-            "        target: {}\n",
-            yaml_single_quoted(&mount.target)
-        ));
+
+        if service != selected || mounts.is_empty() {
+            continue;
+        }
+
+        content.push_str("    volumes:\n");
+        for mount in mounts {
+            content.push_str("      - type: bind\n");
+            content.push_str(&format!(
+                "        source: {}\n",
+                yaml_single_quoted(&mount.source)
+            ));
+            content.push_str(&format!(
+                "        target: {}\n",
+                yaml_single_quoted(&mount.target)
+            ));
+        }
     }
 
     content
@@ -868,10 +926,11 @@ fn render_docker_compose_override(service: &str, mounts: &[DockerBindMount]) -> 
 fn write_docker_compose_override(
     project_root: &std::path::Path,
     container_name: &str,
-    service: &str,
+    selected_service: &str,
+    services: &[String],
     mounts: &[DockerBindMount],
 ) -> Result<Option<std::path::PathBuf>, String> {
-    if mounts.is_empty() {
+    if mounts.is_empty() && services.is_empty() {
         return Ok(None);
     }
 
@@ -882,7 +941,8 @@ fn write_docker_compose_override(
     let filename = format!("docker-compose.gwt.override.{container_name}.yml");
     let path = gwt_dir.join(filename);
 
-    let content = render_docker_compose_override(service, mounts);
+    let content =
+        render_docker_compose_override(selected_service, services, container_name, mounts);
 
     std::fs::write(&path, content).map_err(|e| format!("Failed to write override file: {e}"))?;
     Ok(Some(path))
@@ -1034,6 +1094,7 @@ fn launch_with_config(
     state: &AppState,
     app_handle: AppHandle,
 ) -> Result<String, String> {
+    let agent_name_for_stream = config.agent_name.clone();
     let pane_id = {
         let mut manager = state
             .pane_manager
@@ -1067,7 +1128,7 @@ fn launch_with_config(
 
     let pane_id_clone = pane_id.clone();
     std::thread::spawn(move || {
-        stream_pty_output(reader, pane_id_clone, app_handle);
+        stream_pty_output(reader, pane_id_clone, app_handle, agent_name_for_stream);
     });
 
     Ok(pane_id)
@@ -1105,12 +1166,220 @@ pub fn launch_terminal(
     launch_with_config(&repo_path, config, None, &state, app_handle)
 }
 
+fn non_empty_env_var(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn resolve_shell_launch_spec(is_windows: bool) -> (String, Vec<String>) {
+    let shell = non_empty_env_var("SHELL")
+        .or_else(|| {
+            if is_windows {
+                non_empty_env_var("COMSPEC")
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| {
+            if is_windows {
+                "cmd.exe".to_string()
+            } else {
+                "/bin/sh".to_string()
+            }
+        });
+
+    let lower = shell.to_ascii_lowercase();
+    let requires_plain_launch = lower.ends_with("cmd.exe")
+        || lower.ends_with("powershell.exe")
+        || lower.ends_with("pwsh.exe");
+
+    let args = if requires_plain_launch {
+        Vec::new()
+    } else {
+        vec!["-l".to_string()]
+    };
+
+    (shell, args)
+}
+
+/// Spawn a plain shell terminal (not an agent).
+#[tauri::command]
+pub fn spawn_shell(
+    working_dir: Option<String>,
+    state: State<AppState>,
+    app_handle: AppHandle,
+) -> Result<String, String> {
+    let (shell, shell_args) = resolve_shell_launch_spec(cfg!(windows));
+
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/"));
+
+    let resolved_dir = working_dir
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| home.clone());
+
+    let config = BuiltinLaunchConfig {
+        command: shell,
+        args: shell_args,
+        working_dir: resolved_dir,
+        branch_name: "terminal".to_string(),
+        agent_name: "terminal".to_string(),
+        agent_color: AgentColor::White,
+        env_vars: HashMap::new(),
+    };
+
+    let pane_id = {
+        let mut manager = state
+            .pane_manager
+            .lock()
+            .map_err(|e| format!("Failed to lock pane manager: {}", e))?;
+        manager
+            .spawn_shell(config, 24, 80)
+            .map_err(|e| format!("Failed to spawn shell: {}", e))?
+    };
+
+    let reader = {
+        let manager = state
+            .pane_manager
+            .lock()
+            .map_err(|e| format!("Failed to lock pane manager: {}", e))?;
+        let pane = manager
+            .panes()
+            .iter()
+            .find(|p| p.pane_id() == pane_id)
+            .ok_or_else(|| "Pane not found after creation".to_string())?;
+        pane.take_reader()
+            .map_err(|e| format!("Failed to take reader: {}", e))?
+    };
+
+    let pane_id_clone = pane_id.clone();
+    std::thread::spawn(move || {
+        stream_pty_output(reader, pane_id_clone, app_handle, "terminal".to_string());
+    });
+
+    Ok(pane_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gwt_core::terminal::runner::FallbackRunner;
+    use std::ffi::OsString;
     use std::path::Path;
     use std::time::Duration;
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_shell_launch_spec_prefers_shell_env_with_login_arg() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let _shell = ScopedEnvVar::set("SHELL", "/usr/bin/zsh");
+        let _comspec = ScopedEnvVar::set("COMSPEC", "C:\\Windows\\System32\\cmd.exe");
+
+        let (shell, args) = resolve_shell_launch_spec(false);
+        assert_eq!(shell, "/usr/bin/zsh");
+        assert_eq!(args, vec!["-l".to_string()]);
+    }
+
+    #[test]
+    fn resolve_shell_launch_spec_windows_falls_back_to_comspec_without_login_arg() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let _shell = ScopedEnvVar::remove("SHELL");
+        let _comspec = ScopedEnvVar::set("COMSPEC", "C:\\Windows\\System32\\cmd.exe");
+
+        let (shell, args) = resolve_shell_launch_spec(true);
+        assert_eq!(shell, "C:\\Windows\\System32\\cmd.exe");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn resolve_shell_launch_spec_windows_defaults_to_cmd_when_env_missing() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let _shell = ScopedEnvVar::remove("SHELL");
+        let _comspec = ScopedEnvVar::remove("COMSPEC");
+
+        let (shell, args) = resolve_shell_launch_spec(true);
+        assert_eq!(shell, "cmd.exe");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn resolve_shell_launch_spec_disables_login_arg_for_pwsh() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let _shell = ScopedEnvVar::set("SHELL", "/opt/homebrew/bin/pwsh.exe");
+        let _comspec = ScopedEnvVar::remove("COMSPEC");
+
+        let (shell, args) = resolve_shell_launch_spec(false);
+        assert_eq!(shell, "/opt/homebrew/bin/pwsh.exe");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn consume_osc7_cwd_updates_buffers_fragmented_sequences() {
+        let mut pending = Vec::new();
+        let mut last_cwd = String::new();
+
+        let first = b"out\x1b]7;file://host/tmp/frag";
+        let second = b"mented\x07tail";
+
+        assert_eq!(
+            consume_osc7_cwd_updates(&mut pending, first, &mut last_cwd),
+            None
+        );
+        assert_eq!(last_cwd, "");
+        assert_eq!(
+            consume_osc7_cwd_updates(&mut pending, second, &mut last_cwd),
+            Some("/tmp/fragmented".to_string())
+        );
+        assert_eq!(last_cwd, "/tmp/fragmented");
+    }
+
+    #[test]
+    fn consume_osc7_cwd_updates_returns_latest_unique_cwd() {
+        let mut pending = Vec::new();
+        let mut last_cwd = String::new();
+
+        let chunk = b"\x1b]7;file://host/tmp/a\x07mid\x1b]7;file://host/tmp/b\x07";
+        assert_eq!(
+            consume_osc7_cwd_updates(&mut pending, chunk, &mut last_cwd),
+            Some("/tmp/b".to_string())
+        );
+        assert_eq!(last_cwd, "/tmp/b");
+        assert_eq!(
+            consume_osc7_cwd_updates(&mut pending, b"\x1b]7;file://host/tmp/b\x07", &mut last_cwd),
+            None
+        );
+    }
 
     #[test]
     fn is_node_modules_bin_matches_common_paths() {
@@ -1573,6 +1842,20 @@ mod tests {
     }
 
     #[test]
+    fn docker_compose_exec_workdir_is_empty_without_workspace_folder() {
+        assert_eq!(docker_compose_exec_workdir(None), "");
+    }
+
+    #[test]
+    fn docker_compose_exec_workdir_uses_workspace_folder_when_present() {
+        assert_eq!(
+            docker_compose_exec_workdir(Some("/workspace")),
+            "/workspace"
+        );
+        assert_eq!(docker_compose_exec_workdir(Some("  /app  ")), "/app");
+    }
+
+    #[test]
     fn docker_mount_target_path_converts_windows_drive_style() {
         assert_eq!(
             docker_mount_target_path("D:/Repository/GE/GrimoireEngine.git"),
@@ -1613,11 +1896,23 @@ mod tests {
             target: "/Repository/GE/GrimoireEngine.git".to_string(),
         }];
 
-        let yaml = render_docker_compose_override("app", &mounts);
+        let services = vec!["app".to_string(), "unity-mcp-server".to_string()];
+        let yaml = render_docker_compose_override("app", &services, "gwt-develop", &mounts);
+        assert!(yaml.contains("container_name: 'gwt-develop-app'"));
+        assert!(yaml.contains("container_name: 'gwt-develop-unity-mcp-server'"));
         assert!(yaml.contains("type: bind"));
         assert!(yaml.contains("source: 'D:/Repository/GE/GrimoireEngine.git'"));
         assert!(yaml.contains("target: '/Repository/GE/GrimoireEngine.git'"));
         assert!(!yaml.contains("${HOST_GIT_WORKTREE_DIR}:${HOST_GIT_WORKTREE_DIR}"));
+    }
+
+    #[test]
+    fn render_docker_compose_override_adds_container_names_without_mounts() {
+        let services = vec!["unity-mcp-server".to_string()];
+        let yaml = render_docker_compose_override("unity-mcp-server", &services, "gwt-dev", &[]);
+        assert!(yaml.contains("services:\n  unity-mcp-server:\n"));
+        assert!(yaml.contains("container_name: 'gwt-dev-unity-mcp-server'"));
+        assert!(!yaml.contains("volumes:"));
     }
 
     #[test]
@@ -2058,6 +2353,7 @@ fn launch_agent_for_project_root(
                     &project_root,
                     &container_name,
                     &service,
+                    &services,
                     &mounts,
                 )? {
                     compose_args.push("-f".to_string());
@@ -2078,7 +2374,7 @@ fn launch_agent_for_project_root(
                 docker_env = Some(env);
                 docker_mode = DockerExecMode::Compose {
                     service,
-                    workdir: String::new(),
+                    workdir: docker_compose_exec_workdir(None),
                     compose_args,
                 };
             }
@@ -2148,6 +2444,7 @@ fn launch_agent_for_project_root(
                         &project_root,
                         &container_name,
                         &service,
+                        &services,
                         &mounts,
                     )? {
                         compose_args.push("-f".to_string());
@@ -2166,16 +2463,9 @@ fn launch_agent_for_project_root(
                     docker_container_name = Some(container_name);
                     docker_compose_args = Some(compose_args.clone());
                     docker_env = Some(env);
-                    let workdir = cfg
-                        .workspace_folder
-                        .as_deref()
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| DOCKER_WORKDIR.to_string());
-
                     docker_mode = DockerExecMode::Compose {
                         service,
-                        workdir,
+                        workdir: docker_compose_exec_workdir(cfg.workspace_folder.as_deref()),
                         compose_args,
                     };
                 } else if let Some(image) = cfg
@@ -2592,11 +2882,96 @@ pub fn cancel_launch_job(job_id: String, state: State<AppState>) -> Result<(), S
     Ok(())
 }
 
+/// Terminal cwd changed event payload sent to the frontend
+#[derive(Debug, Clone, Serialize)]
+pub struct TerminalCwdChangedPayload {
+    pub pane_id: String,
+    pub cwd: String,
+}
+
+const OSC7_MARKER: &[u8] = b"\x1b]7;";
+const OSC7_BUFFER_LIMIT: usize = 64 * 1024;
+
+fn trim_osc7_buffer(buffer: &mut Vec<u8>) {
+    if buffer.len() <= OSC7_BUFFER_LIMIT {
+        return;
+    }
+
+    if let Some(marker_pos) = buffer
+        .windows(OSC7_MARKER.len())
+        .rposition(|window| window == OSC7_MARKER)
+    {
+        if marker_pos > 0 {
+            buffer.drain(..marker_pos);
+        }
+    } else {
+        buffer.clear();
+    }
+}
+
+fn retain_possible_osc7_fragment(buffer: &mut Vec<u8>) {
+    if let Some(marker_pos) = buffer
+        .windows(OSC7_MARKER.len())
+        .rposition(|window| window == OSC7_MARKER)
+    {
+        if marker_pos > 0 {
+            buffer.drain(..marker_pos);
+        }
+        return;
+    }
+
+    // Keep only the possible marker prefix tail (e.g., trailing ESC]).
+    let keep = OSC7_MARKER.len().saturating_sub(1);
+    if buffer.len() > keep {
+        let drain_len = buffer.len() - keep;
+        buffer.drain(..drain_len);
+    }
+}
+
+fn consume_osc7_cwd_updates(
+    pending: &mut Vec<u8>,
+    chunk: &[u8],
+    last_cwd: &mut String,
+) -> Option<String> {
+    pending.extend_from_slice(chunk);
+    trim_osc7_buffer(pending);
+
+    let mut latest_changed: Option<String> = None;
+    loop {
+        let Some((cwd, consumed)) =
+            gwt_core::terminal::osc::extract_osc7_cwd_with_consumed(pending)
+        else {
+            retain_possible_osc7_fragment(pending);
+            break;
+        };
+
+        if consumed == 0 || consumed > pending.len() {
+            break;
+        }
+
+        if cwd != *last_cwd {
+            *last_cwd = cwd.clone();
+            latest_changed = Some(cwd);
+        }
+
+        pending.drain(..consumed);
+    }
+
+    latest_changed
+}
+
 /// Stream PTY output to the frontend via Tauri events
-fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_handle: AppHandle) {
+fn stream_pty_output(
+    mut reader: Box<dyn Read + Send>,
+    pane_id: String,
+    app_handle: AppHandle,
+    agent_name: String,
+) {
     let state = app_handle.state::<AppState>();
     let mut buf = [0u8; 4096];
     let mut stream_error: Option<String> = None;
+    let mut last_cwd = String::new();
+    let mut osc7_pending = Vec::new();
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break, // EOF
@@ -2605,6 +2980,19 @@ fn stream_pty_output(mut reader: Box<dyn Read + Send>, pane_id: String, app_hand
                 if let Ok(mut manager) = state.pane_manager.lock() {
                     if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
                         let _ = pane.process_bytes(&buf[..n]);
+                    }
+                }
+
+                // Detect OSC 7 cwd changes for terminal tabs
+                if agent_name == "terminal" {
+                    if let Some(cwd) =
+                        consume_osc7_cwd_updates(&mut osc7_pending, &buf[..n], &mut last_cwd)
+                    {
+                        let payload = TerminalCwdChangedPayload {
+                            pane_id: pane_id.clone(),
+                            cwd,
+                        };
+                        let _ = app_handle.emit("terminal-cwd-changed", &payload);
                     }
                 }
 

@@ -1422,7 +1422,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn init_git_repo(path: &Path) {
-        let out = gwt_core::process::git_command()
+        let out = gwt_core::process::command("git")
             .args(["init"])
             .current_dir(path)
             .output();

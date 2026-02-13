@@ -19,8 +19,8 @@
 ### Phase 1: Windows Host 実行の安定化
 
 - `crates/gwt-core/src/terminal/pty.rs` に起動コマンド解決ヘルパーを追加する。
-- Windows かつ起動コマンドが `.cmd` / `.bat` の場合は `cmd.exe /d /s /c` ラップに変換する。
-- それ以外は既存の直接起動を維持する。
+- Windows Host OS 起動時は PowerShell（`pwsh` 優先、未導入時は `powershell.exe`）の `-Command` ラップに変換する。
+- Windows 以外は既存の直接起動を維持する。
 
 ### Phase 2: PTY read error 時の空タブ防止
 

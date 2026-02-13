@@ -2298,7 +2298,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-core"
-version = "7.1.2"
+version = "7.3.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2334,7 +2334,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-tauri"
-version = "7.1.2"
+version = "7.3.0"
 dependencies = [
  "chrono",
  "gwt-core",
