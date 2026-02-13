@@ -44,6 +44,6 @@
 
 - [x] T26: mcp_registration.rs のユニットテスト（JSON/TOML読み書き、登録・削除・クリーンアップ）
 - [x] T27: WebSocketサーバーの結合テスト（接続・切断・メッセージルーティング）
-- [ ] T28: MCPブリッジのE2Eテスト（ツール呼び出し → WebSocket → Tauri → レスポンス）
+- [x] T28: MCPブリッジのE2Eテスト（ツール呼び出し → WebSocket → Tauri → レスポンス）
 - [x] T29: cargo clippy, cargo fmt, svelte-check による全体品質チェック
-- [ ] T30: 手動検証（gwt起動→MCP登録確認→ツール呼び出し→終了→登録解除確認）
+- [x] T30: 手動検証（gwt起動→MCP登録確認→ツール呼び出し→終了→登録解除確認）
