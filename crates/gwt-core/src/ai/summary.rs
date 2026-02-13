@@ -193,7 +193,7 @@ fn should_preserve_short_status_message(text: &str) -> bool {
     }
 
     let lowered = text.to_lowercase();
-    const IMPORTANT_KEYWORDS: [&str; 19] = [
+    const IMPORTANT_KEYWORDS: &[&str] = &[
         "error",
         "errors",
         "failed",
