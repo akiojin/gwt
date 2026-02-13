@@ -355,12 +355,18 @@ fn is_registered_json(path: &Path) -> Result<bool, GwtError> {
 // Codex (TOML) – T19
 // ---------------------------------------------------------------------------
 
-fn load_toml_table(path: &Path) -> toml::Table {
+fn load_toml_table(path: &Path) -> Result<toml::Table, GwtError> {
     if !path.exists() {
-        return toml::Table::new();
+        return Ok(toml::Table::new());
     }
-    let content = std::fs::read_to_string(path).unwrap_or_default();
-    content.parse::<toml::Table>().unwrap_or_default()
+    let content = std::fs::read_to_string(path).map_err(|e| GwtError::ConfigParseError {
+        reason: format!("Failed to read {}: {}", path.display(), e),
+    })?;
+    content
+        .parse::<toml::Table>()
+        .map_err(|e| GwtError::ConfigParseError {
+            reason: format!("Failed to parse {}: {}", path.display(), e),
+        })
 }
 
 fn write_toml_table(path: &Path, table: &toml::Table) -> Result<(), GwtError> {
@@ -375,7 +381,7 @@ fn write_toml_table(path: &Path, table: &toml::Table) -> Result<(), GwtError> {
 fn register_codex_agent(config: &McpBridgeConfig, path: &Path) -> Result<(), GwtError> {
     ensure_parent_dir(path)?;
 
-    let mut root = load_toml_table(path);
+    let mut root = load_toml_table(path)?;
 
     // Ensure [mcp_servers] table exists
     if !root.contains_key("mcp_servers") {
@@ -425,7 +431,7 @@ fn unregister_codex_agent(path: &Path) -> Result<(), GwtError> {
         return Ok(());
     }
 
-    let mut root = load_toml_table(path);
+    let mut root = load_toml_table(path)?;
 
     let removed = root
         .get_mut("mcp_servers")
@@ -446,7 +452,7 @@ fn unregister_codex_agent(path: &Path) -> Result<(), GwtError> {
 }
 
 fn is_registered_codex(path: &Path) -> Result<bool, GwtError> {
-    let root = load_toml_table(path);
+    let root = load_toml_table(path).unwrap_or_default();
     Ok(root
         .get("mcp_servers")
         .and_then(|v| v.get(MCP_SERVER_NAME))
@@ -711,6 +717,23 @@ args = []
         assert_eq!(root["approval_mode"].as_str(), Some("full-auto"));
         assert!(root["mcp_servers"]["other"].is_table());
         assert!(root["mcp_servers"][MCP_SERVER_NAME].is_table());
+    }
+
+    #[test]
+    fn codex_register_handles_invalid_toml() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(".codex").join("config.toml");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+
+        std::fs::write(&path, "not valid toml = = =").unwrap();
+
+        let result = register_mcp_server_at(McpAgentType::Codex, &sample_config(), &path);
+        assert!(result.is_err());
+
+        let original = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(original, "not valid toml = = =");
     }
 
     // --- Gemini (JSON) ---

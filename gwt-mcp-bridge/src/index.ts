@@ -118,7 +118,14 @@ function sendRpc(method: string, params: Record<string, unknown>): Promise<unkno
       },
     });
 
-    ws.send(JSON.stringify(req));
+    try {
+      ws.send(JSON.stringify(req));
+    } catch (err) {
+      pending.delete(id);
+      clearTimeout(timeout);
+      const message = err instanceof Error ? err.message : String(err);
+      reject(new Error(`Failed to send RPC request: ${message}`));
+    }
   });
 }
 
