@@ -9,7 +9,6 @@
     GhCliStatus,
     GitHubIssueInfo,
     LaunchAgentRequest,
-    RollbackResult,
   } from "../types";
 
   let {
@@ -134,9 +133,8 @@
   let issueSearchQuery: string = $state("");
   let selectedIssue: GitHubIssueInfo | null = $state(null as GitHubIssueInfo | null);
   let issueBranchMap: Map<number, string | null> = $state(new Map());
+  let issueBranchChecksInFlight: Set<number> = $state(new Set());
   let issueRateLimited: boolean = $state(false);
-  let rollbackSteps: string[] = $state([]);
-  let rollbackError: string | null = $state(null);
 
   let filteredIssues = $derived(
     (() => {
@@ -537,21 +535,41 @@
   }
 
   async function checkExistingBranch(issueNumber: number) {
+    issueBranchChecksInFlight = new Set(issueBranchChecksInFlight).add(issueNumber);
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       const branch = await invoke<string | null>("find_existing_issue_branch", {
         projectPath,
         issueNumber,
       });
-      issueBranchMap = new Map(issueBranchMap).set(issueNumber, branch ?? null);
+      const existingBranch = branch ?? null;
+      issueBranchMap = new Map(issueBranchMap).set(issueNumber, existingBranch);
+      if (existingBranch && selectedIssue?.number === issueNumber) {
+        selectedIssue = null;
+      }
     } catch {
-      // Ignore errors for individual branch checks
+      // Treat as "not found" so the issue is not blocked forever.
+      issueBranchMap = new Map(issueBranchMap).set(issueNumber, null);
+    } finally {
+      const next = new Set(issueBranchChecksInFlight);
+      next.delete(issueNumber);
+      issueBranchChecksInFlight = next;
     }
   }
 
+  function isIssueSelectable(issueNumber: number): boolean {
+    if (issueBranchChecksInFlight.has(issueNumber)) return false;
+    if (!issueBranchMap.has(issueNumber)) return false;
+    return !issueBranchMap.get(issueNumber);
+  }
+
+  function canLaunchFromIssue(issue: GitHubIssueInfo | null): boolean {
+    if (!issue) return false;
+    return isIssueSelectable(issue.number);
+  }
+
   function selectIssue(issue: GitHubIssueInfo) {
-    const existing = issueBranchMap.get(issue.number);
-    if (existing) return; // disabled
+    if (!isIssueSelectable(issue.number)) return;
     selectedIssue = issue;
   }
 
@@ -836,68 +854,24 @@
 
       const issueForLaunch =
         newBranchTab === "fromIssue" ? selectedIssue : null;
+      if (issueForLaunch && !canLaunchFromIssue(issueForLaunch)) {
+        errorMessage = "Selected issue is no longer available. Please select another issue.";
+        return;
+      }
       const fullName = issueForLaunch
         ? issueBranchName
         : newBranchFullName.trim();
       if (!baseBranch.trim() || !fullName) return;
       request.branch = fullName;
+      await onLaunch({
+        ...request,
+        createBranch: { name: fullName, base: baseBranch.trim() },
+        issueNumber: issueForLaunch
+          ? issueForLaunch.number
+          : undefined,
+      });
 
-      rollbackSteps = [];
-      rollbackError = null;
-
-      try {
-        await onLaunch({
-          ...request,
-          createBranch: { name: fullName, base: baseBranch.trim() },
-          issueNumber: issueForLaunch
-            ? issueForLaunch.number
-            : undefined,
-        });
-
-        // Link branch to issue after successful worktree creation
-        if (issueForLaunch) {
-          const { invoke } = await import("@tauri-apps/api/core");
-          await invoke("link_branch_to_issue", {
-            projectPath,
-            issueNumber: issueForLaunch.number,
-            branchName: fullName,
-          });
-        }
-
-        onClose();
-      } catch (launchErr) {
-        // Rollback on failure if this was a From Issue launch
-        if (issueForLaunch) {
-          rollbackSteps = ["Launch failed. Rolling back..."];
-          try {
-            const { invoke } = await import("@tauri-apps/api/core");
-            const result = await invoke<RollbackResult>(
-              "rollback_issue_branch",
-              {
-                projectPath,
-                branchName: fullName,
-                deleteRemote: true,
-              }
-            );
-            if (result.localDeleted) {
-              rollbackSteps = [...rollbackSteps, "Local branch deleted."];
-            }
-            if (result.remoteDeleted) {
-              rollbackSteps = [...rollbackSteps, "Remote branch deleted."];
-            }
-            if (result.error) {
-              rollbackSteps = [
-                ...rollbackSteps,
-                `Remote cleanup warning: ${result.error}`,
-              ];
-            }
-            rollbackSteps = [...rollbackSteps, "Rollback complete."];
-          } catch (rbErr) {
-            rollbackError = `Rollback failed: ${toErrorMessage(rbErr)}`;
-          }
-        }
-        throw launchErr;
-      }
+      onClose();
     } catch (err) {
       errorMessage = `Failed to launch agent: ${toErrorMessage(err)}`;
     } finally {
@@ -933,17 +907,6 @@
       <div class="dialog-body">
         {#if errorMessage}
           <div class="error">{errorMessage}</div>
-        {/if}
-
-        {#if rollbackSteps.length > 0}
-          <div class="rollback-info">
-            {#each rollbackSteps as step}
-              <div class="rollback-step">{step}</div>
-            {/each}
-            {#if rollbackError}
-              <div class="rollback-step warn">{rollbackError}</div>
-            {/if}
-          </div>
         {/if}
 
         <div class="field">
@@ -1100,7 +1063,8 @@
               {/if}
               {#each filteredIssues as issue (issue.number)}
                 {@const existingBranchName = issueBranchMap.get(issue.number)}
-                {@const isDisabled = !!existingBranchName}
+                {@const isChecking = issueBranchChecksInFlight.has(issue.number) || !issueBranchMap.has(issue.number)}
+                {@const isDisabled = isChecking || !!existingBranchName}
                 {@const isSelected = selectedIssue?.number === issue.number}
                 <button
                   class="issue-item"
@@ -1109,7 +1073,11 @@
                   disabled={isDisabled}
                   type="button"
                   onclick={() => selectIssue(issue)}
-                  title={isDisabled ? `Branch exists: ${existingBranchName}` : ""}
+                  title={isChecking
+                    ? "Checking existing branch..."
+                    : isDisabled
+                      ? `Branch exists: ${existingBranchName}`
+                      : ""}
                 >
                   <span class="issue-number">#{issue.number}</span>
                   <span class="issue-title">{issue.title}</span>
@@ -1120,7 +1088,9 @@
                       {/each}
                     </span>
                   {/if}
-                  {#if isDisabled}
+                  {#if isChecking}
+                    <span class="issue-existing">Checking...</span>
+                  {:else if isDisabled}
                     <span class="issue-existing">Branch exists</span>
                   {/if}
                 </button>
@@ -1566,7 +1536,7 @@
               ? !existingBranch.trim()
               : !baseBranch.trim() ||
                 (newBranchTab === "fromIssue"
-                  ? !selectedIssue
+                  ? !canLaunchFromIssue(selectedIssue)
                   : !newBranchFullName.trim()))
           }
           onclick={handleLaunch}
@@ -2109,25 +2079,5 @@
     text-align: center;
     color: var(--text-muted);
     font-size: var(--ui-font-md);
-  }
-
-  .rollback-info {
-    padding: 10px 12px;
-    border: 1px solid rgba(255, 180, 0, 0.35);
-    background: rgba(255, 180, 0, 0.08);
-    border-radius: 8px;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  .rollback-step {
-    font-size: var(--ui-font-md);
-    color: var(--text-primary);
-    line-height: 1.4;
-  }
-
-  .rollback-step.warn {
-    color: rgb(255, 160, 160);
   }
 </style>

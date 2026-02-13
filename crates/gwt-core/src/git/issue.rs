@@ -579,11 +579,7 @@ mod tests {
 
     #[test]
     fn test_github_issue_new_has_empty_labels() {
-        let issue = GitHubIssue::new(
-            1,
-            "Test".to_string(),
-            "2025-01-25T10:00:00Z".to_string(),
-        );
+        let issue = GitHubIssue::new(1, "Test".to_string(), "2025-01-25T10:00:00Z".to_string());
         assert!(issue.labels.is_empty());
     }
 

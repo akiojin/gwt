@@ -4,7 +4,9 @@
     BranchInfo,
     ProjectInfo,
     LaunchAgentRequest,
+    LaunchFinishedPayload,
     ProbePathResult,
+    RollbackResult,
     TerminalInfo,
     TerminalAnsiProbe,
     CapturedEnvInfo,
@@ -109,6 +111,12 @@
   let launchProgressOpen: boolean = $state(false);
   let launchJobId: string = $state("");
   let pendingLaunchRequest: LaunchAgentRequest | null = $state(null);
+  type IssueLaunchFollowup = {
+    projectPath: string;
+    issueNumber: number;
+    branchName: string;
+  };
+  let issueLaunchFollowups: Map<string, IssueLaunchFollowup> = $state(new Map());
 
   let migrationOpen: boolean = $state(false);
   let migrationSourceRoot: string = $state("");
@@ -150,6 +158,65 @@
     toastMessage = message;
     if (toastTimeout) clearTimeout(toastTimeout);
     toastTimeout = setTimeout(() => { toastMessage = null; }, durationMs);
+  }
+
+  function queueIssueLaunchFollowup(jobId: string, request: LaunchAgentRequest) {
+    const issueNumber = request.issueNumber;
+    const branchName = request.createBranch?.name?.trim();
+    if (!projectPath || !issueNumber || !branchName) return;
+    issueLaunchFollowups = new Map(issueLaunchFollowups).set(jobId, {
+      projectPath,
+      issueNumber,
+      branchName,
+    });
+  }
+
+  async function handleIssueLaunchFinished(payload: LaunchFinishedPayload) {
+    const followup = issueLaunchFollowups.get(payload.jobId);
+    if (!followup) return;
+
+    const next = new Map(issueLaunchFollowups);
+    next.delete(payload.jobId);
+    issueLaunchFollowups = next;
+
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+
+      if (payload.status === "ok") {
+        await invoke("link_branch_to_issue", {
+          projectPath: followup.projectPath,
+          issueNumber: followup.issueNumber,
+          branchName: followup.branchName,
+        });
+        return;
+      }
+
+      const rollback = await invoke<RollbackResult>("rollback_issue_branch", {
+        projectPath: followup.projectPath,
+        branchName: followup.branchName,
+        deleteRemote: true,
+      });
+
+      sidebarRefreshKey++;
+
+      const warnings: string[] = [];
+      if (!rollback.localDeleted) {
+        warnings.push("Local rollback was incomplete.");
+      }
+      if (rollback.error) {
+        warnings.push(rollback.error.trim());
+      }
+
+      if (warnings.length > 0) {
+        const verb = payload.status === "cancelled" ? "cancelled" : "failed";
+        showToast(
+          `Issue launch ${verb}. ${warnings.join(" ")}`,
+          12000,
+        );
+      }
+    } catch (err) {
+      showToast(`Issue launch cleanup failed: ${toErrorMessage(err)}`, 12000);
+    }
   }
 
   // Poll OS env readiness at startup; stop once ready.
@@ -267,6 +334,37 @@
         unlisten = unlistenFn;
       } catch (err) {
         console.error("Failed to setup terminal closed listener:", err);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  });
+
+  // Handle issue-linking/rollback on actual launch completion.
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen<LaunchFinishedPayload>(
+          "launch-finished",
+          (event) => {
+            void handleIssueLaunchFinished(event.payload);
+          }
+        );
+
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+      } catch (err) {
+        console.error("Failed to setup launch finished listener:", err);
       }
     })();
 
@@ -441,6 +539,7 @@
     const { invoke } = await import("@tauri-apps/api/core");
     const jobId = await invoke<string>("start_launch_job", { request });
 
+    queueIssueLaunchFollowup(jobId, request);
     pendingLaunchRequest = request;
     launchJobId = jobId;
     launchProgressOpen = true;

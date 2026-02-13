@@ -5,6 +5,7 @@ use gwt_core::git::{
     create_linked_branch, fetch_open_issues, find_branch_for_issue, is_gh_cli_authenticated,
     is_gh_cli_available,
 };
+use gwt_core::worktree::WorktreeManager;
 use serde::Serialize;
 use std::path::Path;
 use std::process::Command;
@@ -125,17 +126,15 @@ pub fn rollback_issue_branch(
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)?;
 
-    // Delete local branch
-    let local_output = Command::new("git")
-        .args(["branch", "-D", &branch_name])
-        .current_dir(&repo_path)
-        .output()
-        .map_err(|e| format!("Failed to execute git branch -D: {}", e))?;
-
-    let local_deleted = local_output.status.success();
+    // Local rollback must remove worktree first, then delete the branch.
+    let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
+    let (local_deleted, local_error) = match manager.cleanup_branch(&branch_name, true, true) {
+        Ok(()) => (true, None),
+        Err(err) => (false, Some(err.to_string())),
+    };
 
     // Delete remote branch if requested (FR-014a)
-    let (remote_deleted, error) = if delete_remote {
+    let (remote_deleted, remote_error) = if delete_remote {
         let remote_output = Command::new("git")
             .args(["push", "origin", "--delete", &branch_name])
             .current_dir(&repo_path)
@@ -151,6 +150,16 @@ pub fn rollback_issue_branch(
         }
     } else {
         (false, None)
+    };
+
+    let error = match (local_error, remote_error) {
+        (None, None) => None,
+        (Some(local), None) => Some(format!("Local cleanup warning: {}", local)),
+        (None, Some(remote)) => Some(remote),
+        (Some(local), Some(remote)) => Some(format!(
+            "Local cleanup warning: {}\nRemote cleanup warning: {}",
+            local, remote
+        )),
     };
 
     Ok(RollbackResult {
