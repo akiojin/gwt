@@ -4,7 +4,6 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::Command;
 
 /// Pull Request information
 #[derive(Debug, Clone)]
@@ -101,7 +100,7 @@ impl PrCache {
             return None;
         }
 
-        let output = Command::new("gh")
+        let output = crate::process::command("gh")
             .args([
                 "pr",
                 "list",
@@ -131,7 +130,7 @@ impl PrCache {
 
 /// Check if GitHub CLI (gh) is available
 fn is_gh_available() -> bool {
-    Command::new("gh")
+    crate::process::command("gh")
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -158,7 +157,7 @@ fn fetch_prs(repo_path: &Path) -> Result<Vec<PullRequest>, std::io::Error> {
 /// Fetch PRs by state using GitHub CLI
 fn fetch_prs_by_state(repo_path: &Path, state: &str) -> Result<Vec<PullRequest>, std::io::Error> {
     // gh pr list --state open --json number,title,headRefName,state --limit 100
-    let output = Command::new("gh")
+    let output = crate::process::command("gh")
         .args([
             "pr",
             "list",

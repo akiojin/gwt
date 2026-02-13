@@ -5,7 +5,6 @@ use super::{
     validator::validate_migration,
 };
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use tracing::{debug, info, warn};
 
 /// Information about a worktree being migrated
@@ -734,7 +733,7 @@ fn migrate_clean_worktree(
 /// Copy working files excluding .git and gitignored files (SPEC-a70a1ece T812, FR-208)
 fn copy_working_files(source: &Path, target: &Path) -> Result<(), MigrationError> {
     // Use rsync with git-aware exclusions
-    let output = Command::new("rsync")
+    let output = crate::process::command("rsync")
         .args(["-a", "--exclude=.git", "--filter=:- .gitignore"])
         .arg(format!("{}/", source.display()))
         .arg(format!("{}/", target.display()))

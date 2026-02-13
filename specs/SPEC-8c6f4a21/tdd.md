@@ -1,10 +1,10 @@
-# TDDノート: Windows での Git 実行時コンソール点滅抑止
+# TDDノート: Windows での外部プロセス実行時コンソール点滅抑止
 
 ## 対象
 
 - `crates/gwt-core/src/process.rs`
 - `crates/gwt-core/tests/no_direct_git_command.rs`
-- Git 実行を持つ既存モジュール群（`gwt-core` / `gwt-tauri`）
+- 外部コマンド実行を持つ既存モジュール群（`gwt-core` / `gwt-tauri`）
 
 ## テスト戦略
 
@@ -14,15 +14,15 @@
 
 ## Red / Green 記録
 
-### T1: 本番ソース直書き `Command::new("git")` を禁止
+### T1: ワークスペース Rust コード直書き `Command::new(...)` を禁止
 
 - **Red**: `no_direct_git_command` テスト追加前は混入を検知できない。
-- **Green**: `crates/gwt-core/tests/no_direct_git_command.rs` 追加後、混入時にテスト失敗。
+- **Green**: `crates/gwt-core/tests/no_direct_git_command.rs` で、`process.rs` / ガードテスト自身を除く混入時にテスト失敗。
 
-### T2: 共通ヘルパー API の基本保証
+### T2: 共通ヘルパー API の基本保証（std/tokio）
 
 - **Red**: `process.rs` 追加前は `git_command()` が存在しない。
-- **Green**: `process.rs` のユニットテストで `git_command().get_program() == "git"` を確認。
+- **Green**: `process.rs` のユニットテストで `git_command()` と `tokio_command()` の基本動作を確認。
 
 ### T3: 機能回帰なし
 

@@ -3,7 +3,6 @@
 //! Provides Issue information using GitHub CLI (gh) for branch creation from issues.
 
 use std::path::Path;
-use std::process::Command;
 
 use super::remote::Remote;
 use super::repository::{find_bare_repo_in_dir, is_git_repo};
@@ -90,7 +89,7 @@ impl GitHubIssue {
 
 /// Check if GitHub CLI (gh) is available
 pub fn is_gh_cli_available() -> bool {
-    Command::new("gh")
+    crate::process::command("gh")
         .arg("--version")
         .output()
         .map(|output| output.status.success())
@@ -101,7 +100,7 @@ pub fn is_gh_cli_available() -> bool {
 ///
 /// Runs `gh auth status` and returns true if the exit code is 0.
 pub fn is_gh_cli_authenticated() -> bool {
-    Command::new("gh")
+    crate::process::command("gh")
         .args(["auth", "status"])
         .output()
         .map(|output| output.status.success())
@@ -122,7 +121,7 @@ pub fn fetch_open_issues(
     let repo_slug = resolve_repo_slug(repo_path);
     let args = issue_list_args(repo_slug.as_deref(), page, per_page);
 
-    let output = Command::new("gh")
+    let output = crate::process::command("gh")
         .args(args)
         .current_dir(repo_path)
         .output()
@@ -346,7 +345,7 @@ pub fn create_linked_branch(
 ) -> Result<(), String> {
     // FR-016a: Use --name to specify branch name
     // FR-016b: Use --checkout=false so worktree handles checkout
-    let output = Command::new("gh")
+    let output = crate::process::command("gh")
         .args(issue_develop_args(issue_number, branch_name))
         .current_dir(repo_path)
         .output()
