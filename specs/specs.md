@@ -18,6 +18,7 @@
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
 | [SPEC-552c5e74](SPEC-552c5e74/spec.md) | 機能仕様: Launch Agent のデフォルト設定保持（前回成功起動値） | 2026-02-14 |
+| [SPEC-f490dded](SPEC-f490dded/spec.md) | 機能仕様: シンプルターミナルタブ | 2026-02-13 |
 | [SPEC-4e2f1028](SPEC-4e2f1028/spec.md) | 機能仕様: Windows 移行プロジェクトで Docker 起動時に mount エラーを回避する | 2026-02-13 |
 | [SPEC-6e2a9d4c](SPEC-6e2a9d4c/spec.md) | 機能仕様: Host OS 起動時の空タブ防止（Issue #1029） | 2026-02-13 |
 | [SPEC-6f291006](SPEC-6f291006/spec.md) | 機能仕様: Migration backup copy の Windows 互換修正 | 2026-02-13 |
