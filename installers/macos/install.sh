@@ -17,6 +17,8 @@ set -euo pipefail
 
 REPO="akiojin/gwt"
 APP_NAME="gwt"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -29,6 +31,30 @@ need_cmd() {
   if ! command -v "$1" > /dev/null 2>&1; then
     err "Required command not found: $1"
     exit 1
+  fi
+}
+
+warn_if_pkg_stale() {
+  local pkg_path="$1"
+  local gui_source_file="${REPO_ROOT}/gwt-gui/src/lib/components/AgentLaunchForm.svelte"
+  local pkg_prefix="${REPO_ROOT}/target/release/bundle/pkg/"
+
+  pkg_path="$(cd "$(dirname "$pkg_path")" && pwd)/$(basename "$pkg_path")"
+
+  case "$pkg_path" in
+    "${pkg_prefix}"*)
+      ;;
+    *)
+      return
+      ;;
+  esac
+
+  if [[ -f "$gui_source_file" && "$gui_source_file" -nt "$pkg_path" ]]; then
+    warn "Local package appears older than GUI source change:"
+    warn "  source: ${gui_source_file}"
+    warn "  package: ${pkg_path}"
+    warn "Rebuild it with: ./installers/macos/install-local.sh"
+    warn "If you installed this package already, old model options may remain visible."
   fi
 }
 
@@ -151,6 +177,7 @@ if [[ -n "$LOCAL_PKG" ]]; then
     exit 1
   fi
   INSTALL_LABEL="from local package"
+  warn_if_pkg_stale "$PKG_PATH"
   info "Installing gwt from local package: ${PKG_PATH}"
 else
   if [[ -z "$VERSION" ]]; then
