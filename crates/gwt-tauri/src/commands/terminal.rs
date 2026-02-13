@@ -506,10 +506,12 @@ fn now_millis() -> i64 {
 
 const DOCKER_WORKDIR: &str = "/workspace";
 
-fn docker_compose_exec_workdir(_workspace_folder: Option<&str>) -> String {
-    // Compose services may define their own WORKDIR/working_dir; forcing -w can break
-    // projects that do not have /workspace. Prefer container defaults.
-    String::new()
+fn docker_compose_exec_workdir(workspace_folder: Option<&str>) -> String {
+    workspace_folder
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_default()
 }
 
 fn build_docker_compose_up_args(
@@ -1584,9 +1586,12 @@ mod tests {
     }
 
     #[test]
-    fn docker_compose_exec_workdir_ignores_workspace_folder() {
-        assert_eq!(docker_compose_exec_workdir(Some("/workspace")), "");
-        assert_eq!(docker_compose_exec_workdir(Some("/app")), "");
+    fn docker_compose_exec_workdir_uses_workspace_folder_when_present() {
+        assert_eq!(
+            docker_compose_exec_workdir(Some("/workspace")),
+            "/workspace"
+        );
+        assert_eq!(docker_compose_exec_workdir(Some("  /app  ")), "/app");
     }
 
     #[test]
