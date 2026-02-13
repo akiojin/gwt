@@ -58,23 +58,23 @@ export interface AgentModeState {
 export interface AgentSidebarSubAgent {
   id: string;
   name: string;
-  tool_id: string;
+  toolId: string;
   status: "running" | "completed" | "failed" | (string & {});
   model?: string | null;
   branch: string;
-  worktree_rel_path: string;
-  worktree_abs_path?: string | null;
+  worktreeRelPath: string;
+  worktreeAbsPath?: string | null;
 }
 
 export interface AgentSidebarTask {
   id: string;
   title: string;
   status: "running" | "pending" | "failed" | "completed" | (string & {});
-  sub_agents: AgentSidebarSubAgent[];
+  subAgents: AgentSidebarSubAgent[];
 }
 
 export interface AgentSidebarView {
-  spec_id?: string | null;
+  specId?: string | null;
   tasks: AgentSidebarTask[];
 }
 

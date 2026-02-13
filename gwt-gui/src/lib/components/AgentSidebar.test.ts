@@ -29,22 +29,22 @@ describe("AgentSidebar", () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
         return {
-          spec_id: "SPEC-ba3f610c",
+          specId: "SPEC-ba3f610c",
           tasks: [
             {
               id: "T001",
               title: "T001 [US1] implement auth",
               status: "running",
-              sub_agents: [
+              subAgents: [
                 {
                   id: "sess-codex",
                   name: "Codex",
-                  tool_id: "codex-cli",
+                  toolId: "codex-cli",
                   status: "running",
                   model: "gpt-5-codex",
                   branch: "feature/auth",
-                  worktree_rel_path: ".worktrees/feature-auth",
-                  worktree_abs_path: "/repo/.worktrees/feature-auth",
+                  worktreeRelPath: ".worktrees/feature-auth",
+                  worktreeAbsPath: "/repo/.worktrees/feature-auth",
                 },
               ],
             },
@@ -52,16 +52,16 @@ describe("AgentSidebar", () => {
               id: "T002",
               title: "T002 [US2] add tests",
               status: "pending",
-              sub_agents: [
+              subAgents: [
                 {
                   id: "sess-claude",
                   name: "Claude",
-                  tool_id: "claude-code",
+                  toolId: "claude-code",
                   status: "completed",
                   model: "opus",
                   branch: "feature/auth-tests",
-                  worktree_rel_path: ".worktrees/feature-auth-tests",
-                  worktree_abs_path: "/repo/.worktrees/feature-auth-tests",
+                  worktreeRelPath: ".worktrees/feature-auth-tests",
+                  worktreeAbsPath: "/repo/.worktrees/feature-auth-tests",
                 },
               ],
             },
@@ -106,7 +106,7 @@ describe("AgentSidebar", () => {
   it("shows empty state when no tasks are returned", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
-        return { spec_id: null, tasks: [] };
+        return { specId: null, tasks: [] };
       }
       if (command === "get_branch_session_summary") {
         return {
@@ -133,12 +133,12 @@ describe("AgentSidebar", () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
         return {
-          spec_id: "SPEC-order0001",
+          specId: "SPEC-order0001",
           tasks: [
-            { id: "T004", title: "failed task", status: "failed", sub_agents: [] },
-            { id: "T001", title: "completed task", status: "completed", sub_agents: [] },
-            { id: "T003", title: "running task", status: "running", sub_agents: [] },
-            { id: "T002", title: "pending task", status: "pending", sub_agents: [] },
+            { id: "T004", title: "failed task", status: "failed", subAgents: [] },
+            { id: "T001", title: "completed task", status: "completed", subAgents: [] },
+            { id: "T003", title: "running task", status: "running", subAgents: [] },
+            { id: "T002", title: "pending task", status: "pending", subAgents: [] },
           ],
         };
       }
@@ -178,32 +178,32 @@ describe("AgentSidebar", () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "get_agent_sidebar_view") {
         return {
-          spec_id: "SPEC-multi0001",
+          specId: "SPEC-multi0001",
           tasks: [
             {
               id: "T010",
               title: "T010 multi-assignee task",
               status: "running",
-              sub_agents: [
+              subAgents: [
                 {
                   id: "sess-codex",
                   name: "Codex",
-                  tool_id: "codex-cli",
+                  toolId: "codex-cli",
                   status: "running",
                   model: "gpt-5-codex",
                   branch: "feature/a",
-                  worktree_rel_path: ".worktrees/feature-a",
-                  worktree_abs_path: "/repo/.worktrees/feature-a",
+                  worktreeRelPath: ".worktrees/feature-a",
+                  worktreeAbsPath: "/repo/.worktrees/feature-a",
                 },
                 {
                   id: "sess-claude",
                   name: "Claude",
-                  tool_id: "claude-code",
+                  toolId: "claude-code",
                   status: "completed",
                   model: "opus",
                   branch: "feature/b",
-                  worktree_rel_path: ".worktrees/feature-b",
-                  worktree_abs_path: "/repo/.worktrees/feature-b",
+                  worktreeRelPath: ".worktrees/feature-b",
+                  worktreeAbsPath: "/repo/.worktrees/feature-b",
                 },
               ],
             },

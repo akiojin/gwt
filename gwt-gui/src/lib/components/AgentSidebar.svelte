@@ -17,7 +17,7 @@
     currentBranch?: string;
   } = $props();
 
-  let sidebarView: AgentSidebarView = $state({ spec_id: null, tasks: [] });
+  let sidebarView: AgentSidebarView = $state({ specId: null, tasks: [] });
   let sidebarLoading = $state(false);
   let sidebarError: string | null = $state(null);
   let selectedTaskId: string | null = $state(null);
@@ -133,14 +133,14 @@
       const view = await invoke<AgentSidebarView>("get_agent_sidebar_view", {
         projectPath,
       });
-      sidebarView = view ?? { spec_id: null, tasks: [] };
+      sidebarView = view ?? { specId: null, tasks: [] };
       const hasSelected =
         !!selectedTaskId && sidebarView.tasks.some((t) => t.id === selectedTaskId);
       if (!hasSelected) {
         selectedTaskId = sidebarView.tasks[0]?.id ?? null;
       }
     } catch (err) {
-      sidebarView = { spec_id: null, tasks: [] };
+      sidebarView = { specId: null, tasks: [] };
       sidebarError = `Failed to load tasks: ${toErrorMessage(err)}`;
       selectedTaskId = null;
     } finally {
@@ -249,8 +249,8 @@
         {/if}
       </div>
     </div>
-    {#if sidebarView.spec_id}
-      <div class="spec-id">{sidebarView.spec_id}</div>
+    {#if sidebarView.specId}
+      <div class="spec-id">{sidebarView.specId}</div>
     {/if}
   </div>
 
@@ -304,7 +304,7 @@
             <div class="task-row-title">{task.title}</div>
             <div class="task-row-meta">
               <span class="task-status {taskStatusClass(task.status)}">{task.status}</span>
-              <span class="task-count">{task.sub_agents.length}</span>
+              <span class="task-count">{task.subAgents.length}</span>
             </div>
           </button>
         {/each}
@@ -316,16 +316,16 @@
     <div class="section-header">
       <span>Assigned Agents</span>
       <span class="section-meta">
-        {selectedTask ? selectedTask.sub_agents.length : 0}
+        {selectedTask ? selectedTask.subAgents.length : 0}
       </span>
     </div>
     {#if !selectedTask}
       <div class="agent-muted">Select a task to view assigned agents.</div>
-    {:else if selectedTask.sub_agents.length === 0}
+    {:else if selectedTask.subAgents.length === 0}
       <div class="agent-muted">No assigned agents.</div>
     {:else}
       <div class="assigned-list">
-        {#each selectedTask.sub_agents as assignee}
+        {#each selectedTask.subAgents as assignee}
           <div class="assigned-item">
             <div class="assigned-title">
               <span class="assigned-name">{assignee.name}</span>
@@ -341,9 +341,9 @@
             </div>
             <div
               class="assigned-path mono"
-              title={assignee.worktree_abs_path ?? assignee.worktree_rel_path}
+              title={assignee.worktreeAbsPath ?? assignee.worktreeRelPath}
             >
-              {assignee.worktree_rel_path}
+              {assignee.worktreeRelPath}
             </div>
           </div>
         {/each}
