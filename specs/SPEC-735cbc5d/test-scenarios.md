@@ -209,7 +209,7 @@ Then:  空の Vec<StashEntry> が返却される
 #### T-UI-001: Git セクション折りたたみ/展開
 
 ```text
-Given: Session Summary タブが表示されている
+Given: Worktree Summary パネルが表示されている
 When:  Git セクションヘッダーをクリック
 Then:  セクションが展開され、Changes タブが表示される
 When:  再度ヘッダーをクリック
@@ -220,7 +220,7 @@ Then:  セクションが折りたたまれる
 
 ```text
 Given: ブランチに変更あり（5 files, 3 commits, 1 stash）
-When:  Session Summary タブを表示
+When:  Worktree Summary パネルを表示
 Then:  折りたたまれた Git セクションヘッダーに
        "5 files, 3 commits, 1 stash" が表示される
 ```
@@ -333,6 +333,6 @@ Then:  main にフォールバックして差分が表示される
 
 ```text
 Given: Git リポジトリでないプロジェクトを開いている
-When:  Session Summary タブを表示
+When:  Worktree Summary パネルを表示
 Then:  Git セクションが表示されない
 ```
