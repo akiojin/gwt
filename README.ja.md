@@ -83,6 +83,17 @@ cd ..
 cargo tauri build
 ```
 
+Playwright E2E（WebView UI スモーク）:
+
+```bash
+cd gwt-gui
+pnpm install --frozen-lockfile
+pnpm exec playwright install chromium
+pnpm run test:e2e
+```
+
+CI では `.github/workflows/test.yml` の `E2E (Playwright)` ジョブで同じ Playwright テストを実行します。
+
 ## AI 設定
 
 Agent Mode やセッション要約を使うには AI 設定が必要です。
