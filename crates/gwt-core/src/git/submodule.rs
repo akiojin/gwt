@@ -1,7 +1,6 @@
 //! Git submodule operations (SPEC-a70a1ece US6)
 
 use std::path::Path;
-use std::process::Command;
 use tracing::{debug, warn};
 
 /// Check if repository has submodules (SPEC-a70a1ece T1001)
@@ -30,7 +29,7 @@ pub fn init_submodules(worktree_path: &Path) -> Result<(), String> {
         "Initializing submodules"
     );
 
-    let output = Command::new("git")
+    let output = crate::process::git_command()
         .args(["submodule", "update", "--init", "--recursive"])
         .current_dir(worktree_path)
         .output()
@@ -57,7 +56,7 @@ pub fn init_submodules(worktree_path: &Path) -> Result<(), String> {
 
 /// List submodule paths in a repository
 pub fn list_submodules(repo_root: &Path) -> Vec<String> {
-    let output = Command::new("git")
+    let output = crate::process::git_command()
         .args(["config", "--file", ".gitmodules", "--get-regexp", "path"])
         .current_dir(repo_root)
         .output();
@@ -100,7 +99,7 @@ mod tests {
     fn test_init_submodules_no_submodules() {
         let temp = TempDir::new().unwrap();
         // Initialize git repo
-        Command::new("git")
+        crate::process::git_command()
             .args(["init"])
             .current_dir(temp.path())
             .output()

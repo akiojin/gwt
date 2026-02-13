@@ -14,6 +14,23 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.29.2
+          run_install: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Enable Corepack (pnpm)
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.29.2 --activate
+          pnpm --version
+      - name: Build MCP bridge
+        run: |
+          cd gwt-mcp-bridge
+          pnpm install --no-frozen-lockfile
+          pnpm run build
       - name: Install system dependencies (Linux)
         run: |
           sudo apt-get update

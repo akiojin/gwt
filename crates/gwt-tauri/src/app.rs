@@ -9,6 +9,9 @@ use tracing::{info, warn};
 #[cfg(not(test))]
 use gwt_core::config::os_env;
 
+#[cfg(not(test))]
+use gwt_core::config::mcp_registration;
+
 #[cfg(any(not(test), target_os = "macos"))]
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
@@ -153,6 +156,37 @@ pub fn build_app(
         .setup(|_app| {
             #[cfg(not(test))]
             {
+                // Clean up stale MCP state from a previous crash (FR-019)
+                crate::mcp_ws_server::cleanup_stale_state_file();
+
+                // Start MCP WebSocket server (FR-001, FR-005)
+                {
+                    let app_handle = _app.handle().clone();
+                    let state = _app.state::<AppState>();
+                    let mcp_handle_slot = state.mcp_ws_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        match crate::mcp_ws_server::start(app_handle).await {
+                            Ok(handle) => {
+                                tracing::info!(
+                                    category = "mcp",
+                                    port = handle.port,
+                                    "MCP WebSocket server ready"
+                                );
+                                if let Ok(mut slot) = mcp_handle_slot.lock() {
+                                    *slot = Some(handle);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    category = "mcp",
+                                    error = %e,
+                                    "Failed to start MCP WebSocket server"
+                                );
+                            }
+                        }
+                    });
+                }
+
                 // Native menubar (SPEC-4470704f)
                 let _ = crate::menu::rebuild_menu(_app.handle());
 
@@ -227,6 +261,66 @@ pub fn build_app(
 
                 #[cfg(target_os = "macos")]
                 _tray.set_icon_as_template(true)?;
+
+                // MCP bridge: cleanup stale registrations then register for all agents (T21).
+                // Delay briefly so login-shell PATH capture can complete first.
+                {
+                    let app_handle = _app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        let state = app_handle.state::<AppState>();
+                        let resource_dir = app_handle.path().resource_dir().ok();
+                        let _ = state.wait_os_env_ready(std::time::Duration::from_secs(2));
+
+                        if let Err(e) = mcp_registration::cleanup_stale_registrations() {
+                            warn!(
+                                category = "mcp",
+                                error = %e,
+                                "Failed to cleanup stale MCP registrations"
+                            );
+                        }
+
+                        match mcp_registration::detect_runtime() {
+                            Ok(runtime) => {
+                                match mcp_registration::resolve_bridge_path(resource_dir.as_deref())
+                                {
+                                    Ok(bridge_path) => {
+                                        let config = mcp_registration::McpBridgeConfig {
+                                            command: runtime,
+                                            args: vec![bridge_path.to_string_lossy().into_owned()],
+                                            env: std::collections::HashMap::new(),
+                                        };
+                                        if let Err(e) = mcp_registration::register_all(&config) {
+                                            warn!(
+                                                category = "mcp",
+                                                error = %e,
+                                                "Failed to register MCP server in agent configs"
+                                            );
+                                        } else {
+                                            info!(
+                                                category = "mcp",
+                                                "MCP bridge server registered in all agent configs"
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        info!(
+                                            category = "mcp",
+                                            error = %e,
+                                            "MCP bridge JS not found; skipping registration"
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                info!(
+                                    category = "mcp",
+                                    error = %e,
+                                    "No JS runtime found; skipping MCP registration"
+                                );
+                            }
+                        }
+                    });
+                }
 
                 // Background task: capture login shell environment
                 {
@@ -579,6 +673,16 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
         }
         tauri::RunEvent::Exit => {
             info!(category = "tauri", event = "Exit", "App exiting");
+
+            // T22: Unregister MCP bridge from all agent configs on exit
+            #[cfg(not(test))]
+            if let Err(e) = gwt_core::config::unregister_all_mcp() {
+                warn!(
+                    category = "mcp",
+                    error = %e,
+                    "Failed to unregister MCP server on exit"
+                );
+            }
         }
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen {

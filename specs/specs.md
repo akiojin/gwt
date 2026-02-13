@@ -17,9 +17,12 @@
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
+| [SPEC-8c6f4a21](SPEC-8c6f4a21/spec.md) | 機能仕様: Windows での Git 実行時コンソール点滅抑止 | 2026-02-13 |
 | [SPEC-9f3c2a11](SPEC-9f3c2a11/spec.md) | 機能仕様: Voice Input Mode（GUI 全入力対応） | 2026-02-13 |
 | [SPEC-f466bc68](SPEC-f466bc68/spec.md) | 機能仕様: プロジェクトを開いたときに前回のエージェントタブを復元する | 2026-02-13 |
 | [SPEC-3a1b7c2d](SPEC-3a1b7c2d/spec.md) | 機能仕様: GUI Worktree Summary のスクロールバック要約（実行中対応） | 2026-02-12 |
+| [SPEC-a7b3c9e1](SPEC-a7b3c9e1/spec.md) | 機能仕様: エージェントタブ MCP通信ブリッジ | 2026-02-13 |
+| [SPEC-e2d4f801](SPEC-e2d4f801/spec.md) | 機能仕様: OS環境変数の自動継承 | 2026-02-10 |
 | [SPEC-133bf64f](SPEC-133bf64f/spec.md) | 機能仕様: Project Version History（タグ単位のAI要約 + 簡易CHANGELOG） | 2026-02-10 |
 | [SPEC-1b98b6d7](SPEC-1b98b6d7/spec.md) | 機能仕様: Claude Code Hooks 経由の gwt-tauri hook 実行で GUI を起動しない | 2026-02-10 |
 | [SPEC-ab9b7d08](SPEC-ab9b7d08/spec.md) | 機能仕様: Aboutダイアログにバージョン表示 + タイトルにプロジェクトパス表示（GUI） | 2026-02-10 |
