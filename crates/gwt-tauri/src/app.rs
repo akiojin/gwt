@@ -380,7 +380,7 @@ pub fn build_app(
                 window
                     .app_handle()
                     .state::<AppState>()
-                    .clear_project_for_window(window.label());
+                    .clear_window_state(window.label());
                 let _ = crate::menu::rebuild_menu(window.app_handle());
 
                 // Exit the app when all windows are truly closed (hidden windows still count as open).
