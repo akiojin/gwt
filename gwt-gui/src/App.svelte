@@ -217,7 +217,9 @@
       const rollback = await invoke<RollbackResult>("rollback_issue_branch", {
         projectPath: followup.projectPath,
         branchName: followup.branchName,
-        deleteRemote: true,
+        // Only rollback local artifacts on launch failure.
+        // Remote deletion is unsafe here because the branch may have pre-existed remotely.
+        deleteRemote: false,
       });
 
       sidebarRefreshKey++;
