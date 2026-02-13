@@ -1346,6 +1346,8 @@
           onBranchSelect={handleBranchSelect}
           onBranchActivate={handleBranchActivate}
           onCleanupRequest={handleCleanupRequest}
+          onLaunchAgent={requestAgentLaunch}
+          onQuickLaunch={handleAgentLaunch}
         />
       {/if}
       <MainArea
