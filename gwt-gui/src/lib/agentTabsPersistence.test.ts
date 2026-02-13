@@ -67,6 +67,13 @@ describe("agentTabsPersistence", () => {
             tabs: [
               { type: "agent", paneId: " p1 ", label: "one" },
               { type: "agent", paneId: "p1", label: "dup" },
+              {
+                type: "terminal",
+                paneId: " t1 ",
+                label: "term",
+                cwd: "/tmp/one",
+              },
+              { type: "terminal", paneId: "t1", label: "dup term" },
               { type: "settings", id: "settings", label: "Settings" },
               { type: "settings", id: "settings", label: "dup settings" },
               { type: "versionHistory", id: "", label: 123 },
@@ -82,22 +89,35 @@ describe("agentTabsPersistence", () => {
     expect(loaded).toEqual({
       tabs: [
         { type: "agent", paneId: "p1", label: "one" },
+        { type: "terminal", paneId: "t1", label: "term", cwd: "/tmp/one" },
         { type: "settings", id: "settings", label: "Settings" },
-        { type: "versionHistory", id: "versionHistory", label: "Version History" },
+        {
+          type: "versionHistory",
+          id: "versionHistory",
+          label: "Version History",
+        },
       ],
       activeTabId: "settings",
     });
   });
 
-  it("loadStoredProjectTabs falls back to legacy v1 agent-tab state", () => {
+  it("loadStoredProjectTabs falls back to legacy v1 state with terminal support", () => {
     store.setItem(
       PROJECT_AGENT_TABS_STORAGE_KEY,
       JSON.stringify({
         version: 1,
         byProjectPath: {
           "/repo": {
-            tabs: [{ paneId: " p1 ", label: "one" }, { paneId: "p1", label: "dup" }],
-            activePaneId: " p1 ",
+            tabs: [
+              { paneId: " p1 ", label: "one" },
+              {
+                paneId: "t1",
+                label: "term",
+                type: "terminal",
+                cwd: "/tmp/term",
+              },
+            ],
+            activePaneId: "t1",
           },
         },
       }),
@@ -105,8 +125,11 @@ describe("agentTabsPersistence", () => {
 
     const loaded = loadStoredProjectTabs("/repo", store);
     expect(loaded).toEqual({
-      tabs: [{ type: "agent", paneId: "p1", label: "one" }],
-      activeTabId: "agent-p1",
+      tabs: [
+        { type: "agent", paneId: "p1", label: "one" },
+        { type: "terminal", paneId: "t1", label: "term", cwd: "/tmp/term" },
+      ],
+      activeTabId: "terminal-t1",
     });
   });
 
@@ -127,8 +150,11 @@ describe("agentTabsPersistence", () => {
     persistStoredProjectTabs(
       "/b",
       {
-        tabs: [{ type: "settings", id: "settings", label: "Settings" }],
-        activeTabId: "settings",
+        tabs: [
+          { type: "settings", id: "settings", label: "Settings" },
+          { type: "terminal", paneId: "t1", label: "term", cwd: "/tmp" },
+        ],
+        activeTabId: "terminal-t1",
       },
       store,
     );
@@ -144,8 +170,11 @@ describe("agentTabsPersistence", () => {
           activeTabId: "agentMode",
         },
         "/b": {
-          tabs: [{ type: "settings", id: "settings", label: "Settings" }],
-          activeTabId: "settings",
+          tabs: [
+            { type: "settings", id: "settings", label: "Settings" },
+            { type: "terminal", paneId: "t1", label: "term", cwd: "/tmp" },
+          ],
+          activeTabId: "terminal-t1",
         },
       },
     });
@@ -158,7 +187,11 @@ describe("agentTabsPersistence", () => {
           { type: "agentMode", id: "agentMode", label: "Agent Mode" },
           { type: "settings", id: "settings", label: "Settings" },
           { type: "agent", paneId: "p1", label: "one" },
-          { type: "versionHistory", id: "versionHistory", label: "Version History" },
+          {
+            type: "versionHistory",
+            id: "versionHistory",
+            label: "Version History",
+          },
           { type: "agent", paneId: "p2", label: "two" },
         ],
         activeTabId: "agent-p2",
@@ -176,9 +209,15 @@ describe("agentTabsPersistence", () => {
         paneId: "p1",
         agentId: "codex",
       },
-      { id: "versionHistory", label: "Version History", type: "versionHistory" },
+      {
+        id: "versionHistory",
+        label: "Version History",
+        type: "versionHistory",
+      },
     ]);
     expect(restored.activeTabId).toBeNull();
+    expect(restored.terminalTabsToRespawn).toEqual([]);
+    expect(restored.activeTerminalPaneIdToRespawn).toBeNull();
   });
 
   it("buildRestoredProjectTabs restores active when it exists", () => {
@@ -196,6 +235,8 @@ describe("agentTabsPersistence", () => {
 
     expect(restored.tabs.length).toBe(4);
     expect(restored.activeTabId).toBe("settings");
+    expect(restored.terminalTabsToRespawn).toEqual([]);
+    expect(restored.activeTerminalPaneIdToRespawn).toBeNull();
     expect(restored.tabs).toEqual([
       { id: "agentMode", label: "Agent Mode", type: "agentMode" },
       {
@@ -233,12 +274,55 @@ describe("agentTabsPersistence", () => {
       { id: "agentMode", label: "Agent Mode", type: "agentMode" },
       { id: "agent-p1", label: "one", type: "agent", paneId: "p1" },
     ]);
+    expect(restored.terminalTabsToRespawn).toEqual([]);
+    expect(restored.activeTerminalPaneIdToRespawn).toBeNull();
+  });
+
+  it("buildRestoredProjectTabs marks missing terminal tabs for respawn", () => {
+    const restored = buildRestoredProjectTabs(
+      {
+        tabs: [
+          {
+            type: "terminal",
+            paneId: "t-old",
+            label: "myproject",
+            cwd: "/home/user/myproject",
+          },
+          { type: "agent", paneId: "a-live", label: "feature-a" },
+        ],
+        activeTabId: "terminal-t-old",
+      },
+      [makeTerminal("a-live", "codex")],
+    );
+
+    expect(restored.tabs).toEqual([
+      { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+      {
+        id: "agent-a-live",
+        label: "feature-a",
+        type: "agent",
+        paneId: "a-live",
+        agentId: "codex",
+      },
+    ]);
+    expect(restored.activeTabId).toBeNull();
+    expect(restored.terminalTabsToRespawn).toEqual([
+      {
+        type: "terminal",
+        paneId: "t-old",
+        label: "myproject",
+        cwd: "/home/user/myproject",
+      },
+    ]);
+    expect(restored.activeTerminalPaneIdToRespawn).toBe("t-old");
   });
 
   it("shouldRetryAgentTabRestore handles transient empty matches", () => {
     expect(shouldRetryAgentTabRestore(2, 0, 0)).toBe(true);
     expect(shouldRetryAgentTabRestore(2, 1, 0)).toBe(false);
     expect(shouldRetryAgentTabRestore(0, 0, 0)).toBe(false);
-    expect(shouldRetryAgentTabRestore(2, 0, AGENT_TAB_RESTORE_MAX_RETRIES - 1)).toBe(false);
+    expect(
+      shouldRetryAgentTabRestore(2, 0, AGENT_TAB_RESTORE_MAX_RETRIES - 1),
+    ).toBe(false);
   });
 });

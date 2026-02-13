@@ -1,6 +1,6 @@
 # 仕様一覧
 
-**最終更新**: 2026-02-13
+**最終更新**: 2026-02-14
 
 - 現行の仕様・要件: `specs/SPEC-XXXXXXXX/spec.md`
 - 以前までのTUIの仕様・要件（archive）: `specs/archive/SPEC-XXXXXXXX/spec.md`
@@ -17,18 +17,24 @@
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
+| [SPEC-552c5e74](SPEC-552c5e74/spec.md) | 機能仕様: Launch Agent のデフォルト設定保持（前回成功起動値） | 2026-02-14 |
+| [SPEC-f490dded](SPEC-f490dded/spec.md) | 機能仕様: シンプルターミナルタブ | 2026-02-13 |
+| [SPEC-4e2f1028](SPEC-4e2f1028/spec.md) | 機能仕様: Windows 移行プロジェクトで Docker 起動時に mount エラーを回避する | 2026-02-13 |
 | [SPEC-6e2a9d4c](SPEC-6e2a9d4c/spec.md) | 機能仕様: Host OS 起動時の空タブ防止（Issue #1029） | 2026-02-13 |
+| [SPEC-6f291006](SPEC-6f291006/spec.md) | 機能仕様: Migration backup copy の Windows 互換修正 | 2026-02-13 |
 | [SPEC-7d1a4b2e](SPEC-7d1a4b2e/spec.md) | 機能仕様: Playwrightベースの実装テスト基盤整備（WebView UI） | 2026-02-13 |
 | [SPEC-8c6f4a21](SPEC-8c6f4a21/spec.md) | 機能仕様: Windows での外部プロセス実行時コンソール点滅抑止 | 2026-02-13 |
-| [SPEC-9f3c2a11](SPEC-9f3c2a11/spec.md) | 機能仕様: Voice Input Mode（GUI 全入力対応） | 2026-02-13 |
+| [SPEC-9f3c2a11](SPEC-9f3c2a11/spec.md) | 機能仕様: Voice Input Mode（GUI） | 2026-02-13 |
 | [SPEC-a3daf499](SPEC-a3daf499/spec.md) | 機能仕様: 起動時アプリ更新チェックの取りこぼし防止（遅延 + 再試行） | 2026-02-13 |
+| [SPEC-b7f7b9ad](SPEC-b7f7b9ad/spec.md) | 機能仕様: gwt メニューショートカットと終了保護 | 2026-02-13 |
+| [SPEC-c6ba640a](SPEC-c6ba640a/spec.md) | 機能仕様: GitHub Issue連携によるブランチ作成（GUI版） | 2026-02-13 |
+| [SPEC-d7f2a1b3](SPEC-d7f2a1b3/spec.md) | バグ修正仕様: Cleanup「Select All Safe」が機能しない | 2026-02-13 |
 | [SPEC-f466bc68](SPEC-f466bc68/spec.md) | 機能仕様: プロジェクトを開いたときに前回のエージェントタブを復元する | 2026-02-13 |
 | [SPEC-3a1b7c2d](SPEC-3a1b7c2d/spec.md) | 機能仕様: GUI Worktree Summary のスクロールバック要約（実行中対応） | 2026-02-12 |
 | [SPEC-133bf64f](SPEC-133bf64f/spec.md) | 機能仕様: Project Version History（タグ単位のAI要約 + 簡易CHANGELOG） | 2026-02-10 |
 | [SPEC-1b98b6d7](SPEC-1b98b6d7/spec.md) | 機能仕様: Claude Code Hooks 経由の gwt-tauri hook 実行で GUI を起動しない | 2026-02-10 |
 | [SPEC-ab9b7d08](SPEC-ab9b7d08/spec.md) | 機能仕様: Aboutダイアログにバージョン表示 + タイトルにプロジェクトパス表示（GUI） | 2026-02-10 |
 | [SPEC-b28ab8d9](SPEC-b28ab8d9/spec.md) | 機能仕様: CI の Node ツールチェーンを pnpm に統一する（gwt-gui + commitlint） | 2026-02-10 |
-| [SPEC-b7f7b9ad](SPEC-b7f7b9ad/spec.md) | 機能仕様: gwt メニューショートカットと終了保護 | 2026-02-13 |
 | [SPEC-c4e8f210](SPEC-c4e8f210/spec.md) | 機能仕様: Worktree Cleanup（GUI） | 2026-02-10 |
 | [SPEC-4470704f](SPEC-4470704f/spec.md) | 機能仕様: gwt GUI マルチウィンドウ + Native Windowメニュー | 2026-02-09 |
 | [SPEC-5b7a0f9c](SPEC-5b7a0f9c/spec.md) | 機能仕様: Terminal ANSI Diagnostics（GUI） | 2026-02-09 |
@@ -74,7 +80,7 @@
 | [SPEC-c1d5bad7](archive/SPEC-c1d5bad7/spec.md) | ログ一覧・詳細表示・クリップボードコピー機能 | 2025-12-25 |
 | [SPEC-a0d7334d](archive/SPEC-a0d7334d/spec.md) | 機能仕様: Dependabot PR の向き先を develop に固定 | 2025-12-22 |
 | [SPEC-b0b1b0b1](archive/SPEC-b0b1b0b1/spec.md) | 機能仕様: AIツール終了時の未コミット警告と未プッシュ確認 | 2025-12-20 |
-| [SPEC-96e694b4](archive/SPEC-96e694b4/spec.md) | 機能仕様: Codex CLI gpt-5.3-codex 追加 | 2025-12-18 |
+| [SPEC-96e694b4](archive/SPEC-96e694b4/spec.md) | 機能仕様: Codex CLI gpt-5.3-codex 追加（spark 含む） | 2025-12-18 |
 | [SPEC-dafff079](archive/SPEC-dafff079/spec.md) | 機能仕様: 環境変数プロファイル機能 | 2025-12-15 |
 | [SPEC-1f56fd80](archive/SPEC-1f56fd80/spec.md) | 機能仕様: Web UI システムトレイ統合 | 2025-12-12 |
 | [SPEC-c8e7a5b2](archive/SPEC-c8e7a5b2/spec.md) | 機能仕様: CLI起動時Web UIサーバー自動起動 | 2025-12-12 |

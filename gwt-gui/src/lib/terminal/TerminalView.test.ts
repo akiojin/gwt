@@ -6,6 +6,7 @@ const listenMock = vi.fn();
 const writeTextMock = vi.fn();
 const readTextMock = vi.fn();
 let customKeyEventHandler: ((event: KeyboardEvent) => boolean) | null = null;
+let callOrder: string[] = [];
 
 const terminalInstances: any[] = [];
 
@@ -73,8 +74,11 @@ describe("TerminalView", () => {
     writeTextMock.mockReset();
     readTextMock.mockReset();
     customKeyEventHandler = null;
-
-    listenMock.mockResolvedValue(() => {});
+    callOrder = [];
+    listenMock.mockImplementation(async (eventName: string) => {
+      callOrder.push(`listen:${eventName}`);
+      return () => {};
+    });
 
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
@@ -85,30 +89,35 @@ describe("TerminalView", () => {
     });
 
     invokeMock.mockImplementation(async (command: string) => {
+      callOrder.push(`invoke:${command}`);
       if (command === "capture_scrollback_tail") return "hello\n";
       return null;
     });
   });
 
-  it("loads scrollback tail on mount and then subscribes to terminal-output", async () => {
+  it("subscribes to terminal-output before loading scrollback tail", async () => {
     await renderTerminalView({ paneId: "pane-1", active: true });
-
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalled();
-      expect(
-        invokeMock.mock.calls.some((c) => c[0] === "capture_scrollback_tail"),
-      ).toBe(true);
-    });
-
-    expect(terminalInstances.length).toBeGreaterThan(0);
-    const term = terminalInstances[0];
-    expect(term.write).toHaveBeenCalledWith("hello\n");
 
     await waitFor(() => {
       expect(
         listenMock.mock.calls.some((c) => c[0] === "terminal-output"),
       ).toBe(true);
+      expect(
+        invokeMock.mock.calls.some((c) => c[0] === "capture_scrollback_tail"),
+      ).toBe(true);
     });
+
+    const listenIndex = callOrder.findIndex((v) => v === "listen:terminal-output");
+    const captureIndex = callOrder.findIndex(
+      (v) => v === "invoke:capture_scrollback_tail",
+    );
+    expect(listenIndex).toBeGreaterThanOrEqual(0);
+    expect(captureIndex).toBeGreaterThanOrEqual(0);
+    expect(listenIndex).toBeLessThan(captureIndex);
+
+    expect(terminalInstances.length).toBeGreaterThan(0);
+    const term = terminalInstances[0];
+    expect(term.write).toHaveBeenCalledWith("hello\n");
   });
 
   it("handles gwt-terminal-edit-action copy/paste events", async () => {

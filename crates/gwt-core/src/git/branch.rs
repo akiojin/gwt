@@ -17,7 +17,7 @@ fn run_git_with_timeout(
     args: &[&str],
     timeout: Duration,
 ) -> Result<Output> {
-    let mut child = crate::process::git_command()
+    let mut child = crate::process::command("git")
         .args(args)
         .current_dir(repo_path)
         // Avoid hanging on interactive auth prompts.
@@ -108,7 +108,7 @@ pub struct Branch {
 
 impl Branch {
     fn delete_with_flag(repo_path: &Path, name: &str, flag: &str) -> Result<Output> {
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["branch", flag, name])
             .current_dir(repo_path)
             .output()
@@ -157,7 +157,7 @@ impl Branch {
             "Listing branches"
         );
 
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args([
                 "for-each-ref",
                 "--format=%(refname:short)%09%(objectname:short)%09%(upstream:short)%09%(HEAD)%09%(committerdate:unix)%09%(upstream:track)",
@@ -237,7 +237,7 @@ impl Branch {
             "Listing remote branches"
         );
 
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args([
                 "for-each-ref",
                 "--format=%(refname:short)%09%(objectname:short)%09%(committerdate:unix)",
@@ -381,7 +381,7 @@ impl Branch {
             "Getting current branch"
         );
 
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
             .current_dir(repo_path)
             .output()
@@ -400,7 +400,7 @@ impl Branch {
         }
 
         // Get commit
-        let commit_output = crate::process::git_command()
+        let commit_output = crate::process::command("git")
             .args(["rev-parse", "--short", "HEAD"])
             .current_dir(repo_path)
             .output()
@@ -414,7 +414,7 @@ impl Branch {
             .to_string();
 
         // Get commit timestamp (FR-041)
-        let timestamp_output = crate::process::git_command()
+        let timestamp_output = crate::process::command("git")
             .args(["log", "-1", "--format=%ct", "HEAD"])
             .current_dir(repo_path)
             .output();
@@ -431,7 +431,7 @@ impl Branch {
         });
 
         // Get upstream
-        let upstream_output = crate::process::git_command()
+        let upstream_output = crate::process::command("git")
             .args(["rev-parse", "--abbrev-ref", "@{u}"])
             .current_dir(repo_path)
             .output();
@@ -471,7 +471,7 @@ impl Branch {
     pub fn create(repo_path: &Path, name: &str, base: &str) -> Result<Branch> {
         debug!(category = "git", branch = name, base, "Creating branch");
 
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["branch", name, base])
             .current_dir(repo_path)
             .output()
@@ -496,7 +496,7 @@ impl Branch {
         }
 
         // Get commit of new branch
-        let commit_output = crate::process::git_command()
+        let commit_output = crate::process::command("git")
             .args(["rev-parse", "--short", name])
             .current_dir(repo_path)
             .output()
@@ -595,7 +595,7 @@ impl Branch {
 
     /// Get divergence (ahead, behind) between branch and upstream
     fn get_divergence(repo_path: &Path, branch: &str, upstream: &str) -> Result<(usize, usize)> {
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args([
                 "rev-list",
                 "--left-right",
@@ -626,7 +626,7 @@ impl Branch {
 
     /// Get divergence (ahead, behind) between two refs
     pub fn divergence_between(repo_path: &Path, left: &str, right: &str) -> Result<(usize, usize)> {
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args([
                 "rev-list",
                 "--left-right",
@@ -680,7 +680,7 @@ impl Branch {
 
     /// Check if a branch exists locally
     pub fn exists(repo_path: &Path, name: &str) -> Result<bool> {
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args([
                 "show-ref",
                 "--verify",
@@ -707,7 +707,7 @@ impl Branch {
     /// Check if a branch exists remotely
     pub fn remote_exists(repo_path: &Path, remote: &str, branch: &str) -> Result<bool> {
         // First try local refs/remotes (works for normal repos)
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args([
                 "show-ref",
                 "--verify",
@@ -726,7 +726,7 @@ impl Branch {
         }
 
         // SPEC-a70a1ece FR-124: For bare repos, check via ls-remote
-        let ls_output = crate::process::git_command()
+        let ls_output = crate::process::command("git")
             .args(["ls-remote", "--heads", remote, branch])
             .current_dir(repo_path)
             .output()
@@ -752,7 +752,7 @@ impl Branch {
     pub fn checkout(repo_path: &Path, name: &str) -> Result<()> {
         debug!(category = "git", branch = name, "Checking out branch");
 
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["checkout", name])
             .current_dir(repo_path)
             .output()
@@ -801,7 +801,7 @@ impl Branch {
             "Checking if branch is merged into base"
         );
 
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["merge-base", "--is-ancestor", branch, base])
             .current_dir(repo_path)
             .output()
@@ -871,7 +871,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn run_git(repo_path: &Path, args: &[&str]) {
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(args)
             .current_dir(repo_path)
             .output()
@@ -952,7 +952,7 @@ mod tests {
         let temp = create_test_repo();
         let origin = TempDir::new().unwrap();
 
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["init", "--bare"])
             .current_dir(origin.path())
             .output()
@@ -960,13 +960,13 @@ mod tests {
 
         let branch = Branch::current(temp.path()).unwrap().unwrap().name;
 
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["remote", "add", "origin", origin.path().to_str().unwrap()])
             .current_dir(temp.path())
             .output()
             .unwrap();
 
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["push", "-u", "origin", &branch])
             .current_dir(temp.path())
             .output()
@@ -1042,18 +1042,18 @@ mod tests {
         let temp = create_test_repo();
         let base = Branch::current(temp.path()).unwrap().unwrap().name;
 
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["checkout", "-b", "feature/test"])
             .current_dir(temp.path())
             .output()
             .unwrap();
         std::fs::write(temp.path().join("feature.txt"), "feature").unwrap();
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["add", "."])
             .current_dir(temp.path())
             .output()
             .unwrap();
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["commit", "-m", "feature"])
             .current_dir(temp.path())
             .output()
@@ -1092,19 +1092,19 @@ mod tests {
         let temp = create_test_repo();
         let base = Branch::current(temp.path()).unwrap().unwrap().name;
 
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["checkout", "-b", "feature/merged"])
             .current_dir(temp.path())
             .output()
             .unwrap();
         commit_file(temp.path(), "merged.txt", "merged", "merged commit");
 
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["checkout", &base])
             .current_dir(temp.path())
             .output()
             .unwrap();
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["merge", "--ff-only", "feature/merged"])
             .current_dir(temp.path())
             .output()
@@ -1120,14 +1120,14 @@ mod tests {
         let temp = create_test_repo();
         let base = Branch::current(temp.path()).unwrap().unwrap().name;
 
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["checkout", "-b", "feature/unmerged"])
             .current_dir(temp.path())
             .output()
             .unwrap();
         commit_file(temp.path(), "unmerged.txt", "unmerged", "unmerged commit");
 
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["checkout", &base])
             .current_dir(temp.path())
             .output()
@@ -1153,7 +1153,7 @@ mod tests {
         let temp = create_test_repo();
         let origin = TempDir::new().unwrap();
 
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["init", "--bare"])
             .current_dir(origin.path())
             .output()
@@ -1161,14 +1161,14 @@ mod tests {
 
         let branch = Branch::current(temp.path()).unwrap().unwrap().name;
 
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["remote", "add", "origin", origin.path().to_str().unwrap()])
             .current_dir(temp.path())
             .output()
             .unwrap();
 
         // Create a feature branch and push it
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["checkout", "-b", "feature/will-be-gone"])
             .current_dir(temp.path())
             .output()
@@ -1176,28 +1176,28 @@ mod tests {
 
         commit_file(temp.path(), "gone.txt", "gone", "gone commit");
 
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["push", "-u", "origin", "feature/will-be-gone"])
             .current_dir(temp.path())
             .output()
             .unwrap();
 
         // Delete the remote branch directly from the bare repo
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["branch", "-D", "feature/will-be-gone"])
             .current_dir(origin.path())
             .output()
             .unwrap();
 
         // Checkout back to main/master so we can test the feature branch
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["checkout", &branch])
             .current_dir(temp.path())
             .output()
             .unwrap();
 
         // Fetch with prune to update tracking info
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["fetch", "--prune"])
             .current_dir(temp.path())
             .output()
