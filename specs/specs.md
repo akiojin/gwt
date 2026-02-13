@@ -17,6 +17,7 @@
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
+| [SPEC-f490dded](SPEC-f490dded/spec.md) | 機能仕様: シンプルターミナルタブ | 2026-02-13 |
 | [SPEC-6e2a9d4c](SPEC-6e2a9d4c/spec.md) | 機能仕様: Host OS 起動時の空タブ防止（Issue #1029） | 2026-02-13 |
 | [SPEC-7d1a4b2e](SPEC-7d1a4b2e/spec.md) | 機能仕様: Playwrightベースの実装テスト基盤整備（WebView UI） | 2026-02-13 |
 | [SPEC-8c6f4a21](SPEC-8c6f4a21/spec.md) | 機能仕様: Windows での外部プロセス実行時コンソール点滅抑止 | 2026-02-13 |

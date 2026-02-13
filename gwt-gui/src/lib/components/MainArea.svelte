@@ -7,7 +7,19 @@
   import VersionHistoryPanel from "./VersionHistoryPanel.svelte";
 
   function isAgentTabWithPaneId(tab: Tab): tab is Tab & { paneId: string } {
-    return tab.type === "agent" && typeof tab.paneId === "string" && tab.paneId.length > 0;
+    return (
+      tab.type === "agent" &&
+      typeof tab.paneId === "string" &&
+      tab.paneId.length > 0
+    );
+  }
+
+  function isTerminalTabWithPaneId(tab: Tab): tab is Tab & { paneId: string } {
+    return (
+      tab.type === "terminal" &&
+      typeof tab.paneId === "string" &&
+      tab.paneId.length > 0
+    );
   }
 
   let {
@@ -29,12 +41,19 @@
     onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
     onTabSelect: (tabId: string) => void;
     onTabClose: (tabId: string) => void;
-    onTabReorder: (dragTabId: string, overTabId: string, position: TabDropPosition) => void;
+    onTabReorder: (
+      dragTabId: string,
+      overTabId: string,
+      position: TabDropPosition,
+    ) => void;
   } = $props();
 
   let activeTab = $derived(tabs.find((t) => t.id === activeTabId));
   let agentTabs = $derived(tabs.filter(isAgentTabWithPaneId));
-  let showTerminalLayer = $derived(activeTab?.type === "agent");
+  let terminalTabs = $derived(tabs.filter(isTerminalTabWithPaneId));
+  let showTerminalLayer = $derived(
+    activeTab?.type === "agent" || activeTab?.type === "terminal",
+  );
   let isPinnedTab = (tabType?: Tab["type"]) => tabType === "agentMode";
   let draggingTabId: string | null = $state(null);
   let lastReorderSignature = "";
@@ -42,7 +61,8 @@
   function readDraggedTabId(event: DragEvent): string {
     if (draggingTabId) return draggingTabId;
 
-    const appData = event.dataTransfer?.getData("application/x-gwt-tab-id") ?? "";
+    const appData =
+      event.dataTransfer?.getData("application/x-gwt-tab-id") ?? "";
     if (appData.trim()) return appData.trim();
     const textData = event.dataTransfer?.getData("text/plain") ?? "";
     return textData.trim();
@@ -105,6 +125,7 @@
         class:dragging={draggingTabId === tab.id}
         draggable={tabs.length > 1}
         onclick={() => onTabSelect(tab.id)}
+        title={tab.type === "terminal" ? tab.cwd || "" : ""}
         ondragstart={(e) => handleTabDragStart(e, tab.id)}
         ondragover={(e) => handleTabDragOver(e, tab.id)}
         ondrop={handleTabDrop}
@@ -118,6 +139,8 @@
             class:gemini={tab.agentId === "gemini"}
             class:opencode={tab.agentId === "opencode"}
           ></span>
+        {:else if tab.type === "terminal"}
+          <span class="tab-dot terminal"></span>
         {/if}
         <span class="tab-label">{tab.label}</span>
         {#if !isPinnedTab(tab.type)}
@@ -152,6 +175,11 @@
 
     <div class="terminal-layer" class:hidden={!showTerminalLayer}>
       {#each agentTabs as tab (tab.id)}
+        <div class="terminal-wrapper" class:active={activeTabId === tab.id}>
+          <TerminalView paneId={tab.paneId} active={activeTabId === tab.id} />
+        </div>
+      {/each}
+      {#each terminalTabs as tab (tab.id)}
         <div class="terminal-wrapper" class:active={activeTabId === tab.id}>
           <TerminalView paneId={tab.paneId} active={activeTabId === tab.id} />
         </div>
@@ -234,6 +262,10 @@
 
   .tab-dot.opencode {
     background-color: var(--green);
+  }
+
+  .tab-dot.terminal {
+    background-color: var(--text-muted);
   }
 
   .tab-label {
