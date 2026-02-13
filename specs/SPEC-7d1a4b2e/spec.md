@@ -4,7 +4,7 @@
 **作成日**: 2026-02-13
 **ステータス**: ドラフト
 **カテゴリ**: GUI
-**関連Issue**: https://github.com/akiojin/gwt/issues/1001
+**関連Issue**: [#1001](https://github.com/akiojin/gwt/issues/1001)
 
 ## 背景
 
