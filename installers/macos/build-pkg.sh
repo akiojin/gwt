@@ -118,12 +118,43 @@ PKG_PATH="${PKG_DIR}/${APP_NAME}-macos-${ARCH}.pkg"
 
 info "Building .pkg installer..."
 
+# Use --root mode with a staging directory and component plist to disable
+# relocation. This ensures the installer always writes to /Applications
+# instead of "upgrading" any existing .app found elsewhere on disk.
+STAGE_DIR="$(mktemp -d)"
+cp -a "$APP_PATH" "$STAGE_DIR/"
+
+COMPONENT_PLIST="$(mktemp /tmp/gwt-component.XXXXXX.plist)"
+cat > "$COMPONENT_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array>
+  <dict>
+    <key>BundleHasStrictIdentifier</key>
+    <true/>
+    <key>BundleIsRelocatable</key>
+    <false/>
+    <key>BundleIsVersionChecked</key>
+    <true/>
+    <key>BundleOverwriteAction</key>
+    <string>upgrade</string>
+    <key>RootRelativeBundlePath</key>
+    <string>gwt.app</string>
+  </dict>
+</array>
+</plist>
+PLIST
+
 pkgbuild \
-  --component "$APP_PATH" \
+  --root "$STAGE_DIR" \
+  --component-plist "$COMPONENT_PLIST" \
   --install-location "/Applications" \
   --identifier "$IDENTIFIER" \
   --version "$VERSION" \
   "$PKG_UNSIGNED"
+
+rm -rf "$STAGE_DIR" "$COMPONENT_PLIST"
 
 # --- sign .pkg -------------------------------------------------------------
 
