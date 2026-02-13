@@ -43,7 +43,7 @@ describe("CleanupModal", () => {
     listenMock.mockResolvedValue(() => {});
   });
 
-  it("shows ACTIVE badge for worktrees with open agent tabs", async () => {
+  it("shows spinner indicator for worktrees with open agent tabs", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "list_worktrees") return [worktreeFixture];
       return [];
@@ -57,7 +57,7 @@ describe("CleanupModal", () => {
     });
 
     await rendered.findByText(worktreeFixture.branch);
-    expect(rendered.getByText("ACTIVE")).toBeTruthy();
+    expect(rendered.getByTitle("Agent tab is open for this worktree")).toBeTruthy();
   });
 
   it("warns before cleanup when selected worktrees have open agent tabs", async () => {
@@ -148,5 +148,26 @@ describe("CleanupModal", () => {
       );
     });
   });
-});
 
+  it("sorts worktrees with open agent tabs to the top", async () => {
+    const otherWorktree = { ...worktreeFixture, path: "/tmp/worktrees/other", branch: "feature/other" };
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") return [otherWorktree, worktreeFixture];
+      return [];
+    });
+
+    const rendered = await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project",
+      onClose: vi.fn(),
+      agentTabBranches: [worktreeFixture.branch],
+    });
+
+    await rendered.findByText(worktreeFixture.branch);
+
+    const rows = rendered.container.querySelectorAll("tbody tr");
+    expect(rows.length).toBe(2);
+    expect(rows[0].textContent).toContain(worktreeFixture.branch);
+  });
+});

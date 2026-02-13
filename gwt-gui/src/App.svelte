@@ -5,6 +5,7 @@
     ProjectInfo,
     LaunchAgentRequest,
     ProbePathResult,
+    TerminalInfo,
     TerminalAnsiProbe,
     CapturedEnvInfo,
     SettingsData,
@@ -22,6 +23,11 @@
     formatWindowTitle,
     getAppVersionSafe,
   } from "./lib/windowTitle";
+  import {
+    loadStoredProjectAgentTabs,
+    persistStoredProjectAgentTabs,
+    buildRestoredAgentTabs,
+  } from "./lib/agentTabsPersistence";
 
   interface MenuActionPayload {
     action: string;
@@ -110,6 +116,9 @@
     { id: "agentMode", label: "Agent Mode", type: "agentMode" },
   ]);
   let activeTabId: string = $state("summary");
+
+  let agentTabsHydratedProjectPath: string | null = $state(null);
+  let agentTabsRestoreToken = 0;
 
   let terminalCount = $derived(tabs.filter((t) => t.type === "agent").length);
 
@@ -727,6 +736,85 @@
     void syncWindowAgentTabs();
   });
 
+  async function restoreProjectAgentTabs(targetProjectPath: string, token: number) {
+    const stored = loadStoredProjectAgentTabs(targetProjectPath);
+
+    // Even if no stored state exists, mark hydrated so persistence can proceed.
+    if (!stored) {
+      if (projectPath === targetProjectPath && agentTabsRestoreToken === token) {
+        agentTabsHydratedProjectPath = targetProjectPath;
+      }
+      return;
+    }
+
+    let terminals: TerminalInfo[] = [];
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      terminals = await invoke<TerminalInfo[]>("list_terminals");
+    } catch {
+      // Ignore: not available outside Tauri runtime.
+    }
+
+    if (projectPath !== targetProjectPath || agentTabsRestoreToken !== token) {
+      return;
+    }
+
+    const restored = buildRestoredAgentTabs(stored, terminals);
+    const restoredTabs = restored.tabs;
+
+    const preserved = tabs.filter((t) => t.type !== "agent");
+    tabs = [...preserved, ...restoredTabs];
+
+    const allowOverrideActive =
+      activeTabId === "summary" || activeTabId === "agentMode";
+    if (allowOverrideActive && restored.activeTabId) {
+      activeTabId = restored.activeTabId;
+    }
+
+    agentTabsHydratedProjectPath = targetProjectPath;
+  }
+
+  // Restore persisted agent tabs when a project is opened.
+  $effect(() => {
+    void projectPath;
+
+    if (!projectPath) {
+      agentTabsHydratedProjectPath = null;
+      return;
+    }
+
+    agentTabsHydratedProjectPath = null;
+    const target = projectPath;
+    const token = ++agentTabsRestoreToken;
+    void restoreProjectAgentTabs(target, token);
+  });
+
+  // Persist agent tabs per project (best-effort).
+  $effect(() => {
+    void projectPath;
+    void tabs;
+    void activeTabId;
+    void agentTabsHydratedProjectPath;
+
+    if (!projectPath) return;
+    if (agentTabsHydratedProjectPath !== projectPath) return;
+
+    const agentTabs: Array<{ paneId: string; label: string }> = tabs
+      .filter((t) => t.type === "agent" && typeof t.paneId === "string" && t.paneId.length > 0)
+      .map((t) => ({ paneId: t.paneId as string, label: t.label }));
+
+    const active = tabs.find((t) => t.id === activeTabId);
+    const activePaneId =
+      active?.type === "agent" && typeof active.paneId === "string" && active.paneId.length > 0
+        ? active.paneId
+        : null;
+
+    persistStoredProjectAgentTabs(projectPath, {
+      tabs: agentTabs,
+      activePaneId,
+    });
+  });
+
   // Claude Code Hooks: check & register on startup
   $effect(() => {
     (async () => {
@@ -866,6 +954,7 @@
 <CleanupModal
   open={showCleanupModal}
   preselectedBranch={cleanupPreselectedBranch}
+  refreshKey={sidebarRefreshKey}
   projectPath={projectPath ?? ""}
   {agentTabBranches}
   onClose={() => (showCleanupModal = false)}
