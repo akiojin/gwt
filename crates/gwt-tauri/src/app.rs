@@ -490,6 +490,8 @@ pub fn build_app(
             crate::commands::issue::find_existing_issue_branch,
             crate::commands::issue::link_branch_to_issue,
             crate::commands::issue::rollback_issue_branch,
+            crate::commands::system::get_system_info,
+            crate::commands::system::get_stats,
         ])
 }
 
