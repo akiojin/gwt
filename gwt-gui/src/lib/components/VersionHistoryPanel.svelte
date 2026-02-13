@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import type { ProjectVersions, VersionHistoryResult, VersionItem } from "../types";
+  import MarkdownRenderer from "./MarkdownRenderer.svelte";
 
   let { projectPath }: { projectPath: string } = $props();
 
@@ -218,12 +219,18 @@
 
             {#if res?.summary_markdown}
               <h3>Summary</h3>
-              <pre class="vh-pre mono">{res.summary_markdown}</pre>
+              <MarkdownRenderer
+                className="vh-markdown"
+                text={res.summary_markdown}
+              />
             {/if}
 
             {#if res?.changelog_markdown}
               <h3>Changelog</h3>
-              <pre class="vh-pre mono">{res.changelog_markdown}</pre>
+              <MarkdownRenderer
+                className="vh-markdown"
+                text={res.changelog_markdown}
+              />
             {/if}
           </div>
         {/if}
@@ -394,16 +401,12 @@
     color: var(--text-primary);
   }
 
-  .vh-pre {
+  .vh-markdown {
     margin: 0 0 10px;
-    padding: 10px 12px;
     border: 1px solid var(--border-color);
     border-radius: 10px;
     background: var(--bg-primary);
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    font-size: var(--ui-font-md);
-    color: var(--text-secondary);
+    padding: 10px 12px;
   }
 
   .vh-note {
