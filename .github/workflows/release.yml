@@ -18,12 +18,13 @@ jobs:
     if: |
       github.event_name == 'workflow_dispatch' ||
       startsWith(github.event.head_commit.message, 'chore(release):') ||
-      contains(github.event.head_commit.message, 'from akiojin/release/')
+      contains(github.event.head_commit.message, 'from akiojin/release/') ||
+      contains(github.event.head_commit.message, 'from akiojin/develop')
     outputs:
       tag_name: ${{ steps.tag.outputs.tag_name }}
       version: ${{ steps.tag.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Get version from Cargo.toml
         id: tag
@@ -33,6 +34,9 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
           echo "Version: $VERSION, Tag: $TAG_NAME"
+
+      - name: Fetch tags
+        run: git fetch --tags
 
       - name: Check if tag exists
         id: check-tag
@@ -73,72 +77,146 @@ jobs:
             --notes "$NOTES" \
             --draft=false
 
-  build-binaries:
-    name: Build (${{ matrix.target }})
+  build-tauri:
+    name: Build Tauri (${{ matrix.platform }})
     needs: create-tag
     runs-on: ${{ matrix.os }}
+    env:
+      RELEASE_VERSION: ${{ needs.create-tag.outputs.version }}
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            artifact: gwt-linux-x86_64
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-musl
-            artifact: gwt-linux-aarch64
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            artifact: gwt-macos-x86_64
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact: gwt-macos-aarch64
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact: gwt-windows-x86_64.exe
+          - platform: linux
+            os: ubuntu-latest
+          - platform: macos
+            os: macos-latest
+          - platform: windows
+            os: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
-      - name: Install musl tools (Linux x86_64)
-        if: matrix.target == 'x86_64-unknown-linux-musl'
+          key: tauri-${{ matrix.platform }}
+      # actions/setup-node's pnpm cache requires pnpm to be available.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.29.2
+          run_install: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: 'pnpm'
+          cache-dependency-path: gwt-gui/pnpm-lock.yaml
+      - name: Enable Corepack (pnpm)
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.29.2 --activate
+          pnpm --version
+      - name: Install system dependencies (Linux)
+        if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools
-      - name: Install cross (Linux ARM64)
-        if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: cargo install cross --git https://github.com/cross-rs/cross --tag v0.2.5
-      - name: Build (cross)
-        if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: cross build --release --target ${{ matrix.target }}
-      - name: Build (native)
-        if: matrix.target != 'aarch64-unknown-linux-musl'
-        run: cargo build --release --target ${{ matrix.target }}
-      - name: Prepare artifact (Unix)
-        if: matrix.os != 'windows-latest'
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Install frontend dependencies
+        run: cd gwt-gui && pnpm install --frozen-lockfile
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2"
+      - name: Build Tauri
+        run: cargo tauri build
+      - name: Build macOS installer (.pkg)
+        if: matrix.platform == 'macos'
+        shell: bash
         run: |
-          cp target/${{ matrix.target }}/release/gwt ${{ matrix.artifact }}
-          chmod +x ${{ matrix.artifact }}
-      - name: Prepare artifact (Windows)
-        if: matrix.os == 'windows-latest'
+          set -euo pipefail
+          if [[ -z "${RELEASE_VERSION}" ]]; then
+            echo "::error::Release version is not available."
+            exit 1
+          fi
+          bash installers/macos/build-pkg.sh --version "${RELEASE_VERSION}"
+      - name: Install WiX Toolset
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: choco install wixtoolset --version 3.11.2 -y --allow-downgrade --force
+      - name: Build Windows installer (WiX .msi)
+        if: matrix.platform == 'windows'
+        id: package_windows
+        shell: pwsh
         run: |
-          copy target\${{ matrix.target }}\release\gwt.exe ${{ matrix.artifact }}
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+          $version = "${env:RELEASE_VERSION}"
+          if ([string]::IsNullOrEmpty($version)) {
+            Write-Error "Release version is not available."
+            exit 1
+          }
+          $msiVersion = $version -replace '-.*$', '.0'
+          $binaryDir = Join-Path $PWD "target\\release"
+          $wxsPath = Join-Path $PWD "installers\\windows\\gwt.wxs"
+          $wixObj = "gwt.wixobj"
+          $wixDir = Join-Path $PWD "target\\release\\bundle\\wix"
+          New-Item -ItemType Directory -Path $wixDir -Force | Out-Null
+          $msiPath = Join-Path $wixDir "gwt-wix-windows-x86_64.msi"
+          $wixBin = "${env:ProgramFiles(x86)}\\WiX Toolset v3.11\\bin"
+          $env:PATH = "$wixBin;$env:PATH"
+          candle.exe $wxsPath -out $wixObj -dBinariesDir="$binaryDir" -dProductVersion="$msiVersion"
+          light.exe $wixObj -out $msiPath -sice:ICE03
+          "msi_path=$msiPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Validate Windows installer (WiX .msi)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $msiPath = "${{ steps.package_windows.outputs.msi_path }}"
+          if ([string]::IsNullOrEmpty($msiPath)) {
+            Write-Error "Windows MSI path is missing."
+            exit 1
+          }
+          if (-not (Test-Path $msiPath)) {
+            Write-Error "Windows MSI not found: $msiPath"
+            exit 1
+          }
+          if (-not ($msiPath.ToLower().EndsWith(".msi"))) {
+            Write-Error "Windows MSI has unexpected name."
+            exit 1
+          }
+      - name: Upload artifacts (Linux)
+        if: matrix.platform == 'linux'
+        uses: actions/upload-artifact@v6
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          name: gwt-linux
+          path: |
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
+      - name: Upload artifacts (macOS)
+        if: matrix.platform == 'macos'
+        uses: actions/upload-artifact@v6
+        with:
+          name: gwt-macos
+          path: target/release/bundle/dmg/*.dmg
+      - name: Upload macOS installer (.pkg)
+        if: matrix.platform == 'macos'
+        uses: actions/upload-artifact@v6
+        with:
+          name: gwt-macos-pkg
+          path: target/release/bundle/pkg/*.pkg
+      - name: Upload artifacts (Windows)
+        if: matrix.platform == 'windows'
+        uses: actions/upload-artifact@v6
+        with:
+          name: gwt-windows
+          path: target/release/bundle/msi/*.msi
+      - name: Upload Windows installer (WiX .msi)
+        if: matrix.platform == 'windows'
+        uses: actions/upload-artifact@v6
+        with:
+          name: gwt-windows-wix
+          path: target/release/bundle/wix/*.msi
 
   upload-release:
     name: Upload to GitHub Release
-    needs: [create-tag, build-binaries]
+    needs: [create-tag, build-tauri]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
         with:
           path: artifacts
       - name: Display artifacts
@@ -148,23 +226,3 @@ jobs:
         with:
           tag_name: ${{ needs.create-tag.outputs.tag_name }}
           files: artifacts/**/*
-
-  publish-npm:
-    name: Publish to npm
-    needs: [create-tag, upload-release]
-    runs-on: ubuntu-latest
-    environment: release
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Publish to npm
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

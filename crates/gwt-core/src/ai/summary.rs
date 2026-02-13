@@ -5,7 +5,7 @@ use super::session_parser::{MessageRole, ParsedSession, SessionMessage};
 use std::collections::HashMap;
 use std::time::SystemTime;
 
-pub const SESSION_SYSTEM_PROMPT_BASE: &str = "You are a helpful assistant summarizing a coding agent session so the user can remember the original request and latest instruction.\nReturn Markdown only with the following format and headings, in this exact order:\n\n## 目的\n<1 sentence: the original user request + key constraints + explicit exclusions>\n\n## 要約\n<1-2 sentences: current status (use a clear status word) + the latest user instruction; mention if blocked>\n\n## ハイライト\n- <Original request: ...>\n- <Latest instruction: ...>\n- <Decisions/constraints: ...>\n- <Exclusions/not doing: ...>\n- <Status: ...>\n- <Progress: ...>\n- <Next (one user action): ...>\n- <Needs user input (as a direct question): ...>\n- <Key words (3 items): ...>\n\nAdd more bullets if there are additional important items, but keep the list concise.\nIf there was no progress, say so and why.\nIf waiting for user input, state the exact question needed.\nDo not guess; if something is unknown, say so explicitly in the user's language.\nUse short labels followed by \":\" for each bullet and translate the labels to the user's language.\nDetect the response language from the session content and respond in that language.\nIf the session contains multiple languages, use the language used by the user messages.\nDo not output JSON, code fences, or any extra text.";
+pub const SESSION_SYSTEM_PROMPT_BASE: &str = "You are a helpful assistant summarizing a coding agent session so the user can remember the original request and latest instruction.\nReturn Markdown only with the following format and headings, in this exact order:\n\n## <Purpose heading in the user's language>\n<1 sentence: the original user request + key constraints + explicit exclusions>\n\n## <Summary heading in the user's language>\n<1-2 sentences: current status (use a clear status word) + the latest user instruction; mention if blocked>\n\n## <Highlights heading in the user's language>\n- <Original request: ...>\n- <Latest instruction: ...>\n- <Decisions/constraints: ...>\n- <Exclusions/not doing: ...>\n- <Status: ...>\n- <Progress: ...>\n- <Recent actions (last 1-3): ...>\n- <Next (one user action): ...>\n- <Needs user input (as a direct question): ...>\n- <Key words (3 items): ...>\n\nAdd more bullets if there are additional important items, but keep the list concise.\nIf there was no progress, say so and why.\nIf waiting for user input, state the exact question needed.\nDo not guess; if something is unknown, say so explicitly in the user's language.\nUse short labels followed by \":\" for each bullet and translate the labels to the user's language.\nDetect the response language from the session content and respond in that language.\nIf the session contains multiple languages, use the language used by the user messages.\nAll headings and all content must be in the user's language.\nDo not output JSON, code fences, or any extra text.";
 
 const MAX_MESSAGE_CHARS: usize = 220;
 const MAX_TOOL_ITEMS: usize = 8;
@@ -168,6 +168,79 @@ pub fn build_session_prompt(parsed: &ParsedSession) -> Vec<ChatMessage> {
             content: user_prompt,
         },
     ]
+}
+
+/// Summarizes a terminal scrollback as plain text, bypassing session parsers.
+///
+/// The scrollback text should already have ANSI sequences stripped.
+/// Large texts are sampled (first 40% + last 60%) to fit within MAX_PROMPT_CHARS.
+pub fn summarize_scrollback(
+    client: &AIClient,
+    scrollback_text: &str,
+    branch_name: &str,
+) -> Result<SessionSummary, AIError> {
+    let sampled = sample_scrollback_text(scrollback_text);
+    let user_prompt = format!("Branch: {branch_name}\nTerminal session output:\n{sampled}");
+    let messages = vec![
+        ChatMessage {
+            role: "system".to_string(),
+            content: SESSION_SYSTEM_PROMPT_BASE.to_string(),
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: user_prompt,
+        },
+    ];
+    let content = client.create_response(messages)?;
+    let fields = parse_session_summary_fields(&content).unwrap_or_default();
+    let markdown = normalize_session_summary_markdown(&content, &fields)?;
+    validate_session_summary_markdown(&markdown)?;
+
+    let token_count = scrollback_text.chars().count() / 4;
+    let metrics = SessionMetrics {
+        token_count: if token_count > 0 {
+            Some(token_count)
+        } else {
+            None
+        },
+        tool_execution_count: 0,
+        elapsed_seconds: None,
+        turn_count: 0,
+    };
+
+    Ok(SessionSummary {
+        task_overview: fields.task_overview,
+        short_summary: fields.short_summary,
+        bullet_points: fields.bullet_points,
+        markdown: Some(markdown),
+        metrics,
+        last_updated: Some(SystemTime::now()),
+    })
+}
+
+/// Samples scrollback text to fit within MAX_PROMPT_CHARS.
+///
+/// If the text fits, returns it as-is. Otherwise, takes the first 40%
+/// and last 60% of the allowed characters, with a separator in between.
+fn sample_scrollback_text(text: &str) -> String {
+    let char_count = text.chars().count();
+    if char_count <= MAX_PROMPT_CHARS {
+        return text.to_string();
+    }
+    let head_chars = MAX_PROMPT_CHARS * 2 / 5; // 40%
+    let separator = "\n...[truncated]...\n";
+    let tail_chars = MAX_PROMPT_CHARS - head_chars - separator.len();
+
+    let head: String = text.chars().take(head_chars).collect();
+    let tail: String = text
+        .chars()
+        .rev()
+        .take(tail_chars)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{head}{separator}{tail}")
 }
 
 pub fn summarize_session(
@@ -659,5 +732,31 @@ mod tests {
         let content = "## 目的\nA\n\n## 要約\nB\n\n## ハイライト\n";
         let result = validate_session_summary_markdown(content);
         assert!(matches!(result, Err(AIError::IncompleteSummary)));
+    }
+
+    // --- sample_scrollback_text tests ---
+
+    #[test]
+    fn test_sample_scrollback_within_limit() {
+        let text = "a".repeat(100);
+        let result = sample_scrollback_text(&text);
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn test_sample_scrollback_large_text() {
+        let text = "x".repeat(MAX_PROMPT_CHARS * 2);
+        let result = sample_scrollback_text(&text);
+        assert!(result.chars().count() <= MAX_PROMPT_CHARS);
+        assert!(result.contains("...[truncated]..."));
+        assert!(result.starts_with('x'));
+        assert!(result.ends_with('x'));
+    }
+
+    #[test]
+    fn test_sample_scrollback_exact_limit() {
+        let text = "y".repeat(MAX_PROMPT_CHARS);
+        let result = sample_scrollback_text(&text);
+        assert_eq!(result, text);
     }
 }

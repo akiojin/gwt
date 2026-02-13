@@ -1,8 +1,13 @@
-//! Agent history persistence module
+//! Agent history persistence module (SPEC-a3f4c9df)
 //!
 //! This module provides functionality to persist agent usage history per branch,
 //! allowing the display of recently used agents even after worktrees are deleted.
+//!
+//! File locations:
+//! - New format: ~/.gwt/agent-history.toml
+//! - Legacy format: ~/.config/gwt/agent-history.json
 
+use crate::config::migration::{ensure_config_dir, write_atomic};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -10,7 +15,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Error type for agent history operations
 #[derive(Error, Debug)]
@@ -62,29 +67,84 @@ impl AgentHistoryStore {
         }
     }
 
-    /// Get the default history file path (~/.config/gwt/agent-history.json)
-    pub fn get_history_path() -> Result<PathBuf, AgentHistoryError> {
-        let config_dir = dirs::config_dir().ok_or(AgentHistoryError::HomeDirNotFound)?;
+    /// Get the new TOML history file path (~/.gwt/agent-history.toml)
+    pub fn get_toml_history_path() -> Result<PathBuf, AgentHistoryError> {
+        let home_dir = dirs::home_dir().ok_or(AgentHistoryError::HomeDirNotFound)?;
+        Ok(home_dir.join(".gwt").join("agent-history.toml"))
+    }
+
+    /// Get the legacy JSON history file path (~/.config/gwt/agent-history.json)
+    pub fn get_json_history_path() -> Result<PathBuf, AgentHistoryError> {
+        // Prefer explicit XDG override for determinism (especially in tests and CI).
+        let config_dir = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(dirs::config_dir)
+            .ok_or(AgentHistoryError::HomeDirNotFound)?;
         Ok(config_dir.join("gwt").join("agent-history.json"))
     }
 
-    /// Load history from the default path
-    pub fn load() -> Result<Self, AgentHistoryError> {
-        let path = Self::get_history_path()?;
-        Self::load_from(&path)
+    /// Get the default history file path (deprecated - use get_toml_history_path)
+    #[deprecated(note = "Use get_toml_history_path() for new code")]
+    pub fn get_history_path() -> Result<PathBuf, AgentHistoryError> {
+        Self::get_json_history_path()
     }
 
-    /// Load history from a specific path
-    pub fn load_from(path: &Path) -> Result<Self, AgentHistoryError> {
-        if !path.exists() {
-            debug!("History file does not exist, returning empty store");
-            return Ok(Self::new());
+    /// Load history from the default paths with format auto-detection (SPEC-a3f4c9df FR-005)
+    ///
+    /// Priority: TOML > JSON
+    pub fn load() -> Result<Self, AgentHistoryError> {
+        // Try TOML first (new format)
+        if let Ok(toml_path) = Self::get_toml_history_path() {
+            if toml_path.exists() {
+                debug!("Loading agent history from TOML: {}", toml_path.display());
+                if let Ok(store) = Self::load_from_toml(&toml_path) {
+                    return Ok(store);
+                }
+            }
         }
 
+        // Fall back to JSON (legacy format)
+        if let Ok(json_path) = Self::get_json_history_path() {
+            if json_path.exists() {
+                debug!(
+                    "Loading agent history from JSON (legacy): {}",
+                    json_path.display()
+                );
+                if let Ok(store) = Self::load_from_json(&json_path) {
+                    // Auto-migrate: save as TOML for next time (SPEC-a3f4c9df)
+                    if let Err(e) = store.save() {
+                        warn!("Failed to auto-migrate agent history to TOML: {}", e);
+                    } else {
+                        info!("Auto-migrated agent-history.json to agent-history.toml");
+                    }
+                    return Ok(store);
+                }
+            }
+        }
+
+        debug!("No history file found, returning empty store");
+        Ok(Self::new())
+    }
+
+    /// Load history from TOML file
+    fn load_from_toml(path: &Path) -> Result<Self, AgentHistoryError> {
+        let content = fs::read_to_string(path)?;
+        let store: Self = toml::from_str(&content).map_err(|e| {
+            warn!("Failed to parse TOML history file: {}", e);
+            AgentHistoryError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("TOML parse error: {}", e),
+            ))
+        })?;
+        Ok(store)
+    }
+
+    /// Load history from JSON file (legacy)
+    fn load_from_json(path: &Path) -> Result<Self, AgentHistoryError> {
         let content = match fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) => {
-                warn!("Failed to read history file: {}", e);
+                warn!("Failed to read JSON history file: {}", e);
                 return Ok(Self::new());
             }
         };
@@ -92,20 +152,64 @@ impl AgentHistoryStore {
         match serde_json::from_str(&content) {
             Ok(store) => Ok(store),
             Err(e) => {
-                warn!("Failed to parse history file (corrupted?): {}", e);
+                warn!("Failed to parse JSON history file (corrupted?): {}", e);
                 Ok(Self::new())
             }
         }
     }
 
-    /// Save history to the default path
-    pub fn save(&self) -> Result<(), AgentHistoryError> {
-        let path = Self::get_history_path()?;
-        self.save_to(&path)
+    /// Load history from a specific path (auto-detects format by extension)
+    pub fn load_from(path: &Path) -> Result<Self, AgentHistoryError> {
+        if !path.exists() {
+            debug!("History file does not exist, returning empty store");
+            return Ok(Self::new());
+        }
+
+        if path.extension().is_some_and(|ext| ext == "toml") {
+            Self::load_from_toml(path)
+        } else {
+            Self::load_from_json(path)
+        }
     }
 
-    /// Save history to a specific path
+    /// Save history to the default path in TOML format (SPEC-a3f4c9df FR-006)
+    pub fn save(&self) -> Result<(), AgentHistoryError> {
+        let path = Self::get_toml_history_path()?;
+        self.save_to_toml(&path)
+    }
+
+    /// Save history to a specific path in TOML format
+    fn save_to_toml(&self, path: &Path) -> Result<(), AgentHistoryError> {
+        if let Some(parent) = path.parent() {
+            ensure_config_dir(parent)
+                .map_err(|e| AgentHistoryError::Io(io::Error::other(e.to_string())))?;
+        }
+
+        let content = toml::to_string_pretty(self).map_err(|e| {
+            AgentHistoryError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("TOML serialize error: {}", e),
+            ))
+        })?;
+
+        write_atomic(path, &content)
+            .map_err(|e| AgentHistoryError::Io(io::Error::other(e.to_string())))?;
+
+        info!("Saved agent history to {:?}", path);
+        Ok(())
+    }
+
+    /// Save history to a specific path (auto-detects format by extension)
     pub fn save_to(&self, path: &Path) -> Result<(), AgentHistoryError> {
+        if path.extension().is_some_and(|ext| ext == "toml") {
+            self.save_to_toml(path)
+        } else {
+            self.save_to_json(path)
+        }
+    }
+
+    /// Save history to JSON format (legacy - for backward compatibility)
+    fn save_to_json(&self, path: &Path) -> Result<(), AgentHistoryError> {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -124,6 +228,32 @@ impl AgentHistoryStore {
 
         debug!("Saved history to {:?}", path);
         Ok(())
+    }
+
+    /// Check if migration from JSON to TOML is needed
+    pub fn needs_migration() -> bool {
+        let toml_path = Self::get_toml_history_path().ok();
+        let json_path = Self::get_json_history_path().ok();
+
+        match (toml_path, json_path) {
+            (Some(toml), Some(json)) => json.exists() && !toml.exists(),
+            _ => false,
+        }
+    }
+
+    /// Migrate from JSON to TOML if needed
+    pub fn migrate_if_needed() -> Result<bool, AgentHistoryError> {
+        if !Self::needs_migration() {
+            return Ok(false);
+        }
+
+        info!("Migrating agent history from JSON to TOML");
+
+        let store = Self::load()?;
+        store.save()?;
+
+        info!("Agent history migration completed");
+        Ok(true)
     }
 
     /// Record agent usage for a branch
@@ -212,10 +342,20 @@ mod tests {
         assert_eq!(entry.unwrap().agent_label, "Claude@latest");
     }
 
-    // T105: Test history file path generation
+    // T105: Test history file path generation (TOML)
     #[test]
-    fn test_get_history_path() {
-        let path = AgentHistoryStore::get_history_path();
+    fn test_get_toml_history_path() {
+        let path = AgentHistoryStore::get_toml_history_path();
+        assert!(path.is_ok());
+        let path = path.unwrap();
+        assert!(path.to_string_lossy().contains(".gwt"));
+        assert!(path.to_string_lossy().contains("agent-history.toml"));
+    }
+
+    // T105: Test legacy JSON history file path generation
+    #[test]
+    fn test_get_json_history_path() {
+        let path = AgentHistoryStore::get_json_history_path();
         assert!(path.is_ok());
         let path = path.unwrap();
         assert!(path.to_string_lossy().contains("gwt"));
@@ -382,9 +522,9 @@ mod tests {
         assert!(entries_b.is_empty());
     }
 
-    // Test full save/load cycle
+    // Test full save/load cycle (JSON - legacy)
     #[test]
-    fn test_save_load_cycle() {
+    fn test_save_load_cycle_json() {
         let temp_dir = TempDir::new().unwrap();
         let history_path = temp_dir.path().join("history.json");
 
@@ -407,5 +547,131 @@ mod tests {
             .unwrap();
         assert_eq!(entry.agent_id, "opencode");
         assert_eq!(entry.agent_label, "OpenCode@latest");
+    }
+
+    // Test full save/load cycle (TOML - new)
+    #[test]
+    fn test_save_load_cycle_toml() {
+        let temp_dir = TempDir::new().unwrap();
+        let history_path = temp_dir.path().join("history.toml");
+
+        // Create and save
+        let mut store = AgentHistoryStore::new();
+        store
+            .record(
+                Path::new("/my/repo"),
+                "feature/toml",
+                "claude-code",
+                "Claude@latest",
+            )
+            .unwrap();
+        store.save_to(&history_path).unwrap();
+
+        // Verify TOML content
+        let content = fs::read_to_string(&history_path).unwrap();
+        assert!(content.contains("[repos"));
+
+        // Load and verify
+        let loaded = AgentHistoryStore::load_from(&history_path).unwrap();
+        let entry = loaded.get(Path::new("/my/repo"), "feature/toml").unwrap();
+        assert_eq!(entry.agent_id, "claude-code");
+        assert_eq!(entry.agent_label, "Claude@latest");
+    }
+
+    // Test TOML priority over JSON
+    #[test]
+    fn test_toml_priority_over_json() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp_dir.path());
+
+        // Create legacy JSON in ~/.config/gwt/
+        let config_gwt = temp_dir.path().join(".config").join("gwt");
+        fs::create_dir_all(&config_gwt).unwrap();
+        let json_path = config_gwt.join("agent-history.json");
+        let mut json_store = AgentHistoryStore::new();
+        json_store
+            .record(Path::new("/repo"), "main", "json-agent", "JSON Agent")
+            .unwrap();
+        json_store.save_to(&json_path).unwrap();
+
+        // Create new TOML in ~/.gwt/
+        let gwt_dir = temp_dir.path().join(".gwt");
+        fs::create_dir_all(&gwt_dir).unwrap();
+        let toml_path = gwt_dir.join("agent-history.toml");
+        let mut toml_store = AgentHistoryStore::new();
+        toml_store
+            .record(Path::new("/repo"), "main", "toml-agent", "TOML Agent")
+            .unwrap();
+        toml_store.save_to(&toml_path).unwrap();
+
+        // TOML should be loaded (priority)
+        let loaded = AgentHistoryStore::load().unwrap();
+        let entry = loaded.get(Path::new("/repo"), "main").unwrap();
+        assert_eq!(entry.agent_id, "toml-agent");
+    }
+
+    // Test needs_migration
+    #[test]
+    fn test_needs_migration() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp_dir.path());
+
+        // No files - no migration needed
+        assert!(!AgentHistoryStore::needs_migration());
+
+        // Create JSON only in ~/.config/gwt/
+        let config_gwt = temp_dir.path().join(".config").join("gwt");
+        fs::create_dir_all(&config_gwt).unwrap();
+        fs::write(config_gwt.join("agent-history.json"), "{}").unwrap();
+        assert!(AgentHistoryStore::needs_migration());
+
+        // Create TOML in ~/.gwt/ - no longer needs migration
+        let gwt_dir = temp_dir.path().join(".gwt");
+        fs::create_dir_all(&gwt_dir).unwrap();
+        fs::write(gwt_dir.join("agent-history.toml"), "").unwrap();
+        assert!(!AgentHistoryStore::needs_migration());
+    }
+
+    // Test migrate_if_needed
+    #[test]
+    fn test_migrate_if_needed() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp_dir.path());
+
+        // Create JSON file
+        let config_gwt = temp_dir.path().join(".config").join("gwt");
+        fs::create_dir_all(&config_gwt).unwrap();
+        let json_path = config_gwt.join("agent-history.json");
+        let mut store = AgentHistoryStore::new();
+        store
+            .record(
+                Path::new("/repo"),
+                "migrate",
+                "migrate-agent",
+                "Migrate Agent",
+            )
+            .unwrap();
+        store.save_to(&json_path).unwrap();
+
+        // Migrate
+        let migrated = AgentHistoryStore::migrate_if_needed().unwrap();
+        assert!(migrated);
+
+        // TOML should now exist
+        let gwt_dir = temp_dir.path().join(".gwt");
+        let toml_path = gwt_dir.join("agent-history.toml");
+        assert!(toml_path.exists());
+
+        // Load should work
+        let loaded = AgentHistoryStore::load().unwrap();
+        let entry = loaded.get(Path::new("/repo"), "migrate").unwrap();
+        assert_eq!(entry.agent_id, "migrate-agent");
+
+        // Second migration should be no-op
+        let migrated_again = AgentHistoryStore::migrate_if_needed().unwrap();
+        assert!(!migrated_again);
     }
 }

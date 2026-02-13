@@ -6,6 +6,8 @@
 //! - E3xxx: Configuration errors
 //! - E4xxx: Agent launch errors
 //! - E5xxx: Web API errors
+//! - E6xxx: Docker operation errors
+//! - E7xxx: Terminal operation errors
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -157,6 +159,32 @@ pub enum GwtError {
     #[error("[E5004] PTY spawn failed: {reason}")]
     PtySpawnFailed { reason: String },
 
+    // E6xxx: Docker operation errors
+    #[error("[E6001] Docker error: {0}")]
+    Docker(String),
+
+    #[error("[E6002] Docker daemon not running")]
+    DockerDaemonNotRunning,
+
+    #[error("[E6003] Docker build failed: {reason}")]
+    DockerBuildFailed { reason: String },
+
+    #[error("[E6004] Docker container start failed: {reason}")]
+    DockerStartFailed { reason: String },
+
+    #[error("[E6005] Docker container not found: {name}")]
+    DockerContainerNotFound { name: String },
+
+    #[error("[E6006] Docker port conflict: port {port} is already in use")]
+    DockerPortConflict { port: u16 },
+
+    #[error("[E6007] Docker operation timeout")]
+    DockerTimeout,
+
+    // E7xxx: Terminal operation errors
+    #[error("{0}")]
+    Terminal(#[from] crate::terminal::TerminalError),
+
     // Generic errors
     #[error("[E9001] IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -213,6 +241,23 @@ impl GwtError {
             Self::WebSocketFailed { .. } => "E5002",
             Self::ApiRequestFailed { .. } => "E5003",
             Self::PtySpawnFailed { .. } => "E5004",
+            // E6xxx
+            Self::Docker(_) => "E6001",
+            Self::DockerDaemonNotRunning => "E6002",
+            Self::DockerBuildFailed { .. } => "E6003",
+            Self::DockerStartFailed { .. } => "E6004",
+            Self::DockerContainerNotFound { .. } => "E6005",
+            Self::DockerPortConflict { .. } => "E6006",
+            Self::DockerTimeout => "E6007",
+            // E7xxx
+            Self::Terminal(ref e) => match e {
+                crate::terminal::TerminalError::PtyCreationFailed { .. } => "E7001",
+                crate::terminal::TerminalError::PtyIoError { .. } => "E7002",
+                crate::terminal::TerminalError::EmulatorError { .. } => "E7003",
+                crate::terminal::TerminalError::ScrollbackError { .. } => "E7004",
+                crate::terminal::TerminalError::IpcError { .. } => "E7005",
+                crate::terminal::TerminalError::PaneLimitReached { .. } => "E7006",
+            },
             // E9xxx
             Self::Io(_) => "E9001",
             Self::Internal(_) => "E9002",
@@ -259,6 +304,8 @@ impl GwtError {
             Some(3) => ErrorCategory::Config,
             Some(4) => ErrorCategory::Agent,
             Some(5) => ErrorCategory::WebApi,
+            Some(6) => ErrorCategory::Docker,
+            Some(7) => ErrorCategory::Terminal,
             _ => ErrorCategory::Internal,
         }
     }
@@ -272,6 +319,8 @@ pub enum ErrorCategory {
     Config,
     Agent,
     WebApi,
+    Docker,
+    Terminal,
     Internal,
 }
 
@@ -283,6 +332,8 @@ impl std::fmt::Display for ErrorCategory {
             Self::Config => write!(f, "Config"),
             Self::Agent => write!(f, "Agent"),
             Self::WebApi => write!(f, "WebApi"),
+            Self::Docker => write!(f, "Docker"),
+            Self::Terminal => write!(f, "Terminal"),
             Self::Internal => write!(f, "Internal"),
         }
     }

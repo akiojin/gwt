@@ -1,143 +1,167 @@
 #!/usr/bin/env bash
 
-# specs/ 配下の仕様（SPEC-xxxxxxxx）一覧を specs/specs.md に出力します。
-# - 仕様ディレクトリ: specs/SPEC-[a-f0-9]{8}/
-# - 仕様ファイル: specs/SPEC-xxxxxxx/spec.md
+set -euo pipefail
 
-set -e
-
-# Function to find the repository root by searching for existing project markers
-find_repo_root() {
-    local dir="$1"
-    while [ "$dir" != "/" ]; do
-        if [ -d "$dir/.git" ] || [ -d "$dir/.specify" ]; then
-            echo "$dir"
-            return 0
-        fi
-        dir="$(dirname "$dir")"
-    done
-    return 1
-}
-
-get_repo_root() {
-    if git rev-parse --show-toplevel >/dev/null 2>&1; then
-        git rev-parse --show-toplevel
-        return 0
-    fi
-
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    find_repo_root "$script_dir"
-}
-
-get_mtime_epoch() {
-    local path="$1"
-    # GNU coreutils
-    if stat -c %Y "$path" >/dev/null 2>&1; then
-        stat -c %Y "$path"
-        return 0
-    fi
-    # BSD/macOS
-    stat -f %m "$path" 2>/dev/null || echo "0"
-}
-
-escape_md_table_cell() {
-    # Escape `|` which breaks markdown tables
-    local input="$1"
-    echo "${input//|/\\|}"
-}
+SCRIPT_DIR="$(CDPATH="" cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/common.sh"
 
 REPO_ROOT="$(get_repo_root)"
-if [[ -z "$REPO_ROOT" ]]; then
-    echo "[specify] エラー: リポジトリルートを特定できませんでした" >&2
+if [ -z "$REPO_ROOT" ]; then
+    echo "ERROR: リポジトリルートを特定できません" >&2
     exit 1
 fi
 
 SPECS_DIR="$REPO_ROOT/specs"
-OUTPUT_FILE="$SPECS_DIR/specs.md"
+ARCHIVE_DIR="$SPECS_DIR/archive"
+OUTPUT="$SPECS_DIR/specs.md"
+TODAY="$(date +%Y-%m-%d)"
 
-mkdir -p "$SPECS_DIR"
-
-tmp_file="$(mktemp)"
-entries_file=""
-cleanup() {
-    rm -f "$tmp_file"
-    rm -f "$entries_file"
-}
-trap cleanup EXIT
-
-today="$(date +%Y-%m-%d)"
-
-{
-    echo "<!-- markdownlint-disable MD013 -->"
-    echo "# 仕様一覧"
-    echo ""
-    echo "**最終更新**: $today"
-    echo ""
-    echo 'このファイルは `.specify/scripts/bash/update-specs-index.sh` により自動生成されました。'
-    echo ""
-    echo "| SPEC ID | タイトル | 作成日 |"
-    echo "| --- | --- | --- |"
-} >"$tmp_file"
-
-nullglob_was_enabled=false
-if shopt -q nullglob; then
-    nullglob_was_enabled=true
-fi
-shopt -s nullglob
-spec_dirs=("$SPECS_DIR"/SPEC-*)
-if ! $nullglob_was_enabled; then
-    shopt -u nullglob
+if command -v python3 >/dev/null 2>&1; then
+    PY_BIN=python3
+elif command -v python >/dev/null 2>&1; then
+    PY_BIN=python
+else
+    echo "ERROR: python が見つかりません" >&2
+    exit 1
 fi
 
-if [[ ${#spec_dirs[@]} -eq 0 ]]; then
-    echo "| - | （仕様がまだありません） | - |" >>"$tmp_file"
-    mv "$tmp_file" "$OUTPUT_FILE"
-    exit 0
-fi
+"$PY_BIN" - <<'PY' "$SPECS_DIR" "$ARCHIVE_DIR" "$OUTPUT" "$TODAY"
+import re
+import sys
+from pathlib import Path
 
-# Collect entries as tab-separated lines: mtime<TAB>spec_id<TAB>title<TAB>created
-entries_file="$(mktemp)"
+specs_dir = Path(sys.argv[1])
+archive_dir = Path(sys.argv[2])
+output = Path(sys.argv[3])
+today = sys.argv[4]
 
-for dir in "${spec_dirs[@]}"; do
-    [[ -d "$dir" ]] || continue
-    spec_id="$(basename "$dir")"
+spec_id_re = re.compile(r"^SPEC-[a-f0-9]{8}$", re.I)
 
-    # specs/SPEC-xxxxxxxx 以外は除外
-    if [[ ! "$spec_id" =~ ^SPEC-[a-f0-9]{8}$ ]]; then
-        continue
-    fi
+def parse_spec(path: Path):
+    text = path.read_text(encoding="utf-8")
+    title = ""
+    created = "-"
+    category = ""
 
-    spec_file="$dir/spec.md"
-    title=""
-    created=""
+    for line in text.splitlines():
+        if line.startswith("# "):
+            title = line[2:].strip()
+            break
 
-    if [[ -f "$spec_file" ]]; then
-        title="$(grep -m 1 -E '^#' "$spec_file" 2>/dev/null | sed -E 's/^#+[[:space:]]*//;s/[[:space:]]*$//')"
-        created="$(grep -m 1 -F '**作成日**:' "$spec_file" 2>/dev/null | cut -d ':' -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-    fi
+    for line in text.splitlines():
+        m = re.match(r"^\*\*作成日\*\*:\s*(.+)$", line)
+        if m:
+            created = m.group(1).strip()
+            break
 
-    if [[ -z "$title" ]]; then
-        title="（タイトル未設定）"
-    fi
-    if [[ -z "$created" ]]; then
-        created="-"
-    fi
+    for line in text.splitlines():
+        m = re.match(r"^\*\*カテゴリ\*\*:\s*(.+)$", line)
+        if m:
+            category = m.group(1).strip()
+            break
 
-    mtime="$(get_mtime_epoch "$dir")"
-    printf '%s\t%s\t%s\t%s\n' "$mtime" "$spec_id" "$title" "$created" >>"$entries_file"
-done
+    return title or path.parent.name, created, category
 
-if [[ ! -s "$entries_file" ]]; then
-    echo "| - | （仕様がまだありません） | - |" >>"$tmp_file"
-    mv "$tmp_file" "$OUTPUT_FILE"
-    exit 0
-fi
+def collect_specs(base: Path, prefix: str = ""):
+    rows = []
+    if not base.exists():
+        return rows
+    for child in sorted(base.iterdir()):
+        if not child.is_dir():
+            continue
+        if not spec_id_re.match(child.name):
+            continue
+        spec_file = child / "spec.md"
+        if not spec_file.exists():
+            continue
+        title, created, category = parse_spec(spec_file)
+        link = f"{prefix}{child.name}/spec.md"
+        rows.append({
+            "id": child.name,
+            "title": title,
+            "created": created,
+            "category": category,
+            "link": link,
+        })
+    return rows
 
-sort -rn "$entries_file" | while IFS=$'\t' read -r _mtime spec_id title created; do
-    title_escaped="$(escape_md_table_cell "$title")"
-    created_escaped="$(escape_md_table_cell "$created")"
-    echo "| [$spec_id]($spec_id/spec.md) | $title_escaped | $created_escaped |" >>"$tmp_file"
-done
+current_rows = collect_specs(specs_dir)
+archive_rows = collect_specs(archive_dir, prefix="archive/")
 
-mv "$tmp_file" "$OUTPUT_FILE"
+# 分類
+current_gui = []
+current_porting = []
+for row in current_rows:
+    category = row["category"].lower()
+    if "porting" in category or "移植" in category:
+        current_porting.append(row)
+    else:
+        current_gui.append(row)
+
+# 作成日で降順ソート（不明は末尾）
+
+def sort_key(row):
+    date = row["created"]
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+        return date
+    return "0000-00-00"
+
+for rows in (current_gui, current_porting, archive_rows):
+    rows.sort(key=sort_key, reverse=True)
+
+# 既存ファイルから運用ルールを抽出（あれば）
+ops_rules = None
+if output.exists():
+    content = output.read_text(encoding="utf-8")
+    m = re.search(r"## 運用ルール\n\n(.*?)\n\n## ", content, re.S)
+    if m:
+        ops_rules = m.group(1).strip()
+
+if not ops_rules:
+    ops_rules = "\n".join([
+        "- `カテゴリ: GUI` は、現行のTauri GUI実装で有効な要件（binding）です。",
+        "- `カテゴリ: Porting` は、TUI/WebUI由来の移植待ち（non-binding）です。未実装でも不具合ではありません。",
+        "- Porting を実装対象にする場合は、次のどちらかを実施します:",
+        "1. 既存 spec の内容を GUI 前提に更新し、`カテゴリ` を `GUI` に変更する",
+        "2. 新しい GUI spec を作成し、元の Porting spec を `**依存仕様**:` で参照する",
+    ])
+
+lines = []
+lines.append("# 仕様一覧")
+lines.append("")
+lines.append(f"**最終更新**: {today}")
+lines.append("")
+lines.append("- 現行の仕様・要件: `specs/SPEC-XXXXXXXX/spec.md`")
+lines.append("- 以前までのTUIの仕様・要件（archive）: `specs/archive/SPEC-XXXXXXXX/spec.md`")
+lines.append("")
+lines.append("## 運用ルール")
+lines.append("")
+lines.append(ops_rules)
+lines.append("")
+
+lines.append("## 現行仕様（GUI）")
+lines.append("")
+lines.append("| SPEC ID | タイトル | 作成日 |")
+lines.append("| --- | --- | --- |")
+for row in current_gui:
+    lines.append(f"| [{row['id']}]({row['link']}) | {row['title']} | {row['created']} |")
+lines.append("")
+
+lines.append("## 移植待ち（Porting）")
+lines.append("")
+lines.append("| SPEC ID | タイトル | 作成日 |")
+lines.append("| --- | --- | --- |")
+for row in current_porting:
+    lines.append(f"| [{row['id']}]({row['link']}) | {row['title']} | {row['created']} |")
+lines.append("")
+
+lines.append("## 過去要件（archive）")
+lines.append("")
+lines.append("| SPEC ID | タイトル | 作成日 |")
+lines.append("| --- | --- | --- |")
+for row in archive_rows:
+    lines.append(f"| [{row['id']}]({row['link']}) | {row['title']} | {row['created']} |")
+lines.append("")
+
+output.write_text("\n".join(lines), encoding="utf-8")
+PY

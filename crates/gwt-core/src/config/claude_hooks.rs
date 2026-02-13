@@ -55,8 +55,11 @@ pub fn is_temporary_execution() -> Option<String> {
 ///
 /// This is a separate function for testability.
 pub fn is_temporary_execution_path(exe_path: &str) -> Option<String> {
+    // Normalize path separators so the pattern checks work on Windows too.
+    // `current_exe()` usually returns backslashes on Windows.
+    let normalized = exe_path.replace('\\', "/");
     for pattern in TEMP_EXECUTION_PATTERNS {
-        if exe_path.contains(pattern) {
+        if normalized.contains(pattern) {
             return Some(exe_path.to_string());
         }
     }
@@ -680,6 +683,13 @@ mod tests {
     fn test_is_temporary_execution_node_modules_cache() {
         // node_modules/.cache path should be detected
         let exe_path = "/project/node_modules/.cache/gwt/gwt";
+        assert!(is_temporary_execution_path(exe_path).is_some());
+    }
+
+    #[test]
+    fn test_is_temporary_execution_windows_path_separators() {
+        // Windows paths typically use backslashes; normalize before matching.
+        let exe_path = r"C:\Users\user\.bun\install\cache\@akiojin\gwt@1.0.0\gwt.exe";
         assert!(is_temporary_execution_path(exe_path).is_some());
     }
 

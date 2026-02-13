@@ -3,7 +3,218 @@
 use crate::error::{GwtError, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
+
+/// Repository type classification (SPEC-a70a1ece)
+///
+/// Represents the type of directory where gwt is launched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepoType {
+    /// Normal git repository (.git/ is a directory)
+    Normal,
+    /// Bare repository (is-bare-repository = true)
+    Bare,
+    /// Inside a worktree (normal or bare-based)
+    Worktree,
+    /// Empty directory (no files including hidden)
+    Empty,
+    /// Not a git repository (has files but not git)
+    NonRepo,
+}
+
+/// Header display context (SPEC-a70a1ece)
+///
+/// Contains information needed for header display.
+#[derive(Debug, Clone)]
+pub struct HeaderContext {
+    /// Working directory path
+    pub working_dir: PathBuf,
+    /// Current branch name (None for bare repos)
+    pub branch_name: Option<String>,
+    /// Repository type
+    pub repo_type: RepoType,
+    /// Bare repository name (for worktrees in bare-based projects)
+    pub bare_name: Option<String>,
+}
+
+impl HeaderContext {
+    /// Format the header display string
+    ///
+    /// Returns formatted string based on repo type:
+    /// - Normal/Worktree: `/path [branch]`
+    /// - Bare: `/path [bare]`
+    /// - Bare worktree: `/path [branch] (repo.git)`
+    pub fn format_display(&self) -> String {
+        let path = self.working_dir.display();
+        match self.repo_type {
+            RepoType::Bare => format!("{} [bare]", path),
+            RepoType::Worktree if self.bare_name.is_some() => {
+                format!(
+                    "{} [{}] ({})",
+                    path,
+                    self.branch_name.as_deref().unwrap_or(""),
+                    self.bare_name.as_deref().unwrap()
+                )
+            }
+            _ => format!("{} [{}]", path, self.branch_name.as_deref().unwrap_or("")),
+        }
+    }
+}
+
+/// Check if a directory is empty (SPEC-a70a1ece)
+pub fn is_empty_dir(path: &Path) -> bool {
+    match std::fs::read_dir(path) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(_) => false,
+    }
+}
+
+/// Check if a path is inside a git repository (SPEC-a70a1ece)
+pub fn is_git_repo(path: &Path) -> bool {
+    let output = Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(path)
+        .output();
+
+    matches!(output, Ok(o) if o.status.success())
+}
+
+/// Check if a repository is bare (SPEC-a70a1ece)
+pub fn is_bare_repository(path: &Path) -> bool {
+    let output = Command::new("git")
+        .args(["rev-parse", "--is-bare-repository"])
+        .current_dir(path)
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim() == "true",
+        _ => false,
+    }
+}
+
+/// Check if inside a worktree (not the main repo) (SPEC-a70a1ece)
+pub fn is_inside_worktree(path: &Path) -> bool {
+    // A worktree has a .git file (not directory) pointing to the main repo
+    let git_path = path.join(".git");
+    git_path.is_file()
+}
+
+/// Find a bare repository (*.git directory) in the given directory (SPEC-a70a1ece)
+///
+/// Returns the path to the first bare repository found, if any.
+/// This is used to detect bare repos when gwt is started from the parent directory.
+pub fn find_bare_repo_in_dir(path: &Path) -> Option<std::path::PathBuf> {
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(_) => return None,
+    };
+
+    for entry in entries.flatten() {
+        let entry_path = entry.path();
+        if entry_path.is_dir() {
+            // Check if it's a *.git directory and is a bare repository
+            if let Some(name) = entry_path.file_name().and_then(|n| n.to_str()) {
+                if name.ends_with(".git") && is_bare_repository(&entry_path) {
+                    return Some(entry_path);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Detect the repository type at a given path (SPEC-a70a1ece)
+pub fn detect_repo_type(path: &Path) -> RepoType {
+    // 1. Check if directory is empty
+    if is_empty_dir(path) {
+        return RepoType::Empty;
+    }
+
+    // 2. Check if it's a git repository
+    if !is_git_repo(path) {
+        return RepoType::NonRepo;
+    }
+
+    // 3. Check if it's a bare repository
+    if is_bare_repository(path) {
+        return RepoType::Bare;
+    }
+
+    // 4. Check if inside a worktree
+    if is_inside_worktree(path) {
+        return RepoType::Worktree;
+    }
+
+    RepoType::Normal
+}
+
+/// Get header context for display (SPEC-a70a1ece)
+pub fn get_header_context(path: &Path) -> HeaderContext {
+    let repo_type = detect_repo_type(path);
+    let branch_name = if repo_type != RepoType::Bare {
+        get_current_branch(path)
+    } else {
+        None
+    };
+
+    let bare_name = if repo_type == RepoType::Worktree {
+        detect_bare_parent_name(path)
+    } else {
+        None
+    };
+
+    HeaderContext {
+        working_dir: path.to_path_buf(),
+        branch_name,
+        repo_type,
+        bare_name,
+    }
+}
+
+/// Get the current branch name
+fn get_current_branch(path: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(path)
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if name == "HEAD" {
+            None // Detached HEAD
+        } else {
+            Some(name)
+        }
+    } else {
+        None
+    }
+}
+
+/// Detect if worktree's parent is a bare repository and get its name
+fn detect_bare_parent_name(path: &Path) -> Option<String> {
+    // Read .git file to get the gitdir path
+    let git_file = path.join(".git");
+    if !git_file.is_file() {
+        return None;
+    }
+
+    let content = std::fs::read_to_string(&git_file).ok()?;
+    // Format: "gitdir: /path/to/repo.git/worktrees/branch-name"
+    let gitdir = content.strip_prefix("gitdir: ")?.trim();
+
+    // Extract the bare repo path (remove /worktrees/xxx suffix)
+    let bare_path = PathBuf::from(gitdir);
+    let parent = bare_path.parent()?.parent()?; // Go up from worktrees/branch
+
+    // Check if it's actually a bare repo
+    if is_bare_repository(parent) {
+        parent.file_name()?.to_str().map(String::from)
+    } else {
+        None
+    }
+}
 
 /// Represents a Git repository
 #[derive(Debug)]
@@ -597,21 +808,51 @@ impl Repository {
                 force,
                 "Git worktree removed"
             );
-            Ok(())
-        } else {
-            let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
-            error!(
+            return Ok(());
+        }
+
+        let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+
+        // Handle submodule-related errors by manually removing the directory
+        // Git cannot remove worktrees containing submodules even with --force
+        if err_msg.contains("submodules cannot be moved or removed") {
+            warn!(
+                category = "git",
+                path = %path.display(),
+                "Worktree contains submodules, removing directory manually"
+            );
+
+            if path.exists() {
+                std::fs::remove_dir_all(path).map_err(|e| GwtError::GitOperationFailed {
+                    operation: "worktree remove (manual)".to_string(),
+                    details: format!("Failed to remove worktree directory: {}", e),
+                })?;
+            }
+
+            // Prune stale worktree metadata
+            self.prune_worktrees()?;
+
+            info!(
                 category = "git",
                 operation = "worktree_remove",
                 path = %path.display(),
-                error = err_msg.as_str(),
-                "Failed to remove git worktree"
+                force,
+                "Git worktree removed (with submodules)"
             );
-            Err(GwtError::GitOperationFailed {
-                operation: "worktree remove".to_string(),
-                details: err_msg,
-            })
+            return Ok(());
         }
+
+        error!(
+            category = "git",
+            operation = "worktree_remove",
+            path = %path.display(),
+            error = err_msg.as_str(),
+            "Failed to remove git worktree"
+        );
+        Err(GwtError::GitOperationFailed {
+            operation: "worktree remove".to_string(),
+            details: err_msg,
+        })
     }
 
     /// Prune stale worktree metadata
@@ -672,6 +913,7 @@ pub struct WorktreeInfo {
 /// Get the main repository root from any path (resolves through worktree to main repo)
 /// This is a standalone function that doesn't require a Repository instance.
 /// For worktrees, this returns the path to the main repository.
+/// For bare repos, this returns the bare repo path itself (SPEC-a70a1ece).
 /// For normal repos or non-repo paths, this returns the original path.
 pub fn get_main_repo_root(path: &Path) -> PathBuf {
     let output = Command::new("git")
@@ -682,6 +924,12 @@ pub fn get_main_repo_root(path: &Path) -> PathBuf {
     match output {
         Ok(o) if o.status.success() => {
             let common_dir = String::from_utf8_lossy(&o.stdout).trim().to_string();
+
+            // SPEC-a70a1ece: For bare repos, git-common-dir returns "." - return path as-is
+            if common_dir == "." {
+                return path.to_path_buf();
+            }
+
             let common_path = PathBuf::from(&common_dir);
             if common_path.is_absolute() {
                 common_path
@@ -803,7 +1051,16 @@ mod tests {
 
         let worktrees = repo.list_worktrees().unwrap();
         assert_eq!(worktrees.len(), 1);
-        assert_eq!(worktrees[0].path, temp.path());
+        // macOS temp paths may appear as /var/... while git reports /private/var/... (canonical).
+        let expected = temp
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| temp.path().to_path_buf());
+        let actual = worktrees[0]
+            .path
+            .canonicalize()
+            .unwrap_or_else(|_| worktrees[0].path.clone());
+        assert_eq!(actual, expected);
     }
 
     /// Issue #774: Repository::open should work with worktrees
@@ -880,5 +1137,175 @@ mod tests {
 
         let wt_repo = wt_repo.unwrap();
         assert_eq!(wt_repo.root(), worktree_path);
+    }
+
+    // SPEC-a70a1ece T207: Unit tests for detect_repo_type()
+
+    #[test]
+    fn test_detect_repo_type_empty_dir() {
+        let temp = TempDir::new().unwrap();
+        let result = detect_repo_type(temp.path());
+        assert_eq!(result, RepoType::Empty);
+    }
+
+    #[test]
+    fn test_detect_repo_type_non_repo() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("some_file.txt"), "content").unwrap();
+        let result = detect_repo_type(temp.path());
+        assert_eq!(result, RepoType::NonRepo);
+    }
+
+    #[test]
+    fn test_detect_repo_type_normal() {
+        let (temp, _repo) = create_test_repo();
+        let result = detect_repo_type(temp.path());
+        assert_eq!(result, RepoType::Normal);
+    }
+
+    #[test]
+    fn test_detect_repo_type_bare() {
+        let temp = TempDir::new().unwrap();
+        Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        let result = detect_repo_type(temp.path());
+        assert_eq!(result, RepoType::Bare);
+    }
+
+    #[test]
+    fn test_detect_repo_type_worktree() {
+        let (temp, repo) = create_test_repo_with_commit();
+
+        // Create a worktree
+        let worktree_path = temp.path().join(".worktrees").join("wt-branch");
+        repo.create_worktree(&worktree_path, "wt-branch", true)
+            .unwrap();
+
+        // Check worktree path is detected as Worktree type
+        let result = detect_repo_type(&worktree_path);
+        assert_eq!(result, RepoType::Worktree);
+    }
+
+    #[test]
+    fn test_is_empty_dir_true() {
+        let temp = TempDir::new().unwrap();
+        assert!(is_empty_dir(temp.path()));
+    }
+
+    #[test]
+    fn test_is_empty_dir_false_with_file() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("file.txt"), "").unwrap();
+        assert!(!is_empty_dir(temp.path()));
+    }
+
+    #[test]
+    fn test_is_empty_dir_false_with_hidden() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join(".hidden"), "").unwrap();
+        assert!(!is_empty_dir(temp.path()));
+    }
+
+    #[test]
+    fn test_is_bare_repository_true() {
+        let temp = TempDir::new().unwrap();
+        Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        assert!(is_bare_repository(temp.path()));
+    }
+
+    #[test]
+    fn test_is_bare_repository_false() {
+        let (temp, _repo) = create_test_repo();
+        assert!(!is_bare_repository(temp.path()));
+    }
+
+    #[test]
+    fn test_is_git_repo_true() {
+        let (temp, _repo) = create_test_repo();
+        assert!(is_git_repo(temp.path()));
+    }
+
+    #[test]
+    fn test_is_git_repo_false() {
+        let temp = TempDir::new().unwrap();
+        assert!(!is_git_repo(temp.path()));
+    }
+
+    #[test]
+    fn test_is_inside_worktree_true() {
+        // is_inside_worktree returns true only when .git is a FILE (not directory)
+        // which happens for git worktrees (not the main repo)
+        let (temp, repo) = create_test_repo_with_commit();
+
+        // Create a worktree - worktrees have .git as a file
+        let worktree_path = temp.path().join(".worktrees").join("test-wt");
+        repo.create_worktree(&worktree_path, "test-wt", true)
+            .unwrap();
+
+        // The worktree should have .git as a file
+        assert!(is_inside_worktree(&worktree_path));
+
+        // The main repo should NOT be detected as worktree (has .git directory)
+        assert!(!is_inside_worktree(temp.path()));
+    }
+
+    #[test]
+    fn test_is_inside_worktree_false_for_bare() {
+        let temp = TempDir::new().unwrap();
+        Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        assert!(!is_inside_worktree(temp.path()));
+    }
+
+    #[test]
+    fn test_find_bare_repo_in_dir_found() {
+        let temp = TempDir::new().unwrap();
+        // Create a bare repository with .git suffix
+        let bare_path = temp.path().join("my-repo.git");
+        std::fs::create_dir(&bare_path).unwrap();
+        Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(&bare_path)
+            .output()
+            .unwrap();
+
+        // Should find the bare repo from the parent directory
+        let result = find_bare_repo_in_dir(temp.path());
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), bare_path);
+    }
+
+    #[test]
+    fn test_find_bare_repo_in_dir_not_found() {
+        let temp = TempDir::new().unwrap();
+        // Create a regular file
+        std::fs::write(temp.path().join("file.txt"), "content").unwrap();
+
+        // Should not find any bare repo
+        let result = find_bare_repo_in_dir(temp.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_bare_repo_in_dir_ignores_non_bare() {
+        let temp = TempDir::new().unwrap();
+        // Create a directory with .git suffix but NOT a bare repo
+        let fake_git = temp.path().join("fake.git");
+        std::fs::create_dir(&fake_git).unwrap();
+        std::fs::write(fake_git.join("file.txt"), "content").unwrap();
+
+        // Should not find it (not a bare repo)
+        let result = find_bare_repo_in_dir(temp.path());
+        assert!(result.is_none());
     }
 }

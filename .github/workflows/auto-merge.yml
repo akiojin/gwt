@@ -15,10 +15,25 @@ jobs:
   auto-merge:
     name: Enable auto-merge
     runs-on: ubuntu-latest
-    if: github.event.pull_request.draft == false
+    if: >
+      github.event.pull_request.draft == false &&
+      (github.event.pull_request.user.login == 'akiojin' ||
+       github.event.pull_request.user.login == 'dependabot[bot]')
     steps:
       - name: Enable auto-merge
         env:
           GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
-          gh pr merge "${{ github.event.pull_request.number }}" --auto --squash --repo "${{ github.repository }}"
+          if [ -z "$GH_TOKEN" ]; then
+            echo "PERSONAL_ACCESS_TOKEN not provided, skipping auto-merge"
+            exit 0
+          fi
+          if [ "$BASE_REF" = "main" ] && [ "$HEAD_REF" = "develop" ]; then
+            gh pr merge "$PR_NUMBER" --auto --merge --repo "$REPO"
+          else
+            gh pr merge "$PR_NUMBER" --auto --squash --repo "$REPO"
+          fi

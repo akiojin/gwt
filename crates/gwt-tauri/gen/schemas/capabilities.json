@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Default capability for gwt","local":true,"windows":["main","project-*"],"permissions":["core:default","dialog:default","dialog:allow-open","store:default"]}}

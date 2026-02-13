@@ -315,6 +315,34 @@ mod tests {
     // Mutex to serialize tests that use GWT_SESSIONS_DIR environment variable
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     #[test]
     fn test_session_save_load() {
         let temp = TempDir::new().unwrap();
@@ -330,6 +358,11 @@ mod tests {
 
     #[test]
     fn test_session_path_global() {
+        // Lock mutex to prevent concurrent env var access
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let _home_lock = crate::config::HOME_LOCK.lock().unwrap();
+        let _env_guard = EnvVarGuard::unset("GWT_SESSIONS_DIR");
+
         // Global session path should be under ~/.gwt/sessions/
         let worktree_path = PathBuf::from("/repo/.worktrees/feature");
         let session_path = Session::session_path(&worktree_path);
@@ -351,9 +384,8 @@ mod tests {
     fn test_session_path_hash_consistency() {
         // Lock mutex to prevent concurrent env var access
         let _guard = ENV_MUTEX.lock().unwrap();
-
-        // Clear any previously set env var
-        std::env::remove_var("GWT_SESSIONS_DIR");
+        let _home_lock = crate::config::HOME_LOCK.lock().unwrap();
+        let _env_guard = EnvVarGuard::unset("GWT_SESSIONS_DIR");
 
         // Same worktree path should always produce same session path
         let worktree_path = PathBuf::from("/repo/.worktrees/feature");
@@ -366,6 +398,7 @@ mod tests {
     fn test_migrate_local_to_global() {
         // Lock mutex to prevent concurrent env var access
         let _guard = ENV_MUTEX.lock().unwrap();
+        let _home_lock = crate::config::HOME_LOCK.lock().unwrap();
 
         let temp = TempDir::new().unwrap();
         let worktree_path = temp.path();
@@ -373,7 +406,7 @@ mod tests {
         // Use temp directory as sessions dir to avoid writing to real home
         let sessions_dir = temp.path().join("sessions");
         std::fs::create_dir_all(&sessions_dir).unwrap();
-        std::env::set_var("GWT_SESSIONS_DIR", sessions_dir.to_str().unwrap());
+        let _env_guard = EnvVarGuard::set("GWT_SESSIONS_DIR", sessions_dir.to_str().unwrap());
 
         // Create a local session file
         let local_path = worktree_path.join(Session::LOCAL_SESSION_NAME);
@@ -399,6 +432,7 @@ mod tests {
     fn test_legacy_session_migration() {
         // Lock mutex to prevent concurrent env var access
         let _guard = ENV_MUTEX.lock().unwrap();
+        let _home_lock = crate::config::HOME_LOCK.lock().unwrap();
 
         let temp = TempDir::new().unwrap();
         let legacy_path = temp.path().join(Session::LEGACY_JSON_NAME);

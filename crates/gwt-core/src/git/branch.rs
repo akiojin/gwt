@@ -1,9 +1,87 @@
 //! Branch operations
 
 use crate::error::{GwtError, Result};
+use std::collections::HashMap;
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 use tracing::{debug, error, info};
+
+const LS_REMOTE_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn run_git_with_timeout(
+    repo_path: &Path,
+    operation: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<Output> {
+    let mut child = Command::new("git")
+        .args(args)
+        .current_dir(repo_path)
+        // Avoid hanging on interactive auth prompts.
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| GwtError::GitOperationFailed {
+            operation: operation.to_string(),
+            details: e.to_string(),
+        })?;
+
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+
+    let stdout_handle = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+    let stderr_handle = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf);
+        buf
+    });
+
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout = stdout_handle.join().unwrap_or_else(|_| Vec::new());
+                let stderr = stderr_handle.join().unwrap_or_else(|_| Vec::new());
+                return Ok(Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
+            }
+            Ok(None) => {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_handle.join();
+                    let _ = stderr_handle.join();
+                    return Err(GwtError::GitOperationFailed {
+                        operation: operation.to_string(),
+                        details: format!("timeout after {}ms", timeout.as_millis()),
+                    });
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                return Err(GwtError::GitOperationFailed {
+                    operation: operation.to_string(),
+                    details: e.to_string(),
+                });
+            }
+        }
+    }
+}
 
 /// Represents a Git branch
 #[derive(Debug, Clone)]
@@ -188,6 +266,94 @@ impl Branch {
         }
 
         Ok(branches)
+    }
+
+    /// List remote branches using ls-remote (for bare repositories)
+    /// SPEC-a70a1ece: Bare repositories don't have refs/remotes/, so we use ls-remote
+    pub fn list_remote_from_origin(repo_path: &Path) -> Result<Vec<Branch>> {
+        Self::list_remote_from_remote(repo_path, "origin")
+    }
+
+    /// List remote branches using ls-remote for the given remote name.
+    pub fn list_remote_from_remote(repo_path: &Path, remote: &str) -> Result<Vec<Branch>> {
+        debug!(
+            category = "git",
+            repo_path = %repo_path.display(),
+            remote,
+            "Listing remote branches via ls-remote"
+        );
+
+        let output = run_git_with_timeout(
+            repo_path,
+            "ls-remote",
+            &["ls-remote", "--heads", remote],
+            LS_REMOTE_TIMEOUT,
+        )?;
+
+        if !output.status.success() {
+            // If origin doesn't exist, return empty list
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("No such remote")
+                || stderr.contains("does not appear to be a git repository")
+            {
+                debug!(category = "git", remote, "Remote not configured");
+                return Ok(Vec::new());
+            }
+            return Err(GwtError::GitOperationFailed {
+                operation: "ls-remote".to_string(),
+                details: stderr.to_string(),
+            });
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut branches = Vec::new();
+
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() >= 2 {
+                let commit = &parts[0][..7.min(parts[0].len())]; // Short SHA
+                let ref_name = parts[1];
+                // Convert refs/heads/branch-name to <remote>/branch-name
+                if let Some(branch_name) = ref_name.strip_prefix("refs/heads/") {
+                    branches.push(Branch {
+                        name: format!("{}/{}", remote, branch_name),
+                        is_current: false,
+                        has_remote: true,
+                        upstream: None,
+                        commit: commit.to_string(),
+                        ahead: 0,
+                        behind: 0,
+                        commit_timestamp: None, // ls-remote doesn't provide timestamp
+                        is_gone: false,
+                    });
+                }
+            }
+        }
+
+        debug!(
+            category = "git",
+            count = branches.len(),
+            "Found remote branches via ls-remote"
+        );
+
+        Ok(branches)
+    }
+
+    /// List remote branches, supplementing local remote-tracking refs with ls-remote results.
+    pub fn list_remote_complete(repo_path: &Path, remote: &str) -> Result<Vec<Branch>> {
+        let mut refs = Self::list_remote(repo_path)?;
+        let prefix = format!("{}/", remote);
+        refs.retain(|b| b.name.starts_with(&prefix));
+
+        let mut map: HashMap<String, Branch> =
+            refs.into_iter().map(|b| (b.name.clone(), b)).collect();
+
+        let remote_heads = Self::list_remote_from_remote(repo_path, remote)?;
+        for branch in remote_heads {
+            map.entry(branch.name.clone()).or_insert(branch);
+        }
+
+        Ok(map.into_values().collect())
     }
 
     /// Get the current branch
@@ -490,6 +656,7 @@ impl Branch {
 
     /// Check if a branch exists remotely
     pub fn remote_exists(repo_path: &Path, remote: &str, branch: &str) -> Result<bool> {
+        // First try local refs/remotes (works for normal repos)
         let output = Command::new("git")
             .args([
                 "show-ref",
@@ -504,7 +671,31 @@ impl Branch {
                 details: e.to_string(),
             })?;
 
-        Ok(output.status.success())
+        if output.status.success() {
+            return Ok(true);
+        }
+
+        // SPEC-a70a1ece FR-124: For bare repos, check via ls-remote
+        let ls_output = Command::new("git")
+            .args(["ls-remote", "--heads", remote, branch])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| GwtError::GitOperationFailed {
+                operation: "ls-remote".to_string(),
+                details: e.to_string(),
+            })?;
+
+        if ls_output.status.success() {
+            let stdout = String::from_utf8_lossy(&ls_output.stdout);
+            // ls-remote returns lines like: <sha>\trefs/heads/<branch>
+            return Ok(stdout.lines().any(|line| {
+                line.split('\t')
+                    .nth(1)
+                    .is_some_and(|r| r == format!("refs/heads/{}", branch))
+            }));
+        }
+
+        Ok(false)
     }
 
     /// Checkout this branch
@@ -629,87 +820,56 @@ mod tests {
     use std::path::Path;
     use tempfile::TempDir;
 
+    fn run_git(repo_path: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn create_test_repo() -> TempDir {
         let temp = TempDir::new().unwrap();
-        Command::new("git")
-            .args(["init"])
-            .current_dir(temp.path())
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(temp.path())
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(temp.path())
-            .output()
-            .unwrap();
+        run_git(temp.path(), &["init"]);
+        run_git(temp.path(), &["config", "user.email", "test@test.com"]);
+        run_git(temp.path(), &["config", "user.name", "Test"]);
         // Create initial commit
         std::fs::write(temp.path().join("test.txt"), "hello").unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(temp.path())
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "initial"])
-            .current_dir(temp.path())
-            .output()
-            .unwrap();
+        run_git(temp.path(), &["add", "."]);
+        run_git(temp.path(), &["commit", "-m", "initial"]);
         temp
     }
 
     fn commit_file(repo_path: &Path, filename: &str, content: &str, message: &str) {
         std::fs::write(repo_path.join(filename), content).unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", message])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
+        run_git(repo_path, &["add", "."]);
+        run_git(repo_path, &["commit", "-m", message]);
     }
 
     fn create_repo_with_remote() -> (TempDir, String) {
         let temp = create_test_repo();
         let origin = TempDir::new().unwrap();
 
-        Command::new("git")
-            .args(["init", "--bare"])
-            .current_dir(origin.path())
-            .output()
-            .unwrap();
+        run_git(origin.path(), &["init", "--bare"]);
 
         let branch = Branch::current(temp.path()).unwrap().unwrap().name;
 
-        Command::new("git")
-            .args(["remote", "add", "origin", origin.path().to_str().unwrap()])
-            .current_dir(temp.path())
-            .output()
-            .unwrap();
+        run_git(
+            temp.path(),
+            &["remote", "add", "origin", origin.path().to_str().unwrap()],
+        );
 
-        Command::new("git")
-            .args(["push", "-u", "origin", &branch])
-            .current_dir(temp.path())
-            .output()
-            .unwrap();
+        run_git(temp.path(), &["push", "-u", "origin", &branch]);
 
         std::fs::write(temp.path().join("ahead.txt"), "ahead").unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(temp.path())
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "ahead"])
-            .current_dir(temp.path())
-            .output()
-            .unwrap();
+        run_git(temp.path(), &["add", "."]);
+        run_git(temp.path(), &["commit", "-m", "ahead"]);
 
         (temp, branch)
     }
@@ -734,6 +894,43 @@ mod tests {
         let branch_basic = branches_basic.iter().find(|b| b.name == branch).unwrap();
         assert_eq!(branch_basic.ahead, 0);
         assert_eq!(branch_basic.behind, 0);
+    }
+
+    #[test]
+    fn test_list_remote_from_origin_uses_origin_prefix() {
+        // Keep the origin TempDir alive so `git ls-remote origin` can read from it.
+        let temp = create_test_repo();
+        let origin = TempDir::new().unwrap();
+
+        Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(origin.path())
+            .output()
+            .unwrap();
+
+        let branch = Branch::current(temp.path()).unwrap().unwrap().name;
+
+        Command::new("git")
+            .args(["remote", "add", "origin", origin.path().to_str().unwrap()])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        Command::new("git")
+            .args(["push", "-u", "origin", &branch])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+
+        let remotes = Branch::list_remote_from_origin(temp.path()).unwrap();
+        let expected = format!("origin/{}", branch);
+
+        assert!(
+            remotes.iter().any(|b| b.name == expected),
+            "Expected {expected} in list_remote_from_origin result"
+        );
+        // ls-remote doesn't provide committer timestamp
+        assert!(remotes.iter().all(|b| b.commit_timestamp.is_none()));
     }
 
     #[test]
@@ -954,6 +1151,54 @@ mod tests {
         assert!(
             !main_branch.is_gone,
             "Branch with existing remote should not be marked as gone"
+        );
+    }
+
+    #[test]
+    fn test_list_remote_complete_includes_ls_remote_branches_when_remote_refs_missing() {
+        let origin = TempDir::new().unwrap();
+        run_git(origin.path(), &["init", "--bare"]);
+
+        // Base repo with only one remote-tracking ref configured.
+        let repo = create_test_repo();
+        let base_branch = Branch::current(repo.path()).unwrap().unwrap().name;
+        run_git(
+            repo.path(),
+            &["remote", "add", "origin", origin.path().to_str().unwrap()],
+        );
+        run_git(repo.path(), &["push", "-u", "origin", &base_branch]);
+
+        // Fetch only the base branch so refs/remotes/origin/* is intentionally incomplete.
+        let refspec = format!(
+            "+refs/heads/{}:refs/remotes/origin/{}",
+            base_branch, base_branch
+        );
+        run_git(repo.path(), &["config", "remote.origin.fetch", &refspec]);
+        run_git(repo.path(), &["fetch", "origin"]);
+
+        // Push a new branch to origin from a different repo so it does not exist locally.
+        let pusher = create_test_repo();
+        run_git(
+            pusher.path(),
+            &["remote", "add", "origin", origin.path().to_str().unwrap()],
+        );
+        run_git(pusher.path(), &["checkout", "-b", "feature/missing"]);
+        commit_file(pusher.path(), "missing.txt", "missing", "missing");
+        run_git(pusher.path(), &["push", "-u", "origin", "feature/missing"]);
+
+        // Remote-tracking refs are missing, but list_remote_complete should still include it via ls-remote.
+        let remote_refs = Branch::list_remote(repo.path()).unwrap();
+        assert!(
+            !remote_refs
+                .iter()
+                .any(|b| b.name == "origin/feature/missing"),
+            "refs/remotes should not include the missing branch in this setup"
+        );
+
+        let complete = Branch::list_remote_complete(repo.path(), "origin").unwrap();
+        assert!(
+            complete.iter().any(|b| b.name == "origin/feature/missing"),
+            "list_remote_complete should include missing remote branches via ls-remote"
         );
     }
 }
