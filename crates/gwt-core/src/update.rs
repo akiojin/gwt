@@ -18,7 +18,6 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 const DEFAULT_OWNER: &str = "akiojin";
@@ -416,7 +415,7 @@ impl UpdateManager {
         new_exe: &Path,
         args_file: &Path,
     ) -> Result<(), String> {
-        Command::new(helper_exe)
+        crate::process::command_os(helper_exe)
             .arg("__internal")
             .arg("apply-update")
             .arg("--old-pid")
@@ -441,7 +440,7 @@ impl UpdateManager {
         installer_kind: InstallerKind,
         args_file: &Path,
     ) -> Result<(), String> {
-        Command::new(helper_exe)
+        crate::process::command_os(helper_exe)
             .arg("__internal")
             .arg("run-installer")
             .arg("--old-pid")
@@ -572,7 +571,7 @@ pub fn internal_apply_update(
     let args = UpdateManager::read_restart_args_file(args_file)?;
     replace_executable(target_exe, source_exe)?;
 
-    Command::new(target_exe)
+    crate::process::command_os(target_exe)
         .args(args)
         .spawn()
         .map_err(|e| format!("Failed to restart: {e}"))?;
@@ -624,7 +623,7 @@ pub fn internal_run_installer(
         }
 
         let args = UpdateManager::read_restart_args_file(args_file)?;
-        Command::new(target_exe)
+        crate::process::command_os(target_exe)
             .args(args)
             .spawn()
             .map_err(|e| format!("Failed to restart: {e}"))?;
@@ -956,7 +955,7 @@ fn is_process_running(pid: u32) -> bool {
         let script = format!(
             "if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}"
         );
-        return Command::new("powershell")
+        return crate::process::command("powershell")
             .args(["-NoProfile", "-Command", &script])
             .status()
             .map(|s| s.success())
@@ -965,7 +964,7 @@ fn is_process_running(pid: u32) -> bool {
 
     #[cfg(not(target_os = "windows"))]
     {
-        Command::new("kill")
+        crate::process::command("kill")
             .args(["-0", &pid.to_string()])
             .output()
             .map(|output| output.status.success())
@@ -993,7 +992,7 @@ fn run_shell_with_admin_privileges(shell_cmd: &str) -> Result<(), String> {
         "do shell script \"{}\" with administrator privileges",
         escape_applescript_string(shell_cmd)
     );
-    let status = Command::new("osascript")
+    let status = crate::process::command("osascript")
         .arg("-e")
         .arg(applescript_cmd)
         .status()
@@ -1049,7 +1048,7 @@ fn run_macos_dmg_installer_with_privileges(
     let _ = fs::remove_dir_all(&mount_dir);
     fs::create_dir_all(&mount_dir).map_err(|e| format!("Failed to create mount dir: {e}"))?;
 
-    let attach_status = Command::new("hdiutil")
+    let attach_status = crate::process::command("hdiutil")
         .arg("attach")
         .arg(installer)
         .arg("-nobrowse")
@@ -1081,7 +1080,7 @@ fn run_macos_dmg_installer_with_privileges(
         run_shell_with_admin_privileges(&shell_cmd)
     })();
 
-    let detach_status = Command::new("hdiutil")
+    let detach_status = crate::process::command("hdiutil")
         .arg("detach")
         .arg(&mount_dir)
         .arg("-force")
@@ -1104,7 +1103,7 @@ fn run_windows_msi_with_uac(installer: &Path) -> Result<(), String> {
         "Start-Process msiexec.exe -Verb RunAs -Wait -ArgumentList @('/i', '{}', '/passive')",
         msi.replace('\'', "''")
     );
-    let status = Command::new("powershell")
+    let status = crate::process::command("powershell")
         .arg("-NoProfile")
         .arg("-Command")
         .arg(args)
