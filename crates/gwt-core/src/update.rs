@@ -588,45 +588,54 @@ pub fn internal_run_installer(
 ) -> Result<(), String> {
     wait_for_pid_exit(old_pid, Duration::from_secs(300))?;
 
-    match installer_kind {
-        InstallerKind::MacDmg => {
-            #[cfg(target_os = "macos")]
-            {
-                run_macos_dmg_installer_with_privileges(installer, target_exe)?;
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        match installer_kind {
+            InstallerKind::MacDmg => {
+                #[cfg(target_os = "macos")]
+                {
+                    run_macos_dmg_installer_with_privileges(installer, target_exe)?;
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    return Err("mac_dmg installer can only run on macOS".to_string());
+                }
             }
-            #[cfg(not(target_os = "macos"))]
-            {
-                return Err("mac_dmg installer can only run on macOS".to_string());
+            InstallerKind::MacPkg => {
+                #[cfg(target_os = "macos")]
+                {
+                    run_macos_pkg_installer_with_privileges(installer)?;
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    return Err("mac_pkg installer can only run on macOS".to_string());
+                }
+            }
+            InstallerKind::WindowsMsi => {
+                #[cfg(target_os = "windows")]
+                {
+                    run_windows_msi_with_uac(installer)?;
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    return Err("windows_msi installer can only run on Windows".to_string());
+                }
             }
         }
-        InstallerKind::MacPkg => {
-            #[cfg(target_os = "macos")]
-            {
-                run_macos_pkg_installer_with_privileges(installer)?;
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                return Err("mac_pkg installer can only run on macOS".to_string());
-            }
-        }
-        InstallerKind::WindowsMsi => {
-            #[cfg(target_os = "windows")]
-            {
-                run_windows_msi_with_uac(installer)?;
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                return Err("windows_msi installer can only run on Windows".to_string());
-            }
-        }
+
+        let args = UpdateManager::read_restart_args_file(args_file)?;
+        Command::new(target_exe)
+            .args(args)
+            .spawn()
+            .map_err(|e| format!("Failed to restart: {e}"))?;
+        Ok(())
     }
 
-    let args = UpdateManager::read_restart_args_file(args_file)?;
-    Command::new(target_exe)
-        .args(args)
-        .spawn()
-        .map_err(|e| format!("Failed to restart: {e}"))?;
-    Ok(())
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (target_exe, installer, installer_kind, args_file);
+        Err("installer updates are not supported on this platform".to_string())
+    }
 }
 
 fn default_paths() -> (PathBuf, PathBuf) {
