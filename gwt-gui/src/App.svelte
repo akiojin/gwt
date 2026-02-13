@@ -27,6 +27,7 @@
     formatWindowTitle,
     getAppVersionSafe,
   } from "./lib/windowTitle";
+  import { inferAgentId } from "./lib/agentUtils";
   import {
     AGENT_TAB_RESTORE_MAX_RETRIES,
     loadStoredProjectAgentTabs,
@@ -718,6 +719,7 @@
   function handleLaunchSuccess(paneId: string) {
     const req = pendingLaunchRequest;
     const label = req ? worktreeTabLabel(req.branch) : "Worktree";
+    const requestedAgentId = inferAgentId(req?.agentId);
 
     const newTab: Tab = {
       id: `agent-${paneId}`,
@@ -726,8 +728,30 @@
       paneId,
     };
 
+    if (requestedAgentId) {
+      newTab.agentId = requestedAgentId;
+    }
+
     tabs = [...tabs, newTab];
     activeTabId = newTab.id;
+
+    if (!newTab.agentId) {
+      void (async () => {
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const terminals = await invoke<TerminalInfo[]>("list_terminals");
+          const terminal = terminals.find((t) => t.pane_id === paneId);
+          const terminalAgentId = inferAgentId(terminal?.agent_name);
+          if (!terminalAgentId) return;
+
+          tabs = tabs.map((t) =>
+            t.id === newTab.id ? { ...t, agentId: terminalAgentId } : t
+          );
+        } catch {
+          // Ignore: fallback color is used when terminal metadata is unavailable.
+        }
+      })();
+    }
 
     // Fallback: if the event API is not available, trigger a best-effort refresh.
     if (!worktreesEventAvailable) {

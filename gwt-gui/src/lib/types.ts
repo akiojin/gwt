@@ -145,6 +145,7 @@ export interface ProfilesConfig {
 export interface Tab {
   id: string;
   label: string;
+  agentId?: "claude" | "codex" | "gemini" | "opencode";
   type: "summary" | "agent" | "settings" | "versionHistory" | "agentMode";
   paneId?: string;
 }
