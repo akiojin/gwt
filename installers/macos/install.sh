@@ -32,6 +32,33 @@ need_cmd() {
   fi
 }
 
+install_pkg_with_privilege() {
+  local pkg_path="$1"
+
+  # Interactive shells can use sudo directly.
+  if [[ -t 0 || -t 1 ]]; then
+    sudo installer -pkg "$pkg_path" -target /
+    return
+  fi
+
+  # Non-interactive contexts (e.g. in-app terminals) cannot prompt via sudo.
+  # Fall back to macOS admin dialog using osascript.
+  if command -v osascript > /dev/null 2>&1; then
+    info "No interactive terminal detected. Opening macOS admin authentication dialog..."
+    osascript - "$pkg_path" <<'APPLESCRIPT'
+on run argv
+  set pkgPath to item 1 of argv
+  do shell script "/usr/sbin/installer -pkg " & quoted form of pkgPath & " -target /" with administrator privileges
+end run
+APPLESCRIPT
+    return
+  fi
+
+  err "This session is non-interactive and osascript is unavailable."
+  err "Run from Terminal.app with sudo privileges."
+  exit 1
+}
+
 # --- argument parsing ------------------------------------------------------
 
 VERSION=""
@@ -180,7 +207,7 @@ fi
 # --- install ---------------------------------------------------------------
 
 info "Installing to /Applications (requires sudo)..."
-sudo installer -pkg "$PKG_PATH" -target /
+install_pkg_with_privilege "$PKG_PATH"
 
 # --- verify ----------------------------------------------------------------
 

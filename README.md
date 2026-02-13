@@ -34,6 +34,12 @@ Install from local package:
 ./installers/macos/install.sh --pkg ./target/release/bundle/pkg/gwt-macos-$(uname -m).pkg
 ```
 
+Or run both steps at once:
+
+```bash
+./installers/macos/install-local.sh
+```
+
 ### Uninstall (macOS)
 
 ```bash

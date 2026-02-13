@@ -32,6 +32,12 @@ cargo tauri build
 ./installers/macos/install.sh --pkg ./target/release/bundle/pkg/gwt-macos-$(uname -m).pkg
 ```
 
+または、上記を1コマンドで実行:
+
+```bash
+./installers/macos/install-local.sh
+```
+
 ### アンインストール（macOS）
 
 ```bash
