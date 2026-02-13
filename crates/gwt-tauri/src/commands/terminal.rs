@@ -1598,7 +1598,7 @@ fn report_launch_progress(
     let _ = app_handle.emit("launch-progress", &payload);
 }
 
-pub(crate) fn launch_agent_for_project_root(
+fn launch_agent_for_project_root(
     project_root: PathBuf,
     request: LaunchAgentRequest,
     state: &AppState,
