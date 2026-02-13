@@ -1,6 +1,6 @@
 # 仕様一覧
 
-**最終更新**: 2026-02-13
+**最終更新**: 2026-02-14
 
 - 現行の仕様・要件: `specs/SPEC-XXXXXXXX/spec.md`
 - 以前までのTUIの仕様・要件（archive）: `specs/archive/SPEC-XXXXXXXX/spec.md`
@@ -17,6 +17,7 @@
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
+| [SPEC-a1b2c3d4](SPEC-a1b2c3d4/spec.md) | 機能仕様: エージェント起動統計・システムモニター・About強化 | 2026-02-14 |
 | [SPEC-f490dded](SPEC-f490dded/spec.md) | 機能仕様: シンプルターミナルタブ | 2026-02-13 |
 | [SPEC-6e2a9d4c](SPEC-6e2a9d4c/spec.md) | 機能仕様: Host OS 起動時の空タブ防止（Issue #1029） | 2026-02-13 |
 | [SPEC-7d1a4b2e](SPEC-7d1a4b2e/spec.md) | 機能仕様: Playwrightベースの実装テスト基盤整備（WebView UI） | 2026-02-13 |
