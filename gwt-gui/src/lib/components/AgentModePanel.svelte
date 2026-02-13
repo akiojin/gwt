@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { AgentModeState } from "../types";
-  import { onMount } from "svelte";
+  import { afterUpdate, onMount } from "svelte";
 
   let state: AgentModeState = {
     messages: [],
@@ -16,6 +16,9 @@
   let input = "";
   let sending = false;
   let isComposing = false;
+  let ignoreEnterAfterComposition = false;
+  let chatEl: HTMLDivElement | null = null;
+  let lastMessageCount = 0;
 
   function toErrorMessage(err: unknown): string {
     if (!err) return "Unknown error";
@@ -59,7 +62,14 @@
   }
 
   function onKeydown(event: KeyboardEvent) {
-    if (isComposing || event.isComposing) return;
+    if (
+      isComposing ||
+      ignoreEnterAfterComposition ||
+      event.isComposing ||
+      event.key === "Process"
+    ) {
+      return;
+    }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       void sendMessage();
@@ -68,11 +78,24 @@
 
   function onCompositionStart() {
     isComposing = true;
+    ignoreEnterAfterComposition = false;
   }
 
   function onCompositionEnd() {
     isComposing = false;
+    ignoreEnterAfterComposition = true;
+    setTimeout(() => {
+      ignoreEnterAfterComposition = false;
+    }, 0);
   }
+
+  afterUpdate(() => {
+    if (!chatEl) return;
+    if (state.messages.length !== lastMessageCount) {
+      chatEl.scrollTop = chatEl.scrollHeight;
+      lastMessageCount = state.messages.length;
+    }
+  });
 
   onMount(() => {
     void refreshState();
@@ -88,7 +111,7 @@
     </div>
   </header>
 
-  <div class="agent-chat">
+  <div class="agent-chat" bind:this={chatEl}>
     {#if state.last_error}
       <div class="agent-alert warn">{state.last_error}</div>
     {/if}
