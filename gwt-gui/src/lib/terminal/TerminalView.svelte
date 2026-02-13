@@ -130,6 +130,8 @@
     const viewport = rootEl.querySelector<HTMLElement>(".xterm-viewport");
     if (!viewport) return;
 
+    if (event.deltaY === 0) return;
+
     const fontSize =
       typeof terminal?.options.fontSize === "number" ? terminal.options.fontSize : 13;
     const lineHeight =
@@ -143,7 +145,8 @@
       delta *= viewport.clientHeight;
     }
 
-    viewport.scrollTop += delta;
+    const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+    viewport.scrollTop = Math.min(Math.max(viewport.scrollTop + delta, 0), maxScrollTop);
   }
 
   onMount(() => {
@@ -199,10 +202,9 @@
 
     const handleWheel = (event: WheelEvent) => {
       if (!active || !terminal) return;
+      if (event.deltaY === 0) return;
 
       focusTerminalIfNeeded(rootEl, true);
-      if (isTerminalFocused(rootEl)) return;
-
       event.preventDefault();
       event.stopImmediatePropagation();
       scrollViewportByWheel(rootEl, event);
