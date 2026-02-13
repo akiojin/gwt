@@ -525,7 +525,7 @@ pub async fn handle_get_worktree_diff(
     };
 
     let output = match tokio::task::spawn_blocking(move || {
-        std::process::Command::new("git")
+        gwt_core::process::git_command()
             .args(["diff"])
             .current_dir(&worktree_path)
             .output()
