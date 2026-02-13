@@ -3,6 +3,7 @@
 //! Provides Issue information using GitHub CLI (gh) for branch creation from issues.
 
 use std::path::Path;
+use std::process::Command;
 
 use super::gh_cli::{gh_command, is_gh_available};
 use super::remote::Remote;
