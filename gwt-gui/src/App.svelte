@@ -5,6 +5,7 @@
     ProjectInfo,
     LaunchAgentRequest,
     ProbePathResult,
+    TerminalInfo,
     TerminalAnsiProbe,
     CapturedEnvInfo,
     SettingsData,
@@ -29,6 +30,7 @@
 
   const SIDEBAR_WIDTH_STORAGE_KEY = "gwt.sidebar.width";
   const SIDEBAR_MODE_STORAGE_KEY = "gwt.sidebar.mode";
+  const PROJECT_AGENT_TABS_STORAGE_KEY = "gwt.projectAgentTabs.v1";
   const DEFAULT_SIDEBAR_WIDTH_PX = 260;
   const MIN_SIDEBAR_WIDTH_PX = 220;
   const MAX_SIDEBAR_WIDTH_PX = 520;
@@ -81,6 +83,92 @@
     }
   }
 
+  type StoredAgentTab = { paneId: string; label: string };
+  type StoredProjectAgentTabs = {
+    tabs: StoredAgentTab[];
+    activePaneId: string | null;
+  };
+  type StoredProjectAgentTabsRoot = {
+    version: 1;
+    byProjectPath: Record<string, StoredProjectAgentTabs>;
+  };
+
+  function loadStoredProjectAgentTabs(projectPath: string): StoredProjectAgentTabs | null {
+    if (typeof window === "undefined") return null;
+    const key = projectPath.trim();
+    if (!key) return null;
+
+    try {
+      const raw = window.localStorage.getItem(PROJECT_AGENT_TABS_STORAGE_KEY);
+      if (!raw) return null;
+      const parsed: unknown = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object") return null;
+
+      const root = parsed as Partial<StoredProjectAgentTabsRoot>;
+      if (root.version !== 1) return null;
+      if (!root.byProjectPath || typeof root.byProjectPath !== "object") return null;
+
+      const entryRaw = (root.byProjectPath as Record<string, unknown>)[key];
+      if (!entryRaw || typeof entryRaw !== "object") return null;
+
+      const entry = entryRaw as Partial<StoredProjectAgentTabs>;
+      const tabsRaw = Array.isArray(entry.tabs) ? entry.tabs : [];
+
+      const seen = new Set<string>();
+      const tabs: StoredAgentTab[] = [];
+      for (const t of tabsRaw) {
+        if (!t || typeof t !== "object") continue;
+        const obj = t as Partial<StoredAgentTab>;
+        const paneId = typeof obj.paneId === "string" ? obj.paneId.trim() : "";
+        if (!paneId || seen.has(paneId)) continue;
+        const label = typeof obj.label === "string" ? obj.label : "";
+        tabs.push({ paneId, label });
+        seen.add(paneId);
+      }
+
+      const active =
+        typeof entry.activePaneId === "string" ? entry.activePaneId.trim() : "";
+      const activePaneId = active ? active : null;
+
+      return { tabs, activePaneId };
+    } catch {
+      return null;
+    }
+  }
+
+  function persistStoredProjectAgentTabs(
+    projectPath: string,
+    state: StoredProjectAgentTabs,
+  ) {
+    if (typeof window === "undefined") return;
+    const key = projectPath.trim();
+    if (!key) return;
+
+    try {
+      const raw = window.localStorage.getItem(PROJECT_AGENT_TABS_STORAGE_KEY);
+      let root: StoredProjectAgentTabsRoot = { version: 1, byProjectPath: {} };
+
+      if (raw) {
+        const parsed: unknown = JSON.parse(raw);
+        if (parsed && typeof parsed === "object") {
+          const existing = parsed as Partial<StoredProjectAgentTabsRoot>;
+          if (
+            existing.version === 1 &&
+            existing.byProjectPath &&
+            typeof existing.byProjectPath === "object"
+          ) {
+            root = { version: 1, byProjectPath: existing.byProjectPath };
+          }
+        }
+      }
+
+      root.byProjectPath = { ...root.byProjectPath, [key]: state };
+      window.localStorage.setItem(PROJECT_AGENT_TABS_STORAGE_KEY, JSON.stringify(root));
+    } catch {
+      // Ignore storage failures.
+    }
+  }
+
   let projectPath: string | null = $state(null);
   let appVersion: string | null = $state(null);
   let sidebarVisible: boolean = $state(true);
@@ -110,6 +198,9 @@
     { id: "agentMode", label: "Agent Mode", type: "agentMode" },
   ]);
   let activeTabId: string = $state("summary");
+
+  let agentTabsHydratedProjectPath: string | null = $state(null);
+  let agentTabsRestoreToken = 0;
 
   let terminalCount = $derived(tabs.filter((t) => t.type === "agent").length);
 
@@ -725,6 +816,103 @@
     void tabs;
     void activeTabId;
     void syncWindowAgentTabs();
+  });
+
+  async function restoreProjectAgentTabs(targetProjectPath: string, token: number) {
+    const stored = loadStoredProjectAgentTabs(targetProjectPath);
+
+    // Even if no stored state exists, mark hydrated so persistence can proceed.
+    if (!stored) {
+      if (projectPath === targetProjectPath && agentTabsRestoreToken === token) {
+        agentTabsHydratedProjectPath = targetProjectPath;
+      }
+      return;
+    }
+
+    let terminals: TerminalInfo[] = [];
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      terminals = await invoke<TerminalInfo[]>("list_terminals");
+    } catch {
+      // Ignore: not available outside Tauri runtime.
+    }
+
+    if (projectPath !== targetProjectPath || agentTabsRestoreToken !== token) {
+      return;
+    }
+
+    const existingPaneIds = new Set(terminals.map((t) => t.pane_id));
+    const restoredTabs: Tab[] = [];
+    for (const t of stored.tabs) {
+      if (!existingPaneIds.has(t.paneId)) continue;
+      restoredTabs.push({
+        id: `agent-${t.paneId}`,
+        label: t.label,
+        type: "agent",
+        paneId: t.paneId,
+      });
+    }
+
+    const preserved = tabs.filter((t) => t.type !== "agent");
+    tabs = [...preserved, ...restoredTabs];
+
+    const restoredActive =
+      stored.activePaneId && existingPaneIds.has(stored.activePaneId)
+        ? `agent-${stored.activePaneId}`
+        : "";
+
+    const allowOverrideActive =
+      activeTabId === "summary" || activeTabId === "agentMode";
+    if (
+      allowOverrideActive &&
+      restoredActive &&
+      restoredTabs.some((t) => t.id === restoredActive)
+    ) {
+      activeTabId = restoredActive;
+    }
+
+    agentTabsHydratedProjectPath = targetProjectPath;
+  }
+
+  // Restore persisted agent tabs when a project is opened.
+  $effect(() => {
+    void projectPath;
+
+    if (!projectPath) {
+      agentTabsHydratedProjectPath = null;
+      return;
+    }
+
+    agentTabsHydratedProjectPath = null;
+    const target = projectPath;
+    const token = ++agentTabsRestoreToken;
+    void restoreProjectAgentTabs(target, token);
+  });
+
+  // Persist agent tabs per project (best-effort).
+  $effect(() => {
+    void projectPath;
+    void tabs;
+    void activeTabId;
+    void agentTabsHydratedProjectPath;
+
+    if (!projectPath) return;
+    if (agentTabsHydratedProjectPath !== projectPath) return;
+
+    const agentTabs: StoredAgentTab[] = tabs
+      .filter((t) => t.type === "agent" && typeof t.paneId === "string" && t.paneId.length > 0)
+      .map((t) => ({ paneId: t.paneId as string, label: t.label }));
+
+    const active = tabs.find((t) => t.id === activeTabId);
+    const activePaneId =
+      active?.type === "agent" && typeof active.paneId === "string" && active.paneId.length > 0
+        ? active.paneId
+        : null;
+
+    persistStoredProjectAgentTabs(projectPath, {
+      tabs: agentTabs,
+      activePaneId,
+    });
   });
 
   // Claude Code Hooks: check & register on startup
