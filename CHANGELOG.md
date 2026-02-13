@@ -1,6 +1,17 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.2.0] - 2026-02-13
+
+### Bug Fixes
+
+- AI設定が無効/未設定時はVersion Historyの要約を実行しない (#1033)
+- **docker:** Stop forcing /workspace for compose exec (#1036)
+
+### Features
+
+- **agent-mode:** Enforce spec-kit gate and task assignee sidebar (#1035)
+
 ## [7.1.2] - 2026-02-13
 
 ### Bug Fixes
