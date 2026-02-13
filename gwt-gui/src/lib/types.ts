@@ -110,6 +110,14 @@ export interface SettingsData {
   docker_force_host: boolean;
   ui_font_size: number;
   terminal_font_size: number;
+  voice_input: VoiceInputSettings;
+}
+
+export interface VoiceInputSettings {
+  enabled: boolean;
+  hotkey: string;
+  language: "auto" | "ja" | "en" | (string & {});
+  model: string;
 }
 
 export interface AISettings {

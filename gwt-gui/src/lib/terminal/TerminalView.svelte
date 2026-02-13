@@ -5,6 +5,7 @@
   import "@xterm/xterm/css/xterm.css";
   import { onMount } from "svelte";
   import { isCtrlCShortcut, isPasteShortcut } from "./shortcuts";
+  import { registerTerminalInputTarget } from "../voice/inputTargetRegistry";
 
   let {
     paneId,
@@ -113,6 +114,7 @@
     const rootEl = containerEl;
     if (!rootEl) return;
     let cancelled = false;
+    const unregisterVoiceInputTarget = registerTerminalInputTarget(paneId, rootEl);
 
     const term = new Terminal({
       cursorBlink: true,
@@ -283,6 +285,7 @@
       window.removeEventListener("gwt-terminal-font-size", handleFontSizeChange);
       observer.disconnect();
       term.dispose();
+      unregisterVoiceInputTarget();
     };
   });
 

@@ -6,11 +6,19 @@
     currentBranch = "",
     terminalCount = 0,
     osEnvReady = true,
+    voiceInputEnabled = false,
+    voiceInputListening = false,
+    voiceInputSupported = true,
+    voiceInputError = null,
   }: {
     projectPath: string;
     currentBranch?: string;
     terminalCount?: number;
     osEnvReady?: boolean;
+    voiceInputEnabled?: boolean;
+    voiceInputListening?: boolean;
+    voiceInputSupported?: boolean;
+    voiceInputError?: string | null;
   } = $props();
 
   let agents: AgentInfo[] = $state([]);
@@ -37,6 +45,22 @@
     if (!agent || !agent.available) return "not installed";
     const v = agent.version?.trim() ?? "";
     return v.length > 0 ? v : "installed";
+  }
+
+  function voiceStatusClass(): string {
+    if (!voiceInputSupported) return "bad";
+    if (!voiceInputEnabled) return "muted";
+    if (voiceInputError) return "warn";
+    if (voiceInputListening) return "ok";
+    return "warn";
+  }
+
+  function voiceStatusText(): string {
+    if (!voiceInputSupported) return "Voice: unsupported";
+    if (!voiceInputEnabled) return "Voice: off";
+    if (voiceInputListening) return "Voice: listening";
+    if (voiceInputError) return "Voice: error";
+    return "Voice: idle";
   }
 
   async function detectAgents() {
@@ -76,6 +100,9 @@
   {#if !osEnvReady}
     <span class="status-loading">Loading environment...</span>
   {/if}
+  <span class={`status-item voice ${voiceStatusClass()}`} title={voiceInputError ?? ""}>
+    {voiceStatusText()}
+  </span>
   <span class="status-item agents">
     {#if !osEnvReady}
       <span class="agent muted">Agents: waiting</span>
@@ -112,6 +139,26 @@
 
   .terminal-count {
     color: var(--accent);
+  }
+
+  .voice {
+    font-size: 10px;
+  }
+
+  .voice.ok {
+    color: var(--green);
+  }
+
+  .voice.warn {
+    color: var(--yellow);
+  }
+
+  .voice.bad {
+    color: var(--red);
+  }
+
+  .voice.muted {
+    color: var(--text-muted);
   }
 
   .agents {
