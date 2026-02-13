@@ -80,7 +80,7 @@ export async function installTauriMock(page: Page): Promise<void> {
       }
 
       function emitEvent(event: string, payload: unknown): void {
-        for (const [listenerId, listener] of eventListeners.entries()) {
+        for (const [listenerId, listener] of [...eventListeners.entries()]) {
           if (listener.event !== event) continue;
           const callback = callbacks.get(listener.handlerId);
           if (!callback) continue;

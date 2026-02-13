@@ -73,6 +73,24 @@ test("shows terminal stream error and closes errored terminal tab on Enter", asy
     })
     .toBe(true);
 
+  await expect
+    .poll(async () => {
+      return page.evaluate(() => {
+        const globalWindow = window as unknown as {
+          __GWT_TAURI_INVOKE_LOG__?: Array<{
+            cmd: string;
+            args?: { event?: string };
+          }>;
+        };
+        return (globalWindow.__GWT_TAURI_INVOKE_LOG__ ?? []).some(
+          (entry) =>
+            entry.cmd === "plugin:event|listen" &&
+            entry.args?.event === "menu-action",
+        );
+      });
+    })
+    .toBe(true);
+
   await page.evaluate(() => {
     const globalWindow = window as unknown as {
       __GWT_MOCK_SET_NEXT_SPAWN_ERROR__?: (enabled: boolean) => void;
