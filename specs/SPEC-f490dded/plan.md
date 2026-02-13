@@ -13,27 +13,36 @@
 - **フロントエンド**: Svelte 5 + TypeScript（`gwt-gui/`）
 - **ターミナル**: xterm.js v6（TerminalView.svelte）
 - **テスト**: cargo test / vitest
-- **前提**: PaneManager の `launch_agent()` はシェルコマンドでも動作する（command/args 差し替え）
+- **前提**: PaneManager に `spawn_shell()` メソッドを新設し、`launch_agent()` のブランチマッピング保存をスキップする
 
 ## 実装方針
 
 ### Phase 1: バックエンド - PTY 生成とメニュー
 
-#### 1-1. Tauri コマンド `spawn_shell` の追加
+#### 1-1. PaneManager に `spawn_shell()` メソッドを追加
+
+`crates/gwt-core/src/terminal/manager.rs` に新メソッドを追加する。
+
+- `launch_agent()` のロジックを再利用しつつ、`save_branch_mapping()` をスキップ
+- 引数: `config: BuiltinLaunchConfig, rows: u16, cols: u16`（repo_root 不要）
+- pane_id 生成、PaneConfig 構築、TerminalPane::new() は同一フロー
+
+#### 1-2. Tauri コマンド `spawn_shell` の追加
 
 `crates/gwt-tauri/src/commands/terminal.rs` に新しいコマンドを追加する。
 
 - 引数: `working_dir: Option<String>`（省略時はホームディレクトリ）
 - `$SHELL` 環境変数からシェルを解決、未設定なら `/bin/sh`
-- PaneManager の `launch_agent()` を呼び出し（command=シェル、args=空、agent_name="terminal"）
-- I/O リーダースレッドを起動（既存の `start_pty_reader` を再利用）
+- PaneManager の `spawn_shell()` を呼び出し（command=シェル、args=空、agent_name="terminal"）
+- I/O リーダースレッドを起動（既存の `stream_pty_output()` を再利用）
 - pane_id を返却
 
-#### 1-2. AgentColor に Terminal 用カラーの追加
+#### 1-3. AgentColor の利用方針
 
-`crates/gwt-core/src/terminal/mod.rs` の `AgentColor` enum を確認し、グレー表現が可能か確認。既存の `White` を流用するか、フロントエンド側で `--text-muted` にマッピングする。
+- バックエンドでは `AgentColor::White` を使用（既存 enum に追加不要）
+- フロントエンドの MainArea.svelte で `tab.type === "terminal"` の場合にドットカラーを `--text-muted` にオーバーライド
 
-#### 1-3. Tools メニューに "New Terminal" 追加
+#### 1-4. Tools メニューに "New Terminal" 追加
 
 `crates/gwt-tauri/src/menu.rs`:
 
@@ -102,6 +111,33 @@
 
 - `WindowAgentTabEntry` に `tab_type?: String` フィールドを追加（省略時は "agent"）
 - `menu.rs` の Window メニュー描画で、terminal タブも含めて一覧表示
+
+## リスク
+
+| ID | リスク | 影響 | 軽減策 |
+|---|---|---|---|
+| RISK-001 | Ctrl+` が Tauri accelerator で非対応 | US2 が動作しない | フロントエンド keydown フォールバックで代替 |
+| RISK-002 | OSC 7 がバッファ境界で分断 | cwd 更新が欠落 | pane 単位の不完全シーケンスバッファ |
+| RISK-003 | bash が OSC 7 を送出しない | bash ユーザーの cwd 追従不可 | グレースフルデグレード（起動時 cwd を固定表示） |
+| RISK-004 | stream_pty_output() の変更が既存エージェントタブに影響 | 既存機能の退行 | agent_name=="terminal" の pane のみ OSC 7 処理を適用 |
+
+## 依存関係
+
+- Phase 1 の `spawn_shell()` メソッドが Phase 2〜4 の全てのベース
+- Phase 2 の OSC 7 パーサーは Phase 3 の cwd ラベル更新に必要
+- Phase 3 の Tab 型拡張は Phase 4 の永続化に必要
+- Phase 4 の Window メニュー統合は既存の `sync_window_agent_tabs` に依存
+
+## マイルストーン
+
+| マイルストーン | 内容 | 完了条件 |
+|---|---|---|
+| M1: 最小動作 | メニューからシェル起動・入出力可能 | SC-001 |
+| M2: UI 完成 | グレードット・cwd ラベル・ツールチップ | US3 全シナリオ |
+| M3: cwd 追従 | OSC 7 パースによるリアルタイム更新 | SC-002 |
+| M4: ライフサイクル | exit 自動クローズ・プロジェクト連動 | SC-003 |
+| M5: 永続化 | アプリ再起動後の復元 | SC-004 |
+| M6: メニュー統合 | Window メニューにターミナルタブ表示 | SC-005 |
 
 ## テスト
 
