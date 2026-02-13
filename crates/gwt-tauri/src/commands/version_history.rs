@@ -114,9 +114,9 @@ pub fn get_project_version_history(
     let repo_key = repo_path.to_string_lossy().to_string();
 
     let profiles = ProfilesConfig::load().map_err(|e| e.to_string())?;
-    let settings = match resolve_version_history_ai_settings(&profiles, &version_id) {
-        Ok(settings) => settings,
-        Err(disabled) => return Ok(disabled),
+    let settings = match resolve_version_history_ai_settings(&profiles) {
+        Some(settings) => settings,
+        None => return Ok(disabled_version_history_result(&version_id)),
     };
 
     // Resolve the requested version into a concrete git range.
@@ -256,17 +256,12 @@ fn disabled_version_history_result(version_id: &str) -> VersionHistoryResult {
 
 fn resolve_version_history_ai_settings(
     profiles: &ProfilesConfig,
-    version_id: &str,
-) -> Result<gwt_core::config::ResolvedAISettings, VersionHistoryResult> {
+) -> Option<gwt_core::config::ResolvedAISettings> {
     let ai = profiles.resolve_active_ai_settings();
     if !ai.summary_enabled {
-        return Err(disabled_version_history_result(version_id));
+        return None;
     }
-
-    match ai.resolved {
-        Some(settings) => Ok(settings),
-        None => Err(disabled_version_history_result(version_id)),
-    }
+    ai.resolved
 }
 
 fn get_cached_version_history(
@@ -929,12 +924,8 @@ mod tests {
             profiles: HashMap::new(),
         };
 
-        let out = resolve_version_history_ai_settings(&config, "v1.2.3")
-            .expect_err("summary disabled should skip AI generation");
-        assert_eq!(out.status, "disabled");
-        assert_eq!(out.version_id, "v1.2.3");
-        assert!(out.summary_markdown.is_none());
-        assert!(out.changelog_markdown.is_none());
+        let out = resolve_version_history_ai_settings(&config);
+        assert!(out.is_none(), "summary disabled should skip AI generation");
     }
 
     #[test]
@@ -946,11 +937,8 @@ mod tests {
             profiles: HashMap::new(),
         };
 
-        let out = resolve_version_history_ai_settings(&config, "unreleased")
-            .expect_err("missing AI config should skip AI generation");
-        assert_eq!(out.status, "disabled");
-        assert_eq!(out.version_id, "unreleased");
-        assert!(out.summary_markdown.is_none());
+        let out = resolve_version_history_ai_settings(&config);
+        assert!(out.is_none(), "missing AI config should skip AI generation");
     }
 
     #[test]
@@ -962,7 +950,7 @@ mod tests {
             profiles: HashMap::new(),
         };
 
-        let settings = resolve_version_history_ai_settings(&config, "v2.0.0")
+        let settings = resolve_version_history_ai_settings(&config)
             .expect("enabled AI should provide settings");
         assert_eq!(settings.endpoint, "https://api.openai.com/v1");
         assert_eq!(settings.model, "gpt-5.2-codex");
