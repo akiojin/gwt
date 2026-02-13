@@ -281,7 +281,8 @@ pub fn build_app(
 
                         match mcp_registration::detect_runtime() {
                             Ok(runtime) => {
-                                match mcp_registration::resolve_bridge_path(resource_dir.as_deref()) {
+                                match mcp_registration::resolve_bridge_path(resource_dir.as_deref())
+                                {
                                     Ok(bridge_path) => {
                                         let config = mcp_registration::McpBridgeConfig {
                                             command: runtime,

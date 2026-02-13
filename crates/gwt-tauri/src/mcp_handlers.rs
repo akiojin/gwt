@@ -3,12 +3,12 @@
 //! Each handler receives the WsContext and JSON-RPC params, and returns
 //! a JSON-RPC response value or error.
 
-use crate::mcp_ws_server::{JsonRpcResponse, WsContext};
 use crate::commands::terminal::{launch_agent_for_project_root, LaunchAgentRequest};
+use crate::mcp_ws_server::{JsonRpcResponse, WsContext};
 use crate::state::AppState;
 use gwt_core::terminal::pane::PaneStatus;
-use std::path::PathBuf;
 use serde_json::Value;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Manager;
@@ -357,16 +357,16 @@ pub fn handle_launch_agent(id: Value, params: &Value, ctx: &WsContext) -> JsonRp
 
     // Resolve a project context from the active/known windows.
     let maybe_project_root = {
-        let focused_label = ctx
-            .app_handle
-            .webview_windows()
-            .into_iter()
-            .find_map(|(label, window)| {
-                window
-                    .is_focused()
-                    .ok()
-                    .and_then(|focused| focused.then_some(label))
-            });
+        let focused_label =
+            ctx.app_handle
+                .webview_windows()
+                .into_iter()
+                .find_map(|(label, window)| {
+                    window
+                        .is_focused()
+                        .ok()
+                        .and_then(|focused| focused.then_some(label))
+                });
 
         focused_label
             .as_ref()
@@ -574,18 +574,10 @@ pub async fn handle_get_changed_files(
     {
         Ok(Ok(entries)) => entries,
         Ok(Err(e)) => {
-            return JsonRpcResponse::error(
-                id,
-                -32603,
-                format!("Failed to get changed files: {e}"),
-            );
+            return JsonRpcResponse::error(id, -32603, format!("Failed to get changed files: {e}"));
         }
         Err(e) => {
-            return JsonRpcResponse::error(
-                id,
-                -32603,
-                format!("Changed files task failed: {e}"),
-            );
+            return JsonRpcResponse::error(id, -32603, format!("Changed files task failed: {e}"));
         }
     };
 

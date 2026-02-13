@@ -305,7 +305,10 @@ fn register_json_agent(config: &McpBridgeConfig, path: &Path) -> Result<(), GwtE
         entry["env"] = serde_json::to_value(&config.env).unwrap_or(serde_json::json!({}));
     }
 
-    match root.get_mut("mcpServers").and_then(|servers| servers.as_object_mut()) {
+    match root
+        .get_mut("mcpServers")
+        .and_then(|servers| servers.as_object_mut())
+    {
         Some(servers) => {
             servers.insert(MCP_SERVER_NAME.to_string(), entry);
         }
