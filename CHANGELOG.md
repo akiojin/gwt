@@ -1,6 +1,14 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.1.1] - 2026-02-13
+
+### Bug Fixes
+
+- リリースコマンドのタグ検出・バージョン重複・ステージング問題を修正 by @akiojin
+- **gui:** Wire sidebar launch and quick-start actions (#1020)
+- **gui:** Session Summaryタブの残存表示を削除 (#1019)
+- Color agent tabs by inferred agent (#1021)
 
 ## [7.1.0] - 2026-02-13
 
