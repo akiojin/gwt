@@ -8,7 +8,6 @@ use gwt_core::git::{
 use gwt_core::worktree::WorktreeManager;
 use serde::Serialize;
 use std::path::Path;
-use std::process::Command;
 
 /// Response for fetch_github_issues (FR-010a)
 #[derive(Debug, Clone, Serialize)]
@@ -135,7 +134,7 @@ pub fn rollback_issue_branch(
 
     // Delete remote branch if requested (FR-014a)
     let (remote_deleted, remote_error) = if delete_remote {
-        let remote_output = Command::new("git")
+        let remote_output = gwt_core::process::command("git")
             .args(["push", "origin", "--delete", &branch_name])
             .current_dir(&repo_path)
             .output()

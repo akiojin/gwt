@@ -448,18 +448,17 @@ impl AIClient {
         }
 
         let mut attempts: Vec<Option<&str>> = vec![None];
-        if let Some(effort) = preferred_chat_completion_reasoning_effort(&self.endpoint, &self.model) {
+        if let Some(effort) =
+            preferred_chat_completion_reasoning_effort(&self.endpoint, &self.model)
+        {
             attempts.insert(0, Some(effort));
         }
 
         let mut last_error: Option<AIError> = None;
 
         for reasoning in attempts {
-            let request_body = build_chat_completions_request(
-                &body_messages,
-                &self.model,
-                reasoning,
-            );
+            let request_body =
+                build_chat_completions_request(&body_messages, &self.model, reasoning);
 
             let mut headers = HeaderMap::new();
             if !self.api_key.trim().is_empty() {
@@ -1443,7 +1442,10 @@ mod tests {
     #[test]
     fn test_preferred_chat_completion_reasoning_effort_for_local_model() {
         assert_eq!(
-            preferred_chat_completion_reasoning_effort("http://192.168.100.235:32768/v1", "gpt-oss:20b"),
+            preferred_chat_completion_reasoning_effort(
+                "http://192.168.100.235:32768/v1",
+                "gpt-oss:20b"
+            ),
             Some("low")
         );
     }
@@ -1469,9 +1471,9 @@ mod tests {
         assert!(should_retry_chat_completion_without_reasoning(
             &AIError::ParseError("No message content in chat completion response".to_string())
         ));
-        assert!(!should_retry_chat_completion_without_reasoning(&AIError::ParseError(
-            "bad json".to_string()
-        )));
+        assert!(!should_retry_chat_completion_without_reasoning(
+            &AIError::ParseError("bad json".to_string())
+        ));
     }
 
     #[test]

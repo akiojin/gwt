@@ -123,7 +123,10 @@ pub fn build_session_prompt(parsed: &ParsedSession) -> Vec<ChatMessage> {
         }
 
         if included_messages == 0 {
-            lines.push("No substantive conversation content found; focus was operational updates only.".to_string());
+            lines.push(
+                "No substantive conversation content found; focus was operational updates only."
+                    .to_string(),
+            );
         }
 
         if truncated {
@@ -216,7 +219,9 @@ fn should_preserve_short_status_message(text: &str) -> bool {
         "update",
     ];
 
-    IMPORTANT_KEYWORDS.iter().any(|keyword| lowered.contains(keyword))
+    IMPORTANT_KEYWORDS
+        .iter()
+        .any(|keyword| lowered.contains(keyword))
 }
 
 /// Summarizes a terminal scrollback as plain text, bypassing session parsers.
@@ -824,7 +829,9 @@ mod tests {
 
         assert!(user_prompt.contains("AI要約の本質を改善したいです。"));
         assert!(!user_prompt.contains("$gh-pr"));
-        assert!(user_prompt.contains("Implemented the plan to compress summary input and keep only meaningful messages."));
+        assert!(user_prompt.contains(
+            "Implemented the plan to compress summary input and keep only meaningful messages."
+        ));
         assert!(!user_prompt.contains("Implemented."));
     }
 
@@ -903,10 +910,7 @@ mod tests {
         let content = "## 目的\nA\n\n## 概要\nB\n\n## ハイライト\n- C";
         let fields = SessionSummaryFields::default();
         let markdown = normalize_session_summary_markdown(content, &fields).expect("markdown");
-        assert_eq!(
-            markdown,
-            "## 目的\nA\n\n## 要約\nB\n\n## ハイライト\n- C"
-        );
+        assert_eq!(markdown, "## 目的\nA\n\n## 要約\nB\n\n## ハイライト\n- C");
     }
 
     #[test]

@@ -617,29 +617,28 @@ mod tests {
     // -- Test helpers --
 
     fn create_test_repo(path: &std::path::Path) {
-        use std::process::Command;
-        Command::new("git")
+        gwt_core::process::command("git")
             .args(["init"])
             .current_dir(path)
             .output()
             .unwrap();
-        Command::new("git")
+        gwt_core::process::command("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(path)
             .output()
             .unwrap();
-        Command::new("git")
+        gwt_core::process::command("git")
             .args(["config", "user.name", "Test"])
             .current_dir(path)
             .output()
             .unwrap();
         std::fs::write(path.join("test.txt"), "hello").unwrap();
-        Command::new("git")
+        gwt_core::process::command("git")
             .args(["add", "."])
             .current_dir(path)
             .output()
             .unwrap();
-        Command::new("git")
+        gwt_core::process::command("git")
             .args(["commit", "-m", "initial"])
             .current_dir(path)
             .output()
@@ -647,7 +646,7 @@ mod tests {
     }
 
     fn git_stdout(dir: &std::path::Path, args: &[&str]) -> String {
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::command("git")
             .args(args)
             .current_dir(dir)
             .output()
