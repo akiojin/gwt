@@ -4,7 +4,11 @@
     WorktreeInfo,
     CleanupProgress,
     LaunchAgentRequest,
+    PrStatusInfo,
+    WorkflowRunInfo,
+    GhCliStatus,
   } from "../types";
+  import { workflowStatusIcon, workflowStatusClass } from "../prStatusHelpers";
   import AgentSidebar from "./AgentSidebar.svelte";
   import WorktreeSummaryPanel from "./WorktreeSummaryPanel.svelte";
 
@@ -19,6 +23,7 @@
     onLaunchAgent,
     onQuickLaunch,
     onResize,
+    onOpenCiLog,
     widthPx = 260,
     minWidthPx = 220,
     maxWidthPx = 520,
@@ -28,6 +33,8 @@
     selectedBranch = null,
     currentBranch = "",
     agentTabBranches = [],
+    prStatuses = {},
+    ghCliStatus = null,
   }: {
     projectPath: string;
     onBranchSelect: (branch: BranchInfo) => void;
@@ -36,6 +43,7 @@
     onLaunchAgent?: () => void;
     onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
     onResize?: (nextWidthPx: number) => void;
+    onOpenCiLog?: (runId: number) => void;
     widthPx?: number;
     minWidthPx?: number;
     maxWidthPx?: number;
@@ -45,6 +53,8 @@
     selectedBranch?: BranchInfo | null;
     currentBranch?: string;
     agentTabBranches?: string[];
+    prStatuses?: Record<string, PrStatusInfo | null>;
+    ghCliStatus?: GhCliStatus | null;
   } = $props();
 
   const SIDEBAR_SUMMARY_HEIGHT_STORAGE_KEY = "gwt.sidebar.worktreeSummaryHeight";
@@ -52,6 +62,23 @@
   const MIN_WORKTREE_SUMMARY_HEIGHT_PX = 160;
   const MIN_BRANCH_LIST_HEIGHT_PX = 120;
   const SUMMARY_RESIZE_HANDLE_HEIGHT_PX = 8;
+
+  // PR Status tree expand state
+  let expandedBranches: Set<string> = $state(new Set());
+
+  function toggleBranch(branchName: string) {
+    const next = new Set(expandedBranches);
+    if (next.has(branchName)) {
+      next.delete(branchName);
+    } else {
+      next.add(branchName);
+    }
+    expandedBranches = next;
+  }
+
+  function openCiLog(run: WorkflowRunInfo) {
+    onOpenCiLog?.(run.runId);
+  }
 
   let activeFilter: FilterType = $state("Local");
   let branches: BranchInfo[] = $state([]);
@@ -748,60 +775,96 @@
           <div class="empty-indicator">No branches found.</div>
         {:else}
           {#each filteredBranches as branch}
-            <button
-              class="branch-item"
-              class:active={branch.is_current}
-              class:agent-active={hasActiveAgentTab(branch)}
-              class:deleting={deletingBranches.has(branch.name)}
-              onclick={() => {
-                if (!deletingBranches.has(branch.name)) onBranchSelect(branch);
-              }}
-              ondblclick={() => {
-                if (!deletingBranches.has(branch.name))
-                  onBranchActivate?.(branch);
-              }}
-              oncontextmenu={(e) => handleContextMenu(e, branch)}
-            >
-              <span class="branch-icon">{branch.is_current ? "*" : " "}</span>
-              {#if deletingBranches.has(branch.name)}
-                <span class="safety-spinner"></span>
-              {:else if getSafetyLevel(branch)}
-                <span
-                  class="safety-dot {getSafetyLevel(branch)}"
-                  title={getSafetyTitle(branch)}
-                ></span>
-              {/if}
-              {#if hasActiveAgentTab(branch)}
-                <span
-                  class="agent-tab-icon"
-                  title="Agent tab is open for this branch"
-                  role="img"
-                  aria-label="Agent tab is open for this branch"
+            <div class="branch-tree-item">
+              {#if activeFilter !== "Remote" && prStatuses[branch.name]}
+                <button
+                  class="tree-toggle"
+                  class:expanded={expandedBranches.has(branch.name)}
+                  onclick={(e) => { e.stopPropagation(); toggleBranch(branch.name); }}
+                  title={expandedBranches.has(branch.name) ? "Collapse" : "Expand"}
                 >
-                  <span class="agent-tab-bars" aria-hidden="true">
-                    <span class="agent-tab-bar b1"></span>
-                    <span class="agent-tab-bar b2"></span>
-                    <span class="agent-tab-bar b3"></span>
+                  {expandedBranches.has(branch.name) ? "\u25BC" : "\u25B6"}
+                </button>
+              {:else}
+                <span class="tree-toggle-placeholder"></span>
+              {/if}
+              <button
+                class="branch-item"
+                class:active={branch.is_current}
+                class:agent-active={hasActiveAgentTab(branch)}
+                class:deleting={deletingBranches.has(branch.name)}
+                onclick={() => {
+                  if (!deletingBranches.has(branch.name)) onBranchSelect(branch);
+                }}
+                ondblclick={() => {
+                  if (!deletingBranches.has(branch.name))
+                    onBranchActivate?.(branch);
+                }}
+                oncontextmenu={(e) => handleContextMenu(e, branch)}
+              >
+                <span class="branch-icon">{branch.is_current ? "*" : " "}</span>
+                {#if deletingBranches.has(branch.name)}
+                  <span class="safety-spinner"></span>
+                {:else if getSafetyLevel(branch)}
+                  <span
+                    class="safety-dot {getSafetyLevel(branch)}"
+                    title={getSafetyTitle(branch)}
+                  ></span>
+                {/if}
+                {#if hasActiveAgentTab(branch)}
+                  <span
+                    class="agent-tab-icon"
+                    title="Agent tab is open for this branch"
+                    role="img"
+                    aria-label="Agent tab is open for this branch"
+                  >
+                    <span class="agent-tab-bars" aria-hidden="true">
+                      <span class="agent-tab-bar b1"></span>
+                      <span class="agent-tab-bar b2"></span>
+                      <span class="agent-tab-bar b3"></span>
+                    </span>
+                    <span class="agent-tab-fallback" aria-hidden="true">@</span>
                   </span>
-                  <span class="agent-tab-fallback" aria-hidden="true">@</span>
-                </span>
-              {/if}
-              <span class="branch-name">{branch.name}</span>
-              {#if branch.last_tool_usage}
-                <span
-                  class="tool-usage {toolUsageClass(branch.last_tool_usage)}"
-                >
-                  {branch.last_tool_usage}
-                </span>
-              {/if}
-              {#if divergenceIndicator(branch)}
-                <span
-                  class="divergence {divergenceClass(branch.divergence_status)}"
-                >
-                  {divergenceIndicator(branch)}
-                </span>
-              {/if}
-            </button>
+                {/if}
+                <span class="branch-name">{branch.name}</span>
+                {#if ghCliStatus && !ghCliStatus.authenticated}
+                  <span class="pr-badge disconnected">GitHub not connected</span>
+                {:else if prStatuses[branch.name]}
+                  {@const pr = prStatuses[branch.name]!}
+                  <span class="pr-badge {pr.state.toLowerCase()}">
+                    #{pr.number} {pr.state === "OPEN" ? "Open" : pr.state === "MERGED" ? "Merged" : "Closed"}
+                  </span>
+                {:else if ghCliStatus?.authenticated}
+                  <span class="pr-badge no-pr">No PR</span>
+                {/if}
+                {#if branch.last_tool_usage}
+                  <span
+                    class="tool-usage {toolUsageClass(branch.last_tool_usage)}"
+                  >
+                    {branch.last_tool_usage}
+                  </span>
+                {/if}
+                {#if divergenceIndicator(branch)}
+                  <span
+                    class="divergence {divergenceClass(branch.divergence_status)}"
+                  >
+                    {divergenceIndicator(branch)}
+                  </span>
+                {/if}
+              </button>
+            </div>
+            {#if expandedBranches.has(branch.name) && prStatuses[branch.name]}
+              <div class="workflow-runs">
+                {#each prStatuses[branch.name]!.checkSuites as run}
+                  <button class="workflow-run-item" onclick={() => openCiLog(run)}>
+                    <span class="workflow-status {workflowStatusClass(run)}">{workflowStatusIcon(run)}</span>
+                    <span class="workflow-name">{run.workflowName}</span>
+                  </button>
+                {:else}
+                  <div class="workflow-empty">No workflows</div>
+                {/each}
+              </div>
+            {/if}
           {/each}
         {/if}
       </div>
@@ -1494,5 +1557,128 @@
 
   .confirm-delete:hover {
     opacity: 0.9;
+  }
+
+  /* PR Status tree */
+  .branch-tree-item {
+    display: flex;
+    align-items: stretch;
+  }
+
+  .tree-toggle {
+    width: 20px;
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 10px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .tree-toggle:hover {
+    color: var(--text-primary);
+  }
+
+  .tree-toggle-placeholder {
+    width: 20px;
+    flex-shrink: 0;
+  }
+
+  .workflow-runs {
+    padding-left: 24px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .workflow-run-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: var(--ui-font-xs);
+    cursor: pointer;
+    text-align: left;
+    font-family: inherit;
+  }
+
+  .workflow-run-item:hover {
+    background: var(--bg-hover);
+  }
+
+  .workflow-status {
+    font-size: 11px;
+    width: 14px;
+    text-align: center;
+  }
+
+  .workflow-status.pass {
+    color: var(--green);
+  }
+
+  .workflow-status.fail {
+    color: var(--red);
+  }
+
+  .workflow-status.running {
+    color: var(--yellow);
+  }
+
+  .workflow-status.pending {
+    color: var(--text-muted);
+  }
+
+  .workflow-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .workflow-empty {
+    padding: 3px 8px;
+    color: var(--text-muted);
+    font-size: var(--ui-font-xs);
+    font-style: italic;
+  }
+
+  .pr-badge {
+    font-size: var(--ui-font-xs);
+    padding: 1px 6px;
+    border-radius: 999px;
+    white-space: nowrap;
+    flex-shrink: 0;
+    font-weight: 600;
+  }
+
+  .pr-badge.open {
+    background: rgba(63, 185, 80, 0.15);
+    color: var(--green);
+  }
+
+  .pr-badge.merged {
+    background: rgba(163, 113, 247, 0.15);
+    color: var(--magenta);
+  }
+
+  .pr-badge.closed {
+    background: rgba(248, 81, 73, 0.15);
+    color: var(--red);
+  }
+
+  .pr-badge.no-pr {
+    color: var(--text-muted);
+    background: none;
+  }
+
+  .pr-badge.disconnected {
+    color: var(--text-muted);
+    background: none;
+    font-style: italic;
   }
 </style>
