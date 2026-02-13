@@ -97,6 +97,17 @@ pub fn is_gh_cli_available() -> bool {
         .unwrap_or(false)
 }
 
+/// Check if GitHub CLI (gh) is authenticated (FR-003)
+///
+/// Runs `gh auth status` and returns true if the exit code is 0.
+pub fn is_gh_cli_authenticated() -> bool {
+    Command::new("gh")
+        .args(["auth", "status"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 /// Fetch open issues from GitHub using gh CLI with pagination support (FR-001)
 ///
 /// Returns issues sorted by updated_at descending (most recently updated first).
@@ -442,6 +453,21 @@ mod tests {
     #[test]
     fn test_generate_branch_name_release() {
         assert_eq!(generate_branch_name("release/", 100), "release/issue-100");
+    }
+
+    // ==========================================================
+    // FR-016b: gh issue develop args tests
+    // ==========================================================
+
+    // ==========================================================
+    // FR-003: gh CLI authentication tests
+    // ==========================================================
+
+    #[test]
+    fn test_is_gh_cli_authenticated_returns_bool() {
+        // This test verifies the function runs without panic.
+        // The actual return value depends on the environment.
+        let _result: bool = is_gh_cli_authenticated();
     }
 
     // ==========================================================

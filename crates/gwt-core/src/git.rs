@@ -25,8 +25,8 @@ pub use diff::{
 };
 pub use issue::{
     create_linked_branch, fetch_open_issues, filter_issues_by_title, find_branch_for_issue,
-    generate_branch_name, is_gh_cli_available, parse_gh_issues_json, FetchIssuesResult,
-    GitHubIssue,
+    generate_branch_name, is_gh_cli_authenticated, is_gh_cli_available, parse_gh_issues_json,
+    FetchIssuesResult, GitHubIssue,
 };
 pub use pullrequest::{PrCache, PullRequest};
 pub use remote::Remote;
