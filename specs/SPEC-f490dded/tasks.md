@@ -70,9 +70,9 @@ US1（メニュー起動）─┬─→ US2（ショートカット起動）
 
 ## Phase 9: 仕上げ・横断
 
-- [ ] T031 [P] [共通] `specs/specs.md` の現行仕様テーブルに SPEC-f490dded を登録する `specs/specs.md`
-- [ ] T032 [P] [共通] `cargo clippy --all-targets --all-features -- -D warnings` でバックエンド全体の lint を通す
-- [ ] T033 [P] [共通] `cargo fmt --check` でフォーマットを検証する
+- [x] T031 [P] [共通] `specs/specs.md` の現行仕様テーブルに SPEC-f490dded を登録する `specs/specs.md`
+- [x] T032 [P] [共通] `cargo clippy --all-targets --all-features -- -D warnings` でバックエンド全体の lint を通す
+- [x] T033 [P] [共通] `cargo fmt --check` でフォーマットを検証する
 - [x] T034 [P] [共通] `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json` でフロントエンドの型チェックを通す
-- [ ] T035 [P] [共通] `cargo test` で全バックエンドテストを通す
+- [x] T035 [P] [共通] `cargo test` で全バックエンドテストを通す
 - [x] T036 [P] [共通] `cd gwt-gui && npx vitest run` で全フロントエンドテストを通す
