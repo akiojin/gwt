@@ -348,7 +348,10 @@ export async function installTauriMock(page: Page): Promise<void> {
       (
         window as unknown as {
           __TAURI_INTERNALS__?: {
-            metadata: { currentWindow: { label: string } };
+            metadata: {
+              currentWindow: { label: string };
+              currentWebview: { label: string };
+            };
             invoke: (
               cmd: string,
               args?: unknown,
@@ -365,6 +368,9 @@ export async function installTauriMock(page: Page): Promise<void> {
       ).__TAURI_INTERNALS__ = {
         metadata: {
           currentWindow: {
+            label: "main",
+          },
+          currentWebview: {
             label: "main",
           },
         },
