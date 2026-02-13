@@ -3,6 +3,7 @@
 //! On Windows, GUI applications should spawn child processes without creating
 //! transient console windows.
 
+use std::ffi::OsStr;
 use std::process::Command;
 
 #[cfg(windows)]
@@ -13,6 +14,11 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// Build a command configured for GUI-friendly execution.
 pub fn command(program: &str) -> Command {
+    command_os(program)
+}
+
+/// Build a command configured for GUI-friendly execution from an OS string.
+pub fn command_os<S: AsRef<OsStr>>(program: S) -> Command {
     let mut cmd = Command::new(program);
     configure_no_window(&mut cmd);
     cmd

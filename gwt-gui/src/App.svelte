@@ -11,6 +11,7 @@
     TerminalAnsiProbe,
     CapturedEnvInfo,
     SettingsData,
+    UpdateState,
     VoiceInputSettings,
   } from "./lib/types";
   import Sidebar from "./lib/components/Sidebar.svelte";
@@ -171,16 +172,51 @@
 
   let toastMessage = $state<string | null>(null);
   let toastTimeout: ReturnType<typeof setTimeout> | null = null;
+  type ToastAction = { kind: "apply-update"; latest: string } | null;
+  let toastAction = $state<ToastAction>(null);
+  let lastUpdateToastVersion = $state<string | null>(null);
 
   let showOsEnvDebug = $state(false);
   let osEnvDebugData = $state<CapturedEnvInfo | null>(null);
   let osEnvDebugLoading = $state(false);
   let osEnvDebugError = $state<string | null>(null);
 
-  function showToast(message: string, durationMs = 8000) {
+  function showToast(message: string, durationMs = 8000, action: ToastAction = null) {
     toastMessage = message;
+    toastAction = action;
     if (toastTimeout) clearTimeout(toastTimeout);
-    toastTimeout = setTimeout(() => { toastMessage = null; }, durationMs);
+    toastTimeout = null;
+    if (durationMs > 0) {
+      toastTimeout = setTimeout(() => {
+        toastMessage = null;
+        toastAction = null;
+      }, durationMs);
+    }
+  }
+
+  async function confirmAndApplyUpdate(latest: string) {
+    try {
+      const { confirm } = await import("@tauri-apps/plugin-dialog");
+      const ok = await confirm(
+        `Update available: v${latest}\nRestart to update now?`,
+        { title: "gwt", kind: "info" },
+      );
+      if (!ok) return;
+
+      showToast(`Updating to v${latest}...`, 0);
+
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("apply_app_update");
+    } catch (err) {
+      showToast(`Failed to apply update: ${toErrorMessage(err)}`);
+    }
+  }
+
+  async function handleToastClick() {
+    if (!toastAction) return;
+    if (toastAction.kind === "apply-update") {
+      await confirmAndApplyUpdate(toastAction.latest);
+    }
   }
 
   function queueIssueLaunchFollowup(jobId: string, request: LaunchAgentRequest) {
@@ -291,6 +327,69 @@
       appVersion = v;
     })();
     return () => { cancelled = true; };
+  });
+
+  // Best-effort: request update state once on startup.
+  $effect(() => {
+    if (lastUpdateToastVersion !== null) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const s = await invoke<UpdateState>("check_app_update", { force: false });
+        if (cancelled) return;
+        if (s.state !== "available") return;
+
+        lastUpdateToastVersion = s.latest;
+        if (s.asset_url) {
+          showToast(
+            `Update available: v${s.latest} (click update)`,
+            0,
+            { kind: "apply-update", latest: s.latest },
+          );
+        } else {
+          showToast(`Update available: v${s.latest}. Manual download required.`, 15000);
+        }
+      } catch {
+        // Ignore: update check should not block UI startup.
+      }
+    })();
+    return () => { cancelled = true; };
+  });
+
+  // Listen for app update state notifications from backend startup checks.
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen<UpdateState>("app-update-state", (event) => {
+          const s = event.payload;
+          if (s.state !== "available") return;
+          if (lastUpdateToastVersion === s.latest) return;
+          lastUpdateToastVersion = s.latest;
+
+          if (s.asset_url) {
+            showToast(
+              `Update available: v${s.latest} (click update)`,
+              0,
+              { kind: "apply-update", latest: s.latest },
+            );
+          } else {
+            showToast(`Update available: v${s.latest}. Manual download required.`, 15000);
+          }
+        });
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+      } catch {
+        // Ignore when event API is unavailable.
+      }
+    })();
+    return () => { cancelled = true; if (unlisten) unlisten(); };
   });
 
   $effect(() => {
@@ -931,6 +1030,36 @@
       case "version-history":
         openVersionHistoryTab();
         break;
+      case "check-updates":
+        {
+          try {
+            const { invoke } = await import("@tauri-apps/api/core");
+            const s = await invoke<UpdateState>("check_app_update", { force: true });
+            switch (s.state) {
+              case "up_to_date":
+                showToast("Up to date.");
+                break;
+              case "available":
+                lastUpdateToastVersion = s.latest;
+                if (s.asset_url) {
+                  showToast(
+                    `Update available: v${s.latest} (click update)`,
+                    0,
+                    { kind: "apply-update", latest: s.latest },
+                  );
+                } else {
+                  showToast(`Update available: v${s.latest}. Manual download required.`, 15000);
+                }
+                break;
+              case "failed":
+                showToast(`Update check failed: ${s.message}`);
+                break;
+            }
+          } catch (err) {
+            showToast(`Update check failed: ${toErrorMessage(err)}`);
+          }
+        }
+        break;
       case "about":
         showAbout = true;
         break;
@@ -1470,7 +1599,15 @@
   <div class="toast-container">
     <div class="toast-message">
       <span>{toastMessage}</span>
-      <button class="toast-close" onclick={() => (toastMessage = null)}>[x]</button>
+      {#if toastAction?.kind === "apply-update"}
+        <button class="toast-action" onclick={handleToastClick}>Update</button>
+      {/if}
+      <button
+        class="toast-close"
+        onclick={() => { toastMessage = null; toastAction = null; }}
+      >
+        [x]
+      </button>
     </div>
   </div>
 {/if}
@@ -1678,6 +1815,20 @@
     align-items: center;
     gap: 12px;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  }
+
+  .toast-action {
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .toast-action:hover {
+    background: var(--bg-hover, rgba(255, 255, 255, 0.08));
   }
 
   .toast-close {
