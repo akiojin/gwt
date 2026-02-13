@@ -433,6 +433,11 @@ pub fn build_app(
             crate::commands::version_history::get_project_version_history,
             crate::commands::window_tabs::sync_window_agent_tabs,
             crate::commands::recent_projects::get_recent_projects,
+            crate::commands::issue::fetch_github_issues,
+            crate::commands::issue::check_gh_cli_status,
+            crate::commands::issue::find_existing_issue_branch,
+            crate::commands::issue::link_branch_to_issue,
+            crate::commands::issue::rollback_issue_branch,
         ])
 }
 
