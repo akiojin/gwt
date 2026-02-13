@@ -892,10 +892,15 @@ fn find_extracted_binary(extract_dir: &Path, binary_name: &str) -> Result<Option
     // Fallback: deep search.
     let mut stack = vec![extract_dir.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir)
-            .unwrap_or_else(|_| fs::read_dir(extract_dir).unwrap())
-            .flatten()
-        {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => {
+                // Ignore unreadable directories and continue searching other paths.
+                continue;
+            }
+        };
+
+        for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
@@ -1297,5 +1302,34 @@ mod tests {
 
         let url = find_installer_asset_url(&platform, &assets);
         assert_eq!(url.as_deref(), Some("https://example.com/macos-arm64.dmg"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_extracted_binary_skips_unreadable_dirs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let readable = root.join("readable");
+        let nested = readable.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        let expected = nested.join("gwt");
+        fs::write(&expected, b"bin").unwrap();
+
+        let unreadable = root.join("unreadable");
+        fs::create_dir_all(&unreadable).unwrap();
+        let mut unreadable_perms = fs::metadata(&unreadable).unwrap().permissions();
+        unreadable_perms.set_mode(0o000);
+        fs::set_permissions(&unreadable, unreadable_perms).unwrap();
+
+        let found = find_extracted_binary(root, "gwt");
+
+        // Restore permissions so tempfile cleanup can remove the directory.
+        let mut restore_perms = fs::metadata(&unreadable).unwrap().permissions();
+        restore_perms.set_mode(0o755);
+        let _ = fs::set_permissions(&unreadable, restore_perms);
+
+        assert_eq!(found.unwrap(), Some(expected));
     }
 }
