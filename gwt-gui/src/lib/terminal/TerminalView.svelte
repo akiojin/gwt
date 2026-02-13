@@ -22,16 +22,30 @@
     return !!el && rootEl.contains(el);
   }
 
-  function requestTerminalFocus() {
+  function focusTerminalIfNeeded(rootEl: HTMLElement, immediate = false) {
+    if (!active) return;
     if (!terminal) return;
-    requestAnimationFrame(() => {
+    if (isTerminalFocused(rootEl)) return;
+    requestTerminalFocus(immediate);
+  }
+
+  function requestTerminalFocus(immediate = false) {
+    if (!terminal) return;
+    const focusNow = () => {
       if (!active) return;
       try {
         terminal?.focus();
       } catch {
         // Ignore focus errors in non-interactive contexts.
       }
-    });
+    };
+
+    if (immediate) {
+      focusNow();
+      return;
+    }
+
+    requestAnimationFrame(focusNow);
   }
 
   $effect(() => {
@@ -47,10 +61,7 @@
     // Focus can fail if an overlay/modal is still on-screen when the tab becomes active.
     // Retry a few times shortly after activation to make trackpad scrolling reliable.
     const focusIfNeeded = () => {
-      if (!active) return;
-      if (!terminal) return;
-      if (isTerminalFocused(rootEl)) return;
-      requestTerminalFocus();
+      focusTerminalIfNeeded(rootEl);
     };
 
     focusIfNeeded();
@@ -160,12 +171,9 @@
     });
 
     const handleWheel = () => {
-      if (!active) return;
-      if (!terminal) return;
-      if (isTerminalFocused(rootEl)) return;
-      requestTerminalFocus();
+      focusTerminalIfNeeded(rootEl, true);
     };
-    rootEl.addEventListener("wheel", handleWheel, { passive: true });
+    rootEl.addEventListener("wheel", handleWheel, { passive: true, capture: true });
 
     term.attachCustomKeyEventHandler((event: KeyboardEvent) => {
       if (event.type !== "keydown") return true;
@@ -279,7 +287,7 @@
         unlisten();
       }
       rootEl.removeEventListener("paste", handlePaste);
-      rootEl.removeEventListener("wheel", handleWheel);
+      rootEl.removeEventListener("wheel", handleWheel, true);
       window.removeEventListener("gwt-terminal-font-size", handleFontSizeChange);
       observer.disconnect();
       term.dispose();
