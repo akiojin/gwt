@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
+  AGENT_TAB_RESTORE_MAX_RETRIES,
+  shouldRetryAgentTabRestore,
   PROJECT_AGENT_TABS_STORAGE_KEY,
   loadStoredProjectAgentTabs,
   persistStoredProjectAgentTabs,
@@ -144,5 +146,12 @@ describe("agentTabsPersistence", () => {
 
     expect(restored.tabs.length).toBe(2);
     expect(restored.activeTabId).toBe("agent-p2");
+  });
+
+  it("shouldRetryAgentTabRestore handles transient empty matches", () => {
+    expect(shouldRetryAgentTabRestore(2, 0, 0)).toBe(true);
+    expect(shouldRetryAgentTabRestore(2, 1, 0)).toBe(false);
+    expect(shouldRetryAgentTabRestore(0, 0, 0)).toBe(false);
+    expect(shouldRetryAgentTabRestore(2, 0, AGENT_TAB_RESTORE_MAX_RETRIES - 1)).toBe(false);
   });
 });
