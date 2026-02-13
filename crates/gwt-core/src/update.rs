@@ -5,7 +5,7 @@
 //! - TTL-based local cache to avoid repeated API calls
 //! - User-approved apply flow:
 //!   - Portable payload (tar.gz/zip) => extract and replace the running executable, then restart
-//!   - Installer payload (.pkg/.msi) => run installer with privileges/UAC, then restart
+//!   - Installer payload (.dmg/.pkg/.msi) => run installer with privileges/UAC, then restart
 //! - Internal helper modes (`__internal`) to safely apply updates after the parent process exits
 
 use chrono::{DateTime, Utc};
@@ -99,6 +99,7 @@ struct GitHubAsset {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallerKind {
+    MacDmg,
     MacPkg,
     WindowsMsi,
 }
@@ -154,15 +155,6 @@ impl Platform {
             Some(format!("gwt-{artifact}.zip"))
         } else {
             Some(format!("gwt-{artifact}.tar.gz"))
-        }
-    }
-
-    fn installer_asset_name(&self) -> Option<(String, InstallerKind)> {
-        let artifact = self.artifact()?;
-        match self.os.as_str() {
-            "macos" => Some((format!("gwt-{artifact}.pkg"), InstallerKind::MacPkg)),
-            "windows" => Some((format!("gwt-{artifact}.msi"), InstallerKind::WindowsMsi)),
-            _ => None,
         }
     }
 }
@@ -272,10 +264,7 @@ impl UpdateManager {
                     .and_then(|name| release.assets.iter().find(|a| a.name == name))
                     .map(|a| a.browser_download_url.clone());
 
-                let installer_asset_url = platform
-                    .installer_asset_name()
-                    .and_then(|(name, _)| release.assets.iter().find(|a| a.name == name))
-                    .map(|a| a.browser_download_url.clone());
+                let installer_asset_url = find_installer_asset_url(&platform, &release.assets);
 
                 let asset_url = choose_apply_plan(
                     &platform,
@@ -380,6 +369,13 @@ impl UpdateManager {
             });
         }
 
+        if dest_str.ends_with(".dmg") {
+            return Ok(PreparedPayload::Installer {
+                path: dest,
+                kind: InstallerKind::MacDmg,
+            });
+        }
+
         if dest_str.ends_with(".msi") {
             return Ok(PreparedPayload::Installer {
                 path: dest,
@@ -456,6 +452,7 @@ impl UpdateManager {
             .arg(installer)
             .arg("--installer-kind")
             .arg(match installer_kind {
+                InstallerKind::MacDmg => "mac_dmg",
                 InstallerKind::MacPkg => "mac_pkg",
                 InstallerKind::WindowsMsi => "windows_msi",
             })
@@ -592,6 +589,16 @@ pub fn internal_run_installer(
     wait_for_pid_exit(old_pid, Duration::from_secs(300))?;
 
     match installer_kind {
+        InstallerKind::MacDmg => {
+            #[cfg(target_os = "macos")]
+            {
+                run_macos_dmg_installer_with_privileges(installer, target_exe)?;
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                return Err("mac_dmg installer can only run on macOS".to_string());
+            }
+        }
         InstallerKind::MacPkg => {
             #[cfg(target_os = "macos")]
             {
@@ -674,6 +681,92 @@ fn asset_name_from_url(url: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+fn find_installer_asset_url(platform: &Platform, assets: &[GitHubAsset]) -> Option<String> {
+    match platform.os.as_str() {
+        "macos" => {
+            // New release flow: prefer DMG for macOS.
+            if let Some(asset) = assets.iter().find(|a| {
+                let lower = a.name.to_ascii_lowercase();
+                lower.ends_with(".dmg") && asset_matches_arch(&lower, &platform.arch)
+            }) {
+                return Some(asset.browser_download_url.clone());
+            }
+
+            // Legacy release flow fallback: signed PKG with old naming.
+            if let Some(artifact) = platform.artifact() {
+                let legacy_pkg_name = format!("gwt-{artifact}.pkg");
+                if let Some(asset) = assets.iter().find(|a| a.name == legacy_pkg_name) {
+                    return Some(asset.browser_download_url.clone());
+                }
+            }
+
+            if let Some(asset) = assets
+                .iter()
+                .find(|a| a.name.to_ascii_lowercase().ends_with(".dmg"))
+            {
+                return Some(asset.browser_download_url.clone());
+            }
+
+            assets
+                .iter()
+                .find(|a| a.name.to_ascii_lowercase().ends_with(".pkg"))
+                .map(|a| a.browser_download_url.clone())
+        }
+        "windows" => {
+            // New release flow: WiX MSI.
+            if let Some(asset) = assets
+                .iter()
+                .find(|a| a.name.eq_ignore_ascii_case("gwt-wix-windows-x86_64.msi"))
+            {
+                return Some(asset.browser_download_url.clone());
+            }
+
+            // Legacy naming fallback.
+            if let Some(asset) = assets
+                .iter()
+                .find(|a| a.name.eq_ignore_ascii_case("gwt-windows-x86_64.msi"))
+            {
+                return Some(asset.browser_download_url.clone());
+            }
+
+            if let Some(asset) = assets.iter().find(|a| {
+                let lower = a.name.to_ascii_lowercase();
+                lower.ends_with(".msi") && asset_matches_arch(&lower, &platform.arch)
+            }) {
+                return Some(asset.browser_download_url.clone());
+            }
+
+            assets
+                .iter()
+                .find(|a| a.name.to_ascii_lowercase().ends_with(".msi"))
+                .map(|a| a.browser_download_url.clone())
+        }
+        _ => None,
+    }
+}
+
+fn asset_matches_arch(asset_name_lower: &str, arch: &str) -> bool {
+    match arch {
+        "aarch64" => asset_name_lower.contains("aarch64") || asset_name_lower.contains("arm64"),
+        "x86_64" => {
+            asset_name_lower.contains("x86_64")
+                || asset_name_lower.contains("x64")
+                || asset_name_lower.contains("amd64")
+        }
+        _ => true,
+    }
+}
+
+fn installer_kind_for_url(platform: &Platform, installer_url: &str) -> Option<InstallerKind> {
+    let lower = installer_url.to_ascii_lowercase();
+    match platform.os.as_str() {
+        "macos" if lower.ends_with(".dmg") => Some(InstallerKind::MacDmg),
+        "macos" if lower.ends_with(".pkg") => Some(InstallerKind::MacPkg),
+        "windows" if lower.ends_with(".msi") => Some(InstallerKind::WindowsMsi),
+        _ => None,
+    }
+}
+
 fn choose_apply_plan(
     platform: &Platform,
     current_exe: Option<&Path>,
@@ -683,7 +776,7 @@ fn choose_apply_plan(
     // macOS: prefer installer when available to preserve codesign/notarization integrity.
     if platform.os == "macos" {
         if let Some(url) = installer_url {
-            let kind = platform.installer_asset_name().map(|(_, k)| k)?;
+            let kind = installer_kind_for_url(platform, url)?;
             return Some(ApplyPlan::Installer {
                 url: url.to_string(),
                 kind,
@@ -699,7 +792,7 @@ fn choose_apply_plan(
     // If we cannot replace in-place, prefer installer when available.
     if !writable {
         if let Some(url) = installer_url {
-            let kind = platform.installer_asset_name().map(|(_, k)| k)?;
+            let kind = installer_kind_for_url(platform, url)?;
             return Some(ApplyPlan::Installer {
                 url: url.to_string(),
                 kind,
@@ -715,7 +808,7 @@ fn choose_apply_plan(
     }
 
     if let Some(url) = installer_url {
-        let kind = platform.installer_asset_name().map(|(_, k)| k)?;
+        let kind = installer_kind_for_url(platform, url)?;
         return Some(ApplyPlan::Installer {
             url: url.to_string(),
             kind,
@@ -881,23 +974,110 @@ fn escape_applescript_string(s: &str) -> String {
 }
 
 #[cfg(target_os = "macos")]
+fn run_shell_with_admin_privileges(shell_cmd: &str) -> Result<(), String> {
+    let applescript_cmd = format!(
+        "do shell script \"{}\" with administrator privileges",
+        escape_applescript_string(shell_cmd)
+    );
+    let status = Command::new("osascript")
+        .arg("-e")
+        .arg(applescript_cmd)
+        .status()
+        .map_err(|e| format!("Failed to run privileged command via osascript: {e}"))?;
+    if !status.success() {
+        return Err(format!("osascript command exited with {status}"));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn app_bundle_from_executable(target_exe: &Path) -> Option<PathBuf> {
+    target_exe
+        .ancestors()
+        .find(|p| p.extension() == Some(OsStr::new("app")))
+        .map(Path::to_path_buf)
+}
+
+#[cfg(target_os = "macos")]
+fn find_first_app_bundle(root: &Path) -> Result<Option<PathBuf>, String> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).map_err(|e| format!("Failed to read dir: {e}"))? {
+            let entry = entry.map_err(|e| format!("Failed to read dir entry: {e}"))?;
+            let path = entry.path();
+            if path.is_dir() {
+                if path.extension() == Some(OsStr::new("app")) {
+                    return Ok(Some(path));
+                }
+                stack.push(path);
+            }
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(target_os = "macos")]
 fn run_macos_pkg_installer_with_privileges(installer: &Path) -> Result<(), String> {
     let installer_path = installer.to_string_lossy().to_string();
     let shell_cmd = format!(
         "/usr/sbin/installer -pkg {} -target /",
         sh_single_quote(&installer_path)
     );
-    let applescript_cmd = format!(
-        "do shell script \"{}\" with administrator privileges",
-        escape_applescript_string(&shell_cmd)
-    );
-    let status = Command::new("osascript")
-        .arg("-e")
-        .arg(applescript_cmd)
+    run_shell_with_admin_privileges(&shell_cmd)
+}
+
+#[cfg(target_os = "macos")]
+fn run_macos_dmg_installer_with_privileges(
+    installer: &Path,
+    target_exe: &Path,
+) -> Result<(), String> {
+    let mount_dir = std::env::temp_dir().join(format!("gwt-update-dmg-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&mount_dir);
+    fs::create_dir_all(&mount_dir).map_err(|e| format!("Failed to create mount dir: {e}"))?;
+
+    let attach_status = Command::new("hdiutil")
+        .arg("attach")
+        .arg(installer)
+        .arg("-nobrowse")
+        .arg("-readonly")
+        .arg("-mountpoint")
+        .arg(&mount_dir)
         .status()
-        .map_err(|e| format!("Failed to run macOS installer via osascript: {e}"))?;
-    if !status.success() {
-        return Err(format!("osascript installer exited with {status}"));
+        .map_err(|e| format!("Failed to mount dmg: {e}"))?;
+    if !attach_status.success() {
+        let _ = fs::remove_dir_all(&mount_dir);
+        return Err(format!("hdiutil attach exited with {attach_status}"));
+    }
+
+    let install_result = (|| {
+        let source_app = find_first_app_bundle(&mount_dir)?
+            .ok_or_else(|| "Mounted dmg does not contain an .app bundle".to_string())?;
+        let source_name = source_app
+            .file_name()
+            .ok_or_else(|| "Mounted app bundle has an invalid name".to_string())?;
+        let target_app = app_bundle_from_executable(target_exe)
+            .unwrap_or_else(|| PathBuf::from("/Applications").join(source_name));
+
+        let shell_cmd = format!(
+            "rm -rf {} && /usr/bin/ditto {} {}",
+            sh_single_quote(&target_app.to_string_lossy()),
+            sh_single_quote(&source_app.to_string_lossy()),
+            sh_single_quote(&target_app.to_string_lossy())
+        );
+        run_shell_with_admin_privileges(&shell_cmd)
+    })();
+
+    let detach_status = Command::new("hdiutil")
+        .arg("detach")
+        .arg(&mount_dir)
+        .arg("-force")
+        .status()
+        .map_err(|e| format!("Failed to unmount dmg: {e}"))?;
+    let _ = fs::remove_dir_all(&mount_dir);
+
+    install_result?;
+    if !detach_status.success() {
+        return Err(format!("hdiutil detach exited with {detach_status}"));
     }
     Ok(())
 }
@@ -1052,5 +1232,49 @@ mod tests {
 
         let state = mgr.check(true);
         assert!(matches!(state, UpdateState::Failed { .. }));
+    }
+
+    #[test]
+    fn choose_apply_plan_prefers_macos_dmg_installer() {
+        let platform = Platform {
+            os: "macos".to_string(),
+            arch: "aarch64".to_string(),
+        };
+
+        let plan = choose_apply_plan(
+            &platform,
+            None,
+            Some("https://example.com/gwt-macos-arm64.tar.gz"),
+            Some("https://example.com/gwt_7.1.0_aarch64.dmg"),
+        );
+
+        assert_eq!(
+            plan,
+            Some(ApplyPlan::Installer {
+                url: "https://example.com/gwt_7.1.0_aarch64.dmg".to_string(),
+                kind: InstallerKind::MacDmg,
+            })
+        );
+    }
+
+    #[test]
+    fn find_installer_asset_url_prefers_windows_wix_msi() {
+        let platform = Platform {
+            os: "windows".to_string(),
+            arch: "x86_64".to_string(),
+        };
+        let assets = vec![
+            GitHubAsset {
+                name: "gwt_7.1.0_x64_en-US.msi".to_string(),
+                browser_download_url: "https://example.com/tauri.msi".to_string(),
+            },
+            GitHubAsset {
+                name: "gwt-wix-windows-x86_64.msi".to_string(),
+                browser_download_url: "https://example.com/wix.msi".to_string(),
+            },
+        ];
+
+        let url = find_installer_asset_url(&platform, &assets);
+        assert_eq!(url.as_deref(), Some("https://example.com/wix.msi"));
     }
 }

@@ -199,6 +199,7 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
     #[cfg(target_os = "macos")]
     let gwt = SubmenuBuilder::new(app, app_menu_label)
         .item(&help_about)
+        .item(&help_check_updates)
         .separator()
         .item(&settings_prefs)
         .separator()

@@ -63,6 +63,7 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
         crate::menu::MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS => Some("terminal-diagnostics"),
         crate::menu::MENU_ID_SETTINGS_PREFERENCES => Some("open-settings"),
         crate::menu::MENU_ID_HELP_ABOUT => Some("about"),
+        crate::menu::MENU_ID_HELP_CHECK_UPDATES => Some("check-updates"),
         _ => None,
     }
 }
@@ -361,6 +362,17 @@ pub fn build_app(
                         let _ = os_env_cell.set(result.env);
                     });
                 }
+
+                // Background task: check app update (best-effort, TTL cached).
+                {
+                    let mgr = _app.state::<AppState>().update_manager.clone();
+                    let app_handle_clone = _app.handle().clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        let current_exe = std::env::current_exe().ok();
+                        let state = mgr.check_for_executable(false, current_exe.as_deref());
+                        let _ = app_handle_clone.emit("app-update-state", &state);
+                    });
+                }
             }
 
             Ok(())
@@ -514,6 +526,8 @@ pub fn build_app(
             crate::commands::cleanup::cleanup_single_worktree,
             crate::commands::hooks::check_and_update_hooks,
             crate::commands::hooks::register_hooks,
+            crate::commands::update::check_app_update,
+            crate::commands::update::apply_app_update,
             crate::commands::terminal::get_captured_environment,
             crate::commands::terminal::is_os_env_ready,
             crate::commands::git_view::get_git_change_summary,
@@ -727,6 +741,10 @@ mod tests {
         assert_eq!(
             menu_action_from_id(crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES),
             Some("cleanup-worktrees")
+        );
+        assert_eq!(
+            menu_action_from_id(crate::menu::MENU_ID_HELP_CHECK_UPDATES),
+            Some("check-updates")
         );
     }
 }
