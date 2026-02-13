@@ -35,6 +35,12 @@
     shouldRetryAgentTabRestore,
   } from "./lib/agentTabsPersistence";
   import {
+    runStartupUpdateCheck,
+    STARTUP_UPDATE_INITIAL_DELAY_MS,
+    STARTUP_UPDATE_RETRY_DELAY_MS,
+    STARTUP_UPDATE_MAX_RETRIES,
+  } from "./lib/update/startupUpdate";
+  import {
     VoiceInputController,
     type VoiceControllerState,
   } from "./lib/voice/voiceInputController";
@@ -180,6 +186,7 @@
   let osEnvDebugData = $state<CapturedEnvInfo | null>(null);
   let osEnvDebugLoading = $state(false);
   let osEnvDebugError = $state<string | null>(null);
+  type AvailableUpdateState = Extract<UpdateState, { state: "available" }>;
 
   function showToast(message: string, durationMs = 8000, action: ToastAction = null) {
     toastMessage = message;
@@ -191,6 +198,21 @@
         toastMessage = null;
         toastAction = null;
       }, durationMs);
+    }
+  }
+
+  function showAvailableUpdateToast(s: AvailableUpdateState) {
+    if (lastUpdateToastVersion === s.latest) return;
+    lastUpdateToastVersion = s.latest;
+
+    if (s.asset_url) {
+      showToast(
+        `Update available: v${s.latest} (click update)`,
+        0,
+        { kind: "apply-update", latest: s.latest },
+      );
+    } else {
+      showToast(`Update available: v${s.latest}. Manual download required.`, 15000);
     }
   }
 
@@ -332,29 +354,23 @@
   // Best-effort: request update state once on startup.
   $effect(() => {
     if (lastUpdateToastVersion !== null) return;
-    let cancelled = false;
-    (async () => {
-      try {
+    const controller = new AbortController();
+    void runStartupUpdateCheck({
+      signal: controller.signal,
+      initialDelayMs: STARTUP_UPDATE_INITIAL_DELAY_MS,
+      retryDelayMs: STARTUP_UPDATE_RETRY_DELAY_MS,
+      maxRetries: STARTUP_UPDATE_MAX_RETRIES,
+      checkUpdate: async () => {
         const { invoke } = await import("@tauri-apps/api/core");
-        const s = await invoke<UpdateState>("check_app_update", { force: false });
-        if (cancelled) return;
-        if (s.state !== "available") return;
-
-        lastUpdateToastVersion = s.latest;
-        if (s.asset_url) {
-          showToast(
-            `Update available: v${s.latest} (click update)`,
-            0,
-            { kind: "apply-update", latest: s.latest },
-          );
-        } else {
-          showToast(`Update available: v${s.latest}. Manual download required.`, 15000);
-        }
-      } catch {
-        // Ignore: update check should not block UI startup.
-      }
-    })();
-    return () => { cancelled = true; };
+        return invoke<UpdateState>("check_app_update", { force: false });
+      },
+      onAvailable: (s) => {
+        showAvailableUpdateToast(s);
+      },
+    });
+    return () => {
+      controller.abort();
+    };
   });
 
   // Listen for app update state notifications from backend startup checks.
@@ -367,18 +383,7 @@
         const unlistenFn = await listen<UpdateState>("app-update-state", (event) => {
           const s = event.payload;
           if (s.state !== "available") return;
-          if (lastUpdateToastVersion === s.latest) return;
-          lastUpdateToastVersion = s.latest;
-
-          if (s.asset_url) {
-            showToast(
-              `Update available: v${s.latest} (click update)`,
-              0,
-              { kind: "apply-update", latest: s.latest },
-            );
-          } else {
-            showToast(`Update available: v${s.latest}. Manual download required.`, 15000);
-          }
+          showAvailableUpdateToast(s);
         });
         if (cancelled) {
           unlistenFn();
@@ -1040,16 +1045,7 @@
                 showToast("Up to date.");
                 break;
               case "available":
-                lastUpdateToastVersion = s.latest;
-                if (s.asset_url) {
-                  showToast(
-                    `Update available: v${s.latest} (click update)`,
-                    0,
-                    { kind: "apply-update", latest: s.latest },
-                  );
-                } else {
-                  showToast(`Update available: v${s.latest}. Manual download required.`, 15000);
-                }
+                showAvailableUpdateToast(s);
                 break;
               case "failed":
                 showToast(`Update check failed: ${s.message}`);

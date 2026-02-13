@@ -302,6 +302,15 @@ pub fn build_app(
                     tauri::async_runtime::spawn_blocking(move || {
                         let current_exe = std::env::current_exe().ok();
                         let state = mgr.check_for_executable(false, current_exe.as_deref());
+                        if let gwt_core::update::UpdateState::Failed { message, .. } = &state {
+                            warn!(
+                                category = "update",
+                                force = false,
+                                source = "startup-event",
+                                error = %message,
+                                "Startup update check failed"
+                            );
+                        }
                         let _ = app_handle_clone.emit("app-update-state", &state);
                     });
                 }
