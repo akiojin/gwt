@@ -35,6 +35,7 @@
     buildRestoredAgentTabs,
     shouldRetryAgentTabRestore,
   } from "./lib/agentTabsPersistence";
+  import { defaultAppTabs, shouldAllowRestoredActiveTab } from "./lib/appTabs";
   import {
     VoiceInputController,
     type VoiceControllerState,
@@ -141,11 +142,8 @@
   let migrationOpen: boolean = $state(false);
   let migrationSourceRoot: string = $state("");
 
-  let tabs: Tab[] = $state([
-    { id: "summary", label: "Session Summary", type: "summary" },
-    { id: "agentMode", label: "Agent Mode", type: "agentMode" },
-  ]);
-  let activeTabId: string = $state("summary");
+  let tabs: Tab[] = $state(defaultAppTabs());
+  let activeTabId: string = $state("agentMode");
 
   let agentTabsHydratedProjectPath: string | null = $state(null);
   let agentTabsRestoreToken = 0;
@@ -602,25 +600,11 @@
     fetchCurrentBranch();
   }
 
-  function openSessionSummaryTab() {
-    const existing = tabs.find((t) => t.type === "summary" || t.id === "summary");
-    if (existing) {
-      activeTabId = existing.id;
-      return;
-    }
-
-    const tab: Tab = { id: "summary", label: "Session Summary", type: "summary" };
-    tabs = [tab, ...tabs];
-    activeTabId = tab.id;
-  }
-
   function handleBranchSelect(branch: BranchInfo) {
     selectedBranch = branch;
     if (branch.is_current) {
       currentBranch = branch.name;
     }
-    // Switch to session summary (re-open tab if it was closed).
-    openSessionSummaryTab();
   }
 
   function requestAgentLaunch() {
@@ -639,14 +623,7 @@
     if (existing) return;
 
     const tab: Tab = { id: "agentMode", label: "Agent Mode", type: "agentMode" };
-    const summaryIndex = tabs.findIndex((t) => t.type === "summary" || t.id === "summary");
-    if (summaryIndex >= 0) {
-      const nextTabs = [...tabs];
-      nextTabs.splice(summaryIndex + 1, 0, tab);
-      tabs = nextTabs;
-    } else {
-      tabs = [...tabs, tab];
-    }
+    tabs = [...tabs, tab];
   }
 
   function handleSidebarModeChange(next: SidebarMode) {
@@ -774,9 +751,6 @@
 
   async function handleTabClose(tabId: string) {
     const tab = tabs.find((t) => t.id === tabId);
-    if (tab?.type === "summary") {
-      return;
-    }
     if (tab?.paneId) {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -1025,11 +999,8 @@
           }
 
           projectPath = null;
-          tabs = [
-            { id: "summary", label: "Session Summary", type: "summary" },
-            { id: "agentMode", label: "Agent Mode", type: "agentMode" },
-          ];
-          activeTabId = "summary";
+          tabs = defaultAppTabs();
+          activeTabId = "agentMode";
           selectedBranch = null;
           currentBranch = "";
         }
@@ -1198,8 +1169,7 @@
     const preserved = tabs.filter((t) => t.type !== "agent");
     tabs = [...preserved, ...restoredTabs];
 
-    const allowOverrideActive =
-      activeTabId === "summary" || activeTabId === "agentMode";
+    const allowOverrideActive = shouldAllowRestoredActiveTab(activeTabId);
     if (allowOverrideActive && restored.activeTabId) {
       activeTabId = restored.activeTabId;
     }

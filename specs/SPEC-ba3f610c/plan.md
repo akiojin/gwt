@@ -50,3 +50,11 @@ gwt-gui/src/
 - 送信中にスピナーが表示される
 - チャット履歴が会話形式のバブル表示になる
 - 新規メッセージ追加時にチャットが最下部へ自動スクロールする
+
+## 追補: Session Summaryタブ回帰修正（2026-02-13）
+
+- `App.svelte` の初期タブ/再初期化から `Session Summary` を除去し、`Agent Mode` を既定タブに統一する
+- ブランチ選択時の `Session Summary` 再追加ロジックを削除する
+- タブ復元時の active 上書き条件を `agentMode` のみに限定する
+- `Tab` 型から `summary` を除去して型レベルで再発を防止する
+- `MainArea.test.ts` と `appTabs.test.ts` を追加し、タブ固定仕様をテストで担保する
