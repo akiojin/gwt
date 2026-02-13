@@ -16,7 +16,7 @@
       "icons/icon.icns"
     ],
     "resources": [
-      "../../gwt-mcp-bridge/dist/gwt-mcp-bridge.js"
+      "../../gwt-mcp-bridge/dist"
     ]
   },
   "app": {

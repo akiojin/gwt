@@ -79,8 +79,12 @@ pub fn detect_runtime() -> Result<String, GwtError> {
 /// `<project>/gwt-mcp-bridge/dist/gwt-mcp-bridge.js`.
 pub fn resolve_bridge_path(resource_dir: Option<&Path>) -> Result<PathBuf, GwtError> {
     if let Some(dir) = resource_dir {
-        let path = dir.join("gwt-mcp-bridge.js");
-        if path.exists() {
+        let candidates = [
+            dir.join("gwt-mcp-bridge.js"),
+            dir.join("dist").join("gwt-mcp-bridge.js"),
+        ];
+
+        if let Some(path) = candidates.into_iter().find(|path| path.exists()) {
             return Ok(path);
         }
     }
