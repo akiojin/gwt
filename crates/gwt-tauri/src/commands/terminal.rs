@@ -1750,6 +1750,95 @@ mod tests {
         let _ = mgr.kill_all();
     }
 
+    #[test]
+    fn mark_pane_stream_error_sets_error_status_and_records_message() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::commands::TestEnvGuard::new(home.path());
+
+        let state = AppState::new();
+        let pane_id = "pane-stream-error-test";
+        let pane =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: pane_id.to_string(),
+                command: "/bin/cat".to_string(),
+                args: vec![],
+                working_dir: std::env::temp_dir(),
+                branch_name: "test-branch".to_string(),
+                agent_name: "test-agent".to_string(),
+                agent_color: AgentColor::Green,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+            })
+            .expect("failed to create test pane");
+
+        {
+            let mut mgr = state.pane_manager.lock().unwrap();
+            mgr.add_pane(pane).expect("failed to add test pane");
+        }
+
+        let bytes = mark_pane_stream_error_and_write_message(&state, pane_id, "mock read failure");
+        let output = String::from_utf8_lossy(&bytes);
+        assert_eq!(output, "\r\n[PTY stream error: mock read failure]\r\n");
+
+        {
+            let mut mgr = state.pane_manager.lock().unwrap();
+            let pane = mgr.pane_mut_by_id(pane_id).expect("missing test pane");
+            assert_eq!(
+                pane.status(),
+                &PaneStatus::Error("PTY stream error: mock read failure".to_string())
+            );
+        }
+
+        let captured = capture_scrollback_tail_from_state(&state, pane_id, 1024)
+            .expect("capture should succeed");
+        assert!(captured.contains("[PTY stream error: mock read failure]"));
+
+        let mut mgr = state.pane_manager.lock().unwrap();
+        let _ = mgr.kill_all();
+    }
+
+    #[test]
+    fn append_close_hint_to_pane_scrollback_records_hint() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::commands::TestEnvGuard::new(home.path());
+
+        let state = AppState::new();
+        let pane_id = "pane-stream-close-hint-test";
+        let pane =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: pane_id.to_string(),
+                command: "/bin/cat".to_string(),
+                args: vec![],
+                working_dir: std::env::temp_dir(),
+                branch_name: "test-branch".to_string(),
+                agent_name: "test-agent".to_string(),
+                agent_color: AgentColor::Green,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+            })
+            .expect("failed to create test pane");
+
+        {
+            let mut mgr = state.pane_manager.lock().unwrap();
+            mgr.add_pane(pane).expect("failed to add test pane");
+        }
+
+        let bytes = append_close_hint_to_pane_scrollback(&state, pane_id);
+        let output = String::from_utf8_lossy(&bytes);
+        assert_eq!(output, "\r\nPress Enter to close this tab.\r\n");
+
+        let captured = capture_scrollback_tail_from_state(&state, pane_id, 1024)
+            .expect("capture should succeed");
+        assert!(captured.contains("Press Enter to close this tab."));
+
+        let mut mgr = state.pane_manager.lock().unwrap();
+        let _ = mgr.kill_all();
+    }
+
     fn make_request(agent_id: &str) -> LaunchAgentRequest {
         LaunchAgentRequest {
             agent_id: agent_id.to_string(),
@@ -3048,6 +3137,37 @@ fn consume_osc7_cwd_updates(
     latest_changed
 }
 
+fn mark_pane_stream_error_and_write_message(
+    state: &AppState,
+    pane_id: &str,
+    details: &str,
+) -> Vec<u8> {
+    let status_message = format!("PTY stream error: {details}");
+    let output_message = format!("\r\n[{status_message}]\r\n");
+    let bytes = output_message.into_bytes();
+
+    if let Ok(mut manager) = state.pane_manager.lock() {
+        if let Some(pane) = manager.pane_mut_by_id(pane_id) {
+            pane.mark_error(status_message);
+            let _ = pane.process_bytes(&bytes);
+        }
+    }
+
+    bytes
+}
+
+fn append_close_hint_to_pane_scrollback(state: &AppState, pane_id: &str) -> Vec<u8> {
+    let bytes = b"\r\nPress Enter to close this tab.\r\n".to_vec();
+
+    if let Ok(mut manager) = state.pane_manager.lock() {
+        if let Some(pane) = manager.pane_mut_by_id(pane_id) {
+            let _ = pane.process_bytes(&bytes);
+        }
+    }
+
+    bytes
+}
+
 /// Stream PTY output to the frontend via Tauri events
 fn stream_pty_output(
     mut reader: Box<dyn Read + Send>,
@@ -3101,20 +3221,11 @@ fn stream_pty_output(
     }
 
     if let Some(details) = stream_error.as_deref() {
-        let status_message = format!("PTY stream error: {details}");
-        let output_message = format!("\r\n[{status_message}]\r\n");
-        let bytes = output_message.as_bytes();
-
-        if let Ok(mut manager) = state.pane_manager.lock() {
-            if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
-                pane.mark_error(status_message);
-                let _ = pane.process_bytes(bytes);
-            }
-        }
+        let bytes = mark_pane_stream_error_and_write_message(&state, &pane_id, details);
 
         let payload = TerminalOutputPayload {
             pane_id: pane_id.clone(),
-            data: bytes.to_vec(),
+            data: bytes,
         };
         let _ = app_handle.emit("terminal-output", &payload);
     }
@@ -3284,18 +3395,11 @@ fn stream_pty_output(
     }
 
     if ended {
-        let msg = "\r\nPress Enter to close this tab.\r\n";
-        let bytes = msg.as_bytes();
-
-        if let Ok(mut manager) = state.pane_manager.lock() {
-            if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
-                let _ = pane.process_bytes(bytes);
-            }
-        }
+        let bytes = append_close_hint_to_pane_scrollback(&state, &pane_id);
 
         let payload = TerminalOutputPayload {
             pane_id: pane_id.clone(),
-            data: bytes.to_vec(),
+            data: bytes,
         };
         let _ = app_handle.emit("terminal-output", &payload);
     }
