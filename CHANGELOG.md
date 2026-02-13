@@ -1,6 +1,24 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.4.0] - 2026-02-14
+
+### Bug Fixes
+
+- **ai:** Improve session summary filtering and chat completion fallback (#1040)
+- **tauri:** Avoid UI freeze during worktree cleanup (#1048)
+- **windows:** Filter docker exec env vars (#1050)
+- Windows起動時のClaude Hook上書き判定を修正 (#1051)
+- **gui:** Prevent blank terminal tabs during startup (#1052)
+
+### Features
+
+- Simple terminal tabs を実装し復元/OSC7の回帰を修正 (#1046)
+
+### Miscellaneous Tasks
+
+- **gitignore:** Ignore generated pnpm workspace file (#1049)
+
 ## [7.3.0] - 2026-02-13
 
 ### Bug Fixes
