@@ -1,6 +1,7 @@
 //! Tauri app wiring (builder configuration + run event handling)
 
 use crate::state::AppState;
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use tauri::Manager;
 use tauri::{Emitter, WebviewWindowBuilder};
@@ -18,6 +19,22 @@ fn should_prevent_window_close(is_quitting: bool) -> bool {
 
 fn should_prevent_exit_request(is_quitting: bool) -> bool {
     !is_quitting
+}
+
+fn captured_path_from_env(env: &HashMap<String, String>) -> Option<String> {
+    env.get("PATH")
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn apply_captured_path_to_process_env(env: &HashMap<String, String>) -> bool {
+    let Some(path) = captured_path_from_env(env) else {
+        return false;
+    };
+    std::env::set_var("PATH", path);
+    true
 }
 
 #[cfg(any(not(test), target_os = "macos"))]
@@ -265,6 +282,13 @@ pub fn build_app(
                                 let _ = app_handle_clone.emit("os-env-fallback", reason.clone());
                             }
                         };
+
+                        if apply_captured_path_to_process_env(&result.env) {
+                            tracing::info!(
+                                category = "os_env",
+                                "Updated process PATH from captured environment"
+                            );
+                        }
 
                         let _ = os_env_source_cell.set(result.source);
                         let _ = os_env_cell.set(result.env);
@@ -673,5 +697,23 @@ mod tests {
             menu_action_from_id(crate::menu::MENU_ID_EDIT_PASTE),
             Some("edit-paste")
         );
+    }
+
+    #[test]
+    fn captured_path_from_env_returns_trimmed_path() {
+        let env = HashMap::from([("PATH".to_string(), "  /usr/local/bin  ".to_string())]);
+        assert_eq!(
+            captured_path_from_env(&env),
+            Some("/usr/local/bin".to_string())
+        );
+    }
+
+    #[test]
+    fn captured_path_from_env_rejects_missing_or_empty_path() {
+        let no_path = HashMap::from([("HOME".to_string(), "/tmp".to_string())]);
+        assert_eq!(captured_path_from_env(&no_path), None);
+
+        let empty_path = HashMap::from([("PATH".to_string(), "   ".to_string())]);
+        assert_eq!(captured_path_from_env(&empty_path), None);
     }
 }

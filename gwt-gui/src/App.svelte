@@ -141,9 +141,10 @@
   let migrationSourceRoot: string = $state("");
 
   let tabs: Tab[] = $state([
+    { id: "summary", label: "Session Summary", type: "summary" },
     { id: "agentMode", label: "Agent Mode", type: "agentMode" },
   ]);
-  let activeTabId: string = $state("agentMode");
+  let activeTabId: string = $state("summary");
 
   let agentTabsHydratedProjectPath: string | null = $state(null);
   let agentTabsRestoreToken = 0;
@@ -252,7 +253,9 @@
       const rollback = await invoke<RollbackResult>("rollback_issue_branch", {
         projectPath: followup.projectPath,
         branchName: followup.branchName,
-        deleteRemote: true,
+        // Only rollback local artifacts on launch failure.
+        // Remote deletion is unsafe here because the branch may have pre-existed remotely.
+        deleteRemote: false,
       });
 
       sidebarRefreshKey++;
@@ -598,11 +601,25 @@
     fetchCurrentBranch();
   }
 
+  function openSessionSummaryTab() {
+    const existing = tabs.find((t) => t.type === "summary" || t.id === "summary");
+    if (existing) {
+      activeTabId = existing.id;
+      return;
+    }
+
+    const tab: Tab = { id: "summary", label: "Session Summary", type: "summary" };
+    tabs = [tab, ...tabs];
+    activeTabId = tab.id;
+  }
+
   function handleBranchSelect(branch: BranchInfo) {
     selectedBranch = branch;
     if (branch.is_current) {
       currentBranch = branch.name;
     }
+    // Switch to session summary (re-open tab if it was closed).
+    openSessionSummaryTab();
   }
 
   function requestAgentLaunch() {
@@ -621,7 +638,14 @@
     if (existing) return;
 
     const tab: Tab = { id: "agentMode", label: "Agent Mode", type: "agentMode" };
-    tabs = [tab, ...tabs];
+    const summaryIndex = tabs.findIndex((t) => t.type === "summary" || t.id === "summary");
+    if (summaryIndex >= 0) {
+      const nextTabs = [...tabs];
+      nextTabs.splice(summaryIndex + 1, 0, tab);
+      tabs = nextTabs;
+    } else {
+      tabs = [...tabs, tab];
+    }
   }
 
   function handleSidebarModeChange(next: SidebarMode) {
@@ -726,7 +750,7 @@
 
   async function handleTabClose(tabId: string) {
     const tab = tabs.find((t) => t.id === tabId);
-    if (tab?.type === "agentMode") {
+    if (tab?.type === "summary") {
       return;
     }
     if (tab?.paneId) {
@@ -978,9 +1002,10 @@
 
           projectPath = null;
           tabs = [
+            { id: "summary", label: "Session Summary", type: "summary" },
             { id: "agentMode", label: "Agent Mode", type: "agentMode" },
           ];
-          activeTabId = "agentMode";
+          activeTabId = "summary";
           selectedBranch = null;
           currentBranch = "";
         }
@@ -1149,7 +1174,8 @@
     const preserved = tabs.filter((t) => t.type !== "agent");
     tabs = [...preserved, ...restoredTabs];
 
-    const allowOverrideActive = activeTabId === "agentMode";
+    const allowOverrideActive =
+      activeTabId === "summary" || activeTabId === "agentMode";
     if (allowOverrideActive && restored.activeTabId) {
       activeTabId = restored.activeTabId;
     }
@@ -1350,14 +1376,15 @@
           onBranchSelect={handleBranchSelect}
           onBranchActivate={handleBranchActivate}
           onCleanupRequest={handleCleanupRequest}
-          onLaunchAgent={requestAgentLaunch}
-          onQuickLaunch={handleAgentLaunch}
         />
       {/if}
       <MainArea
         {tabs}
         {activeTabId}
+        {selectedBranch}
         projectPath={projectPath as string}
+        onLaunchAgent={requestAgentLaunch}
+        onQuickLaunch={handleAgentLaunch}
         onTabSelect={handleTabSelect}
         onTabClose={handleTabClose}
       />

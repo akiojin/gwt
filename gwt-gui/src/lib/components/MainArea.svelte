@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Tab } from "../types";
+  import type { LaunchAgentRequest, Tab } from "../types";
   import TerminalView from "../terminal/TerminalView.svelte";
   import AgentModePanel from "./AgentModePanel.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
@@ -12,13 +12,19 @@
   let {
     tabs,
     activeTabId,
+    selectedBranch: _selectedBranch,
     projectPath,
+    onLaunchAgent: _onLaunchAgent,
+    onQuickLaunch: _onQuickLaunch,
     onTabSelect,
     onTabClose,
   }: {
     tabs: Tab[];
     activeTabId: string;
+    selectedBranch?: unknown;
     projectPath: string;
+    onLaunchAgent?: () => void;
+    onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
     onTabSelect: (tabId: string) => void;
     onTabClose: (tabId: string) => void;
   } = $props();

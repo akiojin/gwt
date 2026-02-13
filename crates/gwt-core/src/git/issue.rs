@@ -5,6 +5,7 @@
 use std::path::Path;
 use std::process::Command;
 
+use super::gh_cli::{gh_command, is_gh_available};
 use super::remote::Remote;
 use super::repository::{find_bare_repo_in_dir, is_git_repo};
 
@@ -90,18 +91,14 @@ impl GitHubIssue {
 
 /// Check if GitHub CLI (gh) is available
 pub fn is_gh_cli_available() -> bool {
-    Command::new("gh")
-        .arg("--version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    is_gh_available()
 }
 
 /// Check if GitHub CLI (gh) is authenticated (FR-003)
 ///
 /// Runs `gh auth status` and returns true if the exit code is 0.
 pub fn is_gh_cli_authenticated() -> bool {
-    Command::new("gh")
+    gh_command()
         .args(["auth", "status"])
         .output()
         .map(|output| output.status.success())
@@ -119,10 +116,17 @@ pub fn fetch_open_issues(
     page: u32,
     per_page: u32,
 ) -> Result<FetchIssuesResult, String> {
+    if page == 0 {
+        return Err("page must be greater than 0".to_string());
+    }
+    if per_page == 0 {
+        return Err("per_page must be greater than 0".to_string());
+    }
+
     let repo_slug = resolve_repo_slug(repo_path);
     let args = issue_list_args(repo_slug.as_deref(), page, per_page);
 
-    let output = Command::new("gh")
+    let output = gh_command()
         .args(args)
         .current_dir(repo_path)
         .output()
@@ -136,8 +140,10 @@ pub fn fetch_open_issues(
     let stdout = String::from_utf8_lossy(&output.stdout);
     let all_issues = parse_gh_issues_json(&stdout)?;
 
-    // Skip items from previous pages
-    let skip = ((page - 1) * per_page) as usize;
+    // Skip items from previous pages. Conversion is checked to avoid platform-size overflow.
+    let skip_u64 = u64::from(page - 1) * u64::from(per_page);
+    let skip = usize::try_from(skip_u64)
+        .map_err(|_| "Pagination values are too large for this platform".to_string())?;
     let remaining: Vec<GitHubIssue> = all_issues.into_iter().skip(skip).collect();
 
     // If we got more than per_page items after skipping, there's a next page
@@ -152,7 +158,7 @@ pub fn fetch_open_issues(
 
 fn issue_list_args(repo_slug: Option<&str>, page: u32, per_page: u32) -> Vec<String> {
     // Request enough items to cover the current page plus one extra to detect next page
-    let limit = per_page * page + 1;
+    let limit = u64::from(per_page) * u64::from(page) + 1;
 
     let limit_str = limit.to_string();
     let mut args = vec![
@@ -346,7 +352,7 @@ pub fn create_linked_branch(
 ) -> Result<(), String> {
     // FR-016a: Use --name to specify branch name
     // FR-016b: Use --checkout=false so worktree handles checkout
-    let output = Command::new("gh")
+    let output = gh_command()
         .args(issue_develop_args(issue_number, branch_name))
         .current_dir(repo_path)
         .output()
@@ -805,6 +811,28 @@ mod tests {
             .map(String::from)
             .collect::<Vec<String>>()
         );
+    }
+
+    #[test]
+    fn test_issue_list_args_large_values_do_not_overflow() {
+        let args = issue_list_args(None, u32::MAX, u32::MAX);
+        let expected_limit = (u64::from(u32::MAX) * u64::from(u32::MAX) + 1).to_string();
+
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--limit" && w[1] == expected_limit));
+    }
+
+    #[test]
+    fn test_fetch_open_issues_rejects_page_zero() {
+        let err = fetch_open_issues(std::path::Path::new("."), 0, 50).unwrap_err();
+        assert!(err.contains("page must be greater than 0"));
+    }
+
+    #[test]
+    fn test_fetch_open_issues_rejects_per_page_zero() {
+        let err = fetch_open_issues(std::path::Path::new("."), 1, 0).unwrap_err();
+        assert!(err.contains("per_page must be greater than 0"));
     }
 
     #[test]

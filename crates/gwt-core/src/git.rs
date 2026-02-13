@@ -6,6 +6,7 @@ mod branch;
 mod clone;
 mod commit;
 pub mod diff;
+mod gh_cli;
 mod issue;
 mod pullrequest;
 mod remote;

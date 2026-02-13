@@ -145,7 +145,7 @@ export interface ProfilesConfig {
 export interface Tab {
   id: string;
   label: string;
-  type: "agent" | "settings" | "versionHistory" | "agentMode";
+  type: "summary" | "agent" | "settings" | "versionHistory" | "agentMode";
   paneId?: string;
 }
 
