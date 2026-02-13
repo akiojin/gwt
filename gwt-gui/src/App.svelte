@@ -55,10 +55,6 @@
   } from "./lib/voice/voiceInputController";
   import { createSystemMonitor } from "./lib/systemMonitor";
 
-  interface MenuActionPayload {
-    action: string;
-  }
-
   interface SettingsUpdatedPayload {
     uiFontSize?: number;
     terminalFontSize?: number;
@@ -1627,13 +1623,12 @@
 
     (async () => {
       try {
-        const { listen } = await import("@tauri-apps/api/event");
-        const unlistenFn = await listen<MenuActionPayload>(
-          "menu-action",
-          (event) => {
-            void handleMenuAction(event.payload.action);
-          },
+        const { setupMenuActionListener } = await import(
+          "./lib/menuAction"
         );
+        const unlistenFn = await setupMenuActionListener((action) => {
+          void handleMenuAction(action);
+        });
         if (cancelled) {
           unlistenFn();
           return;

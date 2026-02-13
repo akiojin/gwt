@@ -6,6 +6,9 @@ const listenMock = vi.fn();
 const writeTextMock = vi.fn();
 const readTextMock = vi.fn();
 let customKeyEventHandler: ((event: KeyboardEvent) => boolean) | null = null;
+let terminalOutputHandler:
+  | ((event: { payload: { pane_id: string; data: number[] } }) => void)
+  | null = null;
 let callOrder: string[] = [];
 
 const terminalInstances: any[] = [];
@@ -40,9 +43,11 @@ vi.mock("@xterm/xterm", () => ({
     loadAddon = vi.fn();
     open = vi.fn();
     focus = vi.fn();
-    attachCustomKeyEventHandler = vi.fn((handler: (event: KeyboardEvent) => boolean) => {
-      customKeyEventHandler = handler;
-    });
+    attachCustomKeyEventHandler = vi.fn(
+      (handler: (event: KeyboardEvent) => boolean) => {
+        customKeyEventHandler = handler;
+      },
+    );
     onData = vi.fn();
     onBinary = vi.fn();
     getSelection = vi.fn(() => "");
@@ -74,11 +79,19 @@ describe("TerminalView", () => {
     writeTextMock.mockReset();
     readTextMock.mockReset();
     customKeyEventHandler = null;
+    terminalOutputHandler = null;
     callOrder = [];
-    listenMock.mockImplementation(async (eventName: string) => {
-      callOrder.push(`listen:${eventName}`);
-      return () => {};
-    });
+    listenMock.mockImplementation(
+      async (eventName: string, handler?: unknown) => {
+        callOrder.push(`listen:${eventName}`);
+        if (eventName === "terminal-output" && typeof handler === "function") {
+          terminalOutputHandler = handler as (event: {
+            payload: { pane_id: string; data: number[] };
+          }) => void;
+        }
+        return () => {};
+      },
+    );
 
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
@@ -107,7 +120,9 @@ describe("TerminalView", () => {
       ).toBe(true);
     });
 
-    const listenIndex = callOrder.findIndex((v) => v === "listen:terminal-output");
+    const listenIndex = callOrder.findIndex(
+      (v) => v === "listen:terminal-output",
+    );
     const captureIndex = callOrder.findIndex(
       (v) => v === "invoke:capture_scrollback_tail",
     );
@@ -118,6 +133,48 @@ describe("TerminalView", () => {
     expect(terminalInstances.length).toBeGreaterThan(0);
     const term = terminalInstances[0];
     expect(term.write).toHaveBeenCalledWith("hello\n");
+  });
+
+  it("buffers live output until scrollback restore finishes", async () => {
+    let resolveCapture: ((value: string) => void) | null = null;
+    invokeMock.mockImplementation((command: string) => {
+      callOrder.push(`invoke:${command}`);
+      if (command === "capture_scrollback_tail") {
+        return new Promise<string>((resolve) => {
+          resolveCapture = resolve;
+        });
+      }
+      return Promise.resolve(null);
+    });
+
+    await renderTerminalView({ paneId: "pane-1", active: true });
+
+    await waitFor(() => {
+      expect(terminalOutputHandler).not.toBeNull();
+      expect(resolveCapture).not.toBeNull();
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    const term = terminalInstances[0];
+    terminalOutputHandler!({
+      payload: {
+        pane_id: "pane-1",
+        data: Array.from(new TextEncoder().encode("LIVE\n")),
+      },
+    });
+
+    expect(term.write).not.toHaveBeenCalled();
+
+    resolveCapture!("history\n");
+
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledTimes(2);
+    });
+
+    expect(term.write.mock.calls[0][0]).toBe("history\n");
+    const liveChunk = term.write.mock.calls[1][0];
+    expect(liveChunk).toBeInstanceOf(Uint8Array);
+    expect(new TextDecoder().decode(liveChunk)).toBe("LIVE\n");
   });
 
   it("handles gwt-terminal-edit-action copy/paste events", async () => {
@@ -151,9 +208,9 @@ describe("TerminalView", () => {
 
     await waitFor(() => {
       expect(readTextMock).toHaveBeenCalledTimes(1);
-      expect(
-        invokeMock.mock.calls.some((c) => c[0] === "write_terminal"),
-      ).toBe(true);
+      expect(invokeMock.mock.calls.some((c) => c[0] === "write_terminal")).toBe(
+        true,
+      );
     });
   });
 
@@ -208,15 +265,24 @@ describe("TerminalView", () => {
   });
 
   it("scrolls terminal viewport when wheel is used", async () => {
-    const { container } = await renderTerminalView({ paneId: "pane-2", active: true });
+    const { container } = await renderTerminalView({
+      paneId: "pane-2",
+      active: true,
+    });
     const rootEl = container.querySelector(".terminal-container");
     expect(rootEl).not.toBeNull();
 
     const viewport = document.createElement("div");
     viewport.className = "xterm-viewport";
     viewport.style.overflow = "auto";
-    Object.defineProperty(viewport, "clientHeight", { value: 100, configurable: true });
-    Object.defineProperty(viewport, "scrollHeight", { value: 200, configurable: true });
+    Object.defineProperty(viewport, "clientHeight", {
+      value: 100,
+      configurable: true,
+    });
+    Object.defineProperty(viewport, "scrollHeight", {
+      value: 200,
+      configurable: true,
+    });
     viewport.scrollTop = 5;
     rootEl!.appendChild(viewport);
 
@@ -230,15 +296,24 @@ describe("TerminalView", () => {
   });
 
   it("clamps terminal viewport scroll within bounds on wheel", async () => {
-    const { container } = await renderTerminalView({ paneId: "pane-3", active: true });
+    const { container } = await renderTerminalView({
+      paneId: "pane-3",
+      active: true,
+    });
     const rootEl = container.querySelector(".terminal-container");
     expect(rootEl).not.toBeNull();
 
     const viewport = document.createElement("div");
     viewport.className = "xterm-viewport";
     viewport.style.overflow = "auto";
-    Object.defineProperty(viewport, "clientHeight", { value: 100, configurable: true });
-    Object.defineProperty(viewport, "scrollHeight", { value: 250, configurable: true });
+    Object.defineProperty(viewport, "clientHeight", {
+      value: 100,
+      configurable: true,
+    });
+    Object.defineProperty(viewport, "scrollHeight", {
+      value: 250,
+      configurable: true,
+    });
     viewport.scrollTop = 30;
     rootEl!.appendChild(viewport);
 

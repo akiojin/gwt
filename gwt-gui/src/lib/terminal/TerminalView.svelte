@@ -154,6 +154,8 @@
     if (!rootEl) return;
     let cancelled = false;
     let receivedLiveOutput = false;
+    let restoringScrollback = true;
+    const pendingLiveOutputChunks: Uint8Array[] = [];
     const unregisterVoiceInputTarget = registerTerminalInputTarget(paneId, rootEl);
 
     const term = new Terminal({
@@ -291,8 +293,13 @@
     // Subscribe first so startup output isn't lost before the listener attaches.
     (async () => {
       // Listen to terminal output from backend.
-      const unlistenFn = await setupEventListener(term, () => {
+      const unlistenFn = await setupEventListener(term, (bytes) => {
         receivedLiveOutput = true;
+        if (restoringScrollback) {
+          pendingLiveOutputChunks.push(bytes);
+          return;
+        }
+        term.write(bytes);
       });
       if (cancelled) {
         if (unlistenFn) {
@@ -311,11 +318,17 @@
           paneId,
           maxBytes: 64 * 1024,
         });
-        if (text && !receivedLiveOutput) {
+        if (text) {
           term.write(text);
         }
       } catch {
         // Ignore: not available outside Tauri runtime.
+      } finally {
+        restoringScrollback = false;
+        for (const chunk of pendingLiveOutputChunks) {
+          term.write(chunk);
+        }
+        pendingLiveOutputChunks.length = 0;
       }
     })();
 
@@ -363,7 +376,7 @@
 
   async function setupEventListener(
     term: Terminal,
-    onOutput?: () => void,
+    onOutput?: (bytes: Uint8Array) => void,
   ): Promise<(() => void) | null> {
     try {
       const { listen } = await import("@tauri-apps/api/event");
@@ -371,9 +384,12 @@
         "terminal-output",
         (event) => {
           if (event.payload.pane_id === paneId) {
-            onOutput?.();
             const bytes = new Uint8Array(event.payload.data);
-            term.write(bytes);
+            if (onOutput) {
+              onOutput(bytes);
+            } else {
+              term.write(bytes);
+            }
           }
         }
       );
