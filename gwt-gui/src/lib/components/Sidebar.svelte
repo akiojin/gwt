@@ -47,6 +47,12 @@
     agentTabBranches?: string[];
   } = $props();
 
+  const SIDEBAR_SUMMARY_HEIGHT_STORAGE_KEY = "gwt.sidebar.worktreeSummaryHeight";
+  const DEFAULT_WORKTREE_SUMMARY_HEIGHT_PX = 360;
+  const MIN_WORKTREE_SUMMARY_HEIGHT_PX = 160;
+  const MIN_BRANCH_LIST_HEIGHT_PX = 120;
+  const SUMMARY_RESIZE_HANDLE_HEIGHT_PX = 8;
+
   let activeFilter: FilterType = $state("Local");
   let branches: BranchInfo[] = $state([]);
   let loading: boolean = $state(false);
@@ -63,6 +69,64 @@
   function normalizeTabBranch(name: string): string {
     const trimmed = name.trim();
     return trimmed.startsWith("origin/") ? trimmed.slice("origin/".length) : trimmed;
+  }
+
+  function loadSummaryHeight(): number {
+    if (typeof window === "undefined") return DEFAULT_WORKTREE_SUMMARY_HEIGHT_PX;
+    try {
+      const raw = window.localStorage.getItem(SIDEBAR_SUMMARY_HEIGHT_STORAGE_KEY);
+      if (!raw) return DEFAULT_WORKTREE_SUMMARY_HEIGHT_PX;
+      const parsed = Number(raw);
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        return DEFAULT_WORKTREE_SUMMARY_HEIGHT_PX;
+      }
+      return Math.max(MIN_WORKTREE_SUMMARY_HEIGHT_PX, Math.round(parsed));
+    } catch {
+      return DEFAULT_WORKTREE_SUMMARY_HEIGHT_PX;
+    }
+  }
+
+  function persistSummaryHeight(heightPx: number) {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(
+        SIDEBAR_SUMMARY_HEIGHT_STORAGE_KEY,
+        String(Math.max(MIN_WORKTREE_SUMMARY_HEIGHT_PX, Math.round(heightPx)))
+      );
+    } catch {
+      // Ignore localStorage failures.
+    }
+  }
+
+  function clampSummaryHeight(nextHeightPx: number): number {
+    const sidebarHeight = sidebarEl?.clientHeight ?? 0;
+    const minSummaryHeight = Math.max(
+      MIN_WORKTREE_SUMMARY_HEIGHT_PX,
+      Math.round(nextHeightPx)
+    );
+
+    if (!Number.isFinite(sidebarHeight) || sidebarHeight <= 0) {
+      return minSummaryHeight;
+    }
+
+    const availableSummaryHeight = Math.max(
+      0,
+      sidebarHeight - MIN_BRANCH_LIST_HEIGHT_PX - SUMMARY_RESIZE_HANDLE_HEIGHT_PX
+    );
+
+    if (availableSummaryHeight < MIN_WORKTREE_SUMMARY_HEIGHT_PX) {
+      return Math.round(availableSummaryHeight);
+    }
+
+    return Math.min(minSummaryHeight, Math.round(availableSummaryHeight));
+  }
+
+  function setSummaryHeight(nextHeightPx: number, persist = true) {
+    const clamped = clampSummaryHeight(nextHeightPx);
+    summaryHeightPx = clamped;
+    if (persist) {
+      persistSummaryHeight(clamped);
+    }
   }
 
   let agentTabBranchSet = $derived(
@@ -85,6 +149,14 @@
 
   // Branches currently being deleted
   let deletingBranches: Set<string> = $state(new Set());
+  let sidebarEl: HTMLElement | null = $state(null);
+  let summaryHeightPx = $state(loadSummaryHeight());
+  let summaryResizing = $state(false);
+  let summaryResizePointerId: number | null = $state(null);
+  let summaryResizeStartY = 0;
+  let summaryResizeStartHeight = DEFAULT_WORKTREE_SUMMARY_HEIGHT_PX;
+  let previousSummaryBodyCursor = "";
+  let previousSummaryBodyUserSelect = "";
 
   // Context menu state
   let contextMenu: { x: number; y: number; branch: BranchInfo } | null =
@@ -111,6 +183,11 @@
       : branches
   );
   let clampedWidthPx = $derived(clampSidebarWidth(widthPx));
+
+  $effect(() => {
+    if (!sidebarEl) return;
+    setSummaryHeight(summaryHeightPx, false);
+  });
 
   $effect(() => {
     return () => {
@@ -415,6 +492,28 @@
     document.body.style.userSelect = previousBodyUserSelect;
   }
 
+  function stopSummaryResize() {
+    if (!summaryResizing) return;
+    summaryResizing = false;
+    summaryResizePointerId = null;
+    window.removeEventListener("pointermove", handleSummaryResizePointerMove);
+    window.removeEventListener("pointerup", handleSummaryResizePointerUp);
+    window.removeEventListener("pointercancel", handleSummaryResizePointerUp);
+    document.body.style.cursor = previousSummaryBodyCursor;
+    document.body.style.userSelect = previousSummaryBodyUserSelect;
+    persistSummaryHeight(summaryHeightPx);
+  }
+
+  $effect(() => {
+    if (typeof window === "undefined") return;
+
+    const handleResize = () => {
+      setSummaryHeight(summaryHeightPx, false);
+    };
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  });
+
   function handleResizePointerMove(event: PointerEvent) {
     if (!resizing) return;
     if (resizePointerId !== null && event.pointerId !== resizePointerId) return;
@@ -446,6 +545,52 @@
     window.addEventListener("pointerup", handleResizePointerUp);
     window.addEventListener("pointercancel", handleResizePointerUp);
   }
+
+  function handleSummaryResizePointerMove(event: PointerEvent) {
+    if (!summaryResizing) return;
+    if (summaryResizePointerId !== null && event.pointerId !== summaryResizePointerId) return;
+    const delta = event.clientY - summaryResizeStartY;
+    setSummaryHeight(summaryResizeStartHeight + delta);
+  }
+
+  function handleSummaryResizePointerUp(event: PointerEvent) {
+    if (summaryResizePointerId !== null && event.pointerId !== summaryResizePointerId) return;
+    stopSummaryResize();
+  }
+
+  function handleSummaryResizePointerDown(event: PointerEvent) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+
+    summaryResizing = true;
+    summaryResizeStartY = event.clientY;
+    summaryResizeStartHeight = summaryHeightPx;
+    summaryResizePointerId = event.pointerId;
+
+    previousSummaryBodyCursor = document.body.style.cursor;
+    previousSummaryBodyUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+
+    window.addEventListener("pointermove", handleSummaryResizePointerMove);
+    window.addEventListener("pointerup", handleSummaryResizePointerUp);
+    window.addEventListener("pointercancel", handleSummaryResizePointerUp);
+  }
+
+  function handleSummaryResizeKeydown(event: KeyboardEvent) {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    const step = event.shiftKey ? 32 : 16;
+    const delta = event.key === "ArrowDown" ? step : -step;
+    setSummaryHeight(summaryHeightPx + delta);
+  }
+
+  $effect(() => {
+    return () => {
+      stopSummaryResize();
+    };
+  });
 
   function handleResizeKeydown(event: KeyboardEvent) {
     if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
@@ -538,6 +683,7 @@
 
 <aside
   class="sidebar"
+  bind:this={sidebarEl}
   style="width: {clampedWidthPx}px; min-width: {clampedWidthPx}px;"
 >
   <div class="mode-toggle">
@@ -593,79 +739,92 @@
         bind:value={searchQuery}
       />
     </div>
-    <div class="branch-list">
-      {#if loading}
-        <div class="loading-indicator">Loading...</div>
-      {:else if errorMessage}
-        <div class="error-indicator">{errorMessage}</div>
-      {:else if filteredBranches.length === 0}
-        <div class="empty-indicator">No branches found.</div>
-      {:else}
-        {#each filteredBranches as branch}
-          <button
-            class="branch-item"
-            class:active={branch.is_current}
-            class:agent-active={hasActiveAgentTab(branch)}
-            class:deleting={deletingBranches.has(branch.name)}
-            onclick={() => {
-              if (!deletingBranches.has(branch.name)) onBranchSelect(branch);
-            }}
-            ondblclick={() => {
-              if (!deletingBranches.has(branch.name))
-                onBranchActivate?.(branch);
-            }}
-            oncontextmenu={(e) => handleContextMenu(e, branch)}
-          >
-            <span class="branch-icon">{branch.is_current ? "*" : " "}</span>
-            {#if deletingBranches.has(branch.name)}
-              <span class="safety-spinner"></span>
-            {:else if getSafetyLevel(branch)}
-              <span
-                class="safety-dot {getSafetyLevel(branch)}"
-                title={getSafetyTitle(branch)}
-              ></span>
-            {/if}
-            {#if hasActiveAgentTab(branch)}
-              <span
-                class="agent-tab-icon"
-                title="Agent tab is open for this branch"
-                role="img"
-                aria-label="Agent tab is open for this branch"
-              >
-                <span class="agent-tab-bars" aria-hidden="true">
-                  <span class="agent-tab-bar b1"></span>
-                  <span class="agent-tab-bar b2"></span>
-                  <span class="agent-tab-bar b3"></span>
+    <div class="branch-summary-stack">
+      <div class="branch-list">
+        {#if loading}
+          <div class="loading-indicator">Loading...</div>
+        {:else if errorMessage}
+          <div class="error-indicator">{errorMessage}</div>
+        {:else if filteredBranches.length === 0}
+          <div class="empty-indicator">No branches found.</div>
+        {:else}
+          {#each filteredBranches as branch}
+            <button
+              class="branch-item"
+              class:active={branch.is_current}
+              class:agent-active={hasActiveAgentTab(branch)}
+              class:deleting={deletingBranches.has(branch.name)}
+              onclick={() => {
+                if (!deletingBranches.has(branch.name)) onBranchSelect(branch);
+              }}
+              ondblclick={() => {
+                if (!deletingBranches.has(branch.name))
+                  onBranchActivate?.(branch);
+              }}
+              oncontextmenu={(e) => handleContextMenu(e, branch)}
+            >
+              <span class="branch-icon">{branch.is_current ? "*" : " "}</span>
+              {#if deletingBranches.has(branch.name)}
+                <span class="safety-spinner"></span>
+              {:else if getSafetyLevel(branch)}
+                <span
+                  class="safety-dot {getSafetyLevel(branch)}"
+                  title={getSafetyTitle(branch)}
+                ></span>
+              {/if}
+              {#if hasActiveAgentTab(branch)}
+                <span
+                  class="agent-tab-icon"
+                  title="Agent tab is open for this branch"
+                  role="img"
+                  aria-label="Agent tab is open for this branch"
+                >
+                  <span class="agent-tab-bars" aria-hidden="true">
+                    <span class="agent-tab-bar b1"></span>
+                    <span class="agent-tab-bar b2"></span>
+                    <span class="agent-tab-bar b3"></span>
+                  </span>
+                  <span class="agent-tab-fallback" aria-hidden="true">@</span>
                 </span>
-                <span class="agent-tab-fallback" aria-hidden="true">@</span>
-              </span>
-            {/if}
-            <span class="branch-name">{branch.name}</span>
-            {#if branch.last_tool_usage}
-              <span
-                class="tool-usage {toolUsageClass(branch.last_tool_usage)}"
-              >
-                {branch.last_tool_usage}
-              </span>
-            {/if}
-            {#if divergenceIndicator(branch)}
-              <span
-                class="divergence {divergenceClass(branch.divergence_status)}"
-              >
-                {divergenceIndicator(branch)}
-              </span>
-            {/if}
-          </button>
-        {/each}
-      {/if}
-    </div>
-    <div class="worktree-summary-wrap">
-      <WorktreeSummaryPanel
-        {projectPath}
-        {selectedBranch}
-        onLaunchAgent={onLaunchAgent}
-        onQuickLaunch={onQuickLaunch}
-      />
+              {/if}
+              <span class="branch-name">{branch.name}</span>
+              {#if branch.last_tool_usage}
+                <span
+                  class="tool-usage {toolUsageClass(branch.last_tool_usage)}"
+                >
+                  {branch.last_tool_usage}
+                </span>
+              {/if}
+              {#if divergenceIndicator(branch)}
+                <span
+                  class="divergence {divergenceClass(branch.divergence_status)}"
+                >
+                  {divergenceIndicator(branch)}
+                </span>
+              {/if}
+            </button>
+          {/each}
+        {/if}
+      </div>
+      <button
+        type="button"
+        class="summary-resize-handle"
+        aria-label="Resize session summary"
+        title="Resize session summary"
+        onpointerdown={handleSummaryResizePointerDown}
+        onkeydown={handleSummaryResizeKeydown}
+      ></button>
+      <div
+        class="worktree-summary-wrap"
+        style="height: {summaryHeightPx}px;"
+      >
+        <WorktreeSummaryPanel
+          {projectPath}
+          {selectedBranch}
+          onLaunchAgent={onLaunchAgent}
+          onQuickLaunch={onQuickLaunch}
+        />
+      </div>
     </div>
   {:else}
     <AgentSidebar
@@ -939,18 +1098,52 @@
     color: var(--text-muted);
   }
 
-  .branch-list {
+  .branch-summary-stack {
+    display: flex;
+    flex-direction: column;
     flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .branch-list {
+    flex: 1 1 auto;
+    min-height: 120px;
     overflow-y: auto;
+    min-width: 0;
     padding: 4px 0;
   }
 
   .worktree-summary-wrap {
     border-top: 1px solid var(--border-color);
-    overflow-y: auto;
-    max-height: 52%;
-    min-height: 160px;
     background: var(--bg-primary);
+    overflow-y: auto;
+    flex: 0 0 auto;
+    min-width: 0;
+  }
+
+  .summary-resize-handle {
+    height: 8px;
+    flex: 0 0 8px;
+    border: none;
+    background: transparent;
+    cursor: row-resize;
+    position: relative;
+    width: 100%;
+    padding: 0;
+    touch-action: none;
+  }
+
+  .summary-resize-handle::before {
+    content: "";
+    position: absolute;
+    left: 6px;
+    right: 6px;
+    top: 3px;
+    height: 2px;
+    background: var(--border-color);
+    border-radius: 2px;
+    opacity: 0.5;
   }
 
   .loading-indicator,
