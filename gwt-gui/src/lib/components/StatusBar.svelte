@@ -58,8 +58,8 @@
   function voiceStatusText(): string {
     if (!voiceInputSupported) return "Voice: unsupported";
     if (!voiceInputEnabled) return "Voice: off";
-    if (voiceInputListening) return "Voice: listening";
     if (voiceInputError) return "Voice: error";
+    if (voiceInputListening) return "Voice: listening";
     return "Voice: idle";
   }
 

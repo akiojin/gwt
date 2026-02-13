@@ -139,11 +139,11 @@ describe("VoiceInputController", () => {
     await Promise.resolve();
 
     FakeSpeechRecognition.instances[0].emitFinalTranscript("ls -la");
-    await Promise.resolve();
-
-    expect(invokeMock).toHaveBeenCalledWith("write_terminal", {
-      paneId: "pane-test",
-      data: Array.from(new TextEncoder().encode("ls -la")),
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("write_terminal", {
+        paneId: "pane-test",
+        data: Array.from(new TextEncoder().encode("ls -la")),
+      });
     });
 
     unregister();

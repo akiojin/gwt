@@ -9,21 +9,21 @@
 - `Settings` / `SettingsData` に `voice_input` を追加（enabled/hotkey/language/model）。
 - 既存設定ファイルの後方互換を維持（デフォルト値で補完）。
 
-2. 入力ターゲット抽象化
+1. 入力ターゲット抽象化
 - フォーカス中DOM入力要素と terminal 入力先を判定する共通層を追加。
 - Terminal は `paneId` と root element を登録し、フォーカス中 pane を解決する。
 
-3. 音声コントローラ
+1. 音声コントローラ
 - グローバルホットキーで start/stop。
 - 認識結果を現在の入力ターゲットへ挿入。
 - 自動送信はしない。
 
-4. UI統合
+1. UI統合
 - `App.svelte` でコントローラを初期化し、Settings更新イベントで再設定。
 - `StatusBar` に Voice 状態表示を追加。
 - `SettingsPanel` に Voice Input セクション追加。
 
-5. テスト
+1. テスト
 - 設定の round-trip テスト（Rust）。
 - 音声コントローラのホットキー/ターゲット解決テスト（TS）。
 - 既存 terminal/agent mode テスト回帰確認。

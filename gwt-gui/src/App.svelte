@@ -980,6 +980,12 @@
     function onSettingsUpdated(event: Event) {
       const detail = (event as CustomEvent<SettingsUpdatedPayload>).detail;
       if (!detail) return;
+      if (typeof detail.uiFontSize === "number") {
+        applyUiFontSize(clampFontSize(detail.uiFontSize));
+      }
+      if (typeof detail.terminalFontSize === "number") {
+        applyTerminalFontSize(clampFontSize(detail.terminalFontSize));
+      }
       if (detail.voiceInput) {
         applyVoiceInputSettings(detail.voiceInput);
       }

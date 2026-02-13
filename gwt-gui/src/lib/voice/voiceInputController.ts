@@ -1,4 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
 import { getFocusedTerminalPaneId } from "./inputTargetRegistry";
 
 export interface VoiceControllerSettings {
@@ -128,6 +127,11 @@ function mapLanguage(value: string): string {
   if (normalized === "ja") return "ja-JP";
   if (normalized === "en") return "en-US";
   return "";
+}
+
+async function invokeTauri(command: string, payload: unknown) {
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke(command, payload as Record<string, unknown>);
 }
 
 function isTextInputElement(element: HTMLInputElement): boolean {
@@ -373,9 +377,7 @@ export class VoiceInputController {
 
     const settings = this.options.getSettings();
     const language = mapLanguage(settings.language);
-    if (language) {
-      recognition.lang = language;
-    }
+    recognition.lang = language;
 
     this.startInFlight = true;
     this.shouldKeepListening = true;
@@ -432,7 +434,7 @@ export class VoiceInputController {
   private async sendToTerminal(paneId: string, text: string) {
     const bytes = Array.from(new TextEncoder().encode(text));
     try {
-      await invoke("write_terminal", { paneId, data: bytes });
+      await invokeTauri("write_terminal", { paneId, data: bytes });
       this.setError(null);
     } catch (err) {
       this.setError(`Failed to send transcript to terminal: ${String(err)}`);
