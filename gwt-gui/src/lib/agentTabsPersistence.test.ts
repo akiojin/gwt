@@ -197,4 +197,99 @@ describe("agentTabsPersistence", () => {
     expect(shouldRetryAgentTabRestore(0, 0, 0)).toBe(false);
     expect(shouldRetryAgentTabRestore(2, 0, AGENT_TAB_RESTORE_MAX_RETRIES - 1)).toBe(false);
   });
+
+  it("persistStoredProjectAgentTabs saves terminal tab with type and cwd", () => {
+    persistStoredProjectAgentTabs("/repo", {
+      tabs: [
+        { paneId: "p1", label: "myproject", type: "terminal", cwd: "/home/user/myproject" },
+        { paneId: "p2", label: "feature-x" },
+      ],
+      activePaneId: "p1",
+    }, store);
+
+    const raw = store.getItem(PROJECT_AGENT_TABS_STORAGE_KEY);
+    expect(raw).toBeTruthy();
+    const parsed = JSON.parse(raw || "{}");
+    expect(parsed.byProjectPath["/repo"].tabs).toEqual([
+      { paneId: "p1", label: "myproject", type: "terminal", cwd: "/home/user/myproject" },
+      { paneId: "p2", label: "feature-x" },
+    ]);
+  });
+
+  it("loadStoredProjectAgentTabs preserves type and cwd fields", () => {
+    store.setItem(
+      PROJECT_AGENT_TABS_STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        byProjectPath: {
+          "/repo": {
+            tabs: [
+              { paneId: "p1", label: "myproject", type: "terminal", cwd: "/home/user/myproject" },
+              { paneId: "p2", label: "feature-x" },
+            ],
+            activePaneId: null,
+          },
+        },
+      }),
+    );
+
+    const loaded = loadStoredProjectAgentTabs("/repo", store);
+    expect(loaded).toEqual({
+      tabs: [
+        { paneId: "p1", label: "myproject", type: "terminal", cwd: "/home/user/myproject" },
+        { paneId: "p2", label: "feature-x" },
+      ],
+      activePaneId: null,
+    });
+  });
+
+  it("loadStoredProjectAgentTabs treats entries without type as agent", () => {
+    store.setItem(
+      PROJECT_AGENT_TABS_STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        byProjectPath: {
+          "/repo": {
+            tabs: [{ paneId: "p1", label: "branch-a" }],
+            activePaneId: null,
+          },
+        },
+      }),
+    );
+
+    const loaded = loadStoredProjectAgentTabs("/repo", store);
+    expect(loaded!.tabs[0].type).toBeUndefined();
+    expect(loaded!.tabs[0].cwd).toBeUndefined();
+  });
+
+  it("buildRestoredAgentTabs restores terminal tabs with correct type and cwd", () => {
+    const restored = buildRestoredAgentTabs(
+      {
+        tabs: [
+          { paneId: "p1", label: "myproject", type: "terminal", cwd: "/home/user/myproject" },
+          { paneId: "p2", label: "branch-a" },
+        ],
+        activePaneId: "p1",
+      },
+      [makeTerminal("p1", "terminal"), makeTerminal("p2", "codex")],
+    );
+
+    expect(restored.tabs).toEqual([
+      {
+        id: "terminal-p1",
+        label: "myproject",
+        type: "terminal",
+        paneId: "p1",
+        cwd: "/home/user/myproject",
+      },
+      {
+        id: "agent-p2",
+        label: "branch-a",
+        type: "agent",
+        paneId: "p2",
+        agentId: "codex",
+      },
+    ]);
+    expect(restored.activeTabId).toBe("terminal-p1");
+  });
 });

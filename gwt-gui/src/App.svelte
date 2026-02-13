@@ -150,7 +150,7 @@
   const AGENT_TAB_RESTORE_RETRY_DELAY_MS = 150;
   const AGENT_TAB_RESTORE_RETRY_MAX_DELAY_MS = 1200;
 
-  let terminalCount = $derived(tabs.filter((t) => t.type === "agent").length);
+  let terminalCount = $derived(tabs.filter((t) => t.type === "agent" || t.type === "terminal").length);
 
   let agentTabBranches = $derived(
     tabs
@@ -448,6 +448,7 @@
           "terminal-closed",
           (event) => {
             removeTabLocal(`agent-${event.payload.pane_id}`);
+            removeTabLocal(`terminal-${event.payload.pane_id}`);
           }
         );
 
@@ -458,6 +459,43 @@
         unlisten = unlistenFn;
       } catch (err) {
         console.error("Failed to setup terminal closed listener:", err);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  });
+
+  // Update terminal tab cwd and label when the shell's working directory changes.
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen<{ pane_id: string; cwd: string }>(
+          "terminal-cwd-changed",
+          (event) => {
+            const { pane_id, cwd } = event.payload;
+            tabs = tabs.map((tab) => {
+              if (tab.type === "terminal" && tab.paneId === pane_id) {
+                return { ...tab, cwd, label: cwd.split("/").pop() || "Terminal" };
+              }
+              return tab;
+            });
+          }
+        );
+
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+      } catch (err) {
+        console.error("Failed to setup terminal-cwd-changed listener:", err);
       }
     })();
 
@@ -546,7 +584,7 @@
   function activeAgentPaneId(): string | null {
     const active = tabs.find((t) => t.id === activeTabId);
     if (
-      active?.type === "agent" &&
+      (active?.type === "agent" || active?.type === "terminal") &&
       typeof active.paneId === "string" &&
       active.paneId.length > 0
     ) {
@@ -685,10 +723,10 @@
   }
 
   function mergeRestoredAgentTabs(existingTabs: Tab[], restoredTabs: Tab[]): Tab[] {
-    const nonAgentTabs = existingTabs.filter((t) => t.type !== "agent");
+    const nonAgentTabs = existingTabs.filter((t) => t.type !== "agent" && t.type !== "terminal");
     const restoredAgentPaneIds = new Set(restoredTabs.map((t) => t.paneId));
     const preservedAgentTabs = existingTabs.filter((t) => {
-      return t.type === "agent" && typeof t.paneId === "string" && !restoredAgentPaneIds.has(t.paneId);
+      return (t.type === "agent" || t.type === "terminal") && typeof t.paneId === "string" && !restoredAgentPaneIds.has(t.paneId);
     });
 
     const dedupedPreserved: Tab[] = [];
@@ -834,7 +872,7 @@
 
   function getActiveTerminalPaneId(): string | null {
     const active = tabs.find((t) => t.id === activeTabId);
-    if (!active || active.type !== "agent") {
+    if (!active || (active.type !== "agent" && active.type !== "terminal")) {
       return null;
     }
     return active.paneId && active.paneId.length > 0 ? active.paneId : null;
@@ -918,16 +956,16 @@
   async function syncWindowAgentTabs() {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      const agentTabs = tabs
-        .filter((t) => t.type === "agent")
-        .map((t) => ({ id: t.id, label: t.label }));
-      const activeAgentTabId = agentTabs.some((t) => t.id === activeTabId)
+      const visibleTabs = tabs
+        .filter((t) => t.type === "agent" || t.type === "terminal")
+        .map((t) => ({ id: t.id, label: t.label, tab_type: t.type }));
+      const activeVisibleTabId = visibleTabs.some((t) => t.id === activeTabId)
         ? activeTabId
         : null;
       await invoke("sync_window_agent_tabs", {
         request: {
-          tabs: agentTabs,
-          activeTabId: activeAgentTabId,
+          tabs: visibleTabs,
+          activeTabId: activeVisibleTabId,
         },
       });
     } catch {
@@ -938,7 +976,7 @@
   async function handleMenuAction(action: string) {
     if (action.startsWith("focus-agent-tab::")) {
       const tabId = action.slice("focus-agent-tab::".length).trim();
-      if (tabId && tabs.some((t) => t.id === tabId && t.type === "agent")) {
+      if (tabId && tabs.some((t) => t.id === tabId && (t.type === "agent" || t.type === "terminal"))) {
         activeTabId = tabId;
       }
       return;
@@ -1025,6 +1063,23 @@
       }
       case "close-project":
         {
+          // Kill all terminal tab PTYs before clearing state.
+          const terminalPanes = tabs
+            .filter((t) => t.type === "terminal" && t.paneId)
+            .map((t) => t.paneId as string);
+          if (terminalPanes.length > 0) {
+            try {
+              const { invoke } = await import("@tauri-apps/api/core");
+              await Promise.all(
+                terminalPanes.map((paneId) =>
+                  invoke("close_terminal", { paneId }).catch(() => {})
+                )
+              );
+            } catch {
+              // Ignore: not available outside Tauri runtime.
+            }
+          }
+
           // Clear backend state (window-scoped) best-effort.
           try {
             const { invoke } = await import("@tauri-apps/api/core");
@@ -1123,6 +1178,31 @@
           }
         })();
         break;
+      case "new-terminal": {
+        let workingDir: string | null = null;
+        if (projectPath) {
+          workingDir = projectPath;
+        }
+
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const paneId = await invoke<string>("spawn_shell", { workingDir });
+          const cwd = workingDir || "~";
+          const label = cwd.split("/").pop() || "Terminal";
+          const newTab: Tab = {
+            id: `terminal-${paneId}`,
+            label,
+            type: "terminal",
+            paneId,
+            cwd: workingDir || undefined,
+          };
+          tabs = [...tabs, newTab];
+          activeTabId = newTab.id;
+        } catch (err) {
+          console.error("Failed to spawn shell:", err);
+        }
+        break;
+      }
       case "terminal-diagnostics": {
         const active = tabs.find((t) => t.id === activeTabId) ?? null;
         const paneId = active?.paneId ?? "";
@@ -1240,13 +1320,18 @@
     if (!projectPath) return;
     if (agentTabsHydratedProjectPath !== projectPath) return;
 
-    const agentTabs: Array<{ paneId: string; label: string }> = tabs
-      .filter((t) => t.type === "agent" && typeof t.paneId === "string" && t.paneId.length > 0)
-      .map((t) => ({ paneId: t.paneId as string, label: t.label }));
+    const agentTabs = tabs
+      .filter((t) => (t.type === "agent" || t.type === "terminal") && typeof t.paneId === "string" && t.paneId.length > 0)
+      .map((t) => {
+        if (t.type === "terminal") {
+          return { paneId: t.paneId as string, label: t.label, type: "terminal" as const, cwd: t.cwd };
+        }
+        return { paneId: t.paneId as string, label: t.label };
+      });
 
     const active = tabs.find((t) => t.id === activeTabId);
     const activePaneId =
-      active?.type === "agent" && typeof active.paneId === "string" && active.paneId.length > 0
+      (active?.type === "agent" || active?.type === "terminal") && typeof active.paneId === "string" && active.paneId.length > 0
         ? active.paneId
         : null;
 
@@ -1380,6 +1465,10 @@
       ) {
         e.preventDefault();
         void handleMenuAction("cleanup-worktrees");
+      }
+      if (e.ctrlKey && e.code === "Backquote" && !e.shiftKey && !e.altKey && !e.metaKey) {
+        e.preventDefault();
+        void handleMenuAction("new-terminal");
       }
     }
     document.addEventListener("keydown", onKeydown);

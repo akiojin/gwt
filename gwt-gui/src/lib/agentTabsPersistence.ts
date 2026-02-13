@@ -9,7 +9,7 @@ export const PROJECT_AGENT_TABS_STORAGE_KEY = "gwt.projectAgentTabs.v1";
 /**
  * Minimal persisted representation of an agent tab.
  */
-export type StoredAgentTab = { paneId: string; label: string };
+export type StoredAgentTab = { paneId: string; label: string; type?: "terminal"; cwd?: string };
 
 /**
  * Persisted agent tab state for a single project.
@@ -89,7 +89,14 @@ export function loadStoredProjectAgentTabs(
       const paneId = typeof obj.paneId === "string" ? obj.paneId.trim() : "";
       if (!paneId || seen.has(paneId)) continue;
       const label = typeof obj.label === "string" ? obj.label : "";
-      tabs.push({ paneId, label });
+      const entry: StoredAgentTab = { paneId, label };
+      if (obj.type === "terminal") {
+        entry.type = "terminal";
+        if (typeof obj.cwd === "string") {
+          entry.cwd = obj.cwd;
+        }
+      }
+      tabs.push(entry);
       seen.add(paneId);
     }
 
@@ -159,21 +166,33 @@ export function buildRestoredAgentTabs(
   for (const t of stored.tabs) {
     if (!existingPaneIds.has(t.paneId)) continue;
 
-    const terminal = terminalByPaneId.get(t.paneId);
-    const agentId = inferAgentId(terminal?.agent_name);
+    if (t.type === "terminal") {
+      restoredTabs.push({
+        id: `terminal-${t.paneId}`,
+        label: t.label,
+        type: "terminal",
+        paneId: t.paneId,
+        ...(t.cwd ? { cwd: t.cwd } : {}),
+      });
+    } else {
+      const terminal = terminalByPaneId.get(t.paneId);
+      const agentId = inferAgentId(terminal?.agent_name);
 
-    restoredTabs.push({
-      id: `agent-${t.paneId}`,
-      label: t.label,
-      type: "agent",
-      paneId: t.paneId,
-      ...(agentId ? { agentId } : {}),
-    });
+      restoredTabs.push({
+        id: `agent-${t.paneId}`,
+        label: t.label,
+        type: "agent",
+        paneId: t.paneId,
+        ...(agentId ? { agentId } : {}),
+      });
+    }
   }
 
+  const activeEntry = stored.tabs.find((t) => t.paneId === stored.activePaneId);
+  const activePrefix = activeEntry?.type === "terminal" ? "terminal" : "agent";
   const restoredActive =
     stored.activePaneId && existingPaneIds.has(stored.activePaneId)
-      ? `agent-${stored.activePaneId}`
+      ? `${activePrefix}-${stored.activePaneId}`
       : "";
 
   const activeTabId =

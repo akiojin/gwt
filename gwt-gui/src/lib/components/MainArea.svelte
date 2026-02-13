@@ -9,6 +9,10 @@
     return tab.type === "agent" && typeof tab.paneId === "string" && tab.paneId.length > 0;
   }
 
+  function isTerminalTabWithPaneId(tab: Tab): tab is Tab & { paneId: string } {
+    return tab.type === "terminal" && typeof tab.paneId === "string" && tab.paneId.length > 0;
+  }
+
   let {
     tabs,
     activeTabId,
@@ -31,7 +35,8 @@
 
   let activeTab = $derived(tabs.find((t) => t.id === activeTabId));
   let agentTabs = $derived(tabs.filter(isAgentTabWithPaneId));
-  let showTerminalLayer = $derived(activeTab?.type === "agent");
+  let terminalTabs = $derived(tabs.filter(isTerminalTabWithPaneId));
+  let showTerminalLayer = $derived(activeTab?.type === "agent" || activeTab?.type === "terminal");
   let isPinnedTab = (tabType?: Tab["type"]) => tabType === "agentMode";
 </script>
 
@@ -44,6 +49,7 @@
         class="tab"
         class:active={activeTabId === tab.id}
         onclick={() => onTabSelect(tab.id)}
+        title={tab.type === "terminal" ? (tab.cwd || "") : ""}
       >
         {#if tab.type === "agent"}
           <span
@@ -53,8 +59,10 @@
             class:gemini={tab.agentId === "gemini"}
             class:opencode={tab.agentId === "opencode"}
           ></span>
+        {:else if tab.type === "terminal"}
+          <span class="tab-dot terminal"></span>
         {/if}
-        <span class="tab-label">{tab.label}</span>
+        <span class="tab-label">{tab.type === "terminal" ? (tab.cwd ? tab.cwd.split("/").pop() || "Terminal" : "Terminal") : tab.label}</span>
         {#if !isPinnedTab(tab.type)}
           <button
             class="tab-close"
@@ -87,6 +95,11 @@
 
     <div class="terminal-layer" class:hidden={!showTerminalLayer}>
       {#each agentTabs as tab (tab.id)}
+        <div class="terminal-wrapper" class:active={activeTabId === tab.id}>
+          <TerminalView paneId={tab.paneId} active={activeTabId === tab.id} />
+        </div>
+      {/each}
+      {#each terminalTabs as tab (tab.id)}
         <div class="terminal-wrapper" class:active={activeTabId === tab.id}>
           <TerminalView paneId={tab.paneId} active={activeTabId === tab.id} />
         </div>
@@ -165,6 +178,10 @@
 
   .tab-dot.opencode {
     background-color: var(--green);
+  }
+
+  .tab-dot.terminal {
+    background-color: var(--text-muted);
   }
 
   .tab-label {
