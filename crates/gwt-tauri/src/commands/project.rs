@@ -414,7 +414,7 @@ pub fn create_project(
     args.push(request.repo_url.clone());
     args.push(target.to_string_lossy().to_string());
 
-    let mut child = gwt_core::process::git_command()
+    let mut child = gwt_core::process::command("git")
         .args(args)
         .current_dir(&parent)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -536,7 +536,12 @@ fn encode_migration_state(state: &MigrationState) -> (String, Option<usize>, Opt
 
 /// Start a bare migration job for a normal repository (SPEC-a70a1ece US7).
 #[tauri::command]
-pub fn start_migration_job(path: String, app_handle: AppHandle) -> Result<String, String> {
+pub fn start_migration_job(
+    window: tauri::Window,
+    path: String,
+    state: State<AppState>,
+    app_handle: AppHandle,
+) -> Result<String, String> {
     let selected = Path::new(&path);
     if !selected.exists() {
         return Err(format!("Path does not exist: {}", path));
@@ -551,7 +556,13 @@ pub fn start_migration_job(path: String, app_handle: AppHandle) -> Result<String
     }
 
     let job_id = Uuid::new_v4().to_string();
+    let window_label = window.label().to_string();
+    let source_root_str = source_root.to_string_lossy().to_string();
+    state.set_window_migration(&window_label, job_id.clone(), source_root_str);
+    let _ = crate::menu::rebuild_menu(window.app_handle());
+
     let job_id_thread = job_id.clone();
+    let window_label_thread = window_label.clone();
     let app = app_handle.clone();
     let source_root_thread = source_root.clone();
 
@@ -590,6 +601,10 @@ pub fn start_migration_job(path: String, app_handle: AppHandle) -> Result<String
                 (false, Some(msg))
             }
         };
+
+        app.state::<AppState>()
+            .clear_window_migration_if_job(&window_label_thread, &job_id_thread);
+        let _ = crate::menu::rebuild_menu(&app);
 
         let finished = MigrationFinishedPayload {
             job_id: job_id_thread.clone(),
@@ -695,7 +710,7 @@ mod tests {
         .expect("write project.json");
 
         let bare = root.join("repo.git");
-        let status = gwt_core::process::git_command()
+        let status = gwt_core::process::command("git")
             .args(["init", "--bare"])
             .arg(&bare)
             .status()
@@ -713,7 +728,7 @@ mod tests {
         let root = temp.path();
 
         let bare = root.join("repo.git");
-        let status = gwt_core::process::git_command()
+        let status = gwt_core::process::command("git")
             .args(["init", "--bare"])
             .arg(&bare)
             .status()
