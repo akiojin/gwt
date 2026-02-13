@@ -506,6 +506,12 @@ fn now_millis() -> i64 {
 
 const DOCKER_WORKDIR: &str = "/workspace";
 
+fn docker_compose_exec_workdir(_workspace_folder: Option<&str>) -> String {
+    // Compose services may define their own WORKDIR/working_dir; forcing -w can break
+    // projects that do not have /workspace. Prefer container defaults.
+    String::new()
+}
+
 fn build_docker_compose_up_args(
     compose_args: &[String],
     build: bool,
@@ -1573,6 +1579,17 @@ mod tests {
     }
 
     #[test]
+    fn docker_compose_exec_workdir_is_empty_without_workspace_folder() {
+        assert_eq!(docker_compose_exec_workdir(None), "");
+    }
+
+    #[test]
+    fn docker_compose_exec_workdir_ignores_workspace_folder() {
+        assert_eq!(docker_compose_exec_workdir(Some("/workspace")), "");
+        assert_eq!(docker_compose_exec_workdir(Some("/app")), "");
+    }
+
+    #[test]
     fn docker_mount_target_path_converts_windows_drive_style() {
         assert_eq!(
             docker_mount_target_path("D:/Repository/GE/GrimoireEngine.git"),
@@ -2078,7 +2095,7 @@ fn launch_agent_for_project_root(
                 docker_env = Some(env);
                 docker_mode = DockerExecMode::Compose {
                     service,
-                    workdir: String::new(),
+                    workdir: docker_compose_exec_workdir(None),
                     compose_args,
                 };
             }
@@ -2166,16 +2183,9 @@ fn launch_agent_for_project_root(
                     docker_container_name = Some(container_name);
                     docker_compose_args = Some(compose_args.clone());
                     docker_env = Some(env);
-                    let workdir = cfg
-                        .workspace_folder
-                        .as_deref()
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| DOCKER_WORKDIR.to_string());
-
                     docker_mode = DockerExecMode::Compose {
                         service,
-                        workdir,
+                        workdir: docker_compose_exec_workdir(cfg.workspace_folder.as_deref()),
                         compose_args,
                     };
                 } else if let Some(image) = cfg
