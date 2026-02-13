@@ -9,15 +9,21 @@ use super::gh_cli::gh_command;
 use super::issue::resolve_repo_slug;
 use super::pullrequest::{PrStatusInfo, ReviewComment, ReviewInfo, WorkflowRunInfo};
 
+fn graphql_string_literal(value: &str) -> String {
+    // JSON string escaping is compatible with GraphQL string literal escaping.
+    serde_json::to_string(value).expect("serializing GraphQL string literal should not fail")
+}
+
 /// Build a GraphQL query to fetch PR status for multiple branches at once.
 ///
 /// Each branch gets an aliased field `b{index}` querying the most recent OPEN PR.
 pub fn build_pr_status_query(owner: &str, repo: &str, branch_names: &[String]) -> String {
     let mut fields = String::new();
     for (i, branch) in branch_names.iter().enumerate() {
+        let branch = graphql_string_literal(branch);
         fields.push_str(&format!(
             r#"
-    b{i}: pullRequests(headRefName: "{branch}", first: 1, states: OPEN) {{
+    b{i}: pullRequests(headRefName: {branch}, first: 1, states: OPEN) {{
       nodes {{
         number
         title
@@ -65,8 +71,10 @@ pub fn build_pr_status_query(owner: &str, repo: &str, branch_names: &[String]) -
         ));
     }
 
+    let owner = graphql_string_literal(owner);
+    let repo = graphql_string_literal(repo);
     format!(
-        r#"{{ repository(owner: "{owner}", name: "{repo}") {{ {fields} }} }}"#,
+        r#"{{ repository(owner: {owner}, name: {repo}) {{ {fields} }} }}"#,
         owner = owner,
         repo = repo,
         fields = fields,
@@ -478,10 +486,10 @@ pub fn fetch_pr_detail(repo_path: &Path, pr_number: u64) -> Result<PrStatusInfo,
     parse_pr_detail_response(&stdout)
 }
 
-/// Fetch CI workflow run log via `gh run view <run_id> --log` (T011).
-pub fn gh_run_view_log(repo_path: &Path, run_id: u64) -> Result<String, String> {
+/// Fetch CI workflow run log via `gh run view --job <check_run_id> --log` (T011).
+pub fn gh_run_view_log(repo_path: &Path, check_run_id: u64) -> Result<String, String> {
     let output = gh_command()
-        .args(["run", "view", &run_id.to_string(), "--log"])
+        .args(["run", "view", "--job", &check_run_id.to_string(), "--log"])
         .current_dir(repo_path)
         .output()
         .map_err(|e| format!("Failed to execute gh run view: {}", e))?;
@@ -529,6 +537,12 @@ mod tests {
         assert!(query.contains("repository(owner: \"owner\", name: \"repo\")"));
         // No b0, b1, etc.
         assert!(!query.contains("b0:"));
+    }
+
+    #[test]
+    fn test_build_pr_status_query_escapes_branch_names() {
+        let query = build_pr_status_query("owner", "repo", &["fix/has\"quote".to_string()]);
+        assert!(query.contains("b0: pullRequests(headRefName: \"fix/has\\\"quote\""));
     }
 
     // ==========================================================

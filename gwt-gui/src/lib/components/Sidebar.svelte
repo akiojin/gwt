@@ -81,8 +81,18 @@
     async function refresh() {
       if (destroyed) return;
       try {
-        const branchNames = branches.map((b) => b.name);
-        if (branchNames.length === 0) {
+        const branchKeyByName = new Map<string, string>();
+        const queryBranches: string[] = [];
+        const seen = new Set<string>();
+        for (const branch of branches) {
+          const queryBranch = normalizeBranchForPrLookup(branch.name);
+          branchKeyByName.set(branch.name, queryBranch);
+          if (!queryBranch || seen.has(queryBranch)) continue;
+          seen.add(queryBranch);
+          queryBranches.push(queryBranch);
+        }
+
+        if (queryBranches.length === 0) {
           pollingStatuses = {};
           return;
         }
@@ -90,9 +100,15 @@
         const result = await invoke<{
           statuses: Record<string, PrStatusInfo | null>;
           ghStatus: GhCliStatus;
-        }>("fetch_pr_status", { projectPath: path, branches: branchNames });
+        }>("fetch_pr_status", { projectPath: path, branches: queryBranches });
         if (!destroyed) {
-          pollingStatuses = result.statuses ?? {};
+          const statuses = result.statuses ?? {};
+          const mappedStatuses: Record<string, PrStatusInfo | null> = {};
+          for (const branch of branches) {
+            const key = branchKeyByName.get(branch.name) ?? branch.name;
+            mappedStatuses[branch.name] = statuses[key] ?? null;
+          }
+          pollingStatuses = mappedStatuses;
           pollingGhCliStatus = result.ghStatus ?? null;
         }
       } catch {
@@ -164,6 +180,7 @@
 
   let activeFilter: FilterType = $state("Local");
   let branches: BranchInfo[] = $state([]);
+  let remoteBranchNames: Set<string> = $state(new Set());
   let loading: boolean = $state(false);
   let searchQuery: string = $state("");
   let errorMessage: string | null = $state(null);
@@ -178,6 +195,18 @@
   function normalizeTabBranch(name: string): string {
     const trimmed = name.trim();
     return trimmed.startsWith("origin/") ? trimmed.slice("origin/".length) : trimmed;
+  }
+
+  function stripRemotePrefix(name: string): string {
+    const trimmed = name.trim();
+    const slash = trimmed.indexOf("/");
+    if (slash <= 0) return trimmed;
+    return trimmed.slice(slash + 1);
+  }
+
+  function normalizeBranchForPrLookup(branchName: string): string {
+    const trimmed = branchName.trim();
+    return remoteBranchNames.has(trimmed) ? stripRemotePrefix(trimmed) : trimmed;
   }
 
   function loadSummaryHeight(): number {
@@ -437,6 +466,7 @@
         const next = await invoke<BranchInfo[]>("list_worktree_branches", { projectPath });
         if (token !== fetchToken) return;
         branches = next;
+        remoteBranchNames = new Set();
 
         // Worktree safety info is relatively expensive, but it must refresh when worktrees
         // change (refreshKey) and when explicitly requested (localRefreshKey).
@@ -456,6 +486,7 @@
         });
         if (token !== fetchToken) return;
         branches = next;
+        remoteBranchNames = new Set(next.map((branch) => branch.name.trim()));
         worktreeMap = new Map();
         lastWorktreesFetchKey = "";
       } else {
@@ -478,6 +509,7 @@
           }
         }
         branches = merged;
+        remoteBranchNames = new Set(remote.map((branch) => branch.name.trim()));
 
         const wtKey = `${projectPath}::${localRefreshKey}::${refreshKey}`;
         const shouldFetchWorktrees = wtKey !== lastWorktreesFetchKey;
@@ -500,6 +532,7 @@
       if (token !== fetchToken) return;
       errorMessage = `Failed to fetch branches: ${msg}`;
       branches = [];
+      remoteBranchNames = new Set();
     }
     if (token !== fetchToken) return;
     loading = false;

@@ -39,6 +39,8 @@
   let prDetailError: string | null = $state(null);
   let prDetail: PrStatusInfo | null = $state(null);
   let prDetailBranch: string | null = $state(null);
+  let prDetailPrNumber: number | null = $state(null);
+  let prDetailRequestToken = 0;
 
   let sessionSummaryLoading: boolean = $state(false);
   let sessionSummaryGenerating: boolean = $state(false);
@@ -310,30 +312,59 @@
     };
   });
 
-  async function loadPrDetail(prNum: number) {
+  function clearPrDetailState(nextBranch: string | null = null) {
+    prDetailRequestToken++;
+    prDetailLoading = false;
+    prDetailError = null;
+    prDetail = null;
+    prDetailBranch = nextBranch;
+    prDetailPrNumber = null;
+  }
+
+  async function loadPrDetail(branch: string, prNum: number) {
+    const requestToken = ++prDetailRequestToken;
     prDetailLoading = true;
     prDetailError = null;
+    prDetail = null;
+    prDetailPrNumber = prNum;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       const result = await invoke<PrStatusInfo>("fetch_pr_detail", {
         projectPath,
         prNumber: prNum,
       });
+      if (requestToken !== prDetailRequestToken || prDetailBranch !== branch) return;
       prDetail = result;
     } catch (err) {
+      if (requestToken !== prDetailRequestToken || prDetailBranch !== branch) return;
       prDetailError = typeof err === "string" ? err : String(err);
     } finally {
+      if (requestToken !== prDetailRequestToken || prDetailBranch !== branch) return;
       prDetailLoading = false;
     }
   }
 
   $effect(() => {
-    if (activeTab === "pr" && prNumber) {
-      const branch = currentBranchName();
-      if (branch !== prDetailBranch) {
-        prDetailBranch = branch;
-        loadPrDetail(prNumber);
+    if (activeTab !== "pr") return;
+
+    const branch = currentBranchName();
+    if (!branch || !prNumber) {
+      const nextBranch = branch || null;
+      if (
+        prDetailBranch !== nextBranch ||
+        prDetail !== null ||
+        prDetailError !== null ||
+        prDetailLoading ||
+        prDetailPrNumber !== null
+      ) {
+        clearPrDetailState(nextBranch);
       }
+      return;
+    }
+
+    if (branch !== prDetailBranch || prNumber !== prDetailPrNumber) {
+      prDetailBranch = branch;
+      loadPrDetail(branch, prNumber);
     }
   });
 
@@ -402,9 +433,6 @@
           class:active={activeTab === "pr"}
           onclick={() => {
             activeTab = "pr";
-            if (prNumber && currentBranchName() !== prDetailBranch) {
-              loadPrDetail(prNumber);
-            }
           }}
         >
           PR

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, waitFor, fireEvent } from "@testing-library/svelte";
+import { render, waitFor, fireEvent, cleanup } from "@testing-library/svelte";
 
 const invokeMock = vi.fn();
 const listenMock = vi.fn(async () => () => {});
@@ -29,6 +29,7 @@ const branchFixture = {
 
 describe("WorktreeSummaryPanel", () => {
   beforeEach(() => {
+    cleanup();
     listenMock.mockClear();
     invokeMock.mockReset();
     invokeMock.mockResolvedValue([]);

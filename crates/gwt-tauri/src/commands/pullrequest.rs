@@ -241,7 +241,7 @@ pub fn fetch_pr_detail(project_path: String, pr_number: u64) -> Result<PrDetailR
     Ok(to_pr_detail_response(&info))
 }
 
-/// Fetch CI run log for a specific workflow run (T011)
+/// Fetch CI run log for a specific check run/job ID (T011)
 #[tauri::command]
 pub fn fetch_ci_log(project_path: String, run_id: u64) -> Result<String, String> {
     let project_root = Path::new(&project_path);

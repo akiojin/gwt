@@ -762,7 +762,7 @@
       tabs = [...tabs, newTab];
       activeTabId = newTab.id;
 
-      const cmd = `gh run view ${runId} --log\n`;
+      const cmd = `gh run view --job ${runId} --log\n`;
       const data = Array.from(new TextEncoder().encode(cmd));
       await invoke("write_terminal", { paneId, data });
     } catch (err) {
