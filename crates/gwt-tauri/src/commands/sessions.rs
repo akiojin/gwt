@@ -952,11 +952,12 @@ mod tests {
     use crate::commands::{TestEnvGuard, ENV_LOCK};
     use std::fs;
     use std::path::Path;
+    use std::process::Command;
     use std::time::Duration;
     use tempfile::TempDir;
 
     fn init_git_repo(path: &Path) {
-        let out = gwt_core::process::git_command()
+        let out = Command::new("git")
             .args(["init"])
             .current_dir(path)
             .output();
