@@ -2,7 +2,6 @@
 
 use super::{MigrationConfig, MigrationError};
 use std::path::Path;
-use std::process::Command;
 use tracing::debug;
 
 /// Validation result
@@ -47,7 +46,7 @@ impl ValidationResult {
 /// Check available disk space (SPEC-a70a1ece T801, FR-212)
 pub fn check_disk_space(path: &Path) -> Result<(u64, u64), MigrationError> {
     // Get available space using df command
-    let output = Command::new("df")
+    let output = crate::process::command("df")
         .args(["-B1", "--output=avail"])
         .arg(path)
         .output()
@@ -79,7 +78,7 @@ pub fn check_disk_space(path: &Path) -> Result<(u64, u64), MigrationError> {
 
 /// Get directory size recursively
 fn get_directory_size(path: &Path) -> Result<u64, MigrationError> {
-    let output = Command::new("du")
+    let output = crate::process::command("du")
         .args(["-sb"])
         .arg(path)
         .output()
@@ -104,7 +103,7 @@ fn get_directory_size(path: &Path) -> Result<u64, MigrationError> {
 
 /// Check for locked worktrees (SPEC-a70a1ece T802, FR-222)
 pub fn check_locked_worktrees(repo_root: &Path) -> Result<Vec<String>, MigrationError> {
-    let output = Command::new("git")
+    let output = crate::process::git_command()
         .args(["worktree", "list", "--porcelain"])
         .current_dir(repo_root)
         .output()
@@ -244,17 +243,17 @@ mod tests {
     fn test_check_locked_worktrees_empty() {
         let temp = TempDir::new().unwrap();
         // Initialize git repo
-        std::process::Command::new("git")
+        crate::process::git_command()
             .args(["init"])
             .current_dir(temp.path())
             .output()
             .unwrap();
-        std::process::Command::new("git")
+        crate::process::git_command()
             .args(["config", "user.email", "test@test.com"])
             .current_dir(temp.path())
             .output()
             .unwrap();
-        std::process::Command::new("git")
+        crate::process::git_command()
             .args(["config", "user.name", "Test"])
             .current_dir(temp.path())
             .output()
@@ -275,28 +274,28 @@ mod tests {
         std::fs::create_dir_all(&target).unwrap();
 
         // Initialize git repo
-        std::process::Command::new("git")
+        crate::process::git_command()
             .args(["init"])
             .current_dir(&source)
             .output()
             .unwrap();
-        std::process::Command::new("git")
+        crate::process::git_command()
             .args(["config", "user.email", "test@test.com"])
             .current_dir(&source)
             .output()
             .unwrap();
-        std::process::Command::new("git")
+        crate::process::git_command()
             .args(["config", "user.name", "Test"])
             .current_dir(&source)
             .output()
             .unwrap();
         std::fs::write(source.join("README.md"), "# Test").unwrap();
-        std::process::Command::new("git")
+        crate::process::git_command()
             .args(["add", "."])
             .current_dir(&source)
             .output()
             .unwrap();
-        std::process::Command::new("git")
+        crate::process::git_command()
             .args(["commit", "-m", "Initial"])
             .current_dir(&source)
             .output()
@@ -328,28 +327,28 @@ mod tests {
         std::fs::create_dir_all(&target).unwrap();
 
         // Initialize git repo WITHOUT .worktrees/
-        std::process::Command::new("git")
+        crate::process::git_command()
             .args(["init"])
             .current_dir(&source)
             .output()
             .unwrap();
-        std::process::Command::new("git")
+        crate::process::git_command()
             .args(["config", "user.email", "test@test.com"])
             .current_dir(&source)
             .output()
             .unwrap();
-        std::process::Command::new("git")
+        crate::process::git_command()
             .args(["config", "user.name", "Test"])
             .current_dir(&source)
             .output()
             .unwrap();
         std::fs::write(source.join("README.md"), "# Test").unwrap();
-        std::process::Command::new("git")
+        crate::process::git_command()
             .args(["add", "."])
             .current_dir(&source)
             .output()
             .unwrap();
-        std::process::Command::new("git")
+        crate::process::git_command()
             .args(["commit", "-m", "Initial"])
             .current_dir(&source)
             .output()

@@ -36,10 +36,10 @@ class MemoryStorage implements Storage {
   }
 }
 
-function makeTerminal(paneId: string) {
+function makeTerminal(paneId: string, agentName = "codex") {
   return {
     pane_id: paneId,
-    agent_name: "codex",
+    agent_name: agentName,
     branch_name: "feature/x",
     status: "running",
   };
@@ -127,7 +127,13 @@ describe("agentTabsPersistence", () => {
     );
 
     expect(restored.tabs).toEqual([
-      { id: "agent-p1", label: "one", type: "agent", paneId: "p1" },
+      {
+        id: "agent-p1",
+        label: "one",
+        type: "agent",
+        paneId: "p1",
+        agentId: "codex",
+      },
     ]);
     expect(restored.activeTabId).toBeNull();
   });
@@ -146,6 +152,43 @@ describe("agentTabsPersistence", () => {
 
     expect(restored.tabs.length).toBe(2);
     expect(restored.activeTabId).toBe("agent-p2");
+    expect(restored.tabs).toEqual([
+      {
+        id: "agent-p1",
+        label: "one",
+        type: "agent",
+        paneId: "p1",
+        agentId: "codex",
+      },
+      {
+        id: "agent-p2",
+        label: "two",
+        type: "agent",
+        paneId: "p2",
+        agentId: "codex",
+      },
+    ]);
+  });
+
+  it("buildRestoredAgentTabs leaves unknown agent names without agentId", () => {
+    const restored = buildRestoredAgentTabs(
+      {
+        tabs: [{ paneId: "p1", label: "one" }],
+        activePaneId: null,
+      },
+      [makeTerminal("p1", "unknown-agent")],
+    );
+
+    expect(restored.tabs).toEqual([
+      { id: "agent-p1", label: "one", type: "agent", paneId: "p1" },
+    ]);
+  });
+
+  it("shouldRetryAgentTabRestore handles transient empty matches", () => {
+    expect(shouldRetryAgentTabRestore(2, 0, 0)).toBe(true);
+    expect(shouldRetryAgentTabRestore(2, 1, 0)).toBe(false);
+    expect(shouldRetryAgentTabRestore(0, 0, 0)).toBe(false);
+    expect(shouldRetryAgentTabRestore(2, 0, AGENT_TAB_RESTORE_MAX_RETRIES - 1)).toBe(false);
   });
 
   it("shouldRetryAgentTabRestore handles transient empty matches", () => {

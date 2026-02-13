@@ -73,3 +73,11 @@ gwt-gui/src/
 - フロントエンド: Agentビュー表示、選択連動、並び順、worktree表示形式をコンポーネントテストで検証
 - バックエンド: MA状態変換、再割当時の現在担当のみ保持、成果物4点の実行ゲートをユニットテストで検証
 - 回帰: 既存 `AgentModePanel` のIME/スピナー/オートスクロールテストを維持
+
+## 追補: Session Summaryタブ回帰修正（2026-02-13）
+
+- `App.svelte` の初期タブ/再初期化から `Session Summary` を除去し、`Agent Mode` を既定タブに統一する
+- ブランチ選択時の `Session Summary` 再追加ロジックを削除する
+- タブ復元時の active 上書き条件を `agentMode` のみに限定する
+- `Tab` 型から `summary` を除去して型レベルで再発を防止する
+- `MainArea.test.ts` と `appTabs.test.ts` を追加し、タブ固定仕様をテストで担保する

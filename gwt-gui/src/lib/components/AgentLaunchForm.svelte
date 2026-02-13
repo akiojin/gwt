@@ -124,7 +124,7 @@
   type NewBranchTab = "manual" | "fromIssue";
   let newBranchTab: NewBranchTab = $state("manual" as NewBranchTab);
   let ghCliStatus: GhCliStatus | null = $state(null as GhCliStatus | null);
-  let ghCliChecked: boolean = $state(false);
+  let ghCliCheckedProject: string | null = $state(null as string | null);
   let issues: GitHubIssueInfo[] = $state([]);
   let issuesLoading: boolean = $state(false);
   let issuesError: string | null = $state(null);
@@ -466,11 +466,18 @@
     void loadBaseBranchOptions();
   });
 
-  // Check gh CLI on mount
+  // Check gh CLI once per project after shell environment is ready.
   $effect(() => {
     void projectPath;
-    if (!projectPath || ghCliChecked) return;
-    ghCliChecked = true;
+    void osEnvReady;
+    if (!projectPath) return;
+    if (!osEnvReady) {
+      ghCliStatus = null;
+      ghCliCheckedProject = null;
+      return;
+    }
+    if (ghCliCheckedProject === projectPath) return;
+    ghCliCheckedProject = projectPath;
     void checkGhCli();
   });
 
@@ -992,14 +999,20 @@
               <button
                 class="mode-btn"
                 class:active={newBranchTab === "fromIssue"}
-                disabled={!ghCliAvailable}
-                title={!ghCliAvailable ? "GitHub CLI (gh) is required" : ""}
+                disabled={!osEnvReady || !ghCliAvailable}
+                title={!osEnvReady
+                  ? "Loading shell environment..."
+                  : !ghCliAvailable
+                    ? "GitHub CLI (gh) is required"
+                    : ""}
                 onclick={() => (newBranchTab = "fromIssue")}
               >
                 From Issue
               </button>
             </div>
-            {#if ghCliStatus && !ghCliStatus.available}
+            {#if !osEnvReady}
+              <span class="field-hint">Loading shell environment...</span>
+            {:else if ghCliStatus && !ghCliStatus.available}
               <span class="field-hint warn">GitHub CLI (gh) is not installed.</span>
             {:else if ghCliStatus && !ghCliStatus.authenticated}
               <span class="field-hint warn">GitHub CLI (gh) is not authenticated. Run: gh auth login</span>
@@ -1991,7 +2004,9 @@
   }
 
   .issue-list {
-    max-height: 240px;
+    height: min(46vh, 420px);
+    min-height: 260px;
+    max-height: 420px;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
@@ -2079,5 +2094,13 @@
     text-align: center;
     color: var(--text-muted);
     font-size: var(--ui-font-md);
+  }
+
+  @media (max-width: 640px) {
+    .issue-list {
+      height: 38vh;
+      min-height: 180px;
+      max-height: 320px;
+    }
   }
 </style>

@@ -11,7 +11,6 @@ use gwt_core::config::ProfilesConfig;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::process::Command;
 use tauri::Manager;
 use tauri::{AppHandle, Emitter, State};
 
@@ -115,19 +114,9 @@ pub fn get_project_version_history(
     let repo_key = repo_path.to_string_lossy().to_string();
 
     let profiles = ProfilesConfig::load().map_err(|e| e.to_string())?;
-    let ai = profiles.resolve_active_ai_settings();
-    let Some(settings) = ai.resolved else {
-        return Ok(VersionHistoryResult {
-            status: "disabled".to_string(),
-            version_id: version_id.clone(),
-            label: version_label(&version_id),
-            range_from: None,
-            range_to: String::new(),
-            commit_count: 0,
-            summary_markdown: None,
-            changelog_markdown: None,
-            error: None,
-        });
+    let settings = match resolve_version_history_ai_settings(&profiles) {
+        Some(settings) => settings,
+        None => return Ok(disabled_version_history_result(&version_id)),
     };
 
     // Resolve the requested version into a concrete git range.
@@ -249,6 +238,30 @@ pub fn get_project_version_history(
         changelog_markdown: None,
         error: None,
     })
+}
+
+fn disabled_version_history_result(version_id: &str) -> VersionHistoryResult {
+    VersionHistoryResult {
+        status: "disabled".to_string(),
+        version_id: version_id.to_string(),
+        label: version_label(version_id),
+        range_from: None,
+        range_to: String::new(),
+        commit_count: 0,
+        summary_markdown: None,
+        changelog_markdown: None,
+        error: None,
+    }
+}
+
+fn resolve_version_history_ai_settings(
+    profiles: &ProfilesConfig,
+) -> Option<gwt_core::config::ResolvedAISettings> {
+    let ai = profiles.resolve_active_ai_settings();
+    if !ai.summary_enabled {
+        return None;
+    }
+    ai.resolved
 }
 
 fn get_cached_version_history(
@@ -754,7 +767,7 @@ fn git_log_subjects(
 }
 
 fn git_output(repo_path: &Path, args: &[String]) -> Result<String, String> {
-    let output = Command::new("git")
+    let output = gwt_core::process::git_command()
         .args(args)
         .current_dir(repo_path)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -774,7 +787,7 @@ fn git_output(repo_path: &Path, args: &[String]) -> Result<String, String> {
 }
 
 fn is_unborn_head(repo_path: &Path) -> bool {
-    let output = Command::new("git")
+    let output = gwt_core::process::git_command()
         .args(["rev-parse", "--verify", "--quiet", "HEAD"])
         .current_dir(repo_path)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -790,23 +803,24 @@ fn is_unborn_head(repo_path: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::commands::{TestEnvGuard, ENV_LOCK};
+    use gwt_core::config::AISettings;
+    use std::collections::HashMap;
     use std::fs;
     use std::path::Path;
-    use std::process::Command;
     use tempfile::TempDir;
 
     fn init_git_repo(path: &Path) {
-        let out = Command::new("git")
+        let out = gwt_core::process::git_command()
             .args(["init"])
             .current_dir(path)
             .output();
         assert!(out.is_ok());
         assert!(out.unwrap().status.success());
-        let _ = Command::new("git")
+        let _ = gwt_core::process::git_command()
             .args(["config", "user.email", "test@example.com"])
             .current_dir(path)
             .output();
-        let _ = Command::new("git")
+        let _ = gwt_core::process::git_command()
             .args(["config", "user.name", "Test"])
             .current_dir(path)
             .output();
@@ -814,11 +828,11 @@ mod tests {
 
     fn commit_file(path: &Path, name: &str, content: &str, msg: &str) {
         fs::write(path.join(name), content).unwrap();
-        let _ = Command::new("git")
+        let _ = gwt_core::process::git_command()
             .args(["add", "."])
             .current_dir(path)
             .output();
-        let out = Command::new("git")
+        let out = gwt_core::process::git_command()
             .args(["commit", "-m", msg])
             .current_dir(path)
             .output()
@@ -827,7 +841,7 @@ mod tests {
     }
 
     fn tag(path: &Path, name: &str) {
-        let out = Command::new("git")
+        let out = gwt_core::process::git_command()
             .args(["tag", name])
             .current_dir(path)
             .output()
@@ -890,5 +904,55 @@ mod tests {
         assert!(md.contains("- update readme"));
         assert!(md.contains("### Other"));
         assert!(md.contains("- random message"));
+    }
+
+    fn ai_settings(summary_enabled: bool) -> AISettings {
+        AISettings {
+            endpoint: "https://api.openai.com/v1".to_string(),
+            api_key: String::new(),
+            model: "gpt-5.2-codex".to_string(),
+            summary_enabled,
+        }
+    }
+
+    #[test]
+    fn resolve_version_history_ai_settings_returns_disabled_when_summary_disabled() {
+        let config = ProfilesConfig {
+            version: 1,
+            active: None,
+            default_ai: Some(ai_settings(false)),
+            profiles: HashMap::new(),
+        };
+
+        let out = resolve_version_history_ai_settings(&config);
+        assert!(out.is_none(), "summary disabled should skip AI generation");
+    }
+
+    #[test]
+    fn resolve_version_history_ai_settings_returns_disabled_when_ai_not_configured() {
+        let config = ProfilesConfig {
+            version: 1,
+            active: None,
+            default_ai: None,
+            profiles: HashMap::new(),
+        };
+
+        let out = resolve_version_history_ai_settings(&config);
+        assert!(out.is_none(), "missing AI config should skip AI generation");
+    }
+
+    #[test]
+    fn resolve_version_history_ai_settings_returns_settings_when_enabled() {
+        let config = ProfilesConfig {
+            version: 1,
+            active: None,
+            default_ai: Some(ai_settings(true)),
+            profiles: HashMap::new(),
+        };
+
+        let settings = resolve_version_history_ai_settings(&config)
+            .expect("enabled AI should provide settings");
+        assert_eq!(settings.endpoint, "https://api.openai.com/v1");
+        assert_eq!(settings.model, "gpt-5.2-codex");
     }
 }

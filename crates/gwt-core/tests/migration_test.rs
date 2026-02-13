@@ -3,7 +3,6 @@
 //! These tests verify the migration from .worktrees/ method to bare method.
 
 use std::path::PathBuf;
-use std::process::Command;
 use tempfile::TempDir;
 
 /// Initialize tracing for tests
@@ -20,19 +19,19 @@ fn setup_worktrees_style_repo() -> (TempDir, PathBuf) {
     let repo_path = temp.path().join("myrepo");
 
     // Create a normal repository
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["init"])
         .arg(&repo_path)
         .output()
         .expect("Failed to init repo");
 
     // Configure git user
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["config", "user.email", "test@example.com"])
         .current_dir(&repo_path)
         .output()
         .expect("Failed to set email");
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["config", "user.name", "Test User"])
         .current_dir(&repo_path)
         .output()
@@ -40,12 +39,12 @@ fn setup_worktrees_style_repo() -> (TempDir, PathBuf) {
 
     // Create initial commit
     std::fs::write(repo_path.join("README.md"), "# Test Repo").expect("Failed to write file");
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["add", "."])
         .current_dir(&repo_path)
         .output()
         .expect("Failed to add");
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["commit", "-m", "Initial commit"])
         .current_dir(&repo_path)
         .output()
@@ -57,7 +56,7 @@ fn setup_worktrees_style_repo() -> (TempDir, PathBuf) {
 
     // Create a worktree in .worktrees/ style
     let feature_path = worktrees_dir.join("feature-test");
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["worktree", "add", "-b", "feature/test"])
         .arg(&feature_path)
         .current_dir(&repo_path)
@@ -130,7 +129,7 @@ fn test_bare_repo_clone() {
     let bare_path = temp.path().join("repo.git");
 
     // Initialize a bare repository
-    let output = Command::new("git")
+    let output = gwt_core::process::git_command()
         .args(["init", "--bare"])
         .arg(&bare_path)
         .output()
@@ -158,7 +157,7 @@ fn test_worktree_dirty_detection() {
     let feature_path = repo_path.join(".worktrees").join("feature-test");
 
     // Check clean worktree
-    let output = Command::new("git")
+    let output = gwt_core::process::git_command()
         .args(["status", "--porcelain"])
         .current_dir(&feature_path)
         .output()
@@ -171,7 +170,7 @@ fn test_worktree_dirty_detection() {
     std::fs::write(feature_path.join("dirty.txt"), "dirty content")
         .expect("Failed to write dirty file");
 
-    let output = Command::new("git")
+    let output = gwt_core::process::git_command()
         .args(["status", "--porcelain"])
         .current_dir(&feature_path)
         .output()
@@ -210,7 +209,7 @@ fn test_migrated_worktrees_have_git_file_not_directory() {
     let worktree_path = parent_dir.join("feature-test");
 
     // Create bare repo
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["clone", "--bare", "--"])
         .arg(&repo_path)
         .arg(&bare_path)
@@ -218,7 +217,7 @@ fn test_migrated_worktrees_have_git_file_not_directory() {
         .expect("Failed to create bare repo");
 
     // Create worktree from bare repo
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["worktree", "add"])
         .arg(&worktree_path)
         .arg("feature/test")
@@ -253,7 +252,7 @@ fn test_git_worktree_list_shows_migrated_worktrees() {
     let parent_dir = repo_path.parent().unwrap();
 
     // Get the actual main branch name (could be main or master)
-    let output = Command::new("git")
+    let output = gwt_core::process::git_command()
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(&repo_path)
         .output()
@@ -266,7 +265,7 @@ fn test_git_worktree_list_shows_migrated_worktrees() {
     let feature_worktree = parent_dir.join("feature-test");
 
     // Create bare repo
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["clone", "--bare", "--"])
         .arg(&repo_path)
         .arg(&bare_path)
@@ -274,7 +273,7 @@ fn test_git_worktree_list_shows_migrated_worktrees() {
         .expect("Failed to create bare repo");
 
     // Create main worktree (simulating original repo migration)
-    let output = Command::new("git")
+    let output = gwt_core::process::git_command()
         .args(["worktree", "add"])
         .arg(&main_worktree)
         .arg(&main_branch)
@@ -288,7 +287,7 @@ fn test_git_worktree_list_shows_migrated_worktrees() {
     );
 
     // Create feature worktree
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["worktree", "add"])
         .arg(&feature_worktree)
         .arg("feature/test")
@@ -297,7 +296,7 @@ fn test_git_worktree_list_shows_migrated_worktrees() {
         .expect("Failed to create feature worktree");
 
     // Verify git worktree list shows all worktrees
-    let output = Command::new("git")
+    let output = gwt_core::process::git_command()
         .args(["worktree", "list"])
         .current_dir(&bare_path)
         .output()
@@ -327,37 +326,37 @@ fn test_original_repo_main_branch_becomes_worktree() {
     let parent_dir = temp.path();
 
     // Create a normal repository (simulating source repo)
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["init"])
         .arg(&repo_path)
         .output()
         .expect("Failed to init repo");
 
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["config", "user.email", "test@example.com"])
         .current_dir(&repo_path)
         .output()
         .expect("Failed to set email");
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["config", "user.name", "Test User"])
         .current_dir(&repo_path)
         .output()
         .expect("Failed to set name");
 
     std::fs::write(repo_path.join("README.md"), "# Test").expect("Failed to write");
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["add", "."])
         .current_dir(&repo_path)
         .output()
         .expect("Failed to add");
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["commit", "-m", "Initial"])
         .current_dir(&repo_path)
         .output()
         .expect("Failed to commit");
 
     // Get the main branch name
-    let output = Command::new("git")
+    let output = gwt_core::process::git_command()
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(&repo_path)
         .output()
@@ -369,7 +368,7 @@ fn test_original_repo_main_branch_becomes_worktree() {
     let main_worktree = parent_dir.join(&main_branch);
 
     // Create bare from source
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["clone", "--bare", "--"])
         .arg(&repo_path)
         .arg(&bare_path)
@@ -377,7 +376,7 @@ fn test_original_repo_main_branch_becomes_worktree() {
         .expect("Failed to create bare");
 
     // Create main worktree from bare (this is what migration should do)
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["worktree", "add"])
         .arg(&main_worktree)
         .arg(&main_branch)
@@ -390,7 +389,7 @@ fn test_original_repo_main_branch_becomes_worktree() {
     assert!(git_path.is_file(), "main worktree .git should be a file");
 
     // Verify it's recognized by git worktree list
-    let output = Command::new("git")
+    let output = gwt_core::process::git_command()
         .args(["worktree", "list"])
         .current_dir(&bare_path)
         .output()
@@ -414,19 +413,19 @@ fn test_full_migration_with_worktrees() {
     let repo_path = temp.path().join("myrepo");
 
     // Create a normal repository
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["init"])
         .arg(&repo_path)
         .output()
         .expect("Failed to init repo");
 
     // Configure git user
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["config", "user.email", "test@example.com"])
         .current_dir(&repo_path)
         .output()
         .expect("Failed to set email");
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["config", "user.name", "Test User"])
         .current_dir(&repo_path)
         .output()
@@ -434,12 +433,12 @@ fn test_full_migration_with_worktrees() {
 
     // Create initial commit
     std::fs::write(repo_path.join("README.md"), "# Test Repo").expect("Failed to write file");
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["add", "."])
         .current_dir(&repo_path)
         .output()
         .expect("Failed to add");
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["commit", "-m", "Initial commit"])
         .current_dir(&repo_path)
         .output()
@@ -451,7 +450,7 @@ fn test_full_migration_with_worktrees() {
 
     // Create feature/test worktree
     let feature_path = worktrees_dir.join("feature-test");
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["worktree", "add", "-b", "feature/test"])
         .arg(&feature_path)
         .current_dir(&repo_path)
@@ -460,7 +459,7 @@ fn test_full_migration_with_worktrees() {
 
     // Create develop worktree
     let develop_path = worktrees_dir.join("develop");
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["worktree", "add", "-b", "develop"])
         .arg(&develop_path)
         .current_dir(&repo_path)
@@ -468,7 +467,7 @@ fn test_full_migration_with_worktrees() {
         .expect("Failed to create develop worktree");
 
     // Get main branch name
-    let output = Command::new("git")
+    let output = gwt_core::process::git_command()
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(&repo_path)
         .output()
@@ -539,7 +538,7 @@ fn test_full_migration_with_worktrees() {
     );
 
     // Verify git worktree list shows all worktrees
-    let output = Command::new("git")
+    let output = gwt_core::process::git_command()
         .args(["worktree", "list"])
         .current_dir(&bare_path)
         .output()

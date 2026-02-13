@@ -14,6 +14,7 @@ pub mod recent_projects;
 pub mod sessions;
 pub mod settings;
 pub mod terminal;
+pub mod update;
 pub mod version_history;
 pub mod window_tabs;
 
