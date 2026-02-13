@@ -2,6 +2,7 @@ use crate::agent_master::AgentModeState;
 use gwt_core::ai::SessionSummaryCache;
 use gwt_core::config::os_env::EnvSource;
 use gwt_core::terminal::manager::PaneManager;
+use gwt_core::update::UpdateManager;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -90,6 +91,7 @@ pub struct AppState {
     pub exit_confirm_inflight: AtomicBool,
     pub os_env: Arc<OnceCell<HashMap<String, String>>>,
     pub os_env_source: Arc<OnceCell<EnvSource>>,
+    pub update_manager: UpdateManager,
 }
 
 impl AppState {
@@ -112,6 +114,7 @@ impl AppState {
             exit_confirm_inflight: AtomicBool::new(false),
             os_env: Arc::new(OnceCell::new()),
             os_env_source: Arc::new(OnceCell::new()),
+            update_manager: UpdateManager::new(),
         }
     }
 

@@ -267,7 +267,7 @@ impl WorktreeManager {
     fn prune_worktrees_if_safe(&self) -> Result<bool> {
         let current_name = current_worktree_metadata_name_for_repo(&self.repo_root);
 
-        let output = match std::process::Command::new("git")
+        let output = match crate::process::git_command()
             .args(["worktree", "prune", "--dry-run", "--verbose"])
             .current_dir(&self.repo_root)
             .output()
@@ -380,7 +380,7 @@ impl WorktreeManager {
                 resolved_branch = branch.clone();
                 if !Branch::exists(&self.repo_root, &resolved_branch)? {
                     // Check if refs/remotes/{remote}/{branch} exists locally
-                    let has_local_remote_ref = std::process::Command::new("git")
+                    let has_local_remote_ref = crate::process::git_command()
                         .args([
                             "show-ref",
                             "--verify",
@@ -398,7 +398,7 @@ impl WorktreeManager {
                         Branch::create(&self.repo_root, &resolved_branch, &remote_ref)?;
                     } else {
                         // SPEC-a70a1ece FR-124: No local remote ref, fetch from remote
-                        let fetch_output = std::process::Command::new("git")
+                        let fetch_output = crate::process::git_command()
                             .args(["fetch", &remote, &format!("{}:{}", branch, branch)])
                             .current_dir(&self.repo_root)
                             .output()
@@ -450,7 +450,18 @@ impl WorktreeManager {
             WorktreePath::generate_with_location(&self.repo_root, &resolved_branch, self.location);
 
         // Git can still have this path registered even when the directory is missing.
-        // In that case, git worktree add fails with "missing but already registered worktree".
+        // Reuse an existing active worktree only when it points to the same branch.
+        // This avoids returning another branch's worktree when path sanitization
+        // collides (for example, "feature/foo" vs "feature-foo" in Subdir mode).
+        if let Some(wt) = self.get_registered_worktree_by_path_basic(&path)? {
+            if wt.status == WorktreeStatus::Active
+                && wt.branch.as_deref() == Some(resolved_branch.as_str())
+            {
+                return Ok(wt);
+            }
+        }
+
+        // In case only metadata is stale (missing/prunable), remove stale metadata if safe.
         self.handle_registered_worktree_path_conflict(&path, &mut did_prune)?;
 
         // FR-038-040: Handle existing path (auto-recovery disabled)
@@ -590,7 +601,7 @@ impl WorktreeManager {
 
                     // remote_exists may succeed via ls-remote (bare repo), but the ref still needs
                     // to exist locally for `git reset --hard origin/<branch>` to work.
-                    let has_local_remote_ref = std::process::Command::new("git")
+                    let has_local_remote_ref = crate::process::git_command()
                         .args([
                             "show-ref",
                             "--verify",
@@ -606,7 +617,7 @@ impl WorktreeManager {
                         // Fetch once to materialize refs/remotes/* locally.
                         self.repo.fetch_all()?;
 
-                        let has_local_remote_ref_after = std::process::Command::new("git")
+                        let has_local_remote_ref_after = crate::process::git_command()
                             .args([
                                 "show-ref",
                                 "--verify",
@@ -673,7 +684,7 @@ impl WorktreeManager {
         // If base branch specified, reset to it
         if let Some(base) = normalized_base.as_deref() {
             let wt_repo = Repository::open(&path)?;
-            let reset_output = std::process::Command::new("git")
+            let reset_output = crate::process::git_command()
                 .args(["reset", "--hard", base])
                 .current_dir(&path)
                 .output()
@@ -922,7 +933,7 @@ impl WorktreeManager {
             args.push(r);
         }
 
-        let output = std::process::Command::new("git")
+        let output = crate::process::git_command()
             .args(&args)
             .current_dir(&self.repo_root)
             .output()
@@ -960,7 +971,7 @@ impl WorktreeManager {
         debug!(category = "worktree", path = %path.display(), "Unlocking worktree");
 
         let path_str = path.to_string_lossy();
-        let output = std::process::Command::new("git")
+        let output = crate::process::git_command()
             .args(["worktree", "unlock", &path_str])
             .current_dir(&self.repo_root)
             .output()
@@ -1059,7 +1070,7 @@ fn parse_missing_registered_worktree_path(details: &str) -> Option<PathBuf> {
 
 fn current_worktree_metadata_name_for_repo(repo_root: &Path) -> Option<String> {
     fn rev_parse_path(dir: &Path, arg: &str) -> Option<PathBuf> {
-        let output = std::process::Command::new("git")
+        let output = crate::process::git_command()
             .args(["rev-parse", arg])
             .current_dir(dir)
             .output()
@@ -1157,7 +1168,6 @@ fn resolve_remote_branch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
     use tempfile::TempDir;
 
     fn canonicalize_or_self(path: &Path) -> PathBuf {
@@ -1165,7 +1175,7 @@ mod tests {
     }
 
     fn run_git_in(dir: &Path, args: &[&str]) {
-        let output = Command::new("git")
+        let output = crate::process::git_command()
             .args(args)
             .current_dir(dir)
             .output()
@@ -1179,7 +1189,7 @@ mod tests {
     }
 
     fn git_stdout(dir: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
+        let output = crate::process::git_command()
             .args(args)
             .current_dir(dir)
             .output()
@@ -1195,29 +1205,29 @@ mod tests {
 
     fn create_test_repo() -> TempDir {
         let temp = TempDir::new().unwrap();
-        Command::new("git")
+        crate::process::git_command()
             .args(["init"])
             .current_dir(temp.path())
             .output()
             .unwrap();
-        Command::new("git")
+        crate::process::git_command()
             .args(["config", "user.email", "test@test.com"])
             .current_dir(temp.path())
             .output()
             .unwrap();
-        Command::new("git")
+        crate::process::git_command()
             .args(["config", "user.name", "Test"])
             .current_dir(temp.path())
             .output()
             .unwrap();
         // Create initial commit
         std::fs::write(temp.path().join("test.txt"), "hello").unwrap();
-        Command::new("git")
+        crate::process::git_command()
             .args(["add", "."])
             .current_dir(temp.path())
             .output()
             .unwrap();
-        Command::new("git")
+        crate::process::git_command()
             .args(["commit", "-m", "initial"])
             .current_dir(temp.path())
             .output()
@@ -1285,6 +1295,53 @@ mod tests {
         // Should not create a second worktree for the same branch.
         let worktrees = manager.list().unwrap();
         assert_eq!(worktrees.len(), 2);
+    }
+
+    #[test]
+    fn test_create_for_branch_does_not_reuse_detached_registered_worktree_path() {
+        let temp = create_test_repo();
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+
+        let branch = "feature/reuse-path";
+        Branch::create(temp.path(), branch, "HEAD").unwrap();
+
+        // Register the expected worktree path as a detached active worktree.
+        let wt_path = WorktreePath::generate(temp.path(), branch);
+        run_git_in(
+            temp.path(),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                wt_path.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+
+        let result = manager.create_for_branch(branch);
+        assert!(matches!(
+            result,
+            Err(GwtError::WorktreeAlreadyExists { .. })
+        ));
+    }
+
+    #[test]
+    fn test_create_for_branch_does_not_reuse_active_registered_path_for_other_branch() {
+        let temp = create_test_repo();
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+
+        Branch::create(temp.path(), "feature-foo", "HEAD").unwrap();
+        Branch::create(temp.path(), "feature/foo", "HEAD").unwrap();
+
+        // In Subdir mode both names map to ".worktrees/feature-foo".
+        let existing = manager.create_for_branch("feature-foo").unwrap();
+        assert_eq!(existing.branch.as_deref(), Some("feature-foo"));
+
+        let result = manager.create_for_branch("feature/foo");
+        assert!(matches!(
+            result,
+            Err(GwtError::WorktreeAlreadyExists { .. })
+        ));
     }
 
     #[test]
@@ -1376,7 +1433,7 @@ mod tests {
 
         let creator = TempDir::new().unwrap();
         let creator_path = creator.path().to_string_lossy().to_string();
-        let clone_output = Command::new("git")
+        let clone_output = crate::process::git_command()
             .args(["clone", remote_path.as_str(), creator_path.as_str()])
             .output()
             .unwrap();
@@ -1421,7 +1478,7 @@ mod tests {
         // Create a remote-only branch with an extra commit so HEAD differs from the base ref.
         let creator = TempDir::new().unwrap();
         let creator_path = creator.path().to_string_lossy().to_string();
-        let clone_output = Command::new("git")
+        let clone_output = crate::process::git_command()
             .args(["clone", remote_path.as_str(), creator_path.as_str()])
             .output()
             .unwrap();
@@ -1473,7 +1530,7 @@ mod tests {
 
         let creator = TempDir::new().unwrap();
         let creator_path = creator.path().to_string_lossy().to_string();
-        let clone_output = Command::new("git")
+        let clone_output = crate::process::git_command()
             .args(["clone", remote_path.as_str(), creator_path.as_str()])
             .output()
             .unwrap();
@@ -1609,7 +1666,7 @@ mod tests {
         std::fs::write(wt_path.join(".git"), "stale worktree").unwrap();
 
         // Ensure it's NOT in worktree list
-        let output = Command::new("git")
+        let output = crate::process::git_command()
             .args(["worktree", "list", "--porcelain"])
             .current_dir(temp.path())
             .output()
@@ -1683,7 +1740,7 @@ mod tests {
 
         // Clone as bare
         let bare = temp.path().join("repo.git");
-        let output = Command::new("git")
+        let output = crate::process::git_command()
             .args([
                 "clone",
                 "--bare",
