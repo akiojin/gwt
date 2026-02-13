@@ -8,6 +8,7 @@
     ProbePathResult,
     RollbackResult,
     TerminalInfo,
+    WorktreeInfo,
     TerminalAnsiProbe,
     CapturedEnvInfo,
     SettingsData,
@@ -35,6 +36,7 @@
     buildRestoredAgentTabs,
     shouldRetryAgentTabRestore,
   } from "./lib/agentTabsPersistence";
+  import type { StoredAgentTab } from "./lib/agentTabsPersistence";
   import { defaultAppTabs, shouldAllowRestoredActiveTab } from "./lib/appTabs";
   import {
     VoiceInputController,
@@ -69,7 +71,7 @@
     if (!Number.isFinite(widthPx)) return DEFAULT_SIDEBAR_WIDTH_PX;
     return Math.max(
       MIN_SIDEBAR_WIDTH_PX,
-      Math.min(MAX_SIDEBAR_WIDTH_PX, Math.round(widthPx))
+      Math.min(MAX_SIDEBAR_WIDTH_PX, Math.round(widthPx)),
     );
   }
 
@@ -137,7 +139,9 @@
     issueNumber: number;
     branchName: string;
   };
-  let issueLaunchFollowups: Map<string, IssueLaunchFollowup> = $state(new Map());
+  let issueLaunchFollowups: Map<string, IssueLaunchFollowup> = $state(
+    new Map(),
+  );
 
   let migrationOpen: boolean = $state(false);
   let migrationSourceRoot: string = $state("");
@@ -150,13 +154,15 @@
   const AGENT_TAB_RESTORE_RETRY_DELAY_MS = 150;
   const AGENT_TAB_RESTORE_RETRY_MAX_DELAY_MS = 1200;
 
-  let terminalCount = $derived(tabs.filter((t) => t.type === "agent" || t.type === "terminal").length);
+  let terminalCount = $derived(
+    tabs.filter((t) => t.type === "agent" || t.type === "terminal").length,
+  );
 
   let agentTabBranches = $derived(
     tabs
       .filter((t) => t.type === "agent")
       .map((t) => normalizeBranchName(t.label))
-      .filter((b) => b && b !== "Worktree" && b !== "Agent")
+      .filter((b) => b && b !== "Worktree" && b !== "Agent"),
   );
 
   let terminalDiagnosticsLoading: boolean = $state(false);
@@ -164,7 +170,9 @@
   let terminalDiagnosticsError: string | null = $state(null);
 
   let osEnvReady = $state(false);
-  let voiceInputSettings: VoiceInputSettings = $state(DEFAULT_VOICE_INPUT_SETTINGS);
+  let voiceInputSettings: VoiceInputSettings = $state(
+    DEFAULT_VOICE_INPUT_SETTINGS,
+  );
   let voiceInputListening = $state(false);
   let voiceInputSupported = $state(true);
   let voiceInputError: string | null = $state(null);
@@ -181,7 +189,11 @@
   let osEnvDebugLoading = $state(false);
   let osEnvDebugError = $state<string | null>(null);
 
-  function showToast(message: string, durationMs = 8000, action: ToastAction = null) {
+  function showToast(
+    message: string,
+    durationMs = 8000,
+    action: ToastAction = null,
+  ) {
     toastMessage = message;
     toastAction = action;
     if (toastTimeout) clearTimeout(toastTimeout);
@@ -219,7 +231,10 @@
     }
   }
 
-  function queueIssueLaunchFollowup(jobId: string, request: LaunchAgentRequest) {
+  function queueIssueLaunchFollowup(
+    jobId: string,
+    request: LaunchAgentRequest,
+  ) {
     const issueNumber = request.issueNumber;
     const branchName = request.createBranch?.name?.trim();
     if (!projectPath || !issueNumber || !branchName) return;
@@ -270,10 +285,7 @@
 
       if (warnings.length > 0) {
         const verb = payload.status === "cancelled" ? "cancelled" : "failed";
-        showToast(
-          `Issue launch ${verb}. ${warnings.join(" ")}`,
-          12000,
-        );
+        showToast(`Issue launch ${verb}. ${warnings.join(" ")}`, 12000);
       }
     } catch (err) {
       showToast(`Issue launch cleanup failed: ${toErrorMessage(err)}`, 12000);
@@ -293,12 +305,16 @@
             osEnvReady = true;
             return;
           }
-          await new Promise(r => setTimeout(r, 200));
+          await new Promise((r) => setTimeout(r, 200));
         }
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     };
     poll();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   });
 
   // Listen for OS env fallback event and show toast.
@@ -309,13 +325,23 @@
       try {
         const { listen } = await import("@tauri-apps/api/event");
         const unlistenFn = await listen<string>("os-env-fallback", (event) => {
-          showToast(`Shell environment not loaded: ${event.payload}. Using process environment.`);
+          showToast(
+            `Shell environment not loaded: ${event.payload}. Using process environment.`,
+          );
         });
-        if (cancelled) { unlistenFn(); return; }
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
         unlisten = unlistenFn;
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     })();
-    return () => { cancelled = true; if (unlisten) unlisten(); };
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
   });
 
   // Best-effort: read app version from Tauri runtime (web preview will ignore).
@@ -326,7 +352,9 @@
       if (cancelled) return;
       appVersion = v;
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   });
 
   // Best-effort: request update state once on startup.
@@ -336,25 +364,31 @@
     (async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        const s = await invoke<UpdateState>("check_app_update", { force: false });
+        const s = await invoke<UpdateState>("check_app_update", {
+          force: false,
+        });
         if (cancelled) return;
         if (s.state !== "available") return;
 
         lastUpdateToastVersion = s.latest;
         if (s.asset_url) {
-          showToast(
-            `Update available: v${s.latest} (click update)`,
-            0,
-            { kind: "apply-update", latest: s.latest },
-          );
+          showToast(`Update available: v${s.latest} (click update)`, 0, {
+            kind: "apply-update",
+            latest: s.latest,
+          });
         } else {
-          showToast(`Update available: v${s.latest}. Manual download required.`, 15000);
+          showToast(
+            `Update available: v${s.latest}. Manual download required.`,
+            15000,
+          );
         }
       } catch {
         // Ignore: update check should not block UI startup.
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   });
 
   // Listen for app update state notifications from backend startup checks.
@@ -364,22 +398,27 @@
     (async () => {
       try {
         const { listen } = await import("@tauri-apps/api/event");
-        const unlistenFn = await listen<UpdateState>("app-update-state", (event) => {
-          const s = event.payload;
-          if (s.state !== "available") return;
-          if (lastUpdateToastVersion === s.latest) return;
-          lastUpdateToastVersion = s.latest;
+        const unlistenFn = await listen<UpdateState>(
+          "app-update-state",
+          (event) => {
+            const s = event.payload;
+            if (s.state !== "available") return;
+            if (lastUpdateToastVersion === s.latest) return;
+            lastUpdateToastVersion = s.latest;
 
-          if (s.asset_url) {
-            showToast(
-              `Update available: v${s.latest} (click update)`,
-              0,
-              { kind: "apply-update", latest: s.latest },
-            );
-          } else {
-            showToast(`Update available: v${s.latest}. Manual download required.`, 15000);
-          }
-        });
+            if (s.asset_url) {
+              showToast(`Update available: v${s.latest} (click update)`, 0, {
+                kind: "apply-update",
+                latest: s.latest,
+              });
+            } else {
+              showToast(
+                `Update available: v${s.latest}. Manual download required.`,
+                15000,
+              );
+            }
+          },
+        );
         if (cancelled) {
           unlistenFn();
           return;
@@ -389,7 +428,10 @@
         // Ignore when event API is unavailable.
       }
     })();
-    return () => { cancelled = true; if (unlisten) unlisten(); };
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
   });
 
   $effect(() => {
@@ -406,18 +448,21 @@
     (async () => {
       try {
         const { listen } = await import("@tauri-apps/api/event");
-        const unlistenFn = await listen<unknown>("worktrees-changed", (event) => {
-          if (!projectPath) return;
+        const unlistenFn = await listen<unknown>(
+          "worktrees-changed",
+          (event) => {
+            if (!projectPath) return;
 
-          // If payload includes a project_path, only refresh the active project.
-          const p = (event as { payload?: unknown }).payload;
-          if (p && typeof p === "object" && "project_path" in p) {
-            const raw = (p as { project_path?: unknown }).project_path;
-            if (typeof raw === "string" && raw && raw !== projectPath) return;
-          }
+            // If payload includes a project_path, only refresh the active project.
+            const p = (event as { payload?: unknown }).payload;
+            if (p && typeof p === "object" && "project_path" in p) {
+              const raw = (p as { project_path?: unknown }).project_path;
+              if (typeof raw === "string" && raw && raw !== projectPath) return;
+            }
 
-          sidebarRefreshKey++;
-        });
+            sidebarRefreshKey++;
+          },
+        );
 
         if (cancelled) {
           unlistenFn();
@@ -449,7 +494,7 @@
           (event) => {
             removeTabLocal(`agent-${event.payload.pane_id}`);
             removeTabLocal(`terminal-${event.payload.pane_id}`);
-          }
+          },
         );
 
         if (cancelled) {
@@ -482,11 +527,11 @@
             const { pane_id, cwd } = event.payload;
             tabs = tabs.map((tab) => {
               if (tab.type === "terminal" && tab.paneId === pane_id) {
-                return { ...tab, cwd, label: cwd.split("/").pop() || "Terminal" };
+                return { ...tab, cwd, label: terminalTabLabel(cwd) };
               }
               return tab;
             });
-          }
+          },
         );
 
         if (cancelled) {
@@ -517,7 +562,7 @@
           "launch-finished",
           (event) => {
             void handleIssueLaunchFinished(event.payload);
-          }
+          },
         );
 
         if (cancelled) {
@@ -550,7 +595,7 @@
   }
 
   function normalizeVoiceInputSettings(
-    value: Partial<VoiceInputSettings> | null | undefined
+    value: Partial<VoiceInputSettings> | null | undefined,
   ): VoiceInputSettings {
     const hotkey = (value?.hotkey ?? "").trim();
     const language = (value?.language ?? "").trim().toLowerCase();
@@ -573,10 +618,14 @@
 
   function applyTerminalFontSize(size: number) {
     (window as any).__gwtTerminalFontSize = size;
-    window.dispatchEvent(new CustomEvent("gwt-terminal-font-size", { detail: size }));
+    window.dispatchEvent(
+      new CustomEvent("gwt-terminal-font-size", { detail: size }),
+    );
   }
 
-  function applyVoiceInputSettings(value: Partial<VoiceInputSettings> | null | undefined) {
+  function applyVoiceInputSettings(
+    value: Partial<VoiceInputSettings> | null | undefined,
+  ) {
     voiceInputSettings = normalizeVoiceInputSettings(value);
     voiceController?.updateSettings();
   }
@@ -604,11 +653,13 @@
   async function applyAppearanceSettings() {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      const settings = await invoke<
-        Pick<SettingsData, "ui_font_size" | "terminal_font_size" | "voice_input">
-      >(
-        "get_settings"
-      );
+      const settings =
+        await invoke<
+          Pick<
+            SettingsData,
+            "ui_font_size" | "terminal_font_size" | "voice_input"
+          >
+        >("get_settings");
       applyUiFontSize(clampFontSize(settings.ui_font_size ?? 13));
       applyTerminalFontSize(clampFontSize(settings.terminal_font_size ?? 13));
       applyVoiceInputSettings(settings.voice_input);
@@ -658,10 +709,16 @@
   }
 
   function ensureAgentModeTab() {
-    const existing = tabs.find((t) => t.type === "agentMode" || t.id === "agentMode");
+    const existing = tabs.find(
+      (t) => t.type === "agentMode" || t.id === "agentMode",
+    );
     if (existing) return;
 
-    const tab: Tab = { id: "agentMode", label: "Agent Mode", type: "agentMode" };
+    const tab: Tab = {
+      id: "agentMode",
+      label: "Agent Mode",
+      type: "agentMode",
+    };
     tabs = [...tabs, tab];
   }
 
@@ -714,7 +771,9 @@
 
   function normalizeBranchName(name: string): string {
     const trimmed = name.trim();
-    return trimmed.startsWith("origin/") ? trimmed.slice("origin/".length) : trimmed;
+    return trimmed.startsWith("origin/")
+      ? trimmed.slice("origin/".length)
+      : trimmed;
   }
 
   function worktreeTabLabel(branch: string): string {
@@ -722,11 +781,104 @@
     return b ? normalizeBranchName(b) : "Worktree";
   }
 
-  function mergeRestoredAgentTabs(existingTabs: Tab[], restoredTabs: Tab[]): Tab[] {
-    const nonAgentTabs = existingTabs.filter((t) => t.type !== "agent" && t.type !== "terminal");
+  function terminalTabLabel(
+    pathLike: string | null | undefined,
+    fallback = "Terminal",
+  ): string {
+    const value = (pathLike ?? "").trim();
+    if (!value) return fallback;
+    const parts = value.split(/[\\/]+/).filter(Boolean);
+    if (parts.length === 0) {
+      return value.startsWith("/") || value.startsWith("\\") ? value : fallback;
+    }
+    return parts[parts.length - 1] || fallback;
+  }
+
+  async function resolveNewTerminalWorkingDir(): Promise<string | null> {
+    if (!projectPath) return null;
+
+    const branchName = selectedBranch?.name?.trim() || "";
+    if (!branchName) return projectPath;
+
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", {
+        projectPath,
+      });
+      const normalizedBranchName = normalizeBranchName(branchName);
+      const selectedWorktree = worktrees.find((worktree) => {
+        const worktreeBranch = (worktree.branch ?? "").trim();
+        if (!worktreeBranch) return false;
+        return normalizeBranchName(worktreeBranch) === normalizedBranchName;
+      });
+      const selectedPath = selectedWorktree?.path?.trim() || "";
+      if (selectedPath) return selectedPath;
+    } catch (err) {
+      console.error("Failed to resolve selected worktree path:", err);
+    }
+
+    return projectPath;
+  }
+
+  async function respawnStoredTerminalTabs(
+    storedTabs: StoredAgentTab[],
+    targetProjectPath: string,
+    token: number,
+  ): Promise<{ tabs: Tab[]; paneIdMap: Map<string, string> }> {
+    if (storedTabs.length === 0) {
+      return { tabs: [], paneIdMap: new Map() };
+    }
+
+    const restoredTabs: Tab[] = [];
+    const paneIdMap = new Map<string, string>();
+
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      for (const storedTab of storedTabs) {
+        if (
+          projectPath !== targetProjectPath ||
+          agentTabsRestoreToken !== token
+        ) {
+          break;
+        }
+
+        const cwdCandidate = (storedTab.cwd ?? "").trim();
+        const workingDir = cwdCandidate || targetProjectPath;
+        try {
+          const paneId = await invoke<string>("spawn_shell", { workingDir });
+          paneIdMap.set(storedTab.paneId, paneId);
+          restoredTabs.push({
+            id: `terminal-${paneId}`,
+            label: terminalTabLabel(workingDir, storedTab.label || "Terminal"),
+            type: "terminal",
+            paneId,
+            cwd: workingDir,
+          });
+        } catch (err) {
+          console.error("Failed to respawn stored terminal tab:", err);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to load Tauri API for terminal restore:", err);
+    }
+
+    return { tabs: restoredTabs, paneIdMap };
+  }
+
+  function mergeRestoredAgentTabs(
+    existingTabs: Tab[],
+    restoredTabs: Tab[],
+  ): Tab[] {
+    const nonAgentTabs = existingTabs.filter(
+      (t) => t.type !== "agent" && t.type !== "terminal",
+    );
     const restoredAgentPaneIds = new Set(restoredTabs.map((t) => t.paneId));
     const preservedAgentTabs = existingTabs.filter((t) => {
-      return (t.type === "agent" || t.type === "terminal") && typeof t.paneId === "string" && !restoredAgentPaneIds.has(t.paneId);
+      return (
+        (t.type === "agent" || t.type === "terminal") &&
+        typeof t.paneId === "string" &&
+        !restoredAgentPaneIds.has(t.paneId)
+      );
     });
 
     const dedupedPreserved: Tab[] = [];
@@ -795,7 +947,7 @@
           if (!terminalAgentId) return;
 
           tabs = tabs.map((t) =>
-            t.id === newTab.id ? { ...t, agentId: terminalAgentId } : t
+            t.id === newTab.id ? { ...t, agentId: terminalAgentId } : t,
           );
         } catch {
           // Ignore: fallback color is used when terminal metadata is unavailable.
@@ -818,7 +970,10 @@
 
     if (activeTabId !== tabId) return;
     const fallback =
-      nextTabs[idx] ?? nextTabs[idx - 1] ?? nextTabs[nextTabs.length - 1] ?? null;
+      nextTabs[idx] ??
+      nextTabs[idx - 1] ??
+      nextTabs[nextTabs.length - 1] ??
+      null;
     activeTabId = fallback?.id ?? "";
   }
 
@@ -841,7 +996,9 @@
   }
 
   function openSettingsTab() {
-    const existing = tabs.find((t) => t.type === "settings" || t.id === "settings");
+    const existing = tabs.find(
+      (t) => t.type === "settings" || t.id === "settings",
+    );
     if (existing) {
       activeTabId = existing.id;
       return;
@@ -924,7 +1081,10 @@
     }
     if (!text) return;
 
-    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+    if (
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement
+    ) {
       const start = target.selectionStart ?? target.value.length;
       const end = target.selectionEnd ?? target.value.length;
       target.setRangeText(text, start, end, "end");
@@ -949,7 +1109,7 @@
     window.dispatchEvent(
       new CustomEvent("gwt-terminal-edit-action", {
         detail: { action, paneId },
-      })
+      }),
     );
   }
 
@@ -976,7 +1136,13 @@
   async function handleMenuAction(action: string) {
     if (action.startsWith("focus-agent-tab::")) {
       const tabId = action.slice("focus-agent-tab::".length).trim();
-      if (tabId && tabs.some((t) => t.id === tabId && (t.type === "agent" || t.type === "terminal"))) {
+      if (
+        tabId &&
+        tabs.some(
+          (t) =>
+            t.id === tabId && (t.type === "agent" || t.type === "terminal"),
+        )
+      ) {
         activeTabId = tabId;
       }
       return;
@@ -1007,8 +1173,7 @@
             return;
           }
 
-          appError =
-            probe.message || "Failed to open recent project.";
+          appError = probe.message || "Failed to open recent project.";
         } catch (err) {
           appError = `Failed to open project: ${toErrorMessage(err)}`;
         }
@@ -1036,7 +1201,10 @@
               break;
             }
 
-            if (probe.kind === "migrationRequired" && probe.migrationSourceRoot) {
+            if (
+              probe.kind === "migrationRequired" &&
+              probe.migrationSourceRoot
+            ) {
               migrationSourceRoot = probe.migrationSourceRoot;
               migrationOpen = true;
               break;
@@ -1072,8 +1240,8 @@
               const { invoke } = await import("@tauri-apps/api/core");
               await Promise.all(
                 terminalPanes.map((paneId) =>
-                  invoke("close_terminal", { paneId }).catch(() => {})
-                )
+                  invoke("close_terminal", { paneId }).catch(() => {}),
+                ),
               );
             } catch {
               // Ignore: not available outside Tauri runtime.
@@ -1119,7 +1287,9 @@
         {
           try {
             const { invoke } = await import("@tauri-apps/api/core");
-            const s = await invoke<UpdateState>("check_app_update", { force: true });
+            const s = await invoke<UpdateState>("check_app_update", {
+              force: true,
+            });
             switch (s.state) {
               case "up_to_date":
                 showToast("Up to date.");
@@ -1133,7 +1303,10 @@
                     { kind: "apply-update", latest: s.latest },
                   );
                 } else {
-                  showToast(`Update available: v${s.latest}. Manual download required.`, 15000);
+                  showToast(
+                    `Update available: v${s.latest}. Manual download required.`,
+                    15000,
+                  );
                 }
                 break;
               case "failed":
@@ -1170,7 +1343,9 @@
         (async () => {
           try {
             const { invoke } = await import("@tauri-apps/api/core");
-            osEnvDebugData = await invoke<CapturedEnvInfo>("get_captured_environment");
+            osEnvDebugData = await invoke<CapturedEnvInfo>(
+              "get_captured_environment",
+            );
           } catch (e) {
             osEnvDebugError = String(e);
           } finally {
@@ -1179,16 +1354,12 @@
         })();
         break;
       case "new-terminal": {
-        let workingDir: string | null = null;
-        if (projectPath) {
-          workingDir = projectPath;
-        }
-
         try {
+          const workingDir = await resolveNewTerminalWorkingDir();
           const { invoke } = await import("@tauri-apps/api/core");
           const paneId = await invoke<string>("spawn_shell", { workingDir });
           const cwd = workingDir || "~";
-          const label = cwd.split("/").pop() || "Terminal";
+          const label = terminalTabLabel(cwd);
           const newTab: Tab = {
             id: `terminal-${paneId}`,
             label,
@@ -1218,9 +1389,12 @@
 
         try {
           const { invoke } = await import("@tauri-apps/api/core");
-          terminalDiagnostics = await invoke<TerminalAnsiProbe>("probe_terminal_ansi", {
-            paneId,
-          });
+          terminalDiagnostics = await invoke<TerminalAnsiProbe>(
+            "probe_terminal_ansi",
+            {
+              paneId,
+            },
+          );
         } catch (err) {
           terminalDiagnosticsError = `Failed to probe terminal: ${toErrorMessage(err)}`;
         } finally {
@@ -1246,7 +1420,10 @@
 
     // Even if no stored state exists, mark hydrated so persistence can proceed.
     if (!stored) {
-      if (projectPath === targetProjectPath && agentTabsRestoreToken === token) {
+      if (
+        projectPath === targetProjectPath &&
+        agentTabsRestoreToken === token
+      ) {
         agentTabsHydratedProjectPath = targetProjectPath;
       }
       return;
@@ -1265,32 +1442,56 @@
     }
 
     const restored = buildRestoredAgentTabs(stored, terminals);
+    const storedAgentTabsCount = stored.tabs.filter(
+      (t) => t.type !== "terminal",
+    ).length;
+    const restoredAgentTabsCount = restored.tabs.filter(
+      (t) => t.type === "agent",
+    ).length;
     const shouldRetry = shouldRetryAgentTabRestore(
-      stored.tabs.length,
-      restored.tabs.length,
+      storedAgentTabsCount,
+      restoredAgentTabsCount,
       attempt,
       AGENT_TAB_RESTORE_MAX_RETRIES,
     );
 
-    if (shouldRetry && projectPath === targetProjectPath && agentTabsRestoreToken === token) {
+    if (
+      shouldRetry &&
+      projectPath === targetProjectPath &&
+      agentTabsRestoreToken === token
+    ) {
       setTimeout(() => {
         void restoreProjectAgentTabs(targetProjectPath, token, attempt + 1);
       }, getAgentTabRestoreDelayMs(attempt));
       return;
     }
 
-    // Wait for terminal list to become available before persisting and wiping state.
-    if (stored.tabs.length > 0 && restored.tabs.length === 0) {
+    const respawnedTerminalResult = await respawnStoredTerminalTabs(
+      restored.terminalTabsToRespawn,
+      targetProjectPath,
+      token,
+    );
+
+    if (projectPath !== targetProjectPath || agentTabsRestoreToken !== token) {
       return;
     }
 
-    const restoredTabs = restored.tabs;
+    const restoredTabs = [...restored.tabs, ...respawnedTerminalResult.tabs];
     const mergedTabs = mergeRestoredAgentTabs(tabs, restoredTabs);
     tabs = mergedTabs;
 
     const allowOverrideActive = shouldAllowRestoredActiveTab(activeTabId);
-    if (allowOverrideActive && restored.activeTabId) {
-      activeTabId = restored.activeTabId;
+    if (allowOverrideActive) {
+      if (restored.activeTabId) {
+        activeTabId = restored.activeTabId;
+      } else if (restored.activeTerminalPaneIdToRespawn) {
+        const paneId = respawnedTerminalResult.paneIdMap.get(
+          restored.activeTerminalPaneIdToRespawn,
+        );
+        if (paneId) {
+          activeTabId = `terminal-${paneId}`;
+        }
+      }
     }
 
     agentTabsHydratedProjectPath = targetProjectPath;
@@ -1321,17 +1522,29 @@
     if (agentTabsHydratedProjectPath !== projectPath) return;
 
     const agentTabs = tabs
-      .filter((t) => (t.type === "agent" || t.type === "terminal") && typeof t.paneId === "string" && t.paneId.length > 0)
+      .filter(
+        (t) =>
+          (t.type === "agent" || t.type === "terminal") &&
+          typeof t.paneId === "string" &&
+          t.paneId.length > 0,
+      )
       .map((t) => {
         if (t.type === "terminal") {
-          return { paneId: t.paneId as string, label: t.label, type: "terminal" as const, cwd: t.cwd };
+          return {
+            paneId: t.paneId as string,
+            label: t.label,
+            type: "terminal" as const,
+            cwd: t.cwd,
+          };
         }
         return { paneId: t.paneId as string, label: t.label };
       });
 
     const active = tabs.find((t) => t.id === activeTabId);
     const activePaneId =
-      (active?.type === "agent" || active?.type === "terminal") && typeof active.paneId === "string" && active.paneId.length > 0
+      (active?.type === "agent" || active?.type === "terminal") &&
+      typeof active.paneId === "string" &&
+      active.paneId.length > 0
         ? active.paneId
         : null;
 
@@ -1353,7 +1566,9 @@
         }>("check_and_update_hooks");
 
         if (status.temporary_execution) {
-          console.warn("gwt is running from a temporary execution environment; hooks may not persist.");
+          console.warn(
+            "gwt is running from a temporary execution environment; hooks may not persist.",
+          );
         }
 
         if (!status.registered) {
@@ -1366,10 +1581,10 @@
                 "Register Claude Code hooks for gwt anyway? This allows gwt to track agent status.",
               ].join("\n")
             : "Register Claude Code hooks for gwt? This allows gwt to track agent status.";
-          const ok = await confirm(
-            message,
-            { title: "gwt", kind: status.temporary_execution ? "warning" : "info" },
-          );
+          const ok = await confirm(message, {
+            title: "gwt",
+            kind: status.temporary_execution ? "warning" : "info",
+          });
           if (ok) {
             await invoke("register_hooks");
           }
@@ -1388,9 +1603,12 @@
     (async () => {
       try {
         const { listen } = await import("@tauri-apps/api/event");
-        const unlistenFn = await listen<MenuActionPayload>("menu-action", (event) => {
-          void handleMenuAction(event.payload.action);
-        });
+        const unlistenFn = await listen<MenuActionPayload>(
+          "menu-action",
+          (event) => {
+            void handleMenuAction(event.payload.action);
+          },
+        );
         if (cancelled) {
           unlistenFn();
           return;
@@ -1449,7 +1667,8 @@
     }
 
     window.addEventListener("gwt-settings-updated", onSettingsUpdated);
-    return () => window.removeEventListener("gwt-settings-updated", onSettingsUpdated);
+    return () =>
+      window.removeEventListener("gwt-settings-updated", onSettingsUpdated);
   });
 
   // Global keyboard shortcut: Cmd+Shift+K / Ctrl+Shift+K to open Cleanup modal.
@@ -1466,7 +1685,13 @@
         e.preventDefault();
         void handleMenuAction("cleanup-worktrees");
       }
-      if (e.ctrlKey && e.code === "Backquote" && !e.shiftKey && !e.altKey && !e.metaKey) {
+      if (
+        e.ctrlKey &&
+        e.code === "Backquote" &&
+        !e.shiftKey &&
+        !e.altKey &&
+        !e.metaKey
+      ) {
         e.preventDefault();
         void handleMenuAction("new-terminal");
       }
@@ -1518,9 +1743,9 @@
       {terminalCount}
       {osEnvReady}
       voiceInputEnabled={voiceInputSettings.enabled}
-      voiceInputListening={voiceInputListening}
-      voiceInputSupported={voiceInputSupported}
-      voiceInputError={voiceInputError}
+      {voiceInputListening}
+      {voiceInputSupported}
+      {voiceInputError}
     />
   </div>
 {/if}
@@ -1529,7 +1754,7 @@
   <AgentLaunchForm
     projectPath={projectPath as string}
     selectedBranch={selectedBranch?.name ?? currentBranch}
-    osEnvReady={osEnvReady}
+    {osEnvReady}
     onLaunch={handleAgentLaunch}
     onClose={() => (showAgentLaunch = false)}
   />
@@ -1579,7 +1804,9 @@
           </div>
           <div class="diag-item">
             <span class="diag-label">Bytes</span>
-            <span class="diag-value mono">{terminalDiagnostics.bytes_scanned}</span>
+            <span class="diag-value mono"
+              >{terminalDiagnostics.bytes_scanned}</span
+            >
           </div>
           <div class="diag-item">
             <span class="diag-label">ESC</span>
@@ -1591,7 +1818,9 @@
           </div>
           <div class="diag-item">
             <span class="diag-label">Color SGR</span>
-            <span class="diag-value mono">{terminalDiagnostics.color_sgr_count}</span>
+            <span class="diag-value mono"
+              >{terminalDiagnostics.color_sgr_count}</span
+            >
           </div>
           <div class="diag-item">
             <span class="diag-label">256-color</span>
@@ -1610,9 +1839,9 @@
         {#if terminalDiagnostics.color_sgr_count === 0}
           <div class="diag-hint">
             <p>
-              No color SGR codes were detected in the tail of the scrollback. This
-              usually means the program did not emit ANSI colors (for example, output
-              was captured or treated as non-interactive).
+              No color SGR codes were detected in the tail of the scrollback.
+              This usually means the program did not emit ANSI colors (for
+              example, output was captured or treated as non-interactive).
             </p>
             <p class="diag-muted">Try forcing color output:</p>
             <pre class="diag-code mono">git -c color.ui=always diff</pre>
@@ -1621,8 +1850,8 @@
         {:else}
           <div class="diag-hint">
             <p>
-              Color SGR codes were detected. If you still do not see colors, the issue
-              is likely in the terminal rendering path.
+              Color SGR codes were detected. If you still do not see colors, the
+              issue is likely in the terminal rendering path.
             </p>
           </div>
         {/if}
@@ -1684,9 +1913,18 @@
         <p class="env-debug-error">{osEnvDebugError}</p>
       {:else if osEnvDebugData}
         <div class="env-debug-meta">
-          <span>Source: <strong>{osEnvDebugData.source === 'login_shell' ? 'Login Shell' : osEnvDebugData.source === 'std_env_fallback' ? 'Process Env (fallback)' : osEnvDebugData.source}</strong></span>
+          <span
+            >Source: <strong
+              >{osEnvDebugData.source === "login_shell"
+                ? "Login Shell"
+                : osEnvDebugData.source === "std_env_fallback"
+                  ? "Process Env (fallback)"
+                  : osEnvDebugData.source}</strong
+            ></span
+          >
           {#if osEnvDebugData.reason}
-            <span class="env-debug-reason">Reason: {osEnvDebugData.reason}</span>
+            <span class="env-debug-reason">Reason: {osEnvDebugData.reason}</span
+            >
           {/if}
           <span>Variables: {osEnvDebugData.entries.length}</span>
         </div>
@@ -1699,7 +1937,9 @@
           {/each}
         </div>
       {/if}
-      <button class="about-close" onclick={() => (showOsEnvDebug = false)}>Close</button>
+      <button class="about-close" onclick={() => (showOsEnvDebug = false)}
+        >Close</button
+      >
     </div>
   </div>
 {/if}
@@ -1727,7 +1967,10 @@
       {/if}
       <button
         class="toast-close"
-        onclick={() => { toastMessage = null; toastAction = null; }}
+        onclick={() => {
+          toastMessage = null;
+          toastAction = null;
+        }}
       >
         [x]
       </button>
@@ -2031,7 +2274,8 @@
     overflow-wrap: anywhere;
   }
 
-  .env-debug-loading, .env-debug-error {
+  .env-debug-loading,
+  .env-debug-error {
     font-size: 13px;
     padding: 12px 0;
   }

@@ -9,6 +9,14 @@
 /// Returns `Some(path)` if an OSC 7 sequence is found, `None` otherwise.
 /// URL-encoded characters (e.g., `%20`) are decoded.
 pub fn extract_osc7_cwd(buf: &[u8]) -> Option<String> {
+    extract_osc7_cwd_with_consumed(buf).map(|(cwd, _)| cwd)
+}
+
+/// Extract the current working directory and consumed bytes from an OSC 7 escape sequence.
+///
+/// The returned `usize` is the byte count to consume from the beginning of `buf`
+/// through the OSC 7 terminator.
+pub fn extract_osc7_cwd_with_consumed(buf: &[u8]) -> Option<(String, usize)> {
     // Find ESC ] 7 ; (0x1b 0x5d 0x37 0x3b)
     let marker = b"\x1b]7;";
     let start = buf.windows(marker.len()).position(|w| w == marker)?;
@@ -19,24 +27,24 @@ pub fn extract_osc7_cwd(buf: &[u8]) -> Option<String> {
 
     // Find the terminator: BEL (0x07) or ESC \ (0x1b 0x5c)
     let payload = &buf[after_marker..];
-    let end = find_terminator(payload)?;
+    let (end, terminator_len) = find_terminator(payload)?;
     let uri = &payload[..end];
 
     // Parse the file:// URI
     let uri_str = std::str::from_utf8(uri).ok()?;
     let path_part = strip_file_uri(uri_str)?;
 
-    Some(url_decode(path_part))
+    Some((url_decode(path_part), after_marker + end + terminator_len))
 }
 
 /// Find the position of the OSC terminator (BEL or ST).
-fn find_terminator(buf: &[u8]) -> Option<usize> {
+fn find_terminator(buf: &[u8]) -> Option<(usize, usize)> {
     for i in 0..buf.len() {
         if buf[i] == 0x07 {
-            return Some(i);
+            return Some((i, 1));
         }
         if buf[i] == 0x1b && i + 1 < buf.len() && buf[i + 1] == b'\\' {
-            return Some(i);
+            return Some((i, 2));
         }
     }
     None
@@ -58,23 +66,23 @@ fn strip_file_uri(uri: &str) -> Option<&str> {
 
 /// Decode URL-encoded characters (%XX).
 fn url_decode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
+    let mut decoded = Vec::with_capacity(s.len());
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) =
-                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
-            {
-                result.push(byte as char);
-                i += 3;
-                continue;
+            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    decoded.push(byte);
+                    i += 3;
+                    continue;
+                }
             }
         }
-        result.push(bytes[i] as char);
+        decoded.push(bytes[i]);
         i += 1;
     }
-    result
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 #[cfg(test)]
@@ -113,6 +121,16 @@ mod tests {
         assert_eq!(result, Some("/home/user/my project".to_string()));
     }
 
+    #[test]
+    fn test_url_encoded_utf8_multibyte() {
+        let buf = b"\x1b]7;file:///home/user/%E3%83%86%E3%82%B9%E3%83%88\x07";
+        let result = extract_osc7_cwd(buf);
+        assert_eq!(
+            result,
+            Some("/home/user/\u{30c6}\u{30b9}\u{30c8}".to_string())
+        );
+    }
+
     // T019-5: invalid input (no file://) returns None
     #[test]
     fn test_invalid_no_file_prefix() {
@@ -134,6 +152,13 @@ mod tests {
         let buf = b"some output\x1b]7;file://host/tmp/dir\x07more output";
         let result = extract_osc7_cwd(buf);
         assert_eq!(result, Some("/tmp/dir".to_string()));
+    }
+
+    #[test]
+    fn test_extract_with_consumed_returns_sequence_end() {
+        let buf = b"prefix\x1b]7;file://host/tmp/dir\x07suffix";
+        let result = extract_osc7_cwd_with_consumed(buf);
+        assert_eq!(result, Some(("/tmp/dir".to_string(), 30)));
     }
 
     #[test]

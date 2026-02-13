@@ -9,7 +9,12 @@ export const PROJECT_AGENT_TABS_STORAGE_KEY = "gwt.projectAgentTabs.v1";
 /**
  * Minimal persisted representation of an agent tab.
  */
-export type StoredAgentTab = { paneId: string; label: string; type?: "terminal"; cwd?: string };
+export type StoredAgentTab = {
+  paneId: string;
+  label: string;
+  type?: "terminal";
+  cwd?: string;
+};
 
 /**
  * Persisted agent tab state for a single project.
@@ -17,6 +22,16 @@ export type StoredAgentTab = { paneId: string; label: string; type?: "terminal";
 export type StoredProjectAgentTabs = {
   tabs: StoredAgentTab[];
   activePaneId: string | null;
+};
+
+/**
+ * Result of restoring persisted tabs against currently known panes.
+ */
+export type BuildRestoredAgentTabsResult = {
+  tabs: Tab[];
+  activeTabId: string | null;
+  terminalTabsToRespawn: StoredAgentTab[];
+  activeTerminalPaneIdToRespawn: string | null;
 };
 
 export const AGENT_TAB_RESTORE_MAX_RETRIES = 8;
@@ -28,9 +43,7 @@ export function shouldRetryAgentTabRestore(
   maxRetries = AGENT_TAB_RESTORE_MAX_RETRIES,
 ): boolean {
   return (
-    storedTabsCount > 0 &&
-    restoredTabsCount === 0 &&
-    attempt < maxRetries - 1
+    storedTabsCount > 0 && restoredTabsCount === 0 && attempt < maxRetries - 1
   );
 }
 
@@ -73,7 +86,8 @@ export function loadStoredProjectAgentTabs(
 
     const root = parsed as Partial<StoredProjectAgentTabsRoot>;
     if (root.version !== 1) return null;
-    if (!root.byProjectPath || typeof root.byProjectPath !== "object") return null;
+    if (!root.byProjectPath || typeof root.byProjectPath !== "object")
+      return null;
 
     const entryRaw = (root.byProjectPath as Record<string, unknown>)[key];
     if (!entryRaw || typeof entryRaw !== "object") return null;
@@ -152,40 +166,49 @@ export function persistStoredProjectAgentTabs(
 }
 
 /**
- * Build the set of agent `Tab`s to restore by intersecting persisted pane ids with
- * the currently known terminal panes.
+ * Build the set of tabs that can be restored immediately by intersecting persisted pane ids
+ * with currently known terminal panes, and list persisted terminal tabs that need respawn.
  */
 export function buildRestoredAgentTabs(
   stored: StoredProjectAgentTabs,
   terminals: TerminalInfo[],
-): { tabs: Tab[]; activeTabId: string | null } {
+): BuildRestoredAgentTabsResult {
   const existingPaneIds = new Set(terminals.map((t) => t.pane_id));
-  const terminalByPaneId = new Map(terminals.map((terminal) => [terminal.pane_id, terminal]));
+  const terminalByPaneId = new Map(
+    terminals.map((terminal) => [terminal.pane_id, terminal]),
+  );
 
   const restoredTabs: Tab[] = [];
+  const terminalTabsToRespawn: StoredAgentTab[] = [];
+
   for (const t of stored.tabs) {
+    if (t.type === "terminal") {
+      if (existingPaneIds.has(t.paneId)) {
+        restoredTabs.push({
+          id: `terminal-${t.paneId}`,
+          label: t.label,
+          type: "terminal",
+          paneId: t.paneId,
+          ...(t.cwd ? { cwd: t.cwd } : {}),
+        });
+      } else {
+        terminalTabsToRespawn.push(t);
+      }
+      continue;
+    }
+
     if (!existingPaneIds.has(t.paneId)) continue;
 
-    if (t.type === "terminal") {
-      restoredTabs.push({
-        id: `terminal-${t.paneId}`,
-        label: t.label,
-        type: "terminal",
-        paneId: t.paneId,
-        ...(t.cwd ? { cwd: t.cwd } : {}),
-      });
-    } else {
-      const terminal = terminalByPaneId.get(t.paneId);
-      const agentId = inferAgentId(terminal?.agent_name);
+    const terminal = terminalByPaneId.get(t.paneId);
+    const agentId = inferAgentId(terminal?.agent_name);
 
-      restoredTabs.push({
-        id: `agent-${t.paneId}`,
-        label: t.label,
-        type: "agent",
-        paneId: t.paneId,
-        ...(agentId ? { agentId } : {}),
-      });
-    }
+    restoredTabs.push({
+      id: `agent-${t.paneId}`,
+      label: t.label,
+      type: "agent",
+      paneId: t.paneId,
+      ...(agentId ? { agentId } : {}),
+    });
   }
 
   const activeEntry = stored.tabs.find((t) => t.paneId === stored.activePaneId);
@@ -200,5 +223,18 @@ export function buildRestoredAgentTabs(
       ? restoredActive
       : null;
 
-  return { tabs: restoredTabs, activeTabId };
+  const activeTerminalPaneIdToRespawn =
+    activeEntry?.type === "terminal" &&
+    !!stored.activePaneId &&
+    !existingPaneIds.has(stored.activePaneId) &&
+    terminalTabsToRespawn.some((t) => t.paneId === stored.activePaneId)
+      ? stored.activePaneId
+      : null;
+
+  return {
+    tabs: restoredTabs,
+    activeTabId,
+    terminalTabsToRespawn,
+    activeTerminalPaneIdToRespawn,
+  };
 }

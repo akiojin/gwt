@@ -1174,6 +1174,43 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn consume_osc7_cwd_updates_buffers_fragmented_sequences() {
+        let mut pending = Vec::new();
+        let mut last_cwd = String::new();
+
+        let first = b"out\x1b]7;file://host/tmp/frag";
+        let second = b"mented\x07tail";
+
+        assert_eq!(
+            consume_osc7_cwd_updates(&mut pending, first, &mut last_cwd),
+            None
+        );
+        assert_eq!(last_cwd, "");
+        assert_eq!(
+            consume_osc7_cwd_updates(&mut pending, second, &mut last_cwd),
+            Some("/tmp/fragmented".to_string())
+        );
+        assert_eq!(last_cwd, "/tmp/fragmented");
+    }
+
+    #[test]
+    fn consume_osc7_cwd_updates_returns_latest_unique_cwd() {
+        let mut pending = Vec::new();
+        let mut last_cwd = String::new();
+
+        let chunk = b"\x1b]7;file://host/tmp/a\x07mid\x1b]7;file://host/tmp/b\x07";
+        assert_eq!(
+            consume_osc7_cwd_updates(&mut pending, chunk, &mut last_cwd),
+            Some("/tmp/b".to_string())
+        );
+        assert_eq!(last_cwd, "/tmp/b");
+        assert_eq!(
+            consume_osc7_cwd_updates(&mut pending, b"\x1b]7;file://host/tmp/b\x07", &mut last_cwd),
+            None
+        );
+    }
+
+    #[test]
     fn is_node_modules_bin_matches_common_paths() {
         assert!(gwt_core::terminal::runner::is_node_modules_bin(Path::new(
             "/repo/node_modules/.bin/bunx"
@@ -2660,6 +2697,77 @@ pub struct TerminalCwdChangedPayload {
     pub cwd: String,
 }
 
+const OSC7_MARKER: &[u8] = b"\x1b]7;";
+const OSC7_BUFFER_LIMIT: usize = 64 * 1024;
+
+fn trim_osc7_buffer(buffer: &mut Vec<u8>) {
+    if buffer.len() <= OSC7_BUFFER_LIMIT {
+        return;
+    }
+
+    if let Some(marker_pos) = buffer
+        .windows(OSC7_MARKER.len())
+        .rposition(|window| window == OSC7_MARKER)
+    {
+        if marker_pos > 0 {
+            buffer.drain(..marker_pos);
+        }
+    } else {
+        buffer.clear();
+    }
+}
+
+fn retain_possible_osc7_fragment(buffer: &mut Vec<u8>) {
+    if let Some(marker_pos) = buffer
+        .windows(OSC7_MARKER.len())
+        .rposition(|window| window == OSC7_MARKER)
+    {
+        if marker_pos > 0 {
+            buffer.drain(..marker_pos);
+        }
+        return;
+    }
+
+    // Keep only the possible marker prefix tail (e.g., trailing ESC]).
+    let keep = OSC7_MARKER.len().saturating_sub(1);
+    if buffer.len() > keep {
+        let drain_len = buffer.len() - keep;
+        buffer.drain(..drain_len);
+    }
+}
+
+fn consume_osc7_cwd_updates(
+    pending: &mut Vec<u8>,
+    chunk: &[u8],
+    last_cwd: &mut String,
+) -> Option<String> {
+    pending.extend_from_slice(chunk);
+    trim_osc7_buffer(pending);
+
+    let mut latest_changed: Option<String> = None;
+    loop {
+        let Some((cwd, consumed)) =
+            gwt_core::terminal::osc::extract_osc7_cwd_with_consumed(pending)
+        else {
+            retain_possible_osc7_fragment(pending);
+            break;
+        };
+
+        if consumed == 0 || consumed > pending.len() {
+            break;
+        }
+
+        if cwd != *last_cwd {
+            *last_cwd = cwd.clone();
+            latest_changed = Some(cwd);
+        }
+
+        pending.drain(..consumed);
+    }
+
+    latest_changed
+}
+
 /// Stream PTY output to the frontend via Tauri events
 fn stream_pty_output(
     mut reader: Box<dyn Read + Send>,
@@ -2671,6 +2779,7 @@ fn stream_pty_output(
     let mut buf = [0u8; 4096];
     let mut stream_error: Option<String> = None;
     let mut last_cwd = String::new();
+    let mut osc7_pending = Vec::new();
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break, // EOF
@@ -2684,15 +2793,14 @@ fn stream_pty_output(
 
                 // Detect OSC 7 cwd changes for terminal tabs
                 if agent_name == "terminal" {
-                    if let Some(cwd) = gwt_core::terminal::osc::extract_osc7_cwd(&buf[..n]) {
-                        if cwd != last_cwd {
-                            last_cwd.clone_from(&cwd);
-                            let payload = TerminalCwdChangedPayload {
-                                pane_id: pane_id.clone(),
-                                cwd,
-                            };
-                            let _ = app_handle.emit("terminal-cwd-changed", &payload);
-                        }
+                    if let Some(cwd) =
+                        consume_osc7_cwd_updates(&mut osc7_pending, &buf[..n], &mut last_cwd)
+                    {
+                        let payload = TerminalCwdChangedPayload {
+                            pane_id: pane_id.clone(),
+                            cwd,
+                        };
+                        let _ = app_handle.emit("terminal-cwd-changed", &payload);
                     }
                 }
 
