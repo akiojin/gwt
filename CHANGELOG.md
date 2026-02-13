@@ -1,6 +1,19 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.3.0] - 2026-02-13
+
+### Bug Fixes
+
+- Harden startup update check on app launch (#1041)
+- Show migrating windows in window menu (#1043)
+- Address post-merge update review findings (#1044)
+- **windows:** Host OS起動をPowerShell経由に統一 (#1029) (#1045)
+
+### Features
+
+- **gui:** Enable drag-and-drop tab reordering with persistence (#1042)
+
 ## [7.2.1] - 2026-02-13
 
 ### Bug Fixes
