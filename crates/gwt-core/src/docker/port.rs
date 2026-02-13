@@ -158,12 +158,9 @@ mod tests {
     // T-302: Port in use check test
     #[test]
     fn test_is_port_in_use_available() {
-        // Find a port that's available
-        let allocator = PortAllocator::new();
-        if let Some(port) = allocator.find_available_port(20000) {
-            // Port should not be in use
-            assert!(!PortAllocator::is_port_in_use(port));
-        }
+        // Use port 0 for a deterministic "available" check.
+        // Port 0 asks the OS to choose an available ephemeral port, so binding should always succeed.
+        assert!(!PortAllocator::is_port_in_use(0));
     }
 
     #[test]

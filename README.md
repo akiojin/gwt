@@ -1,512 +1,109 @@
-# @akiojin/gwt
+# gwt
 
 [日本語](README.ja.md)
 
-Interactive Git worktree manager with Coding Agent selection (Claude Code / Codex CLI / Gemini CLI / OpenCode), graphical branch selection, and advanced workflow management.
+gwt is a desktop GUI app for managing Git worktrees and launching coding agents
+(Claude Code, Codex, Gemini, OpenCode).
 
-## Overview
+## Install
 
-`@akiojin/gwt` is a powerful CLI tool that revolutionizes Git worktree management through an intuitive interface. It seamlessly integrates with Claude Code / Codex CLI / Gemini CLI / OpenCode workflows, providing intelligent branch selection, automated worktree creation, and comprehensive project management capabilities.
-
-## Migration Status
-
-The Rust implementation covers the core CLI/TUI workflow and the Web UI (REST + WebSocket terminal). The migration from TypeScript/Bun to Rust is complete. Remaining work is focused on documentation polish and continuous improvements.
-
-## Key Features
-
-- **Modern TUI**: Built with Ratatui for a smooth, responsive terminal interface
-- **Full-screen Layout**: Persistent header with repo context and boxed branch list
-- **Branch Summary Panel**: Real-time branch details panel with commit history, change stats, branch metadata, plus a Tab-switchable session summary view
-- **Smart Branch Creation**: Create feature, bugfix, hotfix, or release branches with guided prompts and automatic base branch selection
-- **Advanced Worktree Management**: Complete lifecycle management including creation, cleanup of worktree-backed branches, and path optimization
-- **Coding Agent Selection**: Choose between built-in agents (Claude Code / Codex CLI / Gemini CLI / OpenCode) or custom coding agents defined in `~/.gwt/tools.json`
-- **Coding Agent Integration**: Launch the selected agent in the worktree (Claude Code includes permission handling and post-change flow)
-- **GitHub PR Integration**: Automatic cleanup of merged pull request branches and worktrees
-- **Change Management**: Built-in support for committing, stashing, or discarding changes after development sessions
-- **tmux Multi-Agent Mode**: Run multiple coding agents in parallel using tmux panes (automatically enabled when running inside tmux)
-- **Universal Package**: Install once, use across all your projects with consistent behavior
-
-## Installation
-
-GitHub Releases are the source of truth for prebuilt binaries. The npm/bunx wrapper automatically downloads the matching release asset on install.
-
-### From GitHub Releases (Recommended)
-
-Download pre-built binaries from the [Releases page](https://github.com/akiojin/gwt/releases). Each release includes binaries for all supported platforms:
-
-- `gwt-linux-x86_64` - Linux x86_64
-- `gwt-linux-aarch64` - Linux ARM64
-- `gwt-macos-x86_64` - macOS Intel
-- `gwt-macos-aarch64` - macOS Apple Silicon
-- `gwt-windows-x86_64.exe` - Windows x86_64
+### macOS (shell installer)
 
 ```bash
-# Example for Linux x86_64
-curl -L https://github.com/akiojin/gwt/releases/latest/download/gwt-linux-x86_64 -o gwt
-chmod +x gwt
-sudo mv gwt /usr/local/bin/
+curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash
 ```
 
-### Via npm/bunx
-
-Install globally or run without installation:
+Or install a specific version:
 
 ```bash
-# Global install
-npm install -g @akiojin/gwt
-bun add -g @akiojin/gwt
-
-# One-time execution
-npx @akiojin/gwt
-bunx @akiojin/gwt
+curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash -s -- --version 6.30.3
 ```
 
-### Via Cargo
+### macOS (local `.pkg` installer)
 
-Install the CLI with Cargo:
+Build a local package:
 
 ```bash
-# With cargo-binstall (faster, downloads prebuilt binary from GitHub Releases)
-cargo binstall gwt-cli
-
-# From GitHub (latest development version)
-cargo install --git https://github.com/akiojin/gwt --package gwt-cli --bin gwt --locked
-
-# Or, from a local checkout
-cargo install --path crates/gwt-cli
-
-# Or run directly from source
-cargo run -p gwt-cli
+cargo tauri build
+./installers/macos/build-pkg.sh
 ```
 
-### Build from Source
+Install from local package:
 
 ```bash
-# Clone the repository
-git clone https://github.com/akiojin/gwt.git
-cd gwt
-
-# Build release binary (default: gwt-cli)
-cargo build --release
-
-# Build all workspace crates (including web/wasm)
-cargo build --workspace
-
-# The binary is at target/release/gwt
-./target/release/gwt
+./installers/macos/install.sh --pkg ./target/release/bundle/pkg/gwt-macos-$(uname -m).pkg
 ```
 
-## Quick Start
-
-Run in any Git repository:
+Or run both steps at once:
 
 ```bash
-# If installed globally or in PATH
-gwt
-
-# Or use bunx for one-time execution
-bunx @akiojin/gwt
+./installers/macos/install-local.sh
 ```
 
-CLI options:
+### Uninstall (macOS)
 
 ```bash
-# Display help
-gwt --help
-
-# Check version
-gwt --version
-
-# List worktrees
-gwt list
-
-# Add worktree for existing branch
-gwt add feature/my-feature
-
-# Create new branch with worktree
-gwt add -n feature/new-feature --base develop
-
-# Remove worktree
-gwt remove feature/old-feature
-
-# Cleanup orphaned worktrees
-gwt clean
-
-# Show logs
-gwt logs --limit 100
-
-# Follow logs
-gwt logs --follow
+curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/uninstall.sh | bash
 ```
 
-The tool presents an interactive interface with the following options:
+### Downloads
 
-1. **Select Existing Branch**: Choose from local or remote branches with worktree auto-creation
-2. **Create New Branch**: Guided branch creation with type selection (feature/bugfix/hotfix/release)
-3. **Manage Worktrees**: View, open, or remove existing worktrees
-4. **Cleanup Branches**: Remove merged PR branches or branches identical to their base directly from the CLI (branches without worktrees are excluded)
+GitHub Releases are the source of truth for distribution.
 
-## Keyboard Shortcuts
+Typical assets:
 
-### Branch List Screen
-
-| Key | Action |
-|-----|--------|
-| `Enter` | Focus existing agent pane / Show hidden pane / Open wizard |
-| `d` | Delete agent pane (with confirmation) |
-| `v` | Open GitView (git status details for selected branch) |
-| `Space` | Select/Deselect branch |
-| `Up/Down` | Navigate branches |
-| `PageUp/PageDown` | Page navigation |
-| `Home/End` | Jump to first/last branch |
-| `f` | Enter filter mode |
-| `r` | Refresh branch list |
-| `c` | Cleanup merged branches |
-| `l` | View logs |
-| `?` | Help |
-| `q` / `Ctrl+C` | Quit |
-
-Mouse:
-- Double-click a branch row to trigger the Enter action (focus pane / open wizard).
-
-### Filter Mode
-
-| Key | Action |
-|-----|--------|
-| `Esc` | Exit filter mode |
-| Type | Filter branches by name |
-
-### GitView Screen
-
-The GitView screen shows detailed git status for a branch, including files and recent commits.
-
-| Key | Action |
-|-----|--------|
-| `Up/Down` | Navigate files and commits |
-| `Space` | Expand/collapse file diff or commit details |
-| `Enter` | Open PR link in browser (when focused on header) |
-| `v` / `Esc` | Return to branch list |
-
-Mouse:
-- Click on the PR link in the header to open it in your browser.
-
-## Status Icons Legend
-
-| Icon | Color | Meaning |
-|------|-------|---------|
-| `o` | Green | Safe - No uncommitted or unpushed changes |
-| `!` | Red | Uncommitted - Has local changes |
-| `^` | Yellow | Unpushed - Has commits not pushed to remote |
-| `*` | Yellow | Unmerged - Has unmerged changes |
-
-## Agent Status Display
-
-In the branch list, running agents are displayed on the right side:
-
-| Format | Meaning |
-|--------|---------|
-| `[/] Claude 01:23:45` | Running agent (spinner, name, uptime) |
-| `[BG] Claude 01:23:45` | Hidden (background) agent (grayed out) |
-
-## Coding Agents
-
-gwt detects agents available on PATH and lists them in the launcher.
-
-Supported agents (built-in):
-
-- Claude Code (`claude`)
-- Codex CLI (`codex`)
-- Gemini CLI (`gemini`)
-- OpenCode (`opencode`)
-
-### Custom coding agents
-
-Custom agents are defined in `~/.gwt/tools.json` and will appear in the launcher.
-
-Minimal example:
-
-```json
-{
-  "version": "1.0.0",
-  "customCodingAgents": [
-    {
-      "id": "aider",
-      "displayName": "Aider",
-      "type": "command",
-      "command": "aider",
-      "defaultArgs": ["--no-git"],
-      "modeArgs": {
-        "normal": [],
-        "continue": ["--resume"],
-        "resume": ["--resume"]
-      },
-      "permissionSkipArgs": ["--yes"],
-      "env": {
-        "OPENAI_API_KEY": "sk-..."
-      },
-      "models": [
-        { "id": "gpt-4o", "label": "GPT-4o" },
-        { "id": "claude-3-opus", "label": "Claude 3 Opus" }
-      ],
-      "versionCommand": "aider --version"
-    }
-  ]
-}
-```
-
-Notes:
-
-- `type` supports `path`, `bunx`, or `command`.
-- `modeArgs` defines args per execution mode (Normal/Continue/Resume).
-- `env` is optional per-agent environment variables.
-- `models` is optional. If defined, model selection step will be shown for this agent.
-- `versionCommand` is optional. If defined, version detection will use this command instead of skipping version selection.
-
-## Bare Repository Workflow
-
-gwt supports a bare repository workflow for efficient worktree management. This approach keeps the bare repository (`.git` data) separate from worktrees, providing cleaner project organization.
-
-### Directory Structure
-
-```text
-/project/
-├── repo.git/           # Bare repository
-├── main/               # Worktree (main branch)
-├── feature-x/          # Worktree (feature/x branch)
-└── .gwt/               # gwt configuration
-    └── project.json
-```
-
-### Setting Up a Bare Repository
-
-```bash
-# Clone as bare repository
-git clone --bare https://github.com/user/repo.git repo.git
-
-# Create worktrees from bare repository
-cd repo.git
-git worktree add ../main main
-git worktree add ../feature-x feature/x
-```
-
-### Using gwt with Bare Repositories
-
-When you run gwt in a bare repository or its worktrees:
-
-| Location | Header Display |
-|----------|----------------|
-| Normal repository | `Working Directory: /path [branch]` |
-| Bare repository | `Working Directory: /path/repo.git [bare]` |
-| Worktree (normal) | `Working Directory: /path [branch]` |
-| Worktree (bare-based) | `Working Directory: /path [branch] (repo.git)` |
-
-### Migration from `.worktrees/` Method
-
-If you have an existing repository using the `.worktrees/` directory method, gwt will detect this and offer migration to the bare repository method:
-
-1. **Backup**: Creates backup in `.gwt-migration-backup/`
-2. **Create bare repo**: Creates `{repo-name}.git`
-3. **Migrate worktrees**: Moves existing worktrees to new structure
-4. **Cleanup**: Removes old `.worktrees/` directory
-5. **Configure**: Creates `.gwt/project.json`
-
-### Submodule Support
-
-When creating worktrees, gwt automatically initializes submodules if present. This ensures submodules are ready to use immediately after worktree creation.
-
-## Advanced Workflows
-
-### Branch Strategy
-
-This repository follows a structured branching strategy:
-
-- **`main`**: Production-ready code. Protected branch for releases only.
-- **`develop`**: Integration branch for features. All feature branches merge here.
-- **`feature/*`**: New features and enhancements. **Must be based on and target `develop`**.
-- **`hotfix/*`**: Critical production fixes. Based on and target `main`.
-- **`release/*`**: Release preparation branches.
-
-**Important**: When creating feature branches, always use `develop` as the base branch:
-
-```bash
-# Correct: Create feature branch from develop
-git checkout develop
-git pull origin develop
-git checkout -b feature/my-feature
-
-# Or use this tool which handles it automatically
-gwt
-# → Select "Create new branch" → "feature" → automatically uses develop as base
-```
-
-### Branch Creation Workflow
-
-> **Important**: This workflow is intended for human developers. Autonomous agents must never create or delete branches unless a human gives explicit, task-specific instructions.
-
-1. Select "Create new branch" from the main menu
-2. Choose branch type (feature, bugfix, hotfix, release)
-3. Enter branch name with automatic prefix application
-4. Select base branch from available options (feature → develop, hotfix → main)
-5. Confirm worktree creation path
-6. Automatic worktree setup and selected tool launch
-
-### Worktree Management
-
-- **Open Existing**: Launch the selected tool in existing worktrees
-- **Remove Worktree**: Clean removal with optional branch deletion
-- **Batch Operations**: Handle multiple worktrees efficiently
-
-### GitHub Integration
-
-- **Branch Cleanup**: Automatically detect and remove merged pull request branches or branches that no longer differ from their base
-- **Authentication Check**: Verify GitHub CLI setup before operations
-- **Remote Sync**: Fetch latest changes before cleanup operations
-
-## System Requirements
-
-- **Rust**: Stable toolchain (for building from source)
-- **Git**: Latest version with worktree support
-- **Coding Agent**: At least one built-in agent or a custom coding agent should be available
-- **GitHub CLI**: Required for PR cleanup features (optional)
-- **bun/npm**: Required for bunx/npx execution method
-
-## Project Structure
-
-```text
-@akiojin/gwt/
-├── Cargo.toml           # Workspace configuration
-├── crates/
-│   ├── gwt-cli/         # CLI entry point and TUI (Ratatui)
-│   ├── gwt-core/        # Core library (worktree management)
-│   ├── gwt-web/         # Web server (Axum)
-│   └── gwt-frontend/    # Web frontend (Leptos CSR)
-├── package.json         # npm distribution wrapper
-├── bin/gwt.js           # Binary wrapper script
-├── scripts/postinstall.js  # Binary download script
-├── specs/               # Feature specifications
-└── docs/                # Documentation
-```
+- macOS: `.dmg`, `.pkg`
+- Windows: `.msi`
+- Linux: `.AppImage`, `.deb`
 
 ## Development
 
-### Setup
+Prereqs:
+
+- Rust (stable)
+- Node.js 22
+- pnpm (via Corepack)
+- Tauri system dependencies (per platform)
+
+Run in dev:
 
 ```bash
-# Clone the repository
-git clone https://github.com/akiojin/gwt.git
-cd gwt
+cd gwt-gui
+pnpm install --frozen-lockfile
 
-# Build the project
-cargo build
-
-# Run tests
-cargo test
-
-# Run with debug output
-cargo run
+cd ..
+cargo tauri dev
 ```
 
-### Available Commands
+Build:
 
 ```bash
-# Development build
-cargo build
+cd gwt-gui
+pnpm install --frozen-lockfile
 
-# Release build
-cargo build --release
-
-# Run tests
-cargo test
-
-# Run clippy lints
-cargo clippy --all-targets --all-features -- -D warnings
-
-# Format code
-cargo fmt
-
-# Run the CLI locally
-cargo run
+cd ..
+cargo tauri build
 ```
 
-### Development Workflow
+## AI Settings
 
-1. **Fork and Clone**: Fork the repository and clone your fork
-2. **Create Branch**: Use the tool itself to create a feature branch
-3. **Development**: Make changes with Rust
-4. **Testing**: Test CLI functionality with `cargo run`
-5. **Quality Checks**: Run `cargo clippy` and `cargo fmt --check`
-6. **Pull Request**: Submit a PR with clear description
+Agent Mode and features like session summaries require AI settings.
 
-### Code Structure
+Steps:
 
-- **Entry Point**: `crates/gwt-cli/src/main.rs` - Main application logic
-- **Core Modules**: Git operations, worktree management in `gwt-core`
-- **TUI Components**: Ratatui-based interface in `gwt-cli/src/tui/`
-- **Type Safety**: Comprehensive Rust type definitions
-- **Error Handling**: Robust error management with `thiserror`
+- Open `Settings`
+- Select a profile in `Profiles`
+- Enable `AI Settings`
+- Set `Endpoint` and `Model` (API key is optional for local LLMs)
+- Click `Save`
 
-## Release Process
+## Repository Layout
 
-End users can install the latest published package (via npm or the GitHub Releases tab). Maintainers should follow the release flow requirements in `specs/SPEC-77b1bc70/spec.md`.
-
-## Troubleshooting
-
-### Common Issues
-
-**Permission Errors**: Ensure proper directory permissions
-**Git Worktree Conflicts**: Use the cleanup feature to remove stale worktrees
-**GitHub Authentication**: Run `gh auth login` before using PR cleanup features
-**Binary Not Found**: Ensure the gwt binary is in your PATH
-**Unicode Character Corruption in Docker + tmux**: If Unicode characters (like the Claude Code logo) appear as underscores in Docker containers with tmux, start tmux with UTF-8 mode:
-
-```bash
-tmux -u
-```
-
-Or add to your `~/.tmux.conf`:
-
-```
-set -gq utf8 on
-```
-
-You may also need to install and configure locales in your Docker container:
-
-```bash
-apt-get update && apt-get install -y locales
-sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen
-locale-gen
-export LANG=en_US.UTF-8
-export LC_ALL=en_US.UTF-8
-```
-
-### Debug Mode
-
-For verbose output, set the environment variable:
-
-```bash
-GWT_DEBUG=1 gwt
-```
+- `crates/gwt-core/`: core logic (Git/worktree/config/logs/docker/pty)
+- `crates/gwt-tauri/`: Tauri v2 backend (commands + state)
+- `gwt-gui/`: Svelte 5 frontend (UI + xterm.js)
+- `installers/`: installer definitions (e.g. WiX)
 
 ## License
 
-MIT - See LICENSE file for details
-
-## Contributing
-
-We welcome contributions! Please read our contributing guidelines:
-
-1. **Issues**: Report bugs or request features via GitHub Issues
-2. **Pull Requests**: Follow the development workflow above
-3. **Code Style**: Maintain Rust best practices and existing patterns
-4. **Documentation**: Update README and code comments for significant changes
-
-### Contributors
-
-- AI Novel Project Team
-- Community contributors welcome
-
-## Support
-
-- **Documentation**: This README and inline code documentation
-- **Issues**: GitHub Issues for bug reports and feature requests
-- **Discussions**: GitHub Discussions for questions and community support
+MIT
