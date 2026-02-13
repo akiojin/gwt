@@ -25,7 +25,7 @@ fn find_any_worktree_path(repo_path: &Path) -> Option<PathBuf> {
 /// Get the list of stash entries with file counts
 pub fn get_stash_list(repo_path: &Path) -> Result<Vec<StashEntry>> {
     let mut exec_path = repo_path.to_path_buf();
-    let mut output = crate::process::git_command()
+    let mut output = crate::process::command("git")
         .args(["stash", "list", "--format=%gd%x00%gs"])
         .current_dir(&exec_path)
         .output()
@@ -39,7 +39,7 @@ pub fn get_stash_list(repo_path: &Path) -> Result<Vec<StashEntry>> {
     if !output.status.success() && is_bare_repository(repo_path) {
         if let Some(wt_path) = find_any_worktree_path(repo_path) {
             exec_path = wt_path;
-            output = crate::process::git_command()
+            output = crate::process::command("git")
                 .args(["stash", "list", "--format=%gd%x00%gs"])
                 .current_dir(&exec_path)
                 .output()
@@ -96,7 +96,7 @@ pub fn get_stash_list(repo_path: &Path) -> Result<Vec<StashEntry>> {
 /// Get the number of files changed in a stash entry
 fn get_stash_file_count(repo_path: &Path, index: usize) -> usize {
     let stash_ref = format!("stash@{{{}}}", index);
-    let output = crate::process::git_command()
+    let output = crate::process::command("git")
         .args(["stash", "show", &stash_ref, "--name-only"])
         .current_dir(repo_path)
         .output();
@@ -117,7 +117,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn run_git(repo_path: &Path, args: &[&str]) {
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(args)
             .current_dir(repo_path)
             .output()
@@ -131,7 +131,7 @@ mod tests {
     }
 
     fn get_current_branch_name(repo_path: &Path) -> String {
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
             .current_dir(repo_path)
             .output()
@@ -207,7 +207,7 @@ mod tests {
 
         // Clone as bare repo (gwt bare project style)
         let bare = temp.path().join("repo.git");
-        let status = crate::process::git_command()
+        let status = crate::process::command("git")
             .args(["clone", "--bare"])
             .arg(&src)
             .arg(&bare)
@@ -217,7 +217,7 @@ mod tests {
 
         // Create a worktree so stash operations are possible
         let wt = temp.path().join("wt");
-        let status = crate::process::git_command()
+        let status = crate::process::command("git")
             .args(["worktree", "add"])
             .arg(&wt)
             .arg(&base)
