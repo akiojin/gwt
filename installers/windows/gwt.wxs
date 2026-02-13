@@ -44,8 +44,9 @@
       <Component Id="AppBinary" Directory="INSTALLFOLDER" Guid="{D5C9E7C2-7E5D-4A54-9F24-A23A8F9B3F70}" Win64="yes">
         <File
           Id="AppExe"
+          Name="gwt.exe"
           KeyPath="yes"
-          Source="$(var.BinariesDir)\\gwt.exe"
+          Source="$(var.BinariesDir)\\gwt-tauri.exe"
         />
       </Component>
 

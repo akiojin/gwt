@@ -11,6 +11,7 @@
     TerminalAnsiProbe,
     CapturedEnvInfo,
     SettingsData,
+    VoiceInputSettings,
   } from "./lib/types";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import MainArea from "./lib/components/MainArea.svelte";
@@ -32,9 +33,19 @@
     buildRestoredAgentTabs,
     shouldRetryAgentTabRestore,
   } from "./lib/agentTabsPersistence";
+  import {
+    VoiceInputController,
+    type VoiceControllerState,
+  } from "./lib/voice/voiceInputController";
 
   interface MenuActionPayload {
     action: string;
+  }
+
+  interface SettingsUpdatedPayload {
+    uiFontSize?: number;
+    terminalFontSize?: number;
+    voiceInput?: VoiceInputSettings;
   }
 
   const SIDEBAR_WIDTH_STORAGE_KEY = "gwt.sidebar.width";
@@ -43,6 +54,13 @@
   const MIN_SIDEBAR_WIDTH_PX = 220;
   const MAX_SIDEBAR_WIDTH_PX = 520;
   type SidebarMode = "branch" | "agent";
+
+  const DEFAULT_VOICE_INPUT_SETTINGS: VoiceInputSettings = {
+    enabled: false,
+    hotkey: "Mod+Shift+M",
+    language: "auto",
+    model: "base",
+  };
 
   function clampSidebarWidth(widthPx: number): number {
     if (!Number.isFinite(widthPx)) return DEFAULT_SIDEBAR_WIDTH_PX;
@@ -145,6 +163,11 @@
   let terminalDiagnosticsError: string | null = $state(null);
 
   let osEnvReady = $state(false);
+  let voiceInputSettings: VoiceInputSettings = $state(DEFAULT_VOICE_INPUT_SETTINGS);
+  let voiceInputListening = $state(false);
+  let voiceInputSupported = $state(true);
+  let voiceInputError: string | null = $state(null);
+  let voiceController: VoiceInputController | null = null;
 
   let toastMessage = $state<string | null>(null);
   let toastTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -387,6 +410,24 @@
     return Math.max(8, Math.min(24, Math.round(size)));
   }
 
+  function normalizeVoiceInputSettings(
+    value: Partial<VoiceInputSettings> | null | undefined
+  ): VoiceInputSettings {
+    const hotkey = (value?.hotkey ?? "").trim();
+    const language = (value?.language ?? "").trim().toLowerCase();
+    const model = (value?.model ?? "").trim();
+
+    return {
+      enabled: !!value?.enabled,
+      hotkey: hotkey.length > 0 ? hotkey : DEFAULT_VOICE_INPUT_SETTINGS.hotkey,
+      language:
+        language === "ja" || language === "en" || language === "auto"
+          ? (language as VoiceInputSettings["language"])
+          : DEFAULT_VOICE_INPUT_SETTINGS.language,
+      model: model.length > 0 ? model : DEFAULT_VOICE_INPUT_SETTINGS.model,
+    };
+  }
+
   function applyUiFontSize(size: number) {
     document.documentElement.style.setProperty("--ui-font-base", `${size}px`);
   }
@@ -396,14 +437,42 @@
     window.dispatchEvent(new CustomEvent("gwt-terminal-font-size", { detail: size }));
   }
 
+  function applyVoiceInputSettings(value: Partial<VoiceInputSettings> | null | undefined) {
+    voiceInputSettings = normalizeVoiceInputSettings(value);
+    voiceController?.updateSettings();
+  }
+
+  function activeAgentPaneId(): string | null {
+    const active = tabs.find((t) => t.id === activeTabId);
+    if (
+      active?.type === "agent" &&
+      typeof active.paneId === "string" &&
+      active.paneId.length > 0
+    ) {
+      return active.paneId;
+    }
+    return null;
+  }
+
+  function readVoiceInputSettingsForController(): VoiceInputSettings {
+    return voiceInputSettings;
+  }
+
+  function readVoiceFallbackTerminalPaneId(): string | null {
+    return activeAgentPaneId();
+  }
+
   async function applyAppearanceSettings() {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      const settings = await invoke<Pick<SettingsData, "ui_font_size" | "terminal_font_size">>(
+      const settings = await invoke<
+        Pick<SettingsData, "ui_font_size" | "terminal_font_size" | "voice_input">
+      >(
         "get_settings"
       );
       applyUiFontSize(clampFontSize(settings.ui_font_size ?? 13));
       applyTerminalFontSize(clampFontSize(settings.terminal_font_size ?? 13));
+      applyVoiceInputSettings(settings.voice_input);
     } catch {
       // Ignore: settings API not available outside Tauri runtime.
     }
@@ -1003,6 +1072,49 @@
     };
   });
 
+  $effect(() => {
+    const controller = new VoiceInputController({
+      getSettings: readVoiceInputSettingsForController,
+      getFallbackTerminalPaneId: readVoiceFallbackTerminalPaneId,
+      onStateChange: (state: VoiceControllerState) => {
+        voiceInputListening = state.listening;
+        voiceInputSupported = state.supported;
+        voiceInputError = state.error;
+      },
+    });
+    voiceController = controller;
+    controller.updateSettings();
+
+    return () => {
+      controller.dispose();
+      if (voiceController === controller) {
+        voiceController = null;
+      }
+      voiceInputListening = false;
+      voiceInputError = null;
+      voiceInputSupported = true;
+    };
+  });
+
+  $effect(() => {
+    function onSettingsUpdated(event: Event) {
+      const detail = (event as CustomEvent<SettingsUpdatedPayload>).detail;
+      if (!detail) return;
+      if (typeof detail.uiFontSize === "number") {
+        applyUiFontSize(clampFontSize(detail.uiFontSize));
+      }
+      if (typeof detail.terminalFontSize === "number") {
+        applyTerminalFontSize(clampFontSize(detail.terminalFontSize));
+      }
+      if (detail.voiceInput) {
+        applyVoiceInputSettings(detail.voiceInput);
+      }
+    }
+
+    window.addEventListener("gwt-settings-updated", onSettingsUpdated);
+    return () => window.removeEventListener("gwt-settings-updated", onSettingsUpdated);
+  });
+
   // Global keyboard shortcut: Cmd+Shift+K / Ctrl+Shift+K to open Cleanup modal.
   // The native menu accelerator handles this on macOS, but this provides a
   // fallback for web-preview and non-Tauri contexts.
@@ -1057,7 +1169,16 @@
         onTabClose={handleTabClose}
       />
     </div>
-    <StatusBar {projectPath} {currentBranch} {terminalCount} {osEnvReady} />
+    <StatusBar
+      {projectPath}
+      {currentBranch}
+      {terminalCount}
+      {osEnvReady}
+      voiceInputEnabled={voiceInputSettings.enabled}
+      voiceInputListening={voiceInputListening}
+      voiceInputSupported={voiceInputSupported}
+      voiceInputError={voiceInputError}
+    />
   </div>
 {/if}
 
