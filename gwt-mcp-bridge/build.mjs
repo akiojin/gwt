@@ -9,7 +9,10 @@ await esbuild.build({
   outfile: "dist/gwt-mcp-bridge.js",
   minify: true,
   banner: {
-    js: "#!/usr/bin/env node",
+    js: [
+      "#!/usr/bin/env node",
+      'import{createRequire as __cjsReq}from"module";const require=__cjsReq(import.meta.url);',
+    ].join("\n"),
   },
   external: [],
 });

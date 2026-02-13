@@ -76,10 +76,10 @@ pub fn detect_runtime() -> Result<String, GwtError> {
 ///
 /// When running inside a Tauri bundle the resource directory is provided by
 /// the caller (`resource_dir`).  During development this falls back to
-/// `<project>/gwt-gui/dist-bridge/mcp-bridge.js`.
+/// `<project>/gwt-mcp-bridge/dist/gwt-mcp-bridge.js`.
 pub fn resolve_bridge_path(resource_dir: Option<&Path>) -> Result<PathBuf, GwtError> {
     if let Some(dir) = resource_dir {
-        let path = dir.join("mcp-bridge.js");
+        let path = dir.join("gwt-mcp-bridge.js");
         if path.exists() {
             return Ok(path);
         }
@@ -90,9 +90,9 @@ pub fn resolve_bridge_path(resource_dir: Option<&Path>) -> Result<PathBuf, GwtEr
         .parent()
         .and_then(|p| p.parent())
         .map(|root| {
-            root.join("gwt-gui")
-                .join("dist-bridge")
-                .join("mcp-bridge.js")
+            root.join("gwt-mcp-bridge")
+                .join("dist")
+                .join("gwt-mcp-bridge.js")
         });
 
     if let Some(path) = dev_path {
