@@ -153,6 +153,7 @@
     const rootEl = containerEl;
     if (!rootEl) return;
     let cancelled = false;
+    let receivedLiveOutput = false;
     const unregisterVoiceInputTarget = registerTerminalInputTarget(paneId, rootEl);
 
     const term = new Terminal({
@@ -287,23 +288,12 @@
       writeToTerminalBytes(Array.from(bytes));
     });
 
-    // Best-effort: show recent scrollback so restored tabs aren't blank.
+    // Subscribe first so startup output isn't lost before the listener attaches.
     (async () => {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const text = await invoke<string>("capture_scrollback_tail", {
-          paneId,
-          maxBytes: 64 * 1024,
-        });
-        if (text) {
-          term.write(text);
-        }
-      } catch {
-        // Ignore: not available outside Tauri runtime.
-      }
-
       // Listen to terminal output from backend.
-      const unlistenFn = await setupEventListener(term);
+      const unlistenFn = await setupEventListener(term, () => {
+        receivedLiveOutput = true;
+      });
       if (cancelled) {
         if (unlistenFn) {
           unlistenFn();
@@ -312,6 +302,20 @@
       }
       if (unlistenFn) {
         unlisten = unlistenFn;
+      }
+
+      // Best-effort: show recent scrollback so restored tabs aren't blank.
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const text = await invoke<string>("capture_scrollback_tail", {
+          paneId,
+          maxBytes: 64 * 1024,
+        });
+        if (text && !receivedLiveOutput) {
+          term.write(text);
+        }
+      } catch {
+        // Ignore: not available outside Tauri runtime.
       }
     })();
 
@@ -357,13 +361,17 @@
     };
   });
 
-  async function setupEventListener(term: Terminal): Promise<(() => void) | null> {
+  async function setupEventListener(
+    term: Terminal,
+    onOutput?: () => void,
+  ): Promise<(() => void) | null> {
     try {
       const { listen } = await import("@tauri-apps/api/event");
       const unlistenFn = await listen<{ pane_id: string; data: number[] }>(
         "terminal-output",
         (event) => {
           if (event.payload.pane_id === paneId) {
+            onOutput?.();
             const bytes = new Uint8Array(event.payload.data);
             term.write(bytes);
           }

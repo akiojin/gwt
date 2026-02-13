@@ -169,8 +169,9 @@ export interface Tab {
   id: string;
   label: string;
   agentId?: "claude" | "codex" | "gemini" | "opencode";
-  type: "summary" | "agent" | "settings" | "versionHistory" | "agentMode";
+  type: "summary" | "agent" | "settings" | "versionHistory" | "agentMode" | "terminal";
   paneId?: string;
+  cwd?: string;
 }
 
 export interface ToolSessionEntry {
