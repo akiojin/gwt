@@ -21,6 +21,9 @@ pub const MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS: &str = "tools-terminal-diagnostics
 pub const MENU_ID_GIT_CLEANUP_WORKTREES: &str = "git-cleanup-worktrees";
 pub const MENU_ID_GIT_VERSION_HISTORY: &str = "git-version-history";
 
+pub const MENU_ID_EDIT_COPY: &str = "edit-copy";
+pub const MENU_ID_EDIT_PASTE: &str = "edit-paste";
+
 pub const MENU_ID_SETTINGS_PREFERENCES: &str = "settings-preferences";
 pub const MENU_ID_HELP_ABOUT: &str = "help-about";
 
@@ -117,14 +120,19 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         .item(&file_close_project)
         .build()?;
 
-    // Use native predefined Edit actions so Cmd/Ctrl shortcuts work consistently.
+    let edit_copy = MenuItem::with_id(app, MENU_ID_EDIT_COPY, "Copy", true, Some("CmdOrCtrl+C"))?;
+    let edit_paste =
+        MenuItem::with_id(app, MENU_ID_EDIT_PASTE, "Paste", true, Some("CmdOrCtrl+V"))?;
+
+    // Keep Undo/Redo/Cut/Select All as native actions and custom-bind Copy/Paste
+    // so keyboard events can be handled by the app.
     let edit = SubmenuBuilder::new(app, "Edit")
         .undo()
         .redo()
         .separator()
         .cut()
-        .copy()
-        .paste()
+        .item(&edit_copy)
+        .item(&edit_paste)
         .separator()
         .select_all()
         .build()?;

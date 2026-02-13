@@ -55,6 +55,8 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
         crate::menu::MENU_ID_FILE_CLOSE_PROJECT => Some("close-project"),
         crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES => Some("cleanup-worktrees"),
         crate::menu::MENU_ID_GIT_VERSION_HISTORY => Some("version-history"),
+        crate::menu::MENU_ID_EDIT_COPY => Some("edit-copy"),
+        crate::menu::MENU_ID_EDIT_PASTE => Some("edit-paste"),
         crate::menu::MENU_ID_TOOLS_LAUNCH_AGENT => Some("launch-agent"),
         crate::menu::MENU_ID_TOOLS_LIST_TERMINALS => Some("list-terminals"),
         crate::menu::MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS => Some("terminal-diagnostics"),
@@ -319,7 +321,7 @@ pub fn build_app(
                     return;
                 }
 
-                // Allow specific windows to actually close (used for macOS Cmd+Q behavior).
+                // Allow explicit close requests from trusted flows if explicitly permitted.
                 if state.consume_window_close_permission(window.label()) {
                     info!(
                         category = "tauri",
@@ -529,16 +531,28 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
             if should_prevent_exit_request(is_quitting) {
                 api.prevent_exit();
 
-                // macOS: Cmd+Q is treated as explicit app quit (with agent confirmation).
+                // macOS: Cmd+Q is treated as explicit window close, not process exit.
                 #[cfg(target_os = "macos")]
                 {
                     let state = app_handle.state::<AppState>();
+                    let window = best_window(app_handle);
+                    let Some(window) = window else {
+                        info!(
+                            category = "tauri",
+                            event = "ExitPrevented",
+                            "Exit prevented; no windows exist"
+                        );
+                        return;
+                    };
+
+                    let window_label = window.label().to_string();
                     if has_running_agents(&state) {
                         if !try_begin_exit_confirm(&state) {
                             return;
                         }
 
                         let app_handle = app_handle.clone();
+                        let window_label = window_label.clone();
                         app_handle
                             .dialog()
                             .message("Agents are still running. Quit gwt anyway?")
@@ -553,14 +567,15 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
                                 if !ok {
                                     return;
                                 }
-                                state.request_quit();
-                                app_handle.exit(0);
+
+                                if let Some(window) = app_handle.get_webview_window(&window_label) {
+                                    let _ = window.hide();
+                                }
                             });
                         return;
                     }
 
-                    app_handle.state::<AppState>().request_quit();
-                    app_handle.exit(0);
+                    let _ = window.hide();
                 }
 
                 // Other OSes: keep current behavior (exit request hides to tray).
@@ -623,6 +638,22 @@ mod tests {
         assert_eq!(
             menu_action_from_id(crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES),
             Some("cleanup-worktrees")
+        );
+    }
+
+    #[test]
+    fn menu_action_from_id_maps_edit_copy() {
+        assert_eq!(
+            menu_action_from_id(crate::menu::MENU_ID_EDIT_COPY),
+            Some("edit-copy")
+        );
+    }
+
+    #[test]
+    fn menu_action_from_id_maps_edit_paste() {
+        assert_eq!(
+            menu_action_from_id(crate::menu::MENU_ID_EDIT_PASTE),
+            Some("edit-paste")
         );
     }
 }
