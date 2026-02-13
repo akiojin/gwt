@@ -851,23 +851,73 @@ fn yaml_single_quoted(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-fn render_docker_compose_override(service: &str, mounts: &[DockerBindMount]) -> String {
-    let mut content = format!("services:\n  {service}:\n");
-    if mounts.is_empty() {
-        return content;
+fn compose_service_container_name(container_name_prefix: &str, service: &str) -> String {
+    let mut suffix = String::new();
+    for c in service.trim().chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+            suffix.push(c.to_ascii_lowercase());
+        } else {
+            suffix.push('-');
+        }
+    }
+    while suffix.contains("--") {
+        suffix = suffix.replace("--", "-");
+    }
+    let suffix = suffix.trim_matches('-');
+    if suffix.is_empty() {
+        container_name_prefix.to_string()
+    } else {
+        format!("{container_name_prefix}-{suffix}")
+    }
+}
+
+fn render_docker_compose_override(
+    selected_service: &str,
+    services: &[String],
+    container_name_prefix: &str,
+    mounts: &[DockerBindMount],
+) -> String {
+    let mut content = "services:\n".to_string();
+    let selected = selected_service.trim();
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut ordered: Vec<String> = Vec::new();
+    for service in services {
+        let name = service.trim();
+        if name.is_empty() || !seen.insert(name.to_string()) {
+            continue;
+        }
+        ordered.push(name.to_string());
+    }
+    if !selected.is_empty() && seen.insert(selected.to_string()) {
+        ordered.push(selected.to_string());
     }
 
-    content.push_str("    volumes:\n");
-    for mount in mounts {
-        content.push_str("      - type: bind\n");
+    for service in ordered {
+        content.push_str(&format!("  {service}:\n"));
+        let resolved_container_name =
+            compose_service_container_name(container_name_prefix, &service);
         content.push_str(&format!(
-            "        source: {}\n",
-            yaml_single_quoted(&mount.source)
+            "    container_name: {}\n",
+            yaml_single_quoted(&resolved_container_name)
         ));
-        content.push_str(&format!(
-            "        target: {}\n",
-            yaml_single_quoted(&mount.target)
-        ));
+
+        if service != selected || mounts.is_empty() {
+            continue;
+        }
+
+        content.push_str("    volumes:\n");
+        for mount in mounts {
+            content.push_str("      - type: bind\n");
+            content.push_str(&format!(
+                "        source: {}\n",
+                yaml_single_quoted(&mount.source)
+            ));
+            content.push_str(&format!(
+                "        target: {}\n",
+                yaml_single_quoted(&mount.target)
+            ));
+        }
     }
 
     content
@@ -876,10 +926,11 @@ fn render_docker_compose_override(service: &str, mounts: &[DockerBindMount]) -> 
 fn write_docker_compose_override(
     project_root: &std::path::Path,
     container_name: &str,
-    service: &str,
+    selected_service: &str,
+    services: &[String],
     mounts: &[DockerBindMount],
 ) -> Result<Option<std::path::PathBuf>, String> {
-    if mounts.is_empty() {
+    if mounts.is_empty() && services.is_empty() {
         return Ok(None);
     }
 
@@ -890,7 +941,8 @@ fn write_docker_compose_override(
     let filename = format!("docker-compose.gwt.override.{container_name}.yml");
     let path = gwt_dir.join(filename);
 
-    let content = render_docker_compose_override(service, mounts);
+    let content =
+        render_docker_compose_override(selected_service, services, container_name, mounts);
 
     std::fs::write(&path, content).map_err(|e| format!("Failed to write override file: {e}"))?;
     Ok(Some(path))
@@ -1635,11 +1687,23 @@ mod tests {
             target: "/Repository/GE/GrimoireEngine.git".to_string(),
         }];
 
-        let yaml = render_docker_compose_override("app", &mounts);
+        let services = vec!["app".to_string(), "unity-mcp-server".to_string()];
+        let yaml = render_docker_compose_override("app", &services, "gwt-develop", &mounts);
+        assert!(yaml.contains("container_name: 'gwt-develop-app'"));
+        assert!(yaml.contains("container_name: 'gwt-develop-unity-mcp-server'"));
         assert!(yaml.contains("type: bind"));
         assert!(yaml.contains("source: 'D:/Repository/GE/GrimoireEngine.git'"));
         assert!(yaml.contains("target: '/Repository/GE/GrimoireEngine.git'"));
         assert!(!yaml.contains("${HOST_GIT_WORKTREE_DIR}:${HOST_GIT_WORKTREE_DIR}"));
+    }
+
+    #[test]
+    fn render_docker_compose_override_adds_container_names_without_mounts() {
+        let services = vec!["unity-mcp-server".to_string()];
+        let yaml = render_docker_compose_override("unity-mcp-server", &services, "gwt-dev", &[]);
+        assert!(yaml.contains("services:\n  unity-mcp-server:\n"));
+        assert!(yaml.contains("container_name: 'gwt-dev-unity-mcp-server'"));
+        assert!(!yaml.contains("volumes:"));
     }
 
     #[test]
@@ -2080,6 +2144,7 @@ fn launch_agent_for_project_root(
                     &project_root,
                     &container_name,
                     &service,
+                    &services,
                     &mounts,
                 )? {
                     compose_args.push("-f".to_string());
@@ -2170,6 +2235,7 @@ fn launch_agent_for_project_root(
                         &project_root,
                         &container_name,
                         &service,
+                        &services,
                         &mounts,
                     )? {
                         compose_args.push("-f".to_string());
