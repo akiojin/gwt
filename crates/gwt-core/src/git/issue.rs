@@ -26,6 +26,8 @@ pub struct GitHubIssue {
     pub title: String,
     /// Issue updatedAt timestamp (ISO-8601)
     pub updated_at: String,
+    /// Issue labels (FR-002)
+    pub labels: Vec<String>,
 }
 
 impl GitHubIssue {
@@ -35,6 +37,22 @@ impl GitHubIssue {
             number,
             title,
             updated_at,
+            labels: Vec::new(),
+        }
+    }
+
+    /// Create a new GitHubIssue with labels
+    pub fn with_labels(
+        number: u64,
+        title: String,
+        updated_at: String,
+        labels: Vec<String>,
+    ) -> Self {
+        Self {
+            number,
+            title,
+            updated_at,
+            labels,
         }
     }
 
@@ -132,7 +150,7 @@ fn issue_list_args(repo_slug: Option<&str>, page: u32, per_page: u32) -> Vec<Str
         "--state",
         "open",
         "--json",
-        "number,title,updatedAt",
+        "number,title,updatedAt,labels",
         "--limit",
         &limit_str,
     ]
@@ -220,7 +238,16 @@ pub fn parse_gh_issues_json(json: &str) -> Result<Vec<GitHubIssue>, String> {
             let number = item.get("number")?.as_u64()?;
             let title = item.get("title")?.as_str()?.to_string();
             let updated_at = item.get("updatedAt")?.as_str()?.to_string();
-            Some(GitHubIssue::new(number, title, updated_at))
+            let labels = item
+                .get("labels")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|label| label.get("name")?.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(GitHubIssue::with_labels(number, title, updated_at, labels))
         })
         .collect();
 
@@ -472,6 +499,69 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_gh_issues_json_with_labels() {
+        let json = r#"[
+            {
+                "number": 42,
+                "title": "Fix login bug",
+                "updatedAt": "2025-01-25T10:00:00Z",
+                "labels": [
+                    {"name": "bug", "color": "d73a4a"},
+                    {"name": "priority: high", "color": "ff0000"}
+                ]
+            }
+        ]"#;
+
+        let issues = parse_gh_issues_json(json).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].labels, vec!["bug", "priority: high"]);
+    }
+
+    #[test]
+    fn test_parse_gh_issues_json_without_labels_field() {
+        let json = r#"[
+            {"number": 42, "title": "Fix login bug", "updatedAt": "2025-01-25T10:00:00Z"}
+        ]"#;
+
+        let issues = parse_gh_issues_json(json).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].labels.is_empty());
+    }
+
+    #[test]
+    fn test_parse_gh_issues_json_empty_labels() {
+        let json = r#"[
+            {"number": 42, "title": "Fix login bug", "updatedAt": "2025-01-25T10:00:00Z", "labels": []}
+        ]"#;
+
+        let issues = parse_gh_issues_json(json).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].labels.is_empty());
+    }
+
+    #[test]
+    fn test_github_issue_with_labels_constructor() {
+        let issue = GitHubIssue::with_labels(
+            42,
+            "Fix bug".to_string(),
+            "2025-01-25T10:00:00Z".to_string(),
+            vec!["bug".to_string(), "urgent".to_string()],
+        );
+        assert_eq!(issue.number, 42);
+        assert_eq!(issue.labels, vec!["bug", "urgent"]);
+    }
+
+    #[test]
+    fn test_github_issue_new_has_empty_labels() {
+        let issue = GitHubIssue::new(
+            1,
+            "Test".to_string(),
+            "2025-01-25T10:00:00Z".to_string(),
+        );
+        assert!(issue.labels.is_empty());
+    }
+
+    #[test]
     fn test_parse_gh_issues_json_empty() {
         let json = "[]";
         let issues = parse_gh_issues_json(json).unwrap();
@@ -618,7 +708,7 @@ mod tests {
                 "--state",
                 "open",
                 "--json",
-                "number,title,updatedAt",
+                "number,title,updatedAt,labels",
                 "--limit",
                 "51"
             ]
@@ -639,7 +729,7 @@ mod tests {
                 "--state",
                 "open",
                 "--json",
-                "number,title,updatedAt",
+                "number,title,updatedAt,labels",
                 "--limit",
                 "51",
                 "--repo",
@@ -663,7 +753,7 @@ mod tests {
                 "--state",
                 "open",
                 "--json",
-                "number,title,updatedAt",
+                "number,title,updatedAt,labels",
                 "--limit",
                 "101"
             ]
@@ -685,7 +775,7 @@ mod tests {
                 "--state",
                 "open",
                 "--json",
-                "number,title,updatedAt",
+                "number,title,updatedAt,labels",
                 "--limit",
                 "11"
             ]
