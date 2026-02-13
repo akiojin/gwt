@@ -17,3 +17,10 @@
 ## Phase 4: 仕上げ・横断
 
 - [ ] T006 [P] [共通] 仕様・計画・タスクの更新 specs/SPEC-ba3f610c/spec.md
+
+## Phase 5: Session Summaryタブ回帰修正（2026-02-13）
+
+- [x] T007 [US1] [テスト] ブランチモードのタブ固定仕様テストを追加 gwt-gui/src/lib/components/MainArea.test.ts
+- [x] T008 [US1] [テスト] 既定タブ/復元条件のユニットテストを追加 gwt-gui/src/lib/appTabs.test.ts
+- [x] T009 [US1] [実装] Appの初期タブ/再初期化/復元ロジックからSession Summary依存を削除 gwt-gui/src/App.svelte
+- [x] T010 [US1] [実装] Tab型からsummaryを除去して再発を防止 gwt-gui/src/lib/types.ts
