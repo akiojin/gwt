@@ -183,6 +183,13 @@
           return false;
         }
 
+        // On macOS `Cmd+C` should only copy when text is selected; do not
+        // send SIGINT when there is no active selection.
+        if (event.metaKey && !event.ctrlKey) {
+          event.preventDefault();
+          return false;
+        }
+
         event.preventDefault();
         void writeToTerminalBytes([0x03]);
         return false;

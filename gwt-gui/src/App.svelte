@@ -535,9 +535,71 @@
     return active.paneId && active.paneId.length > 0 ? active.paneId : null;
   }
 
+  function getActiveEditableElement():
+    | HTMLInputElement
+    | HTMLTextAreaElement
+    | HTMLElement
+    | null {
+    if (typeof document === "undefined") return null;
+    const el = document.activeElement;
+    if (!el) return null;
+
+    if (el instanceof HTMLInputElement && !el.readOnly && !el.disabled) {
+      return el;
+    }
+    if (el instanceof HTMLTextAreaElement && !el.readOnly && !el.disabled) {
+      return el;
+    }
+    if (el instanceof HTMLElement && el.isContentEditable) {
+      return el;
+    }
+
+    return null;
+  }
+
+  async function fallbackMenuEditAction(action: "copy" | "paste") {
+    const target = getActiveEditableElement();
+    if (!target) {
+      // Let browser/editor defaults decide when there is no editable target.
+      if (action === "copy") {
+        document.execCommand("copy");
+      }
+      return;
+    }
+
+    if (action === "copy") {
+      document.execCommand("copy");
+      return;
+    }
+
+    if (!navigator.clipboard?.readText) return;
+    let text: string;
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      return;
+    }
+    if (!text) return;
+
+    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+      const start = target.selectionStart ?? target.value.length;
+      const end = target.selectionEnd ?? target.value.length;
+      target.setRangeText(text, start, end, "end");
+      return;
+    }
+
+    if (target.isContentEditable) {
+      target.focus();
+      document.execCommand("insertText", false, text);
+    }
+  }
+
   function emitTerminalEditAction(action: "copy" | "paste") {
     const paneId = getActiveTerminalPaneId();
-    if (!paneId) return;
+    if (!paneId) {
+      void fallbackMenuEditAction(action);
+      return;
+    }
 
     if (typeof window === "undefined") return;
 

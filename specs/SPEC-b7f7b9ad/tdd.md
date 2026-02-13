@@ -15,6 +15,7 @@
 
 2. `TerminalView` のキーイベント
    - `Cmd/Ctrl + C` の選択コピー
+   - `Cmd + C` が選択なし時に SIGINT に変換しない
    - `Paste` イベント時に `write_terminal` 呼び出し
 
 3. `TerminalView` のメニュー連携

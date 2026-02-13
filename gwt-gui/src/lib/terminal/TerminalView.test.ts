@@ -5,6 +5,7 @@ const invokeMock = vi.fn();
 const listenMock = vi.fn();
 const writeTextMock = vi.fn();
 const readTextMock = vi.fn();
+let customKeyEventHandler: ((event: KeyboardEvent) => boolean) | null = null;
 
 const terminalInstances: any[] = [];
 
@@ -38,7 +39,9 @@ vi.mock("@xterm/xterm", () => ({
     loadAddon = vi.fn();
     open = vi.fn();
     focus = vi.fn();
-    attachCustomKeyEventHandler = vi.fn();
+    attachCustomKeyEventHandler = vi.fn((handler: (event: KeyboardEvent) => boolean) => {
+      customKeyEventHandler = handler;
+    });
     onData = vi.fn();
     onBinary = vi.fn();
     getSelection = vi.fn(() => "");
@@ -69,6 +72,7 @@ describe("TerminalView", () => {
     listenMock.mockReset();
     writeTextMock.mockReset();
     readTextMock.mockReset();
+    customKeyEventHandler = null;
 
     listenMock.mockResolvedValue(() => {});
 
@@ -142,5 +146,29 @@ describe("TerminalView", () => {
         invokeMock.mock.calls.some((c) => c[0] === "write_terminal"),
       ).toBe(true);
     });
+  });
+
+  it("uses copy-only behavior for cmd+c when no selection", async () => {
+    await renderTerminalView({ paneId: "pane-1", active: true });
+
+    await waitFor(() => {
+      expect(customKeyEventHandler).not.toBeNull();
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    const handler = customKeyEventHandler!;
+    const term = terminalInstances[0];
+    term.getSelection = vi.fn(() => "");
+    const event = new KeyboardEvent("keydown", {
+      key: "c",
+      metaKey: true,
+      bubbles: true,
+    });
+    const preventDefaultMock = vi.spyOn(event, "preventDefault");
+
+    const result = handler(event);
+
+    expect(result).toBe(false);
+    expect(preventDefaultMock).toHaveBeenCalled();
   });
 });
