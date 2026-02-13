@@ -11,6 +11,7 @@ use gwt_core::config::ProfilesConfig;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::process::Command;
 use tauri::Manager;
 use tauri::{AppHandle, Emitter, State};
 
@@ -753,7 +754,7 @@ fn git_log_subjects(
 }
 
 fn git_output(repo_path: &Path, args: &[String]) -> Result<String, String> {
-    let output = gwt_core::process::git_command()
+    let output = Command::new("git")
         .args(args)
         .current_dir(repo_path)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -773,7 +774,7 @@ fn git_output(repo_path: &Path, args: &[String]) -> Result<String, String> {
 }
 
 fn is_unborn_head(repo_path: &Path) -> bool {
-    let output = gwt_core::process::git_command()
+    let output = Command::new("git")
         .args(["rev-parse", "--verify", "--quiet", "HEAD"])
         .current_dir(repo_path)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -791,20 +792,21 @@ mod tests {
     use crate::commands::{TestEnvGuard, ENV_LOCK};
     use std::fs;
     use std::path::Path;
+    use std::process::Command;
     use tempfile::TempDir;
 
     fn init_git_repo(path: &Path) {
-        let out = gwt_core::process::git_command()
+        let out = Command::new("git")
             .args(["init"])
             .current_dir(path)
             .output();
         assert!(out.is_ok());
         assert!(out.unwrap().status.success());
-        let _ = gwt_core::process::git_command()
+        let _ = Command::new("git")
             .args(["config", "user.email", "test@example.com"])
             .current_dir(path)
             .output();
-        let _ = gwt_core::process::git_command()
+        let _ = Command::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(path)
             .output();
@@ -812,11 +814,11 @@ mod tests {
 
     fn commit_file(path: &Path, name: &str, content: &str, msg: &str) {
         fs::write(path.join(name), content).unwrap();
-        let _ = gwt_core::process::git_command()
+        let _ = Command::new("git")
             .args(["add", "."])
             .current_dir(path)
             .output();
-        let out = gwt_core::process::git_command()
+        let out = Command::new("git")
             .args(["commit", "-m", msg])
             .current_dir(path)
             .output()
@@ -825,7 +827,7 @@ mod tests {
     }
 
     fn tag(path: &Path, name: &str) {
-        let out = gwt_core::process::git_command()
+        let out = Command::new("git")
             .args(["tag", name])
             .current_dir(path)
             .output()

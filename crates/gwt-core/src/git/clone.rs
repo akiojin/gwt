@@ -4,6 +4,7 @@
 
 use crate::error::{GwtError, Result};
 use std::path::Path;
+use std::process::Command;
 use tracing::{debug, info};
 
 /// Clone configuration (SPEC-a70a1ece T301)
@@ -113,7 +114,7 @@ pub fn clone_bare(config: &CloneConfig) -> Result<std::path::PathBuf> {
 
     debug!(args = ?args, "Running git clone");
 
-    let output = crate::process::git_command()
+    let output = Command::new("git")
         .args(&args)
         .current_dir(&config.target_dir)
         .output()
@@ -142,7 +143,7 @@ pub fn clone_bare(config: &CloneConfig) -> Result<std::path::PathBuf> {
         );
 
         // Configure remote to track all branches
-        let config_output = crate::process::git_command()
+        let config_output = Command::new("git")
             .args([
                 "config",
                 "remote.origin.fetch",
@@ -163,7 +164,7 @@ pub fn clone_bare(config: &CloneConfig) -> Result<std::path::PathBuf> {
         }
 
         // Fetch all branch references with shallow depth
-        let fetch_output = crate::process::git_command()
+        let fetch_output = Command::new("git")
             .args(["fetch", "--depth=1", "origin"])
             .current_dir(&bare_path)
             .output()

@@ -289,7 +289,7 @@ pub fn find_branch_for_issue(
 ) -> Result<Option<String>, String> {
     let pattern = format!("issue-{}", issue_number);
 
-    let output = crate::process::git_command()
+    let output = Command::new("git")
         .args(["branch", "--list", &format!("*{}*", pattern)])
         .current_dir(repo_path)
         .output()
