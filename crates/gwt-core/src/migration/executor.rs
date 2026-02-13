@@ -5,6 +5,7 @@ use super::{
     validator::validate_migration,
 };
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use tracing::{debug, info, warn};
 
 /// Information about a worktree being migrated
