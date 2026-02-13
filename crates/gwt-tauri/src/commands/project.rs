@@ -414,7 +414,7 @@ pub fn create_project(
     args.push(request.repo_url.clone());
     args.push(target.to_string_lossy().to_string());
 
-    let mut child = gwt_core::process::git_command()
+    let mut child = gwt_core::process::command("git")
         .args(args)
         .current_dir(&parent)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -710,7 +710,7 @@ mod tests {
         .expect("write project.json");
 
         let bare = root.join("repo.git");
-        let status = gwt_core::process::git_command()
+        let status = gwt_core::process::command("git")
             .args(["init", "--bare"])
             .arg(&bare)
             .status()
@@ -728,7 +728,7 @@ mod tests {
         let root = temp.path();
 
         let bare = root.join("repo.git");
-        let status = gwt_core::process::git_command()
+        let status = gwt_core::process::command("git")
             .args(["init", "--bare"])
             .arg(&bare)
             .status()

@@ -8,6 +8,7 @@ use tauri::{Manager, State};
 pub struct WindowAgentTabEntry {
     pub id: String,
     pub label: String,
+    pub tab_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -64,18 +65,22 @@ mod tests {
             WindowAgentTabEntry {
                 id: "".to_string(),
                 label: "A".to_string(),
+                tab_type: None,
             },
             WindowAgentTabEntry {
                 id: "agent-1".to_string(),
                 label: "One".to_string(),
+                tab_type: None,
             },
             WindowAgentTabEntry {
                 id: "agent-1".to_string(),
                 label: "Duplicate".to_string(),
+                tab_type: None,
             },
             WindowAgentTabEntry {
                 id: " agent-2 ".to_string(),
                 label: " ".to_string(),
+                tab_type: Some("terminal".to_string()),
             },
         ]);
 
