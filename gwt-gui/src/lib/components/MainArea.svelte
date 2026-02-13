@@ -46,7 +46,13 @@
         onclick={() => onTabSelect(tab.id)}
       >
         {#if tab.type === "agent"}
-          <span class="tab-dot"></span>
+          <span
+            class="tab-dot"
+            class:claude={tab.agentId === "claude"}
+            class:codex={tab.agentId === "codex"}
+            class:gemini={tab.agentId === "gemini"}
+            class:opencode={tab.agentId === "opencode"}
+          ></span>
         {/if}
         <span class="tab-label">{tab.label}</span>
         {#if !isPinnedTab(tab.type)}
@@ -143,6 +149,22 @@
     border-radius: 50%;
     background-color: var(--green);
     flex-shrink: 0;
+  }
+
+  .tab-dot.claude {
+    background-color: var(--yellow);
+  }
+
+  .tab-dot.codex {
+    background-color: var(--cyan);
+  }
+
+  .tab-dot.gemini {
+    background-color: var(--magenta);
+  }
+
+  .tab-dot.opencode {
+    background-color: var(--green);
   }
 
   .tab-label {

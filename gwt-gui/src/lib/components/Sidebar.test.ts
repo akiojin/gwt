@@ -26,6 +26,30 @@ const branchFixture = {
   last_tool_usage: null,
 };
 
+const quickStartEntryFixture = {
+  branch: branchFixture.name,
+  tool_id: "codex",
+  tool_label: "Codex",
+  session_id: "session-123",
+  mode: "normal",
+  model: "gpt-5",
+  reasoning_level: "high",
+  skip_permissions: true,
+  tool_version: "0.33.0",
+  docker_service: "workspace",
+  docker_force_host: true,
+  docker_recreate: false,
+  docker_build: true,
+  docker_keep: false,
+  timestamp: 1_700_000_000,
+};
+
+const noSessionSummaryFixture = {
+  status: "no-session",
+  generating: false,
+  bulletPoints: [],
+};
+
 const makeLocalStorageMock = () => {
   const store = new Map<string, string>();
   return {
@@ -151,6 +175,123 @@ describe("Sidebar", () => {
     expect(onBranchActivate).toHaveBeenCalledWith(
       expect.objectContaining({ name: branchFixture.name })
     );
+  });
+
+  it("opens Launch Agent from summary panel button", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [branchFixture];
+      if (command === "list_worktrees") return [];
+      if (command === "get_branch_quick_start") return [];
+      if (command === "get_branch_session_summary") return noSessionSummaryFixture;
+      return [];
+    });
+
+    const onLaunchAgent = vi.fn();
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      onLaunchAgent,
+      selectedBranch: branchFixture,
+    });
+
+    const launchButton = await rendered.findByRole("button", {
+      name: "Launch Agent...",
+    });
+    await fireEvent.click(launchButton);
+
+    expect(onLaunchAgent).toHaveBeenCalledTimes(1);
+  });
+
+  it("invokes onQuickLaunch with continue mode from Quick Start", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [branchFixture];
+      if (command === "list_worktrees") return [];
+      if (command === "get_branch_quick_start") return [quickStartEntryFixture];
+      if (command === "get_branch_session_summary") return noSessionSummaryFixture;
+      return [];
+    });
+
+    const onQuickLaunch = vi.fn().mockResolvedValue(undefined);
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      onQuickLaunch,
+      selectedBranch: branchFixture,
+    });
+
+    const continueButton = await rendered.findByRole("button", { name: "Continue" });
+    await fireEvent.click(continueButton);
+
+    await waitFor(() => expect(onQuickLaunch).toHaveBeenCalledTimes(1));
+    expect(onQuickLaunch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: "codex",
+        branch: branchFixture.name,
+        mode: "continue",
+        resumeSessionId: quickStartEntryFixture.session_id,
+        model: quickStartEntryFixture.model,
+        agentVersion: quickStartEntryFixture.tool_version,
+        skipPermissions: quickStartEntryFixture.skip_permissions,
+        reasoningLevel: quickStartEntryFixture.reasoning_level,
+        dockerService: quickStartEntryFixture.docker_service,
+        dockerForceHost: quickStartEntryFixture.docker_force_host,
+        dockerRecreate: quickStartEntryFixture.docker_recreate,
+        dockerBuild: quickStartEntryFixture.docker_build,
+        dockerKeep: quickStartEntryFixture.docker_keep,
+      })
+    );
+  });
+
+  it("invokes onQuickLaunch with normal mode from Quick Start New", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [branchFixture];
+      if (command === "list_worktrees") return [];
+      if (command === "get_branch_quick_start") return [quickStartEntryFixture];
+      if (command === "get_branch_session_summary") return noSessionSummaryFixture;
+      return [];
+    });
+
+    const onQuickLaunch = vi.fn().mockResolvedValue(undefined);
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      onQuickLaunch,
+      selectedBranch: branchFixture,
+    });
+
+    const newButton = await rendered.findByRole("button", { name: "New" });
+    await fireEvent.click(newButton);
+
+    await waitFor(() => expect(onQuickLaunch).toHaveBeenCalledTimes(1));
+    expect(onQuickLaunch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: "codex",
+        branch: branchFixture.name,
+        mode: "normal",
+      })
+    );
+    expect(onQuickLaunch.mock.calls[0][0].resumeSessionId).toBeUndefined();
+  });
+
+  it("ignores Quick Start button clicks when no onQuickLaunch handler is provided", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [branchFixture];
+      if (command === "list_worktrees") return [];
+      if (command === "get_branch_quick_start") return [quickStartEntryFixture];
+      if (command === "get_branch_session_summary") return noSessionSummaryFixture;
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      selectedBranch: branchFixture,
+    });
+
+    const continueButton = await rendered.findByRole("button", { name: "Continue" });
+    await fireEvent.click(continueButton);
+
+    expect(rendered.queryByText(/^Failed to launch:/)).toBeNull();
   });
 
   it("disables capitalization and completion helpers for the branch filter input", async () => {
