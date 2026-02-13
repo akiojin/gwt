@@ -2,6 +2,7 @@
 
 use super::{MigrationConfig, MigrationError};
 use std::path::Path;
+use std::process::Command;
 use tracing::debug;
 
 /// Validation result
