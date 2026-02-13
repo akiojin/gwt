@@ -29,6 +29,7 @@
 ### Phase 3: 回帰防止テスト
 
 - mixed path ケース、Windows drive-path 変換、nested worktree skip のユニットテストを追加する。
+- compose exec の workdir 省略ケース（`-w` 非付与）をユニットテストで追加する。
 
 ## テスト
 
