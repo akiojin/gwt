@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.2.1] - 2026-02-13
+
+### Bug Fixes
+
+- **docker:** Avoid compose container_name collisions (#1038)
+
 ## [7.2.0] - 2026-02-13
 
 ### Bug Fixes
