@@ -674,7 +674,7 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     if let Err(err) = fs::rename(&tmp, path) {
         // Windows cannot atomically rename over an existing file.
         // Fallback to remove+rename when the destination already exists.
-        if path.exists() {
+        if err.kind() == io::ErrorKind::AlreadyExists && path.exists() {
             fs::remove_file(path)?;
             fs::rename(&tmp, path)?;
         } else {
