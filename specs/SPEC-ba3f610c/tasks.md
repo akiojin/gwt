@@ -10,9 +10,9 @@
 
 ## Phase 3: ストーリー 1
 
-- [ ] T003 [US1] [テスト] IME送信抑止と送信中スピナーのテスト追加 gwt-gui/src/lib/components/AgentModePanel.test.ts
+- [ ] T003 [US1] [テスト] IME送信抑止/送信中スピナー/自動スクロールのテスト追加 gwt-gui/src/lib/components/AgentModePanel.test.ts
 - [ ] T004 [US1] [実装] IME変換中のEnter送信抑止を追加 gwt-gui/src/lib/components/AgentModePanel.svelte
-- [ ] T005 [US1] [実装] チャットバブル表示と送信中スピナーを追加 gwt-gui/src/lib/components/AgentModePanel.svelte
+- [ ] T005 [US1] [実装] チャットバブル表示/送信中スピナー/自動スクロールを追加 gwt-gui/src/lib/components/AgentModePanel.svelte
 
 ## Phase 4: 仕上げ・横断
 
