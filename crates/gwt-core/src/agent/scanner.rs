@@ -4,6 +4,7 @@
 //! CLAUDE.md, directory tree, build config, specs, source overview.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -81,7 +82,7 @@ impl RepositoryScanner {
 
     fn get_directory_tree(&self) -> String {
         // Use git ls-tree for tracked files, fall back to simple listing
-        let output = crate::process::git_command()
+        let output = Command::new("git")
             .args(["ls-tree", "-r", "--name-only", "HEAD"])
             .current_dir(&self.repo_path)
             .output();
@@ -157,7 +158,7 @@ impl RepositoryScanner {
     }
 
     fn get_source_overview(&self) -> Vec<String> {
-        let output = crate::process::git_command()
+        let output = Command::new("git")
             .args(["ls-tree", "-r", "--name-only", "HEAD"])
             .current_dir(&self.repo_path)
             .output();

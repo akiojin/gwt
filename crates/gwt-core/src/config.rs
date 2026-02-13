@@ -7,7 +7,6 @@ mod bare_project;
 mod claude_hook_events;
 mod claude_hooks;
 mod claude_plugins;
-pub mod mcp_registration;
 pub mod migration;
 pub mod os_env;
 mod profile;
@@ -31,12 +30,6 @@ pub use claude_plugins::{
     is_gwt_marketplace_registered_at, is_plugin_enabled_in_settings, is_plugin_explicitly_disabled,
     register_gwt_marketplace, register_gwt_marketplace_at, setup_gwt_plugin, GWT_MARKETPLACE_NAME,
     GWT_MARKETPLACE_REPO, GWT_MARKETPLACE_SOURCE, GWT_PLUGIN_FULL_NAME, GWT_PLUGIN_NAME,
-};
-pub use mcp_registration::{
-    cleanup_stale_registrations, detect_runtime, is_registered as is_mcp_registered,
-    register_all as register_all_mcp, register_mcp_server, resolve_bridge_path,
-    unregister_all as unregister_all_mcp, unregister_mcp_server, McpAgentType, McpBridgeConfig,
-    MCP_SERVER_NAME,
 };
 pub use migration::{
     backup_broken_file, ensure_config_dir, get_cleanup_candidates, migrate_json_to_toml,

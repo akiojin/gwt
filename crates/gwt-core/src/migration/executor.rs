@@ -143,7 +143,7 @@ pub fn execute_migration(
             // Reset index to HEAD so files appear as unstaged changes, not deleted
             // This is needed because --no-checkout leaves the index empty
             info!("Resetting index to HEAD in main worktree");
-            let _ = crate::process::git_command()
+            let _ = Command::new("git")
                 .args(["reset"])
                 .current_dir(&main_wt.target_path)
                 .output();
@@ -378,7 +378,7 @@ fn create_bare_repository(config: &MigrationConfig) -> Result<(), MigrationError
 
     if let Some(url) = remote_url {
         // Clone bare from remote
-        let output = crate::process::git_command()
+        let output = Command::new("git")
             .args(["clone", "--bare", "--", &url])
             .arg(&bare_path)
             .output()
@@ -405,7 +405,7 @@ fn create_bare_repository(config: &MigrationConfig) -> Result<(), MigrationError
 
 /// Get remote URL from repository
 fn get_remote_url(repo_root: &Path) -> Result<Option<String>, MigrationError> {
-    let output = crate::process::git_command()
+    let output = Command::new("git")
         .args(["remote", "get-url", "origin"])
         .current_dir(repo_root)
         .output()
@@ -427,7 +427,7 @@ fn migrate_local_only_repo(config: &MigrationConfig) -> Result<(), MigrationErro
     debug!(bare = %bare_path.display(), "Migrating local-only repository");
 
     // Initialize bare repository
-    let output = crate::process::git_command()
+    let output = Command::new("git")
         .args(["init", "--bare"])
         .arg(&bare_path)
         .output()
@@ -443,7 +443,7 @@ fn migrate_local_only_repo(config: &MigrationConfig) -> Result<(), MigrationErro
     }
 
     // Push all refs from source to bare
-    let output = crate::process::git_command()
+    let output = Command::new("git")
         .args(["push", "--all"])
         .arg(&bare_path)
         .current_dir(&config.source_root)
@@ -536,7 +536,7 @@ fn list_worktrees_to_migrate(
 
 /// Get branch name from worktree
 fn get_worktree_branch(worktree_path: &Path) -> Option<String> {
-    let output = crate::process::git_command()
+    let output = Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(worktree_path)
         .output()
@@ -551,7 +551,7 @@ fn get_worktree_branch(worktree_path: &Path) -> Option<String> {
 
 /// Check if worktree has uncommitted changes (SPEC-a70a1ece T807, FR-206)
 pub fn is_worktree_dirty(worktree_path: &Path) -> bool {
-    let output = crate::process::git_command()
+    let output = Command::new("git")
         .args(["status", "--porcelain"])
         .current_dir(worktree_path)
         .output();
@@ -630,7 +630,7 @@ fn migrate_dirty_worktree(
         // Remove the old worktree registration from the original repo
         // Note: This may fail if .git is already removed, but we ignore errors
         info!("migrate_dirty_worktree: Removing old worktree reference (may fail)");
-        let _ = crate::process::git_command()
+        let _ = Command::new("git")
             .args(["worktree", "remove", "--force"])
             .arg(&wt_info.source_path)
             .current_dir(&config.source_root)
@@ -639,7 +639,7 @@ fn migrate_dirty_worktree(
 
     // Create new worktree from bare repo with --no-checkout
     info!("migrate_dirty_worktree: Creating worktree with --no-checkout");
-    let output = crate::process::git_command()
+    let output = Command::new("git")
         .args(["worktree", "add", "--no-checkout"])
         .arg(&wt_info.target_path)
         .arg(&wt_info.branch)
@@ -670,7 +670,7 @@ fn migrate_dirty_worktree(
 
         // Reset index to HEAD so files appear as unstaged changes, not deleted
         info!("migrate_dirty_worktree: Resetting index to HEAD");
-        let _ = crate::process::git_command()
+        let _ = Command::new("git")
             .args(["reset"])
             .current_dir(&wt_info.target_path)
             .output();
@@ -698,7 +698,7 @@ fn migrate_clean_worktree(
 
     // For non-main-repo worktrees, remove old worktree reference first
     if !is_main_repo {
-        let _ = crate::process::git_command()
+        let _ = Command::new("git")
             .args(["worktree", "remove", "--force"])
             .arg(&wt_info.source_path)
             .current_dir(&config.source_root)
@@ -706,7 +706,7 @@ fn migrate_clean_worktree(
     }
 
     // Create new worktree from bare repo using git worktree add
-    let output = crate::process::git_command()
+    let output = Command::new("git")
         .args(["worktree", "add"])
         .arg(&wt_info.target_path)
         .arg(&wt_info.branch)
@@ -840,7 +840,7 @@ fn preserve_submodules(worktree_path: &Path) -> Result<(), MigrationError> {
     }
 
     // Initialize and update submodules
-    let output = crate::process::git_command()
+    let output = Command::new("git")
         .args(["submodule", "update", "--init", "--recursive"])
         .current_dir(worktree_path)
         .output();
@@ -869,7 +869,7 @@ fn preserve_file_permissions(_source: &Path, _target: &Path) -> Result<(), Migra
 /// Migrate stash entries (SPEC-a70a1ece T902, FR-220)
 fn migrate_stash(source: &Path, _target: &Path) -> Result<(), MigrationError> {
     // Check if source has stash
-    let output = crate::process::git_command()
+    let output = Command::new("git")
         .args(["stash", "list"])
         .current_dir(source)
         .output();
@@ -925,7 +925,7 @@ fn preserve_tracking_relationships(
     branch: &str,
 ) -> Result<(), MigrationError> {
     // Set upstream tracking
-    let output = crate::process::git_command()
+    let output = Command::new("git")
         .args([
             "branch",
             "--set-upstream-to",
@@ -949,7 +949,7 @@ pub fn derive_bare_repo_name(url_or_path: &str) -> String {
     // First, try to get the name from remote URL if it's a path
     let path = std::path::Path::new(url_or_path);
     if path.exists() {
-        if let Ok(output) = crate::process::git_command()
+        if let Ok(output) = Command::new("git")
             .args(["remote", "get-url", "origin"])
             .current_dir(path)
             .output()
@@ -1004,17 +1004,17 @@ mod tests {
         let temp = TempDir::new().unwrap();
 
         // Initialize git repo
-        crate::process::git_command()
+        Command::new("git")
             .args(["init"])
             .current_dir(temp.path())
             .output()
             .unwrap();
-        crate::process::git_command()
+        Command::new("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(temp.path())
             .output()
             .unwrap();
-        crate::process::git_command()
+        Command::new("git")
             .args(["config", "user.name", "Test"])
             .current_dir(temp.path())
             .output()

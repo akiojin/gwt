@@ -85,17 +85,13 @@ git-cliff --bumped-version
 
 `"version": "X.Y.Z"` を `"version": "{NEW_VERSION}"` に更新
 
-#### 5.3 crates/gwt-tauri/tauri.conf.json
-
-`"version": "X.Y.Z"` を `"version": "{NEW_VERSION}"` に更新
-
-#### 5.4 Cargo.lock
+#### 5.3 Cargo.lock
 
 ```bash
 cargo update -w
 ```
 
-#### 5.5 CHANGELOG.md
+#### 5.4 CHANGELOG.md
 
 前回リリースタグ以降の変更のみを追加してください。git-cliffが過去の変更を含める場合は、手動でv{PREV_TAG}以降の変更のみを追加してください。
 
