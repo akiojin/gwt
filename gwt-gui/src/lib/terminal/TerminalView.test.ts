@@ -172,6 +172,32 @@ describe("TerminalView", () => {
     expect(preventDefaultMock).toHaveBeenCalled();
   });
 
+  it("routes cmd+v to terminal paste and blocks native menu behavior", async () => {
+    readTextMock.mockResolvedValue("pasted line");
+    await renderTerminalView({ paneId: "pane-1", active: true });
+
+    await waitFor(() => {
+      expect(customKeyEventHandler).not.toBeNull();
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    const handler = customKeyEventHandler!;
+    const event = new KeyboardEvent("keydown", {
+      key: "v",
+      metaKey: true,
+      bubbles: true,
+    });
+    const preventDefaultMock = vi.spyOn(event, "preventDefault");
+
+    const result = handler(event);
+    expect(result).toBe(false);
+    expect(preventDefaultMock).toHaveBeenCalled();
+
+    await waitFor(() => {
+      expect(readTextMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("scrolls terminal viewport when wheel is used while not focused", async () => {
     const { container } = await renderTerminalView({ paneId: "pane-2", active: true });
     const rootEl = container.querySelector(".terminal-container");
