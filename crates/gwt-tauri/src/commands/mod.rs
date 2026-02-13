@@ -7,6 +7,7 @@ pub mod cleanup;
 pub mod docker;
 pub mod git_view;
 pub mod hooks;
+pub mod issue;
 pub mod profiles;
 pub mod project;
 pub mod recent_projects;

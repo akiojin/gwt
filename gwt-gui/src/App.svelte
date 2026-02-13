@@ -4,7 +4,9 @@
     BranchInfo,
     ProjectInfo,
     LaunchAgentRequest,
+    LaunchFinishedPayload,
     ProbePathResult,
+    RollbackResult,
     TerminalInfo,
     TerminalAnsiProbe,
     CapturedEnvInfo,
@@ -127,15 +129,20 @@
   let launchProgressOpen: boolean = $state(false);
   let launchJobId: string = $state("");
   let pendingLaunchRequest: LaunchAgentRequest | null = $state(null);
+  type IssueLaunchFollowup = {
+    projectPath: string;
+    issueNumber: number;
+    branchName: string;
+  };
+  let issueLaunchFollowups: Map<string, IssueLaunchFollowup> = $state(new Map());
 
   let migrationOpen: boolean = $state(false);
   let migrationSourceRoot: string = $state("");
 
   let tabs: Tab[] = $state([
-    { id: "summary", label: "Session Summary", type: "summary" },
     { id: "agentMode", label: "Agent Mode", type: "agentMode" },
   ]);
-  let activeTabId: string = $state("summary");
+  let activeTabId: string = $state("agentMode");
 
   let agentTabsHydratedProjectPath: string | null = $state(null);
   let agentTabsRestoreToken = 0;
@@ -173,6 +180,65 @@
     toastMessage = message;
     if (toastTimeout) clearTimeout(toastTimeout);
     toastTimeout = setTimeout(() => { toastMessage = null; }, durationMs);
+  }
+
+  function queueIssueLaunchFollowup(jobId: string, request: LaunchAgentRequest) {
+    const issueNumber = request.issueNumber;
+    const branchName = request.createBranch?.name?.trim();
+    if (!projectPath || !issueNumber || !branchName) return;
+    issueLaunchFollowups = new Map(issueLaunchFollowups).set(jobId, {
+      projectPath,
+      issueNumber,
+      branchName,
+    });
+  }
+
+  async function handleIssueLaunchFinished(payload: LaunchFinishedPayload) {
+    const followup = issueLaunchFollowups.get(payload.jobId);
+    if (!followup) return;
+
+    const next = new Map(issueLaunchFollowups);
+    next.delete(payload.jobId);
+    issueLaunchFollowups = next;
+
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+
+      if (payload.status === "ok") {
+        await invoke("link_branch_to_issue", {
+          projectPath: followup.projectPath,
+          issueNumber: followup.issueNumber,
+          branchName: followup.branchName,
+        });
+        return;
+      }
+
+      const rollback = await invoke<RollbackResult>("rollback_issue_branch", {
+        projectPath: followup.projectPath,
+        branchName: followup.branchName,
+        deleteRemote: true,
+      });
+
+      sidebarRefreshKey++;
+
+      const warnings: string[] = [];
+      if (!rollback.localDeleted) {
+        warnings.push("Local rollback was incomplete.");
+      }
+      if (rollback.error) {
+        warnings.push(rollback.error.trim());
+      }
+
+      if (warnings.length > 0) {
+        const verb = payload.status === "cancelled" ? "cancelled" : "failed";
+        showToast(
+          `Issue launch ${verb}. ${warnings.join(" ")}`,
+          12000,
+        );
+      }
+    } catch (err) {
+      showToast(`Issue launch cleanup failed: ${toErrorMessage(err)}`, 12000);
+    }
   }
 
   // Poll OS env readiness at startup; stop once ready.
@@ -299,6 +365,37 @@
     };
   });
 
+  // Handle issue-linking/rollback on actual launch completion.
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen<LaunchFinishedPayload>(
+          "launch-finished",
+          (event) => {
+            void handleIssueLaunchFinished(event.payload);
+          }
+        );
+
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+      } catch (err) {
+        console.error("Failed to setup launch finished listener:", err);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  });
+
   function toErrorMessage(err: unknown): string {
     if (typeof err === "string") return err;
     if (err && typeof err === "object" && "message" in err) {
@@ -402,25 +499,11 @@
     fetchCurrentBranch();
   }
 
-  function openSessionSummaryTab() {
-    const existing = tabs.find((t) => t.type === "summary" || t.id === "summary");
-    if (existing) {
-      activeTabId = existing.id;
-      return;
-    }
-
-    const tab: Tab = { id: "summary", label: "Session Summary", type: "summary" };
-    tabs = [tab, ...tabs];
-    activeTabId = tab.id;
-  }
-
   function handleBranchSelect(branch: BranchInfo) {
     selectedBranch = branch;
     if (branch.is_current) {
       currentBranch = branch.name;
     }
-    // Switch to session summary (re-open tab if it was closed).
-    openSessionSummaryTab();
   }
 
   function requestAgentLaunch() {
@@ -439,14 +522,7 @@
     if (existing) return;
 
     const tab: Tab = { id: "agentMode", label: "Agent Mode", type: "agentMode" };
-    const summaryIndex = tabs.findIndex((t) => t.type === "summary" || t.id === "summary");
-    if (summaryIndex >= 0) {
-      const nextTabs = [...tabs];
-      nextTabs.splice(summaryIndex + 1, 0, tab);
-      tabs = nextTabs;
-    } else {
-      tabs = [...tabs, tab];
-    }
+    tabs = [tab, ...tabs];
   }
 
   function handleSidebarModeChange(next: SidebarMode) {
@@ -510,6 +586,7 @@
     const { invoke } = await import("@tauri-apps/api/core");
     const jobId = await invoke<string>("start_launch_job", { request });
 
+    queueIssueLaunchFollowup(jobId, request);
     pendingLaunchRequest = request;
     launchJobId = jobId;
     launchProgressOpen = true;
@@ -550,7 +627,7 @@
 
   async function handleTabClose(tabId: string) {
     const tab = tabs.find((t) => t.id === tabId);
-    if (tab?.type === "summary") {
+    if (tab?.type === "agentMode") {
       return;
     }
     if (tab?.paneId) {
@@ -719,10 +796,9 @@
 
           projectPath = null;
           tabs = [
-            { id: "summary", label: "Session Summary", type: "summary" },
             { id: "agentMode", label: "Agent Mode", type: "agentMode" },
           ];
-          activeTabId = "summary";
+          activeTabId = "agentMode";
           selectedBranch = null;
           currentBranch = "";
         }
@@ -855,8 +931,7 @@
     const preserved = tabs.filter((t) => t.type !== "agent");
     tabs = [...preserved, ...restoredTabs];
 
-    const allowOverrideActive =
-      activeTabId === "summary" || activeTabId === "agentMode";
+    const allowOverrideActive = activeTabId === "agentMode";
     if (allowOverrideActive && restored.activeTabId) {
       activeTabId = restored.activeTabId;
     }
@@ -1057,15 +1132,14 @@
           onBranchSelect={handleBranchSelect}
           onBranchActivate={handleBranchActivate}
           onCleanupRequest={handleCleanupRequest}
+          onLaunchAgent={requestAgentLaunch}
+          onQuickLaunch={handleAgentLaunch}
         />
       {/if}
       <MainArea
         {tabs}
         {activeTabId}
-        {selectedBranch}
         projectPath={projectPath as string}
-        onLaunchAgent={requestAgentLaunch}
-        onQuickLaunch={handleAgentLaunch}
         onTabSelect={handleTabSelect}
         onTabClose={handleTabClose}
       />

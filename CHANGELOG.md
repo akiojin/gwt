@@ -1,6 +1,24 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.1.0] - 2026-02-13
+
+### Bug Fixes
+
+- **build:** Correct WiX binary source path for gwt-tauri crate name by @akiojin
+- **gui:** Prewarm worktree summaries and move summary panel to sidebar (#1005)
+- MacOS PKGインストーラーのリロケーション問題を修正
+- **ci:** MacOS署名で Application/Installer 両証明書をインポート
+
+### Documentation
+
+- SPEC-c6ba640a GitHub Issue連携（GUI版）仕様策定 (#1004)
+
+### Features
+
+- Add voice input mode for GUI keyboard inputs (#1002) by @akiojin
+- MacOSインストーラーにコード署名と公証を追加
+
 
 ## [7.0.0] - 2026-02-13
 
