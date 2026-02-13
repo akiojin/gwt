@@ -21,7 +21,6 @@ pub enum SafetyLevel {
 
 /// Worktree info for the frontend (SPEC-c4e8f210)
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct WorktreeInfo {
     pub path: String,
     pub branch: String,
@@ -64,7 +63,6 @@ pub struct CleanupCompletedPayload {
 
 /// Worktrees-changed event payload
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct WorktreesChangedPayload {
     pub project_path: String,
     pub branch: String,
