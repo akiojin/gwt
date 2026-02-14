@@ -194,11 +194,11 @@
     }
     return prStatuses;
   });
-
   let effectiveGhCliStatus = $derived.by(() => {
     if (pollingGhCliStatus) return pollingGhCliStatus;
     return ghCliStatus;
   });
+
 
   // Derived prNumber for WorktreeSummaryPanel
   let selectedPrNumber = $derived.by(() => {
@@ -225,6 +225,14 @@
   let searchQuery: string = $state("");
   let errorMessage: string | null = $state(null);
   let sortMode: BranchSortMode = $state("name");
+  let agentTabBranchSet = $derived.by(() => {
+    const set = new Set<string>();
+    for (const branchName of agentTabBranches) {
+      const normalized = normalizeTabBranch(branchName);
+      if (normalized) set.add(normalized);
+    }
+    return set;
+  });
   let lastFetchKey = "";
   let lastForceKey = "";
   let lastProjectPath = "";
@@ -423,6 +431,10 @@
     return sortedBranches.filter((b) =>
       b.name.toLowerCase().includes(normalizedQuery)
     );
+  });
+  let selectedBranchIndex = $derived.by(() => {
+    if (selectedBranch === null || filteredBranches.length === 0) return -1;
+    return filteredBranches.findIndex((branch) => branch.name === selectedBranch!.name);
   });
   let clampedWidthPx = $derived(clampSidebarWidth(widthPx));
 
@@ -1003,11 +1015,36 @@
     setSummaryHeight(summaryHeightPx + delta);
   }
 
-  function handleBranchItemKeydown(event: KeyboardEvent, currentIndex: number) {
+  function focusBranchButtonByIndex(index: number) {
+    queueMicrotask(() => {
+      const button = branchListEl?.querySelector<HTMLButtonElement>(
+        `[data-branch-index="${index}"]`
+      );
+      button?.focus();
+      button?.scrollIntoView({ block: "nearest" });
+    });
+  }
+
+  function isAgentBranchActive(branch: BranchInfo): boolean {
+    if (activeFilter === "Remote") return false;
+    if (activeFilter === "All" && remoteBranchNames.has(branch.name)) return false;
+    return agentTabBranchSet.has(normalizeTabBranch(branch.name));
+  }
+
+  function handleBranchItemKeydown(event: KeyboardEvent) {
     if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
     event.preventDefault();
     if (filteredBranches.length === 0) return;
 
+    const focusedBranchIndex = Array.from(
+      branchListEl?.querySelectorAll<HTMLButtonElement>(".branch-item") ?? []
+    ).findIndex((el) => el === document.activeElement);
+    const currentIndex =
+      selectedBranchIndex >= 0
+        ? selectedBranchIndex
+        : focusedBranchIndex >= 0
+          ? focusedBranchIndex
+          : -1;
     const maxIndex = filteredBranches.length - 1;
     const nextIndex =
       event.key === "ArrowDown"
@@ -1018,14 +1055,7 @@
 
     const nextBranch = filteredBranches[nextIndex];
     onBranchSelect(nextBranch);
-
-    queueMicrotask(() => {
-      const button = branchListEl?.querySelector<HTMLButtonElement>(
-        `[data-branch-index="${nextIndex}"]`
-      );
-      button?.focus();
-      button?.scrollIntoView({ block: "nearest" });
-    });
+    focusBranchButtonByIndex(nextIndex);
   }
 
   $effect(() => {
@@ -1193,7 +1223,14 @@
       </button>
     </div>
     <div class="branch-summary-stack" bind:this={branchSummaryStackEl}>
-      <div class="branch-list" bind:this={branchListEl}>
+      <div
+        class="branch-list"
+        bind:this={branchListEl}
+        tabindex={filteredBranches.length === 0 ? -1 : 0}
+        role="listbox"
+        aria-label="Worktree branches"
+        onkeydown={handleBranchItemKeydown}
+      >
         {#if loading}
           <div class="loading-indicator">Loading...</div>
         {:else if errorMessage}
@@ -1205,9 +1242,9 @@
             <button
               data-branch-index={index}
               class="branch-item"
+              class:agent-active={isAgentBranchActive(branch)}
               class:active={isSelectedBranch(branch)}
               class:deleting={deletingBranches.has(branch.name)}
-              onkeydown={(event) => handleBranchItemKeydown(event, index)}
               onclick={() => {
                 if (!deletingBranches.has(branch.name)) onBranchSelect(branch);
               }}
@@ -1217,6 +1254,20 @@
               }}
               oncontextmenu={(e) => handleContextMenu(e, branch)}
             >
+              {#if isAgentBranchActive(branch)}
+                <span
+                  class="agent-tab-icon"
+                  aria-hidden="true"
+                  title="Agent tab is open for this branch"
+                >
+                  <span class="agent-tab-bars">
+                    <span class="agent-tab-bar b1"></span>
+                    <span class="agent-tab-bar b2"></span>
+                    <span class="agent-tab-bar b3"></span>
+                  </span>
+                  <span class="agent-tab-fallback" aria-hidden="true">@</span>
+                </span>
+              {/if}
               <span class="branch-icon">{branch.is_current ? "*" : " "}</span>
               {#if deletingBranches.has(branch.name)}
                 <span class="safety-spinner"></span>
@@ -1657,10 +1708,6 @@
     color: var(--accent);
   }
 
-  .branch-item.agent-active:not(.active) {
-    background-color: rgba(148, 226, 213, 0.08);
-  }
-
   .branch-item.deleting {
     opacity: 0.5;
     cursor: default;
@@ -1753,8 +1800,6 @@
     border-radius: 1px;
     background: var(--cyan);
     opacity: 0.85;
-    transform-origin: bottom;
-    animation: agentTabBars 0.9s ease-in-out infinite;
   }
 
   .agent-tab-bar.b1 {
@@ -1767,19 +1812,6 @@
 
   .agent-tab-bar.b3 {
     animation-delay: 300ms;
-  }
-
-  /* Graphical activity indicator for branches with open agent tabs */
-  @keyframes agentTabBars {
-    0%,
-    100% {
-      transform: scaleY(0.35);
-      opacity: 0.55;
-    }
-    50% {
-      transform: scaleY(1);
-      opacity: 1;
-    }
   }
 
   .agent-tab-fallback {
