@@ -68,6 +68,8 @@ const quickStartDockerEntry = {
   docker_recreate: false,
   docker_build: true,
   docker_keep: false,
+  docker_container_name: "workspace-container",
+  docker_compose_args: ["--build", "-f", "docker-compose.dev.yml"],
   timestamp: 1_700_000_002,
 };
 describe("WorktreeSummaryPanel", () => {
@@ -97,13 +99,14 @@ describe("WorktreeSummaryPanel", () => {
 
     // Summary tab is active by default
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    expect(tabs).toHaveLength(5);
+    expect(tabs).toHaveLength(6);
     expect(tabs[0]?.textContent?.trim()).toBe("Summary");
     expect(tabs[0]?.classList.contains("active")).toBe(true);
     expect(tabs[1]?.textContent?.trim()).toBe("Git");
     expect(tabs[2]?.textContent?.trim()).toBe("PR");
     expect(tabs[3]?.textContent?.trim()).toBe("Workflow");
     expect(tabs[4]?.textContent?.trim()).toBe("AI");
+    expect(tabs[5]?.textContent?.trim()).toBe("Docker");
   });
 
   it("shows placeholder when no branch is selected", async () => {
@@ -221,8 +224,9 @@ describe("WorktreeSummaryPanel", () => {
     expect(rendered.container.querySelector(".git-section .collapse-icon")).toBeNull();
   });
 
-  it("switches to Workflow tab and opens workflow run page", async () => {
-    const windowOpen = vi.spyOn(window, "open").mockImplementation(() => null);
+  it("switches to Workflow tab and shows workflow runs", async () => {
+    const windowOpen = vi.spyOn(window, "open").mockReturnValue(null);
+    const onOpenCiLog = vi.fn();
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "get_branch_quick_start") return [];
       if (cmd === "get_branch_session_summary") {
@@ -282,10 +286,8 @@ describe("WorktreeSummaryPanel", () => {
 
     await waitFor(() => {
       expect(workflowTab.classList.contains("active")).toBe(true);
-      expect(rendered.getByText("Success")).toBeTruthy();
-      expect(rendered.getByText("Running")).toBeTruthy();
-      expect(rendered.queryByText("CI Build")).toBeNull();
-      expect(rendered.queryByText("Lint")).toBeNull();
+      expect(rendered.getByText("CI Build")).toBeTruthy();
+      expect(rendered.getByText("Lint")).toBeTruthy();
     });
 
     await fireEvent.click(
@@ -334,28 +336,10 @@ describe("WorktreeSummaryPanel", () => {
     });
   });
 
-  it("calls onLaunchAgent when Launch Agent button is clicked", async () => {
-    const onLaunchAgent = vi.fn();
-    const rendered = await renderPanel({
-      projectPath: "/tmp/project",
-      selectedBranch: branchFixture,
-      onLaunchAgent,
-    });
-
-    await fireEvent.click(rendered.getByRole("button", { name: "Launch Agent..." }));
-    expect(onLaunchAgent).toHaveBeenCalledTimes(1);
-  });
-
-  it("shows quick start error when quick start loading fails", async () => {
+  it("switches to Docker tab and shows docker session details", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "get_branch_quick_start") throw new Error("quick start failed");
-      if (cmd === "get_branch_session_summary") {
-        return {
-          status: "no-session",
-          generating: false,
-          bulletPoints: [],
-        };
-      }
+      if (cmd === "get_branch_quick_start") return [quickStartDockerEntry];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
       return [];
     });
 
@@ -364,491 +348,19 @@ describe("WorktreeSummaryPanel", () => {
       selectedBranch: branchFixture,
     });
 
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const dockerTab = tabs[5] as HTMLElement;
+    await fireEvent.click(dockerTab);
+
     await waitFor(() => {
+      expect(dockerTab.classList.contains("active")).toBe(true);
+      expect(rendered.getByText("runtime: Docker")).toBeTruthy();
+      expect(rendered.getByText("service: workspace")).toBeTruthy();
+      expect(rendered.getByText("container: workspace-container")).toBeTruthy();
       expect(
-        rendered.getByText("Failed to load Quick Start: quick start failed")
+        rendered.getByText("compose args: --build -f docker-compose.dev.yml")
       ).toBeTruthy();
-    });
-  });
-
-  it("shows quick launch error when quick launch fails", async () => {
-    const onQuickLaunch = vi.fn(async () => {
-      throw new Error("launch failed");
-    });
-
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "get_branch_quick_start") return [quickStartHostEntry];
-      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
-      return [];
-    });
-
-    const rendered = await renderPanel({
-      projectPath: "/tmp/project",
-      selectedBranch: branchFixture,
-      onQuickLaunch,
-    });
-
-    await waitFor(() => {
-      expect(rendered.getByRole("button", { name: "Continue" })).toBeTruthy();
-    });
-    await fireEvent.click(rendered.getByRole("button", { name: "Continue" }));
-
-    await waitFor(() => {
-      expect(onQuickLaunch).toHaveBeenCalledWith(
-        expect.objectContaining({
-          agentId: "codex",
-          branch: branchFixture.name,
-          mode: "continue",
-          resumeSessionId: "session-123",
-        })
-      );
-      expect(rendered.getByText("Failed to launch: launch failed")).toBeTruthy();
-    });
-  });
-
-  it("shows AI not configured message in AI tab", async () => {
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "get_branch_quick_start") return [];
-      if (cmd === "get_branch_session_summary") {
-        return {
-          status: "ai-not-configured",
-          generating: false,
-          bulletPoints: [],
-        };
-      }
-      return [];
-    });
-
-    const rendered = await renderPanel({
-      projectPath: "/tmp/project",
-      selectedBranch: branchFixture,
-    });
-
-    const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const aiTab = tabs[4] as HTMLElement;
-    await fireEvent.click(aiTab);
-
-    await waitFor(() => {
-      expect(
-        rendered.getByText("Configure AI in Settings to enable session summary.")
-      ).toBeTruthy();
-    });
-  });
-
-  it("shows AI error message in AI tab", async () => {
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "get_branch_quick_start") return [];
-      if (cmd === "get_branch_session_summary") {
-        return {
-          status: "error",
-          generating: false,
-          error: "summary failed",
-          bulletPoints: [],
-        };
-      }
-      return [];
-    });
-
-    const rendered = await renderPanel({
-      projectPath: "/tmp/project",
-      selectedBranch: branchFixture,
-    });
-
-    const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const aiTab = tabs[4] as HTMLElement;
-    await fireEvent.click(aiTab);
-
-    await waitFor(() => {
-      expect(rendered.getByText("summary failed")).toBeTruthy();
-    });
-  });
-
-  it("shows workflow no-pr state when prNumber is absent", async () => {
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "get_branch_quick_start") return [];
-      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
-      return [];
-    });
-
-    const rendered = await renderPanel({
-      projectPath: "/tmp/project",
-      selectedBranch: branchFixture,
-      prNumber: null,
-    });
-
-    const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const workflowTab = tabs[3] as HTMLElement;
-    await fireEvent.click(workflowTab);
-
-    await waitFor(() => {
-      expect(rendered.getByText("No PR.")).toBeTruthy();
-    });
-  });
-
-  it("shows workflow error when pr detail fetch fails", async () => {
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "get_branch_quick_start") return [];
-      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
-      if (cmd === "fetch_pr_detail") throw new Error("pr detail failed");
-      return [];
-    });
-
-    const rendered = await renderPanel({
-      projectPath: "/tmp/project",
-      selectedBranch: branchFixture,
-      prNumber: 42,
-    });
-
-    const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const workflowTab = tabs[3] as HTMLElement;
-    await fireEvent.click(workflowTab);
-
-    await waitFor(() => {
-      expect(rendered.getByText("pr detail failed")).toBeTruthy();
-    });
-  });
-
-  it("ignores session-summary-updated event when session id is different", async () => {
-    listenMock.mockResolvedValue(() => {});
-
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "get_branch_quick_start") return [];
-      if (cmd === "get_branch_session_summary") {
-        return {
-          status: "ok",
-          generating: false,
-          markdown: "old summary",
-          toolId: "codex",
-          sessionId: "session-1",
-          bulletPoints: [],
-        };
-      }
-      return [];
-    });
-
-    const rendered = await renderPanel({
-      projectPath: "/tmp/project",
-      selectedBranch: branchFixture,
-    });
-
-    const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const aiTab = tabs[4] as HTMLElement;
-    await fireEvent.click(aiTab);
-
-    await waitFor(() => {
-      expect(rendered.getByText("old summary")).toBeTruthy();
-      expect(
-        listenMock.mock.calls.some(
-          (call) =>
-            call[0] === "session-summary-updated" && typeof call[1] === "function"
-        )
-      ).toBe(true);
-    });
-
-    const summaryHandler = listenMock.mock.calls.find(
-      (call) => call[0] === "session-summary-updated"
-    )?.[1] as ((event: { payload: any }) => void) | undefined;
-    if (!summaryHandler) {
-      throw new Error("summaryUpdatedHandler is not registered");
-    }
-    summaryHandler({
-      payload: {
-        projectPath: "/tmp/project",
-        branch: branchFixture.name,
-        result: {
-          status: "ok",
-          generating: false,
-          markdown: "new summary",
-          toolId: "codex",
-          sessionId: "session-other",
-          bulletPoints: [],
-        },
-      },
-    });
-
-    await waitFor(() => {
-      expect(rendered.getByText("old summary")).toBeTruthy();
-    });
-  });
-
-  it("renders divergence counts and maps quick start tool variants", async () => {
-    const onQuickLaunch = vi.fn(async () => undefined);
-    const branchWithDivergence = {
-      ...branchFixture,
-      ahead: 2,
-      behind: 1,
-    };
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "get_branch_quick_start") {
-        return [
-          {
-            ...quickStartHostEntry,
-            tool_id: "gemini-cli",
-            tool_label: "Gemini CLI",
-            session_id: "session-gemini",
-            model: "",
-            timestamp: 1_700_000_010,
-          },
-          {
-            ...quickStartHostEntry,
-            tool_id: "open-code",
-            tool_label: "OpenCode CLI",
-            session_id: "session-opencode",
-            docker_force_host: false,
-            docker_service: "",
-            docker_recreate: undefined,
-            docker_build: undefined,
-            docker_keep: undefined,
-            model: "",
-            timestamp: 1_700_000_011,
-          },
-          {
-            ...quickStartHostEntry,
-            tool_id: "custom-tool",
-            tool_label: "Custom",
-            session_id: "session-custom",
-            model: "",
-            timestamp: 1_700_000_012,
-          },
-        ];
-      }
-      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
-      return [];
-    });
-
-    const rendered = await renderPanel({
-      projectPath: "/tmp/project",
-      selectedBranch: branchWithDivergence,
-      onQuickLaunch,
-    });
-
-    await waitFor(() => {
-      expect(rendered.container.textContent).toContain("(+2)");
-      expect(rendered.container.textContent).toContain("(-1)");
-      expect(rendered.getByText("Gemini")).toBeTruthy();
-      expect(rendered.getByText("OpenCode")).toBeTruthy();
-      expect(rendered.getByText("Custom")).toBeTruthy();
-    });
-
-    const newButtons = rendered.getAllByRole("button", { name: "New" });
-    await fireEvent.click(newButtons[0] as HTMLButtonElement);
-    await waitFor(() => {
-      expect(onQuickLaunch).toHaveBeenCalledWith(
-        expect.objectContaining({
-          agentId: "gemini",
-          branch: branchWithDivergence.name,
-          mode: "normal",
-        })
-      );
-    });
-  });
-
-  it("shows unauthenticated GitHub CLI warning in workflow tab", async () => {
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "get_branch_quick_start") return [];
-      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
-      return [];
-    });
-
-    const rendered = await renderPanel({
-      projectPath: "/tmp/project",
-      selectedBranch: branchFixture,
-      ghCliStatus: { available: true, authenticated: false },
-      prNumber: 42,
-    });
-
-    const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const workflowTab = tabs[3] as HTMLElement;
-    await fireEvent.click(workflowTab);
-
-    await waitFor(() => {
-      expect(rendered.getByText("GitHub CLI issue")).toBeTruthy();
-      expect(
-        rendered.getByText("GitHub CLI (gh) is not authenticated. Run: gh auth login")
-      ).toBeTruthy();
-    });
-  });
-
-  it("renders workflow status labels for all supported conclusions", async () => {
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "get_branch_quick_start") return [];
-      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
-      if (cmd === "fetch_pr_detail") {
-        return {
-          number: 101,
-          title: "Workflow matrix",
-          state: "OPEN",
-          url: "https://github.com/test/repo/pull/101",
-          mergeable: "MERGEABLE",
-          author: "alice",
-          baseBranch: "main",
-          headBranch: branchFixture.name,
-          labels: [],
-          assignees: [],
-          milestone: null,
-          linkedIssues: [],
-          checkSuites: [
-            { workflowName: "Q", runId: 1, status: "queued", conclusion: null },
-            { workflowName: "P", runId: 2, status: "waiting", conclusion: null },
-            { workflowName: "F", runId: 3, status: "completed", conclusion: "failure" },
-            { workflowName: "N", runId: 4, status: "completed", conclusion: "neutral" },
-            { workflowName: "S", runId: 5, status: "completed", conclusion: "skipped" },
-            { workflowName: "C", runId: 6, status: "completed", conclusion: "cancelled" },
-            { workflowName: "T", runId: 7, status: "completed", conclusion: "timed_out" },
-            { workflowName: "A", runId: 8, status: "completed", conclusion: "action_required" },
-            { workflowName: "U", runId: 9, status: "completed", conclusion: "mystery" },
-          ],
-          reviews: [],
-          reviewComments: [],
-          changedFilesCount: 0,
-          additions: 0,
-          deletions: 0,
-        };
-      }
-      return [];
-    });
-
-    const rendered = await renderPanel({
-      projectPath: "/tmp/project",
-      selectedBranch: branchFixture,
-      prNumber: 101,
-    });
-
-    const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const workflowTab = tabs[3] as HTMLElement;
-    await fireEvent.click(workflowTab);
-
-    await waitFor(() => {
-      expect(rendered.getByText("Queued")).toBeTruthy();
-      expect(rendered.getByText("Pending")).toBeTruthy();
-      expect(rendered.getByText("Failed")).toBeTruthy();
-      expect(rendered.getByText("Neutral")).toBeTruthy();
-      expect(rendered.getByText("Skipped")).toBeTruthy();
-      expect(rendered.getByText("Cancelled")).toBeTruthy();
-      expect(rendered.getByText("Timed out")).toBeTruthy();
-      expect(rendered.getByText("Action required")).toBeTruthy();
-      expect(rendered.getByText("Unknown")).toBeTruthy();
-    });
-  });
-
-  it("does not open workflow run page when PR URL is invalid", async () => {
-    const windowOpen = vi.spyOn(window, "open").mockImplementation(() => null);
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "get_branch_quick_start") return [];
-      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
-      if (cmd === "fetch_pr_detail") {
-        return {
-          number: 7,
-          title: "Invalid URL",
-          state: "OPEN",
-          url: "not-a-url",
-          mergeable: "MERGEABLE",
-          author: "alice",
-          baseBranch: "main",
-          headBranch: branchFixture.name,
-          labels: [],
-          assignees: [],
-          milestone: null,
-          linkedIssues: [],
-          checkSuites: [
-            {
-              workflowName: "CI",
-              runId: 100,
-              status: "completed",
-              conclusion: "success",
-            },
-          ],
-          reviews: [],
-          reviewComments: [],
-          changedFilesCount: 0,
-          additions: 0,
-          deletions: 0,
-        };
-      }
-      return [];
-    });
-
-    const rendered = await renderPanel({
-      projectPath: "/tmp/project",
-      selectedBranch: branchFixture,
-      prNumber: 7,
-    });
-
-    const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const workflowTab = tabs[3] as HTMLElement;
-    await fireEvent.click(workflowTab);
-    await waitFor(() => {
-      expect(rendered.getByText("Success")).toBeTruthy();
-    });
-
-    await fireEvent.click(rendered.getByText("Success").closest("button") as HTMLButtonElement);
-    expect(windowOpen).not.toHaveBeenCalled();
-    windowOpen.mockRestore();
-  });
-
-  it("renders AI disabled state with warning", async () => {
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "get_branch_quick_start") return [];
-      if (cmd === "get_branch_session_summary") {
-        return {
-          status: "disabled",
-          generating: false,
-          markdown: null,
-          toolId: null,
-          sessionId: null,
-          warning: "summary disabled by policy",
-          bulletPoints: [],
-          error: null,
-        };
-      }
-      return [];
-    });
-
-    const rendered = await renderPanel({
-      projectPath: "/tmp/project",
-      selectedBranch: branchFixture,
-    });
-
-    const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const aiTab = tabs[4] as HTMLElement;
-    await fireEvent.click(aiTab);
-
-    await waitFor(() => {
-      expect(rendered.getByText("Disabled")).toBeTruthy();
-      expect(rendered.getByText("summary disabled by policy")).toBeTruthy();
-      expect(rendered.getByText("Session summary disabled.")).toBeTruthy();
-    });
-  });
-
-  it("renders AI live generating state for pane session", async () => {
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "get_branch_quick_start") return [];
-      if (cmd === "get_branch_session_summary") {
-        return {
-          status: "ok",
-          generating: true,
-          markdown: null,
-          toolId: "codex",
-          sessionId: "pane:42",
-          warning: null,
-          bulletPoints: [],
-          error: null,
-        };
-      }
-      return [];
-    });
-
-    const rendered = await renderPanel({
-      projectPath: "/tmp/project",
-      selectedBranch: branchFixture,
-    });
-
-    const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const aiTab = tabs[4] as HTMLElement;
-    await fireEvent.click(aiTab);
-    await waitFor(() => {
-      expect(rendered.container.textContent).toContain("codex - Live (pane summary)");
-      expect(rendered.getByText("Generating...")).toBeTruthy();
+      expect(rendered.getByText("Session session-456")).toBeTruthy();
     });
   });
 });

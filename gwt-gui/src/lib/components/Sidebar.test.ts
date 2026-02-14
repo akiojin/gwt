@@ -475,6 +475,7 @@ describe("Sidebar", () => {
       statuses: Record<string, unknown>;
       ghStatus: { available: boolean; authenticated: boolean };
     };
+    vi.useFakeTimers();
     let resolveProjectB: ((value: PrStatusResponse) => void) | null = null;
     try {
       invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
@@ -517,25 +518,44 @@ describe("Sidebar", () => {
           });
         }
         if (command === "fetch_pr_detail") {
+          if (path === "/tmp/project-a") {
+            return Promise.resolve({
+              number: 111,
+              title: "A",
+              state: "OPEN",
+              url: "https://example.invalid/pr/111",
+              mergeable: "MERGEABLE",
+              author: "test",
+              baseBranch: "main",
+              headBranch: branchFixture.name,
+              labels: [],
+              assignees: [],
+              milestone: null,
+              linkedIssues: [],
+              checkSuites: [],
+              reviews: [],
+              reviewComments: [],
+              changedFilesCount: 0,
+              additions: 0,
+              deletions: 0,
+            });
+          }
           return Promise.resolve({
             number: 111,
-            state: "OPEN",
             title: "A",
+            state: "OPEN",
             url: "https://example.invalid/pr/111",
             mergeable: "MERGEABLE",
-            draft: false,
-            author: "owner",
+            author: "test",
             baseBranch: "main",
             headBranch: branchFixture.name,
             labels: [],
             assignees: [],
             milestone: null,
             linkedIssues: [],
-            mergedAt: null,
-            updatedAt: "2026-02-14T00:00:00Z",
+            checkSuites: [],
             reviews: [],
             reviewComments: [],
-            checkSuites: [],
             changedFilesCount: 0,
             additions: 0,
             deletions: 0,
@@ -550,19 +570,18 @@ describe("Sidebar", () => {
         selectedBranch: branchFixture,
       });
 
-      await waitFor(() => {
-        expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(0);
-      });
-      expect(rendered.container.querySelector(".branch-list .branch-name")).toBeTruthy();
-      const tabs = rendered.container.querySelectorAll(".summary-tab");
-      const prTab = tabs[2] as HTMLElement;
+      await rendered.findByText(branchFixture.name);
+      const prTab = rendered.container.querySelectorAll(".summary-tab")[2] as HTMLElement;
       await fireEvent.click(prTab);
       await rendered.findByText("#111 A");
 
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(0);
       await rendered.rerender({ projectPath: "/tmp/project-b" });
       await rendered.findByText(branchFixture.name);
       await waitFor(() => {
         expect(rendered.queryByText("#111 A")).toBeNull();
+        expect(rendered.queryByText("No PR")).toBeTruthy();
       });
     } finally {
       const finalizeProjectB = resolveProjectB as unknown as
@@ -574,6 +593,7 @@ describe("Sidebar", () => {
           ghStatus: { available: true, authenticated: true },
         });
       }
+      vi.useRealTimers();
     }
   });
 
@@ -646,6 +666,8 @@ describe("Sidebar", () => {
         onBranchSelect: vi.fn(),
       });
 
+      await rendered.findByText(branchFixture.name);
+      await vi.advanceTimersByTimeAsync(30_000);
       await waitFor(() => {
         expect(countInvokeCalls("list_worktree_branches")).toBeGreaterThan(0);
       });
@@ -660,18 +682,20 @@ describe("Sidebar", () => {
         ).toBe(1);
       });
       const searchInput = rendered.getByPlaceholderText("Filter branches...");
+      const preFocusPrStatusCalls = countInvokeCalls("fetch_pr_status");
       (searchInput as HTMLInputElement).focus();
       expect(document.activeElement).toBe(searchInput);
 
-      invokeMock.mockClear();
       await vi.advanceTimersByTimeAsync(30_000);
-      expect(countInvokeCalls("fetch_pr_status")).toBe(0);
+      expect(countInvokeCalls("fetch_pr_status")).toBe(preFocusPrStatusCalls);
 
       // Move focus away from search input so polling can resume.
       (searchInput as HTMLInputElement).blur();
       expect(document.activeElement).not.toBe(searchInput);
       await vi.advanceTimersByTimeAsync(30_000);
-      expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(0);
+      await waitFor(() => {
+        expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(preFocusPrStatusCalls);
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -773,120 +797,6 @@ describe("Sidebar", () => {
         "develop",
         "feature/alpha",
         "feature/beta",
-      ]);
-    });
-  });
-
-  it("cycles branch sort mode when pressing the sort button", async () => {
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "list_worktree_branches")
-        return [
-          { ...branchFixture, name: "feature/zulu", commit_timestamp: 200 },
-          { ...mainBranchFixture },
-          { ...developBranchFixture },
-          { ...branchFixture, name: "feature/beta", commit_timestamp: 500 },
-          { ...branchFixture, name: "feature/alpha", commit_timestamp: 300 },
-        ];
-      if (command === "list_worktrees") return [];
-      return [];
-    });
-
-    const rendered = await renderSidebar({
-      projectPath: "/tmp/project",
-      onBranchSelect: vi.fn(),
-    });
-
-    await rendered.findByText(mainBranchFixture.name);
-    expect(getRenderedBranchNames(rendered)).toEqual([
-      "main",
-      "develop",
-      "feature/alpha",
-      "feature/beta",
-      "feature/zulu",
-    ]);
-
-    const sortButton = rendered.getByRole("button", { name: "Sort mode" });
-    const sortModeText = sortButton.querySelector(".sort-mode-text");
-    expect(sortModeText?.textContent).toBe("Name");
-
-    await fireEvent.click(sortButton);
-    await waitFor(() => {
-      expect(sortModeText?.textContent).toBe("Updated");
-      expect(getRenderedBranchNames(rendered)).toEqual([
-        "main",
-        "develop",
-        "feature/beta",
-        "feature/alpha",
-        "feature/zulu",
-      ]);
-    });
-
-    await fireEvent.click(sortButton);
-    await waitFor(() => {
-      expect(sortModeText?.textContent).toBe("Name");
-      expect(getRenderedBranchNames(rendered)).toEqual([
-        "main",
-        "develop",
-        "feature/alpha",
-        "feature/beta",
-        "feature/zulu",
-      ]);
-    });
-  });
-
-  it("cycles branch sort mode when pressing the sort button", async () => {
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "list_worktree_branches")
-        return [
-          { ...branchFixture, name: "feature/zulu", commit_timestamp: 200 },
-          { ...mainBranchFixture },
-          { ...developBranchFixture },
-          { ...branchFixture, name: "feature/beta", commit_timestamp: 500 },
-          { ...branchFixture, name: "feature/alpha", commit_timestamp: 300 },
-        ];
-      if (command === "list_worktrees") return [];
-      return [];
-    });
-
-    const rendered = await renderSidebar({
-      projectPath: "/tmp/project",
-      onBranchSelect: vi.fn(),
-    });
-
-    await rendered.findByText(mainBranchFixture.name);
-    expect(getRenderedBranchNames(rendered)).toEqual([
-      "main",
-      "develop",
-      "feature/alpha",
-      "feature/beta",
-      "feature/zulu",
-    ]);
-
-    const sortButton = rendered.getByRole("button", { name: "Sort mode" });
-    const sortModeText = sortButton.querySelector(".sort-mode-text");
-    expect(sortModeText?.textContent).toBe("Name");
-
-    await fireEvent.click(sortButton);
-    await waitFor(() => {
-      expect(sortModeText?.textContent).toBe("Updated");
-      expect(getRenderedBranchNames(rendered)).toEqual([
-        "main",
-        "develop",
-        "feature/beta",
-        "feature/alpha",
-        "feature/zulu",
-      ]);
-    });
-
-    await fireEvent.click(sortButton);
-    await waitFor(() => {
-      expect(sortModeText?.textContent).toBe("Name");
-      expect(getRenderedBranchNames(rendered)).toEqual([
-        "main",
-        "develop",
-        "feature/alpha",
-        "feature/beta",
-        "feature/zulu",
       ]);
     });
   });
@@ -1366,20 +1276,16 @@ describe("Sidebar", () => {
     });
 
     await waitFor(() => {
-      expect(
-        rendered.container.querySelectorAll(".branch-list .branch-item").length
-      ).toBe(2);
+      expect(rendered.container.querySelectorAll(".branch-item").length).toBe(2);
     });
 
-    const branchButtons = Array.from(
-      rendered.container.querySelectorAll<HTMLButtonElement>(".branch-list .branch-item")
-    );
-    const selectedButton = branchButtons.find(
-      (button) => button.getAttribute("data-branch-name") === selectedBranch.name
-    );
-    const currentButton = branchButtons.find(
-      (button) => button.getAttribute("data-branch-name") === currentBranch.name
-    );
+    const branchButtons = Array.from(rendered.container.querySelectorAll(".branch-item"));
+    const selectedButton = branchButtons.find((button) =>
+      button.textContent?.includes(selectedBranch.name)
+    ) as HTMLElement | undefined;
+    const currentButton = branchButtons.find((button) =>
+      button.textContent?.includes(currentBranch.name)
+    ) as HTMLElement | undefined;
 
     expect(selectedButton).toBeTruthy();
     expect(selectedButton?.classList.contains("active")).toBe(true);

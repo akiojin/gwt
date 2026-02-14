@@ -257,14 +257,14 @@
     return trimmed.slice(slash + 1);
   }
 
-  function sortBranchGroupRank(name: string): number {
+  function branchPriority(name: string): number {
     const normalized = name.trim().toLowerCase();
     const baseName = normalized.startsWith("origin/")
       ? normalized.slice("origin/".length)
       : normalized;
-    if (baseName === "main") return 0;
+    if (baseName === "main") return 2;
     if (baseName === "develop") return 1;
-    return 2;
+    return 0;
   }
 
   function branchSortTimestamp(branch: BranchInfo): number | null {
@@ -290,10 +290,10 @@
       }
     }
 
-    const aPriority = sortBranchGroupRank(a.name);
-    const bPriority = sortBranchGroupRank(b.name);
+    const aPriority = branchPriority(a.name);
+    const bPriority = branchPriority(b.name);
     if (aPriority !== bPriority) {
-      return aPriority - bPriority;
+      return bPriority - aPriority;
     }
 
     const byName = a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
