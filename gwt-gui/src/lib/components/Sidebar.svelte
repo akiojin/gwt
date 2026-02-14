@@ -300,7 +300,7 @@
     if (aTs === null) return 1;
     if (bTs === null) return -1;
     if (aTs !== bTs) {
-      return bTs - aTs;
+      return aTs - bTs;
     }
     return byName;
   }
