@@ -37,6 +37,14 @@
   let showTerminalLayer = $derived(activeTab?.type === "agent");
   let isPinnedTab = (tabType?: Tab["type"]) => tabType === "agentMode";
   let draggingTabId: string | null = $state(null);
+  let pointerDrag:
+    | {
+        tabId: string;
+        pointerId: number;
+        startX: number;
+        captureTarget: HTMLElement;
+      }
+    | null = null;
   let lastReorderSignature = "";
 
   function readDraggedTabId(event: DragEvent): string {
@@ -50,6 +58,7 @@
 
   function resetDragState() {
     draggingTabId = null;
+    pointerDrag = null;
     lastReorderSignature = "";
   }
 
@@ -92,19 +101,97 @@
   function handleTabDragEnd() {
     resetDragState();
   }
+
+  function handleTabPointerDown(event: PointerEvent, tabId: string) {
+    if (event.button !== 0) return;
+    const target = event.currentTarget;
+    if (!(target instanceof HTMLElement)) return;
+
+    draggingTabId = tabId;
+    pointerDrag = {
+      tabId,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      captureTarget: target,
+    };
+    lastReorderSignature = "";
+    if (typeof target.setPointerCapture === "function") {
+      target.setPointerCapture(event.pointerId);
+    }
+  }
+
+  function handleTabBarPointerMove(event: PointerEvent) {
+    if (!pointerDrag || event.pointerId !== pointerDrag.pointerId) return;
+    // Ignore micro jitter so simple clicks do not trigger reordering.
+    if (Math.abs(event.clientX - pointerDrag.startX) < 3) return;
+
+    const fromTarget =
+      event.target instanceof Element
+        ? event.target.closest<HTMLElement>(".tab[data-tab-id]")
+        : null;
+    const fromPoint =
+      typeof document !== "undefined" && typeof document.elementFromPoint === "function"
+        ? document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>(".tab[data-tab-id]")
+        : null;
+    const overTab = fromTarget ?? fromPoint ?? null;
+    if (!overTab) return;
+
+    const overTabId = overTab.dataset.tabId ?? "";
+    if (!overTabId || overTabId === pointerDrag.tabId) return;
+
+    const rect = overTab.getBoundingClientRect();
+    const position: TabDropPosition =
+      event.clientX <= rect.left + rect.width / 2 ? "before" : "after";
+    const signature = `${pointerDrag.tabId}:${overTabId}:${position}`;
+    if (signature === lastReorderSignature) return;
+
+    lastReorderSignature = signature;
+    onTabReorder(pointerDrag.tabId, overTabId, position);
+  }
+
+  function releasePointerDragCapture() {
+    if (!pointerDrag) return;
+    if (
+      typeof pointerDrag.captureTarget.hasPointerCapture === "function" &&
+      typeof pointerDrag.captureTarget.releasePointerCapture === "function" &&
+      pointerDrag.captureTarget.hasPointerCapture(pointerDrag.pointerId)
+    ) {
+      pointerDrag.captureTarget.releasePointerCapture(pointerDrag.pointerId);
+    }
+  }
+
+  function handleTabBarPointerUp(event: PointerEvent) {
+    if (!pointerDrag || event.pointerId !== pointerDrag.pointerId) return;
+    releasePointerDragCapture();
+    resetDragState();
+  }
+
+  function handleTabBarPointerCancel(event: PointerEvent) {
+    if (!pointerDrag || event.pointerId !== pointerDrag.pointerId) return;
+    releasePointerDragCapture();
+    resetDragState();
+  }
 </script>
 
 <main class="main-area">
-  <div class="tab-bar">
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="tab-bar"
+    onpointermove={handleTabBarPointerMove}
+    onpointerup={handleTabBarPointerUp}
+    onpointercancel={handleTabBarPointerCancel}
+  >
     {#each tabs as tab}
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="tab"
+        data-tab-id={tab.id}
         class:active={activeTabId === tab.id}
         class:dragging={draggingTabId === tab.id}
         draggable={tabs.length > 1}
         onclick={() => onTabSelect(tab.id)}
+        onpointerdown={(e) => handleTabPointerDown(e, tab.id)}
         ondragstart={(e) => handleTabDragStart(e, tab.id)}
         ondragover={(e) => handleTabDragOver(e, tab.id)}
         ondrop={handleTabDrop}
