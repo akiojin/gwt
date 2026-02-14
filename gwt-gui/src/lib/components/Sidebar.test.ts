@@ -25,6 +25,10 @@ const branchFixture = {
   divergence_status: "UpToDate",
   last_tool_usage: null,
 };
+const remoteBranchFixture = {
+  ...branchFixture,
+  name: "origin/feature/sidebar-size",
+};
 
 const quickStartEntryFixture = {
   branch: branchFixture.name,
@@ -78,6 +82,10 @@ describe("Sidebar", () => {
       value: mockLocalStorage,
       configurable: true,
     });
+    Object.defineProperty(globalThis, "__TAURI_INTERNALS__", {
+      value: { invoke: invokeMock },
+      configurable: true,
+    });
     invokeMock.mockReset();
     invokeMock.mockResolvedValue([]);
   });
@@ -129,6 +137,86 @@ describe("Sidebar", () => {
         firstLocalBranchFetchCount + 1
       );
     });
+  });
+
+  it("reuses cached filter data when switching back within ttl", async () => {
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => 1_700_000_000_000);
+    try {
+      invokeMock.mockImplementation(async (command: string) => {
+        if (command === "list_worktree_branches") return [branchFixture];
+        if (command === "list_remote_branches") return [remoteBranchFixture];
+        if (command === "list_worktrees") return [];
+        return [];
+      });
+
+      const rendered = await renderSidebar({
+        projectPath: "/tmp/project",
+        onBranchSelect: vi.fn(),
+      });
+
+      await rendered.findByText(branchFixture.name);
+      expect(countInvokeCalls("list_worktree_branches")).toBe(1);
+
+      await fireEvent.click(rendered.getByRole("button", { name: "Remote" }));
+      await rendered.findByText(remoteBranchFixture.name);
+      expect(countInvokeCalls("list_remote_branches")).toBe(1);
+
+      await fireEvent.click(rendered.getByRole("button", { name: "Local" }));
+      await rendered.findByText(branchFixture.name);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(countInvokeCalls("list_worktree_branches")).toBe(1);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it("keeps cached list visible and refreshes in background after ttl", async () => {
+    let nowMs = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => nowMs);
+    let localFetchCount = 0;
+    const localRefreshDeferred: { resolve?: (value: typeof branchFixture[]) => void } = {};
+
+    try {
+      invokeMock.mockImplementation((command: string) => {
+        if (command === "list_worktree_branches") {
+          localFetchCount += 1;
+          if (localFetchCount === 1) return Promise.resolve([branchFixture]);
+          return new Promise<typeof branchFixture[]>((resolve) => {
+            localRefreshDeferred.resolve = resolve;
+          });
+        }
+        if (command === "list_remote_branches") return Promise.resolve([remoteBranchFixture]);
+        if (command === "list_worktrees") return Promise.resolve([]);
+        return Promise.resolve([]);
+      });
+
+      const rendered = await renderSidebar({
+        projectPath: "/tmp/project",
+        onBranchSelect: vi.fn(),
+      });
+
+      await rendered.findByText(branchFixture.name);
+      await fireEvent.click(rendered.getByRole("button", { name: "Remote" }));
+      await rendered.findByText(remoteBranchFixture.name);
+
+      nowMs += 11_000;
+      await fireEvent.click(rendered.getByRole("button", { name: "Local" }));
+      await rendered.findByText(branchFixture.name);
+
+      expect(rendered.queryByText("Loading...")).toBeNull();
+      await waitFor(() => {
+        expect(countInvokeCalls("list_worktree_branches")).toBe(2);
+      });
+
+      localRefreshDeferred.resolve?.([branchFixture]);
+      await waitFor(() => {
+        expect(rendered.queryByText("Loading...")).toBeNull();
+      });
+    } finally {
+      localRefreshDeferred.resolve?.([branchFixture]);
+      nowSpy.mockRestore();
+    }
   });
 
   it("applies sidebar width from props", async () => {

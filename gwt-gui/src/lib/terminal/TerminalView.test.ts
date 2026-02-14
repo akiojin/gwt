@@ -409,7 +409,6 @@ describe("TerminalView", () => {
     expect(preventDefaultSpy).not.toHaveBeenCalled();
     expect(event.defaultPrevented).toBe(false);
   });
-
   it("does not prevent default when scroll would not change", async () => {
     const { container } = await renderTerminalView({
       paneId: "pane-7",

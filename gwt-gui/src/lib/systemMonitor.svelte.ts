@@ -14,14 +14,23 @@ export interface GpuInfo {
   usage_percent: number | null;
 }
 
+const POLL_INTERVAL_MS = 5000;
+
 export function createSystemMonitor() {
   let cpuUsage = $state(0);
   let memUsed = $state(0);
   let memTotal = $state(0);
   let gpuInfo: GpuInfo | null = $state(null);
-  let intervalId: ReturnType<typeof setInterval> | null = null;
+  let timerId: ReturnType<typeof setTimeout> | null = null;
+  let running = false;
+  let destroyed = false;
+  let warmingUp = false;
+  let warmedUp = false;
+  let polling = false;
 
-  async function poll() {
+  async function pollOnce() {
+    if (polling) return;
+    polling = true;
     try {
       const info: SystemInfo = await invoke("get_system_info");
       cpuUsage = info.cpu_usage_percent;
@@ -30,30 +39,58 @@ export function createSystemMonitor() {
       gpuInfo = info.gpu;
     } catch (e) {
       console.warn("Failed to get system info:", e);
+    } finally {
+      polling = false;
     }
   }
 
-  async function init() {
-    // First call warms up sysinfo (returns 0% CPU)
+  async function warmupIfNeeded() {
+    if (warmedUp || warmingUp) return;
+    warmingUp = true;
+    // First call warms up sysinfo (may return 0% CPU).
     await invoke("get_system_info").catch(() => {});
-    // Second call gets real values
-    await poll();
+    warmedUp = true;
+    warmingUp = false;
+  }
+
+  function clearTimer() {
+    if (timerId) {
+      clearTimeout(timerId);
+      timerId = null;
+    }
+  }
+
+  function scheduleNext() {
+    if (!running || destroyed || timerId) return;
+    timerId = setTimeout(() => {
+      timerId = null;
+      void runCycle();
+    }, POLL_INTERVAL_MS);
+  }
+
+  async function runCycle() {
+    if (!running || destroyed) return;
+    await warmupIfNeeded();
+    if (!running || destroyed) return;
+    await pollOnce();
+    if (!running || destroyed) return;
+    scheduleNext();
   }
 
   function start() {
-    if (intervalId) return;
-    init();
-    intervalId = setInterval(poll, 1000);
+    if (running || destroyed) return;
+    running = true;
+    clearTimer();
+    void runCycle();
   }
 
   function stop() {
-    if (intervalId) {
-      clearInterval(intervalId);
-      intervalId = null;
-    }
+    running = false;
+    clearTimer();
   }
 
   function destroy() {
+    destroyed = true;
     stop();
     document.removeEventListener("visibilitychange", handleVisibility);
   }

@@ -1,6 +1,15 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.5.1] - 2026-02-14
+
+### Bug Fixes
+
+- **gui:** SystemMonitor.tsを.svelte.tsにリネームしSvelte 5ルーンを有効化
+- **gui:** Stabilize terminal trackpad fallback when active timing varies (#1064)
+- **gui:** Add pointer fallback for tab drag reorder (#1063)
+- SidebarとSystem Monitorの断続フリーズを抑止 (#1065)
+
 ## [7.5.0] - 2026-02-14
 
 ### Bug Fixes
