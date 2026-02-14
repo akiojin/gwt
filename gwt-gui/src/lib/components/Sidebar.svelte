@@ -194,7 +194,6 @@
     }
     return prStatuses;
   });
-
   let effectiveGhCliStatus = $derived.by(() => {
     if (pollingGhCliStatus) return pollingGhCliStatus;
     return ghCliStatus;
