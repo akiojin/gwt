@@ -156,6 +156,7 @@ export interface Profile {
   disabled_env: string[];
   description: string;
   ai?: AISettings | null;
+  ai_enabled?: boolean | null;
 }
 
 export interface ProfilesConfig {
