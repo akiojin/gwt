@@ -1026,6 +1026,8 @@
   }
 
   function isAgentBranchActive(branch: BranchInfo): boolean {
+    if (activeFilter === "Remote") return false;
+    if (activeFilter === "All" && remoteBranchNames.has(branch.name)) return false;
     return agentTabBranchSet.has(normalizeTabBranch(branch.name));
   }
 
@@ -1042,7 +1044,7 @@
         ? selectedBranchIndex
         : focusedBranchIndex >= 0
           ? focusedBranchIndex
-          : 0;
+          : -1;
     const maxIndex = filteredBranches.length - 1;
     const nextIndex =
       event.key === "ArrowDown"
