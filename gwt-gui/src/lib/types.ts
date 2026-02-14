@@ -434,3 +434,65 @@ export interface LaunchAgentRequest {
   dockerKeep?: boolean;
   issueNumber?: number;
 }
+
+// PR Status types (SPEC-d6949f99)
+
+export interface PrStatusInfo {
+  number: number;
+  title: string;
+  state: "OPEN" | "CLOSED" | "MERGED";
+  url: string;
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+  author: string;
+  baseBranch: string;
+  headBranch: string;
+  labels: string[];
+  assignees: string[];
+  milestone: string | null;
+  linkedIssues: number[];
+  checkSuites: WorkflowRunInfo[];
+  reviews: ReviewInfo[];
+  reviewComments: ReviewComment[];
+  changedFilesCount: number;
+  additions: number;
+  deletions: number;
+}
+
+export interface WorkflowRunInfo {
+  workflowName: string;
+  runId: number;
+  status: "queued" | "in_progress" | "completed";
+  conclusion:
+    | "success"
+    | "failure"
+    | "neutral"
+    | "cancelled"
+    | "timed_out"
+    | "action_required"
+    | "skipped"
+    | null;
+}
+
+export interface ReviewInfo {
+  reviewer: string;
+  state:
+    | "APPROVED"
+    | "CHANGES_REQUESTED"
+    | "COMMENTED"
+    | "PENDING"
+    | "DISMISSED";
+}
+
+export interface ReviewComment {
+  author: string;
+  body: string;
+  filePath: string | null;
+  line: number | null;
+  codeSnippet: string | null;
+  createdAt: string;
+}
+
+export interface PrStatusResponse {
+  statuses: Record<string, PrStatusInfo | null>;
+  ghStatus: GhCliStatus;
+}

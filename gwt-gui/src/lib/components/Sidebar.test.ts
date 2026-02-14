@@ -417,4 +417,195 @@ describe("Sidebar", () => {
     await rendered.findByText(branchFixture.name);
     expect(rendered.getByTitle("Agent tab is open for this branch")).toBeTruthy();
   });
+
+  it("shows PR badge when prStatuses contains data for a branch", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [branchFixture];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const prStatuses: Record<string, any> = {
+      [branchFixture.name]: {
+        number: 42,
+        title: "Test PR",
+        state: "OPEN",
+        url: "https://github.com/test/pr/42",
+        mergeable: "MERGEABLE",
+        author: "test",
+        baseBranch: "main",
+        headBranch: branchFixture.name,
+        labels: [],
+        assignees: [],
+        milestone: null,
+        linkedIssues: [],
+        checkSuites: [],
+        reviews: [],
+        reviewComments: [],
+        changedFilesCount: 1,
+        additions: 10,
+        deletions: 5,
+      },
+    };
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      prStatuses,
+      ghCliStatus: { available: true, authenticated: true },
+    });
+
+    await rendered.findByText(branchFixture.name);
+    const badge = rendered.getByText(/#42 Open/);
+    expect(badge).toBeTruthy();
+    expect(badge.classList.contains("pr-badge")).toBe(true);
+  });
+
+  it("shows tree toggle for branches with PR and expands workflow runs", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [branchFixture];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const prStatuses: Record<string, any> = {
+      [branchFixture.name]: {
+        number: 42,
+        title: "Test PR",
+        state: "OPEN",
+        url: "https://github.com/test/pr/42",
+        mergeable: "MERGEABLE",
+        author: "test",
+        baseBranch: "main",
+        headBranch: branchFixture.name,
+        labels: [],
+        assignees: [],
+        milestone: null,
+        linkedIssues: [],
+        checkSuites: [
+          { workflowName: "CI Build", runId: 100, status: "completed", conclusion: "success" },
+          { workflowName: "Lint", runId: 101, status: "in_progress", conclusion: null },
+        ],
+        reviews: [],
+        reviewComments: [],
+        changedFilesCount: 1,
+        additions: 10,
+        deletions: 5,
+      },
+    };
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      prStatuses,
+      ghCliStatus: { available: true, authenticated: true },
+    });
+
+    await rendered.findByText(branchFixture.name);
+
+    // Tree toggle should be present
+    const toggleBtn = rendered.getByTitle("Expand");
+    expect(toggleBtn).toBeTruthy();
+
+    // Click to expand
+    await fireEvent.click(toggleBtn);
+
+    // Workflow names should appear
+    expect(rendered.getByText("CI Build")).toBeTruthy();
+    expect(rendered.getByText("Lint")).toBeTruthy();
+  });
+
+  it("shows 'No PR' badge when ghCli is authenticated but no PR exists", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [branchFixture];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      prStatuses: {},
+      ghCliStatus: { available: true, authenticated: true },
+    });
+
+    await rendered.findByText(branchFixture.name);
+    const badge = rendered.getByText("No PR");
+    expect(badge).toBeTruthy();
+    expect(badge.classList.contains("no-pr")).toBe(true);
+  });
+
+  it("shows disconnected badge when ghCli is not authenticated", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [branchFixture];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      prStatuses: {},
+      ghCliStatus: { available: true, authenticated: false },
+    });
+
+    await rendered.findByText(branchFixture.name);
+    const badge = rendered.getByText("GitHub not connected");
+    expect(badge).toBeTruthy();
+    expect(badge.classList.contains("disconnected")).toBe(true);
+  });
+
+  it("calls onOpenCiLog when clicking a workflow run item", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [branchFixture];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const prStatuses: Record<string, any> = {
+      [branchFixture.name]: {
+        number: 42,
+        title: "Test PR",
+        state: "OPEN",
+        url: "https://github.com/test/pr/42",
+        mergeable: "MERGEABLE",
+        author: "test",
+        baseBranch: "main",
+        headBranch: branchFixture.name,
+        labels: [],
+        assignees: [],
+        milestone: null,
+        linkedIssues: [],
+        checkSuites: [
+          { workflowName: "CI Build", runId: 100, status: "completed", conclusion: "success" },
+        ],
+        reviews: [],
+        reviewComments: [],
+        changedFilesCount: 1,
+        additions: 10,
+        deletions: 5,
+      },
+    };
+
+    const onOpenCiLog = vi.fn();
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      prStatuses,
+      ghCliStatus: { available: true, authenticated: true },
+      onOpenCiLog,
+    });
+
+    await rendered.findByText(branchFixture.name);
+
+    // Expand tree
+    const toggleBtn = rendered.getByTitle("Expand");
+    await fireEvent.click(toggleBtn);
+
+    // Click workflow run
+    const ciItem = rendered.getByText("CI Build");
+    await fireEvent.click(ciItem.closest("button")!);
+
+    expect(onOpenCiLog).toHaveBeenCalledWith(100);
+  });
 });

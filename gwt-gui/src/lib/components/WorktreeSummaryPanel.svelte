@@ -5,20 +5,24 @@
     LaunchAgentRequest,
     ToolSessionEntry,
     SessionSummaryResult,
+    PrStatusInfo,
   } from "../types";
   import GitSection from "./GitSection.svelte";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
+  import PrStatusSection from "./PrStatusSection.svelte";
 
   let {
     projectPath,
     selectedBranch = null,
     onLaunchAgent,
     onQuickLaunch,
+    prNumber = null,
   }: {
     projectPath: string;
     selectedBranch?: BranchInfo | null;
     onLaunchAgent?: () => void;
     onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
+    prNumber?: number | null;
   } = $props();
 
   let quickStartEntries: ToolSessionEntry[] = $state([]);
@@ -27,6 +31,16 @@
   let quickLaunchError: string | null = $state(null);
   let quickLaunching: boolean = $state(false);
   let quickLaunchingKey: string | null = $state(null);
+
+  type SummaryTab = "summary" | "pr";
+  let activeTab: SummaryTab = $state("summary");
+
+  let prDetailLoading = $state(false);
+  let prDetailError: string | null = $state(null);
+  let prDetail: PrStatusInfo | null = $state(null);
+  let prDetailBranch: string | null = $state(null);
+  let prDetailPrNumber: number | null = $state(null);
+  let prDetailRequestToken = 0;
 
   let sessionSummaryLoading: boolean = $state(false);
   let sessionSummaryGenerating: boolean = $state(false);
@@ -108,6 +122,26 @@
       return "default";
     }
     return null;
+  }
+
+  function runtimeLabel(entry: ToolSessionEntry): string | null {
+    if (entry.docker_force_host === true) {
+      return "HostOS";
+    }
+
+    const hasDockerService = (entry.docker_service ?? "").trim().length > 0;
+    if (entry.docker_recreate !== undefined) return "Docker";
+    if (entry.docker_build !== undefined) return "Docker";
+    if (entry.docker_keep !== undefined) return "Docker";
+    if (hasDockerService) return "Docker";
+    if (entry.docker_force_host === false) return "Docker";
+
+    return null;
+  }
+
+  function runtimeService(entry: ToolSessionEntry): string | null {
+    const service = (entry.docker_service ?? "").trim();
+    return service.length > 0 ? service : null;
   }
 
   function quickStartEntryKey(entry: ToolSessionEntry): string {
@@ -298,6 +332,71 @@
     };
   });
 
+  function clearPrDetailState(nextBranch: string | null = null) {
+    prDetailRequestToken++;
+    prDetailLoading = false;
+    prDetailError = null;
+    prDetail = null;
+    prDetailBranch = nextBranch;
+    prDetailPrNumber = null;
+  }
+
+  async function loadPrDetail(branch: string, prNum: number) {
+    const requestToken = ++prDetailRequestToken;
+    prDetailLoading = true;
+    prDetailError = null;
+    prDetail = null;
+    prDetailPrNumber = prNum;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const result = await invoke<PrStatusInfo>("fetch_pr_detail", {
+        projectPath,
+        prNumber: prNum,
+      });
+      const isCurrent =
+        requestToken === prDetailRequestToken && prDetailBranch === branch;
+      if (isCurrent) {
+        prDetail = result;
+      }
+    } catch (err) {
+      const isCurrent =
+        requestToken === prDetailRequestToken && prDetailBranch === branch;
+      if (isCurrent) {
+        prDetailError = toErrorMessage(err);
+      }
+    } finally {
+      const isCurrent =
+        requestToken === prDetailRequestToken && prDetailBranch === branch;
+      if (isCurrent) {
+        prDetailLoading = false;
+      }
+    }
+  }
+
+  $effect(() => {
+    if (activeTab !== "pr") return;
+
+    const branch = currentBranchName();
+    if (!branch || !prNumber) {
+      const nextBranch = branch || null;
+      if (
+        prDetailBranch !== nextBranch ||
+        prDetail !== null ||
+        prDetailError !== null ||
+        prDetailLoading ||
+        prDetailPrNumber !== null
+      ) {
+        clearPrDetailState(nextBranch);
+      }
+      return;
+    }
+
+    if (branch !== prDetailBranch || prNumber !== prDetailPrNumber) {
+      prDetailBranch = branch;
+      loadPrDetail(branch, prNumber);
+    }
+  });
+
   async function quickLaunch(entry: ToolSessionEntry, action: "continue" | "new") {
     if (!selectedBranch) return;
     if (!onQuickLaunch) return;
@@ -350,166 +449,199 @@
         </button>
       </div>
 
-      <div class="detail-grid">
-        <div class="detail-item">
-          <span class="detail-label">Commit</span>
-          <span class="detail-value mono">{selectedBranch.commit}</span>
-        </div>
-        <div class="detail-item">
-          <span class="detail-label">Status</span>
-          <span class="detail-value">
-            {selectedBranch.divergence_status}
-            {#if selectedBranch.ahead > 0}
-              (+{selectedBranch.ahead})
-            {/if}
-            {#if selectedBranch.behind > 0}
-              (-{selectedBranch.behind})
-            {/if}
-          </span>
-        </div>
-        <div class="detail-item">
-          <span class="detail-label">Current</span>
-          <span class="detail-value">{selectedBranch.is_current ? "Yes" : "No"}</span>
-        </div>
+      <div class="summary-tabs">
+        <button
+          class="summary-tab"
+          class:active={activeTab === "summary"}
+          onclick={() => (activeTab = "summary")}
+        >
+          Summary
+        </button>
+        <button
+          class="summary-tab"
+          class:active={activeTab === "pr"}
+          onclick={() => {
+            activeTab = "pr";
+          }}
+        >
+          PR
+        </button>
       </div>
 
-      <div class="quick-start">
-        <div class="quick-header">
-          <span class="quick-title">Quick Start</span>
-          {#if quickStartLoading}
-            <span class="quick-subtitle">Loading...</span>
+      {#if activeTab === "summary"}
+        <div class="detail-grid">
+          <div class="detail-item">
+            <span class="detail-label">Commit</span>
+            <span class="detail-value mono">{selectedBranch.commit}</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Status</span>
+            <span class="detail-value">
+              {selectedBranch.divergence_status}
+              {#if selectedBranch.ahead > 0}
+                (+{selectedBranch.ahead})
+              {/if}
+              {#if selectedBranch.behind > 0}
+                (-{selectedBranch.behind})
+              {/if}
+            </span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Current</span>
+            <span class="detail-value">{selectedBranch.is_current ? "Yes" : "No"}</span>
+          </div>
+        </div>
+
+        <div class="quick-start">
+          <div class="quick-header">
+            <span class="quick-title">Quick Start</span>
+            {#if quickStartLoading}
+              <span class="quick-subtitle">Loading...</span>
+            {:else if quickStartEntries.length > 0}
+              <span class="quick-subtitle">
+                {quickStartEntries.length} tool{quickStartEntries.length === 1 ? "" : "s"}
+              </span>
+            {:else}
+              <span class="quick-subtitle">No history</span>
+            {/if}
+          </div>
+
+          {#if quickStartError}
+            <div class="quick-error">{quickStartError}</div>
+          {/if}
+
+          {#if quickLaunchError}
+            <div class="quick-error">{quickLaunchError}</div>
+          {/if}
+
+          {#if !quickStartLoading && quickStartEntries.length === 0}
+            <div class="quick-empty">
+              Launch an agent once on this branch to enable Quick Start.
+            </div>
           {:else if quickStartEntries.length > 0}
-            <span class="quick-subtitle">
-              {quickStartEntries.length} tool{quickStartEntries.length === 1 ? "" : "s"}
-            </span>
-          {:else}
-            <span class="quick-subtitle">No history</span>
-          {/if}
-        </div>
-
-        {#if quickStartError}
-          <div class="quick-error">{quickStartError}</div>
-        {/if}
-
-        {#if quickLaunchError}
-          <div class="quick-error">{quickLaunchError}</div>
-        {/if}
-
-        {#if !quickStartLoading && quickStartEntries.length === 0}
-          <div class="quick-empty">
-            Launch an agent once on this branch to enable Quick Start.
-          </div>
-        {:else if quickStartEntries.length > 0}
-          <div class="quick-list">
-            {#each quickStartEntries as entry (quickStartEntryKey(entry))}
-              <div class="quick-row">
-                <div class="quick-info">
-                  <div class="quick-tool {toolClass(entry)}">
-                    <span class="quick-tool-name">{displayToolName(entry)}</span>
-                    <span class="quick-tool-version">
-                      @{displayToolVersion(entry)}
-                    </span>
-                  </div>
-                  <div class="quick-meta">
-                    {#if displayModelLabel(entry) !== null}
-                      <span class="quick-pill">model: {displayModelLabel(entry)}</span>
-                    {/if}
-                    {#if toolClass(entry) === "codex" && entry.reasoning_level}
-                      <span class="quick-pill">reasoning: {entry.reasoning_level}</span>
-                    {/if}
-                    {#if entry.skip_permissions !== undefined && entry.skip_permissions !== null}
-                      <span class="quick-pill">
-                        skip: {entry.skip_permissions ? "on" : "off"}
+            <div class="quick-list">
+              {#each quickStartEntries as entry (quickStartEntryKey(entry))}
+                <div class="quick-row">
+                  <div class="quick-info">
+                    <div class="quick-tool {toolClass(entry)}">
+                      <span class="quick-tool-name">{displayToolName(entry)}</span>
+                      <span class="quick-tool-version">
+                        @{displayToolVersion(entry)}
                       </span>
-                    {/if}
+                    </div>
+                    <div class="quick-meta">
+                      {#if runtimeLabel(entry)}
+                        <span class="quick-pill">runtime: {runtimeLabel(entry)}</span>
+                      {/if}
+                      {#if runtimeService(entry)}
+                        <span class="quick-pill">service: {runtimeService(entry)}</span>
+                      {/if}
+                      {#if displayModelLabel(entry) !== null}
+                        <span class="quick-pill">model: {displayModelLabel(entry)}</span>
+                      {/if}
+                      {#if toolClass(entry) === "codex" && entry.reasoning_level}
+                        <span class="quick-pill">reasoning: {entry.reasoning_level}</span>
+                      {/if}
+                      {#if entry.skip_permissions !== undefined && entry.skip_permissions !== null}
+                        <span class="quick-pill">
+                          skip: {entry.skip_permissions ? "on" : "off"}
+                        </span>
+                      {/if}
+                    </div>
+                  </div>
+                  <div class="quick-actions">
+                    <button
+                      class="quick-btn"
+                      disabled={quickLaunching}
+                      onclick={() => quickLaunch(entry, "continue")}
+                    >
+                      {quickLaunching && quickLaunchingKey === quickStartEntryKey(entry)
+                        ? "Launching..."
+                        : "Continue"}
+                    </button>
+                    <button
+                      class="quick-btn ghost"
+                      disabled={quickLaunching}
+                      onclick={() => quickLaunch(entry, "new")}
+                    >
+                      New
+                    </button>
                   </div>
                 </div>
-                <div class="quick-actions">
-                  <button
-                    class="quick-btn"
-                    disabled={quickLaunching}
-                    onclick={() => quickLaunch(entry, "continue")}
-                  >
-                    {quickLaunching && quickLaunchingKey === quickStartEntryKey(entry)
-                      ? "Launching..."
-                      : "Continue"}
-                  </button>
-                  <button
-                    class="quick-btn ghost"
-                    disabled={quickLaunching}
-                    onclick={() => quickLaunch(entry, "new")}
-                  >
-                    New
-                  </button>
-                </div>
-              </div>
-            {/each}
-          </div>
-        {/if}
-      </div>
-
-      <div class="quick-start ai-summary">
-        <div class="quick-header">
-          <span class="quick-title">AI Summary</span>
-          {#if sessionSummaryLoading}
-            <span class="quick-subtitle">Loading...</span>
-          {:else if sessionSummaryStatus === "ok" && sessionSummaryToolId}
-            <span class="quick-subtitle">
-              {#if sessionSummarySessionId?.startsWith("pane:")}
-                {sessionSummaryToolId} - Live (pane summary)
-              {:else if sessionSummarySessionId}
-                {sessionSummaryToolId} #{sessionSummarySessionId}
-              {:else}
-                {sessionSummaryToolId}
-              {/if}
-              {#if sessionSummaryGenerating}
-                {sessionSummaryMarkdown ? " - Updating..." : " - Generating..."}
-              {/if}
-            </span>
-          {:else if sessionSummaryStatus === "ai-not-configured"}
-            <span class="quick-subtitle">AI not configured</span>
-          {:else if sessionSummaryStatus === "disabled"}
-            <span class="quick-subtitle">Disabled</span>
-          {:else if sessionSummaryStatus === "no-session"}
-            <span class="quick-subtitle">No session</span>
-          {:else if sessionSummaryStatus === "error"}
-            <span class="quick-subtitle">Error</span>
+              {/each}
+            </div>
           {/if}
         </div>
 
-        {#if sessionSummaryWarning}
-          <div class="session-summary-warning">
-            {sessionSummaryWarning}
+        <div class="quick-start ai-summary">
+          <div class="quick-header">
+            <span class="quick-title">AI Summary</span>
+            {#if sessionSummaryLoading}
+              <span class="quick-subtitle">Loading...</span>
+            {:else if sessionSummaryStatus === "ok" && sessionSummaryToolId}
+              <span class="quick-subtitle">
+                {#if sessionSummarySessionId?.startsWith("pane:")}
+                  {sessionSummaryToolId} - Live (pane summary)
+                {:else if sessionSummarySessionId}
+                  {sessionSummaryToolId} #{sessionSummarySessionId}
+                {:else}
+                  {sessionSummaryToolId}
+                {/if}
+                {#if sessionSummaryGenerating}
+                  {sessionSummaryMarkdown ? " - Updating..." : " - Generating..."}
+                {/if}
+              </span>
+            {:else if sessionSummaryStatus === "ai-not-configured"}
+              <span class="quick-subtitle">AI not configured</span>
+            {:else if sessionSummaryStatus === "disabled"}
+              <span class="quick-subtitle">Disabled</span>
+            {:else if sessionSummaryStatus === "no-session"}
+              <span class="quick-subtitle">No session</span>
+            {:else if sessionSummaryStatus === "error"}
+              <span class="quick-subtitle">Error</span>
+            {/if}
           </div>
-        {/if}
 
-        {#if sessionSummaryLoading}
-          <div class="session-summary-placeholder">Loading...</div>
-        {:else if sessionSummaryStatus === "ok" && sessionSummaryGenerating && !sessionSummaryMarkdown}
-          <div class="session-summary-placeholder">Generating...</div>
-        {:else if sessionSummaryStatus === "ai-not-configured"}
-          <div class="session-summary-placeholder">
-            Configure AI in Settings to enable session summary.
-          </div>
-        {:else if sessionSummaryStatus === "disabled"}
-          <div class="session-summary-placeholder">Session summary disabled.</div>
-        {:else if sessionSummaryStatus === "no-session"}
-          <div class="session-summary-placeholder">No session.</div>
-        {:else if sessionSummaryStatus === "error"}
-          <div class="quick-error">
-            {sessionSummaryError ?? "Failed to generate session summary."}
-          </div>
-        {:else if sessionSummaryStatus === "ok" && sessionSummaryMarkdown}
-          <MarkdownRenderer
-            className="session-summary-markdown"
-            text={sessionSummaryMarkdown}
-          />
-        {:else}
-          <div class="session-summary-placeholder">No summary.</div>
-        {/if}
-      </div>
+          {#if sessionSummaryWarning}
+            <div class="session-summary-warning">
+              {sessionSummaryWarning}
+            </div>
+          {/if}
 
-      <GitSection projectPath={projectPath} branch={selectedBranch.name} />
+          {#if sessionSummaryLoading}
+            <div class="session-summary-placeholder">Loading...</div>
+          {:else if sessionSummaryStatus === "ok" && sessionSummaryGenerating && !sessionSummaryMarkdown}
+            <div class="session-summary-placeholder">Generating...</div>
+          {:else if sessionSummaryStatus === "ai-not-configured"}
+            <div class="session-summary-placeholder">
+              Configure AI in Settings to enable session summary.
+            </div>
+          {:else if sessionSummaryStatus === "disabled"}
+            <div class="session-summary-placeholder">Session summary disabled.</div>
+          {:else if sessionSummaryStatus === "no-session"}
+            <div class="session-summary-placeholder">No session.</div>
+          {:else if sessionSummaryStatus === "error"}
+            <div class="quick-error">
+              {sessionSummaryError ?? "Failed to generate session summary."}
+            </div>
+          {:else if sessionSummaryStatus === "ok" && sessionSummaryMarkdown}
+            <MarkdownRenderer
+              className="session-summary-markdown"
+              text={sessionSummaryMarkdown}
+            />
+          {:else}
+            <div class="session-summary-placeholder">No summary.</div>
+          {/if}
+        </div>
+
+        <GitSection projectPath={projectPath} branch={selectedBranch.name} />
+      {:else if activeTab === "pr"}
+        <PrStatusSection
+          prDetail={prDetail}
+          loading={prDetailLoading}
+          error={prDetailError}
+        />
+      {/if}
     </div>
   {:else}
     <div class="placeholder">
@@ -802,5 +934,33 @@
     padding: 10px 12px;
     overflow: hidden;
     margin: 0;
+  }
+
+  .summary-tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 1px solid var(--border-color);
+    margin-bottom: 10px;
+  }
+
+  .summary-tab {
+    padding: 6px 16px;
+    border: none;
+    background: none;
+    color: var(--text-muted);
+    font-size: var(--ui-font-sm);
+    font-weight: 600;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    font-family: inherit;
+  }
+
+  .summary-tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+
+  .summary-tab:hover:not(.active) {
+    color: var(--text-secondary);
   }
 </style>

@@ -17,7 +17,7 @@
 - バックエンド: Rust (gwt-core + gwt-tauri)
 - フロントエンド: Svelte 5 + TypeScript + Vite (gwt-gui/)
 - ターミナルエミュレーション: xterm.js v6
-- UIアイコンは ASCII に統一し、全角/絵文字は避ける
+- UIアイコンはGUIに適したアイコン（SVG / Unicode シンボル等）を使用する
 
 ### 📝 設計ガイドライン
 

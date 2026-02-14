@@ -182,7 +182,7 @@ fn issue_list_args(repo_slug: Option<&str>, page: u32, per_page: u32) -> Vec<Str
     args
 }
 
-fn resolve_repo_slug(repo_path: &Path) -> Option<String> {
+pub(super) fn resolve_repo_slug(repo_path: &Path) -> Option<String> {
     let candidate_repo = if is_git_repo(repo_path) {
         Some(repo_path.to_path_buf())
     } else {
