@@ -55,7 +55,7 @@ describe("VersionHistoryPanel", () => {
   });
 
   it("loads versions and requests per-version history", async () => {
-    await renderPanel({ projectPath: "/tmp/project" });
+    const rendered = await renderPanel({ projectPath: "/tmp/project" });
 
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("list_project_versions", {
@@ -70,6 +70,10 @@ describe("VersionHistoryPanel", () => {
         versionId: "unreleased",
       });
     });
+
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".vh-markdown h2")).toBeTruthy();
+      expect(rendered.container.querySelectorAll(".vh-markdown li")).toHaveLength(2);
+    });
   });
 });
-

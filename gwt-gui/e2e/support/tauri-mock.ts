@@ -21,14 +21,33 @@ type AgentModeState = {
 
 export async function installTauriMock(page: Page): Promise<void> {
   await page.addInitScript(
-    ({ projectPath, lastOpenedAt }: { projectPath: string; lastOpenedAt: string }) => {
+    ({
+      projectPath,
+      lastOpenedAt,
+    }: {
+      projectPath: string;
+      lastOpenedAt: string;
+    }) => {
       type InvokeArgs = Record<string, unknown>;
       type InvokeEntry = { cmd: string; args: InvokeArgs };
+      type EventListener = { event: string; handlerId: number };
+      type MockPane = {
+        paneId: string;
+        cwd: string;
+        status: "running" | "error";
+        errorMessage: string | null;
+        scrollback: string;
+      };
 
       const invokeLog: InvokeEntry[] = [];
       const callbacks = new Map<number, (...args: unknown[]) => void>();
+      const eventListeners = new Map<number, EventListener>();
+      const panes = new Map<string, MockPane>();
       let callbackSeq = 1;
       let listenSeq = 1;
+      let paneSeq = 1;
+      let nextSpawnShellError = false;
+      let lastSpawnedPaneId: string | null = null;
 
       let agentModeState: AgentModeState = {
         messages: [],
@@ -53,8 +72,70 @@ export async function installTauriMock(page: Page): Promise<void> {
         return value as InvokeArgs;
       }
 
+      function isEnterOnly(data: unknown): boolean {
+        if (!Array.isArray(data)) return false;
+        if (data.length === 1) return data[0] === 13 || data[0] === 10;
+        if (data.length === 2) return data[0] === 13 && data[1] === 10;
+        return false;
+      }
+
+      function emitEvent(event: string, payload: unknown): void {
+        for (const [listenerId, listener] of [...eventListeners.entries()]) {
+          if (listener.event !== event) continue;
+          const callback = callbacks.get(listener.handlerId);
+          if (!callback) continue;
+          callback({
+            event,
+            id: listenerId,
+            payload,
+          });
+        }
+      }
+
+      function listTerminals() {
+        return Array.from(panes.values()).map((pane) => ({
+          pane_id: pane.paneId,
+          agent_name: "terminal",
+          branch_name: "",
+          status:
+            pane.status === "running"
+              ? "running"
+              : `error: ${pane.errorMessage ?? "PTY stream error: mock failure"}`,
+        }));
+      }
+
+      function spawnShell(workingDirLike: unknown): string {
+        const paneId = `mock-pane-${paneSeq++}`;
+        const cwd =
+          typeof workingDirLike === "string" && workingDirLike.trim()
+            ? workingDirLike
+            : projectPath;
+        const errorMessage = nextSpawnShellError
+          ? "PTY stream error: mocked read failure"
+          : null;
+        nextSpawnShellError = false;
+        lastSpawnedPaneId = paneId;
+
+        const scrollback = errorMessage
+          ? `\r\n[${errorMessage}]\r\n\r\nPress Enter to close this tab.\r\n`
+          : "";
+
+        panes.set(paneId, {
+          paneId,
+          cwd,
+          status: errorMessage ? "error" : "running",
+          errorMessage,
+          scrollback,
+        });
+
+        return paneId;
+      }
+
       function projectInfo(pathLike: unknown) {
-        const path = typeof pathLike === "string" && pathLike.length > 0 ? pathLike : projectPath;
+        const path =
+          typeof pathLike === "string" && pathLike.length > 0
+            ? pathLike
+            : projectPath;
         const normalized = path.replace(/\/+$/, "");
         const repoName = normalized.split("/").filter(Boolean).pop() || "gwt";
         return {
@@ -103,7 +184,8 @@ export async function installTauriMock(page: Page): Promise<void> {
           case "probe_path":
             return {
               kind: "gwtProject",
-              projectPath: typeof args.path === "string" ? args.path : projectPath,
+              projectPath:
+                typeof args.path === "string" ? args.path : projectPath,
             };
           case "open_project":
             return projectInfo(args.path);
@@ -112,8 +194,9 @@ export async function installTauriMock(page: Page): Promise<void> {
           case "list_worktree_branches":
           case "list_remote_branches":
           case "list_worktrees":
-          case "list_terminals":
             return [];
+          case "list_terminals":
+            return listTerminals();
           case "get_current_branch":
             return {
               name: "main",
@@ -129,15 +212,51 @@ export async function installTauriMock(page: Page): Promise<void> {
             return null;
           case "register_hooks":
             return null;
+          case "spawn_shell":
+            return spawnShell(args.workingDir);
+          case "capture_scrollback_tail": {
+            const paneId = typeof args.paneId === "string" ? args.paneId : "";
+            return panes.get(paneId)?.scrollback ?? "";
+          }
+          case "resize_terminal":
+            return null;
+          case "close_terminal": {
+            const paneId = typeof args.paneId === "string" ? args.paneId : "";
+            if (!paneId) return null;
+            const existed = panes.delete(paneId);
+            if (existed) {
+              emitEvent("terminal-closed", { pane_id: paneId });
+            }
+            return null;
+          }
+          case "write_terminal": {
+            const paneId = typeof args.paneId === "string" ? args.paneId : "";
+            const pane = panes.get(paneId);
+            if (!pane) return null;
+
+            if (isEnterOnly(args.data) && pane.status !== "running") {
+              panes.delete(paneId);
+              emitEvent("terminal-closed", { pane_id: paneId });
+              return null;
+            }
+
+            return null;
+          }
           case "get_agent_mode_state_cmd":
             return cloneAgentModeState();
           case "send_agent_mode_message": {
-            const input = typeof args.input === "string" ? args.input.trim() : "";
+            const input =
+              typeof args.input === "string" ? args.input.trim() : "";
             if (!input) return cloneAgentModeState();
             const now = Date.now();
             const nextMessages = [
               ...agentModeState.messages,
-              { role: "user" as const, kind: "message" as const, content: input, timestamp: now },
+              {
+                role: "user" as const,
+                kind: "message" as const,
+                content: input,
+                timestamp: now,
+              },
               {
                 role: "assistant" as const,
                 kind: "message" as const,
@@ -149,7 +268,8 @@ export async function installTauriMock(page: Page): Promise<void> {
               ...agentModeState,
               messages: nextMessages,
               llm_call_count: agentModeState.llm_call_count + 1,
-              estimated_tokens: agentModeState.estimated_tokens + Math.max(1, input.length),
+              estimated_tokens:
+                agentModeState.estimated_tokens + Math.max(1, input.length),
               last_error: null,
             };
             return cloneAgentModeState();
@@ -157,9 +277,25 @@ export async function installTauriMock(page: Page): Promise<void> {
         }
 
         if (cmd === "plugin:event|listen") {
-          return listenSeq++;
+          const id = listenSeq++;
+          const eventName = typeof args.event === "string" ? args.event : "";
+          const handlerId =
+            typeof args.handler === "number" ? args.handler : null;
+          if (eventName && handlerId !== null) {
+            eventListeners.set(id, { event: eventName, handlerId });
+          }
+          return id;
         }
         if (cmd === "plugin:event|unlisten") {
+          const listenerId =
+            typeof args.eventId === "number"
+              ? args.eventId
+              : typeof args.id === "number"
+                ? args.id
+                : null;
+          if (listenerId !== null) {
+            eventListeners.delete(listenerId);
+          }
           return null;
         }
         if (cmd === "plugin:app|version") {
@@ -178,8 +314,28 @@ export async function installTauriMock(page: Page): Promise<void> {
         return null;
       }
 
-      (window as unknown as { __GWT_TAURI_INVOKE_LOG__?: InvokeEntry[] }).__GWT_TAURI_INVOKE_LOG__ =
-        invokeLog;
+      (
+        window as unknown as { __GWT_TAURI_INVOKE_LOG__?: InvokeEntry[] }
+      ).__GWT_TAURI_INVOKE_LOG__ = invokeLog;
+      (
+        window as unknown as {
+          __GWT_MOCK_SET_NEXT_SPAWN_ERROR__?: (enabled: boolean) => void;
+        }
+      ).__GWT_MOCK_SET_NEXT_SPAWN_ERROR__ = (enabled: boolean) => {
+        nextSpawnShellError = !!enabled;
+      };
+      (
+        window as unknown as {
+          __GWT_MOCK_EMIT_EVENT__?: (event: string, payload: unknown) => void;
+        }
+      ).__GWT_MOCK_EMIT_EVENT__ = (event: string, payload: unknown) => {
+        emitEvent(event, payload);
+      };
+      (
+        window as unknown as {
+          __GWT_MOCK_LAST_SPAWNED_PANE_ID__?: () => string | null;
+        }
+      ).__GWT_MOCK_LAST_SPAWNED_PANE_ID__ = () => lastSpawnedPaneId;
 
       (
         window as unknown as {
@@ -192,9 +348,19 @@ export async function installTauriMock(page: Page): Promise<void> {
       (
         window as unknown as {
           __TAURI_INTERNALS__?: {
-            metadata: { currentWindow: { label: string } };
-            invoke: (cmd: string, args?: unknown, options?: unknown) => Promise<unknown>;
-            transformCallback: (callback: (...args: unknown[]) => void, once?: boolean) => number;
+            metadata: {
+              currentWindow: { label: string };
+              currentWebview: { label: string };
+            };
+            invoke: (
+              cmd: string,
+              args?: unknown,
+              options?: unknown,
+            ) => Promise<unknown>;
+            transformCallback: (
+              callback: (...args: unknown[]) => void,
+              once?: boolean,
+            ) => number;
             unregisterCallback: (id: number) => void;
             convertFileSrc: (filePath: string, protocol?: string) => string;
           };
@@ -204,15 +370,27 @@ export async function installTauriMock(page: Page): Promise<void> {
           currentWindow: {
             label: "main",
           },
+          currentWebview: {
+            label: "main",
+          },
         },
-        invoke: async (cmd: string, args?: unknown, _options?: unknown) => invoke(cmd, args),
-        transformCallback: (callback: (...args: unknown[]) => void, _once = false) => {
+        invoke: async (cmd: string, args?: unknown, _options?: unknown) =>
+          invoke(cmd, args),
+        transformCallback: (
+          callback: (...args: unknown[]) => void,
+          _once = false,
+        ) => {
           const id = callbackSeq++;
           callbacks.set(id, callback);
           return id;
         },
         unregisterCallback: (id: number) => {
           callbacks.delete(id);
+          for (const [listenerId, listener] of eventListeners.entries()) {
+            if (listener.handlerId === id) {
+              eventListeners.delete(listenerId);
+            }
+          }
         },
         convertFileSrc: (filePath: string, protocol = "asset") =>
           `${protocol}://${String(filePath).replace(/^\/+/, "")}`,
@@ -221,6 +399,6 @@ export async function installTauriMock(page: Page): Promise<void> {
     {
       projectPath: DEFAULT_PROJECT_PATH,
       lastOpenedAt: DEFAULT_LAST_OPENED_AT,
-    }
+    },
   );
 }

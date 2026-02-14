@@ -4,6 +4,7 @@ use crate::commands::project::resolve_repo_path_for_project_root;
 use crate::state::{AppState, PaneLaunchMeta};
 use chrono::Utc;
 use gwt_core::ai::SessionParser;
+use gwt_core::config::stats::Stats;
 use gwt_core::config::{AgentConfig, ClaudeAgentProvider, ProfilesConfig, Settings};
 use gwt_core::docker::{
     compose_available, daemon_running, detect_docker_files, docker_available, try_start_daemon,
@@ -543,6 +544,65 @@ fn build_docker_compose_down_args(compose_args: &[String]) -> Vec<String> {
     args
 }
 
+fn is_valid_docker_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+const DOCKER_ENV_MERGE_PREFIX_ALLOWLIST: &[&str] = &[
+    "ANTHROPIC_",
+    "OPENAI_",
+    "GEMINI_",
+    "GOOGLE_",
+    "GITHUB_",
+    "GH_",
+    "GIT_",
+    "NPM_",
+    "HF_",
+    "COORDINATOR_",
+    "GWT_",
+    "CLAUDE_",
+    "CODEX_",
+    "OLLAMA_",
+    "OPENROUTER_",
+];
+
+const DOCKER_ENV_MERGE_KEY_ALLOWLIST: &[&str] = &[
+    "TERM",
+    "COLORTERM",
+    "IS_SANDBOX",
+    "HOST_GIT_COMMON_DIR",
+    "HOST_GIT_WORKTREE_DIR",
+];
+
+fn should_merge_profile_env_for_docker(key: &str) -> bool {
+    let k = key.trim();
+    if k.is_empty() || !is_valid_docker_env_key(k) {
+        return false;
+    }
+    DOCKER_ENV_MERGE_KEY_ALLOWLIST.contains(&k)
+        || DOCKER_ENV_MERGE_PREFIX_ALLOWLIST
+            .iter()
+            .any(|prefix| k.starts_with(prefix))
+}
+
+fn merge_profile_env_for_docker(
+    base_env: &mut HashMap<String, String>,
+    merged_profile_env: &HashMap<String, String>,
+) {
+    for (key, value) in merged_profile_env {
+        let k = key.trim();
+        if !should_merge_profile_env_for_docker(k) {
+            continue;
+        }
+        base_env.insert(k.to_string(), value.to_string());
+    }
+}
+
 fn build_docker_compose_exec_args(
     compose_args: &[String],
     service: &str,
@@ -564,7 +624,7 @@ fn build_docker_compose_exec_args(
     keys.sort();
     for key in keys {
         let k = key.trim();
-        if k.is_empty() {
+        if k.is_empty() || !is_valid_docker_env_key(k) {
             continue;
         }
         let v = env_vars.get(key).map(|s| s.as_str()).unwrap_or_default();
@@ -1691,6 +1751,95 @@ mod tests {
         let _ = mgr.kill_all();
     }
 
+    #[test]
+    fn mark_pane_stream_error_sets_error_status_and_records_message() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::commands::TestEnvGuard::new(home.path());
+
+        let state = AppState::new();
+        let pane_id = "pane-stream-error-test";
+        let pane =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: pane_id.to_string(),
+                command: "/bin/cat".to_string(),
+                args: vec![],
+                working_dir: std::env::temp_dir(),
+                branch_name: "test-branch".to_string(),
+                agent_name: "test-agent".to_string(),
+                agent_color: AgentColor::Green,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+            })
+            .expect("failed to create test pane");
+
+        {
+            let mut mgr = state.pane_manager.lock().unwrap();
+            mgr.add_pane(pane).expect("failed to add test pane");
+        }
+
+        let bytes = mark_pane_stream_error_and_write_message(&state, pane_id, "mock read failure");
+        let output = String::from_utf8_lossy(&bytes);
+        assert_eq!(output, "\r\n[PTY stream error: mock read failure]\r\n");
+
+        {
+            let mut mgr = state.pane_manager.lock().unwrap();
+            let pane = mgr.pane_mut_by_id(pane_id).expect("missing test pane");
+            assert_eq!(
+                pane.status(),
+                &PaneStatus::Error("PTY stream error: mock read failure".to_string())
+            );
+        }
+
+        let captured = capture_scrollback_tail_from_state(&state, pane_id, 1024)
+            .expect("capture should succeed");
+        assert!(captured.contains("[PTY stream error: mock read failure]"));
+
+        let mut mgr = state.pane_manager.lock().unwrap();
+        let _ = mgr.kill_all();
+    }
+
+    #[test]
+    fn append_close_hint_to_pane_scrollback_records_hint() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::commands::TestEnvGuard::new(home.path());
+
+        let state = AppState::new();
+        let pane_id = "pane-stream-close-hint-test";
+        let pane =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: pane_id.to_string(),
+                command: "/bin/cat".to_string(),
+                args: vec![],
+                working_dir: std::env::temp_dir(),
+                branch_name: "test-branch".to_string(),
+                agent_name: "test-agent".to_string(),
+                agent_color: AgentColor::Green,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+            })
+            .expect("failed to create test pane");
+
+        {
+            let mut mgr = state.pane_manager.lock().unwrap();
+            mgr.add_pane(pane).expect("failed to add test pane");
+        }
+
+        let bytes = append_close_hint_to_pane_scrollback(&state, pane_id);
+        let output = String::from_utf8_lossy(&bytes);
+        assert_eq!(output, "\r\nPress Enter to close this tab.\r\n");
+
+        let captured = capture_scrollback_tail_from_state(&state, pane_id, 1024)
+            .expect("capture should succeed");
+        assert!(captured.contains("Press Enter to close this tab."));
+
+        let mut mgr = state.pane_manager.lock().unwrap();
+        let _ = mgr.kill_all();
+    }
+
     fn make_request(agent_id: &str) -> LaunchAgentRequest {
         LaunchAgentRequest {
             agent_id: agent_id.to_string(),
@@ -1839,6 +1988,40 @@ mod tests {
         let args = build_docker_compose_exec_args(&[], "app", "", &env, "npx", &[]);
 
         assert!(!args.contains(&"-w".to_string()));
+    }
+
+    #[test]
+    fn build_docker_compose_exec_args_skips_invalid_env_names() {
+        let mut env = HashMap::new();
+        env.insert("=::".to_string(), "bad".to_string());
+        env.insert("VALID_KEY".to_string(), "ok".to_string());
+
+        let args = build_docker_compose_exec_args(&[], "app", "", &env, "npx", &[]);
+        assert!(args.contains(&"VALID_KEY=ok".to_string()));
+        assert!(!args.iter().any(|a| a.contains("=::")));
+    }
+
+    #[test]
+    fn merge_profile_env_for_docker_filters_non_passthrough_keys() {
+        let mut base = HashMap::new();
+        base.insert("GITHUB_TOKEN".to_string(), "old".to_string());
+
+        let mut merged = HashMap::new();
+        merged.insert("GITHUB_TOKEN".to_string(), "new".to_string());
+        merged.insert("GH_TOKEN".to_string(), "gh".to_string());
+        merged.insert("TERM".to_string(), "xterm-256color".to_string());
+        merged.insert("Path".to_string(), "C:\\Windows\\System32".to_string());
+        merged.insert("RANDOM_KEY".to_string(), "ignored".to_string());
+        merged.insert("=C:".to_string(), "C:\\tmp".to_string());
+
+        merge_profile_env_for_docker(&mut base, &merged);
+
+        assert_eq!(base.get("GITHUB_TOKEN"), Some(&"new".to_string()));
+        assert_eq!(base.get("GH_TOKEN"), Some(&"gh".to_string()));
+        assert_eq!(base.get("TERM"), Some(&"xterm-256color".to_string()));
+        assert!(!base.contains_key("Path"));
+        assert!(!base.contains_key("RANDOM_KEY"));
+        assert!(!base.contains_key("=C:"));
     }
 
     #[test]
@@ -2161,6 +2344,25 @@ fn launch_agent_for_project_root(
         let _ = app_handle.emit("worktrees-changed", &payload);
     }
 
+    // Record stats (agent launch + optional worktree creation) non-blocking.
+    {
+        let stat_agent_id = agent_id.to_string();
+        let stat_model = request.model.as_deref().unwrap_or("").to_string();
+        let stat_repo = repo_path.to_string_lossy().to_string();
+        let stat_wt_created = worktree_created;
+        std::thread::spawn(move || {
+            let result = Stats::update(|stats| {
+                stats.increment_agent_launch(&stat_agent_id, &stat_model, &stat_repo);
+                if stat_wt_created {
+                    stats.increment_worktree_created(&stat_repo);
+                }
+            });
+            if let Err(e) = result {
+                tracing::warn!(error = %e, "Failed to record stats");
+            }
+        });
+    }
+
     report_launch_progress(job_id, &app_handle, "deps", Some("Waiting for environment"));
     if is_launch_cancelled(cancelled) {
         return Err("Cancelled".to_string());
@@ -2339,10 +2541,9 @@ fn launch_agent_for_project_root(
                 );
 
                 let mut env = manager.collect_passthrough_env();
-                // Merge profile/env overrides so compose interpolation and container env inherit them.
-                for (k, v) in &env_vars {
-                    env.insert(k.to_string(), v.to_string());
-                }
+                // Merge only docker-relevant profile/env keys to avoid oversized command lines
+                // and invalid Windows pseudo env keys (e.g. "=C:").
+                merge_profile_env_for_docker(&mut env, &env_vars);
                 env.insert("COMPOSE_PROJECT_NAME".to_string(), container_name.clone());
                 apply_translated_git_env(&mut env);
 
@@ -2433,9 +2634,7 @@ fn launch_agent_for_project_root(
                     );
 
                     let mut env = manager.collect_passthrough_env();
-                    for (k, v) in &env_vars {
-                        env.insert(k.to_string(), v.to_string());
-                    }
+                    merge_profile_env_for_docker(&mut env, &env_vars);
                     env.insert("COMPOSE_PROJECT_NAME".to_string(), container_name.clone());
                     apply_translated_git_env(&mut env);
 
@@ -2713,9 +2912,7 @@ fn launch_agent_for_project_root(
 
             let manager = DockerManager::new(&working_dir, &branch_name, docker_file_type);
             let mut container_env = manager.collect_passthrough_env();
-            for (k, v) in &env_vars {
-                container_env.insert(k.to_string(), v.to_string());
-            }
+            merge_profile_env_for_docker(&mut container_env, &env_vars);
             apply_translated_git_env(&mut container_env);
             let git_mounts = build_git_bind_mounts(&container_env);
 
@@ -2741,7 +2938,7 @@ fn launch_agent_for_project_root(
             keys.sort();
             for key in keys {
                 let k = key.trim();
-                if k.is_empty() {
+                if k.is_empty() || !is_valid_docker_env_key(k) {
                     continue;
                 }
                 let v = container_env
@@ -2960,6 +3157,37 @@ fn consume_osc7_cwd_updates(
     latest_changed
 }
 
+fn mark_pane_stream_error_and_write_message(
+    state: &AppState,
+    pane_id: &str,
+    details: &str,
+) -> Vec<u8> {
+    let status_message = format!("PTY stream error: {details}");
+    let output_message = format!("\r\n[{status_message}]\r\n");
+    let bytes = output_message.into_bytes();
+
+    if let Ok(mut manager) = state.pane_manager.lock() {
+        if let Some(pane) = manager.pane_mut_by_id(pane_id) {
+            pane.mark_error(status_message);
+            let _ = pane.process_bytes(&bytes);
+        }
+    }
+
+    bytes
+}
+
+fn append_close_hint_to_pane_scrollback(state: &AppState, pane_id: &str) -> Vec<u8> {
+    let bytes = b"\r\nPress Enter to close this tab.\r\n".to_vec();
+
+    if let Ok(mut manager) = state.pane_manager.lock() {
+        if let Some(pane) = manager.pane_mut_by_id(pane_id) {
+            let _ = pane.process_bytes(&bytes);
+        }
+    }
+
+    bytes
+}
+
 /// Stream PTY output to the frontend via Tauri events
 fn stream_pty_output(
     mut reader: Box<dyn Read + Send>,
@@ -3013,20 +3241,11 @@ fn stream_pty_output(
     }
 
     if let Some(details) = stream_error.as_deref() {
-        let status_message = format!("PTY stream error: {details}");
-        let output_message = format!("\r\n[{status_message}]\r\n");
-        let bytes = output_message.as_bytes();
-
-        if let Ok(mut manager) = state.pane_manager.lock() {
-            if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
-                pane.mark_error(status_message);
-                let _ = pane.process_bytes(bytes);
-            }
-        }
+        let bytes = mark_pane_stream_error_and_write_message(&state, &pane_id, details);
 
         let payload = TerminalOutputPayload {
             pane_id: pane_id.clone(),
-            data: bytes.to_vec(),
+            data: bytes,
         };
         let _ = app_handle.emit("terminal-output", &payload);
     }
@@ -3196,18 +3415,11 @@ fn stream_pty_output(
     }
 
     if ended {
-        let msg = "\r\nPress Enter to close this tab.\r\n";
-        let bytes = msg.as_bytes();
-
-        if let Ok(mut manager) = state.pane_manager.lock() {
-            if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
-                let _ = pane.process_bytes(bytes);
-            }
-        }
+        let bytes = append_close_hint_to_pane_scrollback(&state, &pane_id);
 
         let payload = TerminalOutputPayload {
             pane_id: pane_id.clone(),
-            data: bytes.to_vec(),
+            data: bytes,
         };
         let _ = app_handle.emit("terminal-output", &payload);
     }

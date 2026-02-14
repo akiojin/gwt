@@ -17,7 +17,7 @@
   --magenta: #cba6f7;
   --sidebar-width: 260px;
   --menubar-height: 30px;
-  --statusbar-height: 24px;
+  --statusbar-height: 28px;
   --tab-height: 36px;
   --ui-font-base: 13px;
   --ui-font-xs:  calc(var(--ui-font-base) - 3px);

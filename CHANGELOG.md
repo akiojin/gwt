@@ -1,6 +1,51 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.5.1] - 2026-02-14
+
+### Bug Fixes
+
+- **gui:** SystemMonitor.tsを.svelte.tsにリネームしSvelte 5ルーンを有効化
+- **gui:** Stabilize terminal trackpad fallback when active timing varies (#1064)
+- **gui:** Add pointer fallback for tab drag reorder (#1063)
+- SidebarとSystem Monitorの断続フリーズを抑止 (#1065)
+
+## [7.5.0] - 2026-02-14
+
+### Bug Fixes
+
+- **gui:** Launch Agentのデフォルト設定を前回成功起動値で保持 (#1053)
+- Auto-force branch delete fallback for unmerged cleanup (#1055)
+- **gui:** メニューアクションをフォーカスウィンドウにのみスコープする (#1057)
+- **windows:** Reinforce issue #1029 regression coverage (#1058)
+- GPU情報の返却漏れとstats更新競合を修正 (#1059)
+
+### Features
+
+- Preview PR status in sidebar and worktree summary (#1061)
+
+### Refactor
+
+- **gui:** Hide version info in agent selector (#1060)
+
+## [7.4.0] - 2026-02-14
+
+### Bug Fixes
+
+- **ai:** Improve session summary filtering and chat completion fallback (#1040)
+- **tauri:** Avoid UI freeze during worktree cleanup (#1048)
+- **windows:** Filter docker exec env vars (#1050)
+- Windows起動時のClaude Hook上書き判定を修正 (#1051)
+- **gui:** Prevent blank terminal tabs during startup (#1052)
+
+### Features
+
+- Simple terminal tabs を実装し復元/OSC7の回帰を修正 (#1046)
+
+### Miscellaneous Tasks
+
+- **gitignore:** Ignore generated pnpm workspace file (#1049)
+
 ## [7.3.0] - 2026-02-13
 
 ### Bug Fixes

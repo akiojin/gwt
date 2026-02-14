@@ -182,7 +182,7 @@ fn issue_list_args(repo_slug: Option<&str>, page: u32, per_page: u32) -> Vec<Str
     args
 }
 
-fn resolve_repo_slug(repo_path: &Path) -> Option<String> {
+pub(super) fn resolve_repo_slug(repo_path: &Path) -> Option<String> {
     let candidate_repo = if is_git_repo(repo_path) {
         Some(repo_path.to_path_buf())
     } else {
@@ -294,7 +294,7 @@ pub fn find_branch_for_issue(
 ) -> Result<Option<String>, String> {
     let pattern = format!("issue-{}", issue_number);
 
-    let output = crate::process::git_command()
+    let output = crate::process::command("git")
         .args(["branch", "--list", &format!("*{}*", pattern)])
         .current_dir(repo_path)
         .output()

@@ -4,12 +4,27 @@
     WorktreeInfo,
     CleanupProgress,
     LaunchAgentRequest,
+    PrStatusInfo,
+    WorkflowRunInfo,
+    GhCliStatus,
   } from "../types";
+  import { workflowStatusIcon, workflowStatusClass } from "../prStatusHelpers";
   import AgentSidebar from "./AgentSidebar.svelte";
   import WorktreeSummaryPanel from "./WorktreeSummaryPanel.svelte";
 
   type FilterType = "Local" | "Remote" | "All";
   type SidebarMode = "branch" | "agent";
+  type FilterCacheEntry = {
+    branches: BranchInfo[];
+    remoteBranchNames: Set<string>;
+    worktreeMap: Map<string, WorktreeInfo>;
+    cacheKey: string;
+    fetchedAtMs: number;
+  };
+  type FetchSnapshotResult =
+    | { ok: true; snapshot: FilterCacheEntry }
+    | { ok: false; errorMessage: string };
+  type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
   let {
     projectPath,
@@ -19,6 +34,7 @@
     onLaunchAgent,
     onQuickLaunch,
     onResize,
+    onOpenCiLog,
     widthPx = 260,
     minWidthPx = 220,
     maxWidthPx = 520,
@@ -28,6 +44,8 @@
     selectedBranch = null,
     currentBranch = "",
     agentTabBranches = [],
+    prStatuses = {},
+    ghCliStatus = null,
   }: {
     projectPath: string;
     onBranchSelect: (branch: BranchInfo) => void;
@@ -36,6 +54,7 @@
     onLaunchAgent?: () => void;
     onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
     onResize?: (nextWidthPx: number) => void;
+    onOpenCiLog?: (runId: number) => void;
     widthPx?: number;
     minWidthPx?: number;
     maxWidthPx?: number;
@@ -45,6 +64,8 @@
     selectedBranch?: BranchInfo | null;
     currentBranch?: string;
     agentTabBranches?: string[];
+    prStatuses?: Record<string, PrStatusInfo | null>;
+    ghCliStatus?: GhCliStatus | null;
   } = $props();
 
   const SIDEBAR_SUMMARY_HEIGHT_STORAGE_KEY = "gwt.sidebar.worktreeSummaryHeight";
@@ -52,16 +73,134 @@
   const MIN_WORKTREE_SUMMARY_HEIGHT_PX = 160;
   const MIN_BRANCH_LIST_HEIGHT_PX = 120;
   const SUMMARY_RESIZE_HANDLE_HEIGHT_PX = 8;
+  const FILTER_BACKGROUND_REFRESH_TTL_MS = 10_000;
+
+  // PR Status tree expand state
+  let expandedBranches: Set<string> = $state(new Set());
+
+  // PR Polling — inline to avoid .svelte.ts import issues in tests
+  const PR_POLL_INTERVAL_MS = 30_000;
+  let pollingStatuses: Record<string, PrStatusInfo | null> = $state({});
+  let pollingGhCliStatus: GhCliStatus | null = $state(null);
+
+  $effect(() => {
+    const path = projectPath;
+    if (!path) return;
+
+    let destroyed = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    async function refresh() {
+      if (destroyed) return;
+      try {
+        const branchKeyByName = new Map<string, string>();
+        const queryBranches: string[] = [];
+        const seen = new Set<string>();
+        for (const branch of branches) {
+          const queryBranch = normalizeBranchForPrLookup(branch.name);
+          branchKeyByName.set(branch.name, queryBranch);
+          if (!queryBranch || seen.has(queryBranch)) continue;
+          seen.add(queryBranch);
+          queryBranches.push(queryBranch);
+        }
+
+        if (queryBranches.length === 0) {
+          pollingStatuses = {};
+          return;
+        }
+        const { invoke } = await import("@tauri-apps/api/core");
+        const result = await invoke<{
+          statuses: Record<string, PrStatusInfo | null>;
+          ghStatus: GhCliStatus;
+        }>("fetch_pr_status", { projectPath: path, branches: queryBranches });
+        if (!destroyed) {
+          const statuses = result.statuses ?? {};
+          const mappedStatuses: Record<string, PrStatusInfo | null> = {};
+          for (const branch of branches) {
+            const key = branchKeyByName.get(branch.name) ?? branch.name;
+            mappedStatuses[branch.name] = statuses[key] ?? null;
+          }
+          pollingStatuses = mappedStatuses;
+          pollingGhCliStatus = result.ghStatus ?? null;
+        }
+      } catch {
+        // Polling failure is silent — keep stale data
+      }
+    }
+
+    function start() {
+      if (destroyed) return;
+      stop();
+      refresh();
+      timer = setInterval(refresh, PR_POLL_INTERVAL_MS);
+    }
+
+    function stop() {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+    }
+
+    function onVisibility() {
+      if (document.hidden) {
+        stop();
+      } else {
+        start();
+      }
+    }
+
+    document.addEventListener("visibilitychange", onVisibility);
+    start();
+
+    return () => {
+      destroyed = true;
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  });
+
+  // Effective values: prefer polling data, fall back to props
+  let activePrStatuses = $derived.by(() => {
+    if (pollingStatuses && Object.keys(pollingStatuses).length > 0) {
+      return pollingStatuses;
+    }
+    return prStatuses;
+  });
+  let activeGhCliStatus = $derived(pollingGhCliStatus ?? ghCliStatus);
+
+  // Derived prNumber for WorktreeSummaryPanel
+  let selectedPrNumber = $derived.by(() => {
+    if (!selectedBranch) return null;
+    const status = activePrStatuses[selectedBranch.name];
+    return status?.number ?? null;
+  });
+
+  function toggleBranch(branchName: string) {
+    const next = new Set(expandedBranches);
+    if (next.has(branchName)) {
+      next.delete(branchName);
+    } else {
+      next.add(branchName);
+    }
+    expandedBranches = next;
+  }
+
+  function openCiLog(run: WorkflowRunInfo) {
+    onOpenCiLog?.(run.runId);
+  }
 
   let activeFilter: FilterType = $state("Local");
   let branches: BranchInfo[] = $state([]);
+  let remoteBranchNames: Set<string> = $state(new Set());
   let loading: boolean = $state(false);
   let searchQuery: string = $state("");
   let errorMessage: string | null = $state(null);
   let lastFetchKey = "";
-  let lastWorktreesFetchKey = "";
   let fetchToken = 0;
   let localRefreshKey = $state(0);
+  let filterCache: Map<FilterType, FilterCacheEntry> = $state(new Map());
+  const inflightFetches = new Map<string, Promise<FetchSnapshotResult>>();
 
   // Worktree safety info
   let worktreeMap: Map<string, WorktreeInfo> = $state(new Map());
@@ -69,6 +208,18 @@
   function normalizeTabBranch(name: string): string {
     const trimmed = name.trim();
     return trimmed.startsWith("origin/") ? trimmed.slice("origin/".length) : trimmed;
+  }
+
+  function stripRemotePrefix(name: string): string {
+    const trimmed = name.trim();
+    const slash = trimmed.indexOf("/");
+    if (slash <= 0) return trimmed;
+    return trimmed.slice(slash + 1);
+  }
+
+  function normalizeBranchForPrLookup(branchName: string): string {
+    const trimmed = branchName.trim();
+    return remoteBranchNames.has(trimmed) ? stripRemotePrefix(trimmed) : trimmed;
   }
 
   function loadSummaryHeight(): number {
@@ -204,7 +355,8 @@
     const key = `${projectPath}::${activeFilter}::${refreshKey}::${localRefreshKey}`;
     if (key === lastFetchKey) return;
     lastFetchKey = key;
-    fetchBranches();
+    const token = ++fetchToken;
+    fetchBranches(token);
   });
 
   $effect(() => {
@@ -318,90 +470,198 @@
     return () => document.removeEventListener("keydown", handler);
   });
 
-  async function fetchBranches() {
-    const token = ++fetchToken;
+  function fetchBranches(token: number) {
+    const filter = activeFilter;
+    const path = projectPath;
+    const cacheKey = buildFilterCacheKey(filter, path);
+    const cached = filterCache.get(filter);
+
+    if (cached && cached.cacheKey === cacheKey) {
+      applyCacheEntry(cached);
+      const ttlElapsed = Date.now() - cached.fetchedAtMs;
+      if (ttlElapsed < FILTER_BACKGROUND_REFRESH_TTL_MS) return;
+      void refreshFilterSnapshot(filter, path, cacheKey, token, true);
+      return;
+    }
+
     loading = true;
     errorMessage = null;
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      if (activeFilter === "Local") {
-        const next = await invoke<BranchInfo[]>("list_worktree_branches", { projectPath });
-        if (token !== fetchToken) return;
-        branches = next;
+    void refreshFilterSnapshot(filter, path, cacheKey, token, false);
+  }
 
-        // Worktree safety info is relatively expensive, but it must refresh when worktrees
-        // change (refreshKey) and when explicitly requested (localRefreshKey).
-        const wtKey = `${projectPath}::${localRefreshKey}::${refreshKey}`;
-        const shouldFetchWorktrees = wtKey !== lastWorktreesFetchKey;
-        if (shouldFetchWorktrees) {
-          const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", { projectPath }).catch(
-            () => [] as WorktreeInfo[]
-          );
-          if (token !== fetchToken) return;
-          updateWorktreeMap(worktrees);
-          lastWorktreesFetchKey = wtKey;
-        }
-      } else if (activeFilter === "Remote") {
-        const next = await invoke<BranchInfo[]>("list_remote_branches", {
-          projectPath,
-        });
-        if (token !== fetchToken) return;
-        branches = next;
-        worktreeMap = new Map();
-        lastWorktreesFetchKey = "";
-      } else {
-        // All: merge local + remote
-        const [local, remote] = await Promise.all([
-          invoke<BranchInfo[]>("list_worktree_branches", { projectPath }),
-          invoke<BranchInfo[]>("list_remote_branches", { projectPath }),
-        ]);
-        if (token !== fetchToken) return;
-        // Deduplicate by name
-        const seen = new Set<string>();
-        const merged: BranchInfo[] = [];
-        for (const b of local) {
-          seen.add(b.name);
-          merged.push(b);
-        }
-        for (const b of remote) {
-          if (!seen.has(b.name)) {
-            merged.push(b);
-          }
-        }
-        branches = merged;
+  async function refreshFilterSnapshot(
+    filter: FilterType,
+    path: string,
+    cacheKey: string,
+    token: number,
+    background: boolean
+  ) {
+    const hadFallbackCache = !!(filterCache.get(filter)?.cacheKey === cacheKey);
+    const result = await loadFilterSnapshot(filter, path, cacheKey);
 
-        const wtKey = `${projectPath}::${localRefreshKey}::${refreshKey}`;
-        const shouldFetchWorktrees = wtKey !== lastWorktreesFetchKey;
-        if (shouldFetchWorktrees) {
-          const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", { projectPath }).catch(
-            () => [] as WorktreeInfo[]
-          );
-          if (token !== fetchToken) return;
-          updateWorktreeMap(worktrees);
-          lastWorktreesFetchKey = wtKey;
-        }
-      }
-    } catch (err) {
-      const msg =
-        typeof err === "string"
-          ? err
-          : err && typeof err === "object" && "message" in err
-            ? String((err as { message?: unknown }).message)
-            : String(err);
-      if (token !== fetchToken) return;
-      errorMessage = `Failed to fetch branches: ${msg}`;
-      branches = [];
-    }
     if (token !== fetchToken) return;
+    if (filter !== activeFilter) return;
+    if (path !== projectPath) return;
+    if (cacheKey !== buildFilterCacheKey(filter, path)) return;
+
+    if (result.ok) {
+      setFilterCacheEntry(filter, result.snapshot);
+      applyCacheEntry(result.snapshot);
+      return;
+    }
+
+    if (background && hadFallbackCache) {
+      loading = false;
+      return;
+    }
+
+    errorMessage = result.errorMessage;
+    branches = [];
+    remoteBranchNames = new Set();
+    worktreeMap = new Map();
     loading = false;
   }
 
-  function updateWorktreeMap(worktrees: WorktreeInfo[]) {
+  function loadFilterSnapshot(
+    filter: FilterType,
+    path: string,
+    cacheKey: string
+  ): Promise<FetchSnapshotResult> {
+    const inflightKey = `${filter}::${cacheKey}`;
+    const inflight = inflightFetches.get(inflightKey);
+    if (inflight) return inflight;
+
+    const promise = fetchFilterSnapshot(filter, path, cacheKey).finally(() => {
+      inflightFetches.delete(inflightKey);
+    });
+    inflightFetches.set(inflightKey, promise);
+    return promise;
+  }
+
+  async function fetchFilterSnapshot(
+    filter: FilterType,
+    path: string,
+    cacheKey: string
+  ): Promise<FetchSnapshotResult> {
+    try {
+      const invoke = await getInvoke();
+
+      if (filter === "Local") {
+        const next = await invoke<BranchInfo[]>("list_worktree_branches", { projectPath: path });
+        const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", { projectPath: path }).catch(
+          () => [] as WorktreeInfo[]
+        );
+        return {
+          ok: true,
+          snapshot: {
+            branches: next,
+            remoteBranchNames: new Set(),
+            worktreeMap: buildWorktreeMap(worktrees),
+            cacheKey,
+            fetchedAtMs: Date.now(),
+          },
+        };
+      }
+
+      if (filter === "Remote") {
+        const next = await invoke<BranchInfo[]>("list_remote_branches", { projectPath: path });
+        return {
+          ok: true,
+          snapshot: {
+            branches: next,
+            remoteBranchNames: new Set(next.map((branch) => branch.name.trim())),
+            worktreeMap: new Map(),
+            cacheKey,
+            fetchedAtMs: Date.now(),
+          },
+        };
+      }
+
+      const [local, remote] = await Promise.all([
+        invoke<BranchInfo[]>("list_worktree_branches", { projectPath: path }),
+        invoke<BranchInfo[]>("list_remote_branches", { projectPath: path }),
+      ]);
+
+      const seen = new Set<string>();
+      const merged: BranchInfo[] = [];
+      for (const branch of local) {
+        seen.add(branch.name);
+        merged.push(branch);
+      }
+      for (const branch of remote) {
+        if (!seen.has(branch.name)) {
+          merged.push(branch);
+        }
+      }
+
+      const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", { projectPath: path }).catch(
+        () => [] as WorktreeInfo[]
+      );
+
+      return {
+        ok: true,
+        snapshot: {
+          branches: merged,
+          remoteBranchNames: new Set(remote.map((branch) => branch.name.trim())),
+          worktreeMap: buildWorktreeMap(worktrees),
+          cacheKey,
+          fetchedAtMs: Date.now(),
+        },
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        errorMessage: `Failed to fetch branches: ${toErrorMessage(err)}`,
+      };
+    }
+  }
+
+  function buildFilterCacheKey(filter: FilterType, path: string): string {
+    if (filter === "Remote") {
+      return `${path}::${refreshKey}`;
+    }
+    return `${path}::${refreshKey}::${localRefreshKey}`;
+  }
+
+  function buildWorktreeMap(worktrees: WorktreeInfo[]): Map<string, WorktreeInfo> {
     const map = new Map<string, WorktreeInfo>();
     for (const wt of worktrees) {
       if (wt.branch) map.set(wt.branch, wt);
     }
-    worktreeMap = map;
+    return map;
+  }
+
+  function applyCacheEntry(entry: FilterCacheEntry) {
+    branches = [...entry.branches];
+    remoteBranchNames = new Set(entry.remoteBranchNames);
+    worktreeMap = new Map(entry.worktreeMap);
+    loading = false;
+    errorMessage = null;
+  }
+
+  function setFilterCacheEntry(filter: FilterType, entry: FilterCacheEntry) {
+    const next = new Map(filterCache);
+    next.set(filter, entry);
+    filterCache = next;
+  }
+
+  function toErrorMessage(err: unknown): string {
+    if (typeof err === "string") return err;
+    if (err && typeof err === "object" && "message" in err) {
+      return String((err as { message?: unknown }).message);
+    }
+    return String(err);
+  }
+
+  async function getInvoke(): Promise<TauriInvoke> {
+    const tauriCore = (await import("@tauri-apps/api/core")) as
+      | { invoke?: TauriInvoke; default?: { invoke?: TauriInvoke } }
+      | undefined;
+    const invokeFn = tauriCore?.invoke ?? tauriCore?.default?.invoke;
+    if (!invokeFn) {
+      throw new Error("Tauri invoke API is unavailable");
+    }
+    return invokeFn;
   }
 
   function getSafetyLevel(branch: BranchInfo): string {
@@ -748,60 +1008,96 @@
           <div class="empty-indicator">No branches found.</div>
         {:else}
           {#each filteredBranches as branch}
-            <button
-              class="branch-item"
-              class:active={branch.is_current}
-              class:agent-active={hasActiveAgentTab(branch)}
-              class:deleting={deletingBranches.has(branch.name)}
-              onclick={() => {
-                if (!deletingBranches.has(branch.name)) onBranchSelect(branch);
-              }}
-              ondblclick={() => {
-                if (!deletingBranches.has(branch.name))
-                  onBranchActivate?.(branch);
-              }}
-              oncontextmenu={(e) => handleContextMenu(e, branch)}
-            >
-              <span class="branch-icon">{branch.is_current ? "*" : " "}</span>
-              {#if deletingBranches.has(branch.name)}
-                <span class="safety-spinner"></span>
-              {:else if getSafetyLevel(branch)}
-                <span
-                  class="safety-dot {getSafetyLevel(branch)}"
-                  title={getSafetyTitle(branch)}
-                ></span>
-              {/if}
-              {#if hasActiveAgentTab(branch)}
-                <span
-                  class="agent-tab-icon"
-                  title="Agent tab is open for this branch"
-                  role="img"
-                  aria-label="Agent tab is open for this branch"
+            <div class="branch-tree-item">
+              {#if activeFilter !== "Remote" && activePrStatuses[branch.name]}
+                <button
+                  class="tree-toggle"
+                  class:expanded={expandedBranches.has(branch.name)}
+                  onclick={(e) => { e.stopPropagation(); toggleBranch(branch.name); }}
+                  title={expandedBranches.has(branch.name) ? "Collapse" : "Expand"}
                 >
-                  <span class="agent-tab-bars" aria-hidden="true">
-                    <span class="agent-tab-bar b1"></span>
-                    <span class="agent-tab-bar b2"></span>
-                    <span class="agent-tab-bar b3"></span>
+                  {expandedBranches.has(branch.name) ? "\u25BC" : "\u25B6"}
+                </button>
+              {:else}
+                <span class="tree-toggle-placeholder"></span>
+              {/if}
+              <button
+                class="branch-item"
+                class:active={branch.is_current}
+                class:agent-active={hasActiveAgentTab(branch)}
+                class:deleting={deletingBranches.has(branch.name)}
+                onclick={() => {
+                  if (!deletingBranches.has(branch.name)) onBranchSelect(branch);
+                }}
+                ondblclick={() => {
+                  if (!deletingBranches.has(branch.name))
+                    onBranchActivate?.(branch);
+                }}
+                oncontextmenu={(e) => handleContextMenu(e, branch)}
+              >
+                <span class="branch-icon">{branch.is_current ? "*" : " "}</span>
+                {#if deletingBranches.has(branch.name)}
+                  <span class="safety-spinner"></span>
+                {:else if getSafetyLevel(branch)}
+                  <span
+                    class="safety-dot {getSafetyLevel(branch)}"
+                    title={getSafetyTitle(branch)}
+                  ></span>
+                {/if}
+                {#if hasActiveAgentTab(branch)}
+                  <span
+                    class="agent-tab-icon"
+                    title="Agent tab is open for this branch"
+                    role="img"
+                    aria-label="Agent tab is open for this branch"
+                  >
+                    <span class="agent-tab-bars" aria-hidden="true">
+                      <span class="agent-tab-bar b1"></span>
+                      <span class="agent-tab-bar b2"></span>
+                      <span class="agent-tab-bar b3"></span>
+                    </span>
+                    <span class="agent-tab-fallback" aria-hidden="true">@</span>
                   </span>
-                  <span class="agent-tab-fallback" aria-hidden="true">@</span>
-                </span>
-              {/if}
-              <span class="branch-name">{branch.name}</span>
-              {#if branch.last_tool_usage}
-                <span
-                  class="tool-usage {toolUsageClass(branch.last_tool_usage)}"
-                >
-                  {branch.last_tool_usage}
-                </span>
-              {/if}
-              {#if divergenceIndicator(branch)}
-                <span
-                  class="divergence {divergenceClass(branch.divergence_status)}"
-                >
-                  {divergenceIndicator(branch)}
-                </span>
-              {/if}
-            </button>
+                {/if}
+                <span class="branch-name">{branch.name}</span>
+                {#if activeGhCliStatus && !activeGhCliStatus.authenticated}
+                  <span class="pr-badge disconnected">GitHub not connected</span>
+                {:else if activePrStatuses[branch.name]}
+                  {@const pr = activePrStatuses[branch.name]!}
+                  <span class="pr-badge {pr.state.toLowerCase()}">
+                    #{pr.number} {pr.state === "OPEN" ? "Open" : pr.state === "MERGED" ? "Merged" : "Closed"}
+                  </span>
+                {:else if activeGhCliStatus?.authenticated}
+                  <span class="pr-badge no-pr">No PR</span>
+                {/if}
+                {#if branch.last_tool_usage}
+                  <span
+                    class="tool-usage {toolUsageClass(branch.last_tool_usage)}"
+                  >
+                    {branch.last_tool_usage}
+                  </span>
+                {/if}
+                {#if divergenceIndicator(branch)}
+                  <span
+                    class="divergence {divergenceClass(branch.divergence_status)}"
+                  >
+                    {divergenceIndicator(branch)}
+                  </span>
+                {/if}
+              </button>
+            </div>
+            {#if expandedBranches.has(branch.name) && activePrStatuses[branch.name]}
+              <div class="workflow-runs">
+                {#each activePrStatuses[branch.name]!.checkSuites as run}
+                  <button class="workflow-run-item" onclick={() => openCiLog(run)}>
+                    <span class="workflow-status {workflowStatusClass(run)}">{workflowStatusIcon(run)}</span>
+                    <span class="workflow-name">{run.workflowName}</span>
+                  </button>
+                {:else}
+                  <div class="workflow-empty">No workflows</div>
+                {/each}
+              </div>
+            {/if}
           {/each}
         {/if}
       </div>
@@ -820,6 +1116,7 @@
         <WorktreeSummaryPanel
           {projectPath}
           {selectedBranch}
+          prNumber={selectedPrNumber}
           onLaunchAgent={onLaunchAgent}
           onQuickLaunch={onQuickLaunch}
         />
@@ -1494,5 +1791,128 @@
 
   .confirm-delete:hover {
     opacity: 0.9;
+  }
+
+  /* PR Status tree */
+  .branch-tree-item {
+    display: flex;
+    align-items: stretch;
+  }
+
+  .tree-toggle {
+    width: 20px;
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 10px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .tree-toggle:hover {
+    color: var(--text-primary);
+  }
+
+  .tree-toggle-placeholder {
+    width: 20px;
+    flex-shrink: 0;
+  }
+
+  .workflow-runs {
+    padding-left: 24px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .workflow-run-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: var(--ui-font-xs);
+    cursor: pointer;
+    text-align: left;
+    font-family: inherit;
+  }
+
+  .workflow-run-item:hover {
+    background: var(--bg-hover);
+  }
+
+  .workflow-status {
+    font-size: 11px;
+    width: 14px;
+    text-align: center;
+  }
+
+  .workflow-status.pass {
+    color: var(--green);
+  }
+
+  .workflow-status.fail {
+    color: var(--red);
+  }
+
+  .workflow-status.running {
+    color: var(--yellow);
+  }
+
+  .workflow-status.pending {
+    color: var(--text-muted);
+  }
+
+  .workflow-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .workflow-empty {
+    padding: 3px 8px;
+    color: var(--text-muted);
+    font-size: var(--ui-font-xs);
+    font-style: italic;
+  }
+
+  .pr-badge {
+    font-size: var(--ui-font-xs);
+    padding: 1px 6px;
+    border-radius: 999px;
+    white-space: nowrap;
+    flex-shrink: 0;
+    font-weight: 600;
+  }
+
+  .pr-badge.open {
+    background: rgba(63, 185, 80, 0.15);
+    color: var(--green);
+  }
+
+  .pr-badge.merged {
+    background: rgba(163, 113, 247, 0.15);
+    color: var(--magenta);
+  }
+
+  .pr-badge.closed {
+    background: rgba(248, 81, 73, 0.15);
+    color: var(--red);
+  }
+
+  .pr-badge.no-pr {
+    color: var(--text-muted);
+    background: none;
+  }
+
+  .pr-badge.disconnected {
+    color: var(--text-muted);
+    background: none;
+    font-style: italic;
   }
 </style>

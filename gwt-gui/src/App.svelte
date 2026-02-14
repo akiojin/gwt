@@ -18,15 +18,14 @@
   import Sidebar from "./lib/components/Sidebar.svelte";
   import MainArea from "./lib/components/MainArea.svelte";
   import StatusBar from "./lib/components/StatusBar.svelte";
+  import AboutDialog from "./lib/components/AboutDialog.svelte";
   import OpenProject from "./lib/components/OpenProject.svelte";
   import AgentLaunchForm from "./lib/components/AgentLaunchForm.svelte";
   import LaunchProgressModal from "./lib/components/LaunchProgressModal.svelte";
   import MigrationModal from "./lib/components/MigrationModal.svelte";
   import CleanupModal from "./lib/components/CleanupModal.svelte";
   import {
-    formatAboutVersion,
     formatWindowTitle,
-    getAppVersionSafe,
   } from "./lib/windowTitle";
   import { inferAgentId } from "./lib/agentUtils";
   import {
@@ -54,10 +53,7 @@
     VoiceInputController,
     type VoiceControllerState,
   } from "./lib/voice/voiceInputController";
-
-  interface MenuActionPayload {
-    action: string;
-  }
+  import { createSystemMonitor } from "./lib/systemMonitor.svelte";
 
   interface SettingsUpdatedPayload {
     uiFontSize?: number;
@@ -127,7 +123,6 @@
   }
 
   let projectPath: string | null = $state(null);
-  let appVersion: string | null = $state(null);
   let sidebarVisible: boolean = $state(true);
   let sidebarWidthPx: number = $state(loadSidebarWidth());
   let sidebarMode: SidebarMode = $state(loadSidebarMode());
@@ -135,6 +130,7 @@
   let showCleanupModal: boolean = $state(false);
   let cleanupPreselectedBranch: string | null = $state(null);
   let showAbout: boolean = $state(false);
+  let aboutInitialTab: "general" | "system" | "statistics" = $state("general");
   let showTerminalDiagnostics: boolean = $state(false);
   let appError: string | null = $state(null);
   let sidebarRefreshKey: number = $state(0);
@@ -189,6 +185,8 @@
   let voiceInputSupported = $state(true);
   let voiceInputError: string | null = $state(null);
   let voiceController: VoiceInputController | null = null;
+
+  const systemMonitor = createSystemMonitor();
 
   let toastMessage = $state<string | null>(null);
   let toastTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -370,19 +368,6 @@
     return () => {
       cancelled = true;
       if (unlisten) unlisten();
-    };
-  });
-
-  // Best-effort: read app version from Tauri runtime (web preview will ignore).
-  $effect(() => {
-    let cancelled = false;
-    (async () => {
-      const v = await getAppVersionSafe();
-      if (cancelled) return;
-      appVersion = v;
-    })();
-    return () => {
-      cancelled = true;
     };
   });
 
@@ -743,6 +728,45 @@
   function handleCleanupRequest(preSelectedBranch?: string) {
     cleanupPreselectedBranch = preSelectedBranch ?? null;
     showCleanupModal = true;
+  }
+
+  async function handleOpenCiLog(runId: number) {
+    if (!projectPath) return;
+    try {
+      const workingDir = projectPath;
+      const { invoke } = await import("@tauri-apps/api/core");
+      const paneId = await invoke<string>("spawn_shell", { workingDir });
+
+      const label = `CI #${runId}`;
+      const newTab: Tab = {
+        id: `terminal-${paneId}`,
+        label,
+        type: "terminal",
+        paneId,
+        cwd: workingDir || undefined,
+      };
+      tabs = [...tabs, newTab];
+      activeTabId = newTab.id;
+
+      // Resolve and read logs via backend so bare-repo project roots still work.
+      const logOutput = await invoke<string>("fetch_ci_log", {
+        projectPath,
+        runId,
+      });
+      const delimiterBase = "__GWT_CI_LOG__";
+      let delimiter = delimiterBase;
+      let delimiterSuffix = 0;
+      while (logOutput.includes(delimiter)) {
+        delimiterSuffix += 1;
+        delimiter = `${delimiterBase}_${delimiterSuffix}`;
+      }
+      const normalized = logOutput.endsWith("\n") ? logOutput : `${logOutput}\n`;
+      const cmd = `cat <<'${delimiter}'\n${normalized}${delimiter}\n`;
+      const data = Array.from(new TextEncoder().encode(cmd));
+      await invoke("write_terminal", { paneId, data });
+    } catch (err) {
+      console.error("Failed to open CI log:", err);
+    }
   }
 
   async function fetchCurrentBranch() {
@@ -1328,6 +1352,7 @@
         }
         break;
       case "about":
+        aboutInitialTab = "general";
         showAbout = true;
         break;
       case "list-terminals":
@@ -1637,13 +1662,12 @@
 
     (async () => {
       try {
-        const { listen } = await import("@tauri-apps/api/event");
-        const unlistenFn = await listen<MenuActionPayload>(
-          "menu-action",
-          (event) => {
-            void handleMenuAction(event.payload.action);
-          },
+        const { setupMenuActionListener } = await import(
+          "./lib/menuAction"
         );
+        const unlistenFn = await setupMenuActionListener((action) => {
+          void handleMenuAction(action);
+        });
         if (cancelled) {
           unlistenFn();
           return;
@@ -1659,6 +1683,14 @@
       if (unlisten) {
         unlisten();
       }
+    };
+  });
+
+  // System monitor lifecycle: start polling, destroy on teardown.
+  $effect(() => {
+    systemMonitor.start();
+    return () => {
+      systemMonitor.destroy();
     };
   });
 
@@ -1759,6 +1791,7 @@
           onCleanupRequest={handleCleanupRequest}
           onLaunchAgent={requestAgentLaunch}
           onQuickLaunch={handleAgentLaunch}
+          onOpenCiLog={handleOpenCiLog}
         />
       {/if}
       <MainArea
@@ -1782,6 +1815,13 @@
       {voiceInputListening}
       {voiceInputSupported}
       {voiceInputError}
+      cpuUsage={systemMonitor.cpuUsage}
+      memUsed={systemMonitor.memUsed}
+      memTotal={systemMonitor.memTotal}
+      onopenAboutSystem={() => {
+        aboutInitialTab = "system";
+        showAbout = true;
+      }}
     />
   </div>
 {/if}
@@ -1805,21 +1845,15 @@
   onClose={() => (showCleanupModal = false)}
 />
 
-{#if showAbout}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="overlay" onclick={() => (showAbout = false)}>
-    <div class="about-dialog" onclick={(e) => e.stopPropagation()}>
-      <h2>gwt</h2>
-      <p>Git Worktree Manager</p>
-      <p class="about-version">GUI Edition</p>
-      <p class="about-version">{formatAboutVersion(appVersion)}</p>
-      <button class="about-close" onclick={() => (showAbout = false)}>
-        Close
-      </button>
-    </div>
-  </div>
-{/if}
+<AboutDialog
+  open={showAbout}
+  initialTab={aboutInitialTab}
+  cpuUsage={systemMonitor.cpuUsage}
+  memUsed={systemMonitor.memUsed}
+  memTotal={systemMonitor.memTotal}
+  gpuInfo={systemMonitor.gpuInfo}
+  onclose={() => (showAbout = false)}
+/>
 
 {#if showTerminalDiagnostics}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -2043,34 +2077,6 @@
 
   .mono {
     font-family: monospace;
-  }
-
-  .about-dialog {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: 12px;
-    padding: 32px 40px;
-    text-align: center;
-    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
-  }
-
-  .about-dialog h2 {
-    font-size: 24px;
-    font-weight: 700;
-    color: var(--accent);
-    margin-bottom: 4px;
-  }
-
-  .about-dialog p {
-    color: var(--text-secondary);
-    font-size: var(--ui-font-base);
-  }
-
-  .about-version {
-    color: var(--text-muted);
-    font-size: var(--ui-font-sm);
-    margin-top: 4px;
-    margin-bottom: 20px;
   }
 
   .about-close {
