@@ -4,7 +4,7 @@ use crate::state::AppState;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use tauri::Manager;
-use tauri::{Emitter, WebviewWindowBuilder};
+use tauri::{Emitter, EventTarget, WebviewWindowBuilder};
 use tracing::{info, warn};
 
 #[cfg(not(test))]
@@ -74,6 +74,7 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
         crate::menu::MENU_ID_GIT_VERSION_HISTORY => Some("version-history"),
         crate::menu::MENU_ID_EDIT_COPY => Some("edit-copy"),
         crate::menu::MENU_ID_EDIT_PASTE => Some("edit-paste"),
+        crate::menu::MENU_ID_TOOLS_NEW_TERMINAL => Some("new-terminal"),
         crate::menu::MENU_ID_TOOLS_LAUNCH_AGENT => Some("launch-agent"),
         crate::menu::MENU_ID_TOOLS_LIST_TERMINALS => Some("list-terminals"),
         crate::menu::MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS => Some("terminal-diagnostics"),
@@ -441,6 +442,7 @@ pub fn build_app(
             crate::commands::sessions::get_branch_session_summary,
             crate::commands::branch_suggest::suggest_branch_names,
             crate::commands::terminal::launch_terminal,
+            crate::commands::terminal::spawn_shell,
             crate::commands::terminal::launch_agent,
             crate::commands::terminal::start_launch_job,
             crate::commands::terminal::cancel_launch_job,
@@ -488,6 +490,11 @@ pub fn build_app(
             crate::commands::issue::find_existing_issue_branch,
             crate::commands::issue::link_branch_to_issue,
             crate::commands::issue::rollback_issue_branch,
+            crate::commands::pullrequest::fetch_pr_status,
+            crate::commands::pullrequest::fetch_pr_detail,
+            crate::commands::pullrequest::fetch_ci_log,
+            crate::commands::system::get_system_info,
+            crate::commands::system::get_stats,
         ])
 }
 
@@ -514,7 +521,8 @@ fn emit_menu_action(app: &tauri::AppHandle<tauri::Wry>, action: &str) {
         return;
     };
 
-    let _ = window.emit(
+    let _ = window.emit_to(
+        EventTarget::webview_window(window.label()),
         crate::menu::MENU_ACTION_EVENT,
         crate::menu::MenuActionPayload {
             action: action.to_string(),

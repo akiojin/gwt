@@ -7,7 +7,7 @@
 
 ## Phase 2: Windows Host 起動安定化
 
-- [x] T003 [US2] `crates/gwt-core/src/terminal/pty.rs` に Windows `.cmd/.bat` ラップ起動ロジックを追加
+- [x] T003 [US2] `crates/gwt-core/src/terminal/pty.rs` に Windows PowerShell ラップ起動ロジック（`pwsh` 優先 / `powershell.exe` フォールバック）を追加
 - [x] T004 [US2] `crates/gwt-core/src/terminal/pty.rs` に起動コマンド解決ユニットテストを追加
 
 ## Phase 3: 空タブ防止
