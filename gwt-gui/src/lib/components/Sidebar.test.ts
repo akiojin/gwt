@@ -698,6 +698,63 @@ describe("Sidebar", () => {
     });
   });
 
+  it("cycles branch sort mode when pressing the sort button", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches")
+        return [
+          { ...branchFixture, name: "feature/zulu", commit_timestamp: 200 },
+          { ...mainBranchFixture },
+          { ...developBranchFixture },
+          { ...branchFixture, name: "feature/beta", commit_timestamp: 500 },
+          { ...branchFixture, name: "feature/alpha", commit_timestamp: 300 },
+        ];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await rendered.findByText(mainBranchFixture.name);
+    expect(getRenderedBranchNames(rendered)).toEqual([
+      "main",
+      "develop",
+      "feature/alpha",
+      "feature/beta",
+      "feature/zulu",
+    ]);
+
+    const sortButton = rendered.getByRole("button", { name: "Sort mode" });
+    const sortModeText = sortButton.querySelector(".sort-mode-text");
+    expect(sortModeText?.textContent).toBe("Name");
+
+    await fireEvent.click(sortButton);
+    await waitFor(() => {
+      expect(sortModeText?.textContent).toBe("Updated");
+      expect(getRenderedBranchNames(rendered)).toEqual([
+        "main",
+        "develop",
+        "feature/beta",
+        "feature/alpha",
+        "feature/zulu",
+      ]);
+    });
+
+    await fireEvent.click(sortButton);
+    await waitFor(() => {
+      expect(sortModeText?.textContent).toBe("Name");
+      expect(getRenderedBranchNames(rendered)).toEqual([
+        "main",
+        "develop",
+        "feature/alpha",
+        "feature/beta",
+        "feature/zulu",
+      ]);
+    });
+  });
+
   it("puts branches with missing commit timestamp at the end in updated mode", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "list_worktree_branches")
@@ -766,6 +823,51 @@ describe("Sidebar", () => {
       "origin/feature/alpha",
       "origin/feature/beta",
     ]);
+  });
+
+  it("moves selected worktree with ArrowUp/ArrowDown keys", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches")
+        return [
+          { ...featureBetaBranchFixture },
+          { ...mainBranchFixture },
+          { ...developBranchFixture },
+          { ...featureAlphaBranchFixture },
+        ];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    let selectedBranch = mainBranchFixture;
+    const onBranchSelect = vi.fn((next) => {
+      selectedBranch = next;
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect,
+      selectedBranch,
+    });
+
+    const branchList = rendered.container.querySelector(".branch-list");
+    expect(branchList).toBeTruthy();
+    branchList?.focus();
+    await rendered.findByText(mainBranchFixture.name);
+
+    await fireEvent.keyDown(branchList as HTMLElement, { key: "ArrowDown" });
+    await waitFor(() => expect(onBranchSelect).toHaveBeenCalledTimes(1));
+    expect(onBranchSelect).toHaveBeenCalledWith(expect.objectContaining({ name: developBranchFixture.name }));
+    await rendered.rerender({ selectedBranch });
+
+    onBranchSelect.mockClear();
+    await fireEvent.keyDown(branchList as HTMLElement, { key: "ArrowUp" });
+    await waitFor(() => expect(onBranchSelect).toHaveBeenCalledTimes(1));
+    expect(onBranchSelect).toHaveBeenCalledWith(expect.objectContaining({ name: mainBranchFixture.name }));
+
+    onBranchSelect.mockClear();
+    await rendered.rerender({ selectedBranch: featureBetaBranchFixture });
+    await fireEvent.keyDown(branchList as HTMLElement, { key: "ArrowDown" });
+    await waitFor(() => expect(onBranchSelect).toHaveBeenCalledTimes(0));
   });
 
   it("applies sidebar width from props", async () => {
@@ -1016,7 +1118,7 @@ describe("Sidebar", () => {
     expect(resizeHandle?.getAttribute("aria-label")).toBe("Resize session summary");
   });
 
-  it("does not show PR/agent indicators in branch rows", async () => {
+  it("does not show PR/CI indicators in branch rows", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "list_worktree_branches") return [branchFixture];
       if (command === "list_worktrees") return [];
@@ -1054,12 +1156,10 @@ describe("Sidebar", () => {
       onBranchSelect: vi.fn(),
       prStatuses,
       ghCliStatus: { available: true, authenticated: true },
-      agentTabBranches: [branchFixture.name],
       onOpenCiLog,
     });
 
     await rendered.findByText(branchFixture.name);
-    expect(rendered.queryByTitle("Agent tab is open for this branch")).toBeNull();
     expect(rendered.queryByText(/#42 Open/)).toBeNull();
     expect(rendered.queryByText("No PR")).toBeNull();
     expect(rendered.queryByText("GitHub not connected")).toBeNull();
@@ -1067,6 +1167,25 @@ describe("Sidebar", () => {
     expect(rendered.queryByText("Lint")).toBeNull();
     expect(rendered.queryByTitle("Expand")).toBeNull();
     expect(onOpenCiLog).not.toHaveBeenCalled();
+  });
+
+  it("shows an animated indicator for branches with open agent tabs", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [branchFixture];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      agentTabBranches: [branchFixture.name],
+    });
+
+    const branchButton = (await rendered.findByText(branchFixture.name)).closest("button");
+    expect(branchButton).toBeTruthy();
+    expect(branchButton?.classList.contains("agent-active")).toBe(true);
+    expect(rendered.queryByTitle("Agent tab is open for this branch")).toBeTruthy();
   });
 
   it("highlights selected branch in Worktree list", async () => {
