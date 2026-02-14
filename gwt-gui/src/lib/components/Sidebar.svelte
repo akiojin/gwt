@@ -20,6 +20,7 @@
     worktreeMap: Map<string, WorktreeInfo>;
     cacheKey: string;
     fetchedAtMs: number;
+    dirty: boolean;
   };
   type FetchSnapshotResult =
     | { ok: true; snapshot: FilterCacheEntry }
@@ -74,6 +75,7 @@
   const MIN_BRANCH_LIST_HEIGHT_PX = 120;
   const SUMMARY_RESIZE_HANDLE_HEIGHT_PX = 8;
   const FILTER_BACKGROUND_REFRESH_TTL_MS = 10_000;
+  const SEARCH_FILTER_DEBOUNCE_MS = 120;
 
   // PR Status tree expand state
   let expandedBranches: Set<string> = $state(new Set());
@@ -82,16 +84,32 @@
   const PR_POLL_INTERVAL_MS = 30_000;
   let pollingStatuses: Record<string, PrStatusInfo | null> = $state({});
   let pollingGhCliStatus: GhCliStatus | null = $state(null);
+  let prPollingBootstrappedPath: string | null = null;
+  let prPollingActivePath: string | null = null;
+  const prPollingInFlightPaths = new Set<string>();
 
   $effect(() => {
     const path = projectPath;
-    if (!path) return;
+    const branchCount = branches.length;
+
+    if (path !== prPollingActivePath) {
+      prPollingActivePath = path || null;
+      prPollingBootstrappedPath = null;
+      pollingStatuses = {};
+      pollingGhCliStatus = null;
+    }
+
+    if (!path) {
+      return;
+    }
 
     let destroyed = false;
     let timer: ReturnType<typeof setInterval> | null = null;
 
-    async function refresh() {
+    async function refresh(markBootstrap = false) {
       if (destroyed) return;
+      if (prPollingInFlightPaths.has(path)) return;
+      prPollingInFlightPaths.add(path);
       try {
         const branchKeyByName = new Map<string, string>();
         const queryBranches: string[] = [];
@@ -108,7 +126,10 @@
           pollingStatuses = {};
           return;
         }
-        const { invoke } = await import("@tauri-apps/api/core");
+        if (markBootstrap) {
+          prPollingBootstrappedPath = path;
+        }
+        const invoke = await getInvoke();
         const result = await invoke<{
           statuses: Record<string, PrStatusInfo | null>;
           ghStatus: GhCliStatus;
@@ -125,14 +146,21 @@
         }
       } catch {
         // Polling failure is silent — keep stale data
+      } finally {
+        prPollingInFlightPaths.delete(path);
       }
     }
 
     function start() {
       if (destroyed) return;
       stop();
-      refresh();
-      timer = setInterval(refresh, PR_POLL_INTERVAL_MS);
+      if (prPollingBootstrappedPath !== path && branchCount > 0) {
+        void refresh(true);
+      }
+      timer = setInterval(() => {
+        if (isTextEntryFocused()) return;
+        void refresh();
+      }, PR_POLL_INTERVAL_MS);
     }
 
     function stop() {
@@ -147,6 +175,9 @@
         stop();
       } else {
         start();
+        if (!isTextEntryFocused()) {
+          void refresh(false);
+        }
       }
     }
 
@@ -190,13 +221,26 @@
     onOpenCiLog?.(run.runId);
   }
 
+  function isTextEntryFocused(): boolean {
+    if (typeof document === "undefined") return false;
+    const active = document.activeElement;
+    if (!active) return false;
+    if (active instanceof HTMLInputElement) return true;
+    if (active instanceof HTMLTextAreaElement) return true;
+    if (active instanceof HTMLSelectElement) return true;
+    return (active as HTMLElement).isContentEditable;
+  }
+
   let activeFilter: FilterType = $state("Local");
   let branches: BranchInfo[] = $state([]);
   let remoteBranchNames: Set<string> = $state(new Set());
   let loading: boolean = $state(false);
+  let searchInput: string = $state("");
   let searchQuery: string = $state("");
   let errorMessage: string | null = $state(null);
   let lastFetchKey = "";
+  let lastForceKey = "";
+  let lastProjectPath = "";
   let fetchToken = 0;
   let localRefreshKey = $state(0);
   let filterCache: Map<FilterType, FilterCacheEntry> = $state(new Map());
@@ -336,6 +380,14 @@
   let clampedWidthPx = $derived(clampSidebarWidth(widthPx));
 
   $effect(() => {
+    const nextQuery = searchInput;
+    const timer = setTimeout(() => {
+      searchQuery = nextQuery;
+    }, SEARCH_FILTER_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  });
+
+  $effect(() => {
     if (!branchSummaryStackEl) return;
     setSummaryHeight(summaryHeightPx, false);
   });
@@ -347,15 +399,36 @@
   });
 
   $effect(() => {
-    // Re-fetch when filter/projectPath changes and when explicitly requested.
+    // Re-fetch when filter changes. Force refresh keys also trigger all-filter background updates.
     if (mode !== "branch") {
       lastFetchKey = "";
+      lastForceKey = "";
+      lastProjectPath = "";
       return;
     }
-    const key = `${projectPath}::${activeFilter}::${refreshKey}::${localRefreshKey}`;
+    const forceKey = `${projectPath}::${refreshKey}::${localRefreshKey}`;
+    const key = `${forceKey}::${activeFilter}`;
     if (key === lastFetchKey) return;
+
+    const isInitialRun = lastForceKey === "";
+    const projectChanged = lastProjectPath !== "" && projectPath !== lastProjectPath;
+    const forceRefreshTriggered = !isInitialRun && forceKey !== lastForceKey;
+
     lastFetchKey = key;
+    lastForceKey = forceKey;
+    lastProjectPath = projectPath;
+
     const token = ++fetchToken;
+    if (projectChanged) {
+      clearFilterCache();
+      fetchBranches(token);
+      return;
+    }
+    if (forceRefreshTriggered) {
+      markAllFilterCachesDirty();
+      refreshAllFilterCaches(token);
+      return;
+    }
     fetchBranches(token);
   });
 
@@ -470,7 +543,7 @@
     return () => document.removeEventListener("keydown", handler);
   });
 
-  function fetchBranches(token: number) {
+  function fetchBranches(token: number, forceRefresh = false) {
     const filter = activeFilter;
     const path = projectPath;
     const cacheKey = buildFilterCacheKey(filter, path);
@@ -479,14 +552,26 @@
     if (cached && cached.cacheKey === cacheKey) {
       applyCacheEntry(cached);
       const ttlElapsed = Date.now() - cached.fetchedAtMs;
-      if (ttlElapsed < FILTER_BACKGROUND_REFRESH_TTL_MS) return;
-      void refreshFilterSnapshot(filter, path, cacheKey, token, true);
+      const shouldRefresh =
+        forceRefresh || cached.dirty || ttlElapsed >= FILTER_BACKGROUND_REFRESH_TTL_MS;
+      if (!shouldRefresh) return;
+      void refreshFilterSnapshot(filter, path, cacheKey, token, true, true);
       return;
     }
 
     loading = true;
     errorMessage = null;
-    void refreshFilterSnapshot(filter, path, cacheKey, token, false);
+    void refreshFilterSnapshot(filter, path, cacheKey, token, false, true);
+  }
+
+  function refreshAllFilterCaches(token: number) {
+    fetchBranches(token, true);
+    const path = projectPath;
+    for (const filter of filters) {
+      if (filter === activeFilter) continue;
+      const cacheKey = buildFilterCacheKey(filter, path);
+      void refreshFilterSnapshot(filter, path, cacheKey, token, true, false);
+    }
   }
 
   async function refreshFilterSnapshot(
@@ -494,24 +579,32 @@
     path: string,
     cacheKey: string,
     token: number,
-    background: boolean
+    background: boolean,
+    applyToActiveView: boolean
   ) {
     const hadFallbackCache = !!(filterCache.get(filter)?.cacheKey === cacheKey);
     const result = await loadFilterSnapshot(filter, path, cacheKey);
 
     if (token !== fetchToken) return;
-    if (filter !== activeFilter) return;
     if (path !== projectPath) return;
     if (cacheKey !== buildFilterCacheKey(filter, path)) return;
 
     if (result.ok) {
       setFilterCacheEntry(filter, result.snapshot);
-      applyCacheEntry(result.snapshot);
+      if (applyToActiveView && filter === activeFilter) {
+        applyCacheEntry(result.snapshot);
+      }
       return;
     }
 
     if (background && hadFallbackCache) {
-      loading = false;
+      if (applyToActiveView && filter === activeFilter) {
+        loading = false;
+      }
+      return;
+    }
+
+    if (!applyToActiveView || filter !== activeFilter) {
       return;
     }
 
@@ -559,6 +652,7 @@
             worktreeMap: buildWorktreeMap(worktrees),
             cacheKey,
             fetchedAtMs: Date.now(),
+            dirty: false,
           },
         };
       }
@@ -573,6 +667,7 @@
             worktreeMap: new Map(),
             cacheKey,
             fetchedAtMs: Date.now(),
+            dirty: false,
           },
         };
       }
@@ -606,6 +701,7 @@
           worktreeMap: buildWorktreeMap(worktrees),
           cacheKey,
           fetchedAtMs: Date.now(),
+          dirty: false,
         },
       };
     } catch (err) {
@@ -643,6 +739,20 @@
     const next = new Map(filterCache);
     next.set(filter, entry);
     filterCache = next;
+  }
+
+  function markAllFilterCachesDirty() {
+    if (filterCache.size === 0) return;
+    const next = new Map<FilterType, FilterCacheEntry>();
+    for (const [filter, entry] of filterCache) {
+      next.set(filter, { ...entry, dirty: true });
+    }
+    filterCache = next;
+  }
+
+  function clearFilterCache() {
+    filterCache = new Map();
+    inflightFetches.clear();
   }
 
   function toErrorMessage(err: unknown): string {
@@ -995,7 +1105,7 @@
         spellcheck="false"
         class="search-input"
         placeholder="Filter branches..."
-        bind:value={searchQuery}
+        bind:value={searchInput}
       />
     </div>
     <div class="branch-summary-stack" bind:this={branchSummaryStackEl}>
