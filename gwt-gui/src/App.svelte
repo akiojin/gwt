@@ -8,13 +8,13 @@
     ProbePathResult,
     RollbackResult,
     TerminalInfo,
-	    WorktreeInfo,
-	    TerminalAnsiProbe,
-	    CapturedEnvInfo,
-	    SettingsData,
-	    UpdateState,
-	    VoiceInputSettings,
-	  } from "./lib/types";
+    WorktreeInfo,
+    TerminalAnsiProbe,
+    CapturedEnvInfo,
+    SettingsData,
+    UpdateState,
+    VoiceInputSettings,
+  } from "./lib/types";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import MainArea from "./lib/components/MainArea.svelte";
   import StatusBar from "./lib/components/StatusBar.svelte";
@@ -579,14 +579,14 @@
     return String(err);
   }
 
-	  function clampFontSize(size: number): number {
-	    return Math.max(8, Math.min(24, Math.round(size)));
-	  }
+  function clampFontSize(size: number): number {
+    return Math.max(8, Math.min(24, Math.round(size)));
+  }
 
-	  function normalizeVoiceInputSettings(
-	    value: Partial<VoiceInputSettings> | null | undefined,
-	  ): VoiceInputSettings {
-	    const hotkey = (value?.hotkey ?? "").trim();
+  function normalizeVoiceInputSettings(
+    value: Partial<VoiceInputSettings> | null | undefined,
+  ): VoiceInputSettings {
+    const hotkey = (value?.hotkey ?? "").trim();
     const language = (value?.language ?? "").trim().toLowerCase();
     const model = (value?.model ?? "").trim();
 
@@ -597,20 +597,20 @@
         language === "ja" || language === "en" || language === "auto"
           ? (language as VoiceInputSettings["language"])
           : DEFAULT_VOICE_INPUT_SETTINGS.language,
-	      model: model.length > 0 ? model : DEFAULT_VOICE_INPUT_SETTINGS.model,
-	    };
-	  }
+      model: model.length > 0 ? model : DEFAULT_VOICE_INPUT_SETTINGS.model,
+    };
+  }
 
-	  function applyUiFontSize(size: number) {
-	    document.documentElement.style.setProperty("--ui-font-base", `${size}px`);
-	  }
+  function applyUiFontSize(size: number) {
+    document.documentElement.style.setProperty("--ui-font-base", `${size}px`);
+  }
 
-	  function applyTerminalFontSize(size: number) {
-	    (window as any).__gwtTerminalFontSize = size;
-	    window.dispatchEvent(
-	      new CustomEvent("gwt-terminal-font-size", { detail: size }),
-	    );
-	  }
+  function applyTerminalFontSize(size: number) {
+    (window as any).__gwtTerminalFontSize = size;
+    window.dispatchEvent(
+      new CustomEvent("gwt-terminal-font-size", { detail: size }),
+    );
+  }
 
   function applyVoiceInputSettings(
     value: Partial<VoiceInputSettings> | null | undefined,
@@ -635,27 +635,27 @@
     return voiceInputSettings;
   }
 
-	  function readVoiceFallbackTerminalPaneId(): string | null {
-	    return activeAgentPaneId();
-	  }
+  function readVoiceFallbackTerminalPaneId(): string | null {
+    return activeAgentPaneId();
+  }
 
-	  async function applyAppearanceSettings() {
-	    try {
-	      const { invoke } = await import("@tauri-apps/api/core");
-	      const settings =
-	        await invoke<
-	          Pick<
+  async function applyAppearanceSettings() {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const settings =
+        await invoke<
+          Pick<
             SettingsData,
             "ui_font_size" | "terminal_font_size" | "voice_input"
           >
-	        >("get_settings");
-	      applyUiFontSize(clampFontSize(settings.ui_font_size ?? 13));
-	      applyTerminalFontSize(clampFontSize(settings.terminal_font_size ?? 13));
-	      applyVoiceInputSettings(settings.voice_input);
-	    } catch {
-	      // Ignore: settings API not available outside Tauri runtime.
-	    }
-	  }
+        >("get_settings");
+      applyUiFontSize(clampFontSize(settings.ui_font_size ?? 13));
+      applyTerminalFontSize(clampFontSize(settings.terminal_font_size ?? 13));
+      applyVoiceInputSettings(settings.voice_input);
+    } catch {
+      // Ignore: settings API not available outside Tauri runtime.
+    }
+  }
 
   async function setWindowTitle() {
     const title = formatWindowTitle({
