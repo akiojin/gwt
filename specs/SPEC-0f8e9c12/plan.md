@@ -1,11 +1,12 @@
 # 実装計画: Sidebar Filter Cache for Local/Remote/All
 
-**仕様ID**: `SPEC-0f8e9c12` | **日付**: 2026-02-14 | **仕様書**: `specs/SPEC-0f8e9c12/spec.md`
+**仕様ID**: `SPEC-0f8e9c12` | **日付**: 2026-02-15 | **仕様書**: `specs/SPEC-0f8e9c12/spec.md`
 
 ## 目的
 
 - Local/Remote/All 切替時の待ち時間を削減し、UIを即応化する
 - キャッシュ表示と背景更新を両立して鮮度を維持する
+- フィルター切替時の PR ステータス即時再取得を抑止し、切替体感の引っかかりを解消する
 
 ## 方針
 
@@ -14,6 +15,7 @@
 3. 最終取得が10秒超過時のみ背景再取得を実行
 4. `refreshKey` / `localRefreshKey` をキャッシュキーに含め、明示更新を優先
 5. 同一キーの並列フェッチは in-flight map で重複排除
+6. PR ステータスポーリングはフィルター切替で再初期化しない
 
 ## 実装対象
 
@@ -45,7 +47,14 @@
 - TTL超過時の背景再取得テスト
 - 背景再取得中に `Loading...` を出さないテスト
 
+### Step 5: PR ポーリング最適化
+
+- `fetch_pr_status` ポーリングを「初期化時即時 + 30秒周期」に固定
+- フィルター切替（`branches` 更新）では即時 `refresh()` を再実行しない
+- in-flight フラグで重複呼び出しを抑止
+
 ## 検証
 
 - `gwt-gui/src/lib/components/Sidebar.test.ts` を実行
 - 既存の `refreshKey` テストが回帰していないことを確認
+- 30秒未満のフィルター切替で `fetch_pr_status` 呼び出しが増えないことを確認

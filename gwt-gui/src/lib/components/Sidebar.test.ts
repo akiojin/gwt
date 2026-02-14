@@ -139,6 +139,39 @@ describe("Sidebar", () => {
     });
   });
 
+  it("refreshes all filter caches on refreshKey change and reuses prefetched data on switch", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [branchFixture];
+      if (command === "list_remote_branches") return [remoteBranchFixture];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      refreshKey: 0,
+    });
+
+    await rendered.findByText(branchFixture.name);
+    invokeMock.mockClear();
+
+    await rendered.rerender({ refreshKey: 1 });
+
+    await waitFor(() => {
+      expect(countInvokeCalls("list_worktree_branches")).toBe(2);
+      expect(countInvokeCalls("list_remote_branches")).toBe(2);
+      expect(countInvokeCalls("list_worktrees")).toBe(2);
+    });
+
+    const remoteFetchCount = countInvokeCalls("list_remote_branches");
+    await fireEvent.click(rendered.getByRole("button", { name: "Remote" }));
+    await rendered.findByText(remoteBranchFixture.name);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(countInvokeCalls("list_remote_branches")).toBe(remoteFetchCount);
+  });
+
   it("reuses cached filter data when switching back within ttl", async () => {
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => 1_700_000_000_000);
     try {
@@ -216,6 +249,99 @@ describe("Sidebar", () => {
     } finally {
       localRefreshDeferred.resolve?.([branchFixture]);
       nowSpy.mockRestore();
+    }
+  });
+
+  it("does not re-run fetch_pr_status immediately when switching filters", async () => {
+    vi.useFakeTimers();
+    try {
+      invokeMock.mockImplementation((command: string) => {
+        if (command === "list_worktree_branches") return Promise.resolve([branchFixture]);
+        if (command === "list_remote_branches") return Promise.resolve([remoteBranchFixture]);
+        if (command === "list_worktrees") return Promise.resolve([]);
+        if (command === "fetch_pr_status") {
+          return Promise.resolve({
+            statuses: {},
+            ghStatus: { available: true, authenticated: true },
+          });
+        }
+        return Promise.resolve([]);
+      });
+
+      const rendered = await renderSidebar({
+        projectPath: "/tmp/project",
+        onBranchSelect: vi.fn(),
+      });
+
+      await rendered.findByText(branchFixture.name);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await waitFor(() => {
+        expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(0);
+      });
+
+      const beforeSwitchCount = countInvokeCalls("fetch_pr_status");
+
+      await fireEvent.click(rendered.getByRole("button", { name: "Remote" }));
+      await rendered.findByText(remoteBranchFixture.name);
+      await fireEvent.click(rendered.getByRole("button", { name: "Local" }));
+      await rendered.findByText(branchFixture.name);
+      await vi.advanceTimersByTimeAsync(20);
+
+      expect(countInvokeCalls("fetch_pr_status")).toBe(beforeSwitchCount);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not queue extra fetch_pr_status calls while previous polling is in flight", async () => {
+    vi.useFakeTimers();
+    type PrStatusResponse = {
+      statuses: Record<string, null>;
+      ghStatus: { available: boolean; authenticated: boolean };
+    };
+    let pendingResolve: ((value: PrStatusResponse) => void) | null = null;
+    try {
+      invokeMock.mockImplementation((command: string) => {
+        if (command === "list_worktree_branches") return Promise.resolve([branchFixture]);
+        if (command === "list_remote_branches") return Promise.resolve([remoteBranchFixture]);
+        if (command === "list_worktrees") return Promise.resolve([]);
+        if (command === "fetch_pr_status") {
+          return new Promise<PrStatusResponse>((resolve) => {
+            pendingResolve = resolve;
+          });
+        }
+        return Promise.resolve([]);
+      });
+
+      const rendered = await renderSidebar({
+        projectPath: "/tmp/project",
+        onBranchSelect: vi.fn(),
+      });
+
+      await rendered.findByText(branchFixture.name);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await waitFor(() => {
+        expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(0);
+      });
+      const inFlightCount = countInvokeCalls("fetch_pr_status");
+
+      await fireEvent.click(rendered.getByRole("button", { name: "Remote" }));
+      await rendered.findByText(remoteBranchFixture.name);
+      await fireEvent.click(rendered.getByRole("button", { name: "Local" }));
+      await rendered.findByText(branchFixture.name);
+      await vi.advanceTimersByTimeAsync(20);
+
+      expect(countInvokeCalls("fetch_pr_status")).toBe(inFlightCount);
+    } finally {
+      const resolvePending = pendingResolve as ((value: PrStatusResponse) => void) | null;
+      if (resolvePending) {
+        resolvePending({
+          statuses: {},
+          ghStatus: { available: true, authenticated: true },
+        });
+        pendingResolve = null;
+      }
+      vi.useRealTimers();
     }
   });
 
