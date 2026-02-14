@@ -195,10 +195,16 @@ fn default_terminal_font_family() -> String {
 pub struct VoiceInputSettings {
     /// Enable voice input hotkey support
     pub enabled: bool,
+    /// Voice backend engine (currently "qwen3-asr")
+    pub engine: String,
     /// Global hotkey string (e.g., "Mod+Shift+M")
     pub hotkey: String,
+    /// Push-to-talk hotkey string (e.g., "Mod+Shift+Space")
+    pub ptt_hotkey: String,
     /// Recognition language ("auto" | "ja" | "en")
     pub language: String,
+    /// Quality preset ("fast" | "balanced" | "accurate")
+    pub quality: String,
     /// Local STT model tier hint
     pub model: String,
 }
@@ -207,9 +213,12 @@ impl Default for VoiceInputSettings {
     fn default() -> Self {
         Self {
             enabled: false,
+            engine: "qwen3-asr".to_string(),
             hotkey: "Mod+Shift+M".to_string(),
+            ptt_hotkey: "Mod+Shift+Space".to_string(),
             language: "auto".to_string(),
-            model: "base".to_string(),
+            quality: "balanced".to_string(),
+            model: "Qwen/Qwen3-ASR-1.7B".to_string(),
         }
     }
 }
@@ -566,9 +575,12 @@ mod tests {
         assert!(!settings.debug);
         assert_eq!(settings.app_language, "auto");
         assert!(!settings.voice_input.enabled);
+        assert_eq!(settings.voice_input.engine, "qwen3-asr");
         assert_eq!(settings.voice_input.hotkey, "Mod+Shift+M");
+        assert_eq!(settings.voice_input.ptt_hotkey, "Mod+Shift+Space");
         assert_eq!(settings.voice_input.language, "auto");
-        assert_eq!(settings.voice_input.model, "base");
+        assert_eq!(settings.voice_input.quality, "balanced");
+        assert_eq!(settings.voice_input.model, "Qwen/Qwen3-ASR-1.7B");
     }
 
     #[test]
@@ -834,9 +846,12 @@ default_base_branch = "legacy-global"
             "\"JetBrains Mono\", \"Fira Code\", \"SF Mono\", Menlo, Consolas, monospace"
         );
         assert!(!settings.voice_input.enabled);
+        assert_eq!(settings.voice_input.engine, "qwen3-asr");
         assert_eq!(settings.voice_input.hotkey, "Mod+Shift+M");
+        assert_eq!(settings.voice_input.ptt_hotkey, "Mod+Shift+Space");
         assert_eq!(settings.voice_input.language, "auto");
-        assert_eq!(settings.voice_input.model, "base");
+        assert_eq!(settings.voice_input.quality, "balanced");
+        assert_eq!(settings.voice_input.model, "Qwen/Qwen3-ASR-1.7B");
     }
 
     #[test]
@@ -906,9 +921,12 @@ ui_font_family = "Inter, sans-serif"
 terminal_font_family = "\"Cascadia Mono\", monospace"
 [voice_input]
 enabled = true
+engine = "qwen3-asr"
 hotkey = "Mod+Shift+V"
+ptt_hotkey = "Mod+Shift+Space"
 language = "ja"
-model = "base"
+quality = "accurate"
+model = "Qwen/Qwen3-ASR-1.7B"
 "#,
         )
         .unwrap();
@@ -925,9 +943,12 @@ model = "base"
             "\"Cascadia Mono\", monospace"
         );
         assert!(loaded.voice_input.enabled);
+        assert_eq!(loaded.voice_input.engine, "qwen3-asr");
         assert_eq!(loaded.voice_input.hotkey, "Mod+Shift+V");
+        assert_eq!(loaded.voice_input.ptt_hotkey, "Mod+Shift+Space");
         assert_eq!(loaded.voice_input.language, "ja");
-        assert_eq!(loaded.voice_input.model, "base");
+        assert_eq!(loaded.voice_input.quality, "accurate");
+        assert_eq!(loaded.voice_input.model, "Qwen/Qwen3-ASR-1.7B");
 
         match prev_gwt_agent {
             Some(value) => std::env::set_var("GWT_AGENT", value),

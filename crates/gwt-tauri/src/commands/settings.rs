@@ -100,8 +100,11 @@ fn os_env_capture_mode_to_string(mode: OsEnvCaptureMode) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoiceInputSettingsData {
     pub enabled: bool,
+    pub engine: String,
     pub hotkey: String,
+    pub ptt_hotkey: String,
     pub language: String,
+    pub quality: String,
     pub model: String,
 }
 
@@ -109,9 +112,12 @@ impl Default for VoiceInputSettingsData {
     fn default() -> Self {
         Self {
             enabled: false,
+            engine: "qwen3-asr".to_string(),
             hotkey: "Mod+Shift+M".to_string(),
+            ptt_hotkey: "Mod+Shift+Space".to_string(),
             language: "auto".to_string(),
-            model: "base".to_string(),
+            quality: "balanced".to_string(),
+            model: "Qwen/Qwen3-ASR-1.7B".to_string(),
         }
     }
 }
@@ -223,8 +229,11 @@ impl From<&Settings> for SettingsData {
             app_language: normalize_app_language(Some(&s.app_language)),
             voice_input: VoiceInputSettingsData {
                 enabled: s.voice_input.enabled,
+                engine: s.voice_input.engine.clone(),
                 hotkey: s.voice_input.hotkey.clone(),
+                ptt_hotkey: s.voice_input.ptt_hotkey.clone(),
                 language: s.voice_input.language.clone(),
+                quality: s.voice_input.quality.clone(),
                 model: s.voice_input.model.clone(),
             },
             default_shell: s.terminal.default_shell.clone(),
@@ -302,10 +311,14 @@ impl SettingsData {
             default_terminal_font_family,
         );
         s.app_language = normalize_app_language(Some(self.app_language.as_str()));
+        let voice = normalize_voice_input(&self.voice_input)?;
         s.voice_input.enabled = self.voice_input.enabled;
-        s.voice_input.hotkey = self.voice_input.hotkey.trim().to_string();
-        s.voice_input.language = self.voice_input.language.trim().to_string();
-        s.voice_input.model = self.voice_input.model.trim().to_string();
+        s.voice_input.engine = voice.engine;
+        s.voice_input.hotkey = voice.hotkey;
+        s.voice_input.ptt_hotkey = voice.ptt_hotkey;
+        s.voice_input.language = voice.language;
+        s.voice_input.quality = voice.quality;
+        s.voice_input.model = voice.model;
         s.terminal.default_shell = self
             .default_shell
             .as_ref()
@@ -315,6 +328,80 @@ impl SettingsData {
             parse_os_env_capture_mode_field(self.os_env_capture_mode.as_deref())?;
         Ok(s)
     }
+}
+
+#[derive(Debug, Clone)]
+struct NormalizedVoiceInput {
+    engine: String,
+    hotkey: String,
+    ptt_hotkey: String,
+    language: String,
+    quality: String,
+    model: String,
+}
+
+fn qwen_model_for_quality(quality: &str) -> &'static str {
+    match quality {
+        "fast" => "Qwen/Qwen3-ASR-0.6B",
+        "accurate" => "Qwen/Qwen3-ASR-1.7B",
+        _ => "Qwen/Qwen3-ASR-1.7B",
+    }
+}
+
+fn normalize_hotkey(hotkey: &str, field: &str) -> Result<String, String> {
+    let trimmed = hotkey.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{field} must not be empty"));
+    }
+    if !trimmed.contains('+') && trimmed.chars().count() != 1 {
+        return Err(format!("{field} must include modifiers or a single key"));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn normalize_voice_input(value: &VoiceInputSettingsData) -> Result<NormalizedVoiceInput, String> {
+    let engine = match value.engine.trim().to_lowercase().as_str() {
+        "" | "qwen3-asr" | "qwen" | "whisper" => "qwen3-asr".to_string(),
+        _ => return Err("voice_input.engine must be \"qwen3-asr\"".to_string()),
+    };
+
+    let hotkey = normalize_hotkey(&value.hotkey, "voice_input.hotkey")?;
+    let ptt_hotkey = normalize_hotkey(&value.ptt_hotkey, "voice_input.ptt_hotkey")?;
+    if hotkey.eq_ignore_ascii_case(&ptt_hotkey) {
+        return Err("voice_input.hotkey and voice_input.ptt_hotkey must differ".to_string());
+    }
+
+    let language = value.language.trim().to_lowercase();
+    let language = match language.as_str() {
+        "" | "auto" => "auto".to_string(),
+        "ja" => "ja".to_string(),
+        "en" => "en".to_string(),
+        _ => return Err("voice_input.language must be one of auto|ja|en".to_string()),
+    };
+
+    let quality = value.quality.trim().to_lowercase();
+    let quality = match quality.as_str() {
+        "" | "balanced" => "balanced".to_string(),
+        "fast" => "fast".to_string(),
+        "accurate" => "accurate".to_string(),
+        _ => return Err("voice_input.quality must be one of fast|balanced|accurate".to_string()),
+    };
+
+    let model = value.model.trim();
+    let model = if model.is_empty() {
+        qwen_model_for_quality(&quality).to_string()
+    } else {
+        model.to_string()
+    };
+
+    Ok(NormalizedVoiceInput {
+        engine,
+        hotkey,
+        ptt_hotkey,
+        language,
+        quality,
+        model,
+    })
 }
 
 /// Get current settings
@@ -362,9 +449,12 @@ mod tests {
         core.appearance.terminal_font_family = "\"Cascadia Mono\", monospace".to_string();
         core.app_language = "ja".to_string();
         core.voice_input.enabled = true;
+        core.voice_input.engine = "qwen3-asr".to_string();
         core.voice_input.hotkey = "Mod+Shift+V".to_string();
+        core.voice_input.ptt_hotkey = "Mod+Shift+Space".to_string();
         core.voice_input.language = "ja".to_string();
-        core.voice_input.model = "base".to_string();
+        core.voice_input.quality = "accurate".to_string();
+        core.voice_input.model = "Qwen/Qwen3-ASR-1.7B".to_string();
         core.terminal.default_shell = Some("powershell".to_string());
         core.os_env_capture_mode = Some(OsEnvCaptureMode::LoginShell);
         let data = SettingsData::from(&core);
@@ -374,9 +464,12 @@ mod tests {
         assert_eq!(data.terminal_font_family, "\"Cascadia Mono\", monospace");
         assert_eq!(data.app_language, "ja");
         assert!(data.voice_input.enabled);
+        assert_eq!(data.voice_input.engine, "qwen3-asr");
         assert_eq!(data.voice_input.hotkey, "Mod+Shift+V");
+        assert_eq!(data.voice_input.ptt_hotkey, "Mod+Shift+Space");
         assert_eq!(data.voice_input.language, "ja");
-        assert_eq!(data.voice_input.model, "base");
+        assert_eq!(data.voice_input.quality, "accurate");
+        assert_eq!(data.voice_input.model, "Qwen/Qwen3-ASR-1.7B");
         assert_eq!(data.default_shell, Some("powershell".to_string()));
         assert_eq!(data.os_env_capture_mode.as_deref(), Some("login_shell"));
         assert_eq!(data.agent_skill_registration_default_scope, None);
@@ -390,9 +483,12 @@ mod tests {
         );
         assert_eq!(back.app_language, "ja");
         assert!(back.voice_input.enabled);
+        assert_eq!(back.voice_input.engine, "qwen3-asr");
         assert_eq!(back.voice_input.hotkey, "Mod+Shift+V");
+        assert_eq!(back.voice_input.ptt_hotkey, "Mod+Shift+Space");
         assert_eq!(back.voice_input.language, "ja");
-        assert_eq!(back.voice_input.model, "base");
+        assert_eq!(back.voice_input.quality, "accurate");
+        assert_eq!(back.voice_input.model, "Qwen/Qwen3-ASR-1.7B");
         assert_eq!(back.terminal.default_shell, Some("powershell".to_string()));
         assert_eq!(back.os_env_capture_mode, Some(OsEnvCaptureMode::LoginShell));
     }
@@ -493,5 +589,23 @@ mod tests {
             err.contains("agent_skill_registration_default_scope is required"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn test_voice_hotkeys_must_not_conflict() {
+        let mut data = SettingsData::from(&Settings::default());
+        data.voice_input.enabled = true;
+        data.voice_input.hotkey = "Mod+Shift+M".to_string();
+        data.voice_input.ptt_hotkey = "Mod+Shift+M".to_string();
+        let err = data.to_settings().unwrap_err();
+        assert!(err.contains("must differ"));
+    }
+
+    #[test]
+    fn test_voice_engine_whisper_is_migrated_to_qwen() {
+        let mut data = SettingsData::from(&Settings::default());
+        data.voice_input.engine = "whisper".to_string();
+        let normalized = data.to_settings().unwrap();
+        assert_eq!(normalized.voice_input.engine, "qwen3-asr");
     }
 }
