@@ -1227,6 +1227,8 @@
         class="branch-list"
         bind:this={branchListEl}
         tabindex={filteredBranches.length === 0 ? -1 : 0}
+        role="listbox"
+        aria-label="Worktree branches"
         onkeydown={handleBranchItemKeydown}
       >
         {#if loading}

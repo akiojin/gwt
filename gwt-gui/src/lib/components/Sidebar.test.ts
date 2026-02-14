@@ -32,6 +32,7 @@ const branchFixture = {
   name: "feature/sidebar-size",
   commit: "1234567",
   is_current: false,
+  is_agent_running: false,
   ahead: 0,
   behind: 0,
   divergence_status: "UpToDate",
@@ -849,7 +850,7 @@ describe("Sidebar", () => {
       selectedBranch,
     });
 
-    const branchList = rendered.container.querySelector(".branch-list");
+    const branchList = rendered.container.querySelector<HTMLDivElement>(".branch-list");
     expect(branchList).toBeTruthy();
     branchList?.focus();
     await rendered.findByText(mainBranchFixture.name);
