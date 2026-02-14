@@ -1800,8 +1800,6 @@
     border-radius: 1px;
     background: var(--cyan);
     opacity: 0.85;
-    transform-origin: bottom;
-    animation: agentTabBars 0.9s ease-in-out infinite;
   }
 
   .agent-tab-bar.b1 {
@@ -1814,19 +1812,6 @@
 
   .agent-tab-bar.b3 {
     animation-delay: 300ms;
-  }
-
-  /* Graphical activity indicator for branches with open agent tabs */
-  @keyframes agentTabBars {
-    0%,
-    100% {
-      transform: scaleY(0.35);
-      opacity: 0.55;
-    }
-    50% {
-      transform: scaleY(1);
-      opacity: 1;
-    }
   }
 
   .agent-tab-fallback {
