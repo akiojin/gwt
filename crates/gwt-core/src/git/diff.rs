@@ -3,10 +3,11 @@
 use super::{is_bare_repository, Repository};
 use crate::error::{GwtError, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 const DIFF_LINE_LIMIT: usize = 1000;
+const DEFAULT_BASE_BRANCH_CANDIDATES: [&str; 3] = ["main", "master", "develop"];
 
 fn find_any_worktree_path(repo_path: &Path) -> Option<PathBuf> {
     let repo = Repository::discover(repo_path).ok()?;
@@ -60,6 +61,147 @@ fn normalize_numstat_path(path: &str) -> String {
         Some((_old, new)) => new.trim().to_string(),
         None => path.to_string(),
     }
+}
+
+fn list_remote_names(repo_path: &Path) -> Result<Vec<String>> {
+    let output = crate::process::command("git")
+        .args(["remote"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| GwtError::GitOperationFailed {
+            operation: "remote".to_string(),
+            details: e.to_string(),
+        })?;
+
+    if !output.status.success() {
+        return Err(GwtError::GitOperationFailed {
+            operation: "remote".to_string(),
+            details: String::from_utf8_lossy(&output.stderr).to_string(),
+        });
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+fn ref_exists(repo_path: &Path, reference: &str) -> Result<bool> {
+    if reference.trim().is_empty() {
+        return Ok(false);
+    }
+
+    let output = crate::process::command("git")
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{}^{{commit}}", reference),
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| GwtError::GitOperationFailed {
+            operation: "rev-parse --verify --quiet".to_string(),
+            details: e.to_string(),
+        })?;
+
+    Ok(output.status.success())
+}
+
+fn split_known_remote_ref<'a>(
+    reference: &'a str,
+    remotes: &[String],
+) -> Option<(&'a str, &'a str)> {
+    let normalized = reference.strip_prefix("remotes/").unwrap_or(reference);
+    let (remote, branch) = normalized.split_once('/')?;
+    if remotes.iter().any(|name| name == remote) {
+        return Some((remote, branch));
+    }
+    None
+}
+
+fn resolve_compare_ref_with_remotes(
+    repo_path: &Path,
+    reference: &str,
+    remotes: &[String],
+) -> Result<String> {
+    let normalized = reference
+        .trim()
+        .strip_prefix("remotes/")
+        .unwrap_or(reference)
+        .trim();
+    if normalized.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut candidates = vec![normalized.to_string()];
+    if let Some((_remote, branch_name)) = split_known_remote_ref(normalized, remotes) {
+        candidates.push(branch_name.to_string());
+    }
+
+    for candidate in candidates {
+        if ref_exists(repo_path, &candidate)? {
+            return Ok(candidate);
+        }
+    }
+
+    Ok(normalized.to_string())
+}
+
+fn resolve_default_base_ref_with_remotes(
+    repo_path: &Path,
+    branch_ref: &str,
+    remotes: &[String],
+) -> Result<Option<String>> {
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some((remote, _branch)) = split_known_remote_ref(branch_ref.trim(), remotes) {
+        for name in DEFAULT_BASE_BRANCH_CANDIDATES {
+            candidates.push(format!("{remote}/{name}"));
+        }
+    }
+    candidates.extend(
+        DEFAULT_BASE_BRANCH_CANDIDATES
+            .iter()
+            .map(|name| name.to_string()),
+    );
+
+    let mut seen = HashSet::new();
+    for candidate in candidates {
+        if !seen.insert(candidate.clone()) {
+            continue;
+        }
+
+        let resolved = resolve_compare_ref_with_remotes(repo_path, &candidate, remotes)?;
+        if !resolved.is_empty() && ref_exists(repo_path, &resolved)? {
+            return Ok(Some(resolved));
+        }
+    }
+
+    Ok(None)
+}
+
+fn resolve_base_ref_with_remotes(
+    repo_path: &Path,
+    base_branch: &str,
+    branch_ref: &str,
+    remotes: &[String],
+) -> Result<String> {
+    let resolved = resolve_compare_ref_with_remotes(repo_path, base_branch, remotes)?;
+    if !resolved.is_empty() && ref_exists(repo_path, &resolved)? {
+        return Ok(resolved);
+    }
+
+    if DEFAULT_BASE_BRANCH_CANDIDATES.contains(&base_branch.trim()) {
+        if let Some(fallback) =
+            resolve_default_base_ref_with_remotes(repo_path, branch_ref, remotes)?
+        {
+            return Ok(fallback);
+        }
+    }
+
+    Ok(resolved)
 }
 
 /// Kind of file change in a diff
@@ -116,6 +258,7 @@ pub struct GitChangeSummary {
 
 /// Detect the base branch for comparison by checking upstream, falling back to "main"
 pub fn detect_base_branch(repo_path: &Path, branch: &str) -> Result<String> {
+    let remotes = list_remote_names(repo_path)?;
     let output = crate::process::command("git")
         .args([
             "rev-parse",
@@ -131,11 +274,14 @@ pub fn detect_base_branch(repo_path: &Path, branch: &str) -> Result<String> {
 
     if output.status.success() {
         let upstream = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        // Strip remote prefix (e.g., "origin/main" -> "main")
-        if let Some(pos) = upstream.find('/') {
-            return Ok(upstream[pos + 1..].to_string());
+        let resolved = resolve_compare_ref_with_remotes(repo_path, &upstream, &remotes)?;
+        if !resolved.is_empty() && ref_exists(repo_path, &resolved)? {
+            return Ok(resolved);
         }
-        return Ok(upstream);
+    }
+
+    if let Some(fallback) = resolve_default_base_ref_with_remotes(repo_path, branch, &remotes)? {
+        return Ok(fallback);
     }
 
     Ok("main".to_string())
@@ -143,21 +289,30 @@ pub fn detect_base_branch(repo_path: &Path, branch: &str) -> Result<String> {
 
 /// List candidate base branches that exist in the repository
 pub fn list_base_branch_candidates(repo_path: &Path) -> Result<Vec<String>> {
-    let candidates = ["main", "master", "develop"];
+    let remotes = list_remote_names(repo_path)?;
+    let mut seen = HashSet::new();
     let mut result = Vec::new();
 
-    for name in &candidates {
-        let output = crate::process::command("git")
-            .args(["rev-parse", "--verify", &format!("refs/heads/{}", name)])
-            .current_dir(repo_path)
-            .output()
-            .map_err(|e| GwtError::GitOperationFailed {
-                operation: "rev-parse --verify".to_string(),
-                details: e.to_string(),
-            })?;
+    for name in DEFAULT_BASE_BRANCH_CANDIDATES {
+        let resolved = resolve_compare_ref_with_remotes(repo_path, name, &remotes)?;
+        if !resolved.is_empty()
+            && ref_exists(repo_path, &resolved)?
+            && seen.insert(resolved.clone())
+        {
+            result.push(resolved);
+        }
+    }
 
-        if output.status.success() {
-            result.push(name.to_string());
+    for remote in &remotes {
+        for name in DEFAULT_BASE_BRANCH_CANDIDATES {
+            let candidate = format!("{remote}/{name}");
+            let resolved = resolve_compare_ref_with_remotes(repo_path, &candidate, &remotes)?;
+            if !resolved.is_empty()
+                && ref_exists(repo_path, &resolved)?
+                && seen.insert(resolved.clone())
+            {
+                result.push(resolved);
+            }
         }
     }
 
@@ -170,7 +325,11 @@ pub fn get_branch_diff_files(
     branch: &str,
     base_branch: &str,
 ) -> Result<Vec<FileChange>> {
-    let range = format!("{}...{}", base_branch, branch);
+    let remotes = list_remote_names(repo_path)?;
+    let resolved_branch = resolve_compare_ref_with_remotes(repo_path, branch, &remotes)?;
+    let resolved_base =
+        resolve_base_ref_with_remotes(repo_path, base_branch, &resolved_branch, &remotes)?;
+    let range = format!("{}...{}", resolved_base, resolved_branch);
 
     // Get numstat for additions/deletions and binary detection
     let numstat_output = crate::process::command("git")
@@ -273,7 +432,11 @@ pub fn get_file_diff(
     base_branch: &str,
     file_path: &str,
 ) -> Result<FileDiff> {
-    let range = format!("{}...{}", base_branch, branch);
+    let remotes = list_remote_names(repo_path)?;
+    let resolved_branch = resolve_compare_ref_with_remotes(repo_path, branch, &remotes)?;
+    let resolved_base =
+        resolve_base_ref_with_remotes(repo_path, base_branch, &resolved_branch, &remotes)?;
+    let range = format!("{}...{}", resolved_base, resolved_branch);
     let output = crate::process::command("git")
         .args(["diff", &range, "--", file_path])
         .current_dir(repo_path)
@@ -396,7 +559,11 @@ pub fn get_branch_commits(
     offset: usize,
     limit: usize,
 ) -> Result<Vec<GitViewCommit>> {
-    let range = format!("{}..{}", base_branch, branch);
+    let remotes = list_remote_names(repo_path)?;
+    let resolved_branch = resolve_compare_ref_with_remotes(repo_path, branch, &remotes)?;
+    let resolved_base =
+        resolve_base_ref_with_remotes(repo_path, base_branch, &resolved_branch, &remotes)?;
+    let range = format!("{}..{}", resolved_base, resolved_branch);
     let output = crate::process::command("git")
         .args([
             "log",
@@ -446,8 +613,12 @@ pub fn get_git_change_summary(
     branch: &str,
     base_branch: &str,
 ) -> Result<GitChangeSummary> {
-    let diff_range = format!("{}...{}", base_branch, branch);
-    let commit_range = format!("{}..{}", base_branch, branch);
+    let remotes = list_remote_names(repo_path)?;
+    let resolved_branch = resolve_compare_ref_with_remotes(repo_path, branch, &remotes)?;
+    let resolved_base =
+        resolve_base_ref_with_remotes(repo_path, base_branch, &resolved_branch, &remotes)?;
+    let diff_range = format!("{}...{}", resolved_base, resolved_branch);
+    let commit_range = format!("{}..{}", resolved_base, resolved_branch);
 
     // File count via --name-only
     let file_output = crate::process::command("git")
@@ -525,7 +696,7 @@ pub fn get_git_change_summary(
         file_count,
         commit_count,
         stash_count,
-        base_branch: base_branch.to_string(),
+        base_branch: resolved_base,
     })
 }
 
@@ -888,7 +1059,8 @@ mod tests {
         run_git(temp.path(), &["checkout", "-b", "feature-noup"]);
 
         let base = detect_base_branch(temp.path(), "feature-noup").unwrap();
-        assert_eq!(base, "main");
+        assert!(["main", "master", "develop"].contains(&base.as_str()));
+        assert!(ref_exists(temp.path(), &base).unwrap());
     }
 
     // T-DIFF-042: Base branch candidates
@@ -964,5 +1136,53 @@ mod tests {
 
         let summary = get_git_change_summary(&bare, &base, &base).unwrap();
         assert_eq!(summary.stash_count, 1);
+    }
+
+    // T-DIFF-052: Resolve remote-like branch refs and missing main fallback in bare repos
+    #[test]
+    fn test_remote_like_branch_and_missing_main_fallback() {
+        let temp = TempDir::new().unwrap();
+
+        let src = temp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        run_git(&src, &["init"]);
+        run_git(&src, &["config", "user.email", "test@test.com"]);
+        run_git(&src, &["config", "user.name", "Test User"]);
+
+        std::fs::write(src.join("README.md"), "# Test\n").unwrap();
+        run_git(&src, &["add", "."]);
+        run_git(&src, &["commit", "-m", "initial"]);
+
+        let current = get_current_branch_name(&src);
+        if current != "master" {
+            run_git(&src, &["branch", "-m", "master"]);
+        }
+
+        run_git(&src, &["checkout", "-b", "develop"]);
+        std::fs::write(src.join("develop.txt"), "develop changes\n").unwrap();
+        run_git(&src, &["add", "develop.txt"]);
+        run_git(&src, &["commit", "-m", "develop changes"]);
+        run_git(&src, &["checkout", "master"]);
+
+        let bare = temp.path().join("repo.git");
+        let status = crate::process::command("git")
+            .args(["clone", "--bare"])
+            .arg(&src)
+            .arg(&bare)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git clone --bare failed");
+
+        // Bare clone does not guarantee refs/remotes/origin/*, but local branches exist.
+        assert!(!ref_exists(&bare, "main").unwrap());
+        assert!(!ref_exists(&bare, "origin/develop").unwrap());
+        assert!(ref_exists(&bare, "develop").unwrap());
+        assert!(ref_exists(&bare, "master").unwrap());
+
+        let files = get_branch_diff_files(&bare, "origin/develop", "main").unwrap();
+        assert!(files.iter().any(|f| f.path == "develop.txt"));
+
+        let summary = get_git_change_summary(&bare, "origin/develop", "main").unwrap();
+        assert_eq!(summary.base_branch, "master");
     }
 }

@@ -834,6 +834,63 @@ describe("Sidebar", () => {
     });
   });
 
+  it("cycles branch sort mode when pressing the sort button", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches")
+        return [
+          { ...branchFixture, name: "feature/zulu", commit_timestamp: 200 },
+          { ...mainBranchFixture },
+          { ...developBranchFixture },
+          { ...branchFixture, name: "feature/beta", commit_timestamp: 500 },
+          { ...branchFixture, name: "feature/alpha", commit_timestamp: 300 },
+        ];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await rendered.findByText(mainBranchFixture.name);
+    expect(getRenderedBranchNames(rendered)).toEqual([
+      "main",
+      "develop",
+      "feature/alpha",
+      "feature/beta",
+      "feature/zulu",
+    ]);
+
+    const sortButton = rendered.getByRole("button", { name: "Sort mode" });
+    const sortModeText = sortButton.querySelector(".sort-mode-text");
+    expect(sortModeText?.textContent).toBe("Name");
+
+    await fireEvent.click(sortButton);
+    await waitFor(() => {
+      expect(sortModeText?.textContent).toBe("Updated");
+      expect(getRenderedBranchNames(rendered)).toEqual([
+        "main",
+        "develop",
+        "feature/beta",
+        "feature/alpha",
+        "feature/zulu",
+      ]);
+    });
+
+    await fireEvent.click(sortButton);
+    await waitFor(() => {
+      expect(sortModeText?.textContent).toBe("Name");
+      expect(getRenderedBranchNames(rendered)).toEqual([
+        "main",
+        "develop",
+        "feature/alpha",
+        "feature/beta",
+        "feature/zulu",
+      ]);
+    });
+  });
+
   it("puts branches with missing commit timestamp at the end in updated mode", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "list_worktree_branches")
@@ -917,7 +974,7 @@ describe("Sidebar", () => {
       return [];
     });
 
-    let selectedBranch = { ...mainBranchFixture, is_current: true };
+    let selectedBranch = mainBranchFixture;
     const onBranchSelect = vi.fn((next) => {
       selectedBranch = next;
     });
