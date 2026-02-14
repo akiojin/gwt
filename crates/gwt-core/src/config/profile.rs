@@ -27,6 +27,9 @@ pub struct Profile {
     /// AI settings (optional)
     #[serde(default)]
     pub ai: Option<AISettings>,
+    /// AI settings enabled flag (optional)
+    #[serde(default)]
+    pub ai_enabled: Option<bool>,
 }
 
 impl Profile {
@@ -38,6 +41,7 @@ impl Profile {
             disabled_env: Vec::new(),
             description: String::new(),
             ai: None,
+            ai_enabled: None,
         }
     }
 
@@ -56,11 +60,17 @@ impl Profile {
 
     /// Resolve AI settings with environment fallbacks
     pub fn resolved_ai_settings(&self) -> Option<ResolvedAISettings> {
+        if self.ai_enabled == Some(false) {
+            return None;
+        }
         self.ai.as_ref().map(|settings| settings.resolved())
     }
 
     /// Check if AI settings are enabled for this profile
     pub fn ai_enabled(&self) -> bool {
+        if self.ai_enabled == Some(false) {
+            return false;
+        }
         self.ai
             .as_ref()
             .map(|settings| settings.is_enabled())
@@ -347,9 +357,18 @@ impl ProfilesConfig {
     ///
     /// Rules:
     /// - If the active profile has `ai` configured (present), it always wins (even when disabled).
+    ///   If `ai_enabled=false`, AI is treated as disabled with no fallback.
     /// - Otherwise fall back to `default_ai`.
     pub fn resolve_active_ai_settings(&self) -> ActiveAISettingsResolution {
         if let Some(profile) = self.active_profile() {
+            if profile.ai_enabled == Some(false) {
+                return ActiveAISettingsResolution {
+                    source: ActiveAISettingsSource::ActiveProfile,
+                    ai_enabled: false,
+                    summary_enabled: false,
+                    resolved: None,
+                };
+            }
             if let Some(settings) = profile.ai.as_ref() {
                 let ai_enabled = settings.is_enabled();
                 let summary_enabled = settings.is_summary_enabled();

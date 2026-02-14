@@ -407,6 +407,7 @@
     const nextProfile: Profile = enabled
       ? {
           ...p,
+          ai_enabled: true,
           ai: p.ai ?? {
             endpoint: "https://api.openai.com/v1",
             api_key: "",
@@ -414,11 +415,17 @@
             summary_enabled: true,
           },
         }
-      : { ...p, ai: null };
+      : { ...p, ai_enabled: false };
     profiles = {
       ...profiles,
       profiles: { ...(profiles.profiles ?? {}), [selectedProfileKey]: nextProfile },
     };
+  }
+
+  function isAiEnabled(profile: Profile | null): boolean {
+    if (!profile) return false;
+    if (profile.ai_enabled === false) return false;
+    return !!profile.ai;
   }
 
   function updateAiField(field: "endpoint" | "api_key" | "model" | "summary_enabled", value: string | boolean) {
@@ -786,13 +793,13 @@
                 <input
                   id="ai-enabled"
                   type="checkbox"
-                  checked={!!currentProfile.ai}
+                  checked={isAiEnabled(currentProfile)}
                   onchange={(e) => setAiEnabled((e.target as HTMLInputElement).checked)}
                 />
                 <label for="ai-enabled" class="ai-enabled-label">Enable AI settings</label>
               </div>
 
-              {#if currentProfile.ai}
+              {#if isAiEnabled(currentProfile)}
                 <div class="ai-grid">
                   <div class="ai-field">
                     <span class="ai-label">Endpoint</span>
