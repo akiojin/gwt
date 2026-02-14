@@ -2,10 +2,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, waitFor, fireEvent, cleanup } from "@testing-library/svelte";
 
 const invokeMock = vi.fn();
-const listenMock = vi.fn(async () => () => {});
+const listenMock = vi.fn();
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
+  default: {
+    invoke: invokeMock,
+  },
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -72,9 +75,14 @@ const quickStartDockerEntry = {
 describe("WorktreeSummaryPanel", () => {
   beforeEach(() => {
     cleanup();
-    listenMock.mockClear();
+    listenMock.mockReset();
+    listenMock.mockResolvedValue(() => {});
     invokeMock.mockReset();
     invokeMock.mockResolvedValue([]);
+    Object.defineProperty(globalThis, "__TAURI_INTERNALS__", {
+      value: { invoke: invokeMock },
+      configurable: true,
+    });
   });
 
   it("renders branch header and tab UI when branch is selected", async () => {
@@ -232,7 +240,7 @@ describe("WorktreeSummaryPanel", () => {
           number: 42,
           title: "CI Test PR",
           state: "OPEN",
-          url: "https://github.com/test/pr/42",
+          url: "https://github.com/test/repo/pull/42",
           mergeable: "MERGEABLE",
           author: "alice",
           baseBranch: "main",
@@ -269,7 +277,6 @@ describe("WorktreeSummaryPanel", () => {
       projectPath: "/tmp/project",
       selectedBranch: branchFixture,
       prNumber: 42,
-      onOpenCiLog,
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
@@ -282,8 +289,15 @@ describe("WorktreeSummaryPanel", () => {
       expect(rendered.getByText("Lint")).toBeTruthy();
     });
 
-    await fireEvent.click(rendered.getByText("CI Build").closest("button") as HTMLButtonElement);
-    expect(onOpenCiLog).toHaveBeenCalledWith(100);
+    await fireEvent.click(
+      rendered.getByText("Success").closest("button") as HTMLButtonElement
+    );
+    expect(windowOpen).toHaveBeenCalledWith(
+      "https://github.com/test/repo/actions/runs/100",
+      "_blank",
+      "noopener"
+    );
+    windowOpen.mockRestore();
   });
 
   it("displays HostOS runtime for quick start entry", async () => {

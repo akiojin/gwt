@@ -8,6 +8,7 @@
     SessionSummaryResult,
     PrStatusInfo,
     GhCliStatus,
+    WorkflowRunInfo,
   } from "../types";
   import GitSection from "./GitSection.svelte";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
@@ -50,6 +51,7 @@
   let prDetailBranch: string | null = $state(null);
   let prDetailPrNumber: number | null = $state(null);
   let prDetailRequestToken = 0;
+  let lastProjectPath: string | null = $state(null);
 
   let sessionSummaryLoading: boolean = $state(false);
   let sessionSummaryGenerating: boolean = $state(false);
@@ -428,6 +430,13 @@
     prDetailPrNumber = null;
   }
 
+  $effect(() => {
+    const nextProjectPath = projectPath ?? "";
+    if (nextProjectPath === lastProjectPath) return;
+    lastProjectPath = nextProjectPath;
+    clearPrDetailState(currentBranchName());
+  });
+
   async function loadPrDetail(branch: string, prNum: number) {
     const requestToken = ++prDetailRequestToken;
     prDetailLoading = true;
@@ -751,12 +760,15 @@
               {#each prDetail.checkSuites as run}
                 <button
                   class="workflow-run-item"
-                  onclick={() => onOpenCiLog?.(run.runId)}
+                  type="button"
+                  onclick={() => openWorkflowRun(run)}
                 >
                   <span class="workflow-status {workflowStatusClass(run)}"
                     >{workflowStatusIcon(run)}</span
                   >
-                  <span class="workflow-name">{run.workflowName}</span>
+                  <span class="workflow-status-text">
+                    {workflowStatusText(run)}
+                  </span>
                 </button>
               {/each}
             </div>
@@ -1321,7 +1333,7 @@
     color: var(--text-muted);
   }
 
-  .workflow-name {
+  .workflow-status-text {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

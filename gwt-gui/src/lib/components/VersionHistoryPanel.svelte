@@ -219,18 +219,16 @@
 
             {#if res?.summary_markdown}
               <h3>Summary</h3>
-              <MarkdownRenderer
-                className="vh-markdown"
-                text={res.summary_markdown}
-              />
+              <div class="vh-markdown">
+                <MarkdownRenderer text={res.summary_markdown} />
+              </div>
             {/if}
 
             {#if res?.changelog_markdown}
               <h3>Changelog</h3>
-              <MarkdownRenderer
-                className="vh-markdown"
-                text={res.changelog_markdown}
-              />
+              <div class="vh-markdown">
+                <MarkdownRenderer text={res.changelog_markdown} />
+              </div>
             {/if}
           </div>
         {/if}

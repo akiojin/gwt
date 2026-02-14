@@ -56,7 +56,7 @@
 </script>
 
 <div class="pr-status-section">
-  {#if loading}
+{#if loading}
     <div class="pr-status-placeholder">Loading...</div>
   {:else if error}
     <div class="pr-status-error">{error}</div>
@@ -86,7 +86,7 @@
           </span>
         </span>
       </div>
-      {#if prDetail.labels.length > 0}
+      {#if (prDetail.labels?.length ?? 0) > 0}
         <div class="pr-meta-item">
           <span class="pr-meta-label">Labels</span>
           <span class="pr-meta-value">
@@ -96,7 +96,7 @@
           </span>
         </div>
       {/if}
-      {#if prDetail.assignees.length > 0}
+      {#if (prDetail.assignees?.length ?? 0) > 0}
         <div class="pr-meta-item">
           <span class="pr-meta-label">Assignees</span>
           <span class="pr-meta-value">{prDetail.assignees.join(", ")}</span>
@@ -108,7 +108,7 @@
           <span class="pr-meta-value">{prDetail.milestone}</span>
         </div>
       {/if}
-      {#if prDetail.linkedIssues.length > 0}
+      {#if (prDetail.linkedIssues?.length ?? 0) > 0}
         <div class="pr-meta-item">
           <span class="pr-meta-label">Issues</span>
           <span class="pr-meta-value">
@@ -118,7 +118,7 @@
       {/if}
     </div>
 
-    {#if prDetail.reviews.length > 0}
+    {#if (prDetail.reviews?.length ?? 0) > 0}
       <div class="reviews-section">
         <h4>Reviews</h4>
         {#each prDetail.reviews as review}
@@ -132,7 +132,7 @@
       </div>
     {/if}
 
-    {#if prDetail.reviewComments.length > 0}
+    {#if (prDetail.reviewComments?.length ?? 0) > 0}
       <div class="comments-section">
         <h4>Comments</h4>
         {#each prDetail.reviewComments as comment}
