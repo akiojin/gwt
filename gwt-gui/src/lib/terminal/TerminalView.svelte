@@ -126,6 +126,11 @@
     }
   }
 
+  function isTrackpadLikeWheel(event: WheelEvent): boolean {
+    if (event.deltaMode !== 0) return false;
+    return !Number.isInteger(event.deltaY) || Math.abs(event.deltaY) <= 60;
+  }
+
   function scrollViewportByWheel(rootEl: HTMLElement, event: WheelEvent): boolean {
     const viewport = rootEl.querySelector<HTMLElement>(".xterm-viewport");
     if (!viewport) return false;
@@ -212,7 +217,9 @@
 
       const wasFocused = isTerminalFocused(rootEl);
       focusTerminalIfNeeded(rootEl, true);
-      if (wasFocused) return;
+
+      const shouldFallback = !wasFocused || isTrackpadLikeWheel(event);
+      if (!shouldFallback) return;
 
       const didScroll = scrollViewportByWheel(rootEl, event);
       if (!didScroll) return;

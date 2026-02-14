@@ -300,7 +300,7 @@ describe("TerminalView", () => {
     expect(stopImmediatePropagationSpy).toHaveBeenCalled();
   });
 
-  it("does not fallback when terminal already has focus", async () => {
+  it("does not fallback when terminal already has focus with mouse-like wheel", async () => {
     const { container } = await renderTerminalView({
       paneId: "pane-3",
       active: true,
@@ -329,14 +329,61 @@ describe("TerminalView", () => {
 
     rootEl!.setAttribute("tabindex", "0");
     rootEl!.focus();
-    const event = new WheelEvent("wheel", { deltaY: 20, bubbles: true });
+    const event = new WheelEvent("wheel", { deltaY: 120, bubbles: true });
     const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+    const stopImmediatePropagationSpy = vi.spyOn(event, "stopImmediatePropagation");
 
     rootEl!.dispatchEvent(event);
 
     expect(preventDefaultSpy).not.toHaveBeenCalled();
+    expect(stopImmediatePropagationSpy).not.toHaveBeenCalled();
     expect(viewport.scrollTop).toBe(5);
     expect(event.defaultPrevented).toBe(false);
+    expect(term.focus).not.toHaveBeenCalled();
+  });
+
+  it("falls back to terminal scroll when focused terminal gets trackpad-like wheel", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-3-2",
+      active: true,
+    });
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement | null;
+    expect(rootEl).not.toBeNull();
+
+    const viewport = document.createElement("div");
+    viewport.className = "xterm-viewport";
+    viewport.style.overflow = "auto";
+    Object.defineProperty(viewport, "clientHeight", {
+      value: 100,
+      configurable: true,
+    });
+    Object.defineProperty(viewport, "scrollHeight", {
+      value: 200,
+      configurable: true,
+    });
+    viewport.scrollTop = 5;
+    rootEl!.appendChild(viewport);
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+    const term = terminalInstances[0];
+
+    rootEl!.setAttribute("tabindex", "0");
+    rootEl!.focus();
+    const event = new WheelEvent("wheel", {
+      deltaY: 2.5,
+      bubbles: true,
+      deltaMode: 0,
+    });
+    const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+    const stopImmediatePropagationSpy = vi.spyOn(event, "stopImmediatePropagation");
+
+    rootEl!.dispatchEvent(event);
+
+    expect(preventDefaultSpy).toHaveBeenCalled();
+    expect(stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(viewport.scrollTop).toBeGreaterThan(5);
     expect(term.focus).not.toHaveBeenCalled();
   });
 
