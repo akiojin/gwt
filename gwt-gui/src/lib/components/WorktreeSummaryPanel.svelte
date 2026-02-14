@@ -20,6 +20,7 @@
     onQuickLaunch,
     onOpenCiLog,
     prNumber = null,
+    ghCliStatus = null,
   }: {
     projectPath: string;
     selectedBranch?: BranchInfo | null;

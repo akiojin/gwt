@@ -16,9 +16,9 @@ function countInvokeCalls(name: string): number {
   return invokeMock.mock.calls.filter((c) => c[0] === name).length;
 }
 
-function getRenderedBranchNames(container: ReturnType<typeof render>): string[] {
+function getRenderedBranchNames(rendered: { container: HTMLElement }): string[] {
   return Array.from(
-    container.container.querySelectorAll("button.branch-item .branch-name")
+    rendered.container.querySelectorAll("button.branch-item .branch-name")
   ).map((node) => node.textContent?.trim() ?? "");
 }
 
