@@ -14,6 +14,7 @@ pub mod sessions;
 pub mod settings;
 pub mod terminal;
 pub mod version_history;
+pub mod voice;
 pub mod window_tabs;
 
 #[cfg(test)]

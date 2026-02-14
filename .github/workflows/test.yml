@@ -19,6 +19,13 @@ jobs:
       - name: Run tests
         run: cargo test -p gwt-core -p gwt-tauri --all-features -- --test-threads=1
         timeout-minutes: 10
+      - name: Voice accuracy regression (optional local dataset)
+        run: |
+          if [ -f tests/voice_eval/manifest.json ]; then
+            scripts/voice-eval.sh --max-wer-delta 0.03 --max-cer-delta 0.03
+          else
+            echo "Skipping voice accuracy regression: tests/voice_eval/manifest.json not found."
+          fi
 
   build:
     name: Build

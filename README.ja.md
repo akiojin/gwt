@@ -83,6 +83,27 @@ cd ..
 cargo tauri build
 ```
 
+### 音声認識の精度評価
+
+ローカル音声データセットで WER/CER を計測できます。
+
+```bash
+cp tests/voice_eval/manifest.template.json tests/voice_eval/manifest.json
+scripts/voice-eval.sh
+```
+
+詳細は `tests/voice_eval/README.md` を参照してください。
+バージョン管理するベンチマークスナップショットは `docs/voice-eval-benchmarks.md` を参照してください。
+
+### 音声入力ランタイム（Qwen3-ASR）
+
+音声入力はローカル Python ランタイム経由で Qwen3-ASR を実行します。
+
+- 必須: Python 3.11 以上（`PATH` 上、または `GWT_VOICE_PYTHON` で指定）
+- 手動導入不要: `qwen_asr` パッケージ
+- 初回利用時に gwt が `~/.gwt/runtime/voice-venv` を自動作成し、必要依存を自動インストール
+- その後、選択品質に対応する Qwen モデルを Hugging Face キャッシュへ必要時に取得
+
 ## AI 設定
 
 Agent Mode やセッション要約を使うには AI 設定が必要です。

@@ -1,6 +1,6 @@
 # 仕様一覧
 
-**最終更新**: 2026-02-13
+**最終更新**: 2026-02-14
 
 - 現行の仕様・要件: `specs/SPEC-XXXXXXXX/spec.md`
 - 以前までのTUIの仕様・要件（archive）: `specs/archive/SPEC-XXXXXXXX/spec.md`
@@ -17,7 +17,7 @@
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
-| [SPEC-9f3c2a11](SPEC-9f3c2a11/spec.md) | 機能仕様: Voice Input Mode（GUI 全入力対応） | 2026-02-13 |
+| [SPEC-9f3c2a11](SPEC-9f3c2a11/spec.md) | 機能仕様: Voice Input Mode（GUI 全入力 + Qwen3-ASR） | 2026-02-13 |
 | [SPEC-f466bc68](SPEC-f466bc68/spec.md) | 機能仕様: プロジェクトを開いたときに前回のエージェントタブを復元する | 2026-02-13 |
 | [SPEC-3a1b7c2d](SPEC-3a1b7c2d/spec.md) | 機能仕様: GUI Session Summary のスクロールバック要約（実行中対応） | 2026-02-12 |
 | [SPEC-133bf64f](SPEC-133bf64f/spec.md) | 機能仕様: Project Version History（タグ単位のAI要約 + 簡易CHANGELOG） | 2026-02-10 |

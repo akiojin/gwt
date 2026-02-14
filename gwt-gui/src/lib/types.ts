@@ -115,8 +115,11 @@ export interface SettingsData {
 
 export interface VoiceInputSettings {
   enabled: boolean;
+  engine: "qwen3-asr" | (string & {});
   hotkey: string;
+  ptt_hotkey: string;
   language: "auto" | "ja" | "en" | (string & {});
+  quality: "fast" | "balanced" | "accurate" | (string & {});
   model: string;
 }
 

@@ -55,9 +55,12 @@
 
   const DEFAULT_VOICE_INPUT_SETTINGS: VoiceInputSettings = {
     enabled: false,
+    engine: "qwen3-asr",
     hotkey: "Mod+Shift+M",
+    ptt_hotkey: "Mod+Shift+Space",
     language: "auto",
-    model: "base",
+    quality: "balanced",
+    model: "Qwen/Qwen3-ASR-1.7B",
   };
 
   function clampSidebarWidth(widthPx: number): number {
@@ -157,7 +160,10 @@
   let osEnvReady = $state(false);
   let voiceInputSettings: VoiceInputSettings = $state(DEFAULT_VOICE_INPUT_SETTINGS);
   let voiceInputListening = $state(false);
+  let voiceInputPreparing = $state(false);
   let voiceInputSupported = $state(true);
+  let voiceInputAvailable = $state(false);
+  let voiceInputAvailabilityReason: string | null = $state(null);
   let voiceInputError: string | null = $state(null);
   let voiceController: VoiceInputController | null = null;
 
@@ -315,18 +321,34 @@
   function normalizeVoiceInputSettings(
     value: Partial<VoiceInputSettings> | null | undefined
   ): VoiceInputSettings {
+    const engine = (value?.engine ?? "").trim().toLowerCase();
     const hotkey = (value?.hotkey ?? "").trim();
+    const pttHotkey = (value?.ptt_hotkey ?? "").trim();
     const language = (value?.language ?? "").trim().toLowerCase();
+    const quality = (value?.quality ?? "").trim().toLowerCase();
     const model = (value?.model ?? "").trim();
+    const normalizedQuality =
+      quality === "fast" || quality === "balanced" || quality === "accurate"
+        ? (quality as VoiceInputSettings["quality"])
+        : DEFAULT_VOICE_INPUT_SETTINGS.quality;
+    const defaultModel =
+      normalizedQuality === "fast" ? "Qwen/Qwen3-ASR-0.6B" : "Qwen/Qwen3-ASR-1.7B";
 
     return {
       enabled: !!value?.enabled,
+      engine:
+        engine === "qwen3-asr" || engine === "qwen" || engine === "whisper"
+          ? "qwen3-asr"
+          : DEFAULT_VOICE_INPUT_SETTINGS.engine,
       hotkey: hotkey.length > 0 ? hotkey : DEFAULT_VOICE_INPUT_SETTINGS.hotkey,
+      ptt_hotkey:
+        pttHotkey.length > 0 ? pttHotkey : DEFAULT_VOICE_INPUT_SETTINGS.ptt_hotkey,
       language:
         language === "ja" || language === "en" || language === "auto"
           ? (language as VoiceInputSettings["language"])
           : DEFAULT_VOICE_INPUT_SETTINGS.language,
-      model: model.length > 0 ? model : DEFAULT_VOICE_INPUT_SETTINGS.model,
+      quality: normalizedQuality,
+      model: model.length > 0 ? model : defaultModel,
     };
   }
 
@@ -979,7 +1001,10 @@
       getFallbackTerminalPaneId: readVoiceFallbackTerminalPaneId,
       onStateChange: (state: VoiceControllerState) => {
         voiceInputListening = state.listening;
+        voiceInputPreparing = state.preparing;
         voiceInputSupported = state.supported;
+        voiceInputAvailable = state.available;
+        voiceInputAvailabilityReason = state.availabilityReason;
         voiceInputError = state.error;
       },
     });
@@ -992,8 +1017,11 @@
         voiceController = null;
       }
       voiceInputListening = false;
+      voiceInputPreparing = false;
       voiceInputError = null;
       voiceInputSupported = true;
+      voiceInputAvailable = false;
+      voiceInputAvailabilityReason = null;
     };
   });
 
@@ -1077,7 +1105,10 @@
       {osEnvReady}
       voiceInputEnabled={voiceInputSettings.enabled}
       voiceInputListening={voiceInputListening}
+      voiceInputPreparing={voiceInputPreparing}
       voiceInputSupported={voiceInputSupported}
+      voiceInputAvailable={voiceInputAvailable}
+      voiceInputAvailabilityReason={voiceInputAvailabilityReason}
       voiceInputError={voiceInputError}
     />
   </div>
