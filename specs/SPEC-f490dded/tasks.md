@@ -76,3 +76,11 @@ US1（メニュー起動）─┬─→ US2（ショートカット起動）
 - [x] T034 [P] [共通] `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json` でフロントエンドの型チェックを通す
 - [x] T035 [P] [共通] `cargo test` で全バックエンドテストを通す
 - [x] T036 [P] [共通] `cd gwt-gui && npx vitest run` で全フロントエンドテストを通す
+
+## Phase 10: US8 タブ並び替え D&D 安定化 (P0)
+
+- [x] T037 [US8] `MainArea.test.ts` に `window` へ dispatch された `pointermove` でも `onTabReorder` が発火する回帰テストを追加し、現状実装で RED を確認する `gwt-gui/src/lib/components/MainArea.test.ts`
+- [x] T038 [US8] `MainArea.svelte` の pointer D&D 実装を更新し、ドラッグ中は `window` の `pointermove/pointerup/pointercancel` を購読してタブバー外移動でも並び替えを継続可能にする `gwt-gui/src/lib/components/MainArea.svelte`
+- [x] T039 [US8] close ボタン押下時のドラッグ開始を抑止し、`draggable` を無効化して pointer ベース挙動を主経路に切り替える `gwt-gui/src/lib/components/MainArea.svelte`
+- [x] T040 [US8] `MainArea.test.ts` と `appTabs.test.ts` を実行し、D&D挙動と並び替え純関数の回帰がないことを確認する `gwt-gui/src/lib/components/MainArea.test.ts` `gwt-gui/src/lib/appTabs.test.ts`
+- [x] T041 [US8] D&D不具合修正の TDD 記録（RED/GREEN/Refactor）を `tdd.md` に追加する `specs/SPEC-f490dded/tdd.md`
