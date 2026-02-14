@@ -124,6 +124,26 @@
     return null;
   }
 
+  function runtimeLabel(entry: ToolSessionEntry): string | null {
+    if (entry.docker_force_host === true) {
+      return "HostOS";
+    }
+
+    const hasDockerService = (entry.docker_service ?? "").trim().length > 0;
+    if (entry.docker_recreate !== undefined) return "Docker";
+    if (entry.docker_build !== undefined) return "Docker";
+    if (entry.docker_keep !== undefined) return "Docker";
+    if (hasDockerService) return "Docker";
+    if (entry.docker_force_host === false) return "Docker";
+
+    return null;
+  }
+
+  function runtimeService(entry: ToolSessionEntry): string | null {
+    const service = (entry.docker_service ?? "").trim();
+    return service.length > 0 ? service : null;
+  }
+
   function quickStartEntryKey(entry: ToolSessionEntry): string {
     const session = entry.session_id?.trim();
     if (session) return session;
@@ -333,14 +353,23 @@
         projectPath,
         prNumber: prNum,
       });
-      if (requestToken !== prDetailRequestToken || prDetailBranch !== branch) return;
-      prDetail = result;
+      const isCurrent =
+        requestToken === prDetailRequestToken && prDetailBranch === branch;
+      if (isCurrent) {
+        prDetail = result;
+      }
     } catch (err) {
-      if (requestToken !== prDetailRequestToken || prDetailBranch !== branch) return;
-      prDetailError = typeof err === "string" ? err : String(err);
+      const isCurrent =
+        requestToken === prDetailRequestToken && prDetailBranch === branch;
+      if (isCurrent) {
+        prDetailError = toErrorMessage(err);
+      }
     } finally {
-      if (requestToken !== prDetailRequestToken || prDetailBranch !== branch) return;
-      prDetailLoading = false;
+      const isCurrent =
+        requestToken === prDetailRequestToken && prDetailBranch === branch;
+      if (isCurrent) {
+        prDetailLoading = false;
+      }
     }
   }
 
@@ -501,6 +530,12 @@
                       </span>
                     </div>
                     <div class="quick-meta">
+                      {#if runtimeLabel(entry)}
+                        <span class="quick-pill">runtime: {runtimeLabel(entry)}</span>
+                      {/if}
+                      {#if runtimeService(entry)}
+                        <span class="quick-pill">service: {runtimeService(entry)}</span>
+                      {/if}
                       {#if displayModelLabel(entry) !== null}
                         <span class="quick-pill">model: {displayModelLabel(entry)}</span>
                       {/if}

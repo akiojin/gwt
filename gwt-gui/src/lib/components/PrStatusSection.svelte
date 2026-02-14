@@ -98,13 +98,13 @@
       {/if}
       {#if prDetail.assignees.length > 0}
         <div class="pr-meta-item">
-          <span class="pr-meta-label">Assign</span>
+          <span class="pr-meta-label">Assignees</span>
           <span class="pr-meta-value">{prDetail.assignees.join(", ")}</span>
         </div>
       {/if}
       {#if prDetail.milestone}
         <div class="pr-meta-item">
-          <span class="pr-meta-label">Mile</span>
+          <span class="pr-meta-label">Milestone</span>
           <span class="pr-meta-value">{prDetail.milestone}</span>
         </div>
       {/if}
@@ -201,7 +201,7 @@
   .pr-meta-label {
     font-weight: 600;
     color: var(--text-muted);
-    min-width: 70px;
+    min-width: 88px;
     font-size: var(--ui-font-xs);
     text-transform: uppercase;
   }

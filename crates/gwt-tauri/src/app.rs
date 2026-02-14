@@ -4,7 +4,7 @@ use crate::state::AppState;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use tauri::Manager;
-use tauri::{Emitter, WebviewWindowBuilder};
+use tauri::{Emitter, EventTarget, WebviewWindowBuilder};
 use tracing::{info, warn};
 
 #[cfg(not(test))]
@@ -493,6 +493,8 @@ pub fn build_app(
             crate::commands::pullrequest::fetch_pr_status,
             crate::commands::pullrequest::fetch_pr_detail,
             crate::commands::pullrequest::fetch_ci_log,
+            crate::commands::system::get_system_info,
+            crate::commands::system::get_stats,
         ])
 }
 
@@ -519,7 +521,8 @@ fn emit_menu_action(app: &tauri::AppHandle<tauri::Wry>, action: &str) {
         return;
     };
 
-    let _ = window.emit(
+    let _ = window.emit_to(
+        EventTarget::webview_window(window.label()),
         crate::menu::MENU_ACTION_EVENT,
         crate::menu::MenuActionPayload {
             action: action.to_string(),

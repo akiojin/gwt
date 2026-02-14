@@ -281,8 +281,10 @@ fn parse_reviews(node: &serde_json::Value) -> Vec<ReviewInfo> {
 
 /// Build a detailed GraphQL query for a single PR (includes reviews, review comments, file changes).
 pub fn build_pr_detail_query(owner: &str, repo: &str, pr_number: u64) -> String {
+    let owner = graphql_string_literal(owner);
+    let repo = graphql_string_literal(repo);
     format!(
-        r#"{{ repository(owner: "{owner}", name: "{repo}") {{
+        r#"{{ repository(owner: {owner}, name: {repo}) {{
     pullRequest(number: {pr_number}) {{
       number
       title
@@ -328,6 +330,7 @@ pub fn build_pr_detail_query(owner: &str, repo: &str, pr_number: u64) -> String 
               body
               path
               line
+              diffHunk
               createdAt
             }}
           }}
@@ -404,6 +407,12 @@ fn parse_review_comments(node: &serde_json::Value) -> Vec<ReviewComment> {
                                         .and_then(|p| p.as_str())
                                         .map(String::from);
                                     let line = comment.get("line").and_then(|l| l.as_u64());
+                                    let code_snippet = comment
+                                        .get("diffHunk")
+                                        .and_then(|d| d.as_str())
+                                        .map(str::trim)
+                                        .filter(|s| !s.is_empty())
+                                        .map(String::from);
                                     let created_at = comment
                                         .get("createdAt")
                                         .and_then(|c| c.as_str())
@@ -414,7 +423,7 @@ fn parse_review_comments(node: &serde_json::Value) -> Vec<ReviewComment> {
                                         body,
                                         file_path,
                                         line,
-                                        code_snippet: None,
+                                        code_snippet,
                                         created_at,
                                     })
                                 })
@@ -770,6 +779,12 @@ mod tests {
         assert!(query.contains("reviews"));
     }
 
+    #[test]
+    fn test_build_pr_detail_query_escapes_owner_repo() {
+        let query = build_pr_detail_query("owner\"x", "repo\\y", 42);
+        assert!(query.contains("repository(owner: \"owner\\\"x\", name: \"repo\\\\y\")"));
+    }
+
     // ==========================================================
     // T006: parse_pr_detail_response tests
     // ==========================================================
@@ -807,6 +822,7 @@ mod tests {
                         "body": "Fix this line",
                         "path": "src/main.rs",
                         "line": 42,
+                        "diffHunk": "@@ -1,2 +1,2 @@\n-old\n+new",
                         "createdAt": "2025-01-01T00:00:00Z"
                       }]
                     }
@@ -833,6 +849,10 @@ mod tests {
             Some("src/main.rs".to_string())
         );
         assert_eq!(info.review_comments[0].line, Some(42));
+        assert_eq!(
+            info.review_comments[0].code_snippet,
+            Some("@@ -1,2 +1,2 @@\n-old\n+new".to_string())
+        );
         assert_eq!(info.changed_files_count, 3);
     }
 

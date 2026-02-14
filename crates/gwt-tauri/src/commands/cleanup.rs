@@ -624,6 +624,37 @@ mod tests {
         assert!(!gwt_core::git::Branch::exists(temp.path(), "feature/wip").unwrap());
     }
 
+    #[test]
+    fn cleanup_single_branch_auto_forces_unmerged_when_force_false() {
+        let temp = tempfile::TempDir::new().unwrap();
+        create_test_repo(temp.path());
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+        let agents = HashSet::new();
+
+        gwt_core::git::Branch::create(temp.path(), "feature/unmerged", "HEAD").unwrap();
+        let wt = manager.create_for_branch("feature/unmerged").unwrap();
+
+        std::fs::write(wt.path.join("unmerged.txt"), "unmerged").unwrap();
+        let add_output = gwt_core::process::git_command()
+            .args(["add", "."])
+            .current_dir(&wt.path)
+            .output()
+            .unwrap();
+        assert!(add_output.status.success());
+
+        let commit_output = gwt_core::process::git_command()
+            .args(["commit", "-m", "unmerged commit"])
+            .current_dir(&wt.path)
+            .output()
+            .unwrap();
+        assert!(commit_output.status.success());
+
+        let result =
+            cleanup_single_branch(&manager, temp.path(), "feature/unmerged", false, &agents);
+        assert!(result.is_ok());
+        assert!(!gwt_core::git::Branch::exists(temp.path(), "feature/unmerged").unwrap());
+    }
+
     // -- Test helpers --
 
     fn create_test_repo(path: &std::path::Path) {
