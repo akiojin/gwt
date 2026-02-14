@@ -6,6 +6,7 @@ export interface BranchInfo {
   ahead: number;
   behind: number;
   divergence_status: string; // "UpToDate" | "Ahead" | "Behind" | "Diverged"
+  commit_timestamp?: number | null;
   last_tool_usage?: string | null;
 }
 

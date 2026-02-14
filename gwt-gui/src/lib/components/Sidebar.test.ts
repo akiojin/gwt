@@ -16,6 +16,12 @@ function countInvokeCalls(name: string): number {
   return invokeMock.mock.calls.filter((c) => c[0] === name).length;
 }
 
+function getRenderedBranchNames(container: ReturnType<typeof render>): string[] {
+  return Array.from(
+    container.container.querySelectorAll("button.branch-item .branch-name")
+  ).map((node) => node.textContent?.trim() ?? "");
+}
+
 function fetchPrStatusProjectPaths(): string[] {
   return invokeMock.mock.calls
     .filter((c) => c[0] === "fetch_pr_status")
@@ -30,6 +36,30 @@ const branchFixture = {
   behind: 0,
   divergence_status: "UpToDate",
   last_tool_usage: null,
+};
+const mainBranchFixture = {
+  ...branchFixture,
+  name: "main",
+  commit_timestamp: 1_700_000_100,
+};
+const developBranchFixture = {
+  ...branchFixture,
+  name: "develop",
+  commit_timestamp: 1_700_000_050,
+};
+const featureAlphaBranchFixture = {
+  ...branchFixture,
+  name: "feature/alpha",
+  commit_timestamp: 1_700_000_090,
+};
+const featureBetaBranchFixture = {
+  ...branchFixture,
+  name: "feature/beta",
+  commit_timestamp: 1_700_000_080,
+};
+const featureNoTimestampBranchFixture = {
+  ...branchFixture,
+  name: "feature/no-timestamp",
 };
 const remoteBranchFixture = {
   ...branchFixture,
@@ -606,6 +636,136 @@ describe("Sidebar", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("sorts branch list by name by default with main/develop prioritized", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches")
+        return [
+          { ...featureBetaBranchFixture },
+          { ...mainBranchFixture },
+          { ...developBranchFixture },
+          { ...featureAlphaBranchFixture },
+        ];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await rendered.findByText(mainBranchFixture.name);
+    await waitFor(() => {
+      expect(getRenderedBranchNames(rendered)).toEqual([
+        "main",
+        "develop",
+        "feature/alpha",
+        "feature/beta",
+      ]);
+    });
+  });
+
+  it("sorts branch list by latest commit timestamp in updated mode", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches")
+        return [
+          { ...featureBetaBranchFixture },
+          { ...mainBranchFixture },
+          { ...developBranchFixture },
+          { ...featureAlphaBranchFixture },
+        ];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    const sortButton = rendered.getByRole("button", { name: "Sort mode" });
+    await fireEvent.click(sortButton);
+
+    await waitFor(() => {
+      expect(getRenderedBranchNames(rendered)).toEqual([
+        "main",
+        "develop",
+        "feature/beta",
+        "feature/alpha",
+      ]);
+    });
+  });
+
+  it("puts branches with missing commit timestamp at the end in updated mode", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches")
+        return [
+          { ...developBranchFixture },
+          { ...featureNoTimestampBranchFixture },
+          { ...featureAlphaBranchFixture },
+          { ...mainBranchFixture },
+        ];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    const sortButton = rendered.getByRole("button", { name: "Sort mode" });
+    await fireEvent.click(sortButton);
+
+    await waitFor(() => {
+      expect(getRenderedBranchNames(rendered)).toEqual([
+        "main",
+        "develop",
+        "feature/alpha",
+        "feature/no-timestamp",
+      ]);
+    });
+  });
+
+  it("sorts All mode with Local-side first and sort mode applied per side", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") {
+        return [
+          { ...featureBetaBranchFixture },
+          { ...mainBranchFixture },
+          { ...developBranchFixture },
+        ];
+      }
+      if (command === "list_remote_branches") {
+        return [
+          { ...remoteBranchFixture, name: "origin/main", commit_timestamp: 1_700_000_200 },
+          { ...remoteBranchFixture, name: "origin/feature/beta", commit_timestamp: 1_700_000_150 },
+          { ...remoteBranchFixture, name: "origin/feature/alpha", commit_timestamp: 1_700_000_180 },
+        ];
+      }
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "All" }));
+    await rendered.findByText("origin/main");
+    await rendered.findByText("origin/feature/alpha");
+
+    expect(getRenderedBranchNames(rendered)).toEqual([
+      "main",
+      "develop",
+      "feature/beta",
+      "origin/main",
+      "origin/feature/alpha",
+      "origin/feature/beta",
+    ]);
   });
 
   it("applies sidebar width from props", async () => {

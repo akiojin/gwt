@@ -11,6 +11,7 @@
   import WorktreeSummaryPanel from "./WorktreeSummaryPanel.svelte";
 
   type FilterType = "Local" | "Remote" | "All";
+  type BranchSortMode = "name" | "updated";
   type SidebarMode = "branch" | "agent";
   type FilterCacheEntry = {
     branches: BranchInfo[];
@@ -223,6 +224,7 @@
   let searchInput: string = $state("");
   let searchQuery: string = $state("");
   let errorMessage: string | null = $state(null);
+  let sortMode: BranchSortMode = $state("name");
   let lastFetchKey = "";
   let lastForceKey = "";
   let lastProjectPath = "";
@@ -244,6 +246,73 @@
     const slash = trimmed.indexOf("/");
     if (slash <= 0) return trimmed;
     return trimmed.slice(slash + 1);
+  }
+
+  function isPriorityBranch(name: string): boolean {
+    const normalized = name.trim().toLowerCase();
+    const remoteStripped = normalized.startsWith("origin/")
+      ? normalized.slice("origin/".length)
+      : normalized;
+    return remoteStripped === "main" || remoteStripped === "develop";
+  }
+
+  function branchSortTimestamp(branch: BranchInfo): number | null {
+    const value = (branch as { commit_timestamp?: unknown }).commit_timestamp;
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string") {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+    return null;
+  }
+
+  function compareBranches(
+    a: BranchInfo,
+    b: BranchInfo,
+    filter: FilterType
+  ): number {
+    if (filter === "All") {
+      const aRemote = remoteBranchNames.has(a.name) ? 1 : 0;
+      const bRemote = remoteBranchNames.has(b.name) ? 1 : 0;
+      if (aRemote !== bRemote) {
+        return aRemote - bRemote;
+      }
+    }
+
+    const aPriority = isPriorityBranch(a.name);
+    const bPriority = isPriorityBranch(b.name);
+    if (aPriority !== bPriority) {
+      return aPriority ? -1 : 1;
+    }
+
+    const byName = a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    if (sortMode === "name") {
+      return byName;
+    }
+
+    const aTs = branchSortTimestamp(a);
+    const bTs = branchSortTimestamp(b);
+    if (aTs === null && bTs === null) {
+      return byName;
+    }
+    if (aTs === null) return 1;
+    if (bTs === null) return -1;
+    if (aTs !== bTs) {
+      return bTs - aTs;
+    }
+    return byName;
+  }
+
+  function sortBranches(list: BranchInfo[], filter: FilterType): BranchInfo[] {
+    return [...list].sort((a, b) => compareBranches(a, b, filter));
+  }
+
+  function toggleSortMode() {
+    sortMode = sortMode === "name" ? "updated" : "name";
+  }
+
+  function getSortModeLabel(): string {
+    return sortMode === "name" ? "Name" : "Updated";
   }
 
   function normalizeBranchForPrLookup(branchName: string): string {
@@ -346,13 +415,15 @@
 
   const filters: FilterType[] = ["Local", "Remote", "All"];
 
-  let filteredBranches = $derived(
-    searchQuery
-      ? branches.filter((b) =>
-          b.name.toLowerCase().includes(searchQuery.toLowerCase())
-        )
-      : branches
-  );
+  let filteredBranches = $derived.by(() => {
+    const sortedBranches = sortBranches(branches, activeFilter);
+    if (!searchQuery) return sortedBranches;
+
+    const normalizedQuery = searchQuery.toLowerCase();
+    return sortedBranches.filter((b) =>
+      b.name.toLowerCase().includes(normalizedQuery)
+    );
+  });
   let clampedWidthPx = $derived(clampSidebarWidth(widthPx));
 
   $effect(() => {
@@ -1108,6 +1179,18 @@
         placeholder="Filter branches..."
         bind:value={searchInput}
       />
+      <button
+        type="button"
+        class="sort-mode-toggle"
+        aria-label="Sort mode"
+        title={`Sort by ${getSortModeLabel()}`}
+        onclick={toggleSortMode}
+      >
+        <span class="sort-mode-icon" aria-hidden="true">
+          {sortMode === "name" ? "A↕" : "🕒"}
+        </span>
+        <span class="sort-mode-text">{getSortModeLabel()}</span>
+      </button>
     </div>
     <div class="branch-summary-stack" bind:this={branchSummaryStackEl}>
       <div class="branch-list" bind:this={branchListEl}>
@@ -1433,10 +1516,15 @@
   .search-bar {
     padding: 6px 8px;
     border-bottom: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
 
   .search-input {
-    width: 100%;
+    flex: 1;
+    min-width: 0;
+    width: auto;
     padding: 5px 8px;
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
@@ -1453,6 +1541,36 @@
 
   .search-input::placeholder {
     color: var(--text-muted);
+  }
+
+  .sort-mode-toggle {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    border: 1px solid var(--border-color);
+    background: none;
+    color: var(--text-secondary);
+    padding: 4px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: var(--ui-font-xs);
+  }
+
+  .sort-mode-toggle:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .sort-mode-icon {
+    font-size: var(--ui-font-xs);
+    line-height: 1;
+  }
+
+  .sort-mode-text {
+    white-space: nowrap;
   }
 
   .branch-summary-stack {
