@@ -730,6 +730,45 @@
     showCleanupModal = true;
   }
 
+  async function handleOpenCiLog(runId: number) {
+    if (!projectPath) return;
+    try {
+      const workingDir = projectPath;
+      const { invoke } = await import("@tauri-apps/api/core");
+      const paneId = await invoke<string>("spawn_shell", { workingDir });
+
+      const label = `CI #${runId}`;
+      const newTab: Tab = {
+        id: `terminal-${paneId}`,
+        label,
+        type: "terminal",
+        paneId,
+        cwd: workingDir || undefined,
+      };
+      tabs = [...tabs, newTab];
+      activeTabId = newTab.id;
+
+      // Resolve and read logs via backend so bare-repo project roots still work.
+      const logOutput = await invoke<string>("fetch_ci_log", {
+        projectPath,
+        runId,
+      });
+      const delimiterBase = "__GWT_CI_LOG__";
+      let delimiter = delimiterBase;
+      let delimiterSuffix = 0;
+      while (logOutput.includes(delimiter)) {
+        delimiterSuffix += 1;
+        delimiter = `${delimiterBase}_${delimiterSuffix}`;
+      }
+      const normalized = logOutput.endsWith("\n") ? logOutput : `${logOutput}\n`;
+      const cmd = `cat <<'${delimiter}'\n${normalized}${delimiter}\n`;
+      const data = Array.from(new TextEncoder().encode(cmd));
+      await invoke("write_terminal", { paneId, data });
+    } catch (err) {
+      console.error("Failed to open CI log:", err);
+    }
+  }
+
   async function fetchCurrentBranch() {
     if (!projectPath) return;
     try {
@@ -1752,6 +1791,7 @@
           onCleanupRequest={handleCleanupRequest}
           onLaunchAgent={requestAgentLaunch}
           onQuickLaunch={handleAgentLaunch}
+          onOpenCiLog={handleOpenCiLog}
         />
       {/if}
       <MainArea

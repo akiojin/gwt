@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, waitFor } from "@testing-library/svelte";
+import { render, waitFor, fireEvent, cleanup } from "@testing-library/svelte";
 
 const invokeMock = vi.fn();
 const listenMock = vi.fn(async () => () => {});
@@ -67,36 +67,82 @@ const quickStartDockerEntry = {
   docker_keep: false,
   timestamp: 1_700_000_002,
 };
-
 describe("WorktreeSummaryPanel", () => {
   beforeEach(() => {
+    cleanup();
     listenMock.mockClear();
     invokeMock.mockReset();
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "get_branch_quick_start") return [];
-      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
-      return [];
-    });
+    invokeMock.mockResolvedValue([]);
   });
 
-  it("renders markdown summary with heading and list", async () => {
+  it("renders branch header and tab UI when branch is selected", async () => {
     const rendered = await renderPanel({
       projectPath: "/tmp/project",
       selectedBranch: branchFixture,
     });
 
     await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("get_branch_session_summary", {
+      expect(rendered.container.querySelector("h2")?.textContent).toBe(
+        "feature/markdown-ui"
+      );
+    });
+
+    // Summary tab is active by default
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    expect(tabs).toHaveLength(2);
+    expect(tabs[0]?.textContent?.trim()).toBe("Summary");
+    expect(tabs[0]?.classList.contains("active")).toBe(true);
+    expect(tabs[1]?.textContent?.trim()).toBe("PR");
+  });
+
+  it("shows placeholder when no branch is selected", async () => {
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: null,
+    });
+
+    await waitFor(() => {
+      expect(
+        rendered.container.querySelector(".placeholder h2")?.textContent
+      ).toBe("Worktree Summary");
+    });
+  });
+
+  it("renders Quick Start section in summary tab", async () => {
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("get_branch_quick_start", {
         projectPath: "/tmp/project",
         branch: "feature/markdown-ui",
       });
     });
 
     await waitFor(() => {
-      expect(rendered.container.querySelector(".session-summary-markdown h2")).toBeTruthy();
-      expect(rendered.container.querySelectorAll(".session-summary-markdown li")).toHaveLength(
-        2
-      );
+      expect(
+        rendered.container.querySelector(".quick-title")?.textContent
+      ).toBe("Quick Start");
+    });
+  });
+
+  it("switches to PR tab and shows PrStatusSection", async () => {
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const prTab = tabs[1] as HTMLElement;
+    await fireEvent.click(prTab);
+
+    await waitFor(() => {
+      expect(prTab.classList.contains("active")).toBe(true);
+      expect(
+        rendered.container.querySelector(".pr-status-section")
+      ).toBeTruthy();
     });
   });
 
