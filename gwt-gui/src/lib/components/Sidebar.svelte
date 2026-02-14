@@ -150,7 +150,8 @@
     function start() {
       if (destroyed) return;
       stop();
-      if (prPollingBootstrappedPath !== path && branchCount > 0) {
+      if (branchCount === 0) return;
+      if (prPollingBootstrappedPath !== path) {
         void refresh(true);
       }
       timer = setInterval(() => {
@@ -256,12 +257,14 @@
     return trimmed.slice(slash + 1);
   }
 
-  function isPriorityBranch(name: string): boolean {
+  function sortBranchGroupRank(name: string): number {
     const normalized = name.trim().toLowerCase();
-    const remoteStripped = normalized.startsWith("origin/")
+    const baseName = normalized.startsWith("origin/")
       ? normalized.slice("origin/".length)
       : normalized;
-    return remoteStripped === "main" || remoteStripped === "develop";
+    if (baseName === "main") return 0;
+    if (baseName === "develop") return 1;
+    return 2;
   }
 
   function branchSortTimestamp(branch: BranchInfo): number | null {
@@ -287,10 +290,10 @@
       }
     }
 
-    const aPriority = isPriorityBranch(a.name);
-    const bPriority = isPriorityBranch(b.name);
+    const aPriority = sortBranchGroupRank(a.name);
+    const bPriority = sortBranchGroupRank(b.name);
     if (aPriority !== bPriority) {
-      return aPriority ? -1 : 1;
+      return aPriority - bPriority;
     }
 
     const byName = a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
@@ -1020,8 +1023,11 @@
       const button = branchListEl?.querySelector<HTMLButtonElement>(
         `[data-branch-index="${index}"]`
       );
-      button?.focus();
-      button?.scrollIntoView({ block: "nearest" });
+      if (!button) return;
+      button.focus();
+      if (typeof button.scrollIntoView === "function") {
+        button.scrollIntoView({ block: "nearest" });
+      }
     });
   }
 
@@ -1057,6 +1063,24 @@
     onBranchSelect(nextBranch);
     focusBranchButtonByIndex(nextIndex);
   }
+
+  $effect(() => {
+    const list = branchListEl;
+    if (!list || filteredBranches.length === 0) return;
+
+    const listener = (event: KeyboardEvent) => {
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (target !== list && !list.contains(target)) return;
+      handleBranchItemKeydown(event);
+    };
+
+    window.addEventListener("keydown", listener, true);
+    return () => {
+      window.removeEventListener("keydown", listener, true);
+    };
+  });
 
   $effect(() => {
     return () => {
@@ -1229,7 +1253,6 @@
         tabindex={filteredBranches.length === 0 ? -1 : 0}
         role="listbox"
         aria-label="Worktree branches"
-        onkeydown={handleBranchItemKeydown}
       >
         {#if loading}
           <div class="loading-indicator">Loading...</div>
@@ -1241,6 +1264,7 @@
           {#each filteredBranches as branch, index}
             <button
               data-branch-index={index}
+              data-branch-name={branch.name}
               class="branch-item"
               class:agent-active={isAgentBranchActive(branch)}
               class:active={isSelectedBranch(branch)}
