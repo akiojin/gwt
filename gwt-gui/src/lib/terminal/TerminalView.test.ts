@@ -325,4 +325,48 @@ describe("TerminalView", () => {
     expect(term.focus).toHaveBeenCalled();
     expect(viewport.scrollTop).toBe(150);
   });
+
+  it("still scrolls wheel input when active is false", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-4",
+      active: false,
+    });
+    const rootEl = container.querySelector(".terminal-container");
+    expect(rootEl).not.toBeNull();
+
+    const viewport = document.createElement("div");
+    viewport.className = "xterm-viewport";
+    viewport.style.overflow = "auto";
+    Object.defineProperty(viewport, "clientHeight", {
+      value: 100,
+      configurable: true,
+    });
+    Object.defineProperty(viewport, "scrollHeight", {
+      value: 250,
+      configurable: true,
+    });
+    viewport.scrollTop = 20;
+    rootEl!.appendChild(viewport);
+
+    await fireEvent.wheel(rootEl!, { deltaY: 20, bubbles: true });
+
+    expect(viewport.scrollTop).toBeGreaterThan(20);
+  });
+
+  it("does not prevent default when no viewport is available", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-5",
+      active: true,
+    });
+    const rootEl = container.querySelector(".terminal-container");
+    expect(rootEl).not.toBeNull();
+
+    const event = new WheelEvent("wheel", { deltaY: 20, bubbles: true });
+    const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+
+    rootEl!.dispatchEvent(event);
+
+    expect(preventDefaultSpy).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+  });
 });

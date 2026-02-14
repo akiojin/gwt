@@ -53,7 +53,7 @@
     VoiceInputController,
     type VoiceControllerState,
   } from "./lib/voice/voiceInputController";
-  import { createSystemMonitor } from "./lib/systemMonitor";
+  import { createSystemMonitor } from "./lib/systemMonitor.svelte";
 
   interface SettingsUpdatedPayload {
     uiFontSize?: number;

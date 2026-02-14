@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { AgentInfo } from "../types";
-  import type { GpuInfo } from "../systemMonitor";
+  import type { GpuInfo } from "../systemMonitor.svelte";
   import { formatAboutVersion, getAppVersionSafe } from "../windowTitle";
   import { renderBar, usageColorClass, formatMemory } from "./statusBarHelpers";
 

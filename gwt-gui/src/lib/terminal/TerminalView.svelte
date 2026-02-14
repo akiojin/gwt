@@ -126,11 +126,11 @@
     }
   }
 
-  function scrollViewportByWheel(rootEl: HTMLElement, event: WheelEvent) {
+  function scrollViewportByWheel(rootEl: HTMLElement, event: WheelEvent): boolean {
     const viewport = rootEl.querySelector<HTMLElement>(".xterm-viewport");
-    if (!viewport) return;
+    if (!viewport) return false;
 
-    if (event.deltaY === 0) return;
+    if (event.deltaY === 0) return false;
 
     const fontSize =
       typeof terminal?.options.fontSize === "number" ? terminal.options.fontSize : 13;
@@ -147,6 +147,7 @@
 
     const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
     viewport.scrollTop = Math.min(Math.max(viewport.scrollTop + delta, 0), maxScrollTop);
+    return true;
   }
 
   onMount(() => {
@@ -204,13 +205,16 @@
     });
 
     const handleWheel = (event: WheelEvent) => {
-      if (!active || !terminal) return;
       if (event.deltaY === 0) return;
+      if (!terminal) return;
 
       focusTerminalIfNeeded(rootEl, true);
+
+      const didScroll = scrollViewportByWheel(rootEl, event);
+      if (!didScroll) return;
+
       event.preventDefault();
       event.stopImmediatePropagation();
-      scrollViewportByWheel(rootEl, event);
     };
     rootEl.addEventListener("wheel", handleWheel, { passive: false, capture: true });
 
