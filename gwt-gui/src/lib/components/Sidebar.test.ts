@@ -908,4 +908,44 @@ describe("Sidebar", () => {
     expect(rendered.queryByTitle("Expand")).toBeNull();
     expect(onOpenCiLog).not.toHaveBeenCalled();
   });
+
+  it("highlights selected branch in Worktree list", async () => {
+    const currentBranch = {
+      ...branchFixture,
+      name: "feature/current",
+      is_current: true,
+    };
+    const selectedBranch = {
+      ...branchFixture,
+      name: "feature/selected",
+      is_current: false,
+    };
+    const onBranchSelect = vi.fn();
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") {
+        return [currentBranch, selectedBranch];
+      }
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect,
+      selectedBranch,
+    });
+
+    await rendered.findByText(selectedBranch.name);
+
+    const selectedButton = rendered
+      .getByText(selectedBranch.name)
+      .closest("button");
+    const currentButton = rendered.getByText(currentBranch.name).closest("button");
+
+    expect(selectedButton).toBeTruthy();
+    expect(selectedButton?.classList.contains("active")).toBe(true);
+    expect(currentButton).toBeTruthy();
+    expect(currentButton?.classList.contains("active")).toBe(false);
+  });
 });

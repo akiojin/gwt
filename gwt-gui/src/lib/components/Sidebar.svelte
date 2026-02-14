@@ -251,6 +251,14 @@
     return remoteBranchNames.has(trimmed) ? stripRemotePrefix(trimmed) : trimmed;
   }
 
+  function isSelectedBranch(branch: BranchInfo): boolean {
+    return (
+      selectedBranch !== null &&
+      selectedBranch !== undefined &&
+      selectedBranch.name === branch.name
+    );
+  }
+
   function loadSummaryHeight(): number {
     if (typeof window === "undefined") return DEFAULT_WORKTREE_SUMMARY_HEIGHT_PX;
     try {
@@ -1087,7 +1095,7 @@
           {#each filteredBranches as branch}
             <button
               class="branch-item"
-              class:active={branch.is_current}
+              class:active={isSelectedBranch(branch)}
               class:deleting={deletingBranches.has(branch.name)}
               onclick={() => {
                 if (!deletingBranches.has(branch.name)) onBranchSelect(branch);
