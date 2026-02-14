@@ -13,6 +13,13 @@
 1. 既存 spec の内容を GUI 前提に更新し、`カテゴリ` を `GUI` に変更する
 2. 新しい GUI spec を作成し、元の Porting spec を `**依存仕様**:` で参照する
 
+## Session Summary 正本（2026-02-14）
+
+- タブ構成・表示責務の正本: `specs/SPEC-d6949f99/spec.md`
+- AI Summary 生成仕様: `specs/SPEC-3a1b7c2d/spec.md`
+- Git セクション内表示仕様（Changes/Commits/Stash）: `specs/SPEC-735cbc5d/spec.md`
+- Session SummaryのUIレイアウトに矛盾がある場合は `SPEC-d6949f99` を優先する
+
 ## 現行仕様（GUI）
 
 | SPEC ID | タイトル | 作成日 |
@@ -21,7 +28,7 @@
 | [SPEC-552c5e74](SPEC-552c5e74/spec.md) | 機能仕様: Launch Agent のデフォルト設定保持（前回成功起動値） | 2026-02-14 |
 | [SPEC-923b33fc](SPEC-923b33fc/spec.md) | 機能仕様: 全操作時の断続フリーズ抑止（System Monitor 負荷制御） | 2026-02-14 |
 | [SPEC-a1b2c3d4](SPEC-a1b2c3d4/spec.md) | 機能仕様: エージェント起動統計・システムモニター・About強化 | 2026-02-14 |
-| [SPEC-d6949f99](SPEC-d6949f99/spec.md) | 機能仕様: PR Status Preview（GUI） | 2026-02-14 |
+| [SPEC-d6949f99](SPEC-d6949f99/spec.md) | 機能仕様: Session Summary + PR Status Preview（GUI） | 2026-02-14 |
 | [SPEC-4e2f1028](SPEC-4e2f1028/spec.md) | 機能仕様: Windows 移行プロジェクトで Docker 起動時に mount エラーを回避する | 2026-02-13 |
 | [SPEC-6e2a9d4c](SPEC-6e2a9d4c/spec.md) | 機能仕様: Host OS 起動時の空タブ防止（Issue #1029） | 2026-02-13 |
 | [SPEC-6f291006](SPEC-6f291006/spec.md) | 機能仕様: Migration backup copy の Windows 互換修正 | 2026-02-13 |
