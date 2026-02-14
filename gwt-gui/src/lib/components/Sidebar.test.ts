@@ -478,22 +478,71 @@ describe("Sidebar", () => {
             resolveProjectB = resolve;
           });
         }
+        if (command === "fetch_pr_detail") {
+          if (path === "/tmp/project-a") {
+            return Promise.resolve({
+              number: 111,
+              title: "A",
+              state: "OPEN",
+              url: "https://example.invalid/pr/111",
+              mergeable: "MERGEABLE",
+              author: "test",
+              baseBranch: "main",
+              headBranch: branchFixture.name,
+              labels: [],
+              assignees: [],
+              milestone: null,
+              linkedIssues: [],
+              checkSuites: [],
+              reviews: [],
+              reviewComments: [],
+              changedFilesCount: 0,
+              additions: 0,
+              deletions: 0,
+            });
+          }
+          return Promise.resolve({
+            number: 111,
+            title: "A",
+            state: "OPEN",
+            url: "https://example.invalid/pr/111",
+            mergeable: "MERGEABLE",
+            author: "test",
+            baseBranch: "main",
+            headBranch: branchFixture.name,
+            labels: [],
+            assignees: [],
+            milestone: null,
+            linkedIssues: [],
+            checkSuites: [],
+            reviews: [],
+            reviewComments: [],
+            changedFilesCount: 0,
+            additions: 0,
+            deletions: 0,
+          });
+        }
         return Promise.resolve([]);
       });
 
       const rendered = await renderSidebar({
         projectPath: "/tmp/project-a",
         onBranchSelect: vi.fn(),
+        selectedBranch: branchFixture,
       });
 
       await rendered.findByText(branchFixture.name);
-      await vi.advanceTimersByTimeAsync(30_000);
-      await rendered.findByText("#111 Open");
+      const prTab = rendered.container.querySelectorAll(".summary-tab")[2] as HTMLElement;
+      await fireEvent.click(prTab);
+      await rendered.findByText("#111 A");
 
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(0);
       await rendered.rerender({ projectPath: "/tmp/project-b" });
       await rendered.findByText(branchFixture.name);
       await waitFor(() => {
-        expect(rendered.queryByText("#111 Open")).toBeNull();
+        expect(rendered.queryByText("#111 A")).toBeNull();
+        expect(rendered.queryByText("No PR")).toBeTruthy();
       });
     } finally {
       const finalizeProjectB = resolveProjectB as unknown as
@@ -579,20 +628,23 @@ describe("Sidebar", () => {
       });
 
       await rendered.findByText(branchFixture.name);
+      await vi.advanceTimersByTimeAsync(30_000);
       await waitFor(() => {
         expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(0);
       });
       const searchInput = rendered.getByPlaceholderText("Filter branches...");
+      const preFocusPrStatusCalls = countInvokeCalls("fetch_pr_status");
       (searchInput as HTMLInputElement).focus();
       expect(document.activeElement).toBe(searchInput);
 
-      invokeMock.mockClear();
       await vi.advanceTimersByTimeAsync(30_000);
-      expect(countInvokeCalls("fetch_pr_status")).toBe(0);
+      expect(countInvokeCalls("fetch_pr_status")).toBe(preFocusPrStatusCalls);
 
       (searchInput as HTMLInputElement).blur();
       await vi.advanceTimersByTimeAsync(30_000);
-      expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(0);
+      await waitFor(() => {
+        expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(preFocusPrStatusCalls);
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -1096,12 +1148,17 @@ describe("Sidebar", () => {
       selectedBranch,
     });
 
-    await rendered.findByText(selectedBranch.name);
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".branch-item").length).toBe(2);
+    });
 
-    const selectedButton = rendered
-      .getByText(selectedBranch.name)
-      .closest("button");
-    const currentButton = rendered.getByText(currentBranch.name).closest("button");
+    const branchButtons = Array.from(rendered.container.querySelectorAll(".branch-item"));
+    const selectedButton = branchButtons.find((button) =>
+      button.textContent?.includes(selectedBranch.name)
+    ) as HTMLElement | undefined;
+    const currentButton = branchButtons.find((button) =>
+      button.textContent?.includes(currentBranch.name)
+    ) as HTMLElement | undefined;
 
     expect(selectedButton).toBeTruthy();
     expect(selectedButton?.classList.contains("active")).toBe(true);

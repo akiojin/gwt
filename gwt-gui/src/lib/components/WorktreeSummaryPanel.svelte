@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { invoke as tauriInvoke } from "@tauri-apps/api/core";
   import type {
     BranchInfo,
     LaunchAgentRequest,
@@ -12,6 +13,8 @@
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
   import PrStatusSection from "./PrStatusSection.svelte";
   import { workflowStatusIcon, workflowStatusClass } from "../prStatusHelpers";
+  
+  type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
   let {
     projectPath,
@@ -38,7 +41,7 @@
   let quickLaunching: boolean = $state(false);
   let quickLaunchingKey: string | null = $state(null);
 
-  type SummaryTab = "summary" | "git" | "pr" | "ci" | "ai";
+  type SummaryTab = "summary" | "git" | "pr" | "workflow" | "ai" | "docker";
   let activeTab: SummaryTab = $state("summary");
 
   let prDetailLoading = $state(false);
@@ -57,6 +60,17 @@
   let sessionSummaryToolId: string | null = $state(null);
   let sessionSummarySessionId: string | null = $state(null);
   const SESSION_SUMMARY_POLL_INTERVAL_MS = 5000;
+
+  type DockerMode = "HostOS" | "Docker" | "Unknown";
+  type DockerModeClass = "hostos" | "docker" | "unknown";
+  type DockerSummaryRow = {
+    entry: ToolSessionEntry;
+    mode: DockerMode;
+    modeClass: DockerModeClass;
+    composeArgs: string | null;
+    service: string | null;
+    containerName: string | null;
+  };
 
   let ghCliStatusMessage = $derived.by(() => {
     if (!ghCliStatus) return null;
@@ -161,6 +175,62 @@
     return service.length > 0 ? service : null;
   }
 
+  function normalizeString(value: string | null | undefined): string {
+    return (value ?? "").trim();
+  }
+
+  function hasDockerInfo(entry: ToolSessionEntry): boolean {
+    if (entry.docker_force_host !== undefined && entry.docker_force_host !== null)
+      return true;
+    if (normalizeString(entry.docker_service).length > 0) return true;
+    if (normalizeString(entry.docker_container_name).length > 0) return true;
+    if (entry.docker_compose_args && entry.docker_compose_args.length > 0) return true;
+    if (entry.docker_recreate !== undefined) return true;
+    if (entry.docker_build !== undefined) return true;
+    if (entry.docker_keep !== undefined) return true;
+    return false;
+  }
+
+  function dockerMode(entry: ToolSessionEntry): DockerMode {
+    if (entry.docker_force_host === true) return "HostOS";
+    if (hasDockerInfo(entry)) return "Docker";
+    return "Unknown";
+  }
+
+  function dockerModeClass(entry: ToolSessionEntry): DockerModeClass {
+    const mode = dockerMode(entry);
+    if (mode === "HostOS") return "hostos";
+    if (mode === "Docker") return "docker";
+    return "unknown";
+  }
+
+  function formatComposeArgs(
+    args: string[] | null | undefined
+  ): string | null {
+    if (!args || args.length === 0) return null;
+    const normalized = args.map((arg) => normalizeString(arg)).filter((arg) => arg.length > 0);
+    return normalized.length > 0 ? normalized.join(" ") : null;
+  }
+
+  function formatTimestamp(timestamp: number): string {
+    const value = Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString() : "n/a";
+    return value;
+  }
+
+  let dockerSummaryRows: DockerSummaryRow[] = $derived.by(() => {
+    return quickStartEntries
+      .filter(hasDockerInfo)
+      .map((entry) => ({
+        entry,
+        mode: dockerMode(entry),
+        modeClass: dockerModeClass(entry),
+        composeArgs: formatComposeArgs(entry.docker_compose_args),
+        service: (normalizeString(entry.docker_service) || null),
+        containerName: (normalizeString(entry.docker_container_name) || null),
+      }))
+      .sort((left, right) => right.entry.timestamp - left.entry.timestamp);
+  });
+
   function quickStartEntryKey(entry: ToolSessionEntry): string {
     const session = entry.session_id?.trim();
     if (session) return session;
@@ -182,7 +252,7 @@
     quickStartLoading = true;
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const invoke = await getInvoke();
       const entries = await invoke<ToolSessionEntry[]>("get_branch_quick_start", {
         projectPath,
         branch,
@@ -228,7 +298,7 @@
     }
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const invoke = await getInvoke();
       const result = await invoke<SessionSummaryResult>("get_branch_session_summary", {
         projectPath,
         branch,
@@ -365,7 +435,7 @@
     prDetail = null;
     prDetailPrNumber = prNum;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const invoke = await getInvoke();
       const result = await invoke<PrStatusInfo>("fetch_pr_detail", {
         projectPath,
         prNumber: prNum,
@@ -391,7 +461,7 @@
   }
 
   $effect(() => {
-    if (activeTab !== "pr" && activeTab !== "ci") return;
+    if (activeTab !== "pr" && activeTab !== "workflow") return;
 
     const branch = currentBranchName();
     if (!branch || !prNumber) {
@@ -454,6 +524,16 @@
       quickLaunchingKey = null;
     }
   }
+
+  async function getInvoke(): Promise<TauriInvoke> {
+    const globalInvoke = (globalThis as { __TAURI_INTERNALS__?: { invoke?: TauriInvoke } })
+      .__TAURI_INTERNALS__?.invoke;
+    const invokeFn = globalInvoke ?? tauriInvoke;
+    if (!invokeFn) {
+      throw new Error("Tauri invoke API is unavailable");
+    }
+    return invokeFn;
+  }
 </script>
 
 <div class="worktree-summary-panel">
@@ -494,12 +574,12 @@
         </button>
         <button
           class="summary-tab"
-          class:active={activeTab === "ci"}
+          class:active={activeTab === "workflow"}
           onclick={() => {
-            activeTab = "ci";
+            activeTab = "workflow";
           }}
         >
-          CI
+          Workflow
         </button>
         <button
           class="summary-tab"
@@ -509,6 +589,15 @@
           }}
         >
           AI
+        </button>
+        <button
+          class="summary-tab"
+          class:active={activeTab === "docker"}
+          onclick={() => {
+            activeTab = "docker";
+          }}
+        >
+          Docker
         </button>
       </div>
 
@@ -630,10 +719,10 @@
           loading={prDetailLoading}
           error={ghCliStatusMessage ?? prDetailError}
         />
-      {:else if activeTab === "ci"}
-        <div class="quick-start ci-panel">
+      {:else if activeTab === "workflow"}
+        <div class="quick-start workflow-panel">
           <div class="quick-header">
-            <span class="quick-title">CI</span>
+            <span class="quick-title">Workflow</span>
             {#if prDetailLoading}
               <span class="quick-subtitle">Loading...</span>
             {:else if ghCliStatusMessage}
@@ -734,6 +823,74 @@
             />
           {:else}
             <div class="session-summary-placeholder">No summary.</div>
+          {/if}
+        </div>
+      {:else if activeTab === "docker"}
+        <div class="quick-start docker-summary">
+          <div class="quick-header">
+            <span class="quick-title">Docker</span>
+            {#if quickStartLoading}
+              <span class="quick-subtitle">Loading...</span>
+            {:else if dockerSummaryRows.length > 0}
+              <span class="quick-subtitle">
+                {dockerSummaryRows.length} record{dockerSummaryRows.length === 1 ? "" : "s"}
+              </span>
+            {:else}
+              <span class="quick-subtitle">No Docker records</span>
+            {/if}
+          </div>
+
+          {#if quickStartLoading}
+            <div class="session-summary-placeholder">Loading...</div>
+          {:else if dockerSummaryRows.length === 0}
+            <div class="session-summary-placeholder">
+              No Docker usage found in quick start history.
+            </div>
+          {:else}
+            <div class="docker-summary-list">
+              {#each dockerSummaryRows as row (quickStartEntryKey(row.entry))}
+                <div class="docker-summary-item">
+                  <div class="docker-summary-head">
+                    <div class="docker-summary-identity">
+                      <div class="quick-tool {toolClass(row.entry)}">
+                        <span class="quick-tool-name">{displayToolName(row.entry)}</span>
+                        <span class="quick-tool-version">@{displayToolVersion(row.entry)}</span>
+                      </div>
+                      {#if row.entry.session_id}
+                        <div class="docker-summary-session">Session {row.entry.session_id}</div>
+                      {/if}
+                    </div>
+                    <span class="docker-summary-time">{formatTimestamp(row.entry.timestamp)}</span>
+                  </div>
+                  <div class="quick-meta">
+                    <span class={`quick-pill ${row.modeClass}`}>runtime: {row.mode}</span>
+                    {#if row.service}
+                      <span class="quick-pill">service: {row.service}</span>
+                    {/if}
+                    {#if row.entry.docker_force_host !== undefined && row.entry.docker_force_host !== null}
+                      <span class="quick-pill">
+                        force-host: {row.entry.docker_force_host ? "on" : "off"}
+                      </span>
+                    {/if}
+                    {#if row.entry.docker_recreate !== undefined}
+                      <span class="quick-pill">recreate: {row.entry.docker_recreate ? "on" : "off"}</span>
+                    {/if}
+                    {#if row.entry.docker_build !== undefined}
+                      <span class="quick-pill">build: {row.entry.docker_build ? "on" : "off"}</span>
+                    {/if}
+                    {#if row.entry.docker_keep !== undefined}
+                      <span class="quick-pill">keep: {row.entry.docker_keep ? "on" : "off"}</span>
+                    {/if}
+                    {#if row.containerName}
+                      <span class="quick-pill">container: {row.containerName}</span>
+                    {/if}
+                    {#if row.composeArgs}
+                      <span class="quick-pill">compose args: {row.composeArgs}</span>
+                    {/if}
+                  </div>
+                </div>
+              {/each}
+            </div>
           {/if}
         </div>
       {/if}
@@ -987,6 +1144,21 @@
     font-family: monospace;
   }
 
+  .quick-pill.hostos {
+    border-color: var(--cyan);
+    color: var(--cyan);
+  }
+
+  .quick-pill.docker {
+    border-color: var(--green);
+    color: var(--green);
+  }
+
+  .quick-pill.unknown {
+    border-color: var(--text-muted);
+    color: var(--text-muted);
+  }
+
   .quick-actions {
     display: flex;
     align-items: center;
@@ -1020,6 +1192,50 @@
   .quick-btn.ghost {
     background: transparent;
     color: var(--text-secondary);
+  }
+
+  .docker-summary-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .docker-summary-item {
+    border: 1px solid var(--border-color);
+    background: var(--bg-primary);
+    border-radius: 10px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .docker-summary-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .docker-summary-identity {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .docker-summary-session {
+    font-size: var(--ui-font-xs);
+    color: var(--text-muted);
+    font-family: monospace;
+  }
+
+  .docker-summary-time {
+    font-size: var(--ui-font-xs);
+    color: var(--text-muted);
+    font-family: monospace;
+    text-align: right;
+    white-space: nowrap;
   }
 
   .session-summary-markdown {
@@ -1118,7 +1334,7 @@
     font-style: italic;
   }
 
-  .ci-panel .workflow-run-item {
+  .workflow-panel .workflow-run-item {
     border-radius: 4px;
   }
 </style>

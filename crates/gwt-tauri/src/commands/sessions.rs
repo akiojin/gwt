@@ -1451,6 +1451,8 @@ mod tests {
             docker_recreate: None,
             docker_build: None,
             docker_keep: None,
+            docker_container_name: None,
+            docker_compose_args: None,
             timestamp: 1,
         };
 
@@ -1511,6 +1513,8 @@ mod tests {
             docker_recreate: None,
             docker_build: None,
             docker_keep: None,
+            docker_container_name: None,
+            docker_compose_args: None,
             timestamp,
         };
 

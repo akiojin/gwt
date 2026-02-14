@@ -193,6 +193,8 @@ export interface ToolSessionEntry {
   docker_recreate?: boolean | null;
   docker_build?: boolean | null;
   docker_keep?: boolean | null;
+  docker_container_name?: string | null;
+  docker_compose_args?: string[] | null;
   timestamp: number;
 }
 
