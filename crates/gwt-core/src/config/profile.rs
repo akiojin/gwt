@@ -735,6 +735,15 @@ profiles:
     }
 
     #[test]
+    fn test_profile_ai_disabled_flag_blocks_settings() {
+        let mut profile = Profile::new("dev");
+        profile.ai = Some(ai_settings("gpt-5.2"));
+        profile.ai_enabled = Some(false);
+        assert!(!profile.ai_enabled());
+        assert!(profile.resolved_ai_settings().is_none());
+    }
+
+    #[test]
     fn resolve_active_ai_settings_prefers_active_profile_when_enabled() {
         let mut profiles = HashMap::new();
         let mut dev = Profile::new("dev");
@@ -761,6 +770,28 @@ profiles:
         let mut dev = Profile::new("dev");
         // Explicit AI config exists but is disabled (empty model).
         dev.ai = Some(ai_settings(""));
+        profiles.insert("dev".to_string(), dev);
+
+        let config = ProfilesConfig {
+            version: 1,
+            active: Some("dev".to_string()),
+            default_ai: Some(ai_settings("gpt-5.1")),
+            profiles,
+        };
+
+        let resolved = config.resolve_active_ai_settings();
+        assert_eq!(resolved.source, ActiveAISettingsSource::ActiveProfile);
+        assert!(!resolved.ai_enabled);
+        assert!(!resolved.summary_enabled);
+        assert!(resolved.resolved.is_none());
+    }
+
+    #[test]
+    fn resolve_active_ai_settings_disables_when_profile_ai_enabled_flag_false() {
+        let mut profiles = HashMap::new();
+        let mut dev = Profile::new("dev");
+        dev.ai = Some(ai_settings("gpt-5.2"));
+        dev.ai_enabled = Some(false);
         profiles.insert("dev".to_string(), dev);
 
         let config = ProfilesConfig {
