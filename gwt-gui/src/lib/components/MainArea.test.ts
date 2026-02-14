@@ -354,4 +354,76 @@ describe("MainArea", () => {
       });
     }
   });
+
+  it("emits onTabReorder when pointermove is dispatched on window", async () => {
+    const onTabReorder = vi.fn();
+    const tabs: Tab[] = [
+      { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+      { id: "settings", label: "Settings", type: "settings" },
+      {
+        id: "versionHistory",
+        label: "Version History",
+        type: "versionHistory",
+      },
+    ];
+    const rendered = await renderMainArea({
+      tabs,
+      activeTabId: "agentMode",
+      onTabReorder,
+    });
+
+    const dragTab = rendered
+      .getByText("Settings")
+      .closest(".tab") as HTMLElement;
+    const targetTab = rendered
+      .getByText("Version History")
+      .closest(".tab") as HTMLElement;
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: vi.fn(() => targetTab),
+    });
+
+    try {
+      vi.spyOn(targetTab, "getBoundingClientRect").mockReturnValue({
+        x: 100,
+        y: 0,
+        width: 200,
+        height: 36,
+        top: 0,
+        right: 300,
+        bottom: 36,
+        left: 100,
+        toJSON: () => ({}),
+      });
+
+      await fireEvent.pointerDown(dragTab, {
+        button: 0,
+        pointerId: 1,
+        clientX: 120,
+      });
+      await fireEvent.pointerMove(window, {
+        pointerId: 1,
+        clientX: 290,
+        clientY: 10,
+      });
+      await fireEvent.pointerUp(window, {
+        pointerId: 1,
+        clientX: 290,
+        clientY: 10,
+      });
+
+      expect(onTabReorder).toHaveBeenCalledTimes(1);
+      expect(onTabReorder).toHaveBeenCalledWith(
+        "settings",
+        "versionHistory",
+        "after",
+      );
+    } finally {
+      Object.defineProperty(document, "elementFromPoint", {
+        configurable: true,
+        value: originalElementFromPoint,
+      });
+    }
+  });
 });
