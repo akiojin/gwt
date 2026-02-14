@@ -85,14 +85,21 @@
   let pollingStatuses: Record<string, PrStatusInfo | null> = $state({});
   let pollingGhCliStatus: GhCliStatus | null = $state(null);
   let prPollingBootstrappedPath: string | null = null;
-  let prPollingInFlight = false;
+  let prPollingActivePath: string | null = null;
+  const prPollingInFlightPaths = new Set<string>();
 
   $effect(() => {
     const path = projectPath;
-    if (!path) {
+    const branchCount = branches.length;
+
+    if (path !== prPollingActivePath) {
+      prPollingActivePath = path || null;
       prPollingBootstrappedPath = null;
       pollingStatuses = {};
       pollingGhCliStatus = null;
+    }
+
+    if (!path) {
       return;
     }
 
@@ -101,8 +108,8 @@
 
     async function refresh(markBootstrap = false) {
       if (destroyed) return;
-      if (prPollingInFlight) return;
-      prPollingInFlight = true;
+      if (prPollingInFlightPaths.has(path)) return;
+      prPollingInFlightPaths.add(path);
       try {
         const branchKeyByName = new Map<string, string>();
         const queryBranches: string[] = [];
@@ -122,7 +129,7 @@
         if (markBootstrap) {
           prPollingBootstrappedPath = path;
         }
-        const { invoke } = await import("@tauri-apps/api/core");
+        const invoke = await getInvoke();
         const result = await invoke<{
           statuses: Record<string, PrStatusInfo | null>;
           ghStatus: GhCliStatus;
@@ -140,14 +147,14 @@
       } catch {
         // Polling failure is silent — keep stale data
       } finally {
-        prPollingInFlight = false;
+        prPollingInFlightPaths.delete(path);
       }
     }
 
     function start() {
       if (destroyed) return;
       stop();
-      if (prPollingBootstrappedPath !== path) {
+      if (prPollingBootstrappedPath !== path && branchCount > 0) {
         void refresh(true);
       }
       timer = setInterval(() => {

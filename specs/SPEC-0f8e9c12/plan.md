@@ -1,6 +1,6 @@
 # 実装計画: Sidebar Filter Cache for Local/Remote/All
 
-**仕様ID**: `SPEC-0f8e9c12` | **日付**: 2026-02-15 | **仕様書**: `specs/SPEC-0f8e9c12/spec.md`
+**仕様ID**: `SPEC-0f8e9c12` | **日付**: 2026-02-14 | **仕様書**: `specs/SPEC-0f8e9c12/spec.md`
 
 ## 目的
 
@@ -58,9 +58,16 @@
 - テキスト入力フォーカス中は30秒周期の `fetch_pr_status` をスキップ
 - 検索入力はデバウンスして一覧絞り込み再計算を抑制
 
+### Step 7: プロジェクト切替時のポーリング整合
+
+- `projectPath` 変更時にポーリング状態（statuses/ghStatus/bootstrap）を即時クリア
+- in-flight ガードを `projectPath` 単位に変更して、切替直後の初回取得を阻害しない
+- ブランチ一覧ロード完了時のブートストラップ即時実行を保証
+
 ## 検証
 
 - `gwt-gui/src/lib/components/Sidebar.test.ts` を実行
 - 既存の `refreshKey` テストが回帰していないことを確認
 - 30秒未満のフィルター切替で `fetch_pr_status` 呼び出しが増えないことを確認
 - 入力フォーカス中の周期スキップとデバウンス反映を確認
+- `projectPath` 切替時の stale 表示抑止と path 単位 in-flight の回帰テストを確認

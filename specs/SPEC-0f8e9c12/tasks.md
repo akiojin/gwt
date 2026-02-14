@@ -19,6 +19,10 @@
 - [x] T019 [RED] `Sidebar.test.ts` に「検索入力がデバウンス後に反映される」テストを追加（失敗確認）
 - [x] T020 [GREEN] `Sidebar.svelte` に入力中ポーリング抑止 + 検索デバウンスを実装
 - [x] T021 [GREEN] `pnpm -s vitest run src/lib/components/Sidebar.test.ts` を通過させる
+- [x] T022 [RED] `Sidebar.test.ts` に「projectPath切替時にin-flightが別プロジェクトを阻害しない」テストを追加（失敗確認）
+- [x] T023 [RED] `Sidebar.test.ts` に「projectPath切替時に旧PRバッジが即時クリアされる」テストを追加（失敗確認）
+- [x] T024 [RED] `Sidebar.test.ts` に「ブランチロード後にPRポーリングが即時ブートストラップされる」テストを追加（失敗確認）
+- [x] T025 [GREEN] `Sidebar.svelte` に projectPath 単位 in-flight + stale state reset + bootstrap改善を実装
 
 ## Phase 3: 仕上げ
 
