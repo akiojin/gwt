@@ -66,6 +66,22 @@ Typical assets:
 
 The sections below are contributor/developer operations.
 
+## Keyboard Shortcuts
+
+| Shortcut (macOS) | Shortcut (Windows/Linux) | Action |
+|---|---|---|
+| Cmd+N | Ctrl+N | New Window |
+| Cmd+O | Ctrl+O | Open Project |
+| Cmd+C | Ctrl+C | Copy |
+| Cmd+V | Ctrl+V | Paste |
+| Cmd+Shift+K | Ctrl+Shift+K | Cleanup Worktrees |
+| Cmd+, | Ctrl+, | Preferences |
+| Cmd+Shift+[ | Ctrl+Shift+[ | Previous Tab |
+| Cmd+Shift+] | Ctrl+Shift+] | Next Tab |
+| Cmd+` | Ctrl+` | Next Window |
+| Cmd+Shift+` | Ctrl+Shift+` | Previous Window |
+| Cmd+M | --- | Minimize (macOS only) |
+
 ## Development
 
 - Rust (stable)
