@@ -1,6 +1,24 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.5.0] - 2026-02-14
+
+### Bug Fixes
+
+- **gui:** Launch Agentのデフォルト設定を前回成功起動値で保持 (#1053)
+- Auto-force branch delete fallback for unmerged cleanup (#1055)
+- **gui:** メニューアクションをフォーカスウィンドウにのみスコープする (#1057)
+- **windows:** Reinforce issue #1029 regression coverage (#1058)
+- GPU情報の返却漏れとstats更新競合を修正 (#1059)
+
+### Features
+
+- Preview PR status in sidebar and worktree summary (#1061)
+
+### Refactor
+
+- **gui:** Hide version info in agent selector (#1060)
+
 ## [7.4.0] - 2026-02-14
 
 ### Bug Fixes
