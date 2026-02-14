@@ -149,6 +149,24 @@ describe("WorktreeSummaryPanel", () => {
     });
   });
 
+  it("shows GitHub CLI auth warning in PR tab when CLI is unavailable", async () => {
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      ghCliStatus: { available: false, authenticated: false },
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const prTab = tabs[2] as HTMLElement;
+    await fireEvent.click(prTab);
+
+    await waitFor(() => {
+      expect(
+        rendered.getByText("GitHub CLI (gh) is not available.")
+      ).toBeTruthy();
+    });
+  });
+
   it("switches to Git tab and keeps Git section expanded", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "get_branch_quick_start") return [];

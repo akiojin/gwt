@@ -194,6 +194,11 @@
     return prStatuses;
   });
 
+  let effectiveGhCliStatus = $derived.by(() => {
+    if (pollingGhCliStatus) return pollingGhCliStatus;
+    return ghCliStatus;
+  });
+
   // Derived prNumber for WorktreeSummaryPanel
   let selectedPrNumber = $derived.by(() => {
     if (!selectedBranch) return null;
@@ -1135,6 +1140,7 @@
           {projectPath}
           {selectedBranch}
           prNumber={selectedPrNumber}
+          ghCliStatus={effectiveGhCliStatus}
           onLaunchAgent={onLaunchAgent}
           onQuickLaunch={onQuickLaunch}
           {onOpenCiLog}

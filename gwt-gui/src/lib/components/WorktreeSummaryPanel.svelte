@@ -6,6 +6,7 @@
     ToolSessionEntry,
     SessionSummaryResult,
     PrStatusInfo,
+    GhCliStatus,
   } from "../types";
   import GitSection from "./GitSection.svelte";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
@@ -26,6 +27,7 @@
     onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
     onOpenCiLog?: (runId: number) => void;
     prNumber?: number | null;
+    ghCliStatus?: GhCliStatus | null;
   } = $props();
 
   let quickStartEntries: ToolSessionEntry[] = $state([]);
@@ -54,6 +56,17 @@
   let sessionSummaryToolId: string | null = $state(null);
   let sessionSummarySessionId: string | null = $state(null);
   const SESSION_SUMMARY_POLL_INTERVAL_MS = 5000;
+
+  let ghCliStatusMessage = $derived.by(() => {
+    if (!ghCliStatus) return null;
+    if (!ghCliStatus.available) {
+      return "GitHub CLI (gh) is not available.";
+    }
+    if (!ghCliStatus.authenticated) {
+      return "GitHub CLI (gh) is not authenticated. Run: gh auth login";
+    }
+    return null;
+  });
 
   type SessionSummaryUpdatedPayload = {
     projectPath: string;
@@ -614,7 +627,7 @@
         <PrStatusSection
           prDetail={prDetail}
           loading={prDetailLoading}
-          error={prDetailError}
+          error={ghCliStatusMessage ?? prDetailError}
         />
       {:else if activeTab === "ci"}
         <div class="quick-start ci-panel">
@@ -622,6 +635,8 @@
             <span class="quick-title">CI</span>
             {#if prDetailLoading}
               <span class="quick-subtitle">Loading...</span>
+            {:else if ghCliStatusMessage}
+              <span class="quick-subtitle">GitHub CLI issue</span>
             {:else if prDetailError}
               <span class="quick-subtitle">Error</span>
             {:else if prDetail}
@@ -633,6 +648,8 @@
 
           {#if prDetailLoading}
             <div class="session-summary-placeholder">Loading...</div>
+          {:else if ghCliStatusMessage}
+            <div class="quick-error">{ghCliStatusMessage}</div>
           {:else if prDetailError}
             <div class="quick-error">
               {prDetailError}
