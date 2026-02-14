@@ -61,7 +61,7 @@
         tabId: string;
         pointerId: number;
         startX: number;
-        captureTarget: HTMLElement;
+        startY: number;
       }
     | null = null;
   let lastReorderSignature = "";
@@ -77,9 +77,25 @@
   }
 
   function resetDragState() {
+    removeGlobalPointerListeners();
     draggingTabId = null;
     pointerDrag = null;
     lastReorderSignature = "";
+  }
+
+  function removeGlobalPointerListeners() {
+    if (typeof window === "undefined") return;
+    window.removeEventListener("pointermove", handleGlobalPointerMove);
+    window.removeEventListener("pointerup", handleGlobalPointerUp);
+    window.removeEventListener("pointercancel", handleGlobalPointerCancel);
+  }
+
+  function addGlobalPointerListeners() {
+    if (typeof window === "undefined") return;
+    removeGlobalPointerListeners();
+    window.addEventListener("pointermove", handleGlobalPointerMove);
+    window.addEventListener("pointerup", handleGlobalPointerUp);
+    window.addEventListener("pointercancel", handleGlobalPointerCancel);
   }
 
   function handleTabDragStart(event: DragEvent, tabId: string) {
@@ -122,28 +138,34 @@
     resetDragState();
   }
 
+  function isTabCloseControl(target: EventTarget | null): boolean {
+    return target instanceof Element && target.closest(".tab-close") !== null;
+  }
+
   function handleTabPointerDown(event: PointerEvent, tabId: string) {
     if (event.button !== 0) return;
-    const target = event.currentTarget;
-    if (!(target instanceof HTMLElement)) return;
+    if (isTabCloseControl(event.target)) return;
 
     draggingTabId = tabId;
     pointerDrag = {
       tabId,
       pointerId: event.pointerId,
       startX: event.clientX,
-      captureTarget: target,
+      startY: event.clientY,
     };
     lastReorderSignature = "";
-    if (typeof target.setPointerCapture === "function") {
-      target.setPointerCapture(event.pointerId);
-    }
+    addGlobalPointerListeners();
   }
 
-  function handleTabBarPointerMove(event: PointerEvent) {
+  function handleGlobalPointerMove(event: PointerEvent) {
     if (!pointerDrag || event.pointerId !== pointerDrag.pointerId) return;
     // Ignore micro jitter so simple clicks do not trigger reordering.
-    if (Math.abs(event.clientX - pointerDrag.startX) < 3) return;
+    if (
+      Math.abs(event.clientX - pointerDrag.startX) < 3 &&
+      Math.abs(event.clientY - pointerDrag.startY) < 3
+    ) {
+      return;
+    }
 
     const fromPoint =
       typeof document !== "undefined" &&
@@ -172,38 +194,26 @@
     onTabReorder(pointerDrag.tabId, overTabId, position);
   }
 
-  function releasePointerDragCapture() {
-    if (!pointerDrag) return;
-    if (
-      typeof pointerDrag.captureTarget.hasPointerCapture === "function" &&
-      typeof pointerDrag.captureTarget.releasePointerCapture === "function" &&
-      pointerDrag.captureTarget.hasPointerCapture(pointerDrag.pointerId)
-    ) {
-      pointerDrag.captureTarget.releasePointerCapture(pointerDrag.pointerId);
-    }
-  }
-
-  function handleTabBarPointerUp(event: PointerEvent) {
+  function handleGlobalPointerUp(event: PointerEvent) {
     if (!pointerDrag || event.pointerId !== pointerDrag.pointerId) return;
-    releasePointerDragCapture();
     resetDragState();
   }
 
-  function handleTabBarPointerCancel(event: PointerEvent) {
+  function handleGlobalPointerCancel(event: PointerEvent) {
     if (!pointerDrag || event.pointerId !== pointerDrag.pointerId) return;
-    releasePointerDragCapture();
     resetDragState();
   }
+
+  $effect(() => {
+    return () => {
+      removeGlobalPointerListeners();
+    };
+  });
 </script>
 
 <main class="main-area">
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    class="tab-bar"
-    onpointermove={handleTabBarPointerMove}
-    onpointerup={handleTabBarPointerUp}
-    onpointercancel={handleTabBarPointerCancel}
-  >
+  <div class="tab-bar">
     {#each tabs as tab}
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -212,7 +222,7 @@
         data-tab-id={tab.id}
         class:active={activeTabId === tab.id}
         class:dragging={draggingTabId === tab.id}
-        draggable={tabs.length > 1 ? "true" : "false"}
+        draggable="false"
         onclick={() => onTabSelect(tab.id)}
         title={tab.type === "terminal" ? tab.cwd || "" : ""}
         onpointerdown={(e) => handleTabPointerDown(e, tab.id)}
@@ -236,6 +246,8 @@
         {#if !isPinnedTab(tab.type)}
           <button
             class="tab-close"
+            type="button"
+            onpointerdown={(e) => e.stopPropagation()}
             onclick={(e) => {
               e.stopPropagation();
               onTabClose(tab.id);
@@ -313,6 +325,7 @@
     cursor: pointer;
     white-space: nowrap;
     font-family: inherit;
+    user-select: none;
   }
 
   .tab:hover {
