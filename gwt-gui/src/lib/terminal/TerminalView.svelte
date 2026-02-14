@@ -146,8 +146,10 @@
     }
 
     const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-    viewport.scrollTop = Math.min(Math.max(viewport.scrollTop + delta, 0), maxScrollTop);
-    return true;
+    const nextScrollTop = Math.min(Math.max(viewport.scrollTop + delta, 0), maxScrollTop);
+    const didScroll = nextScrollTop !== viewport.scrollTop;
+    viewport.scrollTop = nextScrollTop;
+    return didScroll;
   }
 
   onMount(() => {
@@ -208,7 +210,9 @@
       if (event.deltaY === 0) return;
       if (!terminal) return;
 
+      const wasFocused = isTerminalFocused(rootEl);
       focusTerminalIfNeeded(rootEl, true);
+      if (wasFocused || isTerminalFocused(rootEl)) return;
 
       const didScroll = scrollViewportByWheel(rootEl, event);
       if (!didScroll) return;
