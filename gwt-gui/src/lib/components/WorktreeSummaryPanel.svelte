@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { invoke } from "@tauri-apps/api/core";
   import type {
     BranchInfo,
     LaunchAgentRequest,
@@ -7,6 +8,7 @@
     SessionSummaryResult,
     PrStatusInfo,
     GhCliStatus,
+    WorkflowRunInfo,
   } from "../types";
   import GitSection from "./GitSection.svelte";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
@@ -38,7 +40,7 @@
   let quickLaunching: boolean = $state(false);
   let quickLaunchingKey: string | null = $state(null);
 
-  type SummaryTab = "summary" | "git" | "pr" | "ci" | "ai";
+  type SummaryTab = "summary" | "git" | "pr" | "workflow" | "ai";
   let activeTab: SummaryTab = $state("summary");
 
   let prDetailLoading = $state(false);
@@ -47,6 +49,7 @@
   let prDetailBranch: string | null = $state(null);
   let prDetailPrNumber: number | null = $state(null);
   let prDetailRequestToken = 0;
+  let lastProjectPath: string | null = $state(null);
 
   let sessionSummaryLoading: boolean = $state(false);
   let sessionSummaryGenerating: boolean = $state(false);
@@ -159,6 +162,40 @@
   function runtimeService(entry: ToolSessionEntry): string | null {
     const service = (entry.docker_service ?? "").trim();
     return service.length > 0 ? service : null;
+  }
+
+  function workflowStatusText(run: WorkflowRunInfo): string {
+    if (run.status === "queued") return "Queued";
+    if (run.status === "in_progress") return "Running";
+    if (run.status !== "completed") return "Pending";
+    if (run.conclusion === "success") return "Success";
+    if (run.conclusion === "failure") return "Failed";
+    if (run.conclusion === "neutral") return "Neutral";
+    if (run.conclusion === "skipped") return "Skipped";
+    if (run.conclusion === "cancelled") return "Cancelled";
+    if (run.conclusion === "timed_out") return "Timed out";
+    if (run.conclusion === "action_required") return "Action required";
+    return "Unknown";
+  }
+
+  function workflowRepoUrl(prUrl: string): string | null {
+    try {
+      const parsed = new URL(prUrl);
+      const parts = parsed.pathname.split("/").filter(Boolean);
+      if (parts.length < 2) return null;
+      return `${parsed.origin}/${parts[0]}/${parts[1]}`;
+    } catch {
+      return null;
+    }
+  }
+
+  function openWorkflowRun(run: WorkflowRunInfo) {
+    if (typeof window === "undefined") return;
+    if (!prDetail?.url) return;
+
+    const repoUrl = workflowRepoUrl(prDetail.url);
+    if (!repoUrl) return;
+    window.open(`${repoUrl}/actions/runs/${run.runId}`, "_blank", "noopener");
   }
 
   function quickStartEntryKey(entry: ToolSessionEntry): string {
@@ -358,6 +395,13 @@
     prDetailPrNumber = null;
   }
 
+  $effect(() => {
+    const nextProjectPath = projectPath ?? "";
+    if (nextProjectPath === lastProjectPath) return;
+    lastProjectPath = nextProjectPath;
+    clearPrDetailState(currentBranchName());
+  });
+
   async function loadPrDetail(branch: string, prNum: number) {
     const requestToken = ++prDetailRequestToken;
     prDetailLoading = true;
@@ -365,7 +409,6 @@
     prDetail = null;
     prDetailPrNumber = prNum;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
       const result = await invoke<PrStatusInfo>("fetch_pr_detail", {
         projectPath,
         prNumber: prNum,
@@ -391,7 +434,7 @@
   }
 
   $effect(() => {
-    if (activeTab !== "pr" && activeTab !== "ci") return;
+    if (activeTab !== "pr" && activeTab !== "workflow") return;
 
     const branch = currentBranchName();
     if (!branch || !prNumber) {
@@ -494,12 +537,12 @@
         </button>
         <button
           class="summary-tab"
-          class:active={activeTab === "ci"}
+          class:active={activeTab === "workflow"}
           onclick={() => {
-            activeTab = "ci";
+            activeTab = "workflow";
           }}
         >
-          CI
+          Workflow
         </button>
         <button
           class="summary-tab"
@@ -630,10 +673,10 @@
           loading={prDetailLoading}
           error={ghCliStatusMessage ?? prDetailError}
         />
-      {:else if activeTab === "ci"}
-        <div class="quick-start ci-panel">
+      {:else if activeTab === "workflow"}
+        <div class="quick-start workflow-panel">
           <div class="quick-header">
-            <span class="quick-title">CI</span>
+            <span class="quick-title">Workflow</span>
             {#if prDetailLoading}
               <span class="quick-subtitle">Loading...</span>
             {:else if ghCliStatusMessage}
@@ -662,12 +705,15 @@
               {#each prDetail.checkSuites as run}
                 <button
                   class="workflow-run-item"
-                  onclick={() => onOpenCiLog?.(run.runId)}
+                  type="button"
+                  onclick={() => openWorkflowRun(run)}
                 >
                   <span class="workflow-status {workflowStatusClass(run)}"
                     >{workflowStatusIcon(run)}</span
                   >
-                  <span class="workflow-name">{run.workflowName}</span>
+                  <span class="workflow-status-text">
+                    {workflowStatusText(run)}
+                  </span>
                 </button>
               {/each}
             </div>
@@ -1105,7 +1151,7 @@
     color: var(--text-muted);
   }
 
-  .workflow-name {
+  .workflow-status-text {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -1118,7 +1164,7 @@
     font-style: italic;
   }
 
-  .ci-panel .workflow-run-item {
+  .workflow-panel .workflow-run-item {
     border-radius: 4px;
   }
 </style>

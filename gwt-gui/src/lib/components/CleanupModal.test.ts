@@ -6,6 +6,9 @@ const listenMock = vi.fn();
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
+  default: {
+    invoke: invokeMock,
+  },
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -169,5 +172,296 @@ describe("CleanupModal", () => {
     const rows = rendered.container.querySelectorAll("tbody tr");
     expect(rows.length).toBe(2);
     expect(rows[0].textContent).toContain(worktreeFixture.branch);
+  });
+
+  it("shows list error when fetching worktrees fails", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") throw new Error("list failed");
+      return [];
+    });
+
+    const rendered = await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project",
+      onClose: vi.fn(),
+      agentTabBranches: [],
+    });
+
+    await waitFor(() => {
+      expect(
+        rendered.getByText("Failed to list worktrees: list failed")
+      ).toBeTruthy();
+    });
+  });
+
+  it("selects only safe worktrees with Select All Safe", async () => {
+    const warningWorktree = {
+      ...worktreeFixture,
+      path: "/tmp/worktrees/feature/warning",
+      branch: "feature/warning",
+      safety_level: "warning",
+    };
+    const disabledWorktree = {
+      ...worktreeFixture,
+      path: "/tmp/worktrees/feature/disabled",
+      branch: "feature/disabled",
+      safety_level: "disabled",
+    };
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") {
+        return [worktreeFixture, warningWorktree, disabledWorktree];
+      }
+      return [];
+    });
+
+    const rendered = await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project",
+      onClose: vi.fn(),
+      agentTabBranches: [],
+    });
+
+    await rendered.findByText(worktreeFixture.branch);
+    await fireEvent.click(rendered.getByRole("button", { name: "Select All Safe" }));
+
+    await waitFor(() => {
+      expect(rendered.getByRole("button", { name: "Cleanup (1)" })).toBeTruthy();
+    });
+  });
+
+  it("preselects branch when preselectedBranch is provided", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") return [worktreeFixture];
+      return [];
+    });
+
+    const rendered = await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project",
+      preselectedBranch: worktreeFixture.branch,
+      onClose: vi.fn(),
+      agentTabBranches: [],
+    });
+
+    await rendered.findByText(worktreeFixture.branch);
+    await waitFor(() => {
+      expect(rendered.getByRole("button", { name: "Cleanup (1)" })).toBeTruthy();
+    });
+  });
+
+  it("shows failure dialog when cleanup-completed includes failed entries", async () => {
+    let cleanupCompletedHandler: ((event: { payload: { results: any[] } }) => void) | null = null;
+    listenMock.mockImplementation(async (_eventName: string, handler: any) => {
+      cleanupCompletedHandler = handler;
+      return () => {};
+    });
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") return [worktreeFixture];
+      if (command === "cleanup_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project",
+      onClose: vi.fn(),
+      agentTabBranches: [],
+    });
+
+    await rendered.findByText(worktreeFixture.branch);
+    const checkbox = rendered.container.querySelector(
+      "tbody input[type=\"checkbox\"]"
+    ) as HTMLInputElement;
+    await fireEvent.click(checkbox);
+    await fireEvent.click(rendered.getByRole("button", { name: "Cleanup (1)" }));
+
+    await waitFor(() => {
+      expect(cleanupCompletedHandler).toBeTruthy();
+    });
+    cleanupCompletedHandler?.({
+      payload: {
+        results: [{ branch: worktreeFixture.branch, success: false, error: "in use" }],
+      },
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("Cleanup Failed")).toBeTruthy();
+      expect(rendered.getByText("in use")).toBeTruthy();
+    });
+  });
+
+  it("preserves checked branches across refreshKey updates and drops unavailable ones", async () => {
+    const anotherSafe = {
+      ...worktreeFixture,
+      path: "/tmp/worktrees/feature/another",
+      branch: "feature/another",
+    };
+    const disabledAfterRefresh = {
+      ...anotherSafe,
+      safety_level: "disabled",
+    };
+
+    let listCalls = 0;
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") {
+        listCalls += 1;
+        if (listCalls === 1) return [worktreeFixture, anotherSafe];
+        return [worktreeFixture, disabledAfterRefresh];
+      }
+      return [];
+    });
+
+    const onClose = vi.fn();
+    const rendered = await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project",
+      refreshKey: 1,
+      onClose,
+      agentTabBranches: [],
+    });
+
+    await rendered.findByText(worktreeFixture.branch);
+    const checks = rendered.container.querySelectorAll(
+      "tbody input[type=\"checkbox\"]"
+    ) as NodeListOf<HTMLInputElement>;
+    await fireEvent.click(checks[0]);
+    await fireEvent.click(checks[1]);
+    await waitFor(() => {
+      expect(rendered.getByRole("button", { name: "Cleanup (2)" })).toBeTruthy();
+    });
+
+    await rendered.rerender({
+      open: true,
+      projectPath: "/tmp/project",
+      refreshKey: 2,
+      onClose,
+      agentTabBranches: [],
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("list_worktrees", {
+        projectPath: "/tmp/project",
+      });
+      expect(rendered.getByRole("button", { name: "Cleanup (1)" })).toBeTruthy();
+    });
+  });
+
+  it("shows unsafe confirmation and allows cancel via Escape", async () => {
+    const warningWorktree = {
+      ...worktreeFixture,
+      path: "/tmp/worktrees/feature/warning-only",
+      branch: "feature/warning-only",
+      safety_level: "warning",
+    };
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") return [warningWorktree];
+      if (command === "cleanup_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project",
+      onClose: vi.fn(),
+      agentTabBranches: [],
+    });
+
+    await rendered.findByText(warningWorktree.branch);
+    const checkbox = rendered.container.querySelector(
+      "tbody input[type=\"checkbox\"]"
+    ) as HTMLInputElement;
+    await fireEvent.click(checkbox);
+    await fireEvent.click(rendered.getByRole("button", { name: "Cleanup (1)" }));
+
+    await rendered.findByText("Unsafe Worktrees Selected");
+
+    const overlay = rendered.container.querySelector(".overlay") as HTMLDivElement;
+    await fireEvent.keyDown(overlay, { key: "Escape" });
+    await waitFor(() => {
+      expect(rendered.queryByText("Unsafe Worktrees Selected")).toBeNull();
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Cleanup (1)" }));
+    await fireEvent.click(rendered.getByRole("button", { name: "Force Cleanup" }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith(
+        "cleanup_worktrees",
+        expect.objectContaining({
+          force: true,
+        })
+      );
+    });
+  });
+
+  it("shows cleanup invoke failure details and allows closing failure dialog", async () => {
+    const richWorktree = {
+      ...worktreeFixture,
+      safety_level: "danger",
+      has_changes: true,
+      has_unpushed: true,
+      ahead: 2,
+      behind: 1,
+      is_gone: true,
+      last_tool_usage: "codex",
+    };
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") return [richWorktree];
+      if (command === "cleanup_worktrees") throw { code: "E_BUSY" };
+      return [];
+    });
+
+    const rendered = await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project",
+      onClose: vi.fn(),
+      agentTabBranches: [],
+    });
+
+    await rendered.findByText(richWorktree.branch);
+    expect(rendered.getByTitle("Uncommitted changes")).toBeTruthy();
+    expect(rendered.getByTitle("Unpushed commits")).toBeTruthy();
+    expect(rendered.getByText("+2")).toBeTruthy();
+    expect(rendered.getByText("-1")).toBeTruthy();
+    expect(rendered.getByText("gone")).toBeTruthy();
+    expect(rendered.getByText("codex")).toBeTruthy();
+
+    const checkbox = rendered.container.querySelector(
+      "tbody input[type=\"checkbox\"]"
+    ) as HTMLInputElement;
+    await fireEvent.click(checkbox);
+    await fireEvent.click(rendered.getByRole("button", { name: "Cleanup (1)" }));
+    await fireEvent.click(rendered.getByRole("button", { name: "Force Cleanup" }));
+
+    await waitFor(() => {
+      expect(rendered.getByText("Cleanup Failed")).toBeTruthy();
+      expect(rendered.getByText("[object Object]")).toBeTruthy();
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Close" }));
+    await waitFor(() => {
+      expect(rendered.queryByText("Cleanup Failed")).toBeNull();
+    });
+  });
+
+  it("formats list errors when backend throws a string", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") throw "plain string error";
+      return [];
+    });
+
+    const rendered = await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project",
+      onClose: vi.fn(),
+      agentTabBranches: [],
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("Failed to list worktrees: plain string error")).toBeTruthy();
+    });
   });
 });
