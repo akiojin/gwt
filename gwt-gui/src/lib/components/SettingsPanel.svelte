@@ -800,9 +800,9 @@
               </div>
 
               {#if isAiEnabled(currentProfile)}
+                {@const currentAi = currentProfile.ai}
+                {@const currentEndpoint = currentAi?.endpoint?.trim() ?? ""}
                 <div class="ai-grid">
-                  {@const currentAi = currentProfile.ai}
-                  {@const currentEndpoint = currentAi?.endpoint?.trim() ?? ""}
                   <div class="ai-field">
                     <span class="ai-label">Endpoint</span>
                     <input
