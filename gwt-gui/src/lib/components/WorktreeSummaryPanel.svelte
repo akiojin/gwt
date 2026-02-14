@@ -534,6 +534,38 @@
     }
   }
 
+  function workflowStatusText(run: WorkflowRunInfo): string {
+    if (run.status !== "completed") {
+      return run.status === "in_progress" ? "Running" : "Queued";
+    }
+    switch (run.conclusion) {
+      case "success":
+        return "Success";
+      case "failure":
+        return "Failure";
+      case "neutral":
+        return "Neutral";
+      case "skipped":
+        return "Skipped";
+      default:
+        return "Completed";
+    }
+  }
+
+  function openWorkflowRun(run: WorkflowRunInfo): void {
+    if (onOpenCiLog) {
+      onOpenCiLog(run.runId);
+      return;
+    }
+    if (typeof window === "undefined" || !window.open) return;
+
+    const prUrl = prDetail?.url ?? "";
+    const match = prUrl.match(/^(https:\/\/github\.com\/[^/]+\/[^/]+)\//);
+    const workflowBase = match ? match[1] : null;
+    if (!workflowBase) return;
+    window.open(`${workflowBase}/actions/runs/${run.runId}`, "_blank", "noopener");
+  }
+
   async function getInvoke(): Promise<TauriInvoke> {
     const globalInvoke = (globalThis as { __TAURI_INTERNALS__?: { invoke?: TauriInvoke } })
       .__TAURI_INTERNALS__?.invoke;
@@ -766,6 +798,7 @@
                   <span class="workflow-status {workflowStatusClass(run)}"
                     >{workflowStatusIcon(run)}</span
                   >
+                  <span class="workflow-name">{run.workflowName}</span>
                   <span class="workflow-status-text">
                     {workflowStatusText(run)}
                   </span>

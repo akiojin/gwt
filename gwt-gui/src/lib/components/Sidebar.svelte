@@ -262,8 +262,8 @@
     const baseName = normalized.startsWith("origin/")
       ? normalized.slice("origin/".length)
       : normalized;
-    if (remoteStripped === "main") return 2;
-    if (remoteStripped === "develop") return 1;
+    if (baseName === "main") return 2;
+    if (baseName === "develop") return 1;
     return 0;
   }
 

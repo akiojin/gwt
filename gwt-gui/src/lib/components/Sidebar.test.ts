@@ -475,6 +475,7 @@ describe("Sidebar", () => {
       statuses: Record<string, unknown>;
       ghStatus: { available: boolean; authenticated: boolean };
     };
+    vi.useFakeTimers();
     let resolveProjectB: ((value: PrStatusResponse) => void) | null = null;
     try {
       invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
@@ -592,6 +593,7 @@ describe("Sidebar", () => {
           ghStatus: { available: true, authenticated: true },
         });
       }
+      vi.useRealTimers();
     }
   });
 

@@ -225,6 +225,7 @@ describe("WorktreeSummaryPanel", () => {
   });
 
   it("switches to Workflow tab and shows workflow runs", async () => {
+    const windowOpen = vi.spyOn(window, "open").mockReturnValue(null);
     const onOpenCiLog = vi.fn();
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "get_branch_quick_start") return [];
