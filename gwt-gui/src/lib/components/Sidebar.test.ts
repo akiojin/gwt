@@ -16,6 +16,12 @@ function countInvokeCalls(name: string): number {
   return invokeMock.mock.calls.filter((c) => c[0] === name).length;
 }
 
+function fetchPrStatusProjectPaths(): string[] {
+  return invokeMock.mock.calls
+    .filter((c) => c[0] === "fetch_pr_status")
+    .map((c) => (c[1] as { projectPath?: string } | undefined)?.projectPath ?? "");
+}
+
 const branchFixture = {
   name: "feature/sidebar-size",
   commit: "1234567",
@@ -139,6 +145,39 @@ describe("Sidebar", () => {
     });
   });
 
+  it("refreshes all filter caches on refreshKey change and reuses prefetched data on switch", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [branchFixture];
+      if (command === "list_remote_branches") return [remoteBranchFixture];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      refreshKey: 0,
+    });
+
+    await rendered.findByText(branchFixture.name);
+    invokeMock.mockClear();
+
+    await rendered.rerender({ refreshKey: 1 });
+
+    await waitFor(() => {
+      expect(countInvokeCalls("list_worktree_branches")).toBe(2);
+      expect(countInvokeCalls("list_remote_branches")).toBe(2);
+      expect(countInvokeCalls("list_worktrees")).toBe(2);
+    });
+
+    const remoteFetchCount = countInvokeCalls("list_remote_branches");
+    await fireEvent.click(rendered.getByRole("button", { name: "Remote" }));
+    await rendered.findByText(remoteBranchFixture.name);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(countInvokeCalls("list_remote_branches")).toBe(remoteFetchCount);
+  });
+
   it("reuses cached filter data when switching back within ttl", async () => {
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => 1_700_000_000_000);
     try {
@@ -216,6 +255,356 @@ describe("Sidebar", () => {
     } finally {
       localRefreshDeferred.resolve?.([branchFixture]);
       nowSpy.mockRestore();
+    }
+  });
+
+  it("does not re-run fetch_pr_status immediately when switching filters", async () => {
+    vi.useFakeTimers();
+    try {
+      invokeMock.mockImplementation((command: string) => {
+        if (command === "list_worktree_branches") return Promise.resolve([branchFixture]);
+        if (command === "list_remote_branches") return Promise.resolve([remoteBranchFixture]);
+        if (command === "list_worktrees") return Promise.resolve([]);
+        if (command === "fetch_pr_status") {
+          return Promise.resolve({
+            statuses: {},
+            ghStatus: { available: true, authenticated: true },
+          });
+        }
+        return Promise.resolve([]);
+      });
+
+      const rendered = await renderSidebar({
+        projectPath: "/tmp/project",
+        onBranchSelect: vi.fn(),
+      });
+
+      await rendered.findByText(branchFixture.name);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await waitFor(() => {
+        expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(0);
+      });
+
+      const beforeSwitchCount = countInvokeCalls("fetch_pr_status");
+
+      await fireEvent.click(rendered.getByRole("button", { name: "Remote" }));
+      await rendered.findByText(remoteBranchFixture.name);
+      await fireEvent.click(rendered.getByRole("button", { name: "Local" }));
+      await rendered.findByText(branchFixture.name);
+      await vi.advanceTimersByTimeAsync(20);
+
+      expect(countInvokeCalls("fetch_pr_status")).toBe(beforeSwitchCount);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not queue extra fetch_pr_status calls while previous polling is in flight", async () => {
+    vi.useFakeTimers();
+    type PrStatusResponse = {
+      statuses: Record<string, null>;
+      ghStatus: { available: boolean; authenticated: boolean };
+    };
+    let pendingResolve: ((value: PrStatusResponse) => void) | null = null;
+    try {
+      invokeMock.mockImplementation((command: string) => {
+        if (command === "list_worktree_branches") return Promise.resolve([branchFixture]);
+        if (command === "list_remote_branches") return Promise.resolve([remoteBranchFixture]);
+        if (command === "list_worktrees") return Promise.resolve([]);
+        if (command === "fetch_pr_status") {
+          return new Promise<PrStatusResponse>((resolve) => {
+            pendingResolve = resolve;
+          });
+        }
+        return Promise.resolve([]);
+      });
+
+      const rendered = await renderSidebar({
+        projectPath: "/tmp/project",
+        onBranchSelect: vi.fn(),
+      });
+
+      await rendered.findByText(branchFixture.name);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await waitFor(() => {
+        expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(0);
+      });
+      const inFlightCount = countInvokeCalls("fetch_pr_status");
+
+      await fireEvent.click(rendered.getByRole("button", { name: "Remote" }));
+      await rendered.findByText(remoteBranchFixture.name);
+      await fireEvent.click(rendered.getByRole("button", { name: "Local" }));
+      await rendered.findByText(branchFixture.name);
+      await vi.advanceTimersByTimeAsync(20);
+
+      expect(countInvokeCalls("fetch_pr_status")).toBe(inFlightCount);
+    } finally {
+      const resolvePending = pendingResolve as ((value: PrStatusResponse) => void) | null;
+      if (resolvePending) {
+        resolvePending({
+          statuses: {},
+          ghStatus: { available: true, authenticated: true },
+        });
+        pendingResolve = null;
+      }
+      vi.useRealTimers();
+    }
+  });
+
+  it("scopes in-flight polling by projectPath and refreshes immediately after project switch", async () => {
+    vi.useFakeTimers();
+    type PrStatusResponse = {
+      statuses: Record<string, null>;
+      ghStatus: { available: boolean; authenticated: boolean };
+    };
+    let resolveProjectA: ((value: PrStatusResponse) => void) | null = null;
+    const projectBBranch = {
+      ...branchFixture,
+      name: "feature/project-b",
+    };
+    try {
+      invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
+        const path = typeof args?.projectPath === "string" ? args.projectPath : "";
+        if (command === "list_worktree_branches") {
+          if (path === "/tmp/project-b") return Promise.resolve([projectBBranch]);
+          return Promise.resolve([branchFixture]);
+        }
+        if (command === "list_worktrees") return Promise.resolve([]);
+        if (command === "fetch_pr_status") {
+          if (path === "/tmp/project-b") {
+            return Promise.resolve({
+              statuses: {},
+              ghStatus: { available: true, authenticated: true },
+            });
+          }
+          return new Promise<PrStatusResponse>((resolve) => {
+            resolveProjectA = resolve;
+          });
+        }
+        return Promise.resolve([]);
+      });
+
+      const rendered = await renderSidebar({
+        projectPath: "/tmp/project-a",
+        onBranchSelect: vi.fn(),
+      });
+
+      await rendered.findByText(branchFixture.name);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await waitFor(() => {
+        expect(fetchPrStatusProjectPaths()).toContain("/tmp/project-a");
+      });
+
+      await rendered.rerender({ projectPath: "/tmp/project-b" });
+      await rendered.findByText(projectBBranch.name);
+      await waitFor(() => {
+        expect(fetchPrStatusProjectPaths()).toContain("/tmp/project-b");
+      });
+    } finally {
+      const finalizeProjectA = resolveProjectA as unknown as
+        | ((value: PrStatusResponse) => void)
+        | null;
+      if (typeof finalizeProjectA === "function") {
+        finalizeProjectA({
+          statuses: {},
+          ghStatus: { available: true, authenticated: true },
+        });
+      }
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears stale polling statuses immediately when projectPath changes", async () => {
+    vi.useFakeTimers();
+    type PrStatusResponse = {
+      statuses: Record<string, unknown>;
+      ghStatus: { available: boolean; authenticated: boolean };
+    };
+    let resolveProjectB: ((value: PrStatusResponse) => void) | null = null;
+    try {
+      invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
+        const path = typeof args?.projectPath === "string" ? args.projectPath : "";
+        if (command === "list_worktree_branches") return Promise.resolve([branchFixture]);
+        if (command === "list_worktrees") return Promise.resolve([]);
+        if (command === "fetch_pr_status") {
+          if (path === "/tmp/project-a") {
+            return Promise.resolve({
+              statuses: {
+                [branchFixture.name]: {
+                  number: 111,
+                  state: "OPEN",
+                  title: "A",
+                  url: "https://example.invalid/pr/111",
+                  draft: false,
+                  mergedAt: null,
+                  updatedAt: "2026-02-14T00:00:00Z",
+                  checkSuites: [],
+                },
+              },
+              ghStatus: { available: true, authenticated: true },
+            });
+          }
+          return new Promise<PrStatusResponse>((resolve) => {
+            resolveProjectB = resolve;
+          });
+        }
+        return Promise.resolve([]);
+      });
+
+      const rendered = await renderSidebar({
+        projectPath: "/tmp/project-a",
+        onBranchSelect: vi.fn(),
+      });
+
+      await rendered.findByText(branchFixture.name);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await rendered.findByText("#111 Open");
+
+      await rendered.rerender({ projectPath: "/tmp/project-b" });
+      await rendered.findByText(branchFixture.name);
+      await waitFor(() => {
+        expect(rendered.queryByText("#111 Open")).toBeNull();
+      });
+    } finally {
+      const finalizeProjectB = resolveProjectB as unknown as
+        | ((value: PrStatusResponse) => void)
+        | null;
+      if (typeof finalizeProjectB === "function") {
+        finalizeProjectB({
+          statuses: {},
+          ghStatus: { available: true, authenticated: true },
+        });
+      }
+      vi.useRealTimers();
+    }
+  });
+
+  it("bootstraps fetch_pr_status as soon as branches load", async () => {
+    let resolveBranches: ((value: typeof branchFixture[]) => void) | null = null;
+    try {
+      invokeMock.mockImplementation((command: string) => {
+        if (command === "list_worktree_branches") {
+          return new Promise<typeof branchFixture[]>((resolve) => {
+            resolveBranches = resolve;
+          });
+        }
+        if (command === "list_worktrees") return Promise.resolve([]);
+        if (command === "fetch_pr_status") {
+          return Promise.resolve({
+            statuses: {},
+            ghStatus: { available: true, authenticated: true },
+          });
+        }
+        return Promise.resolve([]);
+      });
+
+      const rendered = await renderSidebar({
+        projectPath: "/tmp/project",
+        onBranchSelect: vi.fn(),
+      });
+      expect(countInvokeCalls("fetch_pr_status")).toBe(0);
+
+      await waitFor(() => {
+        expect(resolveBranches).toBeTruthy();
+      });
+      const finalizeBranches = resolveBranches as unknown as
+        | ((value: typeof branchFixture[]) => void)
+        | null;
+      if (typeof finalizeBranches === "function") {
+        finalizeBranches([branchFixture]);
+      }
+      await rendered.findByText(branchFixture.name);
+      await waitFor(() => {
+        expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(0);
+      });
+    } finally {
+      const finalizeBranches = resolveBranches as unknown as
+        | ((value: typeof branchFixture[]) => void)
+        | null;
+      if (typeof finalizeBranches === "function") {
+        finalizeBranches([branchFixture]);
+      }
+    }
+  });
+
+  it("skips 30s fetch_pr_status polling while search input is focused", async () => {
+    vi.useFakeTimers();
+    try {
+      invokeMock.mockImplementation((command: string) => {
+        if (command === "list_worktree_branches") return Promise.resolve([branchFixture]);
+        if (command === "list_remote_branches") return Promise.resolve([remoteBranchFixture]);
+        if (command === "list_worktrees") return Promise.resolve([]);
+        if (command === "fetch_pr_status") {
+          return Promise.resolve({
+            statuses: {},
+            ghStatus: { available: true, authenticated: true },
+          });
+        }
+        return Promise.resolve([]);
+      });
+
+      const rendered = await renderSidebar({
+        projectPath: "/tmp/project",
+        onBranchSelect: vi.fn(),
+      });
+
+      await rendered.findByText(branchFixture.name);
+      await waitFor(() => {
+        expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(0);
+      });
+      const searchInput = rendered.getByPlaceholderText("Filter branches...");
+      (searchInput as HTMLInputElement).focus();
+      expect(document.activeElement).toBe(searchInput);
+
+      invokeMock.mockClear();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(countInvokeCalls("fetch_pr_status")).toBe(0);
+
+      (searchInput as HTMLInputElement).blur();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("applies branch filtering after debounce delay", async () => {
+    vi.useFakeTimers();
+    try {
+      invokeMock.mockImplementation(async (command: string) => {
+        if (command === "list_worktree_branches") {
+          return [
+            branchFixture,
+            {
+              ...branchFixture,
+              name: "feature/another-branch",
+            },
+          ];
+        }
+        if (command === "list_worktrees") return [];
+        return [];
+      });
+
+      const rendered = await renderSidebar({
+        projectPath: "/tmp/project",
+        onBranchSelect: vi.fn(),
+      });
+
+      await rendered.findByText("feature/sidebar-size");
+      await rendered.findByText("feature/another-branch");
+
+      const searchInput = rendered.getByPlaceholderText("Filter branches...");
+      await fireEvent.input(searchInput, { target: { value: "another" } });
+
+      expect(rendered.queryByText("feature/sidebar-size")).toBeTruthy();
+
+      await vi.advanceTimersByTimeAsync(150);
+      await waitFor(() => {
+        expect(rendered.queryByText("feature/sidebar-size")).toBeNull();
+      });
+      expect(rendered.queryByText("feature/another-branch")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
     }
   });
 
