@@ -1,12 +1,12 @@
 //! Settings management (SPEC-a3f4c9df)
 //!
-//! Manages application settings with automatic migration and path unification.
+//! Manages application settings from global configuration files.
 //!
 //! Global config locations (priority):
 //! 1. ~/.gwt/config.toml (new, preferred)
 //! 2. ~/.config/gwt/config.toml (legacy, fallback)
 
-use super::migration::{auto_migrate, ensure_config_dir, write_atomic};
+use super::migration::{ensure_config_dir, write_atomic};
 use crate::error::{GwtError, Result};
 use figment::{
     providers::{Env, Format, Toml},
@@ -144,80 +144,9 @@ impl Settings {
         debug!(
             category = "config",
             repo_root = %repo_root.display(),
-            "Loading settings"
+            "Loading settings (global-only mode)"
         );
-
-        auto_migrate(repo_root)?;
-
-        // Auto-migrate global path if needed (SPEC-a3f4c9df)
-        if Self::needs_global_path_migration() {
-            match Self::migrate_global_path_if_needed() {
-                Ok(true) => {
-                    info!(
-                        category = "config",
-                        operation = "auto_migrate",
-                        "Auto-migrated global config from ~/.config/gwt/ to ~/.gwt/"
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        category = "config",
-                        error = %e,
-                        "Failed to auto-migrate global config path"
-                    );
-                }
-                _ => {}
-            }
-        }
-
-        let config_path = Self::find_config_file(repo_root);
-
-        let mut figment = Figment::new().merge(Toml::string(&Self::default_toml()));
-
-        if let Some(ref path) = config_path {
-            debug!(
-                category = "config",
-                config_path = %path.display(),
-                "Merging config file"
-            );
-            figment = figment.merge(Toml::file(path));
-        }
-
-        figment = figment.merge(Self::settings_env_provider());
-
-        let mut settings: Settings = figment.extract().map_err(|e| {
-            error!(
-                category = "config",
-                error = %e,
-                "Failed to parse config"
-            );
-            GwtError::ConfigParseError {
-                reason: e.to_string(),
-            }
-        })?;
-
-        if let Ok(value) = std::env::var("GWT_AGENT_AUTO_INSTALL_DEPS") {
-            if let Some(parsed) = parse_env_bool(&value) {
-                settings.agent.auto_install_deps = parsed;
-            }
-        }
-
-        if let Ok(value) = std::env::var("GWT_DOCKER_FORCE_HOST") {
-            if let Some(parsed) = parse_env_bool(&value) {
-                settings.docker.force_host = parsed;
-            }
-        }
-
-        info!(
-            category = "config",
-            operation = "load",
-            config_path = config_path.as_ref().map(|p| p.display().to_string()).as_deref(),
-            debug = settings.debug,
-            worktree_root = %settings.worktree_root,
-            "Settings loaded"
-        );
-
-        Ok(settings)
+        Self::load_global()
     }
 
     /// Load settings from global configuration files and environment.
@@ -307,36 +236,13 @@ impl Settings {
         toml::to_string_pretty(&Self::default()).unwrap_or_default()
     }
 
-    /// Find the configuration file (SPEC-a3f4c9df FR-013)
+    /// Find the global configuration file (SPEC-a3f4c9df FR-013)
     ///
     /// Priority (highest to lowest):
-    /// 1. .gwt.toml (local, highest priority)
-    /// 2. .gwt/config.toml (local)
-    /// 3. ~/.gwt/config.toml (global, new location)
-    /// 4. ~/.config/gwt/config.toml (global, legacy fallback)
-    pub fn find_config_file(repo_root: &Path) -> Option<PathBuf> {
-        debug!(
-            category = "config",
-            repo_root = %repo_root.display(),
-            "Searching for config file"
-        );
-
-        // Local config candidates
-        let local_candidates = [
-            repo_root.join(".gwt.toml"),
-            repo_root.join(".gwt/config.toml"),
-        ];
-
-        for path in local_candidates {
-            if path.exists() {
-                debug!(
-                    category = "config",
-                    config_path = %path.display(),
-                    "Found local config file"
-                );
-                return Some(path);
-            }
-        }
+    /// 1. ~/.gwt/config.toml (global, new location)
+    /// 2. ~/.config/gwt/config.toml (global, legacy fallback)
+    pub fn find_config_file(_repo_root: &Path) -> Option<PathBuf> {
+        debug!(category = "config", "Searching for global config file");
 
         // Check new global config location (~/.gwt/config.toml)
         if let Some(new_global) = Self::new_global_config_path() {
@@ -364,8 +270,7 @@ impl Settings {
 
         debug!(
             category = "config",
-            repo_root = %repo_root.display(),
-            "No config file found, using defaults"
+            "No global config file found, using defaults"
         );
         None
     }
@@ -583,26 +488,38 @@ mod tests {
     }
 
     #[test]
-    fn test_load_auto_migrates_json() {
+    fn test_load_ignores_local_json_and_toml() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let json_path = temp.path().join(".gwt.json");
-        let toml_path = temp.path().join(".gwt.toml");
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
 
         std::fs::write(
-            &json_path,
-            r#"{"default_base_branch":"develop","worktree_root":".worktrees"}"#,
+            repo.join(".gwt.json"),
+            r#"{"default_base_branch":"develop","worktree_root":".worktrees","debug":true}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join(".gwt.toml"),
+            r#"
+debug = true
+default_base_branch = "local"
+"#,
         )
         .unwrap();
 
-        let settings = Settings::load(temp.path()).unwrap();
-        assert!(toml_path.exists());
-        assert_eq!(settings.default_base_branch, "develop");
+        let settings = Settings::load(&repo).unwrap();
+        assert!(!settings.debug);
+        assert_eq!(settings.default_base_branch, "main");
     }
 
     #[test]
     fn test_save_and_load() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let config_path = temp.path().join(".gwt.toml");
+        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         let settings = Settings {
             protected_branches: vec!["main".to_string(), "release".to_string()],
@@ -610,9 +527,11 @@ mod tests {
             ..Default::default()
         };
 
-        settings.save(&config_path).unwrap();
+        settings.save_global().unwrap();
 
-        let loaded = Settings::load(temp.path()).unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let loaded = Settings::load(&repo).unwrap();
         assert!(loaded.protected_branches.contains(&"main".to_string()));
         assert!(loaded.protected_branches.contains(&"release".to_string()));
         assert!(loaded.debug);
@@ -629,12 +548,14 @@ mod tests {
 
     #[test]
     fn test_env_override() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         // Set environment variable
         std::env::set_var("GWT_DEBUG", "true");
 
-        let settings = Settings::load(temp.path()).unwrap();
+        let settings = Settings::load_global().unwrap();
 
         // Clean up
         std::env::remove_var("GWT_DEBUG");
@@ -644,10 +565,12 @@ mod tests {
 
     #[test]
     fn test_env_override_docker_force_host_accepts_numeric_bool() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         std::env::set_var("GWT_DOCKER_FORCE_HOST", "1");
-        let settings = Settings::load(temp.path()).unwrap();
+        let settings = Settings::load_global().unwrap();
         std::env::remove_var("GWT_DOCKER_FORCE_HOST");
 
         assert!(settings.docker.force_host);
@@ -655,10 +578,12 @@ mod tests {
 
     #[test]
     fn test_env_override_auto_install_deps() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
 
         std::env::set_var("GWT_AGENT_AUTO_INSTALL_DEPS", "true");
-        let settings = Settings::load(temp.path()).unwrap();
+        let settings = Settings::load_global().unwrap();
         std::env::remove_var("GWT_AGENT_AUTO_INSTALL_DEPS");
 
         assert!(settings.agent.auto_install_deps);
@@ -708,6 +633,39 @@ default_base_branch = "new-global"
         let settings = Settings::load(&repo).unwrap();
         assert!(settings.debug);
         assert_eq!(settings.default_base_branch, "new-global");
+    }
+
+    #[test]
+    fn test_load_ignores_local_config_when_global_exists() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let global_dir = temp.path().join(".gwt");
+        std::fs::create_dir_all(&global_dir).unwrap();
+        std::fs::write(
+            global_dir.join("config.toml"),
+            r#"
+debug = true
+default_base_branch = "global-main"
+"#,
+        )
+        .unwrap();
+
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(
+            repo.join(".gwt.toml"),
+            r#"
+debug = false
+default_base_branch = "local-ignored"
+"#,
+        )
+        .unwrap();
+
+        let settings = Settings::load(&repo).unwrap();
+        assert!(settings.debug);
+        assert_eq!(settings.default_base_branch, "global-main");
     }
 
     #[test]
@@ -768,11 +726,16 @@ default_base_branch = "legacy-global"
 
     #[test]
     fn test_appearance_backward_compat() {
-        // Config without [appearance]/[voice_input] sections should deserialize with defaults
+        // Config without [appearance]/[voice_input] sections should deserialize with defaults.
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let config_path = temp.path().join(".gwt.toml");
-        std::fs::write(&config_path, "debug = true\n").unwrap();
-        let settings = Settings::load(temp.path()).unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let global_dir = temp.path().join(".gwt");
+        std::fs::create_dir_all(&global_dir).unwrap();
+        std::fs::write(global_dir.join("config.toml"), "debug = true\n").unwrap();
+
+        let settings = Settings::load_global().unwrap();
         assert!(settings.debug);
         assert_eq!(settings.appearance.ui_font_size, 13);
         assert_eq!(settings.appearance.terminal_font_size, 13);
@@ -784,13 +747,15 @@ default_base_branch = "legacy-global"
 
     #[test]
     fn test_appearance_save_load() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let config_path = temp.path().join(".gwt.toml");
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
         let mut settings = Settings::default();
         settings.appearance.ui_font_size = 16;
         settings.appearance.terminal_font_size = 18;
-        settings.save(&config_path).unwrap();
-        let loaded = Settings::load(temp.path()).unwrap();
+        settings.save_global().unwrap();
+        let loaded = Settings::load_global().unwrap();
         assert_eq!(loaded.appearance.ui_font_size, 16);
         assert_eq!(loaded.appearance.terminal_font_size, 18);
     }
@@ -863,14 +828,20 @@ model = "base"
 
     #[test]
     fn test_load_ignores_runtime_gwt_agent_env() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let config_path = temp.path().join(".gwt.toml");
-        std::fs::write(&config_path, "debug = true\n").unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let global_dir = temp.path().join(".gwt");
+        std::fs::create_dir_all(&global_dir).unwrap();
+        std::fs::write(global_dir.join("config.toml"), "debug = true\n").unwrap();
 
         let prev_gwt_agent = std::env::var_os("GWT_AGENT");
         std::env::set_var("GWT_AGENT", "Codex");
 
-        let loaded = Settings::load(temp.path()).unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let loaded = Settings::load(&repo).unwrap();
         assert!(loaded.debug);
 
         match prev_gwt_agent {
