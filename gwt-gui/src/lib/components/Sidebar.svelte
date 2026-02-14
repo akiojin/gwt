@@ -5,10 +5,8 @@
     CleanupProgress,
     LaunchAgentRequest,
     PrStatusInfo,
-    WorkflowRunInfo,
     GhCliStatus,
   } from "../types";
-  import { workflowStatusIcon, workflowStatusClass } from "../prStatusHelpers";
   import AgentSidebar from "./AgentSidebar.svelte";
   import WorktreeSummaryPanel from "./WorktreeSummaryPanel.svelte";
 
@@ -76,9 +74,6 @@
   const SUMMARY_RESIZE_HANDLE_HEIGHT_PX = 8;
   const FILTER_BACKGROUND_REFRESH_TTL_MS = 10_000;
   const SEARCH_FILTER_DEBOUNCE_MS = 120;
-
-  // PR Status tree expand state
-  let expandedBranches: Set<string> = $state(new Set());
 
   // PR Polling — inline to avoid .svelte.ts import issues in tests
   const PR_POLL_INTERVAL_MS = 30_000;
@@ -198,7 +193,6 @@
     }
     return prStatuses;
   });
-  let activeGhCliStatus = $derived(pollingGhCliStatus ?? ghCliStatus);
 
   // Derived prNumber for WorktreeSummaryPanel
   let selectedPrNumber = $derived.by(() => {
@@ -206,20 +200,6 @@
     const status = activePrStatuses[selectedBranch.name];
     return status?.number ?? null;
   });
-
-  function toggleBranch(branchName: string) {
-    const next = new Set(expandedBranches);
-    if (next.has(branchName)) {
-      next.delete(branchName);
-    } else {
-      next.add(branchName);
-    }
-    expandedBranches = next;
-  }
-
-  function openCiLog(run: WorkflowRunInfo) {
-    onOpenCiLog?.(run.runId);
-  }
 
   function isTextEntryFocused(): boolean {
     if (typeof document === "undefined") return false;
@@ -322,24 +302,6 @@
     if (persist) {
       persistSummaryHeight(clamped);
     }
-  }
-
-  let agentTabBranchSet = $derived(
-    new Set(
-      agentTabBranches
-        .map((b) => normalizeTabBranch(b))
-        .filter((b) => b && b !== "Worktree" && b !== "Agent")
-    )
-  );
-
-  function hasActiveAgentTab(branch: BranchInfo): boolean {
-    // Local view only includes branches that have an active local worktree.
-    if (activeFilter === "Local") return agentTabBranchSet.has(branch.name);
-
-    // Only mark actual worktrees as active to avoid noise in Remote-only lists.
-    if (activeFilter === "Remote") return false;
-    if (!worktreeMap.get(branch.name)) return false;
-    return agentTabBranchSet.has(branch.name);
   }
 
   // Branches currently being deleted
@@ -1118,96 +1080,42 @@
           <div class="empty-indicator">No branches found.</div>
         {:else}
           {#each filteredBranches as branch}
-            <div class="branch-tree-item">
-              {#if activeFilter !== "Remote" && activePrStatuses[branch.name]}
-                <button
-                  class="tree-toggle"
-                  class:expanded={expandedBranches.has(branch.name)}
-                  onclick={(e) => { e.stopPropagation(); toggleBranch(branch.name); }}
-                  title={expandedBranches.has(branch.name) ? "Collapse" : "Expand"}
-                >
-                  {expandedBranches.has(branch.name) ? "\u25BC" : "\u25B6"}
-                </button>
-              {:else}
-                <span class="tree-toggle-placeholder"></span>
+            <button
+              class="branch-item"
+              class:active={branch.is_current}
+              class:deleting={deletingBranches.has(branch.name)}
+              onclick={() => {
+                if (!deletingBranches.has(branch.name)) onBranchSelect(branch);
+              }}
+              ondblclick={() => {
+                if (!deletingBranches.has(branch.name))
+                  onBranchActivate?.(branch);
+              }}
+              oncontextmenu={(e) => handleContextMenu(e, branch)}
+            >
+              <span class="branch-icon">{branch.is_current ? "*" : " "}</span>
+              {#if deletingBranches.has(branch.name)}
+                <span class="safety-spinner"></span>
+              {:else if getSafetyLevel(branch)}
+                <span
+                  class="safety-dot {getSafetyLevel(branch)}"
+                  title={getSafetyTitle(branch)}
+                ></span>
               {/if}
-              <button
-                class="branch-item"
-                class:active={branch.is_current}
-                class:agent-active={hasActiveAgentTab(branch)}
-                class:deleting={deletingBranches.has(branch.name)}
-                onclick={() => {
-                  if (!deletingBranches.has(branch.name)) onBranchSelect(branch);
-                }}
-                ondblclick={() => {
-                  if (!deletingBranches.has(branch.name))
-                    onBranchActivate?.(branch);
-                }}
-                oncontextmenu={(e) => handleContextMenu(e, branch)}
-              >
-                <span class="branch-icon">{branch.is_current ? "*" : " "}</span>
-                {#if deletingBranches.has(branch.name)}
-                  <span class="safety-spinner"></span>
-                {:else if getSafetyLevel(branch)}
-                  <span
-                    class="safety-dot {getSafetyLevel(branch)}"
-                    title={getSafetyTitle(branch)}
-                  ></span>
-                {/if}
-                {#if hasActiveAgentTab(branch)}
-                  <span
-                    class="agent-tab-icon"
-                    title="Agent tab is open for this branch"
-                    role="img"
-                    aria-label="Agent tab is open for this branch"
-                  >
-                    <span class="agent-tab-bars" aria-hidden="true">
-                      <span class="agent-tab-bar b1"></span>
-                      <span class="agent-tab-bar b2"></span>
-                      <span class="agent-tab-bar b3"></span>
-                    </span>
-                    <span class="agent-tab-fallback" aria-hidden="true">@</span>
-                  </span>
-                {/if}
-                <span class="branch-name">{branch.name}</span>
-                {#if activeGhCliStatus && !activeGhCliStatus.authenticated}
-                  <span class="pr-badge disconnected">GitHub not connected</span>
-                {:else if activePrStatuses[branch.name]}
-                  {@const pr = activePrStatuses[branch.name]!}
-                  <span class="pr-badge {pr.state.toLowerCase()}">
-                    #{pr.number} {pr.state === "OPEN" ? "Open" : pr.state === "MERGED" ? "Merged" : "Closed"}
-                  </span>
-                {:else if activeGhCliStatus?.authenticated}
-                  <span class="pr-badge no-pr">No PR</span>
-                {/if}
-                {#if branch.last_tool_usage}
-                  <span
-                    class="tool-usage {toolUsageClass(branch.last_tool_usage)}"
-                  >
-                    {branch.last_tool_usage}
-                  </span>
-                {/if}
-                {#if divergenceIndicator(branch)}
-                  <span
-                    class="divergence {divergenceClass(branch.divergence_status)}"
-                  >
-                    {divergenceIndicator(branch)}
-                  </span>
-                {/if}
-              </button>
-            </div>
-            {#if expandedBranches.has(branch.name) && activePrStatuses[branch.name]}
-              <div class="workflow-runs">
-                {#each activePrStatuses[branch.name]!.checkSuites as run}
-                  <button class="workflow-run-item" onclick={() => openCiLog(run)}>
-                    <span class="workflow-status {workflowStatusClass(run)}">{workflowStatusIcon(run)}</span>
-                    <span class="workflow-name">{run.workflowName}</span>
-                  </button>
-                {:else}
-                  <div class="workflow-empty">No workflows</div>
-                {/each}
-              </div>
-            {/if}
+              <span class="branch-name">{branch.name}</span>
+              {#if branch.last_tool_usage}
+                <span class="tool-usage {toolUsageClass(branch.last_tool_usage)}">
+                  {branch.last_tool_usage}
+                </span>
+              {/if}
+              {#if divergenceIndicator(branch)}
+                <span
+                  class="divergence {divergenceClass(branch.divergence_status)}"
+                >
+                  {divergenceIndicator(branch)}
+                </span>
+              {/if}
+            </button>
           {/each}
         {/if}
       </div>
@@ -1229,6 +1137,7 @@
           prNumber={selectedPrNumber}
           onLaunchAgent={onLaunchAgent}
           onQuickLaunch={onQuickLaunch}
+          {onOpenCiLog}
         />
       </div>
     </div>
@@ -1904,125 +1813,4 @@
   }
 
   /* PR Status tree */
-  .branch-tree-item {
-    display: flex;
-    align-items: stretch;
-  }
-
-  .tree-toggle {
-    width: 20px;
-    flex-shrink: 0;
-    background: none;
-    border: none;
-    color: var(--text-muted);
-    cursor: pointer;
-    font-size: 10px;
-    padding: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .tree-toggle:hover {
-    color: var(--text-primary);
-  }
-
-  .tree-toggle-placeholder {
-    width: 20px;
-    flex-shrink: 0;
-  }
-
-  .workflow-runs {
-    padding-left: 24px;
-    display: flex;
-    flex-direction: column;
-  }
-
-  .workflow-run-item {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 3px 8px;
-    background: none;
-    border: none;
-    color: var(--text-secondary);
-    font-size: var(--ui-font-xs);
-    cursor: pointer;
-    text-align: left;
-    font-family: inherit;
-  }
-
-  .workflow-run-item:hover {
-    background: var(--bg-hover);
-  }
-
-  .workflow-status {
-    font-size: 11px;
-    width: 14px;
-    text-align: center;
-  }
-
-  .workflow-status.pass {
-    color: var(--green);
-  }
-
-  .workflow-status.fail {
-    color: var(--red);
-  }
-
-  .workflow-status.running {
-    color: var(--yellow);
-  }
-
-  .workflow-status.pending {
-    color: var(--text-muted);
-  }
-
-  .workflow-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .workflow-empty {
-    padding: 3px 8px;
-    color: var(--text-muted);
-    font-size: var(--ui-font-xs);
-    font-style: italic;
-  }
-
-  .pr-badge {
-    font-size: var(--ui-font-xs);
-    padding: 1px 6px;
-    border-radius: 999px;
-    white-space: nowrap;
-    flex-shrink: 0;
-    font-weight: 600;
-  }
-
-  .pr-badge.open {
-    background: rgba(63, 185, 80, 0.15);
-    color: var(--green);
-  }
-
-  .pr-badge.merged {
-    background: rgba(163, 113, 247, 0.15);
-    color: var(--magenta);
-  }
-
-  .pr-badge.closed {
-    background: rgba(248, 81, 73, 0.15);
-    color: var(--red);
-  }
-
-  .pr-badge.no-pr {
-    color: var(--text-muted);
-    background: none;
-  }
-
-  .pr-badge.disconnected {
-    color: var(--text-muted);
-    background: none;
-    font-style: italic;
-  }
 </style>

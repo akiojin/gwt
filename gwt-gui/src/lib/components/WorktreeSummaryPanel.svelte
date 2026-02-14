@@ -10,18 +10,21 @@
   import GitSection from "./GitSection.svelte";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
   import PrStatusSection from "./PrStatusSection.svelte";
+  import { workflowStatusIcon, workflowStatusClass } from "../prStatusHelpers";
 
   let {
     projectPath,
     selectedBranch = null,
     onLaunchAgent,
     onQuickLaunch,
+    onOpenCiLog,
     prNumber = null,
   }: {
     projectPath: string;
     selectedBranch?: BranchInfo | null;
     onLaunchAgent?: () => void;
     onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
+    onOpenCiLog?: (runId: number) => void;
     prNumber?: number | null;
   } = $props();
 
@@ -32,7 +35,7 @@
   let quickLaunching: boolean = $state(false);
   let quickLaunchingKey: string | null = $state(null);
 
-  type SummaryTab = "summary" | "pr" | "ai-summary" | "git";
+  type SummaryTab = "summary" | "git" | "pr" | "ci" | "ai";
   let activeTab: SummaryTab = $state("summary");
 
   let prDetailLoading = $state(false);
@@ -374,7 +377,7 @@
   }
 
   $effect(() => {
-    if (activeTab !== "pr") return;
+    if (activeTab !== "pr" && activeTab !== "ci") return;
 
     const branch = currentBranchName();
     if (!branch || !prNumber) {
@@ -459,6 +462,15 @@
         </button>
         <button
           class="summary-tab"
+          class:active={activeTab === "git"}
+          onclick={() => {
+            activeTab = "git";
+          }}
+        >
+          Git
+        </button>
+        <button
+          class="summary-tab"
           class:active={activeTab === "pr"}
           onclick={() => {
             activeTab = "pr";
@@ -468,21 +480,21 @@
         </button>
         <button
           class="summary-tab"
-          class:active={activeTab === "ai-summary"}
+          class:active={activeTab === "ci"}
           onclick={() => {
-            activeTab = "ai-summary";
+            activeTab = "ci";
           }}
         >
-          AI Summary
+          CI
         </button>
         <button
           class="summary-tab"
-          class:active={activeTab === "git"}
+          class:active={activeTab === "ai"}
           onclick={() => {
-            activeTab = "git";
+            activeTab = "ai";
           }}
         >
-          Git
+          AI
         </button>
       </div>
 
@@ -591,10 +603,64 @@
           {/if}
         </div>
 
-      {:else if activeTab === "ai-summary"}
+      {:else if activeTab === "git"}
+        <GitSection
+          projectPath={projectPath}
+          branch={selectedBranch.name}
+          collapsible={false}
+          defaultCollapsed={false}
+        />
+      {:else if activeTab === "pr"}
+        <PrStatusSection
+          prDetail={prDetail}
+          loading={prDetailLoading}
+          error={prDetailError}
+        />
+      {:else if activeTab === "ci"}
+        <div class="quick-start ci-panel">
+          <div class="quick-header">
+            <span class="quick-title">CI</span>
+            {#if prDetailLoading}
+              <span class="quick-subtitle">Loading...</span>
+            {:else if prDetailError}
+              <span class="quick-subtitle">Error</span>
+            {:else if prDetail}
+              <span class="quick-subtitle">#{prDetail.number}</span>
+            {:else}
+              <span class="quick-subtitle">No PR</span>
+            {/if}
+          </div>
+
+          {#if prDetailLoading}
+            <div class="session-summary-placeholder">Loading...</div>
+          {:else if prDetailError}
+            <div class="quick-error">
+              {prDetailError}
+            </div>
+          {:else if !prDetail}
+            <div class="session-summary-placeholder">No PR.</div>
+          {:else if prDetail.checkSuites.length > 0}
+            <div class="workflow-list">
+              {#each prDetail.checkSuites as run}
+                <button
+                  class="workflow-run-item"
+                  onclick={() => onOpenCiLog?.(run.runId)}
+                >
+                  <span class="workflow-status {workflowStatusClass(run)}"
+                    >{workflowStatusIcon(run)}</span
+                  >
+                  <span class="workflow-name">{run.workflowName}</span>
+                </button>
+              {/each}
+            </div>
+          {:else}
+            <div class="workflow-empty">No workflows</div>
+          {/if}
+        </div>
+      {:else if activeTab === "ai"}
         <div class="quick-start ai-summary">
           <div class="quick-header">
-            <span class="quick-title">AI Summary</span>
+            <span class="quick-title">AI</span>
             {#if sessionSummaryLoading}
               <span class="quick-subtitle">Loading...</span>
             {:else if sessionSummaryStatus === "ok" && sessionSummaryToolId}
@@ -652,19 +718,6 @@
             <div class="session-summary-placeholder">No summary.</div>
           {/if}
         </div>
-      {:else if activeTab === "git"}
-        <GitSection
-          projectPath={projectPath}
-          branch={selectedBranch.name}
-          collapsible={false}
-          defaultCollapsed={false}
-        />
-      {:else if activeTab === "pr"}
-        <PrStatusSection
-          prDetail={prDetail}
-          loading={prDetailLoading}
-          error={prDetailError}
-        />
       {/if}
     </div>
   {:else}
@@ -986,5 +1039,68 @@
 
   .summary-tab:hover:not(.active) {
     color: var(--text-secondary);
+  }
+
+  .workflow-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .workflow-run-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: var(--ui-font-xs);
+    cursor: pointer;
+    text-align: left;
+    font-family: inherit;
+  }
+
+  .workflow-run-item:hover {
+    background: var(--bg-hover);
+  }
+
+  .workflow-status {
+    font-size: 11px;
+    width: 14px;
+    text-align: center;
+  }
+
+  .workflow-status.pass {
+    color: var(--green);
+  }
+
+  .workflow-status.fail {
+    color: var(--red);
+  }
+
+  .workflow-status.running {
+    color: var(--yellow);
+  }
+
+  .workflow-status.pending {
+    color: var(--text-muted);
+  }
+
+  .workflow-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .workflow-empty {
+    padding: 3px 8px;
+    color: var(--text-muted);
+    font-size: var(--ui-font-xs);
+    font-style: italic;
+  }
+
+  .ci-panel .workflow-run-item {
+    border-radius: 4px;
   }
 </style>
