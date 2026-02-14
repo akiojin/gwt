@@ -122,8 +122,13 @@
     resetDragState();
   }
 
+  function isTabCloseControl(target: EventTarget | null): boolean {
+    return target instanceof Element && target.closest(".tab-close") !== null;
+  }
+
   function handleTabPointerDown(event: PointerEvent, tabId: string) {
     if (event.button !== 0) return;
+    if (isTabCloseControl(event.target)) return;
     const target = event.currentTarget;
     if (!(target instanceof HTMLElement)) return;
 
@@ -236,6 +241,8 @@
         {#if !isPinnedTab(tab.type)}
           <button
             class="tab-close"
+            type="button"
+            onpointerdown={(e) => e.stopPropagation()}
             onclick={(e) => {
               e.stopPropagation();
               onTabClose(tab.id);
