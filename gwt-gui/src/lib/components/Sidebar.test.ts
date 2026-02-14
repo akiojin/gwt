@@ -744,8 +744,8 @@ describe("Sidebar", () => {
       expect(getRenderedBranchNames(rendered)).toEqual([
         "main",
         "develop",
-        "feature/beta",
         "feature/alpha",
+        "feature/beta",
       ]);
     });
   });

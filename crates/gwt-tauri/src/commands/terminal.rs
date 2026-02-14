@@ -2816,8 +2816,8 @@ fn launch_agent_for_project_root(
             },
             docker_build: if use_docker { Some(docker_build) } else { None },
             docker_keep: if use_docker { Some(docker_keep) } else { None },
-            docker_container_name: None,
-            docker_compose_args: None,
+            docker_container_name: docker_container_name.clone(),
+            docker_compose_args: docker_compose_args.clone(),
             timestamp: started_at_millis,
         };
 
