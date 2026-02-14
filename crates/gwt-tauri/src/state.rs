@@ -1,6 +1,8 @@
+use crate::agent_master::AgentModeState;
 use gwt_core::ai::SessionSummaryCache;
 use gwt_core::config::os_env::EnvSource;
 use gwt_core::terminal::manager::PaneManager;
+use gwt_core::update::UpdateManager;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -61,17 +63,28 @@ pub struct WindowAgentTabsState {
     pub active_tab_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowMigrationState {
+    pub job_id: String,
+    pub source_root: String,
+}
+
 pub struct AppState {
+    /// System resource monitor for CPU/memory/GPU queries.
+    pub system_monitor: Mutex<gwt_core::system_info::SystemMonitor>,
     /// Project root path per window label.
     ///
     /// Only stores windows that currently have a project opened.
     pub window_projects: Mutex<HashMap<String, String>>,
-    /// One-shot permission to allow a window to actually close (instead of hiding to tray).
-    ///
-    /// Used to implement macOS Cmd+Q as "close the focused window" while keeping (x) as "hide".
+    /// One-shot permission to allow a window to actually close (instead of always hiding it).
+    /// Used by close-event flows that explicitly permit destruction.
     pub windows_allowed_to_close: Mutex<HashSet<String>>,
     /// Agent tab state per window label for native Window menu rendering.
     pub window_agent_tabs: Mutex<HashMap<String, WindowAgentTabsState>>,
+    /// Migration status per window label for native Window menu rendering.
+    pub window_migrations: Mutex<HashMap<String, WindowMigrationState>>,
+    /// Agent mode conversation state per window label.
+    pub window_agent_modes: Mutex<HashMap<String, AgentModeState>>,
     pub pane_manager: Mutex<PaneManager>,
     pub agent_versions_cache: Mutex<HashMap<String, AgentVersionsCache>>,
     pub session_summary_cache: Mutex<HashMap<String, SessionSummaryCache>>,
@@ -83,16 +96,23 @@ pub struct AppState {
     /// Launch job cancellation flags keyed by job id.
     pub launch_jobs: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub is_quitting: AtomicBool,
+    /// Prevent multiple exit confirmation dialogs from showing at once.
+    #[cfg(any(not(test), target_os = "macos"))]
+    pub exit_confirm_inflight: AtomicBool,
     pub os_env: Arc<OnceCell<HashMap<String, String>>>,
     pub os_env_source: Arc<OnceCell<EnvSource>>,
+    pub update_manager: UpdateManager,
 }
 
 impl AppState {
     pub fn new() -> Self {
         Self {
+            system_monitor: Mutex::new(gwt_core::system_info::SystemMonitor::new()),
             window_projects: Mutex::new(HashMap::new()),
             windows_allowed_to_close: Mutex::new(HashSet::new()),
             window_agent_tabs: Mutex::new(HashMap::new()),
+            window_migrations: Mutex::new(HashMap::new()),
+            window_agent_modes: Mutex::new(HashMap::new()),
             pane_manager: Mutex::new(PaneManager::new()),
             agent_versions_cache: Mutex::new(HashMap::new()),
             session_summary_cache: Mutex::new(HashMap::new()),
@@ -102,8 +122,11 @@ impl AppState {
             pane_launch_meta: Mutex::new(HashMap::new()),
             launch_jobs: Mutex::new(HashMap::new()),
             is_quitting: AtomicBool::new(false),
+            #[cfg(any(not(test), target_os = "macos"))]
+            exit_confirm_inflight: AtomicBool::new(false),
             os_env: Arc::new(OnceCell::new()),
             os_env_source: Arc::new(OnceCell::new()),
+            update_manager: UpdateManager::new(),
         }
     }
 
@@ -135,6 +158,16 @@ impl AppState {
             map.remove(window_label);
         }
         if let Ok(mut map) = self.window_agent_tabs.lock() {
+            map.remove(window_label);
+        }
+        if let Ok(mut map) = self.window_agent_modes.lock() {
+            map.remove(window_label);
+        }
+    }
+
+    pub fn clear_window_state(&self, window_label: &str) {
+        self.clear_project_for_window(window_label);
+        if let Ok(mut map) = self.window_migrations.lock() {
             map.remove(window_label);
         }
     }
@@ -170,7 +203,38 @@ impl AppState {
         map.get(window_label).cloned().unwrap_or_default()
     }
 
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn set_window_migration(&self, window_label: &str, job_id: String, source_root: String) {
+        if let Ok(mut map) = self.window_migrations.lock() {
+            map.insert(
+                window_label.to_string(),
+                WindowMigrationState {
+                    job_id,
+                    source_root,
+                },
+            );
+        }
+    }
+
+    pub fn clear_window_migration_if_job(&self, window_label: &str, job_id: &str) {
+        if let Ok(mut map) = self.window_migrations.lock() {
+            let remove = map
+                .get(window_label)
+                .map(|migration| migration.job_id == job_id)
+                .unwrap_or(false);
+            if remove {
+                map.remove(window_label);
+            }
+        }
+    }
+
+    pub fn window_migrations_snapshot(&self) -> HashMap<String, WindowMigrationState> {
+        self.window_migrations
+            .lock()
+            .map(|m| m.clone())
+            .unwrap_or_default()
+    }
+
+    #[allow(dead_code)]
     pub fn allow_window_close(&self, window_label: &str) {
         if let Ok(mut set) = self.windows_allowed_to_close.lock() {
             set.insert(window_label.to_string());
@@ -266,5 +330,86 @@ mod tests {
 
         let tabs = state.window_agent_tabs_for_window("main");
         assert_eq!(tabs.active_tab_id, None);
+    }
+
+    #[test]
+    fn window_migration_set_get_and_clear_matching_job() {
+        let state = AppState::new();
+
+        state.set_window_migration("main", "job-1".to_string(), "/tmp/repo".to_string());
+
+        let migrations = state.window_migrations_snapshot();
+        assert_eq!(migrations.len(), 1);
+        assert_eq!(
+            migrations.get("main"),
+            Some(&WindowMigrationState {
+                job_id: "job-1".to_string(),
+                source_root: "/tmp/repo".to_string(),
+            })
+        );
+
+        // Non-matching job id must not clear a newer/other job.
+        state.clear_window_migration_if_job("main", "job-other");
+        assert!(state.window_migrations_snapshot().contains_key("main"));
+
+        state.clear_window_migration_if_job("main", "job-1");
+        assert!(!state.window_migrations_snapshot().contains_key("main"));
+    }
+
+    #[test]
+    fn clear_project_for_window_keeps_migration_state() {
+        let state = AppState::new();
+        state.set_project_for_window("main", "/tmp/repo".to_string());
+        state.set_window_agent_tabs(
+            "main",
+            vec![AgentTabMenuState {
+                id: "agent-pane-1".to_string(),
+                label: "feature/one".to_string(),
+            }],
+            Some("agent-pane-1".to_string()),
+        );
+        state.set_window_migration("main", "job-1".to_string(), "/tmp/repo".to_string());
+
+        state.clear_project_for_window("main");
+
+        assert_eq!(state.project_for_window("main"), None);
+        assert_eq!(
+            state.window_agent_tabs_for_window("main"),
+            WindowAgentTabsState::default()
+        );
+        assert!(state.window_migrations_snapshot().contains_key("main"));
+    }
+
+    #[test]
+    fn clear_window_state_removes_project_tabs_mode_and_migration() {
+        let state = AppState::new();
+        state.set_project_for_window("main", "/tmp/repo".to_string());
+        state.set_window_agent_tabs(
+            "main",
+            vec![AgentTabMenuState {
+                id: "agent-pane-1".to_string(),
+                label: "feature/one".to_string(),
+            }],
+            Some("agent-pane-1".to_string()),
+        );
+        state.set_window_migration("main", "job-1".to_string(), "/tmp/repo".to_string());
+
+        if let Ok(mut map) = state.window_agent_modes.lock() {
+            map.insert("main".to_string(), AgentModeState::new());
+        }
+
+        state.clear_window_state("main");
+
+        assert_eq!(state.project_for_window("main"), None);
+        assert_eq!(
+            state.window_agent_tabs_for_window("main"),
+            WindowAgentTabsState::default()
+        );
+        assert!(!state.window_migrations_snapshot().contains_key("main"));
+        assert!(state
+            .window_agent_modes
+            .lock()
+            .map(|m| !m.contains_key("main"))
+            .unwrap_or(false));
     }
 }

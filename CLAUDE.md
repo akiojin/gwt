@@ -17,7 +17,7 @@
 - バックエンド: Rust (gwt-core + gwt-tauri)
 - フロントエンド: Svelte 5 + TypeScript + Vite (gwt-gui/)
 - ターミナルエミュレーション: xterm.js v6
-- UIアイコンは ASCII に統一し、全角/絵文字は避ける
+- UIアイコンはGUIに適したアイコン（SVG / Unicode シンボル等）を使用する
 
 ### 📝 設計ガイドライン
 
@@ -30,6 +30,35 @@
 - エラーが発生している状態で完了としないこと。必ずエラーが解消された時点で完了とする。
 
 ## 開発ワークフロー
+
+### 実装前ワークフロー（必須）
+
+> 🚨 **エージェントは、以下のワークフローを完了するまでプロダクションコードの実装に着手してはならない。**
+
+#### 1. 仕様策定（feat / fix / refactor 対象）
+
+- 新機能・バグ修正・リファクタリングの実装前に、`specs/SPEC-{ID}/spec.md` を作成または更新する
+- 仕様は `.specify/templates/spec-template.md` のテンプレートに従い、最低限以下を含める:
+  - ユーザーシナリオとテスト（受け入れシナリオ）
+  - 機能要件（FR-*）
+  - 成功基準
+- `plan.md`、`tasks.md` も策定してから実装に入る
+- Spec Kit スキル（`/speckit-require`）の活用を推奨
+
+#### 2. TDD（テストファースト）
+
+- 仕様の受け入れシナリオに基づき、**実装コードより先にテストコードを書く**
+- Rust: `crates/*/tests/` または `#[cfg(test)]` モジュール内にテストを追加
+- Frontend: `gwt-gui/src/**/*.test.ts` にテストを追加（vitest + @testing-library/svelte）
+- テストが RED（失敗）状態であることを確認してから実装に進む
+
+#### 適用除外
+
+以下の変更は仕様策定・TDD を省略できる:
+
+- `docs:` / `chore:` タイプの変更（ドキュメント修正、CI設定、依存更新など）
+- 1行程度の明白な typo 修正
+- CLAUDE.md / README.md の更新のみの変更
 
 ### 基本ルール
 
@@ -62,6 +91,23 @@
 - フォーマット: `cargo fmt`
 - フロントエンドチェック: `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json`
 
+### フロントエンド実行前セットアップ（gwt-gui）
+
+- `gwt-gui` の依存はこの配下で管理されており、未インストールだと `vitest` / `@tsconfig/svelte` が見つからないエラーになります。  
+  まず `cd gwt-gui && pnpm install` を実行してください（Node 依存の初回/クリーン環境用）。
+- `vitest` を実行する場合は `cd gwt-gui && pnpm test` を使います。  
+  ファイルを限定する場合は `cd gwt-gui && pnpm test src/lib/components/Sidebar.test.ts src/lib/components/WorktreeSummaryPanel.test.ts` のように指定します。
+
+### フロントエンド E2E（Playwright）手順
+
+- `gwt-gui/e2e/` 配下の WebUI E2E は Playwright で実行します（`playwright.config.ts` の Chromium 設定を使用）。
+- 依存が未取得の場合は `cd gwt-gui && pnpm install` の後、初回のみブラウザバイナリを取得します。
+  - `cd gwt-gui && pnpm exec playwright install chromium`
+- E2E 実行コマンド:
+  - `cd gwt-gui && pnpm test:e2e`
+- Playwright 側のローカルサーバー起動は自動です（`http://127.0.0.1:4173`）。必要なら個別実行で絞り込みます。
+  - `cd gwt-gui && pnpm exec playwright test e2e/open-project-smoke.spec.ts`
+
 ## コミュニケーションガイドライン
 
 - 回答は必ず日本語
@@ -74,6 +120,17 @@
 - ドキュメントはREADME.md/README.ja.mdに集約する
 - 仕様・要件ドキュメントは `specs/SPEC-{ID}/` に配置する。完了済み仕様は `specs/archive/` に移動する
 - 以前までのTUIの仕様・要件ドキュメントは `specs/archive/` に保管する
+
+### README.md / README.ja.md に必ず記載する内容
+
+- 利用者向けの導線: インストール方法、起動方法、基本操作、主要機能の使い方
+- 利用前提: サポートOS、初期設定（例: AI 機能を使う場合の設定）
+- 開発者向けの最小情報: 前提環境、ビルド/開発手順、テスト実行方針（`pnpm test`, E2Eなど）
+- 配布情報: リリース/バイナリ資産の取得先、バージョン取得方法
+- 代表的な画面操作: よく使う画面遷移や一般的なトラブル時の案内（再現しやすく簡潔）
+- 変更が設計判断を必要とする場合の案内: 重要仕様の所在（`specs/SPEC-{ID}/` への参照）
+- `CLAUDE.md` の運用ルールや内部実装ガイドは README に入れない
+- 英語版/日本語版の内容は同等レベルを保つ（順序・見出しは対応させる）
 
 ## コードクオリティガイドライン
 

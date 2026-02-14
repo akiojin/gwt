@@ -2,6 +2,13 @@
 
 **SPEC ID**: `SPEC-735cbc5d`
 
+## 前提（2026-02-14 追記）
+
+- Session Summary のレイアウト正本は `SPEC-d6949f99`
+- 本ドキュメントの UI テストは Git 表示領域の内部挙動を対象とする
+- 折りたたみ/展開シナリオは `GitSection` を `collapsible=true` で利用する場合に適用する
+- Session Summary の `Git` タブ（`collapsible=false`）では初期展開で表示される
+
 ## バックエンドテスト（Rust）
 
 ### 1. diff.rs - ブランチ差分ファイル一覧
@@ -209,7 +216,7 @@ Then:  空の Vec<StashEntry> が返却される
 #### T-UI-001: Git セクション折りたたみ/展開
 
 ```text
-Given: Session Summary タブが表示されている
+Given: Worktree Summary パネルが表示されている
 When:  Git セクションヘッダーをクリック
 Then:  セクションが展開され、Changes タブが表示される
 When:  再度ヘッダーをクリック
@@ -220,7 +227,7 @@ Then:  セクションが折りたたまれる
 
 ```text
 Given: ブランチに変更あり（5 files, 3 commits, 1 stash）
-When:  Session Summary タブを表示
+When:  Worktree Summary パネルを表示
 Then:  折りたたまれた Git セクションヘッダーに
        "5 files, 3 commits, 1 stash" が表示される
 ```
@@ -333,6 +340,6 @@ Then:  main にフォールバックして差分が表示される
 
 ```text
 Given: Git リポジトリでないプロジェクトを開いている
-When:  Session Summary タブを表示
+When:  Worktree Summary パネルを表示
 Then:  Git セクションが表示されない
 ```

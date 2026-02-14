@@ -2,9 +2,11 @@ export interface BranchInfo {
   name: string;
   commit: string;
   is_current: boolean;
+  is_agent_running: boolean;
   ahead: number;
   behind: number;
   divergence_status: string; // "UpToDate" | "Ahead" | "Behind" | "Diverged"
+  commit_timestamp?: number | null;
   last_tool_usage?: string | null;
 }
 
@@ -34,6 +36,57 @@ export interface TerminalAnsiProbe {
   color_sgr_count: number;
   has_256_color: boolean;
   has_true_color: boolean;
+}
+
+export interface AgentModeMessage {
+  role: "user" | "assistant" | "system" | "tool";
+  kind?: "message" | "thought" | "action" | "observation" | "error";
+  content: string;
+  timestamp: number;
+}
+
+export interface AgentModeState {
+  messages: AgentModeMessage[];
+  ai_ready: boolean;
+  ai_error?: string | null;
+  last_error?: string | null;
+  is_waiting: boolean;
+  session_name?: string | null;
+  llm_call_count: number;
+  estimated_tokens: number;
+}
+
+export interface AgentSidebarSubAgent {
+  id: string;
+  name: string;
+  toolId: string;
+  status: "running" | "completed" | "failed" | (string & {});
+  model?: string | null;
+  branch: string;
+  worktreeRelPath: string;
+  worktreeAbsPath?: string | null;
+}
+
+export interface AgentSidebarTask {
+  id: string;
+  title: string;
+  status: "running" | "pending" | "failed" | "completed" | (string & {});
+  subAgents: AgentSidebarSubAgent[];
+}
+
+export interface AgentSidebarView {
+  specId?: string | null;
+  tasks: AgentSidebarTask[];
+}
+
+export interface SendKeysRequest {
+  paneId: string;
+  text: string;
+}
+
+export interface CaptureScrollbackRequest {
+  paneId: string;
+  maxBytes?: number;
 }
 
 export interface AgentInfo {
@@ -81,6 +134,14 @@ export interface SettingsData {
   docker_force_host: boolean;
   ui_font_size: number;
   terminal_font_size: number;
+  voice_input: VoiceInputSettings;
+}
+
+export interface VoiceInputSettings {
+  enabled: boolean;
+  hotkey: string;
+  language: "auto" | "ja" | "en" | (string & {});
+  model: string;
 }
 
 export interface AISettings {
@@ -96,6 +157,7 @@ export interface Profile {
   disabled_env: string[];
   description: string;
   ai?: AISettings | null;
+  ai_enabled?: boolean | null;
 }
 
 export interface ProfilesConfig {
@@ -108,8 +170,10 @@ export interface ProfilesConfig {
 export interface Tab {
   id: string;
   label: string;
-  type: "summary" | "agent" | "settings" | "versionHistory";
+  agentId?: "claude" | "codex" | "gemini" | "opencode";
+  type: "summary" | "agent" | "settings" | "versionHistory" | "agentMode" | "terminal";
   paneId?: string;
+  cwd?: string;
 }
 
 export interface ToolSessionEntry {
@@ -267,6 +331,25 @@ export interface CapturedEnvInfo {
   ready: boolean;
 }
 
+export type UpdateState =
+  | {
+      state: "up_to_date";
+      checked_at?: string | null;
+    }
+  | {
+      state: "available";
+      current: string;
+      latest: string;
+      release_url: string;
+      asset_url?: string | null;
+      checked_at: string;
+    }
+  | {
+      state: "failed";
+      message: string;
+      failed_at: string;
+    };
+
 export type FileChangeKind = "Added" | "Modified" | "Deleted" | "Renamed";
 
 export interface FileChange {
@@ -308,6 +391,31 @@ export interface GitChangeSummary {
   base_branch: string;
 }
 
+// GitHub Issue types (SPEC-c6ba640a)
+
+export interface GitHubIssueInfo {
+  number: number;
+  title: string;
+  updatedAt: string;
+  labels: string[];
+}
+
+export interface GhCliStatus {
+  available: boolean;
+  authenticated: boolean;
+}
+
+export interface FetchIssuesResponse {
+  issues: GitHubIssueInfo[];
+  hasNextPage: boolean;
+}
+
+export interface RollbackResult {
+  localDeleted: boolean;
+  remoteDeleted: boolean;
+  error: string | null;
+}
+
 export interface LaunchAgentRequest {
   agentId: string;
   branch: string;
@@ -326,4 +434,67 @@ export interface LaunchAgentRequest {
   dockerRecreate?: boolean;
   dockerBuild?: boolean;
   dockerKeep?: boolean;
+  issueNumber?: number;
+}
+
+// PR Status types (SPEC-d6949f99)
+
+export interface PrStatusInfo {
+  number: number;
+  title: string;
+  state: "OPEN" | "CLOSED" | "MERGED";
+  url: string;
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+  author: string;
+  baseBranch: string;
+  headBranch: string;
+  labels: string[];
+  assignees: string[];
+  milestone: string | null;
+  linkedIssues: number[];
+  checkSuites: WorkflowRunInfo[];
+  reviews: ReviewInfo[];
+  reviewComments: ReviewComment[];
+  changedFilesCount: number;
+  additions: number;
+  deletions: number;
+}
+
+export interface WorkflowRunInfo {
+  workflowName: string;
+  runId: number;
+  status: "queued" | "in_progress" | "completed";
+  conclusion:
+    | "success"
+    | "failure"
+    | "neutral"
+    | "cancelled"
+    | "timed_out"
+    | "action_required"
+    | "skipped"
+    | null;
+}
+
+export interface ReviewInfo {
+  reviewer: string;
+  state:
+    | "APPROVED"
+    | "CHANGES_REQUESTED"
+    | "COMMENTED"
+    | "PENDING"
+    | "DISMISSED";
+}
+
+export interface ReviewComment {
+  author: string;
+  body: string;
+  filePath: string | null;
+  line: number | null;
+  codeSnippet: string | null;
+  createdAt: string;
+}
+
+export interface PrStatusResponse {
+  statuses: Record<string, PrStatusInfo | null>;
+  ghStatus: GhCliStatus;
 }

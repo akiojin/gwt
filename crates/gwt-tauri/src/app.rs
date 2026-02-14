@@ -1,13 +1,17 @@
 //! Tauri app wiring (builder configuration + run event handling)
 
 use crate::state::AppState;
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use tauri::Manager;
-use tauri::{Emitter, WebviewWindowBuilder};
-use tracing::info;
+use tauri::{Emitter, EventTarget, WebviewWindowBuilder};
+use tracing::{info, warn};
 
 #[cfg(not(test))]
 use gwt_core::config::os_env;
+
+#[cfg(any(not(test), target_os = "macos"))]
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 fn should_prevent_window_close(is_quitting: bool) -> bool {
     !is_quitting
@@ -17,17 +21,66 @@ fn should_prevent_exit_request(is_quitting: bool) -> bool {
     !is_quitting
 }
 
+fn captured_path_from_env(env: &HashMap<String, String>) -> Option<String> {
+    env.get("PATH")
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn apply_captured_path_to_process_env(env: &HashMap<String, String>) -> bool {
+    let Some(path) = captured_path_from_env(env) else {
+        return false;
+    };
+    std::env::set_var("PATH", path);
+    true
+}
+
+#[cfg(any(not(test), target_os = "macos"))]
+fn has_running_agents(state: &AppState) -> bool {
+    let Ok(mut manager) = state.pane_manager.lock() else {
+        return false;
+    };
+
+    for pane in manager.panes_mut() {
+        let _ = pane.check_status();
+        if matches!(pane.status(), gwt_core::terminal::pane::PaneStatus::Running) {
+            return true;
+        }
+    }
+
+    false
+}
+
+#[cfg(any(not(test), target_os = "macos"))]
+fn try_begin_exit_confirm(state: &AppState) -> bool {
+    state
+        .exit_confirm_inflight
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+}
+
+#[cfg(any(not(test), target_os = "macos"))]
+fn end_exit_confirm(state: &AppState) {
+    state.exit_confirm_inflight.store(false, Ordering::SeqCst);
+}
+
 fn menu_action_from_id(id: &str) -> Option<&'static str> {
     match id {
         crate::menu::MENU_ID_FILE_OPEN_PROJECT => Some("open-project"),
         crate::menu::MENU_ID_FILE_CLOSE_PROJECT => Some("close-project"),
         crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES => Some("cleanup-worktrees"),
         crate::menu::MENU_ID_GIT_VERSION_HISTORY => Some("version-history"),
+        crate::menu::MENU_ID_EDIT_COPY => Some("edit-copy"),
+        crate::menu::MENU_ID_EDIT_PASTE => Some("edit-paste"),
+        crate::menu::MENU_ID_TOOLS_NEW_TERMINAL => Some("new-terminal"),
         crate::menu::MENU_ID_TOOLS_LAUNCH_AGENT => Some("launch-agent"),
         crate::menu::MENU_ID_TOOLS_LIST_TERMINALS => Some("list-terminals"),
         crate::menu::MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS => Some("terminal-diagnostics"),
         crate::menu::MENU_ID_SETTINGS_PREFERENCES => Some("open-settings"),
         crate::menu::MENU_ID_HELP_ABOUT => Some("about"),
+        crate::menu::MENU_ID_HELP_CHECK_UPDATES => Some("check-updates"),
         _ => None,
     }
 }
@@ -35,10 +88,54 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
 #[cfg_attr(test, allow(dead_code))]
 fn show_best_window(app: &tauri::AppHandle<tauri::Wry>) {
     let Some(window) = best_window(app) else {
+        recreate_main_window(app);
         return;
     };
     let _ = window.show();
     let _ = window.set_focus();
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn recreate_main_window(app: &tauri::AppHandle<tauri::Wry>) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.show();
+            let _ = window.set_focus();
+            return;
+        }
+
+        let mut conf = match app.config().app.windows.first() {
+            Some(c) => c.clone(),
+            None => {
+                info!(
+                    category = "tauri",
+                    event = "MainWindowConfigMissing",
+                    "No window config found; skipping main window recreation"
+                );
+                return;
+            }
+        };
+        conf.label = "main".to_string();
+
+        let builder = WebviewWindowBuilder::from_config(&app, &conf);
+        let window = match builder.and_then(|b| b.build()) {
+            Ok(w) => w,
+            Err(err) => {
+                warn!(
+                    category = "tauri",
+                    event = "MainWindowRecreateFailed",
+                    error = %err,
+                    "Failed to recreate main window"
+                );
+                return;
+            }
+        };
+
+        let _ = window.show();
+        let _ = window.set_focus();
+        let _ = crate::menu::rebuild_menu(&app);
+    });
 }
 
 #[cfg_attr(test, allow(dead_code))]
@@ -106,8 +203,33 @@ pub fn build_app(
                             show_best_window(app);
                         }
                         "tray-quit" => {
-                            app.state::<AppState>().request_quit();
-                            app.exit(0);
+                            let state = app.state::<AppState>();
+                            if !has_running_agents(&state) {
+                                state.request_quit();
+                                app.exit(0);
+                                return;
+                            }
+
+                            if !try_begin_exit_confirm(&state) {
+                                return;
+                            }
+
+                            let app_handle = app.clone();
+                            app.dialog()
+                                .message("Agents are still running. Quit gwt anyway?")
+                                .kind(MessageDialogKind::Warning)
+                                .buttons(MessageDialogButtons::OkCancelCustom(
+                                    "Quit".to_string(),
+                                    "Cancel".to_string(),
+                                ))
+                                .show(move |ok| {
+                                    let state = app_handle.state::<AppState>();
+                                    end_exit_confirm(&state);
+                                    if ok {
+                                        state.request_quit();
+                                        app_handle.exit(0);
+                                    }
+                                });
                         }
                         _ => {}
                     })
@@ -162,8 +284,35 @@ pub fn build_app(
                             }
                         };
 
+                        if apply_captured_path_to_process_env(&result.env) {
+                            tracing::info!(
+                                category = "os_env",
+                                "Updated process PATH from captured environment"
+                            );
+                        }
+
                         let _ = os_env_source_cell.set(result.source);
                         let _ = os_env_cell.set(result.env);
+                    });
+                }
+
+                // Background task: check app update (best-effort, TTL cached).
+                {
+                    let mgr = _app.state::<AppState>().update_manager.clone();
+                    let app_handle_clone = _app.handle().clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        let current_exe = std::env::current_exe().ok();
+                        let state = mgr.check_for_executable(false, current_exe.as_deref());
+                        if let gwt_core::update::UpdateState::Failed { message, .. } = &state {
+                            warn!(
+                                category = "update",
+                                force = false,
+                                source = "startup-event",
+                                error = %message,
+                                "Startup update check failed"
+                            );
+                        }
+                        let _ = app_handle_clone.emit("app-update-state", &state);
                     });
                 }
             }
@@ -218,7 +367,7 @@ pub fn build_app(
                     return;
                 }
 
-                // Allow specific windows to actually close (used for macOS Cmd+Q behavior).
+                // Allow explicit close requests from trusted flows if explicitly permitted.
                 if state.consume_window_close_permission(window.label()) {
                     info!(
                         category = "tauri",
@@ -241,7 +390,7 @@ pub fn build_app(
                 window
                     .app_handle()
                     .state::<AppState>()
-                    .clear_project_for_window(window.label());
+                    .clear_window_state(window.label());
                 let _ = crate::menu::rebuild_menu(window.app_handle());
 
                 // Exit the app when all windows are truly closed (hidden windows still count as open).
@@ -253,13 +402,23 @@ pub fn build_app(
                     .filter(|(label, _)| label != &destroyed_label)
                     .count();
                 if remaining_windows == 0 {
-                    info!(
-                        category = "tauri",
-                        event = "AllWindowsClosed",
-                        "All windows closed; exiting app"
-                    );
-                    app_handle.state::<AppState>().request_quit();
-                    app_handle.exit(0);
+                    let state = app_handle.state::<AppState>();
+                    let is_quitting = state.is_quitting.load(Ordering::SeqCst);
+                    if is_quitting {
+                        info!(
+                            category = "tauri",
+                            event = "AllWindowsClosed",
+                            "All windows closed; exiting app"
+                        );
+                        state.request_quit();
+                        app_handle.exit(0);
+                    } else {
+                        info!(
+                            category = "tauri",
+                            event = "AllWindowsClosed",
+                            "All windows closed; keeping app running"
+                        );
+                    }
                 }
             }
         })
@@ -279,17 +438,24 @@ pub fn build_app(
             crate::commands::project::quit_app,
             crate::commands::docker::detect_docker_context,
             crate::commands::sessions::get_branch_quick_start,
+            crate::commands::sessions::get_agent_sidebar_view,
             crate::commands::sessions::get_branch_session_summary,
             crate::commands::branch_suggest::suggest_branch_names,
             crate::commands::terminal::launch_terminal,
+            crate::commands::terminal::spawn_shell,
             crate::commands::terminal::launch_agent,
             crate::commands::terminal::start_launch_job,
             crate::commands::terminal::cancel_launch_job,
             crate::commands::terminal::write_terminal,
+            crate::commands::terminal::send_keys_to_pane,
+            crate::commands::terminal::send_keys_broadcast,
             crate::commands::terminal::resize_terminal,
             crate::commands::terminal::close_terminal,
             crate::commands::terminal::list_terminals,
             crate::commands::terminal::probe_terminal_ansi,
+            crate::commands::terminal::capture_scrollback_tail,
+            crate::commands::agent_mode::get_agent_mode_state_cmd,
+            crate::commands::agent_mode::send_agent_mode_message,
             crate::commands::settings::get_settings,
             crate::commands::settings::save_settings,
             crate::commands::agents::detect_agents,
@@ -304,6 +470,8 @@ pub fn build_app(
             crate::commands::cleanup::cleanup_single_worktree,
             crate::commands::hooks::check_and_update_hooks,
             crate::commands::hooks::register_hooks,
+            crate::commands::update::check_app_update,
+            crate::commands::update::apply_app_update,
             crate::commands::terminal::get_captured_environment,
             crate::commands::terminal::is_os_env_ready,
             crate::commands::git_view::get_git_change_summary,
@@ -317,6 +485,16 @@ pub fn build_app(
             crate::commands::version_history::get_project_version_history,
             crate::commands::window_tabs::sync_window_agent_tabs,
             crate::commands::recent_projects::get_recent_projects,
+            crate::commands::issue::fetch_github_issues,
+            crate::commands::issue::check_gh_cli_status,
+            crate::commands::issue::find_existing_issue_branch,
+            crate::commands::issue::link_branch_to_issue,
+            crate::commands::issue::rollback_issue_branch,
+            crate::commands::pullrequest::fetch_pr_status,
+            crate::commands::pullrequest::fetch_pr_detail,
+            crate::commands::pullrequest::fetch_ci_log,
+            crate::commands::system::get_system_info,
+            crate::commands::system::get_stats,
         ])
 }
 
@@ -343,7 +521,8 @@ fn emit_menu_action(app: &tauri::AppHandle<tauri::Wry>, action: &str) {
         return;
     };
 
-    let _ = window.emit(
+    let _ = window.emit_to(
+        EventTarget::webview_window(window.label()),
         crate::menu::MENU_ACTION_EVENT,
         crate::menu::MenuActionPayload {
             action: action.to_string(),
@@ -408,19 +587,51 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
             if should_prevent_exit_request(is_quitting) {
                 api.prevent_exit();
 
-                // macOS: treat Cmd+Q as "close the focused window", not "hide to tray".
+                // macOS: Cmd+Q is treated as explicit window close, not process exit.
                 #[cfg(target_os = "macos")]
                 {
-                    if let Some(window) = best_window(app_handle) {
+                    let state = app_handle.state::<AppState>();
+                    let window = best_window(app_handle);
+                    let Some(window) = window else {
+                        info!(
+                            category = "tauri",
+                            event = "ExitPrevented",
+                            "Exit prevented; no windows exist"
+                        );
+                        return;
+                    };
+
+                    let window_label = window.label().to_string();
+                    if has_running_agents(&state) {
+                        if !try_begin_exit_confirm(&state) {
+                            return;
+                        }
+
+                        let app_handle = app_handle.clone();
+                        let window_label = window_label.clone();
                         app_handle
-                            .state::<AppState>()
-                            .allow_window_close(window.label());
-                        let _ = window.close();
-                    } else {
-                        // No windows exist; allow the process to exit.
-                        app_handle.state::<AppState>().request_quit();
-                        app_handle.exit(0);
+                            .dialog()
+                            .message("Agents are still running. Quit gwt anyway?")
+                            .kind(MessageDialogKind::Warning)
+                            .buttons(MessageDialogButtons::OkCancelCustom(
+                                "Quit".to_string(),
+                                "Cancel".to_string(),
+                            ))
+                            .show(move |ok| {
+                                let state = app_handle.state::<AppState>();
+                                end_exit_confirm(&state);
+                                if !ok {
+                                    return;
+                                }
+
+                                if let Some(window) = app_handle.get_webview_window(&window_label) {
+                                    let _ = window.hide();
+                                }
+                            });
+                        return;
                     }
+
+                    let _ = window.hide();
                 }
 
                 // Other OSes: keep current behavior (exit request hides to tray).
@@ -484,5 +695,43 @@ mod tests {
             menu_action_from_id(crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES),
             Some("cleanup-worktrees")
         );
+        assert_eq!(
+            menu_action_from_id(crate::menu::MENU_ID_HELP_CHECK_UPDATES),
+            Some("check-updates")
+        );
+    }
+
+    #[test]
+    fn menu_action_from_id_maps_edit_copy() {
+        assert_eq!(
+            menu_action_from_id(crate::menu::MENU_ID_EDIT_COPY),
+            Some("edit-copy")
+        );
+    }
+
+    #[test]
+    fn menu_action_from_id_maps_edit_paste() {
+        assert_eq!(
+            menu_action_from_id(crate::menu::MENU_ID_EDIT_PASTE),
+            Some("edit-paste")
+        );
+    }
+
+    #[test]
+    fn captured_path_from_env_returns_trimmed_path() {
+        let env = HashMap::from([("PATH".to_string(), "  /usr/local/bin  ".to_string())]);
+        assert_eq!(
+            captured_path_from_env(&env),
+            Some("/usr/local/bin".to_string())
+        );
+    }
+
+    #[test]
+    fn captured_path_from_env_rejects_missing_or_empty_path() {
+        let no_path = HashMap::from([("HOME".to_string(), "/tmp".to_string())]);
+        assert_eq!(captured_path_from_env(&no_path), None);
+
+        let empty_path = HashMap::from([("PATH".to_string(), "   ".to_string())]);
+        assert_eq!(captured_path_from_env(&empty_path), None);
     }
 }

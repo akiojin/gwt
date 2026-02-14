@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
-  import type { ProfilesConfig, Profile, SettingsData } from "../types";
+  import type { ProfilesConfig, Profile, SettingsData, VoiceInputSettings } from "../types";
 
   let { onClose }: { onClose: () => void } = $props();
 
@@ -22,13 +22,20 @@
   let savedUiFontSize: number = $state(13);
   let savedTerminalFontSize: number = $state(13);
 
+  const DEFAULT_VOICE_INPUT: VoiceInputSettings = {
+    enabled: false,
+    hotkey: "Mod+Shift+M",
+    language: "auto",
+    model: "base",
+  };
+
   type AIModelInfo = {
     id: string;
   };
   let aiModels: string[] = $state([]);
   let aiModelsLoading: boolean = $state(false);
   let aiModelsError: string | null = $state(null);
-  let aiModelsLoadedKey: string = $state("");
+  let aiModelsLoadedKey: string = "";
   let aiModelsRequestSeq: number = 0;
 
   function getCurrentProfile(cfg: ProfilesConfig | null, key: string): Profile | null {
@@ -52,6 +59,14 @@
     return current.length > 0 && !aiModels.includes(current);
   });
 
+  function resetAiModelsState() {
+    aiModelsRequestSeq += 1;
+    aiModels = [];
+    aiModelsLoading = false;
+    aiModelsError = null;
+    aiModelsLoadedKey = "";
+  }
+
   $effect(() => {
     loadAll();
   });
@@ -68,24 +83,24 @@
     }
   });
 
+  function isAiEnabled(profile: Profile | null): boolean {
+    if (!profile) return false;
+    if (profile.ai_enabled === false) return false;
+    return !!profile.ai;
+  }
+
   $effect(() => {
     const profileKey = selectedProfileKey.trim();
     const ai = currentProfile?.ai;
     const endpoint = ai?.endpoint?.trim() ?? "";
     const apiKey = ai?.api_key?.trim() ?? "";
 
-    if (!profileKey || !ai) {
-      aiModels = [];
-      aiModelsLoading = false;
-      aiModelsError = null;
-      aiModelsLoadedKey = "";
+    if (!profileKey || !ai || !isAiEnabled(currentProfile)) {
+      resetAiModelsState();
       return;
     }
     if (!endpoint) {
-      aiModels = [];
-      aiModelsLoading = false;
-      aiModelsError = null;
-      aiModelsLoadedKey = "";
+      resetAiModelsState();
       return;
     }
 
@@ -120,6 +135,24 @@
       if (typeof msg === "string") return msg;
     }
     return String(err);
+  }
+
+  function normalizeVoiceInputSettings(
+    value: Partial<VoiceInputSettings> | null | undefined
+  ): VoiceInputSettings {
+    const hotkey = (value?.hotkey ?? "").trim();
+    const language = (value?.language ?? "").trim().toLowerCase();
+    const model = (value?.model ?? "").trim();
+
+    return {
+      enabled: !!value?.enabled,
+      hotkey: hotkey.length > 0 ? hotkey : DEFAULT_VOICE_INPUT.hotkey,
+      language:
+        language === "ja" || language === "en" || language === "auto"
+          ? (language as VoiceInputSettings["language"])
+          : DEFAULT_VOICE_INPUT.language,
+      model: model.length > 0 ? model : DEFAULT_VOICE_INPUT.model,
+    };
   }
 
   async function fetchAiModels(
@@ -166,7 +199,7 @@
     const ai = currentProfile?.ai;
     const endpoint = ai?.endpoint?.trim() ?? "";
     const apiKey = ai?.api_key?.trim() ?? "";
-    if (!profileKey || !ai || !endpoint) {
+    if (!profileKey || !ai || !endpoint || !isAiEnabled(currentProfile)) {
       aiModelsError = "Endpoint is required.";
       return;
     }
@@ -185,6 +218,7 @@
         invoke<SettingsData>("get_settings"),
         invoke<ProfilesConfig>("get_profiles"),
       ]);
+      loadedSettings.voice_input = normalizeVoiceInputSettings(loadedSettings.voice_input);
       settings = loadedSettings;
       savedUiFontSize = loadedSettings.ui_font_size ?? 13;
       savedTerminalFontSize = loadedSettings.terminal_font_size ?? 13;
@@ -215,6 +249,16 @@
       saveMessage = "Settings saved.";
       savedUiFontSize = settings.ui_font_size ?? 13;
       savedTerminalFontSize = settings.terminal_font_size ?? 13;
+      settings.voice_input = normalizeVoiceInputSettings(settings.voice_input);
+      window.dispatchEvent(
+        new CustomEvent("gwt-settings-updated", {
+          detail: {
+            uiFontSize: savedUiFontSize,
+            terminalFontSize: savedTerminalFontSize,
+            voiceInput: settings.voice_input,
+          },
+        })
+      );
     } catch (err) {
       console.error("Failed to save settings/profiles:", err);
       saveMessage = `Failed to save settings: ${toErrorMessage(err)}`;
@@ -369,6 +413,7 @@
     const nextProfile: Profile = enabled
       ? {
           ...p,
+          ai_enabled: true,
           ai: p.ai ?? {
             endpoint: "https://api.openai.com/v1",
             api_key: "",
@@ -376,7 +421,7 @@
             summary_enabled: true,
           },
         }
-      : { ...p, ai: null };
+      : { ...p, ai_enabled: false };
     profiles = {
       ...profiles,
       profiles: { ...(profiles.profiles ?? {}), [selectedProfileKey]: nextProfile },
@@ -394,6 +439,16 @@
       ...profiles,
       profiles: { ...(profiles.profiles ?? {}), [selectedProfileKey]: nextProfile },
     };
+  }
+
+  function updateVoiceInputField(
+    field: keyof VoiceInputSettings,
+    value: VoiceInputSettings[keyof VoiceInputSettings]
+  ) {
+    if (!settings) return;
+    const current = normalizeVoiceInputSettings(settings.voice_input);
+    const next = { ...current, [field]: value } as VoiceInputSettings;
+    settings = { ...settings, voice_input: normalizeVoiceInputSettings(next) };
   }
 </script>
 
@@ -519,6 +574,9 @@
               <input
                 type="text"
                 autocapitalize="off"
+                autocorrect="off"
+                autocomplete="off"
+                spellcheck="false"
                 bind:value={newBranch}
                 placeholder="Add branch..."
                 onkeydown={handleBranchKeydown}
@@ -528,6 +586,84 @@
             <span class="field-hint">
               Branches that cannot be deleted or force-pushed.
             </span>
+          </div>
+        </div>
+      </details>
+
+      <div class="divider"></div>
+
+      <details class="settings-section" open>
+        <summary class="section-title">Voice Input</summary>
+        <div class="section-content">
+          <div class="field">
+            <div class="ai-toggle">
+              <input
+                id="voice-input-enabled"
+                type="checkbox"
+                checked={settings.voice_input.enabled}
+                onchange={(e) =>
+                  updateVoiceInputField(
+                    "enabled",
+                    (e.target as HTMLInputElement).checked
+                  )}
+              />
+              <label for="voice-input-enabled" class="ai-enabled-label">
+                Enable Voice Input
+              </label>
+            </div>
+            <span class="field-hint">
+              Hotkey toggles start/stop and inserts transcript into the focused input.
+            </span>
+          </div>
+
+          <div class="field">
+            <label for="voice-hotkey">Hotkey</label>
+            <input
+              id="voice-hotkey"
+              type="text"
+              value={settings.voice_input.hotkey}
+              oninput={(e) =>
+                updateVoiceInputField(
+                  "hotkey",
+                  (e.target as HTMLInputElement).value
+                )}
+              placeholder="Mod+Shift+M"
+            />
+            <span class="field-hint">Example: Mod+Shift+M</span>
+          </div>
+
+          <div class="field">
+            <label for="voice-language">Language</label>
+            <select
+              id="voice-language"
+              class="select"
+              value={settings.voice_input.language}
+              onchange={(e) =>
+                updateVoiceInputField(
+                  "language",
+                  (e.target as HTMLSelectElement).value as VoiceInputSettings["language"]
+                )}
+            >
+              <option value="auto">Auto</option>
+              <option value="ja">Japanese</option>
+              <option value="en">English</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="voice-model">Model</label>
+            <input
+              id="voice-model"
+              type="text"
+              value={settings.voice_input.model}
+              oninput={(e) =>
+                updateVoiceInputField(
+                  "model",
+                  (e.target as HTMLInputElement).value
+                )}
+              placeholder="base"
+            />
+            <span class="field-hint">Bundled STT model tier label.</span>
           </div>
         </div>
       </details>
@@ -583,6 +719,9 @@
                 id="new-profile"
                 type="text"
                 autocapitalize="off"
+                autocorrect="off"
+                autocomplete="off"
+                spellcheck="false"
                 bind:value={newProfileName}
                 placeholder="e.g. development"
               />
@@ -605,6 +744,9 @@
                       class="env-value"
                       type="text"
                       autocapitalize="off"
+                      autocorrect="off"
+                      autocomplete="off"
+                      spellcheck="false"
                       value={currentProfile.env[key]}
                       oninput={(e) => upsertEnvVar(key, (e.target as HTMLInputElement).value)}
                     />
@@ -618,6 +760,9 @@
                   class="env-key-input"
                   type="text"
                   autocapitalize="off"
+                  autocorrect="off"
+                  autocomplete="off"
+                  spellcheck="false"
                   bind:value={newEnvKey}
                   placeholder="KEY"
                 />
@@ -625,6 +770,9 @@
                   class="env-value-input"
                   type="text"
                   autocapitalize="off"
+                  autocorrect="off"
+                  autocomplete="off"
+                  spellcheck="false"
                   bind:value={newEnvValue}
                   placeholder="value"
                 />
@@ -645,20 +793,25 @@
                 <input
                   id="ai-enabled"
                   type="checkbox"
-                  checked={!!currentProfile.ai}
+                  checked={isAiEnabled(currentProfile)}
                   onchange={(e) => setAiEnabled((e.target as HTMLInputElement).checked)}
                 />
                 <label for="ai-enabled" class="ai-enabled-label">Enable AI settings</label>
               </div>
 
-              {#if currentProfile.ai}
+              {#if isAiEnabled(currentProfile)}
+                {@const currentAi = currentProfile.ai}
+                {@const currentEndpoint = currentAi?.endpoint?.trim() ?? ""}
                 <div class="ai-grid">
                   <div class="ai-field">
                     <span class="ai-label">Endpoint</span>
                     <input
                       type="text"
                       autocapitalize="off"
-                      value={currentProfile.ai.endpoint}
+                      autocorrect="off"
+                      autocomplete="off"
+                      spellcheck="false"
+                      value={currentAi?.endpoint ?? ""}
                       oninput={(e) => updateAiField("endpoint", (e.target as HTMLInputElement).value)}
                     />
                   </div>
@@ -667,7 +820,10 @@
                     <input
                       type="text"
                       autocapitalize="off"
-                      value={currentProfile.ai.api_key}
+                      autocorrect="off"
+                      autocomplete="off"
+                      spellcheck="false"
+                      value={currentAi?.api_key ?? ""}
                       oninput={(e) => updateAiField("api_key", (e.target as HTMLInputElement).value)}
                     />
                   </div>
@@ -676,8 +832,8 @@
                     <div class="row ai-model-row">
                       <select
                         class="select ai-model-select"
-                        value={currentProfile.ai.model}
-                        disabled={aiModelsLoading || !currentProfile.ai.endpoint.trim()}
+                        value={currentAi?.model ?? ""}
+                        disabled={aiModelsLoading || !currentEndpoint}
                         onchange={(e) => updateAiField("model", (e.target as HTMLSelectElement).value)}
                       >
                         <option value="">Select model...</option>
@@ -688,7 +844,7 @@
                       <button
                         class="btn btn-ghost"
                         onclick={refreshAiModels}
-                        disabled={aiModelsLoading || !currentProfile.ai.endpoint.trim()}
+                        disabled={aiModelsLoading || !currentEndpoint}
                       >
                         {aiModelsLoading ? "Loading..." : "Refresh"}
                       </button>
@@ -699,7 +855,7 @@
                       <span class="field-hint">
                         Current model is not listed in /v1/models.
                       </span>
-                    {:else if !aiModelsLoading && aiModels.length === 0 && currentProfile.ai.endpoint.trim()}
+                    {:else if !aiModelsLoading && aiModels.length === 0 && currentEndpoint}
                       <span class="field-hint">No models returned from /v1/models.</span>
                     {/if}
                   </div>
@@ -709,7 +865,7 @@
                       <input
                         id="ai-summary"
                         type="checkbox"
-                        checked={currentProfile.ai.summary_enabled}
+                        checked={currentAi?.summary_enabled ?? false}
                         onchange={(e) => updateAiField("summary_enabled", (e.target as HTMLInputElement).checked)}
                       />
                       <label for="ai-summary">Enabled</label>

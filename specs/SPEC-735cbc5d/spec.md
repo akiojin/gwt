@@ -1,15 +1,22 @@
-# GitView in Session Summary
+# GitView in Worktree Summary Panel
 
 **SPEC ID**: `SPEC-735cbc5d`
 **Created**: 2026-02-10
+**Updated**: 2026-02-14
 **Status**: Draft
 **カテゴリ**: Feature (GUI)
 
 **Implementation Phase**: Phase 1 (Full Implementation)
 
+## 依存仕様と責務境界（2026-02-14 追記）
+
+- Session Summary のタブ構成・配置責務は `SPEC-d6949f99` を正本とする
+- 本SPECは主に Git 表示領域の内部要件（Changes/Commits/Stash、diff、stash、base branch）を定義する
+- レイアウトや初期表示状態が競合する場合は `SPEC-d6949f99` を優先する
+
 ## 概要
 
-Session Summary タブ内に折りたたみ式の Git セクションを追加し、
+Session Summary 内に Git 表示領域を追加し、
 ブランチの変更状況（Changes / Commits / Stash）を視覚的に確認できるようにする。
 TUI 版 GitView の GUI 移植として、エージェントがブランチで何を変えたかの
 全体像を把握するための機能。
@@ -19,27 +26,30 @@ TUI 版 GitView の GUI 移植として、エージェントがブランチで�
 
 ## UI レイアウト概要
 
+> 注記: Session Summary の最終レイアウト（`Summary / PR / AI Summary / Git`）は
+> `SPEC-d6949f99` に従う。以下は Git 表示領域の内部構造イメージ。
+
 ```text
-Session Summary タブ
-├── AI Summary セクション（既存）
-├── Quick Start セクション（既存）
-└── Git セクション（新規・折りたたみ式）  ← Quick Start の下に配置
-    ├── ヘッダー: [v] Git  5 files, 3 commits, 1 stash  [Refresh]
-    ├── 基準ブランチドロップダウン: [main v]
-    └── タブ: [Changes] [Commits] [Stash]
-        ├── Changes タブ（デフォルト）
-        │   ├── フィルター: [Committed] [Uncommitted]
-        │   └── ディレクトリツリー（全展開）
-        │       ├── src/
-        │       │   ├── main.rs  ████░  +45 -12
-        │       │   └── lib.rs   █████  +8 -0
-        │       └── Cargo.toml   ██░░░  +3 -5
-        ├── Commits タブ
-        │   ├── a1b2c3d feat: add login  2 hours ago
-        │   ├── d4e5f6g fix: typo        3 hours ago
-        │   └── [Show more]
-        └── Stash タブ（0件なら非表示）
-            └── stash@{0}: WIP on feature (3 files)
+Sidebar（Branch Mode）
+├── Worktree一覧（既存）
+└── Worktree Summary パネル
+    └── Git 表示領域
+        ├── ヘッダー: [v] Git  5 files, 3 commits, 1 stash  [Refresh]
+        ├── 基準ブランチドロップダウン: [main v]
+        └── タブ: [Changes] [Commits] [Stash]
+            ├── Changes タブ（デフォルト）
+            │   ├── フィルター: [Committed] [Uncommitted]
+            │   └── ディレクトリツリー（全展開）
+            │       ├── src/
+            │       │   ├── main.rs  ████░  +45 -12
+            │       │   └── lib.rs   █████  +8 -0
+            │       └── Cargo.toml   ██░░░  +3 -5
+            ├── Commits タブ
+            │   ├── a1b2c3d feat: add login  2 hours ago
+            │   ├── d4e5f6g fix: typo        3 hours ago
+            │   └── [Show more]
+            └── Stash タブ（0件なら非表示）
+                └── stash@{0}: WIP on feature (3 files)
 ```
 
 ## User Scenarios and Tests
@@ -153,7 +163,7 @@ Git セクションが折りたたまれた状態でも、ヘッダーにサマ�
 
 **Acceptance scenarios**:
 
-1. **Given** Session Summary 表示中, **When** Git セクションが折りたたまれている,
+1. **Given** Worktree Summary パネル表示中, **When** Git セクションが折りたたまれている,
    **Then** ヘッダーに "X files, Y commits, Z stash" のサマリーが表示される。
 2. **Given** Git セクションヘッダー, **When** リフレッシュアイコンをクリック,
    **Then** Git 情報が再取得され、スピナー + "Loading git info..." が表示される。
@@ -195,8 +205,7 @@ diff が develop との比較に切り替わる。
 
 ### Functional Requirements
 
-- **FR-001**: Session Summary タブ内の Quick Start セクションの下に
-  折りたたみ式の Git セクションを表示する。デフォルトは折りたたみ状態。
+- **FR-001**: Session Summary 内に Git 表示領域を表示する。配置・タブ構成・初期表示状態は `SPEC-d6949f99` に従う。
 - **FR-002**: Git セクションヘッダーにサマリー情報（ファイル数、コミット数、
   stash 数）を "X files, Y commits, Z stash" 形式で表示する。
 - **FR-003**: Git セクションヘッダーにリフレッシュボタンを配置する。
@@ -227,7 +236,7 @@ diff が develop との比較に切り替わる。
   diff 展開を不可にする。
 - **FR-015**: 1 ファイルあたり 1000 行を超える diff は切り詰めて
   "Too large to display" と表示する。
-- **FR-016**: Git 情報はタブ表示時に取得し、リフレッシュボタンで手動更新する。
+- **FR-016**: Git 情報は Worktree Summary パネル表示時に取得し、リフレッシュボタンで手動更新する。
   取得中はスピナー + "Loading git info..." を表示する。
 - **FR-017**: Git リポジトリでないプロジェクトでは Git セクションを非表示にする。
 
@@ -282,7 +291,7 @@ diff が develop との比較に切り替わる。
 
 ### Measurable Outcomes
 
-- **SC-001**: Git セクションの折りたたみ/展開が正常に動作する。
+- **SC-001**: Session Summary で Git 表示領域が `SPEC-d6949f99` のレイアウト要件に従って表示される。
 - **SC-002**: Changes タブでファイルツリーと diff 展開が表示される。
 - **SC-003**: Committed/Uncommitted のフィルター切り替えが動作する。
 - **SC-004**: Uncommitted ビューで Staged/Unstaged が分離表示される。
@@ -306,6 +315,7 @@ diff が develop との比較に切り替わる。
 ## Dependencies
 
 - 既存の Session Summary タブ（MainArea.svelte）
+- Session Summary レイアウト正本: `SPEC-d6949f99`
 - gwt-core の Git 操作モジュール（git/branch.rs, git/commit.rs）
 - Tauri IPC（invoke）
 
@@ -313,7 +323,7 @@ diff が develop との比較に切り替わる。
 
 | 項目 | 決定 | 理由 |
 | ---- | ---- | ---- |
-| Git セクション配置 | Quick Start の下に折りたたみ | 補足情報として自然な位置 |
+| Git セクション配置 | Session Summary の Git タブ（正本は SPEC-d6949f99） | レイアウト責務の一元化 |
 | 内部構造 | タブ式切り替え | 情報種別が明確に異なるため |
 | ファイルリスト | ディレクトリツリー（全展開） | 一目で全体把握可能 |
 | diff 表示 | ファイルリスト + 展開式 | 必要なファイルだけ確認できる |
