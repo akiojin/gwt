@@ -328,14 +328,14 @@ fn build_window_submenu(
         MENU_ID_WINDOW_PREVIOUS_WINDOW,
         "Previous Window",
         true,
-        None::<&str>,
+        Some("CmdOrCtrl+Shift+`"),
     )?;
     let next_window = MenuItem::with_id(
         app,
         MENU_ID_WINDOW_NEXT_WINDOW,
         "Next Window",
         true,
-        None::<&str>,
+        Some("CmdOrCtrl+`"),
     )?;
     builder = builder
         .item(&previous_window)

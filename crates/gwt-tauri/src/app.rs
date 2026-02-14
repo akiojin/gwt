@@ -371,10 +371,17 @@ pub fn build_app(
                     return;
                 }
                 if id == crate::menu::MENU_ID_WINDOW_BRING_ALL_TO_FRONT {
+                    let focused_label = focused_window_label(app);
+
                     for (_, w) in app.webview_windows() {
                         let _ = w.show();
+                    }
+
+                    // Restore focus once to keep MRU/history deterministic.
+                    if let Some(w) = app.get_webview_window(&focused_label) {
                         let _ = w.set_focus();
                     }
+                    let _ = crate::menu::rebuild_menu(app);
                     return;
                 }
             }
