@@ -289,10 +289,15 @@ describe("TerminalView", () => {
     expect(terminalInstances.length).toBeGreaterThan(0);
     const term = terminalInstances[0];
 
-    await fireEvent.wheel(rootEl!, { deltaY: 20, bubbles: true });
+    const event = new WheelEvent("wheel", { deltaY: 20, bubbles: true });
+    const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+    const stopImmediatePropagationSpy = vi.spyOn(event, "stopImmediatePropagation");
+    rootEl!.dispatchEvent(event);
 
     expect(term.focus).toHaveBeenCalled();
     expect(viewport.scrollTop).toBeGreaterThan(5);
+    expect(preventDefaultSpy).toHaveBeenCalled();
+    expect(stopImmediatePropagationSpy).toHaveBeenCalled();
   });
 
   it("does not fallback when terminal already has focus", async () => {

@@ -212,7 +212,7 @@
 
       const wasFocused = isTerminalFocused(rootEl);
       focusTerminalIfNeeded(rootEl, true);
-      if (wasFocused || isTerminalFocused(rootEl)) return;
+      if (wasFocused) return;
 
       const didScroll = scrollViewportByWheel(rootEl, event);
       if (!didScroll) return;
