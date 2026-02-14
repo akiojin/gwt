@@ -89,12 +89,13 @@ describe("WorktreeSummaryPanel", () => {
 
     // Summary tab is active by default
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    expect(tabs).toHaveLength(4);
+    expect(tabs).toHaveLength(5);
     expect(tabs[0]?.textContent?.trim()).toBe("Summary");
     expect(tabs[0]?.classList.contains("active")).toBe(true);
-    expect(tabs[1]?.textContent?.trim()).toBe("PR");
-    expect(tabs[2]?.textContent?.trim()).toBe("AI Summary");
-    expect(tabs[3]?.textContent?.trim()).toBe("Git");
+    expect(tabs[1]?.textContent?.trim()).toBe("Git");
+    expect(tabs[2]?.textContent?.trim()).toBe("PR");
+    expect(tabs[3]?.textContent?.trim()).toBe("CI");
+    expect(tabs[4]?.textContent?.trim()).toBe("AI");
   });
 
   it("shows placeholder when no branch is selected", async () => {
@@ -137,13 +138,31 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const prTab = tabs[1] as HTMLElement;
+    const prTab = tabs[2] as HTMLElement;
     await fireEvent.click(prTab);
 
     await waitFor(() => {
       expect(prTab.classList.contains("active")).toBe(true);
       expect(
         rendered.container.querySelector(".pr-status-section")
+      ).toBeTruthy();
+    });
+  });
+
+  it("shows GitHub CLI auth warning in PR tab when CLI is unavailable", async () => {
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      ghCliStatus: { available: false, authenticated: false },
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const prTab = tabs[2] as HTMLElement;
+    await fireEvent.click(prTab);
+
+    await waitFor(() => {
+      expect(
+        rendered.getByText("GitHub CLI (gh) is not available.")
       ).toBeTruthy();
     });
   });
@@ -180,7 +199,7 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const gitTab = tabs[3] as HTMLElement;
+    const gitTab = tabs[1] as HTMLElement;
     await fireEvent.click(gitTab);
 
     await waitFor(() => {
@@ -192,6 +211,76 @@ describe("WorktreeSummaryPanel", () => {
 
     // Git tab mode disables collapse UI.
     expect(rendered.container.querySelector(".git-section .collapse-icon")).toBeNull();
+  });
+
+  it("switches to CI tab and shows workflow runs", async () => {
+    const onOpenCiLog = vi.fn();
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") {
+        return {
+          ...sessionSummaryFixture,
+          markdown: null,
+          bulletPoints: [],
+        };
+      }
+      if (cmd === "fetch_pr_detail") {
+        return {
+          number: 42,
+          title: "CI Test PR",
+          state: "OPEN",
+          url: "https://github.com/test/pr/42",
+          mergeable: "MERGEABLE",
+          author: "alice",
+          baseBranch: "main",
+          headBranch: branchFixture.name,
+          labels: [],
+          assignees: [],
+          milestone: null,
+          linkedIssues: [],
+          checkSuites: [
+            {
+              workflowName: "CI Build",
+              runId: 100,
+              status: "completed",
+              conclusion: "success",
+            },
+            {
+              workflowName: "Lint",
+              runId: 101,
+              status: "in_progress",
+              conclusion: null,
+            },
+          ],
+          reviews: [],
+          reviewComments: [],
+          changedFilesCount: 1,
+          additions: 10,
+          deletions: 5,
+        };
+      }
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      prNumber: 42,
+      onOpenCiLog,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const ciTab = tabs[3] as HTMLElement;
+    await fireEvent.click(ciTab);
+
+    await waitFor(() => {
+      expect(ciTab.classList.contains("active")).toBe(true);
+      expect(rendered.getByText("CI Build")).toBeTruthy();
+      expect(rendered.getByText("Lint")).toBeTruthy();
+    });
+
+    await fireEvent.click(rendered.getByText("CI Build").closest("button") as HTMLButtonElement);
+    expect(onOpenCiLog).toHaveBeenCalledWith(100);
   });
 
   it("displays HostOS runtime for quick start entry", async () => {

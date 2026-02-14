@@ -56,9 +56,17 @@ Typical assets:
 - Windows: `.msi`
 - Linux: `.AppImage`, `.deb`
 
-## Development
+## Usage (for users)
 
-Prereqs:
+- Start the app after install, then open a repository from **Open Project...**.
+- Select a branch to work with, then:
+  - manage worktrees from the sidebar
+  - launch an AI agent from the branch actions
+- Open `Settings` to configure AI profiles if you plan to use agent or summary features.
+
+The sections below are contributor/developer operations.
+
+## Development
 
 - Rust (stable)
 - Node.js 22

@@ -16,6 +16,12 @@ function countInvokeCalls(name: string): number {
   return invokeMock.mock.calls.filter((c) => c[0] === name).length;
 }
 
+function getRenderedBranchNames(rendered: { container: HTMLElement }): string[] {
+  return Array.from(
+    rendered.container.querySelectorAll("button.branch-item .branch-name")
+  ).map((node) => node.textContent?.trim() ?? "");
+}
+
 function fetchPrStatusProjectPaths(): string[] {
   return invokeMock.mock.calls
     .filter((c) => c[0] === "fetch_pr_status")
@@ -30,6 +36,30 @@ const branchFixture = {
   behind: 0,
   divergence_status: "UpToDate",
   last_tool_usage: null,
+};
+const mainBranchFixture = {
+  ...branchFixture,
+  name: "main",
+  commit_timestamp: 1_700_000_100,
+};
+const developBranchFixture = {
+  ...branchFixture,
+  name: "develop",
+  commit_timestamp: 1_700_000_050,
+};
+const featureAlphaBranchFixture = {
+  ...branchFixture,
+  name: "feature/alpha",
+  commit_timestamp: 1_700_000_090,
+};
+const featureBetaBranchFixture = {
+  ...branchFixture,
+  name: "feature/beta",
+  commit_timestamp: 1_700_000_080,
+};
+const featureNoTimestampBranchFixture = {
+  ...branchFixture,
+  name: "feature/no-timestamp",
 };
 const remoteBranchFixture = {
   ...branchFixture,
@@ -608,6 +638,136 @@ describe("Sidebar", () => {
     }
   });
 
+  it("sorts branch list by name by default with main/develop prioritized", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches")
+        return [
+          { ...featureBetaBranchFixture },
+          { ...mainBranchFixture },
+          { ...developBranchFixture },
+          { ...featureAlphaBranchFixture },
+        ];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await rendered.findByText(mainBranchFixture.name);
+    await waitFor(() => {
+      expect(getRenderedBranchNames(rendered)).toEqual([
+        "main",
+        "develop",
+        "feature/alpha",
+        "feature/beta",
+      ]);
+    });
+  });
+
+  it("sorts branch list by latest commit timestamp in updated mode", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches")
+        return [
+          { ...featureBetaBranchFixture },
+          { ...mainBranchFixture },
+          { ...developBranchFixture },
+          { ...featureAlphaBranchFixture },
+        ];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    const sortButton = rendered.getByRole("button", { name: "Sort mode" });
+    await fireEvent.click(sortButton);
+
+    await waitFor(() => {
+      expect(getRenderedBranchNames(rendered)).toEqual([
+        "main",
+        "develop",
+        "feature/beta",
+        "feature/alpha",
+      ]);
+    });
+  });
+
+  it("puts branches with missing commit timestamp at the end in updated mode", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches")
+        return [
+          { ...developBranchFixture },
+          { ...featureNoTimestampBranchFixture },
+          { ...featureAlphaBranchFixture },
+          { ...mainBranchFixture },
+        ];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    const sortButton = rendered.getByRole("button", { name: "Sort mode" });
+    await fireEvent.click(sortButton);
+
+    await waitFor(() => {
+      expect(getRenderedBranchNames(rendered)).toEqual([
+        "main",
+        "develop",
+        "feature/alpha",
+        "feature/no-timestamp",
+      ]);
+    });
+  });
+
+  it("sorts All mode with Local-side first and sort mode applied per side", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") {
+        return [
+          { ...featureBetaBranchFixture },
+          { ...mainBranchFixture },
+          { ...developBranchFixture },
+        ];
+      }
+      if (command === "list_remote_branches") {
+        return [
+          { ...remoteBranchFixture, name: "origin/main", commit_timestamp: 1_700_000_200 },
+          { ...remoteBranchFixture, name: "origin/feature/beta", commit_timestamp: 1_700_000_150 },
+          { ...remoteBranchFixture, name: "origin/feature/alpha", commit_timestamp: 1_700_000_180 },
+        ];
+      }
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "All" }));
+    await rendered.findByText("origin/main");
+    await rendered.findByText("origin/feature/alpha");
+
+    expect(getRenderedBranchNames(rendered)).toEqual([
+      "main",
+      "develop",
+      "feature/beta",
+      "origin/main",
+      "origin/feature/alpha",
+      "origin/feature/beta",
+    ]);
+  });
+
   it("applies sidebar width from props", async () => {
     const rendered = await renderSidebar({
       projectPath: "/tmp/project",
@@ -856,183 +1016,7 @@ describe("Sidebar", () => {
     expect(resizeHandle?.getAttribute("aria-label")).toBe("Resize session summary");
   });
 
-  it("shows spinner indicator for branches with open agent tabs", async () => {
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "list_worktree_branches") {
-        return [branchFixture];
-      }
-      if (command === "list_worktrees") {
-        return [
-          {
-            path: "/tmp/worktrees/feature-sidebar-size",
-            branch: branchFixture.name,
-            commit: "1234567",
-            status: "active",
-            is_main: false,
-            has_changes: false,
-            has_unpushed: false,
-            is_current: false,
-            is_protected: false,
-            is_agent_running: false,
-            ahead: 0,
-            behind: 0,
-            is_gone: false,
-            last_tool_usage: null,
-            safety_level: "safe",
-          },
-        ];
-      }
-      return [];
-    });
-
-    const rendered = await renderSidebar({
-      projectPath: "/tmp/project",
-      onBranchSelect: vi.fn(),
-      agentTabBranches: [branchFixture.name],
-    });
-
-    await rendered.findByText(branchFixture.name);
-    expect(rendered.getByTitle("Agent tab is open for this branch")).toBeTruthy();
-  });
-
-  it("shows PR badge when prStatuses contains data for a branch", async () => {
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "list_worktree_branches") return [branchFixture];
-      if (command === "list_worktrees") return [];
-      return [];
-    });
-
-    const prStatuses: Record<string, any> = {
-      [branchFixture.name]: {
-        number: 42,
-        title: "Test PR",
-        state: "OPEN",
-        url: "https://github.com/test/pr/42",
-        mergeable: "MERGEABLE",
-        author: "test",
-        baseBranch: "main",
-        headBranch: branchFixture.name,
-        labels: [],
-        assignees: [],
-        milestone: null,
-        linkedIssues: [],
-        checkSuites: [],
-        reviews: [],
-        reviewComments: [],
-        changedFilesCount: 1,
-        additions: 10,
-        deletions: 5,
-      },
-    };
-
-    const rendered = await renderSidebar({
-      projectPath: "/tmp/project",
-      onBranchSelect: vi.fn(),
-      prStatuses,
-      ghCliStatus: { available: true, authenticated: true },
-    });
-
-    await rendered.findByText(branchFixture.name);
-    const badge = rendered.getByText(/#42 Open/);
-    expect(badge).toBeTruthy();
-    expect(badge.classList.contains("pr-badge")).toBe(true);
-  });
-
-  it("shows tree toggle for branches with PR and expands workflow runs", async () => {
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "list_worktree_branches") return [branchFixture];
-      if (command === "list_worktrees") return [];
-      return [];
-    });
-
-    const prStatuses: Record<string, any> = {
-      [branchFixture.name]: {
-        number: 42,
-        title: "Test PR",
-        state: "OPEN",
-        url: "https://github.com/test/pr/42",
-        mergeable: "MERGEABLE",
-        author: "test",
-        baseBranch: "main",
-        headBranch: branchFixture.name,
-        labels: [],
-        assignees: [],
-        milestone: null,
-        linkedIssues: [],
-        checkSuites: [
-          { workflowName: "CI Build", runId: 100, status: "completed", conclusion: "success" },
-          { workflowName: "Lint", runId: 101, status: "in_progress", conclusion: null },
-        ],
-        reviews: [],
-        reviewComments: [],
-        changedFilesCount: 1,
-        additions: 10,
-        deletions: 5,
-      },
-    };
-
-    const rendered = await renderSidebar({
-      projectPath: "/tmp/project",
-      onBranchSelect: vi.fn(),
-      prStatuses,
-      ghCliStatus: { available: true, authenticated: true },
-    });
-
-    await rendered.findByText(branchFixture.name);
-
-    // Tree toggle should be present
-    const toggleBtn = rendered.getByTitle("Expand");
-    expect(toggleBtn).toBeTruthy();
-
-    // Click to expand
-    await fireEvent.click(toggleBtn);
-
-    // Workflow names should appear
-    expect(rendered.getByText("CI Build")).toBeTruthy();
-    expect(rendered.getByText("Lint")).toBeTruthy();
-  });
-
-  it("shows 'No PR' badge when ghCli is authenticated but no PR exists", async () => {
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "list_worktree_branches") return [branchFixture];
-      if (command === "list_worktrees") return [];
-      return [];
-    });
-
-    const rendered = await renderSidebar({
-      projectPath: "/tmp/project",
-      onBranchSelect: vi.fn(),
-      prStatuses: {},
-      ghCliStatus: { available: true, authenticated: true },
-    });
-
-    await rendered.findByText(branchFixture.name);
-    const badge = rendered.getByText("No PR");
-    expect(badge).toBeTruthy();
-    expect(badge.classList.contains("no-pr")).toBe(true);
-  });
-
-  it("shows disconnected badge when ghCli is not authenticated", async () => {
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "list_worktree_branches") return [branchFixture];
-      if (command === "list_worktrees") return [];
-      return [];
-    });
-
-    const rendered = await renderSidebar({
-      projectPath: "/tmp/project",
-      onBranchSelect: vi.fn(),
-      prStatuses: {},
-      ghCliStatus: { available: true, authenticated: false },
-    });
-
-    await rendered.findByText(branchFixture.name);
-    const badge = rendered.getByText("GitHub not connected");
-    expect(badge).toBeTruthy();
-    expect(badge.classList.contains("disconnected")).toBe(true);
-  });
-
-  it("calls onOpenCiLog when clicking a workflow run item", async () => {
+  it("does not show PR/agent indicators in branch rows", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "list_worktree_branches") return [branchFixture];
       if (command === "list_worktrees") return [];
@@ -1070,19 +1054,58 @@ describe("Sidebar", () => {
       onBranchSelect: vi.fn(),
       prStatuses,
       ghCliStatus: { available: true, authenticated: true },
+      agentTabBranches: [branchFixture.name],
       onOpenCiLog,
     });
 
     await rendered.findByText(branchFixture.name);
+    expect(rendered.queryByTitle("Agent tab is open for this branch")).toBeNull();
+    expect(rendered.queryByText(/#42 Open/)).toBeNull();
+    expect(rendered.queryByText("No PR")).toBeNull();
+    expect(rendered.queryByText("GitHub not connected")).toBeNull();
+    expect(rendered.queryByText("CI Build")).toBeNull();
+    expect(rendered.queryByText("Lint")).toBeNull();
+    expect(rendered.queryByTitle("Expand")).toBeNull();
+    expect(onOpenCiLog).not.toHaveBeenCalled();
+  });
 
-    // Expand tree
-    const toggleBtn = rendered.getByTitle("Expand");
-    await fireEvent.click(toggleBtn);
+  it("highlights selected branch in Worktree list", async () => {
+    const currentBranch = {
+      ...branchFixture,
+      name: "feature/current",
+      is_current: true,
+    };
+    const selectedBranch = {
+      ...branchFixture,
+      name: "feature/selected",
+      is_current: false,
+    };
+    const onBranchSelect = vi.fn();
 
-    // Click workflow run
-    const ciItem = rendered.getByText("CI Build");
-    await fireEvent.click(ciItem.closest("button")!);
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") {
+        return [currentBranch, selectedBranch];
+      }
+      if (command === "list_worktrees") return [];
+      return [];
+    });
 
-    expect(onOpenCiLog).toHaveBeenCalledWith(100);
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect,
+      selectedBranch,
+    });
+
+    await rendered.findByText(selectedBranch.name);
+
+    const selectedButton = rendered
+      .getByText(selectedBranch.name)
+      .closest("button");
+    const currentButton = rendered.getByText(currentBranch.name).closest("button");
+
+    expect(selectedButton).toBeTruthy();
+    expect(selectedButton?.classList.contains("active")).toBe(true);
+    expect(currentButton).toBeTruthy();
+    expect(currentButton?.classList.contains("active")).toBe(false);
   });
 });
