@@ -32,7 +32,7 @@
   let quickLaunching: boolean = $state(false);
   let quickLaunchingKey: string | null = $state(null);
 
-  type SummaryTab = "summary" | "pr";
+  type SummaryTab = "summary" | "pr" | "ai-summary" | "git";
   let activeTab: SummaryTab = $state("summary");
 
   let prDetailLoading = $state(false);
@@ -466,6 +466,24 @@
         >
           PR
         </button>
+        <button
+          class="summary-tab"
+          class:active={activeTab === "ai-summary"}
+          onclick={() => {
+            activeTab = "ai-summary";
+          }}
+        >
+          AI Summary
+        </button>
+        <button
+          class="summary-tab"
+          class:active={activeTab === "git"}
+          onclick={() => {
+            activeTab = "git";
+          }}
+        >
+          Git
+        </button>
       </div>
 
       {#if activeTab === "summary"}
@@ -573,6 +591,7 @@
           {/if}
         </div>
 
+      {:else if activeTab === "ai-summary"}
         <div class="quick-start ai-summary">
           <div class="quick-header">
             <span class="quick-title">AI Summary</span>
@@ -633,8 +652,13 @@
             <div class="session-summary-placeholder">No summary.</div>
           {/if}
         </div>
-
-        <GitSection projectPath={projectPath} branch={selectedBranch.name} />
+      {:else if activeTab === "git"}
+        <GitSection
+          projectPath={projectPath}
+          branch={selectedBranch.name}
+          collapsible={false}
+          defaultCollapsed={false}
+        />
       {:else if activeTab === "pr"}
         <PrStatusSection
           prDetail={prDetail}

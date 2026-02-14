@@ -14,6 +14,17 @@
 
   type FilterType = "Local" | "Remote" | "All";
   type SidebarMode = "branch" | "agent";
+  type FilterCacheEntry = {
+    branches: BranchInfo[];
+    remoteBranchNames: Set<string>;
+    worktreeMap: Map<string, WorktreeInfo>;
+    cacheKey: string;
+    fetchedAtMs: number;
+  };
+  type FetchSnapshotResult =
+    | { ok: true; snapshot: FilterCacheEntry }
+    | { ok: false; errorMessage: string };
+  type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
   let {
     projectPath,
@@ -62,6 +73,7 @@
   const MIN_WORKTREE_SUMMARY_HEIGHT_PX = 160;
   const MIN_BRANCH_LIST_HEIGHT_PX = 120;
   const SUMMARY_RESIZE_HANDLE_HEIGHT_PX = 8;
+  const FILTER_BACKGROUND_REFRESH_TTL_MS = 10_000;
 
   // PR Status tree expand state
   let expandedBranches: Set<string> = $state(new Set());
@@ -185,9 +197,10 @@
   let searchQuery: string = $state("");
   let errorMessage: string | null = $state(null);
   let lastFetchKey = "";
-  let lastWorktreesFetchKey = "";
   let fetchToken = 0;
   let localRefreshKey = $state(0);
+  let filterCache: Map<FilterType, FilterCacheEntry> = $state(new Map());
+  const inflightFetches = new Map<string, Promise<FetchSnapshotResult>>();
 
   // Worktree safety info
   let worktreeMap: Map<string, WorktreeInfo> = $state(new Map());
@@ -342,7 +355,8 @@
     const key = `${projectPath}::${activeFilter}::${refreshKey}::${localRefreshKey}`;
     if (key === lastFetchKey) return;
     lastFetchKey = key;
-    fetchBranches();
+    const token = ++fetchToken;
+    fetchBranches(token);
   });
 
   $effect(() => {
@@ -456,94 +470,198 @@
     return () => document.removeEventListener("keydown", handler);
   });
 
-  async function fetchBranches() {
-    const token = ++fetchToken;
+  function fetchBranches(token: number) {
+    const filter = activeFilter;
+    const path = projectPath;
+    const cacheKey = buildFilterCacheKey(filter, path);
+    const cached = filterCache.get(filter);
+
+    if (cached && cached.cacheKey === cacheKey) {
+      applyCacheEntry(cached);
+      const ttlElapsed = Date.now() - cached.fetchedAtMs;
+      if (ttlElapsed < FILTER_BACKGROUND_REFRESH_TTL_MS) return;
+      void refreshFilterSnapshot(filter, path, cacheKey, token, true);
+      return;
+    }
+
     loading = true;
     errorMessage = null;
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      if (activeFilter === "Local") {
-        const next = await invoke<BranchInfo[]>("list_worktree_branches", { projectPath });
-        if (token !== fetchToken) return;
-        branches = next;
-        remoteBranchNames = new Set();
+    void refreshFilterSnapshot(filter, path, cacheKey, token, false);
+  }
 
-        // Worktree safety info is relatively expensive, but it must refresh when worktrees
-        // change (refreshKey) and when explicitly requested (localRefreshKey).
-        const wtKey = `${projectPath}::${localRefreshKey}::${refreshKey}`;
-        const shouldFetchWorktrees = wtKey !== lastWorktreesFetchKey;
-        if (shouldFetchWorktrees) {
-          const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", { projectPath }).catch(
-            () => [] as WorktreeInfo[]
-          );
-          if (token !== fetchToken) return;
-          updateWorktreeMap(worktrees);
-          lastWorktreesFetchKey = wtKey;
-        }
-      } else if (activeFilter === "Remote") {
-        const next = await invoke<BranchInfo[]>("list_remote_branches", {
-          projectPath,
-        });
-        if (token !== fetchToken) return;
-        branches = next;
-        remoteBranchNames = new Set(next.map((branch) => branch.name.trim()));
-        worktreeMap = new Map();
-        lastWorktreesFetchKey = "";
-      } else {
-        // All: merge local + remote
-        const [local, remote] = await Promise.all([
-          invoke<BranchInfo[]>("list_worktree_branches", { projectPath }),
-          invoke<BranchInfo[]>("list_remote_branches", { projectPath }),
-        ]);
-        if (token !== fetchToken) return;
-        // Deduplicate by name
-        const seen = new Set<string>();
-        const merged: BranchInfo[] = [];
-        for (const b of local) {
-          seen.add(b.name);
-          merged.push(b);
-        }
-        for (const b of remote) {
-          if (!seen.has(b.name)) {
-            merged.push(b);
-          }
-        }
-        branches = merged;
-        remoteBranchNames = new Set(remote.map((branch) => branch.name.trim()));
+  async function refreshFilterSnapshot(
+    filter: FilterType,
+    path: string,
+    cacheKey: string,
+    token: number,
+    background: boolean
+  ) {
+    const hadFallbackCache = !!(filterCache.get(filter)?.cacheKey === cacheKey);
+    const result = await loadFilterSnapshot(filter, path, cacheKey);
 
-        const wtKey = `${projectPath}::${localRefreshKey}::${refreshKey}`;
-        const shouldFetchWorktrees = wtKey !== lastWorktreesFetchKey;
-        if (shouldFetchWorktrees) {
-          const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", { projectPath }).catch(
-            () => [] as WorktreeInfo[]
-          );
-          if (token !== fetchToken) return;
-          updateWorktreeMap(worktrees);
-          lastWorktreesFetchKey = wtKey;
-        }
-      }
-    } catch (err) {
-      const msg =
-        typeof err === "string"
-          ? err
-          : err && typeof err === "object" && "message" in err
-            ? String((err as { message?: unknown }).message)
-            : String(err);
-      if (token !== fetchToken) return;
-      errorMessage = `Failed to fetch branches: ${msg}`;
-      branches = [];
-      remoteBranchNames = new Set();
-    }
     if (token !== fetchToken) return;
+    if (filter !== activeFilter) return;
+    if (path !== projectPath) return;
+    if (cacheKey !== buildFilterCacheKey(filter, path)) return;
+
+    if (result.ok) {
+      setFilterCacheEntry(filter, result.snapshot);
+      applyCacheEntry(result.snapshot);
+      return;
+    }
+
+    if (background && hadFallbackCache) {
+      loading = false;
+      return;
+    }
+
+    errorMessage = result.errorMessage;
+    branches = [];
+    remoteBranchNames = new Set();
+    worktreeMap = new Map();
     loading = false;
   }
 
-  function updateWorktreeMap(worktrees: WorktreeInfo[]) {
+  function loadFilterSnapshot(
+    filter: FilterType,
+    path: string,
+    cacheKey: string
+  ): Promise<FetchSnapshotResult> {
+    const inflightKey = `${filter}::${cacheKey}`;
+    const inflight = inflightFetches.get(inflightKey);
+    if (inflight) return inflight;
+
+    const promise = fetchFilterSnapshot(filter, path, cacheKey).finally(() => {
+      inflightFetches.delete(inflightKey);
+    });
+    inflightFetches.set(inflightKey, promise);
+    return promise;
+  }
+
+  async function fetchFilterSnapshot(
+    filter: FilterType,
+    path: string,
+    cacheKey: string
+  ): Promise<FetchSnapshotResult> {
+    try {
+      const invoke = await getInvoke();
+
+      if (filter === "Local") {
+        const next = await invoke<BranchInfo[]>("list_worktree_branches", { projectPath: path });
+        const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", { projectPath: path }).catch(
+          () => [] as WorktreeInfo[]
+        );
+        return {
+          ok: true,
+          snapshot: {
+            branches: next,
+            remoteBranchNames: new Set(),
+            worktreeMap: buildWorktreeMap(worktrees),
+            cacheKey,
+            fetchedAtMs: Date.now(),
+          },
+        };
+      }
+
+      if (filter === "Remote") {
+        const next = await invoke<BranchInfo[]>("list_remote_branches", { projectPath: path });
+        return {
+          ok: true,
+          snapshot: {
+            branches: next,
+            remoteBranchNames: new Set(next.map((branch) => branch.name.trim())),
+            worktreeMap: new Map(),
+            cacheKey,
+            fetchedAtMs: Date.now(),
+          },
+        };
+      }
+
+      const [local, remote] = await Promise.all([
+        invoke<BranchInfo[]>("list_worktree_branches", { projectPath: path }),
+        invoke<BranchInfo[]>("list_remote_branches", { projectPath: path }),
+      ]);
+
+      const seen = new Set<string>();
+      const merged: BranchInfo[] = [];
+      for (const branch of local) {
+        seen.add(branch.name);
+        merged.push(branch);
+      }
+      for (const branch of remote) {
+        if (!seen.has(branch.name)) {
+          merged.push(branch);
+        }
+      }
+
+      const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", { projectPath: path }).catch(
+        () => [] as WorktreeInfo[]
+      );
+
+      return {
+        ok: true,
+        snapshot: {
+          branches: merged,
+          remoteBranchNames: new Set(remote.map((branch) => branch.name.trim())),
+          worktreeMap: buildWorktreeMap(worktrees),
+          cacheKey,
+          fetchedAtMs: Date.now(),
+        },
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        errorMessage: `Failed to fetch branches: ${toErrorMessage(err)}`,
+      };
+    }
+  }
+
+  function buildFilterCacheKey(filter: FilterType, path: string): string {
+    if (filter === "Remote") {
+      return `${path}::${refreshKey}`;
+    }
+    return `${path}::${refreshKey}::${localRefreshKey}`;
+  }
+
+  function buildWorktreeMap(worktrees: WorktreeInfo[]): Map<string, WorktreeInfo> {
     const map = new Map<string, WorktreeInfo>();
     for (const wt of worktrees) {
       if (wt.branch) map.set(wt.branch, wt);
     }
-    worktreeMap = map;
+    return map;
+  }
+
+  function applyCacheEntry(entry: FilterCacheEntry) {
+    branches = [...entry.branches];
+    remoteBranchNames = new Set(entry.remoteBranchNames);
+    worktreeMap = new Map(entry.worktreeMap);
+    loading = false;
+    errorMessage = null;
+  }
+
+  function setFilterCacheEntry(filter: FilterType, entry: FilterCacheEntry) {
+    const next = new Map(filterCache);
+    next.set(filter, entry);
+    filterCache = next;
+  }
+
+  function toErrorMessage(err: unknown): string {
+    if (typeof err === "string") return err;
+    if (err && typeof err === "object" && "message" in err) {
+      return String((err as { message?: unknown }).message);
+    }
+    return String(err);
+  }
+
+  async function getInvoke(): Promise<TauriInvoke> {
+    const tauriCore = (await import("@tauri-apps/api/core")) as
+      | { invoke?: TauriInvoke; default?: { invoke?: TauriInvoke } }
+      | undefined;
+    const invokeFn = tauriCore?.invoke ?? tauriCore?.default?.invoke;
+    if (!invokeFn) {
+      throw new Error("Tauri invoke API is unavailable");
+    }
+    return invokeFn;
   }
 
   function getSafetyLevel(branch: BranchInfo): string {

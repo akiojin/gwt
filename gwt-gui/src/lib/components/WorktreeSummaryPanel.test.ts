@@ -89,10 +89,12 @@ describe("WorktreeSummaryPanel", () => {
 
     // Summary tab is active by default
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    expect(tabs).toHaveLength(2);
+    expect(tabs).toHaveLength(4);
     expect(tabs[0]?.textContent?.trim()).toBe("Summary");
     expect(tabs[0]?.classList.contains("active")).toBe(true);
     expect(tabs[1]?.textContent?.trim()).toBe("PR");
+    expect(tabs[2]?.textContent?.trim()).toBe("AI Summary");
+    expect(tabs[3]?.textContent?.trim()).toBe("Git");
   });
 
   it("shows placeholder when no branch is selected", async () => {
@@ -144,6 +146,52 @@ describe("WorktreeSummaryPanel", () => {
         rendered.container.querySelector(".pr-status-section")
       ).toBeTruthy();
     });
+  });
+
+  it("switches to Git tab and keeps Git section expanded", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary")
+        return {
+          ...sessionSummaryFixture,
+          markdown: null,
+          bulletPoints: [],
+        };
+      if (cmd === "get_git_change_summary") {
+        return {
+          file_count: 2,
+          commit_count: 1,
+          stash_count: 0,
+          base_branch: "main",
+          files: [],
+          ahead_by: 0,
+          behind_by: 0,
+        };
+      }
+      if (cmd === "get_base_branch_candidates") return ["main"];
+      if (cmd === "list_git_commits") return [];
+      if (cmd === "list_git_stash") return [];
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const gitTab = tabs[3] as HTMLElement;
+    await fireEvent.click(gitTab);
+
+    await waitFor(() => {
+      expect(gitTab.classList.contains("active")).toBe(true);
+      expect(
+        rendered.container.querySelector(".git-section .git-body")
+      ).toBeTruthy();
+    });
+
+    // Git tab mode disables collapse UI.
+    expect(rendered.container.querySelector(".git-section .collapse-icon")).toBeNull();
   });
 
   it("displays HostOS runtime for quick start entry", async () => {

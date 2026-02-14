@@ -1,4 +1,4 @@
-# 機能仕様: PR Status Preview（GUI）
+# 機能仕様: Session Summary + PR Status Preview（GUI）
 
 **仕様ID**: `SPEC-d6949f99`
 **作成日**: 2026-02-14
@@ -6,13 +6,22 @@
 **ステータス**: レビュー済み
 **カテゴリ**: GUI
 
-**入力**: ユーザー説明: "PRの状態をわざわざGitHub Webを見に行かなくても良いように、gwt上で見られるようにしたい"
+**入力**:
+- ユーザー説明: "PRの状態をわざわざGitHub Webを見に行かなくても良いように、gwt上で見られるようにしたい"
+- 追記要望: "Session Summaryのタブ構成（Summary/PR/AI Summary/Git）を仕様として集約したい"
 
 ## 背景
 
 - 現在、PRのステータス（CI結果、レビュー状態、マージ可否）を確認するにはGitHub Webを開く必要がある
 - gwt はWorktree単位でブランチを管理しており、各ブランチに紐づくPRの状態をgwt内で一覧確認できれば開発効率が大幅に向上する
 - 既存の `gwt-core` には `PrCache`（`pullrequest.rs`）や `gh_cli.rs` などGitHub CLIとの統合基盤が存在しており、これを拡張する形で実現可能
+- Session SummaryのUI要件（Summary/PR/AI Summary/Git）が複数SPECに分散しており、タブ構成の正本を明確化する必要がある
+
+## 依存仕様（Session Summary）
+
+- `SPEC-3a1b7c2d`: AI Summary（スクロールバック要約）の生成・更新ルール
+- `SPEC-735cbc5d`: Gitセクション内のChanges/Commits/Stash表示ルール
+- 本SPECは Session Summary のタブ構成と表示責務の正本とする。レイアウト競合時は本SPECを優先する
 
 ## ユーザーシナリオとテスト *(必須)*
 
@@ -71,6 +80,21 @@
 2. **前提条件** アプリがバックグラウンドに移行した、**操作** 60秒以上待機する、**期待結果** ポーリングが停止しAPI呼び出しが発生しない
 3. **前提条件** アプリがバックグラウンドからフォアグラウンドに復帰した、**操作** フォアグラウンド復帰する、**期待結果** 即座にステータスをリフレッシュし、以降30秒間隔のポーリングが再開する
 
+---
+
+### ユーザーストーリー 5 - Session Summaryのタブ構成を統一する (優先度: P0)
+
+開発者として、Session Summary内でSummary/PR/AI Summary/Gitを明確に切り替えて確認したい。
+
+**独立したテスト**: WorktreeSummaryPanelに4タブが表示され、Gitタブは折りたたみなしで展開表示されること
+
+**受け入れシナリオ**:
+
+1. **前提条件** Worktreeが選択されている、**操作** Session Summaryを表示する、**期待結果** タブに `Summary / PR / AI Summary / Git` の4項目が表示される
+2. **前提条件** `Summary` タブが表示されている、**操作** 内容を確認する、**期待結果** ブランチ基本情報とQuick Startのみを表示し、AI Summaryは表示されない
+3. **前提条件** `AI Summary` タブを選択する、**操作** 内容を確認する、**期待結果** AI Summaryのみを表示する
+4. **前提条件** `Git` タブを選択する、**操作** 内容を確認する、**期待結果** Gitセクションは初期状態で展開され、折りたたみトグルは表示されない
+
 ## エッジケース
 
 - gh CLIが未インストール: GhCliStatusチェック後、PR関連UIを非表示にしグレースフルデグレード
@@ -80,6 +104,7 @@
 - ネットワークオフライン時: キャッシュデータを表示し、次回ポーリング時に再試行
 - Worktreeが0個の場合: PR関連UIは表示されない
 - PRにCI/Workflowが設定されていない場合: ツリー展開しても「No workflows」と表示
+- Session Summaryタブ追加後に既存表示が混在する場合: 各タブは責務外セクションを表示しない
 
 ## 要件 *(必須)*
 
@@ -90,7 +115,11 @@
 - **FR-003**: ツリー展開時に各Workflowの最新1 Runのみを表示する（workflow名 + ステータス）。過去のRunは表示しない
 - **FR-004**: Workflow Runのステータスを視覚的アイコン＋色で表示する（pass=緑, fail=赤, running=黄, pending=グレー）
 - **FR-005**: Workflow Run項目をクリックするとxterm.jsターミナルタブが開き、`gh run view <run_id> --log`のANSIログを表示する
-- **FR-006**: WorktreeSummaryPanel内に「Summary」「PR」のサブタブ切替えを追加する。「Summary」は既存のAI Summary、「PR」はPR Status詳細を表示する
+- **FR-006**: WorktreeSummaryPanel内に `Summary / PR / AI Summary / Git` のサブタブ切替えを追加する
+- **FR-006a**: `Summary` タブはブランチ基本情報とQuick Startを表示し、AI Summaryは含めない
+- **FR-006b**: `PR` タブはPR Status詳細を表示する
+- **FR-006c**: `AI Summary` タブはAI Summaryのみを表示する
+- **FR-006d**: `Git` タブはGitセクションを折りたたみなしで表示する（ヘッダーの折りたたみトグルを無効化）
 - **FR-007**: PR Statusセクションにメタデータ（タイトル、作成者、base/head branch、ラベル、アサイニー、マイルストーン、リンクIssue）を表示する
 - **FR-008**: PR Statusセクションにレビュー情報（レビューアー名、承認/要変更ステータス）を表示する
 - **FR-009**: レビューコメント（inline含む）をファイルパス・行番号・コードスニペット（シンタックスハイライト付き）・コメント本文のフルレンダリングで表示する（読み取り専用、返信機能なし）
@@ -130,3 +159,5 @@
 - **SC-006**: 30秒ポーリングでステータスが自動更新され、バックグラウンド時にポーリングが停止する
 - **SC-007**: gh CLI未認証時にグレースフルデグレードが動作する
 - **SC-008**: Rust単体テストとフロントエンドvitestが全てパスする
+- **SC-009**: Session Summaryに `Summary / PR / AI Summary / Git` の4タブが表示される
+- **SC-010**: `Git` タブ選択時にGitセクションが初期展開され、折りたたみトグルが表示されない
