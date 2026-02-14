@@ -1,4 +1,4 @@
-# 実装計画: PR Status Preview（GUI）
+# 実装計画: Session Summary + PR Status Preview（GUI）
 
 **仕様ID**: `SPEC-d6949f99` | **日付**: 2026-02-14 | **仕様書**: `specs/SPEC-d6949f99/spec.md`
 
@@ -6,7 +6,8 @@
 
 - GitHub Webを開かずにgwt上でPR/CIステータスを確認可能にする
 - Worktreeツリーの展開式UIでCI Workflow Run一覧を視覚的に表示
-- WorktreeSummaryPanel内の「Summary」「PR」サブタブ切替えでPR詳細（メタデータ・レビューコメント・変更サマリー）を表示
+- WorktreeSummaryPanelのタブ構成を `Summary / PR / AI Summary / Git` に統一する
+- `Git` タブでは折りたたみなしの展開表示をデフォルトにし、`AI Summary` を独立タブ化する
 
 ## 技術コンテキスト
 
@@ -23,6 +24,7 @@
 - `crates/gwt-core/src/git/issue.rs`: GitHub Issue取得パターン（`GhCliStatus`、JSON解析、ページネーション）
 - `gwt-gui/src/lib/components/Sidebar.svelte`: ブランチ一覧（`BranchInfo`ベース、safety dot、divergence表示）
 - `gwt-gui/src/lib/components/WorktreeSummaryPanel.svelte`: Session Summary（AI要約、Quick Start）
+- `gwt-gui/src/lib/components/GitSection.svelte`: Gitセクション（Changes/Commits/Stash）
 - `gwt-gui/src/lib/types.ts`: フロントエンド型定義
 
 ## 実装方針
@@ -73,7 +75,7 @@
    - 既存のタブシステム（`Tab` 型の `type: "terminal"`）を活用
    - `gh run view <run_id> --log` を実行するPTYセッションを起動
 
-### Phase 4: フロントエンド — Session Summary PRサブタブ
+### Phase 4: フロントエンド — Session Summaryタブ構成（PR/AI/Git）
 
 **対象ファイル**: `gwt-gui/src/lib/components/`
 
@@ -84,10 +86,16 @@
    - コードスニペットのシンタックスハイライト（フロントエンド処理）
    - Changes サブセクション: ファイル一覧、追加/削除行数、コミット一覧
 
-2. `WorktreeSummaryPanel.svelte` にサブタブUI（「Summary」「PR」）を追加
-   - 「Summary」タブ: 既存のAI Summaryを表示（デフォルト）
-   - 「PR」タブ: 選択中ブランチに紐づくPR詳細（`PrStatusSection`）を表示
-   - タブ切替え時に `fetch_pr_detail` で詳細データをオンデマンド取得
+2. `WorktreeSummaryPanel.svelte` のサブタブUIを `Summary / PR / AI Summary / Git` に統一
+   - `Summary` タブ: ブランチ基本情報 + Quick Start
+   - `PR` タブ: 選択中ブランチに紐づくPR詳細（`PrStatusSection`）
+   - `AI Summary` タブ: AI要約表示を分離
+   - `Git` タブ: `GitSection` を折りたたみなしで展開表示
+   - タブ切替え時に `fetch_pr_detail` でPR詳細をオンデマンド取得
+
+3. `GitSection.svelte` に折りたたみ制御プロパティを追加
+   - `collapsible` / `defaultCollapsed` を導入し、利用コンテキスト別に挙動を制御
+   - Session Summaryの`Git`タブ経由では `collapsible=false` を指定
 
 ### Phase 5: ポーリング + フォーカス管理
 
@@ -117,3 +125,5 @@
 - ツリー展開/折りたたみのインタラクション
 - ポーリング開始/停止のライフサイクル
 - グレースフルデグレード（`GhCliStatus.authenticated = false` 時）
+- Session Summaryの4タブ表示確認（`Summary / PR / AI Summary / Git`）
+- `Git` タブ選択時の初期展開 + 折りたたみトグル非表示の確認
