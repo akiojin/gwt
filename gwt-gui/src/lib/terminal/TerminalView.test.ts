@@ -305,7 +305,7 @@ describe("TerminalView", () => {
       paneId: "pane-3",
       active: true,
     });
-    const rootEl = container.querySelector(".terminal-container");
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement | null;
     expect(rootEl).not.toBeNull();
 
     const viewport = document.createElement("div");
