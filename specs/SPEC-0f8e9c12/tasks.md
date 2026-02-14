@@ -15,8 +15,12 @@
 - [x] T015 [RED] `Sidebar.test.ts` に「フィルター切替で `fetch_pr_status` が即時再実行されない」テストを追加（失敗確認）
 - [x] T016 [GREEN] `Sidebar.svelte` の PR ポーリングを filter 切替非依存 + in-flight 抑止に修正
 - [x] T017 [GREEN] `pnpm -s vitest run src/lib/components/Sidebar.test.ts` を通過させる
+- [x] T018 [RED] `Sidebar.test.ts` に「検索入力フォーカス中は30秒周期 `fetch_pr_status` をスキップ」テストを追加（失敗確認）
+- [x] T019 [RED] `Sidebar.test.ts` に「検索入力がデバウンス後に反映される」テストを追加（失敗確認）
+- [x] T020 [GREEN] `Sidebar.svelte` に入力中ポーリング抑止 + 検索デバウンスを実装
+- [x] T021 [GREEN] `pnpm -s vitest run src/lib/components/Sidebar.test.ts` を通過させる
 
 ## Phase 3: 仕上げ
 
-- [x] T020 手動観点（切替即応・背景更新・エラー時維持）を確認
-- [x] T021 変更ファイルをレビューし、不要差分がないことを確認
+- [x] T030 手動観点（切替即応・背景更新・エラー時維持）を確認
+- [x] T031 変更ファイルをレビューし、不要差分がないことを確認

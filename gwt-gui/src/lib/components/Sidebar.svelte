@@ -75,6 +75,7 @@
   const MIN_BRANCH_LIST_HEIGHT_PX = 120;
   const SUMMARY_RESIZE_HANDLE_HEIGHT_PX = 8;
   const FILTER_BACKGROUND_REFRESH_TTL_MS = 10_000;
+  const SEARCH_FILTER_DEBOUNCE_MS = 120;
 
   // PR Status tree expand state
   let expandedBranches: Set<string> = $state(new Set());
@@ -149,7 +150,10 @@
       if (prPollingBootstrappedPath !== path) {
         void refresh(true);
       }
-      timer = setInterval(refresh, PR_POLL_INTERVAL_MS);
+      timer = setInterval(() => {
+        if (isTextEntryFocused()) return;
+        void refresh();
+      }, PR_POLL_INTERVAL_MS);
     }
 
     function stop() {
@@ -164,7 +168,9 @@
         stop();
       } else {
         start();
-        void refresh(false);
+        if (!isTextEntryFocused()) {
+          void refresh(false);
+        }
       }
     }
 
@@ -208,10 +214,21 @@
     onOpenCiLog?.(run.runId);
   }
 
+  function isTextEntryFocused(): boolean {
+    if (typeof document === "undefined") return false;
+    const active = document.activeElement;
+    if (!active) return false;
+    if (active instanceof HTMLInputElement) return true;
+    if (active instanceof HTMLTextAreaElement) return true;
+    if (active instanceof HTMLSelectElement) return true;
+    return (active as HTMLElement).isContentEditable;
+  }
+
   let activeFilter: FilterType = $state("Local");
   let branches: BranchInfo[] = $state([]);
   let remoteBranchNames: Set<string> = $state(new Set());
   let loading: boolean = $state(false);
+  let searchInput: string = $state("");
   let searchQuery: string = $state("");
   let errorMessage: string | null = $state(null);
   let lastFetchKey = "";
@@ -354,6 +371,14 @@
       : branches
   );
   let clampedWidthPx = $derived(clampSidebarWidth(widthPx));
+
+  $effect(() => {
+    const nextQuery = searchInput;
+    const timer = setTimeout(() => {
+      searchQuery = nextQuery;
+    }, SEARCH_FILTER_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  });
 
   $effect(() => {
     if (!branchSummaryStackEl) return;
@@ -1073,7 +1098,7 @@
         spellcheck="false"
         class="search-input"
         placeholder="Filter branches..."
-        bind:value={searchQuery}
+        bind:value={searchInput}
       />
     </div>
     <div class="branch-summary-stack" bind:this={branchSummaryStackEl}>

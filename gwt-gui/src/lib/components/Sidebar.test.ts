@@ -345,6 +345,87 @@ describe("Sidebar", () => {
     }
   });
 
+  it("skips 30s fetch_pr_status polling while search input is focused", async () => {
+    vi.useFakeTimers();
+    try {
+      invokeMock.mockImplementation((command: string) => {
+        if (command === "list_worktree_branches") return Promise.resolve([branchFixture]);
+        if (command === "list_remote_branches") return Promise.resolve([remoteBranchFixture]);
+        if (command === "list_worktrees") return Promise.resolve([]);
+        if (command === "fetch_pr_status") {
+          return Promise.resolve({
+            statuses: {},
+            ghStatus: { available: true, authenticated: true },
+          });
+        }
+        return Promise.resolve([]);
+      });
+
+      const rendered = await renderSidebar({
+        projectPath: "/tmp/project",
+        onBranchSelect: vi.fn(),
+      });
+
+      await rendered.findByText(branchFixture.name);
+      await waitFor(() => {
+        expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(0);
+      });
+      const searchInput = rendered.getByPlaceholderText("Filter branches...");
+      (searchInput as HTMLInputElement).focus();
+      expect(document.activeElement).toBe(searchInput);
+
+      const before = countInvokeCalls("fetch_pr_status");
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(countInvokeCalls("fetch_pr_status")).toBe(before);
+
+      (searchInput as HTMLInputElement).blur();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("applies branch filtering after debounce delay", async () => {
+    vi.useFakeTimers();
+    try {
+      invokeMock.mockImplementation(async (command: string) => {
+        if (command === "list_worktree_branches") {
+          return [
+            branchFixture,
+            {
+              ...branchFixture,
+              name: "feature/another-branch",
+            },
+          ];
+        }
+        if (command === "list_worktrees") return [];
+        return [];
+      });
+
+      const rendered = await renderSidebar({
+        projectPath: "/tmp/project",
+        onBranchSelect: vi.fn(),
+      });
+
+      await rendered.findByText("feature/sidebar-size");
+      await rendered.findByText("feature/another-branch");
+
+      const searchInput = rendered.getByPlaceholderText("Filter branches...");
+      await fireEvent.input(searchInput, { target: { value: "another" } });
+
+      expect(rendered.queryByText("feature/sidebar-size")).toBeTruthy();
+
+      await vi.advanceTimersByTimeAsync(150);
+      await waitFor(() => {
+        expect(rendered.queryByText("feature/sidebar-size")).toBeNull();
+      });
+      expect(rendered.queryByText("feature/another-branch")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("applies sidebar width from props", async () => {
     const rendered = await renderSidebar({
       projectPath: "/tmp/project",
