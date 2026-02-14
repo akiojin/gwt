@@ -199,6 +199,11 @@
     return ghCliStatus;
   });
 
+  let effectiveGhCliStatus = $derived.by(() => {
+    if (pollingGhCliStatus) return pollingGhCliStatus;
+    return ghCliStatus;
+  });
+
   // Derived prNumber for WorktreeSummaryPanel
   let selectedPrNumber = $derived.by(() => {
     if (!selectedBranch) return null;
