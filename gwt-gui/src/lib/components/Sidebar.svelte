@@ -320,6 +320,7 @@
   // Branches currently being deleted
   let deletingBranches: Set<string> = $state(new Set());
   let branchSummaryStackEl: HTMLElement | null = $state(null);
+  let branchListEl: HTMLDivElement | null = $state(null);
   let summaryHeightPx = $state(loadSummaryHeight());
   let summaryResizing = $state(false);
   let summaryResizePointerId: number | null = $state(null);
@@ -931,6 +932,31 @@
     setSummaryHeight(summaryHeightPx + delta);
   }
 
+  function handleBranchItemKeydown(event: KeyboardEvent, currentIndex: number) {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    if (filteredBranches.length === 0) return;
+
+    const maxIndex = filteredBranches.length - 1;
+    const nextIndex =
+      event.key === "ArrowDown"
+        ? Math.min(maxIndex, currentIndex + 1)
+        : Math.max(0, currentIndex - 1);
+
+    if (nextIndex === currentIndex) return;
+
+    const nextBranch = filteredBranches[nextIndex];
+    onBranchSelect(nextBranch);
+
+    queueMicrotask(() => {
+      const button = branchListEl?.querySelector<HTMLButtonElement>(
+        `[data-branch-index="${nextIndex}"]`
+      );
+      button?.focus();
+      button?.scrollIntoView({ block: "nearest" });
+    });
+  }
+
   $effect(() => {
     return () => {
       stopSummaryResize();
@@ -1084,7 +1110,7 @@
       />
     </div>
     <div class="branch-summary-stack" bind:this={branchSummaryStackEl}>
-      <div class="branch-list">
+      <div class="branch-list" bind:this={branchListEl}>
         {#if loading}
           <div class="loading-indicator">Loading...</div>
         {:else if errorMessage}
@@ -1092,11 +1118,13 @@
         {:else if filteredBranches.length === 0}
           <div class="empty-indicator">No branches found.</div>
         {:else}
-          {#each filteredBranches as branch}
+          {#each filteredBranches as branch, index}
             <button
+              data-branch-index={index}
               class="branch-item"
               class:active={isSelectedBranch(branch)}
               class:deleting={deletingBranches.has(branch.name)}
+              onkeydown={(event) => handleBranchItemKeydown(event, index)}
               onclick={() => {
                 if (!deletingBranches.has(branch.name)) onBranchSelect(branch);
               }}
