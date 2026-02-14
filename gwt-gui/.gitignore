@@ -1,3 +1,6 @@
 node_modules
 dist
 .vite
+playwright-report
+test-results
+pnpm-workspace.yaml

@@ -171,113 +171,123 @@ pub fn list_worktrees(
 
 /// Cleanup multiple worktrees (SPEC-c4e8f210 T2)
 #[tauri::command]
-pub fn cleanup_worktrees(
+pub async fn cleanup_worktrees(
     project_path: String,
     branches: Vec<String>,
     force: bool,
-    state: tauri::State<AppState>,
+    state: tauri::State<'_, AppState>,
     app_handle: AppHandle,
 ) -> Result<Vec<CleanupResult>, String> {
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)?;
 
-    let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
     let agent_branches = running_agent_branches(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
+        let mut results = Vec::with_capacity(branches.len());
 
-    let mut results = Vec::with_capacity(branches.len());
+        for branch in &branches {
+            // Emit deleting progress
+            let _ = app_handle.emit(
+                "cleanup-progress",
+                &CleanupProgressPayload {
+                    branch: branch.clone(),
+                    status: "deleting".to_string(),
+                    error: None,
+                },
+            );
 
-    for branch in &branches {
-        // Emit deleting progress
+            let result =
+                cleanup_single_branch(&manager, &repo_path, branch, force, &agent_branches);
+
+            let cleanup_result = match result {
+                Ok(()) => {
+                    let _ = app_handle.emit(
+                        "cleanup-progress",
+                        &CleanupProgressPayload {
+                            branch: branch.clone(),
+                            status: "deleted".to_string(),
+                            error: None,
+                        },
+                    );
+                    CleanupResult {
+                        branch: branch.clone(),
+                        success: true,
+                        error: None,
+                    }
+                }
+                Err(err) => {
+                    let _ = app_handle.emit(
+                        "cleanup-progress",
+                        &CleanupProgressPayload {
+                            branch: branch.clone(),
+                            status: "failed".to_string(),
+                            error: Some(err.clone()),
+                        },
+                    );
+                    CleanupResult {
+                        branch: branch.clone(),
+                        success: false,
+                        error: Some(err),
+                    }
+                }
+            };
+
+            results.push(cleanup_result);
+        }
+
+        // Emit cleanup-completed
         let _ = app_handle.emit(
-            "cleanup-progress",
-            &CleanupProgressPayload {
-                branch: branch.clone(),
-                status: "deleting".to_string(),
-                error: None,
+            "cleanup-completed",
+            &CleanupCompletedPayload {
+                results: results.clone(),
             },
         );
 
-        let result = cleanup_single_branch(&manager, &repo_path, branch, force, &agent_branches);
+        // Emit worktrees-changed
+        let _ = app_handle.emit(
+            "worktrees-changed",
+            &WorktreesChangedPayload {
+                project_path: project_path.clone(),
+                branch: String::new(),
+            },
+        );
 
-        let cleanup_result = match result {
-            Ok(()) => {
-                let _ = app_handle.emit(
-                    "cleanup-progress",
-                    &CleanupProgressPayload {
-                        branch: branch.clone(),
-                        status: "deleted".to_string(),
-                        error: None,
-                    },
-                );
-                CleanupResult {
-                    branch: branch.clone(),
-                    success: true,
-                    error: None,
-                }
-            }
-            Err(err) => {
-                let _ = app_handle.emit(
-                    "cleanup-progress",
-                    &CleanupProgressPayload {
-                        branch: branch.clone(),
-                        status: "failed".to_string(),
-                        error: Some(err.clone()),
-                    },
-                );
-                CleanupResult {
-                    branch: branch.clone(),
-                    success: false,
-                    error: Some(err),
-                }
-            }
-        };
-
-        results.push(cleanup_result);
-    }
-
-    // Emit cleanup-completed
-    let _ = app_handle.emit(
-        "cleanup-completed",
-        &CleanupCompletedPayload {
-            results: results.clone(),
-        },
-    );
-
-    // Emit worktrees-changed
-    let _ = app_handle.emit(
-        "worktrees-changed",
-        &WorktreesChangedPayload {
-            project_path: project_path.clone(),
-            branch: String::new(),
-        },
-    );
-
-    Ok(results)
+        Ok(results)
+    })
+    .await
+    .map_err(|e| format!("Failed to execute cleanup task: {e}"))?
 }
 
 /// Cleanup a single worktree (SPEC-c4e8f210 T3)
 #[tauri::command]
-pub fn cleanup_single_worktree(
+pub async fn cleanup_single_worktree(
     project_path: String,
     branch: String,
     force: bool,
-    state: tauri::State<AppState>,
+    state: tauri::State<'_, AppState>,
     app_handle: AppHandle,
 ) -> Result<(), String> {
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)?;
 
-    let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
     let agent_branches = running_agent_branches(&state);
+    let branch_for_event = branch.clone();
+    let project_path_for_event = project_path.clone();
 
-    cleanup_single_branch(&manager, &repo_path, &branch, force, &agent_branches)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
+        cleanup_single_branch(&manager, &repo_path, &branch, force, &agent_branches)
+    })
+    .await
+    .map_err(|e| format!("Failed to execute cleanup task: {e}"))??;
 
     // Emit worktrees-changed
     let _ = app_handle.emit(
         "worktrees-changed",
         &WorktreesChangedPayload {
-            project_path: project_path.clone(),
-            branch: branch.clone(),
+            project_path: project_path_for_event,
+            branch: branch_for_event,
         },
     );
 
@@ -614,31 +624,62 @@ mod tests {
         assert!(!gwt_core::git::Branch::exists(temp.path(), "feature/wip").unwrap());
     }
 
+    #[test]
+    fn cleanup_single_branch_auto_forces_unmerged_when_force_false() {
+        let temp = tempfile::TempDir::new().unwrap();
+        create_test_repo(temp.path());
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+        let agents = HashSet::new();
+
+        gwt_core::git::Branch::create(temp.path(), "feature/unmerged", "HEAD").unwrap();
+        let wt = manager.create_for_branch("feature/unmerged").unwrap();
+
+        std::fs::write(wt.path.join("unmerged.txt"), "unmerged").unwrap();
+        let add_output = gwt_core::process::git_command()
+            .args(["add", "."])
+            .current_dir(&wt.path)
+            .output()
+            .unwrap();
+        assert!(add_output.status.success());
+
+        let commit_output = gwt_core::process::git_command()
+            .args(["commit", "-m", "unmerged commit"])
+            .current_dir(&wt.path)
+            .output()
+            .unwrap();
+        assert!(commit_output.status.success());
+
+        let result =
+            cleanup_single_branch(&manager, temp.path(), "feature/unmerged", false, &agents);
+        assert!(result.is_ok());
+        assert!(!gwt_core::git::Branch::exists(temp.path(), "feature/unmerged").unwrap());
+    }
+
     // -- Test helpers --
 
     fn create_test_repo(path: &std::path::Path) {
-        gwt_core::process::git_command()
+        gwt_core::process::command("git")
             .args(["init"])
             .current_dir(path)
             .output()
             .unwrap();
-        gwt_core::process::git_command()
+        gwt_core::process::command("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(path)
             .output()
             .unwrap();
-        gwt_core::process::git_command()
+        gwt_core::process::command("git")
             .args(["config", "user.name", "Test"])
             .current_dir(path)
             .output()
             .unwrap();
         std::fs::write(path.join("test.txt"), "hello").unwrap();
-        gwt_core::process::git_command()
+        gwt_core::process::command("git")
             .args(["add", "."])
             .current_dir(path)
             .output()
             .unwrap();
-        gwt_core::process::git_command()
+        gwt_core::process::command("git")
             .args(["commit", "-m", "initial"])
             .current_dir(path)
             .output()
@@ -646,7 +687,7 @@ mod tests {
     }
 
     fn git_stdout(dir: &std::path::Path, args: &[&str]) -> String {
-        let output = gwt_core::process::git_command()
+        let output = gwt_core::process::command("git")
             .args(args)
             .current_dir(dir)
             .output()

@@ -1,6 +1,88 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.5.0] - 2026-02-14
+
+### Bug Fixes
+
+- **gui:** Launch Agentのデフォルト設定を前回成功起動値で保持 (#1053)
+- Auto-force branch delete fallback for unmerged cleanup (#1055)
+- **gui:** メニューアクションをフォーカスウィンドウにのみスコープする (#1057)
+- **windows:** Reinforce issue #1029 regression coverage (#1058)
+- GPU情報の返却漏れとstats更新競合を修正 (#1059)
+
+### Features
+
+- Preview PR status in sidebar and worktree summary (#1061)
+
+### Refactor
+
+- **gui:** Hide version info in agent selector (#1060)
+
+## [7.4.0] - 2026-02-14
+
+### Bug Fixes
+
+- **ai:** Improve session summary filtering and chat completion fallback (#1040)
+- **tauri:** Avoid UI freeze during worktree cleanup (#1048)
+- **windows:** Filter docker exec env vars (#1050)
+- Windows起動時のClaude Hook上書き判定を修正 (#1051)
+- **gui:** Prevent blank terminal tabs during startup (#1052)
+
+### Features
+
+- Simple terminal tabs を実装し復元/OSC7の回帰を修正 (#1046)
+
+### Miscellaneous Tasks
+
+- **gitignore:** Ignore generated pnpm workspace file (#1049)
+
+## [7.3.0] - 2026-02-13
+
+### Bug Fixes
+
+- Harden startup update check on app launch (#1041)
+- Show migrating windows in window menu (#1043)
+- Address post-merge update review findings (#1044)
+- **windows:** Host OS起動をPowerShell経由に統一 (#1029) (#1045)
+
+### Features
+
+- **gui:** Enable drag-and-drop tab reordering with persistence (#1042)
+
+## [7.2.1] - 2026-02-13
+
+### Bug Fixes
+
+- **docker:** Avoid compose container_name collisions (#1038)
+
+## [7.2.0] - 2026-02-13
+
+### Bug Fixes
+
+- AI設定が無効/未設定時はVersion Historyの要約を実行しない (#1033)
+- **docker:** Stop forcing /workspace for compose exec (#1036)
+
+### Features
+
+- **agent-mode:** Enforce spec-kit gate and task assignee sidebar (#1035)
+
+## [7.1.2] - 2026-02-13
+
+### Bug Fixes
+
+- **gui:** Restore agent tabs without dropping live sessions (#1023)
+- Bare repo で origin/base 指定時の worktree base 解決を修正 (#1024)
+- **gui:** Strengthen terminal trackpad scroll fallback (#1025)
+- **migration:** Add cp fallback for backup copy on Windows (#1006) (#1026)
+- Docker起動時のWindows混在パスmountエラーを修正 (#1028) (#1030)
+- **windows:** Host OS起動時の空タブを防止 (#1029) (#1031)
+- Compose execで/workspaceを固定しない (#1032)
+
+### Testing
+
+- **gui:** Add Playwright WebView UI E2E baseline (#1001) (#1027)
+
 ## [7.1.1] - 2026-02-13
 
 ### Bug Fixes

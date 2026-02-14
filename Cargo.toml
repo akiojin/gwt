@@ -9,7 +9,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "7.1.1"
+version = "7.5.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/akiojin/gwt"
@@ -77,6 +77,10 @@ base64 = "0.22"
 
 # Home directory
 dirs = "6"
+
+# System information
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+nvml-wrapper = "0.10"
 
 [profile.release]
 lto = true
