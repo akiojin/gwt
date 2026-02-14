@@ -251,11 +251,7 @@ describe("CleanupModal", () => {
   });
 
   it("shows failure dialog when cleanup-completed includes failed entries", async () => {
-    let cleanupCompletedHandler: ((event: { payload: { results: any[] } }) => void) | null = null;
-    listenMock.mockImplementation(async (_eventName: string, handler: any) => {
-      cleanupCompletedHandler = handler;
-      return () => {};
-    });
+    listenMock.mockResolvedValue(() => {});
 
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "list_worktrees") return [worktreeFixture];
@@ -278,9 +274,19 @@ describe("CleanupModal", () => {
     await fireEvent.click(rendered.getByRole("button", { name: "Cleanup (1)" }));
 
     await waitFor(() => {
-      expect(cleanupCompletedHandler).toBeTruthy();
+      expect(
+        listenMock.mock.calls.some(
+          (call) => call[0] === "cleanup-completed" && typeof call[1] === "function"
+        )
+      ).toBe(true);
     });
-    cleanupCompletedHandler?.({
+    const cleanupHandler = listenMock.mock.calls.find(
+      (call) => call[0] === "cleanup-completed"
+    )?.[1] as ((event: { payload: { results: any[] } }) => void) | undefined;
+    if (!cleanupHandler) {
+      throw new Error("cleanupCompletedHandler is not registered");
+    }
+    cleanupHandler({
       payload: {
         results: [{ branch: worktreeFixture.branch, success: false, error: "in use" }],
       },

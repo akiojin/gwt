@@ -476,7 +476,6 @@ describe("MainArea", () => {
         id: "agent-1",
         label: "Agent",
         type: "agent",
-        branch: "feature/agent",
         paneId: "pane-agent",
         agentId: "codex",
       },

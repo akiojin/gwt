@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, waitFor, fireEvent, cleanup } from "@testing-library/svelte";
 
 const invokeMock = vi.fn();
-const listenMock = vi.fn(async () => () => {});
+const listenMock = vi.fn();
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
@@ -73,7 +73,8 @@ const quickStartDockerEntry = {
 describe("WorktreeSummaryPanel", () => {
   beforeEach(() => {
     cleanup();
-    listenMock.mockClear();
+    listenMock.mockReset();
+    listenMock.mockResolvedValue(() => {});
     invokeMock.mockReset();
     invokeMock.mockResolvedValue([]);
     Object.defineProperty(globalThis, "__TAURI_INTERNALS__", {
@@ -508,11 +509,7 @@ describe("WorktreeSummaryPanel", () => {
   });
 
   it("ignores session-summary-updated event when session id is different", async () => {
-    let summaryUpdatedHandler: ((event: { payload: any }) => void) | null = null;
-    listenMock.mockImplementation(async (_name: string, handler: any) => {
-      summaryUpdatedHandler = handler;
-      return () => {};
-    });
+    listenMock.mockResolvedValue(() => {});
 
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "get_branch_quick_start") return [];
@@ -540,10 +537,21 @@ describe("WorktreeSummaryPanel", () => {
 
     await waitFor(() => {
       expect(rendered.getByText("old summary")).toBeTruthy();
-      expect(summaryUpdatedHandler).toBeTruthy();
+      expect(
+        listenMock.mock.calls.some(
+          (call) =>
+            call[0] === "session-summary-updated" && typeof call[1] === "function"
+        )
+      ).toBe(true);
     });
 
-    summaryUpdatedHandler?.({
+    const summaryHandler = listenMock.mock.calls.find(
+      (call) => call[0] === "session-summary-updated"
+    )?.[1] as ((event: { payload: any }) => void) | undefined;
+    if (!summaryHandler) {
+      throw new Error("summaryUpdatedHandler is not registered");
+    }
+    summaryHandler({
       payload: {
         projectPath: "/tmp/project",
         branch: branchFixture.name,
