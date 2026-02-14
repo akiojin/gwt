@@ -19,6 +19,27 @@ Or install a specific version:
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash -s -- --version 6.30.3
 ```
 
+### macOS (local `.pkg` installer)
+
+Build a local package:
+
+```bash
+cargo tauri build
+./installers/macos/build-pkg.sh
+```
+
+Install from local package:
+
+```bash
+./installers/macos/install.sh --pkg ./target/release/bundle/pkg/gwt-macos-$(uname -m).pkg
+```
+
+Or run both steps at once:
+
+```bash
+./installers/macos/install-local.sh
+```
+
 ### Uninstall (macOS)
 
 ```bash
@@ -63,6 +84,29 @@ pnpm install --frozen-lockfile
 cd ..
 cargo tauri build
 ```
+
+Playwright E2E (WebView UI smoke):
+
+```bash
+cd gwt-gui
+pnpm install --frozen-lockfile
+pnpm exec playwright install chromium
+pnpm run test:e2e
+```
+
+CI runs the same Playwright suite in `.github/workflows/test.yml` (`E2E (Playwright)` job).
+
+## AI Settings
+
+Agent Mode and features like session summaries require AI settings.
+
+Steps:
+
+- Open `Settings`
+- Select a profile in `Profiles`
+- Enable `AI Settings`
+- Set `Endpoint` and `Model` (API key is optional for local LLMs)
+- Click `Save`
 
 ## Repository Layout
 

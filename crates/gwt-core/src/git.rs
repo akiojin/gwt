@@ -6,6 +6,8 @@ mod branch;
 mod clone;
 mod commit;
 pub mod diff;
+mod gh_cli;
+pub mod graphql;
 mod issue;
 mod pullrequest;
 mod remote;
@@ -25,9 +27,12 @@ pub use diff::{
 };
 pub use issue::{
     create_linked_branch, fetch_open_issues, filter_issues_by_title, find_branch_for_issue,
-    generate_branch_name, is_gh_cli_available, parse_gh_issues_json, GitHubIssue,
+    generate_branch_name, is_gh_cli_authenticated, is_gh_cli_available, parse_gh_issues_json,
+    FetchIssuesResult, GitHubIssue,
 };
-pub use pullrequest::{PrCache, PullRequest};
+pub use pullrequest::{
+    PrCache, PrStatusCache, PrStatusInfo, PullRequest, ReviewComment, ReviewInfo, WorkflowRunInfo,
+};
 pub use remote::Remote;
 pub use repository::{
     detect_repo_type, find_bare_repo_in_dir, get_header_context, get_main_repo_root,

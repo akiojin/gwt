@@ -1,13 +1,13 @@
-# 実装計画: Codex CLI gpt-5.3-codex 追加
+# 実装計画: Codex CLI gpt-5.3-codex 追加（spark 含む）
 
 **仕様ID**: `SPEC-96e694b4` | **日付**: 2025-12-18 | **仕様書**: [spec.md](./spec.md)
-**概要**: Codex のモデル一覧に gpt-5.3-codex を追加し、既存の gpt-5.2-codex 既定モデルは維持したまま、5種類に限定した並び順で選択できるようにする。
+**概要**: Codex のモデル一覧に `gpt-5.3-codex-spark` を追加し、既存の gpt-5.2-codex 既定モデルは維持したまま、6種類を固定した並び順で選択できるようにする。
 
 ## 1. 前提・対象範囲
 
 - 対象は Codex のモデル選択 UI（モデル一覧とテスト）に限定する。
 - 既存の起動フロー、フラグ順序、セッション処理は変更しない。
-- 変更対象ファイルは `crates/gwt-cli/src/tui/screens/wizard.rs` と関連テスト。
+- 変更対象ファイルは `gwt-gui/src/lib/components/AgentLaunchForm.svelte` と関連テスト。
 
 ## 2. 成功基準との対応
 
@@ -15,26 +15,26 @@
 | --- | --- |
 | SC-001 | モデル一覧テストを更新し、gpt-5.3-codex と Extra high を検証する |
 | SC-002 | デフォルト引数テストは変更せず、既定が gpt-5.2-codex のままであることを維持する |
-| SC-003 | UI モデル選択テストで5件限定と並び順を検証する |
+| SC-003 | UI モデル選択テストで6件限定と並び順を検証する |
 
 ## 3. アーキテクチャ方針
 
-1. Codex のモデル選択肢は一覧配列の順序で UI 表示を決めるため、5種類に限定し最新モデルを先頭寄りに配置する。
+1. Codex のモデル選択肢は一覧配列の順序で UI 表示を決めるため、6種類に固定し、最新モデルを先頭寄りに配置する。
 2. 推論レベルの既定値はモデルごとに明示し、Extra high を利用可能にしつつ過度なデフォルト化を避ける。
 3. デフォルトモデルの置換は行わない（既定は gpt-5.2-codex を維持する）。
 
 ## 4. 実装ステップ (ハイレベル ToDo)
 
 1. **テスト更新 (RED)**
-   - `crates/gwt-cli/src/tui/screens/wizard.rs` の Codex モデル一覧テストを、gpt-5.3-codex を含む 5件限定と並び順に合わせて更新する。
+   - `gwt-gui/src/lib/components/AgentLaunchForm.test.ts` の Codex モデル一覧テストを、`gpt-5.3-codex` 系を含む 6件限定と並び順に合わせて更新する。
 2. **実装更新 (GREEN)**
-   - `crates/gwt-cli/src/tui/screens/wizard.rs` の Codex モデル一覧に gpt-5.3-codex を追加し、5件の並び順を調整する。
+   - `gwt-gui/src/lib/components/AgentLaunchForm.svelte` の Codex モデル一覧に `gpt-5.3-codex-spark` を追加し、6件の並び順を調整する。
 3. **バリデーション**
    - 関連ユニットテストを実行し、失敗がないことを確認する。
 
 ## 5. テスト戦略
 
-- ユニットテスト: `crates/gwt-cli/src/tui/screens/wizard.rs`、`crates/gwt-core/src/agent/codex.rs`、`crates/gwt-cli/src/main.rs`。
+- ユニットテスト: `gwt-gui/src/lib/components/AgentLaunchForm.test.ts`
 
 ## 6. リスクと軽減策
 

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
-  import type { ProfilesConfig, Profile, SettingsData } from "../types";
+  import type { ProfilesConfig, Profile, SettingsData, VoiceInputSettings } from "../types";
 
   let { onClose }: { onClose: () => void } = $props();
 
@@ -21,6 +21,13 @@
 
   let savedUiFontSize: number = $state(13);
   let savedTerminalFontSize: number = $state(13);
+
+  const DEFAULT_VOICE_INPUT: VoiceInputSettings = {
+    enabled: false,
+    hotkey: "Mod+Shift+M",
+    language: "auto",
+    model: "base",
+  };
 
   type AIModelInfo = {
     id: string;
@@ -124,6 +131,24 @@
     return String(err);
   }
 
+  function normalizeVoiceInputSettings(
+    value: Partial<VoiceInputSettings> | null | undefined
+  ): VoiceInputSettings {
+    const hotkey = (value?.hotkey ?? "").trim();
+    const language = (value?.language ?? "").trim().toLowerCase();
+    const model = (value?.model ?? "").trim();
+
+    return {
+      enabled: !!value?.enabled,
+      hotkey: hotkey.length > 0 ? hotkey : DEFAULT_VOICE_INPUT.hotkey,
+      language:
+        language === "ja" || language === "en" || language === "auto"
+          ? (language as VoiceInputSettings["language"])
+          : DEFAULT_VOICE_INPUT.language,
+      model: model.length > 0 ? model : DEFAULT_VOICE_INPUT.model,
+    };
+  }
+
   async function fetchAiModels(
     endpoint: string,
     apiKey: string,
@@ -187,6 +212,7 @@
         invoke<SettingsData>("get_settings"),
         invoke<ProfilesConfig>("get_profiles"),
       ]);
+      loadedSettings.voice_input = normalizeVoiceInputSettings(loadedSettings.voice_input);
       settings = loadedSettings;
       savedUiFontSize = loadedSettings.ui_font_size ?? 13;
       savedTerminalFontSize = loadedSettings.terminal_font_size ?? 13;
@@ -217,6 +243,16 @@
       saveMessage = "Settings saved.";
       savedUiFontSize = settings.ui_font_size ?? 13;
       savedTerminalFontSize = settings.terminal_font_size ?? 13;
+      settings.voice_input = normalizeVoiceInputSettings(settings.voice_input);
+      window.dispatchEvent(
+        new CustomEvent("gwt-settings-updated", {
+          detail: {
+            uiFontSize: savedUiFontSize,
+            terminalFontSize: savedTerminalFontSize,
+            voiceInput: settings.voice_input,
+          },
+        })
+      );
     } catch (err) {
       console.error("Failed to save settings/profiles:", err);
       saveMessage = `Failed to save settings: ${toErrorMessage(err)}`;
@@ -397,6 +433,16 @@
       profiles: { ...(profiles.profiles ?? {}), [selectedProfileKey]: nextProfile },
     };
   }
+
+  function updateVoiceInputField(
+    field: keyof VoiceInputSettings,
+    value: VoiceInputSettings[keyof VoiceInputSettings]
+  ) {
+    if (!settings) return;
+    const current = normalizeVoiceInputSettings(settings.voice_input);
+    const next = { ...current, [field]: value } as VoiceInputSettings;
+    settings = { ...settings, voice_input: normalizeVoiceInputSettings(next) };
+  }
 </script>
 
 <div class="settings-panel">
@@ -533,6 +579,84 @@
             <span class="field-hint">
               Branches that cannot be deleted or force-pushed.
             </span>
+          </div>
+        </div>
+      </details>
+
+      <div class="divider"></div>
+
+      <details class="settings-section" open>
+        <summary class="section-title">Voice Input</summary>
+        <div class="section-content">
+          <div class="field">
+            <div class="ai-toggle">
+              <input
+                id="voice-input-enabled"
+                type="checkbox"
+                checked={settings.voice_input.enabled}
+                onchange={(e) =>
+                  updateVoiceInputField(
+                    "enabled",
+                    (e.target as HTMLInputElement).checked
+                  )}
+              />
+              <label for="voice-input-enabled" class="ai-enabled-label">
+                Enable Voice Input
+              </label>
+            </div>
+            <span class="field-hint">
+              Hotkey toggles start/stop and inserts transcript into the focused input.
+            </span>
+          </div>
+
+          <div class="field">
+            <label for="voice-hotkey">Hotkey</label>
+            <input
+              id="voice-hotkey"
+              type="text"
+              value={settings.voice_input.hotkey}
+              oninput={(e) =>
+                updateVoiceInputField(
+                  "hotkey",
+                  (e.target as HTMLInputElement).value
+                )}
+              placeholder="Mod+Shift+M"
+            />
+            <span class="field-hint">Example: Mod+Shift+M</span>
+          </div>
+
+          <div class="field">
+            <label for="voice-language">Language</label>
+            <select
+              id="voice-language"
+              class="select"
+              value={settings.voice_input.language}
+              onchange={(e) =>
+                updateVoiceInputField(
+                  "language",
+                  (e.target as HTMLSelectElement).value as VoiceInputSettings["language"]
+                )}
+            >
+              <option value="auto">Auto</option>
+              <option value="ja">Japanese</option>
+              <option value="en">English</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="voice-model">Model</label>
+            <input
+              id="voice-model"
+              type="text"
+              value={settings.voice_input.model}
+              oninput={(e) =>
+                updateVoiceInputField(
+                  "model",
+                  (e.target as HTMLInputElement).value
+                )}
+              placeholder="base"
+            />
+            <span class="field-hint">Bundled STT model tier label.</span>
           </div>
         </div>
       </details>

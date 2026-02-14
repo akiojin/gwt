@@ -21,7 +21,6 @@ pub enum SafetyLevel {
 
 /// Worktree info for the frontend (SPEC-c4e8f210)
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct WorktreeInfo {
     pub path: String,
     pub branch: String,
@@ -64,7 +63,6 @@ pub struct CleanupCompletedPayload {
 
 /// Worktrees-changed event payload
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct WorktreesChangedPayload {
     pub project_path: String,
     pub branch: String,
@@ -173,113 +171,123 @@ pub fn list_worktrees(
 
 /// Cleanup multiple worktrees (SPEC-c4e8f210 T2)
 #[tauri::command]
-pub fn cleanup_worktrees(
+pub async fn cleanup_worktrees(
     project_path: String,
     branches: Vec<String>,
     force: bool,
-    state: tauri::State<AppState>,
+    state: tauri::State<'_, AppState>,
     app_handle: AppHandle,
 ) -> Result<Vec<CleanupResult>, String> {
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)?;
 
-    let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
     let agent_branches = running_agent_branches(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
+        let mut results = Vec::with_capacity(branches.len());
 
-    let mut results = Vec::with_capacity(branches.len());
+        for branch in &branches {
+            // Emit deleting progress
+            let _ = app_handle.emit(
+                "cleanup-progress",
+                &CleanupProgressPayload {
+                    branch: branch.clone(),
+                    status: "deleting".to_string(),
+                    error: None,
+                },
+            );
 
-    for branch in &branches {
-        // Emit deleting progress
+            let result =
+                cleanup_single_branch(&manager, &repo_path, branch, force, &agent_branches);
+
+            let cleanup_result = match result {
+                Ok(()) => {
+                    let _ = app_handle.emit(
+                        "cleanup-progress",
+                        &CleanupProgressPayload {
+                            branch: branch.clone(),
+                            status: "deleted".to_string(),
+                            error: None,
+                        },
+                    );
+                    CleanupResult {
+                        branch: branch.clone(),
+                        success: true,
+                        error: None,
+                    }
+                }
+                Err(err) => {
+                    let _ = app_handle.emit(
+                        "cleanup-progress",
+                        &CleanupProgressPayload {
+                            branch: branch.clone(),
+                            status: "failed".to_string(),
+                            error: Some(err.clone()),
+                        },
+                    );
+                    CleanupResult {
+                        branch: branch.clone(),
+                        success: false,
+                        error: Some(err),
+                    }
+                }
+            };
+
+            results.push(cleanup_result);
+        }
+
+        // Emit cleanup-completed
         let _ = app_handle.emit(
-            "cleanup-progress",
-            &CleanupProgressPayload {
-                branch: branch.clone(),
-                status: "deleting".to_string(),
-                error: None,
+            "cleanup-completed",
+            &CleanupCompletedPayload {
+                results: results.clone(),
             },
         );
 
-        let result = cleanup_single_branch(&manager, &repo_path, branch, force, &agent_branches);
+        // Emit worktrees-changed
+        let _ = app_handle.emit(
+            "worktrees-changed",
+            &WorktreesChangedPayload {
+                project_path: project_path.clone(),
+                branch: String::new(),
+            },
+        );
 
-        let cleanup_result = match result {
-            Ok(()) => {
-                let _ = app_handle.emit(
-                    "cleanup-progress",
-                    &CleanupProgressPayload {
-                        branch: branch.clone(),
-                        status: "deleted".to_string(),
-                        error: None,
-                    },
-                );
-                CleanupResult {
-                    branch: branch.clone(),
-                    success: true,
-                    error: None,
-                }
-            }
-            Err(err) => {
-                let _ = app_handle.emit(
-                    "cleanup-progress",
-                    &CleanupProgressPayload {
-                        branch: branch.clone(),
-                        status: "failed".to_string(),
-                        error: Some(err.clone()),
-                    },
-                );
-                CleanupResult {
-                    branch: branch.clone(),
-                    success: false,
-                    error: Some(err),
-                }
-            }
-        };
-
-        results.push(cleanup_result);
-    }
-
-    // Emit cleanup-completed
-    let _ = app_handle.emit(
-        "cleanup-completed",
-        &CleanupCompletedPayload {
-            results: results.clone(),
-        },
-    );
-
-    // Emit worktrees-changed
-    let _ = app_handle.emit(
-        "worktrees-changed",
-        &WorktreesChangedPayload {
-            project_path: project_path.clone(),
-            branch: String::new(),
-        },
-    );
-
-    Ok(results)
+        Ok(results)
+    })
+    .await
+    .map_err(|e| format!("Failed to execute cleanup task: {e}"))?
 }
 
 /// Cleanup a single worktree (SPEC-c4e8f210 T3)
 #[tauri::command]
-pub fn cleanup_single_worktree(
+pub async fn cleanup_single_worktree(
     project_path: String,
     branch: String,
     force: bool,
-    state: tauri::State<AppState>,
+    state: tauri::State<'_, AppState>,
     app_handle: AppHandle,
 ) -> Result<(), String> {
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)?;
 
-    let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
     let agent_branches = running_agent_branches(&state);
+    let branch_for_event = branch.clone();
+    let project_path_for_event = project_path.clone();
 
-    cleanup_single_branch(&manager, &repo_path, &branch, force, &agent_branches)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
+        cleanup_single_branch(&manager, &repo_path, &branch, force, &agent_branches)
+    })
+    .await
+    .map_err(|e| format!("Failed to execute cleanup task: {e}"))??;
 
     // Emit worktrees-changed
     let _ = app_handle.emit(
         "worktrees-changed",
         &WorktreesChangedPayload {
-            project_path: project_path.clone(),
-            branch: branch.clone(),
+            project_path: project_path_for_event,
+            branch: branch_for_event,
         },
     );
 
@@ -329,6 +337,105 @@ fn build_last_tool_usage_map(repo_path: &Path) -> std::collections::HashMap<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- Serialization contract tests (SPEC-d7f2a1b3) --
+
+    #[test]
+    fn worktree_info_serializes_with_snake_case_keys() {
+        let info = WorktreeInfo {
+            path: "/tmp/wt".to_string(),
+            branch: "feature/test".to_string(),
+            commit: "abc1234".to_string(),
+            status: "active".to_string(),
+            is_main: false,
+            has_changes: true,
+            has_unpushed: false,
+            is_current: false,
+            is_protected: false,
+            is_agent_running: false,
+            ahead: 1,
+            behind: 0,
+            is_gone: true,
+            last_tool_usage: Some("Claude 2m ago".to_string()),
+            safety_level: SafetyLevel::Warning,
+        };
+        let json = serde_json::to_value(&info).unwrap();
+        let obj = json.as_object().unwrap();
+
+        // All multi-word fields must be snake_case (matching TypeScript types.ts)
+        assert!(
+            obj.contains_key("safety_level"),
+            "expected snake_case key 'safety_level'"
+        );
+        assert!(
+            obj.contains_key("has_changes"),
+            "expected snake_case key 'has_changes'"
+        );
+        assert!(
+            obj.contains_key("has_unpushed"),
+            "expected snake_case key 'has_unpushed'"
+        );
+        assert!(
+            obj.contains_key("is_main"),
+            "expected snake_case key 'is_main'"
+        );
+        assert!(
+            obj.contains_key("is_current"),
+            "expected snake_case key 'is_current'"
+        );
+        assert!(
+            obj.contains_key("is_protected"),
+            "expected snake_case key 'is_protected'"
+        );
+        assert!(
+            obj.contains_key("is_agent_running"),
+            "expected snake_case key 'is_agent_running'"
+        );
+        assert!(
+            obj.contains_key("is_gone"),
+            "expected snake_case key 'is_gone'"
+        );
+        assert!(
+            obj.contains_key("last_tool_usage"),
+            "expected snake_case key 'last_tool_usage'"
+        );
+
+        // camelCase keys must NOT exist
+        assert!(
+            !obj.contains_key("safetyLevel"),
+            "unexpected camelCase key 'safetyLevel'"
+        );
+        assert!(
+            !obj.contains_key("hasChanges"),
+            "unexpected camelCase key 'hasChanges'"
+        );
+        assert!(
+            !obj.contains_key("isGone"),
+            "unexpected camelCase key 'isGone'"
+        );
+
+        // SafetyLevel enum value must be lowercase
+        assert_eq!(json["safety_level"], "warning");
+    }
+
+    #[test]
+    fn worktrees_changed_payload_serializes_with_snake_case_keys() {
+        let payload = WorktreesChangedPayload {
+            project_path: "/tmp/project".to_string(),
+            branch: "main".to_string(),
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        let obj = json.as_object().unwrap();
+
+        assert!(
+            obj.contains_key("project_path"),
+            "expected snake_case key 'project_path'"
+        );
+        assert!(
+            !obj.contains_key("projectPath"),
+            "unexpected camelCase key 'projectPath'"
+        );
+    }
 
     // -- SafetyLevel computation tests (T1) --
 
@@ -517,32 +624,62 @@ mod tests {
         assert!(!gwt_core::git::Branch::exists(temp.path(), "feature/wip").unwrap());
     }
 
+    #[test]
+    fn cleanup_single_branch_auto_forces_unmerged_when_force_false() {
+        let temp = tempfile::TempDir::new().unwrap();
+        create_test_repo(temp.path());
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+        let agents = HashSet::new();
+
+        gwt_core::git::Branch::create(temp.path(), "feature/unmerged", "HEAD").unwrap();
+        let wt = manager.create_for_branch("feature/unmerged").unwrap();
+
+        std::fs::write(wt.path.join("unmerged.txt"), "unmerged").unwrap();
+        let add_output = gwt_core::process::git_command()
+            .args(["add", "."])
+            .current_dir(&wt.path)
+            .output()
+            .unwrap();
+        assert!(add_output.status.success());
+
+        let commit_output = gwt_core::process::git_command()
+            .args(["commit", "-m", "unmerged commit"])
+            .current_dir(&wt.path)
+            .output()
+            .unwrap();
+        assert!(commit_output.status.success());
+
+        let result =
+            cleanup_single_branch(&manager, temp.path(), "feature/unmerged", false, &agents);
+        assert!(result.is_ok());
+        assert!(!gwt_core::git::Branch::exists(temp.path(), "feature/unmerged").unwrap());
+    }
+
     // -- Test helpers --
 
     fn create_test_repo(path: &std::path::Path) {
-        use std::process::Command;
-        Command::new("git")
+        gwt_core::process::command("git")
             .args(["init"])
             .current_dir(path)
             .output()
             .unwrap();
-        Command::new("git")
+        gwt_core::process::command("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(path)
             .output()
             .unwrap();
-        Command::new("git")
+        gwt_core::process::command("git")
             .args(["config", "user.name", "Test"])
             .current_dir(path)
             .output()
             .unwrap();
         std::fs::write(path.join("test.txt"), "hello").unwrap();
-        Command::new("git")
+        gwt_core::process::command("git")
             .args(["add", "."])
             .current_dir(path)
             .output()
             .unwrap();
-        Command::new("git")
+        gwt_core::process::command("git")
             .args(["commit", "-m", "initial"])
             .current_dir(path)
             .output()
@@ -550,7 +687,7 @@ mod tests {
     }
 
     fn git_stdout(dir: &std::path::Path, args: &[&str]) -> String {
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::command("git")
             .args(args)
             .current_dir(dir)
             .output()

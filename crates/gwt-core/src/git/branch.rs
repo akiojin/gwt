@@ -4,10 +4,10 @@ use crate::error::{GwtError, Result};
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 const LS_REMOTE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -17,7 +17,7 @@ fn run_git_with_timeout(
     args: &[&str],
     timeout: Duration,
 ) -> Result<Output> {
-    let mut child = Command::new("git")
+    let mut child = crate::process::command("git")
         .args(args)
         .current_dir(repo_path)
         // Avoid hanging on interactive auth prompts.
@@ -107,6 +107,45 @@ pub struct Branch {
 }
 
 impl Branch {
+    fn delete_with_flag(repo_path: &Path, name: &str, flag: &str) -> Result<Output> {
+        crate::process::command("git")
+            .args(["branch", flag, name])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| GwtError::GitOperationFailed {
+                operation: "branch delete".to_string(),
+                details: e.to_string(),
+            })
+    }
+
+    fn merge_target_for_safe_delete(repo_path: &Path, name: &str) -> String {
+        Self::list_basic(repo_path)
+            .ok()
+            .and_then(|branches| {
+                branches
+                    .into_iter()
+                    .find(|branch| branch.name == name)
+                    .and_then(|branch| branch.upstream)
+            })
+            .unwrap_or_else(|| "HEAD".to_string())
+    }
+
+    fn should_force_delete_after_safe_delete_failure(repo_path: &Path, name: &str) -> bool {
+        if let Ok(Some(current)) = Self::current(repo_path) {
+            if current.name == name {
+                return false;
+            }
+        }
+
+        if let Ok(false) = Self::exists(repo_path, name) {
+            return false;
+        }
+
+        let target = Self::merge_target_for_safe_delete(repo_path, name);
+
+        matches!(Self::is_merged_into(repo_path, name, &target), Ok(false))
+    }
+
     /// Create a new branch instance
     pub fn new(name: impl Into<String>, commit: impl Into<String>) -> Self {
         Self {
@@ -140,7 +179,7 @@ impl Branch {
             "Listing branches"
         );
 
-        let output = Command::new("git")
+        let output = crate::process::command("git")
             .args([
                 "for-each-ref",
                 "--format=%(refname:short)%09%(objectname:short)%09%(upstream:short)%09%(HEAD)%09%(committerdate:unix)%09%(upstream:track)",
@@ -220,7 +259,7 @@ impl Branch {
             "Listing remote branches"
         );
 
-        let output = Command::new("git")
+        let output = crate::process::command("git")
             .args([
                 "for-each-ref",
                 "--format=%(refname:short)%09%(objectname:short)%09%(committerdate:unix)",
@@ -364,7 +403,7 @@ impl Branch {
             "Getting current branch"
         );
 
-        let output = Command::new("git")
+        let output = crate::process::command("git")
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
             .current_dir(repo_path)
             .output()
@@ -383,7 +422,7 @@ impl Branch {
         }
 
         // Get commit
-        let commit_output = Command::new("git")
+        let commit_output = crate::process::command("git")
             .args(["rev-parse", "--short", "HEAD"])
             .current_dir(repo_path)
             .output()
@@ -397,7 +436,7 @@ impl Branch {
             .to_string();
 
         // Get commit timestamp (FR-041)
-        let timestamp_output = Command::new("git")
+        let timestamp_output = crate::process::command("git")
             .args(["log", "-1", "--format=%ct", "HEAD"])
             .current_dir(repo_path)
             .output();
@@ -414,7 +453,7 @@ impl Branch {
         });
 
         // Get upstream
-        let upstream_output = Command::new("git")
+        let upstream_output = crate::process::command("git")
             .args(["rev-parse", "--abbrev-ref", "@{u}"])
             .current_dir(repo_path)
             .output();
@@ -454,7 +493,7 @@ impl Branch {
     pub fn create(repo_path: &Path, name: &str, base: &str) -> Result<Branch> {
         debug!(category = "git", branch = name, base, "Creating branch");
 
-        let output = Command::new("git")
+        let output = crate::process::command("git")
             .args(["branch", name, base])
             .current_dir(repo_path)
             .output()
@@ -479,7 +518,7 @@ impl Branch {
         }
 
         // Get commit of new branch
-        let commit_output = Command::new("git")
+        let commit_output = crate::process::command("git")
             .args(["rev-parse", "--short", name])
             .current_dir(repo_path)
             .output()
@@ -509,14 +548,7 @@ impl Branch {
         debug!(category = "git", branch = name, force, "Deleting branch");
 
         let flag = if force { "-D" } else { "-d" };
-        let output = Command::new("git")
-            .args(["branch", flag, name])
-            .current_dir(repo_path)
-            .output()
-            .map_err(|e| GwtError::GitOperationFailed {
-                operation: "branch delete".to_string(),
-                details: e.to_string(),
-            })?;
+        let output = Self::delete_with_flag(repo_path, name, flag)?;
 
         if output.status.success() {
             info!(
@@ -529,6 +561,46 @@ impl Branch {
             Ok(())
         } else {
             let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+
+            if !force && Self::should_force_delete_after_safe_delete_failure(repo_path, name) {
+                warn!(
+                    category = "git",
+                    branch = name,
+                    error = err_msg.as_str(),
+                    "Branch delete with -d failed and branch is not merged, retrying with -D"
+                );
+
+                let forced_output = Self::delete_with_flag(repo_path, name, "-D")?;
+                if forced_output.status.success() {
+                    info!(
+                        category = "git",
+                        operation = "branch_delete",
+                        branch = name,
+                        force = true,
+                        fallback = true,
+                        "Branch deleted via automatic force fallback"
+                    );
+                    return Ok(());
+                }
+
+                let forced_err = String::from_utf8_lossy(&forced_output.stderr).to_string();
+                let combined_err = format!(
+                    "branch -d failed: {}\nbranch -D fallback failed: {}",
+                    err_msg, forced_err
+                );
+                error!(
+                    category = "git",
+                    branch = name,
+                    force,
+                    error = combined_err.as_str(),
+                    "Failed to delete branch after fallback"
+                );
+                return Err(GwtError::BranchDeleteFailed {
+                    name: name.to_string(),
+                    details: combined_err,
+                });
+            }
+
             error!(
                 category = "git",
                 branch = name,
@@ -545,7 +617,7 @@ impl Branch {
 
     /// Get divergence (ahead, behind) between branch and upstream
     fn get_divergence(repo_path: &Path, branch: &str, upstream: &str) -> Result<(usize, usize)> {
-        let output = Command::new("git")
+        let output = crate::process::command("git")
             .args([
                 "rev-list",
                 "--left-right",
@@ -576,7 +648,7 @@ impl Branch {
 
     /// Get divergence (ahead, behind) between two refs
     pub fn divergence_between(repo_path: &Path, left: &str, right: &str) -> Result<(usize, usize)> {
-        let output = Command::new("git")
+        let output = crate::process::command("git")
             .args([
                 "rev-list",
                 "--left-right",
@@ -630,7 +702,7 @@ impl Branch {
 
     /// Check if a branch exists locally
     pub fn exists(repo_path: &Path, name: &str) -> Result<bool> {
-        let output = Command::new("git")
+        let output = crate::process::command("git")
             .args([
                 "show-ref",
                 "--verify",
@@ -657,7 +729,7 @@ impl Branch {
     /// Check if a branch exists remotely
     pub fn remote_exists(repo_path: &Path, remote: &str, branch: &str) -> Result<bool> {
         // First try local refs/remotes (works for normal repos)
-        let output = Command::new("git")
+        let output = crate::process::command("git")
             .args([
                 "show-ref",
                 "--verify",
@@ -676,7 +748,7 @@ impl Branch {
         }
 
         // SPEC-a70a1ece FR-124: For bare repos, check via ls-remote
-        let ls_output = Command::new("git")
+        let ls_output = crate::process::command("git")
             .args(["ls-remote", "--heads", remote, branch])
             .current_dir(repo_path)
             .output()
@@ -702,7 +774,7 @@ impl Branch {
     pub fn checkout(repo_path: &Path, name: &str) -> Result<()> {
         debug!(category = "git", branch = name, "Checking out branch");
 
-        let output = Command::new("git")
+        let output = crate::process::command("git")
             .args(["checkout", name])
             .current_dir(repo_path)
             .output()
@@ -751,7 +823,7 @@ impl Branch {
             "Checking if branch is merged into base"
         );
 
-        let output = Command::new("git")
+        let output = crate::process::command("git")
             .args(["merge-base", "--is-ancestor", branch, base])
             .current_dir(repo_path)
             .output()
@@ -821,7 +893,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn run_git(repo_path: &Path, args: &[&str]) {
-        let output = Command::new("git")
+        let output = crate::process::command("git")
             .args(args)
             .current_dir(repo_path)
             .output()
@@ -902,7 +974,7 @@ mod tests {
         let temp = create_test_repo();
         let origin = TempDir::new().unwrap();
 
-        Command::new("git")
+        crate::process::command("git")
             .args(["init", "--bare"])
             .current_dir(origin.path())
             .output()
@@ -910,13 +982,13 @@ mod tests {
 
         let branch = Branch::current(temp.path()).unwrap().unwrap().name;
 
-        Command::new("git")
+        crate::process::command("git")
             .args(["remote", "add", "origin", origin.path().to_str().unwrap()])
             .current_dir(temp.path())
             .output()
             .unwrap();
 
-        Command::new("git")
+        crate::process::command("git")
             .args(["push", "-u", "origin", &branch])
             .current_dir(temp.path())
             .output()
@@ -964,22 +1036,46 @@ mod tests {
     }
 
     #[test]
+    fn test_delete_branch_auto_forces_unmerged_when_not_fully_merged() {
+        let temp = create_test_repo();
+        let base = Branch::current(temp.path()).unwrap().unwrap().name;
+
+        run_git(temp.path(), &["checkout", "-b", "feature/unmerged"]);
+        commit_file(temp.path(), "feature.txt", "feature", "feature commit");
+        run_git(temp.path(), &["checkout", &base]);
+
+        assert!(Branch::exists(temp.path(), "feature/unmerged").unwrap());
+        Branch::delete(temp.path(), "feature/unmerged", false).unwrap();
+        assert!(!Branch::exists(temp.path(), "feature/unmerged").unwrap());
+    }
+
+    #[test]
+    fn test_delete_current_branch_still_fails_without_force() {
+        let temp = create_test_repo();
+        let current = Branch::current(temp.path()).unwrap().unwrap();
+
+        let result = Branch::delete(temp.path(), &current.name, false);
+        assert!(result.is_err());
+        assert!(Branch::exists(temp.path(), &current.name).unwrap());
+    }
+
+    #[test]
     fn test_divergence_between() {
         let temp = create_test_repo();
         let base = Branch::current(temp.path()).unwrap().unwrap().name;
 
-        Command::new("git")
+        crate::process::command("git")
             .args(["checkout", "-b", "feature/test"])
             .current_dir(temp.path())
             .output()
             .unwrap();
         std::fs::write(temp.path().join("feature.txt"), "feature").unwrap();
-        Command::new("git")
+        crate::process::command("git")
             .args(["add", "."])
             .current_dir(temp.path())
             .output()
             .unwrap();
-        Command::new("git")
+        crate::process::command("git")
             .args(["commit", "-m", "feature"])
             .current_dir(temp.path())
             .output()
@@ -1018,19 +1114,19 @@ mod tests {
         let temp = create_test_repo();
         let base = Branch::current(temp.path()).unwrap().unwrap().name;
 
-        Command::new("git")
+        crate::process::command("git")
             .args(["checkout", "-b", "feature/merged"])
             .current_dir(temp.path())
             .output()
             .unwrap();
         commit_file(temp.path(), "merged.txt", "merged", "merged commit");
 
-        Command::new("git")
+        crate::process::command("git")
             .args(["checkout", &base])
             .current_dir(temp.path())
             .output()
             .unwrap();
-        let output = Command::new("git")
+        let output = crate::process::command("git")
             .args(["merge", "--ff-only", "feature/merged"])
             .current_dir(temp.path())
             .output()
@@ -1046,14 +1142,14 @@ mod tests {
         let temp = create_test_repo();
         let base = Branch::current(temp.path()).unwrap().unwrap().name;
 
-        Command::new("git")
+        crate::process::command("git")
             .args(["checkout", "-b", "feature/unmerged"])
             .current_dir(temp.path())
             .output()
             .unwrap();
         commit_file(temp.path(), "unmerged.txt", "unmerged", "unmerged commit");
 
-        Command::new("git")
+        crate::process::command("git")
             .args(["checkout", &base])
             .current_dir(temp.path())
             .output()
@@ -1079,7 +1175,7 @@ mod tests {
         let temp = create_test_repo();
         let origin = TempDir::new().unwrap();
 
-        Command::new("git")
+        crate::process::command("git")
             .args(["init", "--bare"])
             .current_dir(origin.path())
             .output()
@@ -1087,14 +1183,14 @@ mod tests {
 
         let branch = Branch::current(temp.path()).unwrap().unwrap().name;
 
-        Command::new("git")
+        crate::process::command("git")
             .args(["remote", "add", "origin", origin.path().to_str().unwrap()])
             .current_dir(temp.path())
             .output()
             .unwrap();
 
         // Create a feature branch and push it
-        Command::new("git")
+        crate::process::command("git")
             .args(["checkout", "-b", "feature/will-be-gone"])
             .current_dir(temp.path())
             .output()
@@ -1102,28 +1198,28 @@ mod tests {
 
         commit_file(temp.path(), "gone.txt", "gone", "gone commit");
 
-        Command::new("git")
+        crate::process::command("git")
             .args(["push", "-u", "origin", "feature/will-be-gone"])
             .current_dir(temp.path())
             .output()
             .unwrap();
 
         // Delete the remote branch directly from the bare repo
-        Command::new("git")
+        crate::process::command("git")
             .args(["branch", "-D", "feature/will-be-gone"])
             .current_dir(origin.path())
             .output()
             .unwrap();
 
         // Checkout back to main/master so we can test the feature branch
-        Command::new("git")
+        crate::process::command("git")
             .args(["checkout", &branch])
             .current_dir(temp.path())
             .output()
             .unwrap();
 
         // Fetch with prune to update tracking info
-        Command::new("git")
+        crate::process::command("git")
             .args(["fetch", "--prune"])
             .current_dir(temp.path())
             .output()
