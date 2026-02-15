@@ -33,6 +33,7 @@ pub struct SessionSummaryCache {
     cache: HashMap<String, SessionSummary>,
     last_modified: HashMap<String, SystemTime>,
     session_ids: HashMap<String, String>,
+    tool_ids: HashMap<String, String>,
 }
 
 impl SessionSummaryCache {
@@ -40,16 +41,30 @@ impl SessionSummaryCache {
         self.cache.get(branch)
     }
 
+    pub fn input_mtime(&self, branch: &str) -> Option<SystemTime> {
+        self.last_modified.get(branch).copied()
+    }
+
+    pub fn tool_id(&self, branch: &str) -> Option<&str> {
+        self.tool_ids.get(branch).map(|s| s.as_str())
+    }
+
+    pub fn session_id(&self, branch: &str) -> Option<&str> {
+        self.session_ids.get(branch).map(|s| s.as_str())
+    }
+
     pub fn set(
         &mut self,
         branch: String,
+        tool_id: String,
         session_id: String,
         summary: SessionSummary,
         mtime: SystemTime,
     ) {
         self.cache.insert(branch.clone(), summary);
         self.last_modified.insert(branch.clone(), mtime);
-        self.session_ids.insert(branch, session_id);
+        self.session_ids.insert(branch.clone(), session_id);
+        self.tool_ids.insert(branch, tool_id);
     }
 
     pub fn is_stale(&self, branch: &str, session_id: &str, current_mtime: SystemTime) -> bool {
@@ -465,20 +480,14 @@ fn normalize_summary_headings(markdown: &str) -> String {
 }
 
 fn normalize_summary_heading_title(title: &str) -> String {
-    if heading_matches(title, &["要約", "概要"]) {
+    if heading_matches(title, &["目的", "Purpose", "purpose"]) {
+        return "目的".to_string();
+    }
+    if heading_matches(title, &["要約", "概要", "Summary", "summary"]) {
         return "要約".to_string();
     }
     if heading_matches(title, &["ハイライト", "Highlights", "highlights"]) {
         return "ハイライト".to_string();
-    }
-    if heading_matches(title, &["目的"]) {
-        return "目的".to_string();
-    }
-    if heading_matches(title, &["Purpose"]) {
-        return "Purpose".to_string();
-    }
-    if heading_matches(title, &["Summary"]) {
-        return "Summary".to_string();
     }
     title.to_string()
 }
@@ -750,7 +759,13 @@ mod tests {
         let mut cache = SessionSummaryCache::default();
         let summary = SessionSummary::default();
         let now = SystemTime::now();
-        cache.set("main".to_string(), "sess-1".to_string(), summary, now);
+        cache.set(
+            "main".to_string(),
+            "codex-cli".to_string(),
+            "sess-1".to_string(),
+            summary,
+            now,
+        );
         assert!(cache.is_stale("main", "sess-2", now));
     }
 
@@ -908,6 +923,14 @@ mod tests {
     #[test]
     fn test_normalize_session_summary_markdown_normalizes_alternative_summary_heading() {
         let content = "## 目的\nA\n\n## 概要\nB\n\n## ハイライト\n- C";
+        let fields = SessionSummaryFields::default();
+        let markdown = normalize_session_summary_markdown(content, &fields).expect("markdown");
+        assert_eq!(markdown, "## 目的\nA\n\n## 要約\nB\n\n## ハイライト\n- C");
+    }
+
+    #[test]
+    fn test_normalize_session_summary_markdown_normalizes_english_headings() {
+        let content = "## Purpose\nA\n\n## Summary\nB\n\n## Highlights\n- C";
         let fields = SessionSummaryFields::default();
         let markdown = normalize_session_summary_markdown(content, &fields).expect("markdown");
         assert_eq!(markdown, "## 目的\nA\n\n## 要約\nB\n\n## ハイライト\n- C");

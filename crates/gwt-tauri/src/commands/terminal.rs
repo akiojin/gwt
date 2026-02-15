@@ -1589,7 +1589,9 @@ mod tests {
 
     #[test]
     fn send_keys_to_pane_errors_when_pane_not_running() {
-        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let _lock = crate::commands::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = tempfile::TempDir::new().unwrap();
         let _env = crate::commands::TestEnvGuard::new(home.path());
 
@@ -1646,7 +1648,9 @@ mod tests {
 
     #[test]
     fn send_keys_broadcast_counts_running_panes() {
-        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let _lock = crate::commands::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = tempfile::TempDir::new().unwrap();
         let _env = crate::commands::TestEnvGuard::new(home.path());
 
@@ -1713,7 +1717,9 @@ mod tests {
 
     #[test]
     fn capture_scrollback_tail_returns_plain_text() {
-        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let _lock = crate::commands::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = tempfile::TempDir::new().unwrap();
         let _env = crate::commands::TestEnvGuard::new(home.path());
 
@@ -2143,7 +2149,9 @@ mod tests {
 
     #[test]
     fn test_merge_os_base_only() {
-        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let _lock = crate::commands::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = tempfile::TempDir::new().unwrap();
         let _env = crate::commands::TestEnvGuard::new(home.path());
 

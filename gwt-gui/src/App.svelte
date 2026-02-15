@@ -174,6 +174,16 @@
       .filter((b) => b && b !== "Worktree" && b !== "Agent"),
   );
 
+  let activeAgentTabBranch = $derived(
+    (() => {
+      const active = tabs.find((t) => t.id === activeTabId);
+      if (!active || active.type !== "agent") return null;
+      const branch = normalizeBranchName(active.label);
+      if (!branch || branch === "Worktree" || branch === "Agent") return null;
+      return branch;
+    })()
+  );
+
   let terminalDiagnosticsLoading: boolean = $state(false);
   let terminalDiagnostics: TerminalAnsiProbe | null = $state(null);
   let terminalDiagnosticsError: string | null = $state(null);
@@ -1796,6 +1806,7 @@
           {selectedBranch}
           {currentBranch}
           {agentTabBranches}
+          {activeAgentTabBranch}
           onResize={handleSidebarResize}
           onBranchSelect={handleBranchSelect}
           onBranchActivate={handleBranchActivate}
