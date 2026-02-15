@@ -102,6 +102,8 @@ pub struct AppState {
     pub os_env: Arc<OnceCell<HashMap<String, String>>>,
     pub os_env_source: Arc<OnceCell<EnvSource>>,
     pub update_manager: UpdateManager,
+    /// MRU (most-recently-used) window focus history. Front = most recent.
+    pub window_focus_history: Mutex<Vec<String>>,
 }
 
 impl AppState {
@@ -127,6 +129,7 @@ impl AppState {
             os_env: Arc::new(OnceCell::new()),
             os_env_source: Arc::new(OnceCell::new()),
             update_manager: UpdateManager::new(),
+            window_focus_history: Mutex::new(Vec::new()),
         }
     }
 
@@ -250,6 +253,41 @@ impl AppState {
 
     pub fn request_quit(&self) {
         self.is_quitting.store(true, Ordering::SeqCst);
+    }
+
+    /// Push window to front of MRU list. If already present, move to front.
+    pub fn push_window_focus(&self, label: &str) {
+        if let Ok(mut history) = self.window_focus_history.lock() {
+            history.retain(|l| l != label);
+            history.insert(0, label.to_string());
+        }
+    }
+
+    /// Get next window in MRU order (after current focused window).
+    /// Returns None if only one or zero windows.
+    pub fn next_window(&self) -> Option<String> {
+        let history = self.window_focus_history.lock().ok()?;
+        if history.len() <= 1 {
+            return None;
+        }
+        Some(history[1].clone())
+    }
+
+    /// Get previous window in MRU order (reverse direction).
+    /// Returns None if only one or zero windows.
+    pub fn previous_window(&self) -> Option<String> {
+        let history = self.window_focus_history.lock().ok()?;
+        if history.len() <= 1 {
+            return None;
+        }
+        history.last().cloned()
+    }
+
+    /// Remove window from MRU history (on window destroy).
+    pub fn remove_window_from_history(&self, label: &str) {
+        if let Ok(mut history) = self.window_focus_history.lock() {
+            history.retain(|l| l != label);
+        }
     }
 }
 
@@ -378,6 +416,57 @@ mod tests {
             WindowAgentTabsState::default()
         );
         assert!(state.window_migrations_snapshot().contains_key("main"));
+    }
+
+    #[test]
+    fn mru_push_moves_to_front() {
+        let state = AppState::new();
+        state.push_window_focus("A");
+        state.push_window_focus("B");
+        state.push_window_focus("C");
+        // History: [C, B, A]
+        state.push_window_focus("A");
+        // History: [A, C, B]
+        let history = state.window_focus_history.lock().unwrap();
+        assert_eq!(*history, vec!["A", "C", "B"]);
+    }
+
+    #[test]
+    fn mru_next_returns_second_entry() {
+        let state = AppState::new();
+        state.push_window_focus("A");
+        state.push_window_focus("B");
+        state.push_window_focus("C");
+        // History: [C, B, A] → next = B
+        assert_eq!(state.next_window(), Some("B".to_string()));
+    }
+
+    #[test]
+    fn mru_next_returns_none_for_single() {
+        let state = AppState::new();
+        state.push_window_focus("A");
+        assert_eq!(state.next_window(), None);
+    }
+
+    #[test]
+    fn mru_previous_returns_last_entry() {
+        let state = AppState::new();
+        state.push_window_focus("A");
+        state.push_window_focus("B");
+        state.push_window_focus("C");
+        // History: [C, B, A] → previous = A
+        assert_eq!(state.previous_window(), Some("A".to_string()));
+    }
+
+    #[test]
+    fn mru_remove_cleans_up() {
+        let state = AppState::new();
+        state.push_window_focus("A");
+        state.push_window_focus("B");
+        state.push_window_focus("C");
+        state.remove_window_from_history("B");
+        let history = state.window_focus_history.lock().unwrap();
+        assert_eq!(*history, vec!["C", "A"]);
     }
 
     #[test]

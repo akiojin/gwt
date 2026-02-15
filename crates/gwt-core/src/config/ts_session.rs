@@ -97,6 +97,20 @@ pub struct ToolSessionEntry {
     /// Keep containers running after agent exit for Quick Start
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "dockerKeep")]
     pub docker_keep: Option<bool>,
+    /// Container name used for docker compose/dockerfile launch
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "dockerContainerName"
+    )]
+    pub docker_container_name: Option<String>,
+    /// Docker compose args used when launch was started
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "dockerComposeArgs"
+    )]
+    pub docker_compose_args: Option<Vec<String>>,
     /// Unix timestamp in milliseconds
     pub timestamp: i64,
 }
@@ -606,6 +620,8 @@ pub fn get_last_tool_usage_map(repo_root: &Path) -> HashMap<String, ToolSessionE
                 docker_recreate: None,
                 docker_build: None,
                 docker_keep: None,
+                docker_container_name: None,
+                docker_compose_args: None,
                 timestamp: session.timestamp,
             };
             map.insert(branch, entry);
@@ -704,6 +720,8 @@ pub fn get_branch_tool_history(repo_root: &Path, branch: &str) -> Vec<ToolSessio
                     docker_recreate: None,
                     docker_build: None,
                     docker_keep: None,
+                    docker_container_name: None,
+                    docker_compose_args: None,
                     timestamp,
                 };
                 tool_map.insert(entry.tool_id.clone(), entry);
@@ -850,6 +868,8 @@ mod tests {
                     docker_recreate: None,
                     docker_build: None,
                     docker_keep: None,
+                    docker_container_name: None,
+                    docker_compose_args: None,
                     timestamp: 2_000,
                 },
                 ToolSessionEntry {
@@ -869,6 +889,8 @@ mod tests {
                     docker_recreate: None,
                     docker_build: None,
                     docker_keep: None,
+                    docker_container_name: None,
+                    docker_compose_args: None,
                     timestamp: 1_000,
                 },
             ],
@@ -924,6 +946,8 @@ mod tests {
                     docker_recreate: None,
                     docker_build: None,
                     docker_keep: None,
+                    docker_container_name: None,
+                    docker_compose_args: None,
                     timestamp: 1_000,
                 },
                 ToolSessionEntry {
@@ -943,6 +967,8 @@ mod tests {
                     docker_recreate: None,
                     docker_build: None,
                     docker_keep: None,
+                    docker_container_name: None,
+                    docker_compose_args: None,
                     timestamp: 2_000,
                 },
             ],
@@ -1006,6 +1032,8 @@ mod tests {
                 docker_recreate: None,
                 docker_build: None,
                 docker_keep: None,
+                docker_container_name: None,
+                docker_compose_args: None,
                 timestamp: 2_000,
             }],
         };
@@ -1055,6 +1083,8 @@ mod tests {
             docker_recreate: None,
             docker_build: None,
             docker_keep: None,
+            docker_container_name: None,
+            docker_compose_args: None,
             timestamp: 1704067200000,
         };
         let result = entry.format_tool_usage();
@@ -1080,6 +1110,8 @@ mod tests {
             docker_recreate: None,
             docker_build: None,
             docker_keep: None,
+            docker_container_name: None,
+            docker_compose_args: None,
             timestamp: 1704067200000,
         };
         let result = entry.format_tool_usage();
@@ -1306,6 +1338,8 @@ mod tests {
             docker_recreate: None,
             docker_build: None,
             docker_keep: None,
+            docker_container_name: None,
+            docker_compose_args: None,
             timestamp: 1_800_000_000_000,
         };
 

@@ -5,14 +5,13 @@
     CleanupProgress,
     LaunchAgentRequest,
     PrStatusInfo,
-    WorkflowRunInfo,
     GhCliStatus,
   } from "../types";
-  import { workflowStatusIcon, workflowStatusClass } from "../prStatusHelpers";
   import AgentSidebar from "./AgentSidebar.svelte";
   import WorktreeSummaryPanel from "./WorktreeSummaryPanel.svelte";
 
   type FilterType = "Local" | "Remote" | "All";
+  type BranchSortMode = "name" | "updated";
   type SidebarMode = "branch" | "agent";
   type FilterCacheEntry = {
     branches: BranchInfo[];
@@ -76,9 +75,6 @@
   const SUMMARY_RESIZE_HANDLE_HEIGHT_PX = 8;
   const FILTER_BACKGROUND_REFRESH_TTL_MS = 10_000;
   const SEARCH_FILTER_DEBOUNCE_MS = 120;
-
-  // PR Status tree expand state
-  let expandedBranches: Set<string> = $state(new Set());
 
   // PR Polling — inline to avoid .svelte.ts import issues in tests
   const PR_POLL_INTERVAL_MS = 30_000;
@@ -154,7 +150,8 @@
     function start() {
       if (destroyed) return;
       stop();
-      if (prPollingBootstrappedPath !== path && branchCount > 0) {
+      if (branchCount === 0) return;
+      if (prPollingBootstrappedPath !== path) {
         void refresh(true);
       }
       timer = setInterval(() => {
@@ -198,7 +195,11 @@
     }
     return prStatuses;
   });
-  let activeGhCliStatus = $derived(pollingGhCliStatus ?? ghCliStatus);
+  let effectiveGhCliStatus = $derived.by(() => {
+    if (pollingGhCliStatus) return pollingGhCliStatus;
+    return ghCliStatus;
+  });
+
 
   // Derived prNumber for WorktreeSummaryPanel
   let selectedPrNumber = $derived.by(() => {
@@ -206,20 +207,6 @@
     const status = activePrStatuses[selectedBranch.name];
     return status?.number ?? null;
   });
-
-  function toggleBranch(branchName: string) {
-    const next = new Set(expandedBranches);
-    if (next.has(branchName)) {
-      next.delete(branchName);
-    } else {
-      next.add(branchName);
-    }
-    expandedBranches = next;
-  }
-
-  function openCiLog(run: WorkflowRunInfo) {
-    onOpenCiLog?.(run.runId);
-  }
 
   function isTextEntryFocused(): boolean {
     if (typeof document === "undefined") return false;
@@ -238,6 +225,15 @@
   let searchInput: string = $state("");
   let searchQuery: string = $state("");
   let errorMessage: string | null = $state(null);
+  let sortMode: BranchSortMode = $state("name");
+  let agentTabBranchSet = $derived.by(() => {
+    const set = new Set<string>();
+    for (const branchName of agentTabBranches) {
+      const normalized = normalizeTabBranch(branchName);
+      if (normalized) set.add(normalized);
+    }
+    return set;
+  });
   let lastFetchKey = "";
   let lastForceKey = "";
   let lastProjectPath = "";
@@ -261,9 +257,86 @@
     return trimmed.slice(slash + 1);
   }
 
+  function branchPriority(name: string): number {
+    const normalized = name.trim().toLowerCase();
+    const baseName = normalized.startsWith("origin/")
+      ? normalized.slice("origin/".length)
+      : normalized;
+    if (baseName === "main") return 2;
+    if (baseName === "develop") return 1;
+    return 0;
+  }
+
+  function branchSortTimestamp(branch: BranchInfo): number | null {
+    const value = (branch as { commit_timestamp?: unknown }).commit_timestamp;
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string") {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+    return null;
+  }
+
+  function compareBranches(
+    a: BranchInfo,
+    b: BranchInfo,
+    filter: FilterType
+  ): number {
+    if (filter === "All") {
+      const aRemote = remoteBranchNames.has(a.name) ? 1 : 0;
+      const bRemote = remoteBranchNames.has(b.name) ? 1 : 0;
+      if (aRemote !== bRemote) {
+        return aRemote - bRemote;
+      }
+    }
+
+    const aPriority = branchPriority(a.name);
+    const bPriority = branchPriority(b.name);
+    if (aPriority !== bPriority) {
+      return bPriority - aPriority;
+    }
+
+    const byName = a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    if (sortMode === "name") {
+      return byName;
+    }
+
+    const aTs = branchSortTimestamp(a);
+    const bTs = branchSortTimestamp(b);
+    if (aTs === null && bTs === null) {
+      return byName;
+    }
+    if (aTs === null) return 1;
+    if (bTs === null) return -1;
+    if (aTs !== bTs) {
+      return bTs - aTs;
+    }
+    return byName;
+  }
+
+  function sortBranches(list: BranchInfo[], filter: FilterType): BranchInfo[] {
+    return [...list].sort((a, b) => compareBranches(a, b, filter));
+  }
+
+  function toggleSortMode() {
+    sortMode = sortMode === "name" ? "updated" : "name";
+  }
+
+  function getSortModeLabel(): string {
+    return sortMode === "name" ? "Name" : "Updated";
+  }
+
   function normalizeBranchForPrLookup(branchName: string): string {
     const trimmed = branchName.trim();
     return remoteBranchNames.has(trimmed) ? stripRemotePrefix(trimmed) : trimmed;
+  }
+
+  function isSelectedBranch(branch: BranchInfo): boolean {
+    return (
+      selectedBranch !== null &&
+      selectedBranch !== undefined &&
+      selectedBranch.name === branch.name
+    );
   }
 
   function loadSummaryHeight(): number {
@@ -324,27 +397,10 @@
     }
   }
 
-  let agentTabBranchSet = $derived(
-    new Set(
-      agentTabBranches
-        .map((b) => normalizeTabBranch(b))
-        .filter((b) => b && b !== "Worktree" && b !== "Agent")
-    )
-  );
-
-  function hasActiveAgentTab(branch: BranchInfo): boolean {
-    // Local view only includes branches that have an active local worktree.
-    if (activeFilter === "Local") return agentTabBranchSet.has(branch.name);
-
-    // Only mark actual worktrees as active to avoid noise in Remote-only lists.
-    if (activeFilter === "Remote") return false;
-    if (!worktreeMap.get(branch.name)) return false;
-    return agentTabBranchSet.has(branch.name);
-  }
-
   // Branches currently being deleted
   let deletingBranches: Set<string> = $state(new Set());
   let branchSummaryStackEl: HTMLElement | null = $state(null);
+  let branchListEl: HTMLDivElement | null = $state(null);
   let summaryHeightPx = $state(loadSummaryHeight());
   let summaryResizing = $state(false);
   let summaryResizePointerId: number | null = $state(null);
@@ -370,13 +426,19 @@
 
   const filters: FilterType[] = ["Local", "Remote", "All"];
 
-  let filteredBranches = $derived(
-    searchQuery
-      ? branches.filter((b) =>
-          b.name.toLowerCase().includes(searchQuery.toLowerCase())
-        )
-      : branches
-  );
+  let filteredBranches = $derived.by(() => {
+    const sortedBranches = sortBranches(branches, activeFilter);
+    if (!searchQuery) return sortedBranches;
+
+    const normalizedQuery = searchQuery.toLowerCase();
+    return sortedBranches.filter((b) =>
+      b.name.toLowerCase().includes(normalizedQuery)
+    );
+  });
+  let selectedBranchIndex = $derived.by(() => {
+    if (selectedBranch === null || filteredBranches.length === 0) return -1;
+    return filteredBranches.findIndex((branch) => branch.name === selectedBranch!.name);
+  });
   let clampedWidthPx = $derived(clampSidebarWidth(widthPx));
 
   $effect(() => {
@@ -956,6 +1018,70 @@
     setSummaryHeight(summaryHeightPx + delta);
   }
 
+  function focusBranchButtonByIndex(index: number) {
+    queueMicrotask(() => {
+      const button = branchListEl?.querySelector<HTMLButtonElement>(
+        `[data-branch-index="${index}"]`
+      );
+      if (!button) return;
+      button.focus();
+      if (typeof button.scrollIntoView === "function") {
+        button.scrollIntoView({ block: "nearest" });
+      }
+    });
+  }
+
+  function isAgentBranchActive(branch: BranchInfo): boolean {
+    if (activeFilter === "Remote") return false;
+    if (activeFilter === "All" && remoteBranchNames.has(branch.name)) return false;
+    return agentTabBranchSet.has(normalizeTabBranch(branch.name));
+  }
+
+  function handleBranchItemKeydown(event: KeyboardEvent) {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    if (filteredBranches.length === 0) return;
+
+    const focusedBranchIndex = Array.from(
+      branchListEl?.querySelectorAll<HTMLButtonElement>(".branch-item") ?? []
+    ).findIndex((el) => el === document.activeElement);
+    const currentIndex =
+      selectedBranchIndex >= 0
+        ? selectedBranchIndex
+        : focusedBranchIndex >= 0
+          ? focusedBranchIndex
+          : -1;
+    const maxIndex = filteredBranches.length - 1;
+    const nextIndex =
+      event.key === "ArrowDown"
+        ? Math.min(maxIndex, currentIndex + 1)
+        : Math.max(0, currentIndex - 1);
+
+    if (nextIndex === currentIndex) return;
+
+    const nextBranch = filteredBranches[nextIndex];
+    onBranchSelect(nextBranch);
+    focusBranchButtonByIndex(nextIndex);
+  }
+
+  $effect(() => {
+    const list = branchListEl;
+    if (!list || filteredBranches.length === 0) return;
+
+    const listener = (event: KeyboardEvent) => {
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (target !== list && !list.contains(target)) return;
+      handleBranchItemKeydown(event);
+    };
+
+    window.addEventListener("keydown", listener, true);
+    return () => {
+      window.removeEventListener("keydown", listener, true);
+    };
+  });
+
   $effect(() => {
     return () => {
       stopSummaryResize();
@@ -1107,9 +1233,27 @@
         placeholder="Filter branches..."
         bind:value={searchInput}
       />
+      <button
+        type="button"
+        class="sort-mode-toggle"
+        aria-label="Sort mode"
+        title={`Sort by ${getSortModeLabel()}`}
+        onclick={toggleSortMode}
+      >
+        <span class="sort-mode-icon" aria-hidden="true">
+          {sortMode === "name" ? "A↕" : "🕒"}
+        </span>
+        <span class="sort-mode-text">{getSortModeLabel()}</span>
+      </button>
     </div>
     <div class="branch-summary-stack" bind:this={branchSummaryStackEl}>
-      <div class="branch-list">
+      <div
+        class="branch-list"
+        bind:this={branchListEl}
+        tabindex={filteredBranches.length === 0 ? -1 : 0}
+        role="listbox"
+        aria-label="Worktree branches"
+      >
         {#if loading}
           <div class="loading-indicator">Loading...</div>
         {:else if errorMessage}
@@ -1117,97 +1261,60 @@
         {:else if filteredBranches.length === 0}
           <div class="empty-indicator">No branches found.</div>
         {:else}
-          {#each filteredBranches as branch}
-            <div class="branch-tree-item">
-              {#if activeFilter !== "Remote" && activePrStatuses[branch.name]}
-                <button
-                  class="tree-toggle"
-                  class:expanded={expandedBranches.has(branch.name)}
-                  onclick={(e) => { e.stopPropagation(); toggleBranch(branch.name); }}
-                  title={expandedBranches.has(branch.name) ? "Collapse" : "Expand"}
+          {#each filteredBranches as branch, index}
+            <button
+              data-branch-index={index}
+              data-branch-name={branch.name}
+              class="branch-item"
+              class:agent-active={isAgentBranchActive(branch)}
+              class:active={isSelectedBranch(branch)}
+              class:deleting={deletingBranches.has(branch.name)}
+              onclick={() => {
+                if (!deletingBranches.has(branch.name)) onBranchSelect(branch);
+              }}
+              ondblclick={() => {
+                if (!deletingBranches.has(branch.name))
+                  onBranchActivate?.(branch);
+              }}
+              oncontextmenu={(e) => handleContextMenu(e, branch)}
+            >
+              {#if isAgentBranchActive(branch)}
+                <span
+                  class="agent-tab-icon"
+                  aria-hidden="true"
+                  title="Agent tab is open for this branch"
                 >
-                  {expandedBranches.has(branch.name) ? "\u25BC" : "\u25B6"}
-                </button>
-              {:else}
-                <span class="tree-toggle-placeholder"></span>
+                  <span class="agent-tab-bars">
+                    <span class="agent-tab-bar b1"></span>
+                    <span class="agent-tab-bar b2"></span>
+                    <span class="agent-tab-bar b3"></span>
+                  </span>
+                  <span class="agent-tab-fallback" aria-hidden="true">@</span>
+                </span>
               {/if}
-              <button
-                class="branch-item"
-                class:active={branch.is_current}
-                class:agent-active={hasActiveAgentTab(branch)}
-                class:deleting={deletingBranches.has(branch.name)}
-                onclick={() => {
-                  if (!deletingBranches.has(branch.name)) onBranchSelect(branch);
-                }}
-                ondblclick={() => {
-                  if (!deletingBranches.has(branch.name))
-                    onBranchActivate?.(branch);
-                }}
-                oncontextmenu={(e) => handleContextMenu(e, branch)}
-              >
-                <span class="branch-icon">{branch.is_current ? "*" : " "}</span>
-                {#if deletingBranches.has(branch.name)}
-                  <span class="safety-spinner"></span>
-                {:else if getSafetyLevel(branch)}
-                  <span
-                    class="safety-dot {getSafetyLevel(branch)}"
-                    title={getSafetyTitle(branch)}
-                  ></span>
-                {/if}
-                {#if hasActiveAgentTab(branch)}
-                  <span
-                    class="agent-tab-icon"
-                    title="Agent tab is open for this branch"
-                    role="img"
-                    aria-label="Agent tab is open for this branch"
-                  >
-                    <span class="agent-tab-bars" aria-hidden="true">
-                      <span class="agent-tab-bar b1"></span>
-                      <span class="agent-tab-bar b2"></span>
-                      <span class="agent-tab-bar b3"></span>
-                    </span>
-                    <span class="agent-tab-fallback" aria-hidden="true">@</span>
-                  </span>
-                {/if}
-                <span class="branch-name">{branch.name}</span>
-                {#if activeGhCliStatus && !activeGhCliStatus.authenticated}
-                  <span class="pr-badge disconnected">GitHub not connected</span>
-                {:else if activePrStatuses[branch.name]}
-                  {@const pr = activePrStatuses[branch.name]!}
-                  <span class="pr-badge {pr.state.toLowerCase()}">
-                    #{pr.number} {pr.state === "OPEN" ? "Open" : pr.state === "MERGED" ? "Merged" : "Closed"}
-                  </span>
-                {:else if activeGhCliStatus?.authenticated}
-                  <span class="pr-badge no-pr">No PR</span>
-                {/if}
-                {#if branch.last_tool_usage}
-                  <span
-                    class="tool-usage {toolUsageClass(branch.last_tool_usage)}"
-                  >
-                    {branch.last_tool_usage}
-                  </span>
-                {/if}
-                {#if divergenceIndicator(branch)}
-                  <span
-                    class="divergence {divergenceClass(branch.divergence_status)}"
-                  >
-                    {divergenceIndicator(branch)}
-                  </span>
-                {/if}
-              </button>
-            </div>
-            {#if expandedBranches.has(branch.name) && activePrStatuses[branch.name]}
-              <div class="workflow-runs">
-                {#each activePrStatuses[branch.name]!.checkSuites as run}
-                  <button class="workflow-run-item" onclick={() => openCiLog(run)}>
-                    <span class="workflow-status {workflowStatusClass(run)}">{workflowStatusIcon(run)}</span>
-                    <span class="workflow-name">{run.workflowName}</span>
-                  </button>
-                {:else}
-                  <div class="workflow-empty">No workflows</div>
-                {/each}
-              </div>
-            {/if}
+              <span class="branch-icon">{branch.is_current ? "*" : " "}</span>
+              {#if deletingBranches.has(branch.name)}
+                <span class="safety-spinner"></span>
+              {:else if getSafetyLevel(branch)}
+                <span
+                  class="safety-dot {getSafetyLevel(branch)}"
+                  title={getSafetyTitle(branch)}
+                ></span>
+              {/if}
+              <span class="branch-name">{branch.name}</span>
+              {#if branch.last_tool_usage}
+                <span class="tool-usage {toolUsageClass(branch.last_tool_usage)}">
+                  {branch.last_tool_usage}
+                </span>
+              {/if}
+              {#if divergenceIndicator(branch)}
+                <span
+                  class="divergence {divergenceClass(branch.divergence_status)}"
+                >
+                  {divergenceIndicator(branch)}
+                </span>
+              {/if}
+            </button>
           {/each}
         {/if}
       </div>
@@ -1227,8 +1334,10 @@
           {projectPath}
           {selectedBranch}
           prNumber={selectedPrNumber}
+          ghCliStatus={effectiveGhCliStatus}
           onLaunchAgent={onLaunchAgent}
           onQuickLaunch={onQuickLaunch}
+          {onOpenCiLog}
         />
       </div>
     </div>
@@ -1482,10 +1591,15 @@
   .search-bar {
     padding: 6px 8px;
     border-bottom: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
 
   .search-input {
-    width: 100%;
+    flex: 1;
+    min-width: 0;
+    width: auto;
     padding: 5px 8px;
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
@@ -1502,6 +1616,36 @@
 
   .search-input::placeholder {
     color: var(--text-muted);
+  }
+
+  .sort-mode-toggle {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    border: 1px solid var(--border-color);
+    background: none;
+    color: var(--text-secondary);
+    padding: 4px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: var(--ui-font-xs);
+  }
+
+  .sort-mode-toggle:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .sort-mode-icon {
+    font-size: var(--ui-font-xs);
+    line-height: 1;
+  }
+
+  .sort-mode-text {
+    white-space: nowrap;
   }
 
   .branch-summary-stack {
@@ -1586,10 +1730,6 @@
   .branch-item.active {
     background-color: var(--bg-surface);
     color: var(--accent);
-  }
-
-  .branch-item.agent-active:not(.active) {
-    background-color: rgba(148, 226, 213, 0.08);
   }
 
   .branch-item.deleting {
@@ -1684,8 +1824,6 @@
     border-radius: 1px;
     background: var(--cyan);
     opacity: 0.85;
-    transform-origin: bottom;
-    animation: agentTabBars 0.9s ease-in-out infinite;
   }
 
   .agent-tab-bar.b1 {
@@ -1698,19 +1836,6 @@
 
   .agent-tab-bar.b3 {
     animation-delay: 300ms;
-  }
-
-  /* Graphical activity indicator for branches with open agent tabs */
-  @keyframes agentTabBars {
-    0%,
-    100% {
-      transform: scaleY(0.35);
-      opacity: 0.55;
-    }
-    50% {
-      transform: scaleY(1);
-      opacity: 1;
-    }
   }
 
   .agent-tab-fallback {
@@ -1904,125 +2029,4 @@
   }
 
   /* PR Status tree */
-  .branch-tree-item {
-    display: flex;
-    align-items: stretch;
-  }
-
-  .tree-toggle {
-    width: 20px;
-    flex-shrink: 0;
-    background: none;
-    border: none;
-    color: var(--text-muted);
-    cursor: pointer;
-    font-size: 10px;
-    padding: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .tree-toggle:hover {
-    color: var(--text-primary);
-  }
-
-  .tree-toggle-placeholder {
-    width: 20px;
-    flex-shrink: 0;
-  }
-
-  .workflow-runs {
-    padding-left: 24px;
-    display: flex;
-    flex-direction: column;
-  }
-
-  .workflow-run-item {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 3px 8px;
-    background: none;
-    border: none;
-    color: var(--text-secondary);
-    font-size: var(--ui-font-xs);
-    cursor: pointer;
-    text-align: left;
-    font-family: inherit;
-  }
-
-  .workflow-run-item:hover {
-    background: var(--bg-hover);
-  }
-
-  .workflow-status {
-    font-size: 11px;
-    width: 14px;
-    text-align: center;
-  }
-
-  .workflow-status.pass {
-    color: var(--green);
-  }
-
-  .workflow-status.fail {
-    color: var(--red);
-  }
-
-  .workflow-status.running {
-    color: var(--yellow);
-  }
-
-  .workflow-status.pending {
-    color: var(--text-muted);
-  }
-
-  .workflow-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .workflow-empty {
-    padding: 3px 8px;
-    color: var(--text-muted);
-    font-size: var(--ui-font-xs);
-    font-style: italic;
-  }
-
-  .pr-badge {
-    font-size: var(--ui-font-xs);
-    padding: 1px 6px;
-    border-radius: 999px;
-    white-space: nowrap;
-    flex-shrink: 0;
-    font-weight: 600;
-  }
-
-  .pr-badge.open {
-    background: rgba(63, 185, 80, 0.15);
-    color: var(--green);
-  }
-
-  .pr-badge.merged {
-    background: rgba(163, 113, 247, 0.15);
-    color: var(--magenta);
-  }
-
-  .pr-badge.closed {
-    background: rgba(248, 81, 73, 0.15);
-    color: var(--red);
-  }
-
-  .pr-badge.no-pr {
-    color: var(--text-muted);
-    background: none;
-  }
-
-  .pr-badge.disconnected {
-    color: var(--text-muted);
-    background: none;
-    font-style: italic;
-  }
 </style>

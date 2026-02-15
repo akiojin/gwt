@@ -4,7 +4,7 @@ use crate::state::AppState;
 use gwt_core::config::Settings;
 use serde::{Deserialize, Serialize};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tauri::State;
 use tracing::error;
 
@@ -134,17 +134,12 @@ impl SettingsData {
 
 /// Get current settings
 #[tauri::command]
-pub fn get_settings(window: tauri::Window, state: State<AppState>) -> Result<SettingsData, String> {
+pub fn get_settings(
+    _window: tauri::Window,
+    _state: State<AppState>,
+) -> Result<SettingsData, String> {
     with_panic_guard("loading settings", || {
-        let repo_root = match state.project_for_window(window.label()) {
-            Some(p) => PathBuf::from(p),
-            None => {
-                let settings = Settings::load_global().map_err(|e| e.to_string())?;
-                return Ok(SettingsData::from(&settings));
-            }
-        };
-
-        let settings = Settings::load(&repo_root).map_err(|e| e.to_string())?;
+        let settings = Settings::load_global().map_err(|e| e.to_string())?;
         Ok(SettingsData::from(&settings))
     })
 }
@@ -152,25 +147,13 @@ pub fn get_settings(window: tauri::Window, state: State<AppState>) -> Result<Set
 /// Save settings
 #[tauri::command]
 pub fn save_settings(
-    window: tauri::Window,
+    _window: tauri::Window,
     settings: SettingsData,
-    state: State<AppState>,
+    _state: State<AppState>,
 ) -> Result<(), String> {
     with_panic_guard("saving settings", || {
         let core_settings = settings.to_settings()?;
-
-        match state.project_for_window(window.label()) {
-            Some(p) => {
-                let config_path = Path::new(&p).join(".gwt.toml");
-                core_settings
-                    .save(&config_path)
-                    .map_err(|e| e.to_string())?;
-            }
-            None => {
-                // Save to global config if no project is opened
-                core_settings.save_global().map_err(|e| e.to_string())?;
-            }
-        }
+        core_settings.save_global().map_err(|e| e.to_string())?;
 
         Ok(())
     })

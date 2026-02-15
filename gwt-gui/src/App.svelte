@@ -43,6 +43,7 @@
     shouldAllowRestoredActiveTab,
     type TabDropPosition,
   } from "./lib/appTabs";
+  import { getNextTabId, getPreviousTabId } from "./lib/tabNavigation";
   import {
     runStartupUpdateCheck,
     STARTUP_UPDATE_INITIAL_DELAY_MS,
@@ -1436,6 +1437,16 @@
         } finally {
           terminalDiagnosticsLoading = false;
         }
+        break;
+      }
+      case "previous-tab": {
+        const prevId = getPreviousTabId(tabs, activeTabId);
+        if (prevId) activeTabId = prevId;
+        break;
+      }
+      case "next-tab": {
+        const nextId = getNextTabId(tabs, activeTabId);
+        if (nextId) activeTabId = nextId;
         break;
       }
     }
