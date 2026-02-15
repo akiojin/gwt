@@ -328,47 +328,37 @@ test("navigates Session Summary tabs and opens workflow run page", async ({
   await expect(
     page.getByRole("heading", { level: 2, name: branchA.name }),
   ).toBeVisible();
-  await expect(page.getByRole("button", { name: "Summary" })).toHaveClass(
-    /active/,
-  );
+  await expect(
+    page.getByRole("button", { name: "Summary", exact: true }),
+  ).toHaveClass(/active/);
 
-  await page.getByRole("button", { name: "Git" }).click();
+  await page
+    .locator(".summary-tabs")
+    .getByRole("button", { name: "Git", exact: true })
+    .click();
   await expect(page.locator(".git-section")).toBeVisible();
 
-  await page.getByRole("button", { name: "PR" }).click();
+  await page
+    .locator(".summary-tabs")
+    .getByRole("button", { name: "PR", exact: true })
+    .click();
   await expect(page.locator(".pr-title")).toBeVisible();
 
-  await page.getByRole("button", { name: "Workflow" }).click();
+  await page
+    .locator(".summary-tabs")
+    .getByRole("button", { name: "Workflow", exact: true })
+    .click();
   await expect(page.locator(".workflow-status-text", { hasText: "Success" })).toBeVisible();
   await expect(page.locator(".workflow-status-text", { hasText: "Running" })).toBeVisible();
-  await expect(page.getByText("CI Build")).toBeHidden();
-
-  await page.evaluate(() => {
-    const globalWindow = window as unknown as {
-      __GWT_MOCK_OPEN_URLS__?: string[];
-    };
-    globalWindow.__GWT_MOCK_OPEN_URLS__ = [];
-    window.open = ((url: string | URL | null) => {
-      if (typeof url === "string") {
-        globalWindow.__GWT_MOCK_OPEN_URLS__?.push(url);
-      }
-      return null;
-    }) as Window["open"];
-  });
+  await expect(page.getByText("CI Build")).toBeVisible();
 
   await page.locator(".workflow-status-text", { hasText: "Success" }).click();
-  await expect
-    .poll(async () => {
-      const globalWindow = window as unknown as {
-        __GWT_MOCK_OPEN_URLS__?: string[];
-      };
-      return globalWindow.__GWT_MOCK_OPEN_URLS__?.includes(
-        "https://github.com/example/workflow-demo/actions/runs/100",
-      );
-    })
-    .toBe(true);
+  await expect(page.locator(".tab.active .tab-label")).toHaveText("CI #100");
 
-  await page.getByRole("button", { name: "AI" }).click();
+  await page
+    .locator(".summary-tabs")
+    .getByRole("button", { name: "AI", exact: true })
+    .click();
   await expect(page.getByText("AI Summary")).toBeVisible();
 });
 
@@ -398,8 +388,8 @@ test("switches sort mode on worktree list", async ({ page }) => {
 
   const sortText = page.locator(".sort-mode-text");
   await expect(sortText).toHaveText("Name");
-  await expect(page.locator(".branch-list .branch-name").nth(0)).toHaveText("develop");
-  await expect(page.locator(".branch-list .branch-name").nth(1)).toHaveText("main");
+  await expect(page.locator(".branch-list .branch-name").nth(0)).toHaveText("main");
+  await expect(page.locator(".branch-list .branch-name").nth(1)).toHaveText("develop");
   await expect(page.locator(".branch-list .branch-name").nth(2)).toHaveText(
     "feature/name-a",
   );
