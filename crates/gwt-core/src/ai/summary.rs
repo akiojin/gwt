@@ -480,20 +480,14 @@ fn normalize_summary_headings(markdown: &str) -> String {
 }
 
 fn normalize_summary_heading_title(title: &str) -> String {
-    if heading_matches(title, &["要約", "概要"]) {
+    if heading_matches(title, &["目的", "Purpose", "purpose"]) {
+        return "目的".to_string();
+    }
+    if heading_matches(title, &["要約", "概要", "Summary", "summary"]) {
         return "要約".to_string();
     }
     if heading_matches(title, &["ハイライト", "Highlights", "highlights"]) {
         return "ハイライト".to_string();
-    }
-    if heading_matches(title, &["目的"]) {
-        return "目的".to_string();
-    }
-    if heading_matches(title, &["Purpose"]) {
-        return "Purpose".to_string();
-    }
-    if heading_matches(title, &["Summary"]) {
-        return "Summary".to_string();
     }
     title.to_string()
 }
@@ -929,6 +923,14 @@ mod tests {
     #[test]
     fn test_normalize_session_summary_markdown_normalizes_alternative_summary_heading() {
         let content = "## 目的\nA\n\n## 概要\nB\n\n## ハイライト\n- C";
+        let fields = SessionSummaryFields::default();
+        let markdown = normalize_session_summary_markdown(content, &fields).expect("markdown");
+        assert_eq!(markdown, "## 目的\nA\n\n## 要約\nB\n\n## ハイライト\n- C");
+    }
+
+    #[test]
+    fn test_normalize_session_summary_markdown_normalizes_english_headings() {
+        let content = "## Purpose\nA\n\n## Summary\nB\n\n## Highlights\n- C";
         let fields = SessionSummaryFields::default();
         let markdown = normalize_session_summary_markdown(content, &fields).expect("markdown");
         assert_eq!(markdown, "## 目的\nA\n\n## 要約\nB\n\n## ハイライト\n- C");

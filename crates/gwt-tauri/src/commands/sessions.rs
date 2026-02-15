@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -700,6 +701,12 @@ struct SessionSummaryUpdatedPayload {
 
 const SESSION_SUMMARY_CACHE_VERSION: u32 = 1;
 
+static SESSION_SUMMARY_CACHE_PERSIST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn session_summary_cache_persist_lock() -> &'static Mutex<()> {
+    SESSION_SUMMARY_CACHE_PERSIST_LOCK.get_or_init(|| Mutex::new(()))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct PersistedSessionSummaryCache {
     pub version: u32,
@@ -805,6 +812,12 @@ fn persist_session_summary_cache_entry(
     input_mtime: SystemTime,
     summary: &SessionSummary,
 ) {
+    // Multiple summary jobs can run concurrently; serialize file updates to avoid lost entries
+    // from a read-modify-write race.
+    let _guard = session_summary_cache_persist_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
     let path = session_summary_cache_toml_path(repo_root);
     let mut persisted = load_persisted_session_summary_cache(repo_root).unwrap_or_else(|| {
         PersistedSessionSummaryCache {
