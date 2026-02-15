@@ -426,6 +426,7 @@ export async function installTauriMock(
     {
       projectPath: DEFAULT_PROJECT_PATH,
       lastOpenedAt: DEFAULT_LAST_OPENED_AT,
+      commandResponses,
     },
   );
 }
