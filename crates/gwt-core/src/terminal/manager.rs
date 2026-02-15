@@ -162,6 +162,41 @@ impl PaneManager {
         Ok(pane_id)
     }
 
+    /// Spawn a plain shell in a new terminal pane.
+    ///
+    /// Similar to `launch_agent()` but skips `save_branch_mapping()`.
+    /// Returns the generated pane ID.
+    pub fn spawn_shell(
+        &mut self,
+        config: BuiltinLaunchConfig,
+        rows: u16,
+        cols: u16,
+    ) -> Result<String, TerminalError> {
+        let pane_id = format!(
+            "pane-{}",
+            uuid::Uuid::new_v4()
+                .to_string()
+                .split('-')
+                .next()
+                .unwrap_or("0")
+        );
+        let pane_config = PaneConfig {
+            pane_id: pane_id.clone(),
+            command: config.command,
+            args: config.args,
+            working_dir: config.working_dir,
+            branch_name: config.branch_name,
+            agent_name: config.agent_name,
+            agent_color: config.agent_color,
+            rows,
+            cols,
+            env_vars: config.env_vars,
+        };
+        let pane = TerminalPane::new(pane_config)?;
+        self.add_pane(pane)?;
+        Ok(pane_id)
+    }
+
     /// Get a mutable reference to a pane by its ID.
     pub fn pane_mut_by_id(&mut self, id: &str) -> Option<&mut TerminalPane> {
         self.panes.iter_mut().find(|p| p.pane_id() == id)
@@ -764,5 +799,52 @@ mod tests {
 
         mgr.set_active_index(999); // out of bounds, should be ignored
         assert_eq!(mgr.active_index(), 0);
+    }
+
+    // --- 29. spawn_shell creates pane and returns pane_id ---
+
+    #[test]
+    fn test_spawn_shell_success() {
+        use crate::terminal::BuiltinLaunchConfig;
+        let mut mgr = PaneManager::new();
+        let config = BuiltinLaunchConfig {
+            command: "/usr/bin/true".to_string(),
+            args: vec!["-l".to_string()],
+            working_dir: std::env::temp_dir(),
+            branch_name: "terminal".to_string(),
+            agent_name: "terminal".to_string(),
+            agent_color: AgentColor::White,
+            env_vars: HashMap::new(),
+        };
+        let pane_id = mgr.spawn_shell(config, 24, 80).unwrap();
+        assert!(!pane_id.is_empty());
+        assert!(pane_id.starts_with("pane-"));
+        assert_eq!(mgr.pane_count(), 1);
+        assert_eq!(mgr.active_index(), 0);
+    }
+
+    // --- 30. spawn_shell sets active to new pane ---
+
+    #[test]
+    fn test_spawn_shell_sets_active() {
+        use crate::terminal::BuiltinLaunchConfig;
+        let mut mgr = PaneManager::new();
+        mgr.add_pane(create_test_pane("p0")).unwrap();
+        assert_eq!(mgr.active_index(), 0);
+
+        let config = BuiltinLaunchConfig {
+            command: "/usr/bin/true".to_string(),
+            args: vec![],
+            working_dir: std::env::temp_dir(),
+            branch_name: "terminal".to_string(),
+            agent_name: "terminal".to_string(),
+            agent_color: AgentColor::White,
+            env_vars: HashMap::new(),
+        };
+        let pane_id = mgr.spawn_shell(config, 24, 80).unwrap();
+        assert_eq!(mgr.pane_count(), 2);
+        assert_eq!(mgr.active_index(), 1);
+        let active = mgr.active_pane().unwrap();
+        assert_eq!(active.pane_id(), pane_id);
     }
 }

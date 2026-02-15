@@ -7,7 +7,19 @@
   import VersionHistoryPanel from "./VersionHistoryPanel.svelte";
 
   function isAgentTabWithPaneId(tab: Tab): tab is Tab & { paneId: string } {
-    return tab.type === "agent" && typeof tab.paneId === "string" && tab.paneId.length > 0;
+    return (
+      tab.type === "agent" &&
+      typeof tab.paneId === "string" &&
+      tab.paneId.length > 0
+    );
+  }
+
+  function isTerminalTabWithPaneId(tab: Tab): tab is Tab & { paneId: string } {
+    return (
+      tab.type === "terminal" &&
+      typeof tab.paneId === "string" &&
+      tab.paneId.length > 0
+    );
   }
 
   let {
@@ -29,28 +41,61 @@
     onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
     onTabSelect: (tabId: string) => void;
     onTabClose: (tabId: string) => void;
-    onTabReorder: (dragTabId: string, overTabId: string, position: TabDropPosition) => void;
+    onTabReorder: (
+      dragTabId: string,
+      overTabId: string,
+      position: TabDropPosition,
+    ) => void;
   } = $props();
 
   let activeTab = $derived(tabs.find((t) => t.id === activeTabId));
   let agentTabs = $derived(tabs.filter(isAgentTabWithPaneId));
-  let showTerminalLayer = $derived(activeTab?.type === "agent");
+  let terminalTabs = $derived(tabs.filter(isTerminalTabWithPaneId));
+  let showTerminalLayer = $derived(
+    activeTab?.type === "agent" || activeTab?.type === "terminal",
+  );
   let isPinnedTab = (tabType?: Tab["type"]) => tabType === "agentMode";
   let draggingTabId: string | null = $state(null);
+  let pointerDrag:
+    | {
+        tabId: string;
+        pointerId: number;
+        startX: number;
+        startY: number;
+      }
+    | null = null;
   let lastReorderSignature = "";
 
   function readDraggedTabId(event: DragEvent): string {
     if (draggingTabId) return draggingTabId;
 
-    const appData = event.dataTransfer?.getData("application/x-gwt-tab-id") ?? "";
+    const appData =
+      event.dataTransfer?.getData("application/x-gwt-tab-id") ?? "";
     if (appData.trim()) return appData.trim();
     const textData = event.dataTransfer?.getData("text/plain") ?? "";
     return textData.trim();
   }
 
   function resetDragState() {
+    removeGlobalPointerListeners();
     draggingTabId = null;
+    pointerDrag = null;
     lastReorderSignature = "";
+  }
+
+  function removeGlobalPointerListeners() {
+    if (typeof window === "undefined") return;
+    window.removeEventListener("pointermove", handleGlobalPointerMove);
+    window.removeEventListener("pointerup", handleGlobalPointerUp);
+    window.removeEventListener("pointercancel", handleGlobalPointerCancel);
+  }
+
+  function addGlobalPointerListeners() {
+    if (typeof window === "undefined") return;
+    removeGlobalPointerListeners();
+    window.addEventListener("pointermove", handleGlobalPointerMove);
+    window.addEventListener("pointerup", handleGlobalPointerUp);
+    window.addEventListener("pointercancel", handleGlobalPointerCancel);
   }
 
   function handleTabDragStart(event: DragEvent, tabId: string) {
@@ -92,19 +137,95 @@
   function handleTabDragEnd() {
     resetDragState();
   }
+
+  function isTabCloseControl(target: EventTarget | null): boolean {
+    return target instanceof Element && target.closest(".tab-close") !== null;
+  }
+
+  function handleTabPointerDown(event: PointerEvent, tabId: string) {
+    if (event.button !== 0) return;
+    if (isTabCloseControl(event.target)) return;
+
+    draggingTabId = tabId;
+    pointerDrag = {
+      tabId,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+    };
+    lastReorderSignature = "";
+    addGlobalPointerListeners();
+  }
+
+  function handleGlobalPointerMove(event: PointerEvent) {
+    if (!pointerDrag || event.pointerId !== pointerDrag.pointerId) return;
+    // Ignore micro jitter so simple clicks do not trigger reordering.
+    if (
+      Math.abs(event.clientX - pointerDrag.startX) < 3 &&
+      Math.abs(event.clientY - pointerDrag.startY) < 3
+    ) {
+      return;
+    }
+
+    const fromPoint =
+      typeof document !== "undefined" &&
+      typeof document.elementFromPoint === "function"
+        ? document
+            .elementFromPoint(event.clientX, event.clientY)
+            ?.closest<HTMLElement>(".tab[data-tab-id]")
+        : null;
+    const fromTarget =
+      event.target instanceof Element
+        ? event.target.closest<HTMLElement>(".tab[data-tab-id]")
+        : null;
+    const overTab = fromPoint ?? fromTarget ?? null;
+    if (!overTab) return;
+
+    const overTabId = overTab.dataset.tabId ?? "";
+    if (!overTabId || overTabId === pointerDrag.tabId) return;
+
+    const rect = overTab.getBoundingClientRect();
+    const position: TabDropPosition =
+      event.clientX <= rect.left + rect.width / 2 ? "before" : "after";
+    const signature = `${pointerDrag.tabId}:${overTabId}:${position}`;
+    if (signature === lastReorderSignature) return;
+
+    lastReorderSignature = signature;
+    onTabReorder(pointerDrag.tabId, overTabId, position);
+  }
+
+  function handleGlobalPointerUp(event: PointerEvent) {
+    if (!pointerDrag || event.pointerId !== pointerDrag.pointerId) return;
+    resetDragState();
+  }
+
+  function handleGlobalPointerCancel(event: PointerEvent) {
+    if (!pointerDrag || event.pointerId !== pointerDrag.pointerId) return;
+    resetDragState();
+  }
+
+  $effect(() => {
+    return () => {
+      removeGlobalPointerListeners();
+    };
+  });
 </script>
 
 <main class="main-area">
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="tab-bar">
     {#each tabs as tab}
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="tab"
+        data-tab-id={tab.id}
         class:active={activeTabId === tab.id}
         class:dragging={draggingTabId === tab.id}
-        draggable={tabs.length > 1}
+        draggable="false"
         onclick={() => onTabSelect(tab.id)}
+        title={tab.type === "terminal" ? tab.cwd || "" : ""}
+        onpointerdown={(e) => handleTabPointerDown(e, tab.id)}
         ondragstart={(e) => handleTabDragStart(e, tab.id)}
         ondragover={(e) => handleTabDragOver(e, tab.id)}
         ondrop={handleTabDrop}
@@ -118,11 +239,15 @@
             class:gemini={tab.agentId === "gemini"}
             class:opencode={tab.agentId === "opencode"}
           ></span>
+        {:else if tab.type === "terminal"}
+          <span class="tab-dot terminal"></span>
         {/if}
         <span class="tab-label">{tab.label}</span>
         {#if !isPinnedTab(tab.type)}
           <button
             class="tab-close"
+            type="button"
+            onpointerdown={(e) => e.stopPropagation()}
             onclick={(e) => {
               e.stopPropagation();
               onTabClose(tab.id);
@@ -152,6 +277,11 @@
 
     <div class="terminal-layer" class:hidden={!showTerminalLayer}>
       {#each agentTabs as tab (tab.id)}
+        <div class="terminal-wrapper" class:active={activeTabId === tab.id}>
+          <TerminalView paneId={tab.paneId} active={activeTabId === tab.id} />
+        </div>
+      {/each}
+      {#each terminalTabs as tab (tab.id)}
         <div class="terminal-wrapper" class:active={activeTabId === tab.id}>
           <TerminalView paneId={tab.paneId} active={activeTabId === tab.id} />
         </div>
@@ -195,6 +325,7 @@
     cursor: pointer;
     white-space: nowrap;
     font-family: inherit;
+    user-select: none;
   }
 
   .tab:hover {
@@ -234,6 +365,10 @@
 
   .tab-dot.opencode {
     background-color: var(--green);
+  }
+
+  .tab-dot.terminal {
+    background-color: var(--text-muted);
   }
 
   .tab-label {

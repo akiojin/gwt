@@ -27,6 +27,9 @@ pub struct Profile {
     /// AI settings (optional)
     #[serde(default)]
     pub ai: Option<AISettings>,
+    /// AI settings enabled flag (optional)
+    #[serde(default)]
+    pub ai_enabled: Option<bool>,
 }
 
 impl Profile {
@@ -38,6 +41,7 @@ impl Profile {
             disabled_env: Vec::new(),
             description: String::new(),
             ai: None,
+            ai_enabled: None,
         }
     }
 
@@ -56,11 +60,17 @@ impl Profile {
 
     /// Resolve AI settings with environment fallbacks
     pub fn resolved_ai_settings(&self) -> Option<ResolvedAISettings> {
+        if self.ai_enabled == Some(false) {
+            return None;
+        }
         self.ai.as_ref().map(|settings| settings.resolved())
     }
 
     /// Check if AI settings are enabled for this profile
     pub fn ai_enabled(&self) -> bool {
+        if self.ai_enabled == Some(false) {
+            return false;
+        }
         self.ai
             .as_ref()
             .map(|settings| settings.is_enabled())
@@ -347,9 +357,18 @@ impl ProfilesConfig {
     ///
     /// Rules:
     /// - If the active profile has `ai` configured (present), it always wins (even when disabled).
+    ///   If `ai_enabled=false`, AI is treated as disabled with no fallback.
     /// - Otherwise fall back to `default_ai`.
     pub fn resolve_active_ai_settings(&self) -> ActiveAISettingsResolution {
         if let Some(profile) = self.active_profile() {
+            if profile.ai_enabled == Some(false) {
+                return ActiveAISettingsResolution {
+                    source: ActiveAISettingsSource::ActiveProfile,
+                    ai_enabled: false,
+                    summary_enabled: false,
+                    resolved: None,
+                };
+            }
             if let Some(settings) = profile.ai.as_ref() {
                 let ai_enabled = settings.is_enabled();
                 let summary_enabled = settings.is_summary_enabled();
@@ -716,6 +735,15 @@ profiles:
     }
 
     #[test]
+    fn test_profile_ai_disabled_flag_blocks_settings() {
+        let mut profile = Profile::new("dev");
+        profile.ai = Some(ai_settings("gpt-5.2"));
+        profile.ai_enabled = Some(false);
+        assert!(!profile.ai_enabled());
+        assert!(profile.resolved_ai_settings().is_none());
+    }
+
+    #[test]
     fn resolve_active_ai_settings_prefers_active_profile_when_enabled() {
         let mut profiles = HashMap::new();
         let mut dev = Profile::new("dev");
@@ -742,6 +770,28 @@ profiles:
         let mut dev = Profile::new("dev");
         // Explicit AI config exists but is disabled (empty model).
         dev.ai = Some(ai_settings(""));
+        profiles.insert("dev".to_string(), dev);
+
+        let config = ProfilesConfig {
+            version: 1,
+            active: Some("dev".to_string()),
+            default_ai: Some(ai_settings("gpt-5.1")),
+            profiles,
+        };
+
+        let resolved = config.resolve_active_ai_settings();
+        assert_eq!(resolved.source, ActiveAISettingsSource::ActiveProfile);
+        assert!(!resolved.ai_enabled);
+        assert!(!resolved.summary_enabled);
+        assert!(resolved.resolved.is_none());
+    }
+
+    #[test]
+    fn resolve_active_ai_settings_disables_when_profile_ai_enabled_flag_false() {
+        let mut profiles = HashMap::new();
+        let mut dev = Profile::new("dev");
+        dev.ai = Some(ai_settings("gpt-5.2"));
+        dev.ai_enabled = Some(false);
         profiles.insert("dev".to_string(), dev);
 
         let config = ProfilesConfig {

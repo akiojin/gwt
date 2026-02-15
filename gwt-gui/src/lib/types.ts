@@ -6,6 +6,7 @@ export interface BranchInfo {
   ahead: number;
   behind: number;
   divergence_status: string; // "UpToDate" | "Ahead" | "Behind" | "Diverged"
+  commit_timestamp?: number | null;
   last_tool_usage?: string | null;
 }
 
@@ -156,6 +157,7 @@ export interface Profile {
   disabled_env: string[];
   description: string;
   ai?: AISettings | null;
+  ai_enabled?: boolean | null;
 }
 
 export interface ProfilesConfig {
@@ -169,8 +171,9 @@ export interface Tab {
   id: string;
   label: string;
   agentId?: "claude" | "codex" | "gemini" | "opencode";
-  type: "summary" | "agent" | "settings" | "versionHistory" | "agentMode";
+  type: "summary" | "agent" | "settings" | "versionHistory" | "agentMode" | "terminal";
   paneId?: string;
+  cwd?: string;
 }
 
 export interface ToolSessionEntry {
@@ -190,6 +193,10 @@ export interface ToolSessionEntry {
   docker_recreate?: boolean | null;
   docker_build?: boolean | null;
   docker_keep?: boolean | null;
+  /** Name of the Docker container launched for this tool session. */
+  docker_container_name?: string | null;
+  /** CLI args used in `docker-compose` launch for this session. */
+  docker_compose_args?: string[] | null;
   timestamp: number;
 }
 
@@ -435,4 +442,66 @@ export interface LaunchAgentRequest {
   dockerBuild?: boolean;
   dockerKeep?: boolean;
   issueNumber?: number;
+}
+
+// PR Status types (SPEC-d6949f99)
+
+export interface PrStatusInfo {
+  number: number;
+  title: string;
+  state: "OPEN" | "CLOSED" | "MERGED";
+  url: string;
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+  author: string;
+  baseBranch: string;
+  headBranch: string;
+  labels: string[];
+  assignees: string[];
+  milestone: string | null;
+  linkedIssues: number[];
+  checkSuites: WorkflowRunInfo[];
+  reviews: ReviewInfo[];
+  reviewComments: ReviewComment[];
+  changedFilesCount: number;
+  additions: number;
+  deletions: number;
+}
+
+export interface WorkflowRunInfo {
+  workflowName: string;
+  runId: number;
+  status: "queued" | "in_progress" | "completed";
+  conclusion:
+    | "success"
+    | "failure"
+    | "neutral"
+    | "cancelled"
+    | "timed_out"
+    | "action_required"
+    | "skipped"
+    | null;
+}
+
+export interface ReviewInfo {
+  reviewer: string;
+  state:
+    | "APPROVED"
+    | "CHANGES_REQUESTED"
+    | "COMMENTED"
+    | "PENDING"
+    | "DISMISSED";
+}
+
+export interface ReviewComment {
+  author: string;
+  body: string;
+  filePath: string | null;
+  line: number | null;
+  codeSnippet: string | null;
+  createdAt: string;
+}
+
+export interface PrStatusResponse {
+  statuses: Record<string, PrStatusInfo | null>;
+  ghStatus: GhCliStatus;
 }

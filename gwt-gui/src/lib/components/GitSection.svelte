@@ -7,9 +7,13 @@
   let {
     projectPath,
     branch,
+    collapsible = true,
+    defaultCollapsed = true,
   }: {
     projectPath: string;
     branch: string;
+    collapsible?: boolean;
+    defaultCollapsed?: boolean;
   } = $props();
 
   let collapsed: boolean = $state(true);
@@ -23,6 +27,11 @@
 
   type TabId = "changes" | "commits" | "stash";
   let activeTab: TabId = $state("changes");
+
+  function handleHeaderClick() {
+    if (!collapsible) return;
+    collapsed = !collapsed;
+  }
 
   function toErrorMessage(err: unknown): string {
     if (typeof err === "string") return err;
@@ -79,6 +88,10 @@
     loadSummary();
   });
 
+  $effect(() => {
+    collapsed = collapsible ? defaultCollapsed : false;
+  });
+
   let summaryText = $derived.by(() => {
     if (!summary) return "";
     const parts: string[] = [];
@@ -96,9 +109,11 @@
 <div class="git-section">
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="git-header" onclick={() => (collapsed = !collapsed)}>
+  <div class="git-header" class:clickable={collapsible} onclick={handleHeaderClick}>
     <div class="git-header-left">
-      <span class="collapse-icon">{collapsed ? ">" : "v"}</span>
+      {#if collapsible}
+        <span class="collapse-icon">{collapsed ? ">" : "v"}</span>
+      {/if}
       <span class="git-title">Git</span>
       {#if loading}
         <span class="git-summary-text">Loading git info...</span>
@@ -118,7 +133,7 @@
     </button>
   </div>
 
-  {#if !collapsed}
+  {#if !collapsible || !collapsed}
     <div class="git-body">
       {#if error}
         <div class="git-error">{error}</div>
@@ -198,11 +213,15 @@
     align-items: center;
     justify-content: space-between;
     padding: 10px 14px;
-    cursor: pointer;
+    cursor: default;
     user-select: none;
   }
 
-  .git-header:hover {
+  .git-header.clickable {
+    cursor: pointer;
+  }
+
+  .git-header.clickable:hover {
     background: var(--bg-hover);
   }
 

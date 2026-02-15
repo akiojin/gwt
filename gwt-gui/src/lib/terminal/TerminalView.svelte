@@ -126,11 +126,16 @@
     }
   }
 
-  function scrollViewportByWheel(rootEl: HTMLElement, event: WheelEvent) {
-    const viewport = rootEl.querySelector<HTMLElement>(".xterm-viewport");
-    if (!viewport) return;
+  function isTrackpadLikeWheel(event: WheelEvent): boolean {
+    if (event.deltaMode !== 0) return false;
+    return !Number.isInteger(event.deltaY) || Math.abs(event.deltaY) <= 60;
+  }
 
-    if (event.deltaY === 0) return;
+  function scrollViewportByWheel(rootEl: HTMLElement, event: WheelEvent): boolean {
+    const viewport = rootEl.querySelector<HTMLElement>(".xterm-viewport");
+    if (!viewport) return false;
+
+    if (event.deltaY === 0) return false;
 
     const fontSize =
       typeof terminal?.options.fontSize === "number" ? terminal.options.fontSize : 13;
@@ -146,13 +151,19 @@
     }
 
     const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-    viewport.scrollTop = Math.min(Math.max(viewport.scrollTop + delta, 0), maxScrollTop);
+    const nextScrollTop = Math.min(Math.max(viewport.scrollTop + delta, 0), maxScrollTop);
+    const didScroll = nextScrollTop !== viewport.scrollTop;
+    viewport.scrollTop = nextScrollTop;
+    return didScroll;
   }
 
   onMount(() => {
     const rootEl = containerEl;
     if (!rootEl) return;
     let cancelled = false;
+    let receivedLiveOutput = false;
+    let restoringScrollback = true;
+    const pendingLiveOutputChunks: Uint8Array[] = [];
     const unregisterVoiceInputTarget = registerTerminalInputTarget(paneId, rootEl);
 
     const term = new Terminal({
@@ -201,13 +212,20 @@
     });
 
     const handleWheel = (event: WheelEvent) => {
-      if (!active || !terminal) return;
       if (event.deltaY === 0) return;
+      if (!terminal) return;
 
+      const wasFocused = isTerminalFocused(rootEl);
       focusTerminalIfNeeded(rootEl, true);
+
+      const shouldFallback = !wasFocused || isTrackpadLikeWheel(event);
+      if (!shouldFallback) return;
+
+      const didScroll = scrollViewportByWheel(rootEl, event);
+      if (!didScroll) return;
+
       event.preventDefault();
       event.stopImmediatePropagation();
-      scrollViewportByWheel(rootEl, event);
     };
     rootEl.addEventListener("wheel", handleWheel, { passive: false, capture: true });
 
@@ -287,8 +305,28 @@
       writeToTerminalBytes(Array.from(bytes));
     });
 
-    // Best-effort: show recent scrollback so restored tabs aren't blank.
+    // Subscribe first so startup output isn't lost before the listener attaches.
     (async () => {
+      // Listen to terminal output from backend.
+      const unlistenFn = await setupEventListener(term, (bytes) => {
+        receivedLiveOutput = true;
+        if (restoringScrollback) {
+          pendingLiveOutputChunks.push(bytes);
+          return;
+        }
+        term.write(bytes);
+      });
+      if (cancelled) {
+        if (unlistenFn) {
+          unlistenFn();
+        }
+        return;
+      }
+      if (unlistenFn) {
+        unlisten = unlistenFn;
+      }
+
+      // Best-effort: show recent scrollback so restored tabs aren't blank.
       try {
         const { invoke } = await import("@tauri-apps/api/core");
         const text = await invoke<string>("capture_scrollback_tail", {
@@ -300,18 +338,12 @@
         }
       } catch {
         // Ignore: not available outside Tauri runtime.
-      }
-
-      // Listen to terminal output from backend.
-      const unlistenFn = await setupEventListener(term);
-      if (cancelled) {
-        if (unlistenFn) {
-          unlistenFn();
+      } finally {
+        restoringScrollback = false;
+        for (const chunk of pendingLiveOutputChunks) {
+          term.write(chunk);
         }
-        return;
-      }
-      if (unlistenFn) {
-        unlisten = unlistenFn;
+        pendingLiveOutputChunks.length = 0;
       }
     })();
 
@@ -357,7 +389,10 @@
     };
   });
 
-  async function setupEventListener(term: Terminal): Promise<(() => void) | null> {
+  async function setupEventListener(
+    term: Terminal,
+    onOutput?: (bytes: Uint8Array) => void,
+  ): Promise<(() => void) | null> {
     try {
       const { listen } = await import("@tauri-apps/api/event");
       const unlistenFn = await listen<{ pane_id: string; data: number[] }>(
@@ -365,7 +400,11 @@
         (event) => {
           if (event.payload.pane_id === paneId) {
             const bytes = new Uint8Array(event.payload.data);
-            term.write(bytes);
+            if (onOutput) {
+              onOutput(bytes);
+            } else {
+              term.write(bytes);
+            }
           }
         }
       );

@@ -83,13 +83,19 @@
     }
   });
 
+  function isAiEnabled(profile: Profile | null): boolean {
+    if (!profile) return false;
+    if (profile.ai_enabled === false) return false;
+    return !!profile.ai;
+  }
+
   $effect(() => {
     const profileKey = selectedProfileKey.trim();
     const ai = currentProfile?.ai;
     const endpoint = ai?.endpoint?.trim() ?? "";
     const apiKey = ai?.api_key?.trim() ?? "";
 
-    if (!profileKey || !ai) {
+    if (!profileKey || !ai || !isAiEnabled(currentProfile)) {
       resetAiModelsState();
       return;
     }
@@ -193,7 +199,7 @@
     const ai = currentProfile?.ai;
     const endpoint = ai?.endpoint?.trim() ?? "";
     const apiKey = ai?.api_key?.trim() ?? "";
-    if (!profileKey || !ai || !endpoint) {
+    if (!profileKey || !ai || !endpoint || !isAiEnabled(currentProfile)) {
       aiModelsError = "Endpoint is required.";
       return;
     }
@@ -407,6 +413,7 @@
     const nextProfile: Profile = enabled
       ? {
           ...p,
+          ai_enabled: true,
           ai: p.ai ?? {
             endpoint: "https://api.openai.com/v1",
             api_key: "",
@@ -414,7 +421,7 @@
             summary_enabled: true,
           },
         }
-      : { ...p, ai: null };
+      : { ...p, ai_enabled: false };
     profiles = {
       ...profiles,
       profiles: { ...(profiles.profiles ?? {}), [selectedProfileKey]: nextProfile },
@@ -786,13 +793,15 @@
                 <input
                   id="ai-enabled"
                   type="checkbox"
-                  checked={!!currentProfile.ai}
+                  checked={isAiEnabled(currentProfile)}
                   onchange={(e) => setAiEnabled((e.target as HTMLInputElement).checked)}
                 />
                 <label for="ai-enabled" class="ai-enabled-label">Enable AI settings</label>
               </div>
 
-              {#if currentProfile.ai}
+              {#if isAiEnabled(currentProfile)}
+                {@const currentAi = currentProfile.ai}
+                {@const currentEndpoint = currentAi?.endpoint?.trim() ?? ""}
                 <div class="ai-grid">
                   <div class="ai-field">
                     <span class="ai-label">Endpoint</span>
@@ -802,7 +811,7 @@
                       autocorrect="off"
                       autocomplete="off"
                       spellcheck="false"
-                      value={currentProfile.ai.endpoint}
+                      value={currentAi?.endpoint ?? ""}
                       oninput={(e) => updateAiField("endpoint", (e.target as HTMLInputElement).value)}
                     />
                   </div>
@@ -814,7 +823,7 @@
                       autocorrect="off"
                       autocomplete="off"
                       spellcheck="false"
-                      value={currentProfile.ai.api_key}
+                      value={currentAi?.api_key ?? ""}
                       oninput={(e) => updateAiField("api_key", (e.target as HTMLInputElement).value)}
                     />
                   </div>
@@ -823,8 +832,8 @@
                     <div class="row ai-model-row">
                       <select
                         class="select ai-model-select"
-                        value={currentProfile.ai.model}
-                        disabled={aiModelsLoading || !currentProfile.ai.endpoint.trim()}
+                        value={currentAi?.model ?? ""}
+                        disabled={aiModelsLoading || !currentEndpoint}
                         onchange={(e) => updateAiField("model", (e.target as HTMLSelectElement).value)}
                       >
                         <option value="">Select model...</option>
@@ -835,7 +844,7 @@
                       <button
                         class="btn btn-ghost"
                         onclick={refreshAiModels}
-                        disabled={aiModelsLoading || !currentProfile.ai.endpoint.trim()}
+                        disabled={aiModelsLoading || !currentEndpoint}
                       >
                         {aiModelsLoading ? "Loading..." : "Refresh"}
                       </button>
@@ -846,7 +855,7 @@
                       <span class="field-hint">
                         Current model is not listed in /v1/models.
                       </span>
-                    {:else if !aiModelsLoading && aiModels.length === 0 && currentProfile.ai.endpoint.trim()}
+                    {:else if !aiModelsLoading && aiModels.length === 0 && currentEndpoint}
                       <span class="field-hint">No models returned from /v1/models.</span>
                     {/if}
                   </div>
@@ -856,7 +865,7 @@
                       <input
                         id="ai-summary"
                         type="checkbox"
-                        checked={currentProfile.ai.summary_enabled}
+                        checked={currentAi?.summary_enabled ?? false}
                         onchange={(e) => updateAiField("summary_enabled", (e.target as HTMLInputElement).checked)}
                       />
                       <label for="ai-summary">Enabled</label>

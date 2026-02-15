@@ -16,12 +16,24 @@ export type StoredAgentTab = {
   label: string;
   agentId?: Tab["agentId"];
 };
+
+export type StoredTerminalTab = {
+  type: "terminal";
+  paneId: string;
+  label: string;
+  cwd?: string;
+};
+
 export type StoredStaticTab = {
   type: "agentMode" | "settings" | "versionHistory";
   id: string;
   label: string;
 };
-export type StoredProjectTab = StoredAgentTab | StoredStaticTab;
+
+export type StoredProjectTab =
+  | StoredAgentTab
+  | StoredTerminalTab
+  | StoredStaticTab;
 
 /**
  * Persisted tab state for a single project.
@@ -29,6 +41,16 @@ export type StoredProjectTab = StoredAgentTab | StoredStaticTab;
 export type StoredProjectTabs = {
   tabs: StoredProjectTab[];
   activeTabId: string | null;
+};
+
+/**
+ * Result of restoring persisted tabs against currently known panes.
+ */
+export type BuildRestoredProjectTabsResult = {
+  tabs: Tab[];
+  activeTabId: string | null;
+  terminalTabsToRespawn: StoredTerminalTab[];
+  activeTerminalPaneIdToRespawn: string | null;
 };
 
 export const AGENT_TAB_RESTORE_MAX_RETRIES = 8;
@@ -40,9 +62,7 @@ export function shouldRetryAgentTabRestore(
   maxRetries = AGENT_TAB_RESTORE_MAX_RETRIES,
 ): boolean {
   return (
-    storedTabsCount > 0 &&
-    restoredTabsCount === 0 &&
-    attempt < maxRetries - 1
+    storedTabsCount > 0 && restoredTabsCount === 0 && attempt < maxRetries - 1
   );
 }
 
@@ -51,11 +71,18 @@ type StoredProjectTabsRoot = {
   byProjectPath: Record<string, StoredProjectTabs>;
 };
 
-type LegacyStoredAgentTab = { paneId: string; label: string };
+type LegacyStoredAgentTab = {
+  paneId: string;
+  label: string;
+  type?: "terminal";
+  cwd?: string;
+};
+
 type LegacyStoredProjectAgentTabs = {
   tabs: LegacyStoredAgentTab[];
   activePaneId: string | null;
 };
+
 type LegacyStoredProjectAgentTabsRoot = {
   version: 1;
   byProjectPath: Record<string, LegacyStoredProjectAgentTabs>;
@@ -77,7 +104,12 @@ function normalizeString(value: unknown): string {
 
 function normalizeAgentId(value: unknown): Tab["agentId"] | undefined {
   const id = normalizeString(value);
-  if (id === "claude" || id === "codex" || id === "gemini" || id === "opencode") {
+  if (
+    id === "claude" ||
+    id === "codex" ||
+    id === "gemini" ||
+    id === "opencode"
+  ) {
     return id;
   }
   return undefined;
@@ -101,7 +133,24 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
     };
   }
 
-  if (type === "agentMode" || type === "settings" || type === "versionHistory") {
+  if (type === "terminal") {
+    const paneId = normalizeString(obj.paneId);
+    if (!paneId) return null;
+    const label = typeof obj.label === "string" ? obj.label : "";
+    const cwd = typeof obj.cwd === "string" ? obj.cwd : undefined;
+    return {
+      type: "terminal",
+      paneId,
+      label,
+      ...(cwd ? { cwd } : {}),
+    };
+  }
+
+  if (
+    type === "agentMode" ||
+    type === "settings" ||
+    type === "versionHistory"
+  ) {
     const fallbackId =
       type === "agentMode"
         ? "agentMode"
@@ -124,6 +173,7 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
 
 function tabStorageKey(tab: StoredProjectTab): string {
   if (tab.type === "agent") return `agent:${tab.paneId}`;
+  if (tab.type === "terminal") return `terminal:${tab.paneId}`;
   return `id:${tab.id}`;
 }
 
@@ -147,7 +197,9 @@ function sanitizeProjectTabsEntry(rawEntry: unknown): StoredProjectTabs | null {
   return { tabs, activeTabId };
 }
 
-function sanitizeLegacyProjectTabsEntry(rawEntry: unknown): LegacyStoredProjectAgentTabs | null {
+function sanitizeLegacyProjectTabsEntry(
+  rawEntry: unknown,
+): LegacyStoredProjectAgentTabs | null {
   if (!rawEntry || typeof rawEntry !== "object") return null;
   const entry = rawEntry as Record<string, unknown>;
   const tabsRaw = Array.isArray(entry.tabs) ? entry.tabs : [];
@@ -160,7 +212,15 @@ function sanitizeLegacyProjectTabsEntry(rawEntry: unknown): LegacyStoredProjectA
     const paneId = normalizeString(obj.paneId);
     if (!paneId || seenPaneIds.has(paneId)) continue;
     const label = typeof obj.label === "string" ? obj.label : "";
-    tabs.push({ paneId, label });
+    const type =
+      normalizeString(obj.type) === "terminal" ? "terminal" : undefined;
+    const cwd = typeof obj.cwd === "string" ? obj.cwd : undefined;
+    tabs.push({
+      paneId,
+      label,
+      ...(type ? { type } : {}),
+      ...(cwd ? { cwd } : {}),
+    });
     seenPaneIds.add(paneId);
   }
 
@@ -181,9 +241,12 @@ function loadStoredProjectTabsV2(
     const root = parsed as Partial<StoredProjectTabsRoot>;
 
     if (root.version !== 2) return null;
-    if (!root.byProjectPath || typeof root.byProjectPath !== "object") return null;
+    if (!root.byProjectPath || typeof root.byProjectPath !== "object")
+      return null;
 
-    const entryRaw = (root.byProjectPath as Record<string, unknown>)[projectPath];
+    const entryRaw = (root.byProjectPath as Record<string, unknown>)[
+      projectPath
+    ];
     return sanitizeProjectTabsEntry(entryRaw);
   } catch {
     return null;
@@ -203,18 +266,38 @@ function loadStoredProjectTabsLegacy(
     const root = parsed as Partial<LegacyStoredProjectAgentTabsRoot>;
 
     if (root.version !== 1) return null;
-    if (!root.byProjectPath || typeof root.byProjectPath !== "object") return null;
+    if (!root.byProjectPath || typeof root.byProjectPath !== "object")
+      return null;
 
-    const entryRaw = (root.byProjectPath as Record<string, unknown>)[projectPath];
+    const entryRaw = (root.byProjectPath as Record<string, unknown>)[
+      projectPath
+    ];
     const legacy = sanitizeLegacyProjectTabsEntry(entryRaw);
     if (!legacy) return null;
 
-    const tabs: StoredProjectTab[] = legacy.tabs.map((tab) => ({
-      type: "agent",
-      paneId: tab.paneId,
-      label: tab.label,
-    }));
-    const activeTabId = legacy.activePaneId ? `agent-${legacy.activePaneId}` : null;
+    const tabs: StoredProjectTab[] = legacy.tabs.map((tab) => {
+      if (tab.type === "terminal") {
+        return {
+          type: "terminal",
+          paneId: tab.paneId,
+          label: tab.label,
+          ...(tab.cwd ? { cwd: tab.cwd } : {}),
+        };
+      }
+
+      return {
+        type: "agent",
+        paneId: tab.paneId,
+        label: tab.label,
+      };
+    });
+
+    const activeEntry = legacy.tabs.find(
+      (tab) => tab.paneId === legacy.activePaneId,
+    );
+    const activeTabId = legacy.activePaneId
+      ? `${activeEntry?.type === "terminal" ? "terminal" : "agent"}-${legacy.activePaneId}`
+      : null;
 
     return { tabs, activeTabId };
   } catch {
@@ -237,7 +320,10 @@ export function loadStoredProjectTabs(
   const key = projectPath.trim();
   if (!key) return null;
 
-  return loadStoredProjectTabsV2(key, store) ?? loadStoredProjectTabsLegacy(key, store);
+  return (
+    loadStoredProjectTabsV2(key, store) ??
+    loadStoredProjectTabsLegacy(key, store)
+  );
 }
 
 /**
@@ -284,50 +370,72 @@ export function persistStoredProjectTabs(
 }
 
 /**
- * Build the set of `Tab`s to restore by intersecting persisted pane ids with
- * currently known terminal panes.
+ * Build the set of tabs that can be restored immediately by intersecting persisted pane ids
+ * with currently known terminal panes, and list persisted terminal tabs that need respawn.
  */
 export function buildRestoredProjectTabs(
   stored: StoredProjectTabs,
   terminals: TerminalInfo[],
-): { tabs: Tab[]; activeTabId: string | null } {
+): BuildRestoredProjectTabsResult {
   const existingPaneIds = new Set(terminals.map((t) => t.pane_id));
-  const terminalByPaneId = new Map(terminals.map((terminal) => [terminal.pane_id, terminal]));
+  const terminalByPaneId = new Map(
+    terminals.map((terminal) => [terminal.pane_id, terminal]),
+  );
 
   const restoredTabs: Tab[] = [];
+  const terminalTabsToRespawn: StoredTerminalTab[] = [];
   const seen = new Set<string>();
-  for (const t of stored.tabs) {
-    if (t.type === "agent") {
-      if (!existingPaneIds.has(t.paneId)) continue;
-      const key = `agent:${t.paneId}`;
+
+  for (const tab of stored.tabs) {
+    if (tab.type === "agent") {
+      if (!existingPaneIds.has(tab.paneId)) continue;
+      const key = `agent:${tab.paneId}`;
       if (seen.has(key)) continue;
       seen.add(key);
 
-      const terminal = terminalByPaneId.get(t.paneId);
-      const agentId = inferAgentId(terminal?.agent_name) ?? t.agentId;
-
+      const terminal = terminalByPaneId.get(tab.paneId);
+      const agentId = inferAgentId(terminal?.agent_name) ?? tab.agentId;
       restoredTabs.push({
-        id: `agent-${t.paneId}`,
-        label: t.label,
+        id: `agent-${tab.paneId}`,
+        label: tab.label,
         type: "agent",
-        paneId: t.paneId,
+        paneId: tab.paneId,
         ...(agentId ? { agentId } : {}),
       });
       continue;
     }
 
-    const key = `id:${t.id}`;
+    if (tab.type === "terminal") {
+      const key = `terminal:${tab.paneId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      if (existingPaneIds.has(tab.paneId)) {
+        restoredTabs.push({
+          id: `terminal-${tab.paneId}`,
+          label: tab.label,
+          type: "terminal",
+          paneId: tab.paneId,
+          ...(tab.cwd ? { cwd: tab.cwd } : {}),
+        });
+      } else {
+        terminalTabsToRespawn.push(tab);
+      }
+      continue;
+    }
+
+    const key = `id:${tab.id}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    restoredTabs.push({
-      id: t.id,
-      label: t.label,
-      type: t.type,
-    });
+    restoredTabs.push({ id: tab.id, label: tab.label, type: tab.type });
   }
 
   if (!restoredTabs.some((tab) => tab.id === "agentMode")) {
-    restoredTabs.unshift({ id: "agentMode", label: "Agent Mode", type: "agentMode" });
+    restoredTabs.unshift({
+      id: "agentMode",
+      label: "Agent Mode",
+      type: "agentMode",
+    });
   }
 
   const restoredIds = new Set(restoredTabs.map((tab) => tab.id));
@@ -336,5 +444,21 @@ export function buildRestoredProjectTabs(
       ? stored.activeTabId
       : null;
 
-  return { tabs: restoredTabs, activeTabId };
+  const activeTerminalPaneId =
+    stored.activeTabId && stored.activeTabId.startsWith("terminal-")
+      ? stored.activeTabId.slice("terminal-".length)
+      : "";
+
+  const activeTerminalPaneIdToRespawn =
+    activeTerminalPaneId &&
+    terminalTabsToRespawn.some((tab) => tab.paneId === activeTerminalPaneId)
+      ? activeTerminalPaneId
+      : null;
+
+  return {
+    tabs: restoredTabs,
+    activeTabId,
+    terminalTabsToRespawn,
+    activeTerminalPaneIdToRespawn,
+  };
 }
