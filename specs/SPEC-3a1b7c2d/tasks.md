@@ -34,3 +34,17 @@
 ## Phase 6: 仕上げ・横断
 
 - [x] T011 [共通] `cargo test -p gwt-tauri sessions` を実行 `crates/gwt-tauri`
+
+## Phase 7: 永続キャッシュ（US4/US6）
+
+- [ ] T012 [US4] Session Summary の永続キャッシュ保存先/フォーマットを実装（atomic write） `crates/gwt-core` / `crates/gwt-tauri`
+- [ ] T013 [US4] `get_branch_session_summary` 初回で永続キャッシュを lazy load して即表示に反映 `crates/gwt-tauri/src/commands/sessions.rs`
+- [ ] T014 [US6] 何を要約しているか（source/識別子/入力更新時刻）を結果に含め、UIで表示 `crates/gwt-tauri` + `gwt-gui`
+- [ ] T015 [US4] 永続キャッシュ即表示のユニットテスト追加 `crates/gwt-tauri/src/commands/sessions.rs`
+
+## Phase 8: 更新制御（US5）
+
+- [ ] T016 [US5] タブ無しは更新不要でキャッシュ表示のみ（自動更新しない） `gwt-gui/src/lib/components/WorktreeSummaryPanel.svelte`
+- [ ] T017 [US5] Liveフォーカス15秒 / Live非フォーカス60秒へ更新間隔を切替 `gwt-gui/src/lib/components/WorktreeSummaryPanel.svelte`
+- [ ] T018 [US5] スクロールバックに変更がない場合は更新しないことをテストで保証 `crates/gwt-tauri/src/commands/sessions.rs`
+- [ ] T019 [US5] フロント側の更新間隔切替のテスト追加 `gwt-gui/src/lib/components/WorktreeSummaryPanel.test.ts`
