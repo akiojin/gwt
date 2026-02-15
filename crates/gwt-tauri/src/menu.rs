@@ -29,8 +29,11 @@ pub const MENU_ID_WINDOW_PREVIOUS_TAB: &str = "window-previous-tab";
 pub const MENU_ID_WINDOW_NEXT_TAB: &str = "window-next-tab";
 pub const MENU_ID_WINDOW_NEXT_WINDOW: &str = "window-next-window";
 pub const MENU_ID_WINDOW_PREVIOUS_WINDOW: &str = "window-previous-window";
+#[cfg(target_os = "macos")]
 pub const MENU_ID_WINDOW_MINIMIZE: &str = "window-minimize";
+#[cfg(target_os = "macos")]
 pub const MENU_ID_WINDOW_ZOOM: &str = "window-zoom";
+#[cfg(target_os = "macos")]
 pub const MENU_ID_WINDOW_BRING_ALL_TO_FRONT: &str = "window-bring-all-to-front";
 
 pub const MENU_ID_SETTINGS_PREFERENCES: &str = "settings-preferences";
