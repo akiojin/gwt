@@ -33,6 +33,7 @@ pub struct SessionSummaryCache {
     cache: HashMap<String, SessionSummary>,
     last_modified: HashMap<String, SystemTime>,
     session_ids: HashMap<String, String>,
+    tool_ids: HashMap<String, String>,
 }
 
 impl SessionSummaryCache {
@@ -40,16 +41,30 @@ impl SessionSummaryCache {
         self.cache.get(branch)
     }
 
+    pub fn input_mtime(&self, branch: &str) -> Option<SystemTime> {
+        self.last_modified.get(branch).copied()
+    }
+
+    pub fn tool_id(&self, branch: &str) -> Option<&str> {
+        self.tool_ids.get(branch).map(|s| s.as_str())
+    }
+
+    pub fn session_id(&self, branch: &str) -> Option<&str> {
+        self.session_ids.get(branch).map(|s| s.as_str())
+    }
+
     pub fn set(
         &mut self,
         branch: String,
+        tool_id: String,
         session_id: String,
         summary: SessionSummary,
         mtime: SystemTime,
     ) {
         self.cache.insert(branch.clone(), summary);
         self.last_modified.insert(branch.clone(), mtime);
-        self.session_ids.insert(branch, session_id);
+        self.session_ids.insert(branch.clone(), session_id);
+        self.tool_ids.insert(branch, tool_id);
     }
 
     pub fn is_stale(&self, branch: &str, session_id: &str, current_mtime: SystemTime) -> bool {
@@ -750,7 +765,13 @@ mod tests {
         let mut cache = SessionSummaryCache::default();
         let summary = SessionSummary::default();
         let now = SystemTime::now();
-        cache.set("main".to_string(), "sess-1".to_string(), summary, now);
+        cache.set(
+            "main".to_string(),
+            "codex-cli".to_string(),
+            "sess-1".to_string(),
+            summary,
+            now,
+        );
         assert!(cache.is_stale("main", "sess-2", now));
     }
 
