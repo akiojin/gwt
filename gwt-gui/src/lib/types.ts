@@ -193,6 +193,10 @@ export interface ToolSessionEntry {
   docker_recreate?: boolean | null;
   docker_build?: boolean | null;
   docker_keep?: boolean | null;
+  /** Name of the Docker container launched for this tool session. */
+  docker_container_name?: string | null;
+  /** CLI args used in `docker-compose` launch for this session. */
+  docker_compose_args?: string[] | null;
   timestamp: number;
 }
 

@@ -2,10 +2,35 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, waitFor, fireEvent, cleanup } from "@testing-library/svelte";
 
 const invokeMock = vi.fn();
+type TauriEventHandler = (event: { payload: any }) => void;
+const eventListeners = new Map<string, Set<TauriEventHandler>>();
+const listenMock = vi.fn(async (eventName: string, handler: TauriEventHandler) => {
+  let bucket = eventListeners.get(eventName);
+  if (!bucket) {
+    bucket = new Set();
+    eventListeners.set(eventName, bucket);
+  }
+  bucket.add(handler);
+  return () => {
+    bucket?.delete(handler);
+    if (bucket && bucket.size === 0) eventListeners.delete(eventName);
+  };
+});
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
 }));
+
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: listenMock,
+}));
+
+async function emitTauriEvent(eventName: string, payload: any) {
+  const handlers = Array.from(eventListeners.get(eventName) ?? []);
+  for (const handler of handlers) {
+    await handler({ payload });
+  }
+}
 
 async function renderSidebar(props: any) {
   const { default: Sidebar } = await import("./Sidebar.svelte");
@@ -32,6 +57,7 @@ const branchFixture = {
   name: "feature/sidebar-size",
   commit: "1234567",
   is_current: false,
+  is_agent_running: false,
   ahead: 0,
   behind: 0,
   divergence_status: "UpToDate",
@@ -113,6 +139,8 @@ const makeLocalStorageMock = () => {
 describe("Sidebar", () => {
   beforeEach(() => {
     cleanup();
+    eventListeners.clear();
+    listenMock.mockClear();
     const mockLocalStorage = makeLocalStorageMock();
     Object.defineProperty(globalThis, "localStorage", {
       value: mockLocalStorage,
@@ -311,9 +339,7 @@ describe("Sidebar", () => {
 
       await rendered.findByText(branchFixture.name);
       await vi.advanceTimersByTimeAsync(30_000);
-      await waitFor(() => {
-        expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(0);
-      });
+      expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(0);
 
       const beforeSwitchCount = countInvokeCalls("fetch_pr_status");
 
@@ -445,11 +471,11 @@ describe("Sidebar", () => {
   });
 
   it("clears stale polling statuses immediately when projectPath changes", async () => {
-    vi.useFakeTimers();
     type PrStatusResponse = {
       statuses: Record<string, unknown>;
       ghStatus: { available: boolean; authenticated: boolean };
     };
+    vi.useFakeTimers();
     let resolveProjectB: ((value: PrStatusResponse) => void) | null = null;
     try {
       invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
@@ -465,10 +491,23 @@ describe("Sidebar", () => {
                   state: "OPEN",
                   title: "A",
                   url: "https://example.invalid/pr/111",
+                  mergeable: "MERGEABLE",
                   draft: false,
+                  author: "owner",
+                  baseBranch: "main",
+                  headBranch: branchFixture.name,
+                  labels: [],
+                  assignees: [],
+                  milestone: null,
+                  linkedIssues: [],
                   mergedAt: null,
                   updatedAt: "2026-02-14T00:00:00Z",
+                  reviews: [],
+                  reviewComments: [],
                   checkSuites: [],
+                  changedFilesCount: 0,
+                  additions: 0,
+                  deletions: 0,
                 },
               },
               ghStatus: { available: true, authenticated: true },
@@ -478,22 +517,71 @@ describe("Sidebar", () => {
             resolveProjectB = resolve;
           });
         }
+        if (command === "fetch_pr_detail") {
+          if (path === "/tmp/project-a") {
+            return Promise.resolve({
+              number: 111,
+              title: "A",
+              state: "OPEN",
+              url: "https://example.invalid/pr/111",
+              mergeable: "MERGEABLE",
+              author: "test",
+              baseBranch: "main",
+              headBranch: branchFixture.name,
+              labels: [],
+              assignees: [],
+              milestone: null,
+              linkedIssues: [],
+              checkSuites: [],
+              reviews: [],
+              reviewComments: [],
+              changedFilesCount: 0,
+              additions: 0,
+              deletions: 0,
+            });
+          }
+          return Promise.resolve({
+            number: 111,
+            title: "A",
+            state: "OPEN",
+            url: "https://example.invalid/pr/111",
+            mergeable: "MERGEABLE",
+            author: "test",
+            baseBranch: "main",
+            headBranch: branchFixture.name,
+            labels: [],
+            assignees: [],
+            milestone: null,
+            linkedIssues: [],
+            checkSuites: [],
+            reviews: [],
+            reviewComments: [],
+            changedFilesCount: 0,
+            additions: 0,
+            deletions: 0,
+          });
+        }
         return Promise.resolve([]);
       });
 
       const rendered = await renderSidebar({
         projectPath: "/tmp/project-a",
         onBranchSelect: vi.fn(),
+        selectedBranch: branchFixture,
       });
 
       await rendered.findByText(branchFixture.name);
-      await vi.advanceTimersByTimeAsync(30_000);
-      await rendered.findByText("#111 Open");
+      const prTab = rendered.container.querySelectorAll(".summary-tab")[2] as HTMLElement;
+      await fireEvent.click(prTab);
+      await rendered.findByText("#111 A");
 
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(0);
       await rendered.rerender({ projectPath: "/tmp/project-b" });
       await rendered.findByText(branchFixture.name);
       await waitFor(() => {
-        expect(rendered.queryByText("#111 Open")).toBeNull();
+        expect(rendered.queryByText("#111 A")).toBeNull();
+        expect(rendered.queryByText("No PR")).toBeTruthy();
       });
     } finally {
       const finalizeProjectB = resolveProjectB as unknown as
@@ -579,20 +667,35 @@ describe("Sidebar", () => {
       });
 
       await rendered.findByText(branchFixture.name);
+      await vi.advanceTimersByTimeAsync(30_000);
       await waitFor(() => {
-        expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(0);
+        expect(countInvokeCalls("list_worktree_branches")).toBeGreaterThan(0);
+      });
+      const beforePollCallCount = countInvokeCalls("fetch_pr_status");
+      await vi.advanceTimersByTimeAsync(30_000);
+      await waitFor(() => {
+        expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(beforePollCallCount);
+      });
+      await waitFor(() => {
+        expect(
+          rendered.container.querySelectorAll(".branch-list .branch-item").length
+        ).toBe(1);
       });
       const searchInput = rendered.getByPlaceholderText("Filter branches...");
+      const preFocusPrStatusCalls = countInvokeCalls("fetch_pr_status");
       (searchInput as HTMLInputElement).focus();
       expect(document.activeElement).toBe(searchInput);
 
-      invokeMock.mockClear();
       await vi.advanceTimersByTimeAsync(30_000);
-      expect(countInvokeCalls("fetch_pr_status")).toBe(0);
+      expect(countInvokeCalls("fetch_pr_status")).toBe(preFocusPrStatusCalls);
 
+      // Move focus away from search input so polling can resume.
       (searchInput as HTMLInputElement).blur();
+      expect(document.activeElement).not.toBe(searchInput);
       await vi.advanceTimersByTimeAsync(30_000);
-      expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(0);
+      await waitFor(() => {
+        expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(preFocusPrStatusCalls);
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -692,8 +795,8 @@ describe("Sidebar", () => {
       expect(getRenderedBranchNames(rendered)).toEqual([
         "main",
         "develop",
-        "feature/beta",
         "feature/alpha",
+        "feature/beta",
       ]);
     });
   });
@@ -766,6 +869,67 @@ describe("Sidebar", () => {
       "origin/feature/alpha",
       "origin/feature/beta",
     ]);
+  });
+
+  it("moves selected worktree with ArrowUp/ArrowDown keys", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches")
+        return [
+          { ...featureBetaBranchFixture },
+          { ...mainBranchFixture },
+          { ...developBranchFixture },
+          { ...featureAlphaBranchFixture },
+        ];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    let selectedBranch = mainBranchFixture;
+    const onBranchSelect = vi.fn((next) => {
+      selectedBranch = next;
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect,
+      selectedBranch,
+    });
+
+    await rendered.findByText(mainBranchFixture.name);
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".branch-list .branch-item").length).toBe(4);
+    });
+
+    const firstItem = rendered.container.querySelector<HTMLButtonElement>(
+      'button[data-branch-name="main"]'
+    );
+    expect(firstItem).toBeTruthy();
+    firstItem?.focus();
+
+    await fireEvent.keyDown(firstItem as HTMLElement, { key: "ArrowDown" });
+    await waitFor(() => expect(onBranchSelect).toHaveBeenCalledTimes(1));
+    expect(onBranchSelect).toHaveBeenCalledWith(expect.objectContaining({ name: developBranchFixture.name }));
+    await rendered.rerender({ selectedBranch });
+
+    onBranchSelect.mockClear();
+    const secondItem = rendered.container.querySelector<HTMLButtonElement>(
+      'button[data-branch-name="develop"]'
+    );
+    expect(secondItem).toBeTruthy();
+    secondItem?.focus();
+    await fireEvent.keyDown(secondItem as HTMLElement, { key: "ArrowUp" });
+    await waitFor(() => expect(onBranchSelect).toHaveBeenCalledTimes(1));
+    expect(onBranchSelect).toHaveBeenCalledWith(expect.objectContaining({ name: mainBranchFixture.name }));
+
+    onBranchSelect.mockClear();
+    await rendered.rerender({ selectedBranch: featureBetaBranchFixture });
+    const lastItem = rendered.container.querySelector<HTMLButtonElement>(
+      'button[data-branch-name="feature/beta"]'
+    );
+    expect(lastItem).toBeTruthy();
+    lastItem?.focus();
+    await fireEvent.keyDown(lastItem as HTMLElement, { key: "ArrowDown" });
+    await waitFor(() => expect(onBranchSelect).toHaveBeenCalledTimes(0));
   });
 
   it("applies sidebar width from props", async () => {
@@ -1016,7 +1180,7 @@ describe("Sidebar", () => {
     expect(resizeHandle?.getAttribute("aria-label")).toBe("Resize session summary");
   });
 
-  it("does not show PR/agent indicators in branch rows", async () => {
+  it("does not show PR/CI indicators in branch rows", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "list_worktree_branches") return [branchFixture];
       if (command === "list_worktrees") return [];
@@ -1054,12 +1218,10 @@ describe("Sidebar", () => {
       onBranchSelect: vi.fn(),
       prStatuses,
       ghCliStatus: { available: true, authenticated: true },
-      agentTabBranches: [branchFixture.name],
       onOpenCiLog,
     });
 
     await rendered.findByText(branchFixture.name);
-    expect(rendered.queryByTitle("Agent tab is open for this branch")).toBeNull();
     expect(rendered.queryByText(/#42 Open/)).toBeNull();
     expect(rendered.queryByText("No PR")).toBeNull();
     expect(rendered.queryByText("GitHub not connected")).toBeNull();
@@ -1069,15 +1231,32 @@ describe("Sidebar", () => {
     expect(onOpenCiLog).not.toHaveBeenCalled();
   });
 
+  it("shows an animated indicator for branches with open agent tabs", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [branchFixture];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      agentTabBranches: [branchFixture.name],
+    });
+
+    const branchButton = (await rendered.findByText(branchFixture.name)).closest("button");
+    expect(branchButton).toBeTruthy();
+    expect(branchButton?.classList.contains("agent-active")).toBe(true);
+    expect(rendered.queryByTitle("Agent tab is open for this branch")).toBeTruthy();
+  });
+
   it("highlights selected branch in Worktree list", async () => {
     const currentBranch = {
-      ...branchFixture,
-      name: "feature/current",
+      ...mainBranchFixture,
       is_current: true,
     };
     const selectedBranch = {
-      ...branchFixture,
-      name: "feature/selected",
+      ...developBranchFixture,
       is_current: false,
     };
     const onBranchSelect = vi.fn();
@@ -1096,16 +1275,283 @@ describe("Sidebar", () => {
       selectedBranch,
     });
 
-    await rendered.findByText(selectedBranch.name);
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".branch-item").length).toBe(2);
+    });
 
-    const selectedButton = rendered
-      .getByText(selectedBranch.name)
-      .closest("button");
-    const currentButton = rendered.getByText(currentBranch.name).closest("button");
+    const branchButtons = Array.from(rendered.container.querySelectorAll(".branch-item"));
+    const selectedButton = branchButtons.find((button) =>
+      button.textContent?.includes(selectedBranch.name)
+    ) as HTMLElement | undefined;
+    const currentButton = branchButtons.find((button) =>
+      button.textContent?.includes(currentBranch.name)
+    ) as HTMLElement | undefined;
 
     expect(selectedButton).toBeTruthy();
     expect(selectedButton?.classList.contains("active")).toBe(true);
     expect(currentButton).toBeTruthy();
     expect(currentButton?.classList.contains("active")).toBe(false);
+  });
+
+  it("handles sidebar resize by pointer and keyboard", async () => {
+    const onResize = vi.fn();
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      onResize,
+      widthPx: 260,
+      minWidthPx: 220,
+      maxWidthPx: 520,
+    });
+
+    const resizeHandle = rendered.container.querySelector<HTMLButtonElement>(".resize-handle");
+    expect(resizeHandle).toBeTruthy();
+
+    await fireEvent.pointerDown(resizeHandle as HTMLElement, {
+      button: 1,
+      pointerId: 10,
+      clientX: 100,
+    });
+    await fireEvent.pointerMove(window, { pointerId: 10, clientX: 180 });
+    expect(onResize).not.toHaveBeenCalled();
+
+    await fireEvent.pointerDown(resizeHandle as HTMLElement, {
+      button: 0,
+      pointerId: 1,
+      clientX: 100,
+    });
+    expect(document.body.style.cursor).toBe("col-resize");
+    expect(document.body.style.userSelect).toBe("none");
+
+    await fireEvent.pointerMove(window, { pointerId: 2, clientX: 180 });
+    expect(onResize).not.toHaveBeenCalled();
+
+    await fireEvent.pointerMove(window, { pointerId: 1, clientX: 140 });
+    expect(onResize).toHaveBeenCalledWith(300);
+
+    await fireEvent.pointerUp(window, { pointerId: 2 });
+    expect(document.body.style.cursor).toBe("col-resize");
+
+    await fireEvent.pointerUp(window, { pointerId: 1 });
+    expect(document.body.style.cursor).toBe("");
+    expect(document.body.style.userSelect).toBe("");
+
+    await fireEvent.keyDown(resizeHandle as HTMLElement, { key: "ArrowRight", shiftKey: true });
+    await fireEvent.keyDown(resizeHandle as HTMLElement, { key: "ArrowLeft" });
+    await fireEvent.keyDown(resizeHandle as HTMLElement, { key: "Home" });
+    await fireEvent.keyDown(resizeHandle as HTMLElement, { key: "End" });
+    await fireEvent.keyDown(resizeHandle as HTMLElement, { key: "Enter" });
+
+    expect(onResize).toHaveBeenCalledWith(284);
+    expect(onResize).toHaveBeenCalledWith(248);
+    expect(onResize).toHaveBeenCalledWith(220);
+    expect(onResize).toHaveBeenCalledWith(520);
+  });
+
+  it("handles summary resize by pointer and keyboard and persists height", async () => {
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    const summaryWrap = rendered.container.querySelector<HTMLElement>(".worktree-summary-wrap");
+    const summaryResizeHandle = rendered.container.querySelector<HTMLButtonElement>(
+      ".summary-resize-handle"
+    );
+    expect(summaryWrap).toBeTruthy();
+    expect(summaryResizeHandle).toBeTruthy();
+    expect(summaryWrap?.style.height).toBe("360px");
+
+    await fireEvent.keyDown(summaryResizeHandle as HTMLElement, { key: "Enter" });
+    expect(summaryWrap?.style.height).toBe("360px");
+
+    await fireEvent.keyDown(summaryResizeHandle as HTMLElement, { key: "ArrowDown" });
+    expect(summaryWrap?.style.height).toBe("344px");
+
+    await fireEvent.keyDown(summaryResizeHandle as HTMLElement, { key: "ArrowUp", shiftKey: true });
+    expect(summaryWrap?.style.height).toBe("376px");
+    expect(window.localStorage.getItem("gwt.sidebar.worktreeSummaryHeight")).toBe("376");
+
+    await fireEvent.pointerDown(summaryResizeHandle as HTMLElement, {
+      button: 0,
+      pointerId: 44,
+      clientY: 200,
+    });
+    expect(document.body.style.cursor).toBe("row-resize");
+    expect(document.body.style.userSelect).toBe("none");
+
+    await fireEvent.pointerMove(window, { pointerId: 45, clientY: 220 });
+    expect(summaryWrap?.style.height).toBe("376px");
+
+    await fireEvent.pointerMove(window, { pointerId: 44, clientY: 232 });
+    expect(summaryWrap?.style.height).toBe("344px");
+
+    await fireEvent.pointerUp(window, { pointerId: 45 });
+    expect(document.body.style.cursor).toBe("row-resize");
+
+    await fireEvent.pointerUp(window, { pointerId: 44 });
+    expect(document.body.style.cursor).toBe("");
+    expect(document.body.style.userSelect).toBe("");
+    expect(window.localStorage.getItem("gwt.sidebar.worktreeSummaryHeight")).toBe("344");
+  });
+
+  it("tracks cleanup-progress events and keeps deleting rows unselectable", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [branchFixture];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const onBranchSelect = vi.fn();
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect,
+      selectedBranch: null,
+    });
+
+    const branchLabel = await rendered.findByText(branchFixture.name);
+    const branchButton = branchLabel.closest("button");
+    expect(branchButton).toBeTruthy();
+
+    await waitFor(() =>
+      expect(
+        listenMock.mock.calls.some((call) => call[0] === "cleanup-progress")
+      ).toBe(true)
+    );
+
+    await emitTauriEvent("cleanup-progress", {
+      branch: branchFixture.name,
+      status: "deleting",
+    });
+    await waitFor(() => {
+      expect(branchButton?.classList.contains("deleting")).toBe(true);
+      expect(rendered.container.querySelector(".safety-spinner")).toBeTruthy();
+    });
+
+    await fireEvent.click(branchButton as HTMLElement);
+    expect(onBranchSelect).not.toHaveBeenCalled();
+
+    await emitTauriEvent("cleanup-progress", {
+      branch: branchFixture.name,
+      status: "done",
+    });
+    await waitFor(() => {
+      expect(branchButton?.classList.contains("deleting")).toBe(false);
+      expect(rendered.container.querySelector(".safety-spinner")).toBeNull();
+    });
+
+  });
+
+  it("opens cleanup confirmation from context menu and handles failure dialog", async () => {
+    const warningBranch = {
+      ...branchFixture,
+      name: "feature/warning",
+      ahead: 1,
+      behind: 0,
+      divergence_status: "Ahead",
+      last_tool_usage: "claude@1.0.0",
+    };
+
+    invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "list_worktree_branches") return [warningBranch];
+      if (command === "list_worktrees") {
+        return [
+          {
+            branch: warningBranch.name,
+            has_changes: true,
+            has_unpushed: false,
+            safety_level: "warning",
+          },
+        ];
+      }
+      if (command === "cleanup_single_worktree") {
+        const branch = (args?.branch as string) ?? "";
+        throw new Error(`failed to cleanup ${branch}`);
+      }
+      return [];
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+    });
+
+    const branchLabel = await rendered.findByText(warningBranch.name);
+    const branchButton = branchLabel.closest("button");
+    expect(branchButton).toBeTruthy();
+    expect(rendered.queryByText("claude@1.0.0")).toBeTruthy();
+    expect(rendered.queryByText("+1")).toBeTruthy();
+
+    await fireEvent.contextMenu(branchButton as HTMLElement);
+    await fireEvent.click(await rendered.findByRole("button", { name: "Cleanup this branch" }));
+
+    expect(rendered.queryByText("Delete Worktree")).toBeTruthy();
+    expect(rendered.queryByText(/has uncommitted changes/)).toBeTruthy();
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Delete" }));
+    await rendered.findByText("Delete Failed");
+    expect(rendered.queryByText(/failed to cleanup/)).toBeTruthy();
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Close" }));
+    await waitFor(() => {
+      expect(rendered.queryByText("Delete Failed")).toBeNull();
+    });
+  });
+
+  it("handles cleanup entry points and mode switching", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [branchFixture];
+      if (command === "list_worktrees") return [];
+      return [];
+    });
+
+    const onCleanupRequest = vi.fn();
+    const onModeChange = vi.fn();
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      onCleanupRequest,
+      onModeChange,
+      mode: "branch",
+      selectedBranch: branchFixture,
+      currentBranch: "main",
+    });
+
+    const cleanupButton = rendered.getByRole("button", { name: "Cleanup" });
+    await fireEvent.click(cleanupButton);
+    expect(onCleanupRequest).toHaveBeenCalledWith();
+
+    await waitFor(() => {
+      expect(
+        rendered.container.querySelector(`button[data-branch-name="${branchFixture.name}"]`)
+      ).toBeTruthy();
+    });
+    const branchButton = rendered.container.querySelector(
+      `button[data-branch-name="${branchFixture.name}"]`
+    );
+    expect(branchButton).toBeTruthy();
+    await fireEvent.contextMenu(branchButton as HTMLElement);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => {
+      expect(rendered.queryByRole("button", { name: "Cleanup Worktrees..." })).toBeNull();
+    });
+
+    await fireEvent.contextMenu(branchButton as HTMLElement);
+    await fireEvent.click(await rendered.findByRole("button", { name: "Cleanup Worktrees..." }));
+    expect(onCleanupRequest).toHaveBeenCalledWith(branchFixture.name);
+
+    const modeButtons = rendered.container.querySelectorAll<HTMLButtonElement>(".mode-btn");
+    expect(modeButtons.length).toBe(2);
+    await fireEvent.click(modeButtons[1] as HTMLButtonElement);
+    expect(onModeChange).toHaveBeenCalledWith("agent");
+
+    await rendered.rerender({ mode: "agent" });
+    await fireEvent.click(modeButtons[1] as HTMLButtonElement);
+    expect(onModeChange).toHaveBeenCalledTimes(1);
+
+    await fireEvent.click(modeButtons[0] as HTMLButtonElement);
+    expect(onModeChange).toHaveBeenCalledWith("branch");
   });
 });

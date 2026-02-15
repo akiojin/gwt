@@ -2,10 +2,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, waitFor, fireEvent, cleanup } from "@testing-library/svelte";
 
 const invokeMock = vi.fn();
-const listenMock = vi.fn(async () => () => {});
+const listenMock = vi.fn();
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
+  default: {
+    invoke: invokeMock,
+  },
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -65,14 +68,21 @@ const quickStartDockerEntry = {
   docker_recreate: false,
   docker_build: true,
   docker_keep: false,
+  docker_container_name: "workspace-container",
+  docker_compose_args: ["--build", "-f", "docker-compose.dev.yml"],
   timestamp: 1_700_000_002,
 };
 describe("WorktreeSummaryPanel", () => {
   beforeEach(() => {
     cleanup();
-    listenMock.mockClear();
+    listenMock.mockReset();
+    listenMock.mockResolvedValue(() => {});
     invokeMock.mockReset();
     invokeMock.mockResolvedValue([]);
+    Object.defineProperty(globalThis, "__TAURI_INTERNALS__", {
+      value: { invoke: invokeMock },
+      configurable: true,
+    });
   });
 
   it("renders branch header and tab UI when branch is selected", async () => {
@@ -89,13 +99,14 @@ describe("WorktreeSummaryPanel", () => {
 
     // Summary tab is active by default
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    expect(tabs).toHaveLength(5);
+    expect(tabs).toHaveLength(6);
     expect(tabs[0]?.textContent?.trim()).toBe("Summary");
     expect(tabs[0]?.classList.contains("active")).toBe(true);
     expect(tabs[1]?.textContent?.trim()).toBe("Git");
     expect(tabs[2]?.textContent?.trim()).toBe("PR");
-    expect(tabs[3]?.textContent?.trim()).toBe("CI");
+    expect(tabs[3]?.textContent?.trim()).toBe("Workflow");
     expect(tabs[4]?.textContent?.trim()).toBe("AI");
+    expect(tabs[5]?.textContent?.trim()).toBe("Docker");
   });
 
   it("shows placeholder when no branch is selected", async () => {
@@ -213,7 +224,8 @@ describe("WorktreeSummaryPanel", () => {
     expect(rendered.container.querySelector(".git-section .collapse-icon")).toBeNull();
   });
 
-  it("switches to CI tab and shows workflow runs", async () => {
+  it("switches to Workflow tab and shows workflow runs", async () => {
+    const windowOpen = vi.spyOn(window, "open").mockReturnValue(null);
     const onOpenCiLog = vi.fn();
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "get_branch_quick_start") return [];
@@ -229,7 +241,7 @@ describe("WorktreeSummaryPanel", () => {
           number: 42,
           title: "CI Test PR",
           state: "OPEN",
-          url: "https://github.com/test/pr/42",
+          url: "https://github.com/test/repo/pull/42",
           mergeable: "MERGEABLE",
           author: "alice",
           baseBranch: "main",
@@ -266,21 +278,27 @@ describe("WorktreeSummaryPanel", () => {
       projectPath: "/tmp/project",
       selectedBranch: branchFixture,
       prNumber: 42,
-      onOpenCiLog,
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const ciTab = tabs[3] as HTMLElement;
-    await fireEvent.click(ciTab);
+    const workflowTab = tabs[3] as HTMLElement;
+    await fireEvent.click(workflowTab);
 
     await waitFor(() => {
-      expect(ciTab.classList.contains("active")).toBe(true);
+      expect(workflowTab.classList.contains("active")).toBe(true);
       expect(rendered.getByText("CI Build")).toBeTruthy();
       expect(rendered.getByText("Lint")).toBeTruthy();
     });
 
-    await fireEvent.click(rendered.getByText("CI Build").closest("button") as HTMLButtonElement);
-    expect(onOpenCiLog).toHaveBeenCalledWith(100);
+    await fireEvent.click(
+      rendered.getByText("Success").closest("button") as HTMLButtonElement
+    );
+    expect(windowOpen).toHaveBeenCalledWith(
+      "https://github.com/test/repo/actions/runs/100",
+      "_blank",
+      "noopener"
+    );
+    windowOpen.mockRestore();
   });
 
   it("displays HostOS runtime for quick start entry", async () => {
@@ -315,6 +333,34 @@ describe("WorktreeSummaryPanel", () => {
     await waitFor(() => {
       expect(rendered.getByText("runtime: Docker")).toBeTruthy();
       expect(rendered.getByText("service: workspace")).toBeTruthy();
+    });
+  });
+
+  it("switches to Docker tab and shows docker session details", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [quickStartDockerEntry];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const dockerTab = tabs[5] as HTMLElement;
+    await fireEvent.click(dockerTab);
+
+    await waitFor(() => {
+      expect(dockerTab.classList.contains("active")).toBe(true);
+      expect(rendered.getByText("runtime: Docker")).toBeTruthy();
+      expect(rendered.getByText("service: workspace")).toBeTruthy();
+      expect(rendered.getByText("container: workspace-container")).toBeTruthy();
+      expect(
+        rendered.getByText("compose args: --build -f docker-compose.dev.yml")
+      ).toBeTruthy();
+      expect(rendered.getByText("Session session-456")).toBeTruthy();
     });
   });
 });
