@@ -54,6 +54,22 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/u
 - Windows: `.msi`
 - Linux: `.AppImage`, `.deb`
 
+## キーボードショートカット
+
+| ショートカット (macOS) | ショートカット (Windows/Linux) | 操作 |
+|---|---|---|
+| Cmd+N | Ctrl+N | 新しいウィンドウ |
+| Cmd+O | Ctrl+O | プロジェクトを開く |
+| Cmd+C | Ctrl+C | コピー |
+| Cmd+V | Ctrl+V | ペースト |
+| Cmd+Shift+K | Ctrl+Shift+K | Worktree のクリーンアップ |
+| Cmd+, | Ctrl+, | 環境設定 |
+| Cmd+Shift+[ | Ctrl+Shift+[ | 前のタブ |
+| Cmd+Shift+] | Ctrl+Shift+] | 次のタブ |
+| Cmd+` | Ctrl+` | 次のウィンドウ |
+| Cmd+Shift+` | Ctrl+Shift+` | 前のウィンドウ |
+| Cmd+M | --- | 最小化（macOS のみ） |
+
 ## 開発
 
 前提:

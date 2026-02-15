@@ -81,6 +81,8 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
         crate::menu::MENU_ID_SETTINGS_PREFERENCES => Some("open-settings"),
         crate::menu::MENU_ID_HELP_ABOUT => Some("about"),
         crate::menu::MENU_ID_HELP_CHECK_UPDATES => Some("check-updates"),
+        crate::menu::MENU_ID_WINDOW_PREVIOUS_TAB => Some("previous-tab"),
+        crate::menu::MENU_ID_WINDOW_NEXT_TAB => Some("next-tab"),
         _ => None,
     }
 }
@@ -327,6 +329,63 @@ pub fn build_app(
                 return;
             }
 
+            // Window switching (MRU order)
+            if id == crate::menu::MENU_ID_WINDOW_NEXT_WINDOW {
+                let state = app.state::<AppState>();
+                if let Some(target) = state.next_window() {
+                    if let Some(w) = app.get_webview_window(&target) {
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
+                }
+                return;
+            }
+            if id == crate::menu::MENU_ID_WINDOW_PREVIOUS_WINDOW {
+                let state = app.state::<AppState>();
+                if let Some(target) = state.previous_window() {
+                    if let Some(w) = app.get_webview_window(&target) {
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
+                }
+                return;
+            }
+
+            // macOS standard window items
+            #[cfg(target_os = "macos")]
+            {
+                if id == crate::menu::MENU_ID_WINDOW_MINIMIZE {
+                    if let Some(w) = focused_webview_window(app) {
+                        let _ = w.minimize();
+                    }
+                    return;
+                }
+                if id == crate::menu::MENU_ID_WINDOW_ZOOM {
+                    if let Some(w) = focused_webview_window(app) {
+                        if w.is_maximized().unwrap_or(false) {
+                            let _ = w.unmaximize();
+                        } else {
+                            let _ = w.maximize();
+                        }
+                    }
+                    return;
+                }
+                if id == crate::menu::MENU_ID_WINDOW_BRING_ALL_TO_FRONT {
+                    let focused_label = focused_window_label(app);
+
+                    for (_, w) in app.webview_windows() {
+                        let _ = w.show();
+                    }
+
+                    // Restore focus once to keep MRU/history deterministic.
+                    if let Some(w) = app.get_webview_window(&focused_label) {
+                        let _ = w.set_focus();
+                    }
+                    let _ = crate::menu::rebuild_menu(app);
+                    return;
+                }
+            }
+
             if let Some(project_path) = crate::menu::parse_recent_project_menu_id(id) {
                 let action = format!("open-recent-project::{}", project_path);
                 emit_menu_action(app, &action);
@@ -383,14 +442,17 @@ pub fn build_app(
             }
 
             if let tauri::WindowEvent::Focused(true) = event {
+                window
+                    .app_handle()
+                    .state::<AppState>()
+                    .push_window_focus(window.label());
                 let _ = crate::menu::rebuild_menu(window.app_handle());
             }
 
             if let tauri::WindowEvent::Destroyed = event {
-                window
-                    .app_handle()
-                    .state::<AppState>()
-                    .clear_window_state(window.label());
+                let state = window.app_handle().state::<AppState>();
+                state.clear_window_state(window.label());
+                state.remove_window_from_history(window.label());
                 let _ = crate::menu::rebuild_menu(window.app_handle());
 
                 // Exit the app when all windows are truly closed (hidden windows still count as open).
@@ -510,6 +572,15 @@ fn focused_window_label(app: &tauri::AppHandle<tauri::Wry>) -> String {
                 .map(|(label, _)| label)
         })
         .unwrap_or_else(|| "main".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn focused_webview_window(
+    app: &tauri::AppHandle<tauri::Wry>,
+) -> Option<tauri::WebviewWindow<tauri::Wry>> {
+    app.webview_windows()
+        .into_iter()
+        .find_map(|(_, w)| w.is_focused().ok().and_then(|f| f.then_some(w)))
 }
 
 fn emit_menu_action(app: &tauri::AppHandle<tauri::Wry>, action: &str) {
@@ -714,6 +785,18 @@ mod tests {
         assert_eq!(
             menu_action_from_id(crate::menu::MENU_ID_EDIT_PASTE),
             Some("edit-paste")
+        );
+    }
+
+    #[test]
+    fn menu_action_from_id_maps_tab_switching() {
+        assert_eq!(
+            menu_action_from_id(crate::menu::MENU_ID_WINDOW_PREVIOUS_TAB),
+            Some("previous-tab")
+        );
+        assert_eq!(
+            menu_action_from_id(crate::menu::MENU_ID_WINDOW_NEXT_TAB),
+            Some("next-tab")
         );
     }
 
