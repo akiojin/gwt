@@ -79,7 +79,7 @@ base64 = "0.22"
 dirs = "6"
 
 # System information
-sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+sysinfo = { version = "0.38", default-features = false, features = ["system"] }
 nvml-wrapper = "0.12"
 
 [profile.release]

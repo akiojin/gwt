@@ -32,7 +32,7 @@ impl SystemMonitor {
     /// Create a new monitor with CPU and memory tracking enabled.
     pub fn new() -> Self {
         let sys = System::new_with_specifics(
-            RefreshKind::new()
+            RefreshKind::nothing()
                 .with_cpu(CpuRefreshKind::everything())
                 .with_memory(MemoryRefreshKind::everything()),
         );
