@@ -28,6 +28,7 @@
     selectedBranch = null,
     currentBranch = "",
     agentTabBranches = [],
+    activeAgentTabBranch = null,
   }: {
     projectPath: string;
     onBranchSelect: (branch: BranchInfo) => void;
@@ -45,6 +46,7 @@
     selectedBranch?: BranchInfo | null;
     currentBranch?: string;
     agentTabBranches?: string[];
+    activeAgentTabBranch?: string | null;
   } = $props();
 
   const SIDEBAR_SUMMARY_HEIGHT_STORAGE_KEY = "gwt.sidebar.worktreeSummaryHeight";
@@ -820,6 +822,8 @@
         <WorktreeSummaryPanel
           {projectPath}
           {selectedBranch}
+          {agentTabBranches}
+          {activeAgentTabBranch}
           onLaunchAgent={onLaunchAgent}
           onQuickLaunch={onQuickLaunch}
         />
@@ -830,6 +834,8 @@
       {projectPath}
       selectedBranch={selectedBranch}
       currentBranch={currentBranch}
+      {agentTabBranches}
+      {activeAgentTabBranch}
     />
   {/if}
   <button

@@ -222,6 +222,9 @@ export interface SessionSummaryResult {
   generating: boolean;
   toolId?: string | null;
   sessionId?: string | null;
+  sourceType?: "session" | "scrollback" | null;
+  inputMtimeMs?: number | null;
+  summaryUpdatedMs?: number | null;
   markdown?: string | null;
   taskOverview?: string | null;
   shortSummary?: string | null;
