@@ -170,7 +170,9 @@ pub fn get_project_version_history(
     }
 
     // Start background job (best-effort)
-    let inflight_key = format!("{repo_key}::{version_id}");
+    // Include language so switching output language can spawn a fresh job
+    // without being blocked by an in-flight request for a different language.
+    let inflight_key = format!("{repo_key}::{version_id}::{language}");
     let should_spawn = match state.project_version_history_inflight.lock() {
         Ok(mut set) => {
             if set.contains(&inflight_key) {

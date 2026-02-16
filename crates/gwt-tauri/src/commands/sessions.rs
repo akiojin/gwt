@@ -1315,8 +1315,8 @@ fn is_latest_branch_session(repo_key: &str, branch: &str, tool_id: &str, session
 
 fn start_session_summary_job(job: SessionSummaryJob, state: &AppState, app_handle: AppHandle) {
     let inflight_key = format!(
-        "{}::{}::{}::{}",
-        job.repo_key, job.branch, job.tool_id, job.session_id
+        "{}::{}::{}::{}::{}",
+        job.repo_key, job.branch, job.tool_id, job.session_id, job.settings.language
     );
     let should_spawn = match state.session_summary_inflight.lock() {
         Ok(mut set) => {
@@ -1375,8 +1375,8 @@ fn start_scrollback_summary_job(
     app_handle: AppHandle,
 ) {
     let inflight_key = format!(
-        "scrollback::{}::{}::{}",
-        job.repo_key, job.branch, job.pane_id
+        "scrollback::{}::{}::{}::{}",
+        job.repo_key, job.branch, job.pane_id, job.settings.language
     );
     let should_spawn = match state.session_summary_inflight.lock() {
         Ok(mut set) => {
