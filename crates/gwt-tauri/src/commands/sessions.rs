@@ -718,6 +718,8 @@ struct PersistedSessionSummaryCache {
 struct PersistedBranchSummary {
     pub tool_id: String,
     pub session_id: String,
+    #[serde(default)]
+    pub language: String,
     pub input_mtime_ms: u64,
     pub last_updated_ms: u64,
     pub markdown: Option<String>,
@@ -792,10 +794,17 @@ fn ensure_persisted_session_summary_cache_loaded(
             ..Default::default()
         };
 
+        let language = if entry.language.trim().is_empty() {
+            "en".to_string()
+        } else {
+            entry.language
+        };
+
         cache.set(
             branch,
             entry.tool_id,
             entry.session_id,
+            language,
             summary,
             input_mtime,
         );
@@ -809,6 +818,7 @@ fn persist_session_summary_cache_entry(
     branch: &str,
     tool_id: &str,
     session_id: &str,
+    language: &str,
     input_mtime: SystemTime,
     summary: &SessionSummary,
 ) {
@@ -843,6 +853,7 @@ fn persist_session_summary_cache_entry(
         PersistedBranchSummary {
             tool_id: tool_id.to_string(),
             session_id: session_id.to_string(),
+            language: language.to_string(),
             input_mtime_ms,
             last_updated_ms,
             markdown: summary.markdown.clone(),
@@ -972,6 +983,7 @@ fn scrollback_summary_immediate(
     state: &AppState,
 ) -> (SessionSummaryResult, Option<ScrollbackSummaryJob>) {
     let pane_session = pane_session_id(&candidate.pane_id);
+    let language = settings.language.clone();
 
     let (cached_ok, previous_any) = {
         let cache_guard = match state.session_summary_cache.lock() {
@@ -992,7 +1004,7 @@ fn scrollback_summary_immediate(
         let cached_ok = cache.and_then(|c| {
             c.get(branch)
                 .cloned()
-                .filter(|_| !c.is_stale(branch, &pane_session, candidate.mtime))
+                .filter(|_| !c.is_stale(branch, &pane_session, &language, candidate.mtime))
         });
         let previous_any = cache.and_then(|c| c.get(branch).cloned());
         (cached_ok, previous_any)
@@ -1210,6 +1222,7 @@ fn get_branch_session_summary_immediate(
         }
     };
     let mtime = metadata.modified().unwrap_or_else(|_| SystemTime::now());
+    let language = settings.language.clone();
 
     // Cache lookup (best-effort). Do not hold the mutex while doing network calls.
     let (cached_ok, previous_any) = {
@@ -1221,7 +1234,7 @@ fn get_branch_session_summary_immediate(
         let cached_ok = cache.and_then(|c| {
             c.get(branch)
                 .cloned()
-                .filter(|_| !c.is_stale(branch, &session_id, mtime))
+                .filter(|_| !c.is_stale(branch, &session_id, &language, mtime))
         });
         let previous_any = cache.and_then(|c| c.get(branch).cloned());
         (cached_ok, previous_any)
@@ -1484,7 +1497,7 @@ fn generate_and_cache_session_summary(
         }
     };
 
-    match summarize_session(&client, &parsed) {
+    match summarize_session(&client, &parsed, &job.settings.language) {
         Ok(summary) => {
             // Avoid overwriting the cache if the branch's latest session has changed
             // since the job started (e.g., a new session was recorded).
@@ -1494,6 +1507,7 @@ fn generate_and_cache_session_summary(
                         job.branch.clone(),
                         job.tool_id.clone(),
                         job.session_id.clone(),
+                        job.settings.language.clone(),
                         summary.clone(),
                         job.mtime,
                     );
@@ -1503,6 +1517,7 @@ fn generate_and_cache_session_summary(
                     &job.branch,
                     &job.tool_id,
                     &job.session_id,
+                    &job.settings.language,
                     job.mtime,
                     &summary,
                 );
@@ -1592,7 +1607,7 @@ fn generate_and_cache_scrollback_summary(
         }
     };
 
-    match summarize_scrollback(&client, &scrollback, &job.branch) {
+    match summarize_scrollback(&client, &scrollback, &job.branch, &job.settings.language) {
         Ok(summary) => {
             if is_latest_scrollback_candidate(
                 state,
@@ -1605,6 +1620,7 @@ fn generate_and_cache_scrollback_summary(
                         job.branch.clone(),
                         job.tool_id.clone(),
                         pane_session.clone(),
+                        job.settings.language.clone(),
                         summary.clone(),
                         job.mtime,
                     );
@@ -1614,6 +1630,7 @@ fn generate_and_cache_scrollback_summary(
                     &job.branch,
                     &job.tool_id,
                     &pane_session,
+                    &job.settings.language,
                     job.mtime,
                     &summary,
                 );
@@ -1865,6 +1882,7 @@ mod tests {
             endpoint: "https://api.openai.com/v1".to_string(),
             api_key: "".to_string(),
             model: "gpt-5.2-codex".to_string(),
+            language: "en".to_string(),
             summary_enabled: false,
         });
         config.save().unwrap();
@@ -1899,6 +1917,7 @@ mod tests {
             endpoint: "https://api.openai.com/v1".to_string(),
             api_key: "".to_string(),
             model: "gpt-4o-mini".to_string(),
+            language: "en".to_string(),
             summary_enabled: true,
         });
         config.save().unwrap();
@@ -1943,6 +1962,7 @@ mod tests {
             endpoint: "https://api.openai.com/v1".to_string(),
             api_key: "".to_string(),
             model: "gpt-4o-mini".to_string(),
+            language: "en".to_string(),
             summary_enabled: true,
         });
         config.save().unwrap();
@@ -1979,6 +1999,7 @@ mod tests {
                 "main".to_string(),
                 "codex-cli".to_string(),
                 "sess-999".to_string(),
+                "en".to_string(),
                 summary,
                 mtime,
             );
@@ -2031,6 +2052,7 @@ mod tests {
             endpoint: "https://api.openai.com/v1".to_string(),
             api_key: "".to_string(),
             model: "gpt-4o-mini".to_string(),
+            language: "en".to_string(),
         };
 
         let (out, job) = scrollback_summary_immediate(
@@ -2174,6 +2196,7 @@ bullet_points = ["- A"]
                 "main".to_string(),
                 "codex-cli".to_string(),
                 pane_session_id("pane-xyz"),
+                "en".to_string(),
                 summary,
                 base,
             );
@@ -2188,6 +2211,7 @@ bullet_points = ["- A"]
             endpoint: "https://api.openai.com/v1".to_string(),
             api_key: "".to_string(),
             model: "gpt-4o-mini".to_string(),
+            language: "en".to_string(),
         };
 
         let (out, job) = scrollback_summary_immediate(

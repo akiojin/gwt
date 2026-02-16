@@ -47,6 +47,7 @@ pub struct VersionHistoryCacheEntry {
     pub range_from_oid: Option<String>,
     pub range_to_oid: String,
     pub commit_count: u32,
+    pub language: String,
     pub summary_markdown: String,
     pub changelog_markdown: String,
 }

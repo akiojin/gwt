@@ -45,6 +45,7 @@ const profilesFixture: ProfilesConfig = {
         endpoint: "https://api.openai.com/v1",
         api_key: "test-key",
         model: "gpt-4o-mini",
+        language: "en",
         summary_enabled: true,
       },
     },
@@ -356,6 +357,7 @@ describe("SettingsPanel", () => {
         endpoint: "https://api.openai.com/v1",
         api_key: "dev-key",
         model: "gpt-4o-mini",
+        language: "en",
         summary_enabled: true,
       },
     };
@@ -427,6 +429,7 @@ describe("SettingsPanel", () => {
       endpoint: "https://api.openai.com/v1",
       api_key: "test-key",
       model: "custom-model",
+      language: "en",
       summary_enabled: true,
     };
     invokeMock.mockImplementation(async (command: string) => {
@@ -448,6 +451,7 @@ describe("SettingsPanel", () => {
       endpoint: "https://api.openai.com/v1",
       api_key: "test-key",
       model: "",
+      language: "en",
       summary_enabled: true,
     };
     invokeMock.mockImplementation(async (command: string) => {

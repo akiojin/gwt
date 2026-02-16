@@ -148,6 +148,7 @@ export interface AISettings {
   endpoint: string;
   api_key: string;
   model: string;
+  language: "en" | "ja" | "auto";
   summary_enabled: boolean;
 }
 
