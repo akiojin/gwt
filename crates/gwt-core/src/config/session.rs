@@ -260,6 +260,67 @@ impl Session {
     }
 }
 
+/// Check if an agent supports Hook-based status reporting (e.g., Claude Code).
+/// Agents without hook support need pane output analysis for status inference.
+pub fn agent_has_hook_support(agent_id: Option<&str>) -> bool {
+    match agent_id {
+        Some(id) => id.to_lowercase().contains("claude"),
+        None => false,
+    }
+}
+
+/// Infer agent status from pane output tail and process liveness.
+///
+/// Used for agents that lack Hook API support (Codex, Gemini, OpenCode).
+/// Heuristics (FR-831):
+/// 1. Process dead → Stopped
+/// 2. Prompt pattern at end of output → WaitingInput
+/// 3. Process alive & recent output → Running
+pub fn infer_agent_status(scrollback_tail: &str, process_alive: bool) -> AgentStatus {
+    if !process_alive {
+        return AgentStatus::Stopped;
+    }
+
+    if looks_like_prompt(scrollback_tail) {
+        return AgentStatus::WaitingInput;
+    }
+
+    AgentStatus::Running
+}
+
+/// Check if the tail of scrollback output ends with a prompt-like pattern.
+fn looks_like_prompt(text: &str) -> bool {
+    let trimmed = text.trim_end();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // Get the last non-empty line
+    let last_line = trimmed.lines().next_back().unwrap_or("").trim();
+    if last_line.is_empty() {
+        return false;
+    }
+
+    // Common prompt patterns
+    let prompt_suffixes = ["> ", "→ ", "$ ", ">>> ", "# "];
+    for suffix in &prompt_suffixes {
+        if last_line.ends_with(suffix.trim_end()) {
+            return true;
+        }
+    }
+
+    // Input prompt patterns (case-insensitive)
+    let last_lower = last_line.to_lowercase();
+    let input_patterns = ["input:", "prompt:", "(y/n)", "[y/n]", "continue?", "proceed?"];
+    for pattern in &input_patterns {
+        if last_lower.contains(pattern) {
+            return true;
+        }
+    }
+
+    false
+}
+
 fn short_tool_label(tool_id: Option<&str>, tool_label: &str) -> String {
     let id = tool_id.unwrap_or("");
     let id_lower = id.to_lowercase();
@@ -593,6 +654,89 @@ updated_at = "2026-01-20T00:00:00Z"
     }
 
     #[test]
+    fn test_check_idle_timeout_transitions_to_stopped() {
+        let mut session = Session::new("/test/path", "test-branch");
+        session.status = AgentStatus::Running;
+        session.last_activity_at = Some(Utc::now() - Duration::seconds(61));
+
+        let changed = session.check_idle_timeout();
+        assert!(changed, "check_idle_timeout should return true when > 60s elapsed");
+        assert_eq!(session.status, AgentStatus::Stopped);
+    }
+
+    #[test]
+    fn test_check_idle_timeout_no_change_within_60s() {
+        let mut session = Session::new("/test/path", "test-branch");
+        session.status = AgentStatus::Running;
+        session.last_activity_at = Some(Utc::now() - Duration::seconds(30));
+
+        let changed = session.check_idle_timeout();
+        assert!(!changed, "check_idle_timeout should return false when < 60s");
+        assert_eq!(session.status, AgentStatus::Running, "status should remain Running");
+    }
+
+    #[test]
+    fn test_check_idle_timeout_already_stopped() {
+        let mut session = Session::new("/test/path", "test-branch");
+        session.status = AgentStatus::Stopped;
+        session.last_activity_at = Some(Utc::now() - Duration::seconds(120));
+
+        let changed = session.check_idle_timeout();
+        assert!(!changed, "already Stopped should not change");
+        assert_eq!(session.status, AgentStatus::Stopped);
+    }
+
+    #[test]
+    fn test_check_idle_timeout_no_last_activity() {
+        let mut session = Session::new("/test/path", "test-branch");
+        session.status = AgentStatus::Running;
+        session.last_activity_at = None;
+
+        let changed = session.check_idle_timeout();
+        assert!(!changed, "no last_activity_at should not trigger timeout");
+        assert_eq!(session.status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn test_agent_status_serde_roundtrip_all_variants() {
+        let variants = [
+            AgentStatus::Unknown,
+            AgentStatus::Running,
+            AgentStatus::WaitingInput,
+            AgentStatus::Stopped,
+        ];
+
+        for status in variants {
+            let json = serde_json::to_string(&status).unwrap();
+            let deserialized: AgentStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, status, "roundtrip failed for {:?}", status);
+        }
+    }
+
+    #[test]
+    fn test_agent_status_toml_roundtrip() {
+        // AgentStatus uses rename_all = "snake_case", verify TOML compat
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Wrapper {
+            status: AgentStatus,
+        }
+
+        let variants = [
+            AgentStatus::Unknown,
+            AgentStatus::Running,
+            AgentStatus::WaitingInput,
+            AgentStatus::Stopped,
+        ];
+
+        for status in variants {
+            let wrapper = Wrapper { status };
+            let toml_str = toml::to_string(&wrapper).unwrap();
+            let deserialized: Wrapper = toml::from_str(&toml_str).unwrap();
+            assert_eq!(deserialized, wrapper, "TOML roundtrip failed for {:?}", status);
+        }
+    }
+
+    #[test]
     fn test_session_save_load_with_status() {
         let temp = TempDir::new().unwrap();
         let session_path = temp.path().join("session.toml");
@@ -605,5 +749,113 @@ updated_at = "2026-01-20T00:00:00Z"
         let loaded = Session::load(&session_path).unwrap();
         assert_eq!(loaded.status, AgentStatus::WaitingInput);
         assert!(loaded.last_activity_at.is_some());
+    }
+
+    // -- infer_agent_status tests (SPEC-b80e7996 T-014) --
+
+    #[test]
+    fn infer_stopped_when_process_dead() {
+        let status = infer_agent_status("some output\n$", false);
+        assert_eq!(status, AgentStatus::Stopped);
+    }
+
+    #[test]
+    fn infer_waiting_input_with_dollar_prompt() {
+        let status = infer_agent_status("output line\n$ ", true);
+        assert_eq!(status, AgentStatus::WaitingInput);
+    }
+
+    #[test]
+    fn infer_waiting_input_with_arrow_prompt() {
+        let status = infer_agent_status("output line\n→ ", true);
+        assert_eq!(status, AgentStatus::WaitingInput);
+    }
+
+    #[test]
+    fn infer_waiting_input_with_chevron_prompt() {
+        let status = infer_agent_status("output line\n> ", true);
+        assert_eq!(status, AgentStatus::WaitingInput);
+    }
+
+    #[test]
+    fn infer_waiting_input_with_triple_chevron() {
+        let status = infer_agent_status("output line\n>>> ", true);
+        assert_eq!(status, AgentStatus::WaitingInput);
+    }
+
+    #[test]
+    fn infer_waiting_input_with_hash_prompt() {
+        let status = infer_agent_status("output\n# ", true);
+        assert_eq!(status, AgentStatus::WaitingInput);
+    }
+
+    #[test]
+    fn infer_waiting_input_with_input_colon() {
+        let status = infer_agent_status("Please provide:\nInput: ", true);
+        assert_eq!(status, AgentStatus::WaitingInput);
+    }
+
+    #[test]
+    fn infer_waiting_input_with_yn_prompt() {
+        let status = infer_agent_status("Continue? (y/n)", true);
+        assert_eq!(status, AgentStatus::WaitingInput);
+    }
+
+    #[test]
+    fn infer_waiting_input_with_yn_bracket() {
+        let status = infer_agent_status("Proceed [Y/n]", true);
+        assert_eq!(status, AgentStatus::WaitingInput);
+    }
+
+    #[test]
+    fn infer_waiting_input_with_continue_question() {
+        let status = infer_agent_status("Do you want to continue?", true);
+        assert_eq!(status, AgentStatus::WaitingInput);
+    }
+
+    #[test]
+    fn infer_waiting_input_with_proceed_question() {
+        let status = infer_agent_status("proceed?", true);
+        assert_eq!(status, AgentStatus::WaitingInput);
+    }
+
+    #[test]
+    fn infer_running_when_no_prompt() {
+        let status = infer_agent_status("Compiling project...\nBuilding module foo", true);
+        assert_eq!(status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn infer_running_on_empty_output() {
+        let status = infer_agent_status("", true);
+        assert_eq!(status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn infer_stopped_on_empty_output_dead_process() {
+        let status = infer_agent_status("", false);
+        assert_eq!(status, AgentStatus::Stopped);
+    }
+
+    #[test]
+    fn infer_prompt_with_trailing_whitespace() {
+        let status = infer_agent_status("line\n$   \n  ", true);
+        assert_eq!(status, AgentStatus::WaitingInput);
+    }
+
+    // -- agent_has_hook_support tests --
+
+    #[test]
+    fn claude_has_hook_support() {
+        assert!(agent_has_hook_support(Some("claude-code")));
+        assert!(agent_has_hook_support(Some("Claude Code")));
+    }
+
+    #[test]
+    fn non_claude_no_hook_support() {
+        assert!(!agent_has_hook_support(Some("codex-cli")));
+        assert!(!agent_has_hook_support(Some("gemini-cli")));
+        assert!(!agent_has_hook_support(Some("opencode")));
+        assert!(!agent_has_hook_support(None));
     }
 }

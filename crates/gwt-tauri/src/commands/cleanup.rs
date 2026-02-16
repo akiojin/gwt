@@ -1,9 +1,11 @@
 //! Worktree cleanup commands (SPEC-c4e8f210)
 
 use crate::commands::project::resolve_repo_path_for_project_root;
+use crate::commands::terminal::capture_scrollback_tail_from_state;
 use crate::state::AppState;
-use gwt_core::config::Session;
+use gwt_core::config::{agent_has_hook_support, infer_agent_status, Session};
 use gwt_core::git::Branch;
+use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::worktree::WorktreeManager;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -88,12 +90,26 @@ fn compute_safety_level(
     }
 }
 
-/// Resolve agent status string from session file (SPEC-b80e7996 FR-811)
-fn resolve_agent_status_for_worktree(worktree_path: &Path) -> String {
+/// Resolve agent status string from session file (SPEC-b80e7996 FR-811).
+/// For agents without Hook support, infers status from pane output.
+fn resolve_agent_status_for_worktree(
+    worktree_path: &Path,
+    branch_name: &str,
+    state: &AppState,
+) -> String {
     match Session::load_for_worktree(worktree_path) {
         Some(mut session) => {
             session.check_idle_timeout();
-            match session.status {
+
+            let status = if agent_has_hook_support(session.agent.as_deref()) {
+                session.status
+            } else if let Some(pane_id) = find_pane_for_branch(state, branch_name) {
+                infer_status_from_pane(state, &pane_id)
+            } else {
+                session.status
+            };
+
+            match status {
                 gwt_core::config::AgentStatus::Running => "running".to_string(),
                 gwt_core::config::AgentStatus::WaitingInput => "waiting_input".to_string(),
                 gwt_core::config::AgentStatus::Stopped => "stopped".to_string(),
@@ -102,6 +118,34 @@ fn resolve_agent_status_for_worktree(worktree_path: &Path) -> String {
         }
         None => "unknown".to_string(),
     }
+}
+
+/// Find pane_id for a branch from running panes.
+fn find_pane_for_branch(state: &AppState, branch_name: &str) -> Option<String> {
+    let manager = state.pane_manager.lock().ok()?;
+    manager
+        .panes()
+        .iter()
+        .find(|p| p.branch_name() == branch_name)
+        .map(|p| p.pane_id().to_string())
+}
+
+/// Infer agent status from a pane's scrollback tail.
+fn infer_status_from_pane(state: &AppState, pane_id: &str) -> gwt_core::config::AgentStatus {
+    let process_alive = match state.pane_manager.lock() {
+        Ok(manager) => manager
+            .panes()
+            .iter()
+            .find(|p| p.pane_id() == pane_id)
+            .map(|p| matches!(p.status(), PaneStatus::Running))
+            .unwrap_or(false),
+        Err(_) => false,
+    };
+
+    let scrollback_tail =
+        capture_scrollback_tail_from_state(state, pane_id, 4096).unwrap_or_default();
+
+    infer_agent_status(&scrollback_tail, process_alive)
 }
 
 /// Get the set of branch names that have a running agent pane
@@ -150,7 +194,7 @@ pub fn list_worktrees(
             let is_agent_running = agent_branches.contains(branch_name);
 
             // Read agent status from session file (SPEC-b80e7996 FR-811)
-            let agent_status = resolve_agent_status_for_worktree(&wt.path);
+            let agent_status = resolve_agent_status_for_worktree(&wt.path, branch_name, &state);
 
             let ahead = branch_info.map(|b| b.ahead).unwrap_or(0);
             let behind = branch_info.map(|b| b.behind).unwrap_or(0);
@@ -458,6 +502,78 @@ mod tests {
             !obj.contains_key("projectPath"),
             "unexpected camelCase key 'projectPath'"
         );
+    }
+
+    // -- agent_status field serialization tests (SPEC-b80e7996) --
+
+    #[test]
+    fn worktree_info_agent_status_serializes_in_json() {
+        let info = WorktreeInfo {
+            path: "/tmp/wt".to_string(),
+            branch: "feature/agent".to_string(),
+            commit: "def5678".to_string(),
+            status: "active".to_string(),
+            is_main: false,
+            has_changes: false,
+            has_unpushed: false,
+            is_current: false,
+            is_protected: false,
+            is_agent_running: true,
+            agent_status: "running".to_string(),
+            ahead: 0,
+            behind: 0,
+            is_gone: false,
+            last_tool_usage: None,
+            safety_level: SafetyLevel::Disabled,
+        };
+        let json = serde_json::to_value(&info).unwrap();
+        let obj = json.as_object().unwrap();
+
+        // agent_status field must exist and be snake_case
+        assert!(
+            obj.contains_key("agent_status"),
+            "expected snake_case key 'agent_status'"
+        );
+        assert!(
+            !obj.contains_key("agentStatus"),
+            "unexpected camelCase key 'agentStatus'"
+        );
+        assert_eq!(json["agent_status"], "running");
+    }
+
+    #[test]
+    fn worktree_info_agent_status_all_values() {
+        for (status_str, expected) in [
+            ("unknown", "unknown"),
+            ("running", "running"),
+            ("waiting_input", "waiting_input"),
+            ("stopped", "stopped"),
+        ] {
+            let info = WorktreeInfo {
+                path: "/tmp/wt".to_string(),
+                branch: "test".to_string(),
+                commit: "abc".to_string(),
+                status: "active".to_string(),
+                is_main: false,
+                has_changes: false,
+                has_unpushed: false,
+                is_current: false,
+                is_protected: false,
+                is_agent_running: false,
+                agent_status: status_str.to_string(),
+                ahead: 0,
+                behind: 0,
+                is_gone: false,
+                last_tool_usage: None,
+                safety_level: SafetyLevel::Safe,
+            };
+            let json = serde_json::to_value(&info).unwrap();
+            assert_eq!(
+                json["agent_status"], expected,
+                "agent_status mismatch for '{}'",
+                status_str
+            );
+        }
     }
 
     // -- SafetyLevel computation tests (T1) --
