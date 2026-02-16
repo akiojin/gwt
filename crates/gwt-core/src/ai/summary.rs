@@ -12,6 +12,7 @@ const MAX_PROMPT_CHARS: usize = 8000;
 
 #[derive(Debug, Clone, Default)]
 pub struct SessionSummary {
+    pub language: Option<String>,
     pub task_overview: Option<String>,
     pub short_summary: Option<String>,
     pub bullet_points: Vec<String>,
@@ -67,12 +68,28 @@ impl SessionSummaryCache {
         self.tool_ids.insert(branch, tool_id);
     }
 
-    pub fn is_stale(&self, branch: &str, session_id: &str, current_mtime: SystemTime) -> bool {
+    pub fn is_stale(
+        &self,
+        branch: &str,
+        session_id: &str,
+        current_mtime: SystemTime,
+        preferred_language: Option<&str>,
+    ) -> bool {
         if let Some(cached_session_id) = self.session_ids.get(branch) {
             if cached_session_id != session_id {
                 return true;
             }
         } else {
+            return true;
+        }
+
+        let requested_language = normalize_summary_language(preferred_language);
+        let cached_language = self
+            .cache
+            .get(branch)
+            .map(|summary| normalize_summary_language(summary.language.as_deref()))
+            .unwrap_or_else(|| "auto".to_string());
+        if cached_language != requested_language {
             return true;
         }
 
@@ -90,7 +107,35 @@ struct SessionSummaryFields {
     bullet_points: Vec<String>,
 }
 
-pub fn build_session_prompt(parsed: &ParsedSession) -> Vec<ChatMessage> {
+fn summary_system_prompt(preferred_language: Option<&str>) -> String {
+    match normalize_summary_language(preferred_language).as_str() {
+        "ja" => format!(
+            "{SESSION_SYSTEM_PROMPT_BASE}\n\nAlways respond in Japanese. Do not use English headings or bullets."
+        ),
+        "en" => format!(
+            "{SESSION_SYSTEM_PROMPT_BASE}\n\nAlways respond in English. Do not use Japanese headings or bullets."
+        ),
+        _ => SESSION_SYSTEM_PROMPT_BASE.to_string(),
+    }
+}
+
+fn normalize_summary_language(preferred_language: Option<&str>) -> String {
+    match preferred_language
+        .unwrap_or("auto")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "ja" => "ja".to_string(),
+        "en" => "en".to_string(),
+        _ => "auto".to_string(),
+    }
+}
+
+pub fn build_session_prompt(
+    parsed: &ParsedSession,
+    preferred_language: Option<&str>,
+) -> Vec<ChatMessage> {
     let mut lines = Vec::new();
     lines.push(format!(
         "Agent: {} (session_id: {})",
@@ -163,7 +208,7 @@ pub fn build_session_prompt(parsed: &ParsedSession) -> Vec<ChatMessage> {
     vec![
         ChatMessage {
             role: "system".to_string(),
-            content: SESSION_SYSTEM_PROMPT_BASE.to_string(),
+            content: summary_system_prompt(preferred_language),
         },
         ChatMessage {
             role: "user".to_string(),
@@ -247,13 +292,15 @@ pub fn summarize_scrollback(
     client: &AIClient,
     scrollback_text: &str,
     branch_name: &str,
+    preferred_language: Option<&str>,
 ) -> Result<SessionSummary, AIError> {
+    let summary_language = normalize_summary_language(preferred_language);
     let sampled = sample_scrollback_text(scrollback_text);
     let user_prompt = format!("Branch: {branch_name}\nTerminal session output:\n{sampled}");
     let messages = vec![
         ChatMessage {
             role: "system".to_string(),
-            content: SESSION_SYSTEM_PROMPT_BASE.to_string(),
+            content: summary_system_prompt(Some(summary_language.as_str())),
         },
         ChatMessage {
             role: "user".to_string(),
@@ -278,6 +325,7 @@ pub fn summarize_scrollback(
     };
 
     Ok(SessionSummary {
+        language: Some(summary_language),
         task_overview: fields.task_overview,
         short_summary: fields.short_summary,
         bullet_points: fields.bullet_points,
@@ -315,8 +363,10 @@ fn sample_scrollback_text(text: &str) -> String {
 pub fn summarize_session(
     client: &AIClient,
     parsed: &ParsedSession,
+    preferred_language: Option<&str>,
 ) -> Result<SessionSummary, AIError> {
-    let messages = build_session_prompt(parsed);
+    let summary_language = normalize_summary_language(preferred_language);
+    let messages = build_session_prompt(parsed, Some(summary_language.as_str()));
     let content = client.create_response(messages)?;
     let fields = parse_session_summary_fields(&content).unwrap_or_default();
     let markdown = normalize_session_summary_markdown(&content, &fields)?;
@@ -325,6 +375,7 @@ pub fn summarize_session(
     let metrics = build_metrics(parsed);
 
     Ok(SessionSummary {
+        language: Some(summary_language),
         task_overview: fields.task_overview,
         short_summary: fields.short_summary,
         bullet_points: fields.bullet_points,
@@ -766,7 +817,7 @@ mod tests {
             summary,
             now,
         );
-        assert!(cache.is_stale("main", "sess-2", now));
+        assert!(cache.is_stale("main", "sess-2", now, None));
     }
 
     #[test]
@@ -789,7 +840,7 @@ mod tests {
             total_turns: 200,
         };
 
-        let prompt = build_session_prompt(&parsed);
+        let prompt = build_session_prompt(&parsed, None);
         let user_prompt = prompt
             .iter()
             .find(|msg| msg.role == "user")
@@ -834,7 +885,7 @@ mod tests {
             total_turns: 3,
         };
 
-        let prompt = build_session_prompt(&parsed);
+        let prompt = build_session_prompt(&parsed, None);
         let user_prompt = prompt
             .iter()
             .find(|msg| msg.role == "user")
@@ -885,7 +936,7 @@ mod tests {
             total_turns: 4,
         };
 
-        let prompt = build_session_prompt(&parsed);
+        let prompt = build_session_prompt(&parsed, None);
         let user_prompt = prompt
             .iter()
             .find(|msg| msg.role == "user")

@@ -9,6 +9,7 @@
     PrStatusInfo,
     GhCliStatus,
     WorkflowRunInfo,
+    SettingsData,
   } from "../types";
   import GitSection from "./GitSection.svelte";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
@@ -23,6 +24,7 @@
     onOpenCiLog,
     agentTabBranches = [],
     activeAgentTabBranch = null,
+    preferredLanguage = "auto",
     prNumber = null,
     ghCliStatus = null,
   }: {
@@ -33,6 +35,7 @@
     onOpenCiLog?: (runId: number) => void;
     agentTabBranches?: string[];
     activeAgentTabBranch?: string | null;
+    preferredLanguage?: SettingsData["app_language"];
     prNumber?: number | null;
     ghCliStatus?: GhCliStatus | null;
   } = $props();
@@ -63,11 +66,17 @@
   let sessionSummaryError: string | null = $state(null);
   let sessionSummaryToolId: string | null = $state(null);
   let sessionSummarySessionId: string | null = $state(null);
+  let sessionSummaryLanguage: string | null = $state(null);
   let sessionSummarySourceType: SessionSummaryResult["sourceType"] | null = $state(
     null,
   );
   let sessionSummaryInputMtimeMs: number | null = $state(null);
   let sessionSummaryUpdatedMs: number | null = $state(null);
+  let summaryRebuildInProgress = $state(false);
+  let summaryRebuildTotal = $state(0);
+  let summaryRebuildCompleted = $state(0);
+  let summaryRebuildBranch: string | null = $state(null);
+  let summaryRebuildError: string | null = $state(null);
   const SESSION_SUMMARY_POLL_FOCUSED_INTERVAL_MS = 15000;
   const SESSION_SUMMARY_POLL_NONFOCUSED_INTERVAL_MS = 60000;
 
@@ -98,6 +107,15 @@
     branch: string;
     result: SessionSummaryResult;
   };
+  type SessionSummaryRebuildProgressPayload = {
+    projectPath: string;
+    language: string;
+    total: number;
+    completed: number;
+    branch?: string | null;
+    status: string;
+    error?: string | null;
+  };
 
   function toErrorMessage(err: unknown): string {
     if (typeof err === "string") return err;
@@ -120,6 +138,21 @@
   function currentBranchName(): string {
     const rawBranch = selectedBranch?.name?.trim() ?? "";
     return normalizeBranchName(rawBranch);
+  }
+
+  function normalizeSummaryLanguage(value: string | null | undefined): string {
+    const language = (value ?? "").trim().toLowerCase();
+    if (language === "ja" || language === "en" || language === "auto") {
+      return language;
+    }
+    return "auto";
+  }
+
+  function summaryLanguageLabel(value: string | null): string | null {
+    const language = normalizeSummaryLanguage(value);
+    if (language === "ja") return "Japanese";
+    if (language === "en") return "English";
+    return language === "auto" ? "Auto" : null;
   }
 
   function hasAgentTabForBranch(branch: string): boolean {
@@ -312,6 +345,7 @@
   ) {
     const silent = options.silent === true;
     const cachedOnly = options.cachedOnly === true;
+    const normalizedLanguage = normalizeSummaryLanguage(preferredLanguage);
     sessionSummaryError = null;
     sessionSummaryWarning = null;
 
@@ -323,6 +357,7 @@
       sessionSummaryMarkdown = null;
       sessionSummaryToolId = null;
       sessionSummarySessionId = null;
+      sessionSummaryLanguage = null;
       sessionSummarySourceType = null;
       sessionSummaryInputMtimeMs = null;
       sessionSummaryUpdatedMs = null;
@@ -337,6 +372,7 @@
       sessionSummaryMarkdown = null;
       sessionSummaryToolId = null;
       sessionSummarySessionId = null;
+      sessionSummaryLanguage = null;
       sessionSummarySourceType = null;
       sessionSummaryInputMtimeMs = null;
       sessionSummaryUpdatedMs = null;
@@ -348,6 +384,7 @@
         projectPath,
         branch,
         cachedOnly,
+        preferredLanguage: normalizedLanguage,
       });
 
       const currentKey = `${projectPath}::${currentBranchName()}`;
@@ -365,6 +402,7 @@
       sessionSummaryError = result.error ?? null;
       sessionSummaryToolId = result.toolId ?? null;
       sessionSummarySessionId = result.sessionId ?? null;
+      sessionSummaryLanguage = result.language ?? normalizedLanguage;
       sessionSummarySourceType = result.sourceType ?? null;
       sessionSummaryInputMtimeMs = result.inputMtimeMs ?? null;
       sessionSummaryUpdatedMs = result.summaryUpdatedMs ?? null;
@@ -376,6 +414,7 @@
       }
       sessionSummaryToolId = null;
       sessionSummarySessionId = null;
+      sessionSummaryLanguage = null;
       sessionSummarySourceType = null;
       sessionSummaryInputMtimeMs = null;
       sessionSummaryUpdatedMs = null;
@@ -399,6 +438,7 @@
     void projectPath;
     void agentTabBranches;
     void activeAgentTabBranch;
+    void preferredLanguage;
 
     const branch = currentBranchName();
     if (!branch) {
@@ -436,12 +476,13 @@
   });
 
   onMount(() => {
-    let unlisten: null | (() => void) = null;
+    let unlistenSummaryUpdated: null | (() => void) = null;
+    let unlistenRebuildProgress: null | (() => void) = null;
     let cancelled = false;
     (async () => {
       try {
         const { listen } = await import("@tauri-apps/api/event");
-        const unlistenFn = await listen<SessionSummaryUpdatedPayload>(
+        const unlistenSummaryFn = await listen<SessionSummaryUpdatedPayload>(
           "session-summary-updated",
           (event) => {
             const payload = event.payload;
@@ -465,16 +506,44 @@
             sessionSummaryError = result.error ?? null;
             sessionSummaryToolId = result.toolId ?? null;
             sessionSummarySessionId = result.sessionId ?? null;
+            sessionSummaryLanguage =
+              result.language ?? normalizeSummaryLanguage(preferredLanguage);
             sessionSummarySourceType = result.sourceType ?? null;
             sessionSummaryInputMtimeMs = result.inputMtimeMs ?? null;
             sessionSummaryUpdatedMs = result.summaryUpdatedMs ?? null;
           }
         );
+        const unlistenRebuildFn = await listen<SessionSummaryRebuildProgressPayload>(
+          "session-summary-rebuild-progress",
+          (event) => {
+            const payload = event.payload;
+            if (!payload) return;
+            if (payload.projectPath !== projectPath) return;
+
+            summaryRebuildTotal = payload.total ?? 0;
+            summaryRebuildCompleted = payload.completed ?? 0;
+            summaryRebuildBranch = payload.branch ?? null;
+            summaryRebuildError = payload.error ?? null;
+            summaryRebuildInProgress = payload.status !== "completed";
+
+            if (payload.status === "completed") {
+              const branch = currentBranchName();
+              if (!branch) return;
+              const tabExists = hasAgentTabForBranch(branch);
+              loadSessionSummary({
+                silent: true,
+                cachedOnly: !tabExists,
+              });
+            }
+          }
+        );
         if (cancelled) {
-          unlistenFn();
+          unlistenSummaryFn();
+          unlistenRebuildFn();
           return;
         }
-        unlisten = unlistenFn;
+        unlistenSummaryUpdated = unlistenSummaryFn;
+        unlistenRebuildProgress = unlistenRebuildFn;
       } catch (err) {
         // Ignore when Tauri event bridge is unavailable (e.g., tests/web preview).
       }
@@ -482,9 +551,8 @@
 
     return () => {
       cancelled = true;
-      if (unlisten) {
-        unlisten();
-      }
+      if (unlistenSummaryUpdated) unlistenSummaryUpdated();
+      if (unlistenRebuildProgress) unlistenRebuildProgress();
     };
   });
 
@@ -880,7 +948,15 @@
         <div class="quick-start ai-summary">
           <div class="quick-header">
             <span class="quick-title">AI</span>
-            {#if sessionSummaryLoading}
+            {#if summaryRebuildInProgress}
+              <span class="quick-subtitle rebuild-progress">
+                <span class="summary-spinner" aria-hidden="true"></span>
+                Rebuilding summaries ({summaryRebuildCompleted}/{summaryRebuildTotal})
+                {#if summaryRebuildBranch}
+                  - {summaryRebuildBranch}
+                {/if}
+              </span>
+            {:else if sessionSummaryLoading}
               <span class="quick-subtitle">Loading...</span>
             {:else if sessionSummaryStatus === "ok" && sessionSummaryToolId}
               <span class="quick-subtitle">
@@ -910,7 +986,8 @@
             (sessionSummaryToolId || sessionSummarySessionId)}
             {@const inputTime = formatSessionSummaryTimestamp(sessionSummaryInputMtimeMs)}
             {@const updatedTime = formatSessionSummaryTimestamp(sessionSummaryUpdatedMs)}
-            {#if sessionSummarySourceType || inputTime || updatedTime}
+            {@const languageLabel = summaryLanguageLabel(sessionSummaryLanguage)}
+            {#if sessionSummarySourceType || languageLabel || inputTime || updatedTime}
               <div class="session-summary-meta">
                 <span class="meta-item">
                   Source: {sessionSummarySourceType === "scrollback" ||
@@ -918,6 +995,9 @@
                     ? "Live (scrollback)"
                     : "Session"}
                 </span>
+                {#if languageLabel}
+                  <span class="meta-item">Language: {languageLabel}</span>
+                {/if}
                 {#if inputTime}
                   <span class="meta-item">Input updated: {inputTime}</span>
                 {/if}
@@ -931,6 +1011,11 @@
           {#if sessionSummaryWarning}
             <div class="session-summary-warning">
               {sessionSummaryWarning}
+            </div>
+          {/if}
+          {#if summaryRebuildError && !summaryRebuildInProgress}
+            <div class="session-summary-warning">
+              Rebuild warning: {summaryRebuildError}
             </div>
           {/if}
 
@@ -1171,6 +1256,30 @@
     color: var(--text-muted);
     font-family: monospace;
     text-align: right;
+  }
+
+  .quick-subtitle.rebuild-progress {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .summary-spinner {
+    width: 12px;
+    height: 12px;
+    border: 2px solid rgba(255, 255, 255, 0.25);
+    border-top-color: rgba(255, 255, 255, 0.75);
+    border-radius: 999px;
+    animation: summary-spin 0.8s linear infinite;
+  }
+
+  @keyframes summary-spin {
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   .session-summary-meta {

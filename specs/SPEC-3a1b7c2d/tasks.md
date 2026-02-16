@@ -1,4 +1,4 @@
-# タスクリスト: GUI Session Summary のスクロールバック要約（実行中対応）
+# タスクリスト: GUI Session Summary のスクロールバック要約（実行中対応）+ 言語切替再生成
 
 ## 依存関係/並列性
 
@@ -37,14 +37,23 @@
 
 ## Phase 7: 永続キャッシュ（US4/US6）
 
-- [ ] T012 [US4] Session Summary の永続キャッシュ保存先/フォーマットを実装（atomic write） `crates/gwt-core` / `crates/gwt-tauri`
-- [ ] T013 [US4] `get_branch_session_summary` 初回で永続キャッシュを lazy load して即表示に反映 `crates/gwt-tauri/src/commands/sessions.rs`
-- [ ] T014 [US6] 何を要約しているか（source/識別子/入力更新時刻）を結果に含め、UIで表示 `crates/gwt-tauri` + `gwt-gui`
-- [ ] T015 [US4] 永続キャッシュ即表示のユニットテスト追加 `crates/gwt-tauri/src/commands/sessions.rs`
+- [x] T012 [US4] Session Summary の永続キャッシュ保存先/フォーマットを実装（atomic write） `crates/gwt-core` / `crates/gwt-tauri`
+- [x] T013 [US4] `get_branch_session_summary` 初回で永続キャッシュを lazy load して即表示に反映 `crates/gwt-tauri/src/commands/sessions.rs`
+- [x] T014 [US6] 何を要約しているか（source/識別子/入力更新時刻）を結果に含め、UIで表示 `crates/gwt-tauri` + `gwt-gui`
+- [x] T015 [US4] 永続キャッシュ即表示のユニットテスト追加 `crates/gwt-tauri/src/commands/sessions.rs`
 
 ## Phase 8: 更新制御（US5）
 
-- [ ] T016 [US5] タブ無しは更新不要でキャッシュ表示のみ（自動更新しない） `gwt-gui/src/lib/components/WorktreeSummaryPanel.svelte`
-- [ ] T017 [US5] Liveフォーカス15秒 / Live非フォーカス60秒へ更新間隔を切替 `gwt-gui/src/lib/components/WorktreeSummaryPanel.svelte`
-- [ ] T018 [US5] スクロールバックに変更がない場合は更新しないことをテストで保証 `crates/gwt-tauri/src/commands/sessions.rs`
-- [ ] T019 [US5] フロント側の更新間隔切替のテスト追加 `gwt-gui/src/lib/components/WorktreeSummaryPanel.test.ts`
+- [x] T016 [US5] タブ無しは更新不要でキャッシュ表示のみ（自動更新しない） `gwt-gui/src/lib/components/WorktreeSummaryPanel.svelte`
+- [x] T017 [US5] Liveフォーカス15秒 / Live非フォーカス60秒へ更新間隔を切替 `gwt-gui/src/lib/components/WorktreeSummaryPanel.svelte`
+- [x] T018 [US5] スクロールバックに変更がない場合は更新しないことをテストで保証 `crates/gwt-tauri/src/commands/sessions.rs`
+- [x] T019 [US5] フロント側の更新間隔切替のテスト追加 `gwt-gui/src/lib/components/WorktreeSummaryPanel.test.ts`
+
+## Phase 9: 言語切替再生成（US7）
+
+- [x] T020 [US7] 共通言語設定（`app_language`）を Settings/Core/Tauri/GUI 型に追加 `crates/gwt-core/src/config/settings.rs` `crates/gwt-tauri/src/commands/settings.rs` `gwt-gui/src/lib/types.ts`
+- [x] T021 [US7] `get_branch_session_summary` に `preferredLanguage` と `forceRebuild` を追加し、要約結果に `language` を含める `crates/gwt-tauri/src/commands/sessions.rs`
+- [x] T022 [US7] 言語切替時に全ブランチを一括再生成する `rebuild_all_branch_session_summaries` を実装 `crates/gwt-tauri/src/commands/sessions.rs` `crates/gwt-tauri/src/app.rs`
+- [x] T023 [US7] `session-summary-rebuild-progress` イベントを追加し、AIタブでスピナーと進捗を表示 `gwt-gui/src/lib/components/WorktreeSummaryPanel.svelte`
+- [x] T024 [US7] 言語切替イベントから再生成コマンドを起動し、Sidebar経由で言語指定を伝播 `gwt-gui/src/App.svelte` `gwt-gui/src/lib/components/Sidebar.svelte` `gwt-gui/src/lib/components/AgentSidebar.svelte`
+- [x] T025 [US7] 単体テストを追加/更新（再生成進捗UI・設定型・セッション要約） `gwt-gui/src/lib/components/WorktreeSummaryPanel.test.ts` `gwt-gui/src/lib/components/SettingsPanel.test.ts` `crates/gwt-tauri/src/commands/sessions.rs`

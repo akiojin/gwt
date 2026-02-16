@@ -134,6 +134,7 @@ export interface SettingsData {
   docker_force_host: boolean;
   ui_font_size: number;
   terminal_font_size: number;
+  app_language: "auto" | "ja" | "en" | (string & {});
   voice_input: VoiceInputSettings;
 }
 
@@ -229,6 +230,7 @@ export interface SessionSummaryResult {
   generating: boolean;
   toolId?: string | null;
   sessionId?: string | null;
+  language?: "auto" | "ja" | "en" | (string & {}) | null;
   sourceType?: "session" | "scrollback" | null;
   inputMtimeMs?: number | null;
   summaryUpdatedMs?: number | null;

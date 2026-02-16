@@ -404,6 +404,7 @@ describe("WorktreeSummaryPanel", () => {
         projectPath: "/tmp/project",
         branch: "feature/markdown-ui",
         cachedOnly: true,
+        preferredLanguage: "auto",
       });
     });
   });
@@ -470,5 +471,60 @@ describe("WorktreeSummaryPanel", () => {
       expect(sessionSummaryCalls()).toHaveLength(2);
     });
   });
-});
 
+  it("shows rebuild progress spinner and refreshes summary on completion", async () => {
+    const listeners: Record<string, (event: { payload: any }) => void> = {};
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      listeners[eventName] = handler;
+      return () => {};
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      agentTabBranches: [],
+      activeAgentTabBranch: null,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const aiTab = tabs[4] as HTMLElement;
+    await fireEvent.click(aiTab);
+
+    await waitFor(() => {
+      expect(typeof listeners["session-summary-rebuild-progress"]).toBe("function");
+    });
+
+    listeners["session-summary-rebuild-progress"]({
+      payload: {
+        projectPath: "/tmp/project",
+        language: "ja",
+        total: 3,
+        completed: 0,
+        branch: null,
+        status: "started",
+        error: null,
+      },
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("Rebuilding summaries (0/3)")).toBeTruthy();
+    });
+
+    const callsBeforeComplete = sessionSummaryCalls().length;
+    listeners["session-summary-rebuild-progress"]({
+      payload: {
+        projectPath: "/tmp/project",
+        language: "ja",
+        total: 3,
+        completed: 3,
+        branch: null,
+        status: "completed",
+        error: null,
+      },
+    });
+
+    await waitFor(() => {
+      expect(sessionSummaryCalls().length).toBeGreaterThan(callsBeforeComplete);
+    });
+  });
+});

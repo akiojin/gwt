@@ -9,6 +9,7 @@ use gwt_core::ai::{
     OpenCodeSessionParser, SessionParseError, SessionParser, SessionSummary, SessionSummaryCache,
 };
 use gwt_core::config::{ProfilesConfig, ResolvedAISettings, ToolSessionEntry};
+use gwt_core::git::Branch;
 use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::terminal::scrollback::ScrollbackFile;
 use serde::{Deserialize, Serialize};
@@ -512,6 +513,7 @@ pub struct SessionSummaryResult {
     pub generating: bool,
     pub tool_id: Option<String>,
     pub session_id: Option<String>,
+    pub language: Option<String>,    // "auto" | "ja" | "en"
     pub source_type: Option<String>, // "session" | "scrollback"
     pub input_mtime_ms: Option<u64>,
     pub summary_updated_ms: Option<u64>,
@@ -528,6 +530,19 @@ fn summary_source_type(session_id: &str) -> &'static str {
         "scrollback"
     } else {
         "session"
+    }
+}
+
+fn normalize_summary_language(preferred_language: Option<&str>) -> String {
+    match preferred_language
+        .unwrap_or("auto")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "ja" => "ja".to_string(),
+        "en" => "en".to_string(),
+        _ => "auto".to_string(),
     }
 }
 
@@ -548,6 +563,7 @@ fn ok_summary(
         generating: false,
         tool_id: Some(tool_id.to_string()),
         session_id: Some(session_id.to_string()),
+        language: summary.language.clone(),
         source_type: Some(summary_source_type(session_id).to_string()),
         input_mtime_ms: input_mtime.map(system_time_millis_u64).filter(|ms| *ms > 0),
         summary_updated_ms: summary
@@ -568,6 +584,7 @@ fn summary_status(
     tool_id: Option<String>,
     session_id: Option<String>,
     message: Option<String>,
+    language: Option<&str>,
 ) -> SessionSummaryResult {
     let source_type = session_id
         .as_deref()
@@ -578,6 +595,7 @@ fn summary_status(
         generating: false,
         tool_id,
         session_id,
+        language: language.map(|lang| normalize_summary_language(Some(lang))),
         source_type,
         input_mtime_ms: None,
         summary_updated_ms: None,
@@ -595,6 +613,7 @@ fn generating_summary(
     session_id: &str,
     previous: Option<&SessionSummary>,
     input_mtime: Option<SystemTime>,
+    language: &str,
 ) -> SessionSummaryResult {
     if let Some(prev) = previous {
         let mut out = ok_summary(tool_id, session_id, prev, input_mtime);
@@ -607,6 +626,7 @@ fn generating_summary(
         generating: true,
         tool_id: Some(tool_id.to_string()),
         session_id: Some(session_id.to_string()),
+        language: Some(normalize_summary_language(Some(language))),
         source_type: Some(summary_source_type(session_id).to_string()),
         input_mtime_ms: input_mtime.map(system_time_millis_u64).filter(|ms| *ms > 0),
         summary_updated_ms: None,
@@ -663,6 +683,7 @@ struct SessionSummaryJob {
     branch: String,
     tool_id: String,
     session_id: String,
+    preferred_language: String,
     settings: ResolvedAISettings,
     mtime: SystemTime,
 }
@@ -674,6 +695,7 @@ struct ScrollbackSummaryJob {
     branch: String,
     pane_id: String,
     tool_id: String,
+    preferred_language: String,
     settings: ResolvedAISettings,
     mtime: SystemTime,
 }
@@ -699,7 +721,19 @@ struct SessionSummaryUpdatedPayload {
     pub result: SessionSummaryResult,
 }
 
-const SESSION_SUMMARY_CACHE_VERSION: u32 = 1;
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionSummaryRebuildProgressPayload {
+    pub project_path: String,
+    pub language: String,
+    pub total: usize,
+    pub completed: usize,
+    pub branch: Option<String>,
+    pub status: String, // "started" | "branch-ok" | "branch-skipped" | "branch-error" | "completed"
+    pub error: Option<String>,
+}
+
+const SESSION_SUMMARY_CACHE_VERSION: u32 = 2;
 
 static SESSION_SUMMARY_CACHE_PERSIST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -718,6 +752,8 @@ struct PersistedSessionSummaryCache {
 struct PersistedBranchSummary {
     pub tool_id: String,
     pub session_id: String,
+    #[serde(default)]
+    pub language: Option<String>,
     pub input_mtime_ms: u64,
     pub last_updated_ms: u64,
     pub markdown: Option<String>,
@@ -784,6 +820,7 @@ fn ensure_persisted_session_summary_cache_loaded(
         };
 
         let summary = SessionSummary {
+            language: Some(normalize_summary_language(entry.language.as_deref())),
             task_overview: entry.task_overview,
             short_summary: entry.short_summary,
             bullet_points: entry.bullet_points,
@@ -843,6 +880,7 @@ fn persist_session_summary_cache_entry(
         PersistedBranchSummary {
             tool_id: tool_id.to_string(),
             session_id: session_id.to_string(),
+            language: summary.language.clone(),
             input_mtime_ms,
             last_updated_ms,
             markdown: summary.markdown.clone(),
@@ -963,11 +1001,14 @@ fn is_latest_scrollback_candidate(
     candidate.pane_id == pane_id
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scrollback_summary_immediate(
     project_path: &str,
     repo_key: &str,
     branch: &str,
     candidate: ScrollbackCandidate,
+    preferred_language: &str,
+    force_rebuild: bool,
     settings: ResolvedAISettings,
     state: &AppState,
 ) -> (SessionSummaryResult, Option<ScrollbackSummaryJob>) {
@@ -983,6 +1024,7 @@ fn scrollback_summary_immediate(
                         Some(candidate.tool_id),
                         Some(pane_session),
                         Some("Session summary cache lock poisoned".to_string()),
+                        Some(preferred_language),
                     ),
                     None,
                 )
@@ -990,9 +1032,15 @@ fn scrollback_summary_immediate(
         };
         let cache = cache_guard.get(repo_key);
         let cached_ok = cache.and_then(|c| {
-            c.get(branch)
-                .cloned()
-                .filter(|_| !c.is_stale(branch, &pane_session, candidate.mtime))
+            c.get(branch).cloned().filter(|_| {
+                !force_rebuild
+                    && !c.is_stale(
+                        branch,
+                        &pane_session,
+                        candidate.mtime,
+                        Some(preferred_language),
+                    )
+            })
         });
         let previous_any = cache.and_then(|c| c.get(branch).cloned());
         (cached_ok, previous_any)
@@ -1015,6 +1063,7 @@ fn scrollback_summary_immediate(
         &pane_session,
         previous_any.as_ref(),
         Some(candidate.mtime),
+        preferred_language,
     );
     let job = ScrollbackSummaryJob {
         project_path: project_path.to_string(),
@@ -1022,6 +1071,7 @@ fn scrollback_summary_immediate(
         branch: branch.to_string(),
         pane_id: candidate.pane_id,
         tool_id: candidate.tool_id,
+        preferred_language: normalize_summary_language(Some(preferred_language)),
         settings,
         mtime: candidate.mtime,
     };
@@ -1033,6 +1083,8 @@ fn get_branch_session_summary_immediate(
     project_path: &str,
     branch: &str,
     cached_only: bool,
+    preferred_language: Option<&str>,
+    force_rebuild: bool,
     state: &AppState,
 ) -> Result<(SessionSummaryResult, Option<SummaryJob>), String> {
     let project_root = Path::new(project_path);
@@ -1043,6 +1095,7 @@ fn get_branch_session_summary_immediate(
     if branch.is_empty() {
         return Err("Branch is required".to_string());
     }
+    let summary_language = normalize_summary_language(preferred_language);
 
     ensure_persisted_session_summary_cache_loaded(&repo_path, &repo_key, state);
 
@@ -1052,16 +1105,16 @@ fn get_branch_session_summary_immediate(
             .lock()
             .map_err(|_| "Session summary cache lock poisoned".to_string())?;
         let Some(cache) = cache_guard.get(&repo_key) else {
-            return Ok((summary_status("no-session", None, None, None), None));
+            return Ok((summary_status("no-session", None, None, None, None), None));
         };
         let Some(summary) = cache.get(branch) else {
-            return Ok((summary_status("no-session", None, None, None), None));
+            return Ok((summary_status("no-session", None, None, None, None), None));
         };
         let Some(tool_id) = cache.tool_id(branch) else {
-            return Ok((summary_status("no-session", None, None, None), None));
+            return Ok((summary_status("no-session", None, None, None, None), None));
         };
         let Some(session_id) = cache.session_id(branch) else {
-            return Ok((summary_status("no-session", None, None, None), None));
+            return Ok((summary_status("no-session", None, None, None, None), None));
         };
 
         return Ok((
@@ -1102,6 +1155,7 @@ fn get_branch_session_summary_immediate(
                     },
                     None,
                     None,
+                    Some(summary_language.as_str()),
                 ),
                 None,
             ));
@@ -1112,13 +1166,25 @@ fn get_branch_session_summary_immediate(
 
         if !ai.ai_enabled {
             return Ok((
-                summary_status("ai-not-configured", Some(candidate.tool_id), None, None),
+                summary_status(
+                    "ai-not-configured",
+                    Some(candidate.tool_id),
+                    None,
+                    None,
+                    Some(summary_language.as_str()),
+                ),
                 None,
             ));
         }
         if !ai.summary_enabled {
             return Ok((
-                summary_status("disabled", Some(candidate.tool_id), None, None),
+                summary_status(
+                    "disabled",
+                    Some(candidate.tool_id),
+                    None,
+                    None,
+                    Some(summary_language.as_str()),
+                ),
                 None,
             ));
         }
@@ -1132,6 +1198,8 @@ fn get_branch_session_summary_immediate(
             &repo_key,
             branch,
             candidate,
+            summary_language.as_str(),
+            force_rebuild,
             settings,
             state,
         );
@@ -1144,13 +1212,25 @@ fn get_branch_session_summary_immediate(
 
     if !ai.ai_enabled {
         return Ok((
-            summary_status("ai-not-configured", Some(tool_id), Some(session_id), None),
+            summary_status(
+                "ai-not-configured",
+                Some(tool_id),
+                Some(session_id),
+                None,
+                Some(summary_language.as_str()),
+            ),
             None,
         ));
     }
     if !ai.summary_enabled {
         return Ok((
-            summary_status("disabled", Some(tool_id), Some(session_id), None),
+            summary_status(
+                "disabled",
+                Some(tool_id),
+                Some(session_id),
+                None,
+                Some(summary_language.as_str()),
+            ),
             None,
         ));
     }
@@ -1167,6 +1247,7 @@ fn get_branch_session_summary_immediate(
                     Some(tool_id),
                     Some(session_id),
                     Some("Unsupported agent session".to_string()),
+                    Some(summary_language.as_str()),
                 ),
                 None,
             ))
@@ -1204,6 +1285,7 @@ fn get_branch_session_summary_immediate(
                     Some(tool_id),
                     Some(session_id),
                     Some(err.to_string()),
+                    Some(summary_language.as_str()),
                 ),
                 None,
             ));
@@ -1219,9 +1301,10 @@ fn get_branch_session_summary_immediate(
             .map_err(|_| "Session summary cache lock poisoned".to_string())?;
         let cache = cache_guard.get(&repo_key);
         let cached_ok = cache.and_then(|c| {
-            c.get(branch)
-                .cloned()
-                .filter(|_| !c.is_stale(branch, &session_id, mtime))
+            c.get(branch).cloned().filter(|_| {
+                !force_rebuild
+                    && !c.is_stale(branch, &session_id, mtime, Some(summary_language.as_str()))
+            })
         });
         let previous_any = cache.and_then(|c| c.get(branch).cloned());
         (cached_ok, previous_any)
@@ -1234,13 +1317,20 @@ fn get_branch_session_summary_immediate(
         ));
     }
 
-    let immediate = generating_summary(&tool_id, &session_id, previous_any.as_ref(), Some(mtime));
+    let immediate = generating_summary(
+        &tool_id,
+        &session_id,
+        previous_any.as_ref(),
+        Some(mtime),
+        summary_language.as_str(),
+    );
     let job = SessionSummaryJob {
         project_path: project_path.to_string(),
         repo_key,
         branch: branch.to_string(),
         tool_id,
         session_id,
+        preferred_language: summary_language,
         settings,
         mtime,
     };
@@ -1266,9 +1356,14 @@ pub(crate) fn prewarm_missing_worktree_summaries(
             continue;
         }
 
-        let Ok((_, maybe_job)) =
-            get_branch_session_summary_immediate(&project_path, &branch, false, &state)
-        else {
+        let Ok((_, maybe_job)) = get_branch_session_summary_immediate(
+            &project_path,
+            &branch,
+            false,
+            None,
+            false,
+            &state,
+        ) else {
             continue;
         };
 
@@ -1282,6 +1377,181 @@ pub(crate) fn prewarm_missing_worktree_summaries(
             None => {}
         }
     }
+}
+
+fn collect_rebuild_target_branches(repo_path: &Path) -> Vec<String> {
+    let mut names: HashSet<String> = HashSet::new();
+
+    if let Ok(branches) = Branch::list(repo_path) {
+        for branch in branches {
+            let name = branch.name.trim();
+            if !name.is_empty() {
+                names.insert(name.to_string());
+            }
+        }
+    }
+
+    for (branch, _) in gwt_core::config::get_last_tool_usage_map(repo_path) {
+        let name = branch.trim();
+        if !name.is_empty() {
+            names.insert(name.to_string());
+        }
+    }
+
+    let mut out = names.into_iter().collect::<Vec<_>>();
+    out.sort_unstable();
+    out
+}
+
+fn emit_rebuild_progress(app_handle: &AppHandle, payload: &SessionSummaryRebuildProgressPayload) {
+    let _ = app_handle.emit("session-summary-rebuild-progress", payload);
+}
+
+fn emit_session_summary_updated(
+    app_handle: &AppHandle,
+    project_path: &str,
+    branch: &str,
+    result: &SessionSummaryResult,
+) {
+    let payload = SessionSummaryUpdatedPayload {
+        project_path: project_path.to_string(),
+        branch: branch.to_string(),
+        result: result.clone(),
+    };
+    let _ = app_handle.emit("session-summary-updated", &payload);
+}
+
+fn run_summary_job_for_rebuild(
+    job: SummaryJob,
+    state: &AppState,
+    app_handle: &AppHandle,
+    project_path: &str,
+    branch: &str,
+) -> SessionSummaryResult {
+    match job {
+        SummaryJob::Session(session_job) => {
+            let result = generate_and_cache_session_summary(&session_job, state);
+            if is_latest_branch_session(
+                &session_job.repo_key,
+                &session_job.branch,
+                &session_job.tool_id,
+                &session_job.session_id,
+            ) {
+                emit_session_summary_updated(app_handle, project_path, branch, &result);
+            }
+            result
+        }
+        SummaryJob::Scrollback(scrollback_job) => {
+            let result = generate_and_cache_scrollback_summary(&scrollback_job, state);
+            if is_latest_scrollback_candidate(
+                state,
+                Path::new(&scrollback_job.repo_key),
+                &scrollback_job.branch,
+                &scrollback_job.pane_id,
+            ) {
+                emit_session_summary_updated(app_handle, project_path, branch, &result);
+            }
+            result
+        }
+    }
+}
+
+#[tauri::command]
+pub fn rebuild_all_branch_session_summaries(
+    project_path: String,
+    preferred_language: Option<String>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let branches = collect_rebuild_target_branches(&repo_path);
+    let language = normalize_summary_language(preferred_language.as_deref());
+
+    let app_handle_clone = app_handle.clone();
+    let project_path_for_task = project_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle_clone.state::<AppState>();
+        let total = branches.len();
+
+        emit_rebuild_progress(
+            &app_handle_clone,
+            &SessionSummaryRebuildProgressPayload {
+                project_path: project_path_for_task.clone(),
+                language: language.clone(),
+                total,
+                completed: 0,
+                branch: None,
+                status: "started".to_string(),
+                error: None,
+            },
+        );
+
+        let mut completed = 0usize;
+        for branch in branches {
+            let immediate = get_branch_session_summary_immediate(
+                &project_path_for_task,
+                &branch,
+                false,
+                Some(language.as_str()),
+                true,
+                &state,
+            );
+
+            let (status, error) = match immediate {
+                Ok((immediate_result, maybe_job)) => {
+                    let result = match maybe_job {
+                        Some(job) => run_summary_job_for_rebuild(
+                            job,
+                            &state,
+                            &app_handle_clone,
+                            &project_path_for_task,
+                            &branch,
+                        ),
+                        None => immediate_result,
+                    };
+
+                    if result.status == "ok" {
+                        ("branch-ok".to_string(), None)
+                    } else {
+                        (
+                            "branch-skipped".to_string(),
+                            result.error.clone().or(result.warning.clone()),
+                        )
+                    }
+                }
+                Err(err) => ("branch-error".to_string(), Some(err)),
+            };
+
+            completed += 1;
+            emit_rebuild_progress(
+                &app_handle_clone,
+                &SessionSummaryRebuildProgressPayload {
+                    project_path: project_path_for_task.clone(),
+                    language: language.clone(),
+                    total,
+                    completed,
+                    branch: Some(branch),
+                    status,
+                    error,
+                },
+            );
+        }
+
+        emit_rebuild_progress(
+            &app_handle_clone,
+            &SessionSummaryRebuildProgressPayload {
+                project_path: project_path_for_task,
+                language,
+                total,
+                completed,
+                branch: None,
+                status: "completed".to_string(),
+                error: None,
+            },
+        );
+    });
+
+    Ok(())
 }
 
 fn is_latest_branch_session(repo_key: &str, branch: &str, tool_id: &str, session_id: &str) -> bool {
@@ -1334,6 +1604,7 @@ fn start_session_summary_job(job: SessionSummaryJob, state: &AppState, app_handl
                 Some(job.tool_id.clone()),
                 Some(job.session_id.clone()),
                 Some("Internal error".to_string()),
+                Some(job.preferred_language.as_str()),
             )
         });
 
@@ -1394,6 +1665,7 @@ fn start_scrollback_summary_job(
                 Some(job.tool_id.clone()),
                 Some(pane_session_id(&job.pane_id)),
                 Some("Internal error".to_string()),
+                Some(job.preferred_language.as_str()),
             )
         });
 
@@ -1445,6 +1717,7 @@ fn generate_and_cache_session_summary(
                 Some(job.tool_id.clone()),
                 Some(job.session_id.clone()),
                 Some("Unsupported agent session".to_string()),
+                Some(job.preferred_language.as_str()),
             );
         }
     };
@@ -1463,6 +1736,7 @@ fn generate_and_cache_session_summary(
                 Some(job.tool_id.clone()),
                 Some(job.session_id.clone()),
                 Some(err.to_string()),
+                Some(job.preferred_language.as_str()),
             );
         }
     };
@@ -1480,11 +1754,12 @@ fn generate_and_cache_session_summary(
                 Some(job.tool_id.clone()),
                 Some(job.session_id.clone()),
                 Some(err.to_string()),
+                Some(job.preferred_language.as_str()),
             );
         }
     };
 
-    match summarize_session(&client, &parsed) {
+    match summarize_session(&client, &parsed, Some(job.preferred_language.as_str())) {
         Ok(summary) => {
             // Avoid overwriting the cache if the branch's latest session has changed
             // since the job started (e.g., a new session was recorded).
@@ -1520,6 +1795,7 @@ fn generate_and_cache_session_summary(
                     Some(job.tool_id.clone()),
                     Some(job.session_id.clone()),
                     Some(format_error_for_display(&AIError::IncompleteSummary)),
+                    Some(job.preferred_language.as_str()),
                 )
             }
         }
@@ -1537,6 +1813,7 @@ fn generate_and_cache_session_summary(
                     Some(job.tool_id.clone()),
                     Some(job.session_id.clone()),
                     Some(format_error_for_display(&other)),
+                    Some(job.preferred_language.as_str()),
                 )
             }
         }
@@ -1571,6 +1848,7 @@ fn generate_and_cache_scrollback_summary(
                 Some(job.tool_id.clone()),
                 Some(pane_session),
                 Some(err),
+                Some(job.preferred_language.as_str()),
             );
         }
     };
@@ -1588,11 +1866,17 @@ fn generate_and_cache_scrollback_summary(
                 Some(job.tool_id.clone()),
                 Some(pane_session),
                 Some(err.to_string()),
+                Some(job.preferred_language.as_str()),
             );
         }
     };
 
-    match summarize_scrollback(&client, &scrollback, &job.branch) {
+    match summarize_scrollback(
+        &client,
+        &scrollback,
+        &job.branch,
+        Some(job.preferred_language.as_str()),
+    ) {
         Ok(summary) => {
             if is_latest_scrollback_candidate(
                 state,
@@ -1631,6 +1915,7 @@ fn generate_and_cache_scrollback_summary(
                     Some(job.tool_id.clone()),
                     Some(pane_session),
                     Some(format_error_for_display(&AIError::IncompleteSummary)),
+                    Some(job.preferred_language.as_str()),
                 )
             }
         }
@@ -1648,6 +1933,7 @@ fn generate_and_cache_scrollback_summary(
                     Some(job.tool_id.clone()),
                     Some(pane_session),
                     Some(format_error_for_display(&other)),
+                    Some(job.preferred_language.as_str()),
                 )
             }
         }
@@ -1665,6 +1951,8 @@ pub fn get_branch_session_summary(
     project_path: String,
     branch: String,
     cached_only: Option<bool>,
+    preferred_language: Option<String>,
+    force_rebuild: Option<bool>,
     state: State<AppState>,
     app_handle: AppHandle,
 ) -> Result<SessionSummaryResult, String> {
@@ -1672,6 +1960,8 @@ pub fn get_branch_session_summary(
         &project_path,
         &branch,
         cached_only.unwrap_or(false),
+        preferred_language.as_deref(),
+        force_rebuild.unwrap_or(false),
         &state,
     )?;
     if let Some(job) = job {
@@ -1821,6 +2111,8 @@ mod tests {
             repo.path().to_str().unwrap(),
             "main",
             false,
+            None,
+            false,
             &state,
         )
         .unwrap();
@@ -1843,6 +2135,8 @@ mod tests {
         let (out, job) = get_branch_session_summary_immediate(
             repo.path().to_str().unwrap(),
             "main",
+            false,
+            None,
             false,
             &state,
         )
@@ -1877,6 +2171,8 @@ mod tests {
         let (out, job) = get_branch_session_summary_immediate(
             repo.path().to_str().unwrap(),
             "main",
+            false,
+            None,
             false,
             &state,
         )
@@ -1920,6 +2216,8 @@ mod tests {
         let (out, job) = get_branch_session_summary_immediate(
             repo.path().to_str().unwrap(),
             "main",
+            false,
+            None,
             false,
             &state,
         )
@@ -1988,6 +2286,8 @@ mod tests {
             repo.path().to_str().unwrap(),
             "main",
             false,
+            None,
+            false,
             &state,
         )
         .unwrap();
@@ -2038,6 +2338,8 @@ mod tests {
             "/tmp/repo",
             "main",
             candidate,
+            "auto",
+            false,
             settings,
             &state,
         );
@@ -2072,7 +2374,7 @@ mod tests {
         fs::write(
             &cache_path,
             r###"
-version = 1
+version = 2
 
 [branches.main]
 tool_id = "codex-cli"
@@ -2092,6 +2394,8 @@ bullet_points = ["- A"]
             repo.path().to_str().unwrap(),
             "main",
             true,
+            None,
+            false,
             &state,
         )
         .unwrap();
@@ -2125,7 +2429,7 @@ bullet_points = ["- A"]
         fs::write(
             &cache_path,
             r###"
-version = 1
+version = 2
 
 [branches.main]
 tool_id = "codex-cli"
@@ -2145,6 +2449,8 @@ bullet_points = ["- A"]
             repo.path().to_str().unwrap(),
             "main",
             true,
+            None,
+            false,
             &state,
         )
         .unwrap();
@@ -2195,6 +2501,8 @@ bullet_points = ["- A"]
             repo_key,
             "main",
             candidate,
+            "auto",
+            false,
             settings,
             &state,
         );
