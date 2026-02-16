@@ -432,6 +432,7 @@
             endpoint: "https://api.openai.com/v1",
             api_key: "",
             model: "",
+            language: "en",
             summary_enabled: true,
           },
         }
@@ -442,7 +443,10 @@
     };
   }
 
-  function updateAiField(field: "endpoint" | "api_key" | "model" | "summary_enabled", value: string | boolean) {
+  function updateAiField(
+    field: "endpoint" | "api_key" | "model" | "language" | "summary_enabled",
+    value: string | boolean
+  ) {
     if (!profiles) return;
     const p = currentProfile;
     if (!p || !p.ai) return;
@@ -899,6 +903,18 @@
                     {:else if !aiModelsLoading && aiModels.length === 0 && currentEndpoint}
                       <span class="field-hint">No models returned from /v1/models.</span>
                     {/if}
+                  </div>
+                  <div class="ai-field">
+                    <span class="ai-label">Language</span>
+                    <select
+                      class="select"
+                      value={currentAi?.language ?? "en"}
+                      onchange={(e) => updateAiField("language", (e.target as HTMLSelectElement).value)}
+                    >
+                      <option value="en">English</option>
+                      <option value="ja">Japanese</option>
+                      <option value="auto">Auto</option>
+                    </select>
                   </div>
                   <div class="ai-field">
                     <span class="ai-label">Session Summary</span>

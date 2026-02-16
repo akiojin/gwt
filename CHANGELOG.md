@@ -1,6 +1,34 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.6.0] - 2026-02-16
+
+### Bug Fixes
+
+- TerminalタブのXクローズ回帰を修正 (#1068)
+- **gui:** Delegate wheel handling when terminal is focused (#1067)
+- **gui:** Stabilize tab reorder drag and drop in tauri (#1070)
+- 入力中のSidebarポーリング負荷を抑制 (#1071)
+- Keep ai settings when disabled (#1072)
+- Restore worktree list sort, agent indicator, and keyboard navigation (#1074)
+- Resolve diff base refs for remote-only branches (#1075)
+- Make settings global (#1077)
+- Window switching shortcuts (#1087)
+- Stabilize playwright tauri mock (#1088)
+- **gui:** Persist AI Summary cache and throttle refresh (#1089)
+- **ai:** Include language in inflight keys (#1092)
+
+### Features
+
+- **gui:** Reorganize session summary tabs and align specs (#1069)
+- Move CI and PR details to summary panel tabs (#1073)
+- **ai:** AI出力言語を設定可能にする (#1091)
+
+### Testing
+
+- Boost GUI coverage to 90% with worktree UI regressions (#1076)
+- **e2e:** Stabilize tauri-mock and update Worktree sidebar expectations (#1090)
+
 ## [7.5.1] - 2026-02-14
 
 ### Bug Fixes

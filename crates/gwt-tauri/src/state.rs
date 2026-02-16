@@ -47,6 +47,7 @@ pub struct VersionHistoryCacheEntry {
     pub range_from_oid: Option<String>,
     pub range_to_oid: String,
     pub commit_count: u32,
+    pub language: String,
     pub summary_markdown: String,
     pub changelog_markdown: String,
 }
@@ -89,6 +90,7 @@ pub struct AppState {
     pub agent_versions_cache: Mutex<HashMap<String, AgentVersionsCache>>,
     pub session_summary_cache: Mutex<HashMap<String, SessionSummaryCache>>,
     pub session_summary_inflight: Mutex<HashSet<String>>,
+    pub session_summary_rebuild_inflight: Mutex<HashSet<String>>,
     pub project_version_history_cache:
         Mutex<HashMap<String, HashMap<String, VersionHistoryCacheEntry>>>,
     pub project_version_history_inflight: Mutex<HashSet<String>>,
@@ -119,6 +121,7 @@ impl AppState {
             agent_versions_cache: Mutex::new(HashMap::new()),
             session_summary_cache: Mutex::new(HashMap::new()),
             session_summary_inflight: Mutex::new(HashSet::new()),
+            session_summary_rebuild_inflight: Mutex::new(HashSet::new()),
             project_version_history_cache: Mutex::new(HashMap::new()),
             project_version_history_inflight: Mutex::new(HashSet::new()),
             pane_launch_meta: Mutex::new(HashMap::new()),

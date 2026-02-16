@@ -527,4 +527,67 @@ describe("WorktreeSummaryPanel", () => {
       expect(sessionSummaryCalls().length).toBeGreaterThan(callsBeforeComplete);
     });
   });
+
+  it("keeps rebuild warning after completion until next rebuild starts", async () => {
+    const listeners: Record<string, (event: { payload: any }) => void> = {};
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      listeners[eventName] = handler;
+      return () => {};
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      agentTabBranches: [],
+      activeAgentTabBranch: null,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const aiTab = tabs[4] as HTMLElement;
+    await fireEvent.click(aiTab);
+
+    await waitFor(() => {
+      expect(typeof listeners["session-summary-rebuild-progress"]).toBe("function");
+    });
+
+    listeners["session-summary-rebuild-progress"]({
+      payload: {
+        projectPath: "/tmp/project",
+        language: "ja",
+        total: 3,
+        completed: 0,
+        branch: null,
+        status: "started",
+        error: null,
+      },
+    });
+
+    listeners["session-summary-rebuild-progress"]({
+      payload: {
+        projectPath: "/tmp/project",
+        language: "ja",
+        total: 3,
+        completed: 1,
+        branch: "feature/markdown-ui",
+        status: "branch-error",
+        error: "branch failed",
+      },
+    });
+
+    listeners["session-summary-rebuild-progress"]({
+      payload: {
+        projectPath: "/tmp/project",
+        language: "ja",
+        total: 3,
+        completed: 3,
+        branch: null,
+        status: "completed",
+        error: null,
+      },
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("Rebuild warning: branch failed")).toBeTruthy();
+    });
+  });
 });

@@ -164,11 +164,11 @@
     out = out.replace(/\*\*([^\*]+?)\*\*/g, "<strong>$1</strong>");
     out = out.replace(/\*([^\*]+?)\*/g, "<em>$1</em>");
 
-    for (let idx = 0; idx < codeTokens.length; idx++) {
-      out = out.replaceAll(`${CODE_PREFIX}${idx}${TOKEN_SUFFIX}`, codeTokens[idx]);
-    }
     for (let idx = 0; idx < linkTokens.length; idx++) {
       out = out.replaceAll(`${LINK_PREFIX}${idx}${TOKEN_SUFFIX}`, linkTokens[idx]);
+    }
+    for (let idx = 0; idx < codeTokens.length; idx++) {
+      out = out.replaceAll(`${CODE_PREFIX}${idx}${TOKEN_SUFFIX}`, codeTokens[idx]);
     }
 
     return out;

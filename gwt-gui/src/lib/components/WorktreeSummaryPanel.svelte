@@ -523,7 +523,11 @@
             summaryRebuildTotal = payload.total ?? 0;
             summaryRebuildCompleted = payload.completed ?? 0;
             summaryRebuildBranch = payload.branch ?? null;
-            summaryRebuildError = payload.error ?? null;
+            if (payload.status === "started") {
+              summaryRebuildError = null;
+            } else if (payload.error) {
+              summaryRebuildError = payload.error;
+            }
             summaryRebuildInProgress = payload.status !== "completed";
 
             if (payload.status === "completed") {
