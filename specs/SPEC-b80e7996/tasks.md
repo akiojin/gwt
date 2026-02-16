@@ -30,11 +30,11 @@
 
 ## Phase 5: 状態推測（Hook 非対応エージェント）
 
-- [ ] T-014: Codex/Gemini/OpenCode のペイン出力解析による状態推測ロジック実装
-- [ ] T-015: list_branches/list_worktrees で推測ロジックを適用
+- [x] T-014: Codex/Gemini/OpenCode のペイン出力解析による状態推測ロジック実装
+- [x] T-015: list_branches/list_worktrees で推測ロジックを適用
 
 ## テスト
 
-- [ ] T-016: agent_status フィールドの Rust ユニットテスト
-- [ ] T-017: fs watcher の統合テスト
-- [ ] T-018: フロントエンド Sidebar インジケーターのコンポーネントテスト
+- [x] T-016: agent_status フィールドの Rust ユニットテスト
+- [x] T-017: fs watcher の統合テスト
+- [x] T-018: フロントエンド Sidebar インジケーターのコンポーネントテスト
