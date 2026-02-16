@@ -12,21 +12,21 @@
 
 ## Phase 2: fs 監視
 
-- [ ] T-005: `notify` crate を Cargo.toml に追加
-- [ ] T-006: sessions ディレクトリの fs watcher モジュール実装（debounce 500ms）
-- [ ] T-007: Tauri setup フックで watcher 起動、`agent-status-changed` イベント emit
+- [x] T-005: `notify` crate を Cargo.toml に追加
+- [x] T-006: sessions ディレクトリの fs watcher モジュール実装（debounce 500ms）
+- [x] T-007: Tauri setup フックで watcher 起動、`agent-status-changed` イベント emit
 
 ## Phase 3: フロントエンド状態同期
 
-- [ ] T-008: Sidebar で `agent-status-changed` Tauri イベントをリッスンしブランチ再取得
-- [ ] T-009: 5秒間隔のポーリングフォールバック実装
+- [x] T-008: Sidebar で `agent-status-changed` Tauri イベントをリッスンしブランチ再取得
+- [x] T-009: 10秒間隔のポーリングフォールバック実装（エージェントタブ存在時のみ）
 
 ## Phase 4: インジケーター UI
 
-- [ ] T-010: 全ブランチ行に 12px 固定幅の予約スペースを追加（インデント修正）
-- [ ] T-011: 2層インジケーター実装（静的ドット + Running 時 pulse アニメーション）
-- [ ] T-012: CSS keyframes `agent-pulse` 定義、prefers-reduced-motion 対応
-- [ ] T-013: CleanupModal にも同様の 2 層インジケーター適用
+- [x] T-010: 全ブランチ行に 12px 固定幅の予約スペースを追加（インデント修正）
+- [x] T-011: 2層インジケーター実装（静的ドット + Running 時 pulse アニメーション）
+- [x] T-012: CSS keyframes `agent-pulse` 定義、prefers-reduced-motion 対応
+- [x] T-013: CleanupModal にも同様の 2 層インジケーター適用
 
 ## Phase 5: 状態推測（Hook 非対応エージェント）
 

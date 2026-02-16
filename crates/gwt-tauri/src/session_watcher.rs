@@ -8,7 +8,8 @@
 #![cfg_attr(test, allow(unused))]
 
 use gwt_core::config::Session;
-use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
+use notify_debouncer_mini::{new_debouncer, DebouncedEvent, DebouncedEventKind};
+use std::path::Path;
 use std::sync::mpsc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
@@ -48,17 +49,7 @@ pub fn start_session_watcher(app_handle: AppHandle) -> Result<(), String> {
             loop {
                 match rx.recv() {
                     Ok(Ok(events)) => {
-                        let has_toml = events
-                            .iter()
-                            .any(|e| {
-                                matches!(e.kind, DebouncedEventKind::Any)
-                                    && e.path
-                                        .extension()
-                                        .map(|ext| ext == "toml")
-                                        .unwrap_or(false)
-                            });
-
-                        if has_toml {
+                        if has_relevant_session_change(&events) {
                             debug!(
                                 category = "session_watcher",
                                 "Session file changed, emitting agent-status-changed"
@@ -87,4 +78,106 @@ pub fn start_session_watcher(app_handle: AppHandle) -> Result<(), String> {
         .map_err(|e| format!("Failed to spawn session watcher thread: {e}"))?;
 
     Ok(())
+}
+
+/// Check if a path is a TOML session file (extracted for testability).
+fn is_session_file(path: &Path) -> bool {
+    path.extension()
+        .map(|ext| ext == "toml")
+        .unwrap_or(false)
+}
+
+/// Filter debounced events, returning true if any `.toml` file was changed.
+fn has_relevant_session_change(events: &[DebouncedEvent]) -> bool {
+    events.iter().any(|e| {
+        matches!(e.kind, DebouncedEventKind::Any) && is_session_file(&e.path)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify_debouncer_mini::{DebouncedEvent, DebouncedEventKind};
+    use std::path::PathBuf;
+
+    fn make_event(path: &str, kind: DebouncedEventKind) -> DebouncedEvent {
+        DebouncedEvent {
+            path: PathBuf::from(path),
+            kind,
+        }
+    }
+
+    // -- is_session_file tests --
+
+    #[test]
+    fn test_is_session_file_toml() {
+        assert!(is_session_file(Path::new("/home/.gwt/sessions/abc.toml")));
+    }
+
+    #[test]
+    fn test_is_session_file_non_toml() {
+        assert!(!is_session_file(Path::new("/home/.gwt/sessions/abc.json")));
+        assert!(!is_session_file(Path::new("/home/.gwt/sessions/abc.txt")));
+        assert!(!is_session_file(Path::new("/home/.gwt/sessions/abc.lock")));
+    }
+
+    #[test]
+    fn test_is_session_file_no_extension() {
+        assert!(!is_session_file(Path::new("/home/.gwt/sessions/abc")));
+    }
+
+    // -- has_relevant_session_change tests --
+
+    #[test]
+    fn test_detects_toml_change() {
+        let events = vec![make_event(
+            "/home/.gwt/sessions/abc.toml",
+            DebouncedEventKind::Any,
+        )];
+        assert!(has_relevant_session_change(&events));
+    }
+
+    #[test]
+    fn test_ignores_non_toml_change() {
+        let events = vec![make_event(
+            "/home/.gwt/sessions/abc.json",
+            DebouncedEventKind::Any,
+        )];
+        assert!(!has_relevant_session_change(&events));
+    }
+
+    #[test]
+    fn test_ignores_non_any_event_kind() {
+        let events = vec![make_event(
+            "/home/.gwt/sessions/abc.toml",
+            DebouncedEventKind::AnyContinuous,
+        )];
+        assert!(!has_relevant_session_change(&events));
+    }
+
+    #[test]
+    fn test_empty_events() {
+        let events: Vec<DebouncedEvent> = vec![];
+        assert!(!has_relevant_session_change(&events));
+    }
+
+    #[test]
+    fn test_mixed_events_detects_toml() {
+        let events = vec![
+            make_event("/home/.gwt/sessions/abc.json", DebouncedEventKind::Any),
+            make_event("/home/.gwt/sessions/def.toml", DebouncedEventKind::Any),
+        ];
+        assert!(has_relevant_session_change(&events));
+    }
+
+    #[test]
+    fn test_sessions_dir_exists_or_can_be_created() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let sessions_dir = temp.path().join("sessions");
+        // Directory doesn't exist yet
+        assert!(!sessions_dir.exists());
+        // But it can be created
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        assert!(sessions_dir.exists());
+    }
 }
