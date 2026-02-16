@@ -44,6 +44,7 @@
     selectedBranch = null,
     currentBranch = "",
     agentTabBranches = [],
+    activeAgentTabBranch = null,
     prStatuses = {},
     ghCliStatus = null,
   }: {
@@ -64,6 +65,7 @@
     selectedBranch?: BranchInfo | null;
     currentBranch?: string;
     agentTabBranches?: string[];
+    activeAgentTabBranch?: string | null;
     prStatuses?: Record<string, PrStatusInfo | null>;
     ghCliStatus?: GhCliStatus | null;
   } = $props();
@@ -1333,6 +1335,8 @@
         <WorktreeSummaryPanel
           {projectPath}
           {selectedBranch}
+          {agentTabBranches}
+          {activeAgentTabBranch}
           prNumber={selectedPrNumber}
           ghCliStatus={effectiveGhCliStatus}
           onLaunchAgent={onLaunchAgent}
@@ -1346,6 +1350,8 @@
       {projectPath}
       selectedBranch={selectedBranch}
       currentBranch={currentBranch}
+      {agentTabBranches}
+      {activeAgentTabBranch}
     />
   {/if}
   <button

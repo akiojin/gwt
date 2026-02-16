@@ -25,6 +25,13 @@ type InstallTauriMockOptions = {
   commandResponses?: Record<string, TauriMockCommandResponse>;
 };
 
+type SystemInfo = {
+  cpu_usage_percent: number;
+  memory_used_bytes: number;
+  memory_total_bytes: number;
+  gpu: null;
+};
+
 export async function installTauriMock(
   page: Page,
   options: InstallTauriMockOptions = {},
@@ -177,6 +184,9 @@ export async function installTauriMock(
         invokeLog.push({ cmd, args });
 
         switch (cmd) {
+          case "detect_agents":
+            // Keep StatusBar reactive graph stable in web-preview E2E.
+            return [];
           case "get_settings":
             return {
               ui_font_size: 13,
@@ -188,6 +198,16 @@ export async function installTauriMock(
                 model: "base",
               },
             };
+          case "get_system_info":
+            return {
+              cpu_usage_percent: 0,
+              memory_used_bytes: 0,
+              memory_total_bytes: 0,
+              gpu: null,
+            } satisfies SystemInfo;
+          case "fetch_ci_log":
+            // App opens CI logs inside a terminal tab.
+            return "mock ci log\n";
           case "is_os_env_ready":
             return true;
           case "check_app_update":

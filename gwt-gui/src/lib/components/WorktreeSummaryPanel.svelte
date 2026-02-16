@@ -14,8 +14,6 @@
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
   import PrStatusSection from "./PrStatusSection.svelte";
   import { workflowStatusIcon, workflowStatusClass } from "../prStatusHelpers";
-  
-  type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
   let {
     projectPath,
@@ -23,6 +21,8 @@
     onLaunchAgent,
     onQuickLaunch,
     onOpenCiLog,
+    agentTabBranches = [],
+    activeAgentTabBranch = null,
     prNumber = null,
     ghCliStatus = null,
   }: {
@@ -31,6 +31,8 @@
     onLaunchAgent?: () => void;
     onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
     onOpenCiLog?: (runId: number) => void;
+    agentTabBranches?: string[];
+    activeAgentTabBranch?: string | null;
     prNumber?: number | null;
     ghCliStatus?: GhCliStatus | null;
   } = $props();
@@ -61,7 +63,13 @@
   let sessionSummaryError: string | null = $state(null);
   let sessionSummaryToolId: string | null = $state(null);
   let sessionSummarySessionId: string | null = $state(null);
-  const SESSION_SUMMARY_POLL_INTERVAL_MS = 5000;
+  let sessionSummarySourceType: SessionSummaryResult["sourceType"] | null = $state(
+    null,
+  );
+  let sessionSummaryInputMtimeMs: number | null = $state(null);
+  let sessionSummaryUpdatedMs: number | null = $state(null);
+  const SESSION_SUMMARY_POLL_FOCUSED_INTERVAL_MS = 15000;
+  const SESSION_SUMMARY_POLL_NONFOCUSED_INTERVAL_MS = 60000;
 
   type DockerMode = "HostOS" | "Docker" | "Unknown";
   type DockerModeClass = "hostos" | "docker" | "unknown";
@@ -100,6 +108,11 @@
     return String(err);
   }
 
+  type TauriInvoke = <T>(
+    command: string,
+    args?: Record<string, unknown>,
+  ) => Promise<T>;
+
   function normalizeBranchName(name: string): string {
     return name.startsWith("origin/") ? name.slice("origin/".length) : name;
   }
@@ -107,6 +120,27 @@
   function currentBranchName(): string {
     const rawBranch = selectedBranch?.name?.trim() ?? "";
     return normalizeBranchName(rawBranch);
+  }
+
+  function hasAgentTabForBranch(branch: string): boolean {
+    const target = normalizeBranchName(branch);
+    return (agentTabBranches ?? [])
+      .map((b) => normalizeBranchName(b))
+      .includes(target);
+  }
+
+  function isAgentTabFocusedForBranch(branch: string): boolean {
+    const target = normalizeBranchName(branch);
+    const active = (activeAgentTabBranch ?? "").trim();
+    if (!active) return false;
+    return normalizeBranchName(active) === target;
+  }
+
+  function formatSessionSummaryTimestamp(ms: number | null): string | null {
+    if (ms === null || !Number.isFinite(ms) || ms <= 0) return null;
+    const d = new Date(ms);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   }
 
   function agentIdForToolId(toolId: string): LaunchAgentRequest["agentId"] {
@@ -273,8 +307,11 @@
     }
   }
 
-  async function loadSessionSummary(options: { silent?: boolean } = {}) {
+  async function loadSessionSummary(
+    options: { silent?: boolean; cachedOnly?: boolean } = {},
+  ) {
     const silent = options.silent === true;
+    const cachedOnly = options.cachedOnly === true;
     sessionSummaryError = null;
     sessionSummaryWarning = null;
 
@@ -286,6 +323,9 @@
       sessionSummaryMarkdown = null;
       sessionSummaryToolId = null;
       sessionSummarySessionId = null;
+      sessionSummarySourceType = null;
+      sessionSummaryInputMtimeMs = null;
+      sessionSummaryUpdatedMs = null;
       return;
     }
 
@@ -297,6 +337,9 @@
       sessionSummaryMarkdown = null;
       sessionSummaryToolId = null;
       sessionSummarySessionId = null;
+      sessionSummarySourceType = null;
+      sessionSummaryInputMtimeMs = null;
+      sessionSummaryUpdatedMs = null;
     }
 
     try {
@@ -304,6 +347,7 @@
       const result = await invoke<SessionSummaryResult>("get_branch_session_summary", {
         projectPath,
         branch,
+        cachedOnly,
       });
 
       const currentKey = `${projectPath}::${currentBranchName()}`;
@@ -321,6 +365,9 @@
       sessionSummaryError = result.error ?? null;
       sessionSummaryToolId = result.toolId ?? null;
       sessionSummarySessionId = result.sessionId ?? null;
+      sessionSummarySourceType = result.sourceType ?? null;
+      sessionSummaryInputMtimeMs = result.inputMtimeMs ?? null;
+      sessionSummaryUpdatedMs = result.summaryUpdatedMs ?? null;
     } catch (err) {
       sessionSummaryStatus = "error";
       sessionSummaryGenerating = false;
@@ -329,6 +376,9 @@
       }
       sessionSummaryToolId = null;
       sessionSummarySessionId = null;
+      sessionSummarySourceType = null;
+      sessionSummaryInputMtimeMs = null;
+      sessionSummaryUpdatedMs = null;
       sessionSummaryError = `Failed to generate session summary: ${toErrorMessage(err)}`;
     } finally {
       const currentKey = `${projectPath}::${currentBranchName()}`;
@@ -347,6 +397,8 @@
   $effect(() => {
     void selectedBranch;
     void projectPath;
+    void agentTabBranches;
+    void activeAgentTabBranch;
 
     const branch = currentBranchName();
     if (!branch) {
@@ -354,7 +406,19 @@
       return;
     }
 
-    loadSessionSummary();
+    const tabExists = hasAgentTabForBranch(branch);
+    const focused = tabExists && isAgentTabFocusedForBranch(branch);
+    const pollIntervalMs = tabExists
+      ? focused
+        ? SESSION_SUMMARY_POLL_FOCUSED_INTERVAL_MS
+        : SESSION_SUMMARY_POLL_NONFOCUSED_INTERVAL_MS
+      : null;
+
+    loadSessionSummary({ cachedOnly: !tabExists });
+
+    if (pollIntervalMs === null) {
+      return;
+    }
 
     const timer = window.setInterval(() => {
       if (
@@ -363,8 +427,8 @@
       ) {
         return;
       }
-      loadSessionSummary({ silent: true });
-    }, SESSION_SUMMARY_POLL_INTERVAL_MS);
+      loadSessionSummary({ silent: true, cachedOnly: false });
+    }, pollIntervalMs);
 
     return () => {
       window.clearInterval(timer);
@@ -401,6 +465,9 @@
             sessionSummaryError = result.error ?? null;
             sessionSummaryToolId = result.toolId ?? null;
             sessionSummarySessionId = result.sessionId ?? null;
+            sessionSummarySourceType = result.sourceType ?? null;
+            sessionSummaryInputMtimeMs = result.inputMtimeMs ?? null;
+            sessionSummaryUpdatedMs = result.summaryUpdatedMs ?? null;
           }
         );
         if (cancelled) {
@@ -839,6 +906,28 @@
             {/if}
           </div>
 
+          {#if sessionSummaryStatus === "ok" &&
+            (sessionSummaryToolId || sessionSummarySessionId)}
+            {@const inputTime = formatSessionSummaryTimestamp(sessionSummaryInputMtimeMs)}
+            {@const updatedTime = formatSessionSummaryTimestamp(sessionSummaryUpdatedMs)}
+            {#if sessionSummarySourceType || inputTime || updatedTime}
+              <div class="session-summary-meta">
+                <span class="meta-item">
+                  Source: {sessionSummarySourceType === "scrollback" ||
+                  sessionSummarySessionId?.startsWith("pane:")
+                    ? "Live (scrollback)"
+                    : "Session"}
+                </span>
+                {#if inputTime}
+                  <span class="meta-item">Input updated: {inputTime}</span>
+                {/if}
+                {#if updatedTime}
+                  <span class="meta-item">Summary updated: {updatedTime}</span>
+                {/if}
+              </div>
+            {/if}
+          {/if}
+
           {#if sessionSummaryWarning}
             <div class="session-summary-warning">
               {sessionSummaryWarning}
@@ -1084,6 +1173,20 @@
     text-align: right;
   }
 
+  .session-summary-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    font-size: var(--ui-font-xs);
+    color: var(--text-muted);
+    font-family: monospace;
+    line-height: 1.4;
+  }
+
+  .session-summary-meta .meta-item {
+    white-space: nowrap;
+  }
+
   .quick-error {
     padding: 10px 12px;
     border: 1px solid rgba(255, 0, 0, 0.35);
@@ -1283,14 +1386,14 @@
     white-space: nowrap;
   }
 
-  .session-summary-markdown {
-    border: 1px solid var(--border-color);
-    border-radius: 10px;
-    background: var(--bg-primary);
-    padding: 10px 12px;
-    overflow: hidden;
-    margin: 0;
-  }
+	  .session-summary-markdown {
+	    border: 1px solid var(--border-color);
+	    border-radius: 10px;
+	    background: var(--bg-primary);
+	    padding: 10px 12px;
+	    overflow: hidden;
+	    margin: 0;
+	  }
 
   .summary-tabs {
     display: flex;
@@ -1379,7 +1482,7 @@
     font-style: italic;
   }
 
-  .workflow-panel .workflow-run-item {
-    border-radius: 4px;
-  }
-</style>
+	  .workflow-panel .workflow-run-item {
+	    border-radius: 4px;
+	  }
+	</style>

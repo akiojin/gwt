@@ -320,7 +320,7 @@ describe("VersionHistoryPanel", () => {
         projectPath: "/tmp/project",
         versionId: "v1.0.0",
       });
+      });
     });
-  });
 
 });

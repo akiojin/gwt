@@ -62,6 +62,7 @@ pub struct SessionSummaryCache {
     cache: HashMap<String, SessionSummary>,
     last_modified: HashMap<String, SystemTime>,
     session_ids: HashMap<String, String>,
+    tool_ids: HashMap<String, String>,
     languages: HashMap<String, String>,
 }
 
@@ -70,9 +71,22 @@ impl SessionSummaryCache {
         self.cache.get(branch)
     }
 
+    pub fn input_mtime(&self, branch: &str) -> Option<SystemTime> {
+        self.last_modified.get(branch).copied()
+    }
+
+    pub fn tool_id(&self, branch: &str) -> Option<&str> {
+        self.tool_ids.get(branch).map(|s| s.as_str())
+    }
+
+    pub fn session_id(&self, branch: &str) -> Option<&str> {
+        self.session_ids.get(branch).map(|s| s.as_str())
+    }
+
     pub fn set(
         &mut self,
         branch: String,
+        tool_id: String,
         session_id: String,
         language: String,
         summary: SessionSummary,
@@ -81,6 +95,7 @@ impl SessionSummaryCache {
         self.cache.insert(branch.clone(), summary);
         self.last_modified.insert(branch.clone(), mtime);
         self.session_ids.insert(branch.clone(), session_id);
+        self.tool_ids.insert(branch.clone(), tool_id);
         self.languages.insert(branch, language);
     }
 
@@ -898,6 +913,7 @@ mod tests {
         let now = SystemTime::now();
         cache.set(
             "main".to_string(),
+            "codex-cli".to_string(),
             "sess-1".to_string(),
             "en".to_string(),
             summary,
@@ -905,6 +921,7 @@ mod tests {
         );
         assert!(cache.is_stale("main", "sess-2", "en", now));
         assert!(cache.is_stale("main", "sess-1", "ja", now));
+        assert!(!cache.is_stale("main", "sess-1", "en", now));
     }
 
     #[test]
@@ -1074,6 +1091,15 @@ mod tests {
     #[test]
     fn test_normalize_session_summary_markdown_normalizes_alternative_summary_heading() {
         let content = "## 目的\nA\n\n## 概要\nB\n\n## ハイライト\n- C";
+        let fields = SessionSummaryFields::default();
+        let markdown =
+            normalize_session_summary_markdown(content, &fields, "ja").expect("markdown");
+        assert_eq!(markdown, "## 目的\nA\n\n## 要約\nB\n\n## ハイライト\n- C");
+    }
+
+    #[test]
+    fn test_normalize_session_summary_markdown_normalizes_english_headings() {
+        let content = "## Purpose\nA\n\n## Summary\nB\n\n## Highlights\n- C";
         let fields = SessionSummaryFields::default();
         let markdown =
             normalize_session_summary_markdown(content, &fields, "ja").expect("markdown");

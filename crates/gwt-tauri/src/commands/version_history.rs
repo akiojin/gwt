@@ -961,7 +961,7 @@ mod tests {
 
     #[test]
     fn list_project_versions_includes_unreleased_and_tags() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = TempDir::new().unwrap();
         let _env = TestEnvGuard::new(home.path());
 
@@ -983,7 +983,7 @@ mod tests {
 
     #[test]
     fn list_project_versions_handles_unborn_head() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = TempDir::new().unwrap();
         let _env = TestEnvGuard::new(home.path());
 
