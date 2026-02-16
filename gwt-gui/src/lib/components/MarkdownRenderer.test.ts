@@ -38,6 +38,14 @@ describe("MarkdownRenderer", () => {
     );
   });
 
+  it("renders inline code inside link labels", async () => {
+    const rendered = await renderRenderer("[`gwt` docs](https://example.com/docs)");
+    const anchor = rendered.container.querySelector("a");
+
+    expect(anchor?.getAttribute("href")).toBe("https://example.com/docs");
+    expect(anchor?.querySelector("code")?.textContent).toBe("gwt");
+  });
+
   it("escapes potentially dangerous html tags", async () => {
     const rendered = await renderRenderer("<script>alert('x')</script>");
     expect(rendered.container.querySelector("script")).toBeNull();

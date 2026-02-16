@@ -5,6 +5,7 @@
     AgentSidebarView,
     AgentSidebarTask,
     AgentSidebarSubAgent,
+    SettingsData,
   } from "../types";
 
   let {
@@ -13,12 +14,14 @@
     currentBranch = "",
     agentTabBranches = [],
     activeAgentTabBranch = null,
+    preferredLanguage = "auto",
   }: {
     projectPath: string;
     selectedBranch?: BranchInfo | null;
     currentBranch?: string;
     agentTabBranches?: string[];
     activeAgentTabBranch?: string | null;
+    preferredLanguage?: SettingsData["app_language"];
   } = $props();
 
   let sidebarView: AgentSidebarView = $state({ specId: null, tasks: [] });
@@ -44,6 +47,14 @@
   function activeBranchName(): string {
     const raw = selectedBranch?.name?.trim() ?? currentBranch?.trim() ?? "";
     return normalizeBranchName(raw);
+  }
+
+  function normalizeSummaryLanguage(value: string | null | undefined): string {
+    const language = (value ?? "").trim().toLowerCase();
+    if (language === "ja" || language === "en" || language === "auto") {
+      return language;
+    }
+    return "auto";
   }
 
   function taskStatusRank(status: AgentSidebarTask["status"]): number {
@@ -158,6 +169,7 @@
   ) {
     const silent = options.silent === true;
     const cachedOnly = options.cachedOnly === true;
+    const normalizedLanguage = normalizeSummaryLanguage(preferredLanguage);
     sessionSummaryError = null;
     sessionSummaryWarning = null;
 
@@ -184,6 +196,7 @@
         projectPath,
         branch,
         cachedOnly,
+        preferredLanguage: normalizedLanguage,
       });
       if (`${projectPath}::${activeBranchName()}` !== key) return;
       sessionSummaryStatus = result.status;
@@ -224,6 +237,7 @@
     void currentBranch;
     void agentTabBranches;
     void activeAgentTabBranch;
+    void preferredLanguage;
     const branch = activeBranchName();
     if (!branch) {
       loadSessionSummary();
