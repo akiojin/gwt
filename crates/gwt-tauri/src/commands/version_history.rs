@@ -2,7 +2,7 @@
 //!
 //! This feature does NOT read CHANGELOG.md. It derives version ranges from Git tags
 //! (v*), generates a simple grouped changelog from commit subjects, and (when AI is
-//! configured) generates an English summary.
+//! configured) generates a summary in the configured language.
 
 use crate::commands::project::resolve_repo_path_for_project_root;
 use crate::state::{AppState, VersionHistoryCacheEntry};
@@ -21,6 +21,13 @@ const MAX_SUBJECTS_FOR_CHANGELOG: usize = 400;
 const MAX_SUBJECTS_FOR_AI: usize = 120;
 const MAX_CHANGELOG_LINES_PER_GROUP: usize = 20;
 const MAX_PROMPT_CHARS: usize = 12000;
+
+fn normalize_version_history_language(value: &str) -> &'static str {
+    match value.trim() {
+        "ja" => "ja",
+        _ => "en", // "en" or "auto" (or any invalid value) -> English
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectVersions {
@@ -138,6 +145,8 @@ pub fn get_project_version_history(
         }
     };
 
+    let language = normalize_version_history_language(&settings.language);
+
     // Cache hit
     if let Some(hit) = get_cached_version_history(
         &state,
@@ -145,6 +154,7 @@ pub fn get_project_version_history(
         &version_id,
         range_from_oid.as_deref(),
         &range_to_oid,
+        language,
     ) {
         return Ok(VersionHistoryResult {
             status: "ok".to_string(),
@@ -270,10 +280,15 @@ fn get_cached_version_history(
     version_id: &str,
     range_from_oid: Option<&str>,
     range_to_oid: &str,
+    language: &str,
 ) -> Option<VersionHistoryCacheEntry> {
     let guard = state.project_version_history_cache.lock().ok()?;
     let repo_map = guard.get(repo_key)?;
     let entry = repo_map.get(version_id)?.clone();
+
+    if entry.language != language {
+        return None;
+    }
 
     let from_ok = match (entry.range_from_oid.as_deref(), range_from_oid) {
         (None, None) => true,
@@ -303,6 +318,7 @@ fn generate_and_cache_version_history(
     settings: gwt_core::config::ResolvedAISettings,
     state: &AppState,
 ) -> VersionHistoryResult {
+    let language = normalize_version_history_language(&settings.language);
     let subjects =
         match git_log_subjects(repo_path, range_from, range_to, MAX_SUBJECTS_FOR_CHANGELOG) {
             Ok(v) => v,
@@ -321,7 +337,7 @@ fn generate_and_cache_version_history(
             }
         };
 
-    let simple_changelog = build_simple_changelog_markdown(&subjects);
+    let simple_changelog = build_simple_changelog_markdown(&subjects, language);
 
     let client = match AIClient::new(settings.clone()) {
         Ok(client) => client,
@@ -349,7 +365,7 @@ fn generate_and_cache_version_history(
         &subjects,
     );
 
-    let summary_markdown = match generate_ai_summary(&client, &ai_input) {
+    let summary_markdown = match generate_ai_summary(&client, &ai_input, language) {
         Ok(md) => md,
         Err(err) => {
             return VersionHistoryResult {
@@ -378,6 +394,7 @@ fn generate_and_cache_version_history(
                 range_from_oid: range_from_oid.map(|s| s.to_string()),
                 range_to_oid: range_to_oid.to_string(),
                 commit_count,
+                language: language.to_string(),
                 summary_markdown: summary_markdown.clone(),
                 changelog_markdown: simple_changelog.clone(),
             },
@@ -428,21 +445,40 @@ fn build_ai_input(
     sample_text(&content, MAX_PROMPT_CHARS)
 }
 
-fn generate_ai_summary(client: &AIClient, input: &str) -> Result<String, AIError> {
-    let system = [
-        "You are a release notes assistant.",
-        "Write concise English for end users.",
-        "Do NOT list commit hashes or raw git commands.",
-        "Do NOT copy commit subjects verbatim unless necessary.",
-        "Output MUST be Markdown with these sections in this order:",
-        "## Summary",
-        "## Highlights",
-        "Highlights MUST be 3-5 bullet points.",
-        "Keep it short and practical.",
-    ]
-    .join("\n");
+fn generate_ai_summary(client: &AIClient, input: &str, language: &str) -> Result<String, AIError> {
+    let system = if language == "ja" {
+        [
+            "You are a release notes assistant.",
+            "Write concise Japanese for end users.",
+            "Do NOT list commit hashes or raw git commands.",
+            "Do NOT copy commit subjects verbatim unless necessary.",
+            "Output MUST be Markdown with these sections in this order:",
+            "## 要約",
+            "## ハイライト",
+            "Highlights MUST be 3-5 bullet points.",
+            "Keep it short and practical.",
+        ]
+        .join("\n")
+    } else {
+        [
+            "You are a release notes assistant.",
+            "Write concise English for end users.",
+            "Do NOT list commit hashes or raw git commands.",
+            "Do NOT copy commit subjects verbatim unless necessary.",
+            "Output MUST be Markdown with these sections in this order:",
+            "## Summary",
+            "## Highlights",
+            "Highlights MUST be 3-5 bullet points.",
+            "Keep it short and practical.",
+        ]
+        .join("\n")
+    };
 
-    let user = format!("Summarize the following project changes for this version.\n\n{input}\n");
+    let user = if language == "ja" {
+        format!("次のプロジェクト変更点を、このバージョンのリリースノートとして要約してください。\n\n{input}\n")
+    } else {
+        format!("Summarize the following project changes for this version.\n\n{input}\n")
+    };
 
     let out = client.create_response(vec![
         ChatMessage {
@@ -455,25 +491,29 @@ fn generate_ai_summary(client: &AIClient, input: &str) -> Result<String, AIError
         },
     ])?;
 
-    let markdown = out.trim().to_string();
-    validate_ai_summary_markdown(&markdown)?;
+    let markdown = normalize_ai_summary_markdown(out.trim(), language);
+    validate_ai_summary_markdown(&markdown, language)?;
     Ok(markdown)
 }
 
-fn validate_ai_summary_markdown(markdown: &str) -> Result<(), AIError> {
+fn validate_ai_summary_markdown(markdown: &str, language: &str) -> Result<(), AIError> {
     let mut has_summary = false;
     let mut has_highlights = false;
     let mut highlight_bullets = 0usize;
     let mut in_highlights = false;
 
+    let want_ja = language == "ja";
+
     for line in markdown.lines() {
         let t = line.trim();
-        if t.eq_ignore_ascii_case("## summary") {
+        if (!want_ja && t.eq_ignore_ascii_case("## summary")) || (want_ja && t == "## 要約") {
             has_summary = true;
             in_highlights = false;
             continue;
         }
-        if t.eq_ignore_ascii_case("## highlights") {
+        if (!want_ja && t.eq_ignore_ascii_case("## highlights"))
+            || (want_ja && t == "## ハイライト")
+        {
             has_highlights = true;
             in_highlights = true;
             continue;
@@ -491,6 +531,48 @@ fn validate_ai_summary_markdown(markdown: &str) -> Result<(), AIError> {
     } else {
         Err(AIError::IncompleteSummary)
     }
+}
+
+fn normalize_ai_summary_markdown(markdown: &str, language: &str) -> String {
+    let want_ja = language == "ja";
+    let mut out = String::with_capacity(markdown.len());
+    let lines: Vec<&str> = markdown.lines().collect();
+    let last_idx = lines.len().saturating_sub(1);
+
+    for (idx, line) in lines.iter().enumerate() {
+        let line = *line;
+        let trimmed = line.trim_start();
+        if let Some(title) = trimmed.strip_prefix("## ") {
+            let title = title.trim();
+            let title_l = title.to_ascii_lowercase();
+
+            if title == "要約" || title == "概要" || title_l == "summary" {
+                out.push_str(if want_ja { "## 要約" } else { "## Summary" });
+                if idx < last_idx {
+                    out.push('\n');
+                }
+                continue;
+            }
+            if title == "ハイライト" || title_l == "highlights" {
+                out.push_str(if want_ja {
+                    "## ハイライト"
+                } else {
+                    "## Highlights"
+                });
+                if idx < last_idx {
+                    out.push('\n');
+                }
+                continue;
+            }
+        }
+
+        out.push_str(line);
+        if idx < last_idx {
+            out.push('\n');
+        }
+    }
+
+    out
 }
 
 fn is_bullet_line(line: &str) -> bool {
@@ -516,7 +598,8 @@ fn strip_ordered_prefix(line: &str) -> Option<&str> {
     None
 }
 
-fn build_simple_changelog_markdown(subjects: &[String]) -> String {
+fn build_simple_changelog_markdown(subjects: &[String], language: &str) -> String {
+    let want_ja = language == "ja";
     let mut groups: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
     for s in subjects {
         let s = s.trim();
@@ -549,7 +632,11 @@ fn build_simple_changelog_markdown(subjects: &[String]) -> String {
             continue;
         }
         out.push_str("### ");
-        out.push_str(name);
+        out.push_str(if want_ja {
+            translate_changelog_group(name)
+        } else {
+            name
+        });
         out.push('\n');
         let mut shown = 0usize;
         for e in entries.iter().take(MAX_CHANGELOG_LINES_PER_GROUP) {
@@ -559,15 +646,38 @@ fn build_simple_changelog_markdown(subjects: &[String]) -> String {
             shown += 1;
         }
         if entries.len() > shown {
-            out.push_str(&format!("- (+{} more)\n", entries.len() - shown));
+            out.push_str(&format!(
+                "- (+{} {})\n",
+                entries.len() - shown,
+                if want_ja { "件" } else { "more" }
+            ));
         }
         out.push('\n');
     }
 
     if out.trim().is_empty() {
-        "(No commits)".to_string()
+        if want_ja {
+            "(コミットなし)".to_string()
+        } else {
+            "(No commits)".to_string()
+        }
     } else {
         out.trim_end().to_string()
+    }
+}
+
+fn translate_changelog_group(name: &str) -> &str {
+    match name {
+        "Features" => "機能",
+        "Bug Fixes" => "バグ修正",
+        "Documentation" => "ドキュメント",
+        "Performance" => "パフォーマンス",
+        "Refactor" => "リファクタ",
+        "Styling" => "スタイル",
+        "Testing" => "テスト",
+        "Miscellaneous Tasks" => "その他タスク",
+        "Other" => "その他",
+        _ => name,
     }
 }
 
@@ -895,7 +1005,7 @@ mod tests {
             "docs: update readme".to_string(),
             "random message".to_string(),
         ];
-        let md = build_simple_changelog_markdown(&subjects);
+        let md = build_simple_changelog_markdown(&subjects, "en");
         assert!(md.contains("### Features"));
         assert!(md.contains("**ui:** add button"));
         assert!(md.contains("### Bug Fixes"));
@@ -906,11 +1016,20 @@ mod tests {
         assert!(md.contains("- random message"));
     }
 
+    #[test]
+    fn simple_changelog_translates_group_headings_in_japanese() {
+        let subjects = vec!["feat: add".to_string(), "fix: bug".to_string()];
+        let md = build_simple_changelog_markdown(&subjects, "ja");
+        assert!(md.contains("### 機能"));
+        assert!(md.contains("### バグ修正"));
+    }
+
     fn ai_settings(summary_enabled: bool) -> AISettings {
         AISettings {
             endpoint: "https://api.openai.com/v1".to_string(),
             api_key: String::new(),
             model: "gpt-5.2-codex".to_string(),
+            language: "en".to_string(),
             summary_enabled,
         }
     }
