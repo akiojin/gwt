@@ -19,14 +19,34 @@ type AgentModeState = {
   estimated_tokens: number;
 };
 
-export async function installTauriMock(page: Page): Promise<void> {
+type TauriMockCommandResponse = unknown;
+
+type InstallTauriMockOptions = {
+  commandResponses?: Record<string, TauriMockCommandResponse>;
+};
+
+type SystemInfo = {
+  cpu_usage_percent: number;
+  memory_used_bytes: number;
+  memory_total_bytes: number;
+  gpu: null;
+};
+
+export async function installTauriMock(
+  page: Page,
+  options: InstallTauriMockOptions = {},
+): Promise<void> {
+  const commandResponses = options.commandResponses ?? {};
+
   await page.addInitScript(
     ({
       projectPath,
       lastOpenedAt,
+      commandResponses,
     }: {
       projectPath: string;
       lastOpenedAt: string;
+      commandResponses: Record<string, TauriMockCommandResponse>;
     }) => {
       type InvokeArgs = Record<string, unknown>;
       type InvokeEntry = { cmd: string; args: InvokeArgs };
@@ -145,11 +165,28 @@ export async function installTauriMock(page: Page): Promise<void> {
         };
       }
 
-      function invoke(cmd: string, rawArgs?: unknown): unknown {
+      async function invoke(cmd: string, rawArgs?: unknown): Promise<unknown> {
         const args = normalizeArgs(rawArgs);
+        const runtimeCommandResponses = (
+          window as unknown as {
+            __GWT_MOCK_COMMAND_RESPONSES__?: Record<string, unknown>;
+          }
+        ).__GWT_MOCK_COMMAND_RESPONSES__;
+        if (
+          runtimeCommandResponses &&
+          Object.prototype.hasOwnProperty.call(runtimeCommandResponses, cmd)
+        ) {
+          return runtimeCommandResponses[cmd];
+        }
+        if (Object.prototype.hasOwnProperty.call(commandResponses, cmd)) {
+          return commandResponses[cmd];
+        }
         invokeLog.push({ cmd, args });
 
         switch (cmd) {
+          case "detect_agents":
+            // Keep StatusBar reactive graph stable in web-preview E2E.
+            return [];
           case "get_settings":
             return {
               ui_font_size: 13,
@@ -161,6 +198,16 @@ export async function installTauriMock(page: Page): Promise<void> {
                 model: "base",
               },
             };
+          case "get_system_info":
+            return {
+              cpu_usage_percent: 0,
+              memory_used_bytes: 0,
+              memory_total_bytes: 0,
+              gpu: null,
+            } satisfies SystemInfo;
+          case "fetch_ci_log":
+            // App opens CI logs inside a terminal tab.
+            return "mock ci log\n";
           case "is_os_env_ready":
             return true;
           case "check_app_update":
@@ -399,6 +446,7 @@ export async function installTauriMock(page: Page): Promise<void> {
     {
       projectPath: DEFAULT_PROJECT_PATH,
       lastOpenedAt: DEFAULT_LAST_OPENED_AT,
+      commandResponses,
     },
   );
 }

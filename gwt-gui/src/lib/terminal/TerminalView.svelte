@@ -126,6 +126,11 @@
     }
   }
 
+  function isTrackpadLikeWheel(event: WheelEvent): boolean {
+    if (event.deltaMode !== 0) return false;
+    return !Number.isInteger(event.deltaY) || Math.abs(event.deltaY) <= 60;
+  }
+
   function scrollViewportByWheel(rootEl: HTMLElement, event: WheelEvent): boolean {
     const viewport = rootEl.querySelector<HTMLElement>(".xterm-viewport");
     if (!viewport) return false;
@@ -146,8 +151,10 @@
     }
 
     const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-    viewport.scrollTop = Math.min(Math.max(viewport.scrollTop + delta, 0), maxScrollTop);
-    return true;
+    const nextScrollTop = Math.min(Math.max(viewport.scrollTop + delta, 0), maxScrollTop);
+    const didScroll = nextScrollTop !== viewport.scrollTop;
+    viewport.scrollTop = nextScrollTop;
+    return didScroll;
   }
 
   onMount(() => {
@@ -208,7 +215,11 @@
       if (event.deltaY === 0) return;
       if (!terminal) return;
 
+      const wasFocused = isTerminalFocused(rootEl);
       focusTerminalIfNeeded(rootEl, true);
+
+      const shouldFallback = !wasFocused || isTrackpadLikeWheel(event);
+      if (!shouldFallback) return;
 
       const didScroll = scrollViewportByWheel(rootEl, event);
       if (!didScroll) return;

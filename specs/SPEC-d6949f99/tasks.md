@@ -1,4 +1,4 @@
-# タスクリスト: PR Status Preview（GUI）
+# タスクリスト: Session Summary + PR Status Preview（GUI）
 
 ## Phase 1: バックエンド — データモデル + GraphQL取得
 
@@ -32,7 +32,7 @@
 - [x] T019 [US1] [テスト] ツリー展開/折りたたみのインタラクションテスト `gwt-gui/src/lib/components/Sidebar.test.ts`
 - [x] T020 [US3] [実装] Workflow Runクリックでxterm.jsターミナルタブを開く `gwt-gui/src/lib/components/Sidebar.svelte`
 
-## Phase 5: フロントエンド — Session Summary PRサブタブ
+## Phase 5: フロントエンド — Session Summaryタブ（PR/AI/Git）
 
 - [x] T021 [US2] [実装] PrStatusSection.svelte 新規作成（メタデータ表示） `gwt-gui/src/lib/components/PrStatusSection.svelte`
 - [x] T022 [US2] [実装] レビュー情報サブセクション（レビューアー承認状態 + inline コメント） `gwt-gui/src/lib/components/PrStatusSection.svelte`
@@ -47,3 +47,11 @@
 - [x] T028 [US4] [実装] ポーリングをSidebarとWorktreeSummaryPanelに接続 `gwt-gui/src/lib/components/Sidebar.svelte`
 - [x] T029 [P] [共通] [検証] `cargo clippy` + `cargo fmt` + `svelte-check` + 全テスト通過確認
 - [x] T030 [P] [共通] [検証] CLAUDE.md のアイコンガイドライン更新反映確認
+
+## Phase 7: Session Summaryタブ構成の統一（2026-02-14 追補）
+
+- [x] T031 [US5] [実装] WorktreeSummaryPanel.svelte のタブを `Summary / PR / AI Summary / Git` に拡張し、AI Summaryを独立タブ化 `gwt-gui/src/lib/components/WorktreeSummaryPanel.svelte`
+- [x] T032 [US5] [実装] GitSection.svelte に `collapsible` / `defaultCollapsed` を追加し、`Git` タブでは折りたたみ無効で初期展開 `gwt-gui/src/lib/components/GitSection.svelte`
+- [x] T033 [US5] [テスト] WorktreeSummaryPanel.test.ts に4タブ表示とGit展開固定の検証を追加 `gwt-gui/src/lib/components/WorktreeSummaryPanel.test.ts`
+- [x] T034 [US5] [検証] `pnpm --dir gwt-gui test -- src/lib/components/WorktreeSummaryPanel.test.ts` を実行し回帰がないことを確認
+- [x] T035 [US5] [検証] `pnpm --dir gwt-gui check` を実行し型エラーがないことを確認
