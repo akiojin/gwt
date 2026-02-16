@@ -18,6 +18,17 @@
   let resizeObserver: ResizeObserver | undefined = $state(undefined);
   let unlisten: (() => void) | undefined = $state(undefined);
 
+  const TRACKPAD_WHEEL_DELTA_THRESHOLD = 180;
+
+  type WheelSample = {
+    at: number;
+    absDeltaY: number;
+    absDeltaX: number;
+  };
+
+  const mouseWheelHistory: WheelSample[] = [];
+  const MOUSE_STEP_VALUES = new Set([120]);
+
   type TerminalEditAction = {
     action: "copy" | "paste";
     paneId: string;
@@ -128,7 +139,64 @@
 
   function isTrackpadLikeWheel(event: WheelEvent): boolean {
     if (event.deltaMode !== 0) return false;
-    return !Number.isInteger(event.deltaY) || Math.abs(event.deltaY) <= 60;
+
+    const absDeltaY = Math.abs(event.deltaY);
+    const absDeltaX = Math.abs(event.deltaX);
+
+    const sourceCapabilities =
+      (event as WheelEvent & { sourceCapabilities?: { firesTouchEvents?: boolean } })
+        .sourceCapabilities;
+
+    // Touchpad-style wheels can set this flag even when delta values look like mouse steps.
+    if (sourceCapabilities?.firesTouchEvents === true) return true;
+
+    // Horizontal movement is usually only emitted by trackpads in this app context.
+    if (absDeltaX > 0) return true;
+
+    const sampleTime =
+      event.timeStamp > 0 ? event.timeStamp : typeof performance === "undefined"
+        ? Date.now()
+        : performance.now();
+
+    mouseWheelHistory.push({
+      at: sampleTime,
+      absDeltaY,
+      absDeltaX,
+    });
+
+    while (
+      mouseWheelHistory.length > 0 &&
+      sampleTime - mouseWheelHistory[0].at > 250
+    ) {
+      mouseWheelHistory.shift();
+    }
+
+    const isIntegerDelta = Number.isInteger(event.deltaY);
+    const isCanonicalMouseStep =
+      isIntegerDelta &&
+      MOUSE_STEP_VALUES.has(absDeltaY) &&
+      absDeltaY > 0;
+
+    let consecutiveMatches = 0;
+    const recentHistory = mouseWheelHistory.slice().reverse();
+    for (const sample of recentHistory) {
+      if (sample.absDeltaX !== 0) break;
+      if (sample.absDeltaY !== absDeltaY) break;
+      if (sample.absDeltaY % 1 !== 0) break;
+
+      consecutiveMatches += 1;
+    }
+
+    const isStableMouseSequence =
+      isCanonicalMouseStep &&
+      consecutiveMatches >= 2;
+
+    if (isStableMouseSequence) return false;
+    if (!isIntegerDelta) return true;
+    if (absDeltaY === 0) return false;
+    if (MOUSE_STEP_VALUES.has(absDeltaY)) return false;
+
+    return absDeltaY <= TRACKPAD_WHEEL_DELTA_THRESHOLD;
   }
 
   function scrollViewportByWheel(rootEl: HTMLElement, event: WheelEvent): boolean {
