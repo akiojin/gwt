@@ -38,6 +38,8 @@ pub struct Settings {
     pub docker: DockerSettings,
     /// Appearance settings
     pub appearance: AppearanceSettings,
+    /// Preferred summary language ("auto" | "ja" | "en")
+    pub app_language: String,
     /// Voice input settings
     pub voice_input: VoiceInputSettings,
 }
@@ -58,6 +60,7 @@ impl Default for Settings {
             agent: AgentSettings::default(),
             docker: DockerSettings::default(),
             appearance: AppearanceSettings::default(),
+            app_language: "auto".to_string(),
             voice_input: VoiceInputSettings::default(),
         }
     }
@@ -481,6 +484,7 @@ mod tests {
         assert!(!settings.protected_branches.is_empty());
         assert!(settings.protected_branches.contains(&"main".to_string()));
         assert!(!settings.debug);
+        assert_eq!(settings.app_language, "auto");
         assert!(!settings.voice_input.enabled);
         assert_eq!(settings.voice_input.hotkey, "Mod+Shift+M");
         assert_eq!(settings.voice_input.language, "auto");
@@ -512,6 +516,7 @@ default_base_branch = "local"
 
         let settings = Settings::load(&repo).unwrap();
         assert!(!settings.debug);
+        assert_eq!(settings.app_language, "auto");
         assert_eq!(settings.default_base_branch, "main");
     }
 
@@ -737,6 +742,7 @@ default_base_branch = "legacy-global"
 
         let settings = Settings::load_global().unwrap();
         assert!(settings.debug);
+        assert_eq!(settings.app_language, "auto");
         assert_eq!(settings.appearance.ui_font_size, 13);
         assert_eq!(settings.appearance.terminal_font_size, 13);
         assert!(!settings.voice_input.enabled);
@@ -813,6 +819,7 @@ model = "base"
         let loaded = Settings::load_global().unwrap();
         assert!(loaded.debug);
         assert_eq!(loaded.default_base_branch, "global-main");
+        assert_eq!(loaded.app_language, "auto");
         assert_eq!(loaded.appearance.ui_font_size, 17);
         assert_eq!(loaded.appearance.terminal_font_size, 19);
         assert!(loaded.voice_input.enabled);

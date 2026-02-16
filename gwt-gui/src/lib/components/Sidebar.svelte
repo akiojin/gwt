@@ -6,6 +6,7 @@
     LaunchAgentRequest,
     PrStatusInfo,
     GhCliStatus,
+    SettingsData,
   } from "../types";
   import AgentSidebar from "./AgentSidebar.svelte";
   import WorktreeSummaryPanel from "./WorktreeSummaryPanel.svelte";
@@ -45,6 +46,7 @@
     currentBranch = "",
     agentTabBranches = [],
     activeAgentTabBranch = null,
+    appLanguage = "auto",
     prStatuses = {},
     ghCliStatus = null,
   }: {
@@ -66,6 +68,7 @@
     currentBranch?: string;
     agentTabBranches?: string[];
     activeAgentTabBranch?: string | null;
+    appLanguage?: SettingsData["app_language"];
     prStatuses?: Record<string, PrStatusInfo | null>;
     ghCliStatus?: GhCliStatus | null;
   } = $props();
@@ -1337,6 +1340,7 @@
           {selectedBranch}
           {agentTabBranches}
           {activeAgentTabBranch}
+          preferredLanguage={appLanguage}
           prNumber={selectedPrNumber}
           ghCliStatus={effectiveGhCliStatus}
           onLaunchAgent={onLaunchAgent}
@@ -1352,6 +1356,7 @@
       currentBranch={currentBranch}
       {agentTabBranches}
       {activeAgentTabBranch}
+      preferredLanguage={appLanguage}
     />
   {/if}
   <button
