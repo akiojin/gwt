@@ -7,8 +7,37 @@ use std::time::SystemTime;
 
 pub const SESSION_SYSTEM_PROMPT_BASE: &str = "You are a helpful assistant summarizing a coding agent session so the user can remember the original request and latest instruction.\nReturn Markdown only with the following format and headings, in this exact order:\n\n## <Purpose heading in the user's language>\n<1 sentence: the original user request + key constraints + explicit exclusions>\n\n## <Summary heading in the user's language>\n<1-2 sentences: current status (use a clear status word) + the latest user instruction; mention if blocked>\n\n## <Highlights heading in the user's language>\n- <Original request: ...>\n- <Latest instruction: ...>\n- <Decisions/constraints: ...>\n- <Exclusions/not doing: ...>\n- <Status: ...>\n- <Progress: ...>\n- <Recent meaningful actions (last 1-3): ...>\n- <Needs user input (as a direct question): ...>\n- <Key words (3 items): ...>\n\nAdd more bullets if there are additional important items, but keep the list concise.\nIf there was no progress, say so and why.\nIf waiting for user input, state the exact question needed.\nDo not guess; if something is unknown, say so explicitly in the user's language.\nUse short labels followed by \":\" for each bullet and translate the labels to the user's language.\nDetect the response language from the session content and respond in that language.\nIf the session contains multiple languages, use the language used by the user messages.\nAll headings and all content must be in the user's language.\nDo not output JSON, code fences, or any extra text.\n\nIgnore operational workflow chatter from this session except for content that changes direction:\n- PR/MR creation, branch operations, test/build/CI activity, and short status updates.\n- Keep summaries focused on user intent, decisions, constraints, outcomes, blockers, or pending actions.\n- Ignore one-line acknowledgements unless they contain a blocking issue or design decision.\nPrioritize substantive conversation over command history.\n\nWhen the session language is Japanese, headings must be exactly in this order:\n- ## 目的\n- ## 要約\n- ## ハイライト\nWhen the session language is English, headings must be exactly in this order:\n- ## Purpose\n- ## Summary\n- ## Highlights.";
 
+const SESSION_SYSTEM_PROMPT_EN: &str = "You are a helpful assistant summarizing a coding agent session so the user can remember the original request and latest instruction.\nRespond in English.\nReturn Markdown only with the following format and headings, in this exact order:\n\n## Purpose\n<1 sentence: the original user request + key constraints + explicit exclusions>\n\n## Summary\n<1-2 sentences: current status (use a clear status word) + the latest user instruction; mention if blocked>\n\n## Highlights\n- <Original request: ...>\n- <Latest instruction: ...>\n- <Decisions/constraints: ...>\n- <Exclusions/not doing: ...>\n- <Status: ...>\n- <Progress: ...>\n- <Recent meaningful actions (last 1-3): ...>\n- <Needs user input (as a direct question): ...>\n- <Key words (3 items): ...>\n\nAdd more bullets if there are additional important items, but keep the list concise.\nIf there was no progress, say so and why.\nIf waiting for user input, state the exact question needed.\nDo not guess; if something is unknown, say so explicitly in English.\nUse short labels followed by \":\" for each bullet.\nAll headings and all content must be in English.\nDo not output JSON, code fences, or any extra text.\n\nIgnore operational workflow chatter from this session except for content that changes direction:\n- PR/MR creation, branch operations, test/build/CI activity, and short status updates.\n- Keep summaries focused on user intent, decisions, constraints, outcomes, blockers, or pending actions.\n- Ignore one-line acknowledgements unless they contain a blocking issue or design decision.\nPrioritize substantive conversation over command history.";
+
+const SESSION_SYSTEM_PROMPT_JA: &str = "You are a helpful assistant summarizing a coding agent session so the user can remember the original request and latest instruction.\nRespond in Japanese.\nReturn Markdown only with the following format and headings, in this exact order:\n\n## 目的\n<1文: 元のユーザー依頼 + 重要な制約 + 明示された除外>\n\n## 要約\n<1-2文: 現在ステータス（明確な状態語を使う）+ 最新のユーザー指示。ブロックされているなら明記>\n\n## ハイライト\n- <元の依頼: ...>\n- <最新指示: ...>\n- <決定事項/制約: ...>\n- <除外/やらないこと: ...>\n- <ステータス: ...>\n- <進捗: ...>\n- <直近の意味のある行動（1-3件）: ...>\n- <ユーザーに必要な入力（質問として）: ...>\n- <キーワード（3つ）: ...>\n\n重要な項目があれば箇条書きを追加してよいが、簡潔にすること。\n進捗がない場合は、その旨と理由を書くこと。\nユーザー入力待ちの場合は、必要な質問をそのまま書くこと。\n推測しない。不明な点は不明と明記すること。\n各箇条書きは短いラベル + \":\" で始め、ラベルも日本語にすること。\n見出しと本文はすべて日本語にすること。\nJSONやコードフェンス、余計なテキストを出力しないこと。\n\n以下の運用的なやり取りは、方向性が変わる内容を除き無視すること:\n- PR/MR作成、ブランチ操作、テスト/ビルド/CI、短いステータス更新\n- 要約はユーザー意図、決定事項、制約、結果、ブロッカー、未完了作業に集中する\n- ブロッキングや設計判断を含まない1行の相槌は無視する\n会話の中身を優先し、コマンド履歴に引っ張られないこと。";
+
 const MAX_MESSAGE_CHARS: usize = 220;
 const MAX_PROMPT_CHARS: usize = 8000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SummaryLanguage {
+    Ja,
+    En,
+}
+
+fn session_system_prompt(language: &str) -> &'static str {
+    match language.trim() {
+        "ja" => SESSION_SYSTEM_PROMPT_JA,
+        "auto" => SESSION_SYSTEM_PROMPT_BASE,
+        _ => SESSION_SYSTEM_PROMPT_EN,
+    }
+}
+
+fn contains_japanese(text: &str) -> bool {
+    text.chars().any(|c| {
+        matches!(
+            c,
+            '\u{3040}'..='\u{309F}' // Hiragana
+                | '\u{30A0}'..='\u{30FF}' // Katakana
+                | '\u{4E00}'..='\u{9FFF}' // CJK Unified Ideographs
+        )
+    })
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct SessionSummary {
@@ -33,6 +62,8 @@ pub struct SessionSummaryCache {
     cache: HashMap<String, SessionSummary>,
     last_modified: HashMap<String, SystemTime>,
     session_ids: HashMap<String, String>,
+    tool_ids: HashMap<String, String>,
+    languages: HashMap<String, String>,
 }
 
 impl SessionSummaryCache {
@@ -40,21 +71,51 @@ impl SessionSummaryCache {
         self.cache.get(branch)
     }
 
+    pub fn input_mtime(&self, branch: &str) -> Option<SystemTime> {
+        self.last_modified.get(branch).copied()
+    }
+
+    pub fn tool_id(&self, branch: &str) -> Option<&str> {
+        self.tool_ids.get(branch).map(|s| s.as_str())
+    }
+
+    pub fn session_id(&self, branch: &str) -> Option<&str> {
+        self.session_ids.get(branch).map(|s| s.as_str())
+    }
+
     pub fn set(
         &mut self,
         branch: String,
+        tool_id: String,
         session_id: String,
+        language: String,
         summary: SessionSummary,
         mtime: SystemTime,
     ) {
         self.cache.insert(branch.clone(), summary);
         self.last_modified.insert(branch.clone(), mtime);
-        self.session_ids.insert(branch, session_id);
+        self.session_ids.insert(branch.clone(), session_id);
+        self.tool_ids.insert(branch.clone(), tool_id);
+        self.languages.insert(branch, language);
     }
 
-    pub fn is_stale(&self, branch: &str, session_id: &str, current_mtime: SystemTime) -> bool {
+    pub fn is_stale(
+        &self,
+        branch: &str,
+        session_id: &str,
+        language: &str,
+        current_mtime: SystemTime,
+    ) -> bool {
         if let Some(cached_session_id) = self.session_ids.get(branch) {
             if cached_session_id != session_id {
+                return true;
+            }
+        } else {
+            return true;
+        }
+
+        if let Some(cached_language) = self.languages.get(branch) {
+            if cached_language != language {
                 return true;
             }
         } else {
@@ -75,7 +136,7 @@ struct SessionSummaryFields {
     bullet_points: Vec<String>,
 }
 
-pub fn build_session_prompt(parsed: &ParsedSession) -> Vec<ChatMessage> {
+pub fn build_session_prompt(parsed: &ParsedSession, language: &str) -> Vec<ChatMessage> {
     let mut lines = Vec::new();
     lines.push(format!(
         "Agent: {} (session_id: {})",
@@ -148,7 +209,7 @@ pub fn build_session_prompt(parsed: &ParsedSession) -> Vec<ChatMessage> {
     vec![
         ChatMessage {
             role: "system".to_string(),
-            content: SESSION_SYSTEM_PROMPT_BASE.to_string(),
+            content: session_system_prompt(language).to_string(),
         },
         ChatMessage {
             role: "user".to_string(),
@@ -232,13 +293,14 @@ pub fn summarize_scrollback(
     client: &AIClient,
     scrollback_text: &str,
     branch_name: &str,
+    language: &str,
 ) -> Result<SessionSummary, AIError> {
     let sampled = sample_scrollback_text(scrollback_text);
     let user_prompt = format!("Branch: {branch_name}\nTerminal session output:\n{sampled}");
     let messages = vec![
         ChatMessage {
             role: "system".to_string(),
-            content: SESSION_SYSTEM_PROMPT_BASE.to_string(),
+            content: session_system_prompt(language).to_string(),
         },
         ChatMessage {
             role: "user".to_string(),
@@ -247,7 +309,7 @@ pub fn summarize_scrollback(
     ];
     let content = client.create_response(messages)?;
     let fields = parse_session_summary_fields(&content).unwrap_or_default();
-    let markdown = normalize_session_summary_markdown(&content, &fields)?;
+    let markdown = normalize_session_summary_markdown(&content, &fields, language)?;
     validate_session_summary_markdown(&markdown)?;
 
     let token_count = scrollback_text.chars().count() / 4;
@@ -300,11 +362,12 @@ fn sample_scrollback_text(text: &str) -> String {
 pub fn summarize_session(
     client: &AIClient,
     parsed: &ParsedSession,
+    language: &str,
 ) -> Result<SessionSummary, AIError> {
-    let messages = build_session_prompt(parsed);
+    let messages = build_session_prompt(parsed, language);
     let content = client.create_response(messages)?;
     let fields = parse_session_summary_fields(&content).unwrap_or_default();
-    let markdown = normalize_session_summary_markdown(&content, &fields)?;
+    let markdown = normalize_session_summary_markdown(&content, &fields, language)?;
     validate_session_summary_markdown(&markdown)?;
 
     let metrics = build_metrics(parsed);
@@ -377,51 +440,78 @@ fn parse_session_summary_fields(content: &str) -> Result<SessionSummaryFields, A
 fn normalize_session_summary_markdown(
     content: &str,
     fields: &SessionSummaryFields,
+    language: &str,
 ) -> Result<String, AIError> {
     let trimmed = content.trim();
     if trimmed.is_empty() {
         return Err(AIError::ParseError("Empty summary".to_string()));
     }
 
+    let target = target_summary_language(language, trimmed);
+
     if parse_json_summary(trimmed).is_some() {
-        return Ok(build_markdown_from_fields(fields));
+        return Ok(build_markdown_from_fields(fields, target));
     }
 
     if looks_like_markdown(trimmed) {
-        return Ok(normalize_summary_headings(trimmed));
+        return Ok(normalize_summary_headings(trimmed, target));
     }
 
-    Ok(build_markdown_from_fields(fields))
+    Ok(build_markdown_from_fields(fields, target))
 }
 
 fn validate_session_summary_markdown(markdown: &str) -> Result<(), AIError> {
     let mut stage = SummaryStage::Start;
+    let mut lang: Option<SummaryLanguage> = None;
     let mut has_bullet = false;
 
     for line in markdown.lines() {
         let trimmed = line.trim();
         if let Some(title) = trimmed.strip_prefix("## ") {
             let title = title.trim();
-            if heading_matches(title, &["目的"]) {
-                if stage != SummaryStage::Start {
-                    return Err(AIError::IncompleteSummary);
+            match stage {
+                SummaryStage::Start => {
+                    if heading_matches(title, &["目的"]) {
+                        lang = Some(SummaryLanguage::Ja);
+                        stage = SummaryStage::Purpose;
+                        continue;
+                    }
+                    if heading_matches(title, &["Purpose", "purpose"]) {
+                        lang = Some(SummaryLanguage::En);
+                        stage = SummaryStage::Purpose;
+                        continue;
+                    }
                 }
-                stage = SummaryStage::Purpose;
-                continue;
-            }
-            if heading_matches(title, &["要約", "概要"]) {
-                if stage != SummaryStage::Purpose {
-                    return Err(AIError::IncompleteSummary);
-                }
-                stage = SummaryStage::Summary;
-                continue;
-            }
-            if heading_matches(title, &["ハイライト", "Highlights", "highlights"]) {
-                if stage != SummaryStage::Summary {
-                    return Err(AIError::IncompleteSummary);
-                }
-                stage = SummaryStage::Highlight;
-                continue;
+                SummaryStage::Purpose => match lang.unwrap_or(SummaryLanguage::Ja) {
+                    SummaryLanguage::Ja => {
+                        if heading_matches(title, &["要約", "概要"]) {
+                            stage = SummaryStage::Summary;
+                            continue;
+                        }
+                    }
+                    SummaryLanguage::En => {
+                        if heading_matches(title, &["Summary", "summary"]) {
+                            stage = SummaryStage::Summary;
+                            continue;
+                        }
+                    }
+                },
+                SummaryStage::Summary => match lang.unwrap_or(SummaryLanguage::Ja) {
+                    SummaryLanguage::Ja => {
+                        if heading_matches(title, &["ハイライト"]) {
+                            stage = SummaryStage::Highlight;
+                            continue;
+                        }
+                    }
+                    SummaryLanguage::En => {
+                        if heading_matches(title, &["Highlights", "highlights"]) {
+                            stage = SummaryStage::Highlight;
+                            continue;
+                        }
+                    }
+                },
+                SummaryStage::Highlight => stage = SummaryStage::Done,
+                SummaryStage::Done => {}
             }
             if stage == SummaryStage::Highlight {
                 stage = SummaryStage::Done;
@@ -441,14 +531,47 @@ fn validate_session_summary_markdown(markdown: &str) -> Result<(), AIError> {
     Err(AIError::IncompleteSummary)
 }
 
-fn normalize_summary_headings(markdown: &str) -> String {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeadingKind {
+    Purpose,
+    Summary,
+    Highlights,
+}
+
+fn classify_heading(title: &str) -> Option<HeadingKind> {
+    if heading_matches(title, &["目的", "Purpose", "purpose"]) {
+        return Some(HeadingKind::Purpose);
+    }
+    if heading_matches(title, &["要約", "概要", "Summary", "summary"]) {
+        return Some(HeadingKind::Summary);
+    }
+    if heading_matches(title, &["ハイライト", "Highlights", "highlights"]) {
+        return Some(HeadingKind::Highlights);
+    }
+    None
+}
+
+fn canonical_heading(kind: HeadingKind, lang: SummaryLanguage) -> &'static str {
+    match (kind, lang) {
+        (HeadingKind::Purpose, SummaryLanguage::Ja) => "目的",
+        (HeadingKind::Purpose, SummaryLanguage::En) => "Purpose",
+        (HeadingKind::Summary, SummaryLanguage::Ja) => "要約",
+        (HeadingKind::Summary, SummaryLanguage::En) => "Summary",
+        (HeadingKind::Highlights, SummaryLanguage::Ja) => "ハイライト",
+        (HeadingKind::Highlights, SummaryLanguage::En) => "Highlights",
+    }
+}
+
+fn normalize_summary_headings(markdown: &str, lang: SummaryLanguage) -> String {
     let mut out = String::with_capacity(markdown.len());
     let lines: Vec<&str> = markdown.lines().collect();
     let last_idx = lines.len().saturating_sub(1);
     for (idx, line) in lines.iter().enumerate() {
         let line = *line;
         if let Some(title) = line.trim_start().strip_prefix("## ") {
-            let normalized_title = normalize_summary_heading_title(title);
+            let normalized_title = classify_heading(title)
+                .map(|kind| canonical_heading(kind, lang).to_string())
+                .unwrap_or_else(|| title.trim().to_string());
             out.push_str("## ");
             out.push_str(&normalized_title);
             if idx < last_idx {
@@ -462,25 +585,6 @@ fn normalize_summary_headings(markdown: &str) -> String {
         }
     }
     out
-}
-
-fn normalize_summary_heading_title(title: &str) -> String {
-    if heading_matches(title, &["要約", "概要"]) {
-        return "要約".to_string();
-    }
-    if heading_matches(title, &["ハイライト", "Highlights", "highlights"]) {
-        return "ハイライト".to_string();
-    }
-    if heading_matches(title, &["目的"]) {
-        return "目的".to_string();
-    }
-    if heading_matches(title, &["Purpose"]) {
-        return "Purpose".to_string();
-    }
-    if heading_matches(title, &["Summary"]) {
-        return "Summary".to_string();
-    }
-    title.to_string()
 }
 
 fn heading_matches(title: &str, expected: &[&str]) -> bool {
@@ -526,28 +630,43 @@ fn looks_like_markdown(content: &str) -> bool {
         || content.contains("\n1)")
 }
 
-fn build_markdown_from_fields(fields: &SessionSummaryFields) -> String {
+fn build_markdown_from_fields(fields: &SessionSummaryFields, lang: SummaryLanguage) -> String {
     let purpose = fields
         .task_overview
         .as_ref()
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
-        .unwrap_or("(Not available)");
+        .unwrap_or(match lang {
+            SummaryLanguage::Ja => "(不明)",
+            SummaryLanguage::En => "(Not available)",
+        });
     let summary = fields
         .short_summary
         .as_ref()
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
-        .unwrap_or("(Not available)");
+        .unwrap_or(match lang {
+            SummaryLanguage::Ja => "(不明)",
+            SummaryLanguage::En => "(Not available)",
+        });
 
     let mut out = String::new();
-    out.push_str("## 目的\n");
+    out.push_str("## ");
+    out.push_str(canonical_heading(HeadingKind::Purpose, lang));
+    out.push('\n');
     out.push_str(purpose);
-    out.push_str("\n\n## 要約\n");
+    out.push_str("\n\n## ");
+    out.push_str(canonical_heading(HeadingKind::Summary, lang));
+    out.push('\n');
     out.push_str(summary);
-    out.push_str("\n\n## ハイライト\n");
+    out.push_str("\n\n## ");
+    out.push_str(canonical_heading(HeadingKind::Highlights, lang));
+    out.push('\n');
     if fields.bullet_points.is_empty() {
-        out.push_str("- (No highlights)\n");
+        match lang {
+            SummaryLanguage::Ja => out.push_str("- (ハイライトなし)\n"),
+            SummaryLanguage::En => out.push_str("- (No highlights)\n"),
+        }
     } else {
         for bullet in fields.bullet_points.iter().take(3) {
             let line = bullet.trim_start_matches("- ").trim();
@@ -557,6 +676,48 @@ fn build_markdown_from_fields(fields: &SessionSummaryFields) -> String {
         }
     }
     out
+}
+
+fn target_summary_language(requested: &str, content: &str) -> SummaryLanguage {
+    match requested.trim() {
+        "ja" => SummaryLanguage::Ja,
+        "en" => SummaryLanguage::En,
+        "auto" => detect_summary_language(content).unwrap_or_else(|| {
+            if contains_japanese(content) {
+                SummaryLanguage::Ja
+            } else {
+                SummaryLanguage::En
+            }
+        }),
+        _ => SummaryLanguage::En,
+    }
+}
+
+fn detect_summary_language(content: &str) -> Option<SummaryLanguage> {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        let Some(title) = trimmed.strip_prefix("## ") else {
+            continue;
+        };
+        let title = title.trim();
+        if heading_matches(title, &["目的", "要約", "概要", "ハイライト"]) {
+            return Some(SummaryLanguage::Ja);
+        }
+        if heading_matches(
+            title,
+            &[
+                "Purpose",
+                "purpose",
+                "Summary",
+                "summary",
+                "Highlights",
+                "highlights",
+            ],
+        ) {
+            return Some(SummaryLanguage::En);
+        }
+    }
+    None
 }
 
 fn parse_json_summary(content: &str) -> Option<SessionSummaryFields> {
@@ -750,8 +911,17 @@ mod tests {
         let mut cache = SessionSummaryCache::default();
         let summary = SessionSummary::default();
         let now = SystemTime::now();
-        cache.set("main".to_string(), "sess-1".to_string(), summary, now);
-        assert!(cache.is_stale("main", "sess-2", now));
+        cache.set(
+            "main".to_string(),
+            "codex-cli".to_string(),
+            "sess-1".to_string(),
+            "en".to_string(),
+            summary,
+            now,
+        );
+        assert!(cache.is_stale("main", "sess-2", "en", now));
+        assert!(cache.is_stale("main", "sess-1", "ja", now));
+        assert!(!cache.is_stale("main", "sess-1", "en", now));
     }
 
     #[test]
@@ -774,7 +944,7 @@ mod tests {
             total_turns: 200,
         };
 
-        let prompt = build_session_prompt(&parsed);
+        let prompt = build_session_prompt(&parsed, "auto");
         let user_prompt = prompt
             .iter()
             .find(|msg| msg.role == "user")
@@ -819,7 +989,7 @@ mod tests {
             total_turns: 3,
         };
 
-        let prompt = build_session_prompt(&parsed);
+        let prompt = build_session_prompt(&parsed, "auto");
         let user_prompt = prompt
             .iter()
             .find(|msg| msg.role == "user")
@@ -870,7 +1040,7 @@ mod tests {
             total_turns: 4,
         };
 
-        let prompt = build_session_prompt(&parsed);
+        let prompt = build_session_prompt(&parsed, "auto");
         let user_prompt = prompt
             .iter()
             .find(|msg| msg.role == "user")
@@ -888,7 +1058,8 @@ mod tests {
         let content =
             r#"{"task_overview":"目的文","short_summary":"要約文","bullets":["項目1","項目2"]}"#;
         let fields = parse_session_summary_fields(content).expect("parse fields");
-        let markdown = normalize_session_summary_markdown(content, &fields).expect("markdown");
+        let markdown =
+            normalize_session_summary_markdown(content, &fields, "ja").expect("markdown");
         assert!(markdown.contains("## 目的"));
         assert!(markdown.contains("目的文"));
         assert!(markdown.contains("## 要約"));
@@ -898,10 +1069,22 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_session_summary_markdown_from_json_english_headings() {
+        let content = r#"{"task_overview":"Purpose text","short_summary":"Summary text","bullets":["A","B"]}"#;
+        let fields = parse_session_summary_fields(content).expect("parse fields");
+        let markdown =
+            normalize_session_summary_markdown(content, &fields, "en").expect("markdown");
+        assert!(markdown.contains("## Purpose"));
+        assert!(markdown.contains("## Summary"));
+        assert!(markdown.contains("## Highlights"));
+    }
+
+    #[test]
     fn test_normalize_session_summary_markdown_passthrough() {
         let content = "## 目的\nA\n\n## 要約\nB\n\n## ハイライト\n- C";
         let fields = SessionSummaryFields::default();
-        let markdown = normalize_session_summary_markdown(content, &fields).expect("markdown");
+        let markdown =
+            normalize_session_summary_markdown(content, &fields, "ja").expect("markdown");
         assert_eq!(markdown, content);
     }
 
@@ -909,13 +1092,29 @@ mod tests {
     fn test_normalize_session_summary_markdown_normalizes_alternative_summary_heading() {
         let content = "## 目的\nA\n\n## 概要\nB\n\n## ハイライト\n- C";
         let fields = SessionSummaryFields::default();
-        let markdown = normalize_session_summary_markdown(content, &fields).expect("markdown");
+        let markdown =
+            normalize_session_summary_markdown(content, &fields, "ja").expect("markdown");
+        assert_eq!(markdown, "## 目的\nA\n\n## 要約\nB\n\n## ハイライト\n- C");
+    }
+
+    #[test]
+    fn test_normalize_session_summary_markdown_normalizes_english_headings() {
+        let content = "## Purpose\nA\n\n## Summary\nB\n\n## Highlights\n- C";
+        let fields = SessionSummaryFields::default();
+        let markdown =
+            normalize_session_summary_markdown(content, &fields, "ja").expect("markdown");
         assert_eq!(markdown, "## 目的\nA\n\n## 要約\nB\n\n## ハイライト\n- C");
     }
 
     #[test]
     fn test_validate_session_summary_markdown_accepts_complete() {
         let content = "## 目的\nA\n\n## 要約\nB\n\n## ハイライト\n- C";
+        assert!(validate_session_summary_markdown(content).is_ok());
+    }
+
+    #[test]
+    fn test_validate_session_summary_markdown_accepts_english_headings() {
+        let content = "## Purpose\nA\n\n## Summary\nB\n\n## Highlights\n- C";
         assert!(validate_session_summary_markdown(content).is_ok());
     }
 

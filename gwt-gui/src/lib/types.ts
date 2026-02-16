@@ -6,6 +6,7 @@ export interface BranchInfo {
   ahead: number;
   behind: number;
   divergence_status: string; // "UpToDate" | "Ahead" | "Behind" | "Diverged"
+  commit_timestamp?: number | null;
   last_tool_usage?: string | null;
 }
 
@@ -147,6 +148,7 @@ export interface AISettings {
   endpoint: string;
   api_key: string;
   model: string;
+  language: "en" | "ja" | "auto";
   summary_enabled: boolean;
 }
 
@@ -156,6 +158,7 @@ export interface Profile {
   disabled_env: string[];
   description: string;
   ai?: AISettings | null;
+  ai_enabled?: boolean | null;
 }
 
 export interface ProfilesConfig {
@@ -191,6 +194,10 @@ export interface ToolSessionEntry {
   docker_recreate?: boolean | null;
   docker_build?: boolean | null;
   docker_keep?: boolean | null;
+  /** Name of the Docker container launched for this tool session. */
+  docker_container_name?: string | null;
+  /** CLI args used in `docker-compose` launch for this session. */
+  docker_compose_args?: string[] | null;
   timestamp: number;
 }
 
@@ -223,6 +230,9 @@ export interface SessionSummaryResult {
   generating: boolean;
   toolId?: string | null;
   sessionId?: string | null;
+  sourceType?: "session" | "scrollback" | null;
+  inputMtimeMs?: number | null;
+  summaryUpdatedMs?: number | null;
   markdown?: string | null;
   taskOverview?: string | null;
   shortSummary?: string | null;

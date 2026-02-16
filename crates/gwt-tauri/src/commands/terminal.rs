@@ -1589,7 +1589,9 @@ mod tests {
 
     #[test]
     fn send_keys_to_pane_errors_when_pane_not_running() {
-        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let _lock = crate::commands::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = tempfile::TempDir::new().unwrap();
         let _env = crate::commands::TestEnvGuard::new(home.path());
 
@@ -1646,7 +1648,9 @@ mod tests {
 
     #[test]
     fn send_keys_broadcast_counts_running_panes() {
-        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let _lock = crate::commands::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = tempfile::TempDir::new().unwrap();
         let _env = crate::commands::TestEnvGuard::new(home.path());
 
@@ -1713,7 +1717,9 @@ mod tests {
 
     #[test]
     fn capture_scrollback_tail_returns_plain_text() {
-        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let _lock = crate::commands::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = tempfile::TempDir::new().unwrap();
         let _env = crate::commands::TestEnvGuard::new(home.path());
 
@@ -2143,7 +2149,9 @@ mod tests {
 
     #[test]
     fn test_merge_os_base_only() {
-        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let _lock = crate::commands::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let home = tempfile::TempDir::new().unwrap();
         let _env = crate::commands::TestEnvGuard::new(home.path());
 
@@ -2816,6 +2824,8 @@ fn launch_agent_for_project_root(
             },
             docker_build: if use_docker { Some(docker_build) } else { None },
             docker_keep: if use_docker { Some(docker_keep) } else { None },
+            docker_container_name: docker_container_name.clone(),
+            docker_compose_args: docker_compose_args.clone(),
             timestamp: started_at_millis,
         };
 
@@ -3276,6 +3286,9 @@ fn stream_pty_output(
         .ok()
         .and_then(|mut map| map.remove(&pane_id));
     if let Some(meta) = meta {
+        let docker_container_name = meta.docker_container_name.clone();
+        let docker_compose_args = meta.docker_compose_args.clone();
+
         if let Some(session_id) =
             detect_session_id(&meta.agent_id, &meta.worktree_path, meta.started_at_millis)
         {
@@ -3304,6 +3317,8 @@ fn stream_pty_output(
                 docker_recreate: meta.docker_recreate,
                 docker_build: meta.docker_build,
                 docker_keep: meta.docker_keep,
+                docker_container_name,
+                docker_compose_args,
                 timestamp: now_millis(),
             };
 

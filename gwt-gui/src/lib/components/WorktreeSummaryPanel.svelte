@@ -1,28 +1,40 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { invoke as tauriInvoke } from "@tauri-apps/api/core";
   import type {
     BranchInfo,
     LaunchAgentRequest,
     ToolSessionEntry,
     SessionSummaryResult,
     PrStatusInfo,
+    GhCliStatus,
+    WorkflowRunInfo,
   } from "../types";
   import GitSection from "./GitSection.svelte";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
   import PrStatusSection from "./PrStatusSection.svelte";
+  import { workflowStatusIcon, workflowStatusClass } from "../prStatusHelpers";
 
   let {
     projectPath,
     selectedBranch = null,
     onLaunchAgent,
     onQuickLaunch,
+    onOpenCiLog,
+    agentTabBranches = [],
+    activeAgentTabBranch = null,
     prNumber = null,
+    ghCliStatus = null,
   }: {
     projectPath: string;
     selectedBranch?: BranchInfo | null;
     onLaunchAgent?: () => void;
     onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
+    onOpenCiLog?: (runId: number) => void;
+    agentTabBranches?: string[];
+    activeAgentTabBranch?: string | null;
     prNumber?: number | null;
+    ghCliStatus?: GhCliStatus | null;
   } = $props();
 
   let quickStartEntries: ToolSessionEntry[] = $state([]);
@@ -32,7 +44,7 @@
   let quickLaunching: boolean = $state(false);
   let quickLaunchingKey: string | null = $state(null);
 
-  type SummaryTab = "summary" | "pr" | "ai-summary" | "git";
+  type SummaryTab = "summary" | "git" | "pr" | "workflow" | "ai" | "docker";
   let activeTab: SummaryTab = $state("summary");
 
   let prDetailLoading = $state(false);
@@ -41,6 +53,7 @@
   let prDetailBranch: string | null = $state(null);
   let prDetailPrNumber: number | null = $state(null);
   let prDetailRequestToken = 0;
+  let lastProjectPath: string | null = $state(null);
 
   let sessionSummaryLoading: boolean = $state(false);
   let sessionSummaryGenerating: boolean = $state(false);
@@ -50,7 +63,35 @@
   let sessionSummaryError: string | null = $state(null);
   let sessionSummaryToolId: string | null = $state(null);
   let sessionSummarySessionId: string | null = $state(null);
-  const SESSION_SUMMARY_POLL_INTERVAL_MS = 5000;
+  let sessionSummarySourceType: SessionSummaryResult["sourceType"] | null = $state(
+    null,
+  );
+  let sessionSummaryInputMtimeMs: number | null = $state(null);
+  let sessionSummaryUpdatedMs: number | null = $state(null);
+  const SESSION_SUMMARY_POLL_FOCUSED_INTERVAL_MS = 15000;
+  const SESSION_SUMMARY_POLL_NONFOCUSED_INTERVAL_MS = 60000;
+
+  type DockerMode = "HostOS" | "Docker" | "Unknown";
+  type DockerModeClass = "hostos" | "docker" | "unknown";
+  type DockerSummaryRow = {
+    entry: ToolSessionEntry;
+    mode: DockerMode;
+    modeClass: DockerModeClass;
+    composeArgs: string | null;
+    service: string | null;
+    containerName: string | null;
+  };
+
+  let ghCliStatusMessage = $derived.by(() => {
+    if (!ghCliStatus) return null;
+    if (!ghCliStatus.available) {
+      return "GitHub CLI (gh) is not available.";
+    }
+    if (!ghCliStatus.authenticated) {
+      return "GitHub CLI (gh) is not authenticated. Run: gh auth login";
+    }
+    return null;
+  });
 
   type SessionSummaryUpdatedPayload = {
     projectPath: string;
@@ -67,6 +108,11 @@
     return String(err);
   }
 
+  type TauriInvoke = <T>(
+    command: string,
+    args?: Record<string, unknown>,
+  ) => Promise<T>;
+
   function normalizeBranchName(name: string): string {
     return name.startsWith("origin/") ? name.slice("origin/".length) : name;
   }
@@ -74,6 +120,27 @@
   function currentBranchName(): string {
     const rawBranch = selectedBranch?.name?.trim() ?? "";
     return normalizeBranchName(rawBranch);
+  }
+
+  function hasAgentTabForBranch(branch: string): boolean {
+    const target = normalizeBranchName(branch);
+    return (agentTabBranches ?? [])
+      .map((b) => normalizeBranchName(b))
+      .includes(target);
+  }
+
+  function isAgentTabFocusedForBranch(branch: string): boolean {
+    const target = normalizeBranchName(branch);
+    const active = (activeAgentTabBranch ?? "").trim();
+    if (!active) return false;
+    return normalizeBranchName(active) === target;
+  }
+
+  function formatSessionSummaryTimestamp(ms: number | null): string | null {
+    if (ms === null || !Number.isFinite(ms) || ms <= 0) return null;
+    const d = new Date(ms);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   }
 
   function agentIdForToolId(toolId: string): LaunchAgentRequest["agentId"] {
@@ -144,6 +211,62 @@
     return service.length > 0 ? service : null;
   }
 
+  function normalizeString(value: string | null | undefined): string {
+    return (value ?? "").trim();
+  }
+
+  function hasDockerInfo(entry: ToolSessionEntry): boolean {
+    if (entry.docker_force_host !== undefined && entry.docker_force_host !== null)
+      return true;
+    if (normalizeString(entry.docker_service).length > 0) return true;
+    if (normalizeString(entry.docker_container_name).length > 0) return true;
+    if (entry.docker_compose_args && entry.docker_compose_args.length > 0) return true;
+    if (entry.docker_recreate !== undefined) return true;
+    if (entry.docker_build !== undefined) return true;
+    if (entry.docker_keep !== undefined) return true;
+    return false;
+  }
+
+  function dockerMode(entry: ToolSessionEntry): DockerMode {
+    if (entry.docker_force_host === true) return "HostOS";
+    if (hasDockerInfo(entry)) return "Docker";
+    return "Unknown";
+  }
+
+  function dockerModeClass(entry: ToolSessionEntry): DockerModeClass {
+    const mode = dockerMode(entry);
+    if (mode === "HostOS") return "hostos";
+    if (mode === "Docker") return "docker";
+    return "unknown";
+  }
+
+  function formatComposeArgs(
+    args: string[] | null | undefined
+  ): string | null {
+    if (!args || args.length === 0) return null;
+    const normalized = args.map((arg) => normalizeString(arg)).filter((arg) => arg.length > 0);
+    return normalized.length > 0 ? normalized.join(" ") : null;
+  }
+
+  function formatTimestamp(timestamp: number): string {
+    const value = Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString() : "n/a";
+    return value;
+  }
+
+  let dockerSummaryRows: DockerSummaryRow[] = $derived.by(() => {
+    return quickStartEntries
+      .filter(hasDockerInfo)
+      .map((entry) => ({
+        entry,
+        mode: dockerMode(entry),
+        modeClass: dockerModeClass(entry),
+        composeArgs: formatComposeArgs(entry.docker_compose_args),
+        service: (normalizeString(entry.docker_service) || null),
+        containerName: (normalizeString(entry.docker_container_name) || null),
+      }))
+      .sort((left, right) => right.entry.timestamp - left.entry.timestamp);
+  });
+
   function quickStartEntryKey(entry: ToolSessionEntry): string {
     const session = entry.session_id?.trim();
     if (session) return session;
@@ -165,7 +288,7 @@
     quickStartLoading = true;
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const invoke = await getInvoke();
       const entries = await invoke<ToolSessionEntry[]>("get_branch_quick_start", {
         projectPath,
         branch,
@@ -184,8 +307,11 @@
     }
   }
 
-  async function loadSessionSummary(options: { silent?: boolean } = {}) {
+  async function loadSessionSummary(
+    options: { silent?: boolean; cachedOnly?: boolean } = {},
+  ) {
     const silent = options.silent === true;
+    const cachedOnly = options.cachedOnly === true;
     sessionSummaryError = null;
     sessionSummaryWarning = null;
 
@@ -197,6 +323,9 @@
       sessionSummaryMarkdown = null;
       sessionSummaryToolId = null;
       sessionSummarySessionId = null;
+      sessionSummarySourceType = null;
+      sessionSummaryInputMtimeMs = null;
+      sessionSummaryUpdatedMs = null;
       return;
     }
 
@@ -208,13 +337,17 @@
       sessionSummaryMarkdown = null;
       sessionSummaryToolId = null;
       sessionSummarySessionId = null;
+      sessionSummarySourceType = null;
+      sessionSummaryInputMtimeMs = null;
+      sessionSummaryUpdatedMs = null;
     }
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const invoke = await getInvoke();
       const result = await invoke<SessionSummaryResult>("get_branch_session_summary", {
         projectPath,
         branch,
+        cachedOnly,
       });
 
       const currentKey = `${projectPath}::${currentBranchName()}`;
@@ -232,6 +365,9 @@
       sessionSummaryError = result.error ?? null;
       sessionSummaryToolId = result.toolId ?? null;
       sessionSummarySessionId = result.sessionId ?? null;
+      sessionSummarySourceType = result.sourceType ?? null;
+      sessionSummaryInputMtimeMs = result.inputMtimeMs ?? null;
+      sessionSummaryUpdatedMs = result.summaryUpdatedMs ?? null;
     } catch (err) {
       sessionSummaryStatus = "error";
       sessionSummaryGenerating = false;
@@ -240,6 +376,9 @@
       }
       sessionSummaryToolId = null;
       sessionSummarySessionId = null;
+      sessionSummarySourceType = null;
+      sessionSummaryInputMtimeMs = null;
+      sessionSummaryUpdatedMs = null;
       sessionSummaryError = `Failed to generate session summary: ${toErrorMessage(err)}`;
     } finally {
       const currentKey = `${projectPath}::${currentBranchName()}`;
@@ -258,6 +397,8 @@
   $effect(() => {
     void selectedBranch;
     void projectPath;
+    void agentTabBranches;
+    void activeAgentTabBranch;
 
     const branch = currentBranchName();
     if (!branch) {
@@ -265,7 +406,19 @@
       return;
     }
 
-    loadSessionSummary();
+    const tabExists = hasAgentTabForBranch(branch);
+    const focused = tabExists && isAgentTabFocusedForBranch(branch);
+    const pollIntervalMs = tabExists
+      ? focused
+        ? SESSION_SUMMARY_POLL_FOCUSED_INTERVAL_MS
+        : SESSION_SUMMARY_POLL_NONFOCUSED_INTERVAL_MS
+      : null;
+
+    loadSessionSummary({ cachedOnly: !tabExists });
+
+    if (pollIntervalMs === null) {
+      return;
+    }
 
     const timer = window.setInterval(() => {
       if (
@@ -274,8 +427,8 @@
       ) {
         return;
       }
-      loadSessionSummary({ silent: true });
-    }, SESSION_SUMMARY_POLL_INTERVAL_MS);
+      loadSessionSummary({ silent: true, cachedOnly: false });
+    }, pollIntervalMs);
 
     return () => {
       window.clearInterval(timer);
@@ -312,6 +465,9 @@
             sessionSummaryError = result.error ?? null;
             sessionSummaryToolId = result.toolId ?? null;
             sessionSummarySessionId = result.sessionId ?? null;
+            sessionSummarySourceType = result.sourceType ?? null;
+            sessionSummaryInputMtimeMs = result.inputMtimeMs ?? null;
+            sessionSummaryUpdatedMs = result.summaryUpdatedMs ?? null;
           }
         );
         if (cancelled) {
@@ -341,6 +497,13 @@
     prDetailPrNumber = null;
   }
 
+  $effect(() => {
+    const nextProjectPath = projectPath ?? "";
+    if (nextProjectPath === lastProjectPath) return;
+    lastProjectPath = nextProjectPath;
+    clearPrDetailState(currentBranchName());
+  });
+
   async function loadPrDetail(branch: string, prNum: number) {
     const requestToken = ++prDetailRequestToken;
     prDetailLoading = true;
@@ -348,7 +511,7 @@
     prDetail = null;
     prDetailPrNumber = prNum;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const invoke = await getInvoke();
       const result = await invoke<PrStatusInfo>("fetch_pr_detail", {
         projectPath,
         prNumber: prNum,
@@ -374,7 +537,7 @@
   }
 
   $effect(() => {
-    if (activeTab !== "pr") return;
+    if (activeTab !== "pr" && activeTab !== "workflow") return;
 
     const branch = currentBranchName();
     if (!branch || !prNumber) {
@@ -437,6 +600,48 @@
       quickLaunchingKey = null;
     }
   }
+
+  function workflowStatusText(run: WorkflowRunInfo): string {
+    if (run.status !== "completed") {
+      return run.status === "in_progress" ? "Running" : "Queued";
+    }
+    switch (run.conclusion) {
+      case "success":
+        return "Success";
+      case "failure":
+        return "Failure";
+      case "neutral":
+        return "Neutral";
+      case "skipped":
+        return "Skipped";
+      default:
+        return "Completed";
+    }
+  }
+
+  function openWorkflowRun(run: WorkflowRunInfo): void {
+    if (onOpenCiLog) {
+      onOpenCiLog(run.runId);
+      return;
+    }
+    if (typeof window === "undefined" || !window.open) return;
+
+    const prUrl = prDetail?.url ?? "";
+    const match = prUrl.match(/^(https:\/\/github\.com\/[^/]+\/[^/]+)\//);
+    const workflowBase = match ? match[1] : null;
+    if (!workflowBase) return;
+    window.open(`${workflowBase}/actions/runs/${run.runId}`, "_blank", "noopener");
+  }
+
+  async function getInvoke(): Promise<TauriInvoke> {
+    const globalInvoke = (globalThis as { __TAURI_INTERNALS__?: { invoke?: TauriInvoke } })
+      .__TAURI_INTERNALS__?.invoke;
+    const invokeFn = globalInvoke ?? tauriInvoke;
+    if (!invokeFn) {
+      throw new Error("Tauri invoke API is unavailable");
+    }
+    return invokeFn;
+  }
 </script>
 
 <div class="worktree-summary-panel">
@@ -459,6 +664,15 @@
         </button>
         <button
           class="summary-tab"
+          class:active={activeTab === "git"}
+          onclick={() => {
+            activeTab = "git";
+          }}
+        >
+          Git
+        </button>
+        <button
+          class="summary-tab"
           class:active={activeTab === "pr"}
           onclick={() => {
             activeTab = "pr";
@@ -468,21 +682,30 @@
         </button>
         <button
           class="summary-tab"
-          class:active={activeTab === "ai-summary"}
+          class:active={activeTab === "workflow"}
           onclick={() => {
-            activeTab = "ai-summary";
+            activeTab = "workflow";
           }}
         >
-          AI Summary
+          Workflow
         </button>
         <button
           class="summary-tab"
-          class:active={activeTab === "git"}
+          class:active={activeTab === "ai"}
           onclick={() => {
-            activeTab = "git";
+            activeTab = "ai";
           }}
         >
-          Git
+          AI
+        </button>
+        <button
+          class="summary-tab"
+          class:active={activeTab === "docker"}
+          onclick={() => {
+            activeTab = "docker";
+          }}
+        >
+          Docker
         </button>
       </div>
 
@@ -591,10 +814,72 @@
           {/if}
         </div>
 
-      {:else if activeTab === "ai-summary"}
+      {:else if activeTab === "git"}
+        <GitSection
+          projectPath={projectPath}
+          branch={selectedBranch.name}
+          collapsible={false}
+          defaultCollapsed={false}
+        />
+      {:else if activeTab === "pr"}
+        <PrStatusSection
+          prDetail={prDetail}
+          loading={prDetailLoading}
+          error={ghCliStatusMessage ?? prDetailError}
+        />
+      {:else if activeTab === "workflow"}
+        <div class="quick-start workflow-panel">
+          <div class="quick-header">
+            <span class="quick-title">Workflow</span>
+            {#if prDetailLoading}
+              <span class="quick-subtitle">Loading...</span>
+            {:else if ghCliStatusMessage}
+              <span class="quick-subtitle">GitHub CLI issue</span>
+            {:else if prDetailError}
+              <span class="quick-subtitle">Error</span>
+            {:else if prDetail}
+              <span class="quick-subtitle">#{prDetail.number}</span>
+            {:else}
+              <span class="quick-subtitle">No PR</span>
+            {/if}
+          </div>
+
+          {#if prDetailLoading}
+            <div class="session-summary-placeholder">Loading...</div>
+          {:else if ghCliStatusMessage}
+            <div class="quick-error">{ghCliStatusMessage}</div>
+          {:else if prDetailError}
+            <div class="quick-error">
+              {prDetailError}
+            </div>
+          {:else if !prDetail}
+            <div class="session-summary-placeholder">No PR.</div>
+          {:else if prDetail.checkSuites.length > 0}
+            <div class="workflow-list">
+              {#each prDetail.checkSuites as run}
+                <button
+                  class="workflow-run-item"
+                  type="button"
+                  onclick={() => openWorkflowRun(run)}
+                >
+                  <span class="workflow-status {workflowStatusClass(run)}"
+                    >{workflowStatusIcon(run)}</span
+                  >
+                  <span class="workflow-name">{run.workflowName}</span>
+                  <span class="workflow-status-text">
+                    {workflowStatusText(run)}
+                  </span>
+                </button>
+              {/each}
+            </div>
+          {:else}
+            <div class="workflow-empty">No workflows</div>
+          {/if}
+        </div>
+      {:else if activeTab === "ai"}
         <div class="quick-start ai-summary">
           <div class="quick-header">
-            <span class="quick-title">AI Summary</span>
+            <span class="quick-title">AI</span>
             {#if sessionSummaryLoading}
               <span class="quick-subtitle">Loading...</span>
             {:else if sessionSummaryStatus === "ok" && sessionSummaryToolId}
@@ -620,6 +905,28 @@
               <span class="quick-subtitle">Error</span>
             {/if}
           </div>
+
+          {#if sessionSummaryStatus === "ok" &&
+            (sessionSummaryToolId || sessionSummarySessionId)}
+            {@const inputTime = formatSessionSummaryTimestamp(sessionSummaryInputMtimeMs)}
+            {@const updatedTime = formatSessionSummaryTimestamp(sessionSummaryUpdatedMs)}
+            {#if sessionSummarySourceType || inputTime || updatedTime}
+              <div class="session-summary-meta">
+                <span class="meta-item">
+                  Source: {sessionSummarySourceType === "scrollback" ||
+                  sessionSummarySessionId?.startsWith("pane:")
+                    ? "Live (scrollback)"
+                    : "Session"}
+                </span>
+                {#if inputTime}
+                  <span class="meta-item">Input updated: {inputTime}</span>
+                {/if}
+                {#if updatedTime}
+                  <span class="meta-item">Summary updated: {updatedTime}</span>
+                {/if}
+              </div>
+            {/if}
+          {/if}
 
           {#if sessionSummaryWarning}
             <div class="session-summary-warning">
@@ -652,19 +959,74 @@
             <div class="session-summary-placeholder">No summary.</div>
           {/if}
         </div>
-      {:else if activeTab === "git"}
-        <GitSection
-          projectPath={projectPath}
-          branch={selectedBranch.name}
-          collapsible={false}
-          defaultCollapsed={false}
-        />
-      {:else if activeTab === "pr"}
-        <PrStatusSection
-          prDetail={prDetail}
-          loading={prDetailLoading}
-          error={prDetailError}
-        />
+      {:else if activeTab === "docker"}
+        <div class="quick-start docker-summary">
+          <div class="quick-header">
+            <span class="quick-title">Docker</span>
+            {#if quickStartLoading}
+              <span class="quick-subtitle">Loading...</span>
+            {:else if dockerSummaryRows.length > 0}
+              <span class="quick-subtitle">
+                {dockerSummaryRows.length} record{dockerSummaryRows.length === 1 ? "" : "s"}
+              </span>
+            {:else}
+              <span class="quick-subtitle">No Docker records</span>
+            {/if}
+          </div>
+
+          {#if quickStartLoading}
+            <div class="session-summary-placeholder">Loading...</div>
+          {:else if dockerSummaryRows.length === 0}
+            <div class="session-summary-placeholder">
+              No Docker usage found in quick start history.
+            </div>
+          {:else}
+            <div class="docker-summary-list">
+              {#each dockerSummaryRows as row (quickStartEntryKey(row.entry))}
+                <div class="docker-summary-item">
+                  <div class="docker-summary-head">
+                    <div class="docker-summary-identity">
+                      <div class="quick-tool {toolClass(row.entry)}">
+                        <span class="quick-tool-name">{displayToolName(row.entry)}</span>
+                        <span class="quick-tool-version">@{displayToolVersion(row.entry)}</span>
+                      </div>
+                      {#if row.entry.session_id}
+                        <div class="docker-summary-session">Session {row.entry.session_id}</div>
+                      {/if}
+                    </div>
+                    <span class="docker-summary-time">{formatTimestamp(row.entry.timestamp)}</span>
+                  </div>
+                  <div class="quick-meta">
+                    <span class={`quick-pill ${row.modeClass}`}>runtime: {row.mode}</span>
+                    {#if row.service}
+                      <span class="quick-pill">service: {row.service}</span>
+                    {/if}
+                    {#if row.entry.docker_force_host !== undefined && row.entry.docker_force_host !== null}
+                      <span class="quick-pill">
+                        force-host: {row.entry.docker_force_host ? "on" : "off"}
+                      </span>
+                    {/if}
+                    {#if row.entry.docker_recreate !== undefined}
+                      <span class="quick-pill">recreate: {row.entry.docker_recreate ? "on" : "off"}</span>
+                    {/if}
+                    {#if row.entry.docker_build !== undefined}
+                      <span class="quick-pill">build: {row.entry.docker_build ? "on" : "off"}</span>
+                    {/if}
+                    {#if row.entry.docker_keep !== undefined}
+                      <span class="quick-pill">keep: {row.entry.docker_keep ? "on" : "off"}</span>
+                    {/if}
+                    {#if row.containerName}
+                      <span class="quick-pill">container: {row.containerName}</span>
+                    {/if}
+                    {#if row.composeArgs}
+                      <span class="quick-pill">compose args: {row.composeArgs}</span>
+                    {/if}
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
       {/if}
     </div>
   {:else}
@@ -811,6 +1173,20 @@
     text-align: right;
   }
 
+  .session-summary-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    font-size: var(--ui-font-xs);
+    color: var(--text-muted);
+    font-family: monospace;
+    line-height: 1.4;
+  }
+
+  .session-summary-meta .meta-item {
+    white-space: nowrap;
+  }
+
   .quick-error {
     padding: 10px 12px;
     border: 1px solid rgba(255, 0, 0, 0.35);
@@ -916,6 +1292,21 @@
     font-family: monospace;
   }
 
+  .quick-pill.hostos {
+    border-color: var(--cyan);
+    color: var(--cyan);
+  }
+
+  .quick-pill.docker {
+    border-color: var(--green);
+    color: var(--green);
+  }
+
+  .quick-pill.unknown {
+    border-color: var(--text-muted);
+    color: var(--text-muted);
+  }
+
   .quick-actions {
     display: flex;
     align-items: center;
@@ -951,14 +1342,58 @@
     color: var(--text-secondary);
   }
 
-  .session-summary-markdown {
-    border: 1px solid var(--border-color);
-    border-radius: 10px;
-    background: var(--bg-primary);
-    padding: 10px 12px;
-    overflow: hidden;
-    margin: 0;
+  .docker-summary-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
   }
+
+  .docker-summary-item {
+    border: 1px solid var(--border-color);
+    background: var(--bg-primary);
+    border-radius: 10px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .docker-summary-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .docker-summary-identity {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .docker-summary-session {
+    font-size: var(--ui-font-xs);
+    color: var(--text-muted);
+    font-family: monospace;
+  }
+
+  .docker-summary-time {
+    font-size: var(--ui-font-xs);
+    color: var(--text-muted);
+    font-family: monospace;
+    text-align: right;
+    white-space: nowrap;
+  }
+
+	  .session-summary-markdown {
+	    border: 1px solid var(--border-color);
+	    border-radius: 10px;
+	    background: var(--bg-primary);
+	    padding: 10px 12px;
+	    overflow: hidden;
+	    margin: 0;
+	  }
 
   .summary-tabs {
     display: flex;
@@ -987,4 +1422,67 @@
   .summary-tab:hover:not(.active) {
     color: var(--text-secondary);
   }
-</style>
+
+  .workflow-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .workflow-run-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: var(--ui-font-xs);
+    cursor: pointer;
+    text-align: left;
+    font-family: inherit;
+  }
+
+  .workflow-run-item:hover {
+    background: var(--bg-hover);
+  }
+
+  .workflow-status {
+    font-size: 11px;
+    width: 14px;
+    text-align: center;
+  }
+
+  .workflow-status.pass {
+    color: var(--green);
+  }
+
+  .workflow-status.fail {
+    color: var(--red);
+  }
+
+  .workflow-status.running {
+    color: var(--yellow);
+  }
+
+  .workflow-status.pending {
+    color: var(--text-muted);
+  }
+
+  .workflow-status-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .workflow-empty {
+    padding: 3px 8px;
+    color: var(--text-muted);
+    font-size: var(--ui-font-xs);
+    font-style: italic;
+  }
+
+	  .workflow-panel .workflow-run-item {
+	    border-radius: 4px;
+	  }
+	</style>

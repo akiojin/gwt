@@ -43,6 +43,7 @@
     shouldAllowRestoredActiveTab,
     type TabDropPosition,
   } from "./lib/appTabs";
+  import { getNextTabId, getPreviousTabId } from "./lib/tabNavigation";
   import {
     runStartupUpdateCheck,
     STARTUP_UPDATE_INITIAL_DELAY_MS,
@@ -171,6 +172,16 @@
       .filter((t) => t.type === "agent")
       .map((t) => normalizeBranchName(t.label))
       .filter((b) => b && b !== "Worktree" && b !== "Agent"),
+  );
+
+  let activeAgentTabBranch = $derived(
+    (() => {
+      const active = tabs.find((t) => t.id === activeTabId);
+      if (!active || active.type !== "agent") return null;
+      const branch = normalizeBranchName(active.label);
+      if (!branch || branch === "Worktree" || branch === "Agent") return null;
+      return branch;
+    })()
   );
 
   let terminalDiagnosticsLoading: boolean = $state(false);
@@ -1438,6 +1449,16 @@
         }
         break;
       }
+      case "previous-tab": {
+        const prevId = getPreviousTabId(tabs, activeTabId);
+        if (prevId) activeTabId = prevId;
+        break;
+      }
+      case "next-tab": {
+        const nextId = getNextTabId(tabs, activeTabId);
+        if (nextId) activeTabId = nextId;
+        break;
+      }
     }
   }
 
@@ -1785,6 +1806,7 @@
           {selectedBranch}
           {currentBranch}
           {agentTabBranches}
+          {activeAgentTabBranch}
           onResize={handleSidebarResize}
           onBranchSelect={handleBranchSelect}
           onBranchActivate={handleBranchActivate}

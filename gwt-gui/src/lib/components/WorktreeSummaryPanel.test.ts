@@ -1,11 +1,14 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, waitFor, fireEvent, cleanup } from "@testing-library/svelte";
 
 const invokeMock = vi.fn();
-const listenMock = vi.fn(async () => () => {});
+const listenMock = vi.fn();
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
+  default: {
+    invoke: invokeMock,
+  },
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -32,8 +35,11 @@ const sessionSummaryFixture = {
   generating: false,
   toolId: "codex",
   sessionId: "session-1",
-  markdown: "## 要約\n- 変更点を整理した\n- テストを追加",
-  bulletPoints: ["変更点を整理した", "テストを追加"],
+  sourceType: "scrollback",
+  inputMtimeMs: 1_700_000_000_000,
+  summaryUpdatedMs: 1_700_000_000_500,
+  markdown: "## 目的\n目的\n\n## 要約\n要約\n\n## ハイライト\n- A\n- B",
+  warning: null,
   error: null,
 };
 
@@ -65,14 +71,37 @@ const quickStartDockerEntry = {
   docker_recreate: false,
   docker_build: true,
   docker_keep: false,
+  docker_container_name: "workspace-container",
+  docker_compose_args: ["--build", "-f", "docker-compose.dev.yml"],
   timestamp: 1_700_000_002,
 };
+
+function sessionSummaryCalls() {
+  return invokeMock.mock.calls.filter((c) => c[0] === "get_branch_session_summary");
+}
+
 describe("WorktreeSummaryPanel", () => {
   beforeEach(() => {
     cleanup();
-    listenMock.mockClear();
+    listenMock.mockReset();
+    listenMock.mockResolvedValue(() => {});
+
     invokeMock.mockReset();
-    invokeMock.mockResolvedValue([]);
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      return [];
+    });
+
+    Object.defineProperty(globalThis, "__TAURI_INTERNALS__", {
+      value: { invoke: invokeMock },
+      configurable: true,
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    delete (globalThis as any).__TAURI_INTERNALS__;
   });
 
   it("renders branch header and tab UI when branch is selected", async () => {
@@ -89,12 +118,14 @@ describe("WorktreeSummaryPanel", () => {
 
     // Summary tab is active by default
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    expect(tabs).toHaveLength(4);
+    expect(tabs).toHaveLength(6);
     expect(tabs[0]?.textContent?.trim()).toBe("Summary");
     expect(tabs[0]?.classList.contains("active")).toBe(true);
-    expect(tabs[1]?.textContent?.trim()).toBe("PR");
-    expect(tabs[2]?.textContent?.trim()).toBe("AI Summary");
-    expect(tabs[3]?.textContent?.trim()).toBe("Git");
+    expect(tabs[1]?.textContent?.trim()).toBe("Git");
+    expect(tabs[2]?.textContent?.trim()).toBe("PR");
+    expect(tabs[3]?.textContent?.trim()).toBe("Workflow");
+    expect(tabs[4]?.textContent?.trim()).toBe("AI");
+    expect(tabs[5]?.textContent?.trim()).toBe("Docker");
   });
 
   it("shows placeholder when no branch is selected", async () => {
@@ -104,9 +135,9 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     await waitFor(() => {
-      expect(
-        rendered.container.querySelector(".placeholder h2")?.textContent
-      ).toBe("Worktree Summary");
+      expect(rendered.container.querySelector(".placeholder h2")?.textContent).toBe(
+        "Worktree Summary"
+      );
     });
   });
 
@@ -124,9 +155,27 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     await waitFor(() => {
-      expect(
-        rendered.container.querySelector(".quick-title")?.textContent
-      ).toBe("Quick Start");
+      expect(rendered.container.querySelector(".quick-title")?.textContent).toBe(
+        "Quick Start"
+      );
+    });
+  });
+
+  it("renders session summary metadata and markdown in AI tab", async () => {
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const aiTab = tabs[4] as HTMLElement;
+    await fireEvent.click(aiTab);
+
+    await waitFor(() => {
+      expect(aiTab.classList.contains("active")).toBe(true);
+      expect(rendered.container.querySelector(".session-summary-meta")).toBeTruthy();
+      expect(rendered.container.querySelector(".session-summary-markdown h2")).toBeTruthy();
+      expect(rendered.container.querySelectorAll(".session-summary-markdown li")).toHaveLength(2);
     });
   });
 
@@ -137,14 +186,28 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const prTab = tabs[1] as HTMLElement;
+    const prTab = tabs[2] as HTMLElement;
     await fireEvent.click(prTab);
 
     await waitFor(() => {
       expect(prTab.classList.contains("active")).toBe(true);
-      expect(
-        rendered.container.querySelector(".pr-status-section")
-      ).toBeTruthy();
+      expect(rendered.container.querySelector(".pr-status-section")).toBeTruthy();
+    });
+  });
+
+  it("shows GitHub CLI auth warning in PR tab when CLI is unavailable", async () => {
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      ghCliStatus: { available: false, authenticated: false },
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const prTab = tabs[2] as HTMLElement;
+    await fireEvent.click(prTab);
+
+    await waitFor(() => {
+      expect(rendered.getByText("GitHub CLI (gh) is not available.")).toBeTruthy();
     });
   });
 
@@ -155,7 +218,6 @@ describe("WorktreeSummaryPanel", () => {
         return {
           ...sessionSummaryFixture,
           markdown: null,
-          bulletPoints: [],
         };
       if (cmd === "get_git_change_summary") {
         return {
@@ -180,18 +242,92 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const gitTab = tabs[3] as HTMLElement;
+    const gitTab = tabs[1] as HTMLElement;
     await fireEvent.click(gitTab);
 
     await waitFor(() => {
       expect(gitTab.classList.contains("active")).toBe(true);
-      expect(
-        rendered.container.querySelector(".git-section .git-body")
-      ).toBeTruthy();
+      expect(rendered.container.querySelector(".git-section .git-body")).toBeTruthy();
     });
 
     // Git tab mode disables collapse UI.
     expect(rendered.container.querySelector(".git-section .collapse-icon")).toBeNull();
+  });
+
+  it("switches to Workflow tab and shows workflow runs", async () => {
+    const windowOpen = vi.spyOn(window, "open").mockReturnValue(null);
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") {
+        return {
+          ...sessionSummaryFixture,
+          markdown: null,
+        };
+      }
+      if (cmd === "fetch_pr_detail") {
+        return {
+          number: 42,
+          title: "CI Test PR",
+          state: "OPEN",
+          url: "https://github.com/test/repo/pull/42",
+          mergeable: "MERGEABLE",
+          author: "alice",
+          baseBranch: "main",
+          headBranch: branchFixture.name,
+          labels: [],
+          assignees: [],
+          milestone: null,
+          linkedIssues: [],
+          checkSuites: [
+            {
+              workflowName: "CI Build",
+              runId: 100,
+              status: "completed",
+              conclusion: "success",
+            },
+            {
+              workflowName: "Lint",
+              runId: 101,
+              status: "in_progress",
+              conclusion: null,
+            },
+          ],
+          reviews: [],
+          reviewComments: [],
+          changedFilesCount: 1,
+          additions: 10,
+          deletions: 5,
+        };
+      }
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      prNumber: 42,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const workflowTab = tabs[3] as HTMLElement;
+    await fireEvent.click(workflowTab);
+
+    await waitFor(() => {
+      expect(workflowTab.classList.contains("active")).toBe(true);
+      expect(rendered.getByText("CI Build")).toBeTruthy();
+      expect(rendered.getByText("Lint")).toBeTruthy();
+    });
+
+    await fireEvent.click(
+      rendered.getByText("Success").closest("button") as HTMLButtonElement
+    );
+    expect(windowOpen).toHaveBeenCalledWith(
+      "https://github.com/test/repo/actions/runs/100",
+      "_blank",
+      "noopener"
+    );
+    windowOpen.mockRestore();
   });
 
   it("displays HostOS runtime for quick start entry", async () => {
@@ -228,4 +364,111 @@ describe("WorktreeSummaryPanel", () => {
       expect(rendered.getByText("service: workspace")).toBeTruthy();
     });
   });
+
+  it("switches to Docker tab and shows docker session details", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [quickStartDockerEntry];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const dockerTab = tabs[5] as HTMLElement;
+    await fireEvent.click(dockerTab);
+
+    await waitFor(() => {
+      expect(dockerTab.classList.contains("active")).toBe(true);
+      expect(rendered.getByText("runtime: Docker")).toBeTruthy();
+      expect(rendered.getByText("service: workspace")).toBeTruthy();
+      expect(rendered.getByText("container: workspace-container")).toBeTruthy();
+      expect(rendered.getByText("compose args: --build -f docker-compose.dev.yml")).toBeTruthy();
+      expect(rendered.getByText("Session session-456")).toBeTruthy();
+    });
+  });
+
+  it("requests cached-only session summary when no agent tab exists", async () => {
+    await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      agentTabBranches: [],
+      activeAgentTabBranch: null,
+    });
+
+    await waitFor(() => {
+      expect(sessionSummaryCalls()[0]?.[1]).toEqual({
+        projectPath: "/tmp/project",
+        branch: "feature/markdown-ui",
+        cachedOnly: true,
+      });
+    });
+  });
+
+  it("does not poll when no agent tab exists", async () => {
+    vi.useFakeTimers();
+    await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      agentTabBranches: [],
+      activeAgentTabBranch: null,
+    });
+
+    await waitFor(() => {
+      expect(sessionSummaryCalls()).toHaveLength(1);
+    });
+
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(sessionSummaryCalls()).toHaveLength(1);
+  });
+
+  it("polls every 15s when agent tab is focused", async () => {
+    vi.useFakeTimers();
+    await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      agentTabBranches: ["feature/markdown-ui"],
+      activeAgentTabBranch: "feature/markdown-ui",
+    });
+
+    await waitFor(() => {
+      expect(sessionSummaryCalls()).toHaveLength(1);
+    });
+    expect(sessionSummaryCalls()[0]?.[1]?.cachedOnly).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(sessionSummaryCalls()).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await waitFor(() => {
+      expect(sessionSummaryCalls()).toHaveLength(2);
+    });
+  });
+
+  it("polls every 60s when agent tab exists but is not focused", async () => {
+    vi.useFakeTimers();
+    await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      agentTabBranches: ["feature/markdown-ui"],
+      activeAgentTabBranch: "other-branch",
+    });
+
+    await waitFor(() => {
+      expect(sessionSummaryCalls()).toHaveLength(1);
+    });
+    expect(sessionSummaryCalls()[0]?.[1]?.cachedOnly).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(sessionSummaryCalls()).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(45_000);
+    await waitFor(() => {
+      expect(sessionSummaryCalls()).toHaveLength(2);
+    });
+  });
 });
+

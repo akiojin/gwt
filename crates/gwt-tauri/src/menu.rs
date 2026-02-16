@@ -25,6 +25,17 @@ pub const MENU_ID_GIT_VERSION_HISTORY: &str = "git-version-history";
 pub const MENU_ID_EDIT_COPY: &str = "edit-copy";
 pub const MENU_ID_EDIT_PASTE: &str = "edit-paste";
 
+pub const MENU_ID_WINDOW_PREVIOUS_TAB: &str = "window-previous-tab";
+pub const MENU_ID_WINDOW_NEXT_TAB: &str = "window-next-tab";
+pub const MENU_ID_WINDOW_NEXT_WINDOW: &str = "window-next-window";
+pub const MENU_ID_WINDOW_PREVIOUS_WINDOW: &str = "window-previous-window";
+#[cfg(target_os = "macos")]
+pub const MENU_ID_WINDOW_MINIMIZE: &str = "window-minimize";
+#[cfg(target_os = "macos")]
+pub const MENU_ID_WINDOW_ZOOM: &str = "window-zoom";
+#[cfg(target_os = "macos")]
+pub const MENU_ID_WINDOW_BRING_ALL_TO_FRONT: &str = "window-bring-all-to-front";
+
 pub const MENU_ID_SETTINGS_PREFERENCES: &str = "settings-preferences";
 pub const MENU_ID_HELP_ABOUT: &str = "help-about";
 pub const MENU_ID_HELP_CHECK_UPDATES: &str = "help-check-updates";
@@ -297,6 +308,44 @@ fn build_window_submenu(
 
     let mut builder = SubmenuBuilder::new(app, "Window");
 
+    // 1. Tab switching items
+    let previous_tab = MenuItem::with_id(
+        app,
+        MENU_ID_WINDOW_PREVIOUS_TAB,
+        "Previous Tab",
+        true,
+        Some("CmdOrCtrl+Shift+["),
+    )?;
+    let next_tab = MenuItem::with_id(
+        app,
+        MENU_ID_WINDOW_NEXT_TAB,
+        "Next Tab",
+        true,
+        Some("CmdOrCtrl+Shift+]"),
+    )?;
+    builder = builder.item(&previous_tab).item(&next_tab).separator();
+
+    // 2. Window switching items
+    let previous_window = MenuItem::with_id(
+        app,
+        MENU_ID_WINDOW_PREVIOUS_WINDOW,
+        "Previous Window",
+        true,
+        Some("CmdOrCtrl+Shift+`"),
+    )?;
+    let next_window = MenuItem::with_id(
+        app,
+        MENU_ID_WINDOW_NEXT_WINDOW,
+        "Next Window",
+        true,
+        Some("CmdOrCtrl+`"),
+    )?;
+    builder = builder
+        .item(&previous_window)
+        .item(&next_window)
+        .separator();
+
+    // 3. Tab list
     if tab_entries.is_empty() {
         let none_tabs = MenuItem::with_id(
             app,
@@ -322,6 +371,21 @@ fn build_window_submenu(
 
     builder = builder.separator();
 
+    // 4. Minimize / Zoom (macOS only)
+    #[cfg(target_os = "macos")]
+    {
+        let minimize = MenuItem::with_id(
+            app,
+            MENU_ID_WINDOW_MINIMIZE,
+            "Minimize",
+            true,
+            Some("CmdOrCtrl+M"),
+        )?;
+        let zoom = MenuItem::with_id(app, MENU_ID_WINDOW_ZOOM, "Zoom", true, None::<&str>)?;
+        builder = builder.item(&minimize).item(&zoom).separator();
+    }
+
+    // 5. Window list
     if window_entries.is_empty() {
         let none_windows = MenuItem::with_id(
             app,
@@ -346,6 +410,19 @@ fn build_window_submenu(
             )?;
             builder = builder.item(&item);
         }
+    }
+
+    // 6. Bring All to Front (macOS only)
+    #[cfg(target_os = "macos")]
+    {
+        let bring_all = MenuItem::with_id(
+            app,
+            MENU_ID_WINDOW_BRING_ALL_TO_FRONT,
+            "Bring All to Front",
+            true,
+            None::<&str>,
+        )?;
+        builder = builder.separator().item(&bring_all);
     }
 
     builder.build()

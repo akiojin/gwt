@@ -27,6 +27,17 @@ describe("MarkdownRenderer", () => {
     );
   });
 
+  it("does not double-escape inline code and link hrefs", async () => {
+    const rendered = await renderRenderer(
+      "Inline `a & b` and [query](https://example.com/?a=1&b=2)"
+    );
+
+    expect(rendered.container.querySelector("code")?.textContent).toBe("a & b");
+    expect(rendered.container.querySelector("a")?.getAttribute("href")).toBe(
+      "https://example.com/?a=1&b=2"
+    );
+  });
+
   it("escapes potentially dangerous html tags", async () => {
     const rendered = await renderRenderer("<script>alert('x')</script>");
     expect(rendered.container.querySelector("script")).toBeNull();
