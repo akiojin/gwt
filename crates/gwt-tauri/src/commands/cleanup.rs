@@ -2,6 +2,7 @@
 
 use crate::commands::project::resolve_repo_path_for_project_root;
 use crate::state::AppState;
+use gwt_core::config::Session;
 use gwt_core::git::Branch;
 use gwt_core::worktree::WorktreeManager;
 use serde::Serialize;
@@ -32,6 +33,7 @@ pub struct WorktreeInfo {
     pub is_current: bool,
     pub is_protected: bool,
     pub is_agent_running: bool,
+    pub agent_status: String,
     pub ahead: usize,
     pub behind: usize,
     pub is_gone: bool,
@@ -86,6 +88,22 @@ fn compute_safety_level(
     }
 }
 
+/// Resolve agent status string from session file (SPEC-b80e7996 FR-811)
+fn resolve_agent_status_for_worktree(worktree_path: &Path) -> String {
+    match Session::load_for_worktree(worktree_path) {
+        Some(mut session) => {
+            session.check_idle_timeout();
+            match session.status {
+                gwt_core::config::AgentStatus::Running => "running".to_string(),
+                gwt_core::config::AgentStatus::WaitingInput => "waiting_input".to_string(),
+                gwt_core::config::AgentStatus::Stopped => "stopped".to_string(),
+                gwt_core::config::AgentStatus::Unknown => "unknown".to_string(),
+            }
+        }
+        None => "unknown".to_string(),
+    }
+}
+
 /// Get the set of branch names that have a running agent pane
 fn running_agent_branches(state: &AppState) -> HashSet<String> {
     let mut branches = HashSet::new();
@@ -131,6 +149,9 @@ pub fn list_worktrees(
             let is_protected = WorktreeManager::is_protected(branch_name);
             let is_agent_running = agent_branches.contains(branch_name);
 
+            // Read agent status from session file (SPEC-b80e7996 FR-811)
+            let agent_status = resolve_agent_status_for_worktree(&wt.path);
+
             let ahead = branch_info.map(|b| b.ahead).unwrap_or(0);
             let behind = branch_info.map(|b| b.behind).unwrap_or(0);
             let is_gone = branch_info.map(|b| b.is_gone).unwrap_or(false);
@@ -154,6 +175,7 @@ pub fn list_worktrees(
                 is_current,
                 is_protected,
                 is_agent_running,
+                agent_status,
                 ahead,
                 behind,
                 is_gone,
@@ -353,6 +375,7 @@ mod tests {
             is_current: false,
             is_protected: false,
             is_agent_running: false,
+            agent_status: "unknown".to_string(),
             ahead: 1,
             behind: 0,
             is_gone: true,

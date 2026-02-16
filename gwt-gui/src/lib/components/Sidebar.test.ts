@@ -58,6 +58,7 @@ const branchFixture = {
   commit: "1234567",
   is_current: false,
   is_agent_running: false,
+  agent_status: "unknown" as const,
   ahead: 0,
   behind: 0,
   divergence_status: "UpToDate",
@@ -1246,8 +1247,10 @@ describe("Sidebar", () => {
 
     const branchButton = (await rendered.findByText(branchFixture.name)).closest("button");
     expect(branchButton).toBeTruthy();
-    expect(branchButton?.classList.contains("agent-active")).toBe(true);
-    expect(rendered.queryByTitle("Agent tab is open for this branch")).toBeTruthy();
+    // Agent indicator slot should exist with agent-active class
+    const indicatorSlot = branchButton?.querySelector(".agent-indicator-slot.agent-active");
+    expect(indicatorSlot).toBeTruthy();
+    expect(rendered.queryByTitle("Agent tab is open")).toBeTruthy();
   });
 
   it("highlights selected branch in Worktree list", async () => {

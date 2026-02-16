@@ -2,6 +2,7 @@
 
 use crate::commands::project::resolve_repo_path_for_project_root;
 use crate::state::AppState;
+use gwt_core::config::{AgentStatus, Session};
 use gwt_core::git::{is_bare_repository, Branch, Remote};
 use gwt_core::worktree::WorktreeManager;
 use serde::Serialize;
@@ -19,6 +20,7 @@ pub struct BranchInfo {
     pub commit: String,
     pub is_current: bool,
     pub is_agent_running: bool,
+    pub agent_status: String,
     pub has_remote: bool,
     pub upstream: Option<String>,
     pub ahead: usize,
@@ -37,6 +39,7 @@ impl From<Branch> for BranchInfo {
             commit: b.commit,
             is_current: b.is_current,
             is_agent_running: false,
+            agent_status: "unknown".to_string(),
             has_remote: b.has_remote,
             upstream: b.upstream,
             ahead: b.ahead,
@@ -46,6 +49,38 @@ impl From<Branch> for BranchInfo {
             is_gone: b.is_gone,
             last_tool_usage: None,
         }
+    }
+}
+
+/// Build a map of branch name → AgentStatus from session files
+fn build_agent_status_map(repo_path: &Path) -> HashMap<String, AgentStatus> {
+    let manager = match WorktreeManager::new(repo_path) {
+        Ok(m) => m,
+        Err(_) => return HashMap::new(),
+    };
+    let worktrees = match manager.list_basic() {
+        Ok(wts) => wts,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut map = HashMap::new();
+    for wt in &worktrees {
+        if let Some(branch_name) = &wt.branch {
+            if let Some(mut session) = Session::load_for_worktree(&wt.path) {
+                session.check_idle_timeout();
+                map.insert(branch_name.clone(), session.status);
+            }
+        }
+    }
+    map
+}
+
+fn agent_status_to_string(status: AgentStatus) -> String {
+    match status {
+        AgentStatus::Unknown => "unknown".to_string(),
+        AgentStatus::Running => "running".to_string(),
+        AgentStatus::WaitingInput => "waiting_input".to_string(),
+        AgentStatus::Stopped => "stopped".to_string(),
     }
 }
 
@@ -125,12 +160,16 @@ pub fn list_branches(
         let repo_path = resolve_repo_path_for_project_root(project_root)?;
         let last_tool = build_last_tool_usage_map(&repo_path);
         let running_branches = running_agent_branches(&state, &repo_path);
+        let agent_statuses = build_agent_status_map(&repo_path);
 
         let branches = Branch::list(&repo_path).map_err(|e| e.to_string())?;
         let mut infos: Vec<BranchInfo> = branches.into_iter().map(BranchInfo::from).collect();
         for info in &mut infos {
             info.last_tool_usage = last_tool.get(&info.name).cloned();
             info.is_agent_running = running_branches.contains(&info.name);
+            if let Some(status) = agent_statuses.get(&info.name) {
+                info.agent_status = agent_status_to_string(*status);
+            }
         }
         Ok(infos)
     })
@@ -148,6 +187,7 @@ pub fn list_worktree_branches(
         let repo_path = resolve_repo_path_for_project_root(project_root)?;
         let last_tool = build_last_tool_usage_map(&repo_path);
         let running_branches = running_agent_branches(&state, &repo_path);
+        let agent_statuses = build_agent_status_map(&repo_path);
 
         let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
         let worktrees = manager.list_basic().map_err(|e| e.to_string())?;
@@ -173,6 +213,9 @@ pub fn list_worktree_branches(
         for info in &mut infos {
             info.last_tool_usage = last_tool.get(&info.name).cloned();
             info.is_agent_running = running_branches.contains(&info.name);
+            if let Some(status) = agent_statuses.get(&info.name) {
+                info.agent_status = agent_status_to_string(*status);
+            }
         }
 
         let prewarm_project_path = project_path.clone();
@@ -199,6 +242,7 @@ pub fn list_remote_branches(
         let repo_path = resolve_repo_path_for_project_root(project_root)?;
         let last_tool = build_last_tool_usage_map(&repo_path);
         let running_branches = running_agent_branches(&state, &repo_path);
+        let agent_statuses = build_agent_status_map(&repo_path);
         let remotes = Remote::list(&repo_path).unwrap_or_default();
 
         let branches = if is_bare_repository(&repo_path) {
@@ -211,6 +255,9 @@ pub fn list_remote_branches(
             let normalized = strip_known_remote_prefix(&info.name, &remotes);
             info.last_tool_usage = last_tool.get(normalized).cloned();
             info.is_agent_running = running_branches.contains(normalized);
+            if let Some(status) = agent_statuses.get(normalized) {
+                info.agent_status = agent_status_to_string(*status);
+            }
         }
         Ok(infos)
     })
@@ -228,10 +275,14 @@ pub fn get_current_branch(
         let branch = Branch::current(&repo_path).map_err(|e| e.to_string())?;
         let last_tool = build_last_tool_usage_map(&repo_path);
         let running_branches = running_agent_branches(&state, &repo_path);
+        let agent_statuses = build_agent_status_map(&repo_path);
         Ok(branch.map(|b| {
             let mut info = BranchInfo::from(b);
             info.last_tool_usage = last_tool.get(&info.name).cloned();
             info.is_agent_running = running_branches.contains(&info.name);
+            if let Some(status) = agent_statuses.get(&info.name) {
+                info.agent_status = agent_status_to_string(*status);
+            }
             info
         }))
     })

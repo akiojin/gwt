@@ -298,6 +298,18 @@ pub fn build_app(
                     });
                 }
 
+                // Background task: watch session files for agent status changes (SPEC-b80e7996 FR-820)
+                {
+                    let watcher_handle = _app.handle().clone();
+                    if let Err(e) = crate::session_watcher::start_session_watcher(watcher_handle) {
+                        warn!(
+                            category = "session_watcher",
+                            error = %e,
+                            "Failed to start session watcher (agent status updates will use polling fallback)"
+                        );
+                    }
+                }
+
                 // Background task: check app update (best-effort, TTL cached).
                 {
                     let mgr = _app.state::<AppState>().update_manager.clone();
