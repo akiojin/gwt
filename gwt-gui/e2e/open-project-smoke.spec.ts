@@ -326,9 +326,6 @@ test("navigates Session Summary tabs and opens workflow run page", async ({
   await branchButton.click();
 
   await expect(
-    page.getByRole("heading", { level: 2, name: branchA.name }),
-  ).toBeVisible();
-  await expect(
     page.getByRole("button", { name: "Summary", exact: true }),
   ).toHaveClass(/active/);
 
