@@ -348,6 +348,7 @@ Treat PR/MR creation, template filling, merge/push, and status checks as means (
 fn derive_worktree_purpose_from_messages(
     messages: &[SessionMessage],
     branch_name: &str,
+    fallback_language: SummaryLanguage,
 ) -> DerivedPurpose {
     let mut explicit: Option<String> = None;
     let mut inferred: Option<String> = None;
@@ -383,10 +384,14 @@ fn derive_worktree_purpose_from_messages(
         return DerivedPurpose::inferred(text);
     }
 
-    DerivedPurpose::inferred(infer_purpose_from_branch(branch_name, SummaryLanguage::En))
+    DerivedPurpose::inferred(infer_purpose_from_branch(branch_name, fallback_language))
 }
 
-fn derive_worktree_purpose_from_scrollback(text: &str, branch_name: &str) -> DerivedPurpose {
+fn derive_worktree_purpose_from_scrollback(
+    text: &str,
+    branch_name: &str,
+    fallback_language: SummaryLanguage,
+) -> DerivedPurpose {
     let mut explicit: Option<String> = None;
     let mut inferred: Option<String> = None;
 
@@ -416,7 +421,7 @@ fn derive_worktree_purpose_from_scrollback(text: &str, branch_name: &str) -> Der
         return DerivedPurpose::inferred(text);
     }
 
-    DerivedPurpose::inferred(infer_purpose_from_branch(branch_name, SummaryLanguage::En))
+    DerivedPurpose::inferred(infer_purpose_from_branch(branch_name, fallback_language))
 }
 
 fn split_text_fragments(text: &str) -> Vec<String> {
@@ -678,7 +683,9 @@ pub fn summarize_scrollback(
     branch_name: &str,
     language: &str,
 ) -> Result<SessionSummary, AIError> {
-    let derived_purpose = derive_worktree_purpose_from_scrollback(scrollback_text, branch_name);
+    let fallback_language = fallback_purpose_language_for_text(language, scrollback_text);
+    let derived_purpose =
+        derive_worktree_purpose_from_scrollback(scrollback_text, branch_name, fallback_language);
     let sampled = sample_scrollback_text(scrollback_text);
     let mut user_prompt = format!(
         "Branch: {branch_name}\nDerived worktree purpose ({}): {}\nPurpose guidance: \
@@ -766,7 +773,9 @@ pub fn summarize_session(
     branch_name: &str,
     language: &str,
 ) -> Result<SessionSummary, AIError> {
-    let derived_purpose = derive_worktree_purpose_from_messages(&parsed.messages, branch_name);
+    let fallback_language = fallback_purpose_language_for_messages(language, &parsed.messages);
+    let derived_purpose =
+        derive_worktree_purpose_from_messages(&parsed.messages, branch_name, fallback_language);
     let messages = build_session_prompt_with_context(
         parsed,
         language,
@@ -1118,9 +1127,7 @@ fn extract_purpose_body(markdown: &str) -> Option<String> {
         }
     }
 
-    let Some(start) = start else {
-        return None;
-    };
+    let start = start?;
     let mut end = lines.len();
     for (idx, line) in lines.iter().enumerate().skip(start) {
         if line.trim_start().starts_with("## ") {
@@ -1239,6 +1246,42 @@ fn target_summary_language(requested: &str, content: &str) -> SummaryLanguage {
                 SummaryLanguage::En
             }
         }),
+        _ => SummaryLanguage::En,
+    }
+}
+
+fn fallback_purpose_language_for_messages(
+    requested: &str,
+    messages: &[SessionMessage],
+) -> SummaryLanguage {
+    match requested.trim() {
+        "ja" => SummaryLanguage::Ja,
+        "en" => SummaryLanguage::En,
+        "auto" => {
+            if messages
+                .iter()
+                .any(|message| contains_japanese(&message.content))
+            {
+                SummaryLanguage::Ja
+            } else {
+                SummaryLanguage::En
+            }
+        }
+        _ => SummaryLanguage::En,
+    }
+}
+
+fn fallback_purpose_language_for_text(requested: &str, text: &str) -> SummaryLanguage {
+    match requested.trim() {
+        "ja" => SummaryLanguage::Ja,
+        "en" => SummaryLanguage::En,
+        "auto" => {
+            if contains_japanese(text) {
+                SummaryLanguage::Ja
+            } else {
+                SummaryLanguage::En
+            }
+        }
         _ => SummaryLanguage::En,
     }
 }
@@ -1625,7 +1668,11 @@ mod tests {
             },
         ];
 
-        let derived = derive_worktree_purpose_from_messages(&messages, "feature/agent-mode");
+        let derived = derive_worktree_purpose_from_messages(
+            &messages,
+            "feature/agent-mode",
+            SummaryLanguage::Ja,
+        );
         assert_eq!(derived.source, PurposeSource::Explicit);
         assert!(derived.text.contains("feature/agent-mode"));
     }
@@ -1645,9 +1692,31 @@ mod tests {
             },
         ];
 
-        let derived = derive_worktree_purpose_from_messages(&messages, "feature/agent-mode");
+        let derived = derive_worktree_purpose_from_messages(
+            &messages,
+            "feature/agent-mode",
+            SummaryLanguage::En,
+        );
         assert_eq!(derived.source, PurposeSource::Inferred);
         assert!(derived.text.contains("feature/agent-mode"));
+    }
+
+    #[test]
+    fn test_derive_worktree_purpose_falls_back_to_requested_japanese_goal() {
+        let messages = vec![SessionMessage {
+            role: MessageRole::User,
+            content: "PR本文テンプレートを埋めてください。".to_string(),
+            timestamp: None,
+        }];
+
+        let derived = derive_worktree_purpose_from_messages(
+            &messages,
+            "feature/agent-mode",
+            SummaryLanguage::Ja,
+        );
+        assert_eq!(derived.source, PurposeSource::Inferred);
+        assert!(derived.text.contains("成果をこのWorktreeで達成すること"));
+        assert!(!derived.text.contains("Deliver the outcome intended"));
     }
 
     #[test]
