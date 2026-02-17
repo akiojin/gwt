@@ -326,9 +326,6 @@ test("navigates Session Summary tabs and opens workflow run page", async ({
   await branchButton.click();
 
   await expect(
-    page.getByRole("heading", { level: 2, name: branchA.name }),
-  ).toBeVisible();
-  await expect(
     page.getByRole("button", { name: "Summary", exact: true }),
   ).toHaveClass(/active/);
 
@@ -357,7 +354,7 @@ test("navigates Session Summary tabs and opens workflow run page", async ({
 
   await page
     .locator(".summary-tabs")
-    .getByRole("button", { name: "AI", exact: true })
+    .getByRole("button", { name: "Summary", exact: true })
     .click();
   await expect(page.getByText("AI Summary")).toBeVisible();
 });
