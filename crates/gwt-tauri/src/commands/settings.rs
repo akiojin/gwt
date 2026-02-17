@@ -4,7 +4,7 @@ use crate::state::AppState;
 use gwt_core::config::Settings;
 use serde::{Deserialize, Serialize};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tauri::State;
 use tracing::error;
 
@@ -19,6 +19,14 @@ fn with_panic_guard<T>(context: &str, f: impl FnOnce() -> Result<T, String>) -> 
             );
             Err(format!("Unexpected error while {}", context))
         }
+    }
+}
+
+fn normalize_app_language(value: Option<&str>) -> String {
+    match value.unwrap_or("auto").trim().to_ascii_lowercase().as_str() {
+        "ja" => "ja".to_string(),
+        "en" => "en".to_string(),
+        _ => "auto".to_string(),
     }
 }
 
@@ -59,8 +67,14 @@ pub struct SettingsData {
     pub docker_force_host: bool,
     pub ui_font_size: u32,
     pub terminal_font_size: u32,
+    #[serde(default = "default_app_language")]
+    pub app_language: String,
     #[serde(default)]
     pub voice_input: VoiceInputSettingsData,
+}
+
+fn default_app_language() -> String {
+    "auto".to_string()
 }
 
 impl From<&Settings> for SettingsData {
@@ -92,6 +106,7 @@ impl From<&Settings> for SettingsData {
             docker_force_host: s.docker.force_host,
             ui_font_size: s.appearance.ui_font_size,
             terminal_font_size: s.appearance.terminal_font_size,
+            app_language: normalize_app_language(Some(&s.app_language)),
             voice_input: VoiceInputSettingsData {
                 enabled: s.voice_input.enabled,
                 hotkey: s.voice_input.hotkey.clone(),
@@ -124,6 +139,7 @@ impl SettingsData {
         s.docker.force_host = self.docker_force_host;
         s.appearance.ui_font_size = self.ui_font_size;
         s.appearance.terminal_font_size = self.terminal_font_size;
+        s.app_language = normalize_app_language(Some(self.app_language.as_str()));
         s.voice_input.enabled = self.voice_input.enabled;
         s.voice_input.hotkey = self.voice_input.hotkey.trim().to_string();
         s.voice_input.language = self.voice_input.language.trim().to_string();
@@ -134,17 +150,12 @@ impl SettingsData {
 
 /// Get current settings
 #[tauri::command]
-pub fn get_settings(window: tauri::Window, state: State<AppState>) -> Result<SettingsData, String> {
+pub fn get_settings(
+    _window: tauri::Window,
+    _state: State<AppState>,
+) -> Result<SettingsData, String> {
     with_panic_guard("loading settings", || {
-        let repo_root = match state.project_for_window(window.label()) {
-            Some(p) => PathBuf::from(p),
-            None => {
-                let settings = Settings::load_global().map_err(|e| e.to_string())?;
-                return Ok(SettingsData::from(&settings));
-            }
-        };
-
-        let settings = Settings::load(&repo_root).map_err(|e| e.to_string())?;
+        let settings = Settings::load_global().map_err(|e| e.to_string())?;
         Ok(SettingsData::from(&settings))
     })
 }
@@ -152,25 +163,13 @@ pub fn get_settings(window: tauri::Window, state: State<AppState>) -> Result<Set
 /// Save settings
 #[tauri::command]
 pub fn save_settings(
-    window: tauri::Window,
+    _window: tauri::Window,
     settings: SettingsData,
-    state: State<AppState>,
+    _state: State<AppState>,
 ) -> Result<(), String> {
     with_panic_guard("saving settings", || {
         let core_settings = settings.to_settings()?;
-
-        match state.project_for_window(window.label()) {
-            Some(p) => {
-                let config_path = Path::new(&p).join(".gwt.toml");
-                core_settings
-                    .save(&config_path)
-                    .map_err(|e| e.to_string())?;
-            }
-            None => {
-                // Save to global config if no project is opened
-                core_settings.save_global().map_err(|e| e.to_string())?;
-            }
-        }
+        core_settings.save_global().map_err(|e| e.to_string())?;
 
         Ok(())
     })
@@ -185,6 +184,7 @@ mod tests {
         let mut core = Settings::default();
         core.appearance.ui_font_size = 16;
         core.appearance.terminal_font_size = 20;
+        core.app_language = "ja".to_string();
         core.voice_input.enabled = true;
         core.voice_input.hotkey = "Mod+Shift+V".to_string();
         core.voice_input.language = "ja".to_string();
@@ -192,6 +192,7 @@ mod tests {
         let data = SettingsData::from(&core);
         assert_eq!(data.ui_font_size, 16);
         assert_eq!(data.terminal_font_size, 20);
+        assert_eq!(data.app_language, "ja");
         assert!(data.voice_input.enabled);
         assert_eq!(data.voice_input.hotkey, "Mod+Shift+V");
         assert_eq!(data.voice_input.language, "ja");
@@ -199,6 +200,7 @@ mod tests {
         let back = data.to_settings().unwrap();
         assert_eq!(back.appearance.ui_font_size, 16);
         assert_eq!(back.appearance.terminal_font_size, 20);
+        assert_eq!(back.app_language, "ja");
         assert!(back.voice_input.enabled);
         assert_eq!(back.voice_input.hotkey, "Mod+Shift+V");
         assert_eq!(back.voice_input.language, "ja");

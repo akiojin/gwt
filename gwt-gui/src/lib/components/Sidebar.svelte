@@ -4,12 +4,28 @@
     WorktreeInfo,
     CleanupProgress,
     LaunchAgentRequest,
+    PrStatusInfo,
+    GhCliStatus,
+    SettingsData,
   } from "../types";
   import AgentSidebar from "./AgentSidebar.svelte";
   import WorktreeSummaryPanel from "./WorktreeSummaryPanel.svelte";
 
   type FilterType = "Local" | "Remote" | "All";
+  type BranchSortMode = "name" | "updated";
   type SidebarMode = "branch" | "agent";
+  type FilterCacheEntry = {
+    branches: BranchInfo[];
+    remoteBranchNames: Set<string>;
+    worktreeMap: Map<string, WorktreeInfo>;
+    cacheKey: string;
+    fetchedAtMs: number;
+    dirty: boolean;
+  };
+  type FetchSnapshotResult =
+    | { ok: true; snapshot: FilterCacheEntry }
+    | { ok: false; errorMessage: string };
+  type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
   let {
     projectPath,
@@ -19,6 +35,7 @@
     onLaunchAgent,
     onQuickLaunch,
     onResize,
+    onOpenCiLog,
     widthPx = 260,
     minWidthPx = 220,
     maxWidthPx = 520,
@@ -28,6 +45,10 @@
     selectedBranch = null,
     currentBranch = "",
     agentTabBranches = [],
+    activeAgentTabBranch = null,
+    appLanguage = "auto",
+    prStatuses = {},
+    ghCliStatus = null,
   }: {
     projectPath: string;
     onBranchSelect: (branch: BranchInfo) => void;
@@ -36,6 +57,7 @@
     onLaunchAgent?: () => void;
     onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
     onResize?: (nextWidthPx: number) => void;
+    onOpenCiLog?: (runId: number) => void;
     widthPx?: number;
     minWidthPx?: number;
     maxWidthPx?: number;
@@ -45,6 +67,10 @@
     selectedBranch?: BranchInfo | null;
     currentBranch?: string;
     agentTabBranches?: string[];
+    activeAgentTabBranch?: string | null;
+    appLanguage?: SettingsData["app_language"];
+    prStatuses?: Record<string, PrStatusInfo | null>;
+    ghCliStatus?: GhCliStatus | null;
   } = $props();
 
   const SIDEBAR_SUMMARY_HEIGHT_STORAGE_KEY = "gwt.sidebar.worktreeSummaryHeight";
@@ -52,16 +78,174 @@
   const MIN_WORKTREE_SUMMARY_HEIGHT_PX = 160;
   const MIN_BRANCH_LIST_HEIGHT_PX = 120;
   const SUMMARY_RESIZE_HANDLE_HEIGHT_PX = 8;
+  const FILTER_BACKGROUND_REFRESH_TTL_MS = 10_000;
+  const SEARCH_FILTER_DEBOUNCE_MS = 120;
+
+  // PR Polling — inline to avoid .svelte.ts import issues in tests
+  const PR_POLL_INTERVAL_MS = 30_000;
+  let pollingStatuses: Record<string, PrStatusInfo | null> = $state({});
+  let pollingGhCliStatus: GhCliStatus | null = $state(null);
+  let prPollingBootstrappedPath: string | null = null;
+  let prPollingActivePath: string | null = null;
+  const prPollingInFlightPaths = new Set<string>();
+
+  $effect(() => {
+    const path = projectPath;
+    const branchCount = branches.length;
+
+    if (path !== prPollingActivePath) {
+      prPollingActivePath = path || null;
+      prPollingBootstrappedPath = null;
+      pollingStatuses = {};
+      pollingGhCliStatus = null;
+    }
+
+    if (!path) {
+      return;
+    }
+
+    let destroyed = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    async function refresh(markBootstrap = false) {
+      if (destroyed) return;
+      if (prPollingInFlightPaths.has(path)) return;
+      prPollingInFlightPaths.add(path);
+      try {
+        const branchKeyByName = new Map<string, string>();
+        const queryBranches: string[] = [];
+        const seen = new Set<string>();
+        for (const branch of branches) {
+          const queryBranch = normalizeBranchForPrLookup(branch.name);
+          branchKeyByName.set(branch.name, queryBranch);
+          if (!queryBranch || seen.has(queryBranch)) continue;
+          seen.add(queryBranch);
+          queryBranches.push(queryBranch);
+        }
+
+        if (queryBranches.length === 0) {
+          pollingStatuses = {};
+          return;
+        }
+        if (markBootstrap) {
+          prPollingBootstrappedPath = path;
+        }
+        const invoke = await getInvoke();
+        const result = await invoke<{
+          statuses: Record<string, PrStatusInfo | null>;
+          ghStatus: GhCliStatus;
+        }>("fetch_pr_status", { projectPath: path, branches: queryBranches });
+        if (!destroyed) {
+          const statuses = result.statuses ?? {};
+          const mappedStatuses: Record<string, PrStatusInfo | null> = {};
+          for (const branch of branches) {
+            const key = branchKeyByName.get(branch.name) ?? branch.name;
+            mappedStatuses[branch.name] = statuses[key] ?? null;
+          }
+          pollingStatuses = mappedStatuses;
+          pollingGhCliStatus = result.ghStatus ?? null;
+        }
+      } catch {
+        // Polling failure is silent — keep stale data
+      } finally {
+        prPollingInFlightPaths.delete(path);
+      }
+    }
+
+    function start() {
+      if (destroyed) return;
+      stop();
+      if (branchCount === 0) return;
+      if (prPollingBootstrappedPath !== path) {
+        void refresh(true);
+      }
+      timer = setInterval(() => {
+        if (isTextEntryFocused()) return;
+        void refresh();
+      }, PR_POLL_INTERVAL_MS);
+    }
+
+    function stop() {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+    }
+
+    function onVisibility() {
+      if (document.hidden) {
+        stop();
+      } else {
+        start();
+        if (!isTextEntryFocused()) {
+          void refresh(false);
+        }
+      }
+    }
+
+    document.addEventListener("visibilitychange", onVisibility);
+    start();
+
+    return () => {
+      destroyed = true;
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  });
+
+  // Effective values: prefer polling data, fall back to props
+  let activePrStatuses = $derived.by(() => {
+    if (pollingStatuses && Object.keys(pollingStatuses).length > 0) {
+      return pollingStatuses;
+    }
+    return prStatuses;
+  });
+  let effectiveGhCliStatus = $derived.by(() => {
+    if (pollingGhCliStatus) return pollingGhCliStatus;
+    return ghCliStatus;
+  });
+
+
+  // Derived prNumber for WorktreeSummaryPanel
+  let selectedPrNumber = $derived.by(() => {
+    if (!selectedBranch) return null;
+    const status = activePrStatuses[selectedBranch.name];
+    return status?.number ?? null;
+  });
+
+  function isTextEntryFocused(): boolean {
+    if (typeof document === "undefined") return false;
+    const active = document.activeElement;
+    if (!active) return false;
+    if (active instanceof HTMLInputElement) return true;
+    if (active instanceof HTMLTextAreaElement) return true;
+    if (active instanceof HTMLSelectElement) return true;
+    return (active as HTMLElement).isContentEditable;
+  }
 
   let activeFilter: FilterType = $state("Local");
   let branches: BranchInfo[] = $state([]);
+  let remoteBranchNames: Set<string> = $state(new Set());
   let loading: boolean = $state(false);
+  let searchInput: string = $state("");
   let searchQuery: string = $state("");
   let errorMessage: string | null = $state(null);
+  let sortMode: BranchSortMode = $state("name");
+  let agentTabBranchSet = $derived.by(() => {
+    const set = new Set<string>();
+    for (const branchName of agentTabBranches) {
+      const normalized = normalizeTabBranch(branchName);
+      if (normalized) set.add(normalized);
+    }
+    return set;
+  });
   let lastFetchKey = "";
-  let lastWorktreesFetchKey = "";
+  let lastForceKey = "";
+  let lastProjectPath = "";
   let fetchToken = 0;
   let localRefreshKey = $state(0);
+  let filterCache: Map<FilterType, FilterCacheEntry> = $state(new Map());
+  const inflightFetches = new Map<string, Promise<FetchSnapshotResult>>();
 
   // Worktree safety info
   let worktreeMap: Map<string, WorktreeInfo> = $state(new Map());
@@ -69,6 +253,95 @@
   function normalizeTabBranch(name: string): string {
     const trimmed = name.trim();
     return trimmed.startsWith("origin/") ? trimmed.slice("origin/".length) : trimmed;
+  }
+
+  function stripRemotePrefix(name: string): string {
+    const trimmed = name.trim();
+    const slash = trimmed.indexOf("/");
+    if (slash <= 0) return trimmed;
+    return trimmed.slice(slash + 1);
+  }
+
+  function branchPriority(name: string): number {
+    const normalized = name.trim().toLowerCase();
+    const baseName = normalized.startsWith("origin/")
+      ? normalized.slice("origin/".length)
+      : normalized;
+    if (baseName === "main") return 2;
+    if (baseName === "develop") return 1;
+    return 0;
+  }
+
+  function branchSortTimestamp(branch: BranchInfo): number | null {
+    const value = (branch as { commit_timestamp?: unknown }).commit_timestamp;
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string") {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+    return null;
+  }
+
+  function compareBranches(
+    a: BranchInfo,
+    b: BranchInfo,
+    filter: FilterType
+  ): number {
+    if (filter === "All") {
+      const aRemote = remoteBranchNames.has(a.name) ? 1 : 0;
+      const bRemote = remoteBranchNames.has(b.name) ? 1 : 0;
+      if (aRemote !== bRemote) {
+        return aRemote - bRemote;
+      }
+    }
+
+    const aPriority = branchPriority(a.name);
+    const bPriority = branchPriority(b.name);
+    if (aPriority !== bPriority) {
+      return bPriority - aPriority;
+    }
+
+    const byName = a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    if (sortMode === "name") {
+      return byName;
+    }
+
+    const aTs = branchSortTimestamp(a);
+    const bTs = branchSortTimestamp(b);
+    if (aTs === null && bTs === null) {
+      return byName;
+    }
+    if (aTs === null) return 1;
+    if (bTs === null) return -1;
+    if (aTs !== bTs) {
+      return bTs - aTs;
+    }
+    return byName;
+  }
+
+  function sortBranches(list: BranchInfo[], filter: FilterType): BranchInfo[] {
+    return [...list].sort((a, b) => compareBranches(a, b, filter));
+  }
+
+  function toggleSortMode() {
+    sortMode = sortMode === "name" ? "updated" : "name";
+  }
+
+  function getSortModeLabel(): string {
+    return sortMode === "name" ? "Name" : "Updated";
+  }
+
+  function normalizeBranchForPrLookup(branchName: string): string {
+    const trimmed = branchName.trim();
+    return remoteBranchNames.has(trimmed) ? stripRemotePrefix(trimmed) : trimmed;
+  }
+
+  function isSelectedBranch(branch: BranchInfo): boolean {
+    return (
+      selectedBranch !== null &&
+      selectedBranch !== undefined &&
+      selectedBranch.name === branch.name
+    );
   }
 
   function loadSummaryHeight(): number {
@@ -129,27 +402,10 @@
     }
   }
 
-  let agentTabBranchSet = $derived(
-    new Set(
-      agentTabBranches
-        .map((b) => normalizeTabBranch(b))
-        .filter((b) => b && b !== "Worktree" && b !== "Agent")
-    )
-  );
-
-  function hasActiveAgentTab(branch: BranchInfo): boolean {
-    // Local view only includes branches that have an active local worktree.
-    if (activeFilter === "Local") return agentTabBranchSet.has(branch.name);
-
-    // Only mark actual worktrees as active to avoid noise in Remote-only lists.
-    if (activeFilter === "Remote") return false;
-    if (!worktreeMap.get(branch.name)) return false;
-    return agentTabBranchSet.has(branch.name);
-  }
-
   // Branches currently being deleted
   let deletingBranches: Set<string> = $state(new Set());
   let branchSummaryStackEl: HTMLElement | null = $state(null);
+  let branchListEl: HTMLDivElement | null = $state(null);
   let summaryHeightPx = $state(loadSummaryHeight());
   let summaryResizing = $state(false);
   let summaryResizePointerId: number | null = $state(null);
@@ -175,14 +431,28 @@
 
   const filters: FilterType[] = ["Local", "Remote", "All"];
 
-  let filteredBranches = $derived(
-    searchQuery
-      ? branches.filter((b) =>
-          b.name.toLowerCase().includes(searchQuery.toLowerCase())
-        )
-      : branches
-  );
+  let filteredBranches = $derived.by(() => {
+    const sortedBranches = sortBranches(branches, activeFilter);
+    if (!searchQuery) return sortedBranches;
+
+    const normalizedQuery = searchQuery.toLowerCase();
+    return sortedBranches.filter((b) =>
+      b.name.toLowerCase().includes(normalizedQuery)
+    );
+  });
+  let selectedBranchIndex = $derived.by(() => {
+    if (selectedBranch === null || filteredBranches.length === 0) return -1;
+    return filteredBranches.findIndex((branch) => branch.name === selectedBranch!.name);
+  });
   let clampedWidthPx = $derived(clampSidebarWidth(widthPx));
+
+  $effect(() => {
+    const nextQuery = searchInput;
+    const timer = setTimeout(() => {
+      searchQuery = nextQuery;
+    }, SEARCH_FILTER_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  });
 
   $effect(() => {
     if (!branchSummaryStackEl) return;
@@ -196,15 +466,37 @@
   });
 
   $effect(() => {
-    // Re-fetch when filter/projectPath changes and when explicitly requested.
+    // Re-fetch when filter changes. Force refresh keys also trigger all-filter background updates.
     if (mode !== "branch") {
       lastFetchKey = "";
+      lastForceKey = "";
+      lastProjectPath = "";
       return;
     }
-    const key = `${projectPath}::${activeFilter}::${refreshKey}::${localRefreshKey}`;
+    const forceKey = `${projectPath}::${refreshKey}::${localRefreshKey}`;
+    const key = `${forceKey}::${activeFilter}`;
     if (key === lastFetchKey) return;
+
+    const isInitialRun = lastForceKey === "";
+    const projectChanged = lastProjectPath !== "" && projectPath !== lastProjectPath;
+    const forceRefreshTriggered = !isInitialRun && forceKey !== lastForceKey;
+
     lastFetchKey = key;
-    fetchBranches();
+    lastForceKey = forceKey;
+    lastProjectPath = projectPath;
+
+    const token = ++fetchToken;
+    if (projectChanged) {
+      clearFilterCache();
+      fetchBranches(token);
+      return;
+    }
+    if (forceRefreshTriggered) {
+      markAllFilterCachesDirty();
+      refreshAllFilterCaches(token);
+      return;
+    }
+    fetchBranches(token);
   });
 
   $effect(() => {
@@ -284,6 +576,43 @@
     };
   });
 
+  // Listen to agent-status-changed to refresh branch list (SPEC-b80e7996 FR-821)
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen("agent-status-changed", () => {
+          localRefreshKey++;
+        });
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+      } catch {
+        /* Tauri not available */
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  });
+
+  // Polling fallback for agent status (SPEC-b80e7996 FR-822)
+  // Only active when there are agent tabs open (avoids unnecessary polling).
+  $effect(() => {
+    if (agentTabBranches.length === 0) return;
+    const interval = setInterval(() => {
+      localRefreshKey++;
+    }, 10_000);
+    return () => clearInterval(interval);
+  });
+
   // Close context menu on outside click / Escape
   $effect(() => {
     if (!contextMenu) return;
@@ -318,90 +647,235 @@
     return () => document.removeEventListener("keydown", handler);
   });
 
-  async function fetchBranches() {
-    const token = ++fetchToken;
+  function fetchBranches(token: number, forceRefresh = false) {
+    const filter = activeFilter;
+    const path = projectPath;
+    const cacheKey = buildFilterCacheKey(filter, path);
+    const cached = filterCache.get(filter);
+
+    if (cached && cached.cacheKey === cacheKey) {
+      applyCacheEntry(cached);
+      const ttlElapsed = Date.now() - cached.fetchedAtMs;
+      const shouldRefresh =
+        forceRefresh || cached.dirty || ttlElapsed >= FILTER_BACKGROUND_REFRESH_TTL_MS;
+      if (!shouldRefresh) return;
+      void refreshFilterSnapshot(filter, path, cacheKey, token, true, true);
+      return;
+    }
+
     loading = true;
     errorMessage = null;
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      if (activeFilter === "Local") {
-        const next = await invoke<BranchInfo[]>("list_worktree_branches", { projectPath });
-        if (token !== fetchToken) return;
-        branches = next;
+    void refreshFilterSnapshot(filter, path, cacheKey, token, false, true);
+  }
 
-        // Worktree safety info is relatively expensive, but it must refresh when worktrees
-        // change (refreshKey) and when explicitly requested (localRefreshKey).
-        const wtKey = `${projectPath}::${localRefreshKey}::${refreshKey}`;
-        const shouldFetchWorktrees = wtKey !== lastWorktreesFetchKey;
-        if (shouldFetchWorktrees) {
-          const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", { projectPath }).catch(
-            () => [] as WorktreeInfo[]
-          );
-          if (token !== fetchToken) return;
-          updateWorktreeMap(worktrees);
-          lastWorktreesFetchKey = wtKey;
-        }
-      } else if (activeFilter === "Remote") {
-        const next = await invoke<BranchInfo[]>("list_remote_branches", {
-          projectPath,
-        });
-        if (token !== fetchToken) return;
-        branches = next;
-        worktreeMap = new Map();
-        lastWorktreesFetchKey = "";
-      } else {
-        // All: merge local + remote
-        const [local, remote] = await Promise.all([
-          invoke<BranchInfo[]>("list_worktree_branches", { projectPath }),
-          invoke<BranchInfo[]>("list_remote_branches", { projectPath }),
-        ]);
-        if (token !== fetchToken) return;
-        // Deduplicate by name
-        const seen = new Set<string>();
-        const merged: BranchInfo[] = [];
-        for (const b of local) {
-          seen.add(b.name);
-          merged.push(b);
-        }
-        for (const b of remote) {
-          if (!seen.has(b.name)) {
-            merged.push(b);
-          }
-        }
-        branches = merged;
-
-        const wtKey = `${projectPath}::${localRefreshKey}::${refreshKey}`;
-        const shouldFetchWorktrees = wtKey !== lastWorktreesFetchKey;
-        if (shouldFetchWorktrees) {
-          const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", { projectPath }).catch(
-            () => [] as WorktreeInfo[]
-          );
-          if (token !== fetchToken) return;
-          updateWorktreeMap(worktrees);
-          lastWorktreesFetchKey = wtKey;
-        }
-      }
-    } catch (err) {
-      const msg =
-        typeof err === "string"
-          ? err
-          : err && typeof err === "object" && "message" in err
-            ? String((err as { message?: unknown }).message)
-            : String(err);
-      if (token !== fetchToken) return;
-      errorMessage = `Failed to fetch branches: ${msg}`;
-      branches = [];
+  function refreshAllFilterCaches(token: number) {
+    fetchBranches(token, true);
+    const path = projectPath;
+    for (const filter of filters) {
+      if (filter === activeFilter) continue;
+      const cacheKey = buildFilterCacheKey(filter, path);
+      void refreshFilterSnapshot(filter, path, cacheKey, token, true, false);
     }
+  }
+
+  async function refreshFilterSnapshot(
+    filter: FilterType,
+    path: string,
+    cacheKey: string,
+    token: number,
+    background: boolean,
+    applyToActiveView: boolean
+  ) {
+    const hadFallbackCache = !!(filterCache.get(filter)?.cacheKey === cacheKey);
+    const result = await loadFilterSnapshot(filter, path, cacheKey);
+
     if (token !== fetchToken) return;
+    if (path !== projectPath) return;
+    if (cacheKey !== buildFilterCacheKey(filter, path)) return;
+
+    if (result.ok) {
+      setFilterCacheEntry(filter, result.snapshot);
+      if (applyToActiveView && filter === activeFilter) {
+        applyCacheEntry(result.snapshot);
+      }
+      return;
+    }
+
+    if (background && hadFallbackCache) {
+      if (applyToActiveView && filter === activeFilter) {
+        loading = false;
+      }
+      return;
+    }
+
+    if (!applyToActiveView || filter !== activeFilter) {
+      return;
+    }
+
+    errorMessage = result.errorMessage;
+    branches = [];
+    remoteBranchNames = new Set();
+    worktreeMap = new Map();
     loading = false;
   }
 
-  function updateWorktreeMap(worktrees: WorktreeInfo[]) {
+  function loadFilterSnapshot(
+    filter: FilterType,
+    path: string,
+    cacheKey: string
+  ): Promise<FetchSnapshotResult> {
+    const inflightKey = `${filter}::${cacheKey}`;
+    const inflight = inflightFetches.get(inflightKey);
+    if (inflight) return inflight;
+
+    const promise = fetchFilterSnapshot(filter, path, cacheKey).finally(() => {
+      inflightFetches.delete(inflightKey);
+    });
+    inflightFetches.set(inflightKey, promise);
+    return promise;
+  }
+
+  async function fetchFilterSnapshot(
+    filter: FilterType,
+    path: string,
+    cacheKey: string
+  ): Promise<FetchSnapshotResult> {
+    try {
+      const invoke = await getInvoke();
+
+      if (filter === "Local") {
+        const next = await invoke<BranchInfo[]>("list_worktree_branches", { projectPath: path });
+        const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", { projectPath: path }).catch(
+          () => [] as WorktreeInfo[]
+        );
+        return {
+          ok: true,
+          snapshot: {
+            branches: next,
+            remoteBranchNames: new Set(),
+            worktreeMap: buildWorktreeMap(worktrees),
+            cacheKey,
+            fetchedAtMs: Date.now(),
+            dirty: false,
+          },
+        };
+      }
+
+      if (filter === "Remote") {
+        const next = await invoke<BranchInfo[]>("list_remote_branches", { projectPath: path });
+        return {
+          ok: true,
+          snapshot: {
+            branches: next,
+            remoteBranchNames: new Set(next.map((branch) => branch.name.trim())),
+            worktreeMap: new Map(),
+            cacheKey,
+            fetchedAtMs: Date.now(),
+            dirty: false,
+          },
+        };
+      }
+
+      const [local, remote] = await Promise.all([
+        invoke<BranchInfo[]>("list_worktree_branches", { projectPath: path }),
+        invoke<BranchInfo[]>("list_remote_branches", { projectPath: path }),
+      ]);
+
+      const seen = new Set<string>();
+      const merged: BranchInfo[] = [];
+      for (const branch of local) {
+        seen.add(branch.name);
+        merged.push(branch);
+      }
+      for (const branch of remote) {
+        if (!seen.has(branch.name)) {
+          merged.push(branch);
+        }
+      }
+
+      const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", { projectPath: path }).catch(
+        () => [] as WorktreeInfo[]
+      );
+
+      return {
+        ok: true,
+        snapshot: {
+          branches: merged,
+          remoteBranchNames: new Set(remote.map((branch) => branch.name.trim())),
+          worktreeMap: buildWorktreeMap(worktrees),
+          cacheKey,
+          fetchedAtMs: Date.now(),
+          dirty: false,
+        },
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        errorMessage: `Failed to fetch branches: ${toErrorMessage(err)}`,
+      };
+    }
+  }
+
+  function buildFilterCacheKey(filter: FilterType, path: string): string {
+    if (filter === "Remote") {
+      return `${path}::${refreshKey}`;
+    }
+    return `${path}::${refreshKey}::${localRefreshKey}`;
+  }
+
+  function buildWorktreeMap(worktrees: WorktreeInfo[]): Map<string, WorktreeInfo> {
     const map = new Map<string, WorktreeInfo>();
     for (const wt of worktrees) {
       if (wt.branch) map.set(wt.branch, wt);
     }
-    worktreeMap = map;
+    return map;
+  }
+
+  function applyCacheEntry(entry: FilterCacheEntry) {
+    branches = [...entry.branches];
+    remoteBranchNames = new Set(entry.remoteBranchNames);
+    worktreeMap = new Map(entry.worktreeMap);
+    loading = false;
+    errorMessage = null;
+  }
+
+  function setFilterCacheEntry(filter: FilterType, entry: FilterCacheEntry) {
+    const next = new Map(filterCache);
+    next.set(filter, entry);
+    filterCache = next;
+  }
+
+  function markAllFilterCachesDirty() {
+    if (filterCache.size === 0) return;
+    const next = new Map<FilterType, FilterCacheEntry>();
+    for (const [filter, entry] of filterCache) {
+      next.set(filter, { ...entry, dirty: true });
+    }
+    filterCache = next;
+  }
+
+  function clearFilterCache() {
+    filterCache = new Map();
+    inflightFetches.clear();
+  }
+
+  function toErrorMessage(err: unknown): string {
+    if (typeof err === "string") return err;
+    if (err && typeof err === "object" && "message" in err) {
+      return String((err as { message?: unknown }).message);
+    }
+    return String(err);
+  }
+
+  async function getInvoke(): Promise<TauriInvoke> {
+    const tauriCore = (await import("@tauri-apps/api/core")) as
+      | { invoke?: TauriInvoke; default?: { invoke?: TauriInvoke } }
+      | undefined;
+    const invokeFn = tauriCore?.invoke ?? tauriCore?.default?.invoke;
+    if (!invokeFn) {
+      throw new Error("Tauri invoke API is unavailable");
+    }
+    return invokeFn;
   }
 
   function getSafetyLevel(branch: BranchInfo): string {
@@ -586,6 +1060,74 @@
     setSummaryHeight(summaryHeightPx + delta);
   }
 
+  function focusBranchButtonByIndex(index: number) {
+    queueMicrotask(() => {
+      const button = branchListEl?.querySelector<HTMLButtonElement>(
+        `[data-branch-index="${index}"]`
+      );
+      if (!button) return;
+      button.focus();
+      if (typeof button.scrollIntoView === "function") {
+        button.scrollIntoView({ block: "nearest" });
+      }
+    });
+  }
+
+  function isAgentBranchActive(branch: BranchInfo): boolean {
+    if (activeFilter === "Remote") return false;
+    if (activeFilter === "All" && remoteBranchNames.has(branch.name)) return false;
+    return agentTabBranchSet.has(normalizeTabBranch(branch.name));
+  }
+
+  function isAgentRunning(branch: BranchInfo): boolean {
+    return isAgentBranchActive(branch) && branch.agent_status === "running";
+  }
+
+  function handleBranchItemKeydown(event: KeyboardEvent) {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    if (filteredBranches.length === 0) return;
+
+    const focusedBranchIndex = Array.from(
+      branchListEl?.querySelectorAll<HTMLButtonElement>(".branch-item") ?? []
+    ).findIndex((el) => el === document.activeElement);
+    const currentIndex =
+      selectedBranchIndex >= 0
+        ? selectedBranchIndex
+        : focusedBranchIndex >= 0
+          ? focusedBranchIndex
+          : -1;
+    const maxIndex = filteredBranches.length - 1;
+    const nextIndex =
+      event.key === "ArrowDown"
+        ? Math.min(maxIndex, currentIndex + 1)
+        : Math.max(0, currentIndex - 1);
+
+    if (nextIndex === currentIndex) return;
+
+    const nextBranch = filteredBranches[nextIndex];
+    onBranchSelect(nextBranch);
+    focusBranchButtonByIndex(nextIndex);
+  }
+
+  $effect(() => {
+    const list = branchListEl;
+    if (!list || filteredBranches.length === 0) return;
+
+    const listener = (event: KeyboardEvent) => {
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (target !== list && !list.contains(target)) return;
+      handleBranchItemKeydown(event);
+    };
+
+    window.addEventListener("keydown", listener, true);
+    return () => {
+      window.removeEventListener("keydown", listener, true);
+    };
+  });
+
   $effect(() => {
     return () => {
       stopSummaryResize();
@@ -735,11 +1277,29 @@
         spellcheck="false"
         class="search-input"
         placeholder="Filter branches..."
-        bind:value={searchQuery}
+        bind:value={searchInput}
       />
+      <button
+        type="button"
+        class="sort-mode-toggle"
+        aria-label="Sort mode"
+        title={`Sort by ${getSortModeLabel()}`}
+        onclick={toggleSortMode}
+      >
+        <span class="sort-mode-icon" aria-hidden="true">
+          {sortMode === "name" ? "A↕" : "🕒"}
+        </span>
+        <span class="sort-mode-text">{getSortModeLabel()}</span>
+      </button>
     </div>
     <div class="branch-summary-stack" bind:this={branchSummaryStackEl}>
-      <div class="branch-list">
+      <div
+        class="branch-list"
+        bind:this={branchListEl}
+        tabindex={filteredBranches.length === 0 ? -1 : 0}
+        role="listbox"
+        aria-label="Worktree branches"
+      >
         {#if loading}
           <div class="loading-indicator">Loading...</div>
         {:else if errorMessage}
@@ -747,11 +1307,13 @@
         {:else if filteredBranches.length === 0}
           <div class="empty-indicator">No branches found.</div>
         {:else}
-          {#each filteredBranches as branch}
+          {#each filteredBranches as branch, index}
             <button
+              data-branch-index={index}
+              data-branch-name={branch.name}
               class="branch-item"
-              class:active={branch.is_current}
-              class:agent-active={hasActiveAgentTab(branch)}
+              class:agent-active={isAgentBranchActive(branch)}
+              class:active={isSelectedBranch(branch)}
               class:deleting={deletingBranches.has(branch.name)}
               onclick={() => {
                 if (!deletingBranches.has(branch.name)) onBranchSelect(branch);
@@ -762,6 +1324,21 @@
               }}
               oncontextmenu={(e) => handleContextMenu(e, branch)}
             >
+              <span
+                class="agent-indicator-slot"
+                class:agent-active={isAgentBranchActive(branch)}
+                class:agent-running={isAgentRunning(branch)}
+                aria-hidden="true"
+                title={isAgentBranchActive(branch) ? (isAgentRunning(branch) ? "Agent is running" : "Agent tab is open") : ""}
+              >
+                {#if isAgentRunning(branch)}
+                  <span class="agent-pulse-dot"></span>
+                  <span class="agent-fallback">@</span>
+                {:else if isAgentBranchActive(branch)}
+                  <span class="agent-static-dot"></span>
+                  <span class="agent-fallback">@</span>
+                {/if}
+              </span>
               <span class="branch-icon">{branch.is_current ? "*" : " "}</span>
               {#if deletingBranches.has(branch.name)}
                 <span class="safety-spinner"></span>
@@ -771,26 +1348,9 @@
                   title={getSafetyTitle(branch)}
                 ></span>
               {/if}
-              {#if hasActiveAgentTab(branch)}
-                <span
-                  class="agent-tab-icon"
-                  title="Agent tab is open for this branch"
-                  role="img"
-                  aria-label="Agent tab is open for this branch"
-                >
-                  <span class="agent-tab-bars" aria-hidden="true">
-                    <span class="agent-tab-bar b1"></span>
-                    <span class="agent-tab-bar b2"></span>
-                    <span class="agent-tab-bar b3"></span>
-                  </span>
-                  <span class="agent-tab-fallback" aria-hidden="true">@</span>
-                </span>
-              {/if}
               <span class="branch-name">{branch.name}</span>
               {#if branch.last_tool_usage}
-                <span
-                  class="tool-usage {toolUsageClass(branch.last_tool_usage)}"
-                >
+                <span class="tool-usage {toolUsageClass(branch.last_tool_usage)}">
                   {branch.last_tool_usage}
                 </span>
               {/if}
@@ -820,8 +1380,14 @@
         <WorktreeSummaryPanel
           {projectPath}
           {selectedBranch}
+          {agentTabBranches}
+          {activeAgentTabBranch}
+          preferredLanguage={appLanguage}
+          prNumber={selectedPrNumber}
+          ghCliStatus={effectiveGhCliStatus}
           onLaunchAgent={onLaunchAgent}
           onQuickLaunch={onQuickLaunch}
+          {onOpenCiLog}
         />
       </div>
     </div>
@@ -830,6 +1396,9 @@
       {projectPath}
       selectedBranch={selectedBranch}
       currentBranch={currentBranch}
+      {agentTabBranches}
+      {activeAgentTabBranch}
+      preferredLanguage={appLanguage}
     />
   {/if}
   <button
@@ -1075,10 +1644,15 @@
   .search-bar {
     padding: 6px 8px;
     border-bottom: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
 
   .search-input {
-    width: 100%;
+    flex: 1;
+    min-width: 0;
+    width: auto;
     padding: 5px 8px;
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
@@ -1095,6 +1669,36 @@
 
   .search-input::placeholder {
     color: var(--text-muted);
+  }
+
+  .sort-mode-toggle {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    border: 1px solid var(--border-color);
+    background: none;
+    color: var(--text-secondary);
+    padding: 4px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: var(--ui-font-xs);
+  }
+
+  .sort-mode-toggle:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .sort-mode-icon {
+    font-size: var(--ui-font-xs);
+    line-height: 1;
+  }
+
+  .sort-mode-text {
+    white-space: nowrap;
   }
 
   .branch-summary-stack {
@@ -1181,10 +1785,6 @@
     color: var(--accent);
   }
 
-  .branch-item.agent-active:not(.active) {
-    background-color: rgba(148, 226, 213, 0.08);
-  }
-
   .branch-item.deleting {
     opacity: 0.5;
     cursor: default;
@@ -1251,77 +1851,54 @@
     flex: 1;
   }
 
-  .agent-tab-icon {
-    color: var(--cyan);
+  /* Agent indicator: fixed-width slot for all branch rows (SPEC-b80e7996 FR-800) */
+  .agent-indicator-slot {
     width: 12px;
-    text-align: center;
+    height: 12px;
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    height: 12px;
-    line-height: 1;
   }
 
-  .agent-tab-bars {
-    display: inline-flex;
-    align-items: flex-end;
-    justify-content: center;
-    gap: 1px;
-    height: 10px;
-  }
-
-  .agent-tab-bar {
-    width: 2px;
-    height: 4px;
-    border-radius: 1px;
+  /* Layer 1: static dot — tab is open (SPEC-b80e7996 FR-801) */
+  .agent-static-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
     background: var(--cyan);
-    opacity: 0.85;
-    transform-origin: bottom;
-    animation: agentTabBars 0.9s ease-in-out infinite;
+    opacity: 0.45;
   }
 
-  .agent-tab-bar.b1 {
-    animation-delay: 0ms;
+  /* Layer 2: pulsing dot — LLM is Running (SPEC-b80e7996 FR-802) */
+  .agent-pulse-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--cyan);
+    animation: agent-pulse 1.4s ease-in-out infinite;
   }
 
-  .agent-tab-bar.b2 {
-    animation-delay: 150ms;
+  @keyframes agent-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.2; }
   }
 
-  .agent-tab-bar.b3 {
-    animation-delay: 300ms;
-  }
-
-  /* Graphical activity indicator for branches with open agent tabs */
-  @keyframes agentTabBars {
-    0%,
-    100% {
-      transform: scaleY(0.35);
-      opacity: 0.55;
-    }
-    50% {
-      transform: scaleY(1);
-      opacity: 1;
-    }
-  }
-
-  .agent-tab-fallback {
+  /* Reduced-motion fallback: show "@" instead of animated dot */
+  .agent-fallback {
     display: none;
     font-size: var(--ui-font-md);
     font-family: monospace;
+    color: var(--cyan);
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .agent-tab-bars {
+    .agent-pulse-dot,
+    .agent-static-dot {
       display: none;
     }
 
-    .agent-tab-bar {
-      animation: none;
-    }
-
-    .agent-tab-fallback {
+    .agent-fallback {
       display: flex;
     }
   }
@@ -1495,4 +2072,6 @@
   .confirm-delete:hover {
     opacity: 0.9;
   }
+
+  /* PR Status tree */
 </style>

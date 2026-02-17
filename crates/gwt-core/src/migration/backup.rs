@@ -2,7 +2,7 @@
 
 use super::MigrationError;
 use std::path::{Path, PathBuf};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Information about a created backup
 #[derive(Debug, Clone)]
@@ -137,24 +137,123 @@ pub fn restore_backup(backup_dir: &Path, target: &Path) -> Result<(), MigrationE
 
 /// Copy directory recursively, preserving permissions (FR-214)
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), MigrationError> {
-    // Use cp -a to preserve permissions, timestamps, and symlinks
-    let output = crate::process::command("cp")
+    #[cfg(not(windows))]
+    {
+        copy_dir_recursive_with_cp_program(src, dst, "cp")
+    }
+
+    #[cfg(windows)]
+    {
+        copy_dir_recursive_native(src, dst)
+    }
+}
+
+#[cfg(not(windows))]
+fn copy_dir_recursive_with_cp_program(
+    src: &Path,
+    dst: &Path,
+    cp_program: &str,
+) -> Result<(), MigrationError> {
+    match copy_dir_with_program(src, dst, cp_program) {
+        Ok(()) => Ok(()),
+        Err(reason) => {
+            warn!(
+                source = %src.display(),
+                target = %dst.display(),
+                cp_program = cp_program,
+                %reason,
+                "cp -a failed or unavailable, falling back to native recursive copy"
+            );
+            copy_dir_recursive_native(src, dst)
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn copy_dir_with_program(src: &Path, dst: &Path, program: &str) -> Result<(), String> {
+    let output = crate::process::command(program)
         .args(["-a", "--"])
         .arg(src)
         .arg(dst)
         .output()
-        .map_err(|e| MigrationError::BackupFailed {
-            reason: format!("Failed to copy {}: {}", src.display(), e),
+        .map_err(|e| format!("Failed to spawn {} for {}: {}", program, src.display(), e))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(format!("cp failed: {}", stderr.trim()))
+}
+
+fn copy_dir_recursive_native(src: &Path, dst: &Path) -> Result<(), MigrationError> {
+    std::fs::create_dir_all(dst).map_err(|e| MigrationError::BackupFailed {
+        reason: format!("Failed to create directory {}: {}", dst.display(), e),
+    })?;
+
+    copy_permissions(src, dst);
+
+    for entry in std::fs::read_dir(src).map_err(|e| MigrationError::BackupFailed {
+        reason: format!("Failed to read directory {}: {}", src.display(), e),
+    })? {
+        let entry = entry.map_err(|e| MigrationError::BackupFailed {
+            reason: format!("Failed to read directory entry in {}: {}", src.display(), e),
         })?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(MigrationError::BackupFailed {
-            reason: format!("cp failed: {}", stderr),
-        });
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .map_err(|e| MigrationError::BackupFailed {
+                reason: format!("Failed to read file type for {}: {}", src_path.display(), e),
+            })?;
+
+        if file_type.is_dir() {
+            copy_dir_recursive_native(&src_path, &dst_path)?;
+            continue;
+        }
+
+        if file_type.is_file() {
+            copy_file_with_permissions(&src_path, &dst_path)?;
+            continue;
+        }
+
+        if file_type.is_symlink() {
+            // Fallback path: dereference symlink target to keep backup portable on Windows.
+            let meta = std::fs::metadata(&src_path).map_err(|e| MigrationError::BackupFailed {
+                reason: format!(
+                    "Failed to read symlink target metadata for {}: {}",
+                    src_path.display(),
+                    e
+                ),
+            })?;
+
+            if meta.is_dir() {
+                copy_dir_recursive_native(&src_path, &dst_path)?;
+            } else {
+                copy_file_with_permissions(&src_path, &dst_path)?;
+            }
+
+            continue;
+        }
     }
 
     Ok(())
+}
+
+fn copy_file_with_permissions(src: &Path, dst: &Path) -> Result<(), MigrationError> {
+    std::fs::copy(src, dst).map_err(|e| MigrationError::BackupFailed {
+        reason: format!("Failed to copy {}: {}", src.display(), e),
+    })?;
+
+    copy_permissions(src, dst);
+    Ok(())
+}
+
+fn copy_permissions(src: &Path, dst: &Path) {
+    if let Ok(meta) = std::fs::metadata(src) {
+        let _ = std::fs::set_permissions(dst, meta.permissions());
+    }
 }
 
 #[cfg(test)]
@@ -188,5 +287,25 @@ mod tests {
         // Verify restoration
         let content = std::fs::read_to_string(source.path().join(".git/config")).unwrap();
         assert_eq!(content, "test config");
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn test_copy_dir_recursive_falls_back_when_cp_program_is_missing() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+
+        std::fs::create_dir_all(source.join(".git")).unwrap();
+        std::fs::write(source.join(".git/config"), "test config").unwrap();
+
+        let result =
+            copy_dir_recursive_with_cp_program(&source, &target, "definitely-missing-cp-binary");
+        assert!(
+            result.is_ok(),
+            "copy_dir_recursive should fall back to native copy when cp is missing: {:?}",
+            result
+        );
+        assert!(target.join(".git/config").exists());
     }
 }

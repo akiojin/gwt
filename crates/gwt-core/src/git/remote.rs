@@ -34,7 +34,7 @@ impl Remote {
             "Listing remotes"
         );
 
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["remote", "-v"])
             .current_dir(repo_path)
             .output()
@@ -112,7 +112,7 @@ impl Remote {
             args.push("--prune");
         }
 
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(&args)
             .current_dir(repo_path)
             .output()
@@ -159,7 +159,7 @@ impl Remote {
             args.push("--prune");
         }
 
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(&args)
             .current_dir(repo_path)
             .output()
@@ -208,7 +208,7 @@ impl Remote {
         args.push(name);
         args.push(branch);
 
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(&args)
             .current_dir(repo_path)
             .output()
@@ -259,7 +259,7 @@ impl Remote {
             "Adding remote"
         );
 
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["remote", "add", name, url])
             .current_dir(repo_path)
             .output()
@@ -302,7 +302,7 @@ impl Remote {
             "Removing remote"
         );
 
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["remote", "remove", name])
             .current_dir(repo_path)
             .output()
@@ -336,7 +336,7 @@ impl Remote {
 
     /// Update remote tracking references
     pub fn update_refs(repo_path: &Path) -> Result<()> {
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["remote", "update", "--prune"])
             .current_dir(repo_path)
             .output()
@@ -357,7 +357,7 @@ impl Remote {
 
     /// Check network connectivity to remote
     pub fn is_reachable(repo_path: &Path, name: &str) -> bool {
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["ls-remote", "--exit-code", name])
             .current_dir(repo_path)
             .output();
@@ -388,17 +388,17 @@ mod tests {
 
     fn create_test_repo() -> TempDir {
         let temp = TempDir::new().unwrap();
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["init"])
             .current_dir(temp.path())
             .output()
             .unwrap();
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(temp.path())
             .output()
             .unwrap();
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["config", "user.name", "Test"])
             .current_dir(temp.path())
             .output()
@@ -445,19 +445,19 @@ mod tests {
         let temp = create_test_repo();
 
         std::fs::write(temp.path().join("README.md"), "# Test").unwrap();
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["add", "."])
             .current_dir(temp.path())
             .output()
             .unwrap();
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["commit", "-m", "Initial commit"])
             .current_dir(temp.path())
             .output()
             .unwrap();
 
         let remote_dir = TempDir::new().unwrap();
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["init", "--bare"])
             .current_dir(remote_dir.path())
             .output()
@@ -477,7 +477,7 @@ mod tests {
 
         Remote::push(temp.path(), "origin", &branch, true).unwrap();
 
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args([
                 "--git-dir",
                 remote_dir.path().to_str().unwrap(),

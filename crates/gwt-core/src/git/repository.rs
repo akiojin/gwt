@@ -70,7 +70,7 @@ pub fn is_empty_dir(path: &Path) -> bool {
 
 /// Check if a path is inside a git repository (SPEC-a70a1ece)
 pub fn is_git_repo(path: &Path) -> bool {
-    let output = crate::process::git_command()
+    let output = crate::process::command("git")
         .args(["rev-parse", "--git-dir"])
         .current_dir(path)
         .output();
@@ -80,7 +80,7 @@ pub fn is_git_repo(path: &Path) -> bool {
 
 /// Check if a repository is bare (SPEC-a70a1ece)
 pub fn is_bare_repository(path: &Path) -> bool {
-    let output = crate::process::git_command()
+    let output = crate::process::command("git")
         .args(["rev-parse", "--is-bare-repository"])
         .current_dir(path)
         .output();
@@ -173,7 +173,7 @@ pub fn get_header_context(path: &Path) -> HeaderContext {
 
 /// Get the current branch name
 fn get_current_branch(path: &Path) -> Option<String> {
-    let output = crate::process::git_command()
+    let output = crate::process::command("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(path)
         .output()
@@ -263,7 +263,7 @@ impl Repository {
     /// Discover a repository using external git command (fallback for gix failures)
     fn discover_with_git_command(path: &Path) -> Result<Self> {
         // Use git rev-parse to find the repository root
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["rev-parse", "--show-toplevel"])
             .current_dir(path)
             .output();
@@ -356,7 +356,7 @@ impl Repository {
     /// Open a repository using external git command (fallback for gix failures)
     fn open_with_git_command(path: &Path) -> Result<Self> {
         // Verify this is a valid git repository by running git rev-parse
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["rev-parse", "--show-toplevel"])
             .current_dir(path)
             .output()
@@ -396,7 +396,7 @@ impl Repository {
     /// For normal repos, this returns the same as root().
     pub fn main_repo_root(&self) -> PathBuf {
         // Use git rev-parse --git-common-dir to get the common git directory
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["rev-parse", "--git-common-dir"])
             .current_dir(&self.root)
             .output();
@@ -432,7 +432,7 @@ impl Repository {
     /// Check if there are uncommitted changes (staged or unstaged)
     pub fn has_uncommitted_changes(&self) -> Result<bool> {
         // Use external git for reliability with worktrees
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["status", "--porcelain"])
             .current_dir(&self.root)
             .output()
@@ -455,7 +455,7 @@ impl Repository {
 
     /// Check if there are unpushed commits
     pub fn has_unpushed_commits(&self) -> Result<bool> {
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["log", "@{u}..", "--oneline"])
             .current_dir(&self.root)
             .output();
@@ -481,7 +481,7 @@ impl Repository {
 
     /// Get HEAD name using external git command
     fn head_name_external(&self) -> Result<Option<String>> {
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
             .current_dir(&self.root)
             .output()
@@ -516,7 +516,7 @@ impl Repository {
 
     /// Get HEAD commit using external git command
     fn head_commit_external(&self) -> Result<String> {
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&self.root)
             .output()
@@ -542,7 +542,7 @@ impl Repository {
     pub fn get_commit_log(&self, limit: usize) -> Result<Vec<super::CommitEntry>> {
         let limit_arg = format!("-{}", limit.clamp(1, 20));
 
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["log", "--oneline", &limit_arg])
             .current_dir(&self.root)
             .output()
@@ -583,7 +583,7 @@ impl Repository {
     ///
     /// Returns change statistics for the working directory compared to HEAD.
     pub fn get_diff_stats(&self) -> Result<super::ChangeStats> {
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["diff", "--shortstat"])
             .current_dir(&self.root)
             .output()
@@ -608,7 +608,7 @@ impl Repository {
 
     /// Pull with fast-forward only
     pub fn pull_fast_forward(&self) -> Result<()> {
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["pull", "--ff-only"])
             .current_dir(&self.root)
             .output()
@@ -629,7 +629,7 @@ impl Repository {
 
     /// Fetch all remotes
     pub fn fetch_all(&self) -> Result<()> {
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["fetch", "--all", "--prune"])
             .current_dir(&self.root)
             .output()
@@ -650,7 +650,7 @@ impl Repository {
 
     /// List all worktrees using git worktree list
     pub fn list_worktrees(&self) -> Result<Vec<WorktreeInfo>> {
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["worktree", "list", "--porcelain"])
             .current_dir(&self.root)
             .output()
@@ -738,7 +738,7 @@ impl Repository {
             args.push(branch);
         }
 
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(&args)
             .current_dir(&self.root)
             .output()
@@ -790,7 +790,7 @@ impl Repository {
             vec!["worktree", "remove", &path_str]
         };
 
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(&args)
             .current_dir(&self.root)
             .output()
@@ -858,7 +858,7 @@ impl Repository {
     pub fn prune_worktrees(&self) -> Result<()> {
         debug!(category = "git", "Pruning stale worktree metadata");
 
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["worktree", "prune"])
             .current_dir(&self.root)
             .output()
@@ -915,7 +915,7 @@ pub struct WorktreeInfo {
 /// For bare repos, this returns the bare repo path itself (SPEC-a70a1ece).
 /// For normal repos or non-repo paths, this returns the original path.
 pub fn get_main_repo_root(path: &Path) -> PathBuf {
-    let output = crate::process::git_command()
+    let output = crate::process::command("git")
         .args(["rev-parse", "--git-common-dir"])
         .current_dir(path)
         .output();
@@ -955,17 +955,17 @@ mod tests {
 
     fn create_test_repo() -> (TempDir, Repository) {
         let temp = TempDir::new().unwrap();
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["init"])
             .current_dir(temp.path())
             .output()
             .unwrap();
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["config", "user.email", "test@test.com"])
             .current_dir(temp.path())
             .output()
             .unwrap();
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["config", "user.name", "Test"])
             .current_dir(temp.path())
             .output()
@@ -978,12 +978,12 @@ mod tests {
     fn create_test_repo_with_commit() -> (TempDir, Repository) {
         let (temp, repo) = create_test_repo();
         std::fs::write(temp.path().join("test.txt"), "hello").unwrap();
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["add", "."])
             .current_dir(temp.path())
             .output()
             .unwrap();
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["commit", "-m", "initial"])
             .current_dir(temp.path())
             .output()
@@ -1037,12 +1037,12 @@ mod tests {
         let (temp, repo) = create_test_repo();
         // Create initial commit
         std::fs::write(temp.path().join("test.txt"), "hello").unwrap();
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["add", "."])
             .current_dir(temp.path())
             .output()
             .unwrap();
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["commit", "-m", "initial"])
             .current_dir(temp.path())
             .output()
@@ -1165,7 +1165,7 @@ mod tests {
     #[test]
     fn test_detect_repo_type_bare() {
         let temp = TempDir::new().unwrap();
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["init", "--bare"])
             .current_dir(temp.path())
             .output()
@@ -1211,7 +1211,7 @@ mod tests {
     #[test]
     fn test_is_bare_repository_true() {
         let temp = TempDir::new().unwrap();
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["init", "--bare"])
             .current_dir(temp.path())
             .output()
@@ -1258,7 +1258,7 @@ mod tests {
     #[test]
     fn test_is_inside_worktree_false_for_bare() {
         let temp = TempDir::new().unwrap();
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["init", "--bare"])
             .current_dir(temp.path())
             .output()
@@ -1272,7 +1272,7 @@ mod tests {
         // Create a bare repository with .git suffix
         let bare_path = temp.path().join("my-repo.git");
         std::fs::create_dir(&bare_path).unwrap();
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["init", "--bare"])
             .current_dir(&bare_path)
             .output()

@@ -1,6 +1,7 @@
 pub mod error;
 pub mod ipc;
 pub mod manager;
+pub mod osc;
 pub mod pane;
 pub mod pty;
 pub mod runner;

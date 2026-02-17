@@ -47,6 +47,7 @@ pub struct VersionHistoryCacheEntry {
     pub range_from_oid: Option<String>,
     pub range_to_oid: String,
     pub commit_count: u32,
+    pub language: String,
     pub summary_markdown: String,
     pub changelog_markdown: String,
 }
@@ -63,7 +64,15 @@ pub struct WindowAgentTabsState {
     pub active_tab_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowMigrationState {
+    pub job_id: String,
+    pub source_root: String,
+}
+
 pub struct AppState {
+    /// System resource monitor for CPU/memory/GPU queries.
+    pub system_monitor: Mutex<gwt_core::system_info::SystemMonitor>,
     /// Project root path per window label.
     ///
     /// Only stores windows that currently have a project opened.
@@ -73,12 +82,15 @@ pub struct AppState {
     pub windows_allowed_to_close: Mutex<HashSet<String>>,
     /// Agent tab state per window label for native Window menu rendering.
     pub window_agent_tabs: Mutex<HashMap<String, WindowAgentTabsState>>,
+    /// Migration status per window label for native Window menu rendering.
+    pub window_migrations: Mutex<HashMap<String, WindowMigrationState>>,
     /// Agent mode conversation state per window label.
     pub window_agent_modes: Mutex<HashMap<String, AgentModeState>>,
     pub pane_manager: Mutex<PaneManager>,
     pub agent_versions_cache: Mutex<HashMap<String, AgentVersionsCache>>,
     pub session_summary_cache: Mutex<HashMap<String, SessionSummaryCache>>,
     pub session_summary_inflight: Mutex<HashSet<String>>,
+    pub session_summary_rebuild_inflight: Mutex<HashSet<String>>,
     pub project_version_history_cache:
         Mutex<HashMap<String, HashMap<String, VersionHistoryCacheEntry>>>,
     pub project_version_history_inflight: Mutex<HashSet<String>>,
@@ -92,19 +104,24 @@ pub struct AppState {
     pub os_env: Arc<OnceCell<HashMap<String, String>>>,
     pub os_env_source: Arc<OnceCell<EnvSource>>,
     pub update_manager: UpdateManager,
+    /// MRU (most-recently-used) window focus history. Front = most recent.
+    pub window_focus_history: Mutex<Vec<String>>,
 }
 
 impl AppState {
     pub fn new() -> Self {
         Self {
+            system_monitor: Mutex::new(gwt_core::system_info::SystemMonitor::new()),
             window_projects: Mutex::new(HashMap::new()),
             windows_allowed_to_close: Mutex::new(HashSet::new()),
             window_agent_tabs: Mutex::new(HashMap::new()),
+            window_migrations: Mutex::new(HashMap::new()),
             window_agent_modes: Mutex::new(HashMap::new()),
             pane_manager: Mutex::new(PaneManager::new()),
             agent_versions_cache: Mutex::new(HashMap::new()),
             session_summary_cache: Mutex::new(HashMap::new()),
             session_summary_inflight: Mutex::new(HashSet::new()),
+            session_summary_rebuild_inflight: Mutex::new(HashSet::new()),
             project_version_history_cache: Mutex::new(HashMap::new()),
             project_version_history_inflight: Mutex::new(HashSet::new()),
             pane_launch_meta: Mutex::new(HashMap::new()),
@@ -115,6 +132,7 @@ impl AppState {
             os_env: Arc::new(OnceCell::new()),
             os_env_source: Arc::new(OnceCell::new()),
             update_manager: UpdateManager::new(),
+            window_focus_history: Mutex::new(Vec::new()),
         }
     }
 
@@ -153,6 +171,13 @@ impl AppState {
         }
     }
 
+    pub fn clear_window_state(&self, window_label: &str) {
+        self.clear_project_for_window(window_label);
+        if let Ok(mut map) = self.window_migrations.lock() {
+            map.remove(window_label);
+        }
+    }
+
     pub fn project_for_window(&self, window_label: &str) -> Option<String> {
         let map = self.window_projects.lock().ok()?;
         map.get(window_label).cloned()
@@ -184,6 +209,37 @@ impl AppState {
         map.get(window_label).cloned().unwrap_or_default()
     }
 
+    pub fn set_window_migration(&self, window_label: &str, job_id: String, source_root: String) {
+        if let Ok(mut map) = self.window_migrations.lock() {
+            map.insert(
+                window_label.to_string(),
+                WindowMigrationState {
+                    job_id,
+                    source_root,
+                },
+            );
+        }
+    }
+
+    pub fn clear_window_migration_if_job(&self, window_label: &str, job_id: &str) {
+        if let Ok(mut map) = self.window_migrations.lock() {
+            let remove = map
+                .get(window_label)
+                .map(|migration| migration.job_id == job_id)
+                .unwrap_or(false);
+            if remove {
+                map.remove(window_label);
+            }
+        }
+    }
+
+    pub fn window_migrations_snapshot(&self) -> HashMap<String, WindowMigrationState> {
+        self.window_migrations
+            .lock()
+            .map(|m| m.clone())
+            .unwrap_or_default()
+    }
+
     #[allow(dead_code)]
     pub fn allow_window_close(&self, window_label: &str) {
         if let Ok(mut set) = self.windows_allowed_to_close.lock() {
@@ -200,6 +256,41 @@ impl AppState {
 
     pub fn request_quit(&self) {
         self.is_quitting.store(true, Ordering::SeqCst);
+    }
+
+    /// Push window to front of MRU list. If already present, move to front.
+    pub fn push_window_focus(&self, label: &str) {
+        if let Ok(mut history) = self.window_focus_history.lock() {
+            history.retain(|l| l != label);
+            history.insert(0, label.to_string());
+        }
+    }
+
+    /// Get next window in MRU order (after current focused window).
+    /// Returns None if only one or zero windows.
+    pub fn next_window(&self) -> Option<String> {
+        let history = self.window_focus_history.lock().ok()?;
+        if history.len() <= 1 {
+            return None;
+        }
+        Some(history[1].clone())
+    }
+
+    /// Get previous window in MRU order (reverse direction).
+    /// Returns None if only one or zero windows.
+    pub fn previous_window(&self) -> Option<String> {
+        let history = self.window_focus_history.lock().ok()?;
+        if history.len() <= 1 {
+            return None;
+        }
+        history.last().cloned()
+    }
+
+    /// Remove window from MRU history (on window destroy).
+    pub fn remove_window_from_history(&self, label: &str) {
+        if let Ok(mut history) = self.window_focus_history.lock() {
+            history.retain(|l| l != label);
+        }
     }
 }
 
@@ -280,5 +371,137 @@ mod tests {
 
         let tabs = state.window_agent_tabs_for_window("main");
         assert_eq!(tabs.active_tab_id, None);
+    }
+
+    #[test]
+    fn window_migration_set_get_and_clear_matching_job() {
+        let state = AppState::new();
+
+        state.set_window_migration("main", "job-1".to_string(), "/tmp/repo".to_string());
+
+        let migrations = state.window_migrations_snapshot();
+        assert_eq!(migrations.len(), 1);
+        assert_eq!(
+            migrations.get("main"),
+            Some(&WindowMigrationState {
+                job_id: "job-1".to_string(),
+                source_root: "/tmp/repo".to_string(),
+            })
+        );
+
+        // Non-matching job id must not clear a newer/other job.
+        state.clear_window_migration_if_job("main", "job-other");
+        assert!(state.window_migrations_snapshot().contains_key("main"));
+
+        state.clear_window_migration_if_job("main", "job-1");
+        assert!(!state.window_migrations_snapshot().contains_key("main"));
+    }
+
+    #[test]
+    fn clear_project_for_window_keeps_migration_state() {
+        let state = AppState::new();
+        state.set_project_for_window("main", "/tmp/repo".to_string());
+        state.set_window_agent_tabs(
+            "main",
+            vec![AgentTabMenuState {
+                id: "agent-pane-1".to_string(),
+                label: "feature/one".to_string(),
+            }],
+            Some("agent-pane-1".to_string()),
+        );
+        state.set_window_migration("main", "job-1".to_string(), "/tmp/repo".to_string());
+
+        state.clear_project_for_window("main");
+
+        assert_eq!(state.project_for_window("main"), None);
+        assert_eq!(
+            state.window_agent_tabs_for_window("main"),
+            WindowAgentTabsState::default()
+        );
+        assert!(state.window_migrations_snapshot().contains_key("main"));
+    }
+
+    #[test]
+    fn mru_push_moves_to_front() {
+        let state = AppState::new();
+        state.push_window_focus("A");
+        state.push_window_focus("B");
+        state.push_window_focus("C");
+        // History: [C, B, A]
+        state.push_window_focus("A");
+        // History: [A, C, B]
+        let history = state.window_focus_history.lock().unwrap();
+        assert_eq!(*history, vec!["A", "C", "B"]);
+    }
+
+    #[test]
+    fn mru_next_returns_second_entry() {
+        let state = AppState::new();
+        state.push_window_focus("A");
+        state.push_window_focus("B");
+        state.push_window_focus("C");
+        // History: [C, B, A] → next = B
+        assert_eq!(state.next_window(), Some("B".to_string()));
+    }
+
+    #[test]
+    fn mru_next_returns_none_for_single() {
+        let state = AppState::new();
+        state.push_window_focus("A");
+        assert_eq!(state.next_window(), None);
+    }
+
+    #[test]
+    fn mru_previous_returns_last_entry() {
+        let state = AppState::new();
+        state.push_window_focus("A");
+        state.push_window_focus("B");
+        state.push_window_focus("C");
+        // History: [C, B, A] → previous = A
+        assert_eq!(state.previous_window(), Some("A".to_string()));
+    }
+
+    #[test]
+    fn mru_remove_cleans_up() {
+        let state = AppState::new();
+        state.push_window_focus("A");
+        state.push_window_focus("B");
+        state.push_window_focus("C");
+        state.remove_window_from_history("B");
+        let history = state.window_focus_history.lock().unwrap();
+        assert_eq!(*history, vec!["C", "A"]);
+    }
+
+    #[test]
+    fn clear_window_state_removes_project_tabs_mode_and_migration() {
+        let state = AppState::new();
+        state.set_project_for_window("main", "/tmp/repo".to_string());
+        state.set_window_agent_tabs(
+            "main",
+            vec![AgentTabMenuState {
+                id: "agent-pane-1".to_string(),
+                label: "feature/one".to_string(),
+            }],
+            Some("agent-pane-1".to_string()),
+        );
+        state.set_window_migration("main", "job-1".to_string(), "/tmp/repo".to_string());
+
+        if let Ok(mut map) = state.window_agent_modes.lock() {
+            map.insert("main".to_string(), AgentModeState::new());
+        }
+
+        state.clear_window_state("main");
+
+        assert_eq!(state.project_for_window("main"), None);
+        assert_eq!(
+            state.window_agent_tabs_for_window("main"),
+            WindowAgentTabsState::default()
+        );
+        assert!(!state.window_migrations_snapshot().contains_key("main"));
+        assert!(state
+            .window_agent_modes
+            .lock()
+            .map(|m| !m.contains_key("main"))
+            .unwrap_or(false));
     }
 }

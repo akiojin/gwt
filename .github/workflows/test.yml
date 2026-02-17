@@ -55,3 +55,53 @@ jobs:
         run: cd gwt-gui && pnpm run build
       - name: Build check
         run: cargo check --workspace
+
+  e2e:
+    name: E2E (Playwright, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      # actions/setup-node's pnpm cache requires pnpm to be available.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.29.2
+          run_install: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: 'pnpm'
+          cache-dependency-path: gwt-gui/pnpm-lock.yaml
+      - name: Enable Corepack (pnpm)
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.29.2 --activate
+          pnpm --version
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: gwt-gui
+      - name: Install Playwright browser (Linux)
+        if: runner.os == 'Linux'
+        run: pnpm exec playwright install --with-deps chromium
+        working-directory: gwt-gui
+      - name: Install Playwright browser (macOS / Windows)
+        if: runner.os != 'Linux'
+        run: pnpm exec playwright install chromium
+        working-directory: gwt-gui
+      - name: Run Playwright E2E
+        run: pnpm run test:e2e
+        working-directory: gwt-gui
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: playwright-report-${{ matrix.os }}
+          path: |
+            gwt-gui/playwright-report
+            gwt-gui/test-results
+          if-no-files-found: ignore

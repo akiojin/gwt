@@ -81,7 +81,7 @@ impl RepositoryScanner {
 
     fn get_directory_tree(&self) -> String {
         // Use git ls-tree for tracked files, fall back to simple listing
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["ls-tree", "-r", "--name-only", "HEAD"])
             .current_dir(&self.repo_path)
             .output();
@@ -157,7 +157,7 @@ impl RepositoryScanner {
     }
 
     fn get_source_overview(&self) -> Vec<String> {
-        let output = crate::process::git_command()
+        let output = crate::process::command("git")
             .args(["ls-tree", "-r", "--name-only", "HEAD"])
             .current_dir(&self.repo_path)
             .output();

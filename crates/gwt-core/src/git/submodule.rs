@@ -29,7 +29,7 @@ pub fn init_submodules(worktree_path: &Path) -> Result<(), String> {
         "Initializing submodules"
     );
 
-    let output = crate::process::git_command()
+    let output = crate::process::command("git")
         .args(["submodule", "update", "--init", "--recursive"])
         .current_dir(worktree_path)
         .output()
@@ -56,7 +56,7 @@ pub fn init_submodules(worktree_path: &Path) -> Result<(), String> {
 
 /// List submodule paths in a repository
 pub fn list_submodules(repo_root: &Path) -> Vec<String> {
-    let output = crate::process::git_command()
+    let output = crate::process::command("git")
         .args(["config", "--file", ".gitmodules", "--get-regexp", "path"])
         .current_dir(repo_root)
         .output();
@@ -99,7 +99,7 @@ mod tests {
     fn test_init_submodules_no_submodules() {
         let temp = TempDir::new().unwrap();
         // Initialize git repo
-        crate::process::git_command()
+        crate::process::command("git")
             .args(["init"])
             .current_dir(temp.path())
             .output()

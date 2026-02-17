@@ -28,6 +28,7 @@
     language: "auto",
     model: "base",
   };
+  const DEFAULT_APP_LANGUAGE: SettingsData["app_language"] = "auto";
 
   type AIModelInfo = {
     id: string;
@@ -83,13 +84,19 @@
     }
   });
 
+  function isAiEnabled(profile: Profile | null): boolean {
+    if (!profile) return false;
+    if (profile.ai_enabled === false) return false;
+    return !!profile.ai;
+  }
+
   $effect(() => {
     const profileKey = selectedProfileKey.trim();
     const ai = currentProfile?.ai;
     const endpoint = ai?.endpoint?.trim() ?? "";
     const apiKey = ai?.api_key?.trim() ?? "";
 
-    if (!profileKey || !ai) {
+    if (!profileKey || !ai || !isAiEnabled(currentProfile)) {
       resetAiModelsState();
       return;
     }
@@ -149,6 +156,16 @@
     };
   }
 
+  function normalizeAppLanguage(
+    value: string | null | undefined
+  ): SettingsData["app_language"] {
+    const language = (value ?? "").trim().toLowerCase();
+    if (language === "ja" || language === "en" || language === "auto") {
+      return language as SettingsData["app_language"];
+    }
+    return DEFAULT_APP_LANGUAGE;
+  }
+
   async function fetchAiModels(
     endpoint: string,
     apiKey: string,
@@ -193,7 +210,7 @@
     const ai = currentProfile?.ai;
     const endpoint = ai?.endpoint?.trim() ?? "";
     const apiKey = ai?.api_key?.trim() ?? "";
-    if (!profileKey || !ai || !endpoint) {
+    if (!profileKey || !ai || !endpoint || !isAiEnabled(currentProfile)) {
       aiModelsError = "Endpoint is required.";
       return;
     }
@@ -213,6 +230,7 @@
         invoke<ProfilesConfig>("get_profiles"),
       ]);
       loadedSettings.voice_input = normalizeVoiceInputSettings(loadedSettings.voice_input);
+      loadedSettings.app_language = normalizeAppLanguage(loadedSettings.app_language);
       settings = loadedSettings;
       savedUiFontSize = loadedSettings.ui_font_size ?? 13;
       savedTerminalFontSize = loadedSettings.terminal_font_size ?? 13;
@@ -240,6 +258,7 @@
       if (profiles) {
         await invoke("save_profiles", { config: profiles });
       }
+      settings.app_language = normalizeAppLanguage(settings.app_language);
       saveMessage = "Settings saved.";
       savedUiFontSize = settings.ui_font_size ?? 13;
       savedTerminalFontSize = settings.terminal_font_size ?? 13;
@@ -249,6 +268,7 @@
           detail: {
             uiFontSize: savedUiFontSize,
             terminalFontSize: savedTerminalFontSize,
+            appLanguage: settings.app_language,
             voiceInput: settings.voice_input,
           },
         })
@@ -407,21 +427,26 @@
     const nextProfile: Profile = enabled
       ? {
           ...p,
+          ai_enabled: true,
           ai: p.ai ?? {
             endpoint: "https://api.openai.com/v1",
             api_key: "",
             model: "",
+            language: "en",
             summary_enabled: true,
           },
         }
-      : { ...p, ai: null };
+      : { ...p, ai_enabled: false };
     profiles = {
       ...profiles,
       profiles: { ...(profiles.profiles ?? {}), [selectedProfileKey]: nextProfile },
     };
   }
 
-  function updateAiField(field: "endpoint" | "api_key" | "model" | "summary_enabled", value: string | boolean) {
+  function updateAiField(
+    field: "endpoint" | "api_key" | "model" | "language" | "summary_enabled",
+    value: string | boolean
+  ) {
     if (!profiles) return;
     const p = currentProfile;
     if (!p || !p.ai) return;
@@ -532,6 +557,33 @@
               >+</button>
               <span class="font-size-unit">px</span>
             </div>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="field">
+            <label for="app-language">Language</label>
+            <select
+              id="app-language"
+              class="select"
+              value={settings.app_language}
+              onchange={(e) => {
+                if (!settings) return;
+                settings = {
+                  ...settings,
+                  app_language: normalizeAppLanguage(
+                    (e.target as HTMLSelectElement).value
+                  ),
+                };
+              }}
+            >
+              <option value="auto">Auto</option>
+              <option value="ja">Japanese</option>
+              <option value="en">English</option>
+            </select>
+            <span class="field-hint">
+              Used for AI summary generation language.
+            </span>
           </div>
 
           <div class="divider"></div>
@@ -786,13 +838,15 @@
                 <input
                   id="ai-enabled"
                   type="checkbox"
-                  checked={!!currentProfile.ai}
+                  checked={isAiEnabled(currentProfile)}
                   onchange={(e) => setAiEnabled((e.target as HTMLInputElement).checked)}
                 />
                 <label for="ai-enabled" class="ai-enabled-label">Enable AI settings</label>
               </div>
 
-              {#if currentProfile.ai}
+              {#if isAiEnabled(currentProfile)}
+                {@const currentAi = currentProfile.ai}
+                {@const currentEndpoint = currentAi?.endpoint?.trim() ?? ""}
                 <div class="ai-grid">
                   <div class="ai-field">
                     <span class="ai-label">Endpoint</span>
@@ -802,7 +856,7 @@
                       autocorrect="off"
                       autocomplete="off"
                       spellcheck="false"
-                      value={currentProfile.ai.endpoint}
+                      value={currentAi?.endpoint ?? ""}
                       oninput={(e) => updateAiField("endpoint", (e.target as HTMLInputElement).value)}
                     />
                   </div>
@@ -814,7 +868,7 @@
                       autocorrect="off"
                       autocomplete="off"
                       spellcheck="false"
-                      value={currentProfile.ai.api_key}
+                      value={currentAi?.api_key ?? ""}
                       oninput={(e) => updateAiField("api_key", (e.target as HTMLInputElement).value)}
                     />
                   </div>
@@ -823,8 +877,8 @@
                     <div class="row ai-model-row">
                       <select
                         class="select ai-model-select"
-                        value={currentProfile.ai.model}
-                        disabled={aiModelsLoading || !currentProfile.ai.endpoint.trim()}
+                        value={currentAi?.model ?? ""}
+                        disabled={aiModelsLoading || !currentEndpoint}
                         onchange={(e) => updateAiField("model", (e.target as HTMLSelectElement).value)}
                       >
                         <option value="">Select model...</option>
@@ -835,7 +889,7 @@
                       <button
                         class="btn btn-ghost"
                         onclick={refreshAiModels}
-                        disabled={aiModelsLoading || !currentProfile.ai.endpoint.trim()}
+                        disabled={aiModelsLoading || !currentEndpoint}
                       >
                         {aiModelsLoading ? "Loading..." : "Refresh"}
                       </button>
@@ -846,9 +900,21 @@
                       <span class="field-hint">
                         Current model is not listed in /v1/models.
                       </span>
-                    {:else if !aiModelsLoading && aiModels.length === 0 && currentProfile.ai.endpoint.trim()}
+                    {:else if !aiModelsLoading && aiModels.length === 0 && currentEndpoint}
                       <span class="field-hint">No models returned from /v1/models.</span>
                     {/if}
+                  </div>
+                  <div class="ai-field">
+                    <span class="ai-label">Language</span>
+                    <select
+                      class="select"
+                      value={currentAi?.language ?? "en"}
+                      onchange={(e) => updateAiField("language", (e.target as HTMLSelectElement).value)}
+                    >
+                      <option value="en">English</option>
+                      <option value="ja">Japanese</option>
+                      <option value="auto">Auto</option>
+                    </select>
                   </div>
                   <div class="ai-field">
                     <span class="ai-label">Session Summary</span>
@@ -856,7 +922,7 @@
                       <input
                         id="ai-summary"
                         type="checkbox"
-                        checked={currentProfile.ai.summary_enabled}
+                        checked={currentAi?.summary_enabled ?? false}
                         onchange={(e) => updateAiField("summary_enabled", (e.target as HTMLInputElement).checked)}
                       />
                       <label for="ai-summary">Enabled</label>

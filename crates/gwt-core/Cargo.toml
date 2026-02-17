@@ -36,6 +36,13 @@ semver.workspace = true
 flate2.workspace = true
 tar.workspace = true
 zip.workspace = true
+sysinfo.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+nvml-wrapper = { workspace = true, optional = true }
+
+[features]
+nvidia-gpu = ["dep:nvml-wrapper"]
 
 [dev-dependencies]
 tempfile.workspace = true
