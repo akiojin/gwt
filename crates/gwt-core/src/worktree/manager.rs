@@ -1625,6 +1625,27 @@ mod tests {
     }
 
     #[test]
+    fn test_cleanup_branch_auto_forces_unmerged_branch_when_force_false() {
+        let temp = create_test_repo();
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+
+        let wt = manager
+            .create_new_branch("feature/unmerged-cleanup", None)
+            .unwrap();
+        std::fs::write(wt.path.join("unmerged.txt"), "unmerged").unwrap();
+        run_git_in(&wt.path, &["add", "."]);
+        run_git_in(&wt.path, &["commit", "-m", "unmerged commit"]);
+
+        assert!(Branch::exists(temp.path(), "feature/unmerged-cleanup").unwrap());
+
+        manager
+            .cleanup_branch("feature/unmerged-cleanup", false, false)
+            .unwrap();
+
+        assert!(!Branch::exists(temp.path(), "feature/unmerged-cleanup").unwrap());
+    }
+
+    #[test]
     fn test_active_count() {
         let temp = create_test_repo();
         let manager = WorktreeManager::new(temp.path()).unwrap();

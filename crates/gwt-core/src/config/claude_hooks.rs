@@ -66,13 +66,145 @@ pub fn is_temporary_execution_path(exe_path: &str) -> Option<String> {
     None
 }
 
+const HOOK_COMMAND_DELIMITER: &str = " hook ";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedGwtHookCommand {
+    executable_identity: String,
+    event: String,
+}
+
+fn strip_wrapping_quotes(value: &str) -> &str {
+    let trimmed = value.trim();
+    trimmed
+        .strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .unwrap_or(trimmed)
+}
+
+fn strip_exe_suffix(value: &str) -> &str {
+    let lowercase = value.to_ascii_lowercase();
+    if lowercase.ends_with(".exe") {
+        &value[..value.len().saturating_sub(4)]
+    } else {
+        value
+    }
+}
+
+fn normalize_command_executable_path(executable: &str) -> String {
+    let normalized = strip_wrapping_quotes(executable).replace('\\', "/");
+    let trimmed = normalized.trim_end_matches('/');
+
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if let Some((dir, file_name)) = trimmed.rsplit_once('/') {
+        format!("{dir}/{}", strip_exe_suffix(file_name))
+    } else {
+        strip_exe_suffix(trimmed).to_string()
+    }
+}
+
+fn command_executable_name(executable: &str) -> Option<&str> {
+    let trimmed = executable.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    trimmed.rsplit('/').next().filter(|name| !name.is_empty())
+}
+
+fn is_gwt_executable_name(executable_name: &str) -> bool {
+    let normalized = strip_exe_suffix(executable_name);
+    let lower = normalized.to_ascii_lowercase();
+    lower == "gwt"
+        || lower
+            .strip_prefix("gwt-")
+            .map(|suffix| !suffix.is_empty())
+            .unwrap_or(false)
+}
+
+fn parse_gwt_hook_command(command: &str) -> Option<ParsedGwtHookCommand> {
+    let (executable, event) = command.trim().split_once(HOOK_COMMAND_DELIMITER)?;
+    let event = event.trim();
+    if event.is_empty() {
+        return None;
+    }
+
+    let executable_identity = normalize_command_executable_path(executable);
+    let executable_name = command_executable_name(&executable_identity)?;
+    if !is_gwt_executable_name(executable_name) {
+        return None;
+    }
+
+    Some(ParsedGwtHookCommand {
+        executable_identity,
+        event: event.to_string(),
+    })
+}
+
+fn is_expected_gwt_hook_command(command: &str, event: &str, exe_path: &str) -> bool {
+    let Some(parsed) = parse_gwt_hook_command(command) else {
+        return false;
+    };
+    if parsed.event != event {
+        return false;
+    }
+    parsed.executable_identity == normalize_command_executable_path(exe_path)
+}
+
+fn gwt_hook_commands_from_value(value: &serde_json::Value) -> Vec<String> {
+    let mut commands = Vec::new();
+
+    if let Some(arr) = value.as_array() {
+        for entry in arr {
+            if let Some(hooks) = entry.get("hooks").and_then(|h| h.as_array()) {
+                for hook in hooks {
+                    if let Some(command) = hook.get("command").and_then(|c| c.as_str()) {
+                        if is_gwt_hook_command(command) {
+                            commands.push(command.to_string());
+                        }
+                    }
+                }
+            } else if let Some(command) = entry.as_str() {
+                if is_gwt_hook_command(command) {
+                    commands.push(command.to_string());
+                }
+            }
+        }
+    } else if let Some(command) = value.as_str() {
+        if is_gwt_hook_command(command) {
+            commands.push(command.to_string());
+        }
+    }
+
+    commands
+}
+
+fn event_has_expected_gwt_hooks(value: &serde_json::Value, event: &str, exe_path: &str) -> bool {
+    let commands = gwt_hook_commands_from_value(value);
+    !commands.is_empty()
+        && commands
+            .iter()
+            .all(|command| is_expected_gwt_hook_command(command, event, exe_path))
+}
+
+fn settings_has_expected_gwt_hooks(settings: &ClaudeSettings, exe_path: &str) -> bool {
+    all_hook_events().all(|event| {
+        settings
+            .hooks
+            .get(event)
+            .map(|value| event_has_expected_gwt_hooks(value, event, exe_path))
+            .unwrap_or(false)
+    })
+}
+
 /// Check if a command string is a gwt hook command (FR-102j)
 ///
-/// Matches both standard format ("gwt hook") and build binary format
-/// (path containing "/gwt" and " hook ").
-/// Example: "/gwt/target/release/deps/gwt-614ba193345891eb hook PreToolUse"
+/// Matches standard format ("gwt hook"), Windows ".exe" paths, and build binary
+/// format (".../gwt-<hash> hook <Event>").
 fn is_gwt_hook_command(command: &str) -> bool {
-    command.contains("gwt hook") || (command.contains("/gwt") && command.contains(" hook "))
+    parse_gwt_hook_command(command).is_some()
 }
 
 /// Claude Code settings.json structure (partial)
@@ -129,27 +261,7 @@ fn settings_has_gwt_hooks(settings: &ClaudeSettings) -> bool {
 }
 
 fn value_has_gwt_hook(value: &serde_json::Value) -> bool {
-    // New format: array of {matcher, hooks}
-    if let Some(arr) = value.as_array() {
-        arr.iter().any(|entry| {
-            if let Some(hooks) = entry.get("hooks").and_then(|h| h.as_array()) {
-                hooks.iter().any(|hook| {
-                    hook.get("command")
-                        .and_then(|c| c.as_str())
-                        .map(is_gwt_hook_command)
-                        .unwrap_or(false)
-                })
-            } else {
-                // Legacy: array of strings
-                entry.as_str().map(is_gwt_hook_command).unwrap_or(false)
-            }
-        })
-    } else if let Some(cmd) = value.as_str() {
-        // Legacy: single string
-        is_gwt_hook_command(cmd)
-    } else {
-        false
-    }
+    !gwt_hook_commands_from_value(value).is_empty()
 }
 
 /// Create a gwt hook entry with matcher (for PreToolUse, PostToolUse)
@@ -282,6 +394,10 @@ fn reregister_gwt_hooks_with_exe_path(
         })?;
 
     if !settings_has_gwt_hooks(&settings) {
+        return Ok(false);
+    }
+
+    if settings_has_expected_gwt_hooks(&settings, exe_path) {
         return Ok(false);
     }
 
@@ -445,6 +561,33 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_existing_gwt_hooks_windows_exe_format() {
+        let temp_dir = TempDir::new().unwrap();
+        let settings_path = temp_dir.path().join(".claude").join("settings.json");
+        std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+
+        let content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "*",
+                    "hooks": [{
+                        "type": "command",
+                        "command": r"C:\Users\user\AppData\Local\gwt\gwt.exe hook PreToolUse"
+                    }]
+                }]
+            }
+        });
+        std::fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&content).unwrap(),
+        )
+        .unwrap();
+
+        let result = is_gwt_hooks_registered(&settings_path);
+        assert!(result);
+    }
+
+    #[test]
     fn test_preserve_existing_event_hooks() {
         let temp_dir = TempDir::new().unwrap();
         let settings_path = temp_dir.path().join(".claude").join("settings.json");
@@ -570,7 +713,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let settings_path = temp_dir.path().join(".claude").join("settings.json");
 
-        register_gwt_hooks_with_exe_path(&settings_path, "old-gwt").unwrap();
+        register_gwt_hooks_with_exe_path(&settings_path, "gwt-old").unwrap();
 
         let content = std::fs::read_to_string(&settings_path).unwrap();
         let mut settings: ClaudeSettings = serde_json::from_str(&content).unwrap();
@@ -590,14 +733,14 @@ mod tests {
         )
         .unwrap();
 
-        let changed = reregister_gwt_hooks_with_exe_path(&settings_path, "new-gwt").unwrap();
+        let changed = reregister_gwt_hooks_with_exe_path(&settings_path, "gwt-new").unwrap();
         assert!(changed);
 
         let updated = std::fs::read_to_string(&settings_path).unwrap();
-        assert!(updated.contains("new-gwt hook UserPromptSubmit"));
-        assert!(!updated.contains("old-gwt hook UserPromptSubmit"));
-        assert!(updated.contains("new-gwt hook PreToolUse"));
-        assert!(updated.contains("new-gwt hook Stop"));
+        assert!(updated.contains("gwt-new hook UserPromptSubmit"));
+        assert!(!updated.contains("gwt-old hook UserPromptSubmit"));
+        assert!(updated.contains("gwt-new hook PreToolUse"));
+        assert!(updated.contains("gwt-new hook Stop"));
         assert!(updated.contains("echo custom"));
     }
 
@@ -611,7 +754,24 @@ mod tests {
         std::fs::write(&settings_path, content).unwrap();
         let before = std::fs::read_to_string(&settings_path).unwrap();
 
-        let changed = reregister_gwt_hooks_with_exe_path(&settings_path, "new-gwt").unwrap();
+        let changed = reregister_gwt_hooks_with_exe_path(&settings_path, "gwt-new").unwrap();
+        assert!(!changed);
+
+        let after = std::fs::read_to_string(&settings_path).unwrap();
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn test_reregister_skips_when_hooks_already_match_exe_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let settings_path = temp_dir.path().join(".claude").join("settings.json");
+
+        register_gwt_hooks_with_exe_path(&settings_path, r"C:\Program Files\gwt\gwt.exe").unwrap();
+        let before = std::fs::read_to_string(&settings_path).unwrap();
+
+        let changed =
+            reregister_gwt_hooks_with_exe_path(&settings_path, r"C:/Program Files/gwt/gwt")
+                .unwrap();
         assert!(!changed);
 
         let after = std::fs::read_to_string(&settings_path).unwrap();
@@ -624,10 +784,10 @@ mod tests {
         let settings_path = temp_dir.path().join(".claude").join("settings.json");
 
         // Register with first path
-        register_gwt_hooks_with_exe_path(&settings_path, "/path/to/old-gwt").unwrap();
+        register_gwt_hooks_with_exe_path(&settings_path, "/path/to/gwt-old").unwrap();
 
         // Register with different path - should OVERWRITE (not add duplicate)
-        register_gwt_hooks_with_exe_path(&settings_path, "/path/to/new-gwt").unwrap();
+        register_gwt_hooks_with_exe_path(&settings_path, "/path/to/gwt-new").unwrap();
 
         // Should only have one gwt hook per event (not duplicated)
         let content = std::fs::read_to_string(&settings_path).unwrap();
@@ -652,8 +812,8 @@ mod tests {
         );
 
         // Verify the new path overwrites the old one
-        assert!(!content.contains("/path/to/old-gwt"));
-        assert!(content.contains("/path/to/new-gwt"));
+        assert!(!content.contains("/path/to/gwt-old"));
+        assert!(content.contains("/path/to/gwt-new"));
     }
 
     // T-102-05: Temporary execution detection tests (FR-102i)
@@ -732,6 +892,27 @@ mod tests {
         ));
         assert!(is_gwt_hook_command(
             "/home/user/gwt/target/debug/gwt-abc123 hook Stop"
+        ));
+    }
+
+    #[test]
+    fn test_is_gwt_hook_command_windows_exe_path() {
+        assert!(is_gwt_hook_command(
+            r"C:\Users\user\AppData\Local\gwt\gwt.exe hook PreToolUse"
+        ));
+    }
+
+    #[test]
+    fn test_is_gwt_hook_command_windows_quoted_exe_path() {
+        assert!(is_gwt_hook_command(
+            r#""C:\Program Files\gwt\gwt.exe" hook Stop"#
+        ));
+    }
+
+    #[test]
+    fn test_is_gwt_hook_command_windows_build_binary_exe() {
+        assert!(is_gwt_hook_command(
+            r"C:\gwt\target\release\deps\gwt-abc123def456.exe hook Notification"
         ));
     }
 

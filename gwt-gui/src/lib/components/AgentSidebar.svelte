@@ -5,16 +5,23 @@
     AgentSidebarView,
     AgentSidebarTask,
     AgentSidebarSubAgent,
+    SettingsData,
   } from "../types";
 
   let {
     projectPath,
     selectedBranch = null,
     currentBranch = "",
+    agentTabBranches = [],
+    activeAgentTabBranch = null,
+    preferredLanguage = "auto",
   }: {
     projectPath: string;
     selectedBranch?: BranchInfo | null;
     currentBranch?: string;
+    agentTabBranches?: string[];
+    activeAgentTabBranch?: string | null;
+    preferredLanguage?: SettingsData["app_language"];
   } = $props();
 
   let sidebarView: AgentSidebarView = $state({ specId: null, tasks: [] });
@@ -29,7 +36,8 @@
   let sessionSummaryError: string | null = $state(null);
   let sessionSummaryToolId: string | null = $state(null);
   const SIDEBAR_POLL_INTERVAL_MS = 5000;
-  const SESSION_SUMMARY_POLL_INTERVAL_MS = 5000;
+  const SESSION_SUMMARY_POLL_FOCUSED_INTERVAL_MS = 15000;
+  const SESSION_SUMMARY_POLL_NONFOCUSED_INTERVAL_MS = 60000;
 
   function normalizeBranchName(name: string): string {
     const trimmed = name.trim();
@@ -39,6 +47,14 @@
   function activeBranchName(): string {
     const raw = selectedBranch?.name?.trim() ?? currentBranch?.trim() ?? "";
     return normalizeBranchName(raw);
+  }
+
+  function normalizeSummaryLanguage(value: string | null | undefined): string {
+    const language = (value ?? "").trim().toLowerCase();
+    if (language === "ja" || language === "en" || language === "auto") {
+      return language;
+    }
+    return "auto";
   }
 
   function taskStatusRank(status: AgentSidebarTask["status"]): number {
@@ -148,8 +164,12 @@
     }
   }
 
-  async function loadSessionSummary(options: { silent?: boolean } = {}) {
+  async function loadSessionSummary(
+    options: { silent?: boolean; cachedOnly?: boolean } = {},
+  ) {
     const silent = options.silent === true;
+    const cachedOnly = options.cachedOnly === true;
+    const normalizedLanguage = normalizeSummaryLanguage(preferredLanguage);
     sessionSummaryError = null;
     sessionSummaryWarning = null;
 
@@ -175,6 +195,8 @@
       const result = await invoke<SessionSummaryResult>("get_branch_session_summary", {
         projectPath,
         branch,
+        cachedOnly,
+        preferredLanguage: normalizedLanguage,
       });
       if (`${projectPath}::${activeBranchName()}` !== key) return;
       sessionSummaryStatus = result.status;
@@ -213,13 +235,33 @@
     void projectPath;
     void selectedBranch;
     void currentBranch;
+    void agentTabBranches;
+    void activeAgentTabBranch;
+    void preferredLanguage;
     const branch = activeBranchName();
     if (!branch) {
       loadSessionSummary();
       return;
     }
 
-    loadSessionSummary();
+    const normalizedBranch = normalizeBranchName(branch);
+    const tabExists = (agentTabBranches ?? [])
+      .map((b) => normalizeBranchName(b))
+      .includes(normalizedBranch);
+    const focused =
+      tabExists &&
+      normalizeBranchName(activeAgentTabBranch ?? "") === normalizedBranch;
+    const pollIntervalMs = tabExists
+      ? focused
+        ? SESSION_SUMMARY_POLL_FOCUSED_INTERVAL_MS
+        : SESSION_SUMMARY_POLL_NONFOCUSED_INTERVAL_MS
+      : null;
+
+    loadSessionSummary({ cachedOnly: !tabExists });
+
+    if (pollIntervalMs === null) {
+      return;
+    }
 
     const timer = window.setInterval(() => {
       if (
@@ -228,8 +270,8 @@
       ) {
         return;
       }
-      loadSessionSummary({ silent: true });
-    }, SESSION_SUMMARY_POLL_INTERVAL_MS);
+      loadSessionSummary({ silent: true, cachedOnly: false });
+    }, pollIntervalMs);
 
     return () => {
       window.clearInterval(timer);

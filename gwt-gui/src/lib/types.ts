@@ -1,11 +1,15 @@
+export type AgentStatusValue = "unknown" | "running" | "waiting_input" | "stopped";
+
 export interface BranchInfo {
   name: string;
   commit: string;
   is_current: boolean;
   is_agent_running: boolean;
+  agent_status: AgentStatusValue;
   ahead: number;
   behind: number;
   divergence_status: string; // "UpToDate" | "Ahead" | "Behind" | "Diverged"
+  commit_timestamp?: number | null;
   last_tool_usage?: string | null;
 }
 
@@ -138,6 +142,7 @@ export interface SettingsData {
   docker_force_host: boolean;
   ui_font_size: number;
   terminal_font_size: number;
+  app_language: "auto" | "ja" | "en" | (string & {});
   voice_input: VoiceInputSettings;
 }
 
@@ -152,6 +157,7 @@ export interface AISettings {
   endpoint: string;
   api_key: string;
   model: string;
+  language: "auto" | "ja" | "en" | (string & {});
   summary_enabled: boolean;
 }
 
@@ -161,6 +167,7 @@ export interface Profile {
   disabled_env: string[];
   description: string;
   ai?: AISettings | null;
+  ai_enabled?: boolean | null;
 }
 
 export interface ProfilesConfig {
@@ -205,6 +212,10 @@ export interface ToolSessionEntry {
   docker_recreate?: boolean | null;
   docker_build?: boolean | null;
   docker_keep?: boolean | null;
+  /** Name of the Docker container launched for this tool session. */
+  docker_container_name?: string | null;
+  /** CLI args used in `docker-compose` launch for this session. */
+  docker_compose_args?: string[] | null;
   timestamp: number;
 }
 
@@ -237,6 +248,10 @@ export interface SessionSummaryResult {
   generating: boolean;
   toolId?: string | null;
   sessionId?: string | null;
+  language?: "auto" | "ja" | "en" | (string & {}) | null;
+  sourceType?: "session" | "scrollback" | null;
+  inputMtimeMs?: number | null;
+  summaryUpdatedMs?: number | null;
   markdown?: string | null;
   taskOverview?: string | null;
   shortSummary?: string | null;
@@ -312,6 +327,7 @@ export interface WorktreeInfo {
   is_current: boolean;
   is_protected: boolean;
   is_agent_running: boolean;
+  agent_status: AgentStatusValue;
   ahead: number;
   behind: number;
   is_gone: boolean;
@@ -447,4 +463,66 @@ export interface LaunchAgentRequest {
   dockerBuild?: boolean;
   dockerKeep?: boolean;
   issueNumber?: number;
+}
+
+// PR Status types (SPEC-d6949f99)
+
+export interface PrStatusInfo {
+  number: number;
+  title: string;
+  state: "OPEN" | "CLOSED" | "MERGED";
+  url: string;
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+  author: string;
+  baseBranch: string;
+  headBranch: string;
+  labels: string[];
+  assignees: string[];
+  milestone: string | null;
+  linkedIssues: number[];
+  checkSuites: WorkflowRunInfo[];
+  reviews: ReviewInfo[];
+  reviewComments: ReviewComment[];
+  changedFilesCount: number;
+  additions: number;
+  deletions: number;
+}
+
+export interface WorkflowRunInfo {
+  workflowName: string;
+  runId: number;
+  status: "queued" | "in_progress" | "completed";
+  conclusion:
+    | "success"
+    | "failure"
+    | "neutral"
+    | "cancelled"
+    | "timed_out"
+    | "action_required"
+    | "skipped"
+    | null;
+}
+
+export interface ReviewInfo {
+  reviewer: string;
+  state:
+    | "APPROVED"
+    | "CHANGES_REQUESTED"
+    | "COMMENTED"
+    | "PENDING"
+    | "DISMISSED";
+}
+
+export interface ReviewComment {
+  author: string;
+  body: string;
+  filePath: string | null;
+  line: number | null;
+  codeSnippet: string | null;
+  createdAt: string;
+}
+
+export interface PrStatusResponse {
+  statuses: Record<string, PrStatusInfo | null>;
+  ghStatus: GhCliStatus;
 }

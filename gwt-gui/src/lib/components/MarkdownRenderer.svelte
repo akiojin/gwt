@@ -131,21 +131,46 @@
   };
 
   const applyInlineMarkdown = (text: string): string => {
-    let out = escapeHtml(text);
-    out = out.replace(
-      /`([^`]+)`/g,
-      (match, code) => `<code>${escapeHtml(String(code))}</code>`
-    );
-    out = out.replace(/\*\*([^\*]+?)\*\*/g, "<strong>$1</strong>");
-    out = out.replace(/\*([^\*]+?)\*/g, "<em>$1</em>");
-    out = out.replace(
+    const codeTokens: string[] = [];
+    const linkTokens: string[] = [];
+    const CODE_PREFIX = "\u0000CODE";
+    const LINK_PREFIX = "\u0000LINK";
+    const TOKEN_SUFFIX = "\u0000";
+
+    const withCodeTokens = String(text ?? "").replace(/`([^`]+)`/g, (match, code) => {
+      const idx = codeTokens.length;
+      codeTokens.push(`<code>${escapeHtml(String(code))}</code>`);
+      return `${CODE_PREFIX}${idx}${TOKEN_SUFFIX}`;
+    });
+
+    const withLinkTokens = withCodeTokens.replace(
       /\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g,
       (match, label, href) => {
+        const idx = linkTokens.length;
+        const safeLabel = escapeHtml(String(label));
         const sanitized = sanitizeUrl(String(href));
-        if (!sanitized) return `<code>${label}</code>`;
-        return `<a href="${escapeAttribute(sanitized)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+        if (!sanitized) {
+          linkTokens.push(`<code>${safeLabel}</code>`);
+        } else {
+          linkTokens.push(
+            `<a href="${escapeAttribute(sanitized)}" target="_blank" rel="noopener noreferrer">${safeLabel}</a>`
+          );
+        }
+        return `${LINK_PREFIX}${idx}${TOKEN_SUFFIX}`;
       }
     );
+
+    let out = escapeHtml(withLinkTokens);
+    out = out.replace(/\*\*([^\*]+?)\*\*/g, "<strong>$1</strong>");
+    out = out.replace(/\*([^\*]+?)\*/g, "<em>$1</em>");
+
+    for (let idx = 0; idx < linkTokens.length; idx++) {
+      out = out.replaceAll(`${LINK_PREFIX}${idx}${TOKEN_SUFFIX}`, linkTokens[idx]);
+    }
+    for (let idx = 0; idx < codeTokens.length; idx++) {
+      out = out.replaceAll(`${CODE_PREFIX}${idx}${TOKEN_SUFFIX}`, codeTokens[idx]);
+    }
+
     return out;
   };
 

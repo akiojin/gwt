@@ -5,6 +5,7 @@ mod agent_tools;
 mod app;
 mod commands;
 mod menu;
+mod session_watcher;
 mod state;
 
 use state::AppState;

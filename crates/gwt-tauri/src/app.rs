@@ -4,7 +4,7 @@ use crate::state::AppState;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use tauri::Manager;
-use tauri::{Emitter, WebviewWindowBuilder};
+use tauri::{Emitter, EventTarget, WebviewWindowBuilder};
 use tracing::{info, warn};
 
 #[cfg(not(test))]
@@ -81,6 +81,8 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
         crate::menu::MENU_ID_SETTINGS_PREFERENCES => Some("open-settings"),
         crate::menu::MENU_ID_HELP_ABOUT => Some("about"),
         crate::menu::MENU_ID_HELP_CHECK_UPDATES => Some("check-updates"),
+        crate::menu::MENU_ID_WINDOW_PREVIOUS_TAB => Some("previous-tab"),
+        crate::menu::MENU_ID_WINDOW_NEXT_TAB => Some("next-tab"),
         _ => None,
     }
 }
@@ -296,6 +298,18 @@ pub fn build_app(
                     });
                 }
 
+                // Background task: watch session files for agent status changes (SPEC-b80e7996 FR-820)
+                {
+                    let watcher_handle = _app.handle().clone();
+                    if let Err(e) = crate::session_watcher::start_session_watcher(watcher_handle) {
+                        warn!(
+                            category = "session_watcher",
+                            error = %e,
+                            "Failed to start session watcher (agent status updates will use polling fallback)"
+                        );
+                    }
+                }
+
                 // Background task: check app update (best-effort, TTL cached).
                 {
                     let mgr = _app.state::<AppState>().update_manager.clone();
@@ -325,6 +339,63 @@ pub fn build_app(
             if id == crate::menu::MENU_ID_FILE_NEW_WINDOW {
                 open_new_window(app);
                 return;
+            }
+
+            // Window switching (MRU order)
+            if id == crate::menu::MENU_ID_WINDOW_NEXT_WINDOW {
+                let state = app.state::<AppState>();
+                if let Some(target) = state.next_window() {
+                    if let Some(w) = app.get_webview_window(&target) {
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
+                }
+                return;
+            }
+            if id == crate::menu::MENU_ID_WINDOW_PREVIOUS_WINDOW {
+                let state = app.state::<AppState>();
+                if let Some(target) = state.previous_window() {
+                    if let Some(w) = app.get_webview_window(&target) {
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
+                }
+                return;
+            }
+
+            // macOS standard window items
+            #[cfg(target_os = "macos")]
+            {
+                if id == crate::menu::MENU_ID_WINDOW_MINIMIZE {
+                    if let Some(w) = focused_webview_window(app) {
+                        let _ = w.minimize();
+                    }
+                    return;
+                }
+                if id == crate::menu::MENU_ID_WINDOW_ZOOM {
+                    if let Some(w) = focused_webview_window(app) {
+                        if w.is_maximized().unwrap_or(false) {
+                            let _ = w.unmaximize();
+                        } else {
+                            let _ = w.maximize();
+                        }
+                    }
+                    return;
+                }
+                if id == crate::menu::MENU_ID_WINDOW_BRING_ALL_TO_FRONT {
+                    let focused_label = focused_window_label(app);
+
+                    for (_, w) in app.webview_windows() {
+                        let _ = w.show();
+                    }
+
+                    // Restore focus once to keep MRU/history deterministic.
+                    if let Some(w) = app.get_webview_window(&focused_label) {
+                        let _ = w.set_focus();
+                    }
+                    let _ = crate::menu::rebuild_menu(app);
+                    return;
+                }
             }
 
             if let Some(project_path) = crate::menu::parse_recent_project_menu_id(id) {
@@ -383,14 +454,17 @@ pub fn build_app(
             }
 
             if let tauri::WindowEvent::Focused(true) = event {
+                window
+                    .app_handle()
+                    .state::<AppState>()
+                    .push_window_focus(window.label());
                 let _ = crate::menu::rebuild_menu(window.app_handle());
             }
 
             if let tauri::WindowEvent::Destroyed = event {
-                window
-                    .app_handle()
-                    .state::<AppState>()
-                    .clear_window_state(window.label());
+                let state = window.app_handle().state::<AppState>();
+                state.clear_window_state(window.label());
+                state.remove_window_from_history(window.label());
                 let _ = crate::menu::rebuild_menu(window.app_handle());
 
                 // Exit the app when all windows are truly closed (hidden windows still count as open).
@@ -440,6 +514,7 @@ pub fn build_app(
             crate::commands::sessions::get_branch_quick_start,
             crate::commands::sessions::get_agent_sidebar_view,
             crate::commands::sessions::get_branch_session_summary,
+            crate::commands::sessions::rebuild_all_branch_session_summaries,
             crate::commands::branch_suggest::suggest_branch_names,
             crate::commands::terminal::launch_terminal,
             crate::commands::terminal::spawn_shell,
@@ -499,6 +574,11 @@ pub fn build_app(
             crate::commands::issue_spec::delete_spec_issue_artifact_comment_cmd,
             crate::commands::issue_spec::close_spec_issue_cmd,
             crate::commands::issue_spec::sync_spec_issue_project_cmd,
+            crate::commands::pullrequest::fetch_pr_status,
+            crate::commands::pullrequest::fetch_pr_detail,
+            crate::commands::pullrequest::fetch_ci_log,
+            crate::commands::system::get_system_info,
+            crate::commands::system::get_stats,
         ])
 }
 
@@ -516,6 +596,15 @@ fn focused_window_label(app: &tauri::AppHandle<tauri::Wry>) -> String {
         .unwrap_or_else(|| "main".to_string())
 }
 
+#[cfg(target_os = "macos")]
+fn focused_webview_window(
+    app: &tauri::AppHandle<tauri::Wry>,
+) -> Option<tauri::WebviewWindow<tauri::Wry>> {
+    app.webview_windows()
+        .into_iter()
+        .find_map(|(_, w)| w.is_focused().ok().and_then(|f| f.then_some(w)))
+}
+
 fn emit_menu_action(app: &tauri::AppHandle<tauri::Wry>, action: &str) {
     let label = focused_window_label(app);
     let Some(window) = app
@@ -525,7 +614,8 @@ fn emit_menu_action(app: &tauri::AppHandle<tauri::Wry>, action: &str) {
         return;
     };
 
-    let _ = window.emit(
+    let _ = window.emit_to(
+        EventTarget::webview_window(window.label()),
         crate::menu::MENU_ACTION_EVENT,
         crate::menu::MenuActionPayload {
             action: action.to_string(),
@@ -717,6 +807,18 @@ mod tests {
         assert_eq!(
             menu_action_from_id(crate::menu::MENU_ID_EDIT_PASTE),
             Some("edit-paste")
+        );
+    }
+
+    #[test]
+    fn menu_action_from_id_maps_tab_switching() {
+        assert_eq!(
+            menu_action_from_id(crate::menu::MENU_ID_WINDOW_PREVIOUS_TAB),
+            Some("previous-tab")
+        );
+        assert_eq!(
+            menu_action_from_id(crate::menu::MENU_ID_WINDOW_NEXT_TAB),
+            Some("next-tab")
         );
     }
 

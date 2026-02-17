@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, waitFor, fireEvent, cleanup } from "@testing-library/svelte";
+import { AGENT_LAUNCH_DEFAULTS_STORAGE_KEY } from "../agentLaunchDefaults";
 
 const invokeMock = vi.fn();
 
@@ -10,6 +11,26 @@ vi.mock("@tauri-apps/api/core", () => ({
 async function renderForm(props: any) {
   const { default: AgentLaunchForm } = await import("./AgentLaunchForm.svelte");
   return render(AgentLaunchForm, { props });
+}
+
+function makeLocalStorageMock() {
+  const store = new Map<string, string>();
+  return {
+    getItem: (key: string) => (store.has(key) ? store.get(key)! : null),
+    setItem: (key: string, value: string) => {
+      store.set(key, String(value));
+    },
+    removeItem: (key: string) => {
+      store.delete(key);
+    },
+    clear: () => {
+      store.clear();
+    },
+    key: (index: number) => Array.from(store.keys())[index] ?? null,
+    get length() {
+      return store.size;
+    },
+  };
 }
 
 function defaultAgentConfig() {
@@ -32,6 +53,16 @@ function defaultAgentConfig() {
 describe("AgentLaunchForm (Claude GLM)", () => {
   beforeEach(() => {
     invokeMock.mockReset();
+    const mockLocalStorage = makeLocalStorageMock();
+    Object.defineProperty(globalThis, "localStorage", {
+      value: mockLocalStorage,
+      configurable: true,
+    });
+    try {
+      window.localStorage.removeItem(AGENT_LAUNCH_DEFAULTS_STORAGE_KEY);
+    } catch {
+      // no-op
+    }
     invokeMock.mockImplementation((cmd: string, args?: any) => {
       switch (cmd) {
         case "detect_agents":

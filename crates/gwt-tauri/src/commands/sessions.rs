@@ -6,16 +6,18 @@ use crate::state::AppState;
 use gwt_core::ai::{
     format_error_for_display, summarize_scrollback, summarize_session, AIClient, AIError,
     AgentType as AiAgentType, ClaudeSessionParser, CodexSessionParser, GeminiSessionParser,
-    OpenCodeSessionParser, SessionParseError, SessionParser, SessionSummary,
+    OpenCodeSessionParser, SessionParseError, SessionParser, SessionSummary, SessionSummaryCache,
 };
 use gwt_core::config::{ProfilesConfig, ResolvedAISettings, ToolSessionEntry};
+use gwt_core::git::Branch;
 use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::terminal::scrollback::ScrollbackFile;
-use serde::Serialize;
-use std::collections::HashSet;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 /// Return tool-specific latest session entries for a branch (Quick Start).
@@ -511,6 +513,10 @@ pub struct SessionSummaryResult {
     pub generating: bool,
     pub tool_id: Option<String>,
     pub session_id: Option<String>,
+    pub language: Option<String>,    // "auto" | "ja" | "en"
+    pub source_type: Option<String>, // "session" | "scrollback"
+    pub input_mtime_ms: Option<u64>,
+    pub summary_updated_ms: Option<u64>,
     pub markdown: Option<String>,
     pub task_overview: Option<String>,
     pub short_summary: Option<String>,
@@ -519,12 +525,51 @@ pub struct SessionSummaryResult {
     pub error: Option<String>,
 }
 
-fn ok_summary(tool_id: &str, session_id: &str, summary: &SessionSummary) -> SessionSummaryResult {
+fn summary_source_type(session_id: &str) -> &'static str {
+    if session_id.starts_with("pane:") {
+        "scrollback"
+    } else {
+        "session"
+    }
+}
+
+fn normalize_summary_language(preferred_language: Option<&str>) -> String {
+    match preferred_language
+        .unwrap_or("auto")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "ja" => "ja".to_string(),
+        "en" => "en".to_string(),
+        _ => "auto".to_string(),
+    }
+}
+
+fn system_time_millis_u64(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn ok_summary(
+    tool_id: &str,
+    session_id: &str,
+    summary: &SessionSummary,
+    input_mtime: Option<SystemTime>,
+) -> SessionSummaryResult {
     SessionSummaryResult {
         status: "ok".to_string(),
         generating: false,
         tool_id: Some(tool_id.to_string()),
         session_id: Some(session_id.to_string()),
+        language: summary.language.clone(),
+        source_type: Some(summary_source_type(session_id).to_string()),
+        input_mtime_ms: input_mtime.map(system_time_millis_u64).filter(|ms| *ms > 0),
+        summary_updated_ms: summary
+            .last_updated
+            .map(system_time_millis_u64)
+            .filter(|ms| *ms > 0),
         markdown: summary.markdown.clone(),
         task_overview: summary.task_overview.clone(),
         short_summary: summary.short_summary.clone(),
@@ -539,12 +584,21 @@ fn summary_status(
     tool_id: Option<String>,
     session_id: Option<String>,
     message: Option<String>,
+    language: Option<&str>,
 ) -> SessionSummaryResult {
+    let source_type = session_id
+        .as_deref()
+        .map(summary_source_type)
+        .map(|s| s.to_string());
     SessionSummaryResult {
         status: status.to_string(),
         generating: false,
         tool_id,
         session_id,
+        language: language.map(|lang| normalize_summary_language(Some(lang))),
+        source_type,
+        input_mtime_ms: None,
+        summary_updated_ms: None,
         markdown: None,
         task_overview: None,
         short_summary: None,
@@ -558,9 +612,11 @@ fn generating_summary(
     tool_id: &str,
     session_id: &str,
     previous: Option<&SessionSummary>,
+    input_mtime: Option<SystemTime>,
+    language: &str,
 ) -> SessionSummaryResult {
     if let Some(prev) = previous {
-        let mut out = ok_summary(tool_id, session_id, prev);
+        let mut out = ok_summary(tool_id, session_id, prev, input_mtime);
         out.generating = true;
         return out;
     }
@@ -570,6 +626,10 @@ fn generating_summary(
         generating: true,
         tool_id: Some(tool_id.to_string()),
         session_id: Some(session_id.to_string()),
+        language: Some(normalize_summary_language(Some(language))),
+        source_type: Some(summary_source_type(session_id).to_string()),
+        input_mtime_ms: input_mtime.map(system_time_millis_u64).filter(|ms| *ms > 0),
+        summary_updated_ms: None,
         markdown: None,
         task_overview: None,
         short_summary: None,
@@ -623,6 +683,7 @@ struct SessionSummaryJob {
     branch: String,
     tool_id: String,
     session_id: String,
+    preferred_language: String,
     settings: ResolvedAISettings,
     mtime: SystemTime,
 }
@@ -634,6 +695,7 @@ struct ScrollbackSummaryJob {
     branch: String,
     pane_id: String,
     tool_id: String,
+    preferred_language: String,
     settings: ResolvedAISettings,
     mtime: SystemTime,
 }
@@ -657,6 +719,182 @@ struct SessionSummaryUpdatedPayload {
     pub project_path: String,
     pub branch: String,
     pub result: SessionSummaryResult,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionSummaryRebuildProgressPayload {
+    pub project_path: String,
+    pub language: String,
+    pub total: usize,
+    pub completed: usize,
+    pub branch: Option<String>,
+    pub status: String, // "started" | "branch-ok" | "branch-skipped" | "branch-error" | "completed"
+    pub error: Option<String>,
+}
+
+const SESSION_SUMMARY_CACHE_VERSION: u32 = 2;
+
+static SESSION_SUMMARY_CACHE_PERSIST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn session_summary_cache_persist_lock() -> &'static Mutex<()> {
+    SESSION_SUMMARY_CACHE_PERSIST_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PersistedSessionSummaryCache {
+    pub version: u32,
+    #[serde(default)]
+    pub branches: HashMap<String, PersistedBranchSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedBranchSummary {
+    pub tool_id: String,
+    pub session_id: String,
+    #[serde(default)]
+    pub language: Option<String>,
+    pub input_mtime_ms: u64,
+    pub last_updated_ms: u64,
+    pub markdown: Option<String>,
+    pub task_overview: Option<String>,
+    pub short_summary: Option<String>,
+    #[serde(default)]
+    pub bullet_points: Vec<String>,
+}
+
+fn session_summary_cache_toml_path(repo_root: &Path) -> PathBuf {
+    let sessions_toml = gwt_core::config::get_ts_session_toml_path(repo_root);
+    let file_name = sessions_toml
+        .file_name()
+        .map(|s| PathBuf::from(s.to_os_string()))
+        .unwrap_or_else(|| PathBuf::from("repo.toml"));
+
+    let gwt_dir = sessions_toml
+        .parent()
+        .and_then(|p| p.parent())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".gwt"));
+
+    gwt_dir.join("session-summaries").join(file_name)
+}
+
+fn load_persisted_session_summary_cache(repo_root: &Path) -> Option<PersistedSessionSummaryCache> {
+    let path = session_summary_cache_toml_path(repo_root);
+    let content = std::fs::read_to_string(path).ok()?;
+    let cache = toml::from_str::<PersistedSessionSummaryCache>(&content).ok()?;
+    if cache.version != SESSION_SUMMARY_CACHE_VERSION {
+        return None;
+    }
+    Some(cache)
+}
+
+fn ensure_persisted_session_summary_cache_loaded(
+    repo_root: &Path,
+    repo_key: &str,
+    state: &AppState,
+) {
+    let Ok(mut guard) = state.session_summary_cache.lock() else {
+        return;
+    };
+
+    if guard.contains_key(repo_key) {
+        return;
+    }
+
+    let Some(persisted) = load_persisted_session_summary_cache(repo_root) else {
+        return;
+    };
+
+    let mut cache = SessionSummaryCache::default();
+    for (branch, entry) in persisted.branches {
+        if entry.tool_id.trim().is_empty() || entry.session_id.trim().is_empty() {
+            continue;
+        }
+
+        let input_mtime = UNIX_EPOCH + Duration::from_millis(entry.input_mtime_ms);
+        let last_updated = if entry.last_updated_ms > 0 {
+            Some(UNIX_EPOCH + Duration::from_millis(entry.last_updated_ms))
+        } else {
+            None
+        };
+
+        let summary = SessionSummary {
+            language: Some(normalize_summary_language(entry.language.as_deref())),
+            task_overview: entry.task_overview,
+            short_summary: entry.short_summary,
+            bullet_points: entry.bullet_points,
+            markdown: entry.markdown,
+            last_updated,
+            ..Default::default()
+        };
+
+        cache.set(
+            branch,
+            entry.tool_id,
+            entry.session_id,
+            summary,
+            input_mtime,
+        );
+    }
+
+    guard.insert(repo_key.to_string(), cache);
+}
+
+fn persist_session_summary_cache_entry(
+    repo_root: &Path,
+    branch: &str,
+    tool_id: &str,
+    session_id: &str,
+    input_mtime: SystemTime,
+    summary: &SessionSummary,
+) {
+    // Multiple summary jobs can run concurrently; serialize file updates to avoid lost entries
+    // from a read-modify-write race.
+    let _guard = session_summary_cache_persist_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let path = session_summary_cache_toml_path(repo_root);
+    let mut persisted = load_persisted_session_summary_cache(repo_root).unwrap_or_else(|| {
+        PersistedSessionSummaryCache {
+            version: SESSION_SUMMARY_CACHE_VERSION,
+            branches: HashMap::new(),
+        }
+    });
+
+    let last_updated_ms = summary
+        .last_updated
+        .unwrap_or_else(SystemTime::now)
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let input_mtime_ms = input_mtime
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    persisted.branches.insert(
+        branch.to_string(),
+        PersistedBranchSummary {
+            tool_id: tool_id.to_string(),
+            session_id: session_id.to_string(),
+            language: summary.language.clone(),
+            input_mtime_ms,
+            last_updated_ms,
+            markdown: summary.markdown.clone(),
+            task_overview: summary.task_overview.clone(),
+            short_summary: summary.short_summary.clone(),
+            bullet_points: summary.bullet_points.clone(),
+        },
+    );
+
+    let Ok(toml_content) = toml::to_string_pretty(&persisted) else {
+        return;
+    };
+
+    let _ = gwt_core::config::write_atomic(&path, &toml_content);
 }
 
 fn scrollback_mtime_for_pane(pane_id: &str) -> Option<SystemTime> {
@@ -763,11 +1001,14 @@ fn is_latest_scrollback_candidate(
     candidate.pane_id == pane_id
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scrollback_summary_immediate(
     project_path: &str,
     repo_key: &str,
     branch: &str,
     candidate: ScrollbackCandidate,
+    preferred_language: &str,
+    force_rebuild: bool,
     settings: ResolvedAISettings,
     state: &AppState,
 ) -> (SessionSummaryResult, Option<ScrollbackSummaryJob>) {
@@ -783,6 +1024,7 @@ fn scrollback_summary_immediate(
                         Some(candidate.tool_id),
                         Some(pane_session),
                         Some("Session summary cache lock poisoned".to_string()),
+                        Some(preferred_language),
                     ),
                     None,
                 )
@@ -790,25 +1032,46 @@ fn scrollback_summary_immediate(
         };
         let cache = cache_guard.get(repo_key);
         let cached_ok = cache.and_then(|c| {
-            c.get(branch)
-                .cloned()
-                .filter(|_| !c.is_stale(branch, &pane_session, candidate.mtime))
+            c.get(branch).cloned().filter(|_| {
+                !force_rebuild
+                    && !c.is_stale(
+                        branch,
+                        &pane_session,
+                        candidate.mtime,
+                        Some(preferred_language),
+                    )
+            })
         });
         let previous_any = cache.and_then(|c| c.get(branch).cloned());
         (cached_ok, previous_any)
     };
 
     if let Some(summary) = cached_ok.as_ref() {
-        return (ok_summary(&candidate.tool_id, &pane_session, summary), None);
+        return (
+            ok_summary(
+                &candidate.tool_id,
+                &pane_session,
+                summary,
+                Some(candidate.mtime),
+            ),
+            None,
+        );
     }
 
-    let immediate = generating_summary(&candidate.tool_id, &pane_session, previous_any.as_ref());
+    let immediate = generating_summary(
+        &candidate.tool_id,
+        &pane_session,
+        previous_any.as_ref(),
+        Some(candidate.mtime),
+        preferred_language,
+    );
     let job = ScrollbackSummaryJob {
         project_path: project_path.to_string(),
         repo_key: repo_key.to_string(),
         branch: branch.to_string(),
         pane_id: candidate.pane_id,
         tool_id: candidate.tool_id,
+        preferred_language: normalize_summary_language(Some(preferred_language)),
         settings,
         mtime: candidate.mtime,
     };
@@ -819,6 +1082,9 @@ fn scrollback_summary_immediate(
 fn get_branch_session_summary_immediate(
     project_path: &str,
     branch: &str,
+    cached_only: bool,
+    preferred_language: Option<&str>,
+    force_rebuild: bool,
     state: &AppState,
 ) -> Result<(SessionSummaryResult, Option<SummaryJob>), String> {
     let project_root = Path::new(project_path);
@@ -828,6 +1094,33 @@ fn get_branch_session_summary_immediate(
     let branch = branch.trim();
     if branch.is_empty() {
         return Err("Branch is required".to_string());
+    }
+    let summary_language = normalize_summary_language(preferred_language);
+
+    ensure_persisted_session_summary_cache_loaded(&repo_path, &repo_key, state);
+
+    if cached_only {
+        let cache_guard = state
+            .session_summary_cache
+            .lock()
+            .map_err(|_| "Session summary cache lock poisoned".to_string())?;
+        let Some(cache) = cache_guard.get(&repo_key) else {
+            return Ok((summary_status("no-session", None, None, None, None), None));
+        };
+        let Some(summary) = cache.get(branch) else {
+            return Ok((summary_status("no-session", None, None, None, None), None));
+        };
+        let Some(tool_id) = cache.tool_id(branch) else {
+            return Ok((summary_status("no-session", None, None, None, None), None));
+        };
+        let Some(session_id) = cache.session_id(branch) else {
+            return Ok((summary_status("no-session", None, None, None, None), None));
+        };
+
+        return Ok((
+            ok_summary(tool_id, session_id, summary, cache.input_mtime(branch)),
+            None,
+        ));
     }
 
     let entries = gwt_core::config::get_branch_tool_history(&repo_path, branch);
@@ -862,6 +1155,7 @@ fn get_branch_session_summary_immediate(
                     },
                     None,
                     None,
+                    Some(summary_language.as_str()),
                 ),
                 None,
             ));
@@ -872,13 +1166,25 @@ fn get_branch_session_summary_immediate(
 
         if !ai.ai_enabled {
             return Ok((
-                summary_status("ai-not-configured", Some(candidate.tool_id), None, None),
+                summary_status(
+                    "ai-not-configured",
+                    Some(candidate.tool_id),
+                    None,
+                    None,
+                    Some(summary_language.as_str()),
+                ),
                 None,
             ));
         }
         if !ai.summary_enabled {
             return Ok((
-                summary_status("disabled", Some(candidate.tool_id), None, None),
+                summary_status(
+                    "disabled",
+                    Some(candidate.tool_id),
+                    None,
+                    None,
+                    Some(summary_language.as_str()),
+                ),
                 None,
             ));
         }
@@ -892,6 +1198,8 @@ fn get_branch_session_summary_immediate(
             &repo_key,
             branch,
             candidate,
+            summary_language.as_str(),
+            force_rebuild,
             settings,
             state,
         );
@@ -904,13 +1212,25 @@ fn get_branch_session_summary_immediate(
 
     if !ai.ai_enabled {
         return Ok((
-            summary_status("ai-not-configured", Some(tool_id), Some(session_id), None),
+            summary_status(
+                "ai-not-configured",
+                Some(tool_id),
+                Some(session_id),
+                None,
+                Some(summary_language.as_str()),
+            ),
             None,
         ));
     }
     if !ai.summary_enabled {
         return Ok((
-            summary_status("disabled", Some(tool_id), Some(session_id), None),
+            summary_status(
+                "disabled",
+                Some(tool_id),
+                Some(session_id),
+                None,
+                Some(summary_language.as_str()),
+            ),
             None,
         ));
     }
@@ -927,6 +1247,7 @@ fn get_branch_session_summary_immediate(
                     Some(tool_id),
                     Some(session_id),
                     Some("Unsupported agent session".to_string()),
+                    Some(summary_language.as_str()),
                 ),
                 None,
             ))
@@ -950,7 +1271,7 @@ fn get_branch_session_summary_immediate(
             };
 
             if let Some(prev) = previous_any.as_ref() {
-                let mut out = ok_summary(&tool_id, &session_id, prev);
+                let mut out = ok_summary(&tool_id, &session_id, prev, None);
                 out.warning = Some(format!(
                     "Failed to read session file; keeping previous: {err}"
                 ));
@@ -964,6 +1285,7 @@ fn get_branch_session_summary_immediate(
                     Some(tool_id),
                     Some(session_id),
                     Some(err.to_string()),
+                    Some(summary_language.as_str()),
                 ),
                 None,
             ));
@@ -979,25 +1301,36 @@ fn get_branch_session_summary_immediate(
             .map_err(|_| "Session summary cache lock poisoned".to_string())?;
         let cache = cache_guard.get(&repo_key);
         let cached_ok = cache.and_then(|c| {
-            c.get(branch)
-                .cloned()
-                .filter(|_| !c.is_stale(branch, &session_id, mtime))
+            c.get(branch).cloned().filter(|_| {
+                !force_rebuild
+                    && !c.is_stale(branch, &session_id, mtime, Some(summary_language.as_str()))
+            })
         });
         let previous_any = cache.and_then(|c| c.get(branch).cloned());
         (cached_ok, previous_any)
     };
 
     if let Some(summary) = cached_ok.as_ref() {
-        return Ok((ok_summary(&tool_id, &session_id, summary), None));
+        return Ok((
+            ok_summary(&tool_id, &session_id, summary, Some(mtime)),
+            None,
+        ));
     }
 
-    let immediate = generating_summary(&tool_id, &session_id, previous_any.as_ref());
+    let immediate = generating_summary(
+        &tool_id,
+        &session_id,
+        previous_any.as_ref(),
+        Some(mtime),
+        summary_language.as_str(),
+    );
     let job = SessionSummaryJob {
         project_path: project_path.to_string(),
         repo_key,
         branch: branch.to_string(),
         tool_id,
         session_id,
+        preferred_language: summary_language,
         settings,
         mtime,
     };
@@ -1023,9 +1356,14 @@ pub(crate) fn prewarm_missing_worktree_summaries(
             continue;
         }
 
-        let Ok((_, maybe_job)) =
-            get_branch_session_summary_immediate(&project_path, &branch, &state)
-        else {
+        let Ok((_, maybe_job)) = get_branch_session_summary_immediate(
+            &project_path,
+            &branch,
+            false,
+            None,
+            false,
+            &state,
+        ) else {
             continue;
         };
 
@@ -1039,6 +1377,286 @@ pub(crate) fn prewarm_missing_worktree_summaries(
             None => {}
         }
     }
+}
+
+fn collect_rebuild_target_branches(repo_path: &Path) -> Vec<String> {
+    let mut names: HashSet<String> = HashSet::new();
+
+    if let Ok(branches) = Branch::list(repo_path) {
+        for branch in branches {
+            let name = branch.name.trim();
+            if !name.is_empty() {
+                names.insert(name.to_string());
+            }
+        }
+    }
+
+    for (branch, _) in gwt_core::config::get_last_tool_usage_map(repo_path) {
+        let name = branch.trim();
+        if !name.is_empty() {
+            names.insert(name.to_string());
+        }
+    }
+
+    let mut out = names.into_iter().collect::<Vec<_>>();
+    out.sort_unstable();
+    out
+}
+
+fn emit_rebuild_progress(app_handle: &AppHandle, payload: &SessionSummaryRebuildProgressPayload) {
+    let _ = app_handle.emit("session-summary-rebuild-progress", payload);
+}
+
+fn emit_session_summary_updated(
+    app_handle: &AppHandle,
+    project_path: &str,
+    branch: &str,
+    result: &SessionSummaryResult,
+) {
+    let payload = SessionSummaryUpdatedPayload {
+        project_path: project_path.to_string(),
+        branch: branch.to_string(),
+        result: result.clone(),
+    };
+    let _ = app_handle.emit("session-summary-updated", &payload);
+}
+
+fn session_summary_inflight_key(job: &SessionSummaryJob) -> String {
+    format!(
+        "{}::{}::{}::{}",
+        job.repo_key, job.branch, job.tool_id, job.session_id
+    )
+}
+
+fn scrollback_summary_inflight_key(job: &ScrollbackSummaryJob) -> String {
+    format!(
+        "scrollback::{}::{}::{}",
+        job.repo_key, job.branch, job.pane_id
+    )
+}
+
+fn try_acquire_session_summary_inflight(state: &AppState, inflight_key: &str) -> bool {
+    match state.session_summary_inflight.lock() {
+        Ok(mut set) => {
+            if set.contains(inflight_key) {
+                false
+            } else {
+                set.insert(inflight_key.to_string());
+                true
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+fn release_session_summary_inflight(state: &AppState, inflight_key: &str) {
+    if let Ok(mut set) = state.session_summary_inflight.lock() {
+        set.remove(inflight_key);
+    }
+}
+
+fn try_acquire_session_summary_rebuild_inflight(state: &AppState, repo_key: &str) -> bool {
+    match state.session_summary_rebuild_inflight.lock() {
+        Ok(mut set) => {
+            if set.contains(repo_key) {
+                false
+            } else {
+                set.insert(repo_key.to_string());
+                true
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+fn release_session_summary_rebuild_inflight(state: &AppState, repo_key: &str) {
+    if let Ok(mut set) = state.session_summary_rebuild_inflight.lock() {
+        set.remove(repo_key);
+    }
+}
+
+fn run_summary_job_for_rebuild(
+    job: SummaryJob,
+    state: &AppState,
+    app_handle: &AppHandle,
+    project_path: &str,
+    branch: &str,
+    fallback_result: &SessionSummaryResult,
+) -> SessionSummaryResult {
+    match job {
+        SummaryJob::Session(session_job) => {
+            let inflight_key = session_summary_inflight_key(&session_job);
+            if !try_acquire_session_summary_inflight(state, &inflight_key) {
+                return fallback_result.clone();
+            }
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                generate_and_cache_session_summary(&session_job, state)
+            }))
+            .unwrap_or_else(|_| {
+                summary_status(
+                    "error",
+                    Some(session_job.tool_id.clone()),
+                    Some(session_job.session_id.clone()),
+                    Some("Internal error".to_string()),
+                    Some(session_job.preferred_language.as_str()),
+                )
+            });
+            release_session_summary_inflight(state, &inflight_key);
+
+            if is_latest_branch_session(
+                &session_job.repo_key,
+                &session_job.branch,
+                &session_job.tool_id,
+                &session_job.session_id,
+            ) {
+                emit_session_summary_updated(app_handle, project_path, branch, &result);
+            }
+            result
+        }
+        SummaryJob::Scrollback(scrollback_job) => {
+            let inflight_key = scrollback_summary_inflight_key(&scrollback_job);
+            if !try_acquire_session_summary_inflight(state, &inflight_key) {
+                return fallback_result.clone();
+            }
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                generate_and_cache_scrollback_summary(&scrollback_job, state)
+            }))
+            .unwrap_or_else(|_| {
+                summary_status(
+                    "error",
+                    Some(scrollback_job.tool_id.clone()),
+                    Some(pane_session_id(&scrollback_job.pane_id)),
+                    Some("Internal error".to_string()),
+                    Some(scrollback_job.preferred_language.as_str()),
+                )
+            });
+            release_session_summary_inflight(state, &inflight_key);
+
+            if is_latest_scrollback_candidate(
+                state,
+                Path::new(&scrollback_job.repo_key),
+                &scrollback_job.branch,
+                &scrollback_job.pane_id,
+            ) {
+                emit_session_summary_updated(app_handle, project_path, branch, &result);
+            }
+            result
+        }
+    }
+}
+
+#[tauri::command]
+pub fn rebuild_all_branch_session_summaries(
+    project_path: String,
+    preferred_language: Option<String>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_key = repo_path.to_string_lossy().to_string();
+    let branches = collect_rebuild_target_branches(&repo_path);
+    let language = normalize_summary_language(preferred_language.as_deref());
+    let state = app_handle.state::<AppState>();
+
+    if !try_acquire_session_summary_rebuild_inflight(&state, &repo_key) {
+        return Ok(());
+    }
+
+    let app_handle_clone = app_handle.clone();
+    let project_path_for_task = project_path.clone();
+    let repo_key_for_task = repo_key.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle_clone.state::<AppState>();
+        let total = branches.len();
+        let (completed, final_error) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                emit_rebuild_progress(
+                    &app_handle_clone,
+                    &SessionSummaryRebuildProgressPayload {
+                        project_path: project_path_for_task.clone(),
+                        language: language.clone(),
+                        total,
+                        completed: 0,
+                        branch: None,
+                        status: "started".to_string(),
+                        error: None,
+                    },
+                );
+
+                let mut completed = 0usize;
+                for branch in branches {
+                    let immediate = get_branch_session_summary_immediate(
+                        &project_path_for_task,
+                        &branch,
+                        false,
+                        Some(language.as_str()),
+                        true,
+                        &state,
+                    );
+
+                    let (status, error) = match immediate {
+                        Ok((immediate_result, maybe_job)) => {
+                            let result = match maybe_job {
+                                Some(job) => run_summary_job_for_rebuild(
+                                    job,
+                                    &state,
+                                    &app_handle_clone,
+                                    &project_path_for_task,
+                                    &branch,
+                                    &immediate_result,
+                                ),
+                                None => immediate_result,
+                            };
+
+                            if result.status == "ok" {
+                                ("branch-ok".to_string(), None)
+                            } else {
+                                (
+                                    "branch-skipped".to_string(),
+                                    result.error.clone().or(result.warning.clone()),
+                                )
+                            }
+                        }
+                        Err(err) => ("branch-error".to_string(), Some(err)),
+                    };
+
+                    completed += 1;
+                    emit_rebuild_progress(
+                        &app_handle_clone,
+                        &SessionSummaryRebuildProgressPayload {
+                            project_path: project_path_for_task.clone(),
+                            language: language.clone(),
+                            total,
+                            completed,
+                            branch: Some(branch),
+                            status,
+                            error,
+                        },
+                    );
+                }
+
+                (completed, None::<String>)
+            }))
+            .unwrap_or_else(|_| (0, Some("Internal error".to_string())));
+
+        emit_rebuild_progress(
+            &app_handle_clone,
+            &SessionSummaryRebuildProgressPayload {
+                project_path: project_path_for_task,
+                language,
+                total,
+                completed,
+                branch: None,
+                status: "completed".to_string(),
+                error: final_error,
+            },
+        );
+        release_session_summary_rebuild_inflight(&state, &repo_key_for_task);
+    });
+
+    Ok(())
 }
 
 fn is_latest_branch_session(repo_key: &str, branch: &str, tool_id: &str, session_id: &str) -> bool {
@@ -1058,23 +1676,8 @@ fn is_latest_branch_session(repo_key: &str, branch: &str, tool_id: &str, session
 }
 
 fn start_session_summary_job(job: SessionSummaryJob, state: &AppState, app_handle: AppHandle) {
-    let inflight_key = format!(
-        "{}::{}::{}::{}",
-        job.repo_key, job.branch, job.tool_id, job.session_id
-    );
-    let should_spawn = match state.session_summary_inflight.lock() {
-        Ok(mut set) => {
-            if set.contains(&inflight_key) {
-                false
-            } else {
-                set.insert(inflight_key.clone());
-                true
-            }
-        }
-        Err(_) => false,
-    };
-
-    if !should_spawn {
+    let inflight_key = session_summary_inflight_key(&job);
+    if !try_acquire_session_summary_inflight(state, &inflight_key) {
         return;
     }
 
@@ -1091,12 +1694,11 @@ fn start_session_summary_job(job: SessionSummaryJob, state: &AppState, app_handl
                 Some(job.tool_id.clone()),
                 Some(job.session_id.clone()),
                 Some("Internal error".to_string()),
+                Some(job.preferred_language.as_str()),
             )
         });
 
-        if let Ok(mut set) = state.session_summary_inflight.lock() {
-            set.remove(&inflight_key);
-        }
+        release_session_summary_inflight(&state, &inflight_key);
 
         // If the branch has moved to a different latest session while this job was running,
         // skip emitting an update event to avoid clobbering the UI with stale data.
@@ -1118,23 +1720,8 @@ fn start_scrollback_summary_job(
     state: &AppState,
     app_handle: AppHandle,
 ) {
-    let inflight_key = format!(
-        "scrollback::{}::{}::{}",
-        job.repo_key, job.branch, job.pane_id
-    );
-    let should_spawn = match state.session_summary_inflight.lock() {
-        Ok(mut set) => {
-            if set.contains(&inflight_key) {
-                false
-            } else {
-                set.insert(inflight_key.clone());
-                true
-            }
-        }
-        Err(_) => false,
-    };
-
-    if !should_spawn {
+    let inflight_key = scrollback_summary_inflight_key(&job);
+    if !try_acquire_session_summary_inflight(state, &inflight_key) {
         return;
     }
 
@@ -1151,12 +1738,11 @@ fn start_scrollback_summary_job(
                 Some(job.tool_id.clone()),
                 Some(pane_session_id(&job.pane_id)),
                 Some("Internal error".to_string()),
+                Some(job.preferred_language.as_str()),
             )
         });
 
-        if let Ok(mut set) = state.session_summary_inflight.lock() {
-            set.remove(&inflight_key);
-        }
+        release_session_summary_inflight(&state, &inflight_key);
 
         if !is_latest_scrollback_candidate(
             &state,
@@ -1180,6 +1766,8 @@ fn generate_and_cache_session_summary(
     job: &SessionSummaryJob,
     state: &AppState,
 ) -> SessionSummaryResult {
+    ensure_persisted_session_summary_cache_loaded(Path::new(&job.repo_key), &job.repo_key, state);
+
     // Cache lookup for fallback (best-effort).
     let previous_any = state.session_summary_cache.lock().ok().and_then(|guard| {
         guard
@@ -1191,7 +1779,7 @@ fn generate_and_cache_session_summary(
         Some(p) => p,
         None => {
             if let Some(prev) = previous_any.as_ref() {
-                let mut out = ok_summary(&job.tool_id, &job.session_id, prev);
+                let mut out = ok_summary(&job.tool_id, &job.session_id, prev, Some(job.mtime));
                 out.warning = Some("Unsupported agent session; keeping previous".to_string());
                 return out;
             }
@@ -1200,6 +1788,7 @@ fn generate_and_cache_session_summary(
                 Some(job.tool_id.clone()),
                 Some(job.session_id.clone()),
                 Some("Unsupported agent session".to_string()),
+                Some(job.preferred_language.as_str()),
             );
         }
     };
@@ -1208,7 +1797,7 @@ fn generate_and_cache_session_summary(
         Ok(parsed) => parsed,
         Err(err) => {
             if let Some(prev) = previous_any.as_ref() {
-                let mut out = ok_summary(&job.tool_id, &job.session_id, prev);
+                let mut out = ok_summary(&job.tool_id, &job.session_id, prev, Some(job.mtime));
                 out.warning = Some(format!("Failed to parse session; keeping previous: {err}"));
                 return out;
             }
@@ -1218,6 +1807,7 @@ fn generate_and_cache_session_summary(
                 Some(job.tool_id.clone()),
                 Some(job.session_id.clone()),
                 Some(err.to_string()),
+                Some(job.preferred_language.as_str()),
             );
         }
     };
@@ -1226,7 +1816,7 @@ fn generate_and_cache_session_summary(
         Ok(client) => client,
         Err(err) => {
             if let Some(prev) = previous_any.as_ref() {
-                let mut out = ok_summary(&job.tool_id, &job.session_id, prev);
+                let mut out = ok_summary(&job.tool_id, &job.session_id, prev, Some(job.mtime));
                 out.warning = Some(format!("Failed to initialize AI; keeping previous: {err}"));
                 return out;
             }
@@ -1235,11 +1825,12 @@ fn generate_and_cache_session_summary(
                 Some(job.tool_id.clone()),
                 Some(job.session_id.clone()),
                 Some(err.to_string()),
+                Some(job.preferred_language.as_str()),
             );
         }
     };
 
-    match summarize_session(&client, &parsed) {
+    match summarize_session(&client, &parsed, Some(job.preferred_language.as_str())) {
         Ok(summary) => {
             // Avoid overwriting the cache if the branch's latest session has changed
             // since the job started (e.g., a new session was recorded).
@@ -1247,17 +1838,26 @@ fn generate_and_cache_session_summary(
                 if let Ok(mut cache_guard) = state.session_summary_cache.lock() {
                     cache_guard.entry(job.repo_key.clone()).or_default().set(
                         job.branch.clone(),
+                        job.tool_id.clone(),
                         job.session_id.clone(),
                         summary.clone(),
                         job.mtime,
                     );
                 }
+                persist_session_summary_cache_entry(
+                    Path::new(&job.repo_key),
+                    &job.branch,
+                    &job.tool_id,
+                    &job.session_id,
+                    job.mtime,
+                    &summary,
+                );
             }
-            ok_summary(&job.tool_id, &job.session_id, &summary)
+            ok_summary(&job.tool_id, &job.session_id, &summary, Some(job.mtime))
         }
         Err(AIError::IncompleteSummary) => {
             if let Some(prev) = previous_any.as_ref() {
-                let mut out = ok_summary(&job.tool_id, &job.session_id, prev);
+                let mut out = ok_summary(&job.tool_id, &job.session_id, prev, Some(job.mtime));
                 out.warning = Some("Incomplete summary; keeping previous".to_string());
                 out
             } else {
@@ -1266,12 +1866,13 @@ fn generate_and_cache_session_summary(
                     Some(job.tool_id.clone()),
                     Some(job.session_id.clone()),
                     Some(format_error_for_display(&AIError::IncompleteSummary)),
+                    Some(job.preferred_language.as_str()),
                 )
             }
         }
         Err(other) => {
             if let Some(prev) = previous_any.as_ref() {
-                let mut out = ok_summary(&job.tool_id, &job.session_id, prev);
+                let mut out = ok_summary(&job.tool_id, &job.session_id, prev, Some(job.mtime));
                 out.warning = Some(format!(
                     "Update failed; keeping previous: {}",
                     format_error_for_display(&other)
@@ -1283,6 +1884,7 @@ fn generate_and_cache_session_summary(
                     Some(job.tool_id.clone()),
                     Some(job.session_id.clone()),
                     Some(format_error_for_display(&other)),
+                    Some(job.preferred_language.as_str()),
                 )
             }
         }
@@ -1293,6 +1895,8 @@ fn generate_and_cache_scrollback_summary(
     job: &ScrollbackSummaryJob,
     state: &AppState,
 ) -> SessionSummaryResult {
+    ensure_persisted_session_summary_cache_loaded(Path::new(&job.repo_key), &job.repo_key, state);
+
     let previous_any = state.session_summary_cache.lock().ok().and_then(|guard| {
         guard
             .get(&job.repo_key)
@@ -1304,7 +1908,7 @@ fn generate_and_cache_scrollback_summary(
         Ok(text) => text,
         Err(err) => {
             if let Some(prev) = previous_any.as_ref() {
-                let mut out = ok_summary(&job.tool_id, &pane_session, prev);
+                let mut out = ok_summary(&job.tool_id, &pane_session, prev, Some(job.mtime));
                 out.warning = Some(format!(
                     "Failed to read scrollback; keeping previous: {err}"
                 ));
@@ -1315,6 +1919,7 @@ fn generate_and_cache_scrollback_summary(
                 Some(job.tool_id.clone()),
                 Some(pane_session),
                 Some(err),
+                Some(job.preferred_language.as_str()),
             );
         }
     };
@@ -1323,7 +1928,7 @@ fn generate_and_cache_scrollback_summary(
         Ok(client) => client,
         Err(err) => {
             if let Some(prev) = previous_any.as_ref() {
-                let mut out = ok_summary(&job.tool_id, &pane_session, prev);
+                let mut out = ok_summary(&job.tool_id, &pane_session, prev, Some(job.mtime));
                 out.warning = Some(format!("Failed to initialize AI; keeping previous: {err}"));
                 return out;
             }
@@ -1332,11 +1937,17 @@ fn generate_and_cache_scrollback_summary(
                 Some(job.tool_id.clone()),
                 Some(pane_session),
                 Some(err.to_string()),
+                Some(job.preferred_language.as_str()),
             );
         }
     };
 
-    match summarize_scrollback(&client, &scrollback, &job.branch) {
+    match summarize_scrollback(
+        &client,
+        &scrollback,
+        &job.branch,
+        Some(job.preferred_language.as_str()),
+    ) {
         Ok(summary) => {
             if is_latest_scrollback_candidate(
                 state,
@@ -1347,17 +1958,26 @@ fn generate_and_cache_scrollback_summary(
                 if let Ok(mut cache_guard) = state.session_summary_cache.lock() {
                     cache_guard.entry(job.repo_key.clone()).or_default().set(
                         job.branch.clone(),
+                        job.tool_id.clone(),
                         pane_session.clone(),
                         summary.clone(),
                         job.mtime,
                     );
                 }
+                persist_session_summary_cache_entry(
+                    Path::new(&job.repo_key),
+                    &job.branch,
+                    &job.tool_id,
+                    &pane_session,
+                    job.mtime,
+                    &summary,
+                );
             }
-            ok_summary(&job.tool_id, &pane_session, &summary)
+            ok_summary(&job.tool_id, &pane_session, &summary, Some(job.mtime))
         }
         Err(AIError::IncompleteSummary) => {
             if let Some(prev) = previous_any.as_ref() {
-                let mut out = ok_summary(&job.tool_id, &pane_session, prev);
+                let mut out = ok_summary(&job.tool_id, &pane_session, prev, Some(job.mtime));
                 out.warning = Some("Incomplete summary; keeping previous".to_string());
                 out
             } else {
@@ -1366,12 +1986,13 @@ fn generate_and_cache_scrollback_summary(
                     Some(job.tool_id.clone()),
                     Some(pane_session),
                     Some(format_error_for_display(&AIError::IncompleteSummary)),
+                    Some(job.preferred_language.as_str()),
                 )
             }
         }
         Err(other) => {
             if let Some(prev) = previous_any.as_ref() {
-                let mut out = ok_summary(&job.tool_id, &pane_session, prev);
+                let mut out = ok_summary(&job.tool_id, &pane_session, prev, Some(job.mtime));
                 out.warning = Some(format!(
                     "Update failed; keeping previous: {}",
                     format_error_for_display(&other)
@@ -1383,6 +2004,7 @@ fn generate_and_cache_scrollback_summary(
                     Some(job.tool_id.clone()),
                     Some(pane_session),
                     Some(format_error_for_display(&other)),
+                    Some(job.preferred_language.as_str()),
                 )
             }
         }
@@ -1399,10 +2021,20 @@ fn generate_and_cache_scrollback_summary(
 pub fn get_branch_session_summary(
     project_path: String,
     branch: String,
+    cached_only: Option<bool>,
+    preferred_language: Option<String>,
+    force_rebuild: Option<bool>,
     state: State<AppState>,
     app_handle: AppHandle,
 ) -> Result<SessionSummaryResult, String> {
-    let (result, job) = get_branch_session_summary_immediate(&project_path, &branch, &state)?;
+    let (result, job) = get_branch_session_summary_immediate(
+        &project_path,
+        &branch,
+        cached_only.unwrap_or(false),
+        preferred_language.as_deref(),
+        force_rebuild.unwrap_or(false),
+        &state,
+    )?;
     if let Some(job) = job {
         match job {
             SummaryJob::Session(job) => start_session_summary_job(job, &state, app_handle),
@@ -1451,6 +2083,8 @@ mod tests {
             docker_recreate: None,
             docker_build: None,
             docker_keep: None,
+            docker_container_name: None,
+            docker_compose_args: None,
             timestamp: 1,
         };
 
@@ -1511,6 +2145,8 @@ mod tests {
             docker_recreate: None,
             docker_build: None,
             docker_keep: None,
+            docker_container_name: None,
+            docker_compose_args: None,
             timestamp,
         };
 
@@ -1534,7 +2170,7 @@ mod tests {
 
     #[test]
     fn session_summary_returns_no_session_when_history_missing() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = TempDir::new().unwrap();
         let _env = TestEnvGuard::new(home.path());
 
@@ -1542,9 +2178,15 @@ mod tests {
         init_git_repo(repo.path());
 
         let state = AppState::new();
-        let (out, job) =
-            get_branch_session_summary_immediate(repo.path().to_str().unwrap(), "main", &state)
-                .unwrap();
+        let (out, job) = get_branch_session_summary_immediate(
+            repo.path().to_str().unwrap(),
+            "main",
+            false,
+            None,
+            false,
+            &state,
+        )
+        .unwrap();
         assert_eq!(out.status, "no-session");
         assert!(!out.generating);
         assert!(job.is_none());
@@ -1552,7 +2194,7 @@ mod tests {
 
     #[test]
     fn session_summary_returns_ai_not_configured_when_profiles_missing() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = TempDir::new().unwrap();
         let _env = TestEnvGuard::new(home.path());
 
@@ -1561,9 +2203,15 @@ mod tests {
         write_session_entry(repo.path(), "main", "codex-cli", "session-1");
 
         let state = AppState::new();
-        let (out, job) =
-            get_branch_session_summary_immediate(repo.path().to_str().unwrap(), "main", &state)
-                .unwrap();
+        let (out, job) = get_branch_session_summary_immediate(
+            repo.path().to_str().unwrap(),
+            "main",
+            false,
+            None,
+            false,
+            &state,
+        )
+        .unwrap();
         assert_eq!(out.status, "ai-not-configured");
         assert!(!out.generating);
         assert!(job.is_none());
@@ -1573,7 +2221,7 @@ mod tests {
 
     #[test]
     fn session_summary_returns_disabled_when_summary_disabled() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = TempDir::new().unwrap();
         let _env = TestEnvGuard::new(home.path());
 
@@ -1582,6 +2230,7 @@ mod tests {
             endpoint: "https://api.openai.com/v1".to_string(),
             api_key: "".to_string(),
             model: "gpt-5.2-codex".to_string(),
+            language: "en".to_string(),
             summary_enabled: false,
         });
         config.save().unwrap();
@@ -1591,9 +2240,15 @@ mod tests {
         write_session_entry(repo.path(), "main", "codex-cli", "session-1");
 
         let state = AppState::new();
-        let (out, job) =
-            get_branch_session_summary_immediate(repo.path().to_str().unwrap(), "main", &state)
-                .unwrap();
+        let (out, job) = get_branch_session_summary_immediate(
+            repo.path().to_str().unwrap(),
+            "main",
+            false,
+            None,
+            false,
+            &state,
+        )
+        .unwrap();
         assert_eq!(out.status, "disabled");
         assert!(!out.generating);
         assert!(job.is_none());
@@ -1603,7 +2258,7 @@ mod tests {
 
     #[test]
     fn session_summary_returns_generating_when_cache_miss_and_session_file_present() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = TempDir::new().unwrap();
         let _env = TestEnvGuard::new(home.path());
 
@@ -1612,6 +2267,7 @@ mod tests {
             endpoint: "https://api.openai.com/v1".to_string(),
             api_key: "".to_string(),
             model: "gpt-4o-mini".to_string(),
+            language: "en".to_string(),
             summary_enabled: true,
         });
         config.save().unwrap();
@@ -1630,9 +2286,15 @@ mod tests {
         .unwrap();
 
         let state = AppState::new();
-        let (out, job) =
-            get_branch_session_summary_immediate(repo.path().to_str().unwrap(), "main", &state)
-                .unwrap();
+        let (out, job) = get_branch_session_summary_immediate(
+            repo.path().to_str().unwrap(),
+            "main",
+            false,
+            None,
+            false,
+            &state,
+        )
+        .unwrap();
 
         assert_eq!(out.status, "ok");
         assert!(out.generating);
@@ -1643,7 +2305,7 @@ mod tests {
 
     #[test]
     fn session_summary_returns_cached_immediately_when_fresh() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = TempDir::new().unwrap();
         let _env = TestEnvGuard::new(home.path());
 
@@ -1652,6 +2314,7 @@ mod tests {
             endpoint: "https://api.openai.com/v1".to_string(),
             api_key: "".to_string(),
             model: "gpt-4o-mini".to_string(),
+            language: "en".to_string(),
             summary_enabled: true,
         });
         config.save().unwrap();
@@ -1686,15 +2349,22 @@ mod tests {
             let mut guard = state.session_summary_cache.lock().unwrap();
             guard.entry(repo_key).or_default().set(
                 "main".to_string(),
+                "codex-cli".to_string(),
                 "sess-999".to_string(),
                 summary,
                 mtime,
             );
         }
 
-        let (out, job) =
-            get_branch_session_summary_immediate(repo.path().to_str().unwrap(), "main", &state)
-                .unwrap();
+        let (out, job) = get_branch_session_summary_immediate(
+            repo.path().to_str().unwrap(),
+            "main",
+            false,
+            None,
+            false,
+            &state,
+        )
+        .unwrap();
         assert_eq!(out.status, "ok");
         assert!(!out.generating);
         assert!(job.is_none());
@@ -1735,6 +2405,7 @@ mod tests {
             endpoint: "https://api.openai.com/v1".to_string(),
             api_key: "".to_string(),
             model: "gpt-4o-mini".to_string(),
+            language: "en".to_string(),
         };
 
         let (out, job) = scrollback_summary_immediate(
@@ -1742,6 +2413,8 @@ mod tests {
             "/tmp/repo",
             "main",
             candidate,
+            "auto",
+            false,
             settings,
             &state,
         );
@@ -1750,5 +2423,168 @@ mod tests {
         assert!(out.generating);
         assert!(out.session_id.as_deref().unwrap_or("").starts_with("pane:"));
         assert!(job.is_some());
+    }
+
+    fn summary_cache_path_for_repo(repo_root: &Path) -> std::path::PathBuf {
+        let sessions_toml = gwt_core::config::get_ts_session_toml_path(repo_root);
+        let file_name = sessions_toml.file_name().expect("session toml file name");
+        let gwt_dir = sessions_toml
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("~/.gwt dir");
+        gwt_dir.join("session-summaries").join(file_name)
+    }
+
+    #[test]
+    fn session_summary_cached_only_loads_persisted_cache_without_history() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(home.path());
+
+        let repo = TempDir::new().unwrap();
+        init_git_repo(repo.path());
+
+        let cache_path = summary_cache_path_for_repo(repo.path());
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(
+            &cache_path,
+            r###"
+version = 2
+
+[branches.main]
+tool_id = "codex-cli"
+session_id = "sess-1"
+input_mtime_ms = 1000
+last_updated_ms = 2000
+markdown = "## Purpose\nCached\n\n## Summary\nCached\n\n## Highlights\n- A\n"
+task_overview = "Cached"
+short_summary = "Cached"
+bullet_points = ["- A"]
+"###,
+        )
+        .unwrap();
+
+        let state = AppState::new();
+        let (out, job) = get_branch_session_summary_immediate(
+            repo.path().to_str().unwrap(),
+            "main",
+            true,
+            None,
+            false,
+            &state,
+        )
+        .unwrap();
+
+        assert_eq!(out.status, "ok");
+        assert!(!out.generating);
+        assert!(job.is_none());
+        assert_eq!(out.tool_id.as_deref(), Some("codex-cli"));
+        assert_eq!(out.session_id.as_deref(), Some("sess-1"));
+        assert!(out.markdown.as_deref().unwrap_or("").contains("Cached"));
+    }
+
+    #[test]
+    fn session_summary_cached_only_does_not_schedule_job_when_stale() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(home.path());
+
+        let repo = TempDir::new().unwrap();
+        init_git_repo(repo.path());
+        write_session_entry(repo.path(), "main", "codex-cli", "sess-123");
+
+        // Session file exists, which would normally trigger an update when stale.
+        let sessions_dir = home.path().join(".codex").join("sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        let session_path = sessions_dir.join("sess-123.jsonl");
+        fs::write(&session_path, r#"{"payload":{"id":"sess-123"}}"#).unwrap();
+
+        let cache_path = summary_cache_path_for_repo(repo.path());
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(
+            &cache_path,
+            r###"
+version = 2
+
+[branches.main]
+tool_id = "codex-cli"
+session_id = "sess-123"
+input_mtime_ms = 1
+last_updated_ms = 2
+markdown = "## Purpose\nCachedOnly\n\n## Summary\nCachedOnly\n\n## Highlights\n- A\n"
+task_overview = "CachedOnly"
+short_summary = "CachedOnly"
+bullet_points = ["- A"]
+"###,
+        )
+        .unwrap();
+
+        let state = AppState::new();
+        let (out, job) = get_branch_session_summary_immediate(
+            repo.path().to_str().unwrap(),
+            "main",
+            true,
+            None,
+            false,
+            &state,
+        )
+        .unwrap();
+
+        assert_eq!(out.status, "ok");
+        assert!(!out.generating);
+        assert!(job.is_none());
+        assert!(out.markdown.as_deref().unwrap_or("").contains("CachedOnly"));
+    }
+
+    #[test]
+    fn scrollback_immediate_returns_cached_without_job_when_mtime_unchanged() {
+        let state = AppState::new();
+        let repo_key = "/tmp/repo";
+
+        let base = UNIX_EPOCH + Duration::from_secs(5);
+        let summary = SessionSummary {
+            markdown: Some(
+                "## Purpose\nCached\n\n## Summary\nCached\n\n## Highlights\n- A\n".to_string(),
+            ),
+            ..Default::default()
+        };
+
+        {
+            let mut cache_guard = state.session_summary_cache.lock().unwrap();
+            cache_guard.entry(repo_key.to_string()).or_default().set(
+                "main".to_string(),
+                "codex-cli".to_string(),
+                pane_session_id("pane-xyz"),
+                summary,
+                base,
+            );
+        }
+
+        let candidate = ScrollbackCandidate {
+            pane_id: "pane-xyz".to_string(),
+            tool_id: "codex-cli".to_string(),
+            mtime: base,
+        };
+        let settings = ResolvedAISettings {
+            endpoint: "https://api.openai.com/v1".to_string(),
+            api_key: "".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            language: "en".to_string(),
+        };
+
+        let (out, job) = scrollback_summary_immediate(
+            "/tmp/project",
+            repo_key,
+            "main",
+            candidate,
+            "auto",
+            false,
+            settings,
+            &state,
+        );
+
+        assert_eq!(out.status, "ok");
+        assert!(!out.generating);
+        assert!(job.is_none());
     }
 }
