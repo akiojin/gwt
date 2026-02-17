@@ -748,14 +748,16 @@ impl Branch {
         }
 
         // SPEC-a70a1ece FR-124: For bare repos, check via ls-remote
-        let ls_output = crate::process::command("git")
-            .args(["ls-remote", "--heads", remote, branch])
-            .current_dir(repo_path)
-            .output()
-            .map_err(|e| GwtError::GitOperationFailed {
-                operation: "ls-remote".to_string(),
-                details: e.to_string(),
-            })?;
+        // SPEC-bare-wt01 FR-001: Use run_git_with_timeout for GIT_TERMINAL_PROMPT=0 and timeout
+        let ls_output = match run_git_with_timeout(
+            repo_path,
+            "ls-remote",
+            &["ls-remote", "--heads", remote, branch],
+            LS_REMOTE_TIMEOUT,
+        ) {
+            Ok(output) => output,
+            Err(_) => return Ok(false),
+        };
 
         if ls_output.status.success() {
             let stdout = String::from_utf8_lossy(&ls_output.stdout);
