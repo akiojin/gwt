@@ -27,9 +27,10 @@ pub use diff::{
     FileChangeKind, FileDiff, GitChangeSummary, GitViewCommit, WorkingTreeEntry,
 };
 pub use issue::{
-    create_linked_branch, fetch_open_issues, filter_issues_by_title, find_branch_for_issue,
-    generate_branch_name, is_gh_cli_authenticated, is_gh_cli_available, parse_gh_issues_json,
-    FetchIssuesResult, GitHubIssue,
+    create_linked_branch, fetch_issue_detail, fetch_open_issues, filter_issues_by_title,
+    find_branch_for_issue, generate_branch_name, is_gh_cli_authenticated, is_gh_cli_available,
+    parse_gh_issues_json, FetchIssuesResult, GitHubAssignee, GitHubIssue, GitHubLabel,
+    GitHubMilestone,
 };
 pub use issue_spec::{
     append_contract_comment, close_spec_issue, delete_spec_issue_artifact_comment,

@@ -188,7 +188,8 @@ export interface Tab {
     | "versionHistory"
     | "agentMode"
     | "terminal"
-    | "issueSpec";
+    | "issueSpec"
+    | "issues";
   paneId?: string;
   cwd?: string;
   issueNumber?: number;
@@ -419,13 +420,34 @@ export interface GitChangeSummary {
   base_branch: string;
 }
 
-// GitHub Issue types (SPEC-c6ba640a)
+// GitHub Issue types (SPEC-c6ba640a, SPEC-ca4b5b07)
+
+export interface GitHubLabel {
+  name: string;
+  color: string;
+}
+
+export interface GitHubAssignee {
+  login: string;
+  avatarUrl: string;
+}
+
+export interface GitHubMilestone {
+  title: string;
+  number: number;
+}
 
 export interface GitHubIssueInfo {
   number: number;
   title: string;
+  body?: string;
+  state: "open" | "closed";
   updatedAt: string;
-  labels: string[];
+  htmlUrl: string;
+  labels: GitHubLabel[];
+  assignees: GitHubAssignee[];
+  commentsCount: number;
+  milestone?: GitHubMilestone;
 }
 
 export interface BranchLinkedIssueInfo {
