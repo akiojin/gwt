@@ -1,15 +1,19 @@
 <script lang="ts">
-  import type { LaunchFinishedPayload, LaunchProgressPayload } from "../types";
-
   let {
     open,
-    jobId,
-    onSuccess,
+    step = "fetch",
+    detail = "",
+    status = "running",
+    error = null,
+    onCancel,
     onClose,
   }: {
     open: boolean;
-    jobId: string;
-    onSuccess: (paneId: string) => void;
+    step: string;
+    detail: string;
+    status: "running" | "ok" | "error" | "cancelled";
+    error: string | null;
+    onCancel: () => void;
     onClose: () => void;
   } = $props();
 
@@ -23,42 +27,32 @@
     { id: "deps", label: "Preparing runtime" },
   ];
 
-  let step: StepId = $state("fetch");
-  let detail: string = $state("");
   let startedAtMs: number = $state(0);
   let stepStartedAtMs: number = $state(0);
   let nowMs: number = $state(Date.now());
-  let status: "running" | "ok" | "error" = $state("running");
-  let error: string | null = $state(null);
-  let finishedPaneId: string | null = $state(null);
 
-  function reset() {
-    step = "fetch";
-    detail = "";
+  // Reset timers when the modal opens.
+  $effect(() => {
+    if (!open) return;
     startedAtMs = Date.now();
     stepStartedAtMs = startedAtMs;
     nowMs = startedAtMs;
-    status = "running";
-    error = null;
-    finishedPaneId = null;
-  }
-
-  $effect(() => {
-    void open;
-    void jobId;
-    if (!open) return;
-    reset();
   });
 
+  // Reset step timer when the step changes.
   $effect(() => {
-    let timer: number | null = null;
+    void step;
     if (!open) return;
-    timer = window.setInterval(() => {
+    stepStartedAtMs = Date.now();
+  });
+
+  // Tick elapsed time while running.
+  $effect(() => {
+    if (!open || status !== "running") return;
+    const timer = window.setInterval(() => {
       nowMs = Date.now();
     }, 200);
-    return () => {
-      if (timer) window.clearInterval(timer);
-    };
+    return () => window.clearInterval(timer);
   });
 
   function stepIndex(id: string): number {
@@ -82,87 +76,11 @@
     return `${elapsedSeconds(ms)}s`;
   }
 
-  async function cancel() {
-    if (!jobId) {
-      onClose();
-      return;
-    }
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("cancel_launch_job", { jobId });
-    } catch {
-      // Ignore: not available outside Tauri runtime.
-    } finally {
-      onClose();
-    }
-  }
-
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") {
-      void cancel();
+      onCancel();
     }
   }
-
-  $effect(() => {
-    let unlistenProgress: null | (() => void) = null;
-    let unlistenFinished: null | (() => void) = null;
-    let cancelled = false;
-    if (!open) return;
-
-    (async () => {
-      try {
-        const { listen } = await import("@tauri-apps/api/event");
-
-        unlistenProgress = await listen<LaunchProgressPayload>(
-          "launch-progress",
-          (event) => {
-            if (!jobId || event.payload.jobId !== jobId) return;
-            if (status !== "running") return;
-            const next = event.payload.step as StepId;
-            if (stepIndex(next) >= 0 && next !== step) {
-              step = next;
-              stepStartedAtMs = Date.now();
-            }
-            detail = (event.payload.detail ?? "").toString();
-          }
-        );
-
-        unlistenFinished = await listen<LaunchFinishedPayload>(
-          "launch-finished",
-          (event) => {
-            if (!jobId || event.payload.jobId !== jobId) return;
-
-            if (event.payload.status === "cancelled") {
-              onClose();
-              return;
-            }
-
-            if (event.payload.status === "ok" && event.payload.paneId) {
-              status = "ok";
-              finishedPaneId = event.payload.paneId;
-              onSuccess(event.payload.paneId);
-              // Close immediately so the new terminal tab is usable without an extra click/scroll retry.
-              onClose();
-              return;
-            }
-
-            status = "error";
-            error = event.payload.error || "Launch failed.";
-          }
-        );
-      } catch {
-        if (cancelled) return;
-        status = "error";
-        error = "Failed to subscribe to launch events.";
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      if (unlistenProgress) unlistenProgress();
-      if (unlistenFinished) unlistenFinished();
-    };
-  });
 </script>
 
 {#if open}
@@ -177,7 +95,7 @@
     <div class="dialog">
       <div class="header">
         <h2>Preparing Launch</h2>
-        <button class="close-btn" onclick={cancel} disabled={status !== "running"}>[x]</button>
+        <button class="close-btn" onclick={onCancel} disabled={status !== "running"}>[x]</button>
       </div>
 
       <div class="body mono">
@@ -210,7 +128,7 @@
 
       <div class="footer">
         {#if status === "running"}
-          <button class="secondary" onclick={cancel}>Cancel (Esc)</button>
+          <button class="secondary" onclick={onCancel}>Cancel (Esc)</button>
         {:else}
           <button class="primary" onclick={onClose}>Close</button>
         {/if}
