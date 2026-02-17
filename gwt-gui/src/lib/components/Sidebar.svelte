@@ -1291,7 +1291,7 @@
       class="mode-btn"
       class:active={mode === "agent"}
       aria-pressed={mode === "agent"}
-      title="Agent Mode"
+      title="Master Agent"
       onclick={() => handleModeChange("agent")}
     >
       <span class="mode-icon">A</span>
