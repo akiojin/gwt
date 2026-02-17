@@ -24,5 +24,6 @@
 ### 実行ログ
 
 - `pnpm -C gwt-gui test src/lib/components/WorktreeSummaryPanel.test.ts` ✅
+- `pnpm -C gwt-gui exec playwright test e2e/open-project-smoke.spec.ts` ✅
 - `cargo test -p gwt-tauri test_strip_known_remote_prefix_for_origin_and_custom_remote` ✅
 - `cargo test -p gwt-tauri test_is_issue_not_found_error` ✅
