@@ -9,6 +9,7 @@ pub mod git_view;
 pub mod hooks;
 pub mod issue;
 pub mod issue_spec;
+pub mod mcp;
 pub mod profiles;
 pub mod project;
 pub mod pullrequest;

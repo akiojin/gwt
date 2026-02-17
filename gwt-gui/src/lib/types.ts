@@ -153,6 +153,24 @@ export interface VoiceInputSettings {
   model: string;
 }
 
+export interface McpAgentRegistrationStatus {
+  agent_id: string;
+  label: string;
+  config_path?: string | null;
+  registered: boolean;
+  error_code?: string | null;
+  error_message?: string | null;
+}
+
+export interface McpRegistrationStatus {
+  overall: "ok" | "degraded" | "failed" | (string & {});
+  bridge_runtime: "ok" | "missing" | (string & {});
+  bridge_script: "ok" | "missing" | (string & {});
+  agents: McpAgentRegistrationStatus[];
+  last_checked_at: number;
+  last_error_message?: string | null;
+}
+
 export interface AISettings {
   endpoint: string;
   api_key: string;
