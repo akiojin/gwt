@@ -6,6 +6,13 @@
       "args": [
         "markitdown-mcp"
       ]
+    },
+    "gwt_issue_spec": {
+      "type": "stdio",
+      "command": "python3",
+      "args": [
+        "scripts/gwt_issue_spec_mcp.py"
+      ]
     }
   }
 }

@@ -75,7 +75,7 @@ export async function installTauriMock(
         ai_error: null,
         last_error: null,
         is_waiting: false,
-        session_name: "Agent Mode",
+        session_name: "Master Agent",
         llm_call_count: 0,
         estimated_tokens: 0,
       };
@@ -191,6 +191,7 @@ export async function installTauriMock(
             return {
               ui_font_size: 13,
               terminal_font_size: 13,
+              app_language: "auto",
               voice_input: {
                 enabled: false,
                 hotkey: "Mod+Shift+M",
@@ -198,6 +199,8 @@ export async function installTauriMock(
                 model: "base",
               },
             };
+          case "rebuild_all_branch_session_summaries":
+            return null;
           case "get_system_info":
             return {
               cpu_usage_percent: 0,

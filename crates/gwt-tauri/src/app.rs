@@ -72,6 +72,7 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
         crate::menu::MENU_ID_FILE_CLOSE_PROJECT => Some("close-project"),
         crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES => Some("cleanup-worktrees"),
         crate::menu::MENU_ID_GIT_VERSION_HISTORY => Some("version-history"),
+        crate::menu::MENU_ID_GIT_ISSUES => Some("git-issues"),
         crate::menu::MENU_ID_EDIT_COPY => Some("edit-copy"),
         crate::menu::MENU_ID_EDIT_PASTE => Some("edit-paste"),
         crate::menu::MENU_ID_TOOLS_NEW_TERMINAL => Some("new-terminal"),
@@ -298,6 +299,18 @@ pub fn build_app(
                     });
                 }
 
+                // Background task: watch session files for agent status changes (SPEC-b80e7996 FR-820)
+                {
+                    let watcher_handle = _app.handle().clone();
+                    if let Err(e) = crate::session_watcher::start_session_watcher(watcher_handle) {
+                        warn!(
+                            category = "session_watcher",
+                            error = %e,
+                            "Failed to start session watcher (agent status updates will use polling fallback)"
+                        );
+                    }
+                }
+
                 // Background task: check app update (best-effort, TTL cached).
                 {
                     let mgr = _app.state::<AppState>().update_manager.clone();
@@ -502,6 +515,7 @@ pub fn build_app(
             crate::commands::sessions::get_branch_quick_start,
             crate::commands::sessions::get_agent_sidebar_view,
             crate::commands::sessions::get_branch_session_summary,
+            crate::commands::sessions::rebuild_all_branch_session_summaries,
             crate::commands::branch_suggest::suggest_branch_names,
             crate::commands::terminal::launch_terminal,
             crate::commands::terminal::spawn_shell,
@@ -546,14 +560,28 @@ pub fn build_app(
             crate::commands::version_history::list_project_versions,
             crate::commands::version_history::get_project_version_history,
             crate::commands::window_tabs::sync_window_agent_tabs,
+            crate::commands::window::get_current_window_label,
+            crate::commands::window::open_gwt_window,
             crate::commands::recent_projects::get_recent_projects,
             crate::commands::issue::fetch_github_issues,
+            crate::commands::issue::fetch_github_issue_detail,
+            crate::commands::issue::fetch_branch_linked_issue,
             crate::commands::issue::check_gh_cli_status,
             crate::commands::issue::find_existing_issue_branch,
             crate::commands::issue::link_branch_to_issue,
             crate::commands::issue::rollback_issue_branch,
+            crate::commands::issue_spec::upsert_spec_issue_cmd,
+            crate::commands::issue_spec::get_spec_issue_detail_cmd,
+            crate::commands::issue_spec::find_spec_issue_by_spec_id_cmd,
+            crate::commands::issue_spec::append_spec_contract_comment_cmd,
+            crate::commands::issue_spec::upsert_spec_issue_artifact_comment_cmd,
+            crate::commands::issue_spec::list_spec_issue_artifact_comments_cmd,
+            crate::commands::issue_spec::delete_spec_issue_artifact_comment_cmd,
+            crate::commands::issue_spec::close_spec_issue_cmd,
+            crate::commands::issue_spec::sync_spec_issue_project_cmd,
             crate::commands::pullrequest::fetch_pr_status,
             crate::commands::pullrequest::fetch_pr_detail,
+            crate::commands::pullrequest::fetch_latest_branch_pr,
             crate::commands::pullrequest::fetch_ci_log,
             crate::commands::system::get_system_info,
             crate::commands::system::get_stats,

@@ -16,3 +16,12 @@
 ## Phase 3: 仕上げ
 
 - [x] T020 [共通] 仕様・実装・テストの整合性を最終確認し、タスク完了状態を更新する `specs/SPEC-923b33fc/tasks.md`
+
+## Phase 4: バックエンド列挙コマンドのスレッド分離（TDD）
+
+- [x] T030 [US3] [RED] `commands::branches` に列挙ロジック回帰テストを追加し、実ロジック分離前提を固定する `crates/gwt-tauri/src/commands/branches.rs`
+- [x] T031 [US3] [GREEN] `list_worktree_branches` / `list_remote_branches` を `spawn_blocking` 化し、内部実装関数を導入する `crates/gwt-tauri/src/commands/branches.rs`
+- [x] T032 [US3] [RED] `commands::cleanup` に列挙ロジック回帰テストを追加し、実ロジック分離前提を固定する `crates/gwt-tauri/src/commands/cleanup.rs`
+- [x] T033 [US3] [GREEN] `list_worktrees` を `spawn_blocking` 化し、内部実装関数を導入する `crates/gwt-tauri/src/commands/cleanup.rs`
+- [x] T034 [US3] [GREEN] `cargo test -p gwt-tauri commands::branches -- --nocapture` を通過させる `crates/gwt-tauri`
+- [x] T035 [US3] [GREEN] `cargo test -p gwt-tauri commands::cleanup -- --nocapture` を通過させる `crates/gwt-tauri`

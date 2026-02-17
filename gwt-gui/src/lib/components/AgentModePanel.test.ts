@@ -14,7 +14,7 @@ const baseState: AgentModeState = {
   ai_error: null,
   last_error: null,
   is_waiting: false,
-  session_name: "Agent Mode",
+  session_name: "Master Agent",
   llm_call_count: 0,
   estimated_tokens: 0,
 };

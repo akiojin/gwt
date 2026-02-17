@@ -28,6 +28,7 @@
     language: "auto",
     model: "base",
   };
+  const DEFAULT_APP_LANGUAGE: SettingsData["app_language"] = "auto";
 
   type AIModelInfo = {
     id: string;
@@ -155,6 +156,16 @@
     };
   }
 
+  function normalizeAppLanguage(
+    value: string | null | undefined
+  ): SettingsData["app_language"] {
+    const language = (value ?? "").trim().toLowerCase();
+    if (language === "ja" || language === "en" || language === "auto") {
+      return language as SettingsData["app_language"];
+    }
+    return DEFAULT_APP_LANGUAGE;
+  }
+
   async function fetchAiModels(
     endpoint: string,
     apiKey: string,
@@ -219,6 +230,7 @@
         invoke<ProfilesConfig>("get_profiles"),
       ]);
       loadedSettings.voice_input = normalizeVoiceInputSettings(loadedSettings.voice_input);
+      loadedSettings.app_language = normalizeAppLanguage(loadedSettings.app_language);
       settings = loadedSettings;
       savedUiFontSize = loadedSettings.ui_font_size ?? 13;
       savedTerminalFontSize = loadedSettings.terminal_font_size ?? 13;
@@ -246,6 +258,7 @@
       if (profiles) {
         await invoke("save_profiles", { config: profiles });
       }
+      settings.app_language = normalizeAppLanguage(settings.app_language);
       saveMessage = "Settings saved.";
       savedUiFontSize = settings.ui_font_size ?? 13;
       savedTerminalFontSize = settings.terminal_font_size ?? 13;
@@ -255,6 +268,7 @@
           detail: {
             uiFontSize: savedUiFontSize,
             terminalFontSize: savedTerminalFontSize,
+            appLanguage: settings.app_language,
             voiceInput: settings.voice_input,
           },
         })
@@ -548,6 +562,33 @@
           <div class="divider"></div>
 
           <div class="field">
+            <label for="app-language">Language</label>
+            <select
+              id="app-language"
+              class="select"
+              value={settings.app_language}
+              onchange={(e) => {
+                if (!settings) return;
+                settings = {
+                  ...settings,
+                  app_language: normalizeAppLanguage(
+                    (e.target as HTMLSelectElement).value
+                  ),
+                };
+              }}
+            >
+              <option value="auto">Auto</option>
+              <option value="ja">Japanese</option>
+              <option value="en">English</option>
+            </select>
+            <span class="field-hint">
+              Used for AI summary generation language.
+            </span>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="field">
             <label for="log-retention">Log Retention (days)</label>
             <input
               id="log-retention"
@@ -589,6 +630,30 @@
             </div>
             <span class="field-hint">
               Branches that cannot be deleted or force-pushed.
+            </span>
+          </div>
+
+          <div class="field">
+            <label for="agent-github-project-id">Spec Project ID</label>
+            <input
+              id="agent-github-project-id"
+              type="text"
+              autocapitalize="off"
+              autocorrect="off"
+              autocomplete="off"
+              spellcheck="false"
+              value={settings.agent_github_project_id ?? ""}
+              oninput={(e) => {
+                if (!settings) return;
+                settings = {
+                  ...settings,
+                  agent_github_project_id: (e.target as HTMLInputElement).value,
+                };
+              }}
+              placeholder="PVT_xxxxxxxxxxxxxxxxxxxx"
+            />
+            <span class="field-hint">
+              Fixed GitHub Project V2 ID for issue-first spec sync.
             </span>
           </div>
         </div>

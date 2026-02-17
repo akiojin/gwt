@@ -3,12 +3,16 @@
   import { invoke as tauriInvoke } from "@tauri-apps/api/core";
   import type {
     BranchInfo,
+    BranchLinkedIssueInfo,
+    BranchPrReference,
+    DockerContext,
     LaunchAgentRequest,
     ToolSessionEntry,
     SessionSummaryResult,
     PrStatusInfo,
     GhCliStatus,
     WorkflowRunInfo,
+    SettingsData,
   } from "../types";
   import GitSection from "./GitSection.svelte";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
@@ -23,6 +27,7 @@
     onOpenCiLog,
     agentTabBranches = [],
     activeAgentTabBranch = null,
+    preferredLanguage = "auto",
     prNumber = null,
     ghCliStatus = null,
   }: {
@@ -33,6 +38,7 @@
     onOpenCiLog?: (runId: number) => void;
     agentTabBranches?: string[];
     activeAgentTabBranch?: string | null;
+    preferredLanguage?: SettingsData["app_language"];
     prNumber?: number | null;
     ghCliStatus?: GhCliStatus | null;
   } = $props();
@@ -44,8 +50,26 @@
   let quickLaunching: boolean = $state(false);
   let quickLaunchingKey: string | null = $state(null);
 
-  type SummaryTab = "summary" | "git" | "pr" | "workflow" | "ai" | "docker";
+  type SummaryTab =
+    | "summary"
+    | "git"
+    | "issue"
+    | "pr"
+    | "workflow"
+    | "docker";
   let activeTab: SummaryTab = $state("summary");
+
+  let linkedIssueLoading: boolean = $state(false);
+  let linkedIssueError: string | null = $state(null);
+  let linkedIssue: BranchLinkedIssueInfo | null = $state(null);
+
+  let latestBranchPrLoading: boolean = $state(false);
+  let latestBranchPrError: string | null = $state(null);
+  let latestBranchPr: BranchPrReference | null = $state(null);
+
+  let dockerContextLoading: boolean = $state(false);
+  let dockerContextError: string | null = $state(null);
+  let dockerContext: DockerContext | null = $state(null);
 
   let prDetailLoading = $state(false);
   let prDetailError: string | null = $state(null);
@@ -63,11 +87,17 @@
   let sessionSummaryError: string | null = $state(null);
   let sessionSummaryToolId: string | null = $state(null);
   let sessionSummarySessionId: string | null = $state(null);
+  let sessionSummaryLanguage: string | null = $state(null);
   let sessionSummarySourceType: SessionSummaryResult["sourceType"] | null = $state(
     null,
   );
   let sessionSummaryInputMtimeMs: number | null = $state(null);
   let sessionSummaryUpdatedMs: number | null = $state(null);
+  let summaryRebuildInProgress = $state(false);
+  let summaryRebuildTotal = $state(0);
+  let summaryRebuildCompleted = $state(0);
+  let summaryRebuildBranch: string | null = $state(null);
+  let summaryRebuildError: string | null = $state(null);
   const SESSION_SUMMARY_POLL_FOCUSED_INTERVAL_MS = 15000;
   const SESSION_SUMMARY_POLL_NONFOCUSED_INTERVAL_MS = 60000;
 
@@ -98,6 +128,15 @@
     branch: string;
     result: SessionSummaryResult;
   };
+  type SessionSummaryRebuildProgressPayload = {
+    projectPath: string;
+    language: string;
+    total: number;
+    completed: number;
+    branch?: string | null;
+    status: string;
+    error?: string | null;
+  };
 
   function toErrorMessage(err: unknown): string {
     if (typeof err === "string") return err;
@@ -120,6 +159,21 @@
   function currentBranchName(): string {
     const rawBranch = selectedBranch?.name?.trim() ?? "";
     return normalizeBranchName(rawBranch);
+  }
+
+  function normalizeSummaryLanguage(value: string | null | undefined): string {
+    const language = (value ?? "").trim().toLowerCase();
+    if (language === "ja" || language === "en" || language === "auto") {
+      return language;
+    }
+    return "auto";
+  }
+
+  function summaryLanguageLabel(value: string | null): string | null {
+    const language = normalizeSummaryLanguage(value);
+    if (language === "ja") return "Japanese";
+    if (language === "en") return "English";
+    return language === "auto" ? "Auto" : null;
   }
 
   function hasAgentTabForBranch(branch: string): boolean {
@@ -273,6 +327,39 @@
     return `${entry.tool_id}-${entry.timestamp}`;
   }
 
+  function normalizeLinkedIssue(value: unknown): BranchLinkedIssueInfo | null {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+
+    const candidate = value as Partial<BranchLinkedIssueInfo>;
+    if (typeof candidate.number !== "number") return null;
+    if (typeof candidate.title !== "string") return null;
+
+    return {
+      number: candidate.number,
+      title: candidate.title,
+      updatedAt: typeof candidate.updatedAt === "string" ? candidate.updatedAt : "",
+      labels: Array.isArray(candidate.labels)
+        ? candidate.labels.filter((label): label is string => typeof label === "string")
+        : [],
+      url: typeof candidate.url === "string" ? candidate.url : "",
+    };
+  }
+
+  let latestQuickStartEntry: ToolSessionEntry | null = $derived.by(() => {
+    if (quickStartEntries.length === 0) return null;
+    return quickStartEntries.reduce((latest, entry) => {
+      return entry.timestamp > latest.timestamp ? entry : latest;
+    });
+  });
+
+  let quickHeaderButtonsDisabled = $derived.by(
+    () =>
+      quickStartLoading ||
+      quickLaunching ||
+      !onQuickLaunch ||
+      latestQuickStartEntry === null,
+  );
+
   async function loadQuickStart() {
     quickLaunchError = null;
     quickStartError = null;
@@ -307,11 +394,117 @@
     }
   }
 
+  function formatIsoTimestamp(value: string | null | undefined): string | null {
+    const raw = (value ?? "").trim();
+    if (!raw) return null;
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) return raw;
+    return parsed.toLocaleString();
+  }
+
+  async function loadBranchLinkedIssue() {
+    linkedIssueError = null;
+
+    const branch = currentBranchName();
+    if (!branch) {
+      linkedIssueLoading = false;
+      linkedIssue = null;
+      return;
+    }
+
+    const key = `${projectPath}::${branch}`;
+    linkedIssueLoading = true;
+    try {
+      const invoke = await getInvoke();
+      const rawResult = await invoke<unknown>("fetch_branch_linked_issue", {
+        projectPath,
+        branch,
+      });
+      const result = normalizeLinkedIssue(rawResult);
+      const currentKey = `${projectPath}::${currentBranchName()}`;
+      if (currentKey !== key) return;
+      linkedIssue = result;
+    } catch (err) {
+      linkedIssue = null;
+      linkedIssueError = `Failed to load linked issue: ${toErrorMessage(err)}`;
+    } finally {
+      const currentKey = `${projectPath}::${currentBranchName()}`;
+      if (currentKey === key) {
+        linkedIssueLoading = false;
+      }
+    }
+  }
+
+  async function loadLatestBranchPr() {
+    latestBranchPrError = null;
+
+    const branch = currentBranchName();
+    if (!branch) {
+      latestBranchPrLoading = false;
+      latestBranchPr = null;
+      return;
+    }
+
+    const key = `${projectPath}::${branch}`;
+    latestBranchPrLoading = true;
+    try {
+      const invoke = await getInvoke();
+      const result = await invoke<BranchPrReference | null>("fetch_latest_branch_pr", {
+        projectPath,
+        branch,
+      });
+      const currentKey = `${projectPath}::${currentBranchName()}`;
+      if (currentKey !== key) return;
+      latestBranchPr = result;
+    } catch (err) {
+      latestBranchPr = null;
+      latestBranchPrError = `Failed to load PR: ${toErrorMessage(err)}`;
+    } finally {
+      const currentKey = `${projectPath}::${currentBranchName()}`;
+      if (currentKey === key) {
+        latestBranchPrLoading = false;
+      }
+    }
+  }
+
+  async function loadDockerContext() {
+    dockerContextError = null;
+
+    const branch = currentBranchName();
+    if (!branch) {
+      dockerContextLoading = false;
+      dockerContext = null;
+      return;
+    }
+
+    const key = `${projectPath}::${branch}`;
+    dockerContextLoading = true;
+    try {
+      const invoke = await getInvoke();
+      const result = await invoke<DockerContext>("detect_docker_context", {
+        projectPath,
+        branch,
+      });
+      const currentKey = `${projectPath}::${currentBranchName()}`;
+      if (currentKey !== key) return;
+      dockerContext = result;
+    } catch (err) {
+      dockerContext = null;
+      dockerContextError = `Failed to detect Docker context: ${toErrorMessage(err)}`;
+    } finally {
+      const currentKey = `${projectPath}::${currentBranchName()}`;
+      if (currentKey === key) {
+        dockerContextLoading = false;
+      }
+    }
+  }
+
   async function loadSessionSummary(
     options: { silent?: boolean; cachedOnly?: boolean } = {},
   ) {
     const silent = options.silent === true;
     const cachedOnly = options.cachedOnly === true;
+    const normalizedLanguage = normalizeSummaryLanguage(preferredLanguage);
     sessionSummaryError = null;
     sessionSummaryWarning = null;
 
@@ -323,6 +516,7 @@
       sessionSummaryMarkdown = null;
       sessionSummaryToolId = null;
       sessionSummarySessionId = null;
+      sessionSummaryLanguage = null;
       sessionSummarySourceType = null;
       sessionSummaryInputMtimeMs = null;
       sessionSummaryUpdatedMs = null;
@@ -337,6 +531,7 @@
       sessionSummaryMarkdown = null;
       sessionSummaryToolId = null;
       sessionSummarySessionId = null;
+      sessionSummaryLanguage = null;
       sessionSummarySourceType = null;
       sessionSummaryInputMtimeMs = null;
       sessionSummaryUpdatedMs = null;
@@ -348,6 +543,7 @@
         projectPath,
         branch,
         cachedOnly,
+        preferredLanguage: normalizedLanguage,
       });
 
       const currentKey = `${projectPath}::${currentBranchName()}`;
@@ -365,6 +561,7 @@
       sessionSummaryError = result.error ?? null;
       sessionSummaryToolId = result.toolId ?? null;
       sessionSummarySessionId = result.sessionId ?? null;
+      sessionSummaryLanguage = result.language ?? normalizedLanguage;
       sessionSummarySourceType = result.sourceType ?? null;
       sessionSummaryInputMtimeMs = result.inputMtimeMs ?? null;
       sessionSummaryUpdatedMs = result.summaryUpdatedMs ?? null;
@@ -376,6 +573,7 @@
       }
       sessionSummaryToolId = null;
       sessionSummarySessionId = null;
+      sessionSummaryLanguage = null;
       sessionSummarySourceType = null;
       sessionSummaryInputMtimeMs = null;
       sessionSummaryUpdatedMs = null;
@@ -392,6 +590,9 @@
     void selectedBranch;
     void projectPath;
     loadQuickStart();
+    loadBranchLinkedIssue();
+    loadLatestBranchPr();
+    loadDockerContext();
   });
 
   $effect(() => {
@@ -399,6 +600,7 @@
     void projectPath;
     void agentTabBranches;
     void activeAgentTabBranch;
+    void preferredLanguage;
 
     const branch = currentBranchName();
     if (!branch) {
@@ -436,12 +638,13 @@
   });
 
   onMount(() => {
-    let unlisten: null | (() => void) = null;
+    let unlistenSummaryUpdated: null | (() => void) = null;
+    let unlistenRebuildProgress: null | (() => void) = null;
     let cancelled = false;
     (async () => {
       try {
         const { listen } = await import("@tauri-apps/api/event");
-        const unlistenFn = await listen<SessionSummaryUpdatedPayload>(
+        const unlistenSummaryFn = await listen<SessionSummaryUpdatedPayload>(
           "session-summary-updated",
           (event) => {
             const payload = event.payload;
@@ -465,16 +668,48 @@
             sessionSummaryError = result.error ?? null;
             sessionSummaryToolId = result.toolId ?? null;
             sessionSummarySessionId = result.sessionId ?? null;
+            sessionSummaryLanguage =
+              result.language ?? normalizeSummaryLanguage(preferredLanguage);
             sessionSummarySourceType = result.sourceType ?? null;
             sessionSummaryInputMtimeMs = result.inputMtimeMs ?? null;
             sessionSummaryUpdatedMs = result.summaryUpdatedMs ?? null;
           }
         );
+        const unlistenRebuildFn = await listen<SessionSummaryRebuildProgressPayload>(
+          "session-summary-rebuild-progress",
+          (event) => {
+            const payload = event.payload;
+            if (!payload) return;
+            if (payload.projectPath !== projectPath) return;
+
+            summaryRebuildTotal = payload.total ?? 0;
+            summaryRebuildCompleted = payload.completed ?? 0;
+            summaryRebuildBranch = payload.branch ?? null;
+            if (payload.status === "started") {
+              summaryRebuildError = null;
+            } else if (payload.error) {
+              summaryRebuildError = payload.error;
+            }
+            summaryRebuildInProgress = payload.status !== "completed";
+
+            if (payload.status === "completed") {
+              const branch = currentBranchName();
+              if (!branch) return;
+              const tabExists = hasAgentTabForBranch(branch);
+              loadSessionSummary({
+                silent: true,
+                cachedOnly: !tabExists,
+              });
+            }
+          }
+        );
         if (cancelled) {
-          unlistenFn();
+          unlistenSummaryFn();
+          unlistenRebuildFn();
           return;
         }
-        unlisten = unlistenFn;
+        unlistenSummaryUpdated = unlistenSummaryFn;
+        unlistenRebuildProgress = unlistenRebuildFn;
       } catch (err) {
         // Ignore when Tauri event bridge is unavailable (e.g., tests/web preview).
       }
@@ -482,9 +717,8 @@
 
     return () => {
       cancelled = true;
-      if (unlisten) {
-        unlisten();
-      }
+      if (unlistenSummaryUpdated) unlistenSummaryUpdated();
+      if (unlistenRebuildProgress) unlistenRebuildProgress();
     };
   });
 
@@ -496,6 +730,11 @@
     prDetailBranch = nextBranch;
     prDetailPrNumber = null;
   }
+
+  let resolvedPrNumber = $derived.by(() => latestBranchPr?.number ?? prNumber ?? null);
+  let workflowDisplayPrNumber = $derived.by(
+    () => latestBranchPr?.number ?? prDetail?.number ?? resolvedPrNumber,
+  );
 
   $effect(() => {
     const nextProjectPath = projectPath ?? "";
@@ -540,7 +779,8 @@
     if (activeTab !== "pr" && activeTab !== "workflow") return;
 
     const branch = currentBranchName();
-    if (!branch || !prNumber) {
+    const prNum = resolvedPrNumber;
+    if (!branch || !prNum) {
       const nextBranch = branch || null;
       if (
         prDetailBranch !== nextBranch ||
@@ -554,9 +794,9 @@
       return;
     }
 
-    if (branch !== prDetailBranch || prNumber !== prDetailPrNumber) {
+    if (branch !== prDetailBranch || prNum !== prDetailPrNumber) {
       prDetailBranch = branch;
-      loadPrDetail(branch, prNumber);
+      loadPrDetail(branch, prNum);
     }
   });
 
@@ -649,10 +889,37 @@
     <div class="branch-detail">
       <div class="branch-header">
         <h2>{selectedBranch.name}</h2>
-        <button class="launch-btn" onclick={() => onLaunchAgent?.()}>
-          Launch Agent...
-        </button>
+        <div class="branch-header-actions">
+          <button
+            class="header-quick-btn"
+            disabled={quickHeaderButtonsDisabled}
+            onclick={() => latestQuickStartEntry && quickLaunch(latestQuickStartEntry, "continue")}
+          >
+            {quickLaunching &&
+            latestQuickStartEntry &&
+            quickLaunchingKey === quickStartEntryKey(latestQuickStartEntry)
+              ? "Launching..."
+              : "Continue"}
+          </button>
+          <button
+            class="header-quick-btn ghost"
+            disabled={quickHeaderButtonsDisabled}
+            onclick={() => latestQuickStartEntry && quickLaunch(latestQuickStartEntry, "new")}
+          >
+            New
+          </button>
+          <button class="launch-btn" onclick={() => onLaunchAgent?.()}>
+            Launch Agent...
+          </button>
+        </div>
       </div>
+
+      {#if quickStartError}
+        <div class="quick-error">{quickStartError}</div>
+      {/if}
+      {#if quickLaunchError}
+        <div class="quick-error">{quickLaunchError}</div>
+      {/if}
 
       <div class="summary-tabs">
         <button
@@ -670,6 +937,15 @@
           }}
         >
           Git
+        </button>
+        <button
+          class="summary-tab"
+          class:active={activeTab === "issue"}
+          onclick={() => {
+            activeTab = "issue";
+          }}
+        >
+          Issue
         </button>
         <button
           class="summary-tab"
@@ -691,15 +967,6 @@
         </button>
         <button
           class="summary-tab"
-          class:active={activeTab === "ai"}
-          onclick={() => {
-            activeTab = "ai";
-          }}
-        >
-          AI
-        </button>
-        <button
-          class="summary-tab"
           class:active={activeTab === "docker"}
           onclick={() => {
             activeTab = "docker";
@@ -710,177 +977,18 @@
       </div>
 
       {#if activeTab === "summary"}
-        <div class="detail-grid">
-          <div class="detail-item">
-            <span class="detail-label">Commit</span>
-            <span class="detail-value mono">{selectedBranch.commit}</span>
-          </div>
-          <div class="detail-item">
-            <span class="detail-label">Status</span>
-            <span class="detail-value">
-              {selectedBranch.divergence_status}
-              {#if selectedBranch.ahead > 0}
-                (+{selectedBranch.ahead})
-              {/if}
-              {#if selectedBranch.behind > 0}
-                (-{selectedBranch.behind})
-              {/if}
-            </span>
-          </div>
-          <div class="detail-item">
-            <span class="detail-label">Current</span>
-            <span class="detail-value">{selectedBranch.is_current ? "Yes" : "No"}</span>
-          </div>
-        </div>
-
-        <div class="quick-start">
-          <div class="quick-header">
-            <span class="quick-title">Quick Start</span>
-            {#if quickStartLoading}
-              <span class="quick-subtitle">Loading...</span>
-            {:else if quickStartEntries.length > 0}
-              <span class="quick-subtitle">
-                {quickStartEntries.length} tool{quickStartEntries.length === 1 ? "" : "s"}
-              </span>
-            {:else}
-              <span class="quick-subtitle">No history</span>
-            {/if}
-          </div>
-
-          {#if quickStartError}
-            <div class="quick-error">{quickStartError}</div>
-          {/if}
-
-          {#if quickLaunchError}
-            <div class="quick-error">{quickLaunchError}</div>
-          {/if}
-
-          {#if !quickStartLoading && quickStartEntries.length === 0}
-            <div class="quick-empty">
-              Launch an agent once on this branch to enable Quick Start.
-            </div>
-          {:else if quickStartEntries.length > 0}
-            <div class="quick-list">
-              {#each quickStartEntries as entry (quickStartEntryKey(entry))}
-                <div class="quick-row">
-                  <div class="quick-info">
-                    <div class="quick-tool {toolClass(entry)}">
-                      <span class="quick-tool-name">{displayToolName(entry)}</span>
-                      <span class="quick-tool-version">
-                        @{displayToolVersion(entry)}
-                      </span>
-                    </div>
-                    <div class="quick-meta">
-                      {#if runtimeLabel(entry)}
-                        <span class="quick-pill">runtime: {runtimeLabel(entry)}</span>
-                      {/if}
-                      {#if runtimeService(entry)}
-                        <span class="quick-pill">service: {runtimeService(entry)}</span>
-                      {/if}
-                      {#if displayModelLabel(entry) !== null}
-                        <span class="quick-pill">model: {displayModelLabel(entry)}</span>
-                      {/if}
-                      {#if toolClass(entry) === "codex" && entry.reasoning_level}
-                        <span class="quick-pill">reasoning: {entry.reasoning_level}</span>
-                      {/if}
-                      {#if entry.skip_permissions !== undefined && entry.skip_permissions !== null}
-                        <span class="quick-pill">
-                          skip: {entry.skip_permissions ? "on" : "off"}
-                        </span>
-                      {/if}
-                    </div>
-                  </div>
-                  <div class="quick-actions">
-                    <button
-                      class="quick-btn"
-                      disabled={quickLaunching}
-                      onclick={() => quickLaunch(entry, "continue")}
-                    >
-                      {quickLaunching && quickLaunchingKey === quickStartEntryKey(entry)
-                        ? "Launching..."
-                        : "Continue"}
-                    </button>
-                    <button
-                      class="quick-btn ghost"
-                      disabled={quickLaunching}
-                      onclick={() => quickLaunch(entry, "new")}
-                    >
-                      New
-                    </button>
-                  </div>
-                </div>
-              {/each}
-            </div>
-          {/if}
-        </div>
-
-      {:else if activeTab === "git"}
-        <GitSection
-          projectPath={projectPath}
-          branch={selectedBranch.name}
-          collapsible={false}
-          defaultCollapsed={false}
-        />
-      {:else if activeTab === "pr"}
-        <PrStatusSection
-          prDetail={prDetail}
-          loading={prDetailLoading}
-          error={ghCliStatusMessage ?? prDetailError}
-        />
-      {:else if activeTab === "workflow"}
-        <div class="quick-start workflow-panel">
-          <div class="quick-header">
-            <span class="quick-title">Workflow</span>
-            {#if prDetailLoading}
-              <span class="quick-subtitle">Loading...</span>
-            {:else if ghCliStatusMessage}
-              <span class="quick-subtitle">GitHub CLI issue</span>
-            {:else if prDetailError}
-              <span class="quick-subtitle">Error</span>
-            {:else if prDetail}
-              <span class="quick-subtitle">#{prDetail.number}</span>
-            {:else}
-              <span class="quick-subtitle">No PR</span>
-            {/if}
-          </div>
-
-          {#if prDetailLoading}
-            <div class="session-summary-placeholder">Loading...</div>
-          {:else if ghCliStatusMessage}
-            <div class="quick-error">{ghCliStatusMessage}</div>
-          {:else if prDetailError}
-            <div class="quick-error">
-              {prDetailError}
-            </div>
-          {:else if !prDetail}
-            <div class="session-summary-placeholder">No PR.</div>
-          {:else if prDetail.checkSuites.length > 0}
-            <div class="workflow-list">
-              {#each prDetail.checkSuites as run}
-                <button
-                  class="workflow-run-item"
-                  type="button"
-                  onclick={() => openWorkflowRun(run)}
-                >
-                  <span class="workflow-status {workflowStatusClass(run)}"
-                    >{workflowStatusIcon(run)}</span
-                  >
-                  <span class="workflow-name">{run.workflowName}</span>
-                  <span class="workflow-status-text">
-                    {workflowStatusText(run)}
-                  </span>
-                </button>
-              {/each}
-            </div>
-          {:else}
-            <div class="workflow-empty">No workflows</div>
-          {/if}
-        </div>
-      {:else if activeTab === "ai"}
         <div class="quick-start ai-summary">
           <div class="quick-header">
-            <span class="quick-title">AI</span>
-            {#if sessionSummaryLoading}
+            <span class="quick-title">Summary</span>
+            {#if summaryRebuildInProgress}
+              <span class="quick-subtitle rebuild-progress">
+                <span class="summary-spinner" aria-hidden="true"></span>
+                Rebuilding summaries ({summaryRebuildCompleted}/{summaryRebuildTotal})
+                {#if summaryRebuildBranch}
+                  - {summaryRebuildBranch}
+                {/if}
+              </span>
+            {:else if sessionSummaryLoading}
               <span class="quick-subtitle">Loading...</span>
             {:else if sessionSummaryStatus === "ok" && sessionSummaryToolId}
               <span class="quick-subtitle">
@@ -910,7 +1018,8 @@
             (sessionSummaryToolId || sessionSummarySessionId)}
             {@const inputTime = formatSessionSummaryTimestamp(sessionSummaryInputMtimeMs)}
             {@const updatedTime = formatSessionSummaryTimestamp(sessionSummaryUpdatedMs)}
-            {#if sessionSummarySourceType || inputTime || updatedTime}
+            {@const languageLabel = summaryLanguageLabel(sessionSummaryLanguage)}
+            {#if sessionSummarySourceType || languageLabel || inputTime || updatedTime}
               <div class="session-summary-meta">
                 <span class="meta-item">
                   Source: {sessionSummarySourceType === "scrollback" ||
@@ -918,6 +1027,9 @@
                     ? "Live (scrollback)"
                     : "Session"}
                 </span>
+                {#if languageLabel}
+                  <span class="meta-item">Language: {languageLabel}</span>
+                {/if}
                 {#if inputTime}
                   <span class="meta-item">Input updated: {inputTime}</span>
                 {/if}
@@ -931,6 +1043,11 @@
           {#if sessionSummaryWarning}
             <div class="session-summary-warning">
               {sessionSummaryWarning}
+            </div>
+          {/if}
+          {#if summaryRebuildError && !summaryRebuildInProgress}
+            <div class="session-summary-warning">
+              Rebuild warning: {summaryRebuildError}
             </div>
           {/if}
 
@@ -959,10 +1076,190 @@
             <div class="session-summary-placeholder">No summary.</div>
           {/if}
         </div>
+      {:else if activeTab === "git"}
+        <div class="detail-grid">
+          <div class="detail-item">
+            <span class="detail-label">Commit</span>
+            <span class="detail-value mono">{selectedBranch.commit}</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Status</span>
+            <span class="detail-value">
+              {selectedBranch.divergence_status}
+              {#if selectedBranch.ahead > 0}
+                (+{selectedBranch.ahead})
+              {/if}
+              {#if selectedBranch.behind > 0}
+                (-{selectedBranch.behind})
+              {/if}
+            </span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Current</span>
+            <span class="detail-value">{selectedBranch.is_current ? "Yes" : "No"}</span>
+          </div>
+        </div>
+        <GitSection
+          projectPath={projectPath}
+          branch={selectedBranch.name}
+          collapsible={false}
+          defaultCollapsed={false}
+        />
+      {:else if activeTab === "issue"}
+        <div class="quick-start issue-panel">
+          <div class="quick-header">
+            <span class="quick-title">Issue</span>
+            {#if linkedIssueLoading}
+              <span class="quick-subtitle">Loading...</span>
+            {:else if linkedIssueError}
+              <span class="quick-subtitle">Error</span>
+            {:else if linkedIssue}
+              <span class="quick-subtitle">#{linkedIssue.number}</span>
+            {:else}
+              <span class="quick-subtitle">No linked issue</span>
+            {/if}
+          </div>
+
+          {#if linkedIssueLoading}
+            <div class="session-summary-placeholder">Loading...</div>
+          {:else if linkedIssueError}
+            <div class="quick-error">{linkedIssueError}</div>
+          {:else if !linkedIssue}
+            <div class="session-summary-placeholder">
+              No issue linked to this branch.
+            </div>
+          {:else}
+            {@const issueUpdated = formatIsoTimestamp(linkedIssue.updatedAt)}
+            <div class="linked-issue-card">
+              <a
+                class="linked-issue-title"
+                href={linkedIssue.url}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                #{linkedIssue.number} {linkedIssue.title}
+              </a>
+              <div class="quick-meta">
+                {#if issueUpdated}
+                  <span class="quick-pill">updated: {issueUpdated}</span>
+                {/if}
+                {#if linkedIssue.labels.length === 0}
+                  <span class="quick-pill">labels: none</span>
+                {:else}
+                  {#each linkedIssue.labels as label}
+                    <span class="quick-pill">label: {label}</span>
+                  {/each}
+                {/if}
+              </div>
+            </div>
+          {/if}
+        </div>
+      {:else if activeTab === "pr"}
+        <PrStatusSection
+          prDetail={prDetail}
+          loading={latestBranchPrLoading || (resolvedPrNumber !== null && prDetailLoading)}
+          error={ghCliStatusMessage ?? latestBranchPrError ?? prDetailError}
+        />
+      {:else if activeTab === "workflow"}
+        <div class="quick-start workflow-panel">
+          <div class="quick-header">
+            <span class="quick-title">Workflow</span>
+            {#if latestBranchPrLoading || (resolvedPrNumber !== null && prDetailLoading)}
+              <span class="quick-subtitle">Loading...</span>
+            {:else if ghCliStatusMessage}
+              <span class="quick-subtitle">GitHub CLI issue</span>
+            {:else if latestBranchPrError || prDetailError}
+              <span class="quick-subtitle">Error</span>
+            {:else if workflowDisplayPrNumber !== null}
+              <span class="quick-subtitle">#{workflowDisplayPrNumber}</span>
+            {:else}
+              <span class="quick-subtitle">No PR</span>
+            {/if}
+          </div>
+
+          {#if latestBranchPrLoading || (resolvedPrNumber !== null && prDetailLoading)}
+            <div class="session-summary-placeholder">Loading...</div>
+          {:else if ghCliStatusMessage}
+            <div class="quick-error">{ghCliStatusMessage}</div>
+          {:else if latestBranchPrError || prDetailError}
+            <div class="quick-error">{latestBranchPrError ?? prDetailError}</div>
+          {:else if workflowDisplayPrNumber === null && !prDetail}
+            <div class="session-summary-placeholder">No PR.</div>
+          {:else if !prDetail}
+            <div class="session-summary-placeholder">Loading PR details...</div>
+          {:else if prDetail.checkSuites.length > 0}
+            <div class="workflow-list">
+              {#each prDetail.checkSuites as run}
+                <button
+                  class="workflow-run-item"
+                  type="button"
+                  onclick={() => openWorkflowRun(run)}
+                >
+                  <span class="workflow-status {workflowStatusClass(run)}"
+                    >{workflowStatusIcon(run)}</span
+                  >
+                  <span class="workflow-name">{run.workflowName}</span>
+                  <span class="workflow-status-text">
+                    {workflowStatusText(run)}
+                  </span>
+                </button>
+              {/each}
+            </div>
+          {:else}
+            <div class="workflow-empty">No workflows</div>
+          {/if}
+        </div>
       {:else if activeTab === "docker"}
         <div class="quick-start docker-summary">
           <div class="quick-header">
             <span class="quick-title">Docker</span>
+            {#if dockerContextLoading}
+              <span class="quick-subtitle">Detecting...</span>
+            {:else if dockerContext}
+              <span class="quick-subtitle">Current: {dockerContext.file_type}</span>
+            {:else if dockerContextError}
+              <span class="quick-subtitle">Current: error</span>
+            {:else}
+              <span class="quick-subtitle">Current: n/a</span>
+            {/if}
+          </div>
+
+          {#if dockerContextLoading}
+            <div class="session-summary-placeholder">Detecting Docker context...</div>
+          {:else if dockerContextError}
+            <div class="quick-error">{dockerContextError}</div>
+          {:else if dockerContext}
+            <div class="docker-current">
+              <div class="quick-meta">
+                <span class="quick-pill">type: {dockerContext.file_type}</span>
+                <span class="quick-pill">
+                  docker: {dockerContext.docker_available ? "available" : "unavailable"}
+                </span>
+                <span class="quick-pill">
+                  compose: {dockerContext.compose_available ? "available" : "unavailable"}
+                </span>
+                <span class="quick-pill">
+                  daemon: {dockerContext.daemon_running ? "running" : "stopped"}
+                </span>
+                <span class="quick-pill">
+                  force-host: {dockerContext.force_host ? "on" : "off"}
+                </span>
+                {#if dockerContext.worktree_path}
+                  <span class="quick-pill">worktree: {dockerContext.worktree_path}</span>
+                {/if}
+                {#if dockerContext.compose_services.length > 0}
+                  <span class="quick-pill">
+                    services: {dockerContext.compose_services.join(", ")}
+                  </span>
+                {/if}
+              </div>
+            </div>
+          {:else}
+            <div class="session-summary-placeholder">No Docker context.</div>
+          {/if}
+
+          <div class="quick-header">
+            <span class="quick-title">Quick Start history</span>
             {#if quickStartLoading}
               <span class="quick-subtitle">Loading...</span>
             {:else if dockerSummaryRows.length > 0}
@@ -1079,6 +1376,15 @@
     gap: 12px;
   }
 
+  .branch-header-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+  }
+
   .branch-detail h2 {
     font-size: var(--ui-font-lg);
     font-weight: 700;
@@ -1105,6 +1411,34 @@
 
   .launch-btn:hover {
     background: var(--accent-hover);
+  }
+
+  .header-quick-btn {
+    padding: 6px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    font-size: var(--ui-font-sm);
+    font-weight: 700;
+    cursor: pointer;
+    font-family: inherit;
+    transition: border-color 0.15s, background-color 0.15s;
+    white-space: nowrap;
+  }
+
+  .header-quick-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+  }
+
+  .header-quick-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .header-quick-btn.ghost {
+    background: transparent;
+    color: var(--text-secondary);
   }
 
   .detail-grid {
@@ -1173,6 +1507,30 @@
     text-align: right;
   }
 
+  .quick-subtitle.rebuild-progress {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .summary-spinner {
+    width: 12px;
+    height: 12px;
+    border: 2px solid rgba(255, 255, 255, 0.25);
+    border-top-color: rgba(255, 255, 255, 0.75);
+    border-radius: 999px;
+    animation: summary-spin 0.8s linear infinite;
+  }
+
+  @keyframes summary-spin {
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
   .session-summary-meta {
     display: flex;
     flex-wrap: wrap;
@@ -1223,6 +1581,28 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
+  }
+
+  .linked-issue-card {
+    border: 1px solid var(--border-color);
+    background: var(--bg-primary);
+    border-radius: 10px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .linked-issue-title {
+    color: var(--accent);
+    text-decoration: none;
+    font-weight: 700;
+    font-size: var(--ui-font-sm);
+    overflow-wrap: anywhere;
+  }
+
+  .linked-issue-title:hover {
+    text-decoration: underline;
   }
 
   .quick-row {
@@ -1346,6 +1726,13 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+
+  .docker-current {
+    border: 1px solid var(--border-color);
+    background: var(--bg-primary);
+    border-radius: 10px;
+    padding: 10px 12px;
   }
 
   .docker-summary-item {

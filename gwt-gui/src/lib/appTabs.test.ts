@@ -7,9 +7,9 @@ import {
 import type { Tab } from "./types";
 
 describe("appTabs", () => {
-  it("uses Agent Mode as the only default tab", () => {
+  it("uses Master Agent as the only default tab", () => {
     expect(defaultAppTabs()).toEqual([
-      { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+      { id: "agentMode", label: "Master Agent", type: "agentMode" },
     ]);
   });
 
@@ -20,13 +20,13 @@ describe("appTabs", () => {
 
   it("moves dragged tab before target tab", () => {
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+      { id: "agentMode", label: "Master Agent", type: "agentMode" },
       { id: "settings", label: "Settings", type: "settings" },
       { id: "versionHistory", label: "Version History", type: "versionHistory" },
     ];
 
     expect(reorderTabsByDrop(tabs, "versionHistory", "settings", "before")).toEqual([
-      { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+      { id: "agentMode", label: "Master Agent", type: "agentMode" },
       { id: "versionHistory", label: "Version History", type: "versionHistory" },
       { id: "settings", label: "Settings", type: "settings" },
     ]);
@@ -34,7 +34,7 @@ describe("appTabs", () => {
 
   it("moves dragged tab after target tab", () => {
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+      { id: "agentMode", label: "Master Agent", type: "agentMode" },
       { id: "settings", label: "Settings", type: "settings" },
       { id: "versionHistory", label: "Version History", type: "versionHistory" },
     ];
@@ -42,13 +42,13 @@ describe("appTabs", () => {
     expect(reorderTabsByDrop(tabs, "agentMode", "versionHistory", "after")).toEqual([
       { id: "settings", label: "Settings", type: "settings" },
       { id: "versionHistory", label: "Version History", type: "versionHistory" },
-      { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+      { id: "agentMode", label: "Master Agent", type: "agentMode" },
     ]);
   });
 
   it("returns the original array when no reorder is needed", () => {
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+      { id: "agentMode", label: "Master Agent", type: "agentMode" },
       { id: "settings", label: "Settings", type: "settings" },
       { id: "versionHistory", label: "Version History", type: "versionHistory" },
     ];

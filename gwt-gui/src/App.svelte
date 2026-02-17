@@ -2,6 +2,7 @@
   import type {
     Tab,
     BranchInfo,
+    GitHubIssueInfo,
     ProjectInfo,
     LaunchAgentRequest,
     LaunchFinishedPayload,
@@ -55,11 +56,24 @@
     type VoiceControllerState,
   } from "./lib/voice/voiceInputController";
   import { createSystemMonitor } from "./lib/systemMonitor.svelte";
+  import {
+    getWindowSession,
+    loadWindowSessions,
+    removeWindowSession,
+    upsertWindowSession,
+  } from "./lib/windowSessions";
 
   interface SettingsUpdatedPayload {
     uiFontSize?: number;
     terminalFontSize?: number;
+    appLanguage?: SettingsData["app_language"];
     voiceInput?: VoiceInputSettings;
+  }
+
+  interface AgentModeSpecIssuePayload {
+    issueNumber: number;
+    specId?: string | null;
+    issueUrl?: string | null;
   }
 
   const SIDEBAR_WIDTH_STORAGE_KEY = "gwt.sidebar.width";
@@ -67,6 +81,8 @@
   const DEFAULT_SIDEBAR_WIDTH_PX = 260;
   const MIN_SIDEBAR_WIDTH_PX = 220;
   const MAX_SIDEBAR_WIDTH_PX = 520;
+  const WINDOW_SESSION_RESTORE_LEAD_KEY = "gwt.windowSessions.restoreLeader.v1";
+  const WINDOW_SESSION_RESTORE_LEAD_TTL_MS = 15_000;
   type SidebarMode = "branch" | "agent";
 
   const DEFAULT_VOICE_INPUT_SETTINGS: VoiceInputSettings = {
@@ -128,6 +144,7 @@
   let sidebarWidthPx: number = $state(loadSidebarWidth());
   let sidebarMode: SidebarMode = $state(loadSidebarMode());
   let showAgentLaunch: boolean = $state(false);
+  let prefillIssue: GitHubIssueInfo | null = $state(null);
   let showCleanupModal: boolean = $state(false);
   let cleanupPreselectedBranch: string | null = $state(null);
   let showAbout: boolean = $state(false);
@@ -136,6 +153,12 @@
   let appError: string | null = $state(null);
   let sidebarRefreshKey: number = $state(0);
   let worktreesEventAvailable: boolean = $state(false);
+  let windowSessionRestoreStarted: boolean = false;
+  let currentWindowLabel: string | null = $state(null);
+  type WindowSessionRestoreLeaderState = {
+    label: string;
+    expiresAt: number;
+  };
 
   let selectedBranch: BranchInfo | null = $state(null);
   let currentBranch: string = $state("");
@@ -192,6 +215,7 @@
   let voiceInputSettings: VoiceInputSettings = $state(
     DEFAULT_VOICE_INPUT_SETTINGS,
   );
+  let appLanguage: SettingsData["app_language"] = $state("auto");
   let voiceInputListening = $state(false);
   let voiceInputSupported = $state(true);
   let voiceInputError: string | null = $state(null);
@@ -440,6 +464,34 @@
     void applyAppearanceSettings();
   });
 
+  $effect(() => {
+    if (windowSessionRestoreStarted) return;
+    windowSessionRestoreStarted = true;
+
+    (async () => {
+      const label = await resolveCurrentWindowLabel();
+      if (!label) return;
+      const isRestoreLeader = tryAcquireWindowSessionRestoreLead(label);
+
+      const sessions = loadWindowSessions();
+      const normalizedSessions = sessions.filter(
+        (entry) => entry.label !== label && entry.projectPath,
+      );
+
+      if (isRestoreLeader) {
+        try {
+          for (const entry of normalizedSessions) {
+            await openAndNormalizeWindowSession(entry.label, entry.projectPath);
+          }
+        } finally {
+          releaseWindowSessionRestoreLead(label);
+        }
+      }
+
+      await restoreWindowSessionProject(label);
+    })();
+  });
+
   // Best-effort: subscribe once and refresh Sidebar when worktrees change.
   $effect(() => {
     let unlisten: null | (() => void) = null;
@@ -612,6 +664,16 @@
     };
   }
 
+  function normalizeAppLanguage(
+    value: string | null | undefined,
+  ): SettingsData["app_language"] {
+    const language = (value ?? "").trim().toLowerCase();
+    if (language === "ja" || language === "en" || language === "auto") {
+      return language as SettingsData["app_language"];
+    }
+    return "auto";
+  }
+
   function applyUiFontSize(size: number) {
     document.documentElement.style.setProperty("--ui-font-base", `${size}px`);
   }
@@ -628,6 +690,23 @@
   ) {
     voiceInputSettings = normalizeVoiceInputSettings(value);
     voiceController?.updateSettings();
+  }
+
+  function applyAppLanguage(value: string | null | undefined) {
+    appLanguage = normalizeAppLanguage(value);
+  }
+
+  async function rebuildAllBranchSessionSummaries(language: SettingsData["app_language"]) {
+    if (!projectPath) return;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("rebuild_all_branch_session_summaries", {
+        projectPath,
+        preferredLanguage: language,
+      });
+    } catch (err) {
+      showToast(`Failed to rebuild summaries: ${toErrorMessage(err)}`, 12000);
+    }
   }
 
   function activeAgentPaneId(): string | null {
@@ -650,6 +729,14 @@
     return activeAgentPaneId();
   }
 
+  function readCurrentWindowLabelFromInternals(): string | null {
+    if (typeof window === "undefined") return null;
+    const metadataLabel = (window as any)?.__TAURI_INTERNALS__?.metadata?.currentWindow?.label;
+    if (typeof metadataLabel !== "string") return null;
+    const next = metadataLabel.trim();
+    return next.length > 0 ? next : null;
+  }
+
   async function applyAppearanceSettings() {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
@@ -657,15 +744,160 @@
         await invoke<
           Pick<
             SettingsData,
-            "ui_font_size" | "terminal_font_size" | "voice_input"
+            "ui_font_size" | "terminal_font_size" | "app_language" | "voice_input"
           >
         >("get_settings");
       applyUiFontSize(clampFontSize(settings.ui_font_size ?? 13));
       applyTerminalFontSize(clampFontSize(settings.terminal_font_size ?? 13));
+      applyAppLanguage(settings.app_language);
       applyVoiceInputSettings(settings.voice_input);
     } catch {
       // Ignore: settings API not available outside Tauri runtime.
     }
+  }
+
+  async function resolveCurrentWindowLabel(): Promise<string | null> {
+    if (currentWindowLabel) return currentWindowLabel;
+
+    const fromInternals = readCurrentWindowLabelFromInternals();
+    if (fromInternals) {
+      currentWindowLabel = fromInternals;
+      return fromInternals;
+    }
+
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const label = await invoke<string>("get_current_window_label");
+      const next = label?.trim();
+      if (!next) return null;
+      currentWindowLabel = next;
+      return next;
+    } catch {
+      return null;
+    }
+  }
+
+  function readWindowSessionRestoreLeader(
+    storage: Storage,
+  ): WindowSessionRestoreLeaderState | null {
+    try {
+      const raw = storage.getItem(WINDOW_SESSION_RESTORE_LEAD_KEY);
+      if (!raw) return null;
+
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object") return null;
+
+      const label = typeof parsed.label === "string" ? parsed.label.trim() : "";
+      const expiresAtRaw = parsed.expiresAt;
+      const expiresAt =
+        typeof expiresAtRaw === "number" && Number.isFinite(expiresAtRaw)
+          ? Math.floor(expiresAtRaw)
+          : NaN;
+
+      if (!label || !Number.isFinite(expiresAt)) return null;
+
+      return { label, expiresAt };
+    } catch {
+      return null;
+    }
+  }
+
+  function tryAcquireWindowSessionRestoreLead(
+    label: string,
+  ): boolean {
+    if (typeof window === "undefined") return false;
+    let store: Storage;
+    try {
+      store = window.localStorage;
+    } catch {
+      return false;
+    }
+
+    try {
+      const existing = readWindowSessionRestoreLeader(store);
+      const now = Date.now();
+      if (
+        existing &&
+        existing.label.length > 0 &&
+        existing.expiresAt > now &&
+        existing.label !== label
+      ) {
+        return false;
+      }
+
+      const next: WindowSessionRestoreLeaderState = {
+        label,
+        expiresAt: now + WINDOW_SESSION_RESTORE_LEAD_TTL_MS,
+      };
+      store.setItem(WINDOW_SESSION_RESTORE_LEAD_KEY, JSON.stringify(next));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function releaseWindowSessionRestoreLead(label: string) {
+    if (typeof window === "undefined") return;
+    try {
+      const rawStore = window.localStorage;
+      const existing = readWindowSessionRestoreLeader(rawStore);
+      if (!existing || existing.label !== label) return;
+      rawStore.removeItem(WINDOW_SESSION_RESTORE_LEAD_KEY);
+    } catch {
+      // Ignore storage failures.
+    }
+  }
+
+  async function updateWindowSession(projectPathForWindow: string | null) {
+    const label = await resolveCurrentWindowLabel();
+    if (!label) return;
+
+    if (projectPathForWindow) {
+      upsertWindowSession(label, projectPathForWindow);
+      return;
+    }
+    removeWindowSession(label);
+  }
+
+  async function openAndNormalizeWindowSession(label: string, projectPath: string) {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const openedLabelRaw = await invoke<unknown>("open_gwt_window", { label });
+      if (typeof openedLabelRaw !== "string") return;
+
+      const openedLabel = openedLabelRaw.trim();
+      if (!openedLabel || openedLabel === label) {
+        return;
+      }
+
+      removeWindowSession(label);
+      upsertWindowSession(openedLabel, projectPath);
+    } catch {
+      // Ignore restore failures: startup session restore is best-effort.
+    }
+  }
+
+  async function restoreWindowSessionProject(label: string) {
+    const session = getWindowSession(label);
+    if (!session?.projectPath) return false;
+
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const info = await invoke<ProjectInfo>("open_project", {
+        path: session.projectPath,
+      });
+      handleOpenedProjectPath(info.path);
+      return true;
+    } catch {
+      removeWindowSession(label);
+      return false;
+    }
+  }
+
+  function handleOpenedProjectPath(path: string) {
+    projectPath = path;
+    fetchCurrentBranch();
+    void updateWindowSession(path);
   }
 
   async function setWindowTitle() {
@@ -686,8 +918,7 @@
   }
 
   function handleProjectOpen(path: string) {
-    projectPath = path;
-    fetchCurrentBranch();
+    handleOpenedProjectPath(path);
   }
 
   function handleBranchSelect(branch: BranchInfo) {
@@ -716,7 +947,7 @@
 
     const tab: Tab = {
       id: "agentMode",
-      label: "Agent Mode",
+      label: "Master Agent",
       type: "agentMode",
     };
     tabs = [...tabs, tab];
@@ -929,7 +1160,7 @@
     if (!merged.some((tab) => tab.id === "agentMode")) {
       merged.unshift({
         id: "agentMode",
-        label: "Agent Mode",
+        label: "Master Agent",
         type: "agentMode",
       });
     }
@@ -1082,6 +1313,81 @@
     activeTabId = tab.id;
   }
 
+  function openIssuesTab() {
+    const existing = tabs.find(
+      (t) => t.type === "issues" || t.id === "issues",
+    );
+    if (existing) {
+      activeTabId = existing.id;
+      return;
+    }
+
+    const tab: Tab = {
+      id: "issues",
+      label: "Issues",
+      type: "issues",
+    };
+    tabs = [...tabs, tab];
+    activeTabId = tab.id;
+  }
+
+  function handleIssueCountChange(count: number) {
+    tabs = tabs.map((t) =>
+      t.id === "issues" ? { ...t, label: count > 0 ? `Issues (${count})` : "Issues" } : t,
+    );
+  }
+
+  function handleWorkOnIssueFromTab(issue: GitHubIssueInfo) {
+    prefillIssue = issue;
+    showAgentLaunch = true;
+  }
+
+  function handleSwitchToWorktreeFromTab(branchName: string) {
+    // Find the matching agent tab and switch to it
+    const agentTab = tabs.find(
+      (t) => t.type === "agent" && normalizeBranchName(t.label) === normalizeBranchName(branchName),
+    );
+    if (agentTab) {
+      activeTabId = agentTab.id;
+      return;
+    }
+    // If no tab exists, select the branch in the sidebar
+    sidebarRefreshKey++;
+  }
+
+  function openIssueSpecTab(payload: AgentModeSpecIssuePayload) {
+    const issueNumber = Number(payload.issueNumber);
+    if (!Number.isFinite(issueNumber) || issueNumber <= 0) return;
+    const specId = payload.specId?.trim() || undefined;
+    const label = specId ? `Spec ${specId}` : `Issue #${issueNumber}`;
+
+    const existing = tabs.find((t) => t.type === "issueSpec" || t.id === "issueSpec");
+    if (existing) {
+      tabs = tabs.map((t) =>
+        t.id === existing.id
+          ? {
+              ...t,
+              label,
+              issueNumber,
+              specId,
+            }
+          : t
+      );
+      activeTabId = existing.id;
+      return;
+    }
+
+    const tab: Tab = {
+      id: "issueSpec",
+      label,
+      type: "issueSpec",
+      issueNumber,
+      ...(specId ? { specId } : {}),
+    };
+    tabs = [...tabs, tab];
+    activeTabId = tab.id;
+  }
+
   function getActiveTerminalPaneId(): string | null {
     const active = tabs.find((t) => t.id === activeTabId);
     if (!active || (active.type !== "agent" && active.type !== "terminal")) {
@@ -1217,8 +1523,7 @@
             const info = await invoke<ProjectInfo>("open_project", {
               path: probe.projectPath,
             });
-            projectPath = info.path;
-            fetchCurrentBranch();
+            handleOpenedProjectPath(info.path);
             return;
           }
 
@@ -1251,8 +1556,7 @@
               const info = await invoke<ProjectInfo>("open_project", {
                 path: probe.projectPath,
               });
-              projectPath = info.path;
-              fetchCurrentBranch();
+              handleOpenedProjectPath(info.path);
               break;
             }
 
@@ -1312,6 +1616,7 @@
           }
 
           projectPath = null;
+          void updateWindowSession(null);
           tabs = defaultAppTabs();
           activeTabId = "agentMode";
           selectedBranch = null;
@@ -1337,6 +1642,9 @@
         break;
       case "version-history":
         openVersionHistoryTab();
+        break;
+      case "git-issues":
+        openIssuesTab();
         break;
       case "check-updates":
         {
@@ -1610,7 +1918,8 @@
       if (
         tab.type === "agentMode" ||
         tab.type === "settings" ||
-        tab.type === "versionHistory"
+        tab.type === "versionHistory" ||
+        tab.type === "issues"
       ) {
         storedTabs.push({
           type: tab.type,
@@ -1749,6 +2058,14 @@
       if (typeof detail.terminalFontSize === "number") {
         applyTerminalFontSize(clampFontSize(detail.terminalFontSize));
       }
+      if (typeof detail.appLanguage === "string") {
+        const nextLanguage = normalizeAppLanguage(detail.appLanguage);
+        const changed = nextLanguage !== appLanguage;
+        applyAppLanguage(nextLanguage);
+        if (changed) {
+          void rebuildAllBranchSessionSummaries(nextLanguage);
+        }
+      }
       if (detail.voiceInput) {
         applyVoiceInputSettings(detail.voiceInput);
       }
@@ -1757,6 +2074,20 @@
     window.addEventListener("gwt-settings-updated", onSettingsUpdated);
     return () =>
       window.removeEventListener("gwt-settings-updated", onSettingsUpdated);
+  });
+
+  $effect(() => {
+    function onOpenIssueSpec(event: Event) {
+      const payload = (event as CustomEvent<AgentModeSpecIssuePayload>).detail;
+      if (!payload) return;
+      openIssueSpecTab(payload);
+    }
+    window.addEventListener("gwt-agent-mode-open-spec-issue", onOpenIssueSpec);
+    return () =>
+      window.removeEventListener(
+        "gwt-agent-mode-open-spec-issue",
+        onOpenIssueSpec,
+      );
   });
 
   // Global keyboard shortcut: Cmd+Shift+K / Ctrl+Shift+K to open Cleanup modal.
@@ -1807,6 +2138,7 @@
           {currentBranch}
           {agentTabBranches}
           {activeAgentTabBranch}
+          {appLanguage}
           onResize={handleSidebarResize}
           onBranchSelect={handleBranchSelect}
           onBranchActivate={handleBranchActivate}
@@ -1826,6 +2158,9 @@
         onTabSelect={handleTabSelect}
         onTabClose={handleTabClose}
         onTabReorder={handleTabReorder}
+        onWorkOnIssue={handleWorkOnIssueFromTab}
+        onSwitchToWorktree={handleSwitchToWorktreeFromTab}
+        onIssueCountChange={handleIssueCountChange}
       />
     </div>
     <StatusBar
@@ -1853,8 +2188,9 @@
     projectPath={projectPath as string}
     selectedBranch={selectedBranch?.name ?? currentBranch}
     {osEnvReady}
+    {prefillIssue}
     onLaunch={handleAgentLaunch}
-    onClose={() => (showAgentLaunch = false)}
+    onClose={() => { showAgentLaunch = false; prefillIssue = null; }}
   />
 {/if}
 
@@ -1971,8 +2307,7 @@
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       const info = await invoke<ProjectInfo>("open_project", { path: p });
-      projectPath = info.path;
-      fetchCurrentBranch();
+      handleOpenedProjectPath(info.path);
     } catch (err) {
       appError = `Failed to open migrated project: ${toErrorMessage(err)}`;
     }

@@ -65,7 +65,7 @@ describe("MainArea", () => {
 
   it("renders without Session Summary tab", async () => {
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+      { id: "agentMode", label: "Master Agent", type: "agentMode" },
     ];
     const rendered = await renderMainArea({ tabs, activeTabId: "agentMode" });
 
@@ -73,12 +73,12 @@ describe("MainArea", () => {
     const tabLabels = Array.from(
       rendered.container.querySelectorAll(".tab-bar .tab-label"),
     ).map((el) => el.textContent?.trim());
-    expect(tabLabels).toEqual(["Agent Mode"]);
+    expect(tabLabels).toEqual(["Master Agent"]);
   });
 
-  it("keeps Agent Mode pinned (no close button)", async () => {
+  it("keeps Master Agent pinned (no close button)", async () => {
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+      { id: "agentMode", label: "Master Agent", type: "agentMode" },
     ];
     const rendered = await renderMainArea({ tabs, activeTabId: "agentMode" });
 
@@ -90,7 +90,7 @@ describe("MainArea", () => {
   it("shows close button for non-pinned tabs and emits close callback", async () => {
     const onTabClose = vi.fn();
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+      { id: "agentMode", label: "Master Agent", type: "agentMode" },
       { id: "settings", label: "Settings", type: "settings" },
     ];
     const rendered = await renderMainArea({
@@ -113,7 +113,7 @@ describe("MainArea", () => {
     const onTabClose = vi.fn();
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+      { id: "agentMode", label: "Master Agent", type: "agentMode" },
       { id: "settings", label: "Settings", type: "settings" },
       {
         id: "versionHistory",
@@ -176,7 +176,7 @@ describe("MainArea", () => {
   it("emits onTabReorder during dragover with before/after positions", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+      { id: "agentMode", label: "Master Agent", type: "agentMode" },
       { id: "settings", label: "Settings", type: "settings" },
       {
         id: "versionHistory",
@@ -253,7 +253,7 @@ describe("MainArea", () => {
   it("does not emit onTabReorder when dragging over the same tab", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+      { id: "agentMode", label: "Master Agent", type: "agentMode" },
       { id: "settings", label: "Settings", type: "settings" },
     ];
     const rendered = await renderMainArea({
@@ -285,7 +285,7 @@ describe("MainArea", () => {
   it("emits onTabReorder via pointer drag fallback", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+      { id: "agentMode", label: "Master Agent", type: "agentMode" },
       { id: "settings", label: "Settings", type: "settings" },
       {
         id: "versionHistory",
@@ -358,7 +358,7 @@ describe("MainArea", () => {
   it("emits onTabReorder when pointermove is dispatched on window", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+      { id: "agentMode", label: "Master Agent", type: "agentMode" },
       { id: "settings", label: "Settings", type: "settings" },
       {
         id: "versionHistory",
@@ -517,7 +517,7 @@ describe("MainArea", () => {
   it("supports text/plain drag fallback and ignores dragStart without dataTransfer", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+      { id: "agentMode", label: "Master Agent", type: "agentMode" },
       { id: "settings", label: "Settings", type: "settings" },
       { id: "versionHistory", label: "Version History", type: "versionHistory" },
     ];
@@ -558,7 +558,7 @@ describe("MainArea", () => {
   it("resets pointer drag state on pointercancel", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+      { id: "agentMode", label: "Master Agent", type: "agentMode" },
       { id: "settings", label: "Settings", type: "settings" },
       { id: "versionHistory", label: "Version History", type: "versionHistory" },
     ];

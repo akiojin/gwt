@@ -9,6 +9,7 @@ use gwt_core::ai::{
     OpenCodeSessionParser, SessionParseError, SessionParser, SessionSummary, SessionSummaryCache,
 };
 use gwt_core::config::{ProfilesConfig, ResolvedAISettings, ToolSessionEntry};
+use gwt_core::git::Branch;
 use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::terminal::scrollback::ScrollbackFile;
 use serde::{Deserialize, Serialize};
@@ -699,12 +700,37 @@ struct SessionSummaryUpdatedPayload {
     pub result: SessionSummaryResult,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionSummaryRebuildProgressPayload {
+    pub project_path: String,
+    pub language: String,
+    pub total: usize,
+    pub completed: usize,
+    pub branch: Option<String>,
+    pub status: String, // "started" | "branch-ok" | "branch-skipped" | "branch-error" | "completed"
+    pub error: Option<String>,
+}
+
 const SESSION_SUMMARY_CACHE_VERSION: u32 = 1;
 
 static SESSION_SUMMARY_CACHE_PERSIST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn session_summary_cache_persist_lock() -> &'static Mutex<()> {
     SESSION_SUMMARY_CACHE_PERSIST_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn normalize_summary_rebuild_language(preferred_language: Option<&str>) -> String {
+    match preferred_language
+        .unwrap_or("auto")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "ja" => "ja".to_string(),
+        "en" => "en".to_string(),
+        _ => "auto".to_string(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1297,6 +1323,172 @@ pub(crate) fn prewarm_missing_worktree_summaries(
     }
 }
 
+fn collect_rebuild_target_branches(repo_path: &Path) -> Vec<String> {
+    let mut names: HashSet<String> = HashSet::new();
+
+    if let Ok(branches) = Branch::list(repo_path) {
+        for branch in branches {
+            let name = branch.name.trim();
+            if !name.is_empty() {
+                names.insert(name.to_string());
+            }
+        }
+    }
+
+    for (branch, _) in gwt_core::config::get_last_tool_usage_map(repo_path) {
+        let name = branch.trim();
+        if !name.is_empty() {
+            names.insert(name.to_string());
+        }
+    }
+
+    let mut out = names.into_iter().collect::<Vec<_>>();
+    out.sort_unstable();
+    out
+}
+
+fn emit_rebuild_progress(app_handle: &AppHandle, payload: &SessionSummaryRebuildProgressPayload) {
+    let _ = app_handle.emit("session-summary-rebuild-progress", payload);
+}
+
+fn emit_session_summary_updated(
+    app_handle: &AppHandle,
+    project_path: &str,
+    branch: &str,
+    result: &SessionSummaryResult,
+) {
+    let payload = SessionSummaryUpdatedPayload {
+        project_path: project_path.to_string(),
+        branch: branch.to_string(),
+        result: result.clone(),
+    };
+    let _ = app_handle.emit("session-summary-updated", &payload);
+}
+
+fn session_summary_inflight_key(job: &SessionSummaryJob) -> String {
+    format!(
+        "{}::{}::{}::{}::{}",
+        job.repo_key, job.branch, job.tool_id, job.session_id, job.settings.language
+    )
+}
+
+fn scrollback_summary_inflight_key(job: &ScrollbackSummaryJob) -> String {
+    format!(
+        "scrollback::{}::{}::{}::{}",
+        job.repo_key, job.branch, job.pane_id, job.settings.language
+    )
+}
+
+fn try_acquire_session_summary_inflight(state: &AppState, inflight_key: &str) -> bool {
+    match state.session_summary_inflight.lock() {
+        Ok(mut set) => {
+            if set.contains(inflight_key) {
+                false
+            } else {
+                set.insert(inflight_key.to_string());
+                true
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+fn release_session_summary_inflight(state: &AppState, inflight_key: &str) {
+    if let Ok(mut set) = state.session_summary_inflight.lock() {
+        set.remove(inflight_key);
+    }
+}
+
+fn try_acquire_session_summary_rebuild_inflight(state: &AppState, repo_key: &str) -> bool {
+    match state.session_summary_rebuild_inflight.lock() {
+        Ok(mut set) => {
+            if set.contains(repo_key) {
+                false
+            } else {
+                set.insert(repo_key.to_string());
+                true
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+fn release_session_summary_rebuild_inflight(state: &AppState, repo_key: &str) {
+    if let Ok(mut set) = state.session_summary_rebuild_inflight.lock() {
+        set.remove(repo_key);
+    }
+}
+
+fn run_summary_job_for_rebuild(
+    job: SummaryJob,
+    state: &AppState,
+    app_handle: &AppHandle,
+    project_path: &str,
+    branch: &str,
+    fallback_result: &SessionSummaryResult,
+) -> SessionSummaryResult {
+    match job {
+        SummaryJob::Session(session_job) => {
+            let inflight_key = session_summary_inflight_key(&session_job);
+            if !try_acquire_session_summary_inflight(state, &inflight_key) {
+                return fallback_result.clone();
+            }
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                generate_and_cache_session_summary(&session_job, state)
+            }))
+            .unwrap_or_else(|_| {
+                summary_status(
+                    "error",
+                    Some(session_job.tool_id.clone()),
+                    Some(session_job.session_id.clone()),
+                    Some("Internal error".to_string()),
+                )
+            });
+            release_session_summary_inflight(state, &inflight_key);
+
+            if is_latest_branch_session(
+                &session_job.repo_key,
+                &session_job.branch,
+                &session_job.tool_id,
+                &session_job.session_id,
+            ) {
+                emit_session_summary_updated(app_handle, project_path, branch, &result);
+            }
+            result
+        }
+        SummaryJob::Scrollback(scrollback_job) => {
+            let inflight_key = scrollback_summary_inflight_key(&scrollback_job);
+            if !try_acquire_session_summary_inflight(state, &inflight_key) {
+                return fallback_result.clone();
+            }
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                generate_and_cache_scrollback_summary(&scrollback_job, state)
+            }))
+            .unwrap_or_else(|_| {
+                summary_status(
+                    "error",
+                    Some(scrollback_job.tool_id.clone()),
+                    Some(pane_session_id(&scrollback_job.pane_id)),
+                    Some("Internal error".to_string()),
+                )
+            });
+            release_session_summary_inflight(state, &inflight_key);
+
+            if is_latest_scrollback_candidate(
+                state,
+                Path::new(&scrollback_job.repo_key),
+                &scrollback_job.branch,
+                &scrollback_job.pane_id,
+            ) {
+                emit_session_summary_updated(app_handle, project_path, branch, &result);
+            }
+            result
+        }
+    }
+}
+
 fn is_latest_branch_session(repo_key: &str, branch: &str, tool_id: &str, session_id: &str) -> bool {
     let entries = gwt_core::config::get_branch_tool_history(Path::new(repo_key), branch);
     let Some(entry) = entries.first() else {
@@ -1698,6 +1890,126 @@ pub fn get_branch_session_summary(
         }
     }
     Ok(result)
+}
+
+#[tauri::command]
+pub fn rebuild_all_branch_session_summaries(
+    project_path: String,
+    preferred_language: Option<String>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_key = repo_path.to_string_lossy().to_string();
+    let branches = collect_rebuild_target_branches(&repo_path);
+    let language = normalize_summary_rebuild_language(preferred_language.as_deref());
+    let state = app_handle.state::<AppState>();
+
+    if !try_acquire_session_summary_rebuild_inflight(&state, &repo_key) {
+        return Ok(());
+    }
+
+    let app_handle_clone = app_handle.clone();
+    let project_path_for_task = project_path.clone();
+    let repo_key_for_task = repo_key.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle_clone.state::<AppState>();
+        let total = branches.len();
+        let (completed, final_error) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                emit_rebuild_progress(
+                    &app_handle_clone,
+                    &SessionSummaryRebuildProgressPayload {
+                        project_path: project_path_for_task.clone(),
+                        language: language.clone(),
+                        total,
+                        completed: 0,
+                        branch: None,
+                        status: "started".to_string(),
+                        error: None,
+                    },
+                );
+
+                let mut completed = 0usize;
+                for branch in branches {
+                    let immediate = get_branch_session_summary_immediate(
+                        &project_path_for_task,
+                        &branch,
+                        false,
+                        &state,
+                    );
+
+                    let (status, error) = match immediate {
+                        Ok((immediate_result, maybe_job)) => {
+                            let result = match maybe_job {
+                                Some(mut job) => {
+                                    match &mut job {
+                                        SummaryJob::Session(job) => {
+                                            job.settings.language = language.clone();
+                                        }
+                                        SummaryJob::Scrollback(job) => {
+                                            job.settings.language = language.clone();
+                                        }
+                                    }
+                                    run_summary_job_for_rebuild(
+                                        job,
+                                        &state,
+                                        &app_handle_clone,
+                                        &project_path_for_task,
+                                        &branch,
+                                        &immediate_result,
+                                    )
+                                }
+                                None => immediate_result,
+                            };
+
+                            if result.status == "ok" {
+                                ("branch-ok".to_string(), None)
+                            } else {
+                                (
+                                    "branch-skipped".to_string(),
+                                    result.error.clone().or(result.warning.clone()),
+                                )
+                            }
+                        }
+                        Err(err) => ("branch-error".to_string(), Some(err)),
+                    };
+
+                    completed += 1;
+                    emit_rebuild_progress(
+                        &app_handle_clone,
+                        &SessionSummaryRebuildProgressPayload {
+                            project_path: project_path_for_task.clone(),
+                            language: language.clone(),
+                            total,
+                            completed,
+                            branch: Some(branch),
+                            status,
+                            error,
+                        },
+                    );
+                }
+
+                (completed, None::<String>)
+            }))
+            .unwrap_or_else(|_| (0, Some("Internal error".to_string())));
+
+        emit_rebuild_progress(
+            &app_handle_clone,
+            &SessionSummaryRebuildProgressPayload {
+                project_path: project_path_for_task,
+                language,
+                total,
+                completed,
+                branch: None,
+                status: "completed".to_string(),
+                error: final_error,
+            },
+        );
+        release_session_summary_rebuild_inflight(&state, &repo_key_for_task);
+    });
+
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1,13 +1,16 @@
 //! Worktree cleanup commands (SPEC-c4e8f210)
 
 use crate::commands::project::resolve_repo_path_for_project_root;
+use crate::commands::terminal::capture_scrollback_tail_from_state;
 use crate::state::AppState;
+use gwt_core::config::{agent_has_hook_support, infer_agent_status, Session};
 use gwt_core::git::Branch;
+use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::worktree::WorktreeManager;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::Path;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// Safety level for a worktree (FR-500)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -32,6 +35,7 @@ pub struct WorktreeInfo {
     pub is_current: bool,
     pub is_protected: bool,
     pub is_agent_running: bool,
+    pub agent_status: String,
     pub ahead: usize,
     pub behind: usize,
     pub is_gone: bool,
@@ -86,6 +90,106 @@ fn compute_safety_level(
     }
 }
 
+/// Resolve agent status string from session file (SPEC-b80e7996 FR-811).
+/// For agents without Hook support, infers status from pane output.
+fn resolve_agent_status_for_worktree(
+    worktree_path: &Path,
+    repo_path: &Path,
+    branch_name: &str,
+    state: &AppState,
+) -> String {
+    match Session::load_for_worktree(worktree_path) {
+        Some(mut session) => {
+            session.check_idle_timeout();
+
+            let status = if agent_has_hook_support(session.agent.as_deref()) {
+                session.status
+            } else if let Some(pane_id) = find_pane_for_branch(state, repo_path, branch_name) {
+                infer_status_from_pane(state, &pane_id)
+            } else {
+                session.status
+            };
+
+            match status {
+                gwt_core::config::AgentStatus::Running => "running".to_string(),
+                gwt_core::config::AgentStatus::WaitingInput => "waiting_input".to_string(),
+                gwt_core::config::AgentStatus::Stopped => "stopped".to_string(),
+                gwt_core::config::AgentStatus::Unknown => "unknown".to_string(),
+            }
+        }
+        None => "unknown".to_string(),
+    }
+}
+
+/// Find pane_id for a branch, preferring a running pane when multiple panes match.
+fn find_pane_for_branch(state: &AppState, repo_path: &Path, branch_name: &str) -> Option<String> {
+    let panes_info: Vec<(String, String, bool)> = {
+        let manager = state.pane_manager.lock().ok()?;
+        manager
+            .panes()
+            .iter()
+            .map(|pane| {
+                (
+                    pane.pane_id().to_string(),
+                    pane.branch_name().to_string(),
+                    matches!(pane.status(), PaneStatus::Running),
+                )
+            })
+            .collect()
+    };
+
+    let launch_meta = state.pane_launch_meta.lock().ok()?;
+    let panes = panes_info.into_iter().map(|(pane_id, branch, is_running)| {
+        let same_repo = launch_meta
+            .get(&pane_id)
+            .map(|meta| meta.repo_path.as_path() == repo_path)
+            .unwrap_or(false);
+        (pane_id, branch, is_running, same_repo)
+    });
+
+    select_preferred_pane_for_branch(panes, branch_name)
+}
+
+fn select_preferred_pane_for_branch<I>(panes: I, branch_name: &str) -> Option<String>
+where
+    I: IntoIterator<Item = (String, String, bool, bool)>,
+{
+    let mut fallback: Option<String> = None;
+    for (pane_id, pane_branch, is_running, same_repo) in panes {
+        if pane_branch != branch_name || !same_repo {
+            continue;
+        }
+
+        if is_running {
+            return Some(pane_id);
+        }
+
+        if fallback.is_none() {
+            fallback = Some(pane_id);
+        }
+    }
+
+    fallback
+}
+
+/// Infer agent status from a pane's scrollback tail.
+fn infer_status_from_pane(state: &AppState, pane_id: &str) -> gwt_core::config::AgentStatus {
+    let process_alive = match state.pane_manager.lock() {
+        Ok(manager) => manager
+            .panes()
+            .iter()
+            .find(|p| p.pane_id() == pane_id)
+            .map(|p| matches!(p.status(), PaneStatus::Running))
+            .unwrap_or(false),
+        Err(_) => false,
+    };
+
+    let scrollback_tail =
+        capture_scrollback_tail_from_state(state, pane_id, 4096).unwrap_or_default();
+
+    infer_agent_status(&scrollback_tail, process_alive)
+}
+
 /// Get the set of branch names that have a running agent pane
 fn running_agent_branches(state: &AppState) -> HashSet<String> {
     let mut branches = HashSet::new();
@@ -99,13 +203,8 @@ fn running_agent_branches(state: &AppState) -> HashSet<String> {
     branches
 }
 
-/// List all worktrees with safety info (SPEC-c4e8f210 T1)
-#[tauri::command]
-pub fn list_worktrees(
-    project_path: String,
-    state: tauri::State<AppState>,
-) -> Result<Vec<WorktreeInfo>, String> {
-    let project_root = Path::new(&project_path);
+fn list_worktrees_impl(project_path: &str, state: &AppState) -> Result<Vec<WorktreeInfo>, String> {
+    let project_root = Path::new(project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)?;
     let last_tool = build_last_tool_usage_map(&repo_path);
 
@@ -119,7 +218,7 @@ pub fn list_worktrees(
         .find(|b| b.is_current)
         .map(|b| b.name.clone());
 
-    let agent_branches = running_agent_branches(&state);
+    let agent_branches = running_agent_branches(state);
 
     let mut infos: Vec<WorktreeInfo> = worktrees
         .into_iter()
@@ -130,6 +229,10 @@ pub fn list_worktrees(
             let is_current = current_branch.as_deref() == Some(branch_name);
             let is_protected = WorktreeManager::is_protected(branch_name);
             let is_agent_running = agent_branches.contains(branch_name);
+
+            // Read agent status from session file (SPEC-b80e7996 FR-811)
+            let agent_status =
+                resolve_agent_status_for_worktree(&wt.path, &repo_path, branch_name, state);
 
             let ahead = branch_info.map(|b| b.ahead).unwrap_or(0);
             let behind = branch_info.map(|b| b.behind).unwrap_or(0);
@@ -154,6 +257,7 @@ pub fn list_worktrees(
                 is_current,
                 is_protected,
                 is_agent_running,
+                agent_status,
                 ahead,
                 behind,
                 is_gone,
@@ -167,6 +271,20 @@ pub fn list_worktrees(
     infos.sort_by_key(|w| w.safety_level);
 
     Ok(infos)
+}
+
+/// List all worktrees with safety info (SPEC-c4e8f210 T1)
+#[tauri::command]
+pub async fn list_worktrees(
+    project_path: String,
+    app_handle: AppHandle,
+) -> Result<Vec<WorktreeInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle.state::<AppState>();
+        list_worktrees_impl(&project_path, &state)
+    })
+    .await
+    .map_err(|e| format!("Failed to list worktrees: {e}"))?
 }
 
 /// Cleanup multiple worktrees (SPEC-c4e8f210 T2)
@@ -353,6 +471,7 @@ mod tests {
             is_current: false,
             is_protected: false,
             is_agent_running: false,
+            agent_status: "unknown".to_string(),
             ahead: 1,
             behind: 0,
             is_gone: true,
@@ -437,6 +556,139 @@ mod tests {
         );
     }
 
+    // -- agent_status field serialization tests (SPEC-b80e7996) --
+
+    #[test]
+    fn worktree_info_agent_status_serializes_in_json() {
+        let info = WorktreeInfo {
+            path: "/tmp/wt".to_string(),
+            branch: "feature/agent".to_string(),
+            commit: "def5678".to_string(),
+            status: "active".to_string(),
+            is_main: false,
+            has_changes: false,
+            has_unpushed: false,
+            is_current: false,
+            is_protected: false,
+            is_agent_running: true,
+            agent_status: "running".to_string(),
+            ahead: 0,
+            behind: 0,
+            is_gone: false,
+            last_tool_usage: None,
+            safety_level: SafetyLevel::Disabled,
+        };
+        let json = serde_json::to_value(&info).unwrap();
+        let obj = json.as_object().unwrap();
+
+        // agent_status field must exist and be snake_case
+        assert!(
+            obj.contains_key("agent_status"),
+            "expected snake_case key 'agent_status'"
+        );
+        assert!(
+            !obj.contains_key("agentStatus"),
+            "unexpected camelCase key 'agentStatus'"
+        );
+        assert_eq!(json["agent_status"], "running");
+    }
+
+    #[test]
+    fn worktree_info_agent_status_all_values() {
+        for (status_str, expected) in [
+            ("unknown", "unknown"),
+            ("running", "running"),
+            ("waiting_input", "waiting_input"),
+            ("stopped", "stopped"),
+        ] {
+            let info = WorktreeInfo {
+                path: "/tmp/wt".to_string(),
+                branch: "test".to_string(),
+                commit: "abc".to_string(),
+                status: "active".to_string(),
+                is_main: false,
+                has_changes: false,
+                has_unpushed: false,
+                is_current: false,
+                is_protected: false,
+                is_agent_running: false,
+                agent_status: status_str.to_string(),
+                ahead: 0,
+                behind: 0,
+                is_gone: false,
+                last_tool_usage: None,
+                safety_level: SafetyLevel::Safe,
+            };
+            let json = serde_json::to_value(&info).unwrap();
+            assert_eq!(
+                json["agent_status"], expected,
+                "agent_status mismatch for '{}'",
+                status_str
+            );
+        }
+    }
+
+    #[test]
+    fn select_preferred_pane_for_branch_prefers_running() {
+        let panes = vec![
+            (
+                "pane-stopped".to_string(),
+                "feature/a".to_string(),
+                false,
+                true,
+            ),
+            (
+                "pane-running".to_string(),
+                "feature/a".to_string(),
+                true,
+                true,
+            ),
+        ];
+
+        let selected = select_preferred_pane_for_branch(panes, "feature/a");
+        assert_eq!(selected.as_deref(), Some("pane-running"));
+    }
+
+    #[test]
+    fn select_preferred_pane_for_branch_falls_back_to_first_non_running() {
+        let panes = vec![
+            ("pane-old".to_string(), "feature/a".to_string(), false, true),
+            ("pane-new".to_string(), "feature/a".to_string(), false, true),
+        ];
+
+        let selected = select_preferred_pane_for_branch(panes, "feature/a");
+        assert_eq!(selected.as_deref(), Some("pane-old"));
+    }
+
+    #[test]
+    fn select_preferred_pane_for_branch_returns_none_for_unknown_branch() {
+        let panes = vec![("pane".to_string(), "feature/a".to_string(), true, true)];
+
+        let selected = select_preferred_pane_for_branch(panes, "feature/b");
+        assert!(selected.is_none());
+    }
+
+    #[test]
+    fn select_preferred_pane_for_branch_ignores_other_repo() {
+        let panes = vec![
+            (
+                "pane-other-repo-running".to_string(),
+                "feature/a".to_string(),
+                true,
+                false,
+            ),
+            (
+                "pane-this-repo".to_string(),
+                "feature/a".to_string(),
+                false,
+                true,
+            ),
+        ];
+
+        let selected = select_preferred_pane_for_branch(panes, "feature/a");
+        assert_eq!(selected.as_deref(), Some("pane-this-repo"));
+    }
+
     // -- SafetyLevel computation tests (T1) --
 
     #[test]
@@ -513,6 +765,19 @@ mod tests {
                 SafetyLevel::Disabled,
             ]
         );
+    }
+
+    #[test]
+    fn list_worktrees_impl_returns_main_worktree_for_repo() {
+        let temp = tempfile::TempDir::new().unwrap();
+        create_test_repo(temp.path());
+        let state = AppState::new();
+        let project_path = temp.path().to_string_lossy().to_string();
+        let current = git_stdout(temp.path(), &["rev-parse", "--abbrev-ref", "HEAD"]);
+
+        let infos = list_worktrees_impl(&project_path, &state).unwrap();
+        assert!(!infos.is_empty());
+        assert!(infos.iter().any(|wt| wt.branch == current));
     }
 
     #[test]

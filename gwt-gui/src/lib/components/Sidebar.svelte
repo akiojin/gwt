@@ -6,6 +6,7 @@
     LaunchAgentRequest,
     PrStatusInfo,
     GhCliStatus,
+    SettingsData,
   } from "../types";
   import AgentSidebar from "./AgentSidebar.svelte";
   import WorktreeSummaryPanel from "./WorktreeSummaryPanel.svelte";
@@ -25,6 +26,10 @@
     | { ok: true; snapshot: FilterCacheEntry }
     | { ok: false; errorMessage: string };
   type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
+  type TauriEventListen = <T = unknown>(
+    event: string,
+    handler: (event: { payload: T }) => void
+  ) => Promise<() => void>;
 
   let {
     projectPath,
@@ -45,6 +50,7 @@
     currentBranch = "",
     agentTabBranches = [],
     activeAgentTabBranch = null,
+    appLanguage = "auto",
     prStatuses = {},
     ghCliStatus = null,
   }: {
@@ -66,6 +72,7 @@
     currentBranch?: string;
     agentTabBranches?: string[];
     activeAgentTabBranch?: string | null;
+    appLanguage?: SettingsData["app_language"];
     prStatuses?: Record<string, PrStatusInfo | null>;
     ghCliStatus?: GhCliStatus | null;
   } = $props();
@@ -243,6 +250,7 @@
   let localRefreshKey = $state(0);
   let filterCache: Map<FilterType, FilterCacheEntry> = $state(new Map());
   const inflightFetches = new Map<string, Promise<FetchSnapshotResult>>();
+  let tauriEventListenPromise: Promise<TauriEventListen> | null = null;
 
   // Worktree safety info
   let worktreeMap: Map<string, WorktreeInfo> = $state(new Map());
@@ -515,7 +523,7 @@
 
     (async () => {
       try {
-        const { listen } = await import("@tauri-apps/api/event");
+        const listen = await getEventListen();
         const unlistenFn = await listen<CleanupProgress>(
           "cleanup-progress",
           (event) => {
@@ -552,7 +560,7 @@
 
     (async () => {
       try {
-        const { listen } = await import("@tauri-apps/api/event");
+        const listen = await getEventListen();
         const unlistenFn = await listen("cleanup-completed", () => {
           deletingBranches = new Set();
           localRefreshKey++;
@@ -571,6 +579,44 @@
       cancelled = true;
       if (unlisten) unlisten();
     };
+  });
+
+  // Listen to agent-status-changed to refresh branch list (SPEC-b80e7996 FR-821)
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const listen = await getEventListen();
+        const unlistenFn = await listen("agent-status-changed", () => {
+          refreshAgentStatusCachesInBackground();
+        });
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+      } catch {
+        /* Tauri not available */
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  });
+
+  // Polling fallback for agent status (SPEC-b80e7996 FR-822)
+  // Only active when there are agent tabs open (avoids unnecessary polling).
+  $effect(() => {
+    if (mode !== "branch") return;
+    if (agentTabBranches.length === 0) return;
+    const interval = setInterval(() => {
+      refreshAgentStatusCachesInBackground();
+    }, 10_000);
+    return () => clearInterval(interval);
   });
 
   // Close context menu on outside click / Escape
@@ -635,6 +681,28 @@
       if (filter === activeFilter) continue;
       const cacheKey = buildFilterCacheKey(filter, path);
       void refreshFilterSnapshot(filter, path, cacheKey, token, true, false);
+    }
+  }
+
+  function refreshAgentStatusCachesInBackground() {
+    if (mode !== "branch") return;
+    const path = projectPath;
+    if (!path) return;
+    const token = fetchToken;
+    const targetFilters: FilterType[] = ["Local", "All"];
+
+    for (const filter of targetFilters) {
+      const cacheKey = buildFilterCacheKey(filter, path);
+      const cached = filterCache.get(filter);
+      if (!cached || cached.cacheKey !== cacheKey) continue;
+      void refreshFilterSnapshot(
+        filter,
+        path,
+        cacheKey,
+        token,
+        true,
+        filter === activeFilter
+      );
     }
   }
 
@@ -838,6 +906,27 @@
     return invokeFn;
   }
 
+  async function getEventListen(): Promise<TauriEventListen> {
+    if (!tauriEventListenPromise) {
+      tauriEventListenPromise = import("@tauri-apps/api/event").then((mod) => {
+        const listenFn =
+          (mod as { listen?: TauriEventListen; default?: { listen?: TauriEventListen } }).listen ??
+          (mod as { default?: { listen?: TauriEventListen } }).default?.listen;
+        if (!listenFn) {
+          throw new Error("Tauri event listen API is unavailable");
+        }
+        return listenFn;
+      });
+    }
+
+    try {
+      return await tauriEventListenPromise;
+    } catch (error) {
+      tauriEventListenPromise = null;
+      throw error;
+    }
+  }
+
   function getSafetyLevel(branch: BranchInfo): string {
     const wt = worktreeMap.get(branch.name);
     if (!wt) return "";
@@ -1039,6 +1128,10 @@
     return agentTabBranchSet.has(normalizeTabBranch(branch.name));
   }
 
+  function isAgentRunning(branch: BranchInfo): boolean {
+    return isAgentBranchActive(branch) && branch.agent_status === "running";
+  }
+
   function handleBranchItemKeydown(event: KeyboardEvent) {
     if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
     event.preventDefault();
@@ -1198,7 +1291,7 @@
       class="mode-btn"
       class:active={mode === "agent"}
       aria-pressed={mode === "agent"}
-      title="Agent Mode"
+      title="Master Agent"
       onclick={() => handleModeChange("agent")}
     >
       <span class="mode-icon">A</span>
@@ -1280,20 +1373,21 @@
               }}
               oncontextmenu={(e) => handleContextMenu(e, branch)}
             >
-              {#if isAgentBranchActive(branch)}
-                <span
-                  class="agent-tab-icon"
-                  aria-hidden="true"
-                  title="Agent tab is open for this branch"
-                >
-                  <span class="agent-tab-bars">
-                    <span class="agent-tab-bar b1"></span>
-                    <span class="agent-tab-bar b2"></span>
-                    <span class="agent-tab-bar b3"></span>
-                  </span>
-                  <span class="agent-tab-fallback" aria-hidden="true">@</span>
-                </span>
-              {/if}
+              <span
+                class="agent-indicator-slot"
+                class:agent-active={isAgentBranchActive(branch)}
+                class:agent-running={isAgentRunning(branch)}
+                aria-hidden="true"
+                title={isAgentBranchActive(branch) ? (isAgentRunning(branch) ? "Agent is running" : "Agent tab is open") : ""}
+              >
+                {#if isAgentRunning(branch)}
+                  <span class="agent-pulse-dot"></span>
+                  <span class="agent-fallback">@</span>
+                {:else if isAgentBranchActive(branch)}
+                  <span class="agent-static-dot"></span>
+                  <span class="agent-fallback">@</span>
+                {/if}
+              </span>
               <span class="branch-icon">{branch.is_current ? "*" : " "}</span>
               {#if deletingBranches.has(branch.name)}
                 <span class="safety-spinner"></span>
@@ -1337,6 +1431,7 @@
           {selectedBranch}
           {agentTabBranches}
           {activeAgentTabBranch}
+          preferredLanguage={appLanguage}
           prNumber={selectedPrNumber}
           ghCliStatus={effectiveGhCliStatus}
           onLaunchAgent={onLaunchAgent}
@@ -1352,6 +1447,7 @@
       currentBranch={currentBranch}
       {agentTabBranches}
       {activeAgentTabBranch}
+      preferredLanguage={appLanguage}
     />
   {/if}
   <button
@@ -1804,62 +1900,54 @@
     flex: 1;
   }
 
-  .agent-tab-icon {
-    color: var(--cyan);
+  /* Agent indicator: fixed-width slot for all branch rows (SPEC-b80e7996 FR-800) */
+  .agent-indicator-slot {
     width: 12px;
-    text-align: center;
+    height: 12px;
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    height: 12px;
-    line-height: 1;
   }
 
-  .agent-tab-bars {
-    display: inline-flex;
-    align-items: flex-end;
-    justify-content: center;
-    gap: 1px;
-    height: 10px;
-  }
-
-  .agent-tab-bar {
-    width: 2px;
-    height: 4px;
-    border-radius: 1px;
+  /* Layer 1: static dot — tab is open (SPEC-b80e7996 FR-801) */
+  .agent-static-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
     background: var(--cyan);
-    opacity: 0.85;
+    opacity: 0.45;
   }
 
-  .agent-tab-bar.b1 {
-    animation-delay: 0ms;
+  /* Layer 2: pulsing dot — LLM is Running (SPEC-b80e7996 FR-802) */
+  .agent-pulse-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--cyan);
+    animation: agent-pulse 1.4s ease-in-out infinite;
   }
 
-  .agent-tab-bar.b2 {
-    animation-delay: 150ms;
+  @keyframes agent-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.2; }
   }
 
-  .agent-tab-bar.b3 {
-    animation-delay: 300ms;
-  }
-
-  .agent-tab-fallback {
+  /* Reduced-motion fallback: show "@" instead of animated dot */
+  .agent-fallback {
     display: none;
     font-size: var(--ui-font-md);
     font-family: monospace;
+    color: var(--cyan);
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .agent-tab-bars {
+    .agent-pulse-dot,
+    .agent-static-dot {
       display: none;
     }
 
-    .agent-tab-bar {
-      animation: none;
-    }
-
-    .agent-tab-fallback {
+    .agent-fallback {
       display: flex;
     }
   }
