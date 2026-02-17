@@ -159,13 +159,7 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         true,
         Some("CmdOrCtrl+Shift+K"),
     )?;
-    let git_issues = MenuItem::with_id(
-        app,
-        MENU_ID_GIT_ISSUES,
-        "Issues",
-        true,
-        None::<&str>,
-    )?;
+    let git_issues = MenuItem::with_id(app, MENU_ID_GIT_ISSUES, "Issues", true, None::<&str>)?;
     let mut git_builder = SubmenuBuilder::new(app, "Git");
 
     if should_show_version_history_menu(app, state) {
