@@ -1176,6 +1176,11 @@
     font-family: monospace;
     outline: none;
     width: 100%;
+  }
+
+  .field input[type="text"].env-value,
+  .field input[type="text"].env-key-input,
+  .field input[type="text"].env-value-input {
     max-width: none;
   }
 
