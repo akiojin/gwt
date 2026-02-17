@@ -136,6 +136,7 @@
   let sidebarWidthPx: number = $state(loadSidebarWidth());
   let sidebarMode: SidebarMode = $state(loadSidebarMode());
   let showAgentLaunch: boolean = $state(false);
+  let prefillIssue: GitHubIssueInfo | null = $state(null);
   let showCleanupModal: boolean = $state(false);
   let cleanupPreselectedBranch: string | null = $state(null);
   let showAbout: boolean = $state(false);
@@ -1137,15 +1138,14 @@
     activeTabId = tab.id;
   }
 
-  function handleWorkOnIssueFromTab(issue: GitHubIssueInfo) {
-    // Infer branch prefix from labels
-    const names = issue.labels.map((l) => l.name.toLowerCase());
-    let prefix = "feature/";
-    if (names.includes("bug")) prefix = "bugfix/";
-    else if (names.includes("enhancement") || names.includes("feature")) prefix = "feature/";
-    else if (names.includes("hotfix")) prefix = "hotfix/";
+  function handleIssueCountChange(count: number) {
+    tabs = tabs.map((t) =>
+      t.id === "issues" ? { ...t, label: count > 0 ? `Issues (${count})` : "Issues" } : t,
+    );
+  }
 
-    // Open the AgentLaunchForm and pre-fill with the issue
+  function handleWorkOnIssueFromTab(issue: GitHubIssueInfo) {
+    prefillIssue = issue;
     showAgentLaunch = true;
   }
 
@@ -1968,6 +1968,7 @@
         onTabReorder={handleTabReorder}
         onWorkOnIssue={handleWorkOnIssueFromTab}
         onSwitchToWorktree={handleSwitchToWorktreeFromTab}
+        onIssueCountChange={handleIssueCountChange}
       />
     </div>
     <StatusBar
@@ -1995,8 +1996,9 @@
     projectPath={projectPath as string}
     selectedBranch={selectedBranch?.name ?? currentBranch}
     {osEnvReady}
+    {prefillIssue}
     onLaunch={handleAgentLaunch}
-    onClose={() => (showAgentLaunch = false)}
+    onClose={() => { showAgentLaunch = false; prefillIssue = null; }}
   />
 {/if}
 

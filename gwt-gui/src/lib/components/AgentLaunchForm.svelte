@@ -20,12 +20,14 @@
     projectPath,
     selectedBranch = "",
     osEnvReady = true,
+    prefillIssue = null,
     onLaunch,
     onClose,
   }: {
     projectPath: string;
     selectedBranch?: string;
     osEnvReady?: boolean;
+    prefillIssue?: GitHubIssueInfo | null;
     onLaunch: (request: LaunchAgentRequest) => Promise<void>;
     onClose: () => void;
   } = $props();
@@ -537,6 +539,23 @@
     void branchMode;
     if (!projectPath || branchMode !== "new") return;
     void loadBaseBranchOptions();
+  });
+
+  // Apply prefill from Issue tab ("Work on this" button).
+  $effect(() => {
+    if (!prefillIssue) return;
+    branchMode = "new";
+    newBranchTab = "fromIssue";
+    selectedIssue = prefillIssue;
+
+    const names = prefillIssue.labels.map((l) => l.name.toLowerCase());
+    if (names.includes("bug")) {
+      newBranchPrefix = "bugfix/";
+    } else if (names.includes("hotfix")) {
+      newBranchPrefix = "hotfix/";
+    } else {
+      newBranchPrefix = "feature/";
+    }
   });
 
   // Check gh CLI once per project after shell environment is ready.

@@ -6,15 +6,18 @@
     FetchIssuesResponse,
   } from "../types";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
+  import IssueSpecPanel from "./IssueSpecPanel.svelte";
 
   let {
     projectPath,
     onWorkOnIssue,
     onSwitchToWorktree,
+    onIssueCountChange,
   }: {
     projectPath: string;
     onWorkOnIssue: (issue: GitHubIssueInfo) => void;
     onSwitchToWorktree: (branchName: string) => void;
+    onIssueCountChange?: (count: number) => void;
   } = $props();
 
   type ViewMode = "list" | "detail";
@@ -167,6 +170,8 @@
       }
       page = pageNum;
       hasNextPage = resp.hasNextPage;
+
+      onIssueCountChange?.(issues.length);
 
       // Check branches for loaded issues
       for (const issue of resp.issues) {
@@ -521,7 +526,12 @@
 
           <!-- Body -->
           <div class="ilp-detail-body">
-            {#if detailIssue.body}
+            {#if isSpecIssue(detailIssue)}
+              <IssueSpecPanel
+                {projectPath}
+                issueNumber={detailIssue.number}
+              />
+            {:else if detailIssue.body}
               <MarkdownRenderer text={detailIssue.body} />
             {:else}
               <p class="ilp-empty">No description provided.</p>

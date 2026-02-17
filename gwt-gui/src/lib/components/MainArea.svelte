@@ -36,6 +36,7 @@
     onTabReorder,
     onWorkOnIssue,
     onSwitchToWorktree,
+    onIssueCountChange,
   }: {
     tabs: Tab[];
     activeTabId: string;
@@ -52,6 +53,7 @@
     ) => void;
     onWorkOnIssue?: (issue: GitHubIssueInfo) => void;
     onSwitchToWorktree?: (branchName: string) => void;
+    onIssueCountChange?: (count: number) => void;
   } = $props();
 
   let activeTab = $derived(tabs.find((t) => t.id === activeTabId));
@@ -285,6 +287,7 @@
           {projectPath}
           onWorkOnIssue={onWorkOnIssue ?? (() => {})}
           onSwitchToWorktree={onSwitchToWorktree ?? (() => {})}
+          {onIssueCountChange}
         />
       {:else}
         <div class="placeholder">

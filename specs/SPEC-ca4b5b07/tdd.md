@@ -84,4 +84,10 @@
 
 ## 残課題
 
-なし（全 37 タスク完了、全テスト通過）
+### 解決済み（実装フェーズ後の分析で発見・修正）
+
+- **FR-015 / FR-016 プリフィル修正**: AgentLaunchForm の Issue プリフィルでブランチ名（`{prefix}issue-{number}`）とラベルからの prefix 推定（bug → bugfix/, enhancement → feature/）が正しく動作するよう修正。テスト追加で回帰防止済み
+- **FR-014 SpecIssue 表示修正**: `spec` ラベル付き Issue で IssueSpecPanel のセクション解析ビューが正しく切り替わるよう修正。テスト追加済み
+- **FR-003 タブラベル修正**: タブラベルの「Issues (N)」形式で件数 N が正しく表示されるよう修正。テスト追加済み
+
+全テスト通過確認済み（cargo test + pnpm test）
