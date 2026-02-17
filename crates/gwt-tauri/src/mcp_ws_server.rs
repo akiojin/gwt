@@ -351,6 +351,14 @@ async fn route_request(text: &str, ctx: &WsContext) -> JsonRpcResponse {
         "gwt_stop_tab" => mcp_handlers::handle_stop_tab(id, params, ctx),
         "gwt_get_worktree_diff" => mcp_handlers::handle_get_worktree_diff(id, params, ctx).await,
         "gwt_get_changed_files" => mcp_handlers::handle_get_changed_files(id, params, ctx).await,
+        "gwt_master_send" => mcp_handlers::handle_master_send(id, params, ctx),
+        "gwt_master_get_state" => mcp_handlers::handle_master_get_state(id, params, ctx),
+        "gwt_master_get_mcp_registration_status" => {
+            mcp_handlers::handle_master_get_mcp_registration_status(id, params, ctx)
+        }
+        "gwt_master_repair_mcp_registration" => {
+            mcp_handlers::handle_master_repair_mcp_registration(id, params, ctx)
+        }
         _ => JsonRpcResponse::error(
             id,
             METHOD_NOT_FOUND,

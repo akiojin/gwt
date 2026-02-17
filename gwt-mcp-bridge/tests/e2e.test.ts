@@ -88,6 +88,75 @@ describe("MCP Bridge E2E", () => {
           case "gwt_get_changed_files":
             result = [{ path: "file.txt", status: "modified", is_staged: false }];
             break;
+          case "gwt_master_send":
+            result = {
+              accepted: true,
+              command_id: "mcmd-1",
+              status: "queued",
+            };
+            break;
+          case "gwt_master_get_state":
+            result = {
+              messages: [],
+              ai_ready: true,
+              ai_error: null,
+              last_error: null,
+              is_waiting: false,
+              session_name: "Master Agent",
+              llm_call_count: 0,
+              estimated_tokens: 0,
+              active_spec_id: null,
+              active_spec_issue_number: null,
+              active_spec_issue_url: null,
+              active_spec_issue_etag: null,
+            };
+            break;
+          case "gwt_master_get_mcp_registration_status":
+            result = {
+              overall: "ok",
+              bridge_runtime: "ok",
+              bridge_script: "ok",
+              agents: [
+                {
+                  agent_id: "claude",
+                  label: "Claude Code",
+                  registered: true,
+                  config_path: "/tmp/.claude.json",
+                },
+                {
+                  agent_id: "codex",
+                  label: "Codex",
+                  registered: true,
+                  config_path: "/tmp/.codex/config.toml",
+                },
+              ],
+              last_checked_at: Date.now(),
+              last_error_message: null,
+            };
+            break;
+          case "gwt_master_repair_mcp_registration":
+            result = {
+              overall: "ok",
+              bridge_runtime: "ok",
+              bridge_script: "ok",
+              agents: [
+                {
+                  agent_id: "claude",
+                  label: "Claude Code",
+                  registered: true,
+                  config_path: "/tmp/.claude.json",
+                },
+                {
+                  agent_id: "codex",
+                  label: "Codex",
+                  registered: true,
+                  config_path: "/tmp/.codex/config.toml",
+                },
+              ],
+              last_checked_at: Date.now(),
+              last_error_message: null,
+            };
+            break;
           default:
             ws.send(
               JSON.stringify({
@@ -135,9 +204,9 @@ describe("MCP Bridge E2E", () => {
   });
 
   // ------- test_mcp_list_tools -------
-  it("should expose 8 MCP tools", async () => {
+  it("should expose 12 MCP tools", async () => {
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(8);
+    expect(tools).toHaveLength(12);
 
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([
@@ -147,6 +216,10 @@ describe("MCP Bridge E2E", () => {
       "gwt_get_worktree_diff",
       "gwt_launch_agent",
       "gwt_list_tabs",
+      "gwt_master_get_mcp_registration_status",
+      "gwt_master_get_state",
+      "gwt_master_repair_mcp_registration",
+      "gwt_master_send",
       "gwt_send_message",
       "gwt_stop_tab",
     ]);
@@ -216,6 +289,36 @@ describe("MCP Bridge E2E", () => {
     const files = JSON.parse(text);
     expect(Array.isArray(files)).toBe(true);
     expect(files[0]).toMatchObject({ path: "file.txt", status: "modified" });
+  });
+
+  it("should call gwt_master_send via WebSocket", async () => {
+    const result = await client.callTool({
+      name: "gwt_master_send",
+      arguments: {
+        command_type: "input_text",
+        payload: { text: "hello master" },
+      },
+    });
+    expect(result.isError).toBeFalsy();
+
+    const text = (result.content[0] as { type: string; text: string }).text;
+    const parsed = JSON.parse(text);
+    expect(parsed).toMatchObject({ accepted: true, status: "queued" });
+  });
+
+  it("should call gwt_master_get_mcp_registration_status via WebSocket", async () => {
+    const result = await client.callTool({
+      name: "gwt_master_get_mcp_registration_status",
+    });
+    expect(result.isError).toBeFalsy();
+
+    const text = (result.content[0] as { type: string; text: string }).text;
+    const parsed = JSON.parse(text);
+    expect(parsed).toMatchObject({
+      overall: "ok",
+      bridge_runtime: "ok",
+      bridge_script: "ok",
+    });
   });
 
   // ------- test_mcp_ws_disconnect_recovery -------

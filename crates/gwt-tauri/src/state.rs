@@ -1,8 +1,8 @@
 use crate::agent_master::AgentModeState;
 use crate::mcp_ws_server::McpWsHandle;
 use gwt_core::ai::SessionSummaryCache;
-use gwt_core::config::McpRegistrationStatus;
 use gwt_core::config::os_env::EnvSource;
+use gwt_core::config::McpRegistrationStatus;
 use gwt_core::terminal::manager::PaneManager;
 use gwt_core::update::UpdateManager;
 use std::collections::{HashMap, HashSet};

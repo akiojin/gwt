@@ -305,6 +305,48 @@ server.tool(
   async ({ tab_id }) => callTool("gwt_get_changed_files", { tab_id }),
 );
 
+// gwt_master_send: { command_type: string, payload?: object, text?: string }
+server.tool(
+  "gwt_master_send",
+  "Send a structured command to the Master Agent",
+  {
+    command_type: z
+      .enum(["input_text", "cancel", "clear_context", "new_session", "switch_session"])
+      .describe("Master command type"),
+    payload: z.record(z.string(), z.unknown()).optional(),
+    text: z.string().optional(),
+    sender_tab_id: z.string().optional(),
+    sender: z.string().optional(),
+    request_id: z.string().optional(),
+  },
+  async (args) => callTool("gwt_master_send", args as Record<string, unknown>),
+);
+
+// gwt_master_get_state: { include_messages?: boolean, limit?: number }
+server.tool(
+  "gwt_master_get_state",
+  "Get Master Agent state (optionally with recent messages)",
+  {
+    include_messages: z.boolean().optional(),
+    limit: z.number().int().min(1).max(200).optional(),
+  },
+  async (args) => callTool("gwt_master_get_state", args as Record<string, unknown>),
+);
+
+// gwt_master_get_mcp_registration_status: no parameters
+server.tool(
+  "gwt_master_get_mcp_registration_status",
+  "Get MCP bridge registration health status",
+  async () => callTool("gwt_master_get_mcp_registration_status", {}),
+);
+
+// gwt_master_repair_mcp_registration: no parameters
+server.tool(
+  "gwt_master_repair_mcp_registration",
+  "Attempt to repair MCP bridge registration",
+  async () => callTool("gwt_master_repair_mcp_registration", {}),
+);
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------

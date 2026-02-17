@@ -3,9 +3,11 @@
 //! Each handler receives the WsContext and JSON-RPC params, and returns
 //! a JSON-RPC response value or error.
 
+use crate::agent_master::{get_agent_mode_state, send_agent_message, AgentModeState};
 use crate::commands::terminal::{launch_agent_for_project_root, LaunchAgentRequest};
 use crate::mcp_ws_server::{JsonRpcResponse, WsContext};
 use crate::state::AppState;
+use gwt_core::config::{get_mcp_registration_status, repair_mcp_registration};
 use gwt_core::terminal::pane::PaneStatus;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -24,6 +26,7 @@ const RATE_LIMIT: u64 = 5;
 
 static LAUNCH_COUNTER: AtomicU64 = AtomicU64::new(0);
 static LAUNCH_WINDOW_START: AtomicU64 = AtomicU64::new(0);
+static MASTER_COMMAND_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn check_rate_limit() -> Result<(), String> {
     let now = SystemTime::now()
@@ -70,6 +73,71 @@ fn get_string_param<'a>(params: &'a Value, key: &str) -> Result<&'a str, JsonRpc
                 format!("Missing or empty required parameter: {key}"),
             )
         })
+}
+
+fn get_master_window_label(ctx: &WsContext, state: &AppState) -> String {
+    let focused = ctx
+        .app_handle
+        .webview_windows()
+        .into_iter()
+        .find_map(|(label, window)| {
+            window
+                .is_focused()
+                .ok()
+                .and_then(|focused| focused.then_some(label))
+        });
+
+    focused
+        .or_else(|| state.project_for_window("main").map(|_| "main".to_string()))
+        .or_else(|| {
+            ctx.app_handle
+                .webview_windows()
+                .into_iter()
+                .next()
+                .map(|(label, _)| label)
+        })
+        .unwrap_or_else(|| "main".to_string())
+}
+
+fn next_master_command_id() -> String {
+    format!(
+        "mcmd-{}",
+        MASTER_COMMAND_COUNTER.fetch_add(1, Ordering::SeqCst) + 1
+    )
+}
+
+fn refresh_mcp_registration_health(
+    ctx: &WsContext,
+    state: &AppState,
+) -> gwt_core::config::McpRegistrationStatus {
+    let resource_dir = ctx.app_handle.path().resource_dir().ok();
+    let status = get_mcp_registration_status(resource_dir.as_deref());
+    state.set_mcp_registration_status(status.clone());
+    status
+}
+
+fn maybe_master_mcp_guard(id: Value, ctx: &WsContext, state: &AppState) -> Option<JsonRpcResponse> {
+    let status = refresh_mcp_registration_health(ctx, state);
+    if status.overall == "ok" {
+        return None;
+    }
+    let reason = if status.bridge_runtime != "ok" {
+        "MCP_RUNTIME_MISSING"
+    } else if status.bridge_script != "ok" {
+        "MCP_BRIDGE_SCRIPT_MISSING"
+    } else {
+        "MCP_REGISTER_MISSING"
+    };
+
+    Some(JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "accepted": false,
+            "status": "rejected",
+            "reason": format!("mcp_registration_failed:{reason}"),
+            "suggested_action": "repair_mcp_registration"
+        }),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -592,6 +660,191 @@ pub async fn handle_get_changed_files(
         })
         .collect();
     JsonRpcResponse::success(id, Value::Array(files))
+}
+
+// ---------------------------------------------------------------------------
+// gwt_master_send
+// ---------------------------------------------------------------------------
+
+pub fn handle_master_send(id: Value, params: &Value, ctx: &WsContext) -> JsonRpcResponse {
+    let state = ctx.app_handle.state::<AppState>();
+    if let Some(resp) = maybe_master_mcp_guard(id.clone(), ctx, &state) {
+        return resp;
+    }
+
+    let command_type = match get_string_param(params, "command_type") {
+        Ok(v) => v.to_string(),
+        Err(mut e) => {
+            e.id = id;
+            return e;
+        }
+    };
+    let command_id = next_master_command_id();
+    let window_label = get_master_window_label(ctx, &state);
+
+    match command_type.as_str() {
+        "input_text" => {
+            let payload_text = params
+                .get("payload")
+                .and_then(|v| v.get("text"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let fallback_text = params
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let text = if !payload_text.trim().is_empty() {
+                payload_text
+            } else {
+                fallback_text
+            };
+            if text.trim().is_empty() {
+                return JsonRpcResponse::success(
+                    id,
+                    serde_json::json!({
+                        "accepted": false,
+                        "command_id": command_id,
+                        "status": "rejected",
+                        "reason": "payload.text is required for input_text"
+                    }),
+                );
+            }
+
+            let app_handle = ctx.app_handle.clone();
+            let input = sanitize_message(text);
+            let window_label_clone = window_label.clone();
+            std::thread::spawn(move || {
+                let state = app_handle.state::<AppState>();
+                let _ = send_agent_message(&state, &window_label_clone, &input);
+            });
+
+            JsonRpcResponse::success(
+                id,
+                serde_json::json!({
+                    "accepted": true,
+                    "command_id": command_id,
+                    "status": "queued"
+                }),
+            )
+        }
+        "clear_context" | "new_session" => {
+            if let Ok(mut map) = state.window_agent_modes.lock() {
+                map.insert(window_label, AgentModeState::new());
+            }
+            JsonRpcResponse::success(
+                id,
+                serde_json::json!({
+                    "accepted": true,
+                    "command_id": command_id,
+                    "status": "done"
+                }),
+            )
+        }
+        "cancel" => {
+            if let Ok(mut map) = state.window_agent_modes.lock() {
+                if let Some(mode) = map.get_mut(&window_label) {
+                    mode.is_waiting = false;
+                    mode.last_error = Some("Cancelled by MCP command.".to_string());
+                }
+            }
+            JsonRpcResponse::success(
+                id,
+                serde_json::json!({
+                    "accepted": true,
+                    "command_id": command_id,
+                    "status": "done"
+                }),
+            )
+        }
+        "switch_session" => JsonRpcResponse::success(
+            id,
+            serde_json::json!({
+                "accepted": false,
+                "command_id": command_id,
+                "status": "rejected",
+                "reason": "switch_session is not supported yet"
+            }),
+        ),
+        _ => JsonRpcResponse::success(
+            id,
+            serde_json::json!({
+                "accepted": false,
+                "command_id": command_id,
+                "status": "rejected",
+                "reason": format!("Unsupported command_type: {}", command_type)
+            }),
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// gwt_master_get_state
+// ---------------------------------------------------------------------------
+
+pub fn handle_master_get_state(id: Value, params: &Value, ctx: &WsContext) -> JsonRpcResponse {
+    let state = ctx.app_handle.state::<AppState>();
+    let window_label = get_master_window_label(ctx, &state);
+    let include_messages = params
+        .get("include_messages")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(20)
+        .min(200) as usize;
+
+    let mut mode = get_agent_mode_state(&state, &window_label);
+    if include_messages {
+        if mode.messages.len() > limit {
+            let start = mode.messages.len().saturating_sub(limit);
+            mode.messages = mode.messages.split_off(start);
+        }
+    } else {
+        mode.messages.clear();
+    }
+
+    JsonRpcResponse::success(
+        id,
+        serde_json::to_value(mode).unwrap_or_else(|_| serde_json::json!({})),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// gwt_master_get_mcp_registration_status
+// ---------------------------------------------------------------------------
+
+pub fn handle_master_get_mcp_registration_status(
+    id: Value,
+    _params: &Value,
+    ctx: &WsContext,
+) -> JsonRpcResponse {
+    let state = ctx.app_handle.state::<AppState>();
+    let status = refresh_mcp_registration_health(ctx, &state);
+    JsonRpcResponse::success(
+        id,
+        serde_json::to_value(status).unwrap_or_else(|_| serde_json::json!({})),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// gwt_master_repair_mcp_registration
+// ---------------------------------------------------------------------------
+
+pub fn handle_master_repair_mcp_registration(
+    id: Value,
+    _params: &Value,
+    ctx: &WsContext,
+) -> JsonRpcResponse {
+    crate::mcp_ws_server::cleanup_stale_state_file();
+    let state = ctx.app_handle.state::<AppState>();
+    let resource_dir = ctx.app_handle.path().resource_dir().ok();
+    let status = repair_mcp_registration(resource_dir.as_deref());
+    state.set_mcp_registration_status(status.clone());
+    JsonRpcResponse::success(
+        id,
+        serde_json::to_value(status).unwrap_or_else(|_| serde_json::json!({})),
+    )
 }
 
 // ---------------------------------------------------------------------------

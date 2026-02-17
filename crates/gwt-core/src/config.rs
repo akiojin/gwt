@@ -35,9 +35,10 @@ pub use claude_plugins::{
 };
 pub use mcp_registration::{
     cleanup_stale_registrations, detect_runtime, is_registered as is_mcp_registered,
-    register_all as register_all_mcp, register_mcp_server, resolve_bridge_path,
-    unregister_all as unregister_all_mcp, unregister_mcp_server, McpAgentType, McpBridgeConfig,
-    MCP_SERVER_NAME,
+    get_registration_status as get_mcp_registration_status, register_all as register_all_mcp,
+    register_mcp_server, repair_registration as repair_mcp_registration, resolve_bridge_path,
+    unregister_all as unregister_all_mcp, unregister_mcp_server, McpAgentType,
+    McpAgentRegistrationStatus, McpBridgeConfig, McpRegistrationStatus, MCP_SERVER_NAME,
 };
 pub use migration::{
     backup_broken_file, ensure_config_dir, get_cleanup_candidates, migrate_json_to_toml,

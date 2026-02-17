@@ -10,6 +10,7 @@
 //! - Gemini: `~/.gemini/settings.json` (JSON, `mcpServers`)
 
 use crate::error::GwtError;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
@@ -51,6 +52,55 @@ pub struct McpBridgeConfig {
     pub command: String,
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
+}
+
+/// Per-agent registration health details.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpAgentRegistrationStatus {
+    pub agent_id: String,
+    pub label: String,
+    pub config_path: Option<String>,
+    pub registered: bool,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+}
+
+/// Registration health snapshot for MCP bridge integration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpRegistrationStatus {
+    /// "ok" | "degraded" | "failed"
+    pub overall: String,
+    /// "ok" | "missing"
+    pub bridge_runtime: String,
+    /// "ok" | "missing"
+    pub bridge_script: String,
+    pub agents: Vec<McpAgentRegistrationStatus>,
+    /// Unix timestamp (milliseconds)
+    pub last_checked_at: i64,
+    pub last_error_message: Option<String>,
+}
+
+impl Default for McpRegistrationStatus {
+    fn default() -> Self {
+        Self {
+            overall: "failed".to_string(),
+            bridge_runtime: "missing".to_string(),
+            bridge_script: "missing".to_string(),
+            agents: McpAgentType::all()
+                .iter()
+                .map(|agent| McpAgentRegistrationStatus {
+                    agent_id: format!("{agent:?}").to_ascii_lowercase(),
+                    label: agent.label().to_string(),
+                    config_path: None,
+                    registered: false,
+                    error_code: Some("NOT_CHECKED".to_string()),
+                    error_message: Some("Registration status has not been checked yet.".to_string()),
+                })
+                .collect(),
+            last_checked_at: chrono::Utc::now().timestamp_millis(),
+            last_error_message: Some("Registration status has not been checked yet.".to_string()),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -252,6 +302,137 @@ pub fn unregister_all() -> Result<(), GwtError> {
         }
     }
     Ok(())
+}
+
+/// Inspect current MCP registration health (runtime/script/agent configs).
+pub fn get_registration_status(resource_dir: Option<&Path>) -> McpRegistrationStatus {
+    let runtime_result = detect_runtime();
+    let bridge_result = resolve_bridge_path(resource_dir);
+
+    let mut agents = Vec::new();
+    let mut last_error: Option<String> = None;
+    for agent in McpAgentType::all() {
+        let path = config_path_for(*agent);
+        let config_path = path.as_ref().map(|p| p.to_string_lossy().to_string());
+        let (registered, error_code, error_message) = match path {
+            None => (
+                false,
+                Some("CONFIG_PATH_UNAVAILABLE".to_string()),
+                Some("Home directory could not be resolved.".to_string()),
+            ),
+            Some(path) => match is_registered_at(*agent, &path) {
+                Ok(registered) => (registered, None, None),
+                Err(err) => (
+                    false,
+                    Some("CONFIG_READ_FAILED".to_string()),
+                    Some(err.to_string()),
+                ),
+            },
+        };
+
+        if last_error.is_none() && error_message.is_some() {
+            last_error = error_message.clone();
+        }
+
+        agents.push(McpAgentRegistrationStatus {
+            agent_id: format!("{agent:?}").to_ascii_lowercase(),
+            label: agent.label().to_string(),
+            config_path,
+            registered,
+            error_code,
+            error_message,
+        });
+    }
+
+    let runtime_ok = runtime_result.is_ok();
+    let bridge_ok = bridge_result.is_ok();
+    let all_agents_registered = agents.iter().all(|a| a.registered);
+    let any_agents_registered = agents.iter().any(|a| a.registered);
+
+    if last_error.is_none() {
+        if let Err(err) = &runtime_result {
+            last_error = Some(err.to_string());
+        } else if let Err(err) = &bridge_result {
+            last_error = Some(err.to_string());
+        } else if !all_agents_registered {
+            let missing = agents
+                .iter()
+                .filter(|a| !a.registered)
+                .map(|a| a.label.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            last_error = Some(format!("MCP server is not registered for: {missing}"));
+        }
+    }
+
+    let overall = if runtime_ok && bridge_ok && all_agents_registered {
+        "ok"
+    } else if runtime_ok || bridge_ok || any_agents_registered {
+        "degraded"
+    } else {
+        "failed"
+    };
+
+    McpRegistrationStatus {
+        overall: overall.to_string(),
+        bridge_runtime: if runtime_ok {
+            "ok".to_string()
+        } else {
+            "missing".to_string()
+        },
+        bridge_script: if bridge_ok {
+            "ok".to_string()
+        } else {
+            "missing".to_string()
+        },
+        agents,
+        last_checked_at: chrono::Utc::now().timestamp_millis(),
+        last_error_message: last_error,
+    }
+}
+
+/// Best-effort repair of MCP registration (stale cleanup + re-register all).
+pub fn repair_registration(resource_dir: Option<&Path>) -> McpRegistrationStatus {
+    let mut bootstrap_error: Option<String> = None;
+
+    if let Err(err) = cleanup_stale_registrations() {
+        bootstrap_error = Some(format!("Failed to cleanup stale registrations: {err}"));
+    }
+
+    let runtime = match detect_runtime() {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            let mut status = get_registration_status(resource_dir);
+            status.last_error_message =
+                Some(format!("Failed to detect JS runtime (bun/node): {err}"));
+            return status;
+        }
+    };
+
+    let bridge_path = match resolve_bridge_path(resource_dir) {
+        Ok(path) => path,
+        Err(err) => {
+            let mut status = get_registration_status(resource_dir);
+            status.last_error_message =
+                Some(format!("Failed to resolve MCP bridge script path: {err}"));
+            return status;
+        }
+    };
+
+    let config = McpBridgeConfig {
+        command: runtime,
+        args: vec![bridge_path.to_string_lossy().into_owned()],
+        env: HashMap::new(),
+    };
+    if let Err(err) = register_all(&config) {
+        bootstrap_error = Some(format!("Failed to register MCP servers: {err}"));
+    }
+
+    let mut status = get_registration_status(resource_dir);
+    if status.last_error_message.is_none() {
+        status.last_error_message = bootstrap_error;
+    }
+    status
 }
 
 // ---------------------------------------------------------------------------
@@ -469,6 +650,7 @@ fn is_registered_codex(path: &Path) -> Result<bool, GwtError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{TestEnvGuard, HOME_LOCK};
     use tempfile::TempDir;
 
     fn sample_config() -> McpBridgeConfig {
@@ -849,5 +1031,41 @@ args = []
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let servers = root["mcpServers"].as_object().unwrap();
         assert_eq!(servers.len(), 1);
+    }
+
+    #[test]
+    fn get_registration_status_reports_missing_agent_registration() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let tmp = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(tmp.path());
+
+        let resource_dir = tmp.path().join("resources");
+        std::fs::create_dir_all(&resource_dir).unwrap();
+        std::fs::write(resource_dir.join("gwt-mcp-bridge.js"), "console.log('bridge');").unwrap();
+
+        let status = get_registration_status(Some(&resource_dir));
+        assert_eq!(status.bridge_script, "ok");
+        assert_eq!(status.agents.len(), McpAgentType::all().len());
+        assert!(status.agents.iter().all(|a| !a.registered));
+        assert_ne!(status.overall, "ok");
+    }
+
+    #[test]
+    fn repair_registration_registers_all_agents_when_runtime_available() {
+        if detect_runtime().is_err() {
+            return;
+        }
+
+        let _guard = HOME_LOCK.lock().unwrap();
+        let tmp = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(tmp.path());
+
+        let resource_dir = tmp.path().join("resources");
+        std::fs::create_dir_all(&resource_dir).unwrap();
+        std::fs::write(resource_dir.join("gwt-mcp-bridge.js"), "console.log('bridge');").unwrap();
+
+        let status = repair_registration(Some(&resource_dir));
+        assert_eq!(status.overall, "ok");
+        assert!(status.agents.iter().all(|a| a.registered));
     }
 }
