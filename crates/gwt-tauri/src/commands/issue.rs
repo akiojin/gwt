@@ -2,8 +2,8 @@
 
 use crate::commands::project::resolve_repo_path_for_project_root;
 use gwt_core::git::{
-    create_linked_branch, fetch_open_issues, find_branch_for_issue, is_gh_cli_authenticated,
-    is_gh_cli_available,
+    create_linked_branch, fetch_open_issues, find_branch_for_issue, get_spec_issue_detail,
+    is_gh_cli_authenticated, is_gh_cli_available,
 };
 use gwt_core::worktree::WorktreeManager;
 use serde::Serialize;
@@ -25,6 +25,17 @@ pub struct IssueInfo {
     pub title: String,
     pub updated_at: String,
     pub labels: Vec<String>,
+}
+
+/// Branch-linked issue info for Worktree Summary.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchLinkedIssueInfo {
+    pub number: u64,
+    pub title: String,
+    pub updated_at: String,
+    pub labels: Vec<String>,
+    pub url: String,
 }
 
 /// gh CLI status (FR-011a)
@@ -70,6 +81,67 @@ pub fn fetch_github_issues(
         issues,
         has_next_page: result.has_next_page,
     })
+}
+
+fn extract_issue_number_from_branch(branch: &str) -> Option<u64> {
+    let trimmed = branch.trim().trim_start_matches("origin/");
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let pattern = "issue-";
+    let mut start = 0usize;
+    while let Some(pos) = lower[start..].find(pattern) {
+        let idx = start + pos + pattern.len();
+        let digits: String = lower[idx..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect();
+        if !digits.is_empty() {
+            if let Ok(number) = digits.parse::<u64>() {
+                return Some(number);
+            }
+        }
+        start = idx;
+        if start >= lower.len() {
+            break;
+        }
+    }
+    None
+}
+
+fn is_issue_not_found_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("not found")
+        || lower.contains("could not resolve to an issue")
+        || lower.contains("http 404")
+}
+
+/// Fetch issue linked to branch naming pattern (`issue-<number>`).
+#[tauri::command]
+pub fn fetch_branch_linked_issue(
+    project_path: String,
+    branch: String,
+) -> Result<Option<BranchLinkedIssueInfo>, String> {
+    let Some(issue_number) = extract_issue_number_from_branch(&branch) else {
+        return Ok(None);
+    };
+
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+
+    match get_spec_issue_detail(&repo_path, issue_number) {
+        Ok(detail) => Ok(Some(BranchLinkedIssueInfo {
+            number: detail.number,
+            title: detail.title,
+            updated_at: detail.updated_at,
+            labels: detail.labels,
+            url: detail.url,
+        })),
+        Err(err) if is_issue_not_found_error(&err) => Ok(None),
+        Err(err) => Err(err),
+    }
 }
 
 /// Check gh CLI availability and authentication (FR-011)
@@ -294,5 +366,48 @@ mod tests {
 
         let json = serde_json::to_string(&info).unwrap();
         assert!(json.contains("\"labels\":[]"));
+    }
+
+    #[test]
+    fn test_branch_linked_issue_info_serialization() {
+        let issue = BranchLinkedIssueInfo {
+            number: 1097,
+            title: "Rework tabs".to_string(),
+            updated_at: "2026-02-17T00:00:00Z".to_string(),
+            labels: vec!["enhancement".to_string()],
+            url: "https://github.com/example/repo/issues/1097".to_string(),
+        };
+
+        let json = serde_json::to_string(&issue).unwrap();
+        assert!(json.contains("\"updatedAt\""));
+        assert!(json.contains("\"url\":\"https://github.com/example/repo/issues/1097\""));
+    }
+
+    #[test]
+    fn test_extract_issue_number_from_branch_variants() {
+        assert_eq!(
+            extract_issue_number_from_branch("feature/issue-1097"),
+            Some(1097)
+        );
+        assert_eq!(
+            extract_issue_number_from_branch("origin/bugfix/issue-42-something"),
+            Some(42)
+        );
+        assert_eq!(extract_issue_number_from_branch("hotfix/ISSUE-9"), Some(9));
+    }
+
+    #[test]
+    fn test_extract_issue_number_from_branch_absent() {
+        assert_eq!(extract_issue_number_from_branch("feature/new-ui"), None);
+        assert_eq!(extract_issue_number_from_branch(""), None);
+    }
+
+    #[test]
+    fn test_is_issue_not_found_error() {
+        assert!(is_issue_not_found_error(
+            "gh issue view failed: could not resolve to an issue"
+        ));
+        assert!(is_issue_not_found_error("HTTP 404"));
+        assert!(!is_issue_not_found_error("permission denied"));
     }
 }
