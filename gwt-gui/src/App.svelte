@@ -63,6 +63,12 @@
     voiceInput?: VoiceInputSettings;
   }
 
+  interface AgentModeSpecIssuePayload {
+    issueNumber: number;
+    specId?: string | null;
+    issueUrl?: string | null;
+  }
+
   const SIDEBAR_WIDTH_STORAGE_KEY = "gwt.sidebar.width";
   const SIDEBAR_MODE_STORAGE_KEY = "gwt.sidebar.mode";
   const DEFAULT_SIDEBAR_WIDTH_PX = 260;
@@ -1112,6 +1118,39 @@
     activeTabId = tab.id;
   }
 
+  function openIssueSpecTab(payload: AgentModeSpecIssuePayload) {
+    const issueNumber = Number(payload.issueNumber);
+    if (!Number.isFinite(issueNumber) || issueNumber <= 0) return;
+    const specId = payload.specId?.trim() || undefined;
+    const label = specId ? `Spec ${specId}` : `Issue #${issueNumber}`;
+
+    const existing = tabs.find((t) => t.type === "issueSpec" || t.id === "issueSpec");
+    if (existing) {
+      tabs = tabs.map((t) =>
+        t.id === existing.id
+          ? {
+              ...t,
+              label,
+              issueNumber,
+              specId,
+            }
+          : t
+      );
+      activeTabId = existing.id;
+      return;
+    }
+
+    const tab: Tab = {
+      id: "issueSpec",
+      label,
+      type: "issueSpec",
+      issueNumber,
+      ...(specId ? { specId } : {}),
+    };
+    tabs = [...tabs, tab];
+    activeTabId = tab.id;
+  }
+
   function getActiveTerminalPaneId(): string | null {
     const active = tabs.find((t) => t.id === activeTabId);
     if (!active || (active.type !== "agent" && active.type !== "terminal")) {
@@ -1795,6 +1834,20 @@
     window.addEventListener("gwt-settings-updated", onSettingsUpdated);
     return () =>
       window.removeEventListener("gwt-settings-updated", onSettingsUpdated);
+  });
+
+  $effect(() => {
+    function onOpenIssueSpec(event: Event) {
+      const payload = (event as CustomEvent<AgentModeSpecIssuePayload>).detail;
+      if (!payload) return;
+      openIssueSpecTab(payload);
+    }
+    window.addEventListener("gwt-agent-mode-open-spec-issue", onOpenIssueSpec);
+    return () =>
+      window.removeEventListener(
+        "gwt-agent-mode-open-spec-issue",
+        onOpenIssueSpec,
+      );
   });
 
   // Global keyboard shortcut: Cmd+Shift+K / Ctrl+Shift+K to open Cleanup modal.
