@@ -51,14 +51,13 @@
   let quickLaunchingKey: string | null = $state(null);
 
   type SummaryTab =
-    | "quick-start"
     | "summary"
     | "git"
     | "issue"
     | "pr"
     | "workflow"
     | "docker";
-  let activeTab: SummaryTab = $state("quick-start");
+  let activeTab: SummaryTab = $state("summary");
 
   let linkedIssueLoading: boolean = $state(false);
   let linkedIssueError: string | null = $state(null);
@@ -328,6 +327,39 @@
     return `${entry.tool_id}-${entry.timestamp}`;
   }
 
+  function normalizeLinkedIssue(value: unknown): BranchLinkedIssueInfo | null {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+
+    const candidate = value as Partial<BranchLinkedIssueInfo>;
+    if (typeof candidate.number !== "number") return null;
+    if (typeof candidate.title !== "string") return null;
+
+    return {
+      number: candidate.number,
+      title: candidate.title,
+      updatedAt: typeof candidate.updatedAt === "string" ? candidate.updatedAt : "",
+      labels: Array.isArray(candidate.labels)
+        ? candidate.labels.filter((label): label is string => typeof label === "string")
+        : [],
+      url: typeof candidate.url === "string" ? candidate.url : "",
+    };
+  }
+
+  let latestQuickStartEntry: ToolSessionEntry | null = $derived.by(() => {
+    if (quickStartEntries.length === 0) return null;
+    return quickStartEntries.reduce((latest, entry) => {
+      return entry.timestamp > latest.timestamp ? entry : latest;
+    });
+  });
+
+  let quickHeaderButtonsDisabled = $derived.by(
+    () =>
+      quickStartLoading ||
+      quickLaunching ||
+      !onQuickLaunch ||
+      latestQuickStartEntry === null,
+  );
+
   async function loadQuickStart() {
     quickLaunchError = null;
     quickStartError = null;
@@ -384,10 +416,11 @@
     linkedIssueLoading = true;
     try {
       const invoke = await getInvoke();
-      const result = await invoke<BranchLinkedIssueInfo | null>("fetch_branch_linked_issue", {
+      const rawResult = await invoke<unknown>("fetch_branch_linked_issue", {
         projectPath,
         branch,
       });
+      const result = normalizeLinkedIssue(rawResult);
       const currentKey = `${projectPath}::${currentBranchName()}`;
       if (currentKey !== key) return;
       linkedIssue = result;
@@ -856,19 +889,39 @@
     <div class="branch-detail">
       <div class="branch-header">
         <h2>{selectedBranch.name}</h2>
-        <button class="launch-btn" onclick={() => onLaunchAgent?.()}>
-          Launch Agent...
-        </button>
+        <div class="branch-header-actions">
+          <button
+            class="header-quick-btn"
+            disabled={quickHeaderButtonsDisabled}
+            onclick={() => latestQuickStartEntry && quickLaunch(latestQuickStartEntry, "continue")}
+          >
+            {quickLaunching &&
+            latestQuickStartEntry &&
+            quickLaunchingKey === quickStartEntryKey(latestQuickStartEntry)
+              ? "Launching..."
+              : "Continue"}
+          </button>
+          <button
+            class="header-quick-btn ghost"
+            disabled={quickHeaderButtonsDisabled}
+            onclick={() => latestQuickStartEntry && quickLaunch(latestQuickStartEntry, "new")}
+          >
+            New
+          </button>
+          <button class="launch-btn" onclick={() => onLaunchAgent?.()}>
+            Launch Agent...
+          </button>
+        </div>
       </div>
 
+      {#if quickStartError}
+        <div class="quick-error">{quickStartError}</div>
+      {/if}
+      {#if quickLaunchError}
+        <div class="quick-error">{quickLaunchError}</div>
+      {/if}
+
       <div class="summary-tabs">
-        <button
-          class="summary-tab"
-          class:active={activeTab === "quick-start"}
-          onclick={() => (activeTab = "quick-start")}
-        >
-          Quick Start
-        </button>
         <button
           class="summary-tab"
           class:active={activeTab === "summary"}
@@ -923,88 +976,7 @@
         </button>
       </div>
 
-      {#if activeTab === "quick-start"}
-        <div class="quick-start">
-          <div class="quick-header">
-            <span class="quick-title">Quick Start</span>
-            {#if quickStartLoading}
-              <span class="quick-subtitle">Loading...</span>
-            {:else if quickStartEntries.length > 0}
-              <span class="quick-subtitle">
-                {quickStartEntries.length} tool{quickStartEntries.length === 1 ? "" : "s"}
-              </span>
-            {:else}
-              <span class="quick-subtitle">No history</span>
-            {/if}
-          </div>
-
-          {#if quickStartError}
-            <div class="quick-error">{quickStartError}</div>
-          {/if}
-
-          {#if quickLaunchError}
-            <div class="quick-error">{quickLaunchError}</div>
-          {/if}
-
-          {#if !quickStartLoading && quickStartEntries.length === 0}
-            <div class="quick-empty">
-              Launch an agent once on this branch to enable Quick Start.
-            </div>
-          {:else if quickStartEntries.length > 0}
-            <div class="quick-list">
-              {#each quickStartEntries as entry (quickStartEntryKey(entry))}
-                <div class="quick-row">
-                  <div class="quick-info">
-                    <div class="quick-tool {toolClass(entry)}">
-                      <span class="quick-tool-name">{displayToolName(entry)}</span>
-                      <span class="quick-tool-version">
-                        @{displayToolVersion(entry)}
-                      </span>
-                    </div>
-                    <div class="quick-meta">
-                      {#if runtimeLabel(entry)}
-                        <span class="quick-pill">runtime: {runtimeLabel(entry)}</span>
-                      {/if}
-                      {#if runtimeService(entry)}
-                        <span class="quick-pill">service: {runtimeService(entry)}</span>
-                      {/if}
-                      {#if displayModelLabel(entry) !== null}
-                        <span class="quick-pill">model: {displayModelLabel(entry)}</span>
-                      {/if}
-                      {#if toolClass(entry) === "codex" && entry.reasoning_level}
-                        <span class="quick-pill">reasoning: {entry.reasoning_level}</span>
-                      {/if}
-                      {#if entry.skip_permissions !== undefined && entry.skip_permissions !== null}
-                        <span class="quick-pill">
-                          skip: {entry.skip_permissions ? "on" : "off"}
-                        </span>
-                      {/if}
-                    </div>
-                  </div>
-                  <div class="quick-actions">
-                    <button
-                      class="quick-btn"
-                      disabled={quickLaunching}
-                      onclick={() => quickLaunch(entry, "continue")}
-                    >
-                      {quickLaunching && quickLaunchingKey === quickStartEntryKey(entry)
-                        ? "Launching..."
-                        : "Continue"}
-                    </button>
-                    <button
-                      class="quick-btn ghost"
-                      disabled={quickLaunching}
-                      onclick={() => quickLaunch(entry, "new")}
-                    >
-                      New
-                    </button>
-                  </div>
-                </div>
-              {/each}
-            </div>
-          {/if}
-        </div>
-      {:else if activeTab === "summary"}
+      {#if activeTab === "summary"}
         <div class="quick-start ai-summary">
           <div class="quick-header">
             <span class="quick-title">Summary</span>
@@ -1404,6 +1376,15 @@
     gap: 12px;
   }
 
+  .branch-header-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+  }
+
   .branch-detail h2 {
     font-size: var(--ui-font-lg);
     font-weight: 700;
@@ -1430,6 +1411,34 @@
 
   .launch-btn:hover {
     background: var(--accent-hover);
+  }
+
+  .header-quick-btn {
+    padding: 6px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    font-size: var(--ui-font-sm);
+    font-weight: 700;
+    cursor: pointer;
+    font-family: inherit;
+    transition: border-color 0.15s, background-color 0.15s;
+    white-space: nowrap;
+  }
+
+  .header-quick-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+  }
+
+  .header-quick-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .header-quick-btn.ghost {
+    background: transparent;
+    color: var(--text-secondary);
   }
 
   .detail-grid {

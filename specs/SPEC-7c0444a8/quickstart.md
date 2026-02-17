@@ -1,4 +1,4 @@
-# Quickstart: GUI Worktree Summary 7タブ再編（Issue #1097）
+# Quickstart: GUI Worktree Summary 6タブ + Quick Launchヘッダー再編（Issue #1097）
 
 ## 前提
 
@@ -9,10 +9,11 @@
 
 1. `cargo tauri dev` を起動し、対象プロジェクトを開く。
 2. Worktree を選択して Summary パネルを表示する。
-3. タブ列が `Quick Start / Summary / Git / Issue / PR / Workflow / Docker` で固定表示されることを確認する。
-4. `feature/issue-<number>` ブランチで Issue タブを開き、該当 Issue のみ表示されることを確認する。
-5. PR があるブランチで PR/Workflow タブを確認し、PRなしブランチでは空状態になることを確認する。
-6. Docker タブで current context と Quick Start 履歴が併記されることを確認する。
+3. タブ列が `Summary / Git / Issue / PR / Workflow / Docker` で固定表示されることを確認する。
+4. ヘッダー右側に `Continue / New / Launch Agent...` が並び、Quick Start 履歴が空のブランチでは `Continue/New` が無効化されることを確認する。
+5. `feature/issue-<number>` ブランチで Issue タブを開き、該当 Issue のみ表示されることを確認する。
+6. PR があるブランチで PR/Workflow タブを確認し、PRなしブランチでは空状態になることを確認する。
+7. Docker タブで current context と Quick Start 履歴が併記されることを確認する。
 
 ## 自動テスト
 
