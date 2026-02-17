@@ -474,6 +474,64 @@ describe("WorktreeSummaryPanel", () => {
     });
   });
 
+  it("ignores stale latest branch PR errors after branch switch", async () => {
+    let rejectFirstPrLookup: ((reason?: unknown) => void) | null = null;
+
+    invokeMock.mockImplementation(
+      (cmd: string, args?: { branch?: string; projectPath?: string }) => {
+        if (cmd === "get_branch_quick_start") return [];
+        if (cmd === "get_branch_session_summary") return { ...sessionSummaryFixture, markdown: null };
+        if (cmd === "fetch_branch_linked_issue") return null;
+        if (cmd === "fetch_latest_branch_pr") {
+          if (args?.branch === "feature/markdown-ui") {
+            return new Promise((_, reject) => {
+              rejectFirstPrLookup = reject;
+            });
+          }
+          return null;
+        }
+        if (cmd === "detect_docker_context") return dockerContextFixture;
+        return [];
+      }
+    );
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("fetch_latest_branch_pr", {
+        projectPath: "/tmp/project",
+        branch: "feature/markdown-ui",
+      });
+    });
+
+    await rendered.rerender({
+      projectPath: "/tmp/project",
+      selectedBranch: { ...branchFixture, name: "feature/next-task" },
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("fetch_latest_branch_pr", {
+        projectPath: "/tmp/project",
+        branch: "feature/next-task",
+      });
+    });
+
+    rejectFirstPrLookup?.(new Error("stale request"));
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const prTab = tabs[3] as HTMLElement;
+    await fireEvent.click(prTab);
+
+    await waitFor(() => {
+      expect(prTab.classList.contains("active")).toBe(true);
+      expect(rendered.getByText("No PR")).toBeTruthy();
+      expect(rendered.queryByText(/Failed to load PR:/)).toBeNull();
+    });
+  });
+
   it("switches to Docker tab and shows current context plus quick-start docker history", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "get_branch_quick_start") return [quickStartDockerEntry];

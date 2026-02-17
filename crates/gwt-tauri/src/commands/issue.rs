@@ -106,9 +106,8 @@ fn extract_issue_number_from_branch(branch: &str) -> Option<u64> {
 
 fn is_issue_not_found_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
-    lower.contains("not found")
-        || lower.contains("could not resolve to an issue")
-        || lower.contains("http 404")
+    lower.contains("could not resolve to an issue")
+        || (lower.contains("issue with the number") && lower.contains("(repository.issue)"))
 }
 
 /// Fetch issue linked to branch naming pattern (`issue-<number>`).
@@ -405,7 +404,15 @@ mod tests {
         assert!(is_issue_not_found_error(
             "gh issue view failed: could not resolve to an issue"
         ));
-        assert!(is_issue_not_found_error("HTTP 404"));
+        assert!(is_issue_not_found_error(
+            "gh issue view failed: GraphQL: Could not resolve to an issue with the number of 1097. (repository.issue)"
+        ));
+        assert!(!is_issue_not_found_error(
+            "gh issue view failed: HTTP 404: Not Found"
+        ));
+        assert!(!is_issue_not_found_error(
+            "gh issue view failed: GraphQL: Could not resolve to a Repository with the name 'org/repo'. (repository)"
+        ));
         assert!(!is_issue_not_found_error("permission denied"));
     }
 }

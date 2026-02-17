@@ -457,6 +457,8 @@
       if (currentKey !== key) return;
       latestBranchPr = result;
     } catch (err) {
+      const currentKey = `${projectPath}::${currentBranchName()}`;
+      if (currentKey !== key) return;
       latestBranchPr = null;
       latestBranchPrError = `Failed to load PR: ${toErrorMessage(err)}`;
     } finally {
