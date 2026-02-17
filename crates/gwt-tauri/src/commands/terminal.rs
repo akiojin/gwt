@@ -20,7 +20,7 @@ use gwt_core::terminal::{AgentColor, BuiltinLaunchConfig};
 use gwt_core::worktree::WorktreeManager;
 use serde::Deserialize;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -600,6 +600,66 @@ fn merge_profile_env_for_docker(
             continue;
         }
         base_env.insert(k.to_string(), value.to_string());
+    }
+}
+
+fn compose_file_paths_from_args(compose_args: &[String]) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut idx = 0usize;
+    while idx + 1 < compose_args.len() {
+        if compose_args[idx] == "-f" {
+            let path = compose_args[idx + 1].trim();
+            if !path.is_empty() {
+                paths.push(PathBuf::from(path));
+            }
+            idx += 2;
+            continue;
+        }
+        idx += 1;
+    }
+    paths
+}
+
+fn collect_compose_env_keys(compose_paths: &[PathBuf]) -> HashSet<String> {
+    let mut keys = HashSet::new();
+    for compose_path in compose_paths {
+        if let Ok(found) = DockerManager::list_env_keys_from_compose_file(compose_path) {
+            keys.extend(found);
+        }
+    }
+    keys
+}
+
+fn merge_compose_env_for_docker(
+    base_env: &mut HashMap<String, String>,
+    merged_profile_env: &HashMap<String, String>,
+    compose_paths: &[PathBuf],
+) {
+    let keys = collect_compose_env_keys(compose_paths);
+    for key in keys {
+        let k = key.trim();
+        if k.is_empty() || !is_valid_docker_env_key(k) {
+            continue;
+        }
+        if let Some(value) = merged_profile_env.get(k) {
+            base_env.insert(k.to_string(), value.to_string());
+        }
+    }
+}
+
+fn merge_compose_env_from_process(
+    base_env: &mut HashMap<String, String>,
+    compose_paths: &[PathBuf],
+) {
+    let keys = collect_compose_env_keys(compose_paths);
+    for key in keys {
+        let k = key.trim();
+        if k.is_empty() || !is_valid_docker_env_key(k) {
+            continue;
+        }
+        if let Ok(value) = std::env::var(k) {
+            base_env.insert(k.to_string(), value);
+        }
     }
 }
 
@@ -1331,6 +1391,7 @@ mod tests {
     use std::ffi::OsString;
     use std::path::Path;
     use std::time::Duration;
+    use tempfile::TempDir;
 
     struct ScopedEnvVar {
         key: &'static str,
@@ -2031,6 +2092,50 @@ mod tests {
     }
 
     #[test]
+    fn compose_file_paths_from_args_extracts_only_compose_files() {
+        let args = vec![
+            "-f".to_string(),
+            "/tmp/compose.base.yml".to_string(),
+            "--project-name".to_string(),
+            "test".to_string(),
+            "-f".to_string(),
+            "/tmp/compose.override.yml".to_string(),
+        ];
+
+        let paths = compose_file_paths_from_args(&args);
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0], PathBuf::from("/tmp/compose.base.yml"));
+        assert_eq!(paths[1], PathBuf::from("/tmp/compose.override.yml"));
+    }
+
+    #[test]
+    fn merge_compose_env_for_docker_includes_non_allowlisted_compose_keys() {
+        let temp = TempDir::new().unwrap();
+        let compose_path = temp.path().join("docker-compose.yml");
+        std::fs::write(
+            &compose_path,
+            r#"
+services:
+  app:
+    environment:
+      - CUSTOM_ENV
+      - GITHUB_TOKEN
+"#,
+        )
+        .unwrap();
+
+        let mut base = HashMap::new();
+        let mut merged = HashMap::new();
+        merged.insert("CUSTOM_ENV".to_string(), "custom".to_string());
+        merged.insert("GITHUB_TOKEN".to_string(), "ghs_xxx".to_string());
+
+        merge_compose_env_for_docker(&mut base, &merged, &[compose_path]);
+
+        assert_eq!(base.get("CUSTOM_ENV"), Some(&"custom".to_string()));
+        assert_eq!(base.get("GITHUB_TOKEN"), Some(&"ghs_xxx".to_string()));
+    }
+
+    #[test]
     fn docker_compose_exec_workdir_is_empty_without_workspace_folder() {
         assert_eq!(docker_compose_exec_workdir(None), "");
     }
@@ -2548,16 +2653,19 @@ fn launch_agent_for_project_root(
                     DockerFileType::Compose(compose_path.clone()),
                 );
 
+                let mut compose_args =
+                    vec!["-f".to_string(), compose_path.to_string_lossy().to_string()];
+                let compose_paths = compose_file_paths_from_args(&compose_args);
+
                 let mut env = manager.collect_passthrough_env();
                 // Merge only docker-relevant profile/env keys to avoid oversized command lines
                 // and invalid Windows pseudo env keys (e.g. "=C:").
                 merge_profile_env_for_docker(&mut env, &env_vars);
+                merge_compose_env_for_docker(&mut env, &env_vars, &compose_paths);
                 env.insert("COMPOSE_PROJECT_NAME".to_string(), container_name.clone());
                 apply_translated_git_env(&mut env);
 
                 let mounts = build_git_bind_mounts(&env);
-                let mut compose_args =
-                    vec!["-f".to_string(), compose_path.to_string_lossy().to_string()];
                 if let Some(override_path) = write_docker_compose_override(
                     &project_root,
                     &container_name,
@@ -2599,6 +2707,7 @@ fn launch_agent_for_project_root(
                     if compose_args.is_empty() {
                         return Err("Devcontainer is configured for compose but no compose files were found".to_string());
                     }
+                    let compose_paths = compose_file_paths_from_args(&compose_args);
 
                     // Best-effort compose service selection: prefer request, then devcontainer.json, then first service.
                     let mut services: Vec<String> = Vec::new();
@@ -2643,6 +2752,7 @@ fn launch_agent_for_project_root(
 
                     let mut env = manager.collect_passthrough_env();
                     merge_profile_env_for_docker(&mut env, &env_vars);
+                    merge_compose_env_for_docker(&mut env, &env_vars, &compose_paths);
                     env.insert("COMPOSE_PROJECT_NAME".to_string(), container_name.clone());
                     apply_translated_git_env(&mut env);
 
@@ -3382,12 +3492,18 @@ fn stream_pty_output(
                             }
                         };
 
-                        let manager = DockerManager::new(
-                            &worktree_path,
-                            "",
-                            DockerFileType::Compose(worktree_path.join("docker-compose.yml")),
-                        );
+                        let compose_paths = compose_file_paths_from_args(&args);
+                        let docker_file_type = compose_paths
+                            .first()
+                            .cloned()
+                            .map(DockerFileType::Compose)
+                            .unwrap_or_else(|| {
+                                DockerFileType::Compose(worktree_path.join("docker-compose.yml"))
+                            });
+
+                        let manager = DockerManager::new(&worktree_path, "", docker_file_type);
                         let mut env = manager.collect_passthrough_env();
+                        merge_compose_env_from_process(&mut env, &compose_paths);
                         env.insert("COMPOSE_PROJECT_NAME".to_string(), container_name.clone());
                         docker_compose_down(&worktree_path, &container_name, &env, &args)
                     })();
