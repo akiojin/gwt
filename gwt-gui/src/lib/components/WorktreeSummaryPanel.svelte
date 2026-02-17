@@ -3,6 +3,9 @@
   import { invoke as tauriInvoke } from "@tauri-apps/api/core";
   import type {
     BranchInfo,
+    BranchLinkedIssueInfo,
+    BranchPrReference,
+    DockerContext,
     LaunchAgentRequest,
     ToolSessionEntry,
     SessionSummaryResult,
@@ -47,8 +50,27 @@
   let quickLaunching: boolean = $state(false);
   let quickLaunchingKey: string | null = $state(null);
 
-  type SummaryTab = "summary" | "git" | "pr" | "workflow" | "ai" | "docker";
-  let activeTab: SummaryTab = $state("summary");
+  type SummaryTab =
+    | "quick-start"
+    | "summary"
+    | "git"
+    | "issue"
+    | "pr"
+    | "workflow"
+    | "docker";
+  let activeTab: SummaryTab = $state("quick-start");
+
+  let linkedIssueLoading: boolean = $state(false);
+  let linkedIssueError: string | null = $state(null);
+  let linkedIssue: BranchLinkedIssueInfo | null = $state(null);
+
+  let latestBranchPrLoading: boolean = $state(false);
+  let latestBranchPrError: string | null = $state(null);
+  let latestBranchPr: BranchPrReference | null = $state(null);
+
+  let dockerContextLoading: boolean = $state(false);
+  let dockerContextError: string | null = $state(null);
+  let dockerContext: DockerContext | null = $state(null);
 
   let prDetailLoading = $state(false);
   let prDetailError: string | null = $state(null);
@@ -340,6 +362,110 @@
     }
   }
 
+  function formatIsoTimestamp(value: string | null | undefined): string | null {
+    const raw = (value ?? "").trim();
+    if (!raw) return null;
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) return raw;
+    return parsed.toLocaleString();
+  }
+
+  async function loadBranchLinkedIssue() {
+    linkedIssueError = null;
+
+    const branch = currentBranchName();
+    if (!branch) {
+      linkedIssueLoading = false;
+      linkedIssue = null;
+      return;
+    }
+
+    const key = `${projectPath}::${branch}`;
+    linkedIssueLoading = true;
+    try {
+      const invoke = await getInvoke();
+      const result = await invoke<BranchLinkedIssueInfo | null>("fetch_branch_linked_issue", {
+        projectPath,
+        branch,
+      });
+      const currentKey = `${projectPath}::${currentBranchName()}`;
+      if (currentKey !== key) return;
+      linkedIssue = result;
+    } catch (err) {
+      linkedIssue = null;
+      linkedIssueError = `Failed to load linked issue: ${toErrorMessage(err)}`;
+    } finally {
+      const currentKey = `${projectPath}::${currentBranchName()}`;
+      if (currentKey === key) {
+        linkedIssueLoading = false;
+      }
+    }
+  }
+
+  async function loadLatestBranchPr() {
+    latestBranchPrError = null;
+
+    const branch = currentBranchName();
+    if (!branch) {
+      latestBranchPrLoading = false;
+      latestBranchPr = null;
+      return;
+    }
+
+    const key = `${projectPath}::${branch}`;
+    latestBranchPrLoading = true;
+    try {
+      const invoke = await getInvoke();
+      const result = await invoke<BranchPrReference | null>("fetch_latest_branch_pr", {
+        projectPath,
+        branch,
+      });
+      const currentKey = `${projectPath}::${currentBranchName()}`;
+      if (currentKey !== key) return;
+      latestBranchPr = result;
+    } catch (err) {
+      latestBranchPr = null;
+      latestBranchPrError = `Failed to load PR: ${toErrorMessage(err)}`;
+    } finally {
+      const currentKey = `${projectPath}::${currentBranchName()}`;
+      if (currentKey === key) {
+        latestBranchPrLoading = false;
+      }
+    }
+  }
+
+  async function loadDockerContext() {
+    dockerContextError = null;
+
+    const branch = currentBranchName();
+    if (!branch) {
+      dockerContextLoading = false;
+      dockerContext = null;
+      return;
+    }
+
+    const key = `${projectPath}::${branch}`;
+    dockerContextLoading = true;
+    try {
+      const invoke = await getInvoke();
+      const result = await invoke<DockerContext>("detect_docker_context", {
+        projectPath,
+        branch,
+      });
+      const currentKey = `${projectPath}::${currentBranchName()}`;
+      if (currentKey !== key) return;
+      dockerContext = result;
+    } catch (err) {
+      dockerContext = null;
+      dockerContextError = `Failed to detect Docker context: ${toErrorMessage(err)}`;
+    } finally {
+      const currentKey = `${projectPath}::${currentBranchName()}`;
+      if (currentKey === key) {
+        dockerContextLoading = false;
+      }
+    }
+  }
+
   async function loadSessionSummary(
     options: { silent?: boolean; cachedOnly?: boolean } = {},
   ) {
@@ -431,6 +557,9 @@
     void selectedBranch;
     void projectPath;
     loadQuickStart();
+    loadBranchLinkedIssue();
+    loadLatestBranchPr();
+    loadDockerContext();
   });
 
   $effect(() => {
@@ -569,6 +698,11 @@
     prDetailPrNumber = null;
   }
 
+  let resolvedPrNumber = $derived.by(() => latestBranchPr?.number ?? prNumber ?? null);
+  let workflowDisplayPrNumber = $derived.by(
+    () => latestBranchPr?.number ?? prDetail?.number ?? resolvedPrNumber,
+  );
+
   $effect(() => {
     const nextProjectPath = projectPath ?? "";
     if (nextProjectPath === lastProjectPath) return;
@@ -612,7 +746,8 @@
     if (activeTab !== "pr" && activeTab !== "workflow") return;
 
     const branch = currentBranchName();
-    if (!branch || !prNumber) {
+    const prNum = resolvedPrNumber;
+    if (!branch || !prNum) {
       const nextBranch = branch || null;
       if (
         prDetailBranch !== nextBranch ||
@@ -626,9 +761,9 @@
       return;
     }
 
-    if (branch !== prDetailBranch || prNumber !== prDetailPrNumber) {
+    if (branch !== prDetailBranch || prNum !== prDetailPrNumber) {
       prDetailBranch = branch;
-      loadPrDetail(branch, prNumber);
+      loadPrDetail(branch, prNum);
     }
   });
 
@@ -729,6 +864,13 @@
       <div class="summary-tabs">
         <button
           class="summary-tab"
+          class:active={activeTab === "quick-start"}
+          onclick={() => (activeTab = "quick-start")}
+        >
+          Quick Start
+        </button>
+        <button
+          class="summary-tab"
           class:active={activeTab === "summary"}
           onclick={() => (activeTab = "summary")}
         >
@@ -742,6 +884,15 @@
           }}
         >
           Git
+        </button>
+        <button
+          class="summary-tab"
+          class:active={activeTab === "issue"}
+          onclick={() => {
+            activeTab = "issue";
+          }}
+        >
+          Issue
         </button>
         <button
           class="summary-tab"
@@ -763,15 +914,6 @@
         </button>
         <button
           class="summary-tab"
-          class:active={activeTab === "ai"}
-          onclick={() => {
-            activeTab = "ai";
-          }}
-        >
-          AI
-        </button>
-        <button
-          class="summary-tab"
           class:active={activeTab === "docker"}
           onclick={() => {
             activeTab = "docker";
@@ -781,30 +923,7 @@
         </button>
       </div>
 
-      {#if activeTab === "summary"}
-        <div class="detail-grid">
-          <div class="detail-item">
-            <span class="detail-label">Commit</span>
-            <span class="detail-value mono">{selectedBranch.commit}</span>
-          </div>
-          <div class="detail-item">
-            <span class="detail-label">Status</span>
-            <span class="detail-value">
-              {selectedBranch.divergence_status}
-              {#if selectedBranch.ahead > 0}
-                (+{selectedBranch.ahead})
-              {/if}
-              {#if selectedBranch.behind > 0}
-                (-{selectedBranch.behind})
-              {/if}
-            </span>
-          </div>
-          <div class="detail-item">
-            <span class="detail-label">Current</span>
-            <span class="detail-value">{selectedBranch.is_current ? "Yes" : "No"}</span>
-          </div>
-        </div>
-
+      {#if activeTab === "quick-start"}
         <div class="quick-start">
           <div class="quick-header">
             <span class="quick-title">Quick Start</span>
@@ -885,73 +1004,10 @@
             </div>
           {/if}
         </div>
-
-      {:else if activeTab === "git"}
-        <GitSection
-          projectPath={projectPath}
-          branch={selectedBranch.name}
-          collapsible={false}
-          defaultCollapsed={false}
-        />
-      {:else if activeTab === "pr"}
-        <PrStatusSection
-          prDetail={prDetail}
-          loading={prDetailLoading}
-          error={ghCliStatusMessage ?? prDetailError}
-        />
-      {:else if activeTab === "workflow"}
-        <div class="quick-start workflow-panel">
-          <div class="quick-header">
-            <span class="quick-title">Workflow</span>
-            {#if prDetailLoading}
-              <span class="quick-subtitle">Loading...</span>
-            {:else if ghCliStatusMessage}
-              <span class="quick-subtitle">GitHub CLI issue</span>
-            {:else if prDetailError}
-              <span class="quick-subtitle">Error</span>
-            {:else if prDetail}
-              <span class="quick-subtitle">#{prDetail.number}</span>
-            {:else}
-              <span class="quick-subtitle">No PR</span>
-            {/if}
-          </div>
-
-          {#if prDetailLoading}
-            <div class="session-summary-placeholder">Loading...</div>
-          {:else if ghCliStatusMessage}
-            <div class="quick-error">{ghCliStatusMessage}</div>
-          {:else if prDetailError}
-            <div class="quick-error">
-              {prDetailError}
-            </div>
-          {:else if !prDetail}
-            <div class="session-summary-placeholder">No PR.</div>
-          {:else if prDetail.checkSuites.length > 0}
-            <div class="workflow-list">
-              {#each prDetail.checkSuites as run}
-                <button
-                  class="workflow-run-item"
-                  type="button"
-                  onclick={() => openWorkflowRun(run)}
-                >
-                  <span class="workflow-status {workflowStatusClass(run)}"
-                    >{workflowStatusIcon(run)}</span
-                  >
-                  <span class="workflow-name">{run.workflowName}</span>
-                  <span class="workflow-status-text">
-                    {workflowStatusText(run)}
-                  </span>
-                </button>
-              {/each}
-            </div>
-          {:else}
-            <div class="workflow-empty">No workflows</div>
-          {/if}
-        </div>
-      {:else if activeTab === "ai"}
+      {:else if activeTab === "summary"}
         <div class="quick-start ai-summary">
           <div class="quick-header">
-            <span class="quick-title">AI</span>
+            <span class="quick-title">Summary</span>
             {#if summaryRebuildInProgress}
               <span class="quick-subtitle rebuild-progress">
                 <span class="summary-spinner" aria-hidden="true"></span>
@@ -1048,10 +1104,190 @@
             <div class="session-summary-placeholder">No summary.</div>
           {/if}
         </div>
+      {:else if activeTab === "git"}
+        <div class="detail-grid">
+          <div class="detail-item">
+            <span class="detail-label">Commit</span>
+            <span class="detail-value mono">{selectedBranch.commit}</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Status</span>
+            <span class="detail-value">
+              {selectedBranch.divergence_status}
+              {#if selectedBranch.ahead > 0}
+                (+{selectedBranch.ahead})
+              {/if}
+              {#if selectedBranch.behind > 0}
+                (-{selectedBranch.behind})
+              {/if}
+            </span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Current</span>
+            <span class="detail-value">{selectedBranch.is_current ? "Yes" : "No"}</span>
+          </div>
+        </div>
+        <GitSection
+          projectPath={projectPath}
+          branch={selectedBranch.name}
+          collapsible={false}
+          defaultCollapsed={false}
+        />
+      {:else if activeTab === "issue"}
+        <div class="quick-start issue-panel">
+          <div class="quick-header">
+            <span class="quick-title">Issue</span>
+            {#if linkedIssueLoading}
+              <span class="quick-subtitle">Loading...</span>
+            {:else if linkedIssueError}
+              <span class="quick-subtitle">Error</span>
+            {:else if linkedIssue}
+              <span class="quick-subtitle">#{linkedIssue.number}</span>
+            {:else}
+              <span class="quick-subtitle">No linked issue</span>
+            {/if}
+          </div>
+
+          {#if linkedIssueLoading}
+            <div class="session-summary-placeholder">Loading...</div>
+          {:else if linkedIssueError}
+            <div class="quick-error">{linkedIssueError}</div>
+          {:else if !linkedIssue}
+            <div class="session-summary-placeholder">
+              No issue linked to this branch.
+            </div>
+          {:else}
+            {@const issueUpdated = formatIsoTimestamp(linkedIssue.updatedAt)}
+            <div class="linked-issue-card">
+              <a
+                class="linked-issue-title"
+                href={linkedIssue.url}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                #{linkedIssue.number} {linkedIssue.title}
+              </a>
+              <div class="quick-meta">
+                {#if issueUpdated}
+                  <span class="quick-pill">updated: {issueUpdated}</span>
+                {/if}
+                {#if linkedIssue.labels.length === 0}
+                  <span class="quick-pill">labels: none</span>
+                {:else}
+                  {#each linkedIssue.labels as label}
+                    <span class="quick-pill">label: {label}</span>
+                  {/each}
+                {/if}
+              </div>
+            </div>
+          {/if}
+        </div>
+      {:else if activeTab === "pr"}
+        <PrStatusSection
+          prDetail={prDetail}
+          loading={latestBranchPrLoading || (resolvedPrNumber !== null && prDetailLoading)}
+          error={ghCliStatusMessage ?? latestBranchPrError ?? prDetailError}
+        />
+      {:else if activeTab === "workflow"}
+        <div class="quick-start workflow-panel">
+          <div class="quick-header">
+            <span class="quick-title">Workflow</span>
+            {#if latestBranchPrLoading || (resolvedPrNumber !== null && prDetailLoading)}
+              <span class="quick-subtitle">Loading...</span>
+            {:else if ghCliStatusMessage}
+              <span class="quick-subtitle">GitHub CLI issue</span>
+            {:else if latestBranchPrError || prDetailError}
+              <span class="quick-subtitle">Error</span>
+            {:else if workflowDisplayPrNumber !== null}
+              <span class="quick-subtitle">#{workflowDisplayPrNumber}</span>
+            {:else}
+              <span class="quick-subtitle">No PR</span>
+            {/if}
+          </div>
+
+          {#if latestBranchPrLoading || (resolvedPrNumber !== null && prDetailLoading)}
+            <div class="session-summary-placeholder">Loading...</div>
+          {:else if ghCliStatusMessage}
+            <div class="quick-error">{ghCliStatusMessage}</div>
+          {:else if latestBranchPrError || prDetailError}
+            <div class="quick-error">{latestBranchPrError ?? prDetailError}</div>
+          {:else if workflowDisplayPrNumber === null && !prDetail}
+            <div class="session-summary-placeholder">No PR.</div>
+          {:else if !prDetail}
+            <div class="session-summary-placeholder">Loading PR details...</div>
+          {:else if prDetail.checkSuites.length > 0}
+            <div class="workflow-list">
+              {#each prDetail.checkSuites as run}
+                <button
+                  class="workflow-run-item"
+                  type="button"
+                  onclick={() => openWorkflowRun(run)}
+                >
+                  <span class="workflow-status {workflowStatusClass(run)}"
+                    >{workflowStatusIcon(run)}</span
+                  >
+                  <span class="workflow-name">{run.workflowName}</span>
+                  <span class="workflow-status-text">
+                    {workflowStatusText(run)}
+                  </span>
+                </button>
+              {/each}
+            </div>
+          {:else}
+            <div class="workflow-empty">No workflows</div>
+          {/if}
+        </div>
       {:else if activeTab === "docker"}
         <div class="quick-start docker-summary">
           <div class="quick-header">
             <span class="quick-title">Docker</span>
+            {#if dockerContextLoading}
+              <span class="quick-subtitle">Detecting...</span>
+            {:else if dockerContext}
+              <span class="quick-subtitle">Current: {dockerContext.file_type}</span>
+            {:else if dockerContextError}
+              <span class="quick-subtitle">Current: error</span>
+            {:else}
+              <span class="quick-subtitle">Current: n/a</span>
+            {/if}
+          </div>
+
+          {#if dockerContextLoading}
+            <div class="session-summary-placeholder">Detecting Docker context...</div>
+          {:else if dockerContextError}
+            <div class="quick-error">{dockerContextError}</div>
+          {:else if dockerContext}
+            <div class="docker-current">
+              <div class="quick-meta">
+                <span class="quick-pill">type: {dockerContext.file_type}</span>
+                <span class="quick-pill">
+                  docker: {dockerContext.docker_available ? "available" : "unavailable"}
+                </span>
+                <span class="quick-pill">
+                  compose: {dockerContext.compose_available ? "available" : "unavailable"}
+                </span>
+                <span class="quick-pill">
+                  daemon: {dockerContext.daemon_running ? "running" : "stopped"}
+                </span>
+                <span class="quick-pill">
+                  force-host: {dockerContext.force_host ? "on" : "off"}
+                </span>
+                {#if dockerContext.worktree_path}
+                  <span class="quick-pill">worktree: {dockerContext.worktree_path}</span>
+                {/if}
+                {#if dockerContext.compose_services.length > 0}
+                  <span class="quick-pill">
+                    services: {dockerContext.compose_services.join(", ")}
+                  </span>
+                {/if}
+              </div>
+            </div>
+          {:else}
+            <div class="session-summary-placeholder">No Docker context.</div>
+          {/if}
+
+          <div class="quick-header">
+            <span class="quick-title">Quick Start history</span>
             {#if quickStartLoading}
               <span class="quick-subtitle">Loading...</span>
             {:else if dockerSummaryRows.length > 0}
@@ -1338,6 +1574,28 @@
     gap: 10px;
   }
 
+  .linked-issue-card {
+    border: 1px solid var(--border-color);
+    background: var(--bg-primary);
+    border-radius: 10px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .linked-issue-title {
+    color: var(--accent);
+    text-decoration: none;
+    font-weight: 700;
+    font-size: var(--ui-font-sm);
+    overflow-wrap: anywhere;
+  }
+
+  .linked-issue-title:hover {
+    text-decoration: underline;
+  }
+
   .quick-row {
     display: flex;
     flex-direction: column;
@@ -1459,6 +1717,13 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+
+  .docker-current {
+    border: 1px solid var(--border-color);
+    background: var(--bg-primary);
+    border-radius: 10px;
+    padding: 10px 12px;
   }
 
   .docker-summary-item {
