@@ -464,6 +464,7 @@
   $effect(() => {
     if (windowSessionRestoreStarted) return;
     windowSessionRestoreStarted = true;
+    const releaseDelayMs = 3000;
 
     (async () => {
       const label = await resolveCurrentWindowLabel();
@@ -480,12 +481,14 @@
           for (const entry of normalizedSessions) {
             await openAndNormalizeWindowSession(entry.label, entry.projectPath);
           }
+          await new Promise<void>((resolve) => setTimeout(resolve, releaseDelayMs));
+          await restoreWindowSessionProject(label);
         } finally {
           await releaseWindowSessionRestoreLead(label);
         }
+      } else {
+        await restoreWindowSessionProject(label);
       }
-
-      await restoreWindowSessionProject(label);
     })();
   });
 
