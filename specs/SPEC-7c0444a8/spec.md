@@ -1,4 +1,4 @@
-# 機能仕様: GUI Worktree Summary 7タブ再編（Issue #1097）
+# 機能仕様: GUI Worktree Summary 6タブ + Quick Launchヘッダー再編（Issue #1097）
 
 **仕様ID**: `SPEC-7c0444a8`
 **作成日**: 2026-02-17
@@ -11,7 +11,7 @@
 - `SPEC-735cbc5d`（Worktree Summary の Git セクション）
 - `SPEC-d6949f99`（Session Summary の PR/Workflow 表示責務）
 
-**入力**: ユーザー説明: "Issue #1097: Worktree Summaryを7タブ構成へ再編（Quick Start/Summary/Git/Issue/PR/Workflow/Docker）"
+**入力**: ユーザー説明: "Issue #1097: Quick Startタブを廃止し、Launch Agent左に Quick Launch（Continue/New）を配置。Summary/Git/Issue/PR/Workflow/Docker の責務を維持する。"
 
 ## 背景
 
@@ -21,15 +21,15 @@
 
 ## ユーザーシナリオとテスト *(必須)*
 
-### ユーザーストーリー 1 - 固定7タブで情報へ到達できる (優先度: P0)
+### ユーザーストーリー 1 - 固定6タブとヘッダー起動導線で情報へ到達できる (優先度: P0)
 
-開発者として、Worktree Summary で必要な情報に最短でアクセスしたいので、表示構成を固定の7タブで統一したい。
+開発者として、Worktree Summary で必要な情報に最短でアクセスしたいので、表示構成を固定6タブに統一し、Quick起動はヘッダー導線で即時実行したい。
 
-**独立したテスト**: Worktree Summary 表示時に 7 タブが固定順で表示され、各タブが独立して描画されることを UI テストで確認できる。
+**独立したテスト**: Worktree Summary 表示時に 6 タブが固定順で表示され、ヘッダーに `Continue/New/Launch Agent...` が並び、各タブが独立して描画されることを UI テストで確認できる。
 
 **受け入れシナリオ**:
 
-1. **前提条件** Worktree Summary パネルを表示、**操作** タブ列を確認、**期待結果** `Quick Start / Summary / Git / Issue / PR / Workflow / Docker` の順で常時表示される。
+1. **前提条件** Worktree Summary パネルを表示、**操作** タブ列とヘッダーを確認、**期待結果** `Summary / Git / Issue / PR / Workflow / Docker` の順で常時表示され、ヘッダー右側に `Continue / New / Launch Agent...` が表示される。
 2. **前提条件** いずれかのタブでデータ取得に失敗、**操作** 別タブへ切り替え、**期待結果** 失敗タブは空状態またはエラー表示に留まり、他タブは継続して利用できる。
 
 ---
@@ -50,15 +50,15 @@
 
 ---
 
-### ユーザーストーリー 3 - Summary/Quick Start/Docker の責務分離を保ったまま利用できる (優先度: P1)
+### ユーザーストーリー 3 - Launch導線/Summary/Docker の責務分離を保ったまま利用できる (優先度: P1)
 
-開発者として、起動導線・AI 要約・Docker 状態を混同せずに確認したいので、各タブの表示責務を明確に分離したい。
+開発者として、起動導線・AI 要約・Docker 状態を混同せずに確認したいので、ヘッダー導線と各タブの表示責務を明確に分離したい。
 
-**独立したテスト**: Quick Start の既存 Continue/New 挙動が維持され、Summary には AI 要約のみ表示され、Docker タブに現在状態と履歴が併記されることを確認できる。
+**独立したテスト**: ヘッダーの Continue/New 挙動が維持され、Summary には AI 要約のみ表示され、Docker タブに現在状態と履歴が併記されることを確認できる。
 
 **受け入れシナリオ**:
 
-1. **前提条件** Quick Start 履歴が存在する、**操作** Quick Start タブで Continue/New を実行、**期待結果** 既存と同じ起動挙動が維持される。
+1. **前提条件** Quick Start 履歴が存在する、**操作** ヘッダーの Continue/New を実行、**期待結果** 既存と同じ起動挙動が維持される。
 2. **前提条件** AI 要約が存在する、**操作** Summary タブを開く、**期待結果** AI 要約 Markdown のみ表示され、Quick Start 要素は表示されない。
 3. **前提条件** Docker 検出結果と Quick Start 履歴が存在する、**操作** Docker タブを開く、**期待結果** 現在の `detect_docker_context` 結果と履歴上の Docker 設定が同一画面で確認できる。
 
@@ -67,14 +67,14 @@
 - ブランチ名に複数の数字を含む場合でも、`issue-<number>` パターンに一致する番号のみを関連 Issue として扱う。
 - Issue/PR/Workflow/Docker の一部取得に失敗しても、タブ列と他タブ表示は維持する。
 - PR は存在するが workflow run が 0 件の場合、Workflow タブは空状態を表示する。
-- Quick Start 履歴が空の場合、Quick Start タブは案内文を表示し UI 全体は継続動作する。
+- Quick Start 履歴が空の場合、ヘッダーの Continue/New は無効化され、`Launch Agent...` は継続利用できる。
 
 ## 要件 *(必須)*
 
 ### 機能要件
 
-- **FR-001**: Worktree Summary は 7 タブを固定順 (`Quick Start`, `Summary`, `Git`, `Issue`, `PR`, `Workflow`, `Docker`) で常時表示しなければならない。
-- **FR-002**: `Quick Start` タブは既存の Continue/New 機能を独立表示し、挙動を変更してはならない。
+- **FR-001**: Worktree Summary は 6 タブを固定順 (`Summary`, `Git`, `Issue`, `PR`, `Workflow`, `Docker`) で常時表示しなければならない。
+- **FR-002**: ヘッダー右側に `Continue` / `New` / `Launch Agent...` を表示し、`Continue/New` は既存 Quick Start 履歴に基づく起動挙動を維持しなければならない。
 - **FR-003**: `Summary` タブは既存の AI 要約 Markdown のみを表示し、Quick Start 要素を含めてはならない。
 - **FR-004**: `Git` タブは既存 `GitSection`（Changes/Commits/Stash）を表示しなければならない。
 - **FR-005**: `Issue` タブはブランチ名の `issue-<number>` から解釈した関連 Issue のみ表示しなければならない。
@@ -93,7 +93,7 @@
 
 - **NFR-001**: タブ切り替え時の UI 応答は既存 Session Summary 体感を劣化させない（不要な全体再描画を避ける）。
 - **NFR-002**: 取得失敗時のメッセージはユーザーが復旧条件（例: PR が未作成）を判断できる情報量を持つ。
-- **NFR-003**: 既存の Summary 生成・Quick Start 起動・Git 表示の回帰をユニットテストで検出可能であること。
+- **NFR-003**: 既存の Summary 生成・Quick Launch 起動・Git 表示の回帰をユニットテストで検出可能であること。
 
 ## 制約と仮定
 
@@ -103,7 +103,7 @@
 
 ## 成功基準 *(必須)*
 
-- **SC-001**: Worktree Summary 表示時に 7 タブが固定順で常時表示されることを UI テストで確認できる。
+- **SC-001**: Worktree Summary 表示時に 6 タブが固定順で常時表示され、ヘッダーに `Continue/New/Launch Agent...` が表示されることを UI テストで確認できる。
 - **SC-002**: `Summary` タブに Quick Start 要素が表示されず、AI 要約のみ表示されることを UI テストで確認できる。
 - **SC-003**: `Issue` タブが `issue-<number>` に一致する関連 Issue のみ表示し、非一致時は空状態となることをテストで確認できる。
 - **SC-004**: `PR` / `Workflow` / `Docker` タブがデータ有無に応じた表示（実データまたは空状態）を行い、全体 UI が継続動作することをテストで確認できる。

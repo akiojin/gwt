@@ -126,6 +126,15 @@ const quickStartDockerEntry = {
   timestamp: 1_700_000_002,
 };
 
+const olderQuickStartEntry = {
+  ...quickStartDockerEntry,
+  session_id: "session-123",
+  tool_id: "codex",
+  tool_label: "Codex",
+  model: "gpt-5-codex",
+  timestamp: 1_700_000_001,
+};
+
 function sessionSummaryCalls() {
   return invokeMock.mock.calls.filter((c) => c[0] === "get_branch_session_summary");
 }
@@ -157,7 +166,7 @@ describe("WorktreeSummaryPanel", () => {
     delete (globalThis as any).__TAURI_INTERNALS__;
   });
 
-  it("renders branch header and fixed 7-tab UI when branch is selected", async () => {
+  it("renders branch header and fixed 6-tab UI when branch is selected", async () => {
     const rendered = await renderPanel({
       projectPath: "/tmp/project",
       selectedBranch: branchFixture,
@@ -176,15 +185,15 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    expect(tabs).toHaveLength(7);
-    expect(tabs[0]?.textContent?.trim()).toBe("Quick Start");
+    expect(tabs).toHaveLength(6);
+    expect(tabs[0]?.textContent?.trim()).toBe("Summary");
     expect(tabs[0]?.classList.contains("active")).toBe(true);
-    expect(tabs[1]?.textContent?.trim()).toBe("Summary");
-    expect(tabs[2]?.textContent?.trim()).toBe("Git");
-    expect(tabs[3]?.textContent?.trim()).toBe("Issue");
-    expect(tabs[4]?.textContent?.trim()).toBe("PR");
-    expect(tabs[5]?.textContent?.trim()).toBe("Workflow");
-    expect(tabs[6]?.textContent?.trim()).toBe("Docker");
+    expect(tabs[1]?.textContent?.trim()).toBe("Git");
+    expect(tabs[2]?.textContent?.trim()).toBe("Issue");
+    expect(tabs[3]?.textContent?.trim()).toBe("PR");
+    expect(tabs[4]?.textContent?.trim()).toBe("Workflow");
+    expect(tabs[5]?.textContent?.trim()).toBe("Docker");
+    expect(rendered.queryByRole("button", { name: "Quick Start" })).toBeNull();
   });
 
   it("shows placeholder when no branch is selected", async () => {
@@ -200,10 +209,21 @@ describe("WorktreeSummaryPanel", () => {
     });
   });
 
-  it("renders Quick Start section in quick-start tab", async () => {
+  it("runs Continue/New from header buttons using latest quick-start entry", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [olderQuickStartEntry, quickStartDockerEntry];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const onQuickLaunch = vi.fn().mockResolvedValue(undefined);
     const rendered = await renderPanel({
       projectPath: "/tmp/project",
       selectedBranch: branchFixture,
+      onQuickLaunch,
     });
 
     await waitFor(() => {
@@ -211,8 +231,45 @@ describe("WorktreeSummaryPanel", () => {
         projectPath: "/tmp/project",
         branch: "feature/markdown-ui",
       });
-      expect(rendered.container.querySelector(".quick-title")?.textContent).toBe("Quick Start");
+      expect(rendered.getByRole("button", { name: "Continue" })).toBeTruthy();
+      expect(rendered.getByRole("button", { name: "New" })).toBeTruthy();
     });
+
+    const continueButton = rendered.getByRole("button", { name: "Continue" });
+    const newButton = rendered.getByRole("button", { name: "New" });
+    expect((continueButton as HTMLButtonElement).disabled).toBe(false);
+    expect((newButton as HTMLButtonElement).disabled).toBe(false);
+
+    await fireEvent.click(continueButton);
+    await fireEvent.click(newButton);
+
+    await waitFor(() => {
+      expect(onQuickLaunch).toHaveBeenCalledTimes(2);
+    });
+    expect(onQuickLaunch.mock.calls[0]?.[0]?.mode).toBe("continue");
+    expect(onQuickLaunch.mock.calls[0]?.[0]?.resumeSessionId).toBe("session-456");
+    expect(onQuickLaunch.mock.calls[1]?.[0]?.mode).toBe("normal");
+    expect(onQuickLaunch.mock.calls[1]?.[0]?.resumeSessionId).toBeUndefined();
+  });
+
+  it("disables header Continue/New buttons when quick-start history is empty", async () => {
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      onQuickLaunch: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("get_branch_quick_start", {
+        projectPath: "/tmp/project",
+        branch: "feature/markdown-ui",
+      });
+    });
+
+    const continueButton = rendered.getByRole("button", { name: "Continue" });
+    const newButton = rendered.getByRole("button", { name: "New" });
+    expect((continueButton as HTMLButtonElement).disabled).toBe(true);
+    expect((newButton as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("renders session summary metadata and markdown in Summary tab", async () => {
@@ -222,7 +279,7 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const summaryTab = tabs[1] as HTMLElement;
+    const summaryTab = tabs[0] as HTMLElement;
     await fireEvent.click(summaryTab);
 
     await waitFor(() => {
@@ -249,7 +306,7 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const issueTab = tabs[3] as HTMLElement;
+    const issueTab = tabs[2] as HTMLElement;
     await fireEvent.click(issueTab);
 
     await waitFor(() => {
@@ -266,7 +323,7 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const issueTab = tabs[3] as HTMLElement;
+    const issueTab = tabs[2] as HTMLElement;
     await fireEvent.click(issueTab);
 
     await waitFor(() => {
@@ -291,7 +348,7 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const prTab = tabs[4] as HTMLElement;
+    const prTab = tabs[3] as HTMLElement;
     await fireEvent.click(prTab);
 
     await waitFor(() => {
@@ -309,7 +366,7 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const prTab = tabs[4] as HTMLElement;
+    const prTab = tabs[3] as HTMLElement;
     await fireEvent.click(prTab);
 
     await waitFor(() => {
@@ -347,7 +404,7 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const gitTab = tabs[2] as HTMLElement;
+    const gitTab = tabs[1] as HTMLElement;
     await fireEvent.click(gitTab);
 
     await waitFor(() => {
@@ -377,7 +434,7 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const workflowTab = tabs[5] as HTMLElement;
+    const workflowTab = tabs[4] as HTMLElement;
     await fireEvent.click(workflowTab);
 
     await waitFor(() => {
@@ -415,7 +472,7 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const workflowTab = tabs[5] as HTMLElement;
+    const workflowTab = tabs[4] as HTMLElement;
     await fireEvent.click(workflowTab);
 
     await waitFor(() => {
@@ -441,7 +498,7 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const dockerTab = tabs[6] as HTMLElement;
+    const dockerTab = tabs[5] as HTMLElement;
     await fireEvent.click(dockerTab);
 
     await waitFor(() => {
@@ -551,7 +608,7 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const summaryTab = tabs[1] as HTMLElement;
+    const summaryTab = tabs[0] as HTMLElement;
     await fireEvent.click(summaryTab);
 
     await waitFor(() => {
@@ -607,7 +664,7 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const summaryTab = tabs[1] as HTMLElement;
+    const summaryTab = tabs[0] as HTMLElement;
     await fireEvent.click(summaryTab);
 
     await waitFor(() => {
