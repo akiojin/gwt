@@ -10,7 +10,7 @@ use gwt_core::worktree::WorktreeManager;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::Path;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// Safety level for a worktree (FR-500)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -205,77 +205,82 @@ fn running_agent_branches(state: &AppState) -> HashSet<String> {
 
 /// List all worktrees with safety info (SPEC-c4e8f210 T1)
 #[tauri::command]
-pub fn list_worktrees(
+pub async fn list_worktrees(
     project_path: String,
-    state: tauri::State<AppState>,
+    app_handle: AppHandle,
 ) -> Result<Vec<WorktreeInfo>, String> {
-    let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
-    let last_tool = build_last_tool_usage_map(&repo_path);
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle.state::<AppState>();
+        let project_root = Path::new(&project_path);
+        let repo_path = resolve_repo_path_for_project_root(project_root)?;
+        let last_tool = build_last_tool_usage_map(&repo_path);
 
-    let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
-    let worktrees = manager.list().map_err(|e| e.to_string())?;
+        let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
+        let worktrees = manager.list().map_err(|e| e.to_string())?;
 
-    // Get branch info for ahead/behind/is_gone/is_current
-    let branches = Branch::list(&repo_path).unwrap_or_default();
-    let current_branch = branches
-        .iter()
-        .find(|b| b.is_current)
-        .map(|b| b.name.clone());
+        // Get branch info for ahead/behind/is_gone/is_current
+        let branches = Branch::list(&repo_path).unwrap_or_default();
+        let current_branch = branches
+            .iter()
+            .find(|b| b.is_current)
+            .map(|b| b.name.clone());
 
-    let agent_branches = running_agent_branches(&state);
+        let agent_branches = running_agent_branches(&state);
 
-    let mut infos: Vec<WorktreeInfo> = worktrees
-        .into_iter()
-        .filter_map(|wt| {
-            let branch_name = wt.branch.as_deref()?;
-            let branch_info = branches.iter().find(|b| b.name == branch_name);
+        let mut infos: Vec<WorktreeInfo> = worktrees
+            .into_iter()
+            .filter_map(|wt| {
+                let branch_name = wt.branch.as_deref()?;
+                let branch_info = branches.iter().find(|b| b.name == branch_name);
 
-            let is_current = current_branch.as_deref() == Some(branch_name);
-            let is_protected = WorktreeManager::is_protected(branch_name);
-            let is_agent_running = agent_branches.contains(branch_name);
+                let is_current = current_branch.as_deref() == Some(branch_name);
+                let is_protected = WorktreeManager::is_protected(branch_name);
+                let is_agent_running = agent_branches.contains(branch_name);
 
-            // Read agent status from session file (SPEC-b80e7996 FR-811)
-            let agent_status =
-                resolve_agent_status_for_worktree(&wt.path, &repo_path, branch_name, &state);
+                // Read agent status from session file (SPEC-b80e7996 FR-811)
+                let agent_status =
+                    resolve_agent_status_for_worktree(&wt.path, &repo_path, branch_name, &state);
 
-            let ahead = branch_info.map(|b| b.ahead).unwrap_or(0);
-            let behind = branch_info.map(|b| b.behind).unwrap_or(0);
-            let is_gone = branch_info.map(|b| b.is_gone).unwrap_or(false);
+                let ahead = branch_info.map(|b| b.ahead).unwrap_or(0);
+                let behind = branch_info.map(|b| b.behind).unwrap_or(0);
+                let is_gone = branch_info.map(|b| b.is_gone).unwrap_or(false);
 
-            let safety_level = compute_safety_level(
-                is_protected,
-                is_current,
-                is_agent_running,
-                wt.has_changes,
-                wt.has_unpushed,
-            );
+                let safety_level = compute_safety_level(
+                    is_protected,
+                    is_current,
+                    is_agent_running,
+                    wt.has_changes,
+                    wt.has_unpushed,
+                );
 
-            Some(WorktreeInfo {
-                path: wt.path.to_string_lossy().to_string(),
-                branch: branch_name.to_string(),
-                commit: wt.commit.clone(),
-                status: wt.status.to_string(),
-                is_main: wt.is_main,
-                has_changes: wt.has_changes,
-                has_unpushed: wt.has_unpushed,
-                is_current,
-                is_protected,
-                is_agent_running,
-                agent_status,
-                ahead,
-                behind,
-                is_gone,
-                last_tool_usage: last_tool.get(branch_name).cloned(),
-                safety_level,
+                Some(WorktreeInfo {
+                    path: wt.path.to_string_lossy().to_string(),
+                    branch: branch_name.to_string(),
+                    commit: wt.commit.clone(),
+                    status: wt.status.to_string(),
+                    is_main: wt.is_main,
+                    has_changes: wt.has_changes,
+                    has_unpushed: wt.has_unpushed,
+                    is_current,
+                    is_protected,
+                    is_agent_running,
+                    agent_status,
+                    ahead,
+                    behind,
+                    is_gone,
+                    last_tool_usage: last_tool.get(branch_name).cloned(),
+                    safety_level,
+                })
             })
-        })
-        .collect();
+            .collect();
 
-    // Sort by safety level: safe → warning → danger → disabled (FR-503)
-    infos.sort_by_key(|w| w.safety_level);
+        // Sort by safety level: safe → warning → danger → disabled (FR-503)
+        infos.sort_by_key(|w| w.safety_level);
 
-    Ok(infos)
+        Ok(infos)
+    })
+    .await
+    .map_err(|e| format!("Failed to list worktrees: {e}"))?
 }
 
 /// Cleanup multiple worktrees (SPEC-c4e8f210 T2)

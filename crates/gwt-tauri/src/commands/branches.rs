@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tracing::error;
 
 /// Serializable branch info for the frontend
@@ -268,90 +268,101 @@ pub fn list_branches(
 
 /// List branches that currently have a local worktree (gwt "Local" view)
 #[tauri::command]
-pub fn list_worktree_branches(
+pub async fn list_worktree_branches(
     project_path: String,
-    state: State<AppState>,
     app_handle: AppHandle,
 ) -> Result<Vec<BranchInfo>, String> {
-    with_panic_guard("listing worktree branches", || {
-        let project_root = Path::new(&project_path);
-        let repo_path = resolve_repo_path_for_project_root(project_root)?;
-        let last_tool = build_last_tool_usage_map(&repo_path);
-        let running_branches = running_agent_branches(&state, &repo_path);
-        let agent_statuses = build_agent_status_map(&repo_path, &state);
+    tauri::async_runtime::spawn_blocking(move || {
+        with_panic_guard("listing worktree branches", || {
+            let state = app_handle.state::<AppState>();
+            let project_root = Path::new(&project_path);
+            let repo_path = resolve_repo_path_for_project_root(project_root)?;
+            let last_tool = build_last_tool_usage_map(&repo_path);
+            let running_branches = running_agent_branches(&state, &repo_path);
+            let agent_statuses = build_agent_status_map(&repo_path, &state);
 
-        let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
-        let worktrees = manager.list_basic().map_err(|e| e.to_string())?;
+            let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
+            let worktrees = manager.list_basic().map_err(|e| e.to_string())?;
 
-        let names: HashSet<String> = worktrees
-            .into_iter()
-            .filter(|wt| !wt.is_main && wt.is_active())
-            .filter_map(|wt| wt.branch)
-            .collect();
+            let names: HashSet<String> = worktrees
+                .into_iter()
+                .filter(|wt| !wt.is_main && wt.is_active())
+                .filter_map(|wt| wt.branch)
+                .collect();
 
-        if names.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let branch_names = names.iter().cloned().collect::<Vec<_>>();
-
-        let branches = Branch::list(&repo_path).map_err(|e| e.to_string())?;
-        let mut infos: Vec<BranchInfo> = branches
-            .into_iter()
-            .filter(|b| names.contains(&b.name))
-            .map(BranchInfo::from)
-            .collect();
-        for info in &mut infos {
-            info.last_tool_usage = last_tool.get(&info.name).cloned();
-            info.is_agent_running = running_branches.contains(&info.name);
-            if let Some(status) = agent_statuses.get(&info.name) {
-                info.agent_status = agent_status_to_string(*status);
+            if names.is_empty() {
+                return Ok(Vec::new());
             }
-        }
 
-        let prewarm_project_path = project_path.clone();
-        tauri::async_runtime::spawn_blocking(move || {
-            crate::commands::sessions::prewarm_missing_worktree_summaries(
-                prewarm_project_path,
-                branch_names,
-                app_handle.clone(),
-            );
-        });
+            let branch_names = names.iter().cloned().collect::<Vec<_>>();
 
-        Ok(infos)
+            let branches = Branch::list(&repo_path).map_err(|e| e.to_string())?;
+            let mut infos: Vec<BranchInfo> = branches
+                .into_iter()
+                .filter(|b| names.contains(&b.name))
+                .map(BranchInfo::from)
+                .collect();
+            for info in &mut infos {
+                info.last_tool_usage = last_tool.get(&info.name).cloned();
+                info.is_agent_running = running_branches.contains(&info.name);
+                if let Some(status) = agent_statuses.get(&info.name) {
+                    info.agent_status = agent_status_to_string(*status);
+                }
+            }
+
+            let prewarm_project_path = project_path.clone();
+            let prewarm_handle = app_handle.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::commands::sessions::prewarm_missing_worktree_summaries(
+                    prewarm_project_path,
+                    branch_names,
+                    prewarm_handle,
+                );
+            });
+
+            Ok(infos)
+        })
     })
+    .await
+    .map_err(|e| format!("Unexpected error while listing worktree branches: {e}"))?
 }
 
 /// List all remote branches in a repository
 #[tauri::command]
-pub fn list_remote_branches(
+pub async fn list_remote_branches(
     project_path: String,
-    state: State<AppState>,
+    app_handle: AppHandle,
 ) -> Result<Vec<BranchInfo>, String> {
-    with_panic_guard("listing remote branches", || {
-        let project_root = Path::new(&project_path);
-        let repo_path = resolve_repo_path_for_project_root(project_root)?;
-        let last_tool = build_last_tool_usage_map(&repo_path);
-        let running_branches = running_agent_branches(&state, &repo_path);
-        let agent_statuses = build_agent_status_map(&repo_path, &state);
-        let remotes = Remote::list(&repo_path).unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || {
+        with_panic_guard("listing remote branches", || {
+            let state = app_handle.state::<AppState>();
+            let project_root = Path::new(&project_path);
+            let repo_path = resolve_repo_path_for_project_root(project_root)?;
+            let last_tool = build_last_tool_usage_map(&repo_path);
+            let running_branches = running_agent_branches(&state, &repo_path);
+            let agent_statuses = build_agent_status_map(&repo_path, &state);
+            let remotes = Remote::list(&repo_path).unwrap_or_default();
 
-        let branches = if is_bare_repository(&repo_path) {
-            Branch::list_remote_from_origin(&repo_path).map_err(|e| e.to_string())?
-        } else {
-            Branch::list_remote(&repo_path).map_err(|e| e.to_string())?
-        };
-        let mut infos: Vec<BranchInfo> = branches.into_iter().map(BranchInfo::from).collect();
-        for info in &mut infos {
-            let normalized = strip_known_remote_prefix(&info.name, &remotes);
-            info.last_tool_usage = last_tool.get(normalized).cloned();
-            info.is_agent_running = running_branches.contains(normalized);
-            if let Some(status) = agent_statuses.get(normalized) {
-                info.agent_status = agent_status_to_string(*status);
+            let branches = if is_bare_repository(&repo_path) {
+                Branch::list_remote_from_origin(&repo_path).map_err(|e| e.to_string())?
+            } else {
+                Branch::list_remote(&repo_path).map_err(|e| e.to_string())?
+            };
+            let mut infos: Vec<BranchInfo> = branches.into_iter().map(BranchInfo::from).collect();
+            for info in &mut infos {
+                let normalized = strip_known_remote_prefix(&info.name, &remotes);
+                info.last_tool_usage = last_tool.get(normalized).cloned();
+                info.is_agent_running = running_branches.contains(normalized);
+                if let Some(status) = agent_statuses.get(normalized) {
+                    info.agent_status = agent_status_to_string(*status);
+                }
             }
-        }
-        Ok(infos)
+
+            Ok(infos)
+        })
     })
+    .await
+    .map_err(|e| format!("Unexpected error while listing remote branches: {e}"))?
 }
 
 /// Get the current branch
