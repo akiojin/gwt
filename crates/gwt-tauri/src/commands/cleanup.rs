@@ -120,14 +120,40 @@ fn resolve_agent_status_for_worktree(
     }
 }
 
-/// Find pane_id for a branch from running panes.
+/// Find pane_id for a branch, preferring a running pane when multiple panes match.
 fn find_pane_for_branch(state: &AppState, branch_name: &str) -> Option<String> {
     let manager = state.pane_manager.lock().ok()?;
-    manager
-        .panes()
-        .iter()
-        .find(|p| p.branch_name() == branch_name)
-        .map(|p| p.pane_id().to_string())
+    let panes = manager.panes().iter().map(|pane| {
+        (
+            pane.pane_id().to_string(),
+            pane.branch_name().to_string(),
+            matches!(pane.status(), PaneStatus::Running),
+        )
+    });
+
+    select_preferred_pane_for_branch(panes, branch_name)
+}
+
+fn select_preferred_pane_for_branch<I>(panes: I, branch_name: &str) -> Option<String>
+where
+    I: IntoIterator<Item = (String, String, bool)>,
+{
+    let mut fallback: Option<String> = None;
+    for (pane_id, pane_branch, is_running) in panes {
+        if pane_branch != branch_name {
+            continue;
+        }
+
+        if is_running {
+            return Some(pane_id);
+        }
+
+        if fallback.is_none() {
+            fallback = Some(pane_id);
+        }
+    }
+
+    fallback
 }
 
 /// Infer agent status from a pane's scrollback tail.
@@ -574,6 +600,36 @@ mod tests {
                 status_str
             );
         }
+    }
+
+    #[test]
+    fn select_preferred_pane_for_branch_prefers_running() {
+        let panes = vec![
+            ("pane-stopped".to_string(), "feature/a".to_string(), false),
+            ("pane-running".to_string(), "feature/a".to_string(), true),
+        ];
+
+        let selected = select_preferred_pane_for_branch(panes, "feature/a");
+        assert_eq!(selected.as_deref(), Some("pane-running"));
+    }
+
+    #[test]
+    fn select_preferred_pane_for_branch_falls_back_to_first_non_running() {
+        let panes = vec![
+            ("pane-old".to_string(), "feature/a".to_string(), false),
+            ("pane-new".to_string(), "feature/a".to_string(), false),
+        ];
+
+        let selected = select_preferred_pane_for_branch(panes, "feature/a");
+        assert_eq!(selected.as_deref(), Some("pane-old"));
+    }
+
+    #[test]
+    fn select_preferred_pane_for_branch_returns_none_for_unknown_branch() {
+        let panes = vec![("pane".to_string(), "feature/a".to_string(), true)];
+
+        let selected = select_preferred_pane_for_branch(panes, "feature/b");
+        assert!(selected.is_none());
     }
 
     // -- SafetyLevel computation tests (T1) --

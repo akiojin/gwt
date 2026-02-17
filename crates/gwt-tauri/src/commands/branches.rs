@@ -92,7 +92,7 @@ fn build_agent_status_map(repo_path: &Path, state: &AppState) -> HashMap<String,
     map
 }
 
-/// Build a map of branch name → pane_id for running panes in the given repo.
+/// Build a map of branch name → pane_id in the given repo, preferring running panes.
 fn build_branch_pane_map(state: &AppState, repo_path: &Path) -> HashMap<String, String> {
     let panes_info: Vec<(String, String, bool)> = match state.pane_manager.lock() {
         Ok(manager) => manager
@@ -112,23 +112,41 @@ fn build_branch_pane_map(state: &AppState, repo_path: &Path) -> HashMap<String, 
     let launch_meta = match state.pane_launch_meta.lock() {
         Ok(meta) => meta,
         Err(_) => {
-            // Fallback: use all panes without repo filtering
-            return panes_info
-                .into_iter()
-                .map(|(pane_id, branch, _)| (branch, pane_id))
-                .collect();
+            // Fallback: use all panes without repo filtering.
+            return select_preferred_branch_panes(panes_info);
         }
     };
 
-    panes_info
+    select_preferred_branch_panes(panes_info.into_iter().filter(|(pane_id, _, _)| {
+        launch_meta
+            .get(pane_id)
+            .map(|meta| meta.repo_path.as_path() == repo_path)
+            .unwrap_or(true)
+    }))
+}
+
+fn select_preferred_branch_panes<I>(panes: I) -> HashMap<String, String>
+where
+    I: IntoIterator<Item = (String, String, bool)>,
+{
+    let mut preferred: HashMap<String, (String, bool)> = HashMap::new();
+    for (pane_id, branch, is_running) in panes {
+        match preferred.get_mut(&branch) {
+            Some((selected_pane_id, selected_is_running)) => {
+                if !*selected_is_running && is_running {
+                    *selected_pane_id = pane_id;
+                    *selected_is_running = true;
+                }
+            }
+            None => {
+                preferred.insert(branch, (pane_id, is_running));
+            }
+        }
+    }
+
+    preferred
         .into_iter()
-        .filter(|(pane_id, _, _)| {
-            launch_meta
-                .get(pane_id)
-                .map(|meta| meta.repo_path.as_path() == repo_path)
-                .unwrap_or(true)
-        })
-        .map(|(pane_id, branch, _)| (branch, pane_id))
+        .map(|(branch, (pane_id, _))| (branch, pane_id))
         .collect()
 }
 
@@ -144,8 +162,8 @@ fn infer_status_from_pane(state: &AppState, pane_id: &str) -> AgentStatus {
         Err(_) => false,
     };
 
-    let scrollback_tail = capture_scrollback_tail_from_state(state, pane_id, 4096)
-        .unwrap_or_default();
+    let scrollback_tail =
+        capture_scrollback_tail_from_state(state, pane_id, 4096).unwrap_or_default();
 
     infer_agent_status(&scrollback_tail, process_alive)
 }
@@ -415,5 +433,30 @@ mod tests {
         let info = BranchInfo::from(branch);
         assert_eq!(info.agent_status, "unknown");
         assert!(!info.is_agent_running);
+    }
+
+    #[test]
+    fn test_select_preferred_branch_panes_prefers_running_pane() {
+        let panes = vec![
+            ("pane-completed".to_string(), "feature/a".to_string(), false),
+            ("pane-running".to_string(), "feature/a".to_string(), true),
+        ];
+
+        let map = select_preferred_branch_panes(panes);
+        assert_eq!(
+            map.get("feature/a").map(String::as_str),
+            Some("pane-running")
+        );
+    }
+
+    #[test]
+    fn test_select_preferred_branch_panes_keeps_first_when_not_running() {
+        let panes = vec![
+            ("pane-old".to_string(), "feature/a".to_string(), false),
+            ("pane-new".to_string(), "feature/a".to_string(), false),
+        ];
+
+        let map = select_preferred_branch_panes(panes);
+        assert_eq!(map.get("feature/a").map(String::as_str), Some("pane-old"));
     }
 }
