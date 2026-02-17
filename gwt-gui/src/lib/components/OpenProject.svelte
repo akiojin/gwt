@@ -3,7 +3,6 @@
     CloneProgress,
     OpenProjectResult,
     ProbePathResult,
-    ProjectInfo,
   } from "../types";
   import MigrationModal from "./MigrationModal.svelte";
 
@@ -170,10 +169,12 @@
       });
 
       const { invoke } = await import("@tauri-apps/api/core");
-      const info = await invoke<ProjectInfo>("create_project", {
+      const result = await invoke<OpenProjectResult>("create_project", {
         request: { repoUrl, parentDir, shallow: shallowClone },
       });
-      onOpen(info.path);
+      if (result.action === "opened") {
+        onOpen(result.info.path);
+      }
     } catch (err) {
       const msg = toErrorMessage(err);
       errorMessage = msg.includes("Invalid repository URL")

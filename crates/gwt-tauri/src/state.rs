@@ -165,26 +165,37 @@ impl AppState {
         self.is_os_env_ready()
     }
 
-    pub fn set_project_for_window(&self, window_label: &str, project_path: String) {
-        if let Ok(mut map) = self.window_projects.lock() {
-            map.insert(window_label.to_string(), project_path);
-        }
-        if let Ok(mut map) = self.window_project_identities.lock() {
-            // Keep path-only updates from inheriting stale identity data.
-            map.remove(window_label);
-        }
-    }
-
-    pub fn set_project_for_window_with_identity(
+    /// Atomically claim a project identity for a window and persist its project path.
+    ///
+    /// Returns `Err(existing_window_label)` when another window already owns the
+    /// same project identity.
+    pub fn claim_project_for_window_with_identity(
         &self,
         window_label: &str,
         project_path: String,
         project_identity: String,
-    ) {
-        self.set_project_for_window(window_label, project_path);
-        if let Ok(mut map) = self.window_project_identities.lock() {
-            map.insert(window_label.to_string(), project_identity);
+    ) -> Result<(), String> {
+        let Ok(mut projects) = self.window_projects.lock() else {
+            return Ok(());
+        };
+        let Ok(mut identities) = self.window_project_identities.lock() else {
+            projects.insert(window_label.to_string(), project_path);
+            return Ok(());
+        };
+
+        if let Some(existing_window_label) = identities.iter().find_map(|(label, identity)| {
+            if identity == &project_identity && label.as_str() != window_label {
+                Some(label.clone())
+            } else {
+                None
+            }
+        }) {
+            return Err(existing_window_label);
         }
+
+        projects.insert(window_label.to_string(), project_path);
+        identities.insert(window_label.to_string(), project_identity);
+        Ok(())
     }
 
     pub fn clear_project_for_window(&self, window_label: &str) {
@@ -225,31 +236,6 @@ impl AppState {
     pub fn project_for_window(&self, window_label: &str) -> Option<String> {
         let map = self.window_projects.lock().ok()?;
         map.get(window_label).cloned()
-    }
-
-    pub fn project_identity_for_window(&self, window_label: &str) -> Option<String> {
-        let map = self.window_project_identities.lock().ok()?;
-        map.get(window_label).cloned()
-    }
-
-    pub fn find_window_by_project_identity(
-        &self,
-        project_identity: &str,
-        exclude_window_label: Option<&str>,
-    ) -> Option<String> {
-        let map = self.window_project_identities.lock().ok()?;
-        for (label, identity) in map.iter() {
-            if identity != project_identity {
-                continue;
-            }
-            if let Some(exclude) = exclude_window_label {
-                if label == exclude {
-                    continue;
-                }
-            }
-            return Some(label.clone());
-        }
-        None
     }
 
     pub fn set_window_agent_tabs(
@@ -371,54 +357,47 @@ mod tests {
     fn window_projects_set_get_clear() {
         let state = AppState::new();
         assert_eq!(state.project_for_window("main"), None);
-        assert_eq!(state.project_identity_for_window("main"), None);
 
-        state.set_project_for_window_with_identity(
+        let claim = state.claim_project_for_window_with_identity(
             "main",
             "/tmp/repo".to_string(),
             "/tmp/repo-canonical".to_string(),
         );
+        assert_eq!(claim, Ok(()));
         assert_eq!(
             state.project_for_window("main"),
             Some("/tmp/repo".to_string())
         );
-        assert_eq!(
-            state.project_identity_for_window("main"),
-            Some("/tmp/repo-canonical".to_string())
-        );
 
         state.clear_project_for_window("main");
         assert_eq!(state.project_for_window("main"), None);
-        assert_eq!(state.project_identity_for_window("main"), None);
     }
 
     #[test]
-    fn find_window_by_project_identity_ignores_excluded_window() {
+    fn claim_project_for_window_with_identity_rejects_duplicates() {
         let state = AppState::new();
 
-        state.set_project_for_window_with_identity(
+        let first = state.claim_project_for_window_with_identity(
             "main",
             "/tmp/repo".to_string(),
             "/tmp/repo-canonical".to_string(),
         );
-        state.set_project_for_window_with_identity(
+        assert_eq!(first, Ok(()));
+
+        let second = state.claim_project_for_window_with_identity(
             "project-2",
             "/tmp/repo".to_string(),
             "/tmp/repo-canonical".to_string(),
         );
+        assert_eq!(second, Err("main".to_string()));
 
-        assert_eq!(
-            state.find_window_by_project_identity("/tmp/repo-canonical", Some("main")),
-            Some("project-2".to_string())
+        state.clear_project_for_window("main");
+        let third = state.claim_project_for_window_with_identity(
+            "project-2",
+            "/tmp/repo".to_string(),
+            "/tmp/repo-canonical".to_string(),
         );
-        assert_eq!(
-            state.find_window_by_project_identity("/tmp/repo-canonical", Some("project-2")),
-            Some("main".to_string())
-        );
-        assert_eq!(
-            state.find_window_by_project_identity("/tmp/other", None),
-            None
-        );
+        assert_eq!(third, Ok(()));
     }
 
     #[test]
@@ -508,7 +487,12 @@ mod tests {
     #[test]
     fn clear_project_for_window_keeps_migration_state() {
         let state = AppState::new();
-        state.set_project_for_window("main", "/tmp/repo".to_string());
+        let claim = state.claim_project_for_window_with_identity(
+            "main",
+            "/tmp/repo".to_string(),
+            "/tmp/repo-canonical".to_string(),
+        );
+        assert_eq!(claim, Ok(()));
         state.set_window_agent_tabs(
             "main",
             vec![AgentTabMenuState {
@@ -583,7 +567,12 @@ mod tests {
     #[test]
     fn clear_window_state_removes_project_tabs_mode_and_migration() {
         let state = AppState::new();
-        state.set_project_for_window("main", "/tmp/repo".to_string());
+        let claim = state.claim_project_for_window_with_identity(
+            "main",
+            "/tmp/repo".to_string(),
+            "/tmp/repo-canonical".to_string(),
+        );
+        assert_eq!(claim, Ok(()));
         state.set_window_agent_tabs(
             "main",
             vec![AgentTabMenuState {

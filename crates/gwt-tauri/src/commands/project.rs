@@ -256,44 +256,46 @@ pub fn open_project(
     };
 
     let current_window_label = window.label().to_string();
-    if let Some(existing_window_label) =
-        state.find_window_by_project_identity(&project_identity, Some(&current_window_label))
-    {
-        if let Some(existing_window) = window
-            .app_handle()
-            .get_webview_window(&existing_window_label)
-        {
-            let _ = existing_window.show();
-            let _ = existing_window.set_focus();
-            let _ = crate::menu::rebuild_menu(window.app_handle());
-            return Ok(OpenProjectResult {
-                info,
-                action: OpenProjectAction::FocusedExisting,
-                focused_window_label: Some(existing_window_label),
-            });
-        }
+    for _attempt in 0..2 {
+        match state.claim_project_for_window_with_identity(
+            &current_window_label,
+            project_root_str.clone(),
+            project_identity.clone(),
+        ) {
+            Ok(()) => {
+                // Record to recent projects history
+                let _ = gwt_core::config::record_recent_project(&project_root_str);
 
-        // Stale window state can remain if process shutdown skipped cleanup.
-        state.clear_project_for_window(&existing_window_label);
+                let _ = crate::menu::rebuild_menu(window.app_handle());
+
+                return Ok(OpenProjectResult {
+                    info,
+                    action: OpenProjectAction::Opened,
+                    focused_window_label: None,
+                });
+            }
+            Err(existing_window_label) => {
+                if let Some(existing_window) = window
+                    .app_handle()
+                    .get_webview_window(&existing_window_label)
+                {
+                    let _ = existing_window.show();
+                    let _ = existing_window.set_focus();
+                    let _ = crate::menu::rebuild_menu(window.app_handle());
+                    return Ok(OpenProjectResult {
+                        info,
+                        action: OpenProjectAction::FocusedExisting,
+                        focused_window_label: Some(existing_window_label),
+                    });
+                }
+
+                // Stale window state can remain if process shutdown skipped cleanup.
+                state.clear_project_for_window(&existing_window_label);
+            }
+        }
     }
 
-    // Update window-scoped state
-    state.set_project_for_window_with_identity(
-        window.label(),
-        project_root_str.clone(),
-        project_identity,
-    );
-
-    // Record to recent projects history
-    let _ = gwt_core::config::record_recent_project(&project_root_str);
-
-    let _ = crate::menu::rebuild_menu(window.app_handle());
-
-    Ok(OpenProjectResult {
-        info,
-        action: OpenProjectAction::Opened,
-        focused_window_label: None,
-    })
+    Err("Failed to open project due to stale duplicate window state. Please retry.".to_string())
 }
 
 /// Get current project info from state
@@ -435,7 +437,7 @@ pub fn create_project(
     request: NewProjectRequest,
     state: State<AppState>,
     app_handle: AppHandle,
-) -> Result<ProjectInfo, String> {
+) -> Result<OpenProjectResult, String> {
     if !is_valid_github_repo_url(&request.repo_url) {
         return Err("Invalid repository URL".to_string());
     }
@@ -549,7 +551,7 @@ pub fn create_project(
     }
 
     // Open the project root (FR-304)
-    open_project(window, request.parent_dir, state).map(|result| result.info)
+    open_project(window, request.parent_dir, state)
 }
 
 #[derive(Debug, Clone, Serialize)]
