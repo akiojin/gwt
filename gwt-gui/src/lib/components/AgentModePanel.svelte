@@ -1,3 +1,5 @@
+<svelte:options runes={false} />
+
 <script lang="ts">
   import type { AgentModeState } from "../types";
   import { afterUpdate, onMount } from "svelte";
@@ -19,6 +21,7 @@
   let ignoreEnterAfterComposition = false;
   let chatEl: HTMLDivElement | null = null;
   let lastMessageCount = 0;
+  let lastOpenedIssueNumber: number | null = null;
 
   function toErrorMessage(err: unknown): string {
     if (!err) return "Unknown error";
@@ -92,16 +95,37 @@
   }
 
   afterUpdate(() => {
+    const count = state.messages.length;
     if (!chatEl) return;
-    if (state.messages.length !== lastMessageCount) {
+    if (count !== lastMessageCount) {
       chatEl.scrollTop = chatEl.scrollHeight;
-      lastMessageCount = state.messages.length;
+      lastMessageCount = count;
     }
   });
 
   onMount(() => {
     void refreshState();
   });
+
+  $: {
+    const issueNumber = state.active_spec_issue_number ?? null;
+    if (!issueNumber || issueNumber === lastOpenedIssueNumber) {
+      // no-op
+    } else {
+      lastOpenedIssueNumber = issueNumber;
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent("gwt-agent-mode-open-spec-issue", {
+            detail: {
+              issueNumber,
+              specId: state.active_spec_id ?? null,
+              issueUrl: state.active_spec_issue_url ?? null,
+            },
+          })
+        );
+      }
+    }
+  }
 </script>
 
 <section class="agent-mode">
