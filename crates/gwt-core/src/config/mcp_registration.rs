@@ -94,7 +94,9 @@ impl Default for McpRegistrationStatus {
                     config_path: None,
                     registered: false,
                     error_code: Some("NOT_CHECKED".to_string()),
-                    error_message: Some("Registration status has not been checked yet.".to_string()),
+                    error_message: Some(
+                        "Registration status has not been checked yet.".to_string(),
+                    ),
                 })
                 .collect(),
             last_checked_at: chrono::Utc::now().timestamp_millis(),
@@ -1041,7 +1043,11 @@ args = []
 
         let resource_dir = tmp.path().join("resources");
         std::fs::create_dir_all(&resource_dir).unwrap();
-        std::fs::write(resource_dir.join("gwt-mcp-bridge.js"), "console.log('bridge');").unwrap();
+        std::fs::write(
+            resource_dir.join("gwt-mcp-bridge.js"),
+            "console.log('bridge');",
+        )
+        .unwrap();
 
         let status = get_registration_status(Some(&resource_dir));
         assert_eq!(status.bridge_script, "ok");
@@ -1062,7 +1068,11 @@ args = []
 
         let resource_dir = tmp.path().join("resources");
         std::fs::create_dir_all(&resource_dir).unwrap();
-        std::fs::write(resource_dir.join("gwt-mcp-bridge.js"), "console.log('bridge');").unwrap();
+        std::fs::write(
+            resource_dir.join("gwt-mcp-bridge.js"),
+            "console.log('bridge');",
+        )
+        .unwrap();
 
         let status = repair_registration(Some(&resource_dir));
         assert_eq!(status.overall, "ok");
