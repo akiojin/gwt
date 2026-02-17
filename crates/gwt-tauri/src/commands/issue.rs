@@ -2,8 +2,8 @@
 
 use crate::commands::project::resolve_repo_path_for_project_root;
 use gwt_core::git::{
-    create_linked_branch, fetch_open_issues, find_branch_for_issue, is_gh_cli_authenticated,
-    is_gh_cli_available,
+    create_linked_branch, fetch_issue_detail, fetch_open_issues, find_branch_for_issue,
+    is_gh_cli_authenticated, is_gh_cli_available,
 };
 use gwt_core::worktree::WorktreeManager;
 use serde::Serialize;
@@ -17,6 +17,30 @@ pub struct FetchIssuesResponse {
     pub has_next_page: bool,
 }
 
+/// Serializable label info for the frontend
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelInfo {
+    pub name: String,
+    pub color: String,
+}
+
+/// Serializable assignee info for the frontend
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssigneeInfo {
+    pub login: String,
+    pub avatar_url: String,
+}
+
+/// Serializable milestone info for the frontend
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MilestoneInfo {
+    pub title: String,
+    pub number: u32,
+}
+
 /// Serializable issue info for the frontend
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,7 +48,13 @@ pub struct IssueInfo {
     pub number: u64,
     pub title: String,
     pub updated_at: String,
-    pub labels: Vec<String>,
+    pub labels: Vec<LabelInfo>,
+    pub body: Option<String>,
+    pub state: String,
+    pub html_url: String,
+    pub assignees: Vec<AssigneeInfo>,
+    pub comments_count: u32,
+    pub milestone: Option<MilestoneInfo>,
 }
 
 /// gh CLI status (FR-011a)
@@ -43,33 +73,71 @@ pub struct RollbackResult {
     pub error: Option<String>,
 }
 
+/// Convert a core GitHubIssue to the serializable IssueInfo
+fn issue_to_info(issue: gwt_core::git::GitHubIssue) -> IssueInfo {
+    IssueInfo {
+        number: issue.number,
+        title: issue.title,
+        updated_at: issue.updated_at,
+        labels: issue
+            .labels
+            .into_iter()
+            .map(|l| LabelInfo {
+                name: l.name,
+                color: l.color,
+            })
+            .collect(),
+        body: issue.body,
+        state: issue.state,
+        html_url: issue.html_url,
+        assignees: issue
+            .assignees
+            .into_iter()
+            .map(|a| AssigneeInfo {
+                login: a.login,
+                avatar_url: a.avatar_url,
+            })
+            .collect(),
+        comments_count: issue.comments_count,
+        milestone: issue.milestone.map(|m| MilestoneInfo {
+            title: m.title,
+            number: m.number,
+        }),
+    }
+}
+
 /// Fetch GitHub issues with pagination (FR-010)
 #[tauri::command]
 pub fn fetch_github_issues(
     project_path: String,
     page: u32,
     per_page: u32,
+    state: String,
 ) -> Result<FetchIssuesResponse, String> {
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)?;
 
-    let result = fetch_open_issues(&repo_path, page, per_page)?;
+    let result = fetch_open_issues(&repo_path, page, per_page, &state)?;
 
-    let issues = result
-        .issues
-        .into_iter()
-        .map(|issue| IssueInfo {
-            number: issue.number,
-            title: issue.title,
-            updated_at: issue.updated_at,
-            labels: issue.labels,
-        })
-        .collect();
+    let issues = result.issues.into_iter().map(issue_to_info).collect();
 
     Ok(FetchIssuesResponse {
         issues,
         has_next_page: result.has_next_page,
     })
+}
+
+/// Fetch a single GitHub issue detail
+#[tauri::command]
+pub fn fetch_github_issue_detail(
+    project_path: String,
+    issue_number: u64,
+) -> Result<IssueInfo, String> {
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+
+    let issue = fetch_issue_detail(&repo_path, issue_number)?;
+    Ok(issue_to_info(issue))
 }
 
 /// Check gh CLI availability and authentication (FR-011)
@@ -183,7 +251,16 @@ mod tests {
                 number: 42,
                 title: "Fix login bug".to_string(),
                 updated_at: "2025-01-25T10:00:00Z".to_string(),
-                labels: vec!["bug".to_string()],
+                labels: vec![LabelInfo {
+                    name: "bug".to_string(),
+                    color: "d73a4a".to_string(),
+                }],
+                body: Some("Issue body".to_string()),
+                state: "OPEN".to_string(),
+                html_url: "https://github.com/user/repo/issues/42".to_string(),
+                assignees: vec![],
+                comments_count: 0,
+                milestone: None,
             }],
             has_next_page: true,
         };
@@ -192,6 +269,7 @@ mod tests {
         assert!(json.contains("\"hasNextPage\":true"));
         assert!(json.contains("\"number\":42"));
         assert!(json.contains("\"updatedAt\":"));
+        assert!(json.contains("\"state\":\"OPEN\""));
     }
 
     #[test]
@@ -204,6 +282,39 @@ mod tests {
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("\"issues\":[]"));
         assert!(json.contains("\"hasNextPage\":false"));
+    }
+
+    #[test]
+    fn test_issue_info_extended_fields_serialization() {
+        let info = IssueInfo {
+            number: 42,
+            title: "Test".to_string(),
+            updated_at: "2025-01-25T10:00:00Z".to_string(),
+            labels: vec![LabelInfo {
+                name: "bug".to_string(),
+                color: "d73a4a".to_string(),
+            }],
+            body: Some("body".to_string()),
+            state: "OPEN".to_string(),
+            html_url: "https://github.com/user/repo/issues/42".to_string(),
+            assignees: vec![AssigneeInfo {
+                login: "octocat".to_string(),
+                avatar_url: "https://avatars.example.com/1".to_string(),
+            }],
+            comments_count: 5,
+            milestone: Some(MilestoneInfo {
+                title: "v1.0".to_string(),
+                number: 1,
+            }),
+        };
+
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"body\":\"body\""));
+        assert!(json.contains("\"state\":\"OPEN\""));
+        assert!(json.contains("\"htmlUrl\":"));
+        assert!(json.contains("\"commentsCount\":5"));
+        assert!(json.contains("\"login\":\"octocat\""));
+        assert!(json.contains("\"avatarUrl\":"));
     }
 
     // ==========================================================
@@ -276,11 +387,21 @@ mod tests {
             number: 42,
             title: "Fix bug".to_string(),
             updated_at: "2025-01-25T10:00:00Z".to_string(),
-            labels: vec!["bug".to_string(), "urgent".to_string()],
+            labels: vec![
+                LabelInfo { name: "bug".to_string(), color: "d73a4a".to_string() },
+                LabelInfo { name: "urgent".to_string(), color: "ff0000".to_string() },
+            ],
+            body: None,
+            state: "OPEN".to_string(),
+            html_url: String::new(),
+            assignees: vec![],
+            comments_count: 0,
+            milestone: None,
         };
 
         let json = serde_json::to_string(&info).unwrap();
-        assert!(json.contains("\"labels\":[\"bug\",\"urgent\"]"));
+        assert!(json.contains("\"name\":\"bug\""));
+        assert!(json.contains("\"name\":\"urgent\""));
     }
 
     #[test]
@@ -290,6 +411,12 @@ mod tests {
             title: "No labels".to_string(),
             updated_at: "2025-01-25T10:00:00Z".to_string(),
             labels: vec![],
+            body: None,
+            state: "OPEN".to_string(),
+            html_url: String::new(),
+            assignees: vec![],
+            comments_count: 0,
+            milestone: None,
         };
 
         let json = serde_json::to_string(&info).unwrap();

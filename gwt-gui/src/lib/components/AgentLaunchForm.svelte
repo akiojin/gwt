@@ -1200,8 +1200,8 @@
                   <span class="issue-title">{issue.title}</span>
                   {#if issue.labels.length > 0}
                     <span class="issue-labels">
-                      {#each issue.labels as lbl (lbl)}
-                        <span class="issue-label">{lbl}</span>
+                      {#each issue.labels as lbl (lbl.name)}
+                        <span class="issue-label">{lbl.name}</span>
                       {/each}
                     </span>
                   {/if}

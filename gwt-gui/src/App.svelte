@@ -2,6 +2,7 @@
   import type {
     Tab,
     BranchInfo,
+    GitHubIssueInfo,
     ProjectInfo,
     LaunchAgentRequest,
     LaunchFinishedPayload,
@@ -1118,6 +1119,49 @@
     activeTabId = tab.id;
   }
 
+  function openIssuesTab() {
+    const existing = tabs.find(
+      (t) => t.type === "issues" || t.id === "issues",
+    );
+    if (existing) {
+      activeTabId = existing.id;
+      return;
+    }
+
+    const tab: Tab = {
+      id: "issues",
+      label: "Issues",
+      type: "issues",
+    };
+    tabs = [...tabs, tab];
+    activeTabId = tab.id;
+  }
+
+  function handleWorkOnIssueFromTab(issue: GitHubIssueInfo) {
+    // Infer branch prefix from labels
+    const names = issue.labels.map((l) => l.name.toLowerCase());
+    let prefix = "feature/";
+    if (names.includes("bug")) prefix = "bugfix/";
+    else if (names.includes("enhancement") || names.includes("feature")) prefix = "feature/";
+    else if (names.includes("hotfix")) prefix = "hotfix/";
+
+    // Open the AgentLaunchForm and pre-fill with the issue
+    showAgentLaunch = true;
+  }
+
+  function handleSwitchToWorktreeFromTab(branchName: string) {
+    // Find the matching agent tab and switch to it
+    const agentTab = tabs.find(
+      (t) => t.type === "agent" && normalizeBranchName(t.label) === normalizeBranchName(branchName),
+    );
+    if (agentTab) {
+      activeTabId = agentTab.id;
+      return;
+    }
+    // If no tab exists, select the branch in the sidebar
+    sidebarRefreshKey++;
+  }
+
   function openIssueSpecTab(payload: AgentModeSpecIssuePayload) {
     const issueNumber = Number(payload.issueNumber);
     if (!Number.isFinite(issueNumber) || issueNumber <= 0) return;
@@ -1407,6 +1451,9 @@
       case "version-history":
         openVersionHistoryTab();
         break;
+      case "git-issues":
+        openIssuesTab();
+        break;
       case "check-updates":
         {
           try {
@@ -1679,7 +1726,8 @@
       if (
         tab.type === "agentMode" ||
         tab.type === "settings" ||
-        tab.type === "versionHistory"
+        tab.type === "versionHistory" ||
+        tab.type === "issues"
       ) {
         storedTabs.push({
           type: tab.type,
@@ -1918,6 +1966,8 @@
         onTabSelect={handleTabSelect}
         onTabClose={handleTabClose}
         onTabReorder={handleTabReorder}
+        onWorkOnIssue={handleWorkOnIssueFromTab}
+        onSwitchToWorktree={handleSwitchToWorktreeFromTab}
       />
     </div>
     <StatusBar
