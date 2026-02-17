@@ -605,6 +605,7 @@
         projectPath,
         page,
         perPage: 30,
+        state: "open",
       });
       if (page === 1) {
         issues = resp.issues;

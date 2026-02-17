@@ -88,7 +88,7 @@ fn issue_to_info(issue: gwt_core::git::GitHubIssue) -> IssueInfo {
             })
             .collect(),
         body: issue.body,
-        state: issue.state,
+        state: normalize_issue_state(&issue.state),
         html_url: issue.html_url,
         assignees: issue
             .assignees
@@ -106,16 +106,25 @@ fn issue_to_info(issue: gwt_core::git::GitHubIssue) -> IssueInfo {
     }
 }
 
+fn normalize_issue_state(state: &str) -> String {
+    if state.eq_ignore_ascii_case("closed") {
+        "closed".to_string()
+    } else {
+        "open".to_string()
+    }
+}
+
 /// Fetch GitHub issues with pagination (FR-010)
 #[tauri::command]
 pub fn fetch_github_issues(
     project_path: String,
     page: u32,
     per_page: u32,
-    state: String,
+    state: Option<String>,
 ) -> Result<FetchIssuesResponse, String> {
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let state = state.unwrap_or_else(|| "open".to_string());
 
     let result = fetch_open_issues(&repo_path, page, per_page, &state)?;
 
@@ -317,6 +326,25 @@ mod tests {
         assert!(json.contains("\"avatarUrl\":"));
     }
 
+    #[test]
+    fn test_issue_to_info_normalizes_state_to_lowercase() {
+        let issue = gwt_core::git::GitHubIssue {
+            number: 42,
+            title: "Test".to_string(),
+            updated_at: "2025-01-25T10:00:00Z".to_string(),
+            labels: vec![],
+            body: None,
+            state: "CLOSED".to_string(),
+            html_url: "https://github.com/user/repo/issues/42".to_string(),
+            assignees: vec![],
+            comments_count: 0,
+            milestone: None,
+        };
+
+        let info = issue_to_info(issue);
+        assert_eq!(info.state, "closed");
+    }
+
     // ==========================================================
     // FR-011: GhCliStatus serialization tests
     // ==========================================================
@@ -388,8 +416,14 @@ mod tests {
             title: "Fix bug".to_string(),
             updated_at: "2025-01-25T10:00:00Z".to_string(),
             labels: vec![
-                LabelInfo { name: "bug".to_string(), color: "d73a4a".to_string() },
-                LabelInfo { name: "urgent".to_string(), color: "ff0000".to_string() },
+                LabelInfo {
+                    name: "bug".to_string(),
+                    color: "d73a4a".to_string(),
+                },
+                LabelInfo {
+                    name: "urgent".to_string(),
+                    color: "ff0000".to_string(),
+                },
             ],
             body: None,
             state: "OPEN".to_string(),

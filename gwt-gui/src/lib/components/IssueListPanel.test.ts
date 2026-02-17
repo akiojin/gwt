@@ -273,6 +273,38 @@ describe("IssueListPanel", () => {
     });
   });
 
+  it("revalidates branch linkage on refresh even when previously cached", async () => {
+    const issue = makeIssue({ number: 5, title: "Refresh Linkage Issue" });
+    let branchLookupCount = 0;
+
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "check_gh_cli_status") return { available: true, authenticated: true } as GhCliStatus;
+      if (cmd === "fetch_github_issues") return { issues: [issue], hasNextPage: false } as FetchIssuesResponse;
+      if (cmd === "find_existing_issue_branch") {
+        branchLookupCount += 1;
+        return branchLookupCount === 1 ? null : "feature/issue-5";
+      }
+      return null;
+    });
+
+    const rendered = await renderIssueListPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("Refresh Linkage Issue")).toBeTruthy();
+      expect(branchLookupCount).toBe(1);
+    });
+    expect(rendered.queryByText("WT")).toBeNull();
+
+    const refreshBtn = rendered.container.querySelector(".ilp-refresh-btn");
+    expect(refreshBtn).toBeTruthy();
+    await fireEvent.click(refreshBtn!);
+
+    await waitFor(() => {
+      expect(branchLookupCount).toBeGreaterThanOrEqual(2);
+      expect(rendered.getByText("WT")).toBeTruthy();
+    });
+  });
+
   it("navigates to detail view on issue click and back to list", async () => {
     const issue = makeIssue({ number: 42, title: "Detail Test Issue", body: "Issue body content" });
 

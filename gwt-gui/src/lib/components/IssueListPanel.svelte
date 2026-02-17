@@ -151,6 +151,8 @@
       loadingMore = true;
     } else {
       loading = true;
+      // Force branch linkage revalidation on full reload (refresh/filter switch).
+      issueBranchMap = new Map();
     }
     error = null;
 
@@ -175,7 +177,7 @@
 
       // Check branches for loaded issues
       for (const issue of resp.issues) {
-        if (!issueBranchMap.has(issue.number)) {
+        if (!append || !issueBranchMap.has(issue.number)) {
           void checkExistingBranch(issue.number);
         }
       }
@@ -248,6 +250,7 @@
 
   function handleRefresh() {
     issues = [];
+    issueBranchMap = new Map();
     page = 1;
     hasNextPage = false;
     void fetchIssues(1);

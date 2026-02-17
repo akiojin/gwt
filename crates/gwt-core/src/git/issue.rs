@@ -8,6 +8,9 @@ use super::gh_cli::{gh_command, is_gh_available};
 use super::remote::Remote;
 use super::repository::{find_bare_repo_in_dir, is_git_repo};
 
+// `gh issue list --json comments` returns at most this many comments per issue.
+const GH_COMMENTS_PREVIEW_LIMIT: u32 = 100;
+
 /// Result of fetching issues with pagination info
 #[derive(Debug, Clone)]
 pub struct FetchIssuesResult {
@@ -200,7 +203,11 @@ pub fn fetch_open_issues(
 
     // If we got more than per_page items after skipping, there's a next page
     let has_next_page = remaining.len() > per_page as usize;
-    let issues: Vec<GitHubIssue> = remaining.into_iter().take(per_page as usize).collect();
+    let mut issues: Vec<GitHubIssue> = remaining.into_iter().take(per_page as usize).collect();
+
+    for issue in &mut issues {
+        hydrate_comments_count_from_rest_if_needed(repo_path, repo_slug.as_deref(), issue);
+    }
 
     Ok(FetchIssuesResult {
         issues,
@@ -234,6 +241,52 @@ fn issue_list_args(repo_slug: Option<&str>, page: u32, per_page: u32, state: &st
     }
 
     args
+}
+
+fn hydrate_comments_count_from_rest_if_needed(
+    repo_path: &Path,
+    repo_slug: Option<&str>,
+    issue: &mut GitHubIssue,
+) {
+    if issue.comments_count < GH_COMMENTS_PREVIEW_LIMIT {
+        return;
+    }
+
+    let slug = repo_slug
+        .map(|value| value.to_string())
+        .or_else(|| parse_repo_slug_from_issue_html_url(&issue.html_url));
+    let Some(slug) = slug else {
+        return;
+    };
+
+    if let Ok(total_count) = fetch_issue_comments_total_count(repo_path, &slug, issue.number) {
+        issue.comments_count = total_count;
+    }
+}
+
+fn fetch_issue_comments_total_count(
+    repo_path: &Path,
+    repo_slug: &str,
+    issue_number: u64,
+) -> Result<u32, String> {
+    let endpoint = format!("repos/{}/issues/{}", repo_slug, issue_number);
+    let output = gh_command()
+        .args(["api", &endpoint, "--jq", ".comments"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to execute gh api for issue comments: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh api comments count failed: {}", stderr));
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let parsed = raw
+        .trim()
+        .parse::<u64>()
+        .map_err(|e| format!("Failed to parse comments count: {}", e))?;
+    u32::try_from(parsed).map_err(|_| "comments count exceeds u32".to_string())
 }
 
 pub(super) fn resolve_repo_slug(repo_path: &Path) -> Option<String> {
@@ -293,6 +346,41 @@ fn normalize_repo_slug(path: &str) -> Option<String> {
     Some(format!("{}/{}", owner, repo))
 }
 
+fn parse_repo_slug_from_issue_html_url(html_url: &str) -> Option<String> {
+    let rest = html_url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(html_url);
+    let mut parts = rest.split('/');
+    let _host = parts.next()?;
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some(format!("{}/{}", owner, repo))
+}
+
+fn parse_comments_count(item: &serde_json::Value) -> u32 {
+    if let Some(count) = item.get("commentsCount").and_then(|v| v.as_u64()) {
+        return u32::try_from(count).unwrap_or(u32::MAX);
+    }
+
+    let Some(comments) = item.get("comments") else {
+        return 0;
+    };
+
+    if let Some(count) = comments.as_u64() {
+        return u32::try_from(count).unwrap_or(u32::MAX);
+    }
+
+    if let Some(count) = comments.get("totalCount").and_then(|v| v.as_u64()) {
+        return u32::try_from(count).unwrap_or(u32::MAX);
+    }
+
+    comments.as_array().map(|arr| arr.len() as u32).unwrap_or(0)
+}
+
 /// Parse gh issue list/view JSON output
 pub fn parse_gh_issues_json(json: &str) -> Result<Vec<GitHubIssue>, String> {
     let parsed: serde_json::Value =
@@ -325,10 +413,7 @@ pub fn parse_gh_issues_json(json: &str) -> Result<Vec<GitHubIssue>, String> {
                         .collect()
                 })
                 .unwrap_or_default();
-            let body = item
-                .get("body")
-                .and_then(|v| v.as_str())
-                .map(String::from);
+            let body = item.get("body").and_then(|v| v.as_str()).map(String::from);
             let state = item
                 .get("state")
                 .and_then(|v| v.as_str())
@@ -356,11 +441,7 @@ pub fn parse_gh_issues_json(json: &str) -> Result<Vec<GitHubIssue>, String> {
                         .collect()
                 })
                 .unwrap_or_default();
-            let comments_count = item
-                .get("comments")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.len() as u32)
-                .unwrap_or(0);
+            let comments_count = parse_comments_count(item);
             let milestone = item.get("milestone").and_then(|v| {
                 if v.is_null() {
                     return None;
@@ -423,9 +504,9 @@ pub fn fetch_issue_detail(repo_path: &Path, issue_number: u64) -> Result<GitHubI
         "number,title,body,state,url,labels,assignees,comments,milestone,updatedAt".to_string(),
     ];
 
-    if let Some(slug) = repo_slug {
+    if let Some(slug) = repo_slug.as_deref() {
         args.push("--repo".to_string());
-        args.push(slug);
+        args.push(slug.to_string());
     }
 
     let output = gh_command()
@@ -440,7 +521,9 @@ pub fn fetch_issue_detail(repo_path: &Path, issue_number: u64) -> Result<GitHubI
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_gh_issue_json(&stdout)
+    let mut issue = parse_gh_issue_json(&stdout)?;
+    hydrate_comments_count_from_rest_if_needed(repo_path, repo_slug.as_deref(), &mut issue);
+    Ok(issue)
 }
 
 /// Filter issues by title (case-insensitive substring match)
@@ -747,8 +830,14 @@ mod tests {
     #[test]
     fn test_github_issue_with_labels_constructor() {
         let labels = vec![
-            GitHubLabel { name: "bug".to_string(), color: "d73a4a".to_string() },
-            GitHubLabel { name: "urgent".to_string(), color: "ff0000".to_string() },
+            GitHubLabel {
+                name: "bug".to_string(),
+                color: "d73a4a".to_string(),
+            },
+            GitHubLabel {
+                name: "urgent".to_string(),
+                color: "ff0000".to_string(),
+            },
         ];
         let issue = GitHubIssue::with_labels(
             42,
@@ -1049,7 +1138,10 @@ mod tests {
         assert_eq!(issue.html_url, "https://github.com/user/repo/issues/42");
         assert_eq!(issue.assignees.len(), 1);
         assert_eq!(issue.assignees[0].login, "octocat");
-        assert_eq!(issue.assignees[0].avatar_url, "https://avatars.example.com/1");
+        assert_eq!(
+            issue.assignees[0].avatar_url,
+            "https://avatars.example.com/1"
+        );
         assert_eq!(issue.comments_count, 2);
         assert!(issue.milestone.is_some());
         let ms = issue.milestone.as_ref().unwrap();
@@ -1076,6 +1168,38 @@ mod tests {
         assert!(issue.assignees.is_empty());
         assert_eq!(issue.comments_count, 0);
         assert!(issue.milestone.is_none());
+    }
+
+    #[test]
+    fn test_parse_gh_issues_json_with_comment_total_count_object() {
+        let json = r#"[
+            {
+                "number": 7,
+                "title": "High traffic issue",
+                "updatedAt": "2025-01-25T10:00:00Z",
+                "comments": {"totalCount": 150}
+            }
+        ]"#;
+
+        let issues = parse_gh_issues_json(json).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].comments_count, 150);
+    }
+
+    #[test]
+    fn test_parse_gh_issues_json_with_numeric_comments() {
+        let json = r#"[
+            {
+                "number": 8,
+                "title": "REST-backed issue",
+                "updatedAt": "2025-01-25T10:00:00Z",
+                "comments": 12
+            }
+        ]"#;
+
+        let issues = parse_gh_issues_json(json).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].comments_count, 12);
     }
 
     #[test]
@@ -1115,6 +1239,12 @@ mod tests {
     fn test_parse_repo_slug_https_trailing_slash() {
         let slug = parse_repo_slug_from_remote_url("https://github.com/user/repo/").unwrap();
         assert_eq!(slug, "user/repo");
+    }
+
+    #[test]
+    fn test_parse_repo_slug_from_issue_html_url() {
+        let slug = parse_repo_slug_from_issue_html_url("https://github.com/user/repo/issues/42");
+        assert_eq!(slug.as_deref(), Some("user/repo"));
     }
 
     #[test]

@@ -1727,6 +1727,7 @@ describe("AgentLaunchForm", () => {
         projectPath: "/tmp/project",
         page: 2,
         perPage: 30,
+        state: "open",
       });
       expect(rendered.getByText("Second issue")).toBeTruthy();
       expect(issuePageCalls).toBeGreaterThanOrEqual(2);
