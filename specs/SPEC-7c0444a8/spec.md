@@ -68,6 +68,8 @@
 - Issue/PR/Workflow/Docker の一部取得に失敗しても、タブ列と他タブ表示は維持する。
 - PR は存在するが workflow run が 0 件の場合、Workflow タブは空状態を表示する。
 - Quick Start 履歴が空の場合、ヘッダーの Continue/New は無効化され、`Launch Agent...` は継続利用できる。
+- リモートブランチ名が `origin/*` 以外（例: `upstream/*`）でも、PR検索時は head ref 名（`feature/*`）へ正規化して照合する。
+- ブランチ切替中に旧ブランチの非同期取得が失敗しても、現在ブランチの PR/Workflow 状態を上書きしない。
 
 ## 要件 *(必須)*
 
@@ -88,6 +90,8 @@
 - **FR-013**: `Docker` タブは Quick Start 履歴由来の Docker 設定（runtime/service/build/recreate/keep 等）を併記表示しなければならない。
 - **FR-014**: 各タブはデータ取得失敗時にタブ単位のエラー/空状態を表示し、他タブの描画・操作に影響を与えてはならない。
 - **FR-015**: Worktree Summary のタブ名称は UI 上で英語表示しなければならない。
+- **FR-016**: `fetch_latest_branch_pr` は `origin/*` を含む既知remote接頭辞付きブランチ名を正規化し、PR head ref 解決に利用しなければならない。
+- **FR-017**: Worktree Summary の PR取得失敗ハンドリングは、要求時の branch key と現在 key が一致する場合のみエラー状態を反映しなければならない。
 
 ### 非機能要件
 
@@ -107,3 +111,4 @@
 - **SC-002**: `Summary` タブに Quick Start 要素が表示されず、AI 要約のみ表示されることを UI テストで確認できる。
 - **SC-003**: `Issue` タブが `issue-<number>` に一致する関連 Issue のみ表示し、非一致時は空状態となることをテストで確認できる。
 - **SC-004**: `PR` / `Workflow` / `Docker` タブがデータ有無に応じた表示（実データまたは空状態）を行い、全体 UI が継続動作することをテストで確認できる。
+- **SC-005**: ブランチ切替後に旧ブランチの `fetch_latest_branch_pr` エラーが返っても、現在ブランチで `No PR` 表示を維持し誤エラー表示しないことをテストで確認できる。

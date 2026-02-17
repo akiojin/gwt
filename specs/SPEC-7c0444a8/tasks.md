@@ -37,6 +37,9 @@
 - [ ] T012 [P] [共通] フロントエンドの対象テストを実行して回帰を確認する `gwt-gui/src/lib/components/WorktreeSummaryPanel.test.ts`
 - [ ] T013 [P] [共通] 必要な backend command テストを実行して Issue/PR/Workflow 選定ロジックを確認する `crates/gwt-tauri/src/commands/issue.rs` `crates/gwt-tauri/src/commands/pullrequest.rs`
 - [ ] T014 [共通] 受け入れ条件（6タブ固定順・ヘッダーContinue/New・Summary分離・Issue限定・PR/Workflow/Docker空状態）の実機スモークを記録する `specs/SPEC-7c0444a8/quickstart.md`
+- [x] T015 [US2] ブランチ切替時に旧 `fetch_latest_branch_pr` 失敗で現在PR状態が汚染されない RED/GREEN テストを追加する `gwt-gui/src/lib/components/WorktreeSummaryPanel.test.ts`
+- [x] T016 [US2] `loadLatestBranchPr` の catch を branch key 一致時のみ反映する実装に修正する `gwt-gui/src/lib/components/WorktreeSummaryPanel.svelte`
+- [x] T017 [US2] issue 未存在判定を `HTTP 404` 汎用判定から issue特化判定へ狭め、回帰テストを追加する `crates/gwt-tauri/src/commands/issue.rs`
 
 ## 並列実行候補
 
