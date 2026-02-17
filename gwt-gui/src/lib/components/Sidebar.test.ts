@@ -704,16 +704,10 @@ describe("Sidebar", () => {
 
   it("keeps worktree list visible during 10s agent-status fallback polling", async () => {
     vi.useFakeTimers();
-    let resolveLocalRefresh: ((value: typeof branchFixture[]) => void) | null = null;
     try {
-      let localFetchCount = 0;
       invokeMock.mockImplementation((command: string) => {
         if (command === "list_worktree_branches") {
-          localFetchCount += 1;
-          if (localFetchCount === 1) return Promise.resolve([branchFixture]);
-          return new Promise<typeof branchFixture[]>((resolve) => {
-            resolveLocalRefresh = resolve;
-          });
+          return Promise.resolve([branchFixture]);
         }
         if (command === "list_worktrees") return Promise.resolve([]);
         if (command === "fetch_pr_status") {
@@ -741,56 +735,45 @@ describe("Sidebar", () => {
       });
       expect(rendered.container.querySelector(".loading-indicator")).toBeNull();
     } finally {
-      if (resolveLocalRefresh) resolveLocalRefresh([branchFixture]);
       vi.useRealTimers();
     }
   });
 
   it("keeps worktree list visible when agent-status-changed event triggers refresh", async () => {
-    let resolveLocalRefresh: ((value: typeof branchFixture[]) => void) | null = null;
-    try {
-      let localFetchCount = 0;
-      invokeMock.mockImplementation((command: string) => {
-        if (command === "list_worktree_branches") {
-          localFetchCount += 1;
-          if (localFetchCount === 1) return Promise.resolve([branchFixture]);
-          return new Promise<typeof branchFixture[]>((resolve) => {
-            resolveLocalRefresh = resolve;
-          });
-        }
-        if (command === "list_worktrees") return Promise.resolve([]);
-        if (command === "fetch_pr_status") {
-          return Promise.resolve({
-            statuses: {},
-            ghStatus: { available: true, authenticated: true },
-          });
-        }
-        return Promise.resolve([]);
-      });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "list_worktree_branches") {
+        return Promise.resolve([branchFixture]);
+      }
+      if (command === "list_worktrees") return Promise.resolve([]);
+      if (command === "fetch_pr_status") {
+        return Promise.resolve({
+          statuses: {},
+          ghStatus: { available: true, authenticated: true },
+        });
+      }
+      return Promise.resolve([]);
+    });
 
-      const rendered = await renderSidebar({
-        projectPath: "/tmp/project",
-        onBranchSelect: vi.fn(),
-        agentTabBranches: [branchFixture.name],
-      });
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      agentTabBranches: [branchFixture.name],
+    });
 
-      await rendered.findByText(branchFixture.name);
-      await waitFor(() =>
-        expect(listenMock.mock.calls.some((call) => call[0] === "agent-status-changed")).toBe(
-          true
-        )
-      );
-      expect(rendered.container.querySelector(".loading-indicator")).toBeNull();
-      const beforeRefresh = countInvokeCalls("list_worktree_branches");
+    await rendered.findByText(branchFixture.name);
+    await waitFor(() =>
+      expect(listenMock.mock.calls.some((call) => call[0] === "agent-status-changed")).toBe(
+        true
+      )
+    );
+    expect(rendered.container.querySelector(".loading-indicator")).toBeNull();
+    const beforeRefresh = countInvokeCalls("list_worktree_branches");
 
-      await emitTauriEvent("agent-status-changed", {});
-      await waitFor(() => {
-        expect(countInvokeCalls("list_worktree_branches")).toBeGreaterThan(beforeRefresh);
-      });
-      expect(rendered.container.querySelector(".loading-indicator")).toBeNull();
-    } finally {
-      if (resolveLocalRefresh) resolveLocalRefresh([branchFixture]);
-    }
+    await emitTauriEvent("agent-status-changed", {});
+    await waitFor(() => {
+      expect(countInvokeCalls("list_worktree_branches")).toBeGreaterThan(beforeRefresh);
+    });
+    expect(rendered.container.querySelector(".loading-indicator")).toBeNull();
   });
 
   it("applies branch filtering after debounce delay", async () => {
