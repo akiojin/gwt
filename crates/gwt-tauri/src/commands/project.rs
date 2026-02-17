@@ -22,6 +22,21 @@ pub struct ProjectInfo {
     pub current_branch: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum OpenProjectAction {
+    Opened,
+    FocusedExisting,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenProjectResult {
+    pub info: ProjectInfo,
+    pub action: OpenProjectAction,
+    pub focused_window_label: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewProjectRequest {
@@ -85,6 +100,13 @@ fn resolve_project_root(selected: &Path) -> std::path::PathBuf {
     } else {
         selected.to_path_buf()
     }
+}
+
+fn canonical_project_identity(project_root: &Path) -> String {
+    std::fs::canonicalize(project_root)
+        .unwrap_or_else(|_| project_root.to_path_buf())
+        .to_string_lossy()
+        .to_string()
 }
 
 pub(crate) fn resolve_repo_path_for_project_root(
@@ -203,7 +225,7 @@ pub fn open_project(
     window: tauri::Window,
     path: String,
     state: State<AppState>,
-) -> Result<ProjectInfo, String> {
+) -> Result<OpenProjectResult, String> {
     let p = Path::new(&path);
 
     if !p.exists() {
@@ -216,6 +238,7 @@ pub fn open_project(
         return Err("Migration required: normal repositories are not supported. Please migrate to a bare gwt project.".to_string());
     }
     let project_root_str = project_root.to_string_lossy().to_string();
+    let project_identity = canonical_project_identity(&project_root);
 
     // Get repo name from the directory name
     let repo_name = project_root
@@ -226,18 +249,50 @@ pub fn open_project(
     // Get current branch
     let current_branch = Branch::current(&repo_path).ok().flatten().map(|b| b.name);
 
+    let info = ProjectInfo {
+        path: project_root_str.clone(),
+        repo_name,
+        current_branch,
+    };
+
+    let current_window_label = window.label().to_string();
+    if let Some(existing_window_label) =
+        state.find_window_by_project_identity(&project_identity, Some(&current_window_label))
+    {
+        if let Some(existing_window) = window
+            .app_handle()
+            .get_webview_window(&existing_window_label)
+        {
+            let _ = existing_window.show();
+            let _ = existing_window.set_focus();
+            let _ = crate::menu::rebuild_menu(window.app_handle());
+            return Ok(OpenProjectResult {
+                info,
+                action: OpenProjectAction::FocusedExisting,
+                focused_window_label: Some(existing_window_label),
+            });
+        }
+
+        // Stale window state can remain if process shutdown skipped cleanup.
+        state.clear_project_for_window(&existing_window_label);
+    }
+
     // Update window-scoped state
-    state.set_project_for_window(window.label(), project_root_str.clone());
+    state.set_project_for_window_with_identity(
+        window.label(),
+        project_root_str.clone(),
+        project_identity,
+    );
 
     // Record to recent projects history
     let _ = gwt_core::config::record_recent_project(&project_root_str);
 
     let _ = crate::menu::rebuild_menu(window.app_handle());
 
-    Ok(ProjectInfo {
-        path: project_root_str,
-        repo_name,
-        current_branch,
+    Ok(OpenProjectResult {
+        info,
+        action: OpenProjectAction::Opened,
+        focused_window_label: None,
     })
 }
 
@@ -494,7 +549,7 @@ pub fn create_project(
     }
 
     // Open the project root (FR-304)
-    open_project(window, request.parent_dir, state)
+    open_project(window, request.parent_dir, state).map(|result| result.info)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -738,5 +793,34 @@ mod tests {
         let resolved =
             resolve_repo_path_for_project_root(root).expect("should resolve bare repo path");
         assert_eq!(resolved, bare);
+    }
+
+    #[test]
+    fn test_canonical_project_identity_normalizes_equivalent_paths() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        let nested = project_root.join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested dirs");
+
+        let direct = canonical_project_identity(&project_root);
+        let via_relative = canonical_project_identity(&nested.join(".."));
+        assert_eq!(direct, via_relative);
+    }
+
+    #[test]
+    fn test_open_project_result_serializes_action_and_focus_label() {
+        let result = OpenProjectResult {
+            info: ProjectInfo {
+                path: "/tmp/repo".to_string(),
+                repo_name: "repo".to_string(),
+                current_branch: Some("main".to_string()),
+            },
+            action: OpenProjectAction::FocusedExisting,
+            focused_window_label: Some("project-2".to_string()),
+        };
+
+        let value = serde_json::to_value(result).expect("serialize");
+        assert_eq!(value["action"], "focusedExisting");
+        assert_eq!(value["focusedWindowLabel"], "project-2");
     }
 }

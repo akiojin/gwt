@@ -3,7 +3,7 @@
     Tab,
     BranchInfo,
     GitHubIssueInfo,
-    ProjectInfo,
+    OpenProjectResult,
     LaunchAgentRequest,
     LaunchFinishedPayload,
     ProbePathResult,
@@ -882,11 +882,7 @@
     if (!session?.projectPath) return false;
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const info = await invoke<ProjectInfo>("open_project", {
-        path: session.projectPath,
-      });
-      handleOpenedProjectPath(info.path);
+      await openProjectAndApplyCurrentWindow(session.projectPath);
       return true;
     } catch {
       removeWindowSession(label);
@@ -898,6 +894,15 @@
     projectPath = path;
     fetchCurrentBranch();
     void updateWindowSession(path);
+  }
+
+  async function openProjectAndApplyCurrentWindow(path: string): Promise<OpenProjectResult> {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const result = await invoke<OpenProjectResult>("open_project", { path });
+    if (result.action === "opened") {
+      handleOpenedProjectPath(result.info.path);
+    }
+    return result;
   }
 
   async function setWindowTitle() {
@@ -1520,10 +1525,7 @@
           });
 
           if (probe.kind === "gwtProject" && probe.projectPath) {
-            const info = await invoke<ProjectInfo>("open_project", {
-              path: probe.projectPath,
-            });
-            handleOpenedProjectPath(info.path);
+            await openProjectAndApplyCurrentWindow(probe.projectPath);
             return;
           }
 
@@ -1553,10 +1555,7 @@
             });
 
             if (probe.kind === "gwtProject" && probe.projectPath) {
-              const info = await invoke<ProjectInfo>("open_project", {
-                path: probe.projectPath,
-              });
-              handleOpenedProjectPath(info.path);
+              await openProjectAndApplyCurrentWindow(probe.projectPath);
               break;
             }
 
@@ -2305,9 +2304,7 @@
     migrationSourceRoot = "";
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const info = await invoke<ProjectInfo>("open_project", { path: p });
-      handleOpenedProjectPath(info.path);
+      await openProjectAndApplyCurrentWindow(p);
     } catch (err) {
       appError = `Failed to open migrated project: ${toErrorMessage(err)}`;
     }

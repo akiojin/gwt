@@ -1,5 +1,10 @@
 <script lang="ts">
-  import type { CloneProgress, ProbePathResult, ProjectInfo } from "../types";
+  import type {
+    CloneProgress,
+    OpenProjectResult,
+    ProbePathResult,
+    ProjectInfo,
+  } from "../types";
   import MigrationModal from "./MigrationModal.svelte";
 
   interface RecentProject {
@@ -86,8 +91,12 @@
     errorMessage = null;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      const info = await invoke<ProjectInfo>("open_project", { path: projectPath });
-      onOpen(info.path);
+      const result = await invoke<OpenProjectResult>("open_project", {
+        path: projectPath,
+      });
+      if (result.action === "opened") {
+        onOpen(result.info.path);
+      }
     } catch (err) {
       errorMessage = normalizeOpenProjectError(toErrorMessage(err));
     } finally {

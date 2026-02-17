@@ -79,6 +79,8 @@ pub struct AppState {
     ///
     /// Only stores windows that currently have a project opened.
     pub window_projects: Mutex<HashMap<String, String>>,
+    /// Canonical project identity per window label (used for duplicate project detection).
+    pub window_project_identities: Mutex<HashMap<String, String>>,
     /// One-shot permission to allow a window to actually close (instead of always hiding it).
     /// Used by close-event flows that explicitly permit destruction.
     pub windows_allowed_to_close: Mutex<HashSet<String>>,
@@ -120,6 +122,7 @@ impl AppState {
         Self {
             system_monitor: Mutex::new(gwt_core::system_info::SystemMonitor::new()),
             window_projects: Mutex::new(HashMap::new()),
+            window_project_identities: Mutex::new(HashMap::new()),
             windows_allowed_to_close: Mutex::new(HashSet::new()),
             window_agent_tabs: Mutex::new(HashMap::new()),
             window_migrations: Mutex::new(HashMap::new()),
@@ -166,10 +169,29 @@ impl AppState {
         if let Ok(mut map) = self.window_projects.lock() {
             map.insert(window_label.to_string(), project_path);
         }
+        if let Ok(mut map) = self.window_project_identities.lock() {
+            // Keep path-only updates from inheriting stale identity data.
+            map.remove(window_label);
+        }
+    }
+
+    pub fn set_project_for_window_with_identity(
+        &self,
+        window_label: &str,
+        project_path: String,
+        project_identity: String,
+    ) {
+        self.set_project_for_window(window_label, project_path);
+        if let Ok(mut map) = self.window_project_identities.lock() {
+            map.insert(window_label.to_string(), project_identity);
+        }
     }
 
     pub fn clear_project_for_window(&self, window_label: &str) {
         if let Ok(mut map) = self.window_projects.lock() {
+            map.remove(window_label);
+        }
+        if let Ok(mut map) = self.window_project_identities.lock() {
             map.remove(window_label);
         }
         if let Ok(mut map) = self.window_agent_tabs.lock() {
@@ -203,6 +225,31 @@ impl AppState {
     pub fn project_for_window(&self, window_label: &str) -> Option<String> {
         let map = self.window_projects.lock().ok()?;
         map.get(window_label).cloned()
+    }
+
+    pub fn project_identity_for_window(&self, window_label: &str) -> Option<String> {
+        let map = self.window_project_identities.lock().ok()?;
+        map.get(window_label).cloned()
+    }
+
+    pub fn find_window_by_project_identity(
+        &self,
+        project_identity: &str,
+        exclude_window_label: Option<&str>,
+    ) -> Option<String> {
+        let map = self.window_project_identities.lock().ok()?;
+        for (label, identity) in map.iter() {
+            if identity != project_identity {
+                continue;
+            }
+            if let Some(exclude) = exclude_window_label {
+                if label == exclude {
+                    continue;
+                }
+            }
+            return Some(label.clone());
+        }
+        None
     }
 
     pub fn set_window_agent_tabs(
@@ -324,15 +371,54 @@ mod tests {
     fn window_projects_set_get_clear() {
         let state = AppState::new();
         assert_eq!(state.project_for_window("main"), None);
+        assert_eq!(state.project_identity_for_window("main"), None);
 
-        state.set_project_for_window("main", "/tmp/repo".to_string());
+        state.set_project_for_window_with_identity(
+            "main",
+            "/tmp/repo".to_string(),
+            "/tmp/repo-canonical".to_string(),
+        );
         assert_eq!(
             state.project_for_window("main"),
             Some("/tmp/repo".to_string())
         );
+        assert_eq!(
+            state.project_identity_for_window("main"),
+            Some("/tmp/repo-canonical".to_string())
+        );
 
         state.clear_project_for_window("main");
         assert_eq!(state.project_for_window("main"), None);
+        assert_eq!(state.project_identity_for_window("main"), None);
+    }
+
+    #[test]
+    fn find_window_by_project_identity_ignores_excluded_window() {
+        let state = AppState::new();
+
+        state.set_project_for_window_with_identity(
+            "main",
+            "/tmp/repo".to_string(),
+            "/tmp/repo-canonical".to_string(),
+        );
+        state.set_project_for_window_with_identity(
+            "project-2",
+            "/tmp/repo".to_string(),
+            "/tmp/repo-canonical".to_string(),
+        );
+
+        assert_eq!(
+            state.find_window_by_project_identity("/tmp/repo-canonical", Some("main")),
+            Some("project-2".to_string())
+        );
+        assert_eq!(
+            state.find_window_by_project_identity("/tmp/repo-canonical", Some("project-2")),
+            Some("main".to_string())
+        );
+        assert_eq!(
+            state.find_window_by_project_identity("/tmp/other", None),
+            None
+        );
     }
 
     #[test]
