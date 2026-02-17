@@ -572,7 +572,7 @@ describe("Sidebar", () => {
       });
 
       await rendered.findByText(branchFixture.name);
-      const prTab = rendered.container.querySelectorAll(".summary-tab")[2] as HTMLElement;
+      const prTab = rendered.container.querySelectorAll(".summary-tab")[3] as HTMLElement;
       await fireEvent.click(prTab);
       await rendered.findByText("#111 A");
 
@@ -1096,6 +1096,9 @@ describe("Sidebar", () => {
     });
 
     const continueButton = await rendered.findByRole("button", { name: "Continue" });
+    await waitFor(() => {
+      expect((continueButton as HTMLButtonElement).disabled).toBe(false);
+    });
     await fireEvent.click(continueButton);
 
     await waitFor(() => expect(onQuickLaunch).toHaveBeenCalledTimes(1));
@@ -1136,6 +1139,9 @@ describe("Sidebar", () => {
     });
 
     const newButton = await rendered.findByRole("button", { name: "New" });
+    await waitFor(() => {
+      expect((newButton as HTMLButtonElement).disabled).toBe(false);
+    });
     await fireEvent.click(newButton);
 
     await waitFor(() => expect(onQuickLaunch).toHaveBeenCalledTimes(1));
