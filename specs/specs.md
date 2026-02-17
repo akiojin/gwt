@@ -33,6 +33,7 @@
 | [SPEC-6f291006](SPEC-6f291006/spec.md) | 機能仕様: Migration backup copy の Windows 互換修正 | 2026-02-13 |
 | [SPEC-7d1a4b2e](SPEC-7d1a4b2e/spec.md) | 機能仕様: Playwrightベースの実装テスト基盤整備（WebView UI） | 2026-02-13 |
 | [SPEC-8c6f4a21](SPEC-8c6f4a21/spec.md) | 機能仕様: Windows での外部プロセス実行時コンソール点滅抑止 | 2026-02-13 |
+| [SPEC-8f9b2d01](SPEC-8f9b2d01/spec.md) | 機能仕様: gwt 起動時に前回のWindowを復元する | 2026-02-17 |
 | [SPEC-9f3c2a11](SPEC-9f3c2a11/spec.md) | 機能仕様: Voice Input Mode（GUI） | 2026-02-13 |
 | [SPEC-a3daf499](SPEC-a3daf499/spec.md) | 機能仕様: 起動時アプリ更新チェックの取りこぼし防止（遅延 + 再試行） | 2026-02-13 |
 | [SPEC-b7f7b9ad](SPEC-b7f7b9ad/spec.md) | 機能仕様: gwt メニューショートカットと終了保護 | 2026-02-13 |
