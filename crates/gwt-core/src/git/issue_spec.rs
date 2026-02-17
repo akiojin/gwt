@@ -617,14 +617,14 @@ fn parse_artifact_header_and_content(body: &str) -> Option<ParsedArtifactBody> {
         let kind = SpecIssueArtifactKind::from_token(kind_token)?;
         let mut remaining = body
             .split_once(first_non_empty)
-            .map(|(_, tail)| tail.trim_start_matches(|c| c == '\n' || c == '\r'))
+            .map(|(_, tail)| tail.trim_start_matches(['\n', '\r']))
             .unwrap_or_default();
         if let Some(next) = remaining.lines().next() {
             let expected_prefix = format!("{}:", kind.token());
             if next.trim().starts_with(&expected_prefix) {
                 remaining = remaining
                     .split_once(next)
-                    .map(|(_, tail)| tail.trim_start_matches(|c| c == '\n' || c == '\r'))
+                    .map(|(_, tail)| tail.trim_start_matches(['\n', '\r']))
                     .unwrap_or_default();
             }
         }
@@ -639,11 +639,7 @@ fn parse_artifact_header_and_content(body: &str) -> Option<ParsedArtifactBody> {
     let kind = SpecIssueArtifactKind::from_token(kind_token)?;
     let content = body
         .split_once(first_non_empty)
-        .map(|(_, tail)| {
-            tail.trim_start_matches(|c| c == '\n' || c == '\r')
-                .trim()
-                .to_string()
-        })
+        .map(|(_, tail)| tail.trim_start_matches(['\n', '\r']).trim().to_string())
         .unwrap_or_default();
     Some(ParsedArtifactBody {
         kind,
