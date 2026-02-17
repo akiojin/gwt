@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, waitFor, fireEvent, cleanup } from "@testing-library/svelte";
+import type { BranchInfo } from "../types";
 
 const invokeMock = vi.fn();
 const listenMock = vi.fn();
@@ -20,7 +21,7 @@ async function renderPanel(props: any) {
   return render(Panel, { props });
 }
 
-const branchFixture = {
+const branchFixture: BranchInfo = {
   name: "feature/markdown-ui",
   commit: "1234567",
   is_current: false,
@@ -28,6 +29,8 @@ const branchFixture = {
   behind: 0,
   divergence_status: "UpToDate",
   last_tool_usage: null,
+  is_agent_running: false,
+  agent_status: "unknown",
 };
 
 const issueBranchFixture = {
@@ -483,7 +486,7 @@ describe("WorktreeSummaryPanel", () => {
   });
 
   it("ignores stale latest branch PR errors after branch switch", async () => {
-    let rejectFirstPrLookup: ((reason?: unknown) => void) | null = null;
+    let rejectFirstPrLookup: ((reason?: Error) => void) | undefined;
 
     invokeMock.mockImplementation(
       (cmd: string, args?: { branch?: string; projectPath?: string }) => {
@@ -492,8 +495,10 @@ describe("WorktreeSummaryPanel", () => {
         if (cmd === "fetch_branch_linked_issue") return null;
         if (cmd === "fetch_latest_branch_pr") {
           if (args?.branch === "feature/markdown-ui") {
-            return new Promise((_, reject) => {
-              rejectFirstPrLookup = reject;
+            return new Promise<null>((_, reject) => {
+              rejectFirstPrLookup = (reason?: Error) => {
+                reject(reason);
+              };
             });
           }
           return null;
@@ -527,7 +532,9 @@ describe("WorktreeSummaryPanel", () => {
       });
     });
 
-    rejectFirstPrLookup?.(new Error("stale request"));
+    if (rejectFirstPrLookup) {
+      rejectFirstPrLookup(new Error("stale request"));
+    }
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
     const prTab = tabs[3] as HTMLElement;
