@@ -1,8 +1,11 @@
 //! Branch management commands
 
 use crate::commands::project::resolve_repo_path_for_project_root;
+use crate::commands::terminal::capture_scrollback_tail_from_state;
 use crate::state::AppState;
+use gwt_core::config::{agent_has_hook_support, infer_agent_status, AgentStatus, Session};
 use gwt_core::git::{is_bare_repository, Branch, Remote};
+use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::worktree::WorktreeManager;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -19,6 +22,7 @@ pub struct BranchInfo {
     pub commit: String,
     pub is_current: bool,
     pub is_agent_running: bool,
+    pub agent_status: String,
     pub has_remote: bool,
     pub upstream: Option<String>,
     pub ahead: usize,
@@ -37,6 +41,7 @@ impl From<Branch> for BranchInfo {
             commit: b.commit,
             is_current: b.is_current,
             is_agent_running: false,
+            agent_status: "unknown".to_string(),
             has_remote: b.has_remote,
             upstream: b.upstream,
             ahead: b.ahead,
@@ -46,6 +51,129 @@ impl From<Branch> for BranchInfo {
             is_gone: b.is_gone,
             last_tool_usage: None,
         }
+    }
+}
+
+/// Build a map of branch name → AgentStatus from session files.
+/// For agents without Hook support, infers status from pane output.
+fn build_agent_status_map(repo_path: &Path, state: &AppState) -> HashMap<String, AgentStatus> {
+    let manager = match WorktreeManager::new(repo_path) {
+        Ok(m) => m,
+        Err(_) => return HashMap::new(),
+    };
+    let worktrees = match manager.list_basic() {
+        Ok(wts) => wts,
+        Err(_) => return HashMap::new(),
+    };
+
+    // Build branch → pane_id mapping for running panes
+    let pane_map = build_branch_pane_map(state, repo_path);
+
+    let mut map = HashMap::new();
+    for wt in &worktrees {
+        if let Some(branch_name) = &wt.branch {
+            if let Some(mut session) = Session::load_for_worktree(&wt.path) {
+                session.check_idle_timeout();
+
+                if agent_has_hook_support(session.agent.as_deref()) {
+                    // Claude Code: trust session file status
+                    map.insert(branch_name.clone(), session.status);
+                } else if let Some(pane_id) = pane_map.get(branch_name) {
+                    // Non-hook agent with running pane: infer from output
+                    let status = infer_status_from_pane(state, pane_id);
+                    map.insert(branch_name.clone(), status);
+                } else {
+                    // No running pane: use session status as-is
+                    map.insert(branch_name.clone(), session.status);
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Build a map of branch name → pane_id in the given repo, preferring running panes.
+fn build_branch_pane_map(state: &AppState, repo_path: &Path) -> HashMap<String, String> {
+    let panes_info: Vec<(String, String, bool)> = match state.pane_manager.lock() {
+        Ok(manager) => manager
+            .panes()
+            .iter()
+            .map(|pane| {
+                (
+                    pane.pane_id().to_string(),
+                    pane.branch_name().to_string(),
+                    matches!(pane.status(), PaneStatus::Running),
+                )
+            })
+            .collect(),
+        Err(_) => return HashMap::new(),
+    };
+
+    let launch_meta = match state.pane_launch_meta.lock() {
+        Ok(meta) => meta,
+        Err(_) => {
+            // Fallback: use all panes without repo filtering.
+            return select_preferred_branch_panes(panes_info);
+        }
+    };
+
+    select_preferred_branch_panes(panes_info.into_iter().filter(|(pane_id, _, _)| {
+        launch_meta
+            .get(pane_id)
+            .map(|meta| meta.repo_path.as_path() == repo_path)
+            .unwrap_or(false)
+    }))
+}
+
+fn select_preferred_branch_panes<I>(panes: I) -> HashMap<String, String>
+where
+    I: IntoIterator<Item = (String, String, bool)>,
+{
+    let mut preferred: HashMap<String, (String, bool)> = HashMap::new();
+    for (pane_id, branch, is_running) in panes {
+        match preferred.get_mut(&branch) {
+            Some((selected_pane_id, selected_is_running)) => {
+                if !*selected_is_running && is_running {
+                    *selected_pane_id = pane_id;
+                    *selected_is_running = true;
+                }
+            }
+            None => {
+                preferred.insert(branch, (pane_id, is_running));
+            }
+        }
+    }
+
+    preferred
+        .into_iter()
+        .map(|(branch, (pane_id, _))| (branch, pane_id))
+        .collect()
+}
+
+/// Infer agent status from a pane's scrollback tail.
+fn infer_status_from_pane(state: &AppState, pane_id: &str) -> AgentStatus {
+    let process_alive = match state.pane_manager.lock() {
+        Ok(manager) => manager
+            .panes()
+            .iter()
+            .find(|p| p.pane_id() == pane_id)
+            .map(|p| matches!(p.status(), PaneStatus::Running))
+            .unwrap_or(false),
+        Err(_) => false,
+    };
+
+    let scrollback_tail =
+        capture_scrollback_tail_from_state(state, pane_id, 4096).unwrap_or_default();
+
+    infer_agent_status(&scrollback_tail, process_alive)
+}
+
+fn agent_status_to_string(status: AgentStatus) -> String {
+    match status {
+        AgentStatus::Unknown => "unknown".to_string(),
+        AgentStatus::Running => "running".to_string(),
+        AgentStatus::WaitingInput => "waiting_input".to_string(),
+        AgentStatus::Stopped => "stopped".to_string(),
     }
 }
 
@@ -88,9 +216,7 @@ fn running_agent_branches(state: &AppState, repo_path: &Path) -> HashSet<String>
     running
         .into_iter()
         .filter_map(|(pane_id, branch)| {
-            let Some(meta) = launch_meta.get(&pane_id) else {
-                return Some(branch);
-            };
+            let meta = launch_meta.get(&pane_id)?;
             if meta.repo_path.as_path() == repo_path {
                 Some(branch)
             } else {
@@ -125,12 +251,16 @@ pub fn list_branches(
         let repo_path = resolve_repo_path_for_project_root(project_root)?;
         let last_tool = build_last_tool_usage_map(&repo_path);
         let running_branches = running_agent_branches(&state, &repo_path);
+        let agent_statuses = build_agent_status_map(&repo_path, &state);
 
         let branches = Branch::list(&repo_path).map_err(|e| e.to_string())?;
         let mut infos: Vec<BranchInfo> = branches.into_iter().map(BranchInfo::from).collect();
         for info in &mut infos {
             info.last_tool_usage = last_tool.get(&info.name).cloned();
             info.is_agent_running = running_branches.contains(&info.name);
+            if let Some(status) = agent_statuses.get(&info.name) {
+                info.agent_status = agent_status_to_string(*status);
+            }
         }
         Ok(infos)
     })
@@ -148,6 +278,7 @@ pub fn list_worktree_branches(
         let repo_path = resolve_repo_path_for_project_root(project_root)?;
         let last_tool = build_last_tool_usage_map(&repo_path);
         let running_branches = running_agent_branches(&state, &repo_path);
+        let agent_statuses = build_agent_status_map(&repo_path, &state);
 
         let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
         let worktrees = manager.list_basic().map_err(|e| e.to_string())?;
@@ -173,6 +304,9 @@ pub fn list_worktree_branches(
         for info in &mut infos {
             info.last_tool_usage = last_tool.get(&info.name).cloned();
             info.is_agent_running = running_branches.contains(&info.name);
+            if let Some(status) = agent_statuses.get(&info.name) {
+                info.agent_status = agent_status_to_string(*status);
+            }
         }
 
         let prewarm_project_path = project_path.clone();
@@ -199,6 +333,7 @@ pub fn list_remote_branches(
         let repo_path = resolve_repo_path_for_project_root(project_root)?;
         let last_tool = build_last_tool_usage_map(&repo_path);
         let running_branches = running_agent_branches(&state, &repo_path);
+        let agent_statuses = build_agent_status_map(&repo_path, &state);
         let remotes = Remote::list(&repo_path).unwrap_or_default();
 
         let branches = if is_bare_repository(&repo_path) {
@@ -211,6 +346,9 @@ pub fn list_remote_branches(
             let normalized = strip_known_remote_prefix(&info.name, &remotes);
             info.last_tool_usage = last_tool.get(normalized).cloned();
             info.is_agent_running = running_branches.contains(normalized);
+            if let Some(status) = agent_statuses.get(normalized) {
+                info.agent_status = agent_status_to_string(*status);
+            }
         }
         Ok(infos)
     })
@@ -228,10 +366,14 @@ pub fn get_current_branch(
         let branch = Branch::current(&repo_path).map_err(|e| e.to_string())?;
         let last_tool = build_last_tool_usage_map(&repo_path);
         let running_branches = running_agent_branches(&state, &repo_path);
+        let agent_statuses = build_agent_status_map(&repo_path, &state);
         Ok(branch.map(|b| {
             let mut info = BranchInfo::from(b);
             info.last_tool_usage = last_tool.get(&info.name).cloned();
             info.is_agent_running = running_branches.contains(&info.name);
+            if let Some(status) = agent_statuses.get(&info.name) {
+                info.agent_status = agent_status_to_string(*status);
+            }
             info
         }))
     })
@@ -239,7 +381,8 @@ pub fn get_current_branch(
 
 #[cfg(test)]
 mod tests {
-    use super::with_panic_guard;
+    use super::*;
+    use gwt_core::config::AgentStatus;
 
     #[test]
     fn test_with_panic_guard_returns_error_on_panic() {
@@ -247,5 +390,71 @@ mod tests {
             panic!("boom");
         });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_agent_status_to_string_unknown() {
+        assert_eq!(agent_status_to_string(AgentStatus::Unknown), "unknown");
+    }
+
+    #[test]
+    fn test_agent_status_to_string_running() {
+        assert_eq!(agent_status_to_string(AgentStatus::Running), "running");
+    }
+
+    #[test]
+    fn test_agent_status_to_string_waiting_input() {
+        assert_eq!(
+            agent_status_to_string(AgentStatus::WaitingInput),
+            "waiting_input"
+        );
+    }
+
+    #[test]
+    fn test_agent_status_to_string_stopped() {
+        assert_eq!(agent_status_to_string(AgentStatus::Stopped), "stopped");
+    }
+
+    #[test]
+    fn test_branch_info_default_agent_status() {
+        let branch = gwt_core::git::Branch {
+            name: "feature/test".to_string(),
+            commit: "abc1234".to_string(),
+            is_current: false,
+            has_remote: false,
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            commit_timestamp: None,
+            is_gone: false,
+        };
+        let info = BranchInfo::from(branch);
+        assert_eq!(info.agent_status, "unknown");
+        assert!(!info.is_agent_running);
+    }
+
+    #[test]
+    fn test_select_preferred_branch_panes_prefers_running_pane() {
+        let panes = vec![
+            ("pane-completed".to_string(), "feature/a".to_string(), false),
+            ("pane-running".to_string(), "feature/a".to_string(), true),
+        ];
+
+        let map = select_preferred_branch_panes(panes);
+        assert_eq!(
+            map.get("feature/a").map(String::as_str),
+            Some("pane-running")
+        );
+    }
+
+    #[test]
+    fn test_select_preferred_branch_panes_keeps_first_when_not_running() {
+        let panes = vec![
+            ("pane-old".to_string(), "feature/a".to_string(), false),
+            ("pane-new".to_string(), "feature/a".to_string(), false),
+        ];
+
+        let map = select_preferred_branch_panes(panes);
+        assert_eq!(map.get("feature/a").map(String::as_str), Some("pane-old"));
     }
 }

@@ -31,6 +31,7 @@ const worktreeFixture = {
   is_current: false,
   is_protected: false,
   is_agent_running: false,
+  agent_status: "unknown",
   ahead: 0,
   behind: 0,
   is_gone: false,
@@ -46,7 +47,7 @@ describe("CleanupModal", () => {
     listenMock.mockResolvedValue(() => {});
   });
 
-  it("shows spinner indicator for worktrees with open agent tabs", async () => {
+  it("shows indicator for worktrees with open agent tabs", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "list_worktrees") return [worktreeFixture];
       return [];
@@ -60,7 +61,11 @@ describe("CleanupModal", () => {
     });
 
     await rendered.findByText(worktreeFixture.branch);
-    expect(rendered.getByTitle("Agent tab is open for this worktree")).toBeTruthy();
+    // Agent indicator slot should contain a static or pulse dot
+    const indicatorSlot = rendered.container.querySelector(".agent-indicator-slot");
+    expect(indicatorSlot).toBeTruthy();
+    const dot = indicatorSlot?.querySelector(".agent-static-dot, .agent-pulse-dot");
+    expect(dot).toBeTruthy();
   });
 
   it("warns before cleanup when selected worktrees have open agent tabs", async () => {

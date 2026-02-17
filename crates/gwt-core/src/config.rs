@@ -42,7 +42,10 @@ pub use profile::{
     ResolvedAISettings,
 };
 pub use recent_projects::{load_recent_projects, record_recent_project, RecentProject};
-pub use session::{get_session_for_branch, load_sessions_from_worktrees, AgentStatus, Session};
+pub use session::{
+    agent_has_hook_support, get_session_for_branch, infer_agent_status,
+    load_sessions_from_worktrees, AgentStatus, Session,
+};
 pub use settings::Settings;
 pub use tools::{AgentType, CustomCodingAgent, ModeArgs, ModelDef, ToolsConfig};
 pub use ts_session::{
