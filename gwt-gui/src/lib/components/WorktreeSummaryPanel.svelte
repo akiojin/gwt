@@ -924,29 +924,6 @@
       </div>
 
       {#if activeTab === "quick-start"}
-        <div class="detail-grid">
-          <div class="detail-item">
-            <span class="detail-label">Commit</span>
-            <span class="detail-value mono">{selectedBranch.commit}</span>
-          </div>
-          <div class="detail-item">
-            <span class="detail-label">Status</span>
-            <span class="detail-value">
-              {selectedBranch.divergence_status}
-              {#if selectedBranch.ahead > 0}
-                (+{selectedBranch.ahead})
-              {/if}
-              {#if selectedBranch.behind > 0}
-                (-{selectedBranch.behind})
-              {/if}
-            </span>
-          </div>
-          <div class="detail-item">
-            <span class="detail-label">Current</span>
-            <span class="detail-value">{selectedBranch.is_current ? "Yes" : "No"}</span>
-          </div>
-        </div>
-
         <div class="quick-start">
           <div class="quick-header">
             <span class="quick-title">Quick Start</span>
@@ -1128,6 +1105,28 @@
           {/if}
         </div>
       {:else if activeTab === "git"}
+        <div class="detail-grid">
+          <div class="detail-item">
+            <span class="detail-label">Commit</span>
+            <span class="detail-value mono">{selectedBranch.commit}</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Status</span>
+            <span class="detail-value">
+              {selectedBranch.divergence_status}
+              {#if selectedBranch.ahead > 0}
+                (+{selectedBranch.ahead})
+              {/if}
+              {#if selectedBranch.behind > 0}
+                (-{selectedBranch.behind})
+              {/if}
+            </span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">Current</span>
+            <span class="detail-value">{selectedBranch.is_current ? "Yes" : "No"}</span>
+          </div>
+        </div>
         <GitSection
           projectPath={projectPath}
           branch={selectedBranch.name}
