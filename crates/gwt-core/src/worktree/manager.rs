@@ -354,11 +354,7 @@ impl WorktreeManager {
             if let Some((remote_candidate, branch_candidate)) = split_remote_ref(normalized_branch)
             {
                 if remotes.iter().any(|r| r.name == remote_candidate)
-                    && Branch::remote_exists(
-                        &self.repo_root,
-                        remote_candidate,
-                        branch_candidate,
-                    )?
+                    && Branch::remote_exists(&self.repo_root, remote_candidate, branch_candidate)?
                 {
                     if let Some(wt) = self.get_by_branch_basic(branch_candidate)? {
                         if let Some(wt) =
@@ -392,7 +388,9 @@ impl WorktreeManager {
                         if let Some((remote_candidate, branch_candidate)) =
                             split_remote_ref(normalized_branch)
                         {
-                            if Branch::exists(&self.repo_root, branch_candidate)? {
+                            if remotes.iter().any(|r| r.name == remote_candidate)
+                                && Branch::exists(&self.repo_root, branch_candidate)?
+                            {
                                 remote_branch = Some((
                                     remote_candidate.to_string(),
                                     branch_candidate.to_string(),
@@ -624,8 +622,7 @@ impl WorktreeManager {
                         // SPEC-bare-wt01 FR-004: Try remote_exists first, fall back to
                         // fetch_all + local check when it fails.
                         let mut did_fetch = false;
-                        let mut found =
-                            Branch::remote_exists(&self.repo_root, remote, branch)?;
+                        let mut found = Branch::remote_exists(&self.repo_root, remote, branch)?;
                         if !found {
                             self.repo.fetch_all()?;
                             did_fetch = true;
@@ -662,11 +659,7 @@ impl WorktreeManager {
                             // SPEC-bare-wt01: fetch_all may not work in bare repos
                             // (no fetch refspec). Explicitly fetch the specific branch.
                             let fetch_output = crate::process::command("git")
-                                .args([
-                                    "fetch",
-                                    remote,
-                                    &format!("{}:{}", branch, branch),
-                                ])
+                                .args(["fetch", remote, &format!("{}:{}", branch, branch)])
                                 .current_dir(&self.repo_root)
                                 .output()
                                 .map_err(|e| GwtError::GitOperationFailed {
@@ -678,11 +671,7 @@ impl WorktreeManager {
                                 && Branch::exists(&self.repo_root, branch)?
                             {
                                 resolved_base = Some(branch.to_string());
-                            } else if has_local_remote_ref(
-                                &self.repo_root,
-                                remote,
-                                branch,
-                            ) {
+                            } else if has_local_remote_ref(&self.repo_root, remote, branch) {
                                 resolved_base = Some(base.to_string());
                             } else {
                                 error!(
@@ -1638,6 +1627,38 @@ mod tests {
     }
 
     #[test]
+    fn test_create_for_branch_remote_like_name_with_unknown_remote_returns_not_found() {
+        let temp = create_test_repo();
+
+        let remote = TempDir::new().unwrap();
+        let remote_path = remote.path().to_string_lossy().to_string();
+        run_git_in(remote.path(), &["init", "--bare"]);
+
+        run_git_in(
+            temp.path(),
+            &["remote", "add", "origin", remote_path.as_str()],
+        );
+
+        let default_branch = git_stdout(temp.path(), &["rev-parse", "--abbrev-ref", "HEAD"]);
+        run_git_in(
+            temp.path(),
+            &["push", "-u", "origin", default_branch.as_str()],
+        );
+
+        Branch::create(temp.path(), "foo", "HEAD").unwrap();
+
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+        let result = manager.create_for_branch("feature/foo");
+        assert!(matches!(
+            result,
+            Err(GwtError::BranchNotFound { ref name }) if name == "feature/foo"
+        ));
+
+        // "feature/foo" must not silently resolve to local "foo".
+        assert!(manager.get_by_branch_basic("foo").unwrap().is_none());
+    }
+
+    #[test]
     fn test_remove_worktree() {
         let temp = create_test_repo();
         let manager = WorktreeManager::new(temp.path()).unwrap();
@@ -2071,28 +2092,33 @@ mod tests {
         );
 
         // NOW push a new branch to source (origin) from helper — after the bare clone
-        run_git_in(&helper, &["checkout", "-b", "develop"]);
-        std::fs::write(helper.join("develop.txt"), "develop content").unwrap();
-        run_git_in(&helper, &["add", "."]);
-        run_git_in(&helper, &["commit", "-m", "develop commit"]);
-        run_git_in(&helper, &["push", "origin", "develop"]);
+        let mut extra_branch = "feature/unfetched-remote".to_string();
+        if extra_branch == base_branch {
+            extra_branch = "feature/unfetched-remote-2".to_string();
+        }
 
-        // Verify develop is NOT in local refs/heads of the bare repo
-        let has_local = Branch::exists(&bare, "develop").unwrap();
+        run_git_in(&helper, &["checkout", "-b", extra_branch.as_str()]);
+        std::fs::write(helper.join("extra-branch.txt"), "extra branch content").unwrap();
+        run_git_in(&helper, &["add", "."]);
+        run_git_in(&helper, &["commit", "-m", "extra branch commit"]);
+        run_git_in(&helper, &["push", "origin", extra_branch.as_str()]);
+
+        // Verify extra branch is NOT in local refs/heads of the bare repo
+        let has_local = Branch::exists(&bare, &extra_branch).unwrap();
         assert!(
             !has_local,
-            "develop should not be in refs/heads/ of bare repo before fetch"
+            "{} should not be in refs/heads/ of bare repo before fetch",
+            extra_branch
         );
 
-        (temp, bare, base_branch, "develop".to_string())
+        (temp, bare, base_branch, extra_branch)
     }
 
     #[test]
     fn test_bare_repo_create_for_branch_from_unfetched_remote_branch() {
-        // SPEC-bare-wt01: create_for_branch("origin/develop") should succeed
-        // even when develop is not yet fetched into refs/heads/
-        let (_temp, bare_path, _base_branch, extra_branch) =
-            create_bare_repo_with_remote_branch();
+        // SPEC-bare-wt01: create_for_branch("origin/<extra-branch>") should succeed
+        // even when that branch is not yet fetched into refs/heads/
+        let (_temp, bare_path, _base_branch, extra_branch) = create_bare_repo_with_remote_branch();
 
         let manager = WorktreeManager::new(&bare_path).unwrap();
         let remote_ref = format!("origin/{}", extra_branch);
@@ -2104,10 +2130,9 @@ mod tests {
 
     #[test]
     fn test_bare_repo_create_new_branch_from_unfetched_remote_base() {
-        // SPEC-bare-wt01: create_new_branch with base "origin/develop" should succeed
-        // even when develop is not yet fetched into refs/heads/
-        let (_temp, bare_path, _base_branch, extra_branch) =
-            create_bare_repo_with_remote_branch();
+        // SPEC-bare-wt01: create_new_branch with base "origin/<extra-branch>" should succeed
+        // even when that branch is not yet fetched into refs/heads/
+        let (_temp, bare_path, _base_branch, extra_branch) = create_bare_repo_with_remote_branch();
 
         let manager = WorktreeManager::new(&bare_path).unwrap();
         let remote_base = format!("origin/{}", extra_branch);
@@ -2118,12 +2143,12 @@ mod tests {
         assert_eq!(wt.branch.as_deref(), Some("feature/from-unfetched"));
         assert!(wt.path.exists());
 
-        // HEAD should point to the develop commit, not the default branch
-        let develop_commit = {
-            // After the create, develop should now be fetched
+        // HEAD should point to the extra branch commit, not the default branch
+        let extra_branch_commit = {
+            // After the create, extra branch should now be fetched
             git_stdout(&bare_path, &["rev-parse", &extra_branch])
         };
         let wt_head = git_stdout(&wt.path, &["rev-parse", "HEAD"]);
-        assert_eq!(wt_head, develop_commit);
+        assert_eq!(wt_head, extra_branch_commit);
     }
 }
