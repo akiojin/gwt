@@ -580,6 +580,30 @@
               Branches that cannot be deleted or force-pushed.
             </span>
           </div>
+
+          <div class="field">
+            <label for="agent-github-project-id">Spec Project ID</label>
+            <input
+              id="agent-github-project-id"
+              type="text"
+              autocapitalize="off"
+              autocorrect="off"
+              autocomplete="off"
+              spellcheck="false"
+              value={settings.agent_github_project_id ?? ""}
+              oninput={(e) => {
+                if (!settings) return;
+                settings = {
+                  ...settings,
+                  agent_github_project_id: (e.target as HTMLInputElement).value,
+                };
+              }}
+              placeholder="PVT_xxxxxxxxxxxxxxxxxxxx"
+            />
+            <span class="field-hint">
+              Fixed GitHub Project V2 ID for issue-first spec sync.
+            </span>
+          </div>
         </div>
       </details>
 

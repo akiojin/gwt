@@ -490,6 +490,15 @@ pub fn build_app(
             crate::commands::issue::find_existing_issue_branch,
             crate::commands::issue::link_branch_to_issue,
             crate::commands::issue::rollback_issue_branch,
+            crate::commands::issue_spec::upsert_spec_issue_cmd,
+            crate::commands::issue_spec::get_spec_issue_detail_cmd,
+            crate::commands::issue_spec::find_spec_issue_by_spec_id_cmd,
+            crate::commands::issue_spec::append_spec_contract_comment_cmd,
+            crate::commands::issue_spec::upsert_spec_issue_artifact_comment_cmd,
+            crate::commands::issue_spec::list_spec_issue_artifact_comments_cmd,
+            crate::commands::issue_spec::delete_spec_issue_artifact_comment_cmd,
+            crate::commands::issue_spec::close_spec_issue_cmd,
+            crate::commands::issue_spec::sync_spec_issue_project_cmd,
         ])
 }
 

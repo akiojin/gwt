@@ -39,6 +39,10 @@ const sessionSummaryFixture = {
 
 describe("WorktreeSummaryPanel", () => {
   beforeEach(() => {
+    (window as any).__TAURI_INTERNALS__ = {
+      ...(window as any).__TAURI_INTERNALS__,
+      invoke: invokeMock,
+    };
     listenMock.mockClear();
     invokeMock.mockReset();
     invokeMock.mockImplementation(async (cmd: string) => {
@@ -55,10 +59,14 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("get_branch_session_summary", {
-        projectPath: "/tmp/project",
-        branch: "feature/markdown-ui",
-      });
+      expect(
+        invokeMock.mock.calls.some(
+          ([cmd, payload]) =>
+            cmd === "get_branch_session_summary" &&
+            payload?.projectPath === "/tmp/project" &&
+            payload?.branch === "feature/markdown-ui"
+        )
+      ).toBe(true);
     });
 
     await waitFor(() => {

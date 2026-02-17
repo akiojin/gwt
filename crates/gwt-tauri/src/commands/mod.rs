@@ -8,6 +8,7 @@ pub mod docker;
 pub mod git_view;
 pub mod hooks;
 pub mod issue;
+pub mod issue_spec;
 pub mod profiles;
 pub mod project;
 pub mod recent_projects;

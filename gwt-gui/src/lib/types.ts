@@ -53,6 +53,10 @@ export interface AgentModeState {
   session_name?: string | null;
   llm_call_count: number;
   estimated_tokens: number;
+  active_spec_id?: string | null;
+  active_spec_issue_number?: number | null;
+  active_spec_issue_url?: string | null;
+  active_spec_issue_etag?: string | null;
 }
 
 export interface AgentSidebarSubAgent {
@@ -130,6 +134,7 @@ export interface SettingsData {
   agent_codex_path?: string | null;
   agent_gemini_path?: string | null;
   agent_auto_install_deps: boolean;
+  agent_github_project_id?: string | null;
   docker_force_host: boolean;
   ui_font_size: number;
   terminal_font_size: number;
@@ -169,9 +174,18 @@ export interface Tab {
   id: string;
   label: string;
   agentId?: "claude" | "codex" | "gemini" | "opencode";
-  type: "summary" | "agent" | "settings" | "versionHistory" | "agentMode" | "terminal";
+  type:
+    | "summary"
+    | "agent"
+    | "settings"
+    | "versionHistory"
+    | "agentMode"
+    | "terminal"
+    | "issueSpec";
   paneId?: string;
   cwd?: string;
+  issueNumber?: number;
+  specId?: string;
 }
 
 export interface ToolSessionEntry {

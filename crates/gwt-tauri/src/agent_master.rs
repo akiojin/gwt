@@ -1,18 +1,18 @@
 use gwt_core::ai::{AIClient, AIResponse, ChatMessage, ToolCall};
-use gwt_core::config::ProfilesConfig;
+use gwt_core::config::{ProfilesConfig, Settings};
+use gwt_core::git::{
+    find_spec_issue_by_spec_id, sync_issue_to_project, upsert_spec_issue, SpecIssueSections,
+    SpecProjectPhase,
+};
 use serde::Serialize;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::agent_tools::{builtin_tool_definitions, execute_tool_call};
+use crate::commands::project::resolve_repo_path_for_project_root;
 use crate::state::AppState;
 
 const MAX_TOOL_CALL_LOOPS: usize = 3;
-const REQUIRED_SPEC_ARTIFACTS: [&str; 4] = ["spec.md", "plan.md", "tasks.md", "tdd.md"];
-const SYSTEM_PROMPT: &str = "You are the master agent for gwt. Use ReAct and tool calls to send instructions to agent panes and capture output when needed. Keep instructions concise and in English.\n\nReAct format:\nThought: <short reasoning>\nAction: <tool name + short params summary>\nObservation: <tool result>\n\nRules:\n- Use tool calls for actions.\n- Do not fabricate observations; observations come from tool results.\n- Keep Thought to 2-4 lines.\n- When delegating to sub-agents, include a clear task and request a short completion summary.";
-const SPEC_TEMPLATE: &str = include_str!("../../../.specify/templates/spec-template.md");
-const PLAN_TEMPLATE: &str = include_str!("../../../.specify/templates/plan-template.md");
-const TASKS_TEMPLATE: &str = include_str!("../../../.specify/templates/tasks-template.md");
+const SYSTEM_PROMPT: &str = "You are the master agent for gwt. Use ReAct and tool calls to send instructions to agent panes and capture output when needed. Keep instructions concise and in English.\n\nReAct format:\nThought: <short reasoning>\nAction: <tool name + short params summary>\nObservation: <tool result>\n\nRules:\n- Use tool calls for actions.\n- Do not fabricate observations; observations come from tool results.\n- Keep Thought to 2-4 lines.\n- Keep spec artifacts in GitHub Issues (Issue-first). Do not generate local spec markdown files.\n- Maintain the full bundle: spec, plan, tasks, tdd, research, data-model, quickstart, contracts, checklists.\n- Keep contracts/checklists as issue comments via artifact tools.\n- When delegating to sub-agents, include a clear task and request a short completion summary.";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentModeMessage {
@@ -32,13 +32,19 @@ pub struct AgentModeState {
     pub session_name: Option<String>,
     pub llm_call_count: u64,
     pub estimated_tokens: u64,
+    pub active_spec_id: Option<String>,
+    pub active_spec_issue_number: Option<u64>,
+    pub active_spec_issue_url: Option<String>,
+    pub active_spec_issue_etag: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-struct SpecKitPreparation {
+struct IssueSpecPreparation {
     spec_id: String,
-    spec_dir: PathBuf,
-    created_files: Vec<String>,
+    issue_number: u64,
+    issue_url: String,
+    etag: String,
+    created: bool,
 }
 
 impl AgentModeState {
@@ -52,6 +58,10 @@ impl AgentModeState {
             session_name: Some("Agent Mode".to_string()),
             llm_call_count: 0,
             estimated_tokens: 0,
+            active_spec_id: None,
+            active_spec_issue_number: None,
+            active_spec_issue_url: None,
+            active_spec_issue_etag: None,
         }
     }
 }
@@ -132,7 +142,12 @@ pub fn send_agent_message(state: &AppState, window_label: &str, input: &str) -> 
     working.ai_error = None;
     save_agent_mode_state(state, window_label, &working);
 
-    let prep = match prepare_spec_kit_artifacts_for_window(state, window_label, trimmed) {
+    let prep = match prepare_issue_spec_for_window(
+        state,
+        window_label,
+        trimmed,
+        working.active_spec_id.as_deref(),
+    ) {
         Ok(p) => p,
         Err(e) => {
             working.last_error = Some(e);
@@ -141,17 +156,23 @@ pub fn send_agent_message(state: &AppState, window_label: &str, input: &str) -> 
             return working;
         }
     };
-    if !prep.created_files.is_empty() {
-        let files = prep.created_files.join(", ");
-        let note = format!(
-            "Prepared {} for {} at {}.",
-            files,
-            prep.spec_id,
-            prep.spec_dir.display()
-        );
-        push_message(&mut working, "assistant", "observation", &note);
-        save_agent_mode_state(state, window_label, &working);
-    }
+    working.active_spec_id = Some(prep.spec_id.clone());
+    working.active_spec_issue_number = Some(prep.issue_number);
+    working.active_spec_issue_url = Some(prep.issue_url.clone());
+    working.active_spec_issue_etag = Some(prep.etag.clone());
+    let note = if prep.created {
+        format!(
+            "Prepared issue-first spec {} as #{} ({})",
+            prep.spec_id, prep.issue_number, prep.issue_url
+        )
+    } else {
+        format!(
+            "Updated issue-first spec {} on #{} ({})",
+            prep.spec_id, prep.issue_number, prep.issue_url
+        )
+    };
+    push_message(&mut working, "assistant", "observation", &note);
+    save_agent_mode_state(state, window_label, &working);
 
     let client = match AIClient::new(settings) {
         Ok(c) => c,
@@ -192,7 +213,7 @@ pub fn send_agent_message(state: &AppState, window_label: &str, input: &str) -> 
                 push_message(&mut working, "assistant", "action", &format_tool_call(call));
             }
         }
-        let tool_observations = execute_tool_calls(state, &response.tool_calls);
+        let tool_observations = execute_tool_calls(state, window_label, &response.tool_calls);
         for obs in tool_observations {
             push_message(&mut working, "tool", "observation", &obs);
         }
@@ -233,10 +254,15 @@ fn apply_ai_response(
     has_action
 }
 
-fn execute_tool_calls(state: &AppState, tool_calls: &[ToolCall]) -> Vec<String> {
+fn execute_tool_calls(
+    state: &AppState,
+    window_label: &str,
+    tool_calls: &[ToolCall],
+) -> Vec<String> {
     let mut results = Vec::new();
     for call in tool_calls {
-        let result = execute_tool_call(state, call).unwrap_or_else(|e| format!("error: {e}"));
+        let result =
+            execute_tool_call(state, window_label, call).unwrap_or_else(|e| format!("error: {e}"));
         results.push(format!("{} => {}", call.name, result));
     }
     results
@@ -269,262 +295,77 @@ fn build_chat_messages(messages: &[AgentModeMessage]) -> Vec<ChatMessage> {
     out
 }
 
-fn prepare_spec_kit_artifacts_for_window(
+fn prepare_issue_spec_for_window(
     state: &AppState,
     window_label: &str,
     user_input: &str,
-) -> Result<SpecKitPreparation, String> {
+    preferred_spec_id: Option<&str>,
+) -> Result<IssueSpecPreparation, String> {
     let Some(project_path) = state.project_for_window(window_label) else {
         return Err("Open a project before using Agent Mode.".to_string());
     };
-    prepare_spec_kit_artifacts(Path::new(&project_path), user_input)
+    prepare_issue_spec(Path::new(&project_path), user_input, preferred_spec_id)
 }
 
-fn prepare_spec_kit_artifacts(
+fn prepare_issue_spec(
     project_root: &Path,
     user_input: &str,
-) -> Result<SpecKitPreparation, String> {
-    let specs_root = project_root.join("specs");
-    fs::create_dir_all(&specs_root)
-        .map_err(|e| format!("Failed to create specs directory: {e}"))?;
-
-    let (spec_id, spec_dir) = resolve_target_spec_dir(&specs_root, user_input)?;
-    fs::create_dir_all(&spec_dir).map_err(|e| format!("Failed to create {}: {e}", spec_id))?;
-
-    let mut created_files = Vec::new();
-
-    ensure_spec_md(&spec_dir, &spec_id, user_input, &mut created_files)?;
-    ensure_plan_md(&spec_dir, &spec_id, user_input, &mut created_files)?;
-    ensure_tasks_md(&spec_dir, user_input, &mut created_files)?;
-    ensure_tdd_md(&spec_dir, &spec_id, &mut created_files)?;
-
-    let missing = missing_required_artifacts(&spec_dir);
-    if !missing.is_empty() {
-        return Err(format!(
-            "Spec Kit artifacts are incomplete for {}: {}",
-            spec_id,
-            missing.join(", ")
-        ));
-    }
-
-    Ok(SpecKitPreparation {
-        spec_id,
-        spec_dir,
-        created_files,
-    })
-}
-
-fn resolve_target_spec_dir(
-    specs_root: &Path,
-    user_input: &str,
-) -> Result<(String, PathBuf), String> {
-    if let Some(spec_id) = extract_spec_id(user_input) {
-        return Ok((spec_id.clone(), specs_root.join(spec_id)));
-    }
-
-    if let Some(existing) = latest_spec_dir(specs_root)? {
-        let spec_id = existing
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .ok_or_else(|| "Invalid spec directory name.".to_string())?;
-        return Ok((spec_id, existing));
-    }
-
-    let spec_id = generate_spec_id();
-    Ok((spec_id.clone(), specs_root.join(spec_id)))
-}
-
-fn latest_spec_dir(specs_root: &Path) -> Result<Option<PathBuf>, String> {
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    let entries = fs::read_dir(specs_root).map_err(|e| format!("Failed to list specs: {e}"))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("Failed to read specs entry: {e}"))?;
-        if !entry
-            .file_type()
-            .map_err(|e| format!("Failed to read file type: {e}"))?
-            .is_dir()
-        {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !name.starts_with("SPEC-") {
-            continue;
-        }
-        let modified = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        match &newest {
-            Some((current, _)) if &modified <= current => {}
-            _ => newest = Some((modified, entry.path())),
-        }
-    }
-    Ok(newest.map(|(_, path)| path))
-}
-
-fn ensure_spec_md(
-    spec_dir: &Path,
-    spec_id: &str,
-    user_input: &str,
-    created_files: &mut Vec<String>,
-) -> Result<(), String> {
-    let path = spec_dir.join("spec.md");
-    if artifact_is_file(&path) {
-        return Ok(());
-    }
-    if path.exists() {
-        return Err(format!(
-            "Failed to write {}: path exists but is not a file",
-            path.display()
-        ));
-    }
-    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let feature = feature_name_from_input(user_input);
-    let input = collapse_whitespace(user_input);
-    let content = render_template(
-        SPEC_TEMPLATE,
-        &[
-            ("[FEATURE_NAME]", feature),
-            ("[SPEC_ID]", spec_id.to_string()),
-            ("[DATE]", date.clone()),
-            ("[UPDATED_DATE]", date),
-            ("[INPUT]", input),
-        ],
+    preferred_spec_id: Option<&str>,
+) -> Result<IssueSpecPreparation, String> {
+    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let spec_id = extract_spec_id(user_input)
+        .or_else(|| preferred_spec_id.map(str::to_string))
+        .unwrap_or_else(generate_spec_id);
+    let existing = find_spec_issue_by_spec_id(&repo_path, &spec_id)?;
+    let created = existing.is_none();
+    let title = build_issue_title(
+        &spec_id,
+        user_input,
+        existing.as_ref().map(|e| e.title.as_str()),
     );
-    fs::write(&path, content).map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
-    created_files.push("spec.md".to_string());
-    Ok(())
-}
-
-fn ensure_plan_md(
-    spec_dir: &Path,
-    spec_id: &str,
-    user_input: &str,
-    created_files: &mut Vec<String>,
-) -> Result<(), String> {
-    let path = spec_dir.join("plan.md");
-    if artifact_is_file(&path) {
-        return Ok(());
-    }
-    if path.exists() {
-        return Err(format!(
-            "Failed to write {}: path exists but is not a file",
-            path.display()
-        ));
-    }
-    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let feature = feature_name_from_input(user_input);
-    let content = render_template(
-        PLAN_TEMPLATE,
-        &[
-            ("[FEATURE_NAME]", feature),
-            ("[SPEC_ID]", spec_id.to_string()),
-            ("[DATE]", date),
-        ],
-    );
-    fs::write(&path, content).map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
-    created_files.push("plan.md".to_string());
-    Ok(())
-}
-
-fn ensure_tasks_md(
-    spec_dir: &Path,
-    user_input: &str,
-    created_files: &mut Vec<String>,
-) -> Result<(), String> {
-    let path = spec_dir.join("tasks.md");
-    if artifact_is_file(&path) {
-        return Ok(());
-    }
-    if path.exists() {
-        return Err(format!(
-            "Failed to write {}: path exists but is not a file",
-            path.display()
-        ));
-    }
-    let feature = feature_name_from_input(user_input);
-    let content = render_template(TASKS_TEMPLATE, &[("[FEATURE_NAME]", feature)]);
-    fs::write(&path, content).map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
-    created_files.push("tasks.md".to_string());
-    Ok(())
-}
-
-fn ensure_tdd_md(
-    spec_dir: &Path,
-    spec_id: &str,
-    created_files: &mut Vec<String>,
-) -> Result<(), String> {
-    let path = spec_dir.join("tdd.md");
-    if artifact_is_file(&path) {
-        return Ok(());
-    }
-    if path.exists() {
-        return Err(format!(
-            "Failed to write {}: path exists but is not a file",
-            path.display()
-        ));
-    }
-    let tasks_path = spec_dir.join("tasks.md");
-    let tasks = fs::read_to_string(&tasks_path)
-        .map_err(|e| format!("Failed to read {}: {e}", tasks_path.display()))?;
-    let content = generate_tdd_markdown(spec_id, &tasks);
-    fs::write(&path, content).map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
-    created_files.push("tdd.md".to_string());
-    Ok(())
-}
-
-fn generate_tdd_markdown(spec_id: &str, tasks_content: &str) -> String {
-    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let task_lines: Vec<String> = tasks_content
-        .lines()
-        .map(str::trim)
-        .filter(|line| line.starts_with("- [ ]") || line.starts_with("- [x]"))
-        .map(|line| {
-            line.trim_start_matches("- [ ]")
-                .trim_start_matches("- [x]")
-                .trim()
-                .to_string()
-        })
-        .filter(|line| !line.is_empty())
-        .take(30)
-        .collect();
-
-    let mut out = String::new();
-    out.push_str(&format!("# TDD テスト仕様: {}\n\n", spec_id));
-    out.push_str(&format!("**作成日**: {}\n\n", date));
-    out.push_str("## テスト戦略\n\n");
-    out.push_str("- まず失敗するテストを作成し、その後で実装を行う。\n");
-    out.push_str("- 各タスクは最小単位でテスト可能な形に分解する。\n");
-    out.push_str("- 回帰防止のため、修正時は関連テストを追加する。\n\n");
-    out.push_str("## タスク対応テスト\n\n");
-    if task_lines.is_empty() {
-        out.push_str("- tasks.md から自動抽出できるタスクが見つからなかったため、手動でテストケースを追記する。\n");
+    let sections = if let Some(current) = existing.as_ref() {
+        let mut sections = current.sections.clone();
+        sections.spec = merge_spec_section(&sections.spec, user_input);
+        sections
     } else {
-        for (idx, task) in task_lines.iter().enumerate() {
-            out.push_str(&format!("{}. `{}`\n", idx + 1, task));
+        SpecIssueSections {
+            spec: collapse_whitespace(user_input),
+            plan: String::new(),
+            tasks: String::new(),
+            tdd: String::new(),
+            research: String::new(),
+            data_model: String::new(),
+            quickstart: String::new(),
+            contracts: String::new(),
+            checklists: String::new(),
         }
+    };
+
+    let detail = upsert_spec_issue(
+        &repo_path,
+        &spec_id,
+        &title,
+        &sections,
+        existing.as_ref().map(|e| e.etag.as_str()),
+    )?;
+
+    let settings = Settings::load(project_root).unwrap_or_default();
+    if let Some(project_id) = settings.agent.github_project_id {
+        let _ = sync_issue_to_project(
+            &repo_path,
+            detail.number,
+            project_id.trim(),
+            SpecProjectPhase::Draft,
+        );
     }
-    out.push_str("\n## テスト実行コマンド\n\n");
-    out.push_str("```bash\ncargo test\ncd gwt-gui && pnpm test\n```\n");
-    out
-}
 
-fn missing_required_artifacts(spec_dir: &Path) -> Vec<String> {
-    REQUIRED_SPEC_ARTIFACTS
-        .iter()
-        .filter_map(|name| {
-            let path = spec_dir.join(name);
-            if artifact_is_file(&path) {
-                None
-            } else {
-                Some((*name).to_string())
-            }
-        })
-        .collect()
-}
-
-fn artifact_is_file(path: &Path) -> bool {
-    fs::metadata(path).map(|m| m.is_file()).unwrap_or(false)
+    Ok(IssueSpecPreparation {
+        spec_id,
+        issue_number: detail.number,
+        issue_url: detail.url,
+        etag: detail.etag,
+        created,
+    })
 }
 
 fn extract_spec_id(input: &str) -> Option<String> {
@@ -548,25 +389,42 @@ fn generate_spec_id() -> String {
     format!("SPEC-{}", &raw[..8])
 }
 
-fn feature_name_from_input(user_input: &str) -> String {
-    let collapsed = collapse_whitespace(user_input);
-    let mut title: String = collapsed.chars().take(64).collect();
-    if title.is_empty() {
-        title = "Agent Mode Task".to_string();
-    }
-    title
-}
-
 fn collapse_whitespace(input: &str) -> String {
     input.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn render_template(template: &str, replacements: &[(&str, String)]) -> String {
-    let mut out = template.to_string();
-    for (needle, value) in replacements {
-        out = out.replace(needle, value);
+fn merge_spec_section(existing: &str, user_input: &str) -> String {
+    let normalized = collapse_whitespace(user_input);
+    if normalized.is_empty() {
+        return existing.to_string();
     }
-    out
+    let trimmed_existing = existing.trim();
+    if trimmed_existing.is_empty() || trimmed_existing == "_TODO_" {
+        return normalized;
+    }
+    if trimmed_existing.contains(&normalized) {
+        return trimmed_existing.to_string();
+    }
+    format!("{trimmed_existing}\n\n- {normalized}")
+}
+
+fn build_issue_title(spec_id: &str, user_input: &str, existing_title: Option<&str>) -> String {
+    if let Some(existing) = existing_title {
+        if !existing.trim().is_empty() {
+            return existing.trim().to_string();
+        }
+    }
+    let base = collapse_whitespace(user_input);
+    let mut title = if base.is_empty() {
+        "Agent Mode Task".to_string()
+    } else {
+        base
+    };
+    if title.len() > 72 {
+        title.truncate(72);
+        title = title.trim_end().to_string();
+    }
+    format!("[{}] {}", spec_id, title)
 }
 
 struct ReactSection {
@@ -637,7 +495,6 @@ fn format_tool_call(call: &ToolCall) -> String {
 mod tests {
     use super::*;
     use crate::state::AppState;
-    use std::fs;
 
     #[test]
     fn build_chat_messages_adds_system_prompt_and_filters_system_messages() {
@@ -676,9 +533,9 @@ mod tests {
     }
 
     #[test]
-    fn prepare_spec_kit_artifacts_for_window_requires_open_project() {
+    fn prepare_issue_spec_for_window_requires_open_project() {
         let state = AppState::new();
-        let err = prepare_spec_kit_artifacts_for_window(&state, "main", "implement auth");
+        let err = prepare_issue_spec_for_window(&state, "main", "implement auth", None);
         assert!(err.is_err());
         assert!(err
             .unwrap_err()
@@ -686,63 +543,33 @@ mod tests {
     }
 
     #[test]
-    fn prepare_spec_kit_artifacts_creates_required_files() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let prep = prepare_spec_kit_artifacts(temp.path(), "Implement authentication")
-            .expect("should prepare spec artifacts");
-
-        assert!(prep.spec_id.starts_with("SPEC-"));
-        for name in REQUIRED_SPEC_ARTIFACTS {
-            assert!(prep.spec_dir.join(name).exists(), "missing {}", name);
-        }
-        assert!(prep.created_files.iter().any(|f| f == "tdd.md"));
+    fn build_issue_title_prefers_existing_title() {
+        let title = build_issue_title("SPEC-deadbeef", "new input", Some("Existing"));
+        assert_eq!(title, "Existing");
     }
 
     #[test]
-    fn prepare_spec_kit_artifacts_uses_explicit_spec_id_and_generates_tdd() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let spec_dir = temp.path().join("specs").join("SPEC-deadbeef");
-        fs::create_dir_all(&spec_dir).unwrap();
-        fs::write(spec_dir.join("spec.md"), "# spec\n").unwrap();
-        fs::write(spec_dir.join("plan.md"), "# plan\n").unwrap();
-        fs::write(
-            spec_dir.join("tasks.md"),
-            "# tasks\n\n- [ ] T001 [US1] [実装] sample\n",
-        )
-        .unwrap();
-
-        let prep = prepare_spec_kit_artifacts(temp.path(), "continue SPEC-deadbeef")
-            .expect("should use explicit spec id");
-        assert_eq!(prep.spec_id, "SPEC-deadbeef");
-        assert!(spec_dir.join("tdd.md").exists());
-
-        let tdd = fs::read_to_string(spec_dir.join("tdd.md")).unwrap();
-        assert!(tdd.contains("T001 [US1] [実装] sample"));
+    fn build_issue_title_contains_spec_id_prefix() {
+        let title = build_issue_title("SPEC-cafebabe", "Implement authentication flow", None);
+        assert!(title.starts_with("[SPEC-cafebabe] "));
     }
 
     #[test]
-    fn prepare_spec_kit_artifacts_rejects_non_file_artifact_paths() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let spec_dir = temp.path().join("specs").join("SPEC-feedface");
-        fs::create_dir_all(&spec_dir).unwrap();
-        fs::create_dir_all(spec_dir.join("spec.md")).unwrap();
-
-        let err = prepare_spec_kit_artifacts(temp.path(), "continue SPEC-feedface")
-            .expect_err("should reject directories where artifact files are expected");
-        assert!(err.contains("path exists but is not a file"));
+    fn generate_spec_id_has_expected_shape() {
+        let id = generate_spec_id();
+        assert_eq!(id.len(), 13);
+        assert!(id.starts_with("SPEC-"));
     }
 
     #[test]
-    fn missing_required_artifacts_requires_regular_files() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let spec_dir = temp.path().join("specs").join("SPEC-cafebabe");
-        fs::create_dir_all(&spec_dir).unwrap();
-        fs::write(spec_dir.join("spec.md"), "# spec\n").unwrap();
-        fs::write(spec_dir.join("plan.md"), "# plan\n").unwrap();
-        fs::create_dir_all(spec_dir.join("tasks.md")).unwrap();
-        fs::write(spec_dir.join("tdd.md"), "# tdd\n").unwrap();
+    fn merge_spec_section_replaces_todo() {
+        let merged = merge_spec_section("_TODO_", "implement oauth flow");
+        assert_eq!(merged, "implement oauth flow");
+    }
 
-        let missing = missing_required_artifacts(&spec_dir);
-        assert_eq!(missing, vec!["tasks.md".to_string()]);
+    #[test]
+    fn merge_spec_section_appends_unique_input() {
+        let merged = merge_spec_section("existing context", "new requirement");
+        assert_eq!(merged, "existing context\n\n- new requirement");
     }
 }

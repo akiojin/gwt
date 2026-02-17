@@ -3,6 +3,7 @@
   import type { TabDropPosition } from "../appTabs";
   import TerminalView from "../terminal/TerminalView.svelte";
   import AgentModePanel from "./AgentModePanel.svelte";
+  import IssueSpecPanel from "./IssueSpecPanel.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
   import VersionHistoryPanel from "./VersionHistoryPanel.svelte";
 
@@ -166,6 +167,12 @@
         <VersionHistoryPanel {projectPath} />
       {:else if activeTab?.type === "agentMode"}
         <AgentModePanel />
+      {:else if activeTab?.type === "issueSpec"}
+        <IssueSpecPanel
+          projectPath={projectPath}
+          issueNumber={activeTab.issueNumber ?? 0}
+          specId={activeTab.specId}
+        />
       {:else}
         <div class="placeholder">
           <h2>Select a tab</h2>
