@@ -6,6 +6,7 @@
     LaunchAgentRequest,
     PrStatusInfo,
     GhCliStatus,
+    SettingsData,
   } from "../types";
   import AgentSidebar from "./AgentSidebar.svelte";
   import WorktreeSummaryPanel from "./WorktreeSummaryPanel.svelte";
@@ -45,6 +46,7 @@
     currentBranch = "",
     agentTabBranches = [],
     activeAgentTabBranch = null,
+    appLanguage = "auto",
     prStatuses = {},
     ghCliStatus = null,
   }: {
@@ -66,6 +68,7 @@
     currentBranch?: string;
     agentTabBranches?: string[];
     activeAgentTabBranch?: string | null;
+    appLanguage?: SettingsData["app_language"];
     prStatuses?: Record<string, PrStatusInfo | null>;
     ghCliStatus?: GhCliStatus | null;
   } = $props();
@@ -573,6 +576,43 @@
     };
   });
 
+  // Listen to agent-status-changed to refresh branch list (SPEC-b80e7996 FR-821)
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen("agent-status-changed", () => {
+          localRefreshKey++;
+        });
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+      } catch {
+        /* Tauri not available */
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  });
+
+  // Polling fallback for agent status (SPEC-b80e7996 FR-822)
+  // Only active when there are agent tabs open (avoids unnecessary polling).
+  $effect(() => {
+    if (agentTabBranches.length === 0) return;
+    const interval = setInterval(() => {
+      localRefreshKey++;
+    }, 10_000);
+    return () => clearInterval(interval);
+  });
+
   // Close context menu on outside click / Escape
   $effect(() => {
     if (!contextMenu) return;
@@ -1039,6 +1079,10 @@
     return agentTabBranchSet.has(normalizeTabBranch(branch.name));
   }
 
+  function isAgentRunning(branch: BranchInfo): boolean {
+    return isAgentBranchActive(branch) && branch.agent_status === "running";
+  }
+
   function handleBranchItemKeydown(event: KeyboardEvent) {
     if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
     event.preventDefault();
@@ -1280,20 +1324,21 @@
               }}
               oncontextmenu={(e) => handleContextMenu(e, branch)}
             >
-              {#if isAgentBranchActive(branch)}
-                <span
-                  class="agent-tab-icon"
-                  aria-hidden="true"
-                  title="Agent tab is open for this branch"
-                >
-                  <span class="agent-tab-bars">
-                    <span class="agent-tab-bar b1"></span>
-                    <span class="agent-tab-bar b2"></span>
-                    <span class="agent-tab-bar b3"></span>
-                  </span>
-                  <span class="agent-tab-fallback" aria-hidden="true">@</span>
-                </span>
-              {/if}
+              <span
+                class="agent-indicator-slot"
+                class:agent-active={isAgentBranchActive(branch)}
+                class:agent-running={isAgentRunning(branch)}
+                aria-hidden="true"
+                title={isAgentBranchActive(branch) ? (isAgentRunning(branch) ? "Agent is running" : "Agent tab is open") : ""}
+              >
+                {#if isAgentRunning(branch)}
+                  <span class="agent-pulse-dot"></span>
+                  <span class="agent-fallback">@</span>
+                {:else if isAgentBranchActive(branch)}
+                  <span class="agent-static-dot"></span>
+                  <span class="agent-fallback">@</span>
+                {/if}
+              </span>
               <span class="branch-icon">{branch.is_current ? "*" : " "}</span>
               {#if deletingBranches.has(branch.name)}
                 <span class="safety-spinner"></span>
@@ -1337,6 +1382,7 @@
           {selectedBranch}
           {agentTabBranches}
           {activeAgentTabBranch}
+          preferredLanguage={appLanguage}
           prNumber={selectedPrNumber}
           ghCliStatus={effectiveGhCliStatus}
           onLaunchAgent={onLaunchAgent}
@@ -1352,6 +1398,7 @@
       currentBranch={currentBranch}
       {agentTabBranches}
       {activeAgentTabBranch}
+      preferredLanguage={appLanguage}
     />
   {/if}
   <button
@@ -1804,62 +1851,54 @@
     flex: 1;
   }
 
-  .agent-tab-icon {
-    color: var(--cyan);
+  /* Agent indicator: fixed-width slot for all branch rows (SPEC-b80e7996 FR-800) */
+  .agent-indicator-slot {
     width: 12px;
-    text-align: center;
+    height: 12px;
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    height: 12px;
-    line-height: 1;
   }
 
-  .agent-tab-bars {
-    display: inline-flex;
-    align-items: flex-end;
-    justify-content: center;
-    gap: 1px;
-    height: 10px;
-  }
-
-  .agent-tab-bar {
-    width: 2px;
-    height: 4px;
-    border-radius: 1px;
+  /* Layer 1: static dot — tab is open (SPEC-b80e7996 FR-801) */
+  .agent-static-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
     background: var(--cyan);
-    opacity: 0.85;
+    opacity: 0.45;
   }
 
-  .agent-tab-bar.b1 {
-    animation-delay: 0ms;
+  /* Layer 2: pulsing dot — LLM is Running (SPEC-b80e7996 FR-802) */
+  .agent-pulse-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--cyan);
+    animation: agent-pulse 1.4s ease-in-out infinite;
   }
 
-  .agent-tab-bar.b2 {
-    animation-delay: 150ms;
+  @keyframes agent-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.2; }
   }
 
-  .agent-tab-bar.b3 {
-    animation-delay: 300ms;
-  }
-
-  .agent-tab-fallback {
+  /* Reduced-motion fallback: show "@" instead of animated dot */
+  .agent-fallback {
     display: none;
     font-size: var(--ui-font-md);
     font-family: monospace;
+    color: var(--cyan);
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .agent-tab-bars {
+    .agent-pulse-dot,
+    .agent-static-dot {
       display: none;
     }
 
-    .agent-tab-bar {
-      animation: none;
-    }
-
-    .agent-tab-fallback {
+    .agent-fallback {
       display: flex;
     }
   }

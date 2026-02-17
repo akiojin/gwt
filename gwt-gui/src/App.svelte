@@ -59,6 +59,7 @@
   interface SettingsUpdatedPayload {
     uiFontSize?: number;
     terminalFontSize?: number;
+    appLanguage?: SettingsData["app_language"];
     voiceInput?: VoiceInputSettings;
   }
 
@@ -192,6 +193,7 @@
   let voiceInputSettings: VoiceInputSettings = $state(
     DEFAULT_VOICE_INPUT_SETTINGS,
   );
+  let appLanguage: SettingsData["app_language"] = $state("auto");
   let voiceInputListening = $state(false);
   let voiceInputSupported = $state(true);
   let voiceInputError: string | null = $state(null);
@@ -612,6 +614,16 @@
     };
   }
 
+  function normalizeAppLanguage(
+    value: string | null | undefined,
+  ): SettingsData["app_language"] {
+    const language = (value ?? "").trim().toLowerCase();
+    if (language === "ja" || language === "en" || language === "auto") {
+      return language as SettingsData["app_language"];
+    }
+    return "auto";
+  }
+
   function applyUiFontSize(size: number) {
     document.documentElement.style.setProperty("--ui-font-base", `${size}px`);
   }
@@ -628,6 +640,23 @@
   ) {
     voiceInputSettings = normalizeVoiceInputSettings(value);
     voiceController?.updateSettings();
+  }
+
+  function applyAppLanguage(value: string | null | undefined) {
+    appLanguage = normalizeAppLanguage(value);
+  }
+
+  async function rebuildAllBranchSessionSummaries(language: SettingsData["app_language"]) {
+    if (!projectPath) return;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("rebuild_all_branch_session_summaries", {
+        projectPath,
+        preferredLanguage: language,
+      });
+    } catch (err) {
+      showToast(`Failed to rebuild summaries: ${toErrorMessage(err)}`, 12000);
+    }
   }
 
   function activeAgentPaneId(): string | null {
@@ -657,11 +686,12 @@
         await invoke<
           Pick<
             SettingsData,
-            "ui_font_size" | "terminal_font_size" | "voice_input"
+            "ui_font_size" | "terminal_font_size" | "app_language" | "voice_input"
           >
         >("get_settings");
       applyUiFontSize(clampFontSize(settings.ui_font_size ?? 13));
       applyTerminalFontSize(clampFontSize(settings.terminal_font_size ?? 13));
+      applyAppLanguage(settings.app_language);
       applyVoiceInputSettings(settings.voice_input);
     } catch {
       // Ignore: settings API not available outside Tauri runtime.
@@ -1749,6 +1779,14 @@
       if (typeof detail.terminalFontSize === "number") {
         applyTerminalFontSize(clampFontSize(detail.terminalFontSize));
       }
+      if (typeof detail.appLanguage === "string") {
+        const nextLanguage = normalizeAppLanguage(detail.appLanguage);
+        const changed = nextLanguage !== appLanguage;
+        applyAppLanguage(nextLanguage);
+        if (changed) {
+          void rebuildAllBranchSessionSummaries(nextLanguage);
+        }
+      }
       if (detail.voiceInput) {
         applyVoiceInputSettings(detail.voiceInput);
       }
@@ -1807,6 +1845,7 @@
           {currentBranch}
           {agentTabBranches}
           {activeAgentTabBranch}
+          {appLanguage}
           onResize={handleSidebarResize}
           onBranchSelect={handleBranchSelect}
           onBranchActivate={handleBranchActivate}
