@@ -19,6 +19,12 @@ export interface ProjectInfo {
   current_branch: string | null;
 }
 
+export interface OpenProjectResult {
+  info: ProjectInfo;
+  action: "opened" | "focusedExisting";
+  focusedWindowLabel?: string | null;
+}
+
 export interface CloneProgress {
   stage: string; // "receiving" | "resolving"
   percent: number; // 0-100

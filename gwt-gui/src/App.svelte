@@ -3,7 +3,7 @@
     Tab,
     BranchInfo,
     GitHubIssueInfo,
-    ProjectInfo,
+    OpenProjectResult,
     LaunchAgentRequest,
     LaunchFinishedPayload,
     ProbePathResult,
@@ -62,6 +62,10 @@
     removeWindowSession,
     upsertWindowSession,
   } from "./lib/windowSessions";
+  import {
+    releaseWindowSessionRestoreLead,
+    tryAcquireWindowSessionRestoreLead,
+  } from "./lib/windowSessionRestoreLeader";
 
   interface SettingsUpdatedPayload {
     uiFontSize?: number;
@@ -81,8 +85,6 @@
   const DEFAULT_SIDEBAR_WIDTH_PX = 260;
   const MIN_SIDEBAR_WIDTH_PX = 220;
   const MAX_SIDEBAR_WIDTH_PX = 520;
-  const WINDOW_SESSION_RESTORE_LEAD_KEY = "gwt.windowSessions.restoreLeader.v1";
-  const WINDOW_SESSION_RESTORE_LEAD_TTL_MS = 15_000;
   type SidebarMode = "branch" | "agent";
 
   const DEFAULT_VOICE_INPUT_SETTINGS: VoiceInputSettings = {
@@ -155,11 +157,6 @@
   let worktreesEventAvailable: boolean = $state(false);
   let windowSessionRestoreStarted: boolean = false;
   let currentWindowLabel: string | null = $state(null);
-  type WindowSessionRestoreLeaderState = {
-    label: string;
-    expiresAt: number;
-  };
-
   let selectedBranch: BranchInfo | null = $state(null);
   let currentBranch: string = $state("");
 
@@ -471,20 +468,30 @@
     (async () => {
       const label = await resolveCurrentWindowLabel();
       if (!label) return;
-      const isRestoreLeader = tryAcquireWindowSessionRestoreLead(label);
+      let restoreStore: Storage | null = null;
+      if (typeof window !== "undefined") {
+        try {
+          restoreStore = window.localStorage;
+        } catch {
+          restoreStore = null;
+        }
+      }
+      const isRestoreLeader = restoreStore
+        ? tryAcquireWindowSessionRestoreLead(restoreStore, label)
+        : false;
 
       const sessions = loadWindowSessions();
       const normalizedSessions = sessions.filter(
         (entry) => entry.label !== label && entry.projectPath,
       );
 
-      if (isRestoreLeader) {
+      if (isRestoreLeader && restoreStore) {
         try {
           for (const entry of normalizedSessions) {
             await openAndNormalizeWindowSession(entry.label, entry.projectPath);
           }
         } finally {
-          releaseWindowSessionRestoreLead(label);
+          releaseWindowSessionRestoreLead(restoreStore, label);
         }
       }
 
@@ -777,77 +784,6 @@
     }
   }
 
-  function readWindowSessionRestoreLeader(
-    storage: Storage,
-  ): WindowSessionRestoreLeaderState | null {
-    try {
-      const raw = storage.getItem(WINDOW_SESSION_RESTORE_LEAD_KEY);
-      if (!raw) return null;
-
-      const parsed = JSON.parse(raw);
-      if (!parsed || typeof parsed !== "object") return null;
-
-      const label = typeof parsed.label === "string" ? parsed.label.trim() : "";
-      const expiresAtRaw = parsed.expiresAt;
-      const expiresAt =
-        typeof expiresAtRaw === "number" && Number.isFinite(expiresAtRaw)
-          ? Math.floor(expiresAtRaw)
-          : NaN;
-
-      if (!label || !Number.isFinite(expiresAt)) return null;
-
-      return { label, expiresAt };
-    } catch {
-      return null;
-    }
-  }
-
-  function tryAcquireWindowSessionRestoreLead(
-    label: string,
-  ): boolean {
-    if (typeof window === "undefined") return false;
-    let store: Storage;
-    try {
-      store = window.localStorage;
-    } catch {
-      return false;
-    }
-
-    try {
-      const existing = readWindowSessionRestoreLeader(store);
-      const now = Date.now();
-      if (
-        existing &&
-        existing.label.length > 0 &&
-        existing.expiresAt > now &&
-        existing.label !== label
-      ) {
-        return false;
-      }
-
-      const next: WindowSessionRestoreLeaderState = {
-        label,
-        expiresAt: now + WINDOW_SESSION_RESTORE_LEAD_TTL_MS,
-      };
-      store.setItem(WINDOW_SESSION_RESTORE_LEAD_KEY, JSON.stringify(next));
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  function releaseWindowSessionRestoreLead(label: string) {
-    if (typeof window === "undefined") return;
-    try {
-      const rawStore = window.localStorage;
-      const existing = readWindowSessionRestoreLeader(rawStore);
-      if (!existing || existing.label !== label) return;
-      rawStore.removeItem(WINDOW_SESSION_RESTORE_LEAD_KEY);
-    } catch {
-      // Ignore storage failures.
-    }
-  }
-
   async function updateWindowSession(projectPathForWindow: string | null) {
     const label = await resolveCurrentWindowLabel();
     if (!label) return;
@@ -882,11 +818,7 @@
     if (!session?.projectPath) return false;
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const info = await invoke<ProjectInfo>("open_project", {
-        path: session.projectPath,
-      });
-      handleOpenedProjectPath(info.path);
+      await openProjectAndApplyCurrentWindow(session.projectPath);
       return true;
     } catch {
       removeWindowSession(label);
@@ -898,6 +830,15 @@
     projectPath = path;
     fetchCurrentBranch();
     void updateWindowSession(path);
+  }
+
+  async function openProjectAndApplyCurrentWindow(path: string): Promise<OpenProjectResult> {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const result = await invoke<OpenProjectResult>("open_project", { path });
+    if (result.action === "opened") {
+      handleOpenedProjectPath(result.info.path);
+    }
+    return result;
   }
 
   async function setWindowTitle() {
@@ -1520,10 +1461,7 @@
           });
 
           if (probe.kind === "gwtProject" && probe.projectPath) {
-            const info = await invoke<ProjectInfo>("open_project", {
-              path: probe.projectPath,
-            });
-            handleOpenedProjectPath(info.path);
+            await openProjectAndApplyCurrentWindow(probe.projectPath);
             return;
           }
 
@@ -1553,10 +1491,7 @@
             });
 
             if (probe.kind === "gwtProject" && probe.projectPath) {
-              const info = await invoke<ProjectInfo>("open_project", {
-                path: probe.projectPath,
-              });
-              handleOpenedProjectPath(info.path);
+              await openProjectAndApplyCurrentWindow(probe.projectPath);
               break;
             }
 
@@ -2305,9 +2240,7 @@
     migrationSourceRoot = "";
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const info = await invoke<ProjectInfo>("open_project", { path: p });
-      handleOpenedProjectPath(info.path);
+      await openProjectAndApplyCurrentWindow(p);
     } catch (err) {
       appError = `Failed to open migrated project: ${toErrorMessage(err)}`;
     }

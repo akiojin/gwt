@@ -165,6 +165,14 @@ export async function installTauriMock(
         };
       }
 
+      function openProjectResult(pathLike: unknown) {
+        return {
+          info: projectInfo(pathLike),
+          action: "opened",
+          focusedWindowLabel: null,
+        };
+      }
+
       async function invoke(cmd: string, rawArgs?: unknown): Promise<unknown> {
         const args = normalizeArgs(rawArgs);
         const runtimeCommandResponses = (
@@ -238,7 +246,7 @@ export async function installTauriMock(
                 typeof args.path === "string" ? args.path : projectPath,
             };
           case "open_project":
-            return projectInfo(args.path);
+            return openProjectResult(args.path);
           case "close_project":
             return null;
           case "list_worktree_branches":
