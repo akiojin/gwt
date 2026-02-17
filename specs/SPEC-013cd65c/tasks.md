@@ -1,4 +1,4 @@
-# タスク: SPEC-bare-wt01
+# タスク: SPEC-013cd65c
 
 ## T1: テスト作成（TDD）
 

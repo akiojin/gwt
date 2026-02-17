@@ -748,7 +748,7 @@ impl Branch {
         }
 
         // SPEC-a70a1ece FR-124: For bare repos, check via ls-remote
-        // SPEC-bare-wt01 FR-001: Use run_git_with_timeout for GIT_TERMINAL_PROMPT=0 and timeout
+        // SPEC-013cd65c FR-001: Use run_git_with_timeout for GIT_TERMINAL_PROMPT=0 and timeout
         let ls_output = match run_git_with_timeout(
             repo_path,
             "ls-remote",
