@@ -78,7 +78,12 @@
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") {
-      onCancel();
+      e.preventDefault();
+      if (status === "running") {
+        onCancel();
+        return;
+      }
+      onClose();
     }
   }
 </script>

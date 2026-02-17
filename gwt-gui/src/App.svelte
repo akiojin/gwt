@@ -1215,8 +1215,10 @@
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("cancel_launch_job", { jobId: launchJobId });
-    } catch {
-      // Ignore: not available outside Tauri runtime.
+    } catch (err) {
+      console.error("Failed to cancel launch job:", err);
+      launchStatus = "error";
+      launchError = "Failed to send cancel request. Close this dialog and retry.";
     }
   }
 

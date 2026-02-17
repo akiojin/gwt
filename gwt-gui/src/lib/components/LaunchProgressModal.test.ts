@@ -73,7 +73,7 @@ describe("LaunchProgressModal", () => {
     expect(onCancel).toHaveBeenCalledOnce();
   });
 
-  it("calls onCancel on Escape key", async () => {
+  it("calls onCancel on Escape key while running", async () => {
     const onCancel = vi.fn();
     const { container } = await renderModal({
       open: true,
@@ -89,6 +89,26 @@ describe("LaunchProgressModal", () => {
     expect(overlay).not.toBeNull();
     await fireEvent.keyDown(overlay!, { key: "Escape" });
     expect(onCancel).toHaveBeenCalledOnce();
+  });
+
+  it("calls onClose on Escape key when not running", async () => {
+    const onCancel = vi.fn();
+    const onClose = vi.fn();
+    const { container } = await renderModal({
+      open: true,
+      step: "create",
+      detail: "",
+      status: "error",
+      error: "Launch failed.",
+      onCancel,
+      onClose,
+    });
+
+    const overlay = container.querySelector(".overlay");
+    expect(overlay).not.toBeNull();
+    await fireEvent.keyDown(overlay!, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(onCancel).not.toHaveBeenCalled();
   });
 
   it("renders nothing when open is false", async () => {
