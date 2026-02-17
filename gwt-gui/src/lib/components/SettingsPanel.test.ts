@@ -384,6 +384,36 @@ describe("SettingsPanel", () => {
     });
   });
 
+  it("toggles env Add button disabled state based on KEY input", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await rendered.findByText("Environment Variables");
+    const addRow = rendered.container.querySelector(".env-add-row") as HTMLElement;
+    const keyInput = addRow.querySelector(".env-key-input") as HTMLInputElement;
+    const addButton = addRow.querySelector("button") as HTMLButtonElement;
+
+    // Initial state: disabled (empty KEY)
+    expect(addButton.disabled).toBe(true);
+
+    // After entering KEY: enabled
+    await fireEvent.input(keyInput, { target: { value: "MY_VAR" } });
+    await waitFor(() => {
+      expect(addButton.disabled).toBe(false);
+    });
+
+    // Whitespace-only KEY: disabled
+    await fireEvent.input(keyInput, { target: { value: "   " } });
+    await waitFor(() => {
+      expect(addButton.disabled).toBe(true);
+    });
+
+    // Re-enter KEY: enabled again
+    await fireEvent.input(keyInput, { target: { value: "ANOTHER_VAR" } });
+    await waitFor(() => {
+      expect(addButton.disabled).toBe(false);
+    });
+  });
+
   it("adds, edits, and removes environment variables", async () => {
     const rendered = await renderSettingsPanel();
 
