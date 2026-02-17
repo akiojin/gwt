@@ -392,7 +392,10 @@ mod tests {
     #[test]
     fn test_extract_issue_number_from_branch_absent() {
         assert_eq!(extract_issue_number_from_branch("feature/new-ui"), None);
-        assert_eq!(extract_issue_number_from_branch("feature/noissue-123"), None);
+        assert_eq!(
+            extract_issue_number_from_branch("feature/noissue-123"),
+            None
+        );
         assert_eq!(extract_issue_number_from_branch("feature/reissue-42"), None);
         assert_eq!(extract_issue_number_from_branch(""), None);
     }
