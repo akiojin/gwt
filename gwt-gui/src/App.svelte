@@ -469,24 +469,14 @@
     (async () => {
       const label = await resolveCurrentWindowLabel();
       if (!label) return;
-      let restoreStore: Storage | null = null;
-      if (typeof window !== "undefined") {
-        try {
-          restoreStore = window.localStorage;
-        } catch {
-          restoreStore = null;
-        }
-      }
-      const isRestoreLeader = restoreStore
-        ? tryAcquireWindowSessionRestoreLead(restoreStore, label)
-        : false;
+      const isRestoreLeader = await tryAcquireWindowSessionRestoreLead(label);
 
       const sessions = loadWindowSessions();
       const normalizedSessions = sessions.filter(
         (entry) => entry.label !== label && entry.projectPath,
       );
 
-      if (isRestoreLeader && restoreStore) {
+      if (isRestoreLeader) {
         try {
           for (const entry of normalizedSessions) {
             await openAndNormalizeWindowSession(entry.label, entry.projectPath);
@@ -494,7 +484,7 @@
           await new Promise<void>((resolve) => setTimeout(resolve, releaseDelayMs));
           await restoreWindowSessionProject(label);
         } finally {
-          releaseWindowSessionRestoreLead(restoreStore, label);
+          await releaseWindowSessionRestoreLead(label);
         }
       } else {
         await restoreWindowSessionProject(label);
@@ -739,14 +729,6 @@
     return activeAgentPaneId();
   }
 
-  function readCurrentWindowLabelFromInternals(): string | null {
-    if (typeof window === "undefined") return null;
-    const metadataLabel = (window as any)?.__TAURI_INTERNALS__?.metadata?.currentWindow?.label;
-    if (typeof metadataLabel !== "string") return null;
-    const next = metadataLabel.trim();
-    return next.length > 0 ? next : null;
-  }
-
   async function applyAppearanceSettings() {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
@@ -768,12 +750,6 @@
 
   async function resolveCurrentWindowLabel(): Promise<string | null> {
     if (currentWindowLabel) return currentWindowLabel;
-
-    const fromInternals = readCurrentWindowLabelFromInternals();
-    if (fromInternals) {
-      currentWindowLabel = fromInternals;
-      return fromInternals;
-    }
 
     try {
       const { invoke } = await import("@tauri-apps/api/core");

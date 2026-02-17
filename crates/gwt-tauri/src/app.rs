@@ -642,6 +642,8 @@ pub fn build_app(
             crate::commands::window_tabs::sync_window_agent_tabs,
             crate::commands::window::get_current_window_label,
             crate::commands::window::open_gwt_window,
+            crate::commands::window::try_acquire_window_restore_leader,
+            crate::commands::window::release_window_restore_leader,
             crate::commands::recent_projects::get_recent_projects,
             crate::commands::issue::fetch_github_issues,
             crate::commands::issue::fetch_github_issue_detail,

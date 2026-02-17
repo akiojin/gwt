@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::OnceCell;
 
 #[derive(Debug, Clone)]
@@ -72,6 +72,14 @@ pub struct WindowMigrationState {
     pub source_root: String,
 }
 
+const WINDOW_SESSION_RESTORE_LEAD_TTL_MS: u64 = 15_000;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowSessionRestoreLeaderState {
+    pub label: String,
+    pub expires_at_millis: u64,
+}
+
 pub struct AppState {
     /// System resource monitor for CPU/memory/GPU queries.
     pub system_monitor: Mutex<gwt_core::system_info::SystemMonitor>,
@@ -99,6 +107,8 @@ pub struct AppState {
         Mutex<HashMap<String, HashMap<String, VersionHistoryCacheEntry>>>,
     pub project_version_history_inflight: Mutex<HashSet<String>>,
     pub pane_launch_meta: Mutex<HashMap<String, PaneLaunchMeta>>,
+    /// Single-process leader lock for startup multi-window restore.
+    pub window_session_restore_leader: Mutex<Option<WindowSessionRestoreLeaderState>>,
     /// Launch job cancellation flags keyed by job id.
     pub launch_jobs: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub is_quitting: AtomicBool,
@@ -135,6 +145,7 @@ impl AppState {
             project_version_history_cache: Mutex::new(HashMap::new()),
             project_version_history_inflight: Mutex::new(HashSet::new()),
             pane_launch_meta: Mutex::new(HashMap::new()),
+            window_session_restore_leader: Mutex::new(None),
             launch_jobs: Mutex::new(HashMap::new()),
             is_quitting: AtomicBool::new(false),
             #[cfg(any(not(test), target_os = "macos"))]
@@ -236,6 +247,58 @@ impl AppState {
     pub fn project_for_window(&self, window_label: &str) -> Option<String> {
         let map = self.window_projects.lock().ok()?;
         map.get(window_label).cloned()
+    }
+
+    fn now_millis() -> u64 {
+        let Ok(duration) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+            return 0;
+        };
+        duration.as_millis() as u64
+    }
+
+    pub fn try_acquire_window_session_restore_leader(&self, label: &str) -> bool {
+        self.try_acquire_window_session_restore_leader_at(label, Self::now_millis())
+    }
+
+    fn try_acquire_window_session_restore_leader_at(&self, label: &str, now_millis: u64) -> bool {
+        let normalized_label = label.trim();
+        if normalized_label != "main" {
+            return false;
+        }
+
+        let Ok(mut slot) = self.window_session_restore_leader.lock() else {
+            return false;
+        };
+
+        if let Some(existing) = slot.as_ref() {
+            if existing.label != normalized_label && existing.expires_at_millis > now_millis {
+                return false;
+            }
+        }
+
+        *slot = Some(WindowSessionRestoreLeaderState {
+            label: normalized_label.to_string(),
+            expires_at_millis: now_millis + WINDOW_SESSION_RESTORE_LEAD_TTL_MS,
+        });
+        true
+    }
+
+    pub fn release_window_session_restore_leader(&self, label: &str) {
+        let normalized_label = label.trim();
+        if normalized_label.is_empty() {
+            return;
+        }
+
+        let Ok(mut slot) = self.window_session_restore_leader.lock() else {
+            return;
+        };
+        let should_clear = slot
+            .as_ref()
+            .map(|existing| existing.label == normalized_label)
+            .unwrap_or(false);
+        if should_clear {
+            *slot = None;
+        }
     }
 
     pub fn set_window_agent_tabs(
@@ -600,5 +663,98 @@ mod tests {
             .lock()
             .map(|m| !m.contains_key("main"))
             .unwrap_or(false));
+    }
+
+    #[test]
+    fn window_session_restore_leader_only_allows_main() {
+        let state = AppState::new();
+        assert!(!state.try_acquire_window_session_restore_leader_at("project-1", 1_000));
+        assert!(!state.try_acquire_window_session_restore_leader_at("  ", 1_000));
+
+        assert!(state.try_acquire_window_session_restore_leader_at("main", 1_000));
+        let leader = state
+            .window_session_restore_leader
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone());
+        assert_eq!(
+            leader,
+            Some(WindowSessionRestoreLeaderState {
+                label: "main".to_string(),
+                expires_at_millis: 1_000 + WINDOW_SESSION_RESTORE_LEAD_TTL_MS,
+            })
+        );
+    }
+
+    #[test]
+    fn window_session_restore_leader_blocks_active_other_label() {
+        let state = AppState::new();
+        if let Ok(mut slot) = state.window_session_restore_leader.lock() {
+            *slot = Some(WindowSessionRestoreLeaderState {
+                label: "other".to_string(),
+                expires_at_millis: 20_000,
+            });
+        }
+
+        assert!(!state.try_acquire_window_session_restore_leader_at("main", 10_000));
+        let leader = state
+            .window_session_restore_leader
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone());
+        assert_eq!(
+            leader,
+            Some(WindowSessionRestoreLeaderState {
+                label: "other".to_string(),
+                expires_at_millis: 20_000,
+            })
+        );
+    }
+
+    #[test]
+    fn window_session_restore_leader_reacquires_after_expiration_and_releases_by_label() {
+        let state = AppState::new();
+        if let Ok(mut slot) = state.window_session_restore_leader.lock() {
+            *slot = Some(WindowSessionRestoreLeaderState {
+                label: "old".to_string(),
+                expires_at_millis: 5_000,
+            });
+        }
+
+        assert!(state.try_acquire_window_session_restore_leader_at("main", 6_000));
+        let leader = state
+            .window_session_restore_leader
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone());
+        assert_eq!(
+            leader,
+            Some(WindowSessionRestoreLeaderState {
+                label: "main".to_string(),
+                expires_at_millis: 6_000 + WINDOW_SESSION_RESTORE_LEAD_TTL_MS,
+            })
+        );
+
+        state.release_window_session_restore_leader("project-1");
+        let leader_after_wrong_release = state
+            .window_session_restore_leader
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone());
+        assert_eq!(
+            leader_after_wrong_release,
+            Some(WindowSessionRestoreLeaderState {
+                label: "main".to_string(),
+                expires_at_millis: 6_000 + WINDOW_SESSION_RESTORE_LEAD_TTL_MS,
+            })
+        );
+
+        state.release_window_session_restore_leader("main");
+        let cleared = state
+            .window_session_restore_leader
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone());
+        assert_eq!(cleared, None);
     }
 }
