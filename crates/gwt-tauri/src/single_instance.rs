@@ -183,6 +183,7 @@ fn create_guard(lock_file: File, lock_path: PathBuf) -> std::io::Result<SingleIn
 fn open_lock_file(lock_path: &Path) -> std::io::Result<File> {
     OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(lock_path)
