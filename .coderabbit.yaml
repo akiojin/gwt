@@ -5,5 +5,4 @@ reviews:
   auto_review:
     enabled: true
     base_branches:
-      - main
-      - develop
+      - ".*"
