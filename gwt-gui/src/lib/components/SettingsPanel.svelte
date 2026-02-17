@@ -1176,6 +1176,7 @@
     font-family: monospace;
     outline: none;
     width: 100%;
+    max-width: none;
   }
 
   .env-add-row {
@@ -1355,8 +1356,13 @@
     font-size: var(--ui-font-md);
   }
 
-  .btn-add:hover {
+  .btn-add:hover:not(:disabled) {
     background: var(--bg-hover);
+  }
+
+  .btn-add:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .btn-cancel {
