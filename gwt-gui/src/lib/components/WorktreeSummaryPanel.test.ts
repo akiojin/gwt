@@ -30,6 +30,11 @@ const branchFixture = {
   last_tool_usage: null,
 };
 
+const issueBranchFixture = {
+  ...branchFixture,
+  name: "feature/issue-1097",
+};
+
 const sessionSummaryFixture = {
   status: "ok",
   generating: false,
@@ -38,23 +43,68 @@ const sessionSummaryFixture = {
   sourceType: "scrollback",
   inputMtimeMs: 1_700_000_000_000,
   summaryUpdatedMs: 1_700_000_000_500,
-  markdown: "## 目的\n目的\n\n## 要約\n要約\n\n## ハイライト\n- A\n- B",
+  markdown: "## Summary\nSummary body\n\n## Highlights\n- A\n- B",
   warning: null,
   error: null,
 };
 
-const quickStartHostEntry = {
-  branch: branchFixture.name,
-  tool_id: "codex",
-  tool_label: "Codex",
-  session_id: "session-123",
-  mode: "normal",
-  model: "gpt-5",
-  reasoning_level: "high",
-  skip_permissions: true,
-  tool_version: "0.33.0",
-  docker_force_host: true,
-  timestamp: 1_700_000_001,
+const linkedIssueFixture = {
+  number: 1097,
+  title: "Worktree Summary rework",
+  updatedAt: "2026-02-17T00:00:00Z",
+  labels: ["enhancement"],
+  url: "https://github.com/test/repo/issues/1097",
+};
+
+const dockerContextFixture = {
+  worktree_path: "/tmp/project/.gwt/worktrees/feature-markdown-ui",
+  file_type: "compose",
+  compose_services: ["workspace"],
+  docker_available: true,
+  compose_available: true,
+  daemon_running: true,
+  force_host: false,
+};
+
+const latestPrFixture = {
+  number: 42,
+  title: "CI Test PR",
+  state: "OPEN",
+  url: "https://github.com/test/repo/pull/42",
+};
+
+const prDetailFixture = {
+  number: 42,
+  title: "CI Test PR",
+  state: "OPEN",
+  url: "https://github.com/test/repo/pull/42",
+  mergeable: "MERGEABLE",
+  author: "alice",
+  baseBranch: "main",
+  headBranch: branchFixture.name,
+  labels: [],
+  assignees: [],
+  milestone: null,
+  linkedIssues: [],
+  checkSuites: [
+    {
+      workflowName: "CI Build",
+      runId: 100,
+      status: "completed",
+      conclusion: "success",
+    },
+    {
+      workflowName: "Lint",
+      runId: 101,
+      status: "in_progress",
+      conclusion: null,
+    },
+  ],
+  reviews: [],
+  reviewComments: [],
+  changedFilesCount: 1,
+  additions: 10,
+  deletions: 5,
 };
 
 const quickStartDockerEntry = {
@@ -76,6 +126,15 @@ const quickStartDockerEntry = {
   timestamp: 1_700_000_002,
 };
 
+const olderQuickStartEntry = {
+  ...quickStartDockerEntry,
+  session_id: "session-123",
+  tool_id: "codex",
+  tool_label: "Codex",
+  model: "gpt-5-codex",
+  timestamp: 1_700_000_001,
+};
+
 function sessionSummaryCalls() {
   return invokeMock.mock.calls.filter((c) => c[0] === "get_branch_session_summary");
 }
@@ -90,6 +149,9 @@ describe("WorktreeSummaryPanel", () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "get_branch_quick_start") return [];
       if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
       return [];
     });
 
@@ -104,36 +166,26 @@ describe("WorktreeSummaryPanel", () => {
     delete (globalThis as any).__TAURI_INTERNALS__;
   });
 
-  it("renders branch header and tab UI when branch is selected", async () => {
+  it("renders branch header and fixed 6-tab UI when branch is selected", async () => {
     const rendered = await renderPanel({
       projectPath: "/tmp/project",
       selectedBranch: branchFixture,
     });
 
     await waitFor(() => {
-      expect(
-        invokeMock.mock.calls.some(
-          ([cmd, payload]) =>
-            cmd === "get_branch_session_summary" &&
-            payload?.projectPath === "/tmp/project" &&
-            payload?.branch === "feature/markdown-ui"
-        )
-      ).toBe(true);
-      expect(rendered.container.querySelector("h2")?.textContent).toBe(
-        "feature/markdown-ui"
-      );
+      expect(rendered.container.querySelector("h2")?.textContent).toBe("feature/markdown-ui");
     });
 
-    // Summary tab is active by default
     const tabs = rendered.container.querySelectorAll(".summary-tab");
     expect(tabs).toHaveLength(6);
     expect(tabs[0]?.textContent?.trim()).toBe("Summary");
     expect(tabs[0]?.classList.contains("active")).toBe(true);
     expect(tabs[1]?.textContent?.trim()).toBe("Git");
-    expect(tabs[2]?.textContent?.trim()).toBe("PR");
-    expect(tabs[3]?.textContent?.trim()).toBe("Workflow");
-    expect(tabs[4]?.textContent?.trim()).toBe("AI");
+    expect(tabs[2]?.textContent?.trim()).toBe("Issue");
+    expect(tabs[3]?.textContent?.trim()).toBe("PR");
+    expect(tabs[4]?.textContent?.trim()).toBe("Workflow");
     expect(tabs[5]?.textContent?.trim()).toBe("Docker");
+    expect(rendered.queryByRole("button", { name: "Quick Start" })).toBeNull();
   });
 
   it("shows placeholder when no branch is selected", async () => {
@@ -149,10 +201,54 @@ describe("WorktreeSummaryPanel", () => {
     });
   });
 
-  it("renders Quick Start section in summary tab", async () => {
+  it("runs Continue/New from header buttons using latest quick-start entry", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [olderQuickStartEntry, quickStartDockerEntry];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const onQuickLaunch = vi.fn().mockResolvedValue(undefined);
     const rendered = await renderPanel({
       projectPath: "/tmp/project",
       selectedBranch: branchFixture,
+      onQuickLaunch,
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("get_branch_quick_start", {
+        projectPath: "/tmp/project",
+        branch: "feature/markdown-ui",
+      });
+      expect(rendered.getByRole("button", { name: "Continue" })).toBeTruthy();
+      expect(rendered.getByRole("button", { name: "New" })).toBeTruthy();
+    });
+
+    const continueButton = rendered.getByRole("button", { name: "Continue" });
+    const newButton = rendered.getByRole("button", { name: "New" });
+    expect((continueButton as HTMLButtonElement).disabled).toBe(false);
+    expect((newButton as HTMLButtonElement).disabled).toBe(false);
+
+    await fireEvent.click(continueButton);
+    await fireEvent.click(newButton);
+
+    await waitFor(() => {
+      expect(onQuickLaunch).toHaveBeenCalledTimes(2);
+    });
+    expect(onQuickLaunch.mock.calls[0]?.[0]?.mode).toBe("continue");
+    expect(onQuickLaunch.mock.calls[0]?.[0]?.resumeSessionId).toBe("session-456");
+    expect(onQuickLaunch.mock.calls[1]?.[0]?.mode).toBe("normal");
+    expect(onQuickLaunch.mock.calls[1]?.[0]?.resumeSessionId).toBeUndefined();
+  });
+
+  it("disables header Continue/New buttons when quick-start history is empty", async () => {
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      onQuickLaunch: vi.fn().mockResolvedValue(undefined),
     });
 
     await waitFor(() => {
@@ -162,44 +258,95 @@ describe("WorktreeSummaryPanel", () => {
       });
     });
 
-    await waitFor(() => {
-      expect(rendered.container.querySelector(".quick-title")?.textContent).toBe(
-        "Quick Start"
-      );
-    });
+    const continueButton = rendered.getByRole("button", { name: "Continue" });
+    const newButton = rendered.getByRole("button", { name: "New" });
+    expect((continueButton as HTMLButtonElement).disabled).toBe(true);
+    expect((newButton as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("renders session summary metadata and markdown in AI tab", async () => {
+  it("renders session summary metadata and markdown in Summary tab", async () => {
     const rendered = await renderPanel({
       projectPath: "/tmp/project",
       selectedBranch: branchFixture,
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const aiTab = tabs[4] as HTMLElement;
-    await fireEvent.click(aiTab);
+    const summaryTab = tabs[0] as HTMLElement;
+    await fireEvent.click(summaryTab);
 
     await waitFor(() => {
-      expect(aiTab.classList.contains("active")).toBe(true);
+      expect(summaryTab.classList.contains("active")).toBe(true);
       expect(rendered.container.querySelector(".session-summary-meta")).toBeTruthy();
       expect(rendered.container.querySelector(".session-summary-markdown h2")).toBeTruthy();
       expect(rendered.container.querySelectorAll(".session-summary-markdown li")).toHaveLength(2);
     });
   });
 
-  it("switches to PR tab and shows PrStatusSection", async () => {
+  it("switches to Issue tab and shows linked branch issue", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return linkedIssueFixture;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: issueBranchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const issueTab = tabs[2] as HTMLElement;
+    await fireEvent.click(issueTab);
+
+    await waitFor(() => {
+      expect(issueTab.classList.contains("active")).toBe(true);
+      expect(rendered.getByText("#1097 Worktree Summary rework")).toBeTruthy();
+      expect(rendered.getByText("label: enhancement")).toBeTruthy();
+    });
+  });
+
+  it("shows empty state in Issue tab when linked issue does not exist", async () => {
     const rendered = await renderPanel({
       projectPath: "/tmp/project",
       selectedBranch: branchFixture,
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const prTab = tabs[2] as HTMLElement;
+    const issueTab = tabs[2] as HTMLElement;
+    await fireEvent.click(issueTab);
+
+    await waitFor(() => {
+      expect(rendered.getByText("No issue linked to this branch.")).toBeTruthy();
+    });
+  });
+
+  it("switches to PR tab and shows PrStatusSection", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return latestPrFixture;
+      if (cmd === "fetch_pr_detail") return prDetailFixture;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const prTab = tabs[3] as HTMLElement;
     await fireEvent.click(prTab);
 
     await waitFor(() => {
       expect(prTab.classList.contains("active")).toBe(true);
       expect(rendered.container.querySelector(".pr-status-section")).toBeTruthy();
+      expect(rendered.getByText("#42 CI Test PR")).toBeTruthy();
     });
   });
 
@@ -211,7 +358,7 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const prTab = tabs[2] as HTMLElement;
+    const prTab = tabs[3] as HTMLElement;
     await fireEvent.click(prTab);
 
     await waitFor(() => {
@@ -222,11 +369,10 @@ describe("WorktreeSummaryPanel", () => {
   it("switches to Git tab and keeps Git section expanded", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "get_branch_quick_start") return [];
-      if (cmd === "get_branch_session_summary")
-        return {
-          ...sessionSummaryFixture,
-          markdown: null,
-        };
+      if (cmd === "get_branch_session_summary") return { ...sessionSummaryFixture, markdown: null };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
       if (cmd === "get_git_change_summary") {
         return {
           file_count: 2,
@@ -258,7 +404,6 @@ describe("WorktreeSummaryPanel", () => {
       expect(rendered.container.querySelector(".git-section .git-body")).toBeTruthy();
     });
 
-    // Git tab mode disables collapse UI.
     expect(rendered.container.querySelector(".git-section .collapse-icon")).toBeNull();
   });
 
@@ -267,58 +412,21 @@ describe("WorktreeSummaryPanel", () => {
 
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "get_branch_quick_start") return [];
-      if (cmd === "get_branch_session_summary") {
-        return {
-          ...sessionSummaryFixture,
-          markdown: null,
-        };
-      }
-      if (cmd === "fetch_pr_detail") {
-        return {
-          number: 42,
-          title: "CI Test PR",
-          state: "OPEN",
-          url: "https://github.com/test/repo/pull/42",
-          mergeable: "MERGEABLE",
-          author: "alice",
-          baseBranch: "main",
-          headBranch: branchFixture.name,
-          labels: [],
-          assignees: [],
-          milestone: null,
-          linkedIssues: [],
-          checkSuites: [
-            {
-              workflowName: "CI Build",
-              runId: 100,
-              status: "completed",
-              conclusion: "success",
-            },
-            {
-              workflowName: "Lint",
-              runId: 101,
-              status: "in_progress",
-              conclusion: null,
-            },
-          ],
-          reviews: [],
-          reviewComments: [],
-          changedFilesCount: 1,
-          additions: 10,
-          deletions: 5,
-        };
-      }
+      if (cmd === "get_branch_session_summary") return { ...sessionSummaryFixture, markdown: null };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return latestPrFixture;
+      if (cmd === "fetch_pr_detail") return prDetailFixture;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
       return [];
     });
 
     const rendered = await renderPanel({
       projectPath: "/tmp/project",
       selectedBranch: branchFixture,
-      prNumber: 42,
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const workflowTab = tabs[3] as HTMLElement;
+    const workflowTab = tabs[4] as HTMLElement;
     await fireEvent.click(workflowTab);
 
     await waitFor(() => {
@@ -338,45 +446,41 @@ describe("WorktreeSummaryPanel", () => {
     windowOpen.mockRestore();
   });
 
-  it("displays HostOS runtime for quick start entry", async () => {
+  it("renders Workflow from resolved prNumber even when latest branch PR is unavailable", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "get_branch_quick_start") return [quickStartHostEntry];
-      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") return { ...sessionSummaryFixture, markdown: null };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "fetch_pr_detail") return prDetailFixture;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
       return [];
     });
 
     const rendered = await renderPanel({
       projectPath: "/tmp/project",
       selectedBranch: branchFixture,
+      prNumber: 42,
     });
 
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const workflowTab = tabs[4] as HTMLElement;
+    await fireEvent.click(workflowTab);
+
     await waitFor(() => {
-      expect(rendered.getByText("runtime: HostOS")).toBeTruthy();
+      expect(workflowTab.classList.contains("active")).toBe(true);
+      expect(rendered.getByText("CI Build")).toBeTruthy();
+      expect(rendered.queryByText("No PR.")).toBeNull();
     });
   });
 
-  it("displays Docker runtime and service for quick start entry", async () => {
+  it("switches to Docker tab and shows current context plus quick-start docker history", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "get_branch_quick_start") return [quickStartDockerEntry];
       if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
-      return [];
-    });
-
-    const rendered = await renderPanel({
-      projectPath: "/tmp/project",
-      selectedBranch: branchFixture,
-    });
-
-    await waitFor(() => {
-      expect(rendered.getByText("runtime: Docker")).toBeTruthy();
-      expect(rendered.getByText("service: workspace")).toBeTruthy();
-    });
-  });
-
-  it("switches to Docker tab and shows docker session details", async () => {
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "get_branch_quick_start") return [quickStartDockerEntry];
-      if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return null;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
       return [];
     });
 
@@ -391,8 +495,9 @@ describe("WorktreeSummaryPanel", () => {
 
     await waitFor(() => {
       expect(dockerTab.classList.contains("active")).toBe(true);
+      expect(rendered.getByText("type: compose")).toBeTruthy();
+      expect(rendered.getByText("services: workspace")).toBeTruthy();
       expect(rendered.getByText("runtime: Docker")).toBeTruthy();
-      expect(rendered.getByText("service: workspace")).toBeTruthy();
       expect(rendered.getByText("container: workspace-container")).toBeTruthy();
       expect(rendered.getByText("compose args: --build -f docker-compose.dev.yml")).toBeTruthy();
       expect(rendered.getByText("Session session-456")).toBeTruthy();
@@ -495,8 +600,8 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const aiTab = tabs[4] as HTMLElement;
-    await fireEvent.click(aiTab);
+    const summaryTab = tabs[0] as HTMLElement;
+    await fireEvent.click(summaryTab);
 
     await waitFor(() => {
       expect(typeof listeners["session-summary-rebuild-progress"]).toBe("function");
@@ -551,8 +656,8 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const aiTab = tabs[4] as HTMLElement;
-    await fireEvent.click(aiTab);
+    const summaryTab = tabs[0] as HTMLElement;
+    await fireEvent.click(summaryTab);
 
     await waitFor(() => {
       expect(typeof listeners["session-summary-rebuild-progress"]).toBe("function");

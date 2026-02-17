@@ -56,6 +56,12 @@
     type VoiceControllerState,
   } from "./lib/voice/voiceInputController";
   import { createSystemMonitor } from "./lib/systemMonitor.svelte";
+  import {
+    getWindowSession,
+    loadWindowSessions,
+    removeWindowSession,
+    upsertWindowSession,
+  } from "./lib/windowSessions";
 
   interface SettingsUpdatedPayload {
     uiFontSize?: number;
@@ -75,6 +81,8 @@
   const DEFAULT_SIDEBAR_WIDTH_PX = 260;
   const MIN_SIDEBAR_WIDTH_PX = 220;
   const MAX_SIDEBAR_WIDTH_PX = 520;
+  const WINDOW_SESSION_RESTORE_LEAD_KEY = "gwt.windowSessions.restoreLeader.v1";
+  const WINDOW_SESSION_RESTORE_LEAD_TTL_MS = 15_000;
   type SidebarMode = "branch" | "agent";
 
   const DEFAULT_VOICE_INPUT_SETTINGS: VoiceInputSettings = {
@@ -145,6 +153,12 @@
   let appError: string | null = $state(null);
   let sidebarRefreshKey: number = $state(0);
   let worktreesEventAvailable: boolean = $state(false);
+  let windowSessionRestoreStarted: boolean = false;
+  let currentWindowLabel: string | null = $state(null);
+  type WindowSessionRestoreLeaderState = {
+    label: string;
+    expiresAt: number;
+  };
 
   let selectedBranch: BranchInfo | null = $state(null);
   let currentBranch: string = $state("");
@@ -450,6 +464,34 @@
     void applyAppearanceSettings();
   });
 
+  $effect(() => {
+    if (windowSessionRestoreStarted) return;
+    windowSessionRestoreStarted = true;
+
+    (async () => {
+      const label = await resolveCurrentWindowLabel();
+      if (!label) return;
+      const isRestoreLeader = tryAcquireWindowSessionRestoreLead(label);
+
+      const sessions = loadWindowSessions();
+      const normalizedSessions = sessions.filter(
+        (entry) => entry.label !== label && entry.projectPath,
+      );
+
+      if (isRestoreLeader) {
+        try {
+          for (const entry of normalizedSessions) {
+            await openAndNormalizeWindowSession(entry.label, entry.projectPath);
+          }
+        } finally {
+          releaseWindowSessionRestoreLead(label);
+        }
+      }
+
+      await restoreWindowSessionProject(label);
+    })();
+  });
+
   // Best-effort: subscribe once and refresh Sidebar when worktrees change.
   $effect(() => {
     let unlisten: null | (() => void) = null;
@@ -687,6 +729,14 @@
     return activeAgentPaneId();
   }
 
+  function readCurrentWindowLabelFromInternals(): string | null {
+    if (typeof window === "undefined") return null;
+    const metadataLabel = (window as any)?.__TAURI_INTERNALS__?.metadata?.currentWindow?.label;
+    if (typeof metadataLabel !== "string") return null;
+    const next = metadataLabel.trim();
+    return next.length > 0 ? next : null;
+  }
+
   async function applyAppearanceSettings() {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
@@ -704,6 +754,150 @@
     } catch {
       // Ignore: settings API not available outside Tauri runtime.
     }
+  }
+
+  async function resolveCurrentWindowLabel(): Promise<string | null> {
+    if (currentWindowLabel) return currentWindowLabel;
+
+    const fromInternals = readCurrentWindowLabelFromInternals();
+    if (fromInternals) {
+      currentWindowLabel = fromInternals;
+      return fromInternals;
+    }
+
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const label = await invoke<string>("get_current_window_label");
+      const next = label?.trim();
+      if (!next) return null;
+      currentWindowLabel = next;
+      return next;
+    } catch {
+      return null;
+    }
+  }
+
+  function readWindowSessionRestoreLeader(
+    storage: Storage,
+  ): WindowSessionRestoreLeaderState | null {
+    try {
+      const raw = storage.getItem(WINDOW_SESSION_RESTORE_LEAD_KEY);
+      if (!raw) return null;
+
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object") return null;
+
+      const label = typeof parsed.label === "string" ? parsed.label.trim() : "";
+      const expiresAtRaw = parsed.expiresAt;
+      const expiresAt =
+        typeof expiresAtRaw === "number" && Number.isFinite(expiresAtRaw)
+          ? Math.floor(expiresAtRaw)
+          : NaN;
+
+      if (!label || !Number.isFinite(expiresAt)) return null;
+
+      return { label, expiresAt };
+    } catch {
+      return null;
+    }
+  }
+
+  function tryAcquireWindowSessionRestoreLead(
+    label: string,
+  ): boolean {
+    if (typeof window === "undefined") return false;
+    let store: Storage;
+    try {
+      store = window.localStorage;
+    } catch {
+      return false;
+    }
+
+    try {
+      const existing = readWindowSessionRestoreLeader(store);
+      const now = Date.now();
+      if (
+        existing &&
+        existing.label.length > 0 &&
+        existing.expiresAt > now &&
+        existing.label !== label
+      ) {
+        return false;
+      }
+
+      const next: WindowSessionRestoreLeaderState = {
+        label,
+        expiresAt: now + WINDOW_SESSION_RESTORE_LEAD_TTL_MS,
+      };
+      store.setItem(WINDOW_SESSION_RESTORE_LEAD_KEY, JSON.stringify(next));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function releaseWindowSessionRestoreLead(label: string) {
+    if (typeof window === "undefined") return;
+    try {
+      const rawStore = window.localStorage;
+      const existing = readWindowSessionRestoreLeader(rawStore);
+      if (!existing || existing.label !== label) return;
+      rawStore.removeItem(WINDOW_SESSION_RESTORE_LEAD_KEY);
+    } catch {
+      // Ignore storage failures.
+    }
+  }
+
+  async function updateWindowSession(projectPathForWindow: string | null) {
+    const label = await resolveCurrentWindowLabel();
+    if (!label) return;
+
+    if (projectPathForWindow) {
+      upsertWindowSession(label, projectPathForWindow);
+      return;
+    }
+    removeWindowSession(label);
+  }
+
+  async function openAndNormalizeWindowSession(label: string, projectPath: string) {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const openedLabelRaw = await invoke<unknown>("open_gwt_window", { label });
+      if (typeof openedLabelRaw !== "string") return;
+
+      const openedLabel = openedLabelRaw.trim();
+      if (!openedLabel || openedLabel === label) {
+        return;
+      }
+
+      removeWindowSession(label);
+      upsertWindowSession(openedLabel, projectPath);
+    } catch {
+      // Ignore restore failures: startup session restore is best-effort.
+    }
+  }
+
+  async function restoreWindowSessionProject(label: string) {
+    const session = getWindowSession(label);
+    if (!session?.projectPath) return false;
+
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const info = await invoke<ProjectInfo>("open_project", {
+        path: session.projectPath,
+      });
+      handleOpenedProjectPath(info.path);
+      return true;
+    } catch {
+      removeWindowSession(label);
+      return false;
+    }
+  }
+
+  function handleOpenedProjectPath(path: string) {
+    projectPath = path;
+    fetchCurrentBranch();
+    void updateWindowSession(path);
   }
 
   async function setWindowTitle() {
@@ -724,8 +918,7 @@
   }
 
   function handleProjectOpen(path: string) {
-    projectPath = path;
-    fetchCurrentBranch();
+    handleOpenedProjectPath(path);
   }
 
   function handleBranchSelect(branch: BranchInfo) {
@@ -1330,8 +1523,7 @@
             const info = await invoke<ProjectInfo>("open_project", {
               path: probe.projectPath,
             });
-            projectPath = info.path;
-            fetchCurrentBranch();
+            handleOpenedProjectPath(info.path);
             return;
           }
 
@@ -1364,8 +1556,7 @@
               const info = await invoke<ProjectInfo>("open_project", {
                 path: probe.projectPath,
               });
-              projectPath = info.path;
-              fetchCurrentBranch();
+              handleOpenedProjectPath(info.path);
               break;
             }
 
@@ -1425,6 +1616,7 @@
           }
 
           projectPath = null;
+          void updateWindowSession(null);
           tabs = defaultAppTabs();
           activeTabId = "agentMode";
           selectedBranch = null;
@@ -2115,8 +2307,7 @@
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       const info = await invoke<ProjectInfo>("open_project", { path: p });
-      projectPath = info.path;
-      fetchCurrentBranch();
+      handleOpenedProjectPath(info.path);
     } catch (err) {
       appError = `Failed to open migrated project: ${toErrorMessage(err)}`;
     }
