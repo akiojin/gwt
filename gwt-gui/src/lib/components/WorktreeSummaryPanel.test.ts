@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, waitFor, fireEvent, cleanup } from "@testing-library/svelte";
+import type { BranchInfo } from "../types";
 
 const invokeMock = vi.fn();
 const listenMock = vi.fn();
@@ -20,7 +21,7 @@ async function renderPanel(props: any) {
   return render(Panel, { props });
 }
 
-const branchFixture = {
+const branchFixture: BranchInfo = {
   name: "feature/markdown-ui",
   commit: "1234567",
   is_current: false,
@@ -28,6 +29,8 @@ const branchFixture = {
   behind: 0,
   divergence_status: "UpToDate",
   last_tool_usage: null,
+  is_agent_running: false,
+  agent_status: "unknown",
 };
 
 const issueBranchFixture = {
@@ -479,6 +482,68 @@ describe("WorktreeSummaryPanel", () => {
       expect(workflowTab.classList.contains("active")).toBe(true);
       expect(rendered.getByText("CI Build")).toBeTruthy();
       expect(rendered.queryByText("No PR.")).toBeNull();
+    });
+  });
+
+  it("ignores stale latest branch PR errors after branch switch", async () => {
+    let rejectFirstPrLookup: ((reason?: Error) => void) | undefined;
+
+    invokeMock.mockImplementation(
+      (cmd: string, args?: { branch?: string; projectPath?: string }) => {
+        if (cmd === "get_branch_quick_start") return [];
+        if (cmd === "get_branch_session_summary") return { ...sessionSummaryFixture, markdown: null };
+        if (cmd === "fetch_branch_linked_issue") return null;
+        if (cmd === "fetch_latest_branch_pr") {
+          if (args?.branch === "feature/markdown-ui") {
+            return new Promise<null>((_, reject) => {
+              rejectFirstPrLookup = (reason?: Error) => {
+                reject(reason);
+              };
+            });
+          }
+          return null;
+        }
+        if (cmd === "detect_docker_context") return dockerContextFixture;
+        return [];
+      }
+    );
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("fetch_latest_branch_pr", {
+        projectPath: "/tmp/project",
+        branch: "feature/markdown-ui",
+      });
+    });
+
+    await rendered.rerender({
+      projectPath: "/tmp/project",
+      selectedBranch: { ...branchFixture, name: "feature/next-task" },
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("fetch_latest_branch_pr", {
+        projectPath: "/tmp/project",
+        branch: "feature/next-task",
+      });
+    });
+
+    if (rejectFirstPrLookup) {
+      rejectFirstPrLookup(new Error("stale request"));
+    }
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const prTab = tabs[3] as HTMLElement;
+    await fireEvent.click(prTab);
+
+    await waitFor(() => {
+      expect(prTab.classList.contains("active")).toBe(true);
+      expect(rendered.getByText("No PR")).toBeTruthy();
+      expect(rendered.queryByText(/Failed to load PR:/)).toBeNull();
     });
   });
 

@@ -457,6 +457,8 @@
       if (currentKey !== key) return;
       latestBranchPr = result;
     } catch (err) {
+      const currentKey = `${projectPath}::${currentBranchName()}`;
+      if (currentKey !== key) return;
       latestBranchPr = null;
       latestBranchPrError = `Failed to load PR: ${toErrorMessage(err)}`;
     } finally {
@@ -1371,9 +1373,10 @@
 
   .branch-header {
     display: flex;
-    align-items: baseline;
+    align-items: flex-start;
     justify-content: space-between;
     gap: 12px;
+    flex-wrap: wrap;
   }
 
   .branch-header-actions {
@@ -1382,14 +1385,19 @@
     justify-content: flex-end;
     gap: 8px;
     flex-wrap: wrap;
-    flex-shrink: 0;
+    margin-left: auto;
+    min-width: 0;
+    flex-shrink: 1;
   }
 
   .branch-detail h2 {
+    margin: 0;
     font-size: var(--ui-font-lg);
     font-weight: 700;
     color: var(--text-primary);
     font-family: monospace;
+    flex: 1 1 auto;
+    min-width: 0;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
