@@ -1497,7 +1497,7 @@ fn generate_and_cache_session_summary(
         }
     };
 
-    match summarize_session(&client, &parsed, &job.settings.language) {
+    match summarize_session(&client, &parsed, &job.branch, &job.settings.language) {
         Ok(summary) => {
             // Avoid overwriting the cache if the branch's latest session has changed
             // since the job started (e.g., a new session was recorded).
