@@ -159,7 +159,7 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
           : "versionHistory";
     const fallbackLabel =
       type === "agentMode"
-        ? "Agent Mode"
+        ? "Master Agent"
         : type === "settings"
           ? "Settings"
           : "Version History";
@@ -433,7 +433,7 @@ export function buildRestoredProjectTabs(
   if (!restoredTabs.some((tab) => tab.id === "agentMode")) {
     restoredTabs.unshift({
       id: "agentMode",
-      label: "Agent Mode",
+      label: "Master Agent",
       type: "agentMode",
     });
   }

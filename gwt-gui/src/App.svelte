@@ -945,7 +945,7 @@
 
     const tab: Tab = {
       id: "agentMode",
-      label: "Agent Mode",
+      label: "Master Agent",
       type: "agentMode",
     };
     tabs = [...tabs, tab];
@@ -1158,7 +1158,7 @@
     if (!merged.some((tab) => tab.id === "agentMode")) {
       merged.unshift({
         id: "agentMode",
-        label: "Agent Mode",
+        label: "Master Agent",
         type: "agentMode",
       });
     }

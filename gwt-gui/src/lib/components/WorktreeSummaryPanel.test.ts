@@ -173,6 +173,14 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     await waitFor(() => {
+      expect(
+        invokeMock.mock.calls.some(
+          ([cmd, payload]) =>
+            cmd === "get_branch_session_summary" &&
+            payload?.projectPath === "/tmp/project" &&
+            payload?.branch === "feature/markdown-ui"
+        )
+      ).toBe(true);
       expect(rendered.container.querySelector("h2")?.textContent).toBe("feature/markdown-ui");
     });
 
