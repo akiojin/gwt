@@ -363,7 +363,7 @@ impl WorktreeManager {
                             return Ok(wt);
                         }
                     }
-                    // SPEC-bare-wt01 FR-002: Bare repos store fetched branches in
+                    // SPEC-013cd65c FR-002: Bare repos store fetched branches in
                     // refs/heads/* without refs/remotes/*, so check local refs first.
                     if Branch::exists(&self.repo_root, branch_candidate)? {
                         resolved_branch = branch_candidate.to_string();
@@ -381,7 +381,7 @@ impl WorktreeManager {
                     remote_branch =
                         resolve_remote_branch(&self.repo_root, normalized_branch, &remotes)?;
 
-                    // SPEC-bare-wt01 FR-003: Bare repos fetch to refs/heads/*,
+                    // SPEC-013cd65c FR-003: Bare repos fetch to refs/heads/*,
                     // so resolve_remote_branch (which checks refs/remotes/*) may
                     // still return None. Fall back to checking refs/heads/*.
                     if remote_branch.is_none() {
@@ -619,7 +619,7 @@ impl WorktreeManager {
                     if Branch::exists(&self.repo_root, branch)? {
                         resolved_base = Some(branch.to_string());
                     } else {
-                        // SPEC-bare-wt01 FR-004: Try remote_exists first, fall back to
+                        // SPEC-013cd65c FR-004: Try remote_exists first, fall back to
                         // fetch_all + local check when it fails.
                         let mut did_fetch = false;
                         let mut found = Branch::remote_exists(&self.repo_root, remote, branch)?;
@@ -656,7 +656,7 @@ impl WorktreeManager {
                             // Keep going with the local branch when only refs/heads/* exists.
                             resolved_base = Some(branch.to_string());
                         } else {
-                            // SPEC-bare-wt01: fetch_all may not work in bare repos
+                            // SPEC-013cd65c: fetch_all may not work in bare repos
                             // (no fetch refspec). Explicitly fetch the specific branch.
                             let fetch_output = crate::process::command("git")
                                 .args(["fetch", remote, &format!("{}:{}", branch, branch)])
@@ -2116,7 +2116,7 @@ mod tests {
 
     #[test]
     fn test_bare_repo_create_for_branch_from_unfetched_remote_branch() {
-        // SPEC-bare-wt01: create_for_branch("origin/<extra-branch>") should succeed
+        // SPEC-013cd65c: create_for_branch("origin/<extra-branch>") should succeed
         // even when that branch is not yet fetched into refs/heads/
         let (_temp, bare_path, _base_branch, extra_branch) = create_bare_repo_with_remote_branch();
 
@@ -2130,7 +2130,7 @@ mod tests {
 
     #[test]
     fn test_bare_repo_create_new_branch_from_unfetched_remote_base() {
-        // SPEC-bare-wt01: create_new_branch with base "origin/<extra-branch>" should succeed
+        // SPEC-013cd65c: create_new_branch with base "origin/<extra-branch>" should succeed
         // even when that branch is not yet fetched into refs/heads/
         let (_temp, bare_path, _base_branch, extra_branch) = create_bare_repo_with_remote_branch();
 
