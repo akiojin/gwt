@@ -17,6 +17,7 @@
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
+| [SPEC-1f9d2a6c](SPEC-1f9d2a6c/spec.md) | バグ修正仕様: Window復元時の無限生成防止 | 2026-02-17 |
 | [SPEC-013cd65c](SPEC-013cd65c/spec.md) | バグ修正仕様: ベアリポジトリでリモートブランチからワークツリー作成時に E1003 エラー | 2026-02-17 |
 | [SPEC-7c0444a8](SPEC-7c0444a8/spec.md) | 機能仕様: Issue #1097: Worktree Summaryを6タブ + Quick Launchヘッダーへ再編 | 2026-02-17 |
 | [SPEC-8ad13230](SPEC-8ad13230/spec.md) | 機能仕様: Agent Mode Issue-first Spec Bundle CRUD | 2026-02-17 |
