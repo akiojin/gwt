@@ -114,9 +114,9 @@ impl ViewMode {
 /// Sort mode for branch list
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BranchSortMode {
-    #[default]
     Default,
     Name,
+    #[default]
     Updated,
 }
 
@@ -131,9 +131,9 @@ impl BranchSortMode {
 
     pub fn cycle(&self) -> Self {
         match self {
+            BranchSortMode::Updated => BranchSortMode::Default,
             BranchSortMode::Default => BranchSortMode::Name,
             BranchSortMode::Name => BranchSortMode::Updated,
-            BranchSortMode::Updated => BranchSortMode::Default,
         }
     }
 }
@@ -2658,7 +2658,8 @@ mod tests {
             sort_branch("main"),
             sort_branch("chore/one"),
         ];
-        let state = BranchListState::new().with_branches(branches);
+        let mut state = BranchListState::new().with_branches(branches);
+        state.set_sort_mode(BranchSortMode::Default);
         let names: Vec<_> = state
             .filtered_branches()
             .iter()
@@ -2726,6 +2727,20 @@ mod tests {
             .map(|branch| branch.name.as_str())
             .collect();
         assert_eq!(names, vec!["feature/new", "feature/old", "feature/unknown"]);
+    }
+
+    #[test]
+    fn test_default_sort_mode_is_updated() {
+        let state = BranchListState::new();
+        assert_eq!(state.sort_mode, BranchSortMode::Updated);
+    }
+
+    #[test]
+    fn test_sort_mode_cycle_order() {
+        // Updated -> Default -> Name -> Updated
+        assert_eq!(BranchSortMode::Updated.cycle(), BranchSortMode::Default);
+        assert_eq!(BranchSortMode::Default.cycle(), BranchSortMode::Name);
+        assert_eq!(BranchSortMode::Name.cycle(), BranchSortMode::Updated);
     }
 
     #[test]
@@ -2912,10 +2927,8 @@ mod tests {
         branch_b.worktree_path = Some("/path".to_string());
 
         let mut state = BranchListState::new().with_branches(vec![branch_a, branch_b]);
-        assert_eq!(
-            state.selected_branch().map(|branch| branch.name.as_str()),
-            Some("feature/b")
-        );
+        // Select feature/b explicitly to test selection preservation
+        state.select_next();
 
         let updated = state.apply_worktree_created("feature/a", temp.path());
         assert!(updated);
