@@ -26,6 +26,10 @@
     | { ok: true; snapshot: FilterCacheEntry }
     | { ok: false; errorMessage: string };
   type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
+  type TauriEventListen = <T = unknown>(
+    event: string,
+    handler: (event: { payload: T }) => void
+  ) => Promise<() => void>;
 
   let {
     projectPath,
@@ -246,6 +250,7 @@
   let localRefreshKey = $state(0);
   let filterCache: Map<FilterType, FilterCacheEntry> = $state(new Map());
   const inflightFetches = new Map<string, Promise<FetchSnapshotResult>>();
+  let tauriEventListenPromise: Promise<TauriEventListen> | null = null;
 
   // Worktree safety info
   let worktreeMap: Map<string, WorktreeInfo> = $state(new Map());
@@ -518,7 +523,7 @@
 
     (async () => {
       try {
-        const { listen } = await import("@tauri-apps/api/event");
+        const listen = await getEventListen();
         const unlistenFn = await listen<CleanupProgress>(
           "cleanup-progress",
           (event) => {
@@ -555,7 +560,7 @@
 
     (async () => {
       try {
-        const { listen } = await import("@tauri-apps/api/event");
+        const listen = await getEventListen();
         const unlistenFn = await listen("cleanup-completed", () => {
           deletingBranches = new Set();
           localRefreshKey++;
@@ -583,9 +588,9 @@
 
     (async () => {
       try {
-        const { listen } = await import("@tauri-apps/api/event");
+        const listen = await getEventListen();
         const unlistenFn = await listen("agent-status-changed", () => {
-          localRefreshKey++;
+          refreshAgentStatusCachesInBackground();
         });
         if (cancelled) {
           unlistenFn();
@@ -606,9 +611,10 @@
   // Polling fallback for agent status (SPEC-b80e7996 FR-822)
   // Only active when there are agent tabs open (avoids unnecessary polling).
   $effect(() => {
+    if (mode !== "branch") return;
     if (agentTabBranches.length === 0) return;
     const interval = setInterval(() => {
-      localRefreshKey++;
+      refreshAgentStatusCachesInBackground();
     }, 10_000);
     return () => clearInterval(interval);
   });
@@ -675,6 +681,28 @@
       if (filter === activeFilter) continue;
       const cacheKey = buildFilterCacheKey(filter, path);
       void refreshFilterSnapshot(filter, path, cacheKey, token, true, false);
+    }
+  }
+
+  function refreshAgentStatusCachesInBackground() {
+    if (mode !== "branch") return;
+    const path = projectPath;
+    if (!path) return;
+    const token = fetchToken;
+    const targetFilters: FilterType[] = ["Local", "All"];
+
+    for (const filter of targetFilters) {
+      const cacheKey = buildFilterCacheKey(filter, path);
+      const cached = filterCache.get(filter);
+      if (!cached || cached.cacheKey !== cacheKey) continue;
+      void refreshFilterSnapshot(
+        filter,
+        path,
+        cacheKey,
+        token,
+        true,
+        filter === activeFilter
+      );
     }
   }
 
@@ -876,6 +904,27 @@
       throw new Error("Tauri invoke API is unavailable");
     }
     return invokeFn;
+  }
+
+  async function getEventListen(): Promise<TauriEventListen> {
+    if (!tauriEventListenPromise) {
+      tauriEventListenPromise = import("@tauri-apps/api/event").then((mod) => {
+        const listenFn =
+          (mod as { listen?: TauriEventListen; default?: { listen?: TauriEventListen } }).listen ??
+          (mod as { default?: { listen?: TauriEventListen } }).default?.listen;
+        if (!listenFn) {
+          throw new Error("Tauri event listen API is unavailable");
+        }
+        return listenFn;
+      });
+    }
+
+    try {
+      return await tauriEventListenPromise;
+    } catch (error) {
+      tauriEventListenPromise = null;
+      throw error;
+    }
   }
 
   function getSafetyLevel(branch: BranchInfo): string {
@@ -1242,7 +1291,7 @@
       class="mode-btn"
       class:active={mode === "agent"}
       aria-pressed={mode === "agent"}
-      title="Agent Mode"
+      title="Master Agent"
       onclick={() => handleModeChange("agent")}
     >
       <span class="mode-icon">A</span>

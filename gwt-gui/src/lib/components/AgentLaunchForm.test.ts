@@ -1632,7 +1632,7 @@ describe("AgentLaunchForm", () => {
                 number: 1,
                 title: "First issue",
                 updatedAt: "2026-02-13T00:00:00Z",
-                labels: ["backend", "urgent"],
+                labels: [{ name: "backend", color: "0075ca" }, { name: "urgent", color: "e4e669" }],
               },
             ],
             hasNextPage: true,
@@ -1727,6 +1727,7 @@ describe("AgentLaunchForm", () => {
         projectPath: "/tmp/project",
         page: 2,
         perPage: 30,
+        state: "open",
       });
       expect(rendered.getByText("Second issue")).toBeTruthy();
       expect(issuePageCalls).toBeGreaterThanOrEqual(2);
