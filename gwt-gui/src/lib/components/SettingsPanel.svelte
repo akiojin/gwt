@@ -1,6 +1,12 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
-  import type { ProfilesConfig, Profile, SettingsData, VoiceInputSettings } from "../types";
+  import type {
+    McpRegistrationStatus,
+    ProfilesConfig,
+    Profile,
+    SettingsData,
+    VoiceInputSettings,
+  } from "../types";
 
   let { onClose }: { onClose: () => void } = $props();
 
@@ -21,6 +27,10 @@
 
   let savedUiFontSize: number = $state(13);
   let savedTerminalFontSize: number = $state(13);
+  let mcpStatus: McpRegistrationStatus | null = $state(null);
+  let mcpStatusLoading: boolean = $state(false);
+  let mcpStatusRepairing: boolean = $state(false);
+  let mcpStatusMessage: string = $state("");
 
   const DEFAULT_VOICE_INPUT: VoiceInputSettings = {
     enabled: false,
@@ -29,6 +39,14 @@
     model: "base",
   };
   const DEFAULT_APP_LANGUAGE: SettingsData["app_language"] = "auto";
+  const DEFAULT_MCP_STATUS: McpRegistrationStatus = {
+    overall: "failed",
+    bridge_runtime: "missing",
+    bridge_script: "missing",
+    agents: [],
+    last_checked_at: 0,
+    last_error_message: null,
+  };
 
   type AIModelInfo = {
     id: string;
@@ -166,6 +184,93 @@
     return DEFAULT_APP_LANGUAGE;
   }
 
+  function normalizeMcpStatus(
+    value: Partial<McpRegistrationStatus> | null | undefined
+  ): McpRegistrationStatus {
+    const agents = Array.isArray(value?.agents)
+      ? value.agents.map((agent) => ({
+          agent_id: agent.agent_id ?? "unknown",
+          label: agent.label ?? "Unknown",
+          config_path: agent.config_path ?? null,
+          registered: !!agent.registered,
+          error_code: agent.error_code ?? null,
+          error_message: agent.error_message ?? null,
+        }))
+      : [];
+
+    return {
+      overall: value?.overall ?? DEFAULT_MCP_STATUS.overall,
+      bridge_runtime: value?.bridge_runtime ?? DEFAULT_MCP_STATUS.bridge_runtime,
+      bridge_script: value?.bridge_script ?? DEFAULT_MCP_STATUS.bridge_script,
+      agents,
+      last_checked_at:
+        typeof value?.last_checked_at === "number" ? value.last_checked_at : Date.now(),
+      last_error_message: value?.last_error_message ?? null,
+    };
+  }
+
+  function mcpStatusClass(status: string): "status-ok" | "status-degraded" | "status-failed" {
+    if (status === "ok") return "status-ok";
+    if (status === "degraded") return "status-degraded";
+    return "status-failed";
+  }
+
+  function mcpStatusText(status: string | null | undefined): string {
+    return (status ?? "unknown").toUpperCase();
+  }
+
+  function formatMcpCheckedAt(millis: number | null | undefined): string {
+    if (typeof millis !== "number" || millis <= 0) {
+      return "-";
+    }
+    try {
+      return new Date(millis).toLocaleString();
+    } catch {
+      return "-";
+    }
+  }
+
+  async function loadMcpStatus(showRefreshMessage: boolean) {
+    mcpStatusLoading = true;
+    if (showRefreshMessage) {
+      mcpStatusMessage = "";
+    }
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const status = await invoke<McpRegistrationStatus>("get_mcp_registration_status_cmd");
+      mcpStatus = normalizeMcpStatus(status);
+      if (showRefreshMessage) {
+        mcpStatusMessage = "MCP status refreshed.";
+      }
+    } catch (err) {
+      mcpStatus = mcpStatus ?? normalizeMcpStatus(null);
+      const message = toErrorMessage(err);
+      mcpStatusMessage = showRefreshMessage
+        ? `Failed to refresh MCP status: ${message}`
+        : `Failed to load MCP status: ${message}`;
+    } finally {
+      mcpStatusLoading = false;
+    }
+  }
+
+  async function repairMcpStatus() {
+    mcpStatusRepairing = true;
+    mcpStatusMessage = "";
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const status = await invoke<McpRegistrationStatus>("repair_mcp_registration_cmd");
+      mcpStatus = normalizeMcpStatus(status);
+      mcpStatusMessage =
+        status.overall === "ok"
+          ? "MCP registration repaired."
+          : "MCP registration remains degraded. Check details below.";
+    } catch (err) {
+      mcpStatusMessage = `Failed to repair MCP registration: ${toErrorMessage(err)}`;
+    } finally {
+      mcpStatusRepairing = false;
+    }
+  }
+
   async function fetchAiModels(
     endpoint: string,
     apiKey: string,
@@ -239,6 +344,7 @@
       const keys = Object.keys(loadedProfiles.profiles ?? {});
       const nextSelected = loadedProfiles.active ?? keys[0] ?? "";
       selectedProfileKey = nextSelected;
+      await loadMcpStatus(false);
     } catch (err) {
       console.error("Failed to load settings/profiles:", err);
       errorMessage = `Failed to load settings: ${toErrorMessage(err)}`;
@@ -740,6 +846,80 @@
       <div class="divider"></div>
 
       <details class="settings-section" open>
+        <summary class="section-title">MCP Bridge</summary>
+        <div class="section-content">
+          <div class="mcp-overview">
+            <span class={`mcp-badge ${mcpStatusClass(mcpStatus?.overall ?? "failed")}`}>
+              Overall: {mcpStatusText(mcpStatus?.overall)}
+            </span>
+            <span class="field-hint">
+              Last checked: {formatMcpCheckedAt(mcpStatus?.last_checked_at)}
+            </span>
+          </div>
+
+          <div class="mcp-health-grid">
+            <div class="mcp-health-item">
+              <span class="mcp-health-label">Runtime (bun/node)</span>
+              <span class={`mcp-mini-badge ${mcpStatusClass(mcpStatus?.bridge_runtime ?? "missing")}`}>
+                {mcpStatusText(mcpStatus?.bridge_runtime)}
+              </span>
+            </div>
+            <div class="mcp-health-item">
+              <span class="mcp-health-label">Bridge Script</span>
+              <span class={`mcp-mini-badge ${mcpStatusClass(mcpStatus?.bridge_script ?? "missing")}`}>
+                {mcpStatusText(mcpStatus?.bridge_script)}
+              </span>
+            </div>
+          </div>
+
+          <div class="mcp-agent-list">
+            {#each mcpStatus?.agents ?? [] as agent (agent.agent_id)}
+              <div class="mcp-agent-row">
+                <div class="mcp-agent-meta">
+                  <span class="mcp-agent-label">{agent.label}</span>
+                  {#if agent.config_path}
+                    <span class="mcp-agent-path mono">{agent.config_path}</span>
+                  {/if}
+                  {#if agent.error_message}
+                    <span class="field-hint">{agent.error_message}</span>
+                  {/if}
+                </div>
+                <span class={`mcp-mini-badge ${agent.registered ? "status-ok" : "status-failed"}`}>
+                  {agent.registered ? "REGISTERED" : "MISSING"}
+                </span>
+              </div>
+            {/each}
+          </div>
+
+          {#if mcpStatus?.last_error_message}
+            <span class="field-hint">{mcpStatus.last_error_message}</span>
+          {/if}
+          {#if mcpStatusMessage}
+            <span class="field-hint">{mcpStatusMessage}</span>
+          {/if}
+
+          <div class="row">
+            <button
+              class="btn btn-ghost"
+              onclick={() => void loadMcpStatus(true)}
+              disabled={mcpStatusLoading || mcpStatusRepairing}
+            >
+              {mcpStatusLoading ? "Refreshing..." : "Refresh MCP Status"}
+            </button>
+            <button
+              class="btn btn-add"
+              onclick={() => void repairMcpStatus()}
+              disabled={mcpStatusRepairing}
+            >
+              {mcpStatusRepairing ? "Repairing..." : "Repair MCP Registration"}
+            </button>
+          </div>
+        </div>
+      </details>
+
+      <div class="divider"></div>
+
+      <details class="settings-section" open>
         <summary class="section-title">Profiles</summary>
         <div class="section-content">
           <div class="field">
@@ -1178,6 +1358,12 @@
     width: 100%;
   }
 
+  .field input[type="text"].env-value,
+  .field input[type="text"].env-key-input,
+  .field input[type="text"].env-value-input {
+    max-width: none;
+  }
+
   .env-add-row {
     display: grid;
     grid-template-columns: 1fr 2fr auto;
@@ -1255,6 +1441,98 @@
     border: 1px solid var(--border-color);
     border-radius: 6px;
     width: fit-content;
+  }
+
+  .mcp-overview {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .mcp-badge,
+  .mcp-mini-badge {
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border-color);
+    font-family: monospace;
+    font-size: var(--ui-font-sm);
+    letter-spacing: 0.2px;
+  }
+
+  .status-ok {
+    border-color: var(--green);
+    color: var(--green);
+  }
+
+  .status-degraded {
+    border-color: var(--yellow);
+    color: var(--yellow);
+  }
+
+  .status-failed {
+    border-color: var(--red);
+    color: var(--red);
+  }
+
+  .mcp-health-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(220px, 1fr));
+    gap: 10px;
+    max-width: 760px;
+  }
+
+  .mcp-health-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+  }
+
+  .mcp-health-label {
+    color: var(--text-secondary);
+    font-size: var(--ui-font-md);
+  }
+
+  .mcp-agent-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-width: 960px;
+  }
+
+  .mcp-agent-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+  }
+
+  .mcp-agent-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .mcp-agent-label {
+    color: var(--text-primary);
+    font-size: var(--ui-font-md);
+    font-weight: 500;
+  }
+
+  .mcp-agent-path {
+    color: var(--text-muted);
+    font-size: var(--ui-font-sm);
+    word-break: break-all;
   }
 
   .field input:focus {
@@ -1355,8 +1633,13 @@
     font-size: var(--ui-font-md);
   }
 
-  .btn-add:hover {
+  .btn-add:hover:not(:disabled) {
     background: var(--bg-hover);
+  }
+
+  .btn-add:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .btn-cancel {
@@ -1478,6 +1761,13 @@
     }
     .ai-grid {
       grid-template-columns: 1fr;
+    }
+    .mcp-health-grid {
+      grid-template-columns: 1fr;
+    }
+    .mcp-agent-row {
+      flex-direction: column;
+      align-items: flex-start;
     }
   }
 </style>

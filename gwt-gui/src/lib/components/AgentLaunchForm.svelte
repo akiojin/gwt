@@ -20,12 +20,14 @@
     projectPath,
     selectedBranch = "",
     osEnvReady = true,
+    prefillIssue = null,
     onLaunch,
     onClose,
   }: {
     projectPath: string;
     selectedBranch?: string;
     osEnvReady?: boolean;
+    prefillIssue?: GitHubIssueInfo | null;
     onLaunch: (request: LaunchAgentRequest) => Promise<void>;
     onClose: () => void;
   } = $props();
@@ -185,6 +187,42 @@
     dockerDetected &&
       (dockerContext?.docker_available ?? false) &&
       (dockerComposeLike ? (dockerContext?.compose_available ?? false) : true)
+  );
+
+  // Auto-control: images missing → Build required
+  let dockerBuildRequired = $derived(
+    runtimeTarget === "docker" &&
+    dockerContext?.images_exist === false
+  );
+
+  // Auto-control: containers missing → Recreate required
+  let dockerRecreateRequired = $derived(
+    runtimeTarget === "docker" &&
+    dockerComposeLike &&
+    dockerContext?.container_status === "not_found"
+  );
+
+  // Human-readable Docker status hint
+  let dockerStatusHint = $derived(
+    (() => {
+      if (runtimeTarget !== "docker") return "";
+      const imgStatus = dockerContext?.images_exist;
+      const ctrStatus = dockerContext?.container_status;
+      if (imgStatus == null || ctrStatus == null) return "";
+      const imgLabel = imgStatus ? "Images ready" : "No images";
+      const ctrLabel =
+        ctrStatus === "running" ? "Containers running"
+        : ctrStatus === "stopped" ? "Containers stopped"
+        : "No containers";
+      const actions: string[] = [];
+      if (!imgStatus) actions.push("build");
+      if (ctrStatus === "not_found") actions.push("create");
+      else if (ctrStatus === "stopped") actions.push("recreate");
+      const suffix = actions.length > 0
+        ? ` \u2014 will ${actions.join(" and ")} automatically`
+        : "";
+      return `${imgLabel} / ${ctrLabel}${suffix}`;
+    })()
   );
   function supportsModelFor(agentId: string): boolean {
     return (
@@ -397,6 +435,12 @@
     loadAgentVersions(selectedAgent);
   });
 
+  // Auto-check Docker build/recreate when status demands it
+  $effect(() => {
+    if (dockerBuildRequired) dockerBuild = true;
+    if (dockerRecreateRequired) dockerRecreate = true;
+  });
+
   function toErrorMessage(err: unknown): string {
     if (typeof err === "string") return err;
     if (err && typeof err === "object" && "message" in err) {
@@ -539,6 +583,23 @@
     void loadBaseBranchOptions();
   });
 
+  // Apply prefill from Issue tab ("Work on this" button).
+  $effect(() => {
+    if (!prefillIssue) return;
+    branchMode = "new";
+    newBranchTab = "fromIssue";
+    selectedIssue = prefillIssue;
+
+    const names = prefillIssue.labels.map((l) => l.name.toLowerCase());
+    if (names.includes("bug")) {
+      newBranchPrefix = "bugfix/";
+    } else if (names.includes("hotfix")) {
+      newBranchPrefix = "hotfix/";
+    } else {
+      newBranchPrefix = "feature/";
+    }
+  });
+
   // Check gh CLI once per project after shell environment is ready.
   $effect(() => {
     void projectPath;
@@ -586,6 +647,7 @@
         projectPath,
         page,
         perPage: 30,
+        state: "open",
       });
       if (page === 1) {
         issues = resp.issues;
@@ -1200,8 +1262,8 @@
                   <span class="issue-title">{issue.title}</span>
                   {#if issue.labels.length > 0}
                     <span class="issue-labels">
-                      {#each issue.labels as lbl (lbl)}
-                        <span class="issue-label">{lbl}</span>
+                      {#each issue.labels as lbl (lbl.name)}
+                        <span class="issue-label">{lbl.name}</span>
                       {/each}
                     </span>
                   {/if}
@@ -1619,18 +1681,29 @@
             <div class="field">
               <span class="field-label">Docker</span>
               <label class="check-row">
-                <input type="checkbox" bind:checked={dockerBuild} />
+                <input
+                  type="checkbox"
+                  bind:checked={dockerBuild}
+                  disabled={dockerBuildRequired}
+                />
                 <span>{dockerComposeLike ? "Build images" : "Build image"}</span>
               </label>
               {#if dockerComposeLike}
                 <label class="check-row">
-                  <input type="checkbox" bind:checked={dockerRecreate} />
+                  <input
+                    type="checkbox"
+                    bind:checked={dockerRecreate}
+                    disabled={dockerRecreateRequired}
+                  />
                   <span>Force recreate</span>
                 </label>
                 <label class="check-row">
                   <input type="checkbox" bind:checked={dockerKeep} />
                   <span>Keep containers running after exit</span>
                 </label>
+              {/if}
+              {#if dockerStatusHint}
+                <span class="field-hint">{dockerStatusHint}</span>
               {/if}
             </div>
           {/if}

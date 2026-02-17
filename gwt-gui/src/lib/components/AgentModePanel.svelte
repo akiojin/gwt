@@ -10,7 +10,7 @@
     ai_error: null,
     last_error: null,
     is_waiting: false,
-    session_name: "Agent Mode",
+    session_name: "Master Agent",
     llm_call_count: 0,
     estimated_tokens: 0,
   };
@@ -130,7 +130,7 @@
 
 <section class="agent-mode">
   <header class="agent-header">
-    <div class="agent-title">{state.session_name ?? "Agent Mode"}</div>
+    <div class="agent-title">{state.session_name ?? "Master Agent"}</div>
     <div class="agent-stats">
       <span>LLM: {state.llm_call_count}</span>
       <span>Tokens: {state.estimated_tokens}</span>

@@ -2,7 +2,8 @@
   import type {
     Tab,
     BranchInfo,
-    ProjectInfo,
+    GitHubIssueInfo,
+    OpenProjectResult,
     LaunchAgentRequest,
     LaunchFinishedPayload,
     ProbePathResult,
@@ -61,6 +62,10 @@
     removeWindowSession,
     upsertWindowSession,
   } from "./lib/windowSessions";
+  import {
+    releaseWindowSessionRestoreLead,
+    tryAcquireWindowSessionRestoreLead,
+  } from "./lib/windowSessionRestoreLeader";
 
   interface SettingsUpdatedPayload {
     uiFontSize?: number;
@@ -80,8 +85,6 @@
   const DEFAULT_SIDEBAR_WIDTH_PX = 260;
   const MIN_SIDEBAR_WIDTH_PX = 220;
   const MAX_SIDEBAR_WIDTH_PX = 520;
-  const WINDOW_SESSION_RESTORE_LEAD_KEY = "gwt.windowSessions.restoreLeader.v1";
-  const WINDOW_SESSION_RESTORE_LEAD_TTL_MS = 15_000;
   type SidebarMode = "branch" | "agent";
 
   const DEFAULT_VOICE_INPUT_SETTINGS: VoiceInputSettings = {
@@ -143,6 +146,7 @@
   let sidebarWidthPx: number = $state(loadSidebarWidth());
   let sidebarMode: SidebarMode = $state(loadSidebarMode());
   let showAgentLaunch: boolean = $state(false);
+  let prefillIssue: GitHubIssueInfo | null = $state(null);
   let showCleanupModal: boolean = $state(false);
   let cleanupPreselectedBranch: string | null = $state(null);
   let showAbout: boolean = $state(false);
@@ -153,11 +157,6 @@
   let worktreesEventAvailable: boolean = $state(false);
   let windowSessionRestoreStarted: boolean = false;
   let currentWindowLabel: string | null = $state(null);
-  type WindowSessionRestoreLeaderState = {
-    label: string;
-    expiresAt: number;
-  };
-
   let selectedBranch: BranchInfo | null = $state(null);
   let currentBranch: string = $state("");
 
@@ -465,28 +464,41 @@
   $effect(() => {
     if (windowSessionRestoreStarted) return;
     windowSessionRestoreStarted = true;
+    const releaseDelayMs = 3000;
 
     (async () => {
       const label = await resolveCurrentWindowLabel();
       if (!label) return;
-      const isRestoreLeader = tryAcquireWindowSessionRestoreLead(label);
+      let restoreStore: Storage | null = null;
+      if (typeof window !== "undefined") {
+        try {
+          restoreStore = window.localStorage;
+        } catch {
+          restoreStore = null;
+        }
+      }
+      const isRestoreLeader = restoreStore
+        ? tryAcquireWindowSessionRestoreLead(restoreStore, label)
+        : false;
 
       const sessions = loadWindowSessions();
       const normalizedSessions = sessions.filter(
         (entry) => entry.label !== label && entry.projectPath,
       );
 
-      if (isRestoreLeader) {
+      if (isRestoreLeader && restoreStore) {
         try {
           for (const entry of normalizedSessions) {
             await openAndNormalizeWindowSession(entry.label, entry.projectPath);
           }
+          await new Promise<void>((resolve) => setTimeout(resolve, releaseDelayMs));
+          await restoreWindowSessionProject(label);
         } finally {
-          releaseWindowSessionRestoreLead(label);
+          releaseWindowSessionRestoreLead(restoreStore, label);
         }
+      } else {
+        await restoreWindowSessionProject(label);
       }
-
-      await restoreWindowSessionProject(label);
     })();
   });
 
@@ -775,77 +787,6 @@
     }
   }
 
-  function readWindowSessionRestoreLeader(
-    storage: Storage,
-  ): WindowSessionRestoreLeaderState | null {
-    try {
-      const raw = storage.getItem(WINDOW_SESSION_RESTORE_LEAD_KEY);
-      if (!raw) return null;
-
-      const parsed = JSON.parse(raw);
-      if (!parsed || typeof parsed !== "object") return null;
-
-      const label = typeof parsed.label === "string" ? parsed.label.trim() : "";
-      const expiresAtRaw = parsed.expiresAt;
-      const expiresAt =
-        typeof expiresAtRaw === "number" && Number.isFinite(expiresAtRaw)
-          ? Math.floor(expiresAtRaw)
-          : NaN;
-
-      if (!label || !Number.isFinite(expiresAt)) return null;
-
-      return { label, expiresAt };
-    } catch {
-      return null;
-    }
-  }
-
-  function tryAcquireWindowSessionRestoreLead(
-    label: string,
-  ): boolean {
-    if (typeof window === "undefined") return false;
-    let store: Storage;
-    try {
-      store = window.localStorage;
-    } catch {
-      return false;
-    }
-
-    try {
-      const existing = readWindowSessionRestoreLeader(store);
-      const now = Date.now();
-      if (
-        existing &&
-        existing.label.length > 0 &&
-        existing.expiresAt > now &&
-        existing.label !== label
-      ) {
-        return false;
-      }
-
-      const next: WindowSessionRestoreLeaderState = {
-        label,
-        expiresAt: now + WINDOW_SESSION_RESTORE_LEAD_TTL_MS,
-      };
-      store.setItem(WINDOW_SESSION_RESTORE_LEAD_KEY, JSON.stringify(next));
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  function releaseWindowSessionRestoreLead(label: string) {
-    if (typeof window === "undefined") return;
-    try {
-      const rawStore = window.localStorage;
-      const existing = readWindowSessionRestoreLeader(rawStore);
-      if (!existing || existing.label !== label) return;
-      rawStore.removeItem(WINDOW_SESSION_RESTORE_LEAD_KEY);
-    } catch {
-      // Ignore storage failures.
-    }
-  }
-
   async function updateWindowSession(projectPathForWindow: string | null) {
     const label = await resolveCurrentWindowLabel();
     if (!label) return;
@@ -880,11 +821,7 @@
     if (!session?.projectPath) return false;
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const info = await invoke<ProjectInfo>("open_project", {
-        path: session.projectPath,
-      });
-      handleOpenedProjectPath(info.path);
+      await openProjectAndApplyCurrentWindow(session.projectPath);
       return true;
     } catch {
       removeWindowSession(label);
@@ -896,6 +833,15 @@
     projectPath = path;
     fetchCurrentBranch();
     void updateWindowSession(path);
+  }
+
+  async function openProjectAndApplyCurrentWindow(path: string): Promise<OpenProjectResult> {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const result = await invoke<OpenProjectResult>("open_project", { path });
+    if (result.action === "opened") {
+      handleOpenedProjectPath(result.info.path);
+    }
+    return result;
   }
 
   async function setWindowTitle() {
@@ -945,7 +891,7 @@
 
     const tab: Tab = {
       id: "agentMode",
-      label: "Agent Mode",
+      label: "Master Agent",
       type: "agentMode",
     };
     tabs = [...tabs, tab];
@@ -1158,7 +1104,7 @@
     if (!merged.some((tab) => tab.id === "agentMode")) {
       merged.unshift({
         id: "agentMode",
-        label: "Agent Mode",
+        label: "Master Agent",
         type: "agentMode",
       });
     }
@@ -1309,6 +1255,48 @@
     };
     tabs = [...tabs, tab];
     activeTabId = tab.id;
+  }
+
+  function openIssuesTab() {
+    const existing = tabs.find(
+      (t) => t.type === "issues" || t.id === "issues",
+    );
+    if (existing) {
+      activeTabId = existing.id;
+      return;
+    }
+
+    const tab: Tab = {
+      id: "issues",
+      label: "Issues",
+      type: "issues",
+    };
+    tabs = [...tabs, tab];
+    activeTabId = tab.id;
+  }
+
+  function handleIssueCountChange(count: number) {
+    tabs = tabs.map((t) =>
+      t.id === "issues" ? { ...t, label: count > 0 ? `Issues (${count})` : "Issues" } : t,
+    );
+  }
+
+  function handleWorkOnIssueFromTab(issue: GitHubIssueInfo) {
+    prefillIssue = issue;
+    showAgentLaunch = true;
+  }
+
+  function handleSwitchToWorktreeFromTab(branchName: string) {
+    // Find the matching agent tab and switch to it
+    const agentTab = tabs.find(
+      (t) => t.type === "agent" && normalizeBranchName(t.label) === normalizeBranchName(branchName),
+    );
+    if (agentTab) {
+      activeTabId = agentTab.id;
+      return;
+    }
+    // If no tab exists, select the branch in the sidebar
+    sidebarRefreshKey++;
   }
 
   function openIssueSpecTab(payload: AgentModeSpecIssuePayload) {
@@ -1476,10 +1464,7 @@
           });
 
           if (probe.kind === "gwtProject" && probe.projectPath) {
-            const info = await invoke<ProjectInfo>("open_project", {
-              path: probe.projectPath,
-            });
-            handleOpenedProjectPath(info.path);
+            await openProjectAndApplyCurrentWindow(probe.projectPath);
             return;
           }
 
@@ -1509,10 +1494,7 @@
             });
 
             if (probe.kind === "gwtProject" && probe.projectPath) {
-              const info = await invoke<ProjectInfo>("open_project", {
-                path: probe.projectPath,
-              });
-              handleOpenedProjectPath(info.path);
+              await openProjectAndApplyCurrentWindow(probe.projectPath);
               break;
             }
 
@@ -1598,6 +1580,9 @@
         break;
       case "version-history":
         openVersionHistoryTab();
+        break;
+      case "git-issues":
+        openIssuesTab();
         break;
       case "check-updates":
         {
@@ -1871,7 +1856,8 @@
       if (
         tab.type === "agentMode" ||
         tab.type === "settings" ||
-        tab.type === "versionHistory"
+        tab.type === "versionHistory" ||
+        tab.type === "issues"
       ) {
         storedTabs.push({
           type: tab.type,
@@ -2110,6 +2096,9 @@
         onTabSelect={handleTabSelect}
         onTabClose={handleTabClose}
         onTabReorder={handleTabReorder}
+        onWorkOnIssue={handleWorkOnIssueFromTab}
+        onSwitchToWorktree={handleSwitchToWorktreeFromTab}
+        onIssueCountChange={handleIssueCountChange}
       />
     </div>
     <StatusBar
@@ -2137,8 +2126,9 @@
     projectPath={projectPath as string}
     selectedBranch={selectedBranch?.name ?? currentBranch}
     {osEnvReady}
+    {prefillIssue}
     onLaunch={handleAgentLaunch}
-    onClose={() => (showAgentLaunch = false)}
+    onClose={() => { showAgentLaunch = false; prefillIssue = null; }}
   />
 {/if}
 
@@ -2253,9 +2243,7 @@
     migrationSourceRoot = "";
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const info = await invoke<ProjectInfo>("open_project", { path: p });
-      handleOpenedProjectPath(info.path);
+      await openProjectAndApplyCurrentWindow(p);
     } catch (err) {
       appError = `Failed to open migrated project: ${toErrorMessage(err)}`;
     }

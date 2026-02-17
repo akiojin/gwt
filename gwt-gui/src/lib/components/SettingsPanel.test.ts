@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, fireEvent, waitFor, cleanup } from "@testing-library/svelte";
 
-import type { ProfilesConfig, SettingsData } from "../types";
+import type { McpRegistrationStatus, ProfilesConfig, SettingsData } from "../types";
 
 const invokeMock = vi.fn();
 
@@ -53,6 +53,32 @@ const profilesFixture: ProfilesConfig = {
   },
 };
 
+const mcpStatusFixture: McpRegistrationStatus = {
+  overall: "ok",
+  bridge_runtime: "ok",
+  bridge_script: "ok",
+  agents: [
+    {
+      agent_id: "claude",
+      label: "Claude Code",
+      config_path: "/tmp/.claude.json",
+      registered: true,
+      error_code: null,
+      error_message: null,
+    },
+    {
+      agent_id: "codex",
+      label: "Codex",
+      config_path: "/tmp/.codex/config.toml",
+      registered: true,
+      error_code: null,
+      error_message: null,
+    },
+  ],
+  last_checked_at: 1_739_763_600_000,
+  last_error_message: null,
+};
+
 async function renderSettingsPanel(overrides: Record<string, unknown> = {}) {
   const { default: SettingsPanel } = await import("./SettingsPanel.svelte");
   return render(SettingsPanel, {
@@ -71,6 +97,8 @@ describe("SettingsPanel", () => {
       if (command === "get_settings") return structuredClone(settingsFixture);
       if (command === "get_profiles") return structuredClone(profilesFixture);
       if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
+      if (command === "get_mcp_registration_status_cmd") return structuredClone(mcpStatusFixture);
+      if (command === "repair_mcp_registration_cmd") return structuredClone(mcpStatusFixture);
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
       return null;
@@ -88,9 +116,55 @@ describe("SettingsPanel", () => {
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("get_settings");
       expect(invokeMock).toHaveBeenCalledWith("get_profiles");
+      expect(invokeMock).toHaveBeenCalledWith("get_mcp_registration_status_cmd");
       expect(rendered.getByText("Appearance")).toBeTruthy();
       expect(rendered.getByText("Voice Input")).toBeTruthy();
+      expect(rendered.getByText("MCP Bridge")).toBeTruthy();
       expect(rendered.getByText("Profiles")).toBeTruthy();
+    });
+  });
+
+  it("repairs MCP registration status", async () => {
+    const degradedStatus: McpRegistrationStatus = {
+      ...mcpStatusFixture,
+      overall: "degraded",
+      bridge_script: "missing",
+      agents: mcpStatusFixture.agents.map((agent) =>
+        agent.agent_id === "codex" ? { ...agent, registered: false } : agent
+      ),
+      last_error_message: "MCP server is not registered for: Codex",
+    };
+    const repairedStatus: McpRegistrationStatus = {
+      ...mcpStatusFixture,
+      overall: "ok",
+      bridge_script: "ok",
+      agents: mcpStatusFixture.agents.map((agent) => ({ ...agent, registered: true })),
+      last_error_message: null,
+    };
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
+      if (command === "get_mcp_registration_status_cmd") return structuredClone(degradedStatus);
+      if (command === "repair_mcp_registration_cmd") return structuredClone(repairedStatus);
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("Overall: DEGRADED")).toBeTruthy();
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Repair MCP Registration" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("repair_mcp_registration_cmd");
+      expect(rendered.getByText("Overall: OK")).toBeTruthy();
+      expect(rendered.getByText("MCP registration repaired.")).toBeTruthy();
     });
   });
 
@@ -307,6 +381,36 @@ describe("SettingsPanel", () => {
     await fireEvent.click(terminalButtons[0] as HTMLButtonElement);
     await waitFor(() => {
       expect(terminalInput.value).toBe("23");
+    });
+  });
+
+  it("toggles env Add button disabled state based on KEY input", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await rendered.findByText("Environment Variables");
+    const addRow = rendered.container.querySelector(".env-add-row") as HTMLElement;
+    const keyInput = addRow.querySelector(".env-key-input") as HTMLInputElement;
+    const addButton = addRow.querySelector("button") as HTMLButtonElement;
+
+    // Initial state: disabled (empty KEY)
+    expect(addButton.disabled).toBe(true);
+
+    // After entering KEY: enabled
+    await fireEvent.input(keyInput, { target: { value: "MY_VAR" } });
+    await waitFor(() => {
+      expect(addButton.disabled).toBe(false);
+    });
+
+    // Whitespace-only KEY: disabled
+    await fireEvent.input(keyInput, { target: { value: "   " } });
+    await waitFor(() => {
+      expect(addButton.disabled).toBe(true);
+    });
+
+    // Re-enter KEY: enabled again
+    await fireEvent.input(keyInput, { target: { value: "ANOTHER_VAR" } });
+    await waitFor(() => {
+      expect(addButton.disabled).toBe(false);
     });
   });
 

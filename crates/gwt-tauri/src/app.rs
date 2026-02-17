@@ -3,12 +3,18 @@
 use crate::state::AppState;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use tauri::Manager;
 use tauri::{Emitter, EventTarget, WebviewWindowBuilder};
 use tracing::{info, warn};
 
 #[cfg(not(test))]
 use gwt_core::config::os_env;
+
+#[cfg(not(test))]
+use gwt_core::config::mcp_registration;
+#[cfg(not(test))]
+use tokio::io::AsyncReadExt;
 
 #[cfg(any(not(test), target_os = "macos"))]
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -72,6 +78,7 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
         crate::menu::MENU_ID_FILE_CLOSE_PROJECT => Some("close-project"),
         crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES => Some("cleanup-worktrees"),
         crate::menu::MENU_ID_GIT_VERSION_HISTORY => Some("version-history"),
+        crate::menu::MENU_ID_GIT_ISSUES => Some("git-issues"),
         crate::menu::MENU_ID_EDIT_COPY => Some("edit-copy"),
         crate::menu::MENU_ID_EDIT_PASTE => Some("edit-paste"),
         crate::menu::MENU_ID_TOOLS_NEW_TERMINAL => Some("new-terminal"),
@@ -163,8 +170,11 @@ fn best_window(app: &tauri::AppHandle<tauri::Wry>) -> Option<tauri::WebviewWindo
 pub fn build_app(
     builder: tauri::Builder<tauri::Wry>,
     app_state: AppState,
+    _single_instance_guard: Option<Arc<crate::single_instance::SingleInstanceGuard>>,
 ) -> tauri::Builder<tauri::Wry> {
     let builder = builder.manage(app_state);
+    #[cfg(not(test))]
+    let single_instance_guard = _single_instance_guard.clone();
 
     // Plugins are not required for unit tests and may rely on runtime features.
     #[cfg(not(test))]
@@ -173,9 +183,44 @@ pub fn build_app(
         .plugin(tauri_plugin_store::Builder::default().build());
 
     builder
-        .setup(|_app| {
+        .setup(move |_app| {
             #[cfg(not(test))]
             {
+                if let Some(guard) = single_instance_guard.as_ref() {
+                    spawn_single_instance_focus_listener(_app.handle().clone(), guard.clone());
+                }
+
+                // Clean up stale MCP state from a previous crash (FR-019)
+                crate::mcp_ws_server::cleanup_stale_state_file();
+
+                // Start MCP WebSocket server (FR-001, FR-005)
+                {
+                    let app_handle = _app.handle().clone();
+                    let state = _app.state::<AppState>();
+                    let mcp_handle_slot = state.mcp_ws_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        match crate::mcp_ws_server::start(app_handle).await {
+                            Ok(handle) => {
+                                tracing::info!(
+                                    category = "mcp",
+                                    port = handle.port,
+                                    "MCP WebSocket server ready"
+                                );
+                                if let Ok(mut slot) = mcp_handle_slot.lock() {
+                                    *slot = Some(handle);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    category = "mcp",
+                                    error = %e,
+                                    "Failed to start MCP WebSocket server"
+                                );
+                            }
+                        }
+                    });
+                }
+
                 // Native menubar (SPEC-4470704f)
                 let _ = crate::menu::rebuild_menu(_app.handle());
 
@@ -250,6 +295,40 @@ pub fn build_app(
 
                 #[cfg(target_os = "macos")]
                 _tray.set_icon_as_template(true)?;
+
+                // MCP bridge: cleanup stale registrations then register for all agents (T21).
+                // Delay briefly so login-shell PATH capture can complete first.
+                {
+                    let app_handle = _app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        let state = app_handle.state::<AppState>();
+                        let resource_dir = app_handle.path().resource_dir().ok();
+                        let _ = state.wait_os_env_ready(std::time::Duration::from_secs(2));
+                        let status = mcp_registration::repair_registration(resource_dir.as_deref());
+                        state.set_mcp_registration_status(status.clone());
+                        match status.overall.as_str() {
+                            "ok" => {
+                                info!(
+                                    category = "mcp",
+                                    "MCP bridge server registered in all agent configs"
+                                );
+                            }
+                            _ => {
+                                warn!(
+                                    category = "mcp",
+                                    overall = %status.overall,
+                                    runtime = %status.bridge_runtime,
+                                    bridge = %status.bridge_script,
+                                    error = %status
+                                        .last_error_message
+                                        .clone()
+                                        .unwrap_or_else(|| "unknown".to_string()),
+                                    "MCP registration is degraded"
+                                );
+                            }
+                        }
+                    });
+                }
 
                 // Background task: capture login shell environment
                 {
@@ -531,6 +610,8 @@ pub fn build_app(
             crate::commands::terminal::capture_scrollback_tail,
             crate::commands::agent_mode::get_agent_mode_state_cmd,
             crate::commands::agent_mode::send_agent_mode_message,
+            crate::commands::mcp::get_mcp_registration_status_cmd,
+            crate::commands::mcp::repair_mcp_registration_cmd,
             crate::commands::settings::get_settings,
             crate::commands::settings::save_settings,
             crate::commands::agents::detect_agents,
@@ -563,6 +644,8 @@ pub fn build_app(
             crate::commands::window::open_gwt_window,
             crate::commands::recent_projects::get_recent_projects,
             crate::commands::issue::fetch_github_issues,
+            crate::commands::issue::fetch_github_issue_detail,
+            crate::commands::issue::fetch_branch_linked_issue,
             crate::commands::issue::check_gh_cli_status,
             crate::commands::issue::find_existing_issue_branch,
             crate::commands::issue::link_branch_to_issue,
@@ -578,10 +661,93 @@ pub fn build_app(
             crate::commands::issue_spec::sync_spec_issue_project_cmd,
             crate::commands::pullrequest::fetch_pr_status,
             crate::commands::pullrequest::fetch_pr_detail,
+            crate::commands::pullrequest::fetch_latest_branch_pr,
             crate::commands::pullrequest::fetch_ci_log,
             crate::commands::system::get_system_info,
             crate::commands::system::get_stats,
         ])
+}
+
+#[cfg(not(test))]
+fn spawn_single_instance_focus_listener(
+    app_handle: tauri::AppHandle<tauri::Wry>,
+    guard: Arc<crate::single_instance::SingleInstanceGuard>,
+) {
+    tauri::async_runtime::spawn(async move {
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(err) => {
+                warn!(
+                    category = "single_instance",
+                    error = %err,
+                    "Failed to bind focus listener"
+                );
+                return;
+            }
+        };
+
+        let port = match listener.local_addr() {
+            Ok(addr) => addr.port(),
+            Err(err) => {
+                warn!(
+                    category = "single_instance",
+                    error = %err,
+                    "Failed to resolve focus listener address"
+                );
+                return;
+            }
+        };
+
+        if let Err(err) = guard.set_focus_port(Some(port)) {
+            warn!(
+                category = "single_instance",
+                error = %err,
+                "Failed to publish focus listener endpoint"
+            );
+            return;
+        }
+
+        info!(
+            category = "single_instance",
+            port = port,
+            "Focus listener ready"
+        );
+
+        loop {
+            let (mut socket, _) = match listener.accept().await {
+                Ok(v) => v,
+                Err(err) => {
+                    warn!(
+                        category = "single_instance",
+                        error = %err,
+                        "Focus listener accept failed"
+                    );
+                    break;
+                }
+            };
+
+            let mut buf = [0u8; 64];
+            let bytes_read = match socket.read(&mut buf).await {
+                Ok(n) => n,
+                Err(err) => {
+                    warn!(
+                        category = "single_instance",
+                        error = %err,
+                        "Focus listener read failed"
+                    );
+                    continue;
+                }
+            };
+            if bytes_read == 0 {
+                continue;
+            }
+
+            let payload = String::from_utf8_lossy(&buf[..bytes_read]);
+            if payload.contains("focus") {
+                show_best_window(&app_handle);
+            }
+        }
+    });
 }
 
 fn focused_window_label(app: &tauri::AppHandle<tauri::Wry>) -> String {
@@ -745,6 +911,16 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
         }
         tauri::RunEvent::Exit => {
             info!(category = "tauri", event = "Exit", "App exiting");
+
+            // T22: Unregister MCP bridge from all agent configs on exit
+            #[cfg(not(test))]
+            if let Err(e) = gwt_core::config::unregister_all_mcp() {
+                warn!(
+                    category = "mcp",
+                    error = %e,
+                    "Failed to unregister MCP server on exit"
+                );
+            }
         }
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen {

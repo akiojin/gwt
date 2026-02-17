@@ -20,6 +20,7 @@ const SECTION_QUICKSTART: &str = "Quickstart";
 const SECTION_CONTRACTS: &str = "Contracts";
 const SECTION_CHECKLISTS: &str = "Checklists";
 const SECTION_CHECKLIST_LEGACY: &str = "Checklist";
+const SECTION_ACCEPTANCE_CHECKLIST: &str = "Acceptance Checklist";
 
 const ARTIFACT_MARKER_PREFIX: &str = "<!-- GWT_SPEC_ARTIFACT:";
 const ARTIFACT_MARKER_SUFFIX: &str = " -->";
@@ -144,7 +145,11 @@ pub fn upsert_spec_issue(
     }
 
     let existing = find_spec_issue_by_spec_id(repo_path, spec_id)?;
-    let body = render_issue_body(spec_id, sections, &SpecIssueChecklist::default());
+    let checklist = existing
+        .as_ref()
+        .map(|issue| parse_acceptance_checklist_from_body(&issue.body))
+        .unwrap_or_default();
+    let body = render_issue_body(spec_id, sections, &checklist);
 
     if let Some(issue) = existing.as_ref() {
         if let Some(expected) = expected_etag {
@@ -426,11 +431,16 @@ fn render_issue_body(
             "Artifact files under `checklists/` are managed in issue comments with `checklist:<name>` entries."
         )
     ));
-    out.push_str("## Acceptance Checklist\n\n");
+    out.push_str(&format!("## {}\n\n", SECTION_ACCEPTANCE_CHECKLIST));
     if checklist.items.is_empty() {
         out.push_str("- [ ] Add acceptance checklist\n");
     } else {
         for item in &checklist.items {
+            if let Some(normalized) = normalize_acceptance_checklist_line(item) {
+                out.push_str(&normalized);
+                out.push('\n');
+                continue;
+            }
             out.push_str("- [ ] ");
             out.push_str(item.trim());
             out.push('\n');
@@ -888,13 +898,58 @@ fn split_markdown_sections(body: &str) -> HashMap<String, String> {
     map
 }
 
+fn parse_acceptance_checklist_from_body(body: &str) -> SpecIssueChecklist {
+    let sections = split_markdown_sections(body);
+    let Some(content) = sections.get(SECTION_ACCEPTANCE_CHECKLIST) else {
+        return SpecIssueChecklist::default();
+    };
+
+    let items = content
+        .lines()
+        .filter_map(normalize_acceptance_checklist_line)
+        .collect::<Vec<String>>();
+
+    if items.is_empty() {
+        SpecIssueChecklist::default()
+    } else {
+        SpecIssueChecklist { items }
+    }
+}
+
+fn normalize_acceptance_checklist_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let rest = trimmed
+        .strip_prefix("- [")
+        .or_else(|| trimmed.strip_prefix("* ["))?;
+    let state = rest.chars().next()?;
+    if !matches!(state, ' ' | 'x' | 'X') {
+        return None;
+    }
+    let text = rest.get(1..)?.strip_prefix(']')?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let checked = matches!(state, 'x' | 'X');
+    let state_mark = if checked { "x" } else { " " };
+    Some(format!("- [{state_mark}] {text}"))
+}
+
 fn build_etag(updated_at: &str, body: &str) -> String {
     format!("{}:{}", updated_at.trim(), body.len())
 }
 
 fn parse_issue_number_from_create_output(output: &str) -> Result<u64, String> {
-    for part in output.split('/') {
-        if let Ok(number) = part.parse::<u64>() {
+    for token in output.split_whitespace().rev() {
+        let trimmed = token
+            .trim()
+            .trim_matches(|c: char| c == '"' || c == '\'' || c == '`')
+            .trim_end_matches('/');
+        if trimmed.is_empty() {
+            continue;
+        }
+        let tail = trimmed.rsplit('/').next().unwrap_or(trimmed);
+        let tail = tail.split(['?', '#']).next().unwrap_or(tail);
+        if let Ok(number) = tail.parse::<u64>() {
             return Ok(number);
         }
     }
@@ -1111,6 +1166,28 @@ mod tests {
         let n =
             parse_issue_number_from_create_output("https://github.com/org/repo/issues/42").unwrap();
         assert_eq!(n, 42);
+    }
+
+    #[test]
+    fn parse_issue_number_prefers_tail_segment() {
+        let n = parse_issue_number_from_create_output("https://github.com/123/repo/issues/42")
+            .expect("parse issue number");
+        assert_eq!(n, 42);
+    }
+
+    #[test]
+    fn parse_acceptance_checklist_preserves_checked_items() {
+        let body = "## Acceptance Checklist\n\n- [x] done\n- [ ] pending\n";
+        let checklist = parse_acceptance_checklist_from_body(body);
+        assert_eq!(
+            checklist.items,
+            vec!["- [x] done".to_string(), "- [ ] pending".to_string()]
+        );
+
+        let rendered =
+            render_issue_body("SPEC-1234abcd", &SpecIssueSections::default(), &checklist);
+        assert!(rendered.contains("- [x] done"));
+        assert!(rendered.contains("- [ ] pending"));
     }
 
     #[test]

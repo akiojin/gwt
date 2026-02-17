@@ -1,6 +1,8 @@
 use crate::agent_master::AgentModeState;
+use crate::mcp_ws_server::McpWsHandle;
 use gwt_core::ai::SessionSummaryCache;
 use gwt_core::config::os_env::EnvSource;
+use gwt_core::config::McpRegistrationStatus;
 use gwt_core::terminal::manager::PaneManager;
 use gwt_core::update::UpdateManager;
 use std::collections::{HashMap, HashSet};
@@ -77,6 +79,8 @@ pub struct AppState {
     ///
     /// Only stores windows that currently have a project opened.
     pub window_projects: Mutex<HashMap<String, String>>,
+    /// Canonical project identity per window label (used for duplicate project detection).
+    pub window_project_identities: Mutex<HashMap<String, String>>,
     /// One-shot permission to allow a window to actually close (instead of always hiding it).
     /// Used by close-event flows that explicitly permit destruction.
     pub windows_allowed_to_close: Mutex<HashSet<String>>,
@@ -103,6 +107,11 @@ pub struct AppState {
     pub exit_confirm_inflight: AtomicBool,
     pub os_env: Arc<OnceCell<HashMap<String, String>>>,
     pub os_env_source: Arc<OnceCell<EnvSource>>,
+    /// Handle to the MCP WebSocket server (started during setup).
+    #[cfg_attr(test, allow(dead_code))]
+    pub mcp_ws_handle: Arc<Mutex<Option<McpWsHandle>>>,
+    /// Last observed MCP registration health snapshot.
+    pub mcp_registration_status: Arc<Mutex<McpRegistrationStatus>>,
     pub update_manager: UpdateManager,
     /// MRU (most-recently-used) window focus history. Front = most recent.
     pub window_focus_history: Mutex<Vec<String>>,
@@ -113,6 +122,7 @@ impl AppState {
         Self {
             system_monitor: Mutex::new(gwt_core::system_info::SystemMonitor::new()),
             window_projects: Mutex::new(HashMap::new()),
+            window_project_identities: Mutex::new(HashMap::new()),
             windows_allowed_to_close: Mutex::new(HashSet::new()),
             window_agent_tabs: Mutex::new(HashMap::new()),
             window_migrations: Mutex::new(HashMap::new()),
@@ -131,6 +141,8 @@ impl AppState {
             exit_confirm_inflight: AtomicBool::new(false),
             os_env: Arc::new(OnceCell::new()),
             os_env_source: Arc::new(OnceCell::new()),
+            mcp_ws_handle: Arc::new(Mutex::new(None)),
+            mcp_registration_status: Arc::new(Mutex::new(McpRegistrationStatus::default())),
             update_manager: UpdateManager::new(),
             window_focus_history: Mutex::new(Vec::new()),
         }
@@ -153,14 +165,44 @@ impl AppState {
         self.is_os_env_ready()
     }
 
-    pub fn set_project_for_window(&self, window_label: &str, project_path: String) {
-        if let Ok(mut map) = self.window_projects.lock() {
-            map.insert(window_label.to_string(), project_path);
+    /// Atomically claim a project identity for a window and persist its project path.
+    ///
+    /// Returns `Err(existing_window_label)` when another window already owns the
+    /// same project identity.
+    pub fn claim_project_for_window_with_identity(
+        &self,
+        window_label: &str,
+        project_path: String,
+        project_identity: String,
+    ) -> Result<(), String> {
+        let Ok(mut projects) = self.window_projects.lock() else {
+            return Ok(());
+        };
+        let Ok(mut identities) = self.window_project_identities.lock() else {
+            projects.insert(window_label.to_string(), project_path);
+            return Ok(());
+        };
+
+        if let Some(existing_window_label) = identities.iter().find_map(|(label, identity)| {
+            if identity == &project_identity && label.as_str() != window_label {
+                Some(label.clone())
+            } else {
+                None
+            }
+        }) {
+            return Err(existing_window_label);
         }
+
+        projects.insert(window_label.to_string(), project_path);
+        identities.insert(window_label.to_string(), project_identity);
+        Ok(())
     }
 
     pub fn clear_project_for_window(&self, window_label: &str) {
         if let Ok(mut map) = self.window_projects.lock() {
+            map.remove(window_label);
+        }
+        if let Ok(mut map) = self.window_project_identities.lock() {
             map.remove(window_label);
         }
         if let Ok(mut map) = self.window_agent_tabs.lock() {
@@ -176,6 +218,19 @@ impl AppState {
         if let Ok(mut map) = self.window_migrations.lock() {
             map.remove(window_label);
         }
+    }
+
+    pub fn set_mcp_registration_status(&self, status: McpRegistrationStatus) {
+        if let Ok(mut slot) = self.mcp_registration_status.lock() {
+            *slot = status;
+        }
+    }
+
+    pub fn get_mcp_registration_status(&self) -> McpRegistrationStatus {
+        self.mcp_registration_status
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default()
     }
 
     pub fn project_for_window(&self, window_label: &str) -> Option<String> {
@@ -303,7 +358,12 @@ mod tests {
         let state = AppState::new();
         assert_eq!(state.project_for_window("main"), None);
 
-        state.set_project_for_window("main", "/tmp/repo".to_string());
+        let claim = state.claim_project_for_window_with_identity(
+            "main",
+            "/tmp/repo".to_string(),
+            "/tmp/repo-canonical".to_string(),
+        );
+        assert_eq!(claim, Ok(()));
         assert_eq!(
             state.project_for_window("main"),
             Some("/tmp/repo".to_string())
@@ -311,6 +371,33 @@ mod tests {
 
         state.clear_project_for_window("main");
         assert_eq!(state.project_for_window("main"), None);
+    }
+
+    #[test]
+    fn claim_project_for_window_with_identity_rejects_duplicates() {
+        let state = AppState::new();
+
+        let first = state.claim_project_for_window_with_identity(
+            "main",
+            "/tmp/repo".to_string(),
+            "/tmp/repo-canonical".to_string(),
+        );
+        assert_eq!(first, Ok(()));
+
+        let second = state.claim_project_for_window_with_identity(
+            "project-2",
+            "/tmp/repo".to_string(),
+            "/tmp/repo-canonical".to_string(),
+        );
+        assert_eq!(second, Err("main".to_string()));
+
+        state.clear_project_for_window("main");
+        let third = state.claim_project_for_window_with_identity(
+            "project-2",
+            "/tmp/repo".to_string(),
+            "/tmp/repo-canonical".to_string(),
+        );
+        assert_eq!(third, Ok(()));
     }
 
     #[test]
@@ -400,7 +487,12 @@ mod tests {
     #[test]
     fn clear_project_for_window_keeps_migration_state() {
         let state = AppState::new();
-        state.set_project_for_window("main", "/tmp/repo".to_string());
+        let claim = state.claim_project_for_window_with_identity(
+            "main",
+            "/tmp/repo".to_string(),
+            "/tmp/repo-canonical".to_string(),
+        );
+        assert_eq!(claim, Ok(()));
         state.set_window_agent_tabs(
             "main",
             vec![AgentTabMenuState {
@@ -475,7 +567,12 @@ mod tests {
     #[test]
     fn clear_window_state_removes_project_tabs_mode_and_migration() {
         let state = AppState::new();
-        state.set_project_for_window("main", "/tmp/repo".to_string());
+        let claim = state.claim_project_for_window_with_identity(
+            "main",
+            "/tmp/repo".to_string(),
+            "/tmp/repo-canonical".to_string(),
+        );
+        assert_eq!(claim, Ok(()));
         state.set_window_agent_tabs(
             "main",
             vec![AgentTabMenuState {
