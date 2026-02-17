@@ -527,6 +527,7 @@ pub fn build_app(
                     return;
                 }
 
+                let _ = window.emit("window-will-hide", ());
                 api.prevent_close();
                 let _ = window.hide();
                 let _ = crate::menu::rebuild_menu(window.app_handle());

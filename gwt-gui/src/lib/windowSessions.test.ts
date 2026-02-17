@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  deduplicateByProjectPath,
   getWindowSession,
   loadWindowSessions,
   persistWindowSessions,
+  pruneWindowSessions,
   removeWindowSession,
   upsertWindowSession,
+  WINDOW_SESSIONS_STORAGE_KEY,
 } from "./windowSessions";
 
 function createMockStorage(): Storage {
@@ -66,5 +69,80 @@ describe("windowSessions", () => {
 
     removeWindowSession("project-1", store);
     expect(getWindowSession("project-1", store)).toBeNull();
+  });
+});
+
+describe("deduplicateByProjectPath", () => {
+  it("keeps only the first entry per projectPath", () => {
+    const result = deduplicateByProjectPath([
+      { label: "main", projectPath: "/tmp/gwt" },
+      { label: "main-1", projectPath: "/tmp/gwt" },
+      { label: "main-1-1", projectPath: "/tmp/gwt" },
+      { label: "project-1", projectPath: "/tmp/llmlb" },
+      { label: "project-1-1", projectPath: "/tmp/llmlb" },
+    ]);
+    expect(result).toEqual([
+      { label: "main", projectPath: "/tmp/gwt" },
+      { label: "project-1", projectPath: "/tmp/llmlb" },
+    ]);
+  });
+
+  it("returns an empty array when given an empty array", () => {
+    expect(deduplicateByProjectPath([])).toEqual([]);
+  });
+
+  it("returns the same single entry unchanged", () => {
+    const input = [{ label: "main", projectPath: "/tmp/project" }];
+    expect(deduplicateByProjectPath(input)).toEqual(input);
+  });
+
+  it("preserves entries with distinct projectPaths", () => {
+    const input = [
+      { label: "a", projectPath: "/a" },
+      { label: "b", projectPath: "/b" },
+      { label: "c", projectPath: "/c" },
+    ];
+    expect(deduplicateByProjectPath(input)).toEqual(input);
+  });
+});
+
+describe("pruneWindowSessions", () => {
+  it("removes duplicate projectPath entries from storage", () => {
+    const store = createMockStorage();
+    const staleData = [
+      { label: "main", projectPath: "/tmp/gwt" },
+      { label: "main-1", projectPath: "/tmp/gwt" },
+      { label: "main-1-1", projectPath: "/tmp/gwt" },
+      { label: "project-1", projectPath: "/tmp/llmlb" },
+      { label: "project-1-1", projectPath: "/tmp/llmlb" },
+    ];
+    store.setItem(WINDOW_SESSIONS_STORAGE_KEY, JSON.stringify(staleData));
+
+    pruneWindowSessions(store);
+
+    const result = loadWindowSessions(store);
+    expect(result).toEqual([
+      { label: "main", projectPath: "/tmp/gwt" },
+      { label: "project-1", projectPath: "/tmp/llmlb" },
+    ]);
+  });
+
+  it("does not write to storage when no duplicates exist", () => {
+    const store = createMockStorage();
+    const cleanData = [
+      { label: "main", projectPath: "/tmp/gwt" },
+      { label: "project-1", projectPath: "/tmp/llmlb" },
+    ];
+    store.setItem(WINDOW_SESSIONS_STORAGE_KEY, JSON.stringify(cleanData));
+
+    const originalValue = store.getItem(WINDOW_SESSIONS_STORAGE_KEY);
+    pruneWindowSessions(store);
+    expect(store.getItem(WINDOW_SESSIONS_STORAGE_KEY)).toBe(originalValue);
+  });
+
+  it("handles empty storage gracefully", () => {
+    const store = createMockStorage();
+    pruneWindowSessions(store);
+    expect(store.getItem(WINDOW_SESSIONS_STORAGE_KEY)).toBeNull();
   });
 });

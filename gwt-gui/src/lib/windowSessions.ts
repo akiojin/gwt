@@ -123,6 +123,25 @@ export function upsertWindowSession(
   persistWindowSessions(sessions, storage);
 }
 
+export function deduplicateByProjectPath(
+  sessions: WindowSessionEntry[],
+): WindowSessionEntry[] {
+  const seen = new Set<string>();
+  return sessions.filter((entry) => {
+    if (seen.has(entry.projectPath)) return false;
+    seen.add(entry.projectPath);
+    return true;
+  });
+}
+
+export function pruneWindowSessions(storage?: Storage | null): void {
+  const sessions = loadWindowSessions(storage);
+  const cleaned = deduplicateByProjectPath(sessions);
+  if (cleaned.length < sessions.length) {
+    persistWindowSessions(cleaned, storage);
+  }
+}
+
 export function removeWindowSession(
   label: string,
   storage?: Storage | null,

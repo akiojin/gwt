@@ -57,8 +57,10 @@
   } from "./lib/voice/voiceInputController";
   import { createSystemMonitor } from "./lib/systemMonitor.svelte";
   import {
+    deduplicateByProjectPath,
     getWindowSession,
     loadWindowSessions,
+    pruneWindowSessions,
     removeWindowSession,
     upsertWindowSession,
   } from "./lib/windowSessions";
@@ -467,13 +469,16 @@
     const releaseDelayMs = 3000;
 
     (async () => {
+      pruneWindowSessions();
       const label = await resolveCurrentWindowLabel();
       if (!label) return;
       const isRestoreLeader = await tryAcquireWindowSessionRestoreLead(label);
 
       const sessions = loadWindowSessions();
-      const normalizedSessions = sessions.filter(
-        (entry) => entry.label !== label && entry.projectPath,
+      const normalizedSessions = deduplicateByProjectPath(
+        sessions.filter(
+          (entry) => entry.label !== label && entry.projectPath,
+        ),
       );
 
       if (isRestoreLeader) {
@@ -490,6 +495,32 @@
         await restoreWindowSessionProject(label);
       }
     })();
+  });
+
+  // Remove session entry when the window is hidden via the close button.
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen("window-will-hide", async () => {
+          const label = await resolveCurrentWindowLabel();
+          if (label) removeWindowSession(label);
+        });
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+      } catch {
+        /* not in Tauri runtime */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
   });
 
   // Best-effort: subscribe once and refresh Sidebar when worktrees change.
