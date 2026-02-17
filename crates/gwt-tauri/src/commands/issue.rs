@@ -84,28 +84,21 @@ pub fn fetch_github_issues(
 }
 
 fn extract_issue_number_from_branch(branch: &str) -> Option<u64> {
-    let trimmed = branch.trim().trim_start_matches("origin/");
+    let trimmed = branch.trim();
     if trimmed.is_empty() {
         return None;
     }
 
-    let lower = trimmed.to_ascii_lowercase();
-    let pattern = "issue-";
-    let mut start = 0usize;
-    while let Some(pos) = lower[start..].find(pattern) {
-        let idx = start + pos + pattern.len();
-        let digits: String = lower[idx..]
-            .chars()
-            .take_while(|ch| ch.is_ascii_digit())
-            .collect();
+    for segment in trimmed.split('/') {
+        let lower = segment.to_ascii_lowercase();
+        let Some(rest) = lower.strip_prefix("issue-") else {
+            continue;
+        };
+        let digits: String = rest.chars().take_while(|ch| ch.is_ascii_digit()).collect();
         if !digits.is_empty() {
             if let Ok(number) = digits.parse::<u64>() {
                 return Some(number);
             }
-        }
-        start = idx;
-        if start >= lower.len() {
-            break;
         }
     }
     None
@@ -399,6 +392,8 @@ mod tests {
     #[test]
     fn test_extract_issue_number_from_branch_absent() {
         assert_eq!(extract_issue_number_from_branch("feature/new-ui"), None);
+        assert_eq!(extract_issue_number_from_branch("feature/noissue-123"), None);
+        assert_eq!(extract_issue_number_from_branch("feature/reissue-42"), None);
         assert_eq!(extract_issue_number_from_branch(""), None);
     }
 
