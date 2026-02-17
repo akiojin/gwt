@@ -64,6 +64,7 @@ pub struct SettingsData {
     pub agent_codex_path: Option<String>,
     pub agent_gemini_path: Option<String>,
     pub agent_auto_install_deps: bool,
+    pub agent_github_project_id: Option<String>,
     pub docker_force_host: bool,
     pub ui_font_size: u32,
     pub terminal_font_size: u32,
@@ -103,6 +104,7 @@ impl From<&Settings> for SettingsData {
                 .as_ref()
                 .map(|p| p.to_string_lossy().to_string()),
             agent_auto_install_deps: s.agent.auto_install_deps,
+            agent_github_project_id: s.agent.github_project_id.clone(),
             docker_force_host: s.docker.force_host,
             ui_font_size: s.appearance.ui_font_size,
             terminal_font_size: s.appearance.terminal_font_size,
@@ -136,6 +138,11 @@ impl SettingsData {
         s.agent.codex_path = self.agent_codex_path.as_ref().map(PathBuf::from);
         s.agent.gemini_path = self.agent_gemini_path.as_ref().map(PathBuf::from);
         s.agent.auto_install_deps = self.agent_auto_install_deps;
+        s.agent.github_project_id = self
+            .agent_github_project_id
+            .as_ref()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
         s.docker.force_host = self.docker_force_host;
         s.appearance.ui_font_size = self.ui_font_size;
         s.appearance.terminal_font_size = self.terminal_font_size;

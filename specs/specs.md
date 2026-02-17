@@ -1,6 +1,6 @@
 # 仕様一覧
 
-**最終更新**: 2026-02-14
+**最終更新**: 2026-02-17
 
 - 現行の仕様・要件: `specs/SPEC-XXXXXXXX/spec.md`
 - 以前までのTUIの仕様・要件（archive）: `specs/archive/SPEC-XXXXXXXX/spec.md`
@@ -24,6 +24,7 @@
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
+| [SPEC-8ad13230](SPEC-8ad13230/spec.md) | 機能仕様: Agent Mode Issue-first Spec Bundle CRUD | 2026-02-17 |
 | [SPEC-0f8e9c12](SPEC-0f8e9c12/spec.md) | 機能仕様: Sidebar Filter Cache for Local/Remote/All | 2026-02-14 |
 | [SPEC-552c5e74](SPEC-552c5e74/spec.md) | 機能仕様: Launch Agent のデフォルト設定保持（前回成功起動値） | 2026-02-14 |
 | [SPEC-923b33fc](SPEC-923b33fc/spec.md) | 機能仕様: 全操作時の断続フリーズ抑止（System Monitor 負荷制御） | 2026-02-14 |

@@ -80,6 +80,8 @@ pub struct AgentSettings {
     pub gemini_path: Option<PathBuf>,
     /// Auto install dependencies before launching agent
     pub auto_install_deps: bool,
+    /// Default GitHub Project V2 ID for issue-first spec sync
+    pub github_project_id: Option<String>,
 }
 
 /// Docker settings
