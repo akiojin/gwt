@@ -2075,7 +2075,6 @@
     gap: 10px;
     font-size: var(--ui-font-md);
     color: var(--text-primary);
-    user-select: none;
   }
 
   .check-row input {
