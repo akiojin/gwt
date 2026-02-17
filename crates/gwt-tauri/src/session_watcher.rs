@@ -82,16 +82,14 @@ pub fn start_session_watcher(app_handle: AppHandle) -> Result<(), String> {
 
 /// Check if a path is a TOML session file (extracted for testability).
 fn is_session_file(path: &Path) -> bool {
-    path.extension()
-        .map(|ext| ext == "toml")
-        .unwrap_or(false)
+    path.extension().map(|ext| ext == "toml").unwrap_or(false)
 }
 
 /// Filter debounced events, returning true if any `.toml` file was changed.
 fn has_relevant_session_change(events: &[DebouncedEvent]) -> bool {
-    events.iter().any(|e| {
-        matches!(e.kind, DebouncedEventKind::Any) && is_session_file(&e.path)
-    })
+    events
+        .iter()
+        .any(|e| matches!(e.kind, DebouncedEventKind::Any) && is_session_file(&e.path))
 }
 
 #[cfg(test)]

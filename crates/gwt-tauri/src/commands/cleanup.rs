@@ -94,6 +94,7 @@ fn compute_safety_level(
 /// For agents without Hook support, infers status from pane output.
 fn resolve_agent_status_for_worktree(
     worktree_path: &Path,
+    repo_path: &Path,
     branch_name: &str,
     state: &AppState,
 ) -> String {
@@ -103,7 +104,7 @@ fn resolve_agent_status_for_worktree(
 
             let status = if agent_has_hook_support(session.agent.as_deref()) {
                 session.status
-            } else if let Some(pane_id) = find_pane_for_branch(state, branch_name) {
+            } else if let Some(pane_id) = find_pane_for_branch(state, repo_path, branch_name) {
                 infer_status_from_pane(state, &pane_id)
             } else {
                 session.status
@@ -121,14 +122,29 @@ fn resolve_agent_status_for_worktree(
 }
 
 /// Find pane_id for a branch, preferring a running pane when multiple panes match.
-fn find_pane_for_branch(state: &AppState, branch_name: &str) -> Option<String> {
-    let manager = state.pane_manager.lock().ok()?;
-    let panes = manager.panes().iter().map(|pane| {
-        (
-            pane.pane_id().to_string(),
-            pane.branch_name().to_string(),
-            matches!(pane.status(), PaneStatus::Running),
-        )
+fn find_pane_for_branch(state: &AppState, repo_path: &Path, branch_name: &str) -> Option<String> {
+    let panes_info: Vec<(String, String, bool)> = {
+        let manager = state.pane_manager.lock().ok()?;
+        manager
+            .panes()
+            .iter()
+            .map(|pane| {
+                (
+                    pane.pane_id().to_string(),
+                    pane.branch_name().to_string(),
+                    matches!(pane.status(), PaneStatus::Running),
+                )
+            })
+            .collect()
+    };
+
+    let launch_meta = state.pane_launch_meta.lock().ok()?;
+    let panes = panes_info.into_iter().map(|(pane_id, branch, is_running)| {
+        let same_repo = launch_meta
+            .get(&pane_id)
+            .map(|meta| meta.repo_path.as_path() == repo_path)
+            .unwrap_or(false);
+        (pane_id, branch, is_running, same_repo)
     });
 
     select_preferred_pane_for_branch(panes, branch_name)
@@ -136,11 +152,11 @@ fn find_pane_for_branch(state: &AppState, branch_name: &str) -> Option<String> {
 
 fn select_preferred_pane_for_branch<I>(panes: I, branch_name: &str) -> Option<String>
 where
-    I: IntoIterator<Item = (String, String, bool)>,
+    I: IntoIterator<Item = (String, String, bool, bool)>,
 {
     let mut fallback: Option<String> = None;
-    for (pane_id, pane_branch, is_running) in panes {
-        if pane_branch != branch_name {
+    for (pane_id, pane_branch, is_running, same_repo) in panes {
+        if pane_branch != branch_name || !same_repo {
             continue;
         }
 
@@ -220,7 +236,8 @@ pub fn list_worktrees(
             let is_agent_running = agent_branches.contains(branch_name);
 
             // Read agent status from session file (SPEC-b80e7996 FR-811)
-            let agent_status = resolve_agent_status_for_worktree(&wt.path, branch_name, &state);
+            let agent_status =
+                resolve_agent_status_for_worktree(&wt.path, &repo_path, branch_name, &state);
 
             let ahead = branch_info.map(|b| b.ahead).unwrap_or(0);
             let behind = branch_info.map(|b| b.behind).unwrap_or(0);
@@ -605,8 +622,18 @@ mod tests {
     #[test]
     fn select_preferred_pane_for_branch_prefers_running() {
         let panes = vec![
-            ("pane-stopped".to_string(), "feature/a".to_string(), false),
-            ("pane-running".to_string(), "feature/a".to_string(), true),
+            (
+                "pane-stopped".to_string(),
+                "feature/a".to_string(),
+                false,
+                true,
+            ),
+            (
+                "pane-running".to_string(),
+                "feature/a".to_string(),
+                true,
+                true,
+            ),
         ];
 
         let selected = select_preferred_pane_for_branch(panes, "feature/a");
@@ -616,8 +643,8 @@ mod tests {
     #[test]
     fn select_preferred_pane_for_branch_falls_back_to_first_non_running() {
         let panes = vec![
-            ("pane-old".to_string(), "feature/a".to_string(), false),
-            ("pane-new".to_string(), "feature/a".to_string(), false),
+            ("pane-old".to_string(), "feature/a".to_string(), false, true),
+            ("pane-new".to_string(), "feature/a".to_string(), false, true),
         ];
 
         let selected = select_preferred_pane_for_branch(panes, "feature/a");
@@ -626,10 +653,31 @@ mod tests {
 
     #[test]
     fn select_preferred_pane_for_branch_returns_none_for_unknown_branch() {
-        let panes = vec![("pane".to_string(), "feature/a".to_string(), true)];
+        let panes = vec![("pane".to_string(), "feature/a".to_string(), true, true)];
 
         let selected = select_preferred_pane_for_branch(panes, "feature/b");
         assert!(selected.is_none());
+    }
+
+    #[test]
+    fn select_preferred_pane_for_branch_ignores_other_repo() {
+        let panes = vec![
+            (
+                "pane-other-repo-running".to_string(),
+                "feature/a".to_string(),
+                true,
+                false,
+            ),
+            (
+                "pane-this-repo".to_string(),
+                "feature/a".to_string(),
+                false,
+                true,
+            ),
+        ];
+
+        let selected = select_preferred_pane_for_branch(panes, "feature/a");
+        assert_eq!(selected.as_deref(), Some("pane-this-repo"));
     }
 
     // -- SafetyLevel computation tests (T1) --

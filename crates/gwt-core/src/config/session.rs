@@ -311,7 +311,14 @@ fn looks_like_prompt(text: &str) -> bool {
 
     // Input prompt patterns (case-insensitive)
     let last_lower = last_line.to_lowercase();
-    let input_patterns = ["input:", "prompt:", "(y/n)", "[y/n]", "continue?", "proceed?"];
+    let input_patterns = [
+        "input:",
+        "prompt:",
+        "(y/n)",
+        "[y/n]",
+        "continue?",
+        "proceed?",
+    ];
     for pattern in &input_patterns {
         if last_lower.contains(pattern) {
             return true;
@@ -660,7 +667,10 @@ updated_at = "2026-01-20T00:00:00Z"
         session.last_activity_at = Some(Utc::now() - Duration::seconds(61));
 
         let changed = session.check_idle_timeout();
-        assert!(changed, "check_idle_timeout should return true when > 60s elapsed");
+        assert!(
+            changed,
+            "check_idle_timeout should return true when > 60s elapsed"
+        );
         assert_eq!(session.status, AgentStatus::Stopped);
     }
 
@@ -671,8 +681,15 @@ updated_at = "2026-01-20T00:00:00Z"
         session.last_activity_at = Some(Utc::now() - Duration::seconds(30));
 
         let changed = session.check_idle_timeout();
-        assert!(!changed, "check_idle_timeout should return false when < 60s");
-        assert_eq!(session.status, AgentStatus::Running, "status should remain Running");
+        assert!(
+            !changed,
+            "check_idle_timeout should return false when < 60s"
+        );
+        assert_eq!(
+            session.status,
+            AgentStatus::Running,
+            "status should remain Running"
+        );
     }
 
     #[test]
@@ -732,7 +749,11 @@ updated_at = "2026-01-20T00:00:00Z"
             let wrapper = Wrapper { status };
             let toml_str = toml::to_string(&wrapper).unwrap();
             let deserialized: Wrapper = toml::from_str(&toml_str).unwrap();
-            assert_eq!(deserialized, wrapper, "TOML roundtrip failed for {:?}", status);
+            assert_eq!(
+                deserialized, wrapper,
+                "TOML roundtrip failed for {:?}",
+                status
+            );
         }
     }
 

@@ -121,7 +121,7 @@ fn build_branch_pane_map(state: &AppState, repo_path: &Path) -> HashMap<String, 
         launch_meta
             .get(pane_id)
             .map(|meta| meta.repo_path.as_path() == repo_path)
-            .unwrap_or(true)
+            .unwrap_or(false)
     }))
 }
 
@@ -217,7 +217,7 @@ fn running_agent_branches(state: &AppState, repo_path: &Path) -> HashSet<String>
         .into_iter()
         .filter_map(|(pane_id, branch)| {
             let Some(meta) = launch_meta.get(&pane_id) else {
-                return Some(branch);
+                return None;
             };
             if meta.repo_path.as_path() == repo_path {
                 Some(branch)
