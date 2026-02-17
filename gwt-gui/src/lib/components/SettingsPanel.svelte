@@ -1178,6 +1178,12 @@
     width: 100%;
   }
 
+  .field input[type="text"].env-value,
+  .field input[type="text"].env-key-input,
+  .field input[type="text"].env-value-input {
+    max-width: none;
+  }
+
   .env-add-row {
     display: grid;
     grid-template-columns: 1fr 2fr auto;
@@ -1355,8 +1361,13 @@
     font-size: var(--ui-font-md);
   }
 
-  .btn-add:hover {
+  .btn-add:hover:not(:disabled) {
     background: var(--bg-hover);
+  }
+
+  .btn-add:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .btn-cancel {
