@@ -420,8 +420,8 @@ fn build_issue_title(spec_id: &str, user_input: &str, existing_title: Option<&st
     } else {
         base
     };
-    if title.len() > 72 {
-        title.truncate(72);
+    if title.chars().count() > 72 {
+        title = title.chars().take(72).collect::<String>();
         title = title.trim_end().to_string();
     }
     format!("[{}] {}", spec_id, title)
@@ -552,6 +552,14 @@ mod tests {
     fn build_issue_title_contains_spec_id_prefix() {
         let title = build_issue_title("SPEC-cafebabe", "Implement authentication flow", None);
         assert!(title.starts_with("[SPEC-cafebabe] "));
+    }
+
+    #[test]
+    fn build_issue_title_handles_multibyte_without_panic() {
+        // 72 chars total but >72 bytes (71 ASCII + 1 multibyte char)
+        let input = format!("{}あ", "a".repeat(71));
+        let title = build_issue_title("SPEC-cafebabe", &input, None);
+        assert!(title.contains('あ'));
     }
 
     #[test]

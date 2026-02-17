@@ -1,8 +1,8 @@
 use serde_json::{json, Value};
 
 use crate::commands::issue_spec::{
-    delete_spec_issue_artifact_comment_cmd, get_spec_issue_detail_cmd,
-    list_spec_issue_artifact_comments_cmd, sync_spec_issue_project_cmd,
+    delete_spec_issue_artifact_comment_cmd, find_spec_issue_by_spec_id_cmd,
+    get_spec_issue_detail_cmd, list_spec_issue_artifact_comments_cmd, sync_spec_issue_project_cmd,
     upsert_spec_issue_artifact_comment_cmd, upsert_spec_issue_cmd, SpecIssueSectionsData,
 };
 use crate::commands::terminal::{
@@ -23,6 +23,19 @@ pub const TOOL_UPSERT_SPEC_ARTIFACT: &str = "upsert_spec_issue_artifact";
 pub const TOOL_LIST_SPEC_ARTIFACTS: &str = "list_spec_issue_artifacts";
 pub const TOOL_DELETE_SPEC_ARTIFACT: &str = "delete_spec_issue_artifact";
 pub const TOOL_SYNC_SPEC_PROJECT: &str = "sync_spec_issue_project";
+
+#[derive(Debug, Default, Clone)]
+struct SpecIssueSectionsPatch {
+    spec: Option<String>,
+    plan: Option<String>,
+    tasks: Option<String>,
+    tdd: Option<String>,
+    research: Option<String>,
+    data_model: Option<String>,
+    quickstart: Option<String>,
+    contracts: Option<String>,
+    checklists: Option<String>,
+}
 
 pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
     vec![
@@ -245,11 +258,18 @@ pub fn execute_tool_call(
             let sections = get_required_object_any(&args, &["sections"])?;
             let expected_etag = get_optional_string_any(&args, &["expected_etag", "expectedEtag"])
                 .map(str::to_string);
+            let patch = parse_sections_patch(sections);
+            let existing =
+                find_spec_issue_by_spec_id_cmd(project_path.clone(), spec_id.to_string())?;
+            let merged_sections = match existing {
+                Some(detail) => merge_sections_data(detail.sections, patch),
+                None => sections_from_patch(patch),
+            };
             let detail = upsert_spec_issue_cmd(
                 project_path,
                 spec_id.to_string(),
                 title.to_string(),
-                parse_sections_data(sections),
+                merged_sections,
                 expected_etag,
             )?;
             serde_json::to_string(&detail).map_err(|e| format!("Failed to serialize result: {e}"))
@@ -401,16 +421,16 @@ fn get_optional_u64_any(value: &Value, keys: &[&str]) -> Option<u64> {
     None
 }
 
-fn parse_sections_data(value: &Value) -> SpecIssueSectionsData {
-    let read = |keys: &[&str]| -> String {
+fn parse_sections_patch(value: &Value) -> SpecIssueSectionsPatch {
+    let read = |keys: &[&str]| -> Option<String> {
         for key in keys {
             if let Some(found) = value.get(*key).and_then(|v| v.as_str()) {
-                return found.to_string();
+                return Some(found.to_string());
             }
         }
-        String::new()
+        None
     };
-    SpecIssueSectionsData {
+    SpecIssueSectionsPatch {
         spec: read(&["spec"]),
         plan: read(&["plan"]),
         tasks: read(&["tasks"]),
@@ -421,6 +441,57 @@ fn parse_sections_data(value: &Value) -> SpecIssueSectionsData {
         contracts: read(&["contracts"]),
         checklists: read(&["checklists"]),
     }
+}
+
+fn sections_from_patch(patch: SpecIssueSectionsPatch) -> SpecIssueSectionsData {
+    merge_sections_data(
+        SpecIssueSectionsData {
+            spec: String::new(),
+            plan: String::new(),
+            tasks: String::new(),
+            tdd: String::new(),
+            research: String::new(),
+            data_model: String::new(),
+            quickstart: String::new(),
+            contracts: String::new(),
+            checklists: String::new(),
+        },
+        patch,
+    )
+}
+
+fn merge_sections_data(
+    mut base: SpecIssueSectionsData,
+    patch: SpecIssueSectionsPatch,
+) -> SpecIssueSectionsData {
+    if let Some(value) = patch.spec {
+        base.spec = value;
+    }
+    if let Some(value) = patch.plan {
+        base.plan = value;
+    }
+    if let Some(value) = patch.tasks {
+        base.tasks = value;
+    }
+    if let Some(value) = patch.tdd {
+        base.tdd = value;
+    }
+    if let Some(value) = patch.research {
+        base.research = value;
+    }
+    if let Some(value) = patch.data_model {
+        base.data_model = value;
+    }
+    if let Some(value) = patch.quickstart {
+        base.quickstart = value;
+    }
+    if let Some(value) = patch.contracts {
+        base.contracts = value;
+    }
+    if let Some(value) = patch.checklists {
+        base.checklists = value;
+    }
+    base
 }
 
 fn get_project_path_for_window(state: &AppState, window_label: &str) -> Result<String, String> {
@@ -491,5 +562,34 @@ mod tests {
         };
         let result = execute_tool_call(&state, "main", &call).expect("tool call");
         assert!(result.contains("hello"));
+    }
+
+    #[test]
+    fn parse_sections_patch_keeps_missing_fields_none() {
+        let patch = parse_sections_patch(&json!({ "tasks": "new tasks" }));
+        assert_eq!(patch.tasks.as_deref(), Some("new tasks"));
+        assert!(patch.spec.is_none());
+        assert!(patch.plan.is_none());
+    }
+
+    #[test]
+    fn merge_sections_data_preserves_omitted_fields() {
+        let base = SpecIssueSectionsData {
+            spec: "spec".to_string(),
+            plan: "plan".to_string(),
+            tasks: "tasks".to_string(),
+            tdd: "tdd".to_string(),
+            research: "research".to_string(),
+            data_model: "data-model".to_string(),
+            quickstart: "quickstart".to_string(),
+            contracts: "contracts".to_string(),
+            checklists: "checklists".to_string(),
+        };
+        let patch = parse_sections_patch(&json!({ "tasks": "updated tasks" }));
+        let merged = merge_sections_data(base, patch);
+        assert_eq!(merged.spec, "spec");
+        assert_eq!(merged.plan, "plan");
+        assert_eq!(merged.tasks, "updated tasks");
+        assert_eq!(merged.tdd, "tdd");
     }
 }

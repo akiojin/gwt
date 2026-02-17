@@ -154,6 +154,18 @@ ARTIFACT_MARKER_PREFIX = "<!-- GWT_SPEC_ARTIFACT:"
 ARTIFACT_MARKER_SUFFIX = " -->"
 VALID_ARTIFACT_KINDS = {"contract", "checklist"}
 
+SECTION_ALIASES = {
+    "spec": ["spec"],
+    "plan": ["plan"],
+    "tasks": ["tasks"],
+    "tdd": ["tdd"],
+    "research": ["research"],
+    "data_model": ["data_model", "dataModel"],
+    "quickstart": ["quickstart"],
+    "contracts": ["contracts"],
+    "checklists": ["checklists"],
+}
+
 
 @dataclass
 class GhResult:
@@ -193,6 +205,31 @@ def parse_issue_number_from_url(url: str) -> int:
 
 def build_etag(updated_at: str, body: str) -> str:
     return f"{updated_at.strip()}:{len(body)}"
+
+
+def normalize_sections(raw: Any) -> Dict[str, str]:
+    result: Dict[str, str] = {}
+    if not isinstance(raw, dict):
+        return result
+    for canonical, aliases in SECTION_ALIASES.items():
+        for key in aliases:
+            if key in raw:
+                value = raw.get(key)
+                if value is None:
+                    result[canonical] = ""
+                elif isinstance(value, str):
+                    result[canonical] = value
+                else:
+                    result[canonical] = str(value)
+                break
+    return result
+
+
+def merge_sections(base: Dict[str, str], patch: Dict[str, str]) -> Dict[str, str]:
+    merged = dict(base)
+    for key, value in patch.items():
+        merged[key] = value
+    return merged
 
 
 def render_body(spec_id: str, sections: Dict[str, Any]) -> str:
@@ -351,13 +388,16 @@ def upsert_issue(args: Dict[str, Any]) -> Dict[str, Any]:
     require(title, "title is required")
     require(isinstance(sections, dict), "sections must be an object")
 
+    incoming_sections = normalize_sections(sections)
     issue_number = find_issue_by_spec_id(spec_id)
-    body = render_body(spec_id, sections)
 
     if issue_number is not None:
         current = get_issue(issue_number)
         if expected_etag and expected_etag != current.get("etag"):
             raise RuntimeError("etag mismatch")
+        current_sections = normalize_sections(current.get("sections", {}) or {})
+        merged_sections = merge_sections(current_sections, incoming_sections)
+        body = render_body(spec_id, merged_sections)
         edited = run_gh(
             "issue",
             "edit",
@@ -375,6 +415,7 @@ def upsert_issue(args: Dict[str, Any]) -> Dict[str, Any]:
             raise RuntimeError(f"gh issue edit failed: {edited.stderr.strip()}")
         return get_issue(issue_number)
 
+    body = render_body(spec_id, incoming_sections)
     created = run_gh(
         "issue",
         "create",
