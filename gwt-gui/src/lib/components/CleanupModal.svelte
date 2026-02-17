@@ -366,21 +366,18 @@
                     <span class="safety-dot {safetyDotClass(wt.safety_level)}"></span>
                   </td>
                   <td class="col-branch mono">
-                    {#if wt.branch && agentTabBranchSet.has(normalizeTabBranch(wt.branch))}
-                      <span
-                        class="agent-tab-icon"
-                        title="Agent tab is open for this worktree"
-                        role="img"
-                        aria-label="Agent tab is open for this worktree"
-                      >
-                        <span class="agent-tab-bars" aria-hidden="true">
-                          <span class="agent-tab-bar b1"></span>
-                          <span class="agent-tab-bar b2"></span>
-                          <span class="agent-tab-bar b3"></span>
-                        </span>
-                        <span class="agent-tab-fallback" aria-hidden="true">@</span>
-                      </span>
-                    {/if}
+                    <span
+                      class="agent-indicator-slot"
+                      aria-hidden="true"
+                    >
+                      {#if wt.branch && agentTabBranchSet.has(normalizeTabBranch(wt.branch)) && wt.agent_status === "running"}
+                        <span class="agent-pulse-dot"></span>
+                        <span class="agent-fallback">@</span>
+                      {:else if wt.branch && agentTabBranchSet.has(normalizeTabBranch(wt.branch))}
+                        <span class="agent-static-dot"></span>
+                        <span class="agent-fallback">@</span>
+                      {/if}
+                    </span>
                     {wt.branch ?? "(detached)"}
                   </td>
                   <td class="col-status">{wt.status}</td>
@@ -772,78 +769,53 @@
     border: 1px solid rgba(243, 139, 168, 0.3);
   }
 
-  .agent-tab-icon {
+  /* Agent indicator: fixed-width slot (SPEC-b80e7996 FR-804) */
+  .agent-indicator-slot {
+    width: 12px;
+    height: 12px;
+    flex-shrink: 0;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 12px;
     margin-right: 4px;
-    color: var(--cyan);
-    text-align: center;
-    height: 12px;
-    line-height: 1;
     vertical-align: middle;
   }
 
-  .agent-tab-bars {
-    display: inline-flex;
-    align-items: flex-end;
-    justify-content: center;
-    gap: 1px;
-    height: 10px;
-  }
-
-  .agent-tab-bar {
-    width: 2px;
-    height: 4px;
-    border-radius: 1px;
+  .agent-static-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
     background: var(--cyan);
-    opacity: 0.85;
-    transform-origin: bottom;
-    animation: agentTabBars 0.9s ease-in-out infinite;
+    opacity: 0.45;
   }
 
-  .agent-tab-bar.b1 {
-    animation-delay: 0ms;
+  .agent-pulse-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--cyan);
+    animation: agent-pulse 1.4s ease-in-out infinite;
   }
 
-  .agent-tab-bar.b2 {
-    animation-delay: 150ms;
+  @keyframes agent-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.2; }
   }
 
-  .agent-tab-bar.b3 {
-    animation-delay: 300ms;
-  }
-
-  /* Graphical activity indicator for worktrees with open agent tabs */
-  @keyframes agentTabBars {
-    0%,
-    100% {
-      transform: scaleY(0.35);
-      opacity: 0.55;
-    }
-    50% {
-      transform: scaleY(1);
-      opacity: 1;
-    }
-  }
-
-  .agent-tab-fallback {
+  .agent-fallback {
     display: none;
     font-size: 11px;
     font-family: monospace;
+    color: var(--cyan);
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .agent-tab-bars {
+    .agent-pulse-dot,
+    .agent-static-dot {
       display: none;
     }
 
-    .agent-tab-bar {
-      animation: none;
-    }
-
-    .agent-tab-fallback {
+    .agent-fallback {
       display: flex;
     }
   }

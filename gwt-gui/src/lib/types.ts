@@ -1,8 +1,11 @@
+export type AgentStatusValue = "unknown" | "running" | "waiting_input" | "stopped";
+
 export interface BranchInfo {
   name: string;
   commit: string;
   is_current: boolean;
   is_agent_running: boolean;
+  agent_status: AgentStatusValue;
   ahead: number;
   behind: number;
   divergence_status: string; // "UpToDate" | "Ahead" | "Behind" | "Diverged"
@@ -310,6 +313,7 @@ export interface WorktreeInfo {
   is_current: boolean;
   is_protected: boolean;
   is_agent_running: boolean;
+  agent_status: AgentStatusValue;
   ahead: number;
   behind: number;
   is_gone: boolean;
