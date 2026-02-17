@@ -6,6 +6,7 @@
 
 - `get_system_info` の高頻度・重複呼び出しを抑制して、操作全般の引っかかりを減らす
 - ウィンドウ復帰時の不要なウォームアップ再実行を除去する
+- Agent タブ関連の周期再取得で実行されるブランチ/ワークツリー列挙を、UI応答経路から分離する
 
 ## 技術コンテキスト
 
@@ -37,11 +38,24 @@
 - 新規テストを GREEN 化し、既存監視挙動の基本回帰（start/stop/destroy）を確認する
 - 仕様タスクを完了状態へ更新する
 
+### Phase 4: バックエンド列挙コマンドの実行分離
+
+- `crates/gwt-tauri/src/commands/branches.rs`
+  - `list_worktree_branches` を `async` + `spawn_blocking` 化
+  - `list_remote_branches` を `async` + `spawn_blocking` 化
+  - 実ロジックを内部関数へ分離し、既存レスポンス契約を維持
+- `crates/gwt-tauri/src/commands/cleanup.rs`
+  - `list_worktrees` を `async` + `spawn_blocking` 化
+  - 実ロジックを内部関数へ分離し、テストから直接検証可能にする
+- `tauri::Manager` 経由で `AppHandle` から `AppState` を取得するパターンへ統一
+
 ## テスト
 
 ### バックエンド
 
 - 変更なし（今回はフロントエンドのポーリング制御のみ）
+- `cargo test -p gwt-tauri commands::branches -- --nocapture`
+- `cargo test -p gwt-tauri commands::cleanup -- --nocapture`
 
 ### フロントエンド
 

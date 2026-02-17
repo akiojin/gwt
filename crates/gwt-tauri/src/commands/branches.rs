@@ -240,6 +240,90 @@ fn with_panic_guard<T>(context: &str, f: impl FnOnce() -> Result<T, String>) -> 
     }
 }
 
+#[derive(Debug)]
+struct WorktreeBranchListing {
+    infos: Vec<BranchInfo>,
+    branch_names: Vec<String>,
+}
+
+fn list_worktree_branches_impl(
+    project_path: &str,
+    state: &AppState,
+) -> Result<WorktreeBranchListing, String> {
+    let project_root = Path::new(project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let last_tool = build_last_tool_usage_map(&repo_path);
+    let running_branches = running_agent_branches(state, &repo_path);
+    let agent_statuses = build_agent_status_map(&repo_path, state);
+
+    let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
+    let worktrees = manager.list_basic().map_err(|e| e.to_string())?;
+
+    let names: HashSet<String> = worktrees
+        .into_iter()
+        .filter(|wt| !wt.is_main && wt.is_active())
+        .filter_map(|wt| wt.branch)
+        .collect();
+
+    if names.is_empty() {
+        return Ok(WorktreeBranchListing {
+            infos: Vec::new(),
+            branch_names: Vec::new(),
+        });
+    }
+
+    let branch_names = names.iter().cloned().collect::<Vec<_>>();
+
+    let branches = Branch::list(&repo_path).map_err(|e| e.to_string())?;
+    let mut infos: Vec<BranchInfo> = branches
+        .into_iter()
+        .filter(|b| names.contains(&b.name))
+        .map(BranchInfo::from)
+        .collect();
+    for info in &mut infos {
+        info.last_tool_usage = last_tool.get(&info.name).cloned();
+        info.is_agent_running = running_branches.contains(&info.name);
+        if let Some(status) = agent_statuses.get(&info.name) {
+            info.agent_status = agent_status_to_string(*status);
+        }
+    }
+
+    Ok(WorktreeBranchListing {
+        infos,
+        branch_names,
+    })
+}
+
+fn list_remote_branches_impl(
+    project_path: &str,
+    state: &AppState,
+) -> Result<Vec<BranchInfo>, String> {
+    let project_root = Path::new(project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let last_tool = build_last_tool_usage_map(&repo_path);
+    let running_branches = running_agent_branches(state, &repo_path);
+    let agent_statuses = build_agent_status_map(&repo_path, state);
+    let remotes = Remote::list(&repo_path).unwrap_or_default();
+
+    let branches = if is_bare_repository(&repo_path) {
+        Branch::list_remote_from_origin(&repo_path).map_err(|e| e.to_string())?
+    } else {
+        Branch::list_remote(&repo_path).map_err(|e| e.to_string())?
+    };
+
+    let mut infos: Vec<BranchInfo> = branches.into_iter().map(BranchInfo::from).collect();
+    for info in &mut infos {
+        let normalized = strip_known_remote_prefix(&info.name, &remotes);
+        info.last_tool_usage = last_tool.get(normalized).cloned();
+        info.is_agent_running = running_branches.contains(normalized);
+        if let Some(status) = agent_statuses.get(normalized) {
+            info.agent_status = agent_status_to_string(*status);
+        }
+    }
+
+    Ok(infos)
+}
+
 /// List all local branches in a repository
 #[tauri::command]
 pub fn list_branches(
@@ -275,43 +359,11 @@ pub async fn list_worktree_branches(
     tauri::async_runtime::spawn_blocking(move || {
         with_panic_guard("listing worktree branches", || {
             let state = app_handle.state::<AppState>();
-            let project_root = Path::new(&project_path);
-            let repo_path = resolve_repo_path_for_project_root(project_root)?;
-            let last_tool = build_last_tool_usage_map(&repo_path);
-            let running_branches = running_agent_branches(&state, &repo_path);
-            let agent_statuses = build_agent_status_map(&repo_path, &state);
-
-            let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
-            let worktrees = manager.list_basic().map_err(|e| e.to_string())?;
-
-            let names: HashSet<String> = worktrees
-                .into_iter()
-                .filter(|wt| !wt.is_main && wt.is_active())
-                .filter_map(|wt| wt.branch)
-                .collect();
-
-            if names.is_empty() {
-                return Ok(Vec::new());
-            }
-
-            let branch_names = names.iter().cloned().collect::<Vec<_>>();
-
-            let branches = Branch::list(&repo_path).map_err(|e| e.to_string())?;
-            let mut infos: Vec<BranchInfo> = branches
-                .into_iter()
-                .filter(|b| names.contains(&b.name))
-                .map(BranchInfo::from)
-                .collect();
-            for info in &mut infos {
-                info.last_tool_usage = last_tool.get(&info.name).cloned();
-                info.is_agent_running = running_branches.contains(&info.name);
-                if let Some(status) = agent_statuses.get(&info.name) {
-                    info.agent_status = agent_status_to_string(*status);
-                }
-            }
+            let listing = list_worktree_branches_impl(&project_path, &state)?;
 
             let prewarm_project_path = project_path.clone();
             let prewarm_handle = app_handle.clone();
+            let branch_names = listing.branch_names;
             tauri::async_runtime::spawn_blocking(move || {
                 crate::commands::sessions::prewarm_missing_worktree_summaries(
                     prewarm_project_path,
@@ -320,7 +372,7 @@ pub async fn list_worktree_branches(
                 );
             });
 
-            Ok(infos)
+            Ok(listing.infos)
         })
     })
     .await
@@ -336,29 +388,7 @@ pub async fn list_remote_branches(
     tauri::async_runtime::spawn_blocking(move || {
         with_panic_guard("listing remote branches", || {
             let state = app_handle.state::<AppState>();
-            let project_root = Path::new(&project_path);
-            let repo_path = resolve_repo_path_for_project_root(project_root)?;
-            let last_tool = build_last_tool_usage_map(&repo_path);
-            let running_branches = running_agent_branches(&state, &repo_path);
-            let agent_statuses = build_agent_status_map(&repo_path, &state);
-            let remotes = Remote::list(&repo_path).unwrap_or_default();
-
-            let branches = if is_bare_repository(&repo_path) {
-                Branch::list_remote_from_origin(&repo_path).map_err(|e| e.to_string())?
-            } else {
-                Branch::list_remote(&repo_path).map_err(|e| e.to_string())?
-            };
-            let mut infos: Vec<BranchInfo> = branches.into_iter().map(BranchInfo::from).collect();
-            for info in &mut infos {
-                let normalized = strip_known_remote_prefix(&info.name, &remotes);
-                info.last_tool_usage = last_tool.get(normalized).cloned();
-                info.is_agent_running = running_branches.contains(normalized);
-                if let Some(status) = agent_statuses.get(normalized) {
-                    info.agent_status = agent_status_to_string(*status);
-                }
-            }
-
-            Ok(infos)
+            list_remote_branches_impl(&project_path, &state)
         })
     })
     .await
@@ -393,7 +423,40 @@ pub fn get_current_branch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::AppState;
     use gwt_core::config::AgentStatus;
+    use gwt_core::process::command;
+    use tempfile::TempDir;
+
+    fn init_git_repo(path: &Path) {
+        let init = command("git").args(["init"]).current_dir(path).output();
+        assert!(init.is_ok(), "git init failed to run");
+        assert!(init.unwrap().status.success(), "git init failed");
+
+        let _ = command("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(path)
+            .output();
+        let _ = command("git")
+            .args(["config", "user.name", "test"])
+            .current_dir(path)
+            .output();
+
+        std::fs::write(path.join("README.md"), "init\n").expect("failed to write README");
+        let add = command("git")
+            .args(["add", "README.md"])
+            .current_dir(path)
+            .output()
+            .expect("git add should run");
+        assert!(add.status.success(), "git add failed");
+
+        let commit = command("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(path)
+            .output()
+            .expect("git commit should run");
+        assert!(commit.status.success(), "git commit failed");
+    }
 
     #[test]
     fn test_with_panic_guard_returns_error_on_panic() {
@@ -467,5 +530,31 @@ mod tests {
 
         let map = select_preferred_branch_panes(panes);
         assert_eq!(map.get("feature/a").map(String::as_str), Some("pane-old"));
+    }
+
+    #[test]
+    fn test_list_worktree_branches_impl_returns_consistent_branch_mapping() {
+        let repo = TempDir::new().expect("temp dir");
+        init_git_repo(repo.path());
+        let project_path = repo.path().to_string_lossy().to_string();
+        let state = AppState::new();
+
+        let out = list_worktree_branches_impl(&project_path, &state).expect("listing should work");
+        let names: HashSet<String> = out.branch_names.iter().cloned().collect();
+        assert_eq!(names.len(), out.branch_names.len());
+        for info in &out.infos {
+            assert!(names.contains(&info.name));
+        }
+    }
+
+    #[test]
+    fn test_list_remote_branches_impl_returns_empty_without_remotes() {
+        let repo = TempDir::new().expect("temp dir");
+        init_git_repo(repo.path());
+        let project_path = repo.path().to_string_lossy().to_string();
+        let state = AppState::new();
+
+        let out = list_remote_branches_impl(&project_path, &state).expect("listing should work");
+        assert!(out.is_empty());
     }
 }
