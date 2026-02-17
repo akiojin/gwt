@@ -326,9 +326,6 @@ test("navigates Session Summary tabs and opens workflow run page", async ({
   await branchButton.click();
 
   await expect(
-    page.getByRole("heading", { level: 2, name: branchA.name }),
-  ).toBeVisible();
-  await expect(
     page.getByRole("button", { name: "Summary", exact: true }),
   ).toHaveClass(/active/);
 
@@ -357,7 +354,7 @@ test("navigates Session Summary tabs and opens workflow run page", async ({
 
   await page
     .locator(".summary-tabs")
-    .getByRole("button", { name: "AI", exact: true })
+    .getByRole("button", { name: "Summary", exact: true })
     .click();
   await expect(page.getByText("AI Summary")).toBeVisible();
 });
@@ -399,4 +396,41 @@ test("switches sort mode on worktree list", async ({ page }) => {
   await expect(page.locator(".branch-list .branch-name").nth(2)).toHaveText(
     "feature/name-b",
   );
+});
+
+test("restores saved window sessions on startup", async ({ page }) => {
+  const savedSessions = [
+    { label: "main", projectPath: "/tmp/project-main" },
+    { label: "project-2", projectPath: "/tmp/project-second" },
+  ];
+
+  await page.addInitScript((sessionsJson) => {
+    window.localStorage.setItem(
+      "gwt.windowSessions.v1",
+      JSON.stringify(sessionsJson),
+    );
+  }, savedSessions);
+
+  await page.goto("/");
+
+  await expect
+    .poll(async () => {
+      const raw = await page.evaluate(() => {
+        const raw = (window as unknown as {
+          __GWT_TAURI_INVOKE_LOG__?: Array<{ cmd: string }>;
+        }).__GWT_TAURI_INVOKE_LOG__;
+        return raw;
+      });
+      const entries = Array.isArray(raw) ? raw : [];
+      return entries.some((entry) => entry.cmd === "open_project");
+    })
+    .toBe(true);
+
+  const invokeCommands = await page.evaluate(() => {
+    const raw = (window as unknown as { __GWT_TAURI_INVOKE_LOG__?: Array<{ cmd: string }> })
+      .__GWT_TAURI_INVOKE_LOG__;
+    return raw ?? [];
+  });
+
+  expect(invokeCommands.map((entry) => entry.cmd)).toContain("open_gwt_window");
 });

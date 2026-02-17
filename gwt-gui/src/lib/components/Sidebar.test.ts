@@ -572,7 +572,7 @@ describe("Sidebar", () => {
       });
 
       await rendered.findByText(branchFixture.name);
-      const prTab = rendered.container.querySelectorAll(".summary-tab")[2] as HTMLElement;
+      const prTab = rendered.container.querySelectorAll(".summary-tab")[3] as HTMLElement;
       await fireEvent.click(prTab);
       await rendered.findByText("#111 A");
 
@@ -700,6 +700,80 @@ describe("Sidebar", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("keeps worktree list visible during 10s agent-status fallback polling", async () => {
+    vi.useFakeTimers();
+    try {
+      invokeMock.mockImplementation((command: string) => {
+        if (command === "list_worktree_branches") {
+          return Promise.resolve([branchFixture]);
+        }
+        if (command === "list_worktrees") return Promise.resolve([]);
+        if (command === "fetch_pr_status") {
+          return Promise.resolve({
+            statuses: {},
+            ghStatus: { available: true, authenticated: true },
+          });
+        }
+        return Promise.resolve([]);
+      });
+
+      const rendered = await renderSidebar({
+        projectPath: "/tmp/project",
+        onBranchSelect: vi.fn(),
+        agentTabBranches: [branchFixture.name],
+      });
+
+      await rendered.findByText(branchFixture.name);
+      expect(rendered.container.querySelector(".loading-indicator")).toBeNull();
+      const beforeRefresh = countInvokeCalls("list_worktree_branches");
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      await waitFor(() => {
+        expect(countInvokeCalls("list_worktree_branches")).toBeGreaterThan(beforeRefresh);
+      });
+      expect(rendered.container.querySelector(".loading-indicator")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps worktree list visible when agent-status-changed event triggers refresh", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "list_worktree_branches") {
+        return Promise.resolve([branchFixture]);
+      }
+      if (command === "list_worktrees") return Promise.resolve([]);
+      if (command === "fetch_pr_status") {
+        return Promise.resolve({
+          statuses: {},
+          ghStatus: { available: true, authenticated: true },
+        });
+      }
+      return Promise.resolve([]);
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      agentTabBranches: [branchFixture.name],
+    });
+
+    await rendered.findByText(branchFixture.name);
+    await waitFor(() =>
+      expect(listenMock.mock.calls.some((call) => call[0] === "agent-status-changed")).toBe(
+        true
+      )
+    );
+    expect(rendered.container.querySelector(".loading-indicator")).toBeNull();
+    const beforeRefresh = countInvokeCalls("list_worktree_branches");
+
+    await emitTauriEvent("agent-status-changed", {});
+    await waitFor(() => {
+      expect(countInvokeCalls("list_worktree_branches")).toBeGreaterThan(beforeRefresh);
+    });
+    expect(rendered.container.querySelector(".loading-indicator")).toBeNull();
   });
 
   it("applies branch filtering after debounce delay", async () => {
@@ -1022,6 +1096,9 @@ describe("Sidebar", () => {
     });
 
     const continueButton = await rendered.findByRole("button", { name: "Continue" });
+    await waitFor(() => {
+      expect((continueButton as HTMLButtonElement).disabled).toBe(false);
+    });
     await fireEvent.click(continueButton);
 
     await waitFor(() => expect(onQuickLaunch).toHaveBeenCalledTimes(1));
@@ -1062,6 +1139,9 @@ describe("Sidebar", () => {
     });
 
     const newButton = await rendered.findByRole("button", { name: "New" });
+    await waitFor(() => {
+      expect((newButton as HTMLButtonElement).disabled).toBe(false);
+    });
     await fireEvent.click(newButton);
 
     await waitFor(() => expect(onQuickLaunch).toHaveBeenCalledTimes(1));

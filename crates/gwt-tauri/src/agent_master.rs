@@ -55,7 +55,7 @@ impl AgentModeState {
             ai_error: None,
             last_error: None,
             is_waiting: false,
-            session_name: Some("Agent Mode".to_string()),
+            session_name: Some("Master Agent".to_string()),
             llm_call_count: 0,
             estimated_tokens: 0,
             active_spec_id: None,
@@ -302,7 +302,7 @@ fn prepare_issue_spec_for_window(
     preferred_spec_id: Option<&str>,
 ) -> Result<IssueSpecPreparation, String> {
     let Some(project_path) = state.project_for_window(window_label) else {
-        return Err("Open a project before using Agent Mode.".to_string());
+        return Err("Open a project before using Master Agent.".to_string());
     };
     prepare_issue_spec(Path::new(&project_path), user_input, preferred_spec_id)
 }
@@ -416,7 +416,7 @@ fn build_issue_title(spec_id: &str, user_input: &str, existing_title: Option<&st
     }
     let base = collapse_whitespace(user_input);
     let mut title = if base.is_empty() {
-        "Agent Mode Task".to_string()
+        "Master Agent Task".to_string()
     } else {
         base
     };
@@ -539,7 +539,7 @@ mod tests {
         assert!(err.is_err());
         assert!(err
             .unwrap_err()
-            .contains("Open a project before using Agent Mode."));
+            .contains("Open a project before using Master Agent."));
     }
 
     #[test]

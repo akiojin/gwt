@@ -28,3 +28,10 @@
 
 - [x] T030 手動観点（切替即応・背景更新・エラー時維持）を確認
 - [x] T031 変更ファイルをレビューし、不要差分がないことを確認
+
+## Phase 4: Agent 状態更新時の無表示再取得（RED → GREEN）
+
+- [x] T040 [RED] `Sidebar.test.ts` に「10秒フォールバック更新で `Loading...` を再表示しない」テストを追加（失敗確認）
+- [x] T041 [RED] `Sidebar.test.ts` に「`agent-status-changed` 受信更新で `Loading...` を再表示しない」テストを追加（失敗確認）
+- [x] T042 [GREEN] `Sidebar.svelte` の Agent 更新経路を `localRefreshKey` 更新から背景再取得に置換
+- [x] T043 [GREEN] `pnpm -s vitest run src/lib/components/Sidebar.test.ts` を通過させる

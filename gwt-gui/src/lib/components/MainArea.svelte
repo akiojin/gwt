@@ -1,8 +1,9 @@
 <script lang="ts">
-  import type { LaunchAgentRequest, Tab } from "../types";
+  import type { GitHubIssueInfo, LaunchAgentRequest, Tab } from "../types";
   import type { TabDropPosition } from "../appTabs";
   import TerminalView from "../terminal/TerminalView.svelte";
   import AgentModePanel from "./AgentModePanel.svelte";
+  import IssueListPanel from "./IssueListPanel.svelte";
   import IssueSpecPanel from "./IssueSpecPanel.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
   import VersionHistoryPanel from "./VersionHistoryPanel.svelte";
@@ -33,6 +34,9 @@
     onTabSelect,
     onTabClose,
     onTabReorder,
+    onWorkOnIssue,
+    onSwitchToWorktree,
+    onIssueCountChange,
   }: {
     tabs: Tab[];
     activeTabId: string;
@@ -47,6 +51,9 @@
       overTabId: string,
       position: TabDropPosition,
     ) => void;
+    onWorkOnIssue?: (issue: GitHubIssueInfo) => void;
+    onSwitchToWorktree?: (branchName: string) => void;
+    onIssueCountChange?: (count: number) => void;
   } = $props();
 
   let activeTab = $derived(tabs.find((t) => t.id === activeTabId));
@@ -274,6 +281,13 @@
           projectPath={projectPath}
           issueNumber={activeTab.issueNumber ?? 0}
           specId={activeTab.specId}
+        />
+      {:else if activeTab?.type === "issues"}
+        <IssueListPanel
+          {projectPath}
+          onWorkOnIssue={onWorkOnIssue ?? (() => {})}
+          onSwitchToWorktree={onSwitchToWorktree ?? (() => {})}
+          {onIssueCountChange}
         />
       {:else}
         <div class="placeholder">

@@ -13,18 +13,16 @@
 1. 既存 spec の内容を GUI 前提に更新し、`カテゴリ` を `GUI` に変更する
 2. 新しい GUI spec を作成し、元の Porting spec を `**依存仕様**:` で参照する
 
-## Session Summary 正本（2026-02-14）
-
-- タブ構成・表示責務の正本: `specs/SPEC-d6949f99/spec.md`
-- AI Summary 生成仕様: `specs/SPEC-3a1b7c2d/spec.md`
-- Git セクション内表示仕様（Changes/Commits/Stash）: `specs/SPEC-735cbc5d/spec.md`
-- Session SummaryのUIレイアウトに矛盾がある場合は `SPEC-d6949f99` を優先する
-
 ## 現行仕様（GUI）
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
+| [SPEC-013cd65c](SPEC-013cd65c/spec.md) | バグ修正仕様: ベアリポジトリでリモートブランチからワークツリー作成時に E1003 エラー | 2026-02-17 |
+| [SPEC-7c0444a8](SPEC-7c0444a8/spec.md) | 機能仕様: Issue #1097: Worktree Summaryを6タブ + Quick Launchヘッダーへ再編 | 2026-02-17 |
 | [SPEC-8ad13230](SPEC-8ad13230/spec.md) | 機能仕様: Agent Mode Issue-first Spec Bundle CRUD | 2026-02-17 |
+| [SPEC-ca4b5b07](SPEC-ca4b5b07/spec.md) | 機能仕様: Issue タブ — GitHub Issue 一覧・詳細・フルフロー | 2026-02-17 |
+| [SPEC-b80e7996](SPEC-b80e7996/spec.md) | 機能仕様: Worktree一覧のエージェント状態アニメーション | 2026-02-16 |
+| [SPEC-e7b3a1d2](SPEC-e7b3a1d2/spec.md) | 機能仕様: ウィンドウ・タブ切り替えショートカット | 2026-02-15 |
 | [SPEC-0f8e9c12](SPEC-0f8e9c12/spec.md) | 機能仕様: Sidebar Filter Cache for Local/Remote/All | 2026-02-14 |
 | [SPEC-552c5e74](SPEC-552c5e74/spec.md) | 機能仕様: Launch Agent のデフォルト設定保持（前回成功起動値） | 2026-02-14 |
 | [SPEC-923b33fc](SPEC-923b33fc/spec.md) | 機能仕様: 全操作時の断続フリーズ抑止（System Monitor 負荷制御） | 2026-02-14 |
@@ -41,7 +39,7 @@
 | [SPEC-c6ba640a](SPEC-c6ba640a/spec.md) | 機能仕様: GitHub Issue連携によるブランチ作成（GUI版） | 2026-02-13 |
 | [SPEC-d7f2a1b3](SPEC-d7f2a1b3/spec.md) | バグ修正仕様: Cleanup「Select All Safe」が機能しない | 2026-02-13 |
 | [SPEC-f466bc68](SPEC-f466bc68/spec.md) | 機能仕様: プロジェクトを開いたときに前回のエージェントタブを復元する | 2026-02-13 |
-| [SPEC-f490dded](SPEC-f490dded/spec.md) | 機能仕様: シンプルターミナルタブ | 2026-02-14 |
+| [SPEC-f490dded](SPEC-f490dded/spec.md) | 機能仕様: シンプルターミナルタブ | 2026-02-13 |
 | [SPEC-3a1b7c2d](SPEC-3a1b7c2d/spec.md) | 機能仕様: GUI Worktree Summary のスクロールバック要約（実行中対応） | 2026-02-12 |
 | [SPEC-133bf64f](SPEC-133bf64f/spec.md) | 機能仕様: Project Version History（タグ単位のAI要約 + 簡易CHANGELOG） | 2026-02-10 |
 | [SPEC-1b98b6d7](SPEC-1b98b6d7/spec.md) | 機能仕様: Claude Code Hooks 経由の gwt-tauri hook 実行で GUI を起動しない | 2026-02-10 |

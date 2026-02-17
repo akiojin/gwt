@@ -20,12 +20,14 @@
     projectPath,
     selectedBranch = "",
     osEnvReady = true,
+    prefillIssue = null,
     onLaunch,
     onClose,
   }: {
     projectPath: string;
     selectedBranch?: string;
     osEnvReady?: boolean;
+    prefillIssue?: GitHubIssueInfo | null;
     onLaunch: (request: LaunchAgentRequest) => Promise<void>;
     onClose: () => void;
   } = $props();
@@ -581,6 +583,23 @@
     void loadBaseBranchOptions();
   });
 
+  // Apply prefill from Issue tab ("Work on this" button).
+  $effect(() => {
+    if (!prefillIssue) return;
+    branchMode = "new";
+    newBranchTab = "fromIssue";
+    selectedIssue = prefillIssue;
+
+    const names = prefillIssue.labels.map((l) => l.name.toLowerCase());
+    if (names.includes("bug")) {
+      newBranchPrefix = "bugfix/";
+    } else if (names.includes("hotfix")) {
+      newBranchPrefix = "hotfix/";
+    } else {
+      newBranchPrefix = "feature/";
+    }
+  });
+
   // Check gh CLI once per project after shell environment is ready.
   $effect(() => {
     void projectPath;
@@ -628,6 +647,7 @@
         projectPath,
         page,
         perPage: 30,
+        state: "open",
       });
       if (page === 1) {
         issues = resp.issues;
@@ -1242,8 +1262,8 @@
                   <span class="issue-title">{issue.title}</span>
                   {#if issue.labels.length > 0}
                     <span class="issue-labels">
-                      {#each issue.labels as lbl (lbl)}
-                        <span class="issue-label">{lbl}</span>
+                      {#each issue.labels as lbl (lbl.name)}
+                        <span class="issue-label">{lbl.name}</span>
                       {/each}
                     </span>
                   {/if}
