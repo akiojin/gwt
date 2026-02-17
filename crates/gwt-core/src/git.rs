@@ -6,7 +6,10 @@ mod branch;
 mod clone;
 mod commit;
 pub mod diff;
+mod gh_cli;
+pub mod graphql;
 mod issue;
+mod issue_spec;
 mod pullrequest;
 mod remote;
 mod repository;
@@ -24,11 +27,21 @@ pub use diff::{
     FileChangeKind, FileDiff, GitChangeSummary, GitViewCommit, WorkingTreeEntry,
 };
 pub use issue::{
-    create_linked_branch, fetch_open_issues, filter_issues_by_title, find_branch_for_issue,
-    generate_branch_name, is_gh_cli_authenticated, is_gh_cli_available, parse_gh_issues_json,
-    FetchIssuesResult, GitHubIssue,
+    create_linked_branch, fetch_issue_detail, fetch_open_issues, filter_issues_by_title,
+    find_branch_for_issue, generate_branch_name, is_gh_cli_authenticated, is_gh_cli_available,
+    parse_gh_issues_json, FetchIssuesResult, GitHubAssignee, GitHubIssue, GitHubLabel,
+    GitHubMilestone,
 };
-pub use pullrequest::{PrCache, PullRequest};
+pub use issue_spec::{
+    append_contract_comment, close_spec_issue, delete_spec_issue_artifact_comment,
+    find_spec_issue_by_spec_id, get_spec_issue_detail, list_spec_issue_artifact_comments,
+    sync_issue_to_project, upsert_spec_issue, upsert_spec_issue_artifact_comment,
+    ProjectSyncResult, SpecIssueArtifactComment, SpecIssueArtifactKind, SpecIssueChecklist,
+    SpecIssueDetail, SpecIssueSections, SpecProjectPhase,
+};
+pub use pullrequest::{
+    PrCache, PrStatusCache, PrStatusInfo, PullRequest, ReviewComment, ReviewInfo, WorkflowRunInfo,
+};
 pub use remote::Remote;
 pub use repository::{
     detect_repo_type, find_bare_repo_in_dir, get_header_context, get_main_repo_root,

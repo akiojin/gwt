@@ -146,9 +146,16 @@ struct ChatCompletionsRequest<'a> {
     messages: Vec<ChatCompletionsInputMessage<'a>>,
     max_tokens: u32,
     temperature: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<ChatCompletionsReasoning<'a>>,
 }
 
 #[derive(Debug, Serialize)]
+struct ChatCompletionsReasoning<'a> {
+    effort: &'a str,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct ChatCompletionsInputMessage<'a> {
     role: &'a str,
     content: &'a str,
@@ -440,63 +447,93 @@ impl AIClient {
             return Err(AIError::ConfigError("No input messages".to_string()));
         }
 
-        let request_body = ChatCompletionsRequest {
-            model: &self.model,
-            messages: body_messages,
-            max_tokens: MAX_OUTPUT_TOKENS,
-            temperature: TEMPERATURE,
-        };
-
-        let mut headers = HeaderMap::new();
-        if !self.api_key.trim().is_empty() {
-            if is_azure_endpoint(&url) {
-                headers.insert(
-                    "api-key",
-                    HeaderValue::from_str(self.api_key.trim())
-                        .map_err(|e| AIError::ConfigError(e.to_string()))?,
-                );
-            } else {
-                let value = format!("Bearer {}", self.api_key.trim());
-                headers.insert(
-                    AUTHORIZATION,
-                    HeaderValue::from_str(&value)
-                        .map_err(|e| AIError::ConfigError(e.to_string()))?,
-                );
-            }
+        let mut attempts: Vec<Option<&str>> = vec![None];
+        if let Some(effort) =
+            preferred_chat_completion_reasoning_effort(&self.endpoint, &self.model)
+        {
+            attempts.insert(0, Some(effort));
         }
 
-        let response = self
-            .client
-            .post(url)
-            .headers(headers)
-            .json(&request_body)
-            .send();
+        let mut last_error: Option<AIError> = None;
 
-        match response {
-            Ok(resp) => {
-                let status = resp.status();
-                let resp_headers = resp.headers().clone();
-                let body = resp.text().unwrap_or_default();
-                if status == StatusCode::OK {
-                    let (text, usage) = parse_chat_completion_with_usage(&body)?;
-                    if let Some(tokens) = usage {
-                        self.cumulative_tokens.fetch_add(tokens, Ordering::Relaxed);
+        for reasoning in attempts {
+            let request_body =
+                build_chat_completions_request(&body_messages, &self.model, reasoning);
+
+            let mut headers = HeaderMap::new();
+            if !self.api_key.trim().is_empty() {
+                if is_azure_endpoint(&url) {
+                    headers.insert(
+                        "api-key",
+                        HeaderValue::from_str(self.api_key.trim())
+                            .map_err(|e| AIError::ConfigError(e.to_string()))?,
+                    );
+                } else {
+                    let value = format!("Bearer {}", self.api_key.trim());
+                    headers.insert(
+                        AUTHORIZATION,
+                        HeaderValue::from_str(&value)
+                            .map_err(|e| AIError::ConfigError(e.to_string()))?,
+                    );
+                }
+            }
+
+            let response = self
+                .client
+                .post(url.clone())
+                .headers(headers)
+                .json(&request_body)
+                .send();
+
+            match response {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let resp_headers = resp.headers().clone();
+                    let body = resp.text().unwrap_or_default();
+                    if status == StatusCode::OK {
+                        match parse_chat_completion_with_usage(&body) {
+                            Ok((text, usage)) => {
+                                if let Some(tokens) = usage {
+                                    self.cumulative_tokens.fetch_add(tokens, Ordering::Relaxed);
+                                }
+                                return Ok(text);
+                            }
+                            Err(error) => {
+                                if reasoning.is_some()
+                                    && should_retry_chat_completion_without_reasoning(&error)
+                                {
+                                    last_error = Some(error);
+                                    continue;
+                                }
+                                return Err(error);
+                            }
+                        }
                     }
-                    return Ok(text);
+                    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                        return Err(AIError::Unauthorized);
+                    }
+                    if status == StatusCode::TOO_MANY_REQUESTS {
+                        let retry_after = parse_retry_after(&body, &resp_headers);
+                        return Err(AIError::RateLimited { retry_after });
+                    }
+                    let message = extract_error_message(&body)
+                        .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
+                    if reasoning.is_some()
+                        && should_retry_chat_completion_without_reasoning_message(status, &message)
+                    {
+                        last_error = Some(AIError::ServerError(message));
+                        continue;
+                    }
+                    return Err(AIError::ServerError(message));
                 }
-                if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-                    return Err(AIError::Unauthorized);
+                Err(err) => {
+                    return Err(AIError::NetworkError(err.to_string()));
                 }
-                if status == StatusCode::TOO_MANY_REQUESTS {
-                    let retry_after = parse_retry_after(&body, &resp_headers);
-                    return Err(AIError::RateLimited { retry_after });
-                }
-                let message = extract_error_message(&body)
-                    .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
-                Err(AIError::ServerError(message))
             }
-            Err(err) => Err(AIError::NetworkError(err.to_string())),
         }
+
+        Err(last_error
+            .unwrap_or_else(|| AIError::ServerError("Chat completion request failed".to_string())))
     }
 }
 
@@ -577,6 +614,61 @@ fn build_chat_completions_messages<'a>(
             content: message.content.as_str(),
         })
         .collect()
+}
+
+fn build_chat_completions_request<'a>(
+    messages: &'a [ChatCompletionsInputMessage<'a>],
+    model: &'a str,
+    reasoning_effort: Option<&'a str>,
+) -> ChatCompletionsRequest<'a> {
+    ChatCompletionsRequest {
+        model,
+        messages: messages.to_vec(),
+        max_tokens: MAX_OUTPUT_TOKENS,
+        temperature: TEMPERATURE,
+        reasoning: reasoning_effort.map(|effort| ChatCompletionsReasoning { effort }),
+    }
+}
+
+fn preferred_chat_completion_reasoning_effort(endpoint: &str, model: &str) -> Option<&'static str> {
+    if !model.contains(':') {
+        return None;
+    }
+
+    let Ok(url) = Url::parse(endpoint) else {
+        return None;
+    };
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    if host == "api.openai.com" {
+        return None;
+    }
+
+    Some("low")
+}
+
+fn should_retry_chat_completion_without_reasoning(error: &AIError) -> bool {
+    matches!(
+        error,
+        AIError::ParseError(message)
+            if message.contains("No message content in chat completion response")
+                || message.contains("No text content in chat completion response")
+    )
+}
+
+fn should_retry_chat_completion_without_reasoning_message(
+    status: StatusCode,
+    message: &str,
+) -> bool {
+    if !status.is_server_error() && status != StatusCode::BAD_REQUEST {
+        return false;
+    }
+
+    let lower = message.to_ascii_lowercase();
+    lower.contains("reasoning")
+        && (lower.contains("cannot unmarshal")
+            || lower.contains("invalid request")
+            || lower.contains("unsupported")
+            || lower.contains("not support"))
 }
 
 fn parse_response_with_usage(body: &str) -> Result<(String, Option<u64>), AIError> {
@@ -1345,6 +1437,43 @@ mod tests {
     #[test]
     fn test_should_not_prefer_chat_completions_for_invalid_endpoint() {
         assert!(!should_prefer_chat_completions("not-a-url", "gpt-4o-mini"));
+    }
+
+    #[test]
+    fn test_preferred_chat_completion_reasoning_effort_for_local_model() {
+        assert_eq!(
+            preferred_chat_completion_reasoning_effort(
+                "http://192.168.100.235:32768/v1",
+                "gpt-oss:20b"
+            ),
+            Some("low")
+        );
+    }
+
+    #[test]
+    fn test_preferred_chat_completion_reasoning_effort_none_for_openai() {
+        assert_eq!(
+            preferred_chat_completion_reasoning_effort("https://api.openai.com/v1", "gpt-oss:20b"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_preferred_chat_completion_reasoning_effort_none_for_official_model_name() {
+        assert_eq!(
+            preferred_chat_completion_reasoning_effort("https://api.openai.com/v1", "gpt-4o-mini"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_should_retry_chat_completion_without_reasoning_parse_error() {
+        assert!(should_retry_chat_completion_without_reasoning(
+            &AIError::ParseError("No message content in chat completion response".to_string())
+        ));
+        assert!(!should_retry_chat_completion_without_reasoning(
+            &AIError::ParseError("bad json".to_string())
+        ));
     }
 
     #[test]

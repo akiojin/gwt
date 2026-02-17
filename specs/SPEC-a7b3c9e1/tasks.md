@@ -12,7 +12,7 @@
 - [x] T5: `gwt-mcp-bridge/` プロジェクト初期化（package.json, tsconfig.json, esbuild設定）
 - [x] T6: @modelcontextprotocol/sdk でstdio MCPサーバーの骨格を実装
 - [x] T7: ws ライブラリで `~/.gwt/mcp-state.json` を読んでWebSocket接続するクライアントを実装
-- [x] T8: 8つのMCPツール定義（スキーマ + description）を登録
+- [x] T8: 12個のMCPツール定義（既存8 + master連携4、スキーマ + description）を登録
 - [x] T9: MCPリクエスト → WebSocket転送 → レスポンス返却のパイプラインを実装
 - [x] T10: esbuildで単一JSファイルにバンドルし、tauri.conf.jsonのresourcesに追加
 
@@ -47,3 +47,19 @@
 - [x] T28: MCPブリッジのE2Eテスト（ツール呼び出し → WebSocket → Tauri → レスポンス）
 - [x] T29: cargo clippy, cargo fmt, svelte-check による全体品質チェック
 - [x] T30: 手動検証（gwt起動→MCP登録確認→ツール呼び出し→終了→登録解除確認）
+
+## Phase 7: マスター連携 + 登録ヘルス可視化
+
+- [x] T31: `gwt_master_send` / `gwt_master_get_state` の MCP ハンドラーを追加
+- [x] T32: `gwt_master_get_mcp_registration_status` / `gwt_master_repair_mcp_registration` を追加
+- [x] T33: `mcp_ws_server` の JSON-RPC ルーティングへ master連携4メソッドを登録
+- [x] T34: `gwt-core::config::mcp_registration` にヘルス取得/修復APIを追加し `config.rs` から公開
+- [x] T35: Tauri command (`get_mcp_registration_status_cmd` / `repair_mcp_registration_cmd`) と `AppState` キャッシュを追加
+- [x] T36: Settings UI に MCP登録状態表示と修復ボタンを実装し、フロント型・テストを更新
+
+## Phase 8: 単一起動制御（MCP登録競合防止）
+
+- [x] T37: `single_instance` モジュールを追加し、ユーザー単位ロックを実装
+- [x] T38: 2つ目起動時に既存インスタンスを前面化して終了する起動ガードを実装
+- [x] T39: stale lock metadata の PID 判定と再取得ロジックを実装
+- [x] T40: 単一起動のユニットテスト（同時起動拒否・解除後再取得・stale回復）を追加

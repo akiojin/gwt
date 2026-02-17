@@ -3,12 +3,11 @@
 //! These tests verify the end-to-end bare clone and worktree creation workflow.
 
 use std::path::PathBuf;
-use std::process::Command;
 use tempfile::TempDir;
 
 /// Get the default branch name (main or master)
 fn get_default_branch(repo_path: &std::path::Path) -> String {
-    let output = Command::new("git")
+    let output = gwt_core::process::git_command()
         .args(["branch", "--show-current"])
         .current_dir(repo_path)
         .output();
@@ -32,7 +31,7 @@ fn setup_bare_test_repo() -> (TempDir, PathBuf, String) {
     let bare_path = temp.path().join("repo.git");
 
     // Create a bare repository
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["init", "--bare"])
         .arg(&bare_path)
         .output()
@@ -40,7 +39,7 @@ fn setup_bare_test_repo() -> (TempDir, PathBuf, String) {
 
     // Create a temporary working repo to add content
     let work_path = temp.path().join("work");
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["clone"])
         .arg(&bare_path)
         .arg(&work_path)
@@ -48,31 +47,31 @@ fn setup_bare_test_repo() -> (TempDir, PathBuf, String) {
         .expect("Failed to clone");
 
     // Configure git user
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["config", "user.email", "test@example.com"])
         .current_dir(&work_path)
         .output()
         .expect("Failed to set email");
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["config", "user.name", "Test User"])
         .current_dir(&work_path)
         .output()
         .expect("Failed to set name");
 
     // Create initial commit on a branch named "main"
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["checkout", "-b", "main"])
         .current_dir(&work_path)
         .output()
         .ok(); // May fail if main already exists
 
     std::fs::write(work_path.join("README.md"), "# Test Repo").expect("Failed to write file");
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["add", "."])
         .current_dir(&work_path)
         .output()
         .expect("Failed to add");
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["commit", "-m", "Initial commit"])
         .current_dir(&work_path)
         .output()
@@ -82,25 +81,25 @@ fn setup_bare_test_repo() -> (TempDir, PathBuf, String) {
     let default_branch = get_default_branch(&work_path);
 
     // Create a feature branch
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["checkout", "-b", "feature/test"])
         .current_dir(&work_path)
         .output()
         .expect("Failed to create branch");
     std::fs::write(work_path.join("feature.txt"), "Feature content").expect("Failed to write");
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["add", "."])
         .current_dir(&work_path)
         .output()
         .expect("Failed to add");
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["commit", "-m", "Add feature"])
         .current_dir(&work_path)
         .output()
         .expect("Failed to commit");
 
     // Push all branches to bare
-    Command::new("git")
+    gwt_core::process::git_command()
         .args(["push", "--all"])
         .current_dir(&work_path)
         .output()
@@ -117,7 +116,7 @@ fn test_bare_repo_detection() {
     let (temp, bare_path, _default_branch) = setup_bare_test_repo();
 
     // Verify bare repo is correctly detected
-    let output = Command::new("git")
+    let output = gwt_core::process::git_command()
         .args(["rev-parse", "--is-bare-repository"])
         .current_dir(&bare_path)
         .output()
@@ -135,7 +134,7 @@ fn test_worktree_creation_from_bare() {
     let worktree_path = temp.path().join(&default_branch);
 
     // Create worktree from bare repo
-    let output = Command::new("git")
+    let output = gwt_core::process::git_command()
         .args(["worktree", "add"])
         .arg(&worktree_path)
         .arg(&default_branch)
@@ -166,7 +165,7 @@ fn test_worktree_creation_for_feature_branch() {
     std::fs::create_dir_all(worktree_path.parent().unwrap()).expect("Failed to create parent");
 
     // Create worktree for feature branch
-    let output = Command::new("git")
+    let output = gwt_core::process::git_command()
         .args(["worktree", "add"])
         .arg(&worktree_path)
         .arg("feature/test")
@@ -190,7 +189,7 @@ fn test_worktree_list_from_bare() {
     let worktree_path = temp.path().join(&default_branch);
 
     // Create a worktree
-    let output = Command::new("git")
+    let output = gwt_core::process::git_command()
         .args(["worktree", "add"])
         .arg(&worktree_path)
         .arg(&default_branch)
@@ -206,7 +205,7 @@ fn test_worktree_list_from_bare() {
     }
 
     // List worktrees
-    let output = Command::new("git")
+    let output = gwt_core::process::git_command()
         .args(["worktree", "list"])
         .current_dir(&bare_path)
         .output()
@@ -234,7 +233,7 @@ fn test_worktree_remove() {
     let worktree_path = temp.path().join(&default_branch);
 
     // Create a worktree
-    let output = Command::new("git")
+    let output = gwt_core::process::git_command()
         .args(["worktree", "add"])
         .arg(&worktree_path)
         .arg(&default_branch)
@@ -251,7 +250,7 @@ fn test_worktree_remove() {
     }
 
     // Remove worktree
-    let output = Command::new("git")
+    let output = gwt_core::process::git_command()
         .args(["worktree", "remove"])
         .arg(&worktree_path)
         .current_dir(&bare_path)

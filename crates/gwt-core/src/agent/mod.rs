@@ -198,7 +198,7 @@ impl AgentManager {
 
 /// Check if a command exists in PATH
 pub fn command_exists(command: &str) -> bool {
-    std::process::Command::new("which")
+    crate::process::command("which")
         .arg(command)
         .output()
         .map(|o| o.status.success())
@@ -207,7 +207,7 @@ pub fn command_exists(command: &str) -> bool {
 
 /// Get command version
 pub fn get_command_version(command: &str, version_flag: &str) -> Option<String> {
-    std::process::Command::new(command)
+    crate::process::command(command)
         .arg(version_flag)
         .output()
         .ok()

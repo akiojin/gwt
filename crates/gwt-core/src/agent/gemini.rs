@@ -53,7 +53,7 @@ impl GeminiAgent {
 
     /// Build command with common arguments
     fn build_command(&self, prompt: &str, directory: &Path) -> Command {
-        let mut cmd = Command::new("gemini");
+        let mut cmd = crate::process::tokio_command("gemini");
         cmd.arg("--non-interactive")
             .arg(prompt)
             .current_dir(directory)

@@ -1,6 +1,8 @@
+<svelte:options runes={false} />
+
 <script lang="ts">
   import type { AgentModeState } from "../types";
-  import { onMount } from "svelte";
+  import { afterUpdate, onMount } from "svelte";
 
   let state: AgentModeState = {
     messages: [],
@@ -8,7 +10,7 @@
     ai_error: null,
     last_error: null,
     is_waiting: false,
-    session_name: "Agent Mode",
+    session_name: "Master Agent",
     llm_call_count: 0,
     estimated_tokens: 0,
   };
@@ -16,6 +18,10 @@
   let input = "";
   let sending = false;
   let isComposing = false;
+  let ignoreEnterAfterComposition = false;
+  let chatEl: HTMLDivElement | null = null;
+  let lastMessageCount = 0;
+  let lastOpenedIssueNumber: number | null = null;
 
   function toErrorMessage(err: unknown): string {
     if (!err) return "Unknown error";
@@ -59,36 +65,79 @@
   }
 
   function onKeydown(event: KeyboardEvent) {
-    if (isComposing || event.isComposing) return;
-    if (event.key === "Enter" && !event.shiftKey) {
+    if (event.key === "Enter") {
+      if (isComposing || ignoreEnterAfterComposition || event.isComposing) {
+        event.preventDefault();
+        return;
+      }
+      if (!event.shiftKey) {
+        event.preventDefault();
+        void sendMessage();
+      }
+      return;
+    }
+    if (event.key === "Process" && (isComposing || event.isComposing)) {
       event.preventDefault();
-      void sendMessage();
     }
   }
 
   function onCompositionStart() {
     isComposing = true;
+    ignoreEnterAfterComposition = false;
   }
 
   function onCompositionEnd() {
     isComposing = false;
+    ignoreEnterAfterComposition = true;
+    setTimeout(() => {
+      ignoreEnterAfterComposition = false;
+    }, 0);
   }
+
+  afterUpdate(() => {
+    const count = state.messages.length;
+    if (!chatEl) return;
+    if (count !== lastMessageCount) {
+      chatEl.scrollTop = chatEl.scrollHeight;
+      lastMessageCount = count;
+    }
+  });
 
   onMount(() => {
     void refreshState();
   });
+
+  $: {
+    const issueNumber = state.active_spec_issue_number ?? null;
+    if (!issueNumber || issueNumber === lastOpenedIssueNumber) {
+      // no-op
+    } else {
+      lastOpenedIssueNumber = issueNumber;
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent("gwt-agent-mode-open-spec-issue", {
+            detail: {
+              issueNumber,
+              specId: state.active_spec_id ?? null,
+              issueUrl: state.active_spec_issue_url ?? null,
+            },
+          })
+        );
+      }
+    }
+  }
 </script>
 
 <section class="agent-mode">
   <header class="agent-header">
-    <div class="agent-title">{state.session_name ?? "Agent Mode"}</div>
+    <div class="agent-title">{state.session_name ?? "Master Agent"}</div>
     <div class="agent-stats">
       <span>LLM: {state.llm_call_count}</span>
       <span>Tokens: {state.estimated_tokens}</span>
     </div>
   </header>
 
-  <div class="agent-chat">
+  <div class="agent-chat" bind:this={chatEl}>
     {#if state.last_error}
       <div class="agent-alert warn">{state.last_error}</div>
     {/if}
@@ -101,7 +150,9 @@
       <div class="agent-empty">Describe your task to start.</div>
     {:else}
       {#each state.messages as msg}
-        <div class={`agent-message ${msg.role} ${msg.kind ?? "message"}`}>
+        <div
+          class={`agent-message ${msg.role} ${msg.kind ?? "message"} ${msg.role === "assistant" && (msg.kind === null || msg.kind === "message" || typeof msg.kind === "undefined") ? "meta-hidden" : ""}`}
+        >
           <div class="agent-bubble">
             <div class="agent-meta">{msg.kind ?? msg.role}</div>
             <div class="agent-content">{msg.content}</div>
@@ -268,7 +319,7 @@
   }
 
   .agent-message.user .agent-meta,
-  .agent-message.assistant .agent-meta {
+  .agent-message.meta-hidden .agent-meta {
     display: none;
   }
 

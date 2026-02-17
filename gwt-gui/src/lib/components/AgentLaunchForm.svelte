@@ -10,17 +10,24 @@
     GitHubIssueInfo,
     LaunchAgentRequest,
   } from "../types";
+  import {
+    loadLaunchDefaults,
+    saveLaunchDefaults,
+    type LaunchDefaults,
+  } from "../agentLaunchDefaults";
 
   let {
     projectPath,
     selectedBranch = "",
     osEnvReady = true,
+    prefillIssue = null,
     onLaunch,
     onClose,
   }: {
     projectPath: string;
     selectedBranch?: string;
     osEnvReady?: boolean;
+    prefillIssue?: GitHubIssueInfo | null;
     onLaunch: (request: LaunchAgentRequest) => Promise<void>;
     onClose: () => void;
   } = $props();
@@ -70,6 +77,7 @@
   let modelByAgent: Record<string, string> = $state({});
   let agentVersionByAgent: Record<string, string> = $state({});
   let lastAgent: string = $state("");
+  let lastAgentNotInstalled: boolean = $state(false);
 
   let resumeSessionId: string = $state("");
   let skipPermissions: boolean = $state(false);
@@ -89,6 +97,8 @@
   let dockerBuild: boolean = $state(false);
   let dockerRecreate: boolean = $state(false);
   let dockerKeep: boolean = $state(false);
+  let pendingRuntimePreference: RuntimeTarget | null = null;
+  let pendingDockerServicePreference: string = "";
 
   let versionsLoading: boolean = $state(false);
   let versionTags: string[] = $state([]);
@@ -124,7 +134,7 @@
   type NewBranchTab = "manual" | "fromIssue";
   let newBranchTab: NewBranchTab = $state("manual" as NewBranchTab);
   let ghCliStatus: GhCliStatus | null = $state(null as GhCliStatus | null);
-  let ghCliChecked: boolean = $state(false);
+  let ghCliCheckedProject: string | null = $state(null as string | null);
   let issues: GitHubIssueInfo[] = $state([]);
   let issuesLoading: boolean = $state(false);
   let issuesError: string | null = $state(null);
@@ -250,6 +260,62 @@
     })()
   );
 
+  function applySavedLaunchDefaults(defaults: LaunchDefaults) {
+    selectedAgent = defaults.selectedAgent;
+    sessionMode = defaults.sessionMode;
+    modelByAgent = { ...defaults.modelByAgent };
+    agentVersionByAgent = { ...defaults.agentVersionByAgent };
+    skipPermissions = defaults.skipPermissions;
+    reasoningLevel = defaults.reasoningLevel;
+    resumeSessionId = defaults.resumeSessionId;
+    showAdvanced = defaults.showAdvanced;
+    extraArgsText = defaults.extraArgsText;
+    envOverridesText = defaults.envOverridesText;
+    runtimeTarget = defaults.runtimeTarget === "docker" ? "docker" : "host";
+    dockerService = defaults.dockerService;
+    dockerBuild = defaults.dockerBuild;
+    dockerRecreate = defaults.dockerRecreate;
+    dockerKeep = defaults.dockerKeep;
+    pendingRuntimePreference = runtimeTarget;
+    pendingDockerServicePreference = dockerService;
+  }
+
+  function persistLaunchDefaultsAfterSuccess() {
+    const nextModelByAgent = { ...modelByAgent };
+    const nextAgentVersionByAgent = { ...agentVersionByAgent };
+    const currentAgent = selectedAgent.trim();
+
+    if (currentAgent) {
+      nextAgentVersionByAgent[currentAgent] = agentVersion;
+      if (supportsModelFor(currentAgent)) {
+        nextModelByAgent[currentAgent] = model;
+      }
+    }
+
+    saveLaunchDefaults({
+      selectedAgent: currentAgent,
+      sessionMode,
+      modelByAgent: nextModelByAgent,
+      agentVersionByAgent: nextAgentVersionByAgent,
+      skipPermissions,
+      reasoningLevel,
+      resumeSessionId,
+      showAdvanced,
+      extraArgsText,
+      envOverridesText,
+      runtimeTarget,
+      dockerService,
+      dockerBuild,
+      dockerRecreate,
+      dockerKeep,
+    });
+  }
+
+  const savedLaunchDefaults = loadLaunchDefaults();
+  if (savedLaunchDefaults) {
+    applySavedLaunchDefaults(savedLaunchDefaults);
+  }
+
   $effect(() => {
     detectAgents();
   });
@@ -290,26 +356,35 @@
   });
 
   $effect(() => {
-    if (selectedAgent === lastAgent) return;
+    const currentAgent = selectedAgent;
+    const currentAgentNotInstalled = agentNotInstalled;
 
-    if (lastAgent && supportsModelFor(lastAgent)) {
-      modelByAgent = { ...modelByAgent, [lastAgent]: model };
-    }
-    if (lastAgent) {
-      agentVersionByAgent = { ...agentVersionByAgent, [lastAgent]: agentVersion };
+    if (currentAgent === lastAgent && currentAgentNotInstalled === lastAgentNotInstalled) {
+      return;
     }
 
-    lastAgent = selectedAgent;
-    model = modelByAgent[selectedAgent] ?? "";
+    if (currentAgent !== lastAgent) {
+      if (lastAgent && supportsModelFor(lastAgent)) {
+        modelByAgent = { ...modelByAgent, [lastAgent]: model };
+      }
+      if (lastAgent) {
+        agentVersionByAgent = { ...agentVersionByAgent, [lastAgent]: agentVersion };
+      }
 
-    const storedVersion = agentVersionByAgent[selectedAgent];
+      lastAgent = currentAgent;
+      model = modelByAgent[currentAgent] ?? "";
+    }
+
+    lastAgentNotInstalled = currentAgentNotInstalled;
+
+    const storedVersion = agentVersionByAgent[currentAgent];
     if (storedVersion) {
       agentVersion =
-        storedVersion === "installed" && agentNotInstalled
+        storedVersion === "installed" && currentAgentNotInstalled
           ? "latest"
           : storedVersion;
     } else {
-      agentVersion = agentNotInstalled ? "latest" : "installed";
+      agentVersion = currentAgentNotInstalled ? "latest" : "installed";
     }
   });
 
@@ -466,11 +541,35 @@
     void loadBaseBranchOptions();
   });
 
-  // Check gh CLI on mount
+  // Apply prefill from Issue tab ("Work on this" button).
+  $effect(() => {
+    if (!prefillIssue) return;
+    branchMode = "new";
+    newBranchTab = "fromIssue";
+    selectedIssue = prefillIssue;
+
+    const names = prefillIssue.labels.map((l) => l.name.toLowerCase());
+    if (names.includes("bug")) {
+      newBranchPrefix = "bugfix/";
+    } else if (names.includes("hotfix")) {
+      newBranchPrefix = "hotfix/";
+    } else {
+      newBranchPrefix = "feature/";
+    }
+  });
+
+  // Check gh CLI once per project after shell environment is ready.
   $effect(() => {
     void projectPath;
-    if (!projectPath || ghCliChecked) return;
-    ghCliChecked = true;
+    void osEnvReady;
+    if (!projectPath) return;
+    if (!osEnvReady) {
+      ghCliStatus = null;
+      ghCliCheckedProject = null;
+      return;
+    }
+    if (ghCliCheckedProject === projectPath) return;
+    ghCliCheckedProject = projectPath;
     void checkGhCli();
   });
 
@@ -506,6 +605,7 @@
         projectPath,
         page,
         perPage: 30,
+        state: "open",
       });
       if (page === 1) {
         issues = resp.issues;
@@ -670,6 +770,8 @@
       if (!ctx || ctx.force_host || ctx.file_type === "none") {
         runtimeTarget = "host" as RuntimeTarget;
         dockerService = "";
+        pendingRuntimePreference = null;
+        pendingDockerServicePreference = "";
         return;
       }
 
@@ -680,24 +782,43 @@
         (ctx.file_type === "devcontainer" && services.length > 0);
 
       if (composeLike) {
-        runtimeTarget =
-          ctx.docker_available && ctx.compose_available
-            ? ("docker" as RuntimeTarget)
-            : ("host" as RuntimeTarget);
+        const canUseDocker = ctx.docker_available && ctx.compose_available;
+        if (pendingRuntimePreference === "host") {
+          runtimeTarget = "host";
+        } else if (pendingRuntimePreference === "docker" && canUseDocker) {
+          runtimeTarget = "docker";
+        } else {
+          runtimeTarget = canUseDocker ? ("docker" as RuntimeTarget) : ("host" as RuntimeTarget);
+        }
 
         if (services.length === 0) {
           dockerService = "";
+          pendingRuntimePreference = null;
+          pendingDockerServicePreference = "";
           return;
         }
-        if (!services.includes(dockerService)) {
+        const preferredService = pendingDockerServicePreference.trim();
+        if (preferredService && services.includes(preferredService)) {
+          dockerService = preferredService;
+        } else if (!services.includes(dockerService)) {
           dockerService = services[0];
         }
+        pendingRuntimePreference = null;
+        pendingDockerServicePreference = "";
         return;
       }
 
       // Dockerfile / image-based devcontainer.
-      runtimeTarget = ctx.docker_available ? ("docker" as RuntimeTarget) : ("host" as RuntimeTarget);
+      if (pendingRuntimePreference === "host") {
+        runtimeTarget = "host";
+      } else if (pendingRuntimePreference === "docker" && ctx.docker_available) {
+        runtimeTarget = "docker";
+      } else {
+        runtimeTarget = ctx.docker_available ? ("docker" as RuntimeTarget) : ("host" as RuntimeTarget);
+      }
       dockerService = "";
+      pendingRuntimePreference = null;
+      pendingDockerServicePreference = "";
     } catch (err) {
       const key = `${projectPath}::${refBranch}`;
       if (dockerContextKey !== key) return;
@@ -705,6 +826,8 @@
       dockerError = toErrorMessage(err);
       runtimeTarget = "host" as RuntimeTarget;
       dockerService = "";
+      pendingRuntimePreference = null;
+      pendingDockerServicePreference = "";
     } finally {
       const key = `${projectPath}::${refBranch}`;
       if (dockerContextKey === key) {
@@ -718,11 +841,17 @@
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       agents = await invoke<AgentInfo[]>("detect_agents");
-      const available = agents.find((a) => a.available);
-      if (available) selectedAgent = available.id;
+      const preferred = selectedAgent.trim();
+      if (preferred && agents.some((a) => a.id === preferred && a.available)) {
+        selectedAgent = preferred;
+      } else {
+        const available = agents.find((a) => a.available);
+        selectedAgent = available?.id ?? "";
+      }
     } catch (err) {
       console.error("Failed to detect agents:", err);
       agents = [];
+      selectedAgent = "";
     }
     loading = false;
   }
@@ -848,6 +977,7 @@
         await onLaunch({
           ...request,
         });
+        persistLaunchDefaultsAfterSuccess();
         onClose();
         return;
       }
@@ -871,6 +1001,7 @@
           : undefined,
       });
 
+      persistLaunchDefaultsAfterSuccess();
       onClose();
     } catch (err) {
       errorMessage = `Failed to launch agent: ${toErrorMessage(err)}`;
@@ -992,14 +1123,20 @@
               <button
                 class="mode-btn"
                 class:active={newBranchTab === "fromIssue"}
-                disabled={!ghCliAvailable}
-                title={!ghCliAvailable ? "GitHub CLI (gh) is required" : ""}
+                disabled={!osEnvReady || !ghCliAvailable}
+                title={!osEnvReady
+                  ? "Loading shell environment..."
+                  : !ghCliAvailable
+                    ? "GitHub CLI (gh) is required"
+                    : ""}
                 onclick={() => (newBranchTab = "fromIssue")}
               >
                 From Issue
               </button>
             </div>
-            {#if ghCliStatus && !ghCliStatus.available}
+            {#if !osEnvReady}
+              <span class="field-hint">Loading shell environment...</span>
+            {:else if ghCliStatus && !ghCliStatus.available}
               <span class="field-hint warn">GitHub CLI (gh) is not installed.</span>
             {:else if ghCliStatus && !ghCliStatus.authenticated}
               <span class="field-hint warn">GitHub CLI (gh) is not authenticated. Run: gh auth login</span>
@@ -1083,8 +1220,8 @@
                   <span class="issue-title">{issue.title}</span>
                   {#if issue.labels.length > 0}
                     <span class="issue-labels">
-                      {#each issue.labels as lbl (lbl)}
-                        <span class="issue-label">{lbl}</span>
+                      {#each issue.labels as lbl (lbl.name)}
+                        <span class="issue-label">{lbl.name}</span>
                       {/each}
                     </span>
                   {/if}
@@ -1122,7 +1259,7 @@
             <option value="" disabled>Select an agent...</option>
             {#each agents as agent (agent.id)}
               <option value={agent.id} disabled={!agent.available}>
-                {agent.name} ({agent.version}{agent.available ? "" : ", Unavailable"})
+                {agent.name}
               </option>
             {/each}
           </select>
@@ -1131,7 +1268,7 @@
               <span class="field-hint warn">Unavailable</span>
             {:else if selectedAgentInfo.version === "bunx" || selectedAgentInfo.version === "npx"}
               <span class="field-hint warn">
-                Not installed. Launch will use {selectedAgentInfo.version}.
+                Not installed. Launch will use a fallback runner.
               </span>
             {:else if !selectedAgentInfo.authenticated}
               <span class="field-hint warn">Not authenticated</span>
@@ -1317,7 +1454,7 @@
           </select>
           {#if agentNotInstalled}
             <span class="field-hint">
-              Installed binary not found. Launch will use bunx/npx.
+              Installed binary not found. Launch will use fallback runner.
             </span>
           {/if}
           {#if versionsLoading}
@@ -1991,7 +2128,9 @@
   }
 
   .issue-list {
-    max-height: 240px;
+    height: min(46vh, 420px);
+    min-height: 260px;
+    max-height: 420px;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
@@ -2079,5 +2218,13 @@
     text-align: center;
     color: var(--text-muted);
     font-size: var(--ui-font-md);
+  }
+
+  @media (max-width: 640px) {
+    .issue-list {
+      height: 38vh;
+      min-height: 180px;
+      max-height: 320px;
+    }
   }
 </style>

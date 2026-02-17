@@ -40,7 +40,7 @@ impl ClaudeAgent {
             get_command_version("claude", "--version").unwrap_or_else(|| "unknown".to_string());
 
         // Check if authenticated
-        let authenticated = std::process::Command::new("claude")
+        let authenticated = crate::process::command("claude")
             .arg("--help")
             .output()
             .map(|o| o.status.success())
@@ -56,7 +56,7 @@ impl ClaudeAgent {
 
     /// Build command with common arguments
     fn build_command(&self, prompt: &str, directory: &Path) -> Command {
-        let mut cmd = Command::new("claude");
+        let mut cmd = crate::process::tokio_command("claude");
         cmd.arg("--print")
             .arg("--dangerously-skip-permissions")
             .arg(prompt)

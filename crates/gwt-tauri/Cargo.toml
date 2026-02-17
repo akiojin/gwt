@@ -26,6 +26,9 @@ tokio-tungstenite.workspace = true
 futures-util.workspace = true
 dirs.workspace = true
 libc.workspace = true
+notify.workspace = true
+notify-debouncer-mini.workspace = true
+fs2.workspace = true
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

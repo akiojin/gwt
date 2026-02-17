@@ -145,7 +145,7 @@ fn bun_info_json_with_timeout(package: &str, field: &str) -> Result<Value, Strin
 
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let out = std::process::Command::new(bun_path)
+        let out = gwt_core::process::command(&bun_path)
             .args(["info", &package, &field_for_cmd, "--json"])
             .output();
         let _ = tx.send(out);

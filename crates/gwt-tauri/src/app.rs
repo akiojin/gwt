@@ -1,9 +1,11 @@
 //! Tauri app wiring (builder configuration + run event handling)
 
 use crate::state::AppState;
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use tauri::Manager;
-use tauri::{Emitter, WebviewWindowBuilder};
+use tauri::{Emitter, EventTarget, WebviewWindowBuilder};
 use tracing::{info, warn};
 
 #[cfg(not(test))]
@@ -11,6 +13,8 @@ use gwt_core::config::os_env;
 
 #[cfg(not(test))]
 use gwt_core::config::mcp_registration;
+#[cfg(not(test))]
+use tokio::io::AsyncReadExt;
 
 #[cfg(any(not(test), target_os = "macos"))]
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -21,6 +25,22 @@ fn should_prevent_window_close(is_quitting: bool) -> bool {
 
 fn should_prevent_exit_request(is_quitting: bool) -> bool {
     !is_quitting
+}
+
+fn captured_path_from_env(env: &HashMap<String, String>) -> Option<String> {
+    env.get("PATH")
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn apply_captured_path_to_process_env(env: &HashMap<String, String>) -> bool {
+    let Some(path) = captured_path_from_env(env) else {
+        return false;
+    };
+    std::env::set_var("PATH", path);
+    true
 }
 
 #[cfg(any(not(test), target_os = "macos"))]
@@ -58,11 +78,18 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
         crate::menu::MENU_ID_FILE_CLOSE_PROJECT => Some("close-project"),
         crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES => Some("cleanup-worktrees"),
         crate::menu::MENU_ID_GIT_VERSION_HISTORY => Some("version-history"),
+        crate::menu::MENU_ID_GIT_ISSUES => Some("git-issues"),
+        crate::menu::MENU_ID_EDIT_COPY => Some("edit-copy"),
+        crate::menu::MENU_ID_EDIT_PASTE => Some("edit-paste"),
+        crate::menu::MENU_ID_TOOLS_NEW_TERMINAL => Some("new-terminal"),
         crate::menu::MENU_ID_TOOLS_LAUNCH_AGENT => Some("launch-agent"),
         crate::menu::MENU_ID_TOOLS_LIST_TERMINALS => Some("list-terminals"),
         crate::menu::MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS => Some("terminal-diagnostics"),
         crate::menu::MENU_ID_SETTINGS_PREFERENCES => Some("open-settings"),
         crate::menu::MENU_ID_HELP_ABOUT => Some("about"),
+        crate::menu::MENU_ID_HELP_CHECK_UPDATES => Some("check-updates"),
+        crate::menu::MENU_ID_WINDOW_PREVIOUS_TAB => Some("previous-tab"),
+        crate::menu::MENU_ID_WINDOW_NEXT_TAB => Some("next-tab"),
         _ => None,
     }
 }
@@ -143,8 +170,11 @@ fn best_window(app: &tauri::AppHandle<tauri::Wry>) -> Option<tauri::WebviewWindo
 pub fn build_app(
     builder: tauri::Builder<tauri::Wry>,
     app_state: AppState,
+    _single_instance_guard: Option<Arc<crate::single_instance::SingleInstanceGuard>>,
 ) -> tauri::Builder<tauri::Wry> {
     let builder = builder.manage(app_state);
+    #[cfg(not(test))]
+    let single_instance_guard = _single_instance_guard.clone();
 
     // Plugins are not required for unit tests and may rely on runtime features.
     #[cfg(not(test))]
@@ -153,9 +183,13 @@ pub fn build_app(
         .plugin(tauri_plugin_store::Builder::default().build());
 
     builder
-        .setup(|_app| {
+        .setup(move |_app| {
             #[cfg(not(test))]
             {
+                if let Some(guard) = single_instance_guard.as_ref() {
+                    spawn_single_instance_focus_listener(_app.handle().clone(), guard.clone());
+                }
+
                 // Clean up stale MCP state from a previous crash (FR-019)
                 crate::mcp_ws_server::cleanup_stale_state_file();
 
@@ -270,52 +304,26 @@ pub fn build_app(
                         let state = app_handle.state::<AppState>();
                         let resource_dir = app_handle.path().resource_dir().ok();
                         let _ = state.wait_os_env_ready(std::time::Duration::from_secs(2));
-
-                        if let Err(e) = mcp_registration::cleanup_stale_registrations() {
-                            warn!(
-                                category = "mcp",
-                                error = %e,
-                                "Failed to cleanup stale MCP registrations"
-                            );
-                        }
-
-                        match mcp_registration::detect_runtime() {
-                            Ok(runtime) => {
-                                match mcp_registration::resolve_bridge_path(resource_dir.as_deref())
-                                {
-                                    Ok(bridge_path) => {
-                                        let config = mcp_registration::McpBridgeConfig {
-                                            command: runtime,
-                                            args: vec![bridge_path.to_string_lossy().into_owned()],
-                                            env: std::collections::HashMap::new(),
-                                        };
-                                        if let Err(e) = mcp_registration::register_all(&config) {
-                                            warn!(
-                                                category = "mcp",
-                                                error = %e,
-                                                "Failed to register MCP server in agent configs"
-                                            );
-                                        } else {
-                                            info!(
-                                                category = "mcp",
-                                                "MCP bridge server registered in all agent configs"
-                                            );
-                                        }
-                                    }
-                                    Err(e) => {
-                                        info!(
-                                            category = "mcp",
-                                            error = %e,
-                                            "MCP bridge JS not found; skipping registration"
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
+                        let status = mcp_registration::repair_registration(resource_dir.as_deref());
+                        state.set_mcp_registration_status(status.clone());
+                        match status.overall.as_str() {
+                            "ok" => {
                                 info!(
                                     category = "mcp",
-                                    error = %e,
-                                    "No JS runtime found; skipping MCP registration"
+                                    "MCP bridge server registered in all agent configs"
+                                );
+                            }
+                            _ => {
+                                warn!(
+                                    category = "mcp",
+                                    overall = %status.overall,
+                                    runtime = %status.bridge_runtime,
+                                    bridge = %status.bridge_script,
+                                    error = %status
+                                        .last_error_message
+                                        .clone()
+                                        .unwrap_or_else(|| "unknown".to_string()),
+                                    "MCP registration is degraded"
                                 );
                             }
                         }
@@ -357,8 +365,47 @@ pub fn build_app(
                             }
                         };
 
+                        if apply_captured_path_to_process_env(&result.env) {
+                            tracing::info!(
+                                category = "os_env",
+                                "Updated process PATH from captured environment"
+                            );
+                        }
+
                         let _ = os_env_source_cell.set(result.source);
                         let _ = os_env_cell.set(result.env);
+                    });
+                }
+
+                // Background task: watch session files for agent status changes (SPEC-b80e7996 FR-820)
+                {
+                    let watcher_handle = _app.handle().clone();
+                    if let Err(e) = crate::session_watcher::start_session_watcher(watcher_handle) {
+                        warn!(
+                            category = "session_watcher",
+                            error = %e,
+                            "Failed to start session watcher (agent status updates will use polling fallback)"
+                        );
+                    }
+                }
+
+                // Background task: check app update (best-effort, TTL cached).
+                {
+                    let mgr = _app.state::<AppState>().update_manager.clone();
+                    let app_handle_clone = _app.handle().clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        let current_exe = std::env::current_exe().ok();
+                        let state = mgr.check_for_executable(false, current_exe.as_deref());
+                        if let gwt_core::update::UpdateState::Failed { message, .. } = &state {
+                            warn!(
+                                category = "update",
+                                force = false,
+                                source = "startup-event",
+                                error = %message,
+                                "Startup update check failed"
+                            );
+                        }
+                        let _ = app_handle_clone.emit("app-update-state", &state);
                     });
                 }
             }
@@ -371,6 +418,63 @@ pub fn build_app(
             if id == crate::menu::MENU_ID_FILE_NEW_WINDOW {
                 open_new_window(app);
                 return;
+            }
+
+            // Window switching (MRU order)
+            if id == crate::menu::MENU_ID_WINDOW_NEXT_WINDOW {
+                let state = app.state::<AppState>();
+                if let Some(target) = state.next_window() {
+                    if let Some(w) = app.get_webview_window(&target) {
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
+                }
+                return;
+            }
+            if id == crate::menu::MENU_ID_WINDOW_PREVIOUS_WINDOW {
+                let state = app.state::<AppState>();
+                if let Some(target) = state.previous_window() {
+                    if let Some(w) = app.get_webview_window(&target) {
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
+                }
+                return;
+            }
+
+            // macOS standard window items
+            #[cfg(target_os = "macos")]
+            {
+                if id == crate::menu::MENU_ID_WINDOW_MINIMIZE {
+                    if let Some(w) = focused_webview_window(app) {
+                        let _ = w.minimize();
+                    }
+                    return;
+                }
+                if id == crate::menu::MENU_ID_WINDOW_ZOOM {
+                    if let Some(w) = focused_webview_window(app) {
+                        if w.is_maximized().unwrap_or(false) {
+                            let _ = w.unmaximize();
+                        } else {
+                            let _ = w.maximize();
+                        }
+                    }
+                    return;
+                }
+                if id == crate::menu::MENU_ID_WINDOW_BRING_ALL_TO_FRONT {
+                    let focused_label = focused_window_label(app);
+
+                    for (_, w) in app.webview_windows() {
+                        let _ = w.show();
+                    }
+
+                    // Restore focus once to keep MRU/history deterministic.
+                    if let Some(w) = app.get_webview_window(&focused_label) {
+                        let _ = w.set_focus();
+                    }
+                    let _ = crate::menu::rebuild_menu(app);
+                    return;
+                }
             }
 
             if let Some(project_path) = crate::menu::parse_recent_project_menu_id(id) {
@@ -413,7 +517,7 @@ pub fn build_app(
                     return;
                 }
 
-                // Allow specific windows to actually close (used for macOS Cmd+Q behavior).
+                // Allow explicit close requests from trusted flows if explicitly permitted.
                 if state.consume_window_close_permission(window.label()) {
                     info!(
                         category = "tauri",
@@ -429,14 +533,17 @@ pub fn build_app(
             }
 
             if let tauri::WindowEvent::Focused(true) = event {
+                window
+                    .app_handle()
+                    .state::<AppState>()
+                    .push_window_focus(window.label());
                 let _ = crate::menu::rebuild_menu(window.app_handle());
             }
 
             if let tauri::WindowEvent::Destroyed = event {
-                window
-                    .app_handle()
-                    .state::<AppState>()
-                    .clear_project_for_window(window.label());
+                let state = window.app_handle().state::<AppState>();
+                state.clear_window_state(window.label());
+                state.remove_window_from_history(window.label());
                 let _ = crate::menu::rebuild_menu(window.app_handle());
 
                 // Exit the app when all windows are truly closed (hidden windows still count as open).
@@ -484,9 +591,12 @@ pub fn build_app(
             crate::commands::project::quit_app,
             crate::commands::docker::detect_docker_context,
             crate::commands::sessions::get_branch_quick_start,
+            crate::commands::sessions::get_agent_sidebar_view,
             crate::commands::sessions::get_branch_session_summary,
+            crate::commands::sessions::rebuild_all_branch_session_summaries,
             crate::commands::branch_suggest::suggest_branch_names,
             crate::commands::terminal::launch_terminal,
+            crate::commands::terminal::spawn_shell,
             crate::commands::terminal::launch_agent,
             crate::commands::terminal::start_launch_job,
             crate::commands::terminal::cancel_launch_job,
@@ -500,6 +610,8 @@ pub fn build_app(
             crate::commands::terminal::capture_scrollback_tail,
             crate::commands::agent_mode::get_agent_mode_state_cmd,
             crate::commands::agent_mode::send_agent_mode_message,
+            crate::commands::mcp::get_mcp_registration_status_cmd,
+            crate::commands::mcp::repair_mcp_registration_cmd,
             crate::commands::settings::get_settings,
             crate::commands::settings::save_settings,
             crate::commands::agents::detect_agents,
@@ -514,6 +626,8 @@ pub fn build_app(
             crate::commands::cleanup::cleanup_single_worktree,
             crate::commands::hooks::check_and_update_hooks,
             crate::commands::hooks::register_hooks,
+            crate::commands::update::check_app_update,
+            crate::commands::update::apply_app_update,
             crate::commands::terminal::get_captured_environment,
             crate::commands::terminal::is_os_env_ready,
             crate::commands::git_view::get_git_change_summary,
@@ -526,13 +640,114 @@ pub fn build_app(
             crate::commands::version_history::list_project_versions,
             crate::commands::version_history::get_project_version_history,
             crate::commands::window_tabs::sync_window_agent_tabs,
+            crate::commands::window::get_current_window_label,
+            crate::commands::window::open_gwt_window,
             crate::commands::recent_projects::get_recent_projects,
             crate::commands::issue::fetch_github_issues,
+            crate::commands::issue::fetch_github_issue_detail,
+            crate::commands::issue::fetch_branch_linked_issue,
             crate::commands::issue::check_gh_cli_status,
             crate::commands::issue::find_existing_issue_branch,
             crate::commands::issue::link_branch_to_issue,
             crate::commands::issue::rollback_issue_branch,
+            crate::commands::issue_spec::upsert_spec_issue_cmd,
+            crate::commands::issue_spec::get_spec_issue_detail_cmd,
+            crate::commands::issue_spec::find_spec_issue_by_spec_id_cmd,
+            crate::commands::issue_spec::append_spec_contract_comment_cmd,
+            crate::commands::issue_spec::upsert_spec_issue_artifact_comment_cmd,
+            crate::commands::issue_spec::list_spec_issue_artifact_comments_cmd,
+            crate::commands::issue_spec::delete_spec_issue_artifact_comment_cmd,
+            crate::commands::issue_spec::close_spec_issue_cmd,
+            crate::commands::issue_spec::sync_spec_issue_project_cmd,
+            crate::commands::pullrequest::fetch_pr_status,
+            crate::commands::pullrequest::fetch_pr_detail,
+            crate::commands::pullrequest::fetch_latest_branch_pr,
+            crate::commands::pullrequest::fetch_ci_log,
+            crate::commands::system::get_system_info,
+            crate::commands::system::get_stats,
         ])
+}
+
+#[cfg(not(test))]
+fn spawn_single_instance_focus_listener(
+    app_handle: tauri::AppHandle<tauri::Wry>,
+    guard: Arc<crate::single_instance::SingleInstanceGuard>,
+) {
+    tauri::async_runtime::spawn(async move {
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(err) => {
+                warn!(
+                    category = "single_instance",
+                    error = %err,
+                    "Failed to bind focus listener"
+                );
+                return;
+            }
+        };
+
+        let port = match listener.local_addr() {
+            Ok(addr) => addr.port(),
+            Err(err) => {
+                warn!(
+                    category = "single_instance",
+                    error = %err,
+                    "Failed to resolve focus listener address"
+                );
+                return;
+            }
+        };
+
+        if let Err(err) = guard.set_focus_port(Some(port)) {
+            warn!(
+                category = "single_instance",
+                error = %err,
+                "Failed to publish focus listener endpoint"
+            );
+            return;
+        }
+
+        info!(
+            category = "single_instance",
+            port = port,
+            "Focus listener ready"
+        );
+
+        loop {
+            let (mut socket, _) = match listener.accept().await {
+                Ok(v) => v,
+                Err(err) => {
+                    warn!(
+                        category = "single_instance",
+                        error = %err,
+                        "Focus listener accept failed"
+                    );
+                    break;
+                }
+            };
+
+            let mut buf = [0u8; 64];
+            let bytes_read = match socket.read(&mut buf).await {
+                Ok(n) => n,
+                Err(err) => {
+                    warn!(
+                        category = "single_instance",
+                        error = %err,
+                        "Focus listener read failed"
+                    );
+                    continue;
+                }
+            };
+            if bytes_read == 0 {
+                continue;
+            }
+
+            let payload = String::from_utf8_lossy(&buf[..bytes_read]);
+            if payload.contains("focus") {
+                show_best_window(&app_handle);
+            }
+        }
+    });
 }
 
 fn focused_window_label(app: &tauri::AppHandle<tauri::Wry>) -> String {
@@ -549,6 +764,15 @@ fn focused_window_label(app: &tauri::AppHandle<tauri::Wry>) -> String {
         .unwrap_or_else(|| "main".to_string())
 }
 
+#[cfg(target_os = "macos")]
+fn focused_webview_window(
+    app: &tauri::AppHandle<tauri::Wry>,
+) -> Option<tauri::WebviewWindow<tauri::Wry>> {
+    app.webview_windows()
+        .into_iter()
+        .find_map(|(_, w)| w.is_focused().ok().and_then(|f| f.then_some(w)))
+}
+
 fn emit_menu_action(app: &tauri::AppHandle<tauri::Wry>, action: &str) {
     let label = focused_window_label(app);
     let Some(window) = app
@@ -558,7 +782,8 @@ fn emit_menu_action(app: &tauri::AppHandle<tauri::Wry>, action: &str) {
         return;
     };
 
-    let _ = window.emit(
+    let _ = window.emit_to(
+        EventTarget::webview_window(window.label()),
         crate::menu::MENU_ACTION_EVENT,
         crate::menu::MenuActionPayload {
             action: action.to_string(),
@@ -623,16 +848,28 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
             if should_prevent_exit_request(is_quitting) {
                 api.prevent_exit();
 
-                // macOS: Cmd+Q is treated as explicit app quit (with agent confirmation).
+                // macOS: Cmd+Q is treated as explicit window close, not process exit.
                 #[cfg(target_os = "macos")]
                 {
                     let state = app_handle.state::<AppState>();
+                    let window = best_window(app_handle);
+                    let Some(window) = window else {
+                        info!(
+                            category = "tauri",
+                            event = "ExitPrevented",
+                            "Exit prevented; no windows exist"
+                        );
+                        return;
+                    };
+
+                    let window_label = window.label().to_string();
                     if has_running_agents(&state) {
                         if !try_begin_exit_confirm(&state) {
                             return;
                         }
 
                         let app_handle = app_handle.clone();
+                        let window_label = window_label.clone();
                         app_handle
                             .dialog()
                             .message("Agents are still running. Quit gwt anyway?")
@@ -647,14 +884,15 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
                                 if !ok {
                                     return;
                                 }
-                                state.request_quit();
-                                app_handle.exit(0);
+
+                                if let Some(window) = app_handle.get_webview_window(&window_label) {
+                                    let _ = window.hide();
+                                }
                             });
                         return;
                     }
 
-                    app_handle.state::<AppState>().request_quit();
-                    app_handle.exit(0);
+                    let _ = window.hide();
                 }
 
                 // Other OSes: keep current behavior (exit request hides to tray).
@@ -728,5 +966,55 @@ mod tests {
             menu_action_from_id(crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES),
             Some("cleanup-worktrees")
         );
+        assert_eq!(
+            menu_action_from_id(crate::menu::MENU_ID_HELP_CHECK_UPDATES),
+            Some("check-updates")
+        );
+    }
+
+    #[test]
+    fn menu_action_from_id_maps_edit_copy() {
+        assert_eq!(
+            menu_action_from_id(crate::menu::MENU_ID_EDIT_COPY),
+            Some("edit-copy")
+        );
+    }
+
+    #[test]
+    fn menu_action_from_id_maps_edit_paste() {
+        assert_eq!(
+            menu_action_from_id(crate::menu::MENU_ID_EDIT_PASTE),
+            Some("edit-paste")
+        );
+    }
+
+    #[test]
+    fn menu_action_from_id_maps_tab_switching() {
+        assert_eq!(
+            menu_action_from_id(crate::menu::MENU_ID_WINDOW_PREVIOUS_TAB),
+            Some("previous-tab")
+        );
+        assert_eq!(
+            menu_action_from_id(crate::menu::MENU_ID_WINDOW_NEXT_TAB),
+            Some("next-tab")
+        );
+    }
+
+    #[test]
+    fn captured_path_from_env_returns_trimmed_path() {
+        let env = HashMap::from([("PATH".to_string(), "  /usr/local/bin  ".to_string())]);
+        assert_eq!(
+            captured_path_from_env(&env),
+            Some("/usr/local/bin".to_string())
+        );
+    }
+
+    #[test]
+    fn captured_path_from_env_rejects_missing_or_empty_path() {
+        let no_path = HashMap::from([("HOME".to_string(), "/tmp".to_string())]);
+        assert_eq!(captured_path_from_env(&no_path), None);
+
+        let empty_path = HashMap::from([("PATH".to_string(), "   ".to_string())]);
+        assert_eq!(captured_path_from_env(&empty_path), None);
     }
 }

@@ -56,9 +56,33 @@ Typical assets:
 - Windows: `.msi`
 - Linux: `.AppImage`, `.deb`
 
-## Development
+## Usage (for users)
 
-Prereqs:
+- Start the app after install, then open a repository from **Open Project...**.
+- Select a branch to work with, then:
+  - manage worktrees from the sidebar
+  - launch an AI agent from the branch actions
+- Open `Settings` to configure AI profiles if you plan to use agent or summary features.
+
+The sections below are contributor/developer operations.
+
+## Keyboard Shortcuts
+
+| Shortcut (macOS) | Shortcut (Windows/Linux) | Action |
+|---|---|---|
+| Cmd+N | Ctrl+N | New Window |
+| Cmd+O | Ctrl+O | Open Project |
+| Cmd+C | Ctrl+C | Copy |
+| Cmd+V | Ctrl+V | Paste |
+| Cmd+Shift+K | Ctrl+Shift+K | Cleanup Worktrees |
+| Cmd+, | Ctrl+, | Preferences |
+| Cmd+Shift+[ | Ctrl+Shift+[ | Previous Tab |
+| Cmd+Shift+] | Ctrl+Shift+] | Next Tab |
+| Cmd+` | Ctrl+` | Next Window |
+| Cmd+Shift+` | Ctrl+Shift+` | Previous Window |
+| Cmd+M | --- | Minimize (macOS only) |
+
+## Development
 
 - Rust (stable)
 - Node.js 22
@@ -84,6 +108,17 @@ pnpm install --frozen-lockfile
 cd ..
 cargo tauri build
 ```
+
+Playwright E2E (WebView UI smoke):
+
+```bash
+cd gwt-gui
+pnpm install --frozen-lockfile
+pnpm exec playwright install chromium
+pnpm run test:e2e
+```
+
+CI runs the same Playwright suite in `.github/workflows/test.yml` (`E2E (Playwright)` job).
 
 ## AI Settings
 

@@ -70,7 +70,7 @@ impl CodexAgent {
 
     /// Build command with common arguments
     fn build_command(&self, prompt: &str, directory: &Path) -> Command {
-        let mut cmd = Command::new("codex");
+        let mut cmd = crate::process::tokio_command("codex");
         let version = get_command_version("codex", "--version");
         cmd.arg("--quiet")
             .args(codex_default_args(

@@ -13,7 +13,10 @@ pub mod git;
 pub mod lock;
 pub mod logging;
 pub mod migration;
+pub mod process;
+pub mod system_info;
 pub mod terminal;
+pub mod update;
 pub mod worktree;
 
 pub use error::{GwtError, Result};

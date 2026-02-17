@@ -14,7 +14,7 @@ const baseState: AgentModeState = {
   ai_error: null,
   last_error: null,
   is_waiting: false,
-  session_name: "Agent Mode",
+  session_name: "Master Agent",
   llm_call_count: 0,
   estimated_tokens: 0,
 };
@@ -65,6 +65,11 @@ describe("AgentModePanel", () => {
     expect(countInvokeCalls("send_agent_mode_message")).toBe(0);
 
     await fireEvent.compositionEnd(textarea);
+    await fireEvent.keyDown(textarea, { key: "Enter" });
+
+    expect(countInvokeCalls("send_agent_mode_message")).toBe(0);
+
+    await new Promise((r) => setTimeout(r, 0));
     await fireEvent.keyDown(textarea, { key: "Enter" });
 
     await waitFor(() => {
@@ -121,5 +126,52 @@ describe("AgentModePanel", () => {
     expect(
       rendered.container.querySelector(".agent-message.assistant .agent-bubble")
     ).toBeTruthy();
+  });
+
+  it("auto-scrolls to latest message", async () => {
+    const rendered = await renderPanel(
+      {},
+      {
+        messages: [
+          {
+            role: "assistant",
+            content: "latest",
+            timestamp: Date.now(),
+          },
+        ],
+      }
+    );
+
+    await waitFor(() => {
+      expect(countInvokeCalls("get_agent_mode_state_cmd")).toBe(1);
+    });
+
+    const chat = rendered.container.querySelector(".agent-chat") as HTMLDivElement;
+    let lastScrollTop = 0;
+    Object.defineProperty(chat, "scrollHeight", {
+      value: 200,
+      configurable: true,
+    });
+    Object.defineProperty(chat, "scrollTop", {
+      get() {
+        return lastScrollTop;
+      },
+      set(value) {
+        lastScrollTop = value;
+      },
+      configurable: true,
+    });
+
+    const textarea = rendered.getByPlaceholderText(
+      "Type a task and press Enter..."
+    ) as HTMLTextAreaElement;
+    await fireEvent.input(textarea, { target: { value: "scroll" } });
+
+    const button = rendered.getByRole("button", { name: "Send" });
+    await fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(lastScrollTop).toBe(200);
+    });
   });
 });

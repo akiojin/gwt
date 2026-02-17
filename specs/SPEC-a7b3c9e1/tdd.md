@@ -177,6 +177,28 @@
   前提: ワークツリーに変更あり
   操作: gwt_get_changed_files
   期待: 変更ファイル一覧が返る
+
+- test_handler_master_send_input_text
+  前提: マスターエージェント状態が初期化済み
+  操作: gwt_master_send(command_type=input_text)
+  期待: accepted=true, status=queued を返す
+
+- test_handler_master_send_guard_on_degraded_registration
+  前提: MCP登録ヘルスが degraded/failed
+  操作: gwt_master_send(...)
+  期待: accepted=false, suggested_action=repair_mcp_registration を返す
+
+- test_handler_master_get_state
+  操作: gwt_master_get_state(include_messages=true, limit=20)
+  期待: AgentModeState を返し、message上限が適用される
+
+- test_handler_master_get_mcp_registration_status
+  操作: gwt_master_get_mcp_registration_status()
+  期待: runtime/script/agents/overall を含むヘルス情報を返す
+
+- test_handler_master_repair_mcp_registration
+  操作: gwt_master_repair_mcp_registration()
+  期待: stale state cleanup + 再登録後のヘルス情報を返す
 ```
 
 ## 3. gwt-mcp-bridge E2Eテスト
@@ -193,21 +215,72 @@
 
 - test_mcp_list_tools
   操作: tools/list リクエスト
-  期待: 8つのツールが定義されている
+  期待: 12個のツールが定義されている（既存8 + master連携4）
 
 - test_mcp_call_tool_list_tabs
   前提: モックWebSocketサーバーが稼働
   操作: tools/call gwt_list_tabs
   期待: WebSocketを経由してレスポンスが返る
 
+- test_mcp_call_tool_master_send
+  前提: モックWebSocketサーバーが稼働
+  操作: tools/call gwt_master_send
+  期待: accepted/status を含むレスポンスが返る
+
+- test_mcp_call_tool_master_get_mcp_registration_status
+  前提: モックWebSocketサーバーが稼働
+  操作: tools/call gwt_master_get_mcp_registration_status
+  期待: registration health のレスポンスが返る
+
 - test_mcp_ws_disconnect_recovery
   操作: WebSocket接続を切断
   期待: MCPツール呼び出しがエラーを返す
+```
+
+## 4. gwt-gui テスト
+
+### 4.1 Settings MCP登録状態
+
+```text
+テストファイル: gwt-gui/src/lib/components/SettingsPanel.test.ts
+
+テストケース:
+- test_settings_loads_mcp_registration_status
+  操作: SettingsPanel 初期表示
+  期待: get_mcp_registration_status_cmd が呼ばれ、MCP Bridgeセクションが表示される
+
+- test_settings_repair_mcp_registration
+  操作: 「Repair MCP Registration」クリック
+  期待: repair_mcp_registration_cmd が呼ばれ、overall が更新される
+```
+
+## 5. 単一起動テスト（gwt-tauri）
+
+### 5.1 single_instance モジュール
+
+```text
+テストファイル: crates/gwt-tauri/src/single_instance.rs
+
+テストケース:
+- test_acquire_fails_when_second_instance_is_running
+  操作: 1つ目でロック取得後に2つ目を取得
+  期待: 2つ目は AlreadyRunning を返す
+
+- test_acquire_succeeds_after_guard_drop
+  操作: ロック保持ガードを drop して再取得
+  期待: 再取得できる
+
+- test_stale_metadata_without_lock_is_recovered
+  前提: lock file metadata の pid が stale
+  操作: 起動時にロック取得
+  期待: stale metadata で起動が阻害されず取得成功
 ```
 
 ## テスト実行順序
 
 1. `cargo test -p gwt-core` (Phase 1 完了後)
 2. `cargo test -p gwt-tauri` (Phase 3 完了後)
-3. `cd gwt-mcp-bridge && bun test` (Phase 2 完了後)
-4. 手動E2Eテスト (Phase 6)
+3. `cd gwt-mcp-bridge && pnpm test` (Phase 2 完了後)
+4. `cd gwt-gui && pnpm test -- src/lib/components/SettingsPanel.test.ts`
+5. `cargo test -p gwt-tauri single_instance::tests -- --nocapture`
+6. 手動E2Eテスト (Phase 6)

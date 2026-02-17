@@ -5,14 +5,14 @@ use super::session_parser::{MessageRole, ParsedSession, SessionMessage};
 use std::collections::HashMap;
 use std::time::SystemTime;
 
-pub const SESSION_SYSTEM_PROMPT_BASE: &str = "You are a helpful assistant summarizing a coding agent session so the user can remember the original request and latest instruction.\nReturn Markdown only with the following format and headings, in this exact order:\n\n## <Purpose heading in the user's language>\n<1 sentence: the original user request + key constraints + explicit exclusions>\n\n## <Summary heading in the user's language>\n<1-2 sentences: current status (use a clear status word) + the latest user instruction; mention if blocked>\n\n## <Highlights heading in the user's language>\n- <Original request: ...>\n- <Latest instruction: ...>\n- <Decisions/constraints: ...>\n- <Exclusions/not doing: ...>\n- <Status: ...>\n- <Progress: ...>\n- <Recent actions (last 1-3): ...>\n- <Next (one user action): ...>\n- <Needs user input (as a direct question): ...>\n- <Key words (3 items): ...>\n\nAdd more bullets if there are additional important items, but keep the list concise.\nIf there was no progress, say so and why.\nIf waiting for user input, state the exact question needed.\nDo not guess; if something is unknown, say so explicitly in the user's language.\nUse short labels followed by \":\" for each bullet and translate the labels to the user's language.\nDetect the response language from the session content and respond in that language.\nIf the session contains multiple languages, use the language used by the user messages.\nAll headings and all content must be in the user's language.\nDo not output JSON, code fences, or any extra text.";
+pub const SESSION_SYSTEM_PROMPT_BASE: &str = "You are a helpful assistant summarizing a coding agent session so the user can remember the original request and latest instruction.\nReturn Markdown only with the following format and headings, in this exact order:\n\n## <Purpose heading in the user's language>\n<1 sentence: the original user request + key constraints + explicit exclusions>\n\n## <Summary heading in the user's language>\n<1-2 sentences: current status (use a clear status word) + the latest user instruction; mention if blocked>\n\n## <Highlights heading in the user's language>\n- <Original request: ...>\n- <Latest instruction: ...>\n- <Decisions/constraints: ...>\n- <Exclusions/not doing: ...>\n- <Status: ...>\n- <Progress: ...>\n- <Recent meaningful actions (last 1-3): ...>\n- <Needs user input (as a direct question): ...>\n- <Key words (3 items): ...>\n\nAdd more bullets if there are additional important items, but keep the list concise.\nIf there was no progress, say so and why.\nIf waiting for user input, state the exact question needed.\nDo not guess; if something is unknown, say so explicitly in the user's language.\nUse short labels followed by \":\" for each bullet and translate the labels to the user's language.\nDetect the response language from the session content and respond in that language.\nIf the session contains multiple languages, use the language used by the user messages.\nAll headings and all content must be in the user's language.\nDo not output JSON, code fences, or any extra text.\n\nIgnore operational workflow chatter from this session except for content that changes direction:\n- PR/MR creation, branch operations, test/build/CI activity, and short status updates.\n- Keep summaries focused on user intent, decisions, constraints, outcomes, blockers, or pending actions.\n- Ignore one-line acknowledgements unless they contain a blocking issue or design decision.\nPrioritize substantive conversation over command history.\n\nWhen the session language is Japanese, headings must be exactly in this order:\n- ## 目的\n- ## 要約\n- ## ハイライト\nWhen the session language is English, headings must be exactly in this order:\n- ## Purpose\n- ## Summary\n- ## Highlights.";
 
 const MAX_MESSAGE_CHARS: usize = 220;
-const MAX_TOOL_ITEMS: usize = 8;
 const MAX_PROMPT_CHARS: usize = 8000;
 
 #[derive(Debug, Clone, Default)]
 pub struct SessionSummary {
+    pub language: Option<String>,
     pub task_overview: Option<String>,
     pub short_summary: Option<String>,
     pub bullet_points: Vec<String>,
@@ -34,6 +34,7 @@ pub struct SessionSummaryCache {
     cache: HashMap<String, SessionSummary>,
     last_modified: HashMap<String, SystemTime>,
     session_ids: HashMap<String, String>,
+    tool_ids: HashMap<String, String>,
 }
 
 impl SessionSummaryCache {
@@ -41,24 +42,54 @@ impl SessionSummaryCache {
         self.cache.get(branch)
     }
 
+    pub fn input_mtime(&self, branch: &str) -> Option<SystemTime> {
+        self.last_modified.get(branch).copied()
+    }
+
+    pub fn tool_id(&self, branch: &str) -> Option<&str> {
+        self.tool_ids.get(branch).map(|s| s.as_str())
+    }
+
+    pub fn session_id(&self, branch: &str) -> Option<&str> {
+        self.session_ids.get(branch).map(|s| s.as_str())
+    }
+
     pub fn set(
         &mut self,
         branch: String,
+        tool_id: String,
         session_id: String,
         summary: SessionSummary,
         mtime: SystemTime,
     ) {
         self.cache.insert(branch.clone(), summary);
         self.last_modified.insert(branch.clone(), mtime);
-        self.session_ids.insert(branch, session_id);
+        self.session_ids.insert(branch.clone(), session_id);
+        self.tool_ids.insert(branch, tool_id);
     }
 
-    pub fn is_stale(&self, branch: &str, session_id: &str, current_mtime: SystemTime) -> bool {
+    pub fn is_stale(
+        &self,
+        branch: &str,
+        session_id: &str,
+        current_mtime: SystemTime,
+        preferred_language: Option<&str>,
+    ) -> bool {
         if let Some(cached_session_id) = self.session_ids.get(branch) {
             if cached_session_id != session_id {
                 return true;
             }
         } else {
+            return true;
+        }
+
+        let requested_language = normalize_summary_language(preferred_language);
+        let cached_language = self
+            .cache
+            .get(branch)
+            .map(|summary| normalize_summary_language(summary.language.as_deref()))
+            .unwrap_or_else(|| "auto".to_string());
+        if cached_language != requested_language {
             return true;
         }
 
@@ -76,7 +107,35 @@ struct SessionSummaryFields {
     bullet_points: Vec<String>,
 }
 
-pub fn build_session_prompt(parsed: &ParsedSession) -> Vec<ChatMessage> {
+fn summary_system_prompt(preferred_language: Option<&str>) -> String {
+    match normalize_summary_language(preferred_language).as_str() {
+        "ja" => format!(
+            "{SESSION_SYSTEM_PROMPT_BASE}\n\nAlways respond in Japanese. Do not use English headings or bullets."
+        ),
+        "en" => format!(
+            "{SESSION_SYSTEM_PROMPT_BASE}\n\nAlways respond in English. Do not use Japanese headings or bullets."
+        ),
+        _ => SESSION_SYSTEM_PROMPT_BASE.to_string(),
+    }
+}
+
+fn normalize_summary_language(preferred_language: Option<&str>) -> String {
+    match preferred_language
+        .unwrap_or("auto")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "ja" => "ja".to_string(),
+        "en" => "en".to_string(),
+        _ => "auto".to_string(),
+    }
+}
+
+pub fn build_session_prompt(
+    parsed: &ParsedSession,
+    preferred_language: Option<&str>,
+) -> Vec<ChatMessage> {
     let mut lines = Vec::new();
     lines.push(format!(
         "Agent: {} (session_id: {})",
@@ -90,11 +149,18 @@ pub fn build_session_prompt(parsed: &ParsedSession) -> Vec<ChatMessage> {
         lines.push("Messages (sampled):".to_string());
         let mut used_chars = lines.join("\n").chars().count();
         let mut truncated = false;
-        for (index, message) in parsed.messages.iter().enumerate() {
+        let mut included_messages = 0usize;
+        for message in parsed.messages.iter() {
             let role = match message.role {
                 MessageRole::User => "user",
                 MessageRole::Assistant => "assistant",
             };
+            if matches!(message.role, MessageRole::Assistant)
+                && is_operational_status_noise(message.content.trim())
+            {
+                continue;
+            }
+
             let mut content = message.content.trim().to_string();
             if content.chars().count() > MAX_MESSAGE_CHARS {
                 content = format!(
@@ -105,7 +171,7 @@ pub fn build_session_prompt(parsed: &ParsedSession) -> Vec<ChatMessage> {
                         .collect::<String>()
                 );
             }
-            let line = format!("{}. {}: {}", index + 1, role, content);
+            let line = format!("{}. {}: {}", included_messages + 1, role, content);
             let line_len = line.chars().count() + 1; // +1 for newline
             if used_chars + line_len > MAX_PROMPT_CHARS {
                 truncated = true;
@@ -113,6 +179,14 @@ pub fn build_session_prompt(parsed: &ParsedSession) -> Vec<ChatMessage> {
             }
             lines.push(line);
             used_chars += line_len;
+            included_messages += 1;
+        }
+
+        if included_messages == 0 {
+            lines.push(
+                "No substantive conversation content found; focus was operational updates only."
+                    .to_string(),
+            );
         }
 
         if truncated {
@@ -120,33 +194,6 @@ pub fn build_session_prompt(parsed: &ParsedSession) -> Vec<ChatMessage> {
             if used_chars + notice.chars().count() < MAX_PROMPT_CHARS {
                 lines.push(notice.to_string());
             }
-        }
-    }
-
-    if !parsed.tool_executions.is_empty() {
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        for tool in &parsed.tool_executions {
-            let key = tool.tool_name.clone();
-            *counts.entry(key).or_insert(0) += 1;
-        }
-        let mut entries: Vec<(String, usize)> = counts.into_iter().collect();
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
-        let summary = entries
-            .into_iter()
-            .take(MAX_TOOL_ITEMS)
-            .map(|(name, count)| format!("{} x{}", name, count))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let tool_line = format!("Tool usage: {}", summary);
-        let current_len = lines.join("\n").chars().count();
-        if current_len + tool_line.chars().count() < MAX_PROMPT_CHARS {
-            lines.push(tool_line);
-        } else if current_len > MAX_PROMPT_CHARS {
-            // Ensure we never exceed the cap even if previous sections were already too long.
-            let truncated = lines.join("\n");
-            let shortened = truncated.chars().take(MAX_PROMPT_CHARS).collect::<String>();
-            lines.clear();
-            lines.push(shortened);
         }
     }
 
@@ -161,13 +208,80 @@ pub fn build_session_prompt(parsed: &ParsedSession) -> Vec<ChatMessage> {
     vec![
         ChatMessage {
             role: "system".to_string(),
-            content: SESSION_SYSTEM_PROMPT_BASE.to_string(),
+            content: summary_system_prompt(preferred_language),
         },
         ChatMessage {
             role: "user".to_string(),
             content: user_prompt,
         },
     ]
+}
+
+fn is_operational_status_noise(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    if trimmed.starts_with('$') {
+        return true;
+    }
+
+    if trimmed.contains('\n') {
+        return false;
+    }
+
+    if should_preserve_short_status_message(trimmed) {
+        return false;
+    }
+
+    let trimmed_len = trimmed.chars().count();
+    if trimmed_len <= 12 {
+        return true;
+    }
+
+    if trimmed_len <= 30 {
+        let word_count = trimmed.split_whitespace().count();
+        if word_count <= 4 {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn should_preserve_short_status_message(text: &str) -> bool {
+    if text.ends_with('?') || text.ends_with('？') {
+        return true;
+    }
+
+    let lowered = text.to_lowercase();
+    const IMPORTANT_KEYWORDS: &[&str] = &[
+        "error",
+        "errors",
+        "failed",
+        "fail",
+        "failure",
+        "blocked",
+        "blocking",
+        "blocker",
+        "unable",
+        "cannot",
+        "can't",
+        "need",
+        "required",
+        "attention",
+        "please",
+        "warn",
+        "warning",
+        "stop",
+        "wait",
+        "update",
+    ];
+
+    IMPORTANT_KEYWORDS
+        .iter()
+        .any(|keyword| lowered.contains(keyword))
 }
 
 /// Summarizes a terminal scrollback as plain text, bypassing session parsers.
@@ -178,13 +292,15 @@ pub fn summarize_scrollback(
     client: &AIClient,
     scrollback_text: &str,
     branch_name: &str,
+    preferred_language: Option<&str>,
 ) -> Result<SessionSummary, AIError> {
+    let summary_language = normalize_summary_language(preferred_language);
     let sampled = sample_scrollback_text(scrollback_text);
     let user_prompt = format!("Branch: {branch_name}\nTerminal session output:\n{sampled}");
     let messages = vec![
         ChatMessage {
             role: "system".to_string(),
-            content: SESSION_SYSTEM_PROMPT_BASE.to_string(),
+            content: summary_system_prompt(Some(summary_language.as_str())),
         },
         ChatMessage {
             role: "user".to_string(),
@@ -209,6 +325,7 @@ pub fn summarize_scrollback(
     };
 
     Ok(SessionSummary {
+        language: Some(summary_language),
         task_overview: fields.task_overview,
         short_summary: fields.short_summary,
         bullet_points: fields.bullet_points,
@@ -246,8 +363,10 @@ fn sample_scrollback_text(text: &str) -> String {
 pub fn summarize_session(
     client: &AIClient,
     parsed: &ParsedSession,
+    preferred_language: Option<&str>,
 ) -> Result<SessionSummary, AIError> {
-    let messages = build_session_prompt(parsed);
+    let summary_language = normalize_summary_language(preferred_language);
+    let messages = build_session_prompt(parsed, Some(summary_language.as_str()));
     let content = client.create_response(messages)?;
     let fields = parse_session_summary_fields(&content).unwrap_or_default();
     let markdown = normalize_session_summary_markdown(&content, &fields)?;
@@ -256,6 +375,7 @@ pub fn summarize_session(
     let metrics = build_metrics(parsed);
 
     Ok(SessionSummary {
+        language: Some(summary_language),
         task_overview: fields.task_overview,
         short_summary: fields.short_summary,
         bullet_points: fields.bullet_points,
@@ -334,7 +454,7 @@ fn normalize_session_summary_markdown(
     }
 
     if looks_like_markdown(trimmed) {
-        return Ok(trimmed.to_string());
+        return Ok(normalize_summary_headings(trimmed));
     }
 
     Ok(build_markdown_from_fields(fields))
@@ -348,21 +468,21 @@ fn validate_session_summary_markdown(markdown: &str) -> Result<(), AIError> {
         let trimmed = line.trim();
         if let Some(title) = trimmed.strip_prefix("## ") {
             let title = title.trim();
-            if heading_matches(title, "目的") {
+            if heading_matches(title, &["目的"]) {
                 if stage != SummaryStage::Start {
                     return Err(AIError::IncompleteSummary);
                 }
                 stage = SummaryStage::Purpose;
                 continue;
             }
-            if heading_matches(title, "要約") {
+            if heading_matches(title, &["要約", "概要"]) {
                 if stage != SummaryStage::Purpose {
                     return Err(AIError::IncompleteSummary);
                 }
                 stage = SummaryStage::Summary;
                 continue;
             }
-            if heading_matches(title, "ハイライト") {
+            if heading_matches(title, &["ハイライト", "Highlights", "highlights"]) {
                 if stage != SummaryStage::Summary {
                     return Err(AIError::IncompleteSummary);
                 }
@@ -387,20 +507,59 @@ fn validate_session_summary_markdown(markdown: &str) -> Result<(), AIError> {
     Err(AIError::IncompleteSummary)
 }
 
-fn heading_matches(title: &str, expected: &str) -> bool {
-    let trimmed = title.trim();
-    if trimmed == expected {
-        return true;
+fn normalize_summary_headings(markdown: &str) -> String {
+    let mut out = String::with_capacity(markdown.len());
+    let lines: Vec<&str> = markdown.lines().collect();
+    let last_idx = lines.len().saturating_sub(1);
+    for (idx, line) in lines.iter().enumerate() {
+        let line = *line;
+        if let Some(title) = line.trim_start().strip_prefix("## ") {
+            let normalized_title = normalize_summary_heading_title(title);
+            out.push_str("## ");
+            out.push_str(&normalized_title);
+            if idx < last_idx {
+                out.push('\n');
+            }
+            continue;
+        }
+        out.push_str(line);
+        if idx < last_idx {
+            out.push('\n');
+        }
     }
-    let Some(rest) = trimmed.strip_prefix(expected) else {
-        return false;
-    };
-    let rest = rest.trim_start();
-    rest.is_empty()
-        || rest.starts_with('(')
-        || rest.starts_with('（')
-        || rest.starts_with(':')
-        || rest.starts_with('：')
+    out
+}
+
+fn normalize_summary_heading_title(title: &str) -> String {
+    if heading_matches(title, &["目的", "Purpose", "purpose"]) {
+        return "目的".to_string();
+    }
+    if heading_matches(title, &["要約", "概要", "Summary", "summary"]) {
+        return "要約".to_string();
+    }
+    if heading_matches(title, &["ハイライト", "Highlights", "highlights"]) {
+        return "ハイライト".to_string();
+    }
+    title.to_string()
+}
+
+fn heading_matches(title: &str, expected: &[&str]) -> bool {
+    let trimmed = title.trim();
+    expected.iter().any(|exp| {
+        if trimmed == *exp {
+            return true;
+        }
+        if let Some(rest) = trimmed.strip_prefix(exp) {
+            let rest = rest.trim_start();
+            rest.is_empty()
+                || rest.starts_with('(')
+                || rest.starts_with('（')
+                || rest.starts_with(':')
+                || rest.starts_with('：')
+        } else {
+            false
+        }
+    })
 }
 
 fn is_bullet_line(line: &str) -> bool {
@@ -651,8 +810,14 @@ mod tests {
         let mut cache = SessionSummaryCache::default();
         let summary = SessionSummary::default();
         let now = SystemTime::now();
-        cache.set("main".to_string(), "sess-1".to_string(), summary, now);
-        assert!(cache.is_stale("main", "sess-2", now));
+        cache.set(
+            "main".to_string(),
+            "codex-cli".to_string(),
+            "sess-1".to_string(),
+            summary,
+            now,
+        );
+        assert!(cache.is_stale("main", "sess-2", now, None));
     }
 
     #[test]
@@ -675,7 +840,7 @@ mod tests {
             total_turns: 200,
         };
 
-        let prompt = build_session_prompt(&parsed);
+        let prompt = build_session_prompt(&parsed, None);
         let user_prompt = prompt
             .iter()
             .find(|msg| msg.role == "user")
@@ -684,6 +849,104 @@ mod tests {
             .clone();
 
         assert!(user_prompt.chars().count() <= MAX_PROMPT_CHARS);
+    }
+
+    #[test]
+    fn test_build_session_prompt_filters_assistant_operational_noise() {
+        let messages = vec![
+            SessionMessage {
+                role: MessageRole::User,
+                content: "AI要約の本質を改善したいです。".to_string(),
+                timestamp: None,
+            },
+            SessionMessage {
+                role: MessageRole::Assistant,
+                content: "$gh-pr".to_string(),
+                timestamp: None,
+            },
+            SessionMessage {
+                role: MessageRole::Assistant,
+                content: "Implemented the plan to compress summary input and keep only meaningful messages.".to_string(),
+                timestamp: None,
+            },
+            SessionMessage {
+                role: MessageRole::Assistant,
+                content: "Implemented.".to_string(),
+                timestamp: None,
+            },
+        ];
+        let parsed = ParsedSession {
+            session_id: "sess-noise".to_string(),
+            agent_type: crate::ai::AgentType::CodexCli,
+            messages,
+            tool_executions: vec![],
+            started_at: None,
+            last_updated_at: None,
+            total_turns: 3,
+        };
+
+        let prompt = build_session_prompt(&parsed, None);
+        let user_prompt = prompt
+            .iter()
+            .find(|msg| msg.role == "user")
+            .expect("user prompt")
+            .content
+            .clone();
+
+        assert!(user_prompt.contains("AI要約の本質を改善したいです。"));
+        assert!(!user_prompt.contains("$gh-pr"));
+        assert!(user_prompt.contains(
+            "Implemented the plan to compress summary input and keep only meaningful messages."
+        ));
+        assert!(!user_prompt.contains("Implemented."));
+    }
+
+    #[test]
+    fn test_build_session_prompt_keeps_short_assistant_blocker_or_question() {
+        let messages = vec![
+            SessionMessage {
+                role: MessageRole::User,
+                content: "テストを続けます。".to_string(),
+                timestamp: None,
+            },
+            SessionMessage {
+                role: MessageRole::Assistant,
+                content: "Error: build blocked.".to_string(),
+                timestamp: None,
+            },
+            SessionMessage {
+                role: MessageRole::Assistant,
+                content: "Need confirmation?".to_string(),
+                timestamp: None,
+            },
+            SessionMessage {
+                role: MessageRole::Assistant,
+                content: "go".to_string(),
+                timestamp: None,
+            },
+        ];
+
+        let parsed = ParsedSession {
+            session_id: "sess-blocker".to_string(),
+            agent_type: crate::ai::AgentType::CodexCli,
+            messages,
+            tool_executions: vec![],
+            started_at: None,
+            last_updated_at: None,
+            total_turns: 4,
+        };
+
+        let prompt = build_session_prompt(&parsed, None);
+        let user_prompt = prompt
+            .iter()
+            .find(|msg| msg.role == "user")
+            .expect("user prompt")
+            .content
+            .clone();
+
+        assert!(user_prompt.contains("Error: build blocked."));
+        assert!(user_prompt.contains("Need confirmation?"));
+        assert!(!user_prompt.contains("go"));
     }
 
     #[test]
@@ -709,8 +972,30 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_session_summary_markdown_normalizes_alternative_summary_heading() {
+        let content = "## 目的\nA\n\n## 概要\nB\n\n## ハイライト\n- C";
+        let fields = SessionSummaryFields::default();
+        let markdown = normalize_session_summary_markdown(content, &fields).expect("markdown");
+        assert_eq!(markdown, "## 目的\nA\n\n## 要約\nB\n\n## ハイライト\n- C");
+    }
+
+    #[test]
+    fn test_normalize_session_summary_markdown_normalizes_english_headings() {
+        let content = "## Purpose\nA\n\n## Summary\nB\n\n## Highlights\n- C";
+        let fields = SessionSummaryFields::default();
+        let markdown = normalize_session_summary_markdown(content, &fields).expect("markdown");
+        assert_eq!(markdown, "## 目的\nA\n\n## 要約\nB\n\n## ハイライト\n- C");
+    }
+
+    #[test]
     fn test_validate_session_summary_markdown_accepts_complete() {
         let content = "## 目的\nA\n\n## 要約\nB\n\n## ハイライト\n- C";
+        assert!(validate_session_summary_markdown(content).is_ok());
+    }
+
+    #[test]
+    fn test_validate_session_summary_markdown_accepts_overview_heading_alias() {
+        let content = "## 目的\nA\n\n## 概要\nB\n\n## ハイライト\n- C";
         assert!(validate_session_summary_markdown(content).is_ok());
     }
 

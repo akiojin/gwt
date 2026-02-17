@@ -21,7 +21,7 @@
 1. `gwt-mcp-bridge/` ディレクトリを作成し、TypeScriptプロジェクトを初期化
 2. `@modelcontextprotocol/sdk` でstdio MCPサーバーを実装
 3. `ws` ライブラリでTauriのWebSocketサーバーに接続
-4. 8つのMCPツールのスタブを定義
+4. 12個のMCPツール（既存8 + master連携4）のスタブを定義
 5. MCPリクエスト→WebSocket→Tauri→WebSocket→MCPレスポンスのパイプラインを実装
 6. esbuildで単一JSファイルにバンドル
 7. `tauri.conf.json` のresourcesにバンドル済みJSを追加
@@ -65,6 +65,26 @@
    - 接続・切断・メッセージルーティング
 3. ブリッジ: MCPツール呼び出しのE2Eテスト
 4. 手動検証: Claude Code/Codex/Geminiからの実際のMCPツール呼び出し
+
+### Phase 7: マスター連携 + 登録ヘルス可視化
+
+1. gwt-tauri の MCP ハンドラーに master連携APIを追加
+   - `gwt_master_send`
+   - `gwt_master_get_state`
+   - `gwt_master_get_mcp_registration_status`
+   - `gwt_master_repair_mcp_registration`
+2. `mcp_registration` にヘルススナップショットAPIを追加
+   - `get_registration_status`
+   - `repair_registration`
+3. Tauriコマンドを追加し、Settings UI から登録ヘルス確認/修復を実行可能にする
+4. MCP登録が不健全な場合に `gwt_master_send` を拒否するガードを実装
+
+### Phase 8: 単一起動制御（MCP登録競合防止）
+
+1. `single_instance` モジュールを追加し、ユーザー単位ロックを導入
+2. 2つ目起動時は既存インスタンスへ前面化通知を送って終了
+3. lock file の stale metadata を PID 生存確認で回復可能にする
+4. 起動時ガードを `main.rs` に組み込み、2つ目起動では MCP 初期化を実行しない
 
 ## テスト計画
 

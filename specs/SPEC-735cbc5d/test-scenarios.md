@@ -2,6 +2,13 @@
 
 **SPEC ID**: `SPEC-735cbc5d`
 
+## 前提（2026-02-14 追記）
+
+- Session Summary のレイアウト正本は `SPEC-d6949f99`
+- 本ドキュメントの UI テストは Git 表示領域の内部挙動を対象とする
+- 折りたたみ/展開シナリオは `GitSection` を `collapsible=true` で利用する場合に適用する
+- Session Summary の `Git` タブ（`collapsible=false`）では初期展開で表示される
+
 ## バックエンドテスト（Rust）
 
 ### 1. diff.rs - ブランチ差分ファイル一覧
