@@ -357,7 +357,7 @@ test("navigates Session Summary tabs and opens workflow run page", async ({
 
   await page
     .locator(".summary-tabs")
-    .getByRole("button", { name: "AI", exact: true })
+    .getByRole("button", { name: "Summary", exact: true })
     .click();
   await expect(page.getByText("AI Summary")).toBeVisible();
 });
