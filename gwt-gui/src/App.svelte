@@ -2,6 +2,7 @@
   import type {
     Tab,
     BranchInfo,
+    GitHubIssueInfo,
     ProjectInfo,
     LaunchAgentRequest,
     LaunchFinishedPayload,
@@ -143,6 +144,7 @@
   let sidebarWidthPx: number = $state(loadSidebarWidth());
   let sidebarMode: SidebarMode = $state(loadSidebarMode());
   let showAgentLaunch: boolean = $state(false);
+  let prefillIssue: GitHubIssueInfo | null = $state(null);
   let showCleanupModal: boolean = $state(false);
   let cleanupPreselectedBranch: string | null = $state(null);
   let showAbout: boolean = $state(false);
@@ -1311,6 +1313,48 @@
     activeTabId = tab.id;
   }
 
+  function openIssuesTab() {
+    const existing = tabs.find(
+      (t) => t.type === "issues" || t.id === "issues",
+    );
+    if (existing) {
+      activeTabId = existing.id;
+      return;
+    }
+
+    const tab: Tab = {
+      id: "issues",
+      label: "Issues",
+      type: "issues",
+    };
+    tabs = [...tabs, tab];
+    activeTabId = tab.id;
+  }
+
+  function handleIssueCountChange(count: number) {
+    tabs = tabs.map((t) =>
+      t.id === "issues" ? { ...t, label: count > 0 ? `Issues (${count})` : "Issues" } : t,
+    );
+  }
+
+  function handleWorkOnIssueFromTab(issue: GitHubIssueInfo) {
+    prefillIssue = issue;
+    showAgentLaunch = true;
+  }
+
+  function handleSwitchToWorktreeFromTab(branchName: string) {
+    // Find the matching agent tab and switch to it
+    const agentTab = tabs.find(
+      (t) => t.type === "agent" && normalizeBranchName(t.label) === normalizeBranchName(branchName),
+    );
+    if (agentTab) {
+      activeTabId = agentTab.id;
+      return;
+    }
+    // If no tab exists, select the branch in the sidebar
+    sidebarRefreshKey++;
+  }
+
   function openIssueSpecTab(payload: AgentModeSpecIssuePayload) {
     const issueNumber = Number(payload.issueNumber);
     if (!Number.isFinite(issueNumber) || issueNumber <= 0) return;
@@ -1599,6 +1643,9 @@
       case "version-history":
         openVersionHistoryTab();
         break;
+      case "git-issues":
+        openIssuesTab();
+        break;
       case "check-updates":
         {
           try {
@@ -1871,7 +1918,8 @@
       if (
         tab.type === "agentMode" ||
         tab.type === "settings" ||
-        tab.type === "versionHistory"
+        tab.type === "versionHistory" ||
+        tab.type === "issues"
       ) {
         storedTabs.push({
           type: tab.type,
@@ -2110,6 +2158,9 @@
         onTabSelect={handleTabSelect}
         onTabClose={handleTabClose}
         onTabReorder={handleTabReorder}
+        onWorkOnIssue={handleWorkOnIssueFromTab}
+        onSwitchToWorktree={handleSwitchToWorktreeFromTab}
+        onIssueCountChange={handleIssueCountChange}
       />
     </div>
     <StatusBar
@@ -2137,8 +2188,9 @@
     projectPath={projectPath as string}
     selectedBranch={selectedBranch?.name ?? currentBranch}
     {osEnvReady}
+    {prefillIssue}
     onLaunch={handleAgentLaunch}
-    onClose={() => (showAgentLaunch = false)}
+    onClose={() => { showAgentLaunch = false; prefillIssue = null; }}
   />
 {/if}
 

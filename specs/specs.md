@@ -20,6 +20,7 @@
 | [SPEC-013cd65c](SPEC-013cd65c/spec.md) | バグ修正仕様: ベアリポジトリでリモートブランチからワークツリー作成時に E1003 エラー | 2026-02-17 |
 | [SPEC-7c0444a8](SPEC-7c0444a8/spec.md) | 機能仕様: Issue #1097: Worktree Summaryを6タブ + Quick Launchヘッダーへ再編 | 2026-02-17 |
 | [SPEC-8ad13230](SPEC-8ad13230/spec.md) | 機能仕様: Agent Mode Issue-first Spec Bundle CRUD | 2026-02-17 |
+| [SPEC-ca4b5b07](SPEC-ca4b5b07/spec.md) | 機能仕様: Issue タブ — GitHub Issue 一覧・詳細・フルフロー | 2026-02-17 |
 | [SPEC-b80e7996](SPEC-b80e7996/spec.md) | 機能仕様: Worktree一覧のエージェント状態アニメーション | 2026-02-16 |
 | [SPEC-e7b3a1d2](SPEC-e7b3a1d2/spec.md) | 機能仕様: ウィンドウ・タブ切り替えショートカット | 2026-02-15 |
 | [SPEC-0f8e9c12](SPEC-0f8e9c12/spec.md) | 機能仕様: Sidebar Filter Cache for Local/Remote/All | 2026-02-14 |

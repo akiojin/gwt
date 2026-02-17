@@ -21,6 +21,7 @@ pub const MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS: &str = "tools-terminal-diagnostics
 
 pub const MENU_ID_GIT_CLEANUP_WORKTREES: &str = "git-cleanup-worktrees";
 pub const MENU_ID_GIT_VERSION_HISTORY: &str = "git-version-history";
+pub const MENU_ID_GIT_ISSUES: &str = "git-issues";
 
 pub const MENU_ID_EDIT_COPY: &str = "edit-copy";
 pub const MENU_ID_EDIT_PASTE: &str = "edit-paste";
@@ -158,6 +159,7 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         true,
         Some("CmdOrCtrl+Shift+K"),
     )?;
+    let git_issues = MenuItem::with_id(app, MENU_ID_GIT_ISSUES, "Issues", true, None::<&str>)?;
     let mut git_builder = SubmenuBuilder::new(app, "Git");
 
     if should_show_version_history_menu(app, state) {
@@ -171,7 +173,11 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         git_builder = git_builder.item(&version_history).separator();
     }
 
-    let git = git_builder.item(&git_cleanup_worktrees).build()?;
+    let git = git_builder
+        .item(&git_issues)
+        .separator()
+        .item(&git_cleanup_worktrees)
+        .build()?;
 
     let tools_new_terminal = MenuItem::with_id(
         app,
