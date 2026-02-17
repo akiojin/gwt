@@ -216,9 +216,7 @@ fn running_agent_branches(state: &AppState, repo_path: &Path) -> HashSet<String>
     running
         .into_iter()
         .filter_map(|(pane_id, branch)| {
-            let Some(meta) = launch_meta.get(&pane_id) else {
-                return None;
-            };
+            let meta = launch_meta.get(&pane_id)?;
             if meta.repo_path.as_path() == repo_path {
                 Some(branch)
             } else {
