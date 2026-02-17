@@ -19,6 +19,7 @@ pub mod system;
 pub mod terminal;
 pub mod update;
 pub mod version_history;
+pub mod window;
 pub mod window_tabs;
 
 #[cfg(test)]

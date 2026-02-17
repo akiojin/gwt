@@ -325,4 +325,11 @@ describe("agentTabsPersistence", () => {
       shouldRetryAgentTabRestore(2, 0, AGENT_TAB_RESTORE_MAX_RETRIES - 1),
     ).toBe(false);
   });
+
+  it("shouldRetryAgentTabRestore handles transient empty matches", () => {
+    expect(shouldRetryAgentTabRestore(2, 0, 0)).toBe(true);
+    expect(shouldRetryAgentTabRestore(2, 1, 0)).toBe(false);
+    expect(shouldRetryAgentTabRestore(0, 0, 0)).toBe(false);
+    expect(shouldRetryAgentTabRestore(2, 0, AGENT_TAB_RESTORE_MAX_RETRIES - 1)).toBe(false);
+  });
 });
