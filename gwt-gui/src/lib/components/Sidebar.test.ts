@@ -702,6 +702,80 @@ describe("Sidebar", () => {
     }
   });
 
+  it("keeps worktree list visible during 10s agent-status fallback polling", async () => {
+    vi.useFakeTimers();
+    try {
+      invokeMock.mockImplementation((command: string) => {
+        if (command === "list_worktree_branches") {
+          return Promise.resolve([branchFixture]);
+        }
+        if (command === "list_worktrees") return Promise.resolve([]);
+        if (command === "fetch_pr_status") {
+          return Promise.resolve({
+            statuses: {},
+            ghStatus: { available: true, authenticated: true },
+          });
+        }
+        return Promise.resolve([]);
+      });
+
+      const rendered = await renderSidebar({
+        projectPath: "/tmp/project",
+        onBranchSelect: vi.fn(),
+        agentTabBranches: [branchFixture.name],
+      });
+
+      await rendered.findByText(branchFixture.name);
+      expect(rendered.container.querySelector(".loading-indicator")).toBeNull();
+      const beforeRefresh = countInvokeCalls("list_worktree_branches");
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      await waitFor(() => {
+        expect(countInvokeCalls("list_worktree_branches")).toBeGreaterThan(beforeRefresh);
+      });
+      expect(rendered.container.querySelector(".loading-indicator")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps worktree list visible when agent-status-changed event triggers refresh", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "list_worktree_branches") {
+        return Promise.resolve([branchFixture]);
+      }
+      if (command === "list_worktrees") return Promise.resolve([]);
+      if (command === "fetch_pr_status") {
+        return Promise.resolve({
+          statuses: {},
+          ghStatus: { available: true, authenticated: true },
+        });
+      }
+      return Promise.resolve([]);
+    });
+
+    const rendered = await renderSidebar({
+      projectPath: "/tmp/project",
+      onBranchSelect: vi.fn(),
+      agentTabBranches: [branchFixture.name],
+    });
+
+    await rendered.findByText(branchFixture.name);
+    await waitFor(() =>
+      expect(listenMock.mock.calls.some((call) => call[0] === "agent-status-changed")).toBe(
+        true
+      )
+    );
+    expect(rendered.container.querySelector(".loading-indicator")).toBeNull();
+    const beforeRefresh = countInvokeCalls("list_worktree_branches");
+
+    await emitTauriEvent("agent-status-changed", {});
+    await waitFor(() => {
+      expect(countInvokeCalls("list_worktree_branches")).toBeGreaterThan(beforeRefresh);
+    });
+    expect(rendered.container.querySelector(".loading-indicator")).toBeNull();
+  });
+
   it("applies branch filtering after debounce delay", async () => {
     vi.useFakeTimers();
     try {

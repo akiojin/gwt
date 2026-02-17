@@ -428,6 +428,14 @@ export interface GitHubIssueInfo {
   labels: string[];
 }
 
+export interface BranchLinkedIssueInfo {
+  number: number;
+  title: string;
+  updatedAt: string;
+  labels: string[];
+  url: string;
+}
+
 export interface GhCliStatus {
   available: boolean;
   authenticated: boolean;
@@ -486,6 +494,13 @@ export interface PrStatusInfo {
   changedFilesCount: number;
   additions: number;
   deletions: number;
+}
+
+export interface BranchPrReference {
+  number: number;
+  title: string;
+  state: "OPEN" | "CLOSED" | "MERGED" | (string & {});
+  url: string | null;
 }
 
 export interface WorkflowRunInfo {

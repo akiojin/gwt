@@ -10,7 +10,7 @@ use gwt_core::worktree::WorktreeManager;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::Path;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// Safety level for a worktree (FR-500)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -203,13 +203,8 @@ fn running_agent_branches(state: &AppState) -> HashSet<String> {
     branches
 }
 
-/// List all worktrees with safety info (SPEC-c4e8f210 T1)
-#[tauri::command]
-pub fn list_worktrees(
-    project_path: String,
-    state: tauri::State<AppState>,
-) -> Result<Vec<WorktreeInfo>, String> {
-    let project_root = Path::new(&project_path);
+fn list_worktrees_impl(project_path: &str, state: &AppState) -> Result<Vec<WorktreeInfo>, String> {
+    let project_root = Path::new(project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)?;
     let last_tool = build_last_tool_usage_map(&repo_path);
 
@@ -223,7 +218,7 @@ pub fn list_worktrees(
         .find(|b| b.is_current)
         .map(|b| b.name.clone());
 
-    let agent_branches = running_agent_branches(&state);
+    let agent_branches = running_agent_branches(state);
 
     let mut infos: Vec<WorktreeInfo> = worktrees
         .into_iter()
@@ -237,7 +232,7 @@ pub fn list_worktrees(
 
             // Read agent status from session file (SPEC-b80e7996 FR-811)
             let agent_status =
-                resolve_agent_status_for_worktree(&wt.path, &repo_path, branch_name, &state);
+                resolve_agent_status_for_worktree(&wt.path, &repo_path, branch_name, state);
 
             let ahead = branch_info.map(|b| b.ahead).unwrap_or(0);
             let behind = branch_info.map(|b| b.behind).unwrap_or(0);
@@ -276,6 +271,20 @@ pub fn list_worktrees(
     infos.sort_by_key(|w| w.safety_level);
 
     Ok(infos)
+}
+
+/// List all worktrees with safety info (SPEC-c4e8f210 T1)
+#[tauri::command]
+pub async fn list_worktrees(
+    project_path: String,
+    app_handle: AppHandle,
+) -> Result<Vec<WorktreeInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle.state::<AppState>();
+        list_worktrees_impl(&project_path, &state)
+    })
+    .await
+    .map_err(|e| format!("Failed to list worktrees: {e}"))?
 }
 
 /// Cleanup multiple worktrees (SPEC-c4e8f210 T2)
@@ -756,6 +765,19 @@ mod tests {
                 SafetyLevel::Disabled,
             ]
         );
+    }
+
+    #[test]
+    fn list_worktrees_impl_returns_main_worktree_for_repo() {
+        let temp = tempfile::TempDir::new().unwrap();
+        create_test_repo(temp.path());
+        let state = AppState::new();
+        let project_path = temp.path().to_string_lossy().to_string();
+        let current = git_stdout(temp.path(), &["rev-parse", "--abbrev-ref", "HEAD"]);
+
+        let infos = list_worktrees_impl(&project_path, &state).unwrap();
+        assert!(!infos.is_empty());
+        assert!(infos.iter().any(|wt| wt.branch == current));
     }
 
     #[test]

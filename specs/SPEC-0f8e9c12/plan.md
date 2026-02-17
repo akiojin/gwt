@@ -1,12 +1,13 @@
 # 実装計画: Sidebar Filter Cache for Local/Remote/All
 
-**仕様ID**: `SPEC-0f8e9c12` | **日付**: 2026-02-14 | **仕様書**: `specs/SPEC-0f8e9c12/spec.md`
+**仕様ID**: `SPEC-0f8e9c12` | **日付**: 2026-02-17 | **仕様書**: `specs/SPEC-0f8e9c12/spec.md`
 
 ## 目的
 
 - Local/Remote/All 切替時の待ち時間を削減し、UIを即応化する
 - キャッシュ表示と背景更新を両立して鮮度を維持する
 - フィルター切替時の PR ステータス即時再取得を抑止し、切替体感の引っかかりを解消する
+- Agent 状態の定期更新時に Worktree 一覧の `Loading...` 再表示を防止する
 
 ## 方針
 
@@ -16,6 +17,7 @@
 4. `refreshKey` / `localRefreshKey` をキャッシュキーに含め、明示更新を優先
 5. 同一キーの並列フェッチは in-flight map で重複排除
 6. PR ステータスポーリングはフィルター切替で再初期化しない
+7. Agent 状態更新は `localRefreshKey` を使わず、背景更新で Local/All キャッシュを更新する
 
 ## 実装対象
 
@@ -64,6 +66,12 @@
 - in-flight ガードを `projectPath` 単位に変更して、切替直後の初回取得を阻害しない
 - ブランチ一覧ロード完了時のブートストラップ即時実行を保証
 
+### Step 8: Agent 状態更新時の無表示再取得
+
+- `agent-status-changed` および 10 秒フォールバックから `localRefreshKey` 更新を除外
+- Local/All キャッシュが有効な場合のみ `refreshFilterSnapshot(..., background=true)` を直接実行
+- active filter に一致する場合も `loading` を維持して一覧表示を崩さない
+
 ## 検証
 
 - `gwt-gui/src/lib/components/Sidebar.test.ts` を実行
@@ -71,3 +79,4 @@
 - 30秒未満のフィルター切替で `fetch_pr_status` 呼び出しが増えないことを確認
 - 入力フォーカス中の周期スキップとデバウンス反映を確認
 - `projectPath` 切替時の stale 表示抑止と path 単位 in-flight の回帰テストを確認
+- Agent 状態更新（10秒/イベント）で `Loading...` が再表示されないことを確認
