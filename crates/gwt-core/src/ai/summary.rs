@@ -1041,12 +1041,22 @@ fn enforce_worktree_purpose_in_markdown(
     let existing_body = lines[start + 1..next_heading].join("\n");
     let existing_trimmed = existing_body.trim();
     let desired = derived_purpose.render_for_output(lang);
+    let existing_has_inferred_marker = has_inferred_marker(existing_trimmed, lang);
     let should_replace = matches!(derived_purpose.source, PurposeSource::Explicit)
         || existing_trimmed.is_empty()
         || is_unknown_placeholder(existing_trimmed)
         || is_operational_only(existing_trimmed);
 
     if !should_replace {
+        if derived_purpose.is_inferred() && !existing_has_inferred_marker {
+            let annotated = annotate_as_inferred(existing_trimmed, lang);
+            let prefix = lines[..=start].join("\n");
+            if next_heading >= lines.len() {
+                return format!("{prefix}\n{annotated}");
+            }
+            let suffix = lines[next_heading..].join("\n");
+            return format!("{prefix}\n{annotated}\n\n{suffix}");
+        }
         return markdown.to_string();
     }
 
@@ -1073,6 +1083,21 @@ fn enforce_worktree_purpose_in_markdown(
     }
     let suffix = lines[next_heading..].join("\n");
     format!("{prefix}\n{desired_body}\n\n{suffix}")
+}
+
+fn has_inferred_marker(text: &str, lang: SummaryLanguage) -> bool {
+    match lang {
+        SummaryLanguage::Ja => text.trim_start().starts_with("（推定）"),
+        SummaryLanguage::En => text.trim_start().starts_with("(Inferred)"),
+    }
+}
+
+fn annotate_as_inferred(text: &str, lang: SummaryLanguage) -> String {
+    let trimmed = text.trim();
+    match lang {
+        SummaryLanguage::Ja => format!("（推定）{trimmed}"),
+        SummaryLanguage::En => format!("(Inferred) {trimmed}"),
+    }
 }
 
 fn extract_purpose_body(markdown: &str) -> Option<String> {
@@ -1657,7 +1682,7 @@ mod tests {
             &derived,
         );
 
-        assert_eq!(enforced, markdown);
+        assert!(enforced.contains("## 目的\n（推定）Issue タブの改善成果を取り込むこと"));
     }
 
     #[test]
