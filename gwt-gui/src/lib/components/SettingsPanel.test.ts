@@ -23,6 +23,7 @@ const settingsFixture: SettingsData = {
   docker_force_host: true,
   ui_font_size: 13,
   terminal_font_size: 13,
+  app_language: "auto",
   voice_input: {
     enabled: false,
     hotkey: "Mod+Shift+M",

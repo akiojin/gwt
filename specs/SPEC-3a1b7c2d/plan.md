@@ -1,6 +1,6 @@
 # 実装計画: GUI Session Summary のスクロールバック要約（実行中対応）+ 永続キャッシュ/更新制御
 
-**仕様ID**: `SPEC-3a1b7c2d` | **日付**: 2026-02-15 | **仕様書**: `specs/SPEC-3a1b7c2d/spec.md`
+**仕様ID**: `SPEC-3a1b7c2d` | **日付**: 2026-02-16 | **仕様書**: `specs/SPEC-3a1b7c2d/spec.md`
 
 ## 目的
 
@@ -10,6 +10,7 @@
 - ブランチ単位で「今/過去」の作業状況を即表示できるよう、要約キャッシュを永続化する
 - Liveフォーカス/非フォーカス/タブ無しで更新頻度を分け、変更がない限り更新しない
 - 何を要約しているか（入力ソース/識別子/入力更新時刻）が分かるようにする
+- 共通言語切替時に全ブランチ要約を再生成し、進捗をUIで表示する
 
 ## 技術コンテキスト
 
@@ -50,6 +51,23 @@
 - Rust: scrollback fallback が job を返すことを検証
 - Rust: 永続キャッシュが即表示に効くこと、タブ無しでは更新しないことを検証
 - Frontend: 更新間隔の切り替え（15/60/無効）を検証
+
+### Phase 5: 言語切替時の再生成（US7）
+
+- `Settings` に共通言語（`app_language`）を追加
+- `get_branch_session_summary` に `preferredLanguage`/`forceRebuild` を追加
+  - 通常ポーリング: mtime unchanged なら再生成しない
+  - 言語切替時: `forceRebuild=true` で mtime unchanged でも再生成
+- `rebuild_all_branch_session_summaries` コマンドを追加
+  - プロジェクト内の対象ブランチを列挙し、順次要約を再生成
+  - `session-summary-rebuild-progress` を emit
+- `SessionSummaryResult` に `language` を追加し、UIメタに表示
+
+### Phase 6: UI進捗表示（US7）
+
+- `WorktreeSummaryPanel` で `session-summary-rebuild-progress` を購読
+- AIタブでスピナー + `completed/total` + 現在ブランチを表示
+- 完了イベントで表示中ブランチの要約を再読込
 
 ## テスト
 
