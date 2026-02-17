@@ -21,6 +21,10 @@ pub struct DockerContext {
     pub compose_available: bool,
     pub daemon_running: bool,
     pub force_host: bool,
+    /// "running" | "stopped" | "not_found" | null (when detection is not possible)
+    pub container_status: Option<String>,
+    /// Whether Docker images exist for this compose project (null when detection is not possible)
+    pub images_exist: Option<bool>,
 }
 
 fn strip_known_remote_prefix<'a>(branch: &'a str, remotes: &[Remote]) -> &'a str {
@@ -84,6 +88,8 @@ pub fn detect_docker_context(
             compose_available: compose_ok,
             daemon_running: daemon_ok,
             force_host,
+            container_status: None,
+            images_exist: None,
         });
     }
 
@@ -127,6 +133,41 @@ pub fn detect_docker_context(
         None => ("none".to_string(), Vec::new()),
     };
 
+    // Detect container / image status when daemon is running and worktree exists.
+    let (container_status, images_exist) = if daemon_ok && compose_ok {
+        if let Some(wt) = worktree_path.as_ref() {
+            if file_type == "compose"
+                || (file_type == "devcontainer" && !compose_services.is_empty())
+            {
+                let wt_name = wt
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                // Detect the docker file type at worktree path for the manager.
+                let docker_file_type = detect_docker_files(wt);
+                if let Some(dft) = docker_file_type {
+                    let mgr = DockerManager::new(wt, &wt_name, dft);
+                    let status = mgr.get_status();
+                    let status_str = match status {
+                        gwt_core::docker::ContainerStatus::Running => "running",
+                        gwt_core::docker::ContainerStatus::Stopped => "stopped",
+                        gwt_core::docker::ContainerStatus::NotFound => "not_found",
+                    };
+                    let img = mgr.images_exist();
+                    (Some(status_str.to_string()), Some(img))
+                } else {
+                    (None, None)
+                }
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
     Ok(DockerContext {
         worktree_path: worktree_path.map(|p| p.to_string_lossy().to_string()),
         file_type,
@@ -135,5 +176,7 @@ pub fn detect_docker_context(
         compose_available: compose_ok,
         daemon_running: daemon_ok,
         force_host,
+        container_status,
+        images_exist,
     })
 }

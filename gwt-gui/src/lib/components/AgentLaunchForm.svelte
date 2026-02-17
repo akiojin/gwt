@@ -186,6 +186,42 @@
       (dockerContext?.docker_available ?? false) &&
       (dockerComposeLike ? (dockerContext?.compose_available ?? false) : true)
   );
+
+  // Auto-control: images missing → Build required
+  let dockerBuildRequired = $derived(
+    runtimeTarget === "docker" &&
+    dockerContext?.images_exist === false
+  );
+
+  // Auto-control: containers missing → Recreate required
+  let dockerRecreateRequired = $derived(
+    runtimeTarget === "docker" &&
+    dockerComposeLike &&
+    dockerContext?.container_status === "not_found"
+  );
+
+  // Human-readable Docker status hint
+  let dockerStatusHint = $derived(
+    (() => {
+      if (runtimeTarget !== "docker") return "";
+      const imgStatus = dockerContext?.images_exist;
+      const ctrStatus = dockerContext?.container_status;
+      if (imgStatus == null || ctrStatus == null) return "";
+      const imgLabel = imgStatus ? "Images ready" : "No images";
+      const ctrLabel =
+        ctrStatus === "running" ? "Containers running"
+        : ctrStatus === "stopped" ? "Containers stopped"
+        : "No containers";
+      const actions: string[] = [];
+      if (!imgStatus) actions.push("build");
+      if (ctrStatus === "not_found") actions.push("create");
+      else if (ctrStatus === "stopped") actions.push("recreate");
+      const suffix = actions.length > 0
+        ? ` \u2014 will ${actions.join(" and ")} automatically`
+        : "";
+      return `${imgLabel} / ${ctrLabel}${suffix}`;
+    })()
+  );
   function supportsModelFor(agentId: string): boolean {
     return (
       agentId === "codex" ||
@@ -395,6 +431,12 @@
       return;
     }
     loadAgentVersions(selectedAgent);
+  });
+
+  // Auto-check Docker build/recreate when status demands it
+  $effect(() => {
+    if (dockerBuildRequired) dockerBuild = true;
+    if (dockerRecreateRequired) dockerRecreate = true;
   });
 
   function toErrorMessage(err: unknown): string {
@@ -1619,18 +1661,29 @@
             <div class="field">
               <span class="field-label">Docker</span>
               <label class="check-row">
-                <input type="checkbox" bind:checked={dockerBuild} />
+                <input
+                  type="checkbox"
+                  bind:checked={dockerBuild}
+                  disabled={dockerBuildRequired}
+                />
                 <span>{dockerComposeLike ? "Build images" : "Build image"}</span>
               </label>
               {#if dockerComposeLike}
                 <label class="check-row">
-                  <input type="checkbox" bind:checked={dockerRecreate} />
+                  <input
+                    type="checkbox"
+                    bind:checked={dockerRecreate}
+                    disabled={dockerRecreateRequired}
+                  />
                   <span>Force recreate</span>
                 </label>
                 <label class="check-row">
                   <input type="checkbox" bind:checked={dockerKeep} />
                   <span>Keep containers running after exit</span>
                 </label>
+              {/if}
+              {#if dockerStatusHint}
+                <span class="field-hint">{dockerStatusHint}</span>
               {/if}
             </div>
           {/if}

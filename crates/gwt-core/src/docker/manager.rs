@@ -875,6 +875,40 @@ impl DockerManager {
         Ok(allocated)
     }
 
+    /// Check if Docker images exist for this compose project.
+    ///
+    /// Runs `docker compose images -q` and returns `true` if any output is produced.
+    pub fn images_exist(&self) -> bool {
+        let env_vars = self.collect_passthrough_env();
+        let output = crate::process::command("docker")
+            .args(["compose", "images", "-q"])
+            .current_dir(&self.worktree_path)
+            .env("COMPOSE_PROJECT_NAME", &self.container_name)
+            .envs(&env_vars)
+            .output();
+
+        match output {
+            Ok(out) => {
+                let exists = out.status.success() && !out.stdout.is_empty();
+                debug!(
+                    category = "docker",
+                    container = %self.container_name,
+                    images_exist = exists,
+                    "Checked docker compose images"
+                );
+                exists
+            }
+            Err(e) => {
+                debug!(
+                    category = "docker",
+                    error = %e,
+                    "Failed to check docker compose images"
+                );
+                false
+            }
+        }
+    }
+
     /// Check if the Docker image needs to be rebuilt
     ///
     /// Compares Dockerfile modification time with last build time.

@@ -274,6 +274,8 @@ export interface DockerContext {
   compose_available: boolean;
   daemon_running: boolean;
   force_host: boolean;
+  container_status?: "running" | "stopped" | "not_found" | null;
+  images_exist?: boolean | null;
 }
 
 export interface ProbePathResult {
