@@ -168,6 +168,7 @@ fn best_window(app: &tauri::AppHandle<tauri::Wry>) -> Option<tauri::WebviewWindo
     app.webview_windows().into_iter().next().map(|(_, w)| w)
 }
 
+#[allow(deprecated)]
 pub fn build_app(
     builder: tauri::Builder<tauri::Wry>,
     app_state: AppState,

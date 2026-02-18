@@ -553,7 +553,10 @@ describe("CleanupModal", () => {
       remoteToggle = rendered.container.querySelector("[data-testid='remote-toggle']");
       expect(remoteToggle).toBeTruthy();
     });
-    await fireEvent.click(remoteToggle as HTMLElement);
+    if (!remoteToggle) {
+      throw new Error("remote toggle not found");
+    }
+    await fireEvent.click(remoteToggle);
 
     await waitFor(() => {
       const args = invokeArgsFor("set_cleanup_settings")[0];
