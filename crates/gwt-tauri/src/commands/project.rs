@@ -268,6 +268,18 @@ pub fn open_project(
 
                 let _ = crate::menu::rebuild_menu(window.app_handle());
 
+                // Prefetch version history in background (SPEC-c9a2f731 FR-006)
+                {
+                    let app_handle = window.app_handle().clone();
+                    let prefetch_path = project_root_str.clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        crate::commands::version_history::prefetch_version_history_inner(
+                            &prefetch_path,
+                            &app_handle,
+                        );
+                    });
+                }
+
                 return Ok(OpenProjectResult {
                     info,
                     action: OpenProjectAction::Opened,

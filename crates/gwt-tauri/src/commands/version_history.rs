@@ -989,6 +989,109 @@ fn git_output(repo_path: &Path, args: &[String]) -> Result<String, String> {
     }
 }
 
+/// Identify versions that are not yet cached and need prefetching.
+///
+/// Returns version IDs that need background generation.
+#[cfg(test)]
+fn find_uncached_versions(
+    repo_path: &Path,
+    repo_key: &str,
+    language: &str,
+    versions: &[VersionItem],
+    state: &AppState,
+) -> Vec<String> {
+    let mut uncached = Vec::new();
+
+    for version in versions {
+        let (_, range_from, range_to) = match resolve_range_for_version(repo_path, &version.id) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let range_from_oid = match &range_from {
+            Some(r) => match rev_parse(repo_path, r) {
+                Ok(v) => Some(v),
+                Err(_) => continue,
+            },
+            None => None,
+        };
+        let range_to_oid = match rev_parse(repo_path, &range_to) {
+            Ok(v) => v,
+            Err(_) => {
+                if range_to == "HEAD" && is_unborn_head(repo_path) {
+                    continue; // Unborn HEAD has no commits to summarize
+                } else {
+                    continue;
+                }
+            }
+        };
+
+        if get_cached_version_history(
+            state,
+            repo_path,
+            repo_key,
+            &version.id,
+            range_from_oid.as_deref(),
+            &range_to_oid,
+            language,
+        )
+        .is_some()
+        {
+            continue;
+        }
+
+        uncached.push(version.id.clone());
+    }
+
+    uncached
+}
+
+/// Inner prefetch logic, callable from both the Tauri command and the project open hook.
+pub fn prefetch_version_history_inner(project_path: &str, app_handle: &AppHandle) {
+    let profiles = match ProfilesConfig::load() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    if resolve_version_history_ai_settings(&profiles).is_none() {
+        return; // AI disabled, nothing to prefetch
+    }
+
+    let versions = match list_project_versions(project_path.to_string(), 20) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    let tauri_state: State<AppState> = app_handle.state::<AppState>();
+
+    for version in versions.items {
+        // get_project_version_history handles cache check, inflight dedup,
+        // and semaphore-controlled background generation internally.
+        let _ = get_project_version_history(
+            project_path.to_string(),
+            version.id,
+            tauri_state.clone(),
+            app_handle.clone(),
+        );
+    }
+}
+
+/// Prefetch version history for all uncached versions in a project.
+///
+/// This command is fire-and-forget: uncached versions are generated in the background
+/// using the existing `get_project_version_history` flow (which handles inflight
+/// deduplication and semaphore-based concurrency limiting).
+#[tauri::command]
+pub fn prefetch_version_history(
+    project_path: String,
+    _state: State<AppState>,
+    app_handle: AppHandle,
+) {
+    let app_handle_bg = app_handle.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        prefetch_version_history_inner(&project_path, &app_handle_bg);
+    });
+}
+
 fn is_unborn_head(repo_path: &Path) -> bool {
     let output = gwt_core::process::command("git")
         .args(["rev-parse", "--verify", "--quiet", "HEAD"])
@@ -1285,6 +1388,106 @@ mod tests {
             "ja",
         );
         assert!(hit.is_none());
+    }
+
+    fn make_cache_entry_with_from(
+        range_from_oid: Option<&str>,
+        range_to_oid: &str,
+        language: &str,
+    ) -> VersionHistoryCacheEntry {
+        VersionHistoryCacheEntry {
+            label: "v1.0.0".to_string(),
+            range_from: None,
+            range_to: "v1.0.0".to_string(),
+            range_from_oid: range_from_oid.map(|s| s.to_string()),
+            range_to_oid: range_to_oid.to_string(),
+            commit_count: 3,
+            language: language.to_string(),
+            summary_markdown: "## Summary\nTest".to_string(),
+            changelog_markdown: "### Features\n- test".to_string(),
+        }
+    }
+
+    #[test]
+    fn prefetch_skips_cached_versions() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(home.path());
+
+        let repo = TempDir::new().unwrap();
+        init_git_repo(repo.path());
+        commit_file(repo.path(), "a.txt", "1", "feat: first");
+        tag(repo.path(), "v1.0.0");
+        commit_file(repo.path(), "b.txt", "2", "fix: second");
+
+        let state = AppState::new();
+        let repo_key = repo.path().to_string_lossy().to_string();
+
+        // Get versions list
+        let versions =
+            list_project_versions(repo.path().to_string_lossy().to_string(), 10).unwrap();
+
+        // Resolve the v1.0.0 OID for cache entry
+        let v100_oid = rev_parse(repo.path(), "v1.0.0").unwrap();
+
+        // Write a valid cache entry for v1.0.0 to disk
+        let mut entries = HashMap::new();
+        entries.insert(
+            "v1.0.0".to_string(),
+            make_cache_entry_with_from(None, &v100_oid, "en"),
+        );
+        save_disk_cache(repo.path(), &entries);
+
+        let uncached =
+            find_uncached_versions(repo.path(), &repo_key, "en", &versions.items, &state);
+
+        // v1.0.0 is cached, so only unreleased should be uncached
+        assert!(
+            !uncached.contains(&"v1.0.0".to_string()),
+            "v1.0.0 should be skipped (cached)"
+        );
+        assert!(
+            uncached.contains(&"unreleased".to_string()),
+            "unreleased should be in uncached list"
+        );
+    }
+
+    #[test]
+    fn prefetch_includes_uncached_versions() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(home.path());
+
+        let repo = TempDir::new().unwrap();
+        init_git_repo(repo.path());
+        commit_file(repo.path(), "a.txt", "1", "feat: first");
+        tag(repo.path(), "v1.0.0");
+        commit_file(repo.path(), "b.txt", "2", "fix: second");
+        tag(repo.path(), "v1.0.1");
+        commit_file(repo.path(), "c.txt", "3", "chore: third");
+
+        let state = AppState::new();
+        let repo_key = repo.path().to_string_lossy().to_string();
+
+        // No cache at all
+        let versions =
+            list_project_versions(repo.path().to_string_lossy().to_string(), 10).unwrap();
+        let uncached =
+            find_uncached_versions(repo.path(), &repo_key, "en", &versions.items, &state);
+
+        // All versions should be uncached
+        assert!(
+            uncached.contains(&"unreleased".to_string()),
+            "unreleased should need prefetch"
+        );
+        assert!(
+            uncached.contains(&"v1.0.1".to_string()),
+            "v1.0.1 should need prefetch"
+        );
+        assert!(
+            uncached.contains(&"v1.0.0".to_string()),
+            "v1.0.0 should need prefetch"
+        );
     }
 
     #[test]

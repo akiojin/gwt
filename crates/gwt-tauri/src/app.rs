@@ -640,6 +640,7 @@ pub fn build_app(
             crate::commands::git_view::get_base_branch_candidates,
             crate::commands::version_history::list_project_versions,
             crate::commands::version_history::get_project_version_history,
+            crate::commands::version_history::prefetch_version_history,
             crate::commands::window_tabs::sync_window_agent_tabs,
             crate::commands::window::get_current_window_label,
             crate::commands::window::open_gwt_window,
