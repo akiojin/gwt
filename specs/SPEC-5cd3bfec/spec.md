@@ -79,6 +79,28 @@
 - 新規コンポーネントファイルは作成せず、SettingsPanel.svelte 内で完結する
 - 既存のテスト（SettingsPanel.test.ts）のセレクタは `<details>` に依存している可能性があるため、テスト側も修正する
 
+## 関連SPEC（親子関係）
+
+本SPECは設定画面（SettingsPanel）の**親SPEC**として位置づけ、設定画面に関連する機能SPECを子SPECとして参照する。
+
+### アクティブ（子SPEC）
+
+| SPEC ID | タイトル | 関連 |
+|---------|--------|------|
+| `SPEC-a7b3c9e1` | MCP Bridge 設定UI | MCP Bridge タブの内容を実装 |
+| `SPEC-9f3c2a11` | Voice Input モード | Voice Input タブの内容を実装 |
+| `SPEC-4470704f` | ネイティブメニュー統合 | メニューから設定画面を開く導線 |
+
+### アーカイブ（子SPEC）
+
+| SPEC ID | タイトル | 関連 |
+|---------|--------|------|
+| `SPEC-86bb4e7c` | GUI Profiles 設定 | Profiles タブの内容（プロファイル・環境変数・AI設定）を実装 |
+| `SPEC-d6210238` | GUI 基盤（設定画面） | 設定画面の初期アーキテクチャを確立 |
+| `SPEC-a3f4c9df` | 設定ファイル統合 | 設定の永続化層（settings.toml）を実装 |
+| `SPEC-71f2742d` | TUI 設定画面タブ統合 | TUI版タブ切り替えの先行実装（本SPECのGUI版に相当） |
+| `SPEC-552c5e74` | Launch Agent デフォルト設定保持 | macOS Launch Agent の設定保存を実装 |
+
 ## 成功基準 *(必須)*
 
 - **SC-001**: 設定画面に4つのタブが表示され、クリックで切り替わる
