@@ -118,8 +118,8 @@
 ## ドキュメント管理
 
 - ドキュメントはREADME.md/README.ja.mdに集約する
-- 仕様・要件ドキュメントは `specs/SPEC-{ID}/` に配置する。完了済み仕様は `specs/archive/` に移動する
-- 以前までのTUIの仕様・要件ドキュメントは `specs/archive/` に保管する
+- 仕様・要件ドキュメントは `specs/SPEC-{ID}/` に配置する。実装完了後もそのまま残す
+- `specs/archive/` には現在利用しない仕様（TUI版など）のみを保管する
 
 ### README.md / README.ja.md に必ず記載する内容
 

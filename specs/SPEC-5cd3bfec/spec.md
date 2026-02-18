@@ -91,14 +91,14 @@
 | `SPEC-9f3c2a11` | Voice Input モード | Voice Input タブの内容を実装 |
 | `SPEC-4470704f` | ネイティブメニュー統合 | メニューから設定画面を開く導線 |
 | `SPEC-552c5e74` | Launch Agent デフォルト設定保持 | macOS Launch Agent の設定保存を実装 |
+| `SPEC-86bb4e7c` | GUI Profiles 設定 | Profiles タブの内容（プロファイル・環境変数・AI設定）を実装（※現在archiveに誤配置） |
+| `SPEC-d6210238` | GUI 基盤（設定画面） | 設定画面の初期アーキテクチャを確立（※現在archiveに誤配置） |
+| `SPEC-a3f4c9df` | 設定ファイル統合 | 設定の永続化層（settings.toml）を実装（※現在archiveに誤配置） |
 
-### 過去要件（子SPEC・archive）
+### archive（子SPEC・現在利用しないTUI版）
 
 | SPEC ID | タイトル | 関連 |
 |---------|--------|------|
-| `SPEC-86bb4e7c` | GUI Profiles 設定 | Profiles タブの内容（プロファイル・環境変数・AI設定）を実装 |
-| `SPEC-d6210238` | GUI 基盤（設定画面） | 設定画面の初期アーキテクチャを確立 |
-| `SPEC-a3f4c9df` | 設定ファイル統合 | 設定の永続化層（settings.toml）を実装 |
 | `SPEC-71f2742d` | TUI 設定画面タブ統合 | TUI版タブ切り替えの先行実装（本SPECのGUI版に相当） |
 
 ## 成功基準 *(必須)*
