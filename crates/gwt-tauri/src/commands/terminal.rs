@@ -24,8 +24,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
@@ -350,6 +349,106 @@ fn get_command_version_with_timeout(command: &str) -> Option<String> {
         return Some(stderr);
     }
     None
+}
+
+#[derive(Debug, Clone)]
+struct CodexFeatureProbeContext {
+    command: String,
+    args: Vec<String>,
+    tool_version: String,
+}
+
+static CODEX_MULTI_AGENT_SUPPORT_CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+const CODEX_FEATURES_LIST_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn codex_multi_agent_support_cache() -> &'static Mutex<HashMap<String, bool>> {
+    CODEX_MULTI_AGENT_SUPPORT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn codex_multi_agent_support_cache_key(context: &CodexFeatureProbeContext) -> String {
+    let mut key = format!("{}|{}", context.command, context.tool_version);
+    for arg in &context.args {
+        key.push('\u{1f}');
+        key.push_str(arg);
+    }
+    key
+}
+
+fn codex_features_list_contains_feature(raw: &str, feature: &str) -> bool {
+    raw.lines().any(|line| {
+        line.split_whitespace()
+            .next()
+            .is_some_and(|name| name == feature)
+    })
+}
+
+fn probe_codex_features_list(command: &str, args: &[String], timeout: Duration) -> Option<String> {
+    let command = command.to_string();
+    let args = args.to_vec();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let out = gwt_core::process::command(&command)
+            .args(args)
+            .arg("features")
+            .arg("list")
+            .output();
+        let _ = tx.send(out);
+    });
+
+    let out = rx.recv_timeout(timeout).ok()?.ok()?;
+    if !out.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if stdout.is_empty() {
+        return None;
+    }
+
+    Some(stdout)
+}
+
+fn codex_supports_multi_agent(context: &CodexFeatureProbeContext) -> bool {
+    let cache_key = codex_multi_agent_support_cache_key(context);
+    if let Ok(cache) = codex_multi_agent_support_cache().lock() {
+        if let Some(value) = cache.get(&cache_key) {
+            return *value;
+        }
+    }
+
+    let supported = match probe_codex_features_list(
+        &context.command,
+        &context.args,
+        CODEX_FEATURES_LIST_TIMEOUT,
+    ) {
+        Some(raw) => codex_features_list_contains_feature(&raw, "multi_agent"),
+        // Preserve default behavior for package-tag launches when probing is unavailable.
+        None => context.tool_version.eq_ignore_ascii_case("latest"),
+    };
+
+    if let Ok(mut cache) = codex_multi_agent_support_cache().lock() {
+        cache.insert(cache_key, supported);
+    }
+
+    supported
+}
+
+fn codex_config_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".codex").join("config.toml"))
+}
+
+fn codex_config_has_collab_alias(path: &std::path::Path) -> Result<bool, String> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read Codex config ({}): {e}", path.display()))?;
+    let parsed: toml::Value = toml::from_str(&raw)
+        .map_err(|e| format!("Failed to parse Codex config ({}): {e}", path.display()))?;
+    Ok(parsed
+        .get("features")
+        .and_then(|value| value.get("collab"))
+        .is_some())
 }
 
 #[derive(Debug, Clone)]
@@ -1077,6 +1176,7 @@ fn build_agent_args(
     agent_id: &str,
     request: &LaunchAgentRequest,
     version_for_gates: Option<&str>,
+    enable_codex_multi_agent: bool,
 ) -> Result<Vec<String>, String> {
     let mode = request.mode.unwrap_or(SessionMode::Normal);
     let skip_permissions = request.skip_permissions.unwrap_or(false);
@@ -1118,6 +1218,7 @@ fn build_agent_args(
                 version_for_gates,
                 skip_permissions,
                 collaboration,
+                enable_codex_multi_agent,
             ));
 
             if skip_permissions {
@@ -1934,7 +2035,7 @@ mod tests {
     fn build_agent_args_codex_continue_defaults_to_resume_last() {
         let mut req = make_request("codex");
         req.mode = Some(SessionMode::Continue);
-        let args = build_agent_args("codex", &req, Some("0.92.0")).unwrap();
+        let args = build_agent_args("codex", &req, Some("0.92.0"), false).unwrap();
         assert_eq!(args[0], "resume");
         assert_eq!(args[1], "--last");
         assert!(args.iter().any(|a| a.starts_with("--model=")));
@@ -1943,10 +2044,69 @@ mod tests {
     #[test]
     fn build_agent_args_codex_collaboration_modes_always_enabled() {
         let req = make_request("codex");
-        let args = build_agent_args("codex", &req, Some("latest")).unwrap();
+        let args = build_agent_args("codex", &req, Some("latest"), false).unwrap();
         assert!(args
             .windows(2)
             .any(|w| w[0] == "--enable" && w[1] == "collaboration_modes"));
+    }
+
+    #[test]
+    fn build_agent_args_codex_multi_agent_enabled() {
+        let req = make_request("codex");
+        let args = build_agent_args("codex", &req, Some("latest"), true).unwrap();
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--enable" && w[1] == "multi_agent"));
+    }
+
+    #[test]
+    fn build_agent_args_codex_multi_agent_disabled() {
+        let req = make_request("codex");
+        let args = build_agent_args("codex", &req, Some("latest"), false).unwrap();
+        assert!(!args
+            .windows(2)
+            .any(|w| w[0] == "--enable" && w[1] == "multi_agent"));
+    }
+
+    #[test]
+    fn codex_features_list_contains_feature_parses_first_column() {
+        let raw = r#"
+multi_agent                      experimental       true
+collaboration_modes              stable             true
+"#;
+        assert!(codex_features_list_contains_feature(raw, "multi_agent"));
+        assert!(!codex_features_list_contains_feature(raw, "collab"));
+    }
+
+    #[test]
+    fn codex_config_has_collab_alias_detects_legacy_key() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[features]
+collab = true
+multi_agent = true
+"#,
+        )
+        .unwrap();
+        assert!(codex_config_has_collab_alias(&path).unwrap());
+    }
+
+    #[test]
+    fn codex_config_has_collab_alias_ignores_missing_key() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[features]
+multi_agent = true
+"#,
+        )
+        .unwrap();
+        assert!(!codex_config_has_collab_alias(&path).unwrap());
     }
 
     #[test]
@@ -1954,10 +2114,10 @@ mod tests {
         let mut req = make_request("codex");
         req.skip_permissions = Some(true);
 
-        let legacy = build_agent_args("codex", &req, Some("0.79.9")).unwrap();
+        let legacy = build_agent_args("codex", &req, Some("0.79.9"), false).unwrap();
         assert!(legacy.iter().any(|a| a == "--yolo"));
 
-        let modern = build_agent_args("codex", &req, Some("0.80.0")).unwrap();
+        let modern = build_agent_args("codex", &req, Some("0.80.0"), false).unwrap();
         assert!(modern
             .iter()
             .any(|a| a == "--dangerously-bypass-approvals-and-sandbox"));
@@ -1968,7 +2128,7 @@ mod tests {
         let mut req = make_request("claude");
         req.mode = Some(SessionMode::Continue);
         req.resume_session_id = Some("sess-123".to_string());
-        let args = build_agent_args("claude", &req, None).unwrap();
+        let args = build_agent_args("claude", &req, None, false).unwrap();
         assert_eq!(args[0], "--resume");
         assert_eq!(args[1], "sess-123");
     }
@@ -1977,7 +2137,7 @@ mod tests {
     fn build_agent_args_claude_resume_without_id_opens_picker() {
         let mut req = make_request("claude");
         req.mode = Some(SessionMode::Resume);
-        let args = build_agent_args("claude", &req, None).unwrap();
+        let args = build_agent_args("claude", &req, None, false).unwrap();
         assert_eq!(args[0], "--resume");
         assert_eq!(args.len(), 1);
     }
@@ -1987,7 +2147,7 @@ mod tests {
         let mut req = make_request("gemini");
         req.mode = Some(SessionMode::Continue);
         req.resume_session_id = Some("sess-123".to_string());
-        let args = build_agent_args("gemini", &req, None).unwrap();
+        let args = build_agent_args("gemini", &req, None, false).unwrap();
         assert_eq!(args, vec!["-r".to_string(), "sess-123".to_string()]);
     }
 
@@ -1996,7 +2156,7 @@ mod tests {
         let mut req = make_request("opencode");
         req.mode = Some(SessionMode::Continue);
         req.resume_session_id = Some("sess-123".to_string());
-        let args = build_agent_args("opencode", &req, None).unwrap();
+        let args = build_agent_args("opencode", &req, None, false).unwrap();
         assert_eq!(args, vec!["-s".to_string(), "sess-123".to_string()]);
     }
 
@@ -2004,7 +2164,7 @@ mod tests {
     fn build_agent_args_opencode_resume_requires_session_id() {
         let mut req = make_request("opencode");
         req.mode = Some(SessionMode::Resume);
-        let err = build_agent_args("opencode", &req, None).unwrap_err();
+        let err = build_agent_args("opencode", &req, None, false).unwrap_err();
         assert!(err.to_lowercase().contains("session id"));
     }
 
@@ -2401,6 +2561,21 @@ pub(crate) fn launch_agent_for_project_root(
     let agent_id = request.agent_id.trim();
     if agent_id.is_empty() {
         return Err("Agent is required".to_string());
+    }
+    if agent_id == "codex" {
+        if let Some(path) = codex_config_path() {
+            match codex_config_has_collab_alias(&path) {
+                Ok(true) => {
+                    let detail = "Deprecated Codex feature key `collab` detected. Use `[features].multi_agent` in ~/.codex/config.toml.";
+                    tracing::warn!(path = %path.display(), "{detail}");
+                    report_launch_progress(job_id, &app_handle, "validate", Some(detail));
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::debug!(%error, "Failed to inspect Codex config for deprecated keys");
+                }
+            }
+        }
     }
     if is_launch_cancelled(cancelled) {
         return Err("Cancelled".to_string());
@@ -2866,8 +3041,24 @@ pub(crate) fn launch_agent_for_project_root(
         .as_deref()
         .or(Some(resolved.tool_version.as_str()));
 
+    let enable_codex_multi_agent = if agent_id == "codex" {
+        let context = CodexFeatureProbeContext {
+            command: resolved.command.clone(),
+            args: resolved.args.clone(),
+            tool_version: resolved.tool_version.clone(),
+        };
+        codex_supports_multi_agent(&context)
+    } else {
+        false
+    };
+
     let mut args = resolved.args.clone();
-    args.extend(build_agent_args(agent_id, &request, version_for_gates)?);
+    args.extend(build_agent_args(
+        agent_id,
+        &request,
+        version_for_gates,
+        enable_codex_multi_agent,
+    )?);
 
     let mode = request.mode.unwrap_or(SessionMode::Normal);
     let mode_str = match mode {

@@ -17,6 +17,7 @@
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
+| [SPEC-5cd3bfec](SPEC-5cd3bfec/spec.md) | 機能仕様: 設定画面のスクロールをタブ切り替えに変更 | 2026-02-18 |
 | [SPEC-9c1e4d2f](SPEC-9c1e4d2f/spec.md) | 機能仕様: ネイティブメニュー無反応時の検知性強化と受信経路修復 | 2026-02-18 |
 | [SPEC-ad1ac432](SPEC-ad1ac432/spec.md) | 機能仕様: Cleanup Remote Branches | 2026-02-18 |
 | [SPEC-c0b4e2d9](SPEC-c0b4e2d9/spec.md) | 機能仕様: Sidebar Branch Switch Non-Blocking | 2026-02-18 |
@@ -64,7 +65,7 @@
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
 
-## 過去要件（archive）
+## 現在利用しない仕様（archive: TUI版など）
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
