@@ -1516,18 +1516,18 @@ mod tests {
     }
 
     #[test]
-    fn choose_fallback_runner_prefers_bunx_when_not_local() {
+    fn choose_fallback_runner_prefers_npx_when_both_available() {
         assert_eq!(
             choose_fallback_runner(Some(Path::new("/usr/local/bin/bunx")), true),
-            Some(FallbackRunner::Bunx)
+            Some(FallbackRunner::Npx)
         );
     }
 
     #[test]
-    fn choose_fallback_runner_uses_npx_when_bunx_is_local_node_modules() {
+    fn choose_fallback_runner_uses_bunx_when_npx_unavailable() {
         assert_eq!(
-            choose_fallback_runner(Some(Path::new("/repo/node_modules/.bin/bunx")), true),
-            Some(FallbackRunner::Npx)
+            choose_fallback_runner(Some(Path::new("/usr/local/bin/bunx")), false),
+            Some(FallbackRunner::Bunx)
         );
     }
 
