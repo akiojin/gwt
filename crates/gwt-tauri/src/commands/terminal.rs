@@ -3153,18 +3153,14 @@ pub fn start_launch_job(
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let state = app.state::<AppState>();
-            let result = launch_agent_for_project_root(
+            launch_agent_for_project_root(
                 PathBuf::from(project_root),
                 request,
                 &state,
                 app.clone(),
                 Some(job_id_thread.as_str()),
                 Some(cancel_flag.as_ref()),
-            );
-            if let Ok(mut jobs) = state.launch_jobs.lock() {
-                jobs.remove(&job_id_thread);
-            }
-            result
+            )
         }));
 
         let finished = match &result {
@@ -3197,12 +3193,6 @@ pub fn start_launch_job(
             }
             Err(_panic) => {
                 tracing::error!(job_id = %job_id_thread, "launch thread panicked");
-                // Clean up the job entry on panic so polling detects the loss.
-                if let Some(state) = app.try_state::<AppState>() {
-                    if let Ok(mut jobs) = state.launch_jobs.lock() {
-                        jobs.remove(&job_id_thread);
-                    }
-                }
                 LaunchFinishedPayload {
                     job_id: job_id_thread.clone(),
                     status: "error".to_string(),
@@ -3216,6 +3206,14 @@ pub fn start_launch_job(
 
         tracing::debug!(job_id = %job_id_thread, status = %finished.status, "emitting launch-finished");
         let _ = app.emit("launch-finished", &finished);
+
+        // Remove the job AFTER emitting the event so that the frontend
+        // polling never sees the job as gone before receiving the event.
+        if let Some(state) = app.try_state::<AppState>() {
+            if let Ok(mut jobs) = state.launch_jobs.lock() {
+                jobs.remove(&job_id_thread);
+            }
+        }
     });
 
     Ok(job_id)
