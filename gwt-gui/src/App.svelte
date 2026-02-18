@@ -2233,9 +2233,9 @@
       );
   });
 
-  // Global keyboard shortcut: Cmd+Shift+K / Ctrl+Shift+K to open Cleanup modal.
-  // The native menu accelerator handles this on macOS, but this provides a
-  // fallback for web-preview and non-Tauri contexts.
+  // Keyboard shortcut fallbacks: these mirror native menu accelerators so that
+  // shortcuts still work even when xterm or another element has swallowed the
+  // key event before Tauri's accelerator layer can process it.
   $effect(() => {
     function onKeydown(e: KeyboardEvent) {
       if (
@@ -2256,6 +2256,46 @@
       ) {
         e.preventDefault();
         void handleMenuAction("new-terminal");
+      }
+      // Cmd+O / Ctrl+O → Open Project
+      if (
+        e.key === "o" &&
+        (e.metaKey || e.ctrlKey) &&
+        !e.shiftKey &&
+        !e.altKey
+      ) {
+        e.preventDefault();
+        void handleMenuAction("open-project");
+      }
+      // Cmd+, / Ctrl+, → Settings
+      if (
+        e.key === "," &&
+        (e.metaKey || e.ctrlKey) &&
+        !e.shiftKey &&
+        !e.altKey
+      ) {
+        e.preventDefault();
+        void handleMenuAction("open-settings");
+      }
+      // Cmd+Shift+[ / Ctrl+Shift+[ → Previous Tab
+      if (
+        e.key === "{" &&
+        e.shiftKey &&
+        (e.metaKey || e.ctrlKey) &&
+        !e.altKey
+      ) {
+        e.preventDefault();
+        void handleMenuAction("previous-tab");
+      }
+      // Cmd+Shift+] / Ctrl+Shift+] → Next Tab
+      if (
+        e.key === "}" &&
+        e.shiftKey &&
+        (e.metaKey || e.ctrlKey) &&
+        !e.altKey
+      ) {
+        e.preventDefault();
+        void handleMenuAction("next-tab");
       }
     }
     document.addEventListener("keydown", onKeydown);
