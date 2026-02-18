@@ -1228,6 +1228,10 @@
     border-bottom: 1px solid var(--border-color);
     padding: 0 24px;
     flex-shrink: 0;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
   }
 
   .settings-tab-btn {
