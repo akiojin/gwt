@@ -328,7 +328,11 @@ pub async fn list_worktrees(
 /// Check gh CLI availability (SPEC-ad1ac432 T010)
 #[tauri::command]
 pub async fn check_gh_available(state: tauri::State<'_, AppState>) -> Result<bool, String> {
-    Ok(state.gh_available.load(Ordering::Relaxed))
+    let available = tauri::async_runtime::spawn_blocking(gwt_core::git::gh_cli::check_auth)
+        .await
+        .map_err(|e| format!("Failed to check gh availability: {e}"))?;
+    state.gh_available.store(available, Ordering::Relaxed);
+    Ok(available)
 }
 
 /// Get PR statuses for cleanup (SPEC-ad1ac432 T011)
