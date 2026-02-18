@@ -12,7 +12,7 @@ PLANS.md
 **/*.rs.bk
 
 # Generated (Tauri build)
-/crates/gwt-tauri/gen/schemas/linux-schema.json
+/crates/gwt-tauri/gen/schemas/
 
 # npm wrapper (for bunx distribution)
 node_modules/

@@ -296,6 +296,13 @@
         return false;
       }
 
+      // Delegate all Cmd+key combinations to the native menu / browser layer.
+      // Without this, xterm consumes the keydown and calls preventDefault(),
+      // which silently breaks native accelerators (Cmd+O, Cmd+N, Cmd+, …).
+      if (event.metaKey) {
+        return false;
+      }
+
       return true;
     });
 

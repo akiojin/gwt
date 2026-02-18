@@ -816,7 +816,7 @@ describe("Sidebar", () => {
     }
   });
 
-  it("sorts branch list by name by default with main/develop prioritized", async () => {
+  it("sorts branch list by updated timestamp by default with main/develop prioritized", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "list_worktree_branches")
         return [
@@ -845,7 +845,7 @@ describe("Sidebar", () => {
     });
   });
 
-  it("sorts branch list by latest commit timestamp in updated mode", async () => {
+  it("sorts branch list by name after toggling sort mode", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "list_worktree_branches")
         return [
@@ -894,9 +894,7 @@ describe("Sidebar", () => {
       onBranchSelect: vi.fn(),
     });
 
-    const sortButton = rendered.getByRole("button", { name: "Sort mode" });
-    await fireEvent.click(sortButton);
-
+    // Default is now "updated", so no click needed
     await waitFor(() => {
       expect(getRenderedBranchNames(rendered)).toEqual([
         "main",

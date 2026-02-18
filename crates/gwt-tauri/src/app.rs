@@ -223,7 +223,11 @@ pub fn build_app(
                 }
 
                 // Native menubar (SPEC-4470704f)
-                let _ = crate::menu::rebuild_menu(_app.handle());
+                if let Err(e) = crate::menu::rebuild_menu(_app.handle()) {
+                    warn!(category = "menu", error = %e, "Failed to build initial menu");
+                } else {
+                    info!(category = "menu", "Initial native menu built");
+                }
 
                 // System tray (SPEC-dfb1611a FR-310〜FR-313)
                 let tray_menu = tauri::menu::Menu::new(_app)?;
@@ -415,6 +419,7 @@ pub fn build_app(
         })
         .on_menu_event(|app, event| {
             let id = event.id().as_ref();
+            info!(category = "menu", id = id, "Native menu event received");
 
             if id == crate::menu::MENU_ID_FILE_NEW_WINDOW {
                 open_new_window(app);
@@ -602,6 +607,7 @@ pub fn build_app(
             crate::commands::terminal::launch_agent,
             crate::commands::terminal::start_launch_job,
             crate::commands::terminal::cancel_launch_job,
+            crate::commands::terminal::poll_launch_job,
             crate::commands::terminal::write_terminal,
             crate::commands::terminal::send_keys_to_pane,
             crate::commands::terminal::send_keys_broadcast,
@@ -641,6 +647,7 @@ pub fn build_app(
             crate::commands::git_view::get_base_branch_candidates,
             crate::commands::version_history::list_project_versions,
             crate::commands::version_history::get_project_version_history,
+            crate::commands::version_history::prefetch_version_history,
             crate::commands::window_tabs::sync_window_agent_tabs,
             crate::commands::window::get_current_window_label,
             crate::commands::window::open_gwt_window,
@@ -783,16 +790,39 @@ fn emit_menu_action(app: &tauri::AppHandle<tauri::Wry>, action: &str) {
         .get_webview_window(&label)
         .or_else(|| app.get_webview_window("main"))
     else {
+        warn!(
+            category = "menu",
+            action = action,
+            requested_label = %label,
+            "Skipping menu action emit because target window was not found"
+        );
         return;
     };
 
-    let _ = window.emit_to(
+    info!(
+        category = "menu",
+        action = action,
+        target_label = window.label(),
+        "Emitting menu action"
+    );
+
+    let emit_result = window.emit_to(
         EventTarget::webview_window(window.label()),
         crate::menu::MENU_ACTION_EVENT,
         crate::menu::MenuActionPayload {
             action: action.to_string(),
         },
     );
+
+    if let Err(err) = emit_result {
+        warn!(
+            category = "menu",
+            action = action,
+            target_label = window.label(),
+            error = %err,
+            "Failed to emit menu action"
+        );
+    }
 }
 
 fn open_new_window(app: &tauri::AppHandle<tauri::Wry>) {
@@ -943,6 +973,7 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn should_prevent_window_close_when_not_quitting() {
@@ -1020,5 +1051,36 @@ mod tests {
 
         let empty_path = HashMap::from([("PATH".to_string(), "   ".to_string())]);
         assert_eq!(captured_path_from_env(&empty_path), None);
+    }
+
+    #[test]
+    fn capabilities_default_allows_event_listen() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let path = format!("{manifest_dir}/capabilities/default.json");
+        let contents = fs::read_to_string(path).expect("read capabilities/default.json");
+        let json: serde_json::Value =
+            serde_json::from_str(&contents).expect("parse capabilities/default.json");
+        let permissions = json
+            .get("permissions")
+            .and_then(|v| v.as_array())
+            .expect("permissions array missing");
+
+        let has_event_default = permissions
+            .iter()
+            .any(|v| v.as_str() == Some("core:event:default"));
+        assert!(
+            has_event_default,
+            "capabilities/default.json must include core:event:default"
+        );
+
+        let windows = json
+            .get("windows")
+            .and_then(|v| v.as_array())
+            .expect("windows array missing");
+        let allows_all_windows = windows.iter().any(|v| v.as_str() == Some("*"));
+        assert!(
+            allows_all_windows,
+            "capabilities/default.json must include windows: [\"*\"]"
+        );
     }
 }

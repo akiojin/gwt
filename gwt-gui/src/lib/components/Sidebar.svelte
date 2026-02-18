@@ -234,7 +234,7 @@
   let searchInput: string = $state("");
   let searchQuery: string = $state("");
   let errorMessage: string | null = $state(null);
-  let sortMode: BranchSortMode = $state("name");
+  let sortMode: BranchSortMode = $state("updated");
   let agentTabBranchSet = $derived.by(() => {
     const set = new Set<string>();
     for (const branchName of agentTabBranches) {
