@@ -323,4 +323,55 @@ describe("VersionHistoryPanel", () => {
       });
     });
 
+  it("displays changelog immediately while AI summary is generating", async () => {
+    invokeMock.mockImplementation(async (cmd: string, args?: any) => {
+      if (cmd === "list_project_versions") {
+        return {
+          items: [
+            {
+              id: "unreleased",
+              label: "Unreleased (HEAD)",
+              range_from: "v1.0.0",
+              range_to: "HEAD",
+              commit_count: 3,
+            },
+          ],
+        };
+      }
+      if (cmd === "get_project_version_history") {
+        return {
+          status: "generating",
+          version_id: "unreleased",
+          label: "Unreleased (HEAD)",
+          range_from: "v1.0.0",
+          range_to: "HEAD",
+          commit_count: 3,
+          summary_markdown: null,
+          changelog_markdown: "### Features\n- added new feature",
+          error: null,
+        };
+      }
+      return [];
+    });
+
+    const rendered = await renderPanel({ projectPath: "/tmp/project" });
+
+    // Should show "Generating summary..." note
+    await waitFor(() => {
+      expect(rendered.getByText("Generating summary...")).toBeTruthy();
+    });
+
+    // Changelog should be displayed even during generating state
+    await waitFor(() => {
+      const h3s = rendered.container.querySelectorAll("h3");
+      const changelogH3 = Array.from(h3s).find((h: Element) => h.textContent === "Changelog");
+      expect(changelogH3).toBeTruthy();
+    });
+
+    // Summary heading should NOT be present (summary_markdown is null)
+    const h3s = rendered.container.querySelectorAll("h3");
+    const summaryH3 = Array.from(h3s).find((h: Element) => h.textContent === "Summary");
+    expect(summaryH3).toBeUndefined();
+  });
+
 });
