@@ -14,7 +14,6 @@
   // Ensure we register the backend update listener before kicking off generation.
   let mounted: boolean = $state(false);
 
-  let generatingIndex: number = $state(-1);
   let expanded: Record<string, boolean> = $state({ unreleased: true });
 
   function toErrorMessage(err: unknown): string {
@@ -44,7 +43,6 @@
     versions = [];
     results = {};
     expanded = { unreleased: true };
-    generatingIndex = -1;
 
     const key = projectPath;
     try {
@@ -55,60 +53,37 @@
       });
       if (projectPath !== key) return;
       versions = out.items ?? [];
-      generatingIndex = 0;
-      await stepGenerate(key);
+
+      // Fire all version history requests in parallel.
+      for (const item of versions) {
+        invoke<VersionHistoryResult>("get_project_version_history", {
+          projectPath,
+          versionId: item.id,
+        })
+          .then((res) => {
+            if (projectPath !== key) return;
+            setResult(res);
+          })
+          .catch((e) => {
+            if (projectPath !== key) return;
+            setResult({
+              status: "error",
+              version_id: item.id,
+              label: item.label,
+              range_to: item.range_to,
+              commit_count: item.commit_count,
+              range_from: item.range_from ?? null,
+              summary_markdown: null,
+              changelog_markdown: null,
+              error: `Failed to generate history: ${toErrorMessage(e)}`,
+            });
+          });
+      }
     } catch (e) {
       if (projectPath !== key) return;
       error = `Failed to load versions: ${toErrorMessage(e)}`;
     } finally {
       if (projectPath === key) loading = false;
-    }
-  }
-
-  async function stepGenerate(key: string) {
-    if (projectPath !== key) return;
-
-    while (generatingIndex >= 0 && generatingIndex < versions.length) {
-      const item = versions[generatingIndex];
-      if (!item) return;
-
-      const existing = results[item.id];
-      if (existing && existing.status === "ok") {
-        generatingIndex++;
-        continue;
-      }
-
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const res = await invoke<VersionHistoryResult>("get_project_version_history", {
-          projectPath,
-          versionId: item.id,
-        });
-        if (projectPath !== key) return;
-        setResult(res);
-
-        if (res.status === "generating") {
-          // Wait for event update before continuing.
-          return;
-        }
-
-        generatingIndex++;
-        continue;
-      } catch (e) {
-        if (projectPath !== key) return;
-        setResult({
-          status: "error",
-          version_id: item.id,
-          label: item.label,
-          range_to: item.range_to,
-          commit_count: item.commit_count,
-          range_from: item.range_from ?? null,
-          summary_markdown: null,
-          changelog_markdown: null,
-          error: `Failed to generate history: ${toErrorMessage(e)}`,
-        });
-        generatingIndex++;
-      }
     }
   }
 
@@ -135,13 +110,6 @@
           if (cancelled) return;
           if (event.payload.projectPath !== projectPath) return;
           setResult(event.payload.result);
-
-          // Continue sequential generation when the currently generating item updates.
-          const idx = versions.findIndex((v) => v.id === event.payload.versionId);
-          if (idx === generatingIndex) {
-            generatingIndex++;
-            void stepGenerate(projectPath);
-          }
         });
       } catch {
         // Ignore outside Tauri runtime.

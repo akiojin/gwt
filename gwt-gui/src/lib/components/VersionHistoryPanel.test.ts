@@ -215,7 +215,84 @@ describe("VersionHistoryPanel", () => {
     });
   });
 
-  it("continues sequential generation on history-updated events for the active project", async () => {
+  it("updates result via event listener and ignores events for other projects", async () => {
+    invokeMock.mockImplementation(async (cmd: string, args?: any) => {
+      if (cmd === "list_project_versions") {
+        return {
+          items: [
+            {
+              id: "unreleased",
+              label: "Unreleased (HEAD)",
+              range_from: "v1.0.0",
+              range_to: "HEAD",
+              commit_count: 2,
+            },
+          ],
+        };
+      }
+      if (cmd === "get_project_version_history") {
+        return {
+          status: "generating",
+          version_id: "unreleased",
+          label: "Unreleased (HEAD)",
+          range_from: "v1.0.0",
+          range_to: "HEAD",
+          commit_count: 2,
+          summary_markdown: null,
+          changelog_markdown: null,
+          error: null,
+        };
+      }
+      return [];
+    });
+
+    const rendered = await renderPanel({ projectPath: "/tmp/project" });
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".vh-status.gen")).toBeTruthy();
+    });
+
+    // Event for a different project should be ignored.
+    await emitVersionHistoryUpdated({
+      projectPath: "/tmp/other",
+      versionId: "unreleased",
+      result: {
+        status: "ok",
+        version_id: "unreleased",
+        label: "Unreleased (HEAD)",
+        range_from: "v1.0.0",
+        range_to: "HEAD",
+        commit_count: 2,
+        summary_markdown: "ignored",
+        changelog_markdown: null,
+        error: null,
+      },
+    });
+    // Should still show "generating" (event for wrong project was ignored).
+    expect(rendered.container.querySelector(".vh-status.gen")).toBeTruthy();
+
+    // Event for the correct project should update the result.
+    await emitVersionHistoryUpdated({
+      projectPath: "/tmp/project",
+      versionId: "unreleased",
+      result: {
+        status: "ok",
+        version_id: "unreleased",
+        label: "Unreleased (HEAD)",
+        range_from: "v1.0.0",
+        range_to: "HEAD",
+        commit_count: 2,
+        summary_markdown: "## Summary\nDone",
+        changelog_markdown: null,
+        error: null,
+      },
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".vh-status.ok")).toBeTruthy();
+    });
+  });
+
+  it("calls get_project_version_history for all versions in parallel", async () => {
     invokeMock.mockImplementation(async (cmd: string, args?: any) => {
       if (cmd === "list_project_versions") {
         return {
@@ -232,34 +309,23 @@ describe("VersionHistoryPanel", () => {
               label: "v1.0.0",
               range_from: null,
               range_to: "v1.0.0",
-              commit_count: 1,
+              commit_count: 5,
             },
           ],
         };
       }
-      if (cmd === "get_project_version_history" && args?.versionId === "unreleased") {
-        return {
-          status: "generating",
-          version_id: "unreleased",
-          label: "Unreleased (HEAD)",
-          range_from: "v1.0.0",
-          range_to: "HEAD",
-          commit_count: 2,
-          summary_markdown: null,
-          changelog_markdown: null,
-          error: null,
-        };
-      }
-      if (cmd === "get_project_version_history" && args?.versionId === "v1.0.0") {
+      if (cmd === "get_project_version_history") {
+        const versionId = String(args?.versionId ?? "");
+        // Return immediately with "ok" status.
         return {
           status: "ok",
-          version_id: "v1.0.0",
-          label: "v1.0.0",
+          version_id: versionId,
+          label: versionId,
           range_from: null,
-          range_to: "v1.0.0",
+          range_to: versionId === "unreleased" ? "HEAD" : versionId,
           commit_count: 1,
-          summary_markdown: "## Done",
-          changelog_markdown: null,
+          summary_markdown: "## Summary\nOK",
+          changelog_markdown: "### Features\n- ok",
           error: null,
         };
       }
@@ -267,61 +333,104 @@ describe("VersionHistoryPanel", () => {
     });
 
     await renderPanel({ projectPath: "/tmp/project" });
+
+    // Wait for all get_project_version_history calls.
     await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("get_project_version_history", {
-        projectPath: "/tmp/project",
-        versionId: "unreleased",
-      });
+      const historyCalls = invokeMock.mock.calls.filter(
+        (c: any[]) => c[0] === "get_project_version_history"
+      );
+      expect(historyCalls).toHaveLength(2);
     });
 
-    const before = invokeMock.mock.calls.filter(
-      (call) => call[0] === "get_project_version_history" && call[1]?.versionId === "v1.0.0"
-    ).length;
+    // Both versions should have been requested (in any order, since parallel).
+    const historyVersionIds = invokeMock.mock.calls
+      .filter((c: any[]) => c[0] === "get_project_version_history")
+      .map((c: any[]) => c[1]?.versionId);
+    expect(historyVersionIds).toContain("unreleased");
+    expect(historyVersionIds).toContain("v1.0.0");
+  });
 
-    await emitVersionHistoryUpdated({
-      projectPath: "/tmp/other",
-      versionId: "unreleased",
-      result: {
-        status: "ok",
-        version_id: "unreleased",
-        label: "Unreleased (HEAD)",
-        range_from: "v1.0.0",
-        range_to: "HEAD",
-        commit_count: 2,
-        summary_markdown: "ignored",
-        changelog_markdown: null,
-        error: null,
-      },
+  it("updates each version status individually as results arrive", async () => {
+    invokeMock.mockImplementation(async (cmd: string, args?: any) => {
+      if (cmd === "list_project_versions") {
+        return {
+          items: [
+            {
+              id: "unreleased",
+              label: "Unreleased (HEAD)",
+              range_from: "v1.0.0",
+              range_to: "HEAD",
+              commit_count: 2,
+            },
+            {
+              id: "v1.0.0",
+              label: "v1.0.0",
+              range_from: null,
+              range_to: "v1.0.0",
+              commit_count: 5,
+            },
+          ],
+        };
+      }
+      if (cmd === "get_project_version_history") {
+        const versionId = String(args?.versionId ?? "");
+        // Return "generating" status for all, so we can simulate staggered completion.
+        return {
+          status: "generating",
+          version_id: versionId,
+          label: versionId,
+          range_from: null,
+          range_to: versionId === "unreleased" ? "HEAD" : versionId,
+          commit_count: 1,
+          summary_markdown: null,
+          changelog_markdown: null,
+          error: null,
+        };
+      }
+      return [];
     });
 
-    const afterOtherPath = invokeMock.mock.calls.filter(
-      (call) => call[0] === "get_project_version_history" && call[1]?.versionId === "v1.0.0"
-    ).length;
-    expect(afterOtherPath).toBe(before);
+    const rendered = await renderPanel({ projectPath: "/tmp/project" });
 
+    // Wait for both calls to complete.
+    await waitFor(() => {
+      const historyCalls = invokeMock.mock.calls.filter(
+        (c: any[]) => c[0] === "get_project_version_history"
+      );
+      expect(historyCalls).toHaveLength(2);
+    });
+
+    // Both should show "generating" status.
+    await waitFor(() => {
+      const genBadges = rendered.container.querySelectorAll(".vh-status.gen");
+      expect(genBadges.length).toBe(2);
+    });
+
+    // Now simulate only v1.0.0 completing via event.
     await emitVersionHistoryUpdated({
       projectPath: "/tmp/project",
-      versionId: "unreleased",
+      versionId: "v1.0.0",
       result: {
         status: "ok",
-        version_id: "unreleased",
-        label: "Unreleased (HEAD)",
-        range_from: "v1.0.0",
-        range_to: "HEAD",
-        commit_count: 2,
-        summary_markdown: "## summary",
-        changelog_markdown: null,
+        version_id: "v1.0.0",
+        label: "v1.0.0",
+        range_from: null,
+        range_to: "v1.0.0",
+        commit_count: 5,
+        summary_markdown: "## Summary\nDone",
+        changelog_markdown: "### Features\n- done",
         error: null,
       },
     });
 
+    // v1.0.0 should now show "ok", but unreleased should still be "generating".
     await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("get_project_version_history", {
-        projectPath: "/tmp/project",
-        versionId: "v1.0.0",
-      });
-      });
+      const okBadges = rendered.container.querySelectorAll(".vh-status.ok");
+      const genBadges = rendered.container.querySelectorAll(".vh-status.gen");
+      expect(okBadges.length).toBe(1);
+      expect(genBadges.length).toBe(1);
     });
+  });
 
   it("displays changelog immediately while AI summary is generating", async () => {
     invokeMock.mockImplementation(async (cmd: string, args?: any) => {

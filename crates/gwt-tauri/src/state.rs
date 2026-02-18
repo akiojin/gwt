@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::OnceCell;
+use tokio::sync::{OnceCell, Semaphore};
 
 #[derive(Debug, Clone)]
 pub struct AgentVersionsCache {
@@ -106,6 +106,8 @@ pub struct AppState {
     pub project_version_history_cache:
         Mutex<HashMap<String, HashMap<String, VersionHistoryCacheEntry>>>,
     pub project_version_history_inflight: Mutex<HashSet<String>>,
+    /// Semaphore to limit concurrent AI summary generation (max 3).
+    pub version_history_semaphore: Arc<Semaphore>,
     pub pane_launch_meta: Mutex<HashMap<String, PaneLaunchMeta>>,
     /// Single-process leader lock for startup multi-window restore.
     pub window_session_restore_leader: Mutex<Option<WindowSessionRestoreLeaderState>>,
@@ -144,6 +146,7 @@ impl AppState {
             session_summary_rebuild_inflight: Mutex::new(HashSet::new()),
             project_version_history_cache: Mutex::new(HashMap::new()),
             project_version_history_inflight: Mutex::new(HashSet::new()),
+            version_history_semaphore: Arc::new(Semaphore::new(3)),
             pane_launch_meta: Mutex::new(HashMap::new()),
             window_session_restore_leader: Mutex::new(None),
             launch_jobs: Mutex::new(HashMap::new()),
@@ -415,6 +418,20 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_history_semaphore_has_three_permits() {
+        let state = AppState::new();
+        // The semaphore should allow exactly 3 concurrent permits.
+        let p1 = state.version_history_semaphore.try_acquire();
+        assert!(p1.is_ok(), "1st permit should succeed");
+        let p2 = state.version_history_semaphore.try_acquire();
+        assert!(p2.is_ok(), "2nd permit should succeed");
+        let p3 = state.version_history_semaphore.try_acquire();
+        assert!(p3.is_ok(), "3rd permit should succeed");
+        let p4 = state.version_history_semaphore.try_acquire();
+        assert!(p4.is_err(), "4th permit should fail (max 3)");
+    }
 
     #[test]
     fn window_projects_set_get_clear() {

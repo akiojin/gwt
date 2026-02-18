@@ -247,47 +247,54 @@ pub fn get_project_version_history(
         let label_clone = label.clone();
         let range_from_oid_clone = range_from_oid.clone();
         let range_to_oid_clone = range_to_oid.clone();
+        let semaphore = state.version_history_semaphore.clone();
 
-        tauri::async_runtime::spawn_blocking(move || {
-            let state = app_handle_clone.state::<AppState>();
+        tauri::async_runtime::spawn(async move {
+            // Acquire a semaphore permit to limit concurrent AI generation.
+            let _permit = semaphore.acquire().await;
 
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                generate_and_cache_version_history(
-                    &repo_path,
-                    &repo_key_clone,
-                    &version_id_clone,
-                    &label_clone,
-                    range_from_clone.as_deref(),
-                    &range_to_clone,
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                let state = app_handle_clone.state::<AppState>();
+
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    generate_and_cache_version_history(
+                        &repo_path,
+                        &repo_key_clone,
+                        &version_id_clone,
+                        &label_clone,
+                        range_from_clone.as_deref(),
+                        &range_to_clone,
+                        commit_count,
+                        range_from_oid_clone.as_deref(),
+                        &range_to_oid_clone,
+                        settings,
+                        &state,
+                    )
+                }))
+                .unwrap_or_else(|_| VersionHistoryResult {
+                    status: "error".to_string(),
+                    version_id: version_id_clone.clone(),
+                    label: label_clone.clone(),
+                    range_from: range_from_clone.clone(),
+                    range_to: range_to_clone.clone(),
                     commit_count,
-                    range_from_oid_clone.as_deref(),
-                    &range_to_oid_clone,
-                    settings,
-                    &state,
-                )
-            }))
-            .unwrap_or_else(|_| VersionHistoryResult {
-                status: "error".to_string(),
-                version_id: version_id_clone.clone(),
-                label: label_clone.clone(),
-                range_from: range_from_clone.clone(),
-                range_to: range_to_clone.clone(),
-                commit_count,
-                summary_markdown: None,
-                changelog_markdown: None,
-                error: Some("Internal error".to_string()),
-            });
+                    summary_markdown: None,
+                    changelog_markdown: None,
+                    error: Some("Internal error".to_string()),
+                });
 
-            if let Ok(mut set) = state.project_version_history_inflight.lock() {
-                set.remove(&inflight_key);
-            }
+                if let Ok(mut set) = state.project_version_history_inflight.lock() {
+                    set.remove(&inflight_key);
+                }
 
-            let payload = VersionHistoryUpdatedPayload {
-                project_path: project_path_clone,
-                version_id: version_id_clone,
-                result: result.clone(),
-            };
-            let _ = app_handle_clone.emit("project-version-history-updated", &payload);
+                let payload = VersionHistoryUpdatedPayload {
+                    project_path: project_path_clone,
+                    version_id: version_id_clone,
+                    result: result.clone(),
+                };
+                let _ = app_handle_clone.emit("project-version-history-updated", &payload);
+            })
+            .await;
         });
     }
 
