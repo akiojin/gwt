@@ -6,6 +6,7 @@
     OpenProjectResult,
     LaunchAgentRequest,
     LaunchFinishedPayload,
+    LaunchProgressPayload,
     ProbePathResult,
     RollbackResult,
     TerminalInfo,
@@ -165,6 +166,12 @@
   let launchProgressOpen: boolean = $state(false);
   let launchJobId: string = $state("");
   let pendingLaunchRequest: LaunchAgentRequest | null = $state(null);
+
+  type LaunchStepId = "fetch" | "validate" | "paths" | "conflicts" | "create" | "deps";
+  let launchStep: LaunchStepId = $state("fetch");
+  let launchDetail: string = $state("");
+  let launchStatus: "running" | "ok" | "error" | "cancelled" = $state("running");
+  let launchError: string | null = $state(null);
   type IssueLaunchFollowup = {
     projectPath: string;
     issueNumber: number;
@@ -633,7 +640,43 @@
     };
   });
 
-  // Handle issue-linking/rollback on actual launch completion.
+  // Subscribe to launch-progress events at mount time to avoid race conditions.
+  // LaunchProgressModal is a pure display component; all event handling lives here.
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const STEP_IDS: LaunchStepId[] = ["fetch", "validate", "paths", "conflicts", "create", "deps"];
+        const unlistenFn = await listen<LaunchProgressPayload>(
+          "launch-progress",
+          (event) => {
+            if (!launchJobId || event.payload.jobId !== launchJobId) return;
+            if (launchStatus !== "running") return;
+            const next = event.payload.step as LaunchStepId;
+            if (STEP_IDS.includes(next) && next !== launchStep) {
+              launchStep = next;
+            }
+            launchDetail = (event.payload.detail ?? "").toString();
+          },
+        );
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+      } catch (err) {
+        console.error("Failed to setup launch progress listener:", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  });
+
+  // Handle issue-linking/rollback and progress modal state on launch completion.
   $effect(() => {
     let unlisten: null | (() => void) = null;
     let cancelled = false;
@@ -644,7 +687,24 @@
         const unlistenFn = await listen<LaunchFinishedPayload>(
           "launch-finished",
           (event) => {
+            // Issue-linking/rollback (existing logic, applies to all jobIds).
             void handleIssueLaunchFinished(event.payload);
+
+            // Progress modal state update (moved from LaunchProgressModal).
+            if (!launchJobId || event.payload.jobId !== launchJobId) return;
+
+            if (event.payload.status === "cancelled") {
+              handleLaunchModalClose();
+              return;
+            }
+            if (event.payload.status === "ok" && event.payload.paneId) {
+              launchStatus = "ok";
+              handleLaunchSuccess(event.payload.paneId);
+              handleLaunchModalClose();
+              return;
+            }
+            launchStatus = "error";
+            launchError = event.payload.error || "Launch failed.";
           },
         );
 
@@ -1132,6 +1192,12 @@
   }
 
   async function handleAgentLaunch(request: LaunchAgentRequest) {
+    // Reset progress state before starting the job.
+    launchStep = "fetch";
+    launchDetail = "";
+    launchStatus = "running";
+    launchError = null;
+
     const { invoke } = await import("@tauri-apps/api/core");
     const jobId = await invoke<string>("start_launch_job", { request });
 
@@ -1139,6 +1205,32 @@
     pendingLaunchRequest = request;
     launchJobId = jobId;
     launchProgressOpen = true;
+  }
+
+  async function handleLaunchCancel() {
+    if (!launchJobId) {
+      handleLaunchModalClose();
+      return;
+    }
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("cancel_launch_job", { jobId: launchJobId });
+      handleLaunchModalClose();
+    } catch (err) {
+      console.error("Failed to cancel launch job:", err);
+      launchStatus = "error";
+      launchError = "Failed to send cancel request. Close this dialog and retry.";
+    }
+  }
+
+  function handleLaunchModalClose() {
+    launchProgressOpen = false;
+    launchJobId = "";
+    pendingLaunchRequest = null;
+    launchStatus = "running";
+    launchStep = "fetch";
+    launchDetail = "";
+    launchError = null;
   }
 
   function handleLaunchSuccess(paneId: string) {
@@ -2263,13 +2355,12 @@
 
 <LaunchProgressModal
   open={launchProgressOpen}
-  jobId={launchJobId}
-  onSuccess={handleLaunchSuccess}
-  onClose={() => {
-    launchProgressOpen = false;
-    launchJobId = "";
-    pendingLaunchRequest = null;
-  }}
+  step={launchStep}
+  detail={launchDetail}
+  status={launchStatus}
+  error={launchError}
+  onCancel={handleLaunchCancel}
+  onClose={handleLaunchModalClose}
 />
 {#if showOsEnvDebug}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
