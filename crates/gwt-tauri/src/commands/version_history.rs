@@ -378,21 +378,20 @@ fn get_cached_version_history(
 
     // 2. Disk cache fallback
     let disk_map = load_disk_cache(repo_path)?;
+    // Restore disk cache into in-memory cache
+    if let Ok(mut guard) = state.project_version_history_cache.lock() {
+        let repo_entry = guard.entry(repo_key.to_string()).or_default();
+        for (k, v) in &disk_map {
+            repo_entry.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
+
     let entry = disk_map.get(version_id)?;
     if !validate_cache_entry(entry, range_from_oid, range_to_oid, language) {
         return None;
     }
-    let entry = entry.clone();
 
-    // Restore disk cache into in-memory cache
-    if let Ok(mut guard) = state.project_version_history_cache.lock() {
-        let repo_entry = guard.entry(repo_key.to_string()).or_default();
-        for (k, v) in disk_map {
-            repo_entry.entry(k).or_insert(v);
-        }
-    }
-
-    Some(entry)
+    Some(entry.clone())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1388,6 +1387,50 @@ mod tests {
             "ja",
         );
         assert!(hit.is_none());
+    }
+
+    #[test]
+    fn cache_miss_still_hydrates_disk_entries_for_future_save() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(home.path());
+
+        let repo = TempDir::new().unwrap();
+        let state = AppState::new();
+        let repo_key = repo.path().to_string_lossy().to_string();
+
+        let mut entries = HashMap::new();
+        entries.insert("v1.0.0".to_string(), make_cache_entry("old_oid", "en"));
+        entries.insert("v1.0.1".to_string(), make_cache_entry("stable_oid", "en"));
+        save_disk_cache(repo.path(), &entries);
+
+        // Requested version misses validation, but disk entries should still hydrate.
+        let hit = get_cached_version_history(
+            &state,
+            repo.path(),
+            &repo_key,
+            "v1.0.0",
+            None,
+            "new_oid",
+            "en",
+        );
+        assert!(hit.is_none());
+
+        // Simulate successful regeneration and persist all in-memory entries.
+        {
+            let mut guard = state.project_version_history_cache.lock().unwrap();
+            let repo_map = guard
+                .get_mut(&repo_key)
+                .expect("disk entries should hydrate after fallback");
+            assert!(repo_map.contains_key("v1.0.1"));
+            repo_map.insert("v1.0.0".to_string(), make_cache_entry("new_oid", "en"));
+            save_disk_cache(repo.path(), repo_map);
+        }
+
+        let loaded = load_disk_cache(repo.path()).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded.get("v1.0.1").unwrap().range_to_oid, "stable_oid");
+        assert_eq!(loaded.get("v1.0.0").unwrap().range_to_oid, "new_oid");
     }
 
     fn make_cache_entry_with_from(
