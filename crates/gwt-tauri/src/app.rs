@@ -972,6 +972,7 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn should_prevent_window_close_when_not_quitting() {
@@ -1049,5 +1050,24 @@ mod tests {
 
         let empty_path = HashMap::from([("PATH".to_string(), "   ".to_string())]);
         assert_eq!(captured_path_from_env(&empty_path), None);
+    }
+
+    #[test]
+    fn capabilities_default_allows_event_listen() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let path = format!("{manifest_dir}/capabilities/default.json");
+        let contents = fs::read_to_string(path).expect("read capabilities/default.json");
+        let json: serde_json::Value =
+            serde_json::from_str(&contents).expect("parse capabilities/default.json");
+        let permissions = json
+            .get("permissions")
+            .and_then(|v| v.as_array())
+            .expect("permissions array missing");
+
+        let has_event_default = permissions.iter().any(|v| v.as_str() == Some("core:event:default"));
+        assert!(
+            has_event_default,
+            "capabilities/default.json must include core:event:default"
+        );
     }
 }
