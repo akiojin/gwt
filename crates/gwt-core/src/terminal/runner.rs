@@ -20,9 +20,12 @@ pub fn is_node_modules_bin(path: &Path) -> bool {
 
 /// Chooses which runner to use when launching npm packages.
 ///
-/// - Prefer `npx` when available — it does not interact with project
-///   lockfiles and avoids hangs in PTY environments when the working
-///   directory contains a `packageManager` field that conflicts with bun.
+/// - Prefer `npx` when available — it reads registry settings from
+///   `~/.npmrc` (typically the public npm registry), whereas `bunx`
+///   reads from `~/.bunfig.toml` which may point to a private registry
+///   that does not mirror public packages and can hang indefinitely.
+///   `npx` also avoids lockfile conflicts with project-level
+///   `packageManager` fields.
 /// - Fall back to `bunx` when `npx` is not installed but a global `bunx`
 ///   is available.
 pub fn choose_fallback_runner(
