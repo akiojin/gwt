@@ -184,8 +184,30 @@ fn fetch_npm_versions_via_bun(package: &str) -> Result<(Vec<String>, Vec<String>
 /// Detect available coding agents
 #[tauri::command]
 pub fn detect_agents() -> Vec<DetectedAgentInfo> {
+    let process_path = std::env::var("PATH").unwrap_or_default();
+    tracing::debug!(
+        category = "detect_agents",
+        path = %process_path,
+        "detect_agents called"
+    );
+
+    let claude_detect = claude::ClaudeAgent::detect();
+    tracing::debug!(
+        category = "detect_agents",
+        found = claude_detect.is_some(),
+        version = ?claude_detect.as_ref().map(|i| &i.version),
+        agent_path = ?claude_detect.as_ref().and_then(|i| i.path.as_ref()),
+        "Claude detection result"
+    );
+
     let bunx_path = resolve_command_path("bunx");
     let npx_path = resolve_command_path("npx");
+    tracing::debug!(
+        category = "detect_agents",
+        bunx = ?bunx_path,
+        npx = ?npx_path,
+        "Runner paths"
+    );
     let runner = choose_fallback_runner(bunx_path.as_deref(), npx_path.is_some());
 
     let bunx_path_str = bunx_path
@@ -287,7 +309,7 @@ pub fn detect_agents() -> Vec<DetectedAgentInfo> {
         map_with_fallback(
             "claude",
             "Claude Code",
-            claude::ClaudeAgent::detect(),
+            claude_detect,
             runner,
             bunx_path_str.as_deref(),
             npx_path_str.as_deref(),
