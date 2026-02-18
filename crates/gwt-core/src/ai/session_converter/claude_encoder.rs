@@ -10,6 +10,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use super::{ConversionError, ConversionMetadata, ConversionResult, LossInfo, SessionEncoder};
+use crate::ai::claude_paths::encode_claude_project_path;
 use crate::ai::session_parser::{AgentType, MessageRole, ParsedSession};
 
 /// Encoder for Claude Code JSONL format.
@@ -33,22 +34,6 @@ impl ClaudeEncoder {
     /// Returns the base directory for Claude Code projects.
     fn base_dir(&self) -> PathBuf {
         self.home_dir.join(".claude").join("projects")
-    }
-
-    /// Encodes a worktree path for use in Claude's project directory structure.
-    fn encode_path(path: &Path) -> String {
-        // Claude Code uses URL-encoded paths with slashes replaced by hyphens
-        let path_str = path.to_string_lossy();
-        path_str
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '.' || c == '_' {
-                    c.to_string()
-                } else {
-                    "-".to_string()
-                }
-            })
-            .collect()
     }
 
     /// Converts a SessionMessage to a Claude Code JSONL entry.
@@ -144,7 +129,7 @@ impl SessionEncoder for ClaudeEncoder {
     }
 
     fn output_path(&self, worktree_path: &Path, session_id: &str) -> PathBuf {
-        let encoded = Self::encode_path(worktree_path);
+        let encoded = encode_claude_project_path(worktree_path);
         self.base_dir()
             .join(encoded)
             .join(format!("{}.jsonl", session_id))
@@ -182,14 +167,6 @@ mod tests {
             last_updated_at: None,
             total_turns: 2,
         }
-    }
-
-    #[test]
-    fn test_encode_path() {
-        let path = PathBuf::from("/home/user/projects/my-app");
-        let encoded = ClaudeEncoder::encode_path(&path);
-        assert!(!encoded.contains('/'));
-        assert!(!encoded.is_empty());
     }
 
     #[test]

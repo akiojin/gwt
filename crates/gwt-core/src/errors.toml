@@ -47,6 +47,14 @@ E5002 = "WebSocket connection failed"
 E5003 = "API request failed"
 E5004 = "PTY spawn failed"
 
+[terminal]
+E7001 = "PTY creation failed"
+E7002 = "PTY I/O error"
+E7003 = "Emulator error"
+E7004 = "Scrollback error"
+E7005 = "IPC error"
+E7006 = "Pane limit reached"
+
 [general]
 E9001 = "IO error"
 E9002 = "Internal error"
@@ -92,5 +100,11 @@ E5001 = ["Check if port is in use", "Try different port"]
 E5002 = ["Check network connection", "Verify WebSocket URL"]
 E5003 = ["Check API endpoint", "Verify authentication"]
 E5004 = ["Check terminal emulator", "Verify PTY support"]
+E7001 = ["Check PTY availability", "Verify terminal emulator support"]
+E7002 = ["Check terminal I/O state", "Verify PTY file descriptor"]
+E7003 = ["Check terminal escape sequences", "Verify VT100 compatibility"]
+E7004 = ["Check scrollback file permissions", "Verify disk space"]
+E7005 = ["Check IPC channel state", "Verify pane connections"]
+E7006 = ["Close unused panes", "Increase pane limit in configuration"]
 E9001 = ["Check file permissions", "Verify disk space"]
 E9002 = ["Report this issue", "Check logs for details"]

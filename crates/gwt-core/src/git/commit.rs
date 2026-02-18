@@ -1,7 +1,7 @@
 //! Commit and branch summary data structures
 //!
 //! Provides data structures for displaying branch summary information
-//! in the TUI panel.
+//! in the UI.
 
 use std::path::PathBuf;
 

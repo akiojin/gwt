@@ -90,8 +90,8 @@ module.exports = {
   ignores: [
     (commit) => {
       const firstLine = commit.split("\n")[0].trim();
-      // Merge commits
-      if (/^merge[:\s]/i.test(firstLine)) return true;
+      // Merge commits (git-generated)
+      if (/^merge(\s|:)/i.test(firstLine)) return true;
       // Branch-name-style commits (historical)
       if (/^(bugfix|feature|hotfix|release)\//.test(firstLine)) return true;
       // Historical commits without conventional prefix (Fix/Stabilize pattern)

@@ -8,6 +8,7 @@
 
 - Bun 1.3.1+（推奨: 最新版）
 - Node.js 18+（任意、Node製開発ツール利用時）
+- pnpm（Corepack経由、任意。CIのcommitlintはpnpmを使用）
 - Git 2.25+
 - GitHub CLI (オプション、PRクリーンアップ機能のテストに必要)
 
@@ -27,6 +28,8 @@ cd gwt
 ```bash
 bun install
 ```
+
+> Note: Nodeベースのツールチェーン（CIのcommitlint等）はpnpm（Corepack）を使用します。ロックファイルは `pnpm-lock.yaml` を正とし、`package-lock.json` は使用しません。
 
 1. ビルド
 

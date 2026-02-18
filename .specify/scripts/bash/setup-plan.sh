@@ -1,105 +1,105 @@
 #!/usr/bin/env bash
 
-set -e
+set -euo pipefail
 
-# コマンドライン引数を解析
 JSON_MODE=false
 SPEC_ID=""
-i=1
+FORCE=false
 
-while [ $i -le $# ]; do
-    arg="${!i}"
-    case "$arg" in
+while [ $# -gt 0 ]; do
+    case "$1" in
         --json)
             JSON_MODE=true
+            shift
             ;;
         --spec-id)
-            if [ $((i + 1)) -gt $# ]; then
-                echo 'エラー: --spec-id には値が必要です' >&2
-                exit 1
-            fi
-            i=$((i + 1))
-            next_arg="${!i}"
-            if [[ "$next_arg" == --* ]]; then
-                echo 'エラー: --spec-id には値が必要です' >&2
-                exit 1
-            fi
-            SPEC_ID="$next_arg"
+            SPEC_ID="${2:-}"
+            shift 2
+            ;;
+        --force)
+            FORCE=true
+            shift
             ;;
         --help|-h)
-            echo "使い方: $0 [--json] [--spec-id <id>]"
-            echo "  --json           結果をJSON形式で出力"
-            echo "  --spec-id <id>   SPEC IDを明示的に指定（例: SPEC-12345678）"
-            echo "  --help           このヘルプメッセージを表示"
+            cat <<'USAGE'
+使い方: setup-plan.sh [--json] --spec-id <SPEC_ID> [--force]
+USAGE
             exit 0
             ;;
         *)
-            echo "エラー: 未知のオプション '$arg'。使用方法については --help を参照してください。" >&2
+            echo "ERROR: 不明な引数: $1" >&2
             exit 1
             ;;
     esac
-    i=$((i + 1))
 done
 
-# SPEC_IDが指定された場合はSPECIFY_FEATURE環境変数に設定
-if [[ -n "$SPEC_ID" ]]; then
-    export SPECIFY_FEATURE="$SPEC_ID"
-fi
-
-# スクリプトディレクトリを取得し、共通関数を読み込む
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(CDPATH="" cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
-# 共通関数からすべてのパスと変数を取得（失敗したら終了）
-load_feature_paths || exit 1
-
-# 機能ディレクトリが存在することを確認
-mkdir -p "$FEATURE_DIR"
-
-# planテンプレートが存在する場合はコピー
-TEMPLATE="$REPO_ROOT/.specify/templates/plan-template.md"
-if [[ -f "$TEMPLATE" ]]; then
-    cp "$TEMPLATE" "$IMPL_PLAN"
-    if ! $JSON_MODE; then
-        echo "planテンプレートを $IMPL_PLAN にコピーしました"
-    else
-        >&2 echo "[specify] planテンプレートを $IMPL_PLAN にコピーしました"
-    fi
-else
-    if ! $JSON_MODE; then
-        echo "警告: $TEMPLATE にplanテンプレートが見つかりません"
-    else
-        >&2 echo "[specify] 警告: $TEMPLATE にplanテンプレートが見つかりません"
-    fi
-    # テンプレートが存在しない場合は基本的なplanファイルを作成
-    touch "$IMPL_PLAN"
+if [ -z "$SPEC_ID" ]; then
+    SPEC_ID="${SPECIFY_SPEC_ID:-}"
 fi
 
-# 結果を出力
-if $JSON_MODE; then
-    if command -v jq >/dev/null 2>&1; then
-        jq -cn \
-            --arg feature_spec "$FEATURE_SPEC" \
-            --arg impl_plan "$IMPL_PLAN" \
-            --arg feature_dir "$FEATURE_DIR" \
-            --arg spec_id "$SPEC_ID" \
-            --arg git_branch "$GIT_BRANCH" \
-            --arg has_git "$HAS_GIT" \
-            '{FEATURE_SPEC: $feature_spec, IMPL_PLAN: $impl_plan, FEATURE_DIR: $feature_dir, SPEC_ID: $spec_id, GIT_BRANCH: $git_branch, HAS_GIT: $has_git}'
+SPEC_ID="$(normalize_spec_id "$SPEC_ID")"
+require_spec_id "$SPEC_ID"
+
+EVAL_OUT=$(get_feature_paths "$SPEC_ID")
+# shellcheck disable=SC2086
+eval "$EVAL_OUT"
+
+if [ ! -f "$FEATURE_SPEC" ]; then
+    echo "ERROR: spec.md が見つかりません: $FEATURE_SPEC" >&2
+    exit 1
+fi
+
+mkdir -p "$FEATURE_DIR"
+
+TEMPLATE="$REPO_ROOT/.specify/templates/plan-template.md"
+if [ -f "$IMPL_PLAN" ] && [ "$FORCE" != true ]; then
+    :
+else
+    if [ -f "$TEMPLATE" ]; then
+        cp "$TEMPLATE" "$IMPL_PLAN"
     else
-        printf '{"FEATURE_SPEC":"%s","IMPL_PLAN":"%s","FEATURE_DIR":"%s","SPEC_ID":"%s","GIT_BRANCH":"%s","HAS_GIT":"%s"}\n' \
-            "$(json_escape_string "$FEATURE_SPEC")" \
-            "$(json_escape_string "$IMPL_PLAN")" \
-            "$(json_escape_string "$FEATURE_DIR")" \
-            "$(json_escape_string "$SPEC_ID")" \
-            "$(json_escape_string "$GIT_BRANCH")" \
-            "$(json_escape_string "$HAS_GIT")"
+        echo "WARNING: plan-template.md が見つからないため空ファイルを作成します" >&2
+        : > "$IMPL_PLAN"
+    fi
+fi
+
+if $JSON_MODE; then
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - <<'PY' "$SPEC_ID" "$FEATURE_DIR" "$FEATURE_SPEC" "$IMPL_PLAN"
+import json
+import sys
+
+spec_id, feature_dir, feature_spec, impl_plan = sys.argv[1:5]
+print(json.dumps({
+    "SPEC_ID": spec_id,
+    "FEATURE_DIR": feature_dir,
+    "FEATURE_SPEC": feature_spec,
+    "IMPL_PLAN": impl_plan,
+}, ensure_ascii=False))
+PY
+    elif command -v python >/dev/null 2>&1; then
+        python - <<'PY' "$SPEC_ID" "$FEATURE_DIR" "$FEATURE_SPEC" "$IMPL_PLAN"
+import json
+import sys
+
+spec_id, feature_dir, feature_spec, impl_plan = sys.argv[1:5]
+print(json.dumps({
+    "SPEC_ID": spec_id,
+    "FEATURE_DIR": feature_dir,
+    "FEATURE_SPEC": feature_spec,
+    "IMPL_PLAN": impl_plan,
+}, ensure_ascii=False))
+PY
+    else
+        printf '{"SPEC_ID":"%s","FEATURE_DIR":"%s","FEATURE_SPEC":"%s","IMPL_PLAN":"%s"}\n' \
+            "$SPEC_ID" "$FEATURE_DIR" "$FEATURE_SPEC" "$IMPL_PLAN"
     fi
 else
-    echo "機能仕様: $FEATURE_SPEC"
-    echo "実装計画: $IMPL_PLAN"
-    echo "仕様ディレクトリ: $FEATURE_DIR"
-    echo "SPEC ID: $SPEC_ID"
-    echo "Gitブランチ: $GIT_BRANCH"
-    echo "Git使用: $HAS_GIT"
+    echo "SPEC_ID: $SPEC_ID"
+    echo "FEATURE_DIR: $FEATURE_DIR"
+    echo "FEATURE_SPEC: $FEATURE_SPEC"
+    echo "IMPL_PLAN: $IMPL_PLAN"
 fi

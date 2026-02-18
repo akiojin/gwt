@@ -27,6 +27,9 @@ pub struct Profile {
     /// AI settings (optional)
     #[serde(default)]
     pub ai: Option<AISettings>,
+    /// AI settings enabled flag (optional)
+    #[serde(default)]
+    pub ai_enabled: Option<bool>,
 }
 
 impl Profile {
@@ -38,6 +41,7 @@ impl Profile {
             disabled_env: Vec::new(),
             description: String::new(),
             ai: None,
+            ai_enabled: None,
         }
     }
 
@@ -56,11 +60,17 @@ impl Profile {
 
     /// Resolve AI settings with environment fallbacks
     pub fn resolved_ai_settings(&self) -> Option<ResolvedAISettings> {
+        if self.ai_enabled == Some(false) {
+            return None;
+        }
         self.ai.as_ref().map(|settings| settings.resolved())
     }
 
     /// Check if AI settings are enabled for this profile
     pub fn ai_enabled(&self) -> bool {
+        if self.ai_enabled == Some(false) {
+            return false;
+        }
         self.ai
             .as_ref()
             .map(|settings| settings.is_enabled())
@@ -80,6 +90,12 @@ pub struct AISettings {
     /// Model name
     #[serde(default = "default_model")]
     pub model: String,
+    /// Output language ("en" | "ja" | "auto")
+    #[serde(default = "default_ai_language")]
+    pub language: String,
+    /// Session summary enabled
+    #[serde(default = "default_summary_enabled")]
+    pub summary_enabled: bool,
 }
 
 /// Resolved AI settings with defaults and environment fallbacks applied
@@ -88,6 +104,22 @@ pub struct ResolvedAISettings {
     pub endpoint: String,
     pub api_key: String,
     pub model: String,
+    pub language: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveAISettingsSource {
+    ActiveProfile,
+    DefaultAI,
+    None,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveAISettingsResolution {
+    pub source: ActiveAISettingsSource,
+    pub ai_enabled: bool,
+    pub summary_enabled: bool,
+    pub resolved: Option<ResolvedAISettings>,
 }
 
 impl AISettings {
@@ -97,6 +129,7 @@ impl AISettings {
             endpoint: self.endpoint.trim().to_string(),
             api_key: self.api_key.trim().to_string(),
             model: self.model.trim().to_string(),
+            language: normalize_ai_language(&self.language),
         }
     }
 
@@ -106,6 +139,11 @@ impl AISettings {
         let model = self.model.trim();
         !endpoint.is_empty() && !model.is_empty()
     }
+
+    /// Check if session summary is enabled (requires valid AI settings)
+    pub fn is_summary_enabled(&self) -> bool {
+        self.is_enabled() && self.summary_enabled
+    }
 }
 
 fn default_endpoint() -> String {
@@ -114,6 +152,22 @@ fn default_endpoint() -> String {
 
 fn default_model() -> String {
     String::new() // No default - must be selected via wizard
+}
+
+fn default_ai_language() -> String {
+    "en".to_string()
+}
+
+fn default_summary_enabled() -> bool {
+    true
+}
+
+fn normalize_ai_language(value: &str) -> String {
+    match value.trim().to_lowercase().as_str() {
+        "ja" => "ja".to_string(),
+        "auto" => "auto".to_string(),
+        _ => "en".to_string(),
+    }
 }
 
 /// Profiles configuration stored on disk
@@ -168,6 +222,9 @@ impl ProfilesConfig {
     /// 1. profiles.toml (new format)
     /// 2. profiles.yaml (legacy format)
     /// 3. Default profile
+    ///
+    /// Note: loading does not write to disk. Migration from YAML to TOML happens on explicit
+    /// save (or `migrate_if_needed`) to avoid unintended side effects during startup.
     pub fn load() -> Result<Self> {
         let toml_path = Self::toml_path();
         let yaml_path = Self::yaml_path();
@@ -207,20 +264,6 @@ impl ProfilesConfig {
             match Self::load_yaml(&yaml_path) {
                 Ok(mut config) => {
                     config.ensure_defaults();
-                    // Auto-migrate: save as TOML for next time (SPEC-a3f4c9df)
-                    if let Err(e) = config.save() {
-                        warn!(
-                            category = "config",
-                            error = %e,
-                            "Failed to auto-migrate profiles to TOML"
-                        );
-                    } else {
-                        info!(
-                            category = "config",
-                            operation = "auto_migrate",
-                            "Auto-migrated profiles.yaml to profiles.toml"
-                        );
-                    }
                     return Ok(config);
                 }
                 Err(e) => {
@@ -327,6 +370,53 @@ impl ProfilesConfig {
             .and_then(|name| self.profiles.get(name))
     }
 
+    /// Resolve active AI settings and feature flags.
+    ///
+    /// Rules:
+    /// - If the active profile has `ai` configured (present), it always wins (even when disabled).
+    ///   If `ai_enabled=false`, AI is treated as disabled with no fallback.
+    /// - Otherwise fall back to `default_ai`.
+    pub fn resolve_active_ai_settings(&self) -> ActiveAISettingsResolution {
+        if let Some(profile) = self.active_profile() {
+            if profile.ai_enabled == Some(false) {
+                return ActiveAISettingsResolution {
+                    source: ActiveAISettingsSource::ActiveProfile,
+                    ai_enabled: false,
+                    summary_enabled: false,
+                    resolved: None,
+                };
+            }
+            if let Some(settings) = profile.ai.as_ref() {
+                let ai_enabled = settings.is_enabled();
+                let summary_enabled = settings.is_summary_enabled();
+                return ActiveAISettingsResolution {
+                    source: ActiveAISettingsSource::ActiveProfile,
+                    ai_enabled,
+                    summary_enabled,
+                    resolved: ai_enabled.then(|| settings.resolved()),
+                };
+            }
+        }
+
+        if let Some(settings) = self.default_ai.as_ref() {
+            let ai_enabled = settings.is_enabled();
+            let summary_enabled = settings.is_summary_enabled();
+            return ActiveAISettingsResolution {
+                source: ActiveAISettingsSource::DefaultAI,
+                ai_enabled,
+                summary_enabled,
+                resolved: ai_enabled.then(|| settings.resolved()),
+            };
+        }
+
+        ActiveAISettingsResolution {
+            source: ActiveAISettingsSource::None,
+            ai_enabled: false,
+            summary_enabled: false,
+            resolved: None,
+        }
+    }
+
     /// Set active profile
     pub fn set_active(&mut self, name: Option<String>) {
         self.active = name;
@@ -373,6 +463,16 @@ impl Default for ProfilesConfig {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn ai_settings(model: &str) -> AISettings {
+        AISettings {
+            endpoint: default_endpoint(),
+            api_key: String::new(),
+            model: model.to_string(),
+            language: "en".to_string(),
+            summary_enabled: true,
+        }
+    }
 
     #[test]
     fn test_profile_builder() {
@@ -555,6 +655,8 @@ profiles:
         assert_eq!(resolved.endpoint, "");
         assert_eq!(resolved.model, "");
         assert_eq!(resolved.api_key, "");
+        assert_eq!(resolved.language, "en");
+        assert!(!settings.summary_enabled);
     }
 
     #[test]
@@ -566,6 +668,33 @@ profiles:
         assert_eq!(resolved.endpoint, "https://api.openai.com/v1"); // serde default
         assert_eq!(resolved.model, ""); // No default model
         assert_eq!(resolved.api_key, "");
+        assert_eq!(settings.language, "en");
+        assert_eq!(resolved.language, "en");
+        assert!(settings.summary_enabled);
+    }
+
+    #[test]
+    fn test_ai_settings_language_normalizes_known_values() {
+        let settings = AISettings {
+            endpoint: "https://api.example.com/v1".to_string(),
+            api_key: "".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            language: "JA".to_string(),
+            summary_enabled: true,
+        };
+        assert_eq!(settings.resolved().language, "ja");
+
+        let settings = AISettings {
+            language: " auto ".to_string(),
+            ..settings
+        };
+        assert_eq!(settings.resolved().language, "auto");
+
+        let settings = AISettings {
+            language: "fr".to_string(),
+            ..settings
+        };
+        assert_eq!(settings.resolved().language, "en");
     }
 
     #[test]
@@ -575,6 +704,8 @@ profiles:
             endpoint: "".to_string(),
             api_key: "".to_string(),
             model: "".to_string(),
+            language: "en".to_string(),
+            summary_enabled: true,
         };
         let resolved = settings.resolved();
         // Should return empty strings, not environment variable values
@@ -589,6 +720,8 @@ profiles:
             endpoint: "http://localhost:11434/v1".to_string(),
             api_key: "".to_string(),
             model: "llama3.2".to_string(),
+            language: "en".to_string(),
+            summary_enabled: true,
         };
         assert!(settings.is_enabled());
     }
@@ -599,6 +732,8 @@ profiles:
             endpoint: "https://api.example.com/v1".to_string(),
             api_key: "".to_string(),
             model: "gpt-4o-mini".to_string(),
+            language: "en".to_string(),
+            summary_enabled: true,
         };
         assert!(settings.is_enabled());
     }
@@ -609,6 +744,8 @@ profiles:
             endpoint: "".to_string(),
             api_key: "key".to_string(),
             model: "gpt-4o-mini".to_string(),
+            language: "en".to_string(),
+            summary_enabled: true,
         };
         assert!(!missing_endpoint.is_enabled());
 
@@ -616,13 +753,145 @@ profiles:
             endpoint: "https://api.example.com/v1".to_string(),
             api_key: "key".to_string(),
             model: "".to_string(),
+            language: "en".to_string(),
+            summary_enabled: true,
         };
         assert!(!missing_model.is_enabled());
+    }
+
+    #[test]
+    fn test_ai_settings_summary_enabled_gate() {
+        let disabled = AISettings {
+            endpoint: "https://api.example.com/v1".to_string(),
+            api_key: "key".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            language: "en".to_string(),
+            summary_enabled: false,
+        };
+        assert!(!disabled.is_summary_enabled());
+
+        let enabled = AISettings {
+            endpoint: "https://api.example.com/v1".to_string(),
+            api_key: "key".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            language: "en".to_string(),
+            summary_enabled: true,
+        };
+        assert!(enabled.is_summary_enabled());
     }
 
     #[test]
     fn test_profile_ai_enabled_requires_settings() {
         let profile = Profile::new("dev");
         assert!(!profile.ai_enabled());
+    }
+
+    #[test]
+    fn test_profile_ai_disabled_flag_blocks_settings() {
+        let mut profile = Profile::new("dev");
+        profile.ai = Some(ai_settings("gpt-5.2"));
+        profile.ai_enabled = Some(false);
+        assert!(!profile.ai_enabled());
+        assert!(profile.resolved_ai_settings().is_none());
+    }
+
+    #[test]
+    fn resolve_active_ai_settings_prefers_active_profile_when_enabled() {
+        let mut profiles = HashMap::new();
+        let mut dev = Profile::new("dev");
+        dev.ai = Some(ai_settings("gpt-5.2"));
+        profiles.insert("dev".to_string(), dev);
+
+        let config = ProfilesConfig {
+            version: 1,
+            active: Some("dev".to_string()),
+            default_ai: Some(ai_settings("gpt-5.1")),
+            profiles,
+        };
+
+        let resolved = config.resolve_active_ai_settings();
+        assert_eq!(resolved.source, ActiveAISettingsSource::ActiveProfile);
+        assert!(resolved.ai_enabled);
+        assert!(resolved.summary_enabled);
+        assert_eq!(resolved.resolved.unwrap().model, "gpt-5.2");
+    }
+
+    #[test]
+    fn resolve_active_ai_settings_does_not_fallback_to_default_when_profile_ai_is_disabled() {
+        let mut profiles = HashMap::new();
+        let mut dev = Profile::new("dev");
+        // Explicit AI config exists but is disabled (empty model).
+        dev.ai = Some(ai_settings(""));
+        profiles.insert("dev".to_string(), dev);
+
+        let config = ProfilesConfig {
+            version: 1,
+            active: Some("dev".to_string()),
+            default_ai: Some(ai_settings("gpt-5.1")),
+            profiles,
+        };
+
+        let resolved = config.resolve_active_ai_settings();
+        assert_eq!(resolved.source, ActiveAISettingsSource::ActiveProfile);
+        assert!(!resolved.ai_enabled);
+        assert!(!resolved.summary_enabled);
+        assert!(resolved.resolved.is_none());
+    }
+
+    #[test]
+    fn resolve_active_ai_settings_disables_when_profile_ai_enabled_flag_false() {
+        let mut profiles = HashMap::new();
+        let mut dev = Profile::new("dev");
+        dev.ai = Some(ai_settings("gpt-5.2"));
+        dev.ai_enabled = Some(false);
+        profiles.insert("dev".to_string(), dev);
+
+        let config = ProfilesConfig {
+            version: 1,
+            active: Some("dev".to_string()),
+            default_ai: Some(ai_settings("gpt-5.1")),
+            profiles,
+        };
+
+        let resolved = config.resolve_active_ai_settings();
+        assert_eq!(resolved.source, ActiveAISettingsSource::ActiveProfile);
+        assert!(!resolved.ai_enabled);
+        assert!(!resolved.summary_enabled);
+        assert!(resolved.resolved.is_none());
+    }
+
+    #[test]
+    fn resolve_active_ai_settings_falls_back_to_default_when_profile_has_no_ai_config() {
+        let mut profiles = HashMap::new();
+        profiles.insert("dev".to_string(), Profile::new("dev"));
+
+        let config = ProfilesConfig {
+            version: 1,
+            active: Some("dev".to_string()),
+            default_ai: Some(ai_settings("gpt-5.1")),
+            profiles,
+        };
+
+        let resolved = config.resolve_active_ai_settings();
+        assert_eq!(resolved.source, ActiveAISettingsSource::DefaultAI);
+        assert!(resolved.ai_enabled);
+        assert!(resolved.summary_enabled);
+        assert_eq!(resolved.resolved.unwrap().model, "gpt-5.1");
+    }
+
+    #[test]
+    fn resolve_active_ai_settings_returns_none_source_when_no_ai_is_configured() {
+        let config = ProfilesConfig {
+            version: 1,
+            active: None,
+            default_ai: None,
+            profiles: HashMap::new(),
+        };
+
+        let resolved = config.resolve_active_ai_settings();
+        assert_eq!(resolved.source, ActiveAISettingsSource::None);
+        assert!(!resolved.ai_enabled);
+        assert!(!resolved.summary_enabled);
+        assert!(resolved.resolved.is_none());
     }
 }

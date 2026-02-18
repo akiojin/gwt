@@ -1,0 +1,39 @@
+{
+  "productName": "gwt",
+  "version": "7.6.0",
+  "identifier": "com.akiojin.gwt",
+  "build": {
+    "frontendDist": "../../gwt-gui/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "cd gwt-gui && pnpm run dev",
+    "beforeBuildCommand": "cd gwt-gui && pnpm run build && cd ../gwt-mcp-bridge && pnpm install && pnpm run build"
+  },
+  "bundle": {
+    "active": true,
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ],
+    "resources": [
+      "../../gwt-mcp-bridge/dist"
+    ]
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "gwt",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600,
+        "decorations": true,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+    },
+    "macOSPrivateApi": true
+  }
+}

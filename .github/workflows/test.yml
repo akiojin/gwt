@@ -9,11 +9,32 @@ jobs:
     name: Test (Rust)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.29.2
+          run_install: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Enable Corepack (pnpm)
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.29.2 --activate
+          pnpm --version
+      - name: Build MCP bridge
+        run: |
+          cd gwt-mcp-bridge
+          pnpm install --no-frozen-lockfile
+          pnpm run build
+      - name: Install system dependencies (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - name: Run tests
-        run: cargo test -p gwt-cli -p gwt-core -p gwt-web --all-features -- --test-threads=1
+        run: cargo test -p gwt-core -p gwt-tauri --all-features -- --test-threads=1
         timeout-minutes: 10
 
   build:
@@ -21,10 +42,87 @@ jobs:
     runs-on: ubuntu-latest
     needs: test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build release
-        run: cargo build -p gwt-cli --release
-      - name: Check binary exists
-        run: test -f target/release/gwt
+      # actions/setup-node's pnpm cache requires pnpm to be available.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.29.2
+          run_install: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: 'pnpm'
+          cache-dependency-path: gwt-gui/pnpm-lock.yaml
+      - name: Enable Corepack (pnpm)
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.29.2 --activate
+          pnpm --version
+      - name: Install system dependencies (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Install frontend dependencies
+        run: cd gwt-gui && pnpm install --frozen-lockfile
+      - name: Frontend check
+        run: cd gwt-gui && pnpm run check
+      - name: Frontend build
+        run: cd gwt-gui && pnpm run build
+      - name: Install MCP bridge dependencies
+        run: cd gwt-mcp-bridge && pnpm install --no-frozen-lockfile
+      - name: Build MCP bridge
+        run: cd gwt-mcp-bridge && pnpm run build
+      - name: Build check
+        run: cargo check --workspace
+
+  e2e:
+    name: E2E (Playwright, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      # actions/setup-node's pnpm cache requires pnpm to be available.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.29.2
+          run_install: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: 'pnpm'
+          cache-dependency-path: gwt-gui/pnpm-lock.yaml
+      - name: Enable Corepack (pnpm)
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.29.2 --activate
+          pnpm --version
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: gwt-gui
+      - name: Install Playwright browser (Linux)
+        if: runner.os == 'Linux'
+        run: pnpm exec playwright install --with-deps chromium
+        working-directory: gwt-gui
+      - name: Install Playwright browser (macOS / Windows)
+        if: runner.os != 'Linux'
+        run: pnpm exec playwright install chromium
+        working-directory: gwt-gui
+      - name: Run Playwright E2E
+        run: pnpm run test:e2e
+        working-directory: gwt-gui
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: playwright-report-${{ matrix.os }}
+          path: |
+            gwt-gui/playwright-report
+            gwt-gui/test-results
+          if-no-files-found: ignore

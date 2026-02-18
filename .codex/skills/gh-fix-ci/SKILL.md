@@ -65,7 +65,7 @@ Prereq: ensure `gh` is authenticated (for example, run `gh auth login` once), th
 9. Implement after approval.
    - Apply the approved plan, summarize diffs/tests, and ask about opening a PR.
 10. Recheck status.
-   - After changes, suggest re-running the relevant tests and `gh pr checks` to confirm.
+    - After changes, suggest re-running the relevant tests and `gh pr checks` to confirm.
 
 ## Bundled Resources
 

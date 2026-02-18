@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import re
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -122,10 +124,16 @@ def main() -> int:
     if checks is None:
         return 1
 
-    failing = [c for c in checks if is_failing(c)]
-
     results = []
     has_blocking = False
+
+    checks_summary = build_checks_summary(checks)
+    if checks_summary:
+        results.append(checks_summary)
+        if checks_summary.get("failingCount", 0) > 0:
+            has_blocking = True
+
+    failing = [c for c in checks if is_failing(c)]
     if merge_conflict:
         results.append(merge_conflict)
         has_blocking = True
@@ -551,6 +559,38 @@ def is_failing(check: dict[str, Any]) -> bool:
     return bucket in FAILURE_BUCKETS
 
 
+def build_checks_summary(checks: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not checks:
+        return None
+
+    failing_checks = []
+    for check in checks:
+        name = check.get("name") or ""
+        state = normalize_field(check.get("state") or check.get("status"))
+        bucket = normalize_field(check.get("bucket"))
+        workflow = check.get("workflow") or ""
+        link = check.get("detailsUrl") or check.get("link") or ""
+        is_failure = is_failing(check)
+        if is_failure:
+            failing_checks.append(
+                {
+                    "name": name,
+                    "state": state,
+                    "bucket": bucket,
+                    "workflow": workflow,
+                    "detailsUrl": link,
+                }
+            )
+
+    return {
+        "name": "Checks summary",
+        "status": "summary",
+        "totalCount": len(checks),
+        "failingCount": len(failing_checks),
+        "failingChecks": failing_checks,
+    }
+
+
 def analyze_check(
     check: dict[str, Any],
     repo_root: Path,
@@ -651,19 +691,19 @@ def fetch_check_log(
     job_id: str | None,
     repo_root: Path,
 ) -> tuple[str, str, str]:
+    if job_id:
+        job_log, job_error, job_status = fetch_job_log(job_id, repo_root)
+        if job_log:
+            return job_log, "", "ok"
+        if job_status == "pending":
+            return "", job_error, "pending"
+        if job_error:
+            # fall back to run log below
+            pass
+
     log_text, log_error = fetch_run_log(run_id, repo_root)
     if not log_error:
         return log_text, "", "ok"
-
-    if is_log_pending_message(log_error) and job_id:
-        job_log, job_error = fetch_job_log(job_id, repo_root)
-        if job_log:
-            return job_log, "", "ok"
-        if job_error and is_log_pending_message(job_error):
-            return "", job_error, "pending"
-        if job_error:
-            return "", job_error, "error"
-        return "", log_error, "pending"
 
     if is_log_pending_message(log_error):
         return "", log_error, "pending"
@@ -679,18 +719,23 @@ def fetch_run_log(run_id: str, repo_root: Path) -> tuple[str, str]:
     return result.stdout, ""
 
 
-def fetch_job_log(job_id: str, repo_root: Path) -> tuple[str, str]:
+def fetch_job_log(job_id: str, repo_root: Path) -> tuple[str, str, str]:
     repo_slug = fetch_repo_slug(repo_root)
     if not repo_slug:
-        return "", "Error: unable to resolve repository name for job logs."
+        return "", "Error: unable to resolve repository name for job logs.", "error"
     endpoint = f"/repos/{repo_slug}/actions/jobs/{job_id}/logs"
     returncode, stdout_bytes, stderr = run_gh_command_raw(["api", endpoint], cwd=repo_root)
     if returncode != 0:
         message = (stderr or stdout_bytes.decode(errors="replace")).strip()
-        return "", message or "gh api job logs failed"
+        if is_log_pending_message(message):
+            return "", message or "Job logs are still in progress.", "pending"
+        return "", message or "gh api job logs failed", "error"
     if is_zip_payload(stdout_bytes):
-        return "", "Job logs returned a zip archive; unable to parse."
-    return stdout_bytes.decode(errors="replace"), ""
+        decoded = decode_job_log_zip(stdout_bytes)
+        if decoded:
+            return decoded, "", "ok"
+        return "", "Job logs returned a zip archive; unable to parse.", "error"
+    return stdout_bytes.decode(errors="replace"), "", "ok"
 
 
 def fetch_repo_slug(repo_root: Path) -> str | None:
@@ -762,6 +807,24 @@ def is_zip_payload(payload: bytes) -> bool:
     return payload.startswith(b"PK")
 
 
+def decode_job_log_zip(payload: bytes) -> str:
+    if not payload:
+        return ""
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            parts = []
+            for name in archive.namelist():
+                if not name.endswith(".txt"):
+                    continue
+                try:
+                    parts.append(archive.read(name).decode(errors="replace"))
+                except Exception:
+                    continue
+            return "\n".join(part for part in parts if part)
+    except Exception:
+        return ""
+
+
 def extract_failure_snippet(log_text: str, max_lines: int, context: int) -> str:
     lines = log_text.splitlines()
     if not lines:
@@ -813,6 +876,9 @@ def render_results(pr_number: str, results: Iterable[dict[str, Any]]) -> None:
 
         if str(status).startswith("review"):
             render_review_result(result)
+            continue
+        if str(status).startswith("summary"):
+            render_checks_summary(result)
             continue
 
         run_meta = result.get("run", {})
@@ -884,6 +950,34 @@ def render_review_result(result: dict[str, Any]) -> None:
         print("Issue comments:")
         for comment in issue_comments:
             print(f"  - {format_comment_line(comment, include_path=False)}")
+
+
+def render_checks_summary(result: dict[str, Any]) -> None:
+    total = result.get("totalCount", 0)
+    failing = result.get("failingCount", 0)
+    print(f"Checks: {failing} failing / {total} total")
+    failing_checks = result.get("failingChecks", []) or []
+    if not failing_checks:
+        print("No failing checks detected.")
+        return
+    print("Failing checks:")
+    for check in failing_checks:
+        name = check.get("name", "")
+        state = check.get("state", "")
+        bucket = check.get("bucket", "")
+        workflow = check.get("workflow", "")
+        details = check.get("detailsUrl", "")
+        detail_bits = []
+        if workflow:
+            detail_bits.append(f"workflow={workflow}")
+        if state:
+            detail_bits.append(f"state={state}")
+        if bucket:
+            detail_bits.append(f"bucket={bucket}")
+        suffix = f" ({', '.join(detail_bits)})" if detail_bits else ""
+        print(f"  - {name}{suffix}")
+        if details:
+            print(f"    Details: {details}")
 
 
 def format_review_line(review: dict[str, Any]) -> str:

@@ -1,199 +1,193 @@
 #!/usr/bin/env bash
 
-set -e
+set -euo pipefail
 
 JSON_MODE=false
-SPEC_ID=""
 ARGS=()
-i=1
-while [ $i -le $# ]; do
-    arg="${!i}"
-    case "$arg" in
+
+while [ $# -gt 0 ]; do
+    case "$1" in
         --json)
             JSON_MODE=true
-            ;;
-        --no-branch)
-            # 後方互換性のため残す（非推奨 / 何もしない）
-            ;;
-        --branch)
-            echo "エラー: このプロジェクトではブランチ作成はサポートしていません（Worktree設計思想に準拠）。" >&2
-            echo "       ブランチは手動で作成してください。" >&2
-            exit 1
-            ;;
-        --spec-id)
-            if [ $((i + 1)) -gt $# ]; then
-                echo 'エラー: --spec-id には値が必要です' >&2
-                exit 1
-            fi
-            i=$((i + 1))
-            next_arg="${!i}"
-            # Check if the next argument is another option (starts with --)
-            if [[ "$next_arg" == --* ]]; then
-                echo 'エラー: --spec-id には値が必要です' >&2
-                exit 1
-            fi
-            SPEC_ID="$next_arg"
+            shift
             ;;
         --help|-h)
-            echo "使い方: $0 [--json] [--spec-id <id>] <機能の説明>"
-            echo ""
-            echo "オプション:"
-            echo "  --json          JSON形式で出力"
-            echo "  --branch        （非対応）ブランチ作成はサポートしていません"
-            echo "  --spec-id <id>  カスタムSPEC IDを指定（例: SPEC-12345678）"
-            echo "  --help, -h      このヘルプメッセージを表示"
-            echo ""
-            echo "注意:"
-            echo "  このプロジェクトはWorktree設計思想に基づき、エージェントが自動的にブランチを作成しません。"
-            echo ""
-            echo "例:"
-            echo "  $0 'ユーザー認証システムを追加'"
-            echo "  $0 'API用のOAuth2統合を実装' --spec-id SPEC-abcd1234"
+            cat <<'USAGE'
+使い方: create-new-feature.sh [--json] <機能説明>
+
+オプション:
+  --json   JSON 形式で出力
+  --help   ヘルプ表示
+USAGE
             exit 0
             ;;
         *)
-            ARGS+=("$arg")
+            ARGS+=("$1")
+            shift
             ;;
     esac
-    i=$((i + 1))
 done
 
 FEATURE_DESCRIPTION="${ARGS[*]}"
 if [ -z "$FEATURE_DESCRIPTION" ]; then
-    echo "使い方: $0 [--json] [--spec-id <id>] <機能の説明>" >&2
+    echo "ERROR: 機能説明が空です" >&2
     exit 1
 fi
 
-# Function to find the repository root by searching for existing project markers
-find_repo_root() {
-    local dir="$1"
-    while [ "$dir" != "/" ]; do
-        if [ -d "$dir/.git" ] || [ -d "$dir/.specify" ]; then
-            echo "$dir"
-            return 0
-        fi
-        dir="$(dirname "$dir")"
-    done
-    return 1
-}
+SCRIPT_DIR="$(CDPATH="" cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/common.sh"
 
-# Function to generate UUID-based SPEC ID
-generate_spec_id() {
-    # Generate UUID and take first 8 characters (excluding hyphens)
-    local uuid=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "$(date +%s)$(( RANDOM % 10000 ))")
-    local uuid_clean=$(echo "$uuid" | tr -d '-' | tr '[:upper:]' '[:lower:]')
-    local spec_suffix=$(echo "$uuid_clean" | cut -c1-8)
-    echo "SPEC-${spec_suffix}"
-}
-
-# Function to check if SPEC ID already exists
-check_spec_id_exists() {
-    local spec_id="$1"
-
-    # Fetch all remotes to get latest branch info (suppress errors if no remotes)
-    git fetch --all --prune 2>/dev/null || true
-
-    # Check remote branches
-    local remote_exists=$(git ls-remote --heads origin 2>/dev/null | grep -c "refs/heads/${spec_id}$" || echo "0")
-
-    # Check local branches
-    local local_exists=$(git branch 2>/dev/null | grep -c "^[* ]*${spec_id}$" || echo "0")
-
-    # Check specs directory
-    local spec_dir_exists=0
-    if [ -d "$SPECS_DIR/${spec_id}" ]; then
-        spec_dir_exists=1
-    fi
-
-    # Return 0 if exists anywhere, 1 if not exists
-    if [ "$remote_exists" -gt 0 ] || [ "$local_exists" -gt 0 ] || [ "$spec_dir_exists" -gt 0 ]; then
-        return 0
-    else
-        return 1
-    fi
-}
-
-# Resolve repository root. Prefer git information when available, but fall back
-# to searching for repository markers so the workflow still functions in repositories that
-# were initialised with --no-git.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-if git rev-parse --show-toplevel >/dev/null 2>&1; then
-    REPO_ROOT=$(git rev-parse --show-toplevel)
-    HAS_GIT=true
-else
-    REPO_ROOT="$(find_repo_root "$SCRIPT_DIR")"
-    if [ -z "$REPO_ROOT" ]; then
-        echo "エラー: リポジトリルートを特定できませんでした。リポジトリ内でこのスクリプトを実行してください。" >&2
-        exit 1
-    fi
-    HAS_GIT=false
+REPO_ROOT="$(get_repo_root)"
+if [ -z "$REPO_ROOT" ]; then
+    echo "ERROR: リポジトリルートを特定できません" >&2
+    exit 1
 fi
-
-cd "$REPO_ROOT"
 
 SPECS_DIR="$REPO_ROOT/specs"
 mkdir -p "$SPECS_DIR"
 
-# Determine SPEC ID
+random_hex() {
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - <<'PY'
+import secrets
+print(secrets.token_hex(4))
+PY
+        return
+    fi
+    if command -v python >/dev/null 2>&1; then
+        python - <<'PY'
+import os
+print(os.urandom(4).hex())
+PY
+        return
+    fi
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex 4
+        return
+    fi
+    od -An -N4 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+SPEC_ID=""
+for _ in $(seq 1 20); do
+    SPEC_ID="SPEC-$(random_hex)"
+    if [ ! -d "$SPECS_DIR/$SPEC_ID" ]; then
+        break
+    fi
+    SPEC_ID=""
+done
+
 if [ -z "$SPEC_ID" ]; then
-    # Generate new SPEC ID and ensure it's unique
-    SPEC_ID=$(generate_spec_id)
-
-    # Retry if ID already exists (very unlikely but possible)
-    retry_count=0
-    max_retries=10
-    while check_spec_id_exists "$SPEC_ID" && [ $retry_count -lt $max_retries ]; do
-        >&2 echo "[specify] 警告: SPEC ID $SPEC_ID は既に存在します。新しいIDを生成中..."
-        SPEC_ID=$(generate_spec_id)
-        retry_count=$((retry_count + 1))
-    done
-
-    if [ $retry_count -eq $max_retries ]; then
-        echo "エラー: 一意のSPEC IDの生成に失敗しました。" >&2
-        exit 1
-    fi
-else
-    # Validate provided SPEC ID format
-    if ! echo "$SPEC_ID" | grep -qE '^SPEC-[a-f0-9]{8}$'; then
-        echo "エラー: 無効なSPEC IDフォーマットです。SPEC-xxxxxxxx の形式で指定してください（xは小文字の16進数8桁）。" >&2
-        exit 1
-    fi
-
-    # Check if provided SPEC ID already exists
-    if check_spec_id_exists "$SPEC_ID"; then
-        echo "エラー: SPEC ID $SPEC_ID は既に存在します。" >&2
-        exit 1
-    fi
+    echo "ERROR: SPEC_ID を生成できませんでした" >&2
+    exit 1
 fi
 
-BRANCH_NAME="$SPEC_ID"
->&2 echo "[specify] ブランチは作成しません（Worktree設計思想に準拠）。"
-
-FEATURE_DIR="$SPECS_DIR/$BRANCH_NAME"
+FEATURE_DIR="$SPECS_DIR/$SPEC_ID"
 mkdir -p "$FEATURE_DIR"
 
-TEMPLATE="$REPO_ROOT/.specify/templates/spec-template.md"
 SPEC_FILE="$FEATURE_DIR/spec.md"
-if [ -f "$TEMPLATE" ]; then cp "$TEMPLATE" "$SPEC_FILE"; else touch "$SPEC_FILE"; fi
+TEMPLATE="$REPO_ROOT/.specify/templates/spec-template.md"
 
-# 仕様一覧を更新（失敗しても仕様作成は継続）
-INDEX_SCRIPT="$REPO_ROOT/.specify/scripts/bash/update-specs-index.sh"
-if [[ -f "$INDEX_SCRIPT" ]]; then
-    if ! "$INDEX_SCRIPT" >/dev/null 2>&1; then
-        >&2 echo "[specify] 警告: specs/specs.md の更新に失敗しました"
-        >&2 echo "[specify]        手動で更新する場合: $INDEX_SCRIPT を実行してください"
-    fi
+if [ -f "$TEMPLATE" ]; then
+    cp "$TEMPLATE" "$SPEC_FILE"
 else
-    >&2 echo "[specify] 警告: $INDEX_SCRIPT が見つかりません"
-    >&2 echo "[specify]        specs/specs.md の自動更新は利用できません"
+    cat <<'FALLBACK' > "$SPEC_FILE"
+# 機能仕様: [FEATURE_NAME]
+
+**仕様ID**: `[SPEC_ID]`
+**作成日**: [DATE]
+**ステータス**: ドラフト
+**カテゴリ**: GUI
+**入力**: ユーザー説明: "[INPUT]"
+FALLBACK
+fi
+
+TODAY="$(date +%Y-%m-%d)"
+
+if command -v python3 >/dev/null 2>&1; then
+    python3 - <<'PY' "$SPEC_FILE" "$SPEC_ID" "$TODAY" "$FEATURE_DESCRIPTION"
+import sys
+from pathlib import Path
+
+spec_file = Path(sys.argv[1])
+spec_id = sys.argv[2]
+created = sys.argv[3]
+feature_description = sys.argv[4]
+
+# タイトルは入力を短く整形
+feature_title = feature_description.strip().replace("\n", " ")
+if len(feature_title) > 80:
+    feature_title = feature_title[:77] + "..."
+
+text = spec_file.read_text(encoding="utf-8")
+text = text.replace("[SPEC_ID]", spec_id)
+text = text.replace("[DATE]", created)
+text = text.replace("[UPDATED_DATE]", created)
+text = text.replace("[INPUT]", feature_description)
+text = text.replace("[FEATURE_NAME]", feature_title)
+
+spec_file.write_text(text, encoding="utf-8")
+PY
+elif command -v python >/dev/null 2>&1; then
+    python - <<'PY' "$SPEC_FILE" "$SPEC_ID" "$TODAY" "$FEATURE_DESCRIPTION"
+import sys
+from pathlib import Path
+
+spec_file = Path(sys.argv[1])
+spec_id = sys.argv[2]
+created = sys.argv[3]
+feature_description = sys.argv[4]
+
+feature_title = feature_description.strip().replace("\\n", " ")
+if len(feature_title) > 80:
+    feature_title = feature_title[:77] + "..."
+
+text = spec_file.read_text(encoding="utf-8")
+text = text.replace("[SPEC_ID]", spec_id)
+text = text.replace("[DATE]", created)
+text = text.replace("[UPDATED_DATE]", created)
+text = text.replace("[INPUT]", feature_description)
+text = text.replace("[FEATURE_NAME]", feature_title)
+
+spec_file.write_text(text, encoding="utf-8")
+PY
+fi
+
+UPDATE_INDEX="$REPO_ROOT/.specify/scripts/bash/update-specs-index.sh"
+if [ -x "$UPDATE_INDEX" ]; then
+    "$UPDATE_INDEX" >/dev/null 2>&1 || true
 fi
 
 if $JSON_MODE; then
-    printf '{"BRANCH_NAME":"%s","SPEC_FILE":"%s","SPEC_ID":"%s"}\n' "$BRANCH_NAME" "$SPEC_FILE" "$SPEC_ID"
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - <<'PY' "$SPEC_ID" "$SPEC_FILE" "$FEATURE_DIR"
+import json
+import sys
+
+spec_id, spec_file, feature_dir = sys.argv[1:4]
+print(json.dumps({
+    "SPEC_ID": spec_id,
+    "SPEC_FILE": spec_file,
+    "FEATURE_DIR": feature_dir,
+}, ensure_ascii=False))
+PY
+    elif command -v python >/dev/null 2>&1; then
+        python - <<'PY' "$SPEC_ID" "$SPEC_FILE" "$FEATURE_DIR"
+import json
+import sys
+
+spec_id, spec_file, feature_dir = sys.argv[1:4]
+print(json.dumps({
+    "SPEC_ID": spec_id,
+    "SPEC_FILE": spec_file,
+    "FEATURE_DIR": feature_dir,
+}, ensure_ascii=False))
+PY
+    else
+        printf '{"SPEC_ID":"%s","SPEC_FILE":"%s","FEATURE_DIR":"%s"}\n' "$SPEC_ID" "$SPEC_FILE" "$FEATURE_DIR"
+    fi
 else
-    echo "ブランチ名: $BRANCH_NAME"
-    echo "仕様ファイル: $SPEC_FILE"
-    echo "SPEC ID: $SPEC_ID"
-    echo "ヒント: plan/tasks などを実行する場合は --spec-id $SPEC_ID を指定してください（または export SPECIFY_FEATURE=$SPEC_ID）"
+    echo "SPEC_ID: $SPEC_ID"
+    echo "SPEC_FILE: $SPEC_FILE"
+    echo "FEATURE_DIR: $FEATURE_DIR"
 fi

@@ -9,12 +9,15 @@
 - **設計・実装は複雑にせずに、シンプルさの極限を追求してください**
 - **ただし、ユーザビリティと開発者体験の品質は決して妥協しない**
 - 実装はシンプルに、開発者体験は最高品質に
-- CLI操作の直感性と効率性を技術的複雑さより優先
+- GUI操作の直感性と効率性を技術的複雑さより優先
 
-### 🧩 Ratatui ガイドライン
+### 🧩 Tauri GUI ガイドライン
 
-- CLI TUI は `ratatui` を利用
-- 端末描画で使用するアイコンは ASCII に統一し、全角/絵文字は避ける
+- デスクトップGUI は Tauri v2 + Svelte 5 + xterm.js
+- バックエンド: Rust (gwt-core + gwt-tauri)
+- フロントエンド: Svelte 5 + TypeScript + Vite (gwt-gui/)
+- ターミナルエミュレーション: xterm.js v6
+- UIアイコンはGUIに適したアイコン（SVG / Unicode シンボル等）を使用する
 
 ### 📝 設計ガイドライン
 
@@ -28,41 +31,43 @@
 
 ## 開発ワークフロー
 
+### 実装前ワークフロー（必須）
+
+> 🚨 **エージェントは、以下のワークフローを完了するまでプロダクションコードの実装に着手してはならない。**
+
+#### 1. 仕様策定（feat / fix / refactor 対象）
+
+- 新機能・バグ修正・リファクタリングの実装前に、`specs/SPEC-{ID}/spec.md` を作成または更新する
+- 仕様は `.specify/templates/spec-template.md` のテンプレートに従い、最低限以下を含める:
+  - ユーザーシナリオとテスト（受け入れシナリオ）
+  - 機能要件（FR-*）
+  - 成功基準
+- `plan.md`、`tasks.md` も策定してから実装に入る
+- Spec Kit スキル（`/speckit-require`）の活用を推奨
+
+#### 2. TDD（テストファースト）
+
+- 仕様の受け入れシナリオに基づき、**実装コードより先にテストコードを書く**
+- Rust: `crates/*/tests/` または `#[cfg(test)]` モジュール内にテストを追加
+- Frontend: `gwt-gui/src/**/*.test.ts` にテストを追加（vitest + @testing-library/svelte）
+- テストが RED（失敗）状態であることを確認してから実装に進む
+
+#### 適用除外
+
+以下の変更は仕様策定・TDD を省略できる:
+
+- `docs:` / `chore:` タイプの変更（ドキュメント修正、CI設定、依存更新など）
+- 1行程度の明白な typo 修正
+- CLAUDE.md / README.md の更新のみの変更
+
 ### 基本ルール
 
-- **指示を受けた場合、まず既存要件（spec.md）に追記可能かを調べ、次に要件化（Spec Kit による仕様策定）とTDD化を優先的に実行する。実装は要件とテストが確定した後に着手する。**
+- 指示を受けた場合、まず既存実装・関連ドキュメント（README/CLAUDE.md）を確認し、必要なら先に更新する。
 - 作業（タスク）を完了したら、変更点を日本語でコミットログに追加して、コミット＆プッシュを必ず行う
 - 作業（タスク）は、最大限の並列化をして進める
-- 作業（タスク）は、最大限の細分化をしてPLANS.mdにやるべきことを出力する
 - `git rebase -i origin/main` はLLMでの失敗率が高いため禁止（必要な場合は人間が手動で整形すること）
-- Spec Kitを用いたSDD/TDDの絶対遵守を義務付ける。Spec Kit承認前およびSpec準拠のTDD完了前の実装着手を全面禁止し、違反タスクは即時差し戻す。
 - 作業（タスク）は、忖度なしで進める
 - **エージェントはユーザーからの明示的な指示なく新規ブランチの作成・削除を行ってはならない。Worktreeは起動ブランチで作業を完結する設計。**
-
-### 🚨 仕様・TDD優先の絶対ルール
-
-> **重要**: このルールはすべての実装作業に適用される。バグ修正やエッジケース対応であっても例外なく従うこと。
-
-1. **仕様の確認と更新が最優先**
-   - 実装に着手する前に、必ず関連する `spec.md` を確認する
-   - 新しい動作やエッジケースを追加する場合は、先に `spec.md` のエッジケースセクションまたは受け入れシナリオに追記する
-   - 仕様に記載のない動作を実装してはならない
-
-2. **テストの追加が実装より先**
-   - 新機能やバグ修正の場合、先にテストを作成する（TDD）
-   - テストが失敗することを確認してから実装に着手する
-   - テストなしでの実装完了は認めない
-
-3. **変更の順序**
-   - ① `spec.md` の更新（仕様の明文化）
-   - ② テストの追加（期待動作の定義）
-   - ③ 実装（テストを通すコード）
-   - ④ コミット＆プッシュ
-   - この順序を守らない作業は差し戻しとする
-
-4. **エッジケースやバグ修正の場合も同様**
-   - 「急ぎの修正だから仕様は後で」は許可しない
-   - 仕様とテストを先に整備することで、同じ問題の再発を防ぐ
 
 ### コミットメッセージポリシー
 
@@ -78,23 +83,54 @@
 
 ### ローカル検証/実行ルール（Rust）
 
-- このリポジトリのローカル検証・実行は Cargo を使用する
-- ビルド: `cargo build --release`
+- このリポジトリのローカル検証・実行は Cargo + Tauri CLI を使用する
+- ビルド: `cargo tauri build`
+- 開発: `cargo tauri dev`
 - テスト: `cargo test`
 - Lint: `cargo clippy --all-targets --all-features -- -D warnings`
 - フォーマット: `cargo fmt`
-- 実行: `./target/release/gwt` または `cargo run`
-- npm配布: `bunx @akiojin/gwt` または `npm install -g @akiojin/gwt`
+- フロントエンドチェック: `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json`
+
+### フロントエンド実行前セットアップ（gwt-gui）
+
+- `gwt-gui` の依存はこの配下で管理されており、未インストールだと `vitest` / `@tsconfig/svelte` が見つからないエラーになります。  
+  まず `cd gwt-gui && pnpm install` を実行してください（Node 依存の初回/クリーン環境用）。
+- `vitest` を実行する場合は `cd gwt-gui && pnpm test` を使います。  
+  ファイルを限定する場合は `cd gwt-gui && pnpm test src/lib/components/Sidebar.test.ts src/lib/components/WorktreeSummaryPanel.test.ts` のように指定します。
+
+### フロントエンド E2E（Playwright）手順
+
+- `gwt-gui/e2e/` 配下の WebUI E2E は Playwright で実行します（`playwright.config.ts` の Chromium 設定を使用）。
+- 依存が未取得の場合は `cd gwt-gui && pnpm install` の後、初回のみブラウザバイナリを取得します。
+  - `cd gwt-gui && pnpm exec playwright install chromium`
+- E2E 実行コマンド:
+  - `cd gwt-gui && pnpm test:e2e`
+- Playwright 側のローカルサーバー起動は自動です（`http://127.0.0.1:4173`）。必要なら個別実行で絞り込みます。
+  - `cd gwt-gui && pnpm exec playwright test e2e/open-project-smoke.spec.ts`
 
 ## コミュニケーションガイドライン
 
 - 回答は必ず日本語
-- CLIのユーザー向け出力は英語のみ（日本語の文言を表示しない）
+- GUIのユーザー向け表示は英語のみ（日本語の文言を表示しない）
+- ログ（`~/.gwt/logs/` 等）はこの環境から直接参照できる前提で対応すること
+- ログ参照の指示があれば、この環境から直接読み取って調査すること
 
 ## ドキュメント管理
 
 - ドキュメントはREADME.md/README.ja.mdに集約する
-- 仕様ファイルは必ず `specs/SPEC-????????/` （UUID8桁）配下に配置する。`specs/feature/*` など別階層への配置は禁止。
+- 仕様・要件ドキュメントは `specs/SPEC-{ID}/` に配置する。完了済み仕様は `specs/archive/` に移動する
+- 以前までのTUIの仕様・要件ドキュメントは `specs/archive/` に保管する
+
+### README.md / README.ja.md に必ず記載する内容
+
+- 利用者向けの導線: インストール方法、起動方法、基本操作、主要機能の使い方
+- 利用前提: サポートOS、初期設定（例: AI 機能を使う場合の設定）
+- 開発者向けの最小情報: 前提環境、ビルド/開発手順、テスト実行方針（`pnpm test`, E2Eなど）
+- 配布情報: リリース/バイナリ資産の取得先、バージョン取得方法
+- 代表的な画面操作: よく使う画面遷移や一般的なトラブル時の案内（再現しやすく簡潔）
+- 変更が設計判断を必要とする場合の案内: 重要仕様の所在（`specs/SPEC-{ID}/` への参照）
+- `CLAUDE.md` の運用ルールや内部実装ガイドは README に入れない
+- 英語版/日本語版の内容は同等レベルを保つ（順序・見出しは対応させる）
 
 ## コードクオリティガイドライン
 
@@ -103,7 +139,6 @@
 
 ## 開発ガイドライン
 
-- Spec Kitを用いたSDD/TDDの絶対遵守を組織ルールとする。Spec Kit外での設計・テスト着手、およびSpec未承認・TDD未完了での実装開始を検知次第即時差し戻す。
 - 既存のファイルのメンテナンスを無視して、新規ファイルばかり作成するのは禁止。既存ファイルを改修することを優先する。
 
 ## ドキュメント作成ガイドライン
@@ -120,56 +155,32 @@
   - develop → main への PR を作成（リリースブランチは作成しない）
 - Release PR が main にマージされると `.github/workflows/release.yml` が以下を自動実行:
   - タグ・GitHub Release を作成
-  - クロスコンパイル済みバイナリを GitHub Release にアップロード
-  - npm へ公開（provenance 付き）
+  - Tauri ビルド（.dmg/.msi/.AppImage）を GitHub Release にアップロード
 
 ## パッケージ公開状況
 
-> **重要**: 各プラットフォームのバージョンは独立して管理されており、一度公開したバージョンは再利用不可。リリース前に必ず各プラットフォームの最新バージョンを確認すること。
-
-| プラットフォーム | パッケージ名 | 確認コマンド |
-| -------------- | ----------- | ----------- |
-| npmjs | `@akiojin/gwt` | `npm view @akiojin/gwt version` |
-| GitHub Release | - | `gh release list --repo akiojin/gwt --limit 1` |
-
-### 次回リリース時の注意
-
-- 各プラットフォームのバージョンは一度公開すると再利用不可
-- リリース前に上記の確認コマンドで最新バージョンをチェックすること
-- npm の `latest` タグが古いバージョンを指している場合は手動で修正が必要:
-  `npm dist-tag add @akiojin/gwt@<version> latest`
+| プラットフォーム | 確認コマンド |
+| -------------- | ----------- |
+| GitHub Release | `gh release list --repo akiojin/gwt --limit 1` |
 
 ## 使用中の技術
-- Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, reqwest (blocking), serde_json, chrono (SPEC-4b893dae)
-- ファイルシステム（セッションファイル読み取り）、メモリキャッシュ (SPEC-4b893dae)
-- Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, tracing, tracing-appender, serde_json, chrono, arboard (SPEC-e66acf66)
-- ファイル（gwt.jsonl.YYYY-MM-DD） (SPEC-e66acf66)
-- Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, reqwest (blocking), serde_json, chrono, tracing (SPEC-ba3f610c)
-- ファイルシステム (`~/.gwt/sessions/` - JSON形式) (SPEC-ba3f610c)
-- Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, serde, serde_json, chrono, directories (SPEC-71f2742d)
-- ファイル（~/.gwt/tools.json, .gwt/tools.json） (SPEC-71f2742d)
-- ファイルシステム（.gwt/設定、gitメタデータ） (SPEC-a70a1ece)
-- メモリキャッシュ（GitViewCache） (SPEC-1ea18899)
-
-- Rust (Stable) + Ratatui TUI フレームワーク
-- ファイル/ローカル Git メタデータ（DB なし）
+- Rust 2021 Edition (stable) + Tauri v2, portable-pty, serde, tokio
+- Svelte 5 + TypeScript + Vite 6
+- xterm.js v6 (@xterm/xterm, @xterm/addon-fit, @xterm/addon-web-links)
+- ローカルファイルと Git メタデータ（DB なし）
 
 ## プロジェクト構成
 
 ```text
 ├── Cargo.toml          # ワークスペース設定
 ├── crates/
-│   ├── gwt-cli/        # CLIエントリポイント・TUI
-│   ├── gwt-core/       # コアライブラリ（worktree管理）
-│   ├── gwt-web/        # Webサーバー（将来）
-│   └── gwt-frontend/   # Webフロントエンド（将来）
-├── package.json        # npm配布用ラッパー
-├── bin/gwt.js          # バイナリラッパースクリプト
-└── scripts/postinstall.js  # バイナリダウンロードスクリプト
+│   ├── gwt-core/       # コアライブラリ（Git操作・PTY管理・設定）
+│   └── gwt-tauri/      # Tauri v2 バックエンド（コマンド・状態管理）
+├── gwt-gui/            # Svelte 5 フロントエンド（UI・xterm.js）
+│   ├── src/
+│   │   ├── lib/components/  # UIコンポーネント
+│   │   ├── lib/terminal/    # xterm.jsラッパー
+│   │   └── lib/types.ts     # TypeScript型定義
+│   └── package.json
+└── package.json        # Tauri開発用スクリプト
 ```
-
-## 最近の変更
-- SPEC-1ea18899: 追加: Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, serde, serde_json, chrono
-- SPEC-a70a1ece: 追加: Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, serde, serde_json, chrono
-- SPEC-71f2742d: 追加: Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, serde, serde_json, chrono, directories
-- SPEC-ba3f610c: 追加: Rust 2021 Edition (stable) + ratatui 0.29, crossterm 0.28, reqwest (blocking), serde_json, chrono, tracing

@@ -75,7 +75,11 @@ impl AgentHistoryStore {
 
     /// Get the legacy JSON history file path (~/.config/gwt/agent-history.json)
     pub fn get_json_history_path() -> Result<PathBuf, AgentHistoryError> {
-        let config_dir = dirs::config_dir().ok_or(AgentHistoryError::HomeDirNotFound)?;
+        // Prefer explicit XDG override for determinism (especially in tests and CI).
+        let config_dir = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(dirs::config_dir)
+            .ok_or(AgentHistoryError::HomeDirNotFound)?;
         Ok(config_dir.join("gwt").join("agent-history.json"))
     }
 

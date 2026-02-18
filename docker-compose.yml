@@ -9,8 +9,9 @@ services:
       - claude-config:/root/.claude
       - codex-config:/root/.codex
       - ${HOME:-~}/.codex:/root/.codex-host:ro
+      - ${HOST_GIT_COMMON_DIR}:${HOST_GIT_COMMON_DIR}:ro
     ports:
-      - 6400:6400
+      - ${PORT:-3000}:3000
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
@@ -37,8 +38,8 @@ services:
     image: ghcr.io/xtr-dev/mcp-playwright-novnc:latest
     platform: ${PLAYWRIGHT_NOVNC_PLATFORM:-linux/amd64}
     ports:
-      - 6080:6080
-      - 3080:3080
+      - ${PLAYWRIGHT_NOVNC_PORT:-6080}:6080
+      - ${PLAYWRIGHT_NOVNC_VNC_PORT:-3080}:3080
     volumes:
       - .:/gwt
     environment:

@@ -1,0 +1,2542 @@
+//! Session history commands (Quick Start)
+
+use crate::commands::project::resolve_repo_path_for_project_root;
+use crate::commands::terminal::capture_scrollback_tail_from_state;
+use crate::state::AppState;
+use gwt_core::ai::{
+    format_error_for_display, summarize_scrollback, summarize_session, AIClient, AIError,
+    AgentType as AiAgentType, ClaudeSessionParser, CodexSessionParser, GeminiSessionParser,
+    OpenCodeSessionParser, SessionParseError, SessionParser, SessionSummary, SessionSummaryCache,
+};
+use gwt_core::config::{ProfilesConfig, ResolvedAISettings, ToolSessionEntry};
+use gwt_core::git::Branch;
+use gwt_core::terminal::pane::PaneStatus;
+use gwt_core::terminal::scrollback::ScrollbackFile;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tauri::{AppHandle, Emitter, Manager, State};
+
+/// Return tool-specific latest session entries for a branch (Quick Start).
+///
+/// This is a read-only operation (no config/history writes).
+#[tauri::command]
+pub fn get_branch_quick_start(
+    project_path: String,
+    branch: String,
+) -> Result<Vec<ToolSessionEntry>, String> {
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return Err("Branch is required".to_string());
+    }
+
+    Ok(gwt_core::config::get_branch_tool_history(
+        &repo_path, branch,
+    ))
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSidebarSubAgent {
+    pub id: String,
+    pub name: String,
+    pub tool_id: String,
+    pub status: String, // "running" | "completed" | "failed"
+    pub model: Option<String>,
+    pub branch: String,
+    pub worktree_rel_path: String,
+    pub worktree_abs_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSidebarTask {
+    pub id: String,
+    pub title: String,
+    pub status: String, // "running" | "pending" | "failed" | "completed"
+    pub sub_agents: Vec<AgentSidebarSubAgent>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSidebarView {
+    pub spec_id: Option<String>,
+    pub tasks: Vec<AgentSidebarTask>,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedTask {
+    id: String,
+    title: String,
+    base_status: String, // "pending" | "completed"
+}
+
+#[derive(Debug, Clone)]
+struct ParsedTaskSet {
+    spec_id: Option<String>,
+    tasks: Vec<ParsedTask>,
+}
+
+#[derive(Debug, Clone)]
+struct RunningPaneRef {
+    branch: String,
+    tool_id: String,
+}
+
+#[tauri::command]
+pub fn get_agent_sidebar_view(
+    project_path: String,
+    state: State<AppState>,
+) -> Result<AgentSidebarView, String> {
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+
+    let parsed = parse_latest_spec_tasks(project_root)?;
+    let entries = load_recent_sub_agents(&repo_path);
+    let running_refs = collect_running_pane_refs(&state, &repo_path);
+
+    let mut tasks: Vec<AgentSidebarTask> = parsed
+        .tasks
+        .into_iter()
+        .map(|t| AgentSidebarTask {
+            id: t.id,
+            title: t.title,
+            status: t.base_status,
+            sub_agents: Vec::new(),
+        })
+        .collect();
+
+    if tasks.is_empty() && !entries.is_empty() {
+        for (idx, entry) in entries.iter().enumerate() {
+            tasks.push(AgentSidebarTask {
+                id: format!("TASK-{}", idx + 1),
+                title: format!(
+                    "{} ({})",
+                    display_tool_name(entry),
+                    normalize_branch_name(&entry.branch)
+                ),
+                status: "pending".to_string(),
+                sub_agents: Vec::new(),
+            });
+        }
+    }
+    for (idx, entry) in entries.iter().enumerate() {
+        let sub = map_entry_to_sub_agent(entry, idx, project_root, &repo_path, &running_refs);
+        let task_idx = detect_task_index_for_entry(entry, &tasks)
+            .unwrap_or_else(|| fallback_task_index(&tasks));
+        if let Some(task) = tasks.get_mut(task_idx) {
+            task.sub_agents.push(sub);
+        }
+    }
+
+    for task in &mut tasks {
+        let has_running = task.sub_agents.iter().any(|a| a.status == "running");
+        let has_failed = task.sub_agents.iter().any(|a| a.status == "failed");
+        let next_status = if has_running {
+            "running"
+        } else if task.status == "completed" {
+            "completed"
+        } else if has_failed {
+            "failed"
+        } else {
+            "pending"
+        };
+        task.status = next_status.to_string();
+    }
+
+    tasks.sort_by(|a, b| {
+        task_status_rank(&a.status)
+            .cmp(&task_status_rank(&b.status))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    Ok(AgentSidebarView {
+        spec_id: parsed.spec_id,
+        tasks,
+    })
+}
+
+fn parse_latest_spec_tasks(project_root: &Path) -> Result<ParsedTaskSet, String> {
+    let specs_root = project_root.join("specs");
+    if !specs_root.exists() {
+        return Ok(ParsedTaskSet {
+            spec_id: None,
+            tasks: Vec::new(),
+        });
+    }
+
+    let mut newest: Option<(SystemTime, String, std::path::PathBuf)> = None;
+    let entries = fs::read_dir(&specs_root).map_err(|e| format!("Failed to read specs/: {e}"))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read specs entry: {e}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("Failed to read specs entry type: {e}"))?;
+        if !file_type.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("SPEC-") {
+            continue;
+        }
+
+        let tasks_path = entry.path().join("tasks.md");
+        if !tasks_path.exists() {
+            continue;
+        }
+
+        let modified = fs::metadata(&tasks_path)
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        match &newest {
+            Some((current, _, _)) if &modified <= current => {}
+            _ => newest = Some((modified, name, tasks_path)),
+        }
+    }
+
+    let Some((_, spec_id, tasks_path)) = newest else {
+        return Ok(ParsedTaskSet {
+            spec_id: None,
+            tasks: Vec::new(),
+        });
+    };
+
+    let content =
+        fs::read_to_string(&tasks_path).map_err(|e| format!("Failed to read tasks.md: {e}"))?;
+    let tasks = parse_tasks_markdown(&content);
+
+    Ok(ParsedTaskSet {
+        spec_id: Some(spec_id),
+        tasks,
+    })
+}
+
+fn parse_tasks_markdown(content: &str) -> Vec<ParsedTask> {
+    let mut out = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        let (is_completed, body) = if let Some(rest) = trimmed.strip_prefix("- [ ]") {
+            (false, rest.trim())
+        } else if let Some(rest) = trimmed.strip_prefix("- [x]") {
+            (true, rest.trim())
+        } else if let Some(rest) = trimmed.strip_prefix("- [X]") {
+            (true, rest.trim())
+        } else {
+            continue;
+        };
+
+        if body.is_empty() {
+            continue;
+        }
+
+        let mut id: Option<String> = None;
+        for token in body.split_whitespace() {
+            let normalized = token.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+            if looks_like_task_id(normalized) {
+                id = Some(normalized.to_ascii_uppercase());
+                break;
+            }
+        }
+        let id = id.unwrap_or_else(|| format!("TASK-{}", out.len() + 1));
+
+        out.push(ParsedTask {
+            id,
+            title: body.to_string(),
+            base_status: if is_completed {
+                "completed".to_string()
+            } else {
+                "pending".to_string()
+            },
+        });
+    }
+
+    out
+}
+
+fn looks_like_task_id(token: &str) -> bool {
+    if token.len() < 2 {
+        return false;
+    }
+    if !token.starts_with('T') {
+        return false;
+    }
+    token[1..].chars().all(|c| c.is_ascii_digit())
+}
+
+fn load_recent_sub_agents(repo_path: &Path) -> Vec<ToolSessionEntry> {
+    let out = gwt_core::config::load_ts_session(repo_path)
+        .map(|s| s.history)
+        .unwrap_or_default();
+    dedupe_current_sub_agents(out)
+}
+
+fn dedupe_current_sub_agents(mut entries: Vec<ToolSessionEntry>) -> Vec<ToolSessionEntry> {
+    // Keep only the latest assignment per (tool, branch).
+    entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+    let mut deduped = Vec::new();
+    let mut seen = HashSet::new();
+    for entry in entries {
+        let key = format!(
+            "{}::{}",
+            normalize_tool_id(&entry.tool_id),
+            normalize_branch_name(&entry.branch)
+        );
+        if seen.insert(key) {
+            deduped.push(entry);
+        }
+    }
+    deduped
+}
+
+fn collect_running_pane_refs(state: &AppState, repo_path: &Path) -> Vec<RunningPaneRef> {
+    let panes = match state.pane_manager.lock() {
+        Ok(manager) => manager
+            .panes()
+            .iter()
+            .map(|p| {
+                (
+                    p.pane_id().to_string(),
+                    p.branch_name().to_string(),
+                    p.status().clone(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        Err(_) => Vec::new(),
+    };
+    let meta = state
+        .pane_launch_meta
+        .lock()
+        .ok()
+        .map(|m| m.clone())
+        .unwrap_or_default();
+
+    let mut out = Vec::new();
+    for (pane_id, pane_branch, pane_status) in panes {
+        if !matches!(pane_status, PaneStatus::Running) {
+            continue;
+        }
+        let Some(m) = meta.get(&pane_id) else {
+            continue;
+        };
+        if m.repo_path.as_path() != repo_path {
+            continue;
+        }
+        let branch = if m.branch.trim().is_empty() {
+            normalize_branch_name(&pane_branch)
+        } else {
+            normalize_branch_name(&m.branch)
+        };
+        out.push(RunningPaneRef {
+            branch,
+            tool_id: normalize_tool_id(&tool_id_for_agent(&m.agent_id)),
+        });
+    }
+    out
+}
+
+fn map_entry_to_sub_agent(
+    entry: &ToolSessionEntry,
+    idx: usize,
+    project_root: &Path,
+    repo_path: &Path,
+    running_refs: &[RunningPaneRef],
+) -> AgentSidebarSubAgent {
+    let tool_id = normalize_tool_id(&entry.tool_id);
+    let branch = normalize_branch_name(&entry.branch);
+    let running = running_refs
+        .iter()
+        .any(|r| r.branch == branch && r.tool_id == tool_id);
+    let mut status = if running { "running" } else { "completed" }.to_string();
+    if !running {
+        if let Some(mode) = entry.mode.as_deref() {
+            let m = mode.to_ascii_lowercase();
+            if m == "error" || m == "failed" {
+                status = "failed".to_string();
+            }
+        }
+    }
+
+    let (worktree_rel_path, worktree_abs_path) =
+        derive_worktree_paths(entry.worktree_path.as_deref(), project_root, repo_path);
+
+    AgentSidebarSubAgent {
+        id: entry
+            .session_id
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| format!("sub-agent-{}", idx + 1)),
+        name: display_tool_name(entry),
+        tool_id,
+        status,
+        model: entry.model.clone().filter(|m| !m.trim().is_empty()),
+        branch,
+        worktree_rel_path,
+        worktree_abs_path,
+    }
+}
+
+fn detect_task_index_for_entry(
+    entry: &ToolSessionEntry,
+    tasks: &[AgentSidebarTask],
+) -> Option<usize> {
+    let mut haystack = String::new();
+    haystack.push_str(&entry.branch.to_ascii_lowercase());
+    haystack.push(' ');
+    haystack.push_str(
+        &entry
+            .worktree_path
+            .as_deref()
+            .unwrap_or("")
+            .to_ascii_lowercase(),
+    );
+    haystack.push(' ');
+    haystack.push_str(
+        &entry
+            .session_id
+            .as_deref()
+            .unwrap_or("")
+            .to_ascii_lowercase(),
+    );
+    haystack.push(' ');
+    haystack.push_str(&entry.model.as_deref().unwrap_or("").to_ascii_lowercase());
+
+    for (idx, task) in tasks.iter().enumerate() {
+        if haystack.contains(&task.id.to_ascii_lowercase()) {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+fn fallback_task_index(tasks: &[AgentSidebarTask]) -> usize {
+    tasks
+        .iter()
+        .position(|t| t.status != "completed")
+        .unwrap_or(0)
+}
+
+fn derive_worktree_paths(
+    maybe_abs: Option<&str>,
+    project_root: &Path,
+    repo_path: &Path,
+) -> (String, Option<String>) {
+    let Some(abs) = maybe_abs.map(str::trim).filter(|s| !s.is_empty()) else {
+        return ("-".to_string(), None);
+    };
+    let abs_path = Path::new(abs);
+
+    if let Ok(rel) = abs_path.strip_prefix(project_root) {
+        let rel_text = rel.to_string_lossy().to_string();
+        return (
+            if rel_text.is_empty() {
+                ".".to_string()
+            } else {
+                rel_text
+            },
+            Some(abs.to_string()),
+        );
+    }
+
+    if let Ok(rel) = abs_path.strip_prefix(repo_path) {
+        let rel_text = rel.to_string_lossy().to_string();
+        return (
+            if rel_text.is_empty() {
+                ".".to_string()
+            } else {
+                rel_text
+            },
+            Some(abs.to_string()),
+        );
+    }
+
+    (abs.to_string(), Some(abs.to_string()))
+}
+
+fn display_tool_name(entry: &ToolSessionEntry) -> String {
+    let id = normalize_tool_id(&entry.tool_id);
+    if id == "claude-code" {
+        return "Claude".to_string();
+    }
+    if id == "codex-cli" {
+        return "Codex".to_string();
+    }
+    if id == "gemini-cli" {
+        return "Gemini".to_string();
+    }
+    if id == "opencode" {
+        return "OpenCode".to_string();
+    }
+    entry.tool_label.clone()
+}
+
+fn normalize_tool_id(tool_id: &str) -> String {
+    let id = tool_id.trim().to_ascii_lowercase();
+    match id.as_str() {
+        "claude" | "claude-code" => "claude-code".to_string(),
+        "codex" | "codex-cli" => "codex-cli".to_string(),
+        "gemini" | "gemini-cli" => "gemini-cli".to_string(),
+        "opencode" | "open-code" => "opencode".to_string(),
+        _ => id,
+    }
+}
+
+fn normalize_branch_name(branch: &str) -> String {
+    let trimmed = branch.trim();
+    if let Some(rest) = trimmed.strip_prefix("origin/") {
+        return rest.to_string();
+    }
+    trimmed.to_string()
+}
+
+fn task_status_rank(status: &str) -> u8 {
+    match status {
+        "running" => 0,
+        "pending" => 1,
+        "failed" => 2,
+        "completed" => 3,
+        _ => 4,
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSummaryResult {
+    pub status: String, // "ok" | "ai-not-configured" | "disabled" | "no-session" | "error"
+    pub generating: bool,
+    pub tool_id: Option<String>,
+    pub session_id: Option<String>,
+    pub source_type: Option<String>, // "session" | "scrollback"
+    pub input_mtime_ms: Option<u64>,
+    pub summary_updated_ms: Option<u64>,
+    pub markdown: Option<String>,
+    pub task_overview: Option<String>,
+    pub short_summary: Option<String>,
+    pub bullet_points: Vec<String>,
+    pub warning: Option<String>,
+    pub error: Option<String>,
+}
+
+fn summary_source_type(session_id: &str) -> &'static str {
+    if session_id.starts_with("pane:") {
+        "scrollback"
+    } else {
+        "session"
+    }
+}
+
+fn system_time_millis_u64(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn ok_summary(
+    tool_id: &str,
+    session_id: &str,
+    summary: &SessionSummary,
+    input_mtime: Option<SystemTime>,
+) -> SessionSummaryResult {
+    SessionSummaryResult {
+        status: "ok".to_string(),
+        generating: false,
+        tool_id: Some(tool_id.to_string()),
+        session_id: Some(session_id.to_string()),
+        source_type: Some(summary_source_type(session_id).to_string()),
+        input_mtime_ms: input_mtime.map(system_time_millis_u64).filter(|ms| *ms > 0),
+        summary_updated_ms: summary
+            .last_updated
+            .map(system_time_millis_u64)
+            .filter(|ms| *ms > 0),
+        markdown: summary.markdown.clone(),
+        task_overview: summary.task_overview.clone(),
+        short_summary: summary.short_summary.clone(),
+        bullet_points: summary.bullet_points.clone(),
+        warning: None,
+        error: None,
+    }
+}
+
+fn summary_status(
+    status: &str,
+    tool_id: Option<String>,
+    session_id: Option<String>,
+    message: Option<String>,
+) -> SessionSummaryResult {
+    let source_type = session_id
+        .as_deref()
+        .map(summary_source_type)
+        .map(|s| s.to_string());
+    SessionSummaryResult {
+        status: status.to_string(),
+        generating: false,
+        tool_id,
+        session_id,
+        source_type,
+        input_mtime_ms: None,
+        summary_updated_ms: None,
+        markdown: None,
+        task_overview: None,
+        short_summary: None,
+        bullet_points: Vec::new(),
+        warning: None,
+        error: message,
+    }
+}
+
+fn generating_summary(
+    tool_id: &str,
+    session_id: &str,
+    previous: Option<&SessionSummary>,
+    input_mtime: Option<SystemTime>,
+) -> SessionSummaryResult {
+    if let Some(prev) = previous {
+        let mut out = ok_summary(tool_id, session_id, prev, input_mtime);
+        out.generating = true;
+        return out;
+    }
+
+    SessionSummaryResult {
+        status: "ok".to_string(),
+        generating: true,
+        tool_id: Some(tool_id.to_string()),
+        session_id: Some(session_id.to_string()),
+        source_type: Some(summary_source_type(session_id).to_string()),
+        input_mtime_ms: input_mtime.map(system_time_millis_u64).filter(|ms| *ms > 0),
+        summary_updated_ms: None,
+        markdown: None,
+        task_overview: None,
+        short_summary: None,
+        bullet_points: Vec::new(),
+        warning: None,
+        error: None,
+    }
+}
+
+fn session_parser_for_tool(tool_id: &str) -> Option<Box<dyn SessionParser>> {
+    let agent_type = AiAgentType::from_tool_id(tool_id)?;
+    match agent_type {
+        AiAgentType::ClaudeCode => {
+            ClaudeSessionParser::with_default_home().map(|p| Box::new(p) as Box<dyn SessionParser>)
+        }
+        AiAgentType::CodexCli => {
+            CodexSessionParser::with_default_home().map(|p| Box::new(p) as Box<dyn SessionParser>)
+        }
+        AiAgentType::GeminiCli => {
+            GeminiSessionParser::with_default_home().map(|p| Box::new(p) as Box<dyn SessionParser>)
+        }
+        AiAgentType::OpenCode => OpenCodeSessionParser::with_default_home()
+            .map(|p| Box::new(p) as Box<dyn SessionParser>),
+    }
+}
+
+fn tool_id_for_agent(agent_id: &str) -> String {
+    match agent_id {
+        "claude" => "claude-code".to_string(),
+        "codex" => "codex-cli".to_string(),
+        "gemini" => "gemini-cli".to_string(),
+        "opencode" => "opencode".to_string(),
+        _ => agent_id.to_string(),
+    }
+}
+
+fn pane_session_id(pane_id: &str) -> String {
+    format!("pane:{pane_id}")
+}
+
+fn system_time_millis(time: SystemTime) -> u128 {
+    time.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+#[derive(Debug, Clone)]
+struct SessionSummaryJob {
+    project_path: String,
+    repo_key: String,
+    branch: String,
+    tool_id: String,
+    session_id: String,
+    settings: ResolvedAISettings,
+    mtime: SystemTime,
+}
+
+#[derive(Debug, Clone)]
+struct ScrollbackSummaryJob {
+    project_path: String,
+    repo_key: String,
+    branch: String,
+    pane_id: String,
+    tool_id: String,
+    settings: ResolvedAISettings,
+    mtime: SystemTime,
+}
+
+#[derive(Debug, Clone)]
+enum SummaryJob {
+    Session(SessionSummaryJob),
+    Scrollback(ScrollbackSummaryJob),
+}
+
+#[derive(Debug, Clone)]
+struct ScrollbackCandidate {
+    pane_id: String,
+    tool_id: String,
+    mtime: SystemTime,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionSummaryUpdatedPayload {
+    pub project_path: String,
+    pub branch: String,
+    pub result: SessionSummaryResult,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionSummaryRebuildProgressPayload {
+    pub project_path: String,
+    pub language: String,
+    pub total: usize,
+    pub completed: usize,
+    pub branch: Option<String>,
+    pub status: String, // "started" | "branch-ok" | "branch-skipped" | "branch-error" | "completed"
+    pub error: Option<String>,
+}
+
+const SESSION_SUMMARY_CACHE_VERSION: u32 = 1;
+
+static SESSION_SUMMARY_CACHE_PERSIST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn session_summary_cache_persist_lock() -> &'static Mutex<()> {
+    SESSION_SUMMARY_CACHE_PERSIST_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn normalize_summary_rebuild_language(preferred_language: Option<&str>) -> String {
+    match preferred_language
+        .unwrap_or("auto")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "ja" => "ja".to_string(),
+        "en" => "en".to_string(),
+        _ => "auto".to_string(),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PersistedSessionSummaryCache {
+    pub version: u32,
+    #[serde(default)]
+    pub branches: HashMap<String, PersistedBranchSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedBranchSummary {
+    pub tool_id: String,
+    pub session_id: String,
+    #[serde(default)]
+    pub language: String,
+    pub input_mtime_ms: u64,
+    pub last_updated_ms: u64,
+    pub markdown: Option<String>,
+    pub task_overview: Option<String>,
+    pub short_summary: Option<String>,
+    #[serde(default)]
+    pub bullet_points: Vec<String>,
+}
+
+fn session_summary_cache_toml_path(repo_root: &Path) -> PathBuf {
+    let sessions_toml = gwt_core::config::get_ts_session_toml_path(repo_root);
+    let file_name = sessions_toml
+        .file_name()
+        .map(|s| PathBuf::from(s.to_os_string()))
+        .unwrap_or_else(|| PathBuf::from("repo.toml"));
+
+    let gwt_dir = sessions_toml
+        .parent()
+        .and_then(|p| p.parent())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".gwt"));
+
+    gwt_dir.join("session-summaries").join(file_name)
+}
+
+fn load_persisted_session_summary_cache(repo_root: &Path) -> Option<PersistedSessionSummaryCache> {
+    let path = session_summary_cache_toml_path(repo_root);
+    let content = std::fs::read_to_string(path).ok()?;
+    let cache = toml::from_str::<PersistedSessionSummaryCache>(&content).ok()?;
+    if cache.version != SESSION_SUMMARY_CACHE_VERSION {
+        return None;
+    }
+    Some(cache)
+}
+
+fn ensure_persisted_session_summary_cache_loaded(
+    repo_root: &Path,
+    repo_key: &str,
+    state: &AppState,
+) {
+    let Ok(mut guard) = state.session_summary_cache.lock() else {
+        return;
+    };
+
+    if guard.contains_key(repo_key) {
+        return;
+    }
+
+    let Some(persisted) = load_persisted_session_summary_cache(repo_root) else {
+        return;
+    };
+
+    let mut cache = SessionSummaryCache::default();
+    for (branch, entry) in persisted.branches {
+        if entry.tool_id.trim().is_empty() || entry.session_id.trim().is_empty() {
+            continue;
+        }
+
+        let input_mtime = UNIX_EPOCH + Duration::from_millis(entry.input_mtime_ms);
+        let last_updated = if entry.last_updated_ms > 0 {
+            Some(UNIX_EPOCH + Duration::from_millis(entry.last_updated_ms))
+        } else {
+            None
+        };
+
+        let summary = SessionSummary {
+            task_overview: entry.task_overview,
+            short_summary: entry.short_summary,
+            bullet_points: entry.bullet_points,
+            markdown: entry.markdown,
+            last_updated,
+            ..Default::default()
+        };
+
+        let language = if entry.language.trim().is_empty() {
+            "en".to_string()
+        } else {
+            entry.language
+        };
+
+        cache.set(
+            branch,
+            entry.tool_id,
+            entry.session_id,
+            language,
+            summary,
+            input_mtime,
+        );
+    }
+
+    guard.insert(repo_key.to_string(), cache);
+}
+
+fn persist_session_summary_cache_entry(
+    repo_root: &Path,
+    branch: &str,
+    tool_id: &str,
+    session_id: &str,
+    language: &str,
+    input_mtime: SystemTime,
+    summary: &SessionSummary,
+) {
+    // Multiple summary jobs can run concurrently; serialize file updates to avoid lost entries
+    // from a read-modify-write race.
+    let _guard = session_summary_cache_persist_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let path = session_summary_cache_toml_path(repo_root);
+    let mut persisted = load_persisted_session_summary_cache(repo_root).unwrap_or_else(|| {
+        PersistedSessionSummaryCache {
+            version: SESSION_SUMMARY_CACHE_VERSION,
+            branches: HashMap::new(),
+        }
+    });
+
+    let last_updated_ms = summary
+        .last_updated
+        .unwrap_or_else(SystemTime::now)
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let input_mtime_ms = input_mtime
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    persisted.branches.insert(
+        branch.to_string(),
+        PersistedBranchSummary {
+            tool_id: tool_id.to_string(),
+            session_id: session_id.to_string(),
+            language: language.to_string(),
+            input_mtime_ms,
+            last_updated_ms,
+            markdown: summary.markdown.clone(),
+            task_overview: summary.task_overview.clone(),
+            short_summary: summary.short_summary.clone(),
+            bullet_points: summary.bullet_points.clone(),
+        },
+    );
+
+    let Ok(toml_content) = toml::to_string_pretty(&persisted) else {
+        return;
+    };
+
+    let _ = gwt_core::config::write_atomic(&path, &toml_content);
+}
+
+fn scrollback_mtime_for_pane(pane_id: &str) -> Option<SystemTime> {
+    let path = ScrollbackFile::scrollback_path_for_pane(pane_id).ok()?;
+    let metadata = std::fs::metadata(&path).ok()?;
+    metadata.modified().ok()
+}
+
+fn collect_scrollback_candidates(
+    state: &AppState,
+    repo_path: &Path,
+    branch: &str,
+    fallback_tool_id: Option<&str>,
+) -> Vec<ScrollbackCandidate> {
+    let panes = match state.pane_manager.lock() {
+        Ok(manager) => manager
+            .panes()
+            .iter()
+            .map(|pane| {
+                (
+                    pane.pane_id().to_string(),
+                    pane.branch_name().to_string(),
+                    pane.status().clone(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        Err(_) => Vec::new(),
+    };
+
+    let launch_meta = state
+        .pane_launch_meta
+        .lock()
+        .ok()
+        .map(|m| m.clone())
+        .unwrap_or_default();
+
+    let mut out = Vec::new();
+    for (pane_id, pane_branch, status) in panes {
+        if pane_branch != branch {
+            continue;
+        }
+        if !matches!(status, PaneStatus::Running) {
+            continue;
+        }
+
+        let mut tool_id = fallback_tool_id.unwrap_or("").to_string();
+        let mut include = true;
+        if let Some(meta) = launch_meta.get(&pane_id) {
+            if meta.repo_path.as_path() != repo_path {
+                include = false;
+            } else {
+                tool_id = tool_id_for_agent(&meta.agent_id);
+            }
+        }
+        if !include {
+            continue;
+        }
+        if tool_id.trim().is_empty() {
+            tool_id = "unknown".to_string();
+        }
+
+        let Some(mtime) = scrollback_mtime_for_pane(&pane_id) else {
+            continue;
+        };
+
+        out.push(ScrollbackCandidate {
+            pane_id,
+            tool_id,
+            mtime,
+        });
+    }
+
+    out
+}
+
+fn select_latest_scrollback_candidate(
+    candidates: Vec<ScrollbackCandidate>,
+) -> Option<ScrollbackCandidate> {
+    candidates
+        .into_iter()
+        .max_by_key(|c| system_time_millis(c.mtime))
+}
+
+fn latest_scrollback_candidate_for_branch(
+    state: &AppState,
+    repo_path: &Path,
+    branch: &str,
+    fallback_tool_id: Option<&str>,
+) -> Option<ScrollbackCandidate> {
+    let candidates = collect_scrollback_candidates(state, repo_path, branch, fallback_tool_id);
+    select_latest_scrollback_candidate(candidates)
+}
+
+fn is_latest_scrollback_candidate(
+    state: &AppState,
+    repo_path: &Path,
+    branch: &str,
+    pane_id: &str,
+) -> bool {
+    let Some(candidate) = latest_scrollback_candidate_for_branch(state, repo_path, branch, None)
+    else {
+        return false;
+    };
+    candidate.pane_id == pane_id
+}
+
+fn scrollback_summary_immediate(
+    project_path: &str,
+    repo_key: &str,
+    branch: &str,
+    candidate: ScrollbackCandidate,
+    settings: ResolvedAISettings,
+    state: &AppState,
+) -> (SessionSummaryResult, Option<ScrollbackSummaryJob>) {
+    let pane_session = pane_session_id(&candidate.pane_id);
+    let language = settings.language.clone();
+
+    let (cached_ok, previous_any) = {
+        let cache_guard = match state.session_summary_cache.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                return (
+                    summary_status(
+                        "error",
+                        Some(candidate.tool_id),
+                        Some(pane_session),
+                        Some("Session summary cache lock poisoned".to_string()),
+                    ),
+                    None,
+                )
+            }
+        };
+        let cache = cache_guard.get(repo_key);
+        let cached_ok = cache.and_then(|c| {
+            c.get(branch)
+                .cloned()
+                .filter(|_| !c.is_stale(branch, &pane_session, &language, candidate.mtime))
+        });
+        let previous_any = cache.and_then(|c| c.get(branch).cloned());
+        (cached_ok, previous_any)
+    };
+
+    if let Some(summary) = cached_ok.as_ref() {
+        return (
+            ok_summary(
+                &candidate.tool_id,
+                &pane_session,
+                summary,
+                Some(candidate.mtime),
+            ),
+            None,
+        );
+    }
+
+    let immediate = generating_summary(
+        &candidate.tool_id,
+        &pane_session,
+        previous_any.as_ref(),
+        Some(candidate.mtime),
+    );
+    let job = ScrollbackSummaryJob {
+        project_path: project_path.to_string(),
+        repo_key: repo_key.to_string(),
+        branch: branch.to_string(),
+        pane_id: candidate.pane_id,
+        tool_id: candidate.tool_id,
+        settings,
+        mtime: candidate.mtime,
+    };
+
+    (immediate, Some(job))
+}
+
+fn get_branch_session_summary_immediate(
+    project_path: &str,
+    branch: &str,
+    cached_only: bool,
+    state: &AppState,
+) -> Result<(SessionSummaryResult, Option<SummaryJob>), String> {
+    let project_root = Path::new(project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_key = repo_path.to_string_lossy().to_string();
+
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return Err("Branch is required".to_string());
+    }
+
+    ensure_persisted_session_summary_cache_loaded(&repo_path, &repo_key, state);
+
+    if cached_only {
+        let cache_guard = state
+            .session_summary_cache
+            .lock()
+            .map_err(|_| "Session summary cache lock poisoned".to_string())?;
+        let Some(cache) = cache_guard.get(&repo_key) else {
+            return Ok((summary_status("no-session", None, None, None), None));
+        };
+        let Some(summary) = cache.get(branch) else {
+            return Ok((summary_status("no-session", None, None, None), None));
+        };
+        let Some(tool_id) = cache.tool_id(branch) else {
+            return Ok((summary_status("no-session", None, None, None), None));
+        };
+        let Some(session_id) = cache.session_id(branch) else {
+            return Ok((summary_status("no-session", None, None, None), None));
+        };
+
+        return Ok((
+            ok_summary(tool_id, session_id, summary, cache.input_mtime(branch)),
+            None,
+        ));
+    }
+
+    let entries = gwt_core::config::get_branch_tool_history(&repo_path, branch);
+    let entry = entries.first();
+
+    let tool_id = entry.map(|e| e.tool_id.trim()).unwrap_or("").to_string();
+    let session_id = entry
+        .and_then(|e| e.session_id.as_deref())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    if tool_id.is_empty() || session_id.is_empty() {
+        let candidate = latest_scrollback_candidate_for_branch(
+            state,
+            &repo_path,
+            branch,
+            if tool_id.is_empty() {
+                None
+            } else {
+                Some(tool_id.as_str())
+            },
+        );
+        let Some(candidate) = candidate else {
+            return Ok((
+                summary_status(
+                    "no-session",
+                    if tool_id.is_empty() {
+                        None
+                    } else {
+                        Some(tool_id)
+                    },
+                    None,
+                    None,
+                ),
+                None,
+            ));
+        };
+
+        let profiles = ProfilesConfig::load().map_err(|e| e.to_string())?;
+        let ai = profiles.resolve_active_ai_settings();
+
+        if !ai.ai_enabled {
+            return Ok((
+                summary_status("ai-not-configured", Some(candidate.tool_id), None, None),
+                None,
+            ));
+        }
+        if !ai.summary_enabled {
+            return Ok((
+                summary_status("disabled", Some(candidate.tool_id), None, None),
+                None,
+            ));
+        }
+
+        let settings = ai
+            .resolved
+            .ok_or_else(|| "AI settings are not configured".to_string())?;
+
+        let (immediate, job) = scrollback_summary_immediate(
+            project_path,
+            &repo_key,
+            branch,
+            candidate,
+            settings,
+            state,
+        );
+        let job = job.map(SummaryJob::Scrollback);
+        return Ok((immediate, job));
+    }
+
+    let profiles = ProfilesConfig::load().map_err(|e| e.to_string())?;
+    let ai = profiles.resolve_active_ai_settings();
+
+    if !ai.ai_enabled {
+        return Ok((
+            summary_status("ai-not-configured", Some(tool_id), Some(session_id), None),
+            None,
+        ));
+    }
+    if !ai.summary_enabled {
+        return Ok((
+            summary_status("disabled", Some(tool_id), Some(session_id), None),
+            None,
+        ));
+    }
+
+    let settings = ai
+        .resolved
+        .ok_or_else(|| "AI settings are not configured".to_string())?;
+    let parser = match session_parser_for_tool(&tool_id) {
+        Some(p) => p,
+        None => {
+            return Ok((
+                summary_status(
+                    "error",
+                    Some(tool_id),
+                    Some(session_id),
+                    Some("Unsupported agent session".to_string()),
+                ),
+                None,
+            ))
+        }
+    };
+
+    let path = parser.session_file_path(&session_id);
+    let metadata = match std::fs::metadata(&path) {
+        Ok(meta) => meta,
+        Err(err) => {
+            // If we already have a cached summary, keep showing it even if the session file
+            // is temporarily missing (best-effort UX).
+            let previous_any = {
+                let cache_guard = state
+                    .session_summary_cache
+                    .lock()
+                    .map_err(|_| "Session summary cache lock poisoned".to_string())?;
+                cache_guard
+                    .get(&repo_key)
+                    .and_then(|c| c.get(branch).cloned())
+            };
+
+            if let Some(prev) = previous_any.as_ref() {
+                let mut out = ok_summary(&tool_id, &session_id, prev, None);
+                out.warning = Some(format!(
+                    "Failed to read session file; keeping previous: {err}"
+                ));
+                return Ok((out, None));
+            }
+
+            let missing = err.kind() == std::io::ErrorKind::NotFound;
+            return Ok((
+                summary_status(
+                    if missing { "no-session" } else { "error" },
+                    Some(tool_id),
+                    Some(session_id),
+                    Some(err.to_string()),
+                ),
+                None,
+            ));
+        }
+    };
+    let mtime = metadata.modified().unwrap_or_else(|_| SystemTime::now());
+    let language = settings.language.clone();
+
+    // Cache lookup (best-effort). Do not hold the mutex while doing network calls.
+    let (cached_ok, previous_any) = {
+        let cache_guard = state
+            .session_summary_cache
+            .lock()
+            .map_err(|_| "Session summary cache lock poisoned".to_string())?;
+        let cache = cache_guard.get(&repo_key);
+        let cached_ok = cache.and_then(|c| {
+            c.get(branch)
+                .cloned()
+                .filter(|_| !c.is_stale(branch, &session_id, &language, mtime))
+        });
+        let previous_any = cache.and_then(|c| c.get(branch).cloned());
+        (cached_ok, previous_any)
+    };
+
+    if let Some(summary) = cached_ok.as_ref() {
+        return Ok((
+            ok_summary(&tool_id, &session_id, summary, Some(mtime)),
+            None,
+        ));
+    }
+
+    let immediate = generating_summary(&tool_id, &session_id, previous_any.as_ref(), Some(mtime));
+    let job = SessionSummaryJob {
+        project_path: project_path.to_string(),
+        repo_key,
+        branch: branch.to_string(),
+        tool_id,
+        session_id,
+        settings,
+        mtime,
+    };
+
+    Ok((immediate, Some(SummaryJob::Session(job))))
+}
+
+pub(crate) fn prewarm_missing_worktree_summaries(
+    project_path: String,
+    branches: Vec<String>,
+    app_handle: AppHandle,
+) {
+    if branches.is_empty() {
+        return;
+    }
+
+    let state = app_handle.state::<AppState>();
+    let mut seen = HashSet::new();
+
+    for branch in branches {
+        let branch = branch.trim().to_string();
+        if branch.is_empty() || !seen.insert(branch.clone()) {
+            continue;
+        }
+
+        let Ok((_, maybe_job)) =
+            get_branch_session_summary_immediate(&project_path, &branch, false, &state)
+        else {
+            continue;
+        };
+
+        match maybe_job {
+            Some(SummaryJob::Session(job)) => {
+                start_session_summary_job(job, &state, app_handle.clone())
+            }
+            Some(SummaryJob::Scrollback(job)) => {
+                start_scrollback_summary_job(job, &state, app_handle.clone())
+            }
+            None => {}
+        }
+    }
+}
+
+fn collect_rebuild_target_branches(repo_path: &Path) -> Vec<String> {
+    let mut names: HashSet<String> = HashSet::new();
+
+    if let Ok(branches) = Branch::list(repo_path) {
+        for branch in branches {
+            let name = branch.name.trim();
+            if !name.is_empty() {
+                names.insert(name.to_string());
+            }
+        }
+    }
+
+    for (branch, _) in gwt_core::config::get_last_tool_usage_map(repo_path) {
+        let name = branch.trim();
+        if !name.is_empty() {
+            names.insert(name.to_string());
+        }
+    }
+
+    let mut out = names.into_iter().collect::<Vec<_>>();
+    out.sort_unstable();
+    out
+}
+
+fn emit_rebuild_progress(app_handle: &AppHandle, payload: &SessionSummaryRebuildProgressPayload) {
+    let _ = app_handle.emit("session-summary-rebuild-progress", payload);
+}
+
+fn emit_session_summary_updated(
+    app_handle: &AppHandle,
+    project_path: &str,
+    branch: &str,
+    result: &SessionSummaryResult,
+) {
+    let payload = SessionSummaryUpdatedPayload {
+        project_path: project_path.to_string(),
+        branch: branch.to_string(),
+        result: result.clone(),
+    };
+    let _ = app_handle.emit("session-summary-updated", &payload);
+}
+
+fn session_summary_inflight_key(job: &SessionSummaryJob) -> String {
+    format!(
+        "{}::{}::{}::{}::{}",
+        job.repo_key, job.branch, job.tool_id, job.session_id, job.settings.language
+    )
+}
+
+fn scrollback_summary_inflight_key(job: &ScrollbackSummaryJob) -> String {
+    format!(
+        "scrollback::{}::{}::{}::{}",
+        job.repo_key, job.branch, job.pane_id, job.settings.language
+    )
+}
+
+fn try_acquire_session_summary_inflight(state: &AppState, inflight_key: &str) -> bool {
+    match state.session_summary_inflight.lock() {
+        Ok(mut set) => {
+            if set.contains(inflight_key) {
+                false
+            } else {
+                set.insert(inflight_key.to_string());
+                true
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+fn release_session_summary_inflight(state: &AppState, inflight_key: &str) {
+    if let Ok(mut set) = state.session_summary_inflight.lock() {
+        set.remove(inflight_key);
+    }
+}
+
+fn try_acquire_session_summary_rebuild_inflight(state: &AppState, repo_key: &str) -> bool {
+    match state.session_summary_rebuild_inflight.lock() {
+        Ok(mut set) => {
+            if set.contains(repo_key) {
+                false
+            } else {
+                set.insert(repo_key.to_string());
+                true
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+fn release_session_summary_rebuild_inflight(state: &AppState, repo_key: &str) {
+    if let Ok(mut set) = state.session_summary_rebuild_inflight.lock() {
+        set.remove(repo_key);
+    }
+}
+
+fn run_summary_job_for_rebuild(
+    job: SummaryJob,
+    state: &AppState,
+    app_handle: &AppHandle,
+    project_path: &str,
+    branch: &str,
+    fallback_result: &SessionSummaryResult,
+) -> SessionSummaryResult {
+    match job {
+        SummaryJob::Session(session_job) => {
+            let inflight_key = session_summary_inflight_key(&session_job);
+            if !try_acquire_session_summary_inflight(state, &inflight_key) {
+                return fallback_result.clone();
+            }
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                generate_and_cache_session_summary(&session_job, state)
+            }))
+            .unwrap_or_else(|_| {
+                summary_status(
+                    "error",
+                    Some(session_job.tool_id.clone()),
+                    Some(session_job.session_id.clone()),
+                    Some("Internal error".to_string()),
+                )
+            });
+            release_session_summary_inflight(state, &inflight_key);
+
+            if is_latest_branch_session(
+                &session_job.repo_key,
+                &session_job.branch,
+                &session_job.tool_id,
+                &session_job.session_id,
+            ) {
+                emit_session_summary_updated(app_handle, project_path, branch, &result);
+            }
+            result
+        }
+        SummaryJob::Scrollback(scrollback_job) => {
+            let inflight_key = scrollback_summary_inflight_key(&scrollback_job);
+            if !try_acquire_session_summary_inflight(state, &inflight_key) {
+                return fallback_result.clone();
+            }
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                generate_and_cache_scrollback_summary(&scrollback_job, state)
+            }))
+            .unwrap_or_else(|_| {
+                summary_status(
+                    "error",
+                    Some(scrollback_job.tool_id.clone()),
+                    Some(pane_session_id(&scrollback_job.pane_id)),
+                    Some("Internal error".to_string()),
+                )
+            });
+            release_session_summary_inflight(state, &inflight_key);
+
+            if is_latest_scrollback_candidate(
+                state,
+                Path::new(&scrollback_job.repo_key),
+                &scrollback_job.branch,
+                &scrollback_job.pane_id,
+            ) {
+                emit_session_summary_updated(app_handle, project_path, branch, &result);
+            }
+            result
+        }
+    }
+}
+
+fn is_latest_branch_session(repo_key: &str, branch: &str, tool_id: &str, session_id: &str) -> bool {
+    let entries = gwt_core::config::get_branch_tool_history(Path::new(repo_key), branch);
+    let Some(entry) = entries.first() else {
+        // If we can't determine the current session, treat as latest to avoid breaking updates.
+        return true;
+    };
+
+    let current_tool_id = entry.tool_id.trim();
+    let current_session_id = entry.session_id.as_deref().unwrap_or("").trim();
+    if current_tool_id.is_empty() || current_session_id.is_empty() {
+        return true;
+    }
+
+    current_tool_id == tool_id && current_session_id == session_id
+}
+
+fn start_session_summary_job(job: SessionSummaryJob, state: &AppState, app_handle: AppHandle) {
+    let inflight_key = format!(
+        "{}::{}::{}::{}::{}",
+        job.repo_key, job.branch, job.tool_id, job.session_id, job.settings.language
+    );
+    let should_spawn = match state.session_summary_inflight.lock() {
+        Ok(mut set) => {
+            if set.contains(&inflight_key) {
+                false
+            } else {
+                set.insert(inflight_key.clone());
+                true
+            }
+        }
+        Err(_) => false,
+    };
+
+    if !should_spawn {
+        return;
+    }
+
+    let app_handle_clone = app_handle.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle_clone.state::<AppState>();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            generate_and_cache_session_summary(&job, &state)
+        }))
+        .unwrap_or_else(|_| {
+            summary_status(
+                "error",
+                Some(job.tool_id.clone()),
+                Some(job.session_id.clone()),
+                Some("Internal error".to_string()),
+            )
+        });
+
+        if let Ok(mut set) = state.session_summary_inflight.lock() {
+            set.remove(&inflight_key);
+        }
+
+        // If the branch has moved to a different latest session while this job was running,
+        // skip emitting an update event to avoid clobbering the UI with stale data.
+        if !is_latest_branch_session(&job.repo_key, &job.branch, &job.tool_id, &job.session_id) {
+            return;
+        }
+
+        let payload = SessionSummaryUpdatedPayload {
+            project_path: job.project_path.clone(),
+            branch: job.branch.clone(),
+            result,
+        };
+        let _ = app_handle_clone.emit("session-summary-updated", &payload);
+    });
+}
+
+fn start_scrollback_summary_job(
+    job: ScrollbackSummaryJob,
+    state: &AppState,
+    app_handle: AppHandle,
+) {
+    let inflight_key = format!(
+        "scrollback::{}::{}::{}::{}",
+        job.repo_key, job.branch, job.pane_id, job.settings.language
+    );
+    let should_spawn = match state.session_summary_inflight.lock() {
+        Ok(mut set) => {
+            if set.contains(&inflight_key) {
+                false
+            } else {
+                set.insert(inflight_key.clone());
+                true
+            }
+        }
+        Err(_) => false,
+    };
+
+    if !should_spawn {
+        return;
+    }
+
+    let app_handle_clone = app_handle.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle_clone.state::<AppState>();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            generate_and_cache_scrollback_summary(&job, &state)
+        }))
+        .unwrap_or_else(|_| {
+            summary_status(
+                "error",
+                Some(job.tool_id.clone()),
+                Some(pane_session_id(&job.pane_id)),
+                Some("Internal error".to_string()),
+            )
+        });
+
+        if let Ok(mut set) = state.session_summary_inflight.lock() {
+            set.remove(&inflight_key);
+        }
+
+        if !is_latest_scrollback_candidate(
+            &state,
+            Path::new(&job.repo_key),
+            &job.branch,
+            &job.pane_id,
+        ) {
+            return;
+        }
+
+        let payload = SessionSummaryUpdatedPayload {
+            project_path: job.project_path.clone(),
+            branch: job.branch.clone(),
+            result,
+        };
+        let _ = app_handle_clone.emit("session-summary-updated", &payload);
+    });
+}
+
+fn generate_and_cache_session_summary(
+    job: &SessionSummaryJob,
+    state: &AppState,
+) -> SessionSummaryResult {
+    ensure_persisted_session_summary_cache_loaded(Path::new(&job.repo_key), &job.repo_key, state);
+
+    // Cache lookup for fallback (best-effort).
+    let previous_any = state.session_summary_cache.lock().ok().and_then(|guard| {
+        guard
+            .get(&job.repo_key)
+            .and_then(|c| c.get(&job.branch).cloned())
+    });
+
+    let parser = match session_parser_for_tool(&job.tool_id) {
+        Some(p) => p,
+        None => {
+            if let Some(prev) = previous_any.as_ref() {
+                let mut out = ok_summary(&job.tool_id, &job.session_id, prev, Some(job.mtime));
+                out.warning = Some("Unsupported agent session; keeping previous".to_string());
+                return out;
+            }
+            return summary_status(
+                "error",
+                Some(job.tool_id.clone()),
+                Some(job.session_id.clone()),
+                Some("Unsupported agent session".to_string()),
+            );
+        }
+    };
+
+    let parsed = match parser.parse(&job.session_id) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            if let Some(prev) = previous_any.as_ref() {
+                let mut out = ok_summary(&job.tool_id, &job.session_id, prev, Some(job.mtime));
+                out.warning = Some(format!("Failed to parse session; keeping previous: {err}"));
+                return out;
+            }
+            let missing = matches!(err, SessionParseError::FileNotFound(_));
+            return summary_status(
+                if missing { "no-session" } else { "error" },
+                Some(job.tool_id.clone()),
+                Some(job.session_id.clone()),
+                Some(err.to_string()),
+            );
+        }
+    };
+
+    let client = match AIClient::new(job.settings.clone()) {
+        Ok(client) => client,
+        Err(err) => {
+            if let Some(prev) = previous_any.as_ref() {
+                let mut out = ok_summary(&job.tool_id, &job.session_id, prev, Some(job.mtime));
+                out.warning = Some(format!("Failed to initialize AI; keeping previous: {err}"));
+                return out;
+            }
+            return summary_status(
+                "error",
+                Some(job.tool_id.clone()),
+                Some(job.session_id.clone()),
+                Some(err.to_string()),
+            );
+        }
+    };
+
+    match summarize_session(&client, &parsed, &job.branch, &job.settings.language) {
+        Ok(summary) => {
+            // Avoid overwriting the cache if the branch's latest session has changed
+            // since the job started (e.g., a new session was recorded).
+            if is_latest_branch_session(&job.repo_key, &job.branch, &job.tool_id, &job.session_id) {
+                if let Ok(mut cache_guard) = state.session_summary_cache.lock() {
+                    cache_guard.entry(job.repo_key.clone()).or_default().set(
+                        job.branch.clone(),
+                        job.tool_id.clone(),
+                        job.session_id.clone(),
+                        job.settings.language.clone(),
+                        summary.clone(),
+                        job.mtime,
+                    );
+                }
+                persist_session_summary_cache_entry(
+                    Path::new(&job.repo_key),
+                    &job.branch,
+                    &job.tool_id,
+                    &job.session_id,
+                    &job.settings.language,
+                    job.mtime,
+                    &summary,
+                );
+            }
+            ok_summary(&job.tool_id, &job.session_id, &summary, Some(job.mtime))
+        }
+        Err(AIError::IncompleteSummary) => {
+            if let Some(prev) = previous_any.as_ref() {
+                let mut out = ok_summary(&job.tool_id, &job.session_id, prev, Some(job.mtime));
+                out.warning = Some("Incomplete summary; keeping previous".to_string());
+                out
+            } else {
+                summary_status(
+                    "error",
+                    Some(job.tool_id.clone()),
+                    Some(job.session_id.clone()),
+                    Some(format_error_for_display(&AIError::IncompleteSummary)),
+                )
+            }
+        }
+        Err(other) => {
+            if let Some(prev) = previous_any.as_ref() {
+                let mut out = ok_summary(&job.tool_id, &job.session_id, prev, Some(job.mtime));
+                out.warning = Some(format!(
+                    "Update failed; keeping previous: {}",
+                    format_error_for_display(&other)
+                ));
+                out
+            } else {
+                summary_status(
+                    "error",
+                    Some(job.tool_id.clone()),
+                    Some(job.session_id.clone()),
+                    Some(format_error_for_display(&other)),
+                )
+            }
+        }
+    }
+}
+
+fn generate_and_cache_scrollback_summary(
+    job: &ScrollbackSummaryJob,
+    state: &AppState,
+) -> SessionSummaryResult {
+    ensure_persisted_session_summary_cache_loaded(Path::new(&job.repo_key), &job.repo_key, state);
+
+    let previous_any = state.session_summary_cache.lock().ok().and_then(|guard| {
+        guard
+            .get(&job.repo_key)
+            .and_then(|c| c.get(&job.branch).cloned())
+    });
+
+    let pane_session = pane_session_id(&job.pane_id);
+    let scrollback = match capture_scrollback_tail_from_state(state, &job.pane_id, 0) {
+        Ok(text) => text,
+        Err(err) => {
+            if let Some(prev) = previous_any.as_ref() {
+                let mut out = ok_summary(&job.tool_id, &pane_session, prev, Some(job.mtime));
+                out.warning = Some(format!(
+                    "Failed to read scrollback; keeping previous: {err}"
+                ));
+                return out;
+            }
+            return summary_status(
+                "error",
+                Some(job.tool_id.clone()),
+                Some(pane_session),
+                Some(err),
+            );
+        }
+    };
+
+    let client = match AIClient::new(job.settings.clone()) {
+        Ok(client) => client,
+        Err(err) => {
+            if let Some(prev) = previous_any.as_ref() {
+                let mut out = ok_summary(&job.tool_id, &pane_session, prev, Some(job.mtime));
+                out.warning = Some(format!("Failed to initialize AI; keeping previous: {err}"));
+                return out;
+            }
+            return summary_status(
+                "error",
+                Some(job.tool_id.clone()),
+                Some(pane_session),
+                Some(err.to_string()),
+            );
+        }
+    };
+
+    match summarize_scrollback(&client, &scrollback, &job.branch, &job.settings.language) {
+        Ok(summary) => {
+            if is_latest_scrollback_candidate(
+                state,
+                Path::new(&job.repo_key),
+                &job.branch,
+                &job.pane_id,
+            ) {
+                if let Ok(mut cache_guard) = state.session_summary_cache.lock() {
+                    cache_guard.entry(job.repo_key.clone()).or_default().set(
+                        job.branch.clone(),
+                        job.tool_id.clone(),
+                        pane_session.clone(),
+                        job.settings.language.clone(),
+                        summary.clone(),
+                        job.mtime,
+                    );
+                }
+                persist_session_summary_cache_entry(
+                    Path::new(&job.repo_key),
+                    &job.branch,
+                    &job.tool_id,
+                    &pane_session,
+                    &job.settings.language,
+                    job.mtime,
+                    &summary,
+                );
+            }
+            ok_summary(&job.tool_id, &pane_session, &summary, Some(job.mtime))
+        }
+        Err(AIError::IncompleteSummary) => {
+            if let Some(prev) = previous_any.as_ref() {
+                let mut out = ok_summary(&job.tool_id, &pane_session, prev, Some(job.mtime));
+                out.warning = Some("Incomplete summary; keeping previous".to_string());
+                out
+            } else {
+                summary_status(
+                    "error",
+                    Some(job.tool_id.clone()),
+                    Some(pane_session),
+                    Some(format_error_for_display(&AIError::IncompleteSummary)),
+                )
+            }
+        }
+        Err(other) => {
+            if let Some(prev) = previous_any.as_ref() {
+                let mut out = ok_summary(&job.tool_id, &pane_session, prev, Some(job.mtime));
+                out.warning = Some(format!(
+                    "Update failed; keeping previous: {}",
+                    format_error_for_display(&other)
+                ));
+                out
+            } else {
+                summary_status(
+                    "error",
+                    Some(job.tool_id.clone()),
+                    Some(pane_session),
+                    Some(format_error_for_display(&other)),
+                )
+            }
+        }
+    }
+}
+
+/// Return (and cache) an AI session summary for the selected branch.
+///
+/// - Uses the latest ToolSessionEntry for the branch (most recent tool usage).
+/// - Reads agent session file via the tool-specific session parser.
+/// - Summarizes using the active AI profile settings when enabled.
+/// - Never writes settings/history files as a side effect.
+#[tauri::command]
+pub fn get_branch_session_summary(
+    project_path: String,
+    branch: String,
+    cached_only: Option<bool>,
+    state: State<AppState>,
+    app_handle: AppHandle,
+) -> Result<SessionSummaryResult, String> {
+    let (result, job) = get_branch_session_summary_immediate(
+        &project_path,
+        &branch,
+        cached_only.unwrap_or(false),
+        &state,
+    )?;
+    if let Some(job) = job {
+        match job {
+            SummaryJob::Session(job) => start_session_summary_job(job, &state, app_handle),
+            SummaryJob::Scrollback(job) => start_scrollback_summary_job(job, &state, app_handle),
+        }
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn rebuild_all_branch_session_summaries(
+    project_path: String,
+    preferred_language: Option<String>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_key = repo_path.to_string_lossy().to_string();
+    let branches = collect_rebuild_target_branches(&repo_path);
+    let language = normalize_summary_rebuild_language(preferred_language.as_deref());
+    let state = app_handle.state::<AppState>();
+
+    if !try_acquire_session_summary_rebuild_inflight(&state, &repo_key) {
+        return Ok(());
+    }
+
+    let app_handle_clone = app_handle.clone();
+    let project_path_for_task = project_path.clone();
+    let repo_key_for_task = repo_key.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle_clone.state::<AppState>();
+        let total = branches.len();
+        let (completed, final_error) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                emit_rebuild_progress(
+                    &app_handle_clone,
+                    &SessionSummaryRebuildProgressPayload {
+                        project_path: project_path_for_task.clone(),
+                        language: language.clone(),
+                        total,
+                        completed: 0,
+                        branch: None,
+                        status: "started".to_string(),
+                        error: None,
+                    },
+                );
+
+                let mut completed = 0usize;
+                for branch in branches {
+                    let immediate = get_branch_session_summary_immediate(
+                        &project_path_for_task,
+                        &branch,
+                        false,
+                        &state,
+                    );
+
+                    let (status, error) = match immediate {
+                        Ok((immediate_result, maybe_job)) => {
+                            let result = match maybe_job {
+                                Some(mut job) => {
+                                    match &mut job {
+                                        SummaryJob::Session(job) => {
+                                            job.settings.language = language.clone();
+                                        }
+                                        SummaryJob::Scrollback(job) => {
+                                            job.settings.language = language.clone();
+                                        }
+                                    }
+                                    run_summary_job_for_rebuild(
+                                        job,
+                                        &state,
+                                        &app_handle_clone,
+                                        &project_path_for_task,
+                                        &branch,
+                                        &immediate_result,
+                                    )
+                                }
+                                None => immediate_result,
+                            };
+
+                            if result.status == "ok" {
+                                ("branch-ok".to_string(), None)
+                            } else {
+                                (
+                                    "branch-skipped".to_string(),
+                                    result.error.clone().or(result.warning.clone()),
+                                )
+                            }
+                        }
+                        Err(err) => ("branch-error".to_string(), Some(err)),
+                    };
+
+                    completed += 1;
+                    emit_rebuild_progress(
+                        &app_handle_clone,
+                        &SessionSummaryRebuildProgressPayload {
+                            project_path: project_path_for_task.clone(),
+                            language: language.clone(),
+                            total,
+                            completed,
+                            branch: Some(branch),
+                            status,
+                            error,
+                        },
+                    );
+                }
+
+                (completed, None::<String>)
+            }))
+            .unwrap_or_else(|_| (0, Some("Internal error".to_string())));
+
+        emit_rebuild_progress(
+            &app_handle_clone,
+            &SessionSummaryRebuildProgressPayload {
+                project_path: project_path_for_task,
+                language,
+                total,
+                completed,
+                branch: None,
+                status: "completed".to_string(),
+                error: final_error,
+            },
+        );
+        release_session_summary_rebuild_inflight(&state, &repo_key_for_task);
+    });
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::{TestEnvGuard, ENV_LOCK};
+    use std::fs;
+    use std::path::Path;
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    fn init_git_repo(path: &Path) {
+        let out = gwt_core::process::command("git")
+            .args(["init"])
+            .current_dir(path)
+            .output();
+        assert!(out.is_ok(), "git init failed to run");
+        assert!(
+            out.unwrap().status.success(),
+            "git init failed to create repo"
+        );
+    }
+
+    fn write_session_entry(repo_root: &Path, branch: &str, tool_id: &str, session_id: &str) {
+        let entry = ToolSessionEntry {
+            branch: branch.to_string(),
+            worktree_path: None,
+            tool_id: tool_id.to_string(),
+            tool_label: "Codex".to_string(),
+            session_id: Some(session_id.to_string()),
+            mode: None,
+            model: None,
+            reasoning_level: None,
+            skip_permissions: None,
+            tool_version: Some("latest".to_string()),
+            collaboration_modes: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
+            docker_container_name: None,
+            docker_compose_args: None,
+            timestamp: 1,
+        };
+
+        gwt_core::config::save_session_entry(repo_root, entry).expect("save session entry");
+    }
+
+    #[test]
+    fn parse_tasks_markdown_extracts_status_and_ids() {
+        let tasks = parse_tasks_markdown(
+            r#"
+# タスク
+- [ ] T001 [US1] implement api
+- [x] T002 [US2] add tests
+- [ ] no-id fallback task
+"#,
+        );
+        assert_eq!(tasks.len(), 3);
+        assert_eq!(tasks[0].id, "T001");
+        assert_eq!(tasks[0].base_status, "pending");
+        assert_eq!(tasks[1].id, "T002");
+        assert_eq!(tasks[1].base_status, "completed");
+        assert_eq!(tasks[2].id, "TASK-3");
+    }
+
+    #[test]
+    fn derive_worktree_paths_prefers_project_relative() {
+        let project_root = Path::new("/repo");
+        let repo_path = Path::new("/repo/bare.git");
+        let (rel, abs) =
+            derive_worktree_paths(Some("/repo/.worktrees/agent-auth"), project_root, repo_path);
+        assert_eq!(rel, ".worktrees/agent-auth");
+        assert_eq!(abs.as_deref(), Some("/repo/.worktrees/agent-auth"));
+    }
+
+    #[test]
+    fn task_status_rank_matches_spec_order() {
+        assert!(task_status_rank("running") < task_status_rank("pending"));
+        assert!(task_status_rank("pending") < task_status_rank("failed"));
+        assert!(task_status_rank("failed") < task_status_rank("completed"));
+    }
+
+    #[test]
+    fn dedupe_current_sub_agents_keeps_latest_per_tool_and_branch() {
+        let mk = |tool_id: &str, branch: &str, session_id: &str, timestamp: i64| ToolSessionEntry {
+            branch: branch.to_string(),
+            worktree_path: None,
+            tool_id: tool_id.to_string(),
+            tool_label: "Agent".to_string(),
+            session_id: Some(session_id.to_string()),
+            mode: None,
+            model: None,
+            reasoning_level: None,
+            skip_permissions: None,
+            tool_version: None,
+            collaboration_modes: None,
+            docker_service: None,
+            docker_force_host: None,
+            docker_recreate: None,
+            docker_build: None,
+            docker_keep: None,
+            docker_container_name: None,
+            docker_compose_args: None,
+            timestamp,
+        };
+
+        let out = dedupe_current_sub_agents(vec![
+            mk("codex-cli", "feature/a", "s-old", 10),
+            mk("codex-cli", "feature/a", "s-new", 20),
+            mk("claude-code", "feature/a", "s-claude", 15),
+            mk("codex-cli", "feature/b", "s-b", 18),
+        ]);
+
+        assert_eq!(out.len(), 3);
+        let ids: Vec<String> = out
+            .iter()
+            .map(|e| e.session_id.clone().unwrap_or_default())
+            .collect();
+        assert!(ids.contains(&"s-new".to_string()));
+        assert!(ids.contains(&"s-claude".to_string()));
+        assert!(ids.contains(&"s-b".to_string()));
+        assert!(!ids.contains(&"s-old".to_string()));
+    }
+
+    #[test]
+    fn session_summary_returns_no_session_when_history_missing() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(home.path());
+
+        let repo = TempDir::new().unwrap();
+        init_git_repo(repo.path());
+
+        let state = AppState::new();
+        let (out, job) = get_branch_session_summary_immediate(
+            repo.path().to_str().unwrap(),
+            "main",
+            false,
+            &state,
+        )
+        .unwrap();
+        assert_eq!(out.status, "no-session");
+        assert!(!out.generating);
+        assert!(job.is_none());
+    }
+
+    #[test]
+    fn session_summary_returns_ai_not_configured_when_profiles_missing() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(home.path());
+
+        let repo = TempDir::new().unwrap();
+        init_git_repo(repo.path());
+        write_session_entry(repo.path(), "main", "codex-cli", "session-1");
+
+        let state = AppState::new();
+        let (out, job) = get_branch_session_summary_immediate(
+            repo.path().to_str().unwrap(),
+            "main",
+            false,
+            &state,
+        )
+        .unwrap();
+        assert_eq!(out.status, "ai-not-configured");
+        assert!(!out.generating);
+        assert!(job.is_none());
+        assert_eq!(out.tool_id.as_deref(), Some("codex-cli"));
+        assert_eq!(out.session_id.as_deref(), Some("session-1"));
+    }
+
+    #[test]
+    fn session_summary_returns_disabled_when_summary_disabled() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(home.path());
+
+        let mut config = ProfilesConfig::default();
+        config.default_ai = Some(gwt_core::config::AISettings {
+            endpoint: "https://api.openai.com/v1".to_string(),
+            api_key: "".to_string(),
+            model: "gpt-5.2-codex".to_string(),
+            language: "en".to_string(),
+            summary_enabled: false,
+        });
+        config.save().unwrap();
+
+        let repo = TempDir::new().unwrap();
+        init_git_repo(repo.path());
+        write_session_entry(repo.path(), "main", "codex-cli", "session-1");
+
+        let state = AppState::new();
+        let (out, job) = get_branch_session_summary_immediate(
+            repo.path().to_str().unwrap(),
+            "main",
+            false,
+            &state,
+        )
+        .unwrap();
+        assert_eq!(out.status, "disabled");
+        assert!(!out.generating);
+        assert!(job.is_none());
+        assert_eq!(out.tool_id.as_deref(), Some("codex-cli"));
+        assert_eq!(out.session_id.as_deref(), Some("session-1"));
+    }
+
+    #[test]
+    fn session_summary_returns_generating_when_cache_miss_and_session_file_present() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(home.path());
+
+        let mut config = ProfilesConfig::default();
+        config.default_ai = Some(gwt_core::config::AISettings {
+            endpoint: "https://api.openai.com/v1".to_string(),
+            api_key: "".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            language: "en".to_string(),
+            summary_enabled: true,
+        });
+        config.save().unwrap();
+
+        let repo = TempDir::new().unwrap();
+        init_git_repo(repo.path());
+        write_session_entry(repo.path(), "main", "codex-cli", "sess-123");
+
+        let sessions_dir = home.path().join(".codex").join("sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        let session_path = sessions_dir.join("sess-123.jsonl");
+        fs::write(
+            &session_path,
+            r#"{"payload":{"id":"sess-123","cwd":"/repo/wt"}}"#,
+        )
+        .unwrap();
+
+        let state = AppState::new();
+        let (out, job) = get_branch_session_summary_immediate(
+            repo.path().to_str().unwrap(),
+            "main",
+            false,
+            &state,
+        )
+        .unwrap();
+
+        assert_eq!(out.status, "ok");
+        assert!(out.generating);
+        assert_eq!(out.tool_id.as_deref(), Some("codex-cli"));
+        assert_eq!(out.session_id.as_deref(), Some("sess-123"));
+        assert!(matches!(job, Some(SummaryJob::Session(_))));
+    }
+
+    #[test]
+    fn session_summary_returns_cached_immediately_when_fresh() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(home.path());
+
+        let mut config = ProfilesConfig::default();
+        config.default_ai = Some(gwt_core::config::AISettings {
+            endpoint: "https://api.openai.com/v1".to_string(),
+            api_key: "".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            language: "en".to_string(),
+            summary_enabled: true,
+        });
+        config.save().unwrap();
+
+        let repo = TempDir::new().unwrap();
+        init_git_repo(repo.path());
+        write_session_entry(repo.path(), "main", "codex-cli", "sess-999");
+
+        let sessions_dir = home.path().join(".codex").join("sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        let session_path = sessions_dir.join("sess-999.jsonl");
+        fs::write(
+            &session_path,
+            r#"{"payload":{"id":"sess-999","cwd":"/repo/wt"}}"#,
+        )
+        .unwrap();
+        let mtime = fs::metadata(&session_path)
+            .unwrap()
+            .modified()
+            .unwrap_or_else(|_| SystemTime::now());
+
+        let summary = SessionSummary {
+            markdown: Some(
+                "## Purpose\nCached\n\n## Summary\nCached\n\n## Highlights\n- A\n".to_string(),
+            ),
+            ..Default::default()
+        };
+
+        let state = AppState::new();
+        {
+            let repo_key = repo.path().to_string_lossy().to_string();
+            let mut guard = state.session_summary_cache.lock().unwrap();
+            guard.entry(repo_key).or_default().set(
+                "main".to_string(),
+                "codex-cli".to_string(),
+                "sess-999".to_string(),
+                "en".to_string(),
+                summary,
+                mtime,
+            );
+        }
+
+        let (out, job) = get_branch_session_summary_immediate(
+            repo.path().to_str().unwrap(),
+            "main",
+            false,
+            &state,
+        )
+        .unwrap();
+        assert_eq!(out.status, "ok");
+        assert!(!out.generating);
+        assert!(job.is_none());
+        assert!(out.markdown.as_deref().unwrap_or("").contains("Cached"));
+    }
+
+    #[test]
+    fn select_latest_scrollback_candidate_picks_latest_mtime() {
+        let base = UNIX_EPOCH + Duration::from_secs(10);
+        let older = UNIX_EPOCH + Duration::from_secs(1);
+
+        let candidates = vec![
+            ScrollbackCandidate {
+                pane_id: "pane-1".to_string(),
+                tool_id: "codex-cli".to_string(),
+                mtime: older,
+            },
+            ScrollbackCandidate {
+                pane_id: "pane-2".to_string(),
+                tool_id: "codex-cli".to_string(),
+                mtime: base,
+            },
+        ];
+
+        let selected = select_latest_scrollback_candidate(candidates).unwrap();
+        assert_eq!(selected.pane_id, "pane-2");
+    }
+
+    #[test]
+    fn scrollback_immediate_returns_job_with_pane_session_id() {
+        let state = AppState::new();
+        let candidate = ScrollbackCandidate {
+            pane_id: "pane-xyz".to_string(),
+            tool_id: "codex-cli".to_string(),
+            mtime: UNIX_EPOCH + Duration::from_secs(5),
+        };
+        let settings = ResolvedAISettings {
+            endpoint: "https://api.openai.com/v1".to_string(),
+            api_key: "".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            language: "en".to_string(),
+        };
+
+        let (out, job) = scrollback_summary_immediate(
+            "/tmp/project",
+            "/tmp/repo",
+            "main",
+            candidate,
+            settings,
+            &state,
+        );
+
+        assert_eq!(out.status, "ok");
+        assert!(out.generating);
+        assert!(out.session_id.as_deref().unwrap_or("").starts_with("pane:"));
+        assert!(job.is_some());
+    }
+
+    fn summary_cache_path_for_repo(repo_root: &Path) -> std::path::PathBuf {
+        let sessions_toml = gwt_core::config::get_ts_session_toml_path(repo_root);
+        let file_name = sessions_toml.file_name().expect("session toml file name");
+        let gwt_dir = sessions_toml
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("~/.gwt dir");
+        gwt_dir.join("session-summaries").join(file_name)
+    }
+
+    #[test]
+    fn session_summary_cached_only_loads_persisted_cache_without_history() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(home.path());
+
+        let repo = TempDir::new().unwrap();
+        init_git_repo(repo.path());
+
+        let cache_path = summary_cache_path_for_repo(repo.path());
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(
+            &cache_path,
+            r###"
+version = 1
+
+[branches.main]
+tool_id = "codex-cli"
+session_id = "sess-1"
+input_mtime_ms = 1000
+last_updated_ms = 2000
+markdown = "## Purpose\nCached\n\n## Summary\nCached\n\n## Highlights\n- A\n"
+task_overview = "Cached"
+short_summary = "Cached"
+bullet_points = ["- A"]
+"###,
+        )
+        .unwrap();
+
+        let state = AppState::new();
+        let (out, job) = get_branch_session_summary_immediate(
+            repo.path().to_str().unwrap(),
+            "main",
+            true,
+            &state,
+        )
+        .unwrap();
+
+        assert_eq!(out.status, "ok");
+        assert!(!out.generating);
+        assert!(job.is_none());
+        assert_eq!(out.tool_id.as_deref(), Some("codex-cli"));
+        assert_eq!(out.session_id.as_deref(), Some("sess-1"));
+        assert!(out.markdown.as_deref().unwrap_or("").contains("Cached"));
+    }
+
+    #[test]
+    fn session_summary_cached_only_does_not_schedule_job_when_stale() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(home.path());
+
+        let repo = TempDir::new().unwrap();
+        init_git_repo(repo.path());
+        write_session_entry(repo.path(), "main", "codex-cli", "sess-123");
+
+        // Session file exists, which would normally trigger an update when stale.
+        let sessions_dir = home.path().join(".codex").join("sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        let session_path = sessions_dir.join("sess-123.jsonl");
+        fs::write(&session_path, r#"{"payload":{"id":"sess-123"}}"#).unwrap();
+
+        let cache_path = summary_cache_path_for_repo(repo.path());
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        fs::write(
+            &cache_path,
+            r###"
+version = 1
+
+[branches.main]
+tool_id = "codex-cli"
+session_id = "sess-123"
+input_mtime_ms = 1
+last_updated_ms = 2
+markdown = "## Purpose\nCachedOnly\n\n## Summary\nCachedOnly\n\n## Highlights\n- A\n"
+task_overview = "CachedOnly"
+short_summary = "CachedOnly"
+bullet_points = ["- A"]
+"###,
+        )
+        .unwrap();
+
+        let state = AppState::new();
+        let (out, job) = get_branch_session_summary_immediate(
+            repo.path().to_str().unwrap(),
+            "main",
+            true,
+            &state,
+        )
+        .unwrap();
+
+        assert_eq!(out.status, "ok");
+        assert!(!out.generating);
+        assert!(job.is_none());
+        assert!(out.markdown.as_deref().unwrap_or("").contains("CachedOnly"));
+    }
+
+    #[test]
+    fn scrollback_immediate_returns_cached_without_job_when_mtime_unchanged() {
+        let state = AppState::new();
+        let repo_key = "/tmp/repo";
+
+        let base = UNIX_EPOCH + Duration::from_secs(5);
+        let summary = SessionSummary {
+            markdown: Some(
+                "## Purpose\nCached\n\n## Summary\nCached\n\n## Highlights\n- A\n".to_string(),
+            ),
+            ..Default::default()
+        };
+
+        {
+            let mut cache_guard = state.session_summary_cache.lock().unwrap();
+            cache_guard.entry(repo_key.to_string()).or_default().set(
+                "main".to_string(),
+                "codex-cli".to_string(),
+                pane_session_id("pane-xyz"),
+                "en".to_string(),
+                summary,
+                base,
+            );
+        }
+
+        let candidate = ScrollbackCandidate {
+            pane_id: "pane-xyz".to_string(),
+            tool_id: "codex-cli".to_string(),
+            mtime: base,
+        };
+        let settings = ResolvedAISettings {
+            endpoint: "https://api.openai.com/v1".to_string(),
+            api_key: "".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            language: "en".to_string(),
+        };
+
+        let (out, job) = scrollback_summary_immediate(
+            "/tmp/project",
+            repo_key,
+            "main",
+            candidate,
+            settings,
+            &state,
+        );
+
+        assert_eq!(out.status, "ok");
+        assert!(!out.generating);
+        assert!(job.is_none());
+    }
+}
