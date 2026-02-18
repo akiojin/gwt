@@ -123,7 +123,7 @@ pub fn build_env_capture_command(shell_type: ShellType, shell_path: &str) -> (St
             "$env | to json".to_owned(),
         ],
         ShellType::Bash | ShellType::Zsh | ShellType::Fish | ShellType::Sh => {
-            vec!["-l".to_owned(), "-c".to_owned(), "env -0".to_owned()]
+            vec!["-li".to_owned(), "-c".to_owned(), "env -0".to_owned()]
         }
     };
     (prog, args)
@@ -344,21 +344,21 @@ mod tests {
     fn test_build_command_bash() {
         let (prog, args) = build_env_capture_command(ShellType::Bash, "/bin/bash");
         assert_eq!(prog, "/bin/bash");
-        assert_eq!(args, vec!["-l", "-c", "env -0"]);
+        assert_eq!(args, vec!["-li", "-c", "env -0"]);
     }
 
     #[test]
     fn test_build_command_zsh() {
         let (prog, args) = build_env_capture_command(ShellType::Zsh, "/bin/zsh");
         assert_eq!(prog, "/bin/zsh");
-        assert_eq!(args, vec!["-l", "-c", "env -0"]);
+        assert_eq!(args, vec!["-li", "-c", "env -0"]);
     }
 
     #[test]
     fn test_build_command_fish() {
         let (prog, args) = build_env_capture_command(ShellType::Fish, "/usr/bin/fish");
         assert_eq!(prog, "/usr/bin/fish");
-        assert_eq!(args, vec!["-l", "-c", "env -0"]);
+        assert_eq!(args, vec!["-li", "-c", "env -0"]);
     }
 
     #[test]
@@ -372,6 +372,6 @@ mod tests {
     fn test_build_command_sh_fallback() {
         let (prog, args) = build_env_capture_command(ShellType::Sh, "/bin/sh");
         assert_eq!(prog, "/bin/sh");
-        assert_eq!(args, vec!["-l", "-c", "env -0"]);
+        assert_eq!(args, vec!["-li", "-c", "env -0"]);
     }
 }

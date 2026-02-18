@@ -224,6 +224,8 @@ pub fn build_app(
                 // Native menubar (SPEC-4470704f)
                 if let Err(e) = crate::menu::rebuild_menu(_app.handle()) {
                     warn!(category = "menu", error = %e, "Failed to build initial menu");
+                } else {
+                    info!(category = "menu", "Initial native menu built");
                 }
 
                 // System tray (SPEC-dfb1611a FR-310〜FR-313)
@@ -416,6 +418,7 @@ pub fn build_app(
         })
         .on_menu_event(|app, event| {
             let id = event.id().as_ref();
+            info!(category = "menu", id = id, "Native menu event received");
 
             if id == crate::menu::MENU_ID_FILE_NEW_WINDOW {
                 open_new_window(app);
@@ -786,16 +789,39 @@ fn emit_menu_action(app: &tauri::AppHandle<tauri::Wry>, action: &str) {
         .get_webview_window(&label)
         .or_else(|| app.get_webview_window("main"))
     else {
+        warn!(
+            category = "menu",
+            action = action,
+            requested_label = %label,
+            "Skipping menu action emit because target window was not found"
+        );
         return;
     };
 
-    let _ = window.emit_to(
+    info!(
+        category = "menu",
+        action = action,
+        target_label = window.label(),
+        "Emitting menu action"
+    );
+
+    let emit_result = window.emit_to(
         EventTarget::webview_window(window.label()),
         crate::menu::MENU_ACTION_EVENT,
         crate::menu::MenuActionPayload {
             action: action.to_string(),
         },
     );
+
+    if let Err(err) = emit_result {
+        warn!(
+            category = "menu",
+            action = action,
+            target_label = window.label(),
+            error = %err,
+            "Failed to emit menu action"
+        );
+    }
 }
 
 fn open_new_window(app: &tauri::AppHandle<tauri::Wry>) {

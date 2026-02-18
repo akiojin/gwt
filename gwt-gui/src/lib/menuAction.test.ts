@@ -55,4 +55,13 @@ describe("setupMenuActionListener", () => {
 
     expect(unlisten).toBe(mockUnlisten);
   });
+
+  it("rethrows listener setup errors with context", async () => {
+    mockListen.mockRejectedValue(new Error("boom"));
+    const handler = vi.fn();
+
+    await expect(setupMenuActionListener(handler)).rejects.toThrow(
+      "menu-action listener init failed",
+    );
+  });
 });

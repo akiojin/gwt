@@ -864,6 +864,14 @@
     return String(err);
   }
 
+  function isTauriRuntimeAvailable(): boolean {
+    if (typeof window === "undefined") return false;
+    return (
+      typeof (window as Window & { __TAURI_INTERNALS__?: unknown })
+        .__TAURI_INTERNALS__ !== "undefined"
+    );
+  }
+
   function clampFontSize(size: number): number {
     return Math.max(8, Math.min(24, Math.round(size)));
   }
@@ -2169,6 +2177,10 @@
     let cancelled = false;
 
     (async () => {
+      if (!isTauriRuntimeAvailable()) {
+        return;
+      }
+
       try {
         const { setupMenuActionListener } = await import(
           "./lib/menuAction"
@@ -2181,8 +2193,11 @@
           return;
         }
         unlisten = unlistenFn;
-      } catch {
-        // Ignore: not available outside Tauri runtime.
+        console.info("menu listener ready");
+      } catch (err) {
+        if (cancelled) return;
+        console.error("Failed to initialize menu action listener:", err);
+        appError = `Menu integration failed: ${toErrorMessage(err)}`;
       }
     })();
 
