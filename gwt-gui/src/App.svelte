@@ -820,9 +820,10 @@
     };
   });
 
-  // Poll backend to detect lost launch-finished events (safety net).
-  // If the job disappears from the backend map but we never received a
-  // launch-finished event, the frontend would be stuck forever.
+  // Poll backend for launch job results.  Tauri events can be silently
+  // lost, so we periodically ask the backend directly.  When the job has
+  // finished, the stored result is applied exactly as a launch-finished
+  // event would be.
   $effect(() => {
     if (!launchProgressOpen || !launchJobId || launchStatus !== "running") return;
     const jobId = launchJobId;
@@ -830,16 +831,27 @@
       if (launchJobId !== jobId || launchStatus !== "running") return;
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        const alive = await invoke<boolean>("is_launch_job_alive", { jobId });
-        if (!alive && launchJobId === jobId && launchStatus === "running") {
+        const result = await invoke<{
+          running: boolean;
+          finished: LaunchFinishedPayload | null;
+        }>("poll_launch_job", { jobId });
+
+        if (result.running) return; // still going
+        if (launchJobId !== jobId || launchStatus !== "running") return;
+
+        if (result.finished) {
+          // Apply the stored result as if it were a normal event.
+          applyLaunchFinishedPayload(result.finished);
+        } else {
+          // No result stored – genuinely lost.
           launchStatus = "error";
           launchError =
-            "Launch job ended unexpectedly. Events may have been lost. Please retry.";
+            "Launch job ended unexpectedly. Please retry.";
         }
       } catch {
         /* ignore polling errors */
       }
-    }, 3000);
+    }, 1500);
     return () => window.clearInterval(timer);
   });
 

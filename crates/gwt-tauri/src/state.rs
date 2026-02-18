@@ -111,6 +111,9 @@ pub struct AppState {
     pub window_session_restore_leader: Mutex<Option<WindowSessionRestoreLeaderState>>,
     /// Launch job cancellation flags keyed by job id.
     pub launch_jobs: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Completed launch results stored for polling retrieval (fallback when
+    /// Tauri events are lost).
+    pub launch_results: Mutex<HashMap<String, crate::commands::terminal::LaunchFinishedPayload>>,
     pub is_quitting: AtomicBool,
     /// Prevent multiple exit confirmation dialogs from showing at once.
     #[cfg(any(not(test), target_os = "macos"))]
@@ -147,6 +150,7 @@ impl AppState {
             pane_launch_meta: Mutex::new(HashMap::new()),
             window_session_restore_leader: Mutex::new(None),
             launch_jobs: Mutex::new(HashMap::new()),
+            launch_results: Mutex::new(HashMap::new()),
             is_quitting: AtomicBool::new(false),
             #[cfg(any(not(test), target_os = "macos"))]
             exit_confirm_inflight: AtomicBool::new(false),
