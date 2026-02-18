@@ -207,4 +207,40 @@ describe("collectScreenText", () => {
 
     expect(result).toContain("fallback main text");
   });
+
+  it("preserves leading whitespace from terminal viewport lines", () => {
+    container.appendChild(createEl("aside", "sidebar", "main"));
+    const mainArea = createEl("main", "main-area", "");
+    const wrapper = createEl("div", "terminal-wrapper active", "");
+    const terminalContainer = createEl("div", "terminal-container", "");
+    terminalContainer.setAttribute("data-pane-id", "pane-indent");
+    (terminalContainer as CaptureTerminalContainer).__gwtTerminal = {
+      rows: 2,
+      buffer: {
+        active: {
+          viewportY: 0,
+          length: 2,
+          getLine: (index: number) => {
+            const lines = ["    indented", "  second"];
+            const value = lines[index];
+            if (typeof value !== "string") return undefined;
+            return { translateToString: () => value };
+          },
+        },
+      },
+    };
+    wrapper.appendChild(terminalContainer);
+    mainArea.appendChild(wrapper);
+    container.appendChild(mainArea);
+    container.appendChild(createEl("footer", "statusbar", "ready"));
+
+    const result = collectScreenText({
+      branch: "main",
+      activeTab: "Terminal",
+      activeTabType: "terminal",
+      activePaneId: "pane-indent",
+    });
+
+    expect(result).toContain("    indented\n  second");
+  });
 });

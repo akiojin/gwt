@@ -1348,7 +1348,9 @@
     return active.paneId && active.paneId.length > 0 ? active.paneId : null;
   }
 
-  function getActiveEditableElement():
+  function getActiveEditableElement(
+    mode: "copy" | "paste" = "paste",
+  ):
     | HTMLInputElement
     | HTMLTextAreaElement
     | HTMLElement
@@ -1357,11 +1359,11 @@
     const el = document.activeElement;
     if (!el) return null;
 
-    if (el instanceof HTMLInputElement && !el.readOnly && !el.disabled) {
-      return el;
+    if (el instanceof HTMLInputElement && !el.disabled) {
+      if (mode === "copy" || !el.readOnly) return el;
     }
-    if (el instanceof HTMLTextAreaElement && !el.readOnly && !el.disabled) {
-      return el;
+    if (el instanceof HTMLTextAreaElement && !el.disabled) {
+      if (mode === "copy" || !el.readOnly) return el;
     }
     if (el instanceof HTMLElement && el.isContentEditable) {
       return el;
@@ -1393,7 +1395,7 @@
   }
 
   async function fallbackMenuEditAction(action: "copy" | "paste") {
-    const target = getActiveEditableElement();
+    const target = getActiveEditableElement(action);
     if (!target) {
       if (action === "copy") {
         const sel = window.getSelection()?.toString();

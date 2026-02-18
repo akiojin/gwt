@@ -19,7 +19,7 @@ Cmd+Shift+C → Tauri Menu → "screen-copy" event → Frontend Handler
 
 ### フロントエンド (Svelte/TypeScript)
 
-3. **screenCapture.ts** (新規): 画面テキスト収集ロジック
+1. **screenCapture.ts** (新規): 画面テキスト収集ロジック
    - `collectScreenText()`: 各セクションのテキストを収集・構造化
    - サイドバー: DOM の可視テキスト取得
    - ターミナル: xterm.js buffer API で可視行取得 + ANSI除去
@@ -28,12 +28,12 @@ Cmd+Shift+C → Tauri Menu → "screen-copy" event → Frontend Handler
    - ステータスバー: DOM の可視テキスト取得
    - メタデータ: ブランチ名、アクティブタブ名、ウィンドウサイズ
 
-4. **App.svelte**: メニューアクションハンドラに `"screen-copy"` ケースを追加
+2. **App.svelte**: メニューアクションハンドラに `"screen-copy"` ケースを追加
    - `collectScreenText()` を呼び出し
    - `navigator.clipboard.writeText()` でコピー
    - フラッシュ + トースト表示
 
-5. **CopyFlash.svelte** (新規 or App.svelte内): コピー時の視覚フィードバック
+3. **CopyFlash.svelte** (新規 or App.svelte内): コピー時の視覚フィードバック
    - アクセントカラー半透明オーバーレイ (opacity 0 → 0.15 → 0)
    - CSS animation で 200ms
 

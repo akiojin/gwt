@@ -89,7 +89,7 @@ function getTerminalViewportText(paneId?: string): string {
     lines.pop();
   }
 
-  return lines.join("\n").trim();
+  return lines.join("\n");
 }
 
 function getMainText(ctx: ScreenCaptureContext): string {
