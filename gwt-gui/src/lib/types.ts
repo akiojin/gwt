@@ -362,16 +362,25 @@ export interface WorktreeInfo {
   safety_level: "safe" | "warning" | "danger" | "disabled";
 }
 
+export type PrStatus = "merged" | "open" | "closed" | "none" | "unknown";
+
 export interface CleanupResult {
   branch: string;
   success: boolean;
   error: string | null;
+  remote_success: boolean | null;
+  remote_error: string | null;
 }
 
 export interface CleanupProgress {
   branch: string;
   status: "deleting" | "deleted" | "failed";
   error?: string;
+  remote_status?: string;
+}
+
+export interface CleanupSettings {
+  delete_remote_branches: boolean;
 }
 
 export interface CapturedEnvEntry {

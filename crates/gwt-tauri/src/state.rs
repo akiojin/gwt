@@ -128,6 +128,8 @@ pub struct AppState {
     /// Last observed MCP registration health snapshot.
     pub mcp_registration_status: Arc<Mutex<McpRegistrationStatus>>,
     pub update_manager: UpdateManager,
+    /// Whether `gh` CLI is authenticated (SPEC-ad1ac432 T009).
+    pub gh_available: AtomicBool,
     /// MRU (most-recently-used) window focus history. Front = most recent.
     pub window_focus_history: Mutex<Vec<String>>,
 }
@@ -162,6 +164,7 @@ impl AppState {
             mcp_ws_handle: Arc::new(Mutex::new(None)),
             mcp_registration_status: Arc::new(Mutex::new(McpRegistrationStatus::default())),
             update_manager: UpdateManager::new(),
+            gh_available: AtomicBool::new(false),
             window_focus_history: Mutex::new(Vec::new()),
         }
     }

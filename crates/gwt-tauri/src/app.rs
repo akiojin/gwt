@@ -168,6 +168,7 @@ fn best_window(app: &tauri::AppHandle<tauri::Wry>) -> Option<tauri::WebviewWindo
     app.webview_windows().into_iter().next().map(|(_, w)| w)
 }
 
+#[allow(deprecated)]
 pub fn build_app(
     builder: tauri::Builder<tauri::Wry>,
     app_state: AppState,
@@ -379,6 +380,23 @@ pub fn build_app(
 
                         let _ = os_env_source_cell.set(result.source);
                         let _ = os_env_cell.set(result.env);
+                    });
+                }
+
+                // Background task: check gh CLI authentication (SPEC-ad1ac432 T009)
+                {
+                    let app_handle = _app.handle().clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        let available = gwt_core::git::gh_cli::check_auth();
+                        let state = app_handle.state::<AppState>();
+                        state
+                            .gh_available
+                            .store(available, std::sync::atomic::Ordering::Relaxed);
+                        tracing::info!(
+                            category = "gh_cli",
+                            available = available,
+                            "gh CLI authentication check completed"
+                        );
                     });
                 }
 
@@ -632,6 +650,10 @@ pub fn build_app(
             crate::commands::cleanup::list_worktrees,
             crate::commands::cleanup::cleanup_worktrees,
             crate::commands::cleanup::cleanup_single_worktree,
+            crate::commands::cleanup::check_gh_available,
+            crate::commands::cleanup::get_cleanup_pr_statuses,
+            crate::commands::cleanup::get_cleanup_settings,
+            crate::commands::cleanup::set_cleanup_settings,
             crate::commands::hooks::check_and_update_hooks,
             crate::commands::hooks::register_hooks,
             crate::commands::update::check_app_update,
