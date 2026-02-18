@@ -1064,7 +1064,9 @@ mod tests {
             .and_then(|v| v.as_array())
             .expect("permissions array missing");
 
-        let has_event_default = permissions.iter().any(|v| v.as_str() == Some("core:event:default"));
+        let has_event_default = permissions
+            .iter()
+            .any(|v| v.as_str() == Some("core:event:default"));
         assert!(
             has_event_default,
             "capabilities/default.json must include core:event:default"
