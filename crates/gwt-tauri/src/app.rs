@@ -1069,5 +1069,15 @@ mod tests {
             has_event_default,
             "capabilities/default.json must include core:event:default"
         );
+
+        let windows = json
+            .get("windows")
+            .and_then(|v| v.as_array())
+            .expect("windows array missing");
+        let allows_all_windows = windows.iter().any(|v| v.as_str() == Some("*"));
+        assert!(
+            allows_all_windows,
+            "capabilities/default.json must include windows: [\"*\"]"
+        );
     }
 }
