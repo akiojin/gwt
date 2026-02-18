@@ -41,7 +41,7 @@ pub struct PaneLaunchMeta {
     pub started_at_millis: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VersionHistoryCacheEntry {
     pub label: String,
     pub range_from: Option<String>,

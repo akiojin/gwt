@@ -9,10 +9,51 @@ use crate::state::{AppState, VersionHistoryCacheEntry};
 use gwt_core::ai::{format_error_for_display, AIClient, AIError, ChatMessage};
 use gwt_core::config::ProfilesConfig;
 use serde::Serialize;
-use std::collections::BTreeMap;
-use std::path::Path;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap};
+use std::fs;
+use std::path::{Path, PathBuf};
 use tauri::Manager;
 use tauri::{AppHandle, Emitter, State};
+
+/// Compute the cache file path for a given repo path.
+///
+/// Path: `~/.gwt/cache/version-history/{hash}.json`
+/// where `hash` = first 16 hex chars of SHA-256(canonical repo path).
+fn cache_file_path(repo_path: &Path) -> PathBuf {
+    let canonical = repo_path
+        .canonicalize()
+        .unwrap_or_else(|_| repo_path.to_path_buf());
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.to_string_lossy().as_bytes());
+    let digest = hasher.finalize();
+    let hash = format!("{digest:x}");
+    let short_hash = &hash[..16];
+
+    let base = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    base.join(".gwt")
+        .join("cache")
+        .join("version-history")
+        .join(format!("{short_hash}.json"))
+}
+
+/// Load disk cache for a repo. Returns None if the file does not exist or contains invalid JSON.
+fn load_disk_cache(repo_path: &Path) -> Option<HashMap<String, VersionHistoryCacheEntry>> {
+    let path = cache_file_path(repo_path);
+    let data = fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+/// Save the in-memory cache entries to disk for a repo, creating directories as needed.
+fn save_disk_cache(repo_path: &Path, entries: &HashMap<String, VersionHistoryCacheEntry>) {
+    let path = cache_file_path(repo_path);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(entries) {
+        let _ = fs::write(&path, json);
+    }
+}
 
 const VERSION_ID_UNRELEASED: &str = "unreleased";
 const RANGE_OID_UNBORN_HEAD: &str = "UNBORN_HEAD";
@@ -150,6 +191,7 @@ pub fn get_project_version_history(
     // Cache hit
     if let Some(hit) = get_cached_version_history(
         &state,
+        &repo_path,
         &repo_key,
         &version_id,
         range_from_oid.as_deref(),
@@ -168,6 +210,16 @@ pub fn get_project_version_history(
             error: None,
         });
     }
+
+    // Build simple changelog for immediate "generating" response (FR-008).
+    let generating_changelog = git_log_subjects(
+        &repo_path,
+        range_from.as_deref(),
+        &range_to,
+        MAX_SUBJECTS_FOR_CHANGELOG,
+    )
+    .ok()
+    .map(|subjects| build_simple_changelog_markdown(&subjects, language));
 
     // Start background job (best-effort)
     // Include language so switching output language can spawn a fresh job
@@ -247,7 +299,7 @@ pub fn get_project_version_history(
         range_to,
         commit_count,
         summary_markdown: None,
-        changelog_markdown: None,
+        changelog_markdown: generating_changelog,
         error: None,
     })
 }
@@ -276,33 +328,63 @@ fn resolve_version_history_ai_settings(
     ai.resolved
 }
 
-fn get_cached_version_history(
-    state: &AppState,
-    repo_key: &str,
-    version_id: &str,
+fn validate_cache_entry(
+    entry: &VersionHistoryCacheEntry,
     range_from_oid: Option<&str>,
     range_to_oid: &str,
     language: &str,
-) -> Option<VersionHistoryCacheEntry> {
-    let guard = state.project_version_history_cache.lock().ok()?;
-    let repo_map = guard.get(repo_key)?;
-    let entry = repo_map.get(version_id)?.clone();
-
+) -> bool {
     if entry.language != language {
-        return None;
+        return false;
     }
-
     let from_ok = match (entry.range_from_oid.as_deref(), range_from_oid) {
         (None, None) => true,
         (Some(a), Some(b)) => a == b,
         _ => false,
     };
     if !from_ok {
+        return false;
+    }
+    entry.range_to_oid == range_to_oid
+}
+
+fn get_cached_version_history(
+    state: &AppState,
+    repo_path: &Path,
+    repo_key: &str,
+    version_id: &str,
+    range_from_oid: Option<&str>,
+    range_to_oid: &str,
+    language: &str,
+) -> Option<VersionHistoryCacheEntry> {
+    // 1. In-memory cache check
+    {
+        let guard = state.project_version_history_cache.lock().ok()?;
+        if let Some(repo_map) = guard.get(repo_key) {
+            if let Some(entry) = repo_map.get(version_id) {
+                if validate_cache_entry(entry, range_from_oid, range_to_oid, language) {
+                    return Some(entry.clone());
+                }
+            }
+        }
+    }
+
+    // 2. Disk cache fallback
+    let disk_map = load_disk_cache(repo_path)?;
+    let entry = disk_map.get(version_id)?;
+    if !validate_cache_entry(entry, range_from_oid, range_to_oid, language) {
         return None;
     }
-    if entry.range_to_oid != range_to_oid {
-        return None;
+    let entry = entry.clone();
+
+    // Restore disk cache into in-memory cache
+    if let Ok(mut guard) = state.project_version_history_cache.lock() {
+        let repo_entry = guard.entry(repo_key.to_string()).or_default();
+        for (k, v) in disk_map {
+            repo_entry.entry(k).or_insert(v);
+        }
     }
+
     Some(entry)
 }
 
@@ -385,22 +467,24 @@ fn generate_and_cache_version_history(
     };
 
     // Cache only successful results.
+    let new_entry = VersionHistoryCacheEntry {
+        label: label.to_string(),
+        range_from: range_from.map(|s| s.to_string()),
+        range_to: range_to.to_string(),
+        range_from_oid: range_from_oid.map(|s| s.to_string()),
+        range_to_oid: range_to_oid.to_string(),
+        commit_count,
+        language: language.to_string(),
+        summary_markdown: summary_markdown.clone(),
+        changelog_markdown: simple_changelog.clone(),
+    };
+
     if let Ok(mut guard) = state.project_version_history_cache.lock() {
         let repo_entry = guard.entry(repo_key.to_string()).or_default();
-        repo_entry.insert(
-            version_id.to_string(),
-            VersionHistoryCacheEntry {
-                label: label.to_string(),
-                range_from: range_from.map(|s| s.to_string()),
-                range_to: range_to.to_string(),
-                range_from_oid: range_from_oid.map(|s| s.to_string()),
-                range_to_oid: range_to_oid.to_string(),
-                commit_count,
-                language: language.to_string(),
-                summary_markdown: summary_markdown.clone(),
-                changelog_markdown: simple_changelog.clone(),
-            },
-        );
+        repo_entry.insert(version_id.to_string(), new_entry);
+
+        // Write all entries for this repo to disk.
+        save_disk_cache(repo_path, repo_entry);
     }
 
     VersionHistoryResult {
@@ -1034,6 +1118,166 @@ mod tests {
             language: "en".to_string(),
             summary_enabled,
         }
+    }
+
+    fn make_cache_entry(range_to_oid: &str, language: &str) -> VersionHistoryCacheEntry {
+        VersionHistoryCacheEntry {
+            label: "v1.0.0".to_string(),
+            range_from: None,
+            range_to: "v1.0.0".to_string(),
+            range_from_oid: None,
+            range_to_oid: range_to_oid.to_string(),
+            commit_count: 3,
+            language: language.to_string(),
+            summary_markdown: "## Summary\nTest".to_string(),
+            changelog_markdown: "### Features\n- test".to_string(),
+        }
+    }
+
+    #[test]
+    fn cache_file_path_same_path_produces_same_hash() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(home.path());
+
+        let repo = TempDir::new().unwrap();
+        let p1 = cache_file_path(repo.path());
+        let p2 = cache_file_path(repo.path());
+        assert_eq!(p1, p2);
+    }
+
+    #[test]
+    fn cache_file_path_different_paths_produce_different_hashes() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(home.path());
+
+        let repo_a = TempDir::new().unwrap();
+        let repo_b = TempDir::new().unwrap();
+        let p1 = cache_file_path(repo_a.path());
+        let p2 = cache_file_path(repo_b.path());
+        assert_ne!(p1, p2);
+    }
+
+    #[test]
+    fn disk_cache_roundtrip() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(home.path());
+
+        let repo = TempDir::new().unwrap();
+        let mut entries = HashMap::new();
+        entries.insert("v1.0.0".to_string(), make_cache_entry("abc123", "en"));
+
+        save_disk_cache(repo.path(), &entries);
+        let loaded = load_disk_cache(repo.path());
+        assert!(loaded.is_some());
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.len(), 1);
+        let entry = loaded.get("v1.0.0").unwrap();
+        assert_eq!(entry.range_to_oid, "abc123");
+        assert_eq!(entry.language, "en");
+        assert_eq!(entry.summary_markdown, "## Summary\nTest");
+    }
+
+    #[test]
+    fn disk_cache_invalid_json_returns_none() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(home.path());
+
+        let repo = TempDir::new().unwrap();
+        let path = cache_file_path(repo.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "{ invalid json }}}").unwrap();
+
+        let loaded = load_disk_cache(repo.path());
+        assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn get_cached_version_history_falls_back_to_disk() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(home.path());
+
+        let repo = TempDir::new().unwrap();
+        let state = AppState::new();
+        let repo_key = repo.path().to_string_lossy().to_string();
+
+        // Write cache to disk (but NOT to in-memory)
+        let mut entries = HashMap::new();
+        entries.insert("v1.0.0".to_string(), make_cache_entry("abc123", "en"));
+        save_disk_cache(repo.path(), &entries);
+
+        // Should find via disk fallback
+        let hit = get_cached_version_history(
+            &state,
+            repo.path(),
+            &repo_key,
+            "v1.0.0",
+            None,
+            "abc123",
+            "en",
+        );
+        assert!(hit.is_some());
+        assert_eq!(hit.unwrap().range_to_oid, "abc123");
+
+        // After disk fallback, the entry should be in in-memory cache too
+        let guard = state.project_version_history_cache.lock().unwrap();
+        assert!(guard.get(&repo_key).unwrap().contains_key("v1.0.0"));
+    }
+
+    #[test]
+    fn cache_miss_on_oid_mismatch() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(home.path());
+
+        let repo = TempDir::new().unwrap();
+        let state = AppState::new();
+        let repo_key = repo.path().to_string_lossy().to_string();
+
+        let mut entries = HashMap::new();
+        entries.insert("v1.0.0".to_string(), make_cache_entry("abc123", "en"));
+        save_disk_cache(repo.path(), &entries);
+
+        let hit = get_cached_version_history(
+            &state,
+            repo.path(),
+            &repo_key,
+            "v1.0.0",
+            None,
+            "different_oid",
+            "en",
+        );
+        assert!(hit.is_none());
+    }
+
+    #[test]
+    fn cache_miss_on_language_mismatch() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        let _env = TestEnvGuard::new(home.path());
+
+        let repo = TempDir::new().unwrap();
+        let state = AppState::new();
+        let repo_key = repo.path().to_string_lossy().to_string();
+
+        let mut entries = HashMap::new();
+        entries.insert("v1.0.0".to_string(), make_cache_entry("abc123", "en"));
+        save_disk_cache(repo.path(), &entries);
+
+        let hit = get_cached_version_history(
+            &state,
+            repo.path(),
+            &repo_key,
+            "v1.0.0",
+            None,
+            "abc123",
+            "ja",
+        );
+        assert!(hit.is_none());
     }
 
     #[test]
