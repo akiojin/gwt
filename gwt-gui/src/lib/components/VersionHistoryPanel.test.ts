@@ -432,6 +432,82 @@ describe("VersionHistoryPanel", () => {
     });
   });
 
+  it("keeps completed status when a stale generating response arrives later", async () => {
+    let resolveHistory: ((value: any) => void) | null = null;
+
+    invokeMock.mockImplementation(async (cmd: string, args?: any) => {
+      if (cmd === "list_project_versions") {
+        return {
+          items: [
+            {
+              id: "unreleased",
+              label: "Unreleased (HEAD)",
+              range_from: "v1.0.0",
+              range_to: "HEAD",
+              commit_count: 2,
+            },
+          ],
+        };
+      }
+      if (cmd === "get_project_version_history") {
+        const versionId = String(args?.versionId ?? "");
+        return new Promise((resolve) => {
+          resolveHistory = resolve;
+          void versionId;
+        });
+      }
+      return [];
+    });
+
+    const rendered = await renderPanel({ projectPath: "/tmp/project" });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("get_project_version_history", {
+        projectPath: "/tmp/project",
+        versionId: "unreleased",
+      });
+    });
+
+    // Background event completes first.
+    await emitVersionHistoryUpdated({
+      projectPath: "/tmp/project",
+      versionId: "unreleased",
+      result: {
+        status: "ok",
+        version_id: "unreleased",
+        label: "Unreleased (HEAD)",
+        range_from: "v1.0.0",
+        range_to: "HEAD",
+        commit_count: 2,
+        summary_markdown: "## Summary\nDone",
+        changelog_markdown: "### Features\n- done",
+        error: null,
+      },
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".vh-status.ok")).toBeTruthy();
+    });
+
+    // Then the stale direct invoke response resolves with "generating".
+    resolveHistory?.({
+      status: "generating",
+      version_id: "unreleased",
+      label: "Unreleased (HEAD)",
+      range_from: "v1.0.0",
+      range_to: "HEAD",
+      commit_count: 2,
+      summary_markdown: null,
+      changelog_markdown: "### Features\n- done",
+      error: null,
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".vh-status.ok")).toBeTruthy();
+      expect(rendered.container.querySelector(".vh-status.gen")).toBeNull();
+    });
+  });
+
   it("displays changelog immediately while AI summary is generating", async () => {
     invokeMock.mockImplementation(async (cmd: string, args?: any) => {
       if (cmd === "list_project_versions") {

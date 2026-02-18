@@ -26,6 +26,10 @@
   }
 
   function setResult(result: VersionHistoryResult) {
+    const previous = results[result.version_id];
+    if (previous && previous.status !== "generating" && result.status === "generating") {
+      return;
+    }
     results = { ...results, [result.version_id]: result };
   }
 
