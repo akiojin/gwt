@@ -58,10 +58,10 @@
 ### Phase D: GUI（プロジェクトチームUI）
 
 24. Project Teamタブ・モード切り替え
-25. Leadチャット画面（バブル表示、入力エリア）
-26. 下部パネル切替（Chat / Kanban / Coordinator）
-27. Kanbanボード（Pending/Running/Completed/Failed 4カラム、Issue別フィルタ、タスクカード表示）
-28. Coordinatorパネル（状態表示、View Terminal、Chat、Developer一覧）
+25. ダッシュボード（左カラム：Issue/Task/Developer階層表示、ステータスバッジ）
+26. Leadチャット画面（右カラム：バブル表示、入力エリア、進捗インライン表示）
+27. ダッシュボード内Coordinator詳細展開（ステータス、ターミナル/チャットリンク）
+28. Developer表示のBranch Mode連携（TaskクリックでWorktreeジャンプ）
 29. コスト可視化（APIコール数/推定トークン数）
 30. AI設定未構成時のエラー表示
 
@@ -103,10 +103,10 @@ crates/gwt-tauri/src/
 gwt-gui/src/
 ├── lib/components/
 │   ├── ProjectTeamPanel.svelte   # メインパネル（旧AgentModePanel）
-│   ├── LeadChat.svelte           # Leadチャット
-│   ├── KanbanBoard.svelte        # Kanbanボード
-│   ├── CoordinatorPanel.svelte   # Coordinatorパネル
-│   └── TaskCard.svelte           # タスクカード
+│   ├── LeadChat.svelte           # Leadチャット（右カラム）
+│   ├── Dashboard.svelte          # ダッシュボード（左カラム）
+│   ├── IssueItem.svelte          # Issue階層表示コンポーネント
+│   └── CoordinatorDetail.svelte  # Coordinator詳細展開
 └── lib/types.ts                  # 3層対応型定義
 ```
 
@@ -126,7 +126,8 @@ gwt-gui/src/
 - Leadが要件をIssue単位に分割し、各Issue分の成果物4点を生成できる
 - 承認後、各IssueにCoordinatorを並列起動できる（ファイルパス受け渡し）
 - 1 Task = N Developer = N Worktreeの並列割り当てが可能
-- KanbanボードでDeveloper/タスクをPending/Running/Completed/Failedの4カラム + Issue別フィルタで表示できる
+- ダッシュボードでIssue/Task/Developerの階層をステータス付きで常時俯瞰できる
+- ダッシュボードのTaskクリックでBranch Modeの該当Worktreeにジャンプできる
 - CoordinatorがCI結果を監視し、失敗時に自律修正ループを実行できる
 - 各層が独立して動作し、上位層の障害が下位層に影響しない
 - セッションを永続化し、gwt再起動後に復元・再開できる
@@ -135,7 +136,7 @@ gwt-gui/src/
 
 ## 検証方針
 
-- フロントエンド: Kanbanボード、チャット、パネル切替をコンポーネントテスト（vitest）で検証
+- フロントエンド: ダッシュボード、チャット、Branch Mode連携をコンポーネントテスト（vitest）で検証
 - バックエンド: Lead/Coordinator/Developer状態管理、成果物ゲート、CI監視をユニットテスト（cargo test）で検証
 - 回帰: 既存AgentModePanel/AgentSidebarの機能テストを維持
 - 統合: Coordinator→Developer起動→完了検出→PR作成のE2Eフローを検証

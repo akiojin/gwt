@@ -174,36 +174,36 @@
   - 旧AgentModePanelをProjectTeamPanelにリネーム・拡張
   - 依存: T401
 
-- [ ] T403 [US1] [テスト] 下部パネル切替テスト（Chat / Kanban / Coordinator） `gwt-gui/src/lib/components/ProjectTeamPanel.test.ts`
-  - 3つのパネルビューの切り替え動作検証
-  - 依存: T402
+- [ ] T403 [US1] [テスト] ダッシュボード表示テスト（Issue/Task/Developer階層） `gwt-gui/src/lib/components/Dashboard.test.ts`
+  - Issue階層表示、ステータスバッジ、タスク数/完了数、折りたたみ動作
+  - 依存: T102
 
-- [ ] T404 [US1] [実装] 下部パネル切替（Chat / Kanban / Coordinator） `gwt-gui/src/lib/components/ProjectTeamPanel.svelte`
-  - タブ切り替えUIとパネルコンテンツの動的表示
+- [ ] T404 [US1] [実装] ダッシュボード（左カラム） `gwt-gui/src/lib/components/Dashboard.svelte`
+  - Issue→Task→Developer階層表示、ステータスバッジ、折りたたみ/展開
   - 依存: T403
 
-- [ ] T405 [US2] [テスト] Kanbanボード表示テスト（4カラム + Issue別フィルタ + タスクカード） `gwt-gui/src/lib/components/KanbanBoard.test.ts`
-  - Pending/Running/Completed/Failedの4カラム、Issue別フィルタ、1 Task = N Developer表示
+- [ ] T405 [US2] [テスト] Issue展開・Coordinator詳細テスト `gwt-gui/src/lib/components/IssueItem.test.ts`
+  - Issue展開時のCoordinator詳細表示（ステータス/CI結果/Developer一覧）
   - 依存: T102
 
-- [ ] T406 [US2] [実装] Kanbanボード `gwt-gui/src/lib/components/KanbanBoard.svelte`
-  - 4カラムレイアウト、Issue別フィルタ/グルーピング、TaskCardコンポーネント、worktree相対パス表示
+- [ ] T406 [US2] [実装] Issue階層コンポーネント + Coordinator詳細展開 `gwt-gui/src/lib/components/IssueItem.svelte`
+  - Issue情報、展開時Coordinator詳細、View Terminal/Chatリンク
   - 依存: T405
 
-- [ ] T407 [US2] [テスト] タスクカード表示テスト（タスク名/ブランチ名/worktree/ホバー） `gwt-gui/src/lib/components/TaskCard.test.ts`
-  - カード内表示情報、ホバーで絶対パス表示
-  - 依存: T102
+- [ ] T407 [US2] [テスト] TaskクリックでBranch Modeジャンプテスト `gwt-gui/src/lib/components/Dashboard.test.ts`
+  - TaskクリックでBranch Modeの該当Worktreeへの自動遷移
+  - 依存: T404
 
-- [ ] T408 [US2] [実装] タスクカード `gwt-gui/src/lib/components/TaskCard.svelte`
-  - タスクID/名前、ブランチ名、worktree相対パス、ホバーtooltip
+- [ ] T408 [US2] [実装] Dashboard→Branch Mode連携（Taskクリックジャンプ） `gwt-gui/src/lib/components/Dashboard.svelte`
+  - Taskクリック→Branch Modeタブ切替→該当Worktree選択
   - 依存: T407
 
-- [ ] T409 [US8] [テスト] Coordinatorパネル表示テスト `gwt-gui/src/lib/components/CoordinatorPanel.test.ts`
-  - Coordinator状態、Developer一覧、View Terminal/Chatボタン
+- [ ] T409 [US8] [テスト] Coordinator詳細パネル表示テスト `gwt-gui/src/lib/components/CoordinatorDetail.test.ts`
+  - Coordinator状態、Developer一覧、View Terminal/Chatリンク
   - 依存: T102
 
-- [ ] T410 [US8] [実装] Coordinatorパネル `gwt-gui/src/lib/components/CoordinatorPanel.svelte`
-  - 状態表示、Developer一覧、ターミナル/チャット切り替えボタン
+- [ ] T410 [US8] [実装] Coordinator詳細パネル `gwt-gui/src/lib/components/CoordinatorDetail.svelte`
+  - 状態表示、CI結果、Developer一覧、ターミナル/チャットリンク
   - 依存: T409
 
 - [ ] T411 [US1] [テスト] コスト可視化テスト `gwt-gui/src/lib/components/ProjectTeamPanel.test.ts`

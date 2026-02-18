@@ -42,10 +42,10 @@
 ### Phase D: GUI
 
 21. Project Teamタブ・モード切り替えテスト
-22. 下部パネル切替テスト（Chat / Kanban / Coordinator の3ビュー）
-23. Kanbanボード表示テスト（4カラム: Pending/Running/Completed/Failed）
-24. タスクカード表示テスト（タスク名 / ブランチ名 / worktree相対パス / ホバー絶対パス）
-25. Coordinatorパネル表示テスト（状態 / Developer一覧 / View Terminal / Chat）
+22. ダッシュボード表示テスト（Issue/Task/Developer階層、ステータスバッジ、折りたたみ）
+23. Issue展開・Coordinator詳細テスト（CI結果、Developer一覧、ターミナル/チャットリンク）
+24. TaskクリックでBranch Modeジャンプテスト（Worktree自動遷移）
+25. Coordinator詳細パネル表示テスト（状態 / Developer一覧 / View Terminal / Chat）
 26. コスト可視化テスト（APIコール数 / 推定トークン数）
 27. AI設定未構成時エラー表示テスト
 
@@ -78,9 +78,9 @@
 
 - `cd gwt-gui && pnpm test src/lib/components/ProjectTeamPanel.test.ts`
 - `cd gwt-gui && pnpm test src/lib/components/LeadChat.test.ts`
-- `cd gwt-gui && pnpm test src/lib/components/KanbanBoard.test.ts`
-- `cd gwt-gui && pnpm test src/lib/components/TaskCard.test.ts`
-- `cd gwt-gui && pnpm test src/lib/components/CoordinatorPanel.test.ts`
+- `cd gwt-gui && pnpm test src/lib/components/Dashboard.test.ts`
+- `cd gwt-gui && pnpm test src/lib/components/IssueItem.test.ts`
+- `cd gwt-gui && pnpm test src/lib/components/CoordinatorDetail.test.ts`
 
 ## 実行ログ
 
