@@ -20,6 +20,7 @@ pub struct GpuDynamicInfo {
 /// Monitors CPU, memory, and GPU resources.
 pub struct SystemMonitor {
     sys: System,
+    gpu_static_cache: std::sync::OnceLock<Option<GpuStaticInfo>>,
 }
 
 impl Default for SystemMonitor {
@@ -36,7 +37,10 @@ impl SystemMonitor {
                 .with_cpu(CpuRefreshKind::everything())
                 .with_memory(MemoryRefreshKind::everything()),
         );
-        Self { sys }
+        Self {
+            sys,
+            gpu_static_cache: std::sync::OnceLock::new(),
+        }
     }
 
     /// Refresh CPU and memory readings.
@@ -55,12 +59,24 @@ impl SystemMonitor {
         (self.sys.used_memory(), self.sys.total_memory())
     }
 
-    /// Attempt to detect GPU model from system components.
+    /// Detect GPU model name from the system.
     ///
-    /// The `sysinfo` "component" feature is not enabled, so this always returns `None`.
-    /// On NVIDIA systems, GPU info comes from `gpu_dynamic_info()` instead.
+    /// On macOS, uses `system_profiler` to detect Apple Silicon GPU.
+    /// On NVIDIA systems, dynamic GPU info comes from `gpu_dynamic_info()` instead.
+    /// Results are cached after the first call.
     pub fn gpu_static_info(&self) -> Option<GpuStaticInfo> {
-        None
+        self.gpu_static_cache
+            .get_or_init(|| {
+                #[cfg(target_os = "macos")]
+                {
+                    detect_macos_gpu()
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    None
+                }
+            })
+            .clone()
     }
 
     /// Dynamic GPU info from NVIDIA (requires `nvidia-gpu` feature on Linux/Windows).
@@ -86,6 +102,29 @@ impl SystemMonitor {
     pub fn gpu_dynamic_info(&self) -> Option<GpuDynamicInfo> {
         None
     }
+}
+
+#[cfg(target_os = "macos")]
+fn detect_macos_gpu() -> Option<GpuStaticInfo> {
+    let output = std::process::Command::new("system_profiler")
+        .args(["SPDisplaysDataType", "-json"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let name = json
+        .get("SPDisplaysDataType")?
+        .as_array()?
+        .first()?
+        .get("sppci_model")?
+        .as_str()?
+        .to_string();
+    Some(GpuStaticInfo {
+        name,
+        vram_total_bytes: None,
+    })
 }
 
 #[cfg(test)]
@@ -123,5 +162,48 @@ mod tests {
         let monitor = SystemMonitor::new();
         // On macOS without nvidia-gpu feature, this should always be None
         assert!(monitor.gpu_dynamic_info().is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn gpu_static_info_returns_some_on_macos() {
+        let monitor = SystemMonitor::new();
+        let info = monitor.gpu_static_info();
+        assert!(info.is_some(), "gpu_static_info should detect GPU on macOS");
+        let info = info.unwrap();
+        assert!(!info.name.is_empty(), "GPU name should not be empty");
+        // Apple Silicon uses unified memory, so vram_total_bytes should be None
+        assert!(
+            info.vram_total_bytes.is_none(),
+            "Apple Silicon should have vram_total_bytes = None"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn gpu_static_info_is_cached() {
+        let monitor = SystemMonitor::new();
+        let first = monitor.gpu_static_info();
+        let second = monitor.gpu_static_info();
+        assert_eq!(
+            first.as_ref().map(|i| &i.name),
+            second.as_ref().map(|i| &i.name),
+            "gpu_static_info should return the same result on repeated calls"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_macos_gpu_json() {
+        let json_str = r#"{"SPDisplaysDataType":[{"sppci_model":"Apple M4 Max"}]}"#;
+        let json: serde_json::Value = serde_json::from_str(json_str).unwrap();
+        let name = json
+            .get("SPDisplaysDataType")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|entry| entry.get("sppci_model"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        assert_eq!(name, Some("Apple M4 Max".to_string()));
     }
 }
