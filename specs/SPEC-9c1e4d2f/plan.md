@@ -34,7 +34,14 @@
   - `emit_menu_action` の target/action/result ログ
   - target未解決時のwarnログ
 
-### Phase 3: TDDで検証
+### Phase 3: ACL不足の是正
+
+- `crates/gwt-tauri/capabilities/default.json`
+  - `core:event:default` を明示的に許可し、`plugin:event|listen` を通す
+- `crates/gwt-tauri/src/app.rs`
+  - capabilities 設定のユニットテストで `core:event:default` を検証
+
+### Phase 4: TDDで検証
 
 - 先に `gwt-gui/src/lib/menuAction.test.ts` へ失敗系テストを追加（RED）
 - 実装後に同テストをGREEN化

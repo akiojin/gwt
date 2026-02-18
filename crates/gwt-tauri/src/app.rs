@@ -81,6 +81,7 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
         crate::menu::MENU_ID_GIT_ISSUES => Some("git-issues"),
         crate::menu::MENU_ID_EDIT_COPY => Some("edit-copy"),
         crate::menu::MENU_ID_EDIT_PASTE => Some("edit-paste"),
+        crate::menu::MENU_ID_EDIT_COPY_SCREEN => Some("screen-copy"),
         crate::menu::MENU_ID_TOOLS_NEW_TERMINAL => Some("new-terminal"),
         crate::menu::MENU_ID_TOOLS_LAUNCH_AGENT => Some("launch-agent"),
         crate::menu::MENU_ID_TOOLS_LIST_TERMINALS => Some("list-terminals"),
@@ -972,6 +973,7 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn should_prevent_window_close_when_not_quitting() {
@@ -1049,5 +1051,36 @@ mod tests {
 
         let empty_path = HashMap::from([("PATH".to_string(), "   ".to_string())]);
         assert_eq!(captured_path_from_env(&empty_path), None);
+    }
+
+    #[test]
+    fn capabilities_default_allows_event_listen() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let path = format!("{manifest_dir}/capabilities/default.json");
+        let contents = fs::read_to_string(path).expect("read capabilities/default.json");
+        let json: serde_json::Value =
+            serde_json::from_str(&contents).expect("parse capabilities/default.json");
+        let permissions = json
+            .get("permissions")
+            .and_then(|v| v.as_array())
+            .expect("permissions array missing");
+
+        let has_event_default = permissions
+            .iter()
+            .any(|v| v.as_str() == Some("core:event:default"));
+        assert!(
+            has_event_default,
+            "capabilities/default.json must include core:event:default"
+        );
+
+        let windows = json
+            .get("windows")
+            .and_then(|v| v.as_array())
+            .expect("windows array missing");
+        let allows_all_windows = windows.iter().any(|v| v.as_str() == Some("*"));
+        assert!(
+            allows_all_windows,
+            "capabilities/default.json must include windows: [\"*\"]"
+        );
     }
 }
