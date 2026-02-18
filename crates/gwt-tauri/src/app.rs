@@ -81,6 +81,7 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
         crate::menu::MENU_ID_GIT_ISSUES => Some("git-issues"),
         crate::menu::MENU_ID_EDIT_COPY => Some("edit-copy"),
         crate::menu::MENU_ID_EDIT_PASTE => Some("edit-paste"),
+        crate::menu::MENU_ID_EDIT_COPY_SCREEN => Some("screen-copy"),
         crate::menu::MENU_ID_TOOLS_NEW_TERMINAL => Some("new-terminal"),
         crate::menu::MENU_ID_TOOLS_LAUNCH_AGENT => Some("launch-agent"),
         crate::menu::MENU_ID_TOOLS_LIST_TERMINALS => Some("list-terminals"),
