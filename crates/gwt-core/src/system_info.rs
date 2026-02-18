@@ -106,7 +106,7 @@ impl SystemMonitor {
 
 #[cfg(target_os = "macos")]
 fn detect_macos_gpu() -> Option<GpuStaticInfo> {
-    let output = std::process::Command::new("system_profiler")
+    let output = crate::process::command("system_profiler")
         .args(["SPDisplaysDataType", "-json"])
         .output()
         .ok()?;
