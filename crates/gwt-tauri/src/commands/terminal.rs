@@ -2390,11 +2390,13 @@ pub(crate) fn launch_agent_for_project_root(
     job_id: Option<&str>,
     cancelled: Option<&AtomicBool>,
 ) -> Result<String, String> {
+    tracing::debug!(job_id = ?job_id, "launch step: fetch");
     report_launch_progress(job_id, &app_handle, "fetch", None);
     if is_launch_cancelled(cancelled) {
         return Err("Cancelled".to_string());
     }
 
+    tracing::debug!(job_id = ?job_id, "launch step: validate");
     report_launch_progress(job_id, &app_handle, "validate", None);
     let agent_id = request.agent_id.trim();
     if agent_id.is_empty() {
@@ -2404,17 +2406,20 @@ pub(crate) fn launch_agent_for_project_root(
         return Err("Cancelled".to_string());
     }
 
+    tracing::debug!(job_id = ?job_id, "launch step: paths");
     report_launch_progress(job_id, &app_handle, "paths", None);
     let repo_path = resolve_repo_path_for_project_root(&project_root)?;
     if is_launch_cancelled(cancelled) {
         return Err("Cancelled".to_string());
     }
 
+    tracing::debug!(job_id = ?job_id, "launch step: conflicts");
     report_launch_progress(job_id, &app_handle, "conflicts", None);
     if is_launch_cancelled(cancelled) {
         return Err("Cancelled".to_string());
     }
 
+    tracing::debug!(job_id = ?job_id, "launch step: create");
     report_launch_progress(job_id, &app_handle, "create", None);
 
     let (working_dir, branch_name, worktree_created) =
@@ -2476,6 +2481,7 @@ pub(crate) fn launch_agent_for_project_root(
         });
     }
 
+    tracing::debug!(job_id = ?job_id, "launch step: deps (waiting for environment)");
     report_launch_progress(job_id, &app_handle, "deps", Some("Waiting for environment"));
     if is_launch_cancelled(cancelled) {
         return Err("Cancelled".to_string());
@@ -2493,6 +2499,7 @@ pub(crate) fn launch_agent_for_project_root(
         return Err("Cancelled".to_string());
     }
 
+    tracing::debug!(job_id = ?job_id, "launch step: deps (resolved)");
     report_launch_progress(job_id, &app_handle, "deps", None);
     let mut env_vars = merge_profile_env(&os_env, request.profile.as_deref());
     // Useful for debugging and for agents that want to introspect gwt context.
@@ -3142,42 +3149,71 @@ pub fn start_launch_job(
     let app = app_handle.clone();
     let job_id_thread = job_id.clone();
     std::thread::spawn(move || {
-        let state = app.state::<AppState>();
-        let result = launch_agent_for_project_root(
-            PathBuf::from(project_root),
-            request,
-            &state,
-            app.clone(),
-            Some(job_id_thread.as_str()),
-            Some(cancel_flag.as_ref()),
-        );
+        tracing::debug!(job_id = %job_id_thread, "launch thread started");
 
-        if let Ok(mut jobs) = state.launch_jobs.lock() {
-            jobs.remove(&job_id_thread);
-        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let state = app.state::<AppState>();
+            launch_agent_for_project_root(
+                PathBuf::from(project_root),
+                request,
+                &state,
+                app.clone(),
+                Some(job_id_thread.as_str()),
+                Some(cancel_flag.as_ref()),
+            )
+        }));
 
-        let finished = match result {
-            Ok(pane_id) => LaunchFinishedPayload {
-                job_id: job_id_thread.clone(),
-                status: "ok".to_string(),
-                pane_id: Some(pane_id),
-                error: None,
-            },
-            Err(err) if err.trim() == "Cancelled" => LaunchFinishedPayload {
-                job_id: job_id_thread.clone(),
-                status: "cancelled".to_string(),
-                pane_id: None,
-                error: None,
-            },
-            Err(err) => LaunchFinishedPayload {
-                job_id: job_id_thread.clone(),
-                status: "error".to_string(),
-                pane_id: None,
-                error: Some(err),
-            },
+        let finished = match &result {
+            Ok(Ok(pane_id)) => {
+                tracing::debug!(job_id = %job_id_thread, pane_id = %pane_id, "launch succeeded");
+                LaunchFinishedPayload {
+                    job_id: job_id_thread.clone(),
+                    status: "ok".to_string(),
+                    pane_id: Some(pane_id.clone()),
+                    error: None,
+                }
+            }
+            Ok(Err(err)) if err.trim() == "Cancelled" => {
+                tracing::debug!(job_id = %job_id_thread, "launch cancelled");
+                LaunchFinishedPayload {
+                    job_id: job_id_thread.clone(),
+                    status: "cancelled".to_string(),
+                    pane_id: None,
+                    error: None,
+                }
+            }
+            Ok(Err(err)) => {
+                tracing::warn!(job_id = %job_id_thread, error = %err, "launch failed");
+                LaunchFinishedPayload {
+                    job_id: job_id_thread.clone(),
+                    status: "error".to_string(),
+                    pane_id: None,
+                    error: Some(err.clone()),
+                }
+            }
+            Err(_panic) => {
+                tracing::error!(job_id = %job_id_thread, "launch thread panicked");
+                LaunchFinishedPayload {
+                    job_id: job_id_thread.clone(),
+                    status: "error".to_string(),
+                    pane_id: None,
+                    error: Some(
+                        "Internal error: launch thread panicked".to_string(),
+                    ),
+                }
+            }
         };
 
+        tracing::debug!(job_id = %job_id_thread, status = %finished.status, "emitting launch-finished");
         let _ = app.emit("launch-finished", &finished);
+
+        // Remove the job AFTER emitting the event so that the frontend
+        // polling never sees the job as gone before receiving the event.
+        if let Some(state) = app.try_state::<AppState>() {
+            if let Ok(mut jobs) = state.launch_jobs.lock() {
+                jobs.remove(&job_id_thread);
+            }
+        }
     });
 
     Ok(job_id)
@@ -3197,6 +3233,20 @@ pub fn cancel_launch_job(job_id: String, state: State<AppState>) -> Result<(), S
         }
     }
     Ok(())
+}
+
+/// Check whether a launch job is still running (used by frontend polling).
+#[tauri::command]
+pub fn is_launch_job_alive(job_id: String, state: State<AppState>) -> bool {
+    let id = job_id.trim();
+    if id.is_empty() {
+        return false;
+    }
+    state
+        .launch_jobs
+        .lock()
+        .map(|jobs| jobs.contains_key(id))
+        .unwrap_or(false)
 }
 
 /// Terminal cwd changed event payload sent to the frontend

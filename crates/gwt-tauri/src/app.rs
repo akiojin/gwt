@@ -603,6 +603,7 @@ pub fn build_app(
             crate::commands::terminal::launch_agent,
             crate::commands::terminal::start_launch_job,
             crate::commands::terminal::cancel_launch_job,
+            crate::commands::terminal::is_launch_job_alive,
             crate::commands::terminal::write_terminal,
             crate::commands::terminal::send_keys_to_pane,
             crate::commands::terminal::send_keys_broadcast,
