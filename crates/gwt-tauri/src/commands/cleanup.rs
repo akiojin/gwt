@@ -1,15 +1,17 @@
-//! Worktree cleanup commands (SPEC-c4e8f210)
+//! Worktree cleanup commands (SPEC-c4e8f210, SPEC-ad1ac432)
 
 use crate::commands::project::resolve_repo_path_for_project_root;
 use crate::commands::terminal::capture_scrollback_tail_from_state;
 use crate::state::AppState;
 use gwt_core::config::{agent_has_hook_support, infer_agent_status, Session};
+use gwt_core::git::gh_cli::PrStatus;
 use gwt_core::git::Branch;
 use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::worktree::WorktreeManager;
-use serde::Serialize;
-use std::collections::HashSet;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager};
 
 /// Safety level for a worktree (FR-500)
@@ -43,20 +45,23 @@ pub struct WorktreeInfo {
     pub safety_level: SafetyLevel,
 }
 
-/// Cleanup result for a single branch
+/// Cleanup result for a single branch (T012: remote fields added)
 #[derive(Debug, Clone, Serialize)]
 pub struct CleanupResult {
     pub branch: String,
     pub success: bool,
     pub error: Option<String>,
+    pub remote_success: Option<bool>,
+    pub remote_error: Option<String>,
 }
 
-/// Progress event payload emitted per-branch during cleanup
+/// Progress event payload emitted per-branch during cleanup (T015: remote_status added)
 #[derive(Debug, Clone, Serialize)]
 pub struct CleanupProgressPayload {
     pub branch: String,
     pub status: String,
     pub error: Option<String>,
+    pub remote_status: Option<String>,
 }
 
 /// Completed event payload emitted when batch cleanup finishes
@@ -72,21 +77,52 @@ pub struct WorktreesChangedPayload {
     pub branch: String,
 }
 
-/// Determine the safety level for a worktree (FR-500)
+/// Cleanup settings for a project (T018-T019)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CleanupSettings {
+    pub delete_remote_branches: bool,
+}
+
+/// Determine the safety level for a worktree (FR-500, SPEC-ad1ac432 T016-T017)
+///
+/// When `delete_remote` is true, PR status is integrated into the judgment:
+/// - Local Safe + PR Merged/Closed → Safe
+/// - Local Safe + PR Open/None → Warning
+/// - Local Warning or above → kept as-is
+/// - When `delete_remote` is false → legacy local-only logic
 fn compute_safety_level(
     is_protected: bool,
     is_current: bool,
     is_agent_running: bool,
     has_changes: bool,
     has_unpushed: bool,
+    delete_remote: bool,
+    pr_status: Option<PrStatus>,
 ) -> SafetyLevel {
     if is_protected || is_current || is_agent_running {
         return SafetyLevel::Disabled;
     }
-    match (has_changes, has_unpushed) {
+
+    let local_level = match (has_changes, has_unpushed) {
         (false, false) => SafetyLevel::Safe,
         (true, true) => SafetyLevel::Danger,
         _ => SafetyLevel::Warning,
+    };
+
+    if !delete_remote {
+        return local_level;
+    }
+
+    // Integrate PR status only when local is Safe
+    if local_level != SafetyLevel::Safe {
+        return local_level;
+    }
+
+    match pr_status {
+        Some(PrStatus::Merged) | Some(PrStatus::Closed) => SafetyLevel::Safe,
+        Some(PrStatus::Open) | Some(PrStatus::None) => SafetyLevel::Warning,
+        // Unknown or no info → don't downgrade
+        _ => SafetyLevel::Safe,
     }
 }
 
@@ -244,6 +280,8 @@ fn list_worktrees_impl(project_path: &str, state: &AppState) -> Result<Vec<Workt
                 is_agent_running,
                 wt.has_changes,
                 wt.has_unpushed,
+                false,
+                None,
             );
 
             Some(WorktreeInfo {
@@ -287,17 +325,81 @@ pub async fn list_worktrees(
     .map_err(|e| format!("Failed to list worktrees: {e}"))?
 }
 
-/// Cleanup multiple worktrees (SPEC-c4e8f210 T2)
+/// Check gh CLI availability (SPEC-ad1ac432 T010)
+#[tauri::command]
+pub async fn check_gh_available(state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    Ok(state.gh_available.load(Ordering::Relaxed))
+}
+
+/// Get PR statuses for cleanup (SPEC-ad1ac432 T011)
+#[tauri::command]
+pub async fn get_cleanup_pr_statuses(
+    project_path: String,
+) -> Result<HashMap<String, String>, String> {
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        gwt_core::git::gh_cli::get_pr_statuses(&repo_path)
+    })
+    .await
+    .map_err(|e| format!("Failed to get PR statuses: {e}"))?;
+
+    // Convert PrStatus enum to string for frontend
+    Ok(result
+        .into_iter()
+        .map(|(branch, status)| {
+            let status_str = match status {
+                PrStatus::Merged => "merged",
+                PrStatus::Open => "open",
+                PrStatus::Closed => "closed",
+                PrStatus::None => "none",
+                PrStatus::Unknown => "unknown",
+            };
+            (branch, status_str.to_string())
+        })
+        .collect())
+}
+
+/// Get cleanup settings for a project (SPEC-ad1ac432 T019)
+#[tauri::command]
+pub async fn get_cleanup_settings(project_path: String) -> Result<CleanupSettings, String> {
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    Ok(load_cleanup_settings(&repo_path))
+}
+
+/// Set cleanup settings for a project (SPEC-ad1ac432 T019)
+#[tauri::command]
+pub async fn set_cleanup_settings(
+    project_path: String,
+    settings: CleanupSettings,
+) -> Result<(), String> {
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    save_cleanup_settings(&repo_path, &settings)
+}
+
+/// Cleanup multiple worktrees (SPEC-c4e8f210 T2, SPEC-ad1ac432 T013-T014)
 #[tauri::command]
 pub async fn cleanup_worktrees(
     project_path: String,
     branches: Vec<String>,
     force: bool,
+    delete_remote: bool,
     state: tauri::State<'_, AppState>,
     app_handle: AppHandle,
 ) -> Result<Vec<CleanupResult>, String> {
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)?;
+
+    // Collect gone branches for skipping remote deletion
+    let branch_list = Branch::list(&repo_path).unwrap_or_default();
+    let gone_branches: HashSet<String> = branch_list
+        .iter()
+        .filter(|b| b.is_gone)
+        .map(|b| b.name.clone())
+        .collect();
 
     let agent_branches = running_agent_branches(&state);
     tauri::async_runtime::spawn_blocking(move || {
@@ -312,26 +414,57 @@ pub async fn cleanup_worktrees(
                     branch: branch.clone(),
                     status: "deleting".to_string(),
                     error: None,
+                    remote_status: None,
                 },
             );
 
-            let result =
+            let local_result =
                 cleanup_single_branch(&manager, &repo_path, branch, force, &agent_branches);
 
-            let cleanup_result = match result {
+            let cleanup_result = match local_result {
                 Ok(()) => {
+                    // Local deletion succeeded; attempt remote if requested
+                    let (remote_success, remote_error, remote_status) =
+                        if delete_remote && !gone_branches.contains(branch.as_str()) {
+                            let _ = app_handle.emit(
+                                "cleanup-progress",
+                                &CleanupProgressPayload {
+                                    branch: branch.clone(),
+                                    status: "deleting_remote".to_string(),
+                                    error: None,
+                                    remote_status: Some("deleting".to_string()),
+                                },
+                            );
+
+                            match gwt_core::git::gh_cli::delete_remote_branch(
+                                &repo_path, branch,
+                            ) {
+                                Ok(()) => (Some(true), None, Some("deleted".to_string())),
+                                Err(e) => (Some(false), Some(e), Some("failed".to_string())),
+                            }
+                        } else if delete_remote && gone_branches.contains(branch.as_str()) {
+                            // gone branch: remote already deleted
+                            (Some(true), None, Some("skipped_gone".to_string()))
+                        } else {
+                            (None, None, None)
+                        };
+
                     let _ = app_handle.emit(
                         "cleanup-progress",
                         &CleanupProgressPayload {
                             branch: branch.clone(),
                             status: "deleted".to_string(),
                             error: None,
+                            remote_status: remote_status.clone(),
                         },
                     );
+
                     CleanupResult {
                         branch: branch.clone(),
                         success: true,
                         error: None,
+                        remote_success,
+                        remote_error,
                     }
                 }
                 Err(err) => {
@@ -341,12 +474,15 @@ pub async fn cleanup_worktrees(
                             branch: branch.clone(),
                             status: "failed".to_string(),
                             error: Some(err.clone()),
+                            remote_status: None,
                         },
                     );
                     CleanupResult {
                         branch: branch.clone(),
                         success: false,
                         error: Some(err),
+                        remote_success: None,
+                        remote_error: None,
                     }
                 }
             };
@@ -443,6 +579,29 @@ fn cleanup_single_branch(
     manager
         .cleanup_branch(branch, force, force)
         .map_err(|e| e.to_string())
+}
+
+/// Load cleanup settings from `.gwt/cleanup_settings.json` (T018)
+fn load_cleanup_settings(repo_path: &Path) -> CleanupSettings {
+    let settings_path = repo_path.join(".gwt").join("cleanup_settings.json");
+    match std::fs::read_to_string(&settings_path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => CleanupSettings::default(),
+    }
+}
+
+/// Save cleanup settings to `.gwt/cleanup_settings.json` (T018)
+fn save_cleanup_settings(repo_path: &Path, settings: &CleanupSettings) -> Result<(), String> {
+    let gwt_dir = repo_path.join(".gwt");
+    if !gwt_dir.exists() {
+        std::fs::create_dir_all(&gwt_dir)
+            .map_err(|e| format!("Failed to create .gwt directory: {}", e))?;
+    }
+    let settings_path = gwt_dir.join("cleanup_settings.json");
+    let json =
+        serde_json::to_string_pretty(settings).map_err(|e| format!("Failed to serialize: {}", e))?;
+    std::fs::write(&settings_path, json)
+        .map_err(|e| format!("Failed to write cleanup settings: {}", e))
 }
 
 fn build_last_tool_usage_map(repo_path: &Path) -> std::collections::HashMap<String, String> {
@@ -689,12 +848,12 @@ mod tests {
         assert_eq!(selected.as_deref(), Some("pane-this-repo"));
     }
 
-    // -- SafetyLevel computation tests (T1) --
+    // -- SafetyLevel computation tests (T1) — backward compatible (delete_remote=false) --
 
     #[test]
     fn safe_when_no_changes_and_no_unpushed() {
         assert_eq!(
-            compute_safety_level(false, false, false, false, false),
+            compute_safety_level(false, false, false, false, false, false, None),
             SafetyLevel::Safe
         );
     }
@@ -702,7 +861,7 @@ mod tests {
     #[test]
     fn warning_when_unpushed_only() {
         assert_eq!(
-            compute_safety_level(false, false, false, false, true),
+            compute_safety_level(false, false, false, false, true, false, None),
             SafetyLevel::Warning
         );
     }
@@ -710,7 +869,7 @@ mod tests {
     #[test]
     fn warning_when_changes_only() {
         assert_eq!(
-            compute_safety_level(false, false, false, true, false),
+            compute_safety_level(false, false, false, true, false, false, None),
             SafetyLevel::Warning
         );
     }
@@ -718,7 +877,7 @@ mod tests {
     #[test]
     fn danger_when_both_changes_and_unpushed() {
         assert_eq!(
-            compute_safety_level(false, false, false, true, true),
+            compute_safety_level(false, false, false, true, true, false, None),
             SafetyLevel::Danger
         );
     }
@@ -726,7 +885,7 @@ mod tests {
     #[test]
     fn disabled_when_protected() {
         assert_eq!(
-            compute_safety_level(true, false, false, false, false),
+            compute_safety_level(true, false, false, false, false, false, None),
             SafetyLevel::Disabled
         );
     }
@@ -734,7 +893,7 @@ mod tests {
     #[test]
     fn disabled_when_current() {
         assert_eq!(
-            compute_safety_level(false, true, false, false, false),
+            compute_safety_level(false, true, false, false, false, false, None),
             SafetyLevel::Disabled
         );
     }
@@ -742,7 +901,7 @@ mod tests {
     #[test]
     fn disabled_when_agent_running() {
         assert_eq!(
-            compute_safety_level(false, false, true, false, false),
+            compute_safety_level(false, false, true, false, false, false, None),
             SafetyLevel::Disabled
         );
     }
@@ -766,6 +925,202 @@ mod tests {
             ]
         );
     }
+
+    // -- T016-T017: Integrated safety level with PR status --
+
+    #[test]
+    fn integrated_safe_with_merged_pr() {
+        assert_eq!(
+            compute_safety_level(false, false, false, false, false, true, Some(PrStatus::Merged)),
+            SafetyLevel::Safe
+        );
+    }
+
+    #[test]
+    fn integrated_safe_with_closed_pr() {
+        assert_eq!(
+            compute_safety_level(false, false, false, false, false, true, Some(PrStatus::Closed)),
+            SafetyLevel::Safe
+        );
+    }
+
+    #[test]
+    fn integrated_safe_with_open_pr_downgrades_to_warning() {
+        assert_eq!(
+            compute_safety_level(false, false, false, false, false, true, Some(PrStatus::Open)),
+            SafetyLevel::Warning
+        );
+    }
+
+    #[test]
+    fn integrated_safe_with_no_pr_downgrades_to_warning() {
+        assert_eq!(
+            compute_safety_level(false, false, false, false, false, true, Some(PrStatus::None)),
+            SafetyLevel::Warning
+        );
+    }
+
+    #[test]
+    fn integrated_warning_stays_warning_regardless_of_pr() {
+        assert_eq!(
+            compute_safety_level(false, false, false, true, false, true, Some(PrStatus::Merged)),
+            SafetyLevel::Warning
+        );
+    }
+
+    #[test]
+    fn integrated_danger_stays_danger_regardless_of_pr() {
+        assert_eq!(
+            compute_safety_level(false, false, false, true, true, true, Some(PrStatus::Open)),
+            SafetyLevel::Danger
+        );
+    }
+
+    #[test]
+    fn toggle_off_ignores_pr_status() {
+        // With delete_remote=false, PR status is irrelevant
+        assert_eq!(
+            compute_safety_level(false, false, false, false, false, false, Some(PrStatus::Open)),
+            SafetyLevel::Safe
+        );
+    }
+
+    #[test]
+    fn disabled_stays_disabled_regardless_of_pr() {
+        assert_eq!(
+            compute_safety_level(true, false, false, false, false, true, Some(PrStatus::Merged)),
+            SafetyLevel::Disabled
+        );
+    }
+
+    // -- T012: CleanupResult serialization tests --
+
+    #[test]
+    fn cleanup_result_serializes_with_remote_fields() {
+        let result = CleanupResult {
+            branch: "feature/test".to_string(),
+            success: true,
+            error: None,
+            remote_success: Some(true),
+            remote_error: None,
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        let obj = json.as_object().unwrap();
+
+        assert!(obj.contains_key("remote_success"));
+        assert!(obj.contains_key("remote_error"));
+        assert_eq!(json["remote_success"], true);
+        assert!(json["remote_error"].is_null());
+    }
+
+    #[test]
+    fn cleanup_result_remote_none_when_toggle_off() {
+        let result = CleanupResult {
+            branch: "feature/test".to_string(),
+            success: true,
+            error: None,
+            remote_success: None,
+            remote_error: None,
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert!(json["remote_success"].is_null());
+        assert!(json["remote_error"].is_null());
+    }
+
+    #[test]
+    fn cleanup_result_remote_failure() {
+        let result = CleanupResult {
+            branch: "feature/test".to_string(),
+            success: true,
+            error: None,
+            remote_success: Some(false),
+            remote_error: Some("Permission denied".to_string()),
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["remote_success"], false);
+        assert_eq!(json["remote_error"], "Permission denied");
+    }
+
+    // -- T015: CleanupProgressPayload includes remote_status --
+
+    #[test]
+    fn progress_event_includes_remote_status() {
+        let payload = CleanupProgressPayload {
+            branch: "feature/test".to_string(),
+            status: "deleted".to_string(),
+            error: None,
+            remote_status: Some("deleted".to_string()),
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["remote_status"], "deleted");
+    }
+
+    #[test]
+    fn progress_event_remote_status_none() {
+        let payload = CleanupProgressPayload {
+            branch: "feature/test".to_string(),
+            status: "deleted".to_string(),
+            error: None,
+            remote_status: None,
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert!(json["remote_status"].is_null());
+    }
+
+    // -- T018-T019: Cleanup settings persistence --
+
+    #[test]
+    fn cleanup_settings_default() {
+        let settings = CleanupSettings::default();
+        assert!(!settings.delete_remote_branches);
+    }
+
+    #[test]
+    fn cleanup_settings_serialization_roundtrip() {
+        let settings = CleanupSettings {
+            delete_remote_branches: true,
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        let deserialized: CleanupSettings = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.delete_remote_branches);
+    }
+
+    #[test]
+    fn load_cleanup_settings_returns_default_when_missing() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let settings = load_cleanup_settings(temp.path());
+        assert!(!settings.delete_remote_branches);
+    }
+
+    #[test]
+    fn save_and_load_cleanup_settings() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let settings = CleanupSettings {
+            delete_remote_branches: true,
+        };
+        save_cleanup_settings(temp.path(), &settings).unwrap();
+
+        let loaded = load_cleanup_settings(temp.path());
+        assert!(loaded.delete_remote_branches);
+    }
+
+    #[test]
+    fn save_cleanup_settings_creates_gwt_dir() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let gwt_dir = temp.path().join(".gwt");
+        assert!(!gwt_dir.exists());
+
+        save_cleanup_settings(
+            temp.path(),
+            &CleanupSettings {
+                delete_remote_branches: false,
+            },
+        )
+        .unwrap();
+        assert!(gwt_dir.exists());
+    }
+
+    // -- Integration tests (existing) --
 
     #[test]
     fn list_worktrees_impl_returns_main_worktree_for_repo() {

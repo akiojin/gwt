@@ -6,7 +6,7 @@ mod branch;
 mod clone;
 mod commit;
 pub mod diff;
-mod gh_cli;
+pub mod gh_cli;
 pub mod graphql;
 mod issue;
 mod issue_spec;
@@ -42,6 +42,7 @@ pub use issue_spec::{
 pub use pullrequest::{
     PrCache, PrStatusCache, PrStatusInfo, PullRequest, ReviewComment, ReviewInfo, WorkflowRunInfo,
 };
+pub use gh_cli::PrStatus;
 pub use remote::Remote;
 pub use repository::{
     detect_repo_type, find_bare_repo_in_dir, get_header_context, get_main_repo_root,
