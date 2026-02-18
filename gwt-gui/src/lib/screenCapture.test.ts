@@ -8,6 +8,19 @@ function createEl(tag: string, className: string, text: string): HTMLElement {
   return el;
 }
 
+type CaptureTerminalContainer = HTMLElement & {
+  __gwtTerminal?: {
+    rows?: number;
+    buffer?: {
+      active?: {
+        viewportY?: number;
+        length?: number;
+        getLine: (index: number) => { translateToString: () => string } | undefined;
+      };
+    };
+  };
+};
+
 describe("collectScreenText", () => {
   let container: HTMLDivElement;
 
@@ -135,5 +148,63 @@ describe("collectScreenText", () => {
     });
 
     expect(result).toMatch(/Window: \d+x\d+/);
+  });
+
+  it("uses xterm viewport text for active terminal tab", () => {
+    container.appendChild(createEl("aside", "sidebar", "main"));
+    const mainArea = createEl("main", "main-area", "");
+    const wrapper = createEl("div", "terminal-wrapper active", "");
+    const terminalContainer = createEl("div", "terminal-container", "");
+    terminalContainer.setAttribute("data-pane-id", "pane-1");
+    (terminalContainer as CaptureTerminalContainer).__gwtTerminal = {
+      rows: 3,
+      buffer: {
+        active: {
+          viewportY: 1,
+          length: 5,
+          getLine: (index: number) => {
+            const lines = ["ignored", "$ git status", "On branch main", ""];
+            const value = lines[index];
+            if (typeof value !== "string") return undefined;
+            return { translateToString: () => value };
+          },
+        },
+      },
+    };
+    wrapper.appendChild(terminalContainer);
+    mainArea.appendChild(wrapper);
+    container.appendChild(mainArea);
+    container.appendChild(createEl("footer", "statusbar", "ready"));
+
+    const result = collectScreenText({
+      branch: "main",
+      activeTab: "Terminal",
+      activeTabType: "terminal",
+      activePaneId: "pane-1",
+    });
+
+    expect(result).toContain("$ git status\nOn branch main");
+    expect(result).not.toContain("(empty)");
+  });
+
+  it("falls back to DOM text when terminal buffer is unavailable", () => {
+    container.appendChild(createEl("aside", "sidebar", "main"));
+    const mainArea = createEl("main", "main-area", "fallback main text");
+    const wrapper = createEl("div", "terminal-wrapper active", "");
+    const terminalContainer = createEl("div", "terminal-container", "");
+    terminalContainer.setAttribute("data-pane-id", "pane-missing");
+    wrapper.appendChild(terminalContainer);
+    mainArea.appendChild(wrapper);
+    container.appendChild(mainArea);
+    container.appendChild(createEl("footer", "statusbar", "ready"));
+
+    const result = collectScreenText({
+      branch: "main",
+      activeTab: "Terminal",
+      activeTabType: "terminal",
+      activePaneId: "pane-missing",
+    });
+
+    expect(result).toContain("fallback main text");
   });
 });

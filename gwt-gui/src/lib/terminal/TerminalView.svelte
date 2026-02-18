@@ -27,6 +27,10 @@
     paneId: string;
   };
 
+  type CaptureTerminalContainer = HTMLDivElement & {
+    __gwtTerminal?: Terminal;
+  };
+
   function isTerminalFocused(rootEl: HTMLElement): boolean {
     const el = document.activeElement;
     return !!el && rootEl.contains(el);
@@ -233,6 +237,7 @@
     term.loadAddon(fit);
     term.loadAddon(webLinks);
     term.open(rootEl);
+    (rootEl as CaptureTerminalContainer).__gwtTerminal = term;
 
     // Initial fit
     requestAnimationFrame(() => {
@@ -412,6 +417,7 @@
       rootEl.removeEventListener("wheel", handleWheel, true);
       window.removeEventListener("gwt-terminal-edit-action", handleTerminalEditAction);
       window.removeEventListener("gwt-terminal-font-size", handleFontSizeChange);
+      delete (rootEl as CaptureTerminalContainer).__gwtTerminal;
       observer.disconnect();
       term.dispose();
       unregisterVoiceInputTarget();
@@ -474,7 +480,11 @@
   }
 </script>
 
-<div class="terminal-container" bind:this={containerEl}></div>
+<div
+  class="terminal-container"
+  data-pane-id={paneId}
+  bind:this={containerEl}
+></div>
 
 <style>
   .terminal-container {

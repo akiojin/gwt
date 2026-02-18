@@ -1370,6 +1370,28 @@
     return null;
   }
 
+  function getEditableSelectionText(
+    target: HTMLInputElement | HTMLTextAreaElement | HTMLElement,
+  ): string {
+    if (
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement
+    ) {
+      const start = target.selectionStart;
+      const end = target.selectionEnd;
+      if (start === null || end === null || start === end) return "";
+      const from = Math.min(start, end);
+      const to = Math.max(start, end);
+      return target.value.slice(from, to);
+    }
+
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return "";
+    const range = selection.getRangeAt(0);
+    if (!target.contains(range.commonAncestorContainer)) return "";
+    return selection.toString();
+  }
+
   async function fallbackMenuEditAction(action: "copy" | "paste") {
     const target = getActiveEditableElement();
     if (!target) {
@@ -1383,7 +1405,7 @@
     }
 
     if (action === "copy") {
-      const sel = window.getSelection()?.toString();
+      const sel = getEditableSelectionText(target);
       if (sel && navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(sel);
       }
@@ -1422,6 +1444,11 @@
     const text = collectScreenText({
       branch: currentBranch,
       activeTab: activeTab?.label ?? activeTabId,
+      activeTabType: activeTab?.type,
+      activePaneId:
+        activeTab?.type === "agent" || activeTab?.type === "terminal"
+          ? activeTab.paneId
+          : undefined,
     });
     try {
       await navigator.clipboard.writeText(text);

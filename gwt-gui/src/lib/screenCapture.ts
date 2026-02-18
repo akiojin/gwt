@@ -1,12 +1,105 @@
 export interface ScreenCaptureContext {
   branch: string;
   activeTab: string;
+  activeTabType?: string;
+  activePaneId?: string;
 }
 
 function getVisibleText(el: Element | null): string {
   if (!el) return "";
   const html = el as HTMLElement;
   return (html.innerText ?? html.textContent ?? "").trim();
+}
+
+type TerminalLineLike = {
+  translateToString: (
+    trimRight?: boolean,
+    startColumn?: number,
+    endColumn?: number,
+  ) => string;
+};
+
+type TerminalBufferLike = {
+  viewportY?: number;
+  length?: number;
+  getLine: (index: number) => TerminalLineLike | undefined;
+};
+
+type TerminalLike = {
+  rows?: number;
+  buffer?: {
+    active?: TerminalBufferLike;
+  };
+};
+
+type TerminalContainerElement = HTMLElement & {
+  __gwtTerminal?: TerminalLike;
+};
+
+function cssEscapeValue(value: string): string {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(value);
+  }
+  return value.replace(/[\\"]/g, "\\$&");
+}
+
+function getTerminalContainer(paneId?: string): TerminalContainerElement | null {
+  if (paneId && paneId.length > 0) {
+    const escaped = cssEscapeValue(paneId);
+    const byPaneId = document.querySelector<TerminalContainerElement>(
+      `.terminal-container[data-pane-id="${escaped}"]`,
+    );
+    if (byPaneId) return byPaneId;
+  }
+
+  return document.querySelector<TerminalContainerElement>(
+    ".terminal-wrapper.active .terminal-container",
+  );
+}
+
+function getTerminalViewportText(paneId?: string): string {
+  const container = getTerminalContainer(paneId);
+  const terminal = container?.__gwtTerminal;
+  const buffer = terminal?.buffer?.active;
+  if (!buffer) return "";
+
+  const bufferLength =
+    typeof buffer.length === "number" && buffer.length > 0 ? buffer.length : 0;
+  if (bufferLength === 0) return "";
+
+  const viewportYRaw =
+    typeof buffer.viewportY === "number" && Number.isFinite(buffer.viewportY)
+      ? Math.floor(buffer.viewportY)
+      : 0;
+  const viewportY = Math.max(0, Math.min(viewportYRaw, bufferLength - 1));
+  const rowsRaw =
+    typeof terminal?.rows === "number" && terminal.rows > 0
+      ? Math.floor(terminal.rows)
+      : 0;
+  const rows = rowsRaw > 0 ? rowsRaw : bufferLength - viewportY;
+  const end = Math.min(viewportY + rows, bufferLength);
+
+  const lines: string[] = [];
+  for (let i = viewportY; i < end; i++) {
+    const line = buffer.getLine(i);
+    lines.push(line ? line.translateToString(true) : "");
+  }
+
+  while (lines.length > 0 && lines[lines.length - 1].trim() === "") {
+    lines.pop();
+  }
+
+  return lines.join("\n").trim();
+}
+
+function getMainText(ctx: ScreenCaptureContext): string {
+  if (ctx.activeTabType === "agent" || ctx.activeTabType === "terminal") {
+    const terminalText = getTerminalViewportText(ctx.activePaneId);
+    if (terminalText) return terminalText;
+  }
+
+  const mainArea = document.querySelector(".main-area");
+  return getVisibleText(mainArea);
 }
 
 function findModalText(): string | null {
@@ -45,8 +138,7 @@ export function collectScreenText(ctx: ScreenCaptureContext): string {
   }
 
   // Main area
-  const mainArea = document.querySelector(".main-area");
-  const mainText = getVisibleText(mainArea);
+  const mainText = getMainText(ctx);
   lines.push("");
   lines.push(`--- Main: ${ctx.activeTab} ---`);
   lines.push(mainText || "(empty)");
