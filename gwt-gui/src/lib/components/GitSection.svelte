@@ -214,7 +214,6 @@
     justify-content: space-between;
     padding: 10px 14px;
     cursor: default;
-    user-select: none;
   }
 
   .git-header.clickable {

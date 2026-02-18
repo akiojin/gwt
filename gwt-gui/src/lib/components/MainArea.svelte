@@ -346,7 +346,6 @@
     cursor: pointer;
     white-space: nowrap;
     font-family: inherit;
-    user-select: none;
   }
 
   .tab:hover {
