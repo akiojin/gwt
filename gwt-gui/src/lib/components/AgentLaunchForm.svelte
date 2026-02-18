@@ -352,12 +352,7 @@
     applySavedLaunchDefaults(savedLaunchDefaults);
   }
 
-  // Wait for the OS environment (PATH) to be captured before detecting agents.
-  // Without this, the GUI-inherited PATH is minimal and `which claude` fails
-  // even when the agent is globally installed.
   $effect(() => {
-    void osEnvReady;
-    if (!osEnvReady) return;
     detectAgents();
   });
 
