@@ -433,7 +433,10 @@ describe("VersionHistoryPanel", () => {
   });
 
   it("keeps completed status when a stale generating response arrives later", async () => {
-    let resolveHistory: ((value: any) => void) | null = null;
+    let resolveHistory!: (value: any) => void;
+    const historyPromise = new Promise<any>((resolve) => {
+      resolveHistory = resolve;
+    });
 
     invokeMock.mockImplementation(async (cmd: string, args?: any) => {
       if (cmd === "list_project_versions") {
@@ -450,11 +453,7 @@ describe("VersionHistoryPanel", () => {
         };
       }
       if (cmd === "get_project_version_history") {
-        const versionId = String(args?.versionId ?? "");
-        return new Promise((resolve) => {
-          resolveHistory = resolve;
-          void versionId;
-        });
+        return historyPromise;
       }
       return [];
     });
@@ -490,7 +489,7 @@ describe("VersionHistoryPanel", () => {
     });
 
     // Then the stale direct invoke response resolves with "generating".
-    resolveHistory?.({
+    resolveHistory({
       status: "generating",
       version_id: "unreleased",
       label: "Unreleased (HEAD)",
