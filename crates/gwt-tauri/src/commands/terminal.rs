@@ -3203,10 +3203,20 @@ pub fn start_launch_job(
         };
 
         tracing::debug!(job_id = %job_id_thread, status = %finished.status, "emitting launch-finished");
+
+        // Store the result for polling retrieval before emitting.  This
+        // guarantees the frontend can always recover the result even when
+        // Tauri events are silently lost.
+        if let Some(state) = app.try_state::<AppState>() {
+            if let Ok(mut results) = state.launch_results.lock() {
+                results.insert(job_id_thread.clone(), finished.clone());
+            }
+        }
+
         let _ = app.emit("launch-finished", &finished);
 
-        // Remove the job AFTER emitting the event so that the frontend
-        // polling never sees the job as gone before receiving the event.
+        // Remove the running-job entry last so that polling sees the job
+        // as "running" until both the result store and event are done.
         if let Some(state) = app.try_state::<AppState>() {
             if let Ok(mut jobs) = state.launch_jobs.lock() {
                 jobs.remove(&job_id_thread);
@@ -3233,18 +3243,54 @@ pub fn cancel_launch_job(job_id: String, state: State<AppState>) -> Result<(), S
     Ok(())
 }
 
-/// Check whether a launch job is still running (used by frontend polling).
+/// Frontend polling result for a launch job.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchJobPollResult {
+    /// `true` while the job thread is still running.
+    pub running: bool,
+    /// Populated once the job has finished (success, error, or panic).
+    /// The frontend should apply this exactly as it would a
+    /// `launch-finished` event.
+    pub finished: Option<LaunchFinishedPayload>,
+}
+
+/// Poll the state of a launch job.  Returns the final result when
+/// available so the frontend can recover even if Tauri events are lost.
 #[tauri::command]
-pub fn is_launch_job_alive(job_id: String, state: State<AppState>) -> bool {
+pub fn poll_launch_job(job_id: String, state: State<AppState>) -> LaunchJobPollResult {
     let id = job_id.trim();
     if id.is_empty() {
-        return false;
+        return LaunchJobPollResult {
+            running: false,
+            finished: None,
+        };
     }
-    state
+
+    // Still running?
+    let running = state
         .launch_jobs
         .lock()
         .map(|jobs| jobs.contains_key(id))
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if running {
+        return LaunchJobPollResult {
+            running: true,
+            finished: None,
+        };
+    }
+
+    // Finished – try to retrieve (and consume) the stored result.
+    let finished = state
+        .launch_results
+        .lock()
+        .ok()
+        .and_then(|mut results| results.remove(id));
+
+    LaunchJobPollResult {
+        running: false,
+        finished,
+    }
 }
 
 /// Terminal cwd changed event payload sent to the frontend
