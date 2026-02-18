@@ -68,6 +68,7 @@
     releaseWindowSessionRestoreLead,
     tryAcquireWindowSessionRestoreLead,
   } from "./lib/windowSessionRestoreLeader";
+  import { collectScreenText } from "./lib/screenCapture";
 
   interface SettingsUpdatedPayload {
     uiFontSize?: number;
@@ -1414,6 +1415,24 @@
     }
   }
 
+  let copyFlashActive = $state(false);
+
+  async function handleScreenCopy() {
+    const activeTab = tabs.find((t) => t.id === activeTabId);
+    const text = collectScreenText({
+      branch: currentBranch,
+      activeTab: activeTab?.label ?? activeTabId,
+    });
+    try {
+      await navigator.clipboard.writeText(text);
+      copyFlashActive = true;
+      setTimeout(() => { copyFlashActive = false; }, 300);
+      showToast("Copied to clipboard", 2000);
+    } catch {
+      showToast("Failed to copy screen text", 4000);
+    }
+  }
+
   function emitTerminalEditAction(action: "copy" | "paste") {
     const paneId = getActiveTerminalPaneId();
     if (!paneId) {
@@ -1640,6 +1659,9 @@
         break;
       case "edit-paste":
         emitTerminalEditAction("paste");
+        break;
+      case "screen-copy":
+        void handleScreenCopy();
         break;
       case "debug-os-env":
         showOsEnvDebug = true;
@@ -2333,6 +2355,10 @@
   </div>
 {/if}
 
+{#if copyFlashActive}
+  <div class="copy-flash"></div>
+{/if}
+
 {#if toastMessage}
   <div class="toast-container">
     <div class="toast-message">
@@ -2629,5 +2655,21 @@
 
   .env-debug-error {
     color: var(--text-error, #f38ba8);
+  }
+
+  .copy-flash {
+    position: fixed;
+    inset: 0;
+    background: var(--accent, #89b4fa);
+    opacity: 0;
+    pointer-events: none;
+    z-index: 9999;
+    animation: copy-flash-anim 0.25s ease-out forwards;
+  }
+
+  @keyframes copy-flash-anim {
+    0% { opacity: 0; }
+    30% { opacity: 0.12; }
+    100% { opacity: 0; }
   }
 </style>
