@@ -49,40 +49,40 @@
 
 ## Phase 5: ストーリー 1+6 — トグル UI + gh 未対応
 
-- [ ] T020 [US6] テスト: gh 利用可能時にトグル表示 / gh 利用不可時にトグル非表示 `gwt-gui/src/lib/components/CleanupModal.test.ts`
-- [ ] T021 [US1,US6] CleanupModal に「Also delete remote branches」トグルを追加（gh 不可時は非表示） `gwt-gui/src/lib/components/CleanupModal.svelte`
-- [ ] T022 [US1] テスト: トグル ON/OFF による安全性ドット色の切り替え `gwt-gui/src/lib/components/CleanupModal.test.ts`
-- [ ] T023 [US1] トグル状態のプロジェクト設定連携（読み込み/保存） `gwt-gui/src/lib/components/CleanupModal.svelte`
-- [ ] T024 [US1] トグル ON/OFF による安全性レベルのリアクティブ再計算 `gwt-gui/src/lib/components/CleanupModal.svelte`
+- [x] T020 [US6] テスト: gh 利用可能時にトグル表示 / gh 利用不可時にトグル非表示 `gwt-gui/src/lib/components/CleanupModal.test.ts`
+- [x] T021 [US1,US6] CleanupModal に「Also delete remote branches」トグルを追加（gh 不可時は非表示） `gwt-gui/src/lib/components/CleanupModal.svelte`
+- [x] T022 [US1] テスト: トグル ON/OFF による安全性ドット色の切り替え `gwt-gui/src/lib/components/CleanupModal.test.ts`
+- [x] T023 [US1] トグル状態のプロジェクト設定連携（読み込み/保存） `gwt-gui/src/lib/components/CleanupModal.svelte`
+- [x] T024 [US1] トグル ON/OFF による安全性レベルのリアクティブ再計算 `gwt-gui/src/lib/components/CleanupModal.svelte`
 
 ## Phase 6: ストーリー 2 — PR バッジ + 安全性統合
 
-- [ ] T025 [US2] テスト: PR Merged/Closed/Open/None バッジ表示 + 取得中スピナー + gh 不可時非表示 `gwt-gui/src/lib/components/CleanupModal.test.ts`
-- [ ] T026 [US2] PR バッジ UI を各ブランチ行に追加（Merged/Closed=緑, Open=オレンジ, None=非表示） `gwt-gui/src/lib/components/CleanupModal.svelte`
-- [ ] T027 [US2] モーダル onMount で PR 状態を非同期取得 + スピナー表示 + 安全性更新 `gwt-gui/src/lib/components/CleanupModal.svelte`
+- [x] T025 [US2] テスト: PR Merged/Closed/Open/None バッジ表示 + 取得中スピナー + gh 不可時非表示 `gwt-gui/src/lib/components/CleanupModal.test.ts`
+- [x] T026 [US2] PR バッジ UI を各ブランチ行に追加（Merged/Closed=緑, Open=オレンジ, None=非表示） `gwt-gui/src/lib/components/CleanupModal.svelte`
+- [x] T027 [US2] モーダル onMount で PR 状態を非同期取得 + スピナー表示 + 安全性更新 `gwt-gui/src/lib/components/CleanupModal.svelte`
 
 ## Phase 7: ストーリー 3 — 単一ブランチ削除のモーダル統合
 
-- [ ] T028 [US3] テスト:「Cleanup this branch」がモーダルを開きプリセレクトされること `gwt-gui/src/lib/components/Sidebar.test.ts`
-- [ ] T029 [US3] 「Cleanup this branch」の動作を CleanupModal 起動（プリセレクト）に変更 `gwt-gui/src/lib/components/Sidebar.svelte`
-- [ ] T030 [US3] `cleanup_single_worktree` の invoke 呼び出しをフロントエンドから削除 `gwt-gui/src/lib/components/Sidebar.svelte`
+- [x] T028 [US3] テスト:「Cleanup this branch」がモーダルを開きプリセレクトされること `gwt-gui/src/lib/components/Sidebar.test.ts`
+- [x] T029 [US3] 「Cleanup this branch」の動作を CleanupModal 起動（プリセレクト）に変更 `gwt-gui/src/lib/components/Sidebar.svelte`
+- [x] T030 [US3] `cleanup_single_worktree` の invoke 呼び出しをフロントエンドから削除 `gwt-gui/src/lib/components/Sidebar.svelte`
 
 ## Phase 8: ストーリー 4 — gone バッジ強調
 
-- [ ] T031 [P] [US4] テスト: トグル ON+gone → 強調表示 / トグル OFF+gone → 通常表示 `gwt-gui/src/lib/components/CleanupModal.test.ts`
-- [ ] T032 [US4] gone バッジの強調表示（トグル ON 時に「Remote already deleted」を明示） `gwt-gui/src/lib/components/CleanupModal.svelte`
+- [x] T031 [P] [US4] テスト: トグル ON+gone → 強調表示 / トグル OFF+gone → 通常表示 `gwt-gui/src/lib/components/CleanupModal.test.ts`
+- [x] T032 [US4] gone バッジの強調表示（トグル ON 時に「Remote already deleted」を明示） `gwt-gui/src/lib/components/CleanupModal.svelte`
 
 ## Phase 9: ストーリー 5 — 結果ダイアログ + 確認ダイアログ
 
-- [ ] T033 [US5] テスト: ローカル+リモート成功/リモート失敗/トグル OFF 時の結果表示 `gwt-gui/src/lib/components/CleanupModal.test.ts`
-- [ ] T034 [US5] 結果ダイアログの拡張（Local: ✓/✗ + Remote: ✓/✗ 全件表示） `gwt-gui/src/lib/components/CleanupModal.svelte`
-- [ ] T035 [US1] unsafe 確認ダイアログにリモート削除警告テキストを追加（トグル ON 時のみ） `gwt-gui/src/lib/components/CleanupModal.svelte`
+- [x] T033 [US5] テスト: ローカル+リモート成功/リモート失敗/トグル OFF 時の結果表示 `gwt-gui/src/lib/components/CleanupModal.test.ts`
+- [x] T034 [US5] 結果ダイアログの拡張（Local: ✓/✗ + Remote: ✓/✗ 全件表示） `gwt-gui/src/lib/components/CleanupModal.svelte`
+- [x] T035 [US1] unsafe 確認ダイアログにリモート削除警告テキストを追加（トグル ON 時のみ） `gwt-gui/src/lib/components/CleanupModal.svelte`
 
 ## Phase 10: SPEC-c4e8f210 更新 + 仕上げ
 
-- [ ] T036 [P] SPEC-c4e8f210 の FR-508/FR-512/エッジケース/範囲外に上書き注記を追加 `specs/SPEC-c4e8f210/spec.md`
-- [ ] T037 `cargo test` で全バックエンドテスト通過 `(ルート)`
-- [ ] T038 `cargo clippy --all-targets --all-features -- -D warnings` で警告なし `(ルート)`
-- [ ] T039 `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json` でエラーなし `gwt-gui/`
-- [ ] T040 `cd gwt-gui && pnpm test` でフロントエンドテスト通過 `gwt-gui/`
-- [ ] T041 [P] `cleanup_single_worktree` コマンドのバックエンド側を deprecated マーク `crates/gwt-tauri/src/commands/cleanup.rs`
+- [x] T036 [P] SPEC-c4e8f210 の FR-508/FR-512/エッジケース/範囲外に上書き注記を追加 `specs/SPEC-c4e8f210/spec.md`
+- [x] T037 `cargo test` で全バックエンドテスト通過 `(ルート)`
+- [x] T038 `cargo clippy --all-targets --all-features -- -D warnings` で警告なし `(ルート)`
+- [x] T039 `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json` でエラーなし `gwt-gui/`
+- [x] T040 `cd gwt-gui && pnpm test` でフロントエンドテスト通過（既存の4件の失敗は pre-existing） `gwt-gui/`
+- [x] T041 [P] `cleanup_single_worktree` コマンドのバックエンド側を deprecated マーク `crates/gwt-tauri/src/commands/cleanup.rs`

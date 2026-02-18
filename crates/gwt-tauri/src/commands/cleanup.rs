@@ -514,6 +514,11 @@ pub async fn cleanup_worktrees(
 }
 
 /// Cleanup a single worktree (SPEC-c4e8f210 T3)
+///
+/// **Deprecated**: Use `cleanup_worktrees` with a single-element `branches` list instead.
+/// This command is retained for backward compatibility but the frontend now routes
+/// all deletions through `CleanupModal` → `cleanup_worktrees` (SPEC-ad1ac432 FR-612).
+#[deprecated(note = "Use cleanup_worktrees with a single branch instead (SPEC-ad1ac432 FR-612)")]
 #[tauri::command]
 pub async fn cleanup_single_worktree(
     project_path: String,
