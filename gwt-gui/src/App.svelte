@@ -1372,15 +1372,20 @@
   async function fallbackMenuEditAction(action: "copy" | "paste") {
     const target = getActiveEditableElement();
     if (!target) {
-      // Let browser/editor defaults decide when there is no editable target.
       if (action === "copy") {
-        document.execCommand("copy");
+        const sel = window.getSelection()?.toString();
+        if (sel && navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(sel);
+        }
       }
       return;
     }
 
     if (action === "copy") {
-      document.execCommand("copy");
+      const sel = window.getSelection()?.toString();
+      if (sel && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(sel);
+      }
       return;
     }
 
