@@ -1,19 +1,14 @@
-# 実装計画: エージェントモード（GUI版）
+# 実装計画: プロジェクトチーム（Project Team）
 
-**仕様ID**: `SPEC-ba3f610c`  
-**日付**: 2026-02-13  
+**仕様ID**: `SPEC-ba3f610c`
+**日付**: 2026-02-19
 **仕様書**: [spec.md](./spec.md)
 
 ## 概要
 
-マスターエージェント（MA）との対話を中心に、Agentビューでタスクと担当サブエージェントを可視化する。  
-本計画では、チャット表示改善に加えて以下を同期実装する。
-
-- Agentビューのタスク一覧表示（状態付き）
-- タスク選択時の担当サブエージェント一覧表示
-- worktree相対パス表示と詳細時の絶対パス表示
-- 再計画時の即時同期（現在担当のみ表示）
-- MAによるSpec Kit成果物（`spec.md`/`plan.md`/`tasks.md`/`tdd.md`）の生成完了チェック
+3層エージェントアーキテクチャ（Lead / Coordinator / Developer）によるプロジェクト統括機能を実装する。
+Leadがプロジェクトのゴールを保持し、要件定義・Spec Kitワークフロー・GitHub Issue/Project管理を担い、
+Coordinatorが実装タスク管理・CI監視・Developer管理を行い、Developerが各Worktreeで実装を実行する。
 
 ## 技術コンテキスト
 
@@ -22,62 +17,122 @@
 - バックエンド: gwt-tauri + gwt-core
 - ストレージ: ファイルシステム（`~/.gwt/sessions/`）
 - テスト: cargo test / pnpm test / vitest
+- CI/CD: GitHub Actions
 
 ## 実装スコープ
 
-1. MAセッション状態モデルの拡張（Task/SubAgent/worktree表示情報）
-2. Agentビューのタスク一覧UI実装（`running > pending > failed > completed`）
-3. タスク選択時の担当サブエージェント一覧UI実装（全件表示）
-4. 複数サブエージェント割当の表示対応
-5. 再計画・再割当時の同期表示（現在担当のみ）
-6. worktree表示仕様（相対デフォルト + ホバー/詳細で絶対）
-7. Spec Kit成果物4点（`spec.md`/`plan.md`/`tasks.md`/`tdd.md`）生成と実行ゲート制御
-8. 既存チャット要件（IME、スピナー、自動スクロール）の回帰防止
+### Phase A: 基盤モデル・型定義
+
+1. 3層状態モデル（Session / Lead / Coordinator / Developer / Task）の定義
+2. フロント型定義の3層対応（Lead / Coordinator / Developer）
+3. PTY通信のスキル化基盤（agent_tools.rs → Claude Code plugin skills）
+
+### Phase B: Lead（PM）機能
+
+4. Lead実行基盤（gwt内蔵AI / Claude Code切り替え対応）
+5. Leadチャット（ユーザー対話、IME/スピナー/自動スクロール）
+6. Spec Kit内蔵化（LLMプロンプトテンプレートのRust組み込み）
+7. Spec Kitワークフロー実行（clarify → specify → plan → tasks → tdd）
+8. 成果物4点ゲート（spec.md/plan.md/tasks.md/tdd.md揃うまでCoordinator起動不可）
+9. 計画提示・承認フロー
+10. GitHub Issue作成・GitHub Project登録
+11. 段階的委譲（自律範囲の判定ロジック）
+12. ハイブリッド常駐（イベント駆動 + 2分間隔ポーリング）
+13. 途中経過報告（軽量な状態チェック + チャット報告）
+
+### Phase C: Coordinator（Orchestrator）機能
+
+14. Coordinator起動・管理（GUI内蔵ターミナルペインで起動）
+15. Coordinator粒度の動的判断（1:1 or 1:N）
+16. タスク分割・Developer割り当て
+17. Worktree/ブランチ自動作成（`agent/`プレフィックス、命名規則）
+18. Developer起動プロンプト生成（アダプティブ、CLAUDE.md規約含む）
+19. Developer完了検出（Hook Stop / GWT_TASK_DONE / プロセス終了）
+20. 並列実行制御（同時実行数のLLM判断）
+21. CI監視と自律修正ループ（CI失敗 → Developer修正 → 再プッシュ、最大3回）
+22. 成果物検証（テスト実行 → PR作成）
+23. Developer間コンテキスト共有（Git merge経由）
+
+### Phase D: GUI（プロジェクトチームUI）
+
+24. Project Teamタブ・モード切り替え
+25. Leadチャット画面（バブル表示、入力エリア）
+26. 下部パネル切替（Chat / Kanban / Coordinator）
+27. Kanbanボード（Pending/Running/Completed/Failed 4カラム、タスクカード表示）
+28. Coordinatorパネル（状態表示、View Terminal、Chat、Developer一覧）
+29. コスト可視化（APIコール数/推定トークン数）
+30. AI設定未構成時のエラー表示
+
+### Phase E: セッション・障害・連携
+
+31. セッション永続化（JSON形式、~/.gwt/sessions/）
+32. セッション復元・再開
+33. 層間独立性（Lead障害 / Coordinator障害 / Developer障害の各ハンドリング）
+34. Coordinator自律再起動
+35. セッション強制中断（Esc → SIGTERM → Paused永続化）
+36. ブランチモード連携（agent/ブランチ表示・削除検出）
+37. ログ記録（agent.lead.llm / agent.coordinator / agent.developer）
+38. コンテキスト要約・圧縮
+
+### Phase F: スキル化・統合
+
+39. PTY通信のClaude Codeスキル化（send_keys_to_pane / send_keys_broadcast / capture_scrollback_tail）
+40. agent_tools.rsからの完全移行
+41. 直接アクセス（Developerターミナル直操作 / Coordinatorチャット）
 
 ## 主要コード構成
 
 ```text
+crates/gwt-core/src/
+├── agent/
+│   ├── mod.rs                    # 3層エージェントモデル
+│   ├── lead.rs                   # Lead状態・ロジック
+│   ├── coordinator.rs            # Coordinator状態・ロジック
+│   └── developer.rs              # Developer状態・ロジック
+
 crates/gwt-tauri/src/
-├── agent_master.rs                # MA状態・応答ループ
-├── state.rs                       # ウィンドウごとのAgent Mode状態
-├── commands/agent_mode.rs         # Agent Mode用Tauriコマンド
-└── session/* (必要に応じて)       # セッション永続化
+├── agent_master.rs               # Lead実行ループ（旧MA）
+├── state.rs                      # ウィンドウごとのProject Team状態
+├── commands/
+│   ├── agent_mode.rs             # Project Team用Tauriコマンド
+│   └── terminal.rs               # PTY通信（スキル化元）
+└── session/                      # セッション永続化
 
 gwt-gui/src/
-├── lib/components/AgentModePanel.svelte
-├── lib/components/AgentSidebar.svelte
-└── lib/types.ts
+├── lib/components/
+│   ├── ProjectTeamPanel.svelte   # メインパネル（旧AgentModePanel）
+│   ├── LeadChat.svelte           # Leadチャット
+│   ├── KanbanBoard.svelte        # Kanbanボード
+│   ├── CoordinatorPanel.svelte   # Coordinatorパネル
+│   └── TaskCard.svelte           # タスクカード
+└── lib/types.ts                  # 3層対応型定義
 ```
 
 ## 実装方針
 
-- UIは「チャット」と「Agentビュー」を同一セッション状態で駆動する。
-- タスク選択を単一選択に統一し、下部一覧は選択タスクに限定して描画する。
-- サブエージェント一覧は全件表示し、再計画時は現在担当だけを保持する。
-- worktreeは表示用相対パスと詳細用絶対パスを同時保持する。
-- 実行フェーズ遷移前に成果物4点の存在検証を行い、不足時はMAが再生成またはユーザー確認を行う。
+- 既存のAgentModePanel/AgentSidebarをリネーム・拡張して3層対応する
+- Lead実行ループは既存のagent_master.rsを拡張する
+- Coordinator/Developerは新規の状態管理モジュールとして追加する
+- GUI UIは「Leadチャット + 下部切替パネル」構成で実装する
+- PTY通信は既存のsend_keys系を維持しつつ、スキルとしてのインターフェースを追加する
+- セッション永続化は既存の~/.gwt/sessions/を拡張する
+- テストは各フェーズごとにTDD（テストファースト）で進める
 
 ## 受け入れ条件
 
-- MAチャットでユーザー入力を受け付け、既存UI要件（IME/スピナー/自動スクロール）を満たす
-- Agentビューにタスク一覧が状態付きで表示される
-- タスク一覧の表示順が `running > pending > failed > completed` になる
-- タスク選択時に下部へ担当サブエージェント一覧が全件表示される
-- 1タスクに複数担当がある場合も全件表示される
-- 再計画時、下部一覧は現在担当のみを表示し過去担当を表示しない
-- worktreeは相対パスを表示し、ホバーまたは詳細で絶対パスを確認できる
-- MAは`spec.md`/`plan.md`/`tasks.md`/`tdd.md`が揃うまで実行を開始しない
+- Leadチャットでユーザーと対話し、要件定義・Spec Kitワークフローを実行できる
+- Leadが成果物4点を生成し、承認後にCoordinatorを起動できる
+- CoordinatorがDeveloperを起動し、タスクを割り当てて自律実行できる
+- KanbanボードでDeveloper/タスクをPending/Running/Completed/Failedの4カラムで表示できる
+- CoordinatorがCI結果を監視し、失敗時に自律修正ループを実行できる
+- 各層が独立して動作し、上位層の障害が下位層に影響しない
+- セッションを永続化し、gwt再起動後に復元・再開できる
+- IME/スピナー/自動スクロールの既存チャット要件を維持する
+- PTY通信がClaude Codeスキルとして利用可能
 
 ## 検証方針
 
-- フロントエンド: Agentビュー表示、選択連動、並び順、worktree表示形式をコンポーネントテストで検証
-- バックエンド: MA状態変換、再割当時の現在担当のみ保持、成果物4点の実行ゲートをユニットテストで検証
-- 回帰: 既存 `AgentModePanel` のIME/スピナー/オートスクロールテストを維持
-
-## 追補: Session Summaryタブ回帰修正（2026-02-13）
-
-- `App.svelte` の初期タブ/再初期化から `Session Summary` を除去し、`Agent Mode` を既定タブに統一する
-- ブランチ選択時の `Session Summary` 再追加ロジックを削除する
-- タブ復元時の active 上書き条件を `agentMode` のみに限定する
-- `Tab` 型から `summary` を除去して型レベルで再発を防止する
-- `MainArea.test.ts` と `appTabs.test.ts` を追加し、タブ固定仕様をテストで担保する
+- フロントエンド: Kanbanボード、チャット、パネル切替をコンポーネントテスト（vitest）で検証
+- バックエンド: Lead/Coordinator/Developer状態管理、成果物ゲート、CI監視をユニットテスト（cargo test）で検証
+- 回帰: 既存AgentModePanel/AgentSidebarの機能テストを維持
+- 統合: Coordinator→Developer起動→完了検出→PR作成のE2Eフローを検証
