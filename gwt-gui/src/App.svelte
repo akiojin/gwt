@@ -1215,6 +1215,7 @@
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("cancel_launch_job", { jobId: launchJobId });
+      handleLaunchModalClose();
     } catch (err) {
       console.error("Failed to cancel launch job:", err);
       launchStatus = "error";
