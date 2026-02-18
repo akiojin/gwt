@@ -185,4 +185,67 @@ describe("GitChangesTab", () => {
       expect(rendered.getByText("Failed to read working tree")).toBeTruthy();
     });
   });
+
+  it("ignores stale committed response after base branch changes again", async () => {
+    let resolveDevelop: ((value: FileChange[]) => void) | null = null;
+
+    invokeMock.mockImplementation((command: string, args?: { baseBranch?: string }) => {
+      if (command === "get_branch_diff_files") {
+        if (args?.baseBranch === "develop") {
+          return new Promise<FileChange[]>((resolve) => {
+            resolveDevelop = resolve;
+          });
+        }
+        if (args?.baseBranch === "main") {
+          return Promise.resolve([
+            {
+              path: "src/main-final.ts",
+              kind: "Modified",
+              additions: 2,
+              deletions: 1,
+              is_binary: false,
+            },
+          ]);
+        }
+      }
+      if (command === "get_working_tree_status") return Promise.resolve([]);
+      return Promise.resolve([]);
+    });
+
+    const rendered = await renderTab({ baseBranch: "develop" });
+    await waitFor(() => {
+      expect(resolveDevelop).toBeTruthy();
+    });
+
+    await rendered.rerender({
+      projectPath: "/tmp/project",
+      branch: "feature/changes",
+      baseBranch: "main",
+      refreshToken: 0,
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("main-final.ts")).toBeTruthy();
+    });
+
+    const resolveDevelopNow = resolveDevelop as ((value: FileChange[]) => void) | null;
+    if (!resolveDevelopNow) {
+      throw new Error("Expected pending develop response");
+    }
+    resolveDevelopNow([
+      {
+        path: "src/develop-stale.ts",
+        kind: "Added",
+        additions: 5,
+        deletions: 0,
+        is_binary: false,
+      },
+    ]);
+    await Promise.resolve();
+
+    await waitFor(() => {
+      expect(rendered.queryByText("develop-stale.ts")).toBeNull();
+      expect(rendered.getByText("main-final.ts")).toBeTruthy();
+    });
+  });
 });

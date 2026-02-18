@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import type { GitChangeSummary } from "../types";
   import GitChangesTab from "./GitChangesTab.svelte";
   import GitCommitsTab from "./GitCommitsTab.svelte";
@@ -18,12 +19,14 @@
 
   let collapsed: boolean = $state(true);
   let loading: boolean = $state(false);
+  let refreshing: boolean = $state(false);
   let error: string | null = $state(null);
   let summary = $state<GitChangeSummary | null>(null);
   let refreshToken: number = $state(0);
 
   let baseBranchCandidates: string[] = $state([]);
   let baseBranch: string = $state("");
+  let summaryRequestId = 0;
 
   type TabId = "changes" | "commits" | "stash";
   let activeTab: TabId = $state("changes");
@@ -43,7 +46,13 @@
   }
 
   async function loadSummary() {
-    loading = true;
+    const requestId = summaryRequestId + 1;
+    summaryRequestId = requestId;
+    const requestedBase = baseBranch || undefined;
+    const hasExistingSummary = summary !== null;
+
+    loading = !hasExistingSummary;
+    refreshing = hasExistingSummary;
     error = null;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
@@ -52,22 +61,45 @@
         invoke<GitChangeSummary>("get_git_change_summary", {
           projectPath,
           branch,
-          baseBranch: baseBranch || undefined,
+          baseBranch: requestedBase,
         }),
         invoke<string[]>("get_base_branch_candidates", { projectPath }),
       ]);
 
-      summary = summaryResult ?? null;
-      baseBranchCandidates = candidates ?? [];
+      if (requestId !== summaryRequestId) return;
 
-      if (!baseBranch && summaryResult?.base_branch) {
-        baseBranch = summaryResult.base_branch;
+      const nextSummary = summaryResult ?? null;
+      const nextCandidates = candidates ?? [];
+      const summaryBase = nextSummary?.base_branch?.trim() ?? "";
+
+      summary = nextSummary;
+      baseBranchCandidates = nextCandidates;
+
+      if (!baseBranch || (nextCandidates.length > 0 && !nextCandidates.includes(baseBranch))) {
+        if (summaryBase && (nextCandidates.length === 0 || nextCandidates.includes(summaryBase))) {
+          baseBranch = summaryBase;
+        } else if (nextCandidates.length > 0) {
+          baseBranch = nextCandidates[0];
+        } else if (summaryBase) {
+          baseBranch = summaryBase;
+        }
       }
     } catch (err) {
+      if (requestId !== summaryRequestId) return;
+
+      console.error("Failed to load git summary", {
+        branch,
+        requestedBaseBranch: requestedBase ?? null,
+        requestId,
+        error: err,
+      });
       error = toErrorMessage(err);
       summary = null;
     } finally {
-      loading = false;
+      if (requestId === summaryRequestId) {
+        loading = false;
+        refreshing = false;
+      }
     }
   }
 
@@ -77,15 +109,31 @@
   }
 
   function handleBaseBranchChange(e: Event) {
-    const select = e.target as HTMLSelectElement;
-    baseBranch = select.value;
-    loadSummary();
+    const select = e.currentTarget;
+    if (!(select instanceof HTMLSelectElement)) return;
+
+    const nextBase = select.value.trim();
+    if (!nextBase) return;
+
+    if (baseBranchCandidates.length > 0 && !baseBranchCandidates.includes(nextBase)) {
+      const fallback = baseBranchCandidates.includes(baseBranch)
+        ? baseBranch
+        : (baseBranchCandidates[0] ?? "");
+      baseBranch = fallback;
+      return;
+    }
+
+    if (nextBase === baseBranch) return;
+    baseBranch = nextBase;
+    void loadSummary();
   }
 
   $effect(() => {
     void projectPath;
     void branch;
-    loadSummary();
+    untrack(() => {
+      void loadSummary();
+    });
   });
 
   $effect(() => {
@@ -115,7 +163,7 @@
         <span class="collapse-icon">{collapsed ? ">" : "v"}</span>
       {/if}
       <span class="git-title">Git</span>
-      {#if loading}
+      {#if loading || refreshing}
         <span class="git-summary-text">Loading git info...</span>
       {:else if summaryText}
         <span class="git-summary-text">{summaryText}</span>
