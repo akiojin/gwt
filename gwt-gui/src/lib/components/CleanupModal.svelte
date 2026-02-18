@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { WorktreeInfo, CleanupResult } from "../types";
+  import type { WorktreeInfo, CleanupResult, PrStatus, CleanupSettings } from "../types";
   import { untrack } from "svelte";
   import { flip } from "svelte/animate";
 
@@ -40,7 +40,20 @@
   let confirmMode: ConfirmMode | null = $state(null);
   let cleaning: boolean = $state(false);
 
-  // Failure re-open state
+  // Remote toggle state
+  let ghAvailable: boolean = $state(false);
+  let deleteRemote: boolean = $state(false);
+
+  // PR statuses
+  let prStatuses: Record<string, PrStatus> = $state({});
+  let prLoading: boolean = $state(false);
+
+  // Result dialog state (replaces failure-only dialog)
+  let results: CleanupResult[] = $state([]);
+  let showResults: boolean = $state(false);
+  let resultsDeleteRemote: boolean = $state(false);
+
+  // Legacy failure state for invoke errors
   let failures: CleanupResult[] = $state([]);
   let showFailures: boolean = $state(false);
 
@@ -61,13 +74,23 @@
     typeof (Element.prototype as unknown as { animate?: unknown }).animate === "function" &&
     typeof (Element.prototype as unknown as { getAnimations?: unknown }).getAnimations === "function";
 
+  function getEffectiveSafetyLevel(wt: WorktreeInfo): string {
+    if (!deleteRemote) return wt.safety_level;
+    if (wt.safety_level !== "safe") return wt.safety_level;
+    const branch = wt.branch;
+    if (!branch) return wt.safety_level;
+    const pr = prStatuses[branch];
+    if (pr === "open" || pr === "none") return "warning";
+    return "safe";
+  }
+
   let sortedWorktrees = $derived(
     [...worktrees].sort(
       (a, b) =>
         (isDisabled(a) ? 1 : 0) - (isDisabled(b) ? 1 : 0) ||
         (a.branch && agentTabBranchSet.has(normalizeTabBranch(a.branch)) ? -1 : 0) -
           (b.branch && agentTabBranchSet.has(normalizeTabBranch(b.branch)) ? -1 : 0) ||
-        (SAFETY_ORDER[a.safety_level] ?? 99) - (SAFETY_ORDER[b.safety_level] ?? 99) ||
+        (SAFETY_ORDER[getEffectiveSafetyLevel(a)] ?? 99) - (SAFETY_ORDER[getEffectiveSafetyLevel(b)] ?? 99) ||
         (a.branch ?? a.path).localeCompare(b.branch ?? b.path)
     )
   );
@@ -76,19 +99,23 @@
 
   let hasUnsafeChecked = $derived(
     sortedWorktrees.some(
-      (w) =>
-        w.branch &&
-        checked.has(w.branch) &&
-        (w.safety_level === "warning" || w.safety_level === "danger")
+      (w) => {
+        const level = getEffectiveSafetyLevel(w);
+        return w.branch &&
+          checked.has(w.branch) &&
+          (level === "warning" || level === "danger");
+      }
     )
   );
 
   let unsafeCheckedCount = $derived(
     sortedWorktrees.filter(
-      (w) =>
-        w.branch &&
-        checked.has(w.branch) &&
-        (w.safety_level === "warning" || w.safety_level === "danger")
+      (w) => {
+        const level = getEffectiveSafetyLevel(w);
+        return w.branch &&
+          checked.has(w.branch) &&
+          (level === "warning" || level === "danger");
+      }
     ).length
   );
 
@@ -120,9 +147,11 @@
       wasOpen = true;
       lastRefreshKey = rk;
       showFailures = false;
+      showResults = false;
       failures = [];
+      results = [];
       untrack(() => {
-        fetchWorktrees({ preserveChecked: false });
+        fetchWorktrees({ preserveChecked: false, initRemote: true });
       });
       return;
     }
@@ -130,17 +159,29 @@
     if (rk === lastRefreshKey) return;
     lastRefreshKey = rk;
     untrack(() => {
-      fetchWorktrees({ preserveChecked: true });
+      fetchWorktrees({ preserveChecked: true, initRemote: false });
     });
   });
 
-  async function fetchWorktrees({ preserveChecked }: { preserveChecked: boolean }) {
+  async function handleToggleRemote() {
+    deleteRemote = !deleteRemote;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("set_cleanup_settings", { repoPath: projectPath, settings: { delete_remote_branches: deleteRemote } });
+    } catch {
+      // Ignore save errors silently
+    }
+  }
+
+  async function fetchWorktrees({ preserveChecked, initRemote }: { preserveChecked: boolean; initRemote: boolean }) {
     loading = true;
     errorMessage = null;
     const previouslyChecked = new Set(checked);
     if (!preserveChecked) checked = new Set();
+    let loadedInvoke: typeof import("@tauri-apps/api/core")["invoke"] | null = null;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
+      loadedInvoke = invoke;
       worktrees = await invoke<WorktreeInfo[]>("list_worktrees", {
         projectPath,
       });
@@ -164,6 +205,38 @@
       worktrees = [];
     } finally {
       loading = false;
+    }
+
+    // Initialize remote state after worktrees are shown
+    if (initRemote && loadedInvoke) {
+      const invoke = loadedInvoke;
+      try {
+        const available = await invoke<boolean>("check_gh_available");
+        ghAvailable = available;
+        if (available) {
+          try {
+            const settings = await invoke<CleanupSettings>("get_cleanup_settings", { repoPath: projectPath });
+            deleteRemote = settings.delete_remote_branches;
+          } catch {
+            deleteRemote = false;
+          }
+          prLoading = true;
+          try {
+            const statuses = await invoke<Record<string, PrStatus>>("get_cleanup_pr_statuses", { repoPath: projectPath });
+            prStatuses = statuses;
+          } catch {
+            prStatuses = {};
+          } finally {
+            prLoading = false;
+          }
+        } else {
+          ghAvailable = false;
+          deleteRemote = false;
+        }
+      } catch {
+        ghAvailable = false;
+        deleteRemote = false;
+      }
     }
   }
 
@@ -230,25 +303,23 @@
   async function executeCleanup(force: boolean) {
     cleaning = true;
     const branches = Array.from(checked);
+    const wasDeleteRemote = deleteRemote;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
 
       // Close modal immediately
       onClose();
 
-      // Listen for cleanup-completed to handle failures
+      // Listen for cleanup-completed to show results
       const { listen } = await import("@tauri-apps/api/event");
       const unlisten = await listen<{ results: CleanupResult[] }>(
         "cleanup-completed",
         (event) => {
           unlisten();
-          const failed = (event.payload.results ?? []).filter(
-            (r) => !r.success
-          );
-          if (failed.length > 0) {
-            failures = failed;
-            showFailures = true;
-          }
+          const allResults = event.payload.results ?? [];
+          resultsDeleteRemote = wasDeleteRemote;
+          results = allResults;
+          showResults = true;
         }
       );
 
@@ -256,6 +327,7 @@
         projectPath,
         branches,
         force,
+        deleteRemote: wasDeleteRemote,
       });
     } catch (err) {
       // If invoke itself fails, show as a single failure
@@ -263,11 +335,18 @@
         branch: b,
         success: false,
         error: toErrorMessage(err),
+        remote_success: null,
+        remote_error: null,
       }));
       showFailures = true;
     } finally {
       cleaning = false;
     }
+  }
+
+  function closeResults() {
+    showResults = false;
+    results = [];
   }
 
   function closeFailures() {
@@ -333,6 +412,17 @@
             <span class="toolbar-count">
               {checkedCount} selected
             </span>
+            {#if ghAvailable}
+              <!-- svelte-ignore a11y_click_events_have_key_events -->
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <!-- svelte-ignore a11y_label_has_associated_control -->
+              <label class="toggle-label" data-testid="remote-toggle" onclick={handleToggleRemote}>
+                <span class="toggle-switch" class:toggle-on={deleteRemote}>
+                  <span class="toggle-knob"></span>
+                </span>
+                <span class="toggle-text">Also delete remote branches</span>
+              </label>
+            {/if}
           </div>
 
           <div class="table-wrapper">
@@ -346,6 +436,9 @@
                   <th class="col-markers">Changes</th>
                   <th class="col-sync">Ahead/Behind</th>
                   <th class="col-gone">Gone</th>
+                  {#if ghAvailable}
+                    <th class="col-pr">PR</th>
+                  {/if}
                   <th class="col-tool">Tool</th>
                 </tr>
               </thead>
@@ -363,7 +456,7 @@
                     {/if}
                   </td>
                   <td class="col-safety">
-                    <span class="safety-dot {safetyDotClass(wt.safety_level)}"></span>
+                    <span class="safety-dot {safetyDotClass(getEffectiveSafetyLevel(wt))}"></span>
                   </td>
                   <td class="col-branch mono">
                     <span
@@ -399,9 +492,29 @@
                   </td>
                   <td class="col-gone">
                     {#if wt.is_gone}
-                      <span class="gone-badge">gone</span>
+                      {#if deleteRemote}
+                        <span class="gone-badge gone-badge-emphasized" title="Remote already deleted">gone</span>
+                      {:else}
+                        <span class="gone-badge">gone</span>
+                      {/if}
                     {/if}
                   </td>
+                  {#if ghAvailable}
+                    <td class="col-pr">
+                      {#if prLoading}
+                        <span class="pr-spinner">...</span>
+                      {:else if wt.branch && prStatuses[wt.branch]}
+                        {@const pr = prStatuses[wt.branch]}
+                        {#if pr === "merged"}
+                          <span class="pr-badge pr-badge-merged">PR: merged</span>
+                        {:else if pr === "closed"}
+                          <span class="pr-badge pr-badge-closed">PR: closed</span>
+                        {:else if pr === "open"}
+                          <span class="pr-badge pr-badge-open">PR: open</span>
+                        {/if}
+                      {/if}
+                    </td>
+                  {/if}
                   <td class="col-tool">
                     {#if wt.last_tool_usage}
                       <span class="tool-label">{wt.last_tool_usage}</span>
@@ -471,6 +584,9 @@
               have an open agent tab. Cleaning them up may break the active session. Continue?
             </p>
           {/if}
+          {#if deleteRemote}
+            <p>Remote branches will also be deleted.</p>
+          {/if}
           <div class="confirm-actions">
             <button class="btn btn-cancel" onclick={cancelConfirm}>
               Cancel
@@ -482,6 +598,48 @@
         </div>
       </div>
     {/if}
+  </div>
+{/if}
+
+{#if showResults && results.length > 0}
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_interactive_supports_focus -->
+  <div
+    class="overlay"
+    onclick={closeResults}
+    role="dialog"
+    aria-modal="true"
+    aria-label="Cleanup Results"
+  >
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <div class="dialog" onclick={(e) => e.stopPropagation()}>
+      <div class="dialog-header">
+        <h2>Cleanup Results</h2>
+        <button class="close-btn" onclick={closeResults}>[x]</button>
+      </div>
+
+      <div class="dialog-body">
+        <div class="result-list">
+          {#each results as r (r.branch)}
+            <div class="result-item" class:result-item-error={!r.success || r.remote_success === false}>
+              <span class="mono">{r.branch}</span>
+              <span class="result-detail">
+                Local: {r.success ? "\u2713" : "\u2717"}{#if r.error} ({r.error}){/if}
+                {#if resultsDeleteRemote && r.remote_success !== null}
+                  &nbsp;/ Remote: {r.remote_success ? "\u2713" : "\u2717"}{#if r.remote_error} ({r.remote_error}){/if}
+                {/if}
+              </span>
+            </div>
+          {/each}
+        </div>
+      </div>
+
+      <div class="dialog-footer">
+        <button class="btn btn-cancel" onclick={closeResults}>Close</button>
+      </div>
+    </div>
   </div>
 {/if}
 
@@ -613,6 +771,7 @@
     display: flex;
     align-items: center;
     gap: 12px;
+    flex-wrap: wrap;
   }
 
   .toolbar-btn {
@@ -635,6 +794,50 @@
   .toolbar-count {
     font-size: 12px;
     color: var(--text-muted);
+  }
+
+  .toggle-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    margin-left: auto;
+    user-select: none;
+  }
+
+  .toggle-switch {
+    position: relative;
+    width: 32px;
+    height: 18px;
+    border-radius: 9px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-color);
+    transition: background 0.15s;
+  }
+
+  .toggle-switch.toggle-on {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .toggle-knob {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--text-primary);
+    transition: left 0.15s;
+  }
+
+  .toggle-on .toggle-knob {
+    left: 16px;
+  }
+
+  .toggle-text {
+    font-size: 11px;
+    color: var(--text-secondary);
   }
 
   .table-wrapper {
@@ -721,6 +924,7 @@
   .col-markers,
   .col-sync,
   .col-gone,
+  .col-pr,
   .col-tool {
     white-space: nowrap;
   }
@@ -767,6 +971,47 @@
     background: rgba(243, 139, 168, 0.15);
     color: var(--red);
     border: 1px solid rgba(243, 139, 168, 0.3);
+  }
+
+  .gone-badge-emphasized {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: rgba(243, 139, 168, 0.35);
+    color: var(--red);
+    border: 1px solid rgba(243, 139, 168, 0.6);
+    font-weight: 600;
+  }
+
+  .pr-badge {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    border: 1px solid;
+  }
+
+  .pr-badge-merged,
+  .pr-badge-closed {
+    background: rgba(166, 227, 161, 0.15);
+    color: var(--green);
+    border-color: rgba(166, 227, 161, 0.3);
+  }
+
+  .pr-badge-open {
+    background: rgba(250, 179, 135, 0.15);
+    color: var(--peach, #fab387);
+    border-color: rgba(250, 179, 135, 0.3);
+  }
+
+  .pr-spinner {
+    font-size: 10px;
+    color: var(--text-muted);
+    animation: pr-spin 1s ease-in-out infinite;
+  }
+
+  @keyframes pr-spin {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
   }
 
   /* Agent indicator: fixed-width slot (SPEC-b80e7996 FR-804) */
@@ -930,6 +1175,33 @@
   .failure-error {
     font-size: 11px;
     color: var(--red);
+    line-height: 1.4;
+  }
+
+  .result-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .result-item {
+    padding: 10px 12px;
+    border: 1px solid rgba(166, 227, 161, 0.3);
+    background: rgba(166, 227, 161, 0.06);
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .result-item-error {
+    border-color: rgba(243, 139, 168, 0.3);
+    background: rgba(243, 139, 168, 0.06);
+  }
+
+  .result-detail {
+    font-size: 11px;
+    color: var(--text-secondary);
     line-height: 1.4;
   }
 </style>

@@ -423,10 +423,6 @@
   let contextMenu: { x: number; y: number; branch: BranchInfo } | null =
     $state(null);
 
-  // Confirmation dialog state
-  let confirmDelete: { branch: string; safetyLevel: string } | null =
-    $state(null);
-  let confirmDeleteError: string | null = $state(null);
   let resizing = false;
   let resizePointerId: number | null = null;
   let resizeStartX = 0;
@@ -507,8 +503,6 @@
   $effect(() => {
     if (mode === "branch") return;
     contextMenu = null;
-    confirmDelete = null;
-    confirmDeleteError = null;
   });
 
   function handleModeChange(next: SidebarMode) {
@@ -640,18 +634,6 @@
     };
   });
 
-  // Close dialogs on Escape
-  $effect(() => {
-    if (!confirmDelete && !confirmDeleteError) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        confirmDelete = null;
-        confirmDeleteError = null;
-      }
-    };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
-  });
 
   function fetchBranches(token: number, forceRefresh = false) {
     const filter = activeFilter;
@@ -1222,11 +1204,9 @@
 
   function handleCleanupThisBranch() {
     if (!contextMenu) return;
-    const branch = contextMenu.branch;
+    const branchName = contextMenu.branch.name;
     contextMenu = null;
-    const level = getSafetyLevel(branch);
-    confirmDelete = { branch: branch.name, safetyLevel: level };
-    confirmDeleteError = null;
+    onCleanupRequest?.(branchName);
   }
 
   function handleCleanupWorktrees() {
@@ -1236,40 +1216,6 @@
     onCleanupRequest?.(branchName);
   }
 
-  // --- Single delete ---
-
-  async function handleConfirmDelete() {
-    if (!confirmDelete) return;
-    const { branch, safetyLevel } = confirmDelete;
-    const force = safetyLevel !== "safe";
-    confirmDelete = null;
-    confirmDeleteError = null;
-
-    deletingBranches = new Set([...deletingBranches, branch]);
-
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("cleanup_single_worktree", {
-        projectPath,
-        branch,
-        force,
-      });
-      const next = new Set(deletingBranches);
-      next.delete(branch);
-      deletingBranches = next;
-      localRefreshKey++;
-    } catch (err) {
-      const next = new Set(deletingBranches);
-      next.delete(branch);
-      deletingBranches = next;
-      confirmDeleteError =
-        typeof err === "string"
-          ? err
-          : err && typeof err === "object" && "message" in err
-            ? String((err as { message?: unknown }).message)
-            : String(err);
-    }
-  }
 </script>
 
 <aside
@@ -1494,63 +1440,6 @@
   {/if}
 {/if}
 
-<!-- Single delete confirmation dialog -->
-{#if mode === "branch"}
-  {#if confirmDelete}
-    {@const wt = worktreeMap.get(confirmDelete.branch)}
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="overlay" onclick={() => (confirmDelete = null)}>
-      <div class="confirm-dialog" onclick={(e) => e.stopPropagation()}>
-        <h3>Delete Worktree</h3>
-        <p class="confirm-text">
-          {#if confirmDelete.safetyLevel === "danger"}
-            Branch <strong>{confirmDelete.branch}</strong> has uncommitted changes
-            and unpushed commits. This cannot be undone.
-          {:else if confirmDelete.safetyLevel === "warning" && wt?.has_changes}
-            Branch <strong>{confirmDelete.branch}</strong> has uncommitted changes.
-          {:else if confirmDelete.safetyLevel === "warning" && wt?.has_unpushed}
-            Branch <strong>{confirmDelete.branch}</strong> has unpushed commits.
-          {:else}
-            Delete worktree and local branch <strong
-              >{confirmDelete.branch}</strong
-            >?
-          {/if}
-        </p>
-        <div class="confirm-actions">
-          <button class="confirm-cancel" onclick={() => (confirmDelete = null)}>
-            Cancel
-          </button>
-          <button class="confirm-delete" onclick={handleConfirmDelete}>
-            Delete
-          </button>
-        </div>
-      </div>
-    </div>
-  {/if}
-{/if}
-
-<!-- Delete error dialog -->
-{#if mode === "branch"}
-  {#if confirmDeleteError}
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="overlay" onclick={() => (confirmDeleteError = null)}>
-      <div class="confirm-dialog" onclick={(e) => e.stopPropagation()}>
-        <h3>Delete Failed</h3>
-        <p class="confirm-error">{confirmDeleteError}</p>
-        <div class="confirm-actions">
-          <button
-            class="confirm-cancel"
-            onclick={() => (confirmDeleteError = null)}
-          >
-            Close
-          </button>
-        </div>
-      </div>
-    </div>
-  {/if}
-{/if}
 
 <style>
   .sidebar {
@@ -2038,88 +1927,6 @@
 
   .context-menu-item.disabled:hover {
     background: none;
-  }
-
-  /* Overlays & dialogs */
-  .overlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: rgba(0, 0, 0, 0.6);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 2000;
-  }
-
-  .confirm-dialog {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: 10px;
-    padding: 20px 24px;
-    max-width: 400px;
-    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
-  }
-
-  .confirm-dialog h3 {
-    font-size: 14px;
-    font-weight: 700;
-    color: var(--text-primary);
-    margin-bottom: 8px;
-  }
-
-  .confirm-text {
-    color: var(--text-secondary);
-    font-size: 12px;
-    line-height: 1.5;
-    margin-bottom: 16px;
-  }
-
-  .confirm-error {
-    color: rgb(255, 160, 160);
-    font-size: 12px;
-    line-height: 1.5;
-    margin-bottom: 16px;
-    white-space: pre-wrap;
-  }
-
-  .confirm-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-  }
-
-  .confirm-cancel {
-    padding: 5px 14px;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-color);
-    border-radius: 5px;
-    color: var(--text-primary);
-    cursor: pointer;
-    font-family: inherit;
-    font-size: 12px;
-  }
-
-  .confirm-cancel:hover {
-    background: var(--bg-hover);
-  }
-
-  .confirm-delete {
-    padding: 5px 14px;
-    background: var(--red);
-    border: 1px solid transparent;
-    border-radius: 5px;
-    color: var(--bg-primary);
-    cursor: pointer;
-    font-family: inherit;
-    font-size: 12px;
-    font-weight: 600;
-  }
-
-  .confirm-delete:hover {
-    opacity: 0.9;
   }
 
   /* PR Status tree */

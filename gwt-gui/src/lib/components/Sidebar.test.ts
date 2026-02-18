@@ -1523,60 +1523,30 @@ describe("Sidebar", () => {
 
   });
 
-  it("opens cleanup confirmation from context menu and handles failure dialog", async () => {
-    const warningBranch = {
-      ...branchFixture,
-      name: "feature/warning",
-      ahead: 1,
-      behind: 0,
-      divergence_status: "Ahead",
-      last_tool_usage: "claude@1.0.0",
-    };
-
-    invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
-      if (command === "list_worktree_branches") return [warningBranch];
-      if (command === "list_worktrees") {
-        return [
-          {
-            branch: warningBranch.name,
-            has_changes: true,
-            has_unpushed: false,
-            safety_level: "warning",
-          },
-        ];
-      }
-      if (command === "cleanup_single_worktree") {
-        const branch = (args?.branch as string) ?? "";
-        throw new Error(`failed to cleanup ${branch}`);
-      }
+  it("opens CleanupModal via context menu 'Cleanup this branch' and does not call cleanup_single_worktree", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktree_branches") return [branchFixture];
+      if (command === "list_worktrees") return [];
       return [];
     });
 
+    const onCleanupRequest = vi.fn();
     const rendered = await renderSidebar({
       projectPath: "/tmp/project",
       onBranchSelect: vi.fn(),
+      onCleanupRequest,
     });
 
-    const branchLabel = await rendered.findByText(warningBranch.name);
+    const branchLabel = await rendered.findByText(branchFixture.name);
     const branchButton = branchLabel.closest("button");
     expect(branchButton).toBeTruthy();
-    expect(rendered.queryByText("claude@1.0.0")).toBeTruthy();
-    expect(rendered.queryByText("+1")).toBeTruthy();
 
     await fireEvent.contextMenu(branchButton as HTMLElement);
     await fireEvent.click(await rendered.findByRole("button", { name: "Cleanup this branch" }));
 
-    expect(rendered.queryByText("Delete Worktree")).toBeTruthy();
-    expect(rendered.queryByText(/has uncommitted changes/)).toBeTruthy();
-
-    await fireEvent.click(rendered.getByRole("button", { name: "Delete" }));
-    await rendered.findByText("Delete Failed");
-    expect(rendered.queryByText(/failed to cleanup/)).toBeTruthy();
-
-    await fireEvent.click(rendered.getByRole("button", { name: "Close" }));
-    await waitFor(() => {
-      expect(rendered.queryByText("Delete Failed")).toBeNull();
-    });
+    expect(onCleanupRequest).toHaveBeenCalledWith(branchFixture.name);
+    // cleanup_single_worktree should never be called
+    expect(invokeMock).not.toHaveBeenCalledWith("cleanup_single_worktree", expect.anything());
   });
 
   it("renders agent-indicator-slot for branches without agent tabs", async () => {
