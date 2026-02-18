@@ -239,25 +239,32 @@
     selectedAgent === "opencode" && sessionMode === "resume"
   );
 
-  let modelOptions = $derived(
+  let modelOptions: SelectOption[] = $derived(
     selectedAgent === "codex"
       ? [
-          "gpt-5.3-codex",
-          "gpt-5.3-codex-spark",
-          "gpt-5.2-codex",
-          "gpt-5.1-codex-max",
-          "gpt-5.2",
-          "gpt-5.1-codex-mini",
+          { value: "gpt-5.3-codex", label: "gpt-5.3-codex" },
+          { value: "gpt-5.3-codex-spark", label: "gpt-5.3-codex-spark" },
+          { value: "gpt-5.2-codex", label: "gpt-5.2-codex" },
+          { value: "gpt-5.1-codex-max", label: "gpt-5.1-codex-max" },
+          { value: "gpt-5.2", label: "gpt-5.2" },
+          { value: "gpt-5.1-codex-mini", label: "gpt-5.1-codex-mini" },
         ]
       : selectedAgent === "claude"
-        ? ["opus", "sonnet", "haiku"]
+        ? [
+            { value: "opus", label: "Opus" },
+            { value: "sonnet", label: "Sonnet" },
+            { value: "haiku", label: "Haiku" },
+            { value: "opus[1m]", label: "Opus (1M context)" },
+            { value: "sonnet[1m]", label: "Sonnet (1M context)" },
+            { value: "opusplan", label: "Opus Plan (plan: opus / exec: sonnet)" },
+          ]
         : selectedAgent === "gemini"
           ? [
-              "gemini-3-pro-preview",
-              "gemini-3-flash-preview",
-              "gemini-2.5-pro",
-              "gemini-2.5-flash",
-              "gemini-2.5-flash-lite",
+              { value: "gemini-3-pro-preview", label: "gemini-3-pro-preview" },
+              { value: "gemini-3-flash-preview", label: "gemini-3-flash-preview" },
+              { value: "gemini-2.5-pro", label: "gemini-2.5-pro" },
+              { value: "gemini-2.5-flash", label: "gemini-2.5-flash" },
+              { value: "gemini-2.5-flash-lite", label: "gemini-2.5-flash-lite" },
             ]
           : []
   );
@@ -1338,8 +1345,8 @@
               <label for="model-select">Model</label>
               <select id="model-select" bind:value={model}>
                 <option value="">Default</option>
-                {#each modelOptions as opt (opt)}
-                  <option value={opt}>{opt}</option>
+                {#each modelOptions as opt (opt.value)}
+                  <option value={opt.value}>{opt.label}</option>
                 {/each}
               </select>
             </div>
