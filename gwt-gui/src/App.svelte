@@ -820,6 +820,29 @@
     };
   });
 
+  // Poll backend to detect lost launch-finished events (safety net).
+  // If the job disappears from the backend map but we never received a
+  // launch-finished event, the frontend would be stuck forever.
+  $effect(() => {
+    if (!launchProgressOpen || !launchJobId || launchStatus !== "running") return;
+    const jobId = launchJobId;
+    const timer = window.setInterval(async () => {
+      if (launchJobId !== jobId || launchStatus !== "running") return;
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const alive = await invoke<boolean>("is_launch_job_alive", { jobId });
+        if (!alive && launchJobId === jobId && launchStatus === "running") {
+          launchStatus = "error";
+          launchError =
+            "Launch job ended unexpectedly. Events may have been lost. Please retry.";
+        }
+      } catch {
+        /* ignore polling errors */
+      }
+    }, 3000);
+    return () => window.clearInterval(timer);
+  });
+
   function toErrorMessage(err: unknown): string {
     if (typeof err === "string") return err;
     if (err && typeof err === "object" && "message" in err) {
