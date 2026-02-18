@@ -172,6 +172,18 @@
   let launchDetail: string = $state("");
   let launchStatus: "running" | "ok" | "error" | "cancelled" = $state("running");
   let launchError: string | null = $state(null);
+  const LAUNCH_STEP_IDS: LaunchStepId[] = [
+    "fetch",
+    "validate",
+    "paths",
+    "conflicts",
+    "create",
+    "deps",
+  ];
+  const LAUNCH_EVENT_BUFFER_LIMIT = 64;
+  let launchJobStartPending = false;
+  let bufferedLaunchProgressEvents: LaunchProgressPayload[] = [];
+  let bufferedLaunchFinishedEvents: LaunchFinishedPayload[] = [];
   type IssueLaunchFollowup = {
     projectPath: string;
     issueNumber: number;
@@ -358,6 +370,78 @@
     } catch (err) {
       showToast(`Issue launch cleanup failed: ${toErrorMessage(err)}`, 12000);
     }
+  }
+
+  function debugLaunchEvent(message: string, payload: unknown) {
+    console.debug(`[launch] ${message}`, payload);
+  }
+
+  function clearBufferedLaunchEvents() {
+    launchJobStartPending = false;
+    bufferedLaunchProgressEvents = [];
+    bufferedLaunchFinishedEvents = [];
+  }
+
+  function bufferLaunchProgressEvent(payload: LaunchProgressPayload) {
+    if (bufferedLaunchProgressEvents.length >= LAUNCH_EVENT_BUFFER_LIMIT) {
+      bufferedLaunchProgressEvents.shift();
+    }
+    bufferedLaunchProgressEvents.push(payload);
+  }
+
+  function bufferLaunchFinishedEvent(payload: LaunchFinishedPayload) {
+    if (bufferedLaunchFinishedEvents.length >= LAUNCH_EVENT_BUFFER_LIMIT) {
+      bufferedLaunchFinishedEvents.shift();
+    }
+    bufferedLaunchFinishedEvents.push(payload);
+  }
+
+  function applyLaunchProgressPayload(payload: LaunchProgressPayload) {
+    if (launchStatus !== "running") return;
+    const next = payload.step as LaunchStepId;
+    if (LAUNCH_STEP_IDS.includes(next) && next !== launchStep) {
+      launchStep = next;
+    }
+    launchDetail = (payload.detail ?? "").toString();
+  }
+
+  function applyLaunchFinishedPayload(payload: LaunchFinishedPayload) {
+    // Retry followup on buffered events to recover from early-finished races.
+    void handleIssueLaunchFinished(payload);
+
+    if (payload.status === "cancelled") {
+      handleLaunchModalClose();
+      return;
+    }
+    if (payload.status === "ok" && payload.paneId) {
+      launchStatus = "ok";
+      handleLaunchSuccess(payload.paneId);
+      handleLaunchModalClose();
+      return;
+    }
+    launchStatus = "error";
+    launchError = payload.error || "Launch failed.";
+  }
+
+  function flushBufferedLaunchEventsForActiveJob() {
+    if (!launchJobId) {
+      clearBufferedLaunchEvents();
+      return;
+    }
+    const activeJobId = launchJobId;
+
+    for (const payload of bufferedLaunchProgressEvents) {
+      if (payload.jobId !== activeJobId) continue;
+      applyLaunchProgressPayload(payload);
+    }
+
+    for (const payload of bufferedLaunchFinishedEvents) {
+      if (payload.jobId !== activeJobId) continue;
+      applyLaunchFinishedPayload(payload);
+      if (!launchJobId || launchJobId !== activeJobId) break;
+    }
+
+    clearBufferedLaunchEvents();
   }
 
   // Poll OS env readiness at startup; stop once ready.
@@ -648,17 +732,26 @@
     (async () => {
       try {
         const { listen } = await import("@tauri-apps/api/event");
-        const STEP_IDS: LaunchStepId[] = ["fetch", "validate", "paths", "conflicts", "create", "deps"];
         const unlistenFn = await listen<LaunchProgressPayload>(
           "launch-progress",
           (event) => {
-            if (!launchJobId || event.payload.jobId !== launchJobId) return;
-            if (launchStatus !== "running") return;
-            const next = event.payload.step as LaunchStepId;
-            if (STEP_IDS.includes(next) && next !== launchStep) {
-              launchStep = next;
+            const payload = event.payload;
+            if (launchJobId) {
+              if (payload.jobId !== launchJobId) {
+                debugLaunchEvent("Ignored launch-progress for different job", payload);
+                return;
+              }
+              applyLaunchProgressPayload(payload);
+              return;
             }
-            launchDetail = (event.payload.detail ?? "").toString();
+
+            if (launchJobStartPending) {
+              bufferLaunchProgressEvent(payload);
+              debugLaunchEvent("Buffered launch-progress before jobId assignment", payload);
+              return;
+            }
+
+            debugLaunchEvent("Ignored launch-progress without active job", payload);
           },
         );
         if (cancelled) {
@@ -687,24 +780,27 @@
         const unlistenFn = await listen<LaunchFinishedPayload>(
           "launch-finished",
           (event) => {
+            const payload = event.payload;
             // Issue-linking/rollback (existing logic, applies to all jobIds).
-            void handleIssueLaunchFinished(event.payload);
+            void handleIssueLaunchFinished(payload);
 
             // Progress modal state update (moved from LaunchProgressModal).
-            if (!launchJobId || event.payload.jobId !== launchJobId) return;
+            if (launchJobId) {
+              if (payload.jobId !== launchJobId) {
+                debugLaunchEvent("Ignored launch-finished for different job", payload);
+                return;
+              }
+              applyLaunchFinishedPayload(payload);
+              return;
+            }
 
-            if (event.payload.status === "cancelled") {
-              handleLaunchModalClose();
+            if (launchJobStartPending) {
+              bufferLaunchFinishedEvent(payload);
+              debugLaunchEvent("Buffered launch-finished before jobId assignment", payload);
               return;
             }
-            if (event.payload.status === "ok" && event.payload.paneId) {
-              launchStatus = "ok";
-              handleLaunchSuccess(event.payload.paneId);
-              handleLaunchModalClose();
-              return;
-            }
-            launchStatus = "error";
-            launchError = event.payload.error || "Launch failed.";
+
+            debugLaunchEvent("Ignored launch-finished without active job", payload);
           },
         );
 
@@ -1197,14 +1293,23 @@
     launchDetail = "";
     launchStatus = "running";
     launchError = null;
+    launchJobStartPending = true;
+    bufferedLaunchProgressEvents = [];
+    bufferedLaunchFinishedEvents = [];
 
-    const { invoke } = await import("@tauri-apps/api/core");
-    const jobId = await invoke<string>("start_launch_job", { request });
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const jobId = await invoke<string>("start_launch_job", { request });
 
-    queueIssueLaunchFollowup(jobId, request);
-    pendingLaunchRequest = request;
-    launchJobId = jobId;
-    launchProgressOpen = true;
+      queueIssueLaunchFollowup(jobId, request);
+      pendingLaunchRequest = request;
+      launchJobId = jobId;
+      launchProgressOpen = true;
+      flushBufferedLaunchEventsForActiveJob();
+    } catch (err) {
+      clearBufferedLaunchEvents();
+      throw err;
+    }
   }
 
   async function handleLaunchCancel() {
@@ -1227,6 +1332,7 @@
     launchProgressOpen = false;
     launchJobId = "";
     pendingLaunchRequest = null;
+    clearBufferedLaunchEvents();
     launchStatus = "running";
     launchStep = "fetch";
     launchDetail = "";
