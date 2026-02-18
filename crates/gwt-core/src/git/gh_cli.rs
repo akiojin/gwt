@@ -135,16 +135,17 @@ pub fn delete_remote_branch(repo_path: &Path, branch: &str) -> Result<(), String
                         branch
                     ))
                 } else {
-                    Err(format!("Failed to delete remote branch '{}': {}", branch, combined.trim()))
+                    Err(format!(
+                        "Failed to delete remote branch '{}': {}",
+                        branch,
+                        combined.trim()
+                    ))
                 }
             }
         }
         None => {
             let _ = child.kill();
-            Err(format!(
-                "Timeout deleting remote branch '{}' (10s)",
-                branch
-            ))
+            Err(format!("Timeout deleting remote branch '{}' (10s)", branch))
         }
     }
 }
@@ -248,8 +249,16 @@ fn select_best_pr_status(prs: &[PrEntry]) -> PrStatus {
     let best = prs
         .iter()
         .max_by(|a, b| {
-            let ts_a = a.merged_at.as_deref().or(a.updated_at.as_deref()).unwrap_or("");
-            let ts_b = b.merged_at.as_deref().or(b.updated_at.as_deref()).unwrap_or("");
+            let ts_a = a
+                .merged_at
+                .as_deref()
+                .or(a.updated_at.as_deref())
+                .unwrap_or("");
+            let ts_b = b
+                .merged_at
+                .as_deref()
+                .or(b.updated_at.as_deref())
+                .unwrap_or("");
             ts_a.cmp(ts_b)
         })
         .unwrap();
@@ -285,7 +294,11 @@ fn resolve_owner_repo(repo_path: &Path) -> Result<(String, String), String> {
 
     let owner = parsed
         .get("owner")
-        .and_then(|v| v.get("login").and_then(|l| l.as_str()).or_else(|| v.as_str()))
+        .and_then(|v| {
+            v.get("login")
+                .and_then(|l| l.as_str())
+                .or_else(|| v.as_str())
+        })
         .ok_or("Missing owner in gh repo view output")?
         .to_string();
 
@@ -341,18 +354,12 @@ mod tests {
             serde_json::to_string(&PrStatus::Merged).unwrap(),
             "\"merged\""
         );
-        assert_eq!(
-            serde_json::to_string(&PrStatus::Open).unwrap(),
-            "\"open\""
-        );
+        assert_eq!(serde_json::to_string(&PrStatus::Open).unwrap(), "\"open\"");
         assert_eq!(
             serde_json::to_string(&PrStatus::Closed).unwrap(),
             "\"closed\""
         );
-        assert_eq!(
-            serde_json::to_string(&PrStatus::None).unwrap(),
-            "\"none\""
-        );
+        assert_eq!(serde_json::to_string(&PrStatus::None).unwrap(), "\"none\"");
         assert_eq!(
             serde_json::to_string(&PrStatus::Unknown).unwrap(),
             "\"unknown\""
@@ -453,10 +460,7 @@ mod tests {
             {"headRefName": "feature/abandoned", "state": "CLOSED", "mergedAt": null, "updatedAt": "2026-01-15T10:00:00Z"}
         ]"#;
         let statuses = parse_pr_statuses_json(json);
-        assert_eq!(
-            statuses.get("feature/abandoned"),
-            Some(&PrStatus::Closed)
-        );
+        assert_eq!(statuses.get("feature/abandoned"), Some(&PrStatus::Closed));
     }
 
     #[test]

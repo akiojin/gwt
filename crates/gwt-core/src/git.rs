@@ -26,6 +26,7 @@ pub use diff::{
     get_git_change_summary, get_working_tree_status, list_base_branch_candidates, FileChange,
     FileChangeKind, FileDiff, GitChangeSummary, GitViewCommit, WorkingTreeEntry,
 };
+pub use gh_cli::PrStatus;
 pub use issue::{
     create_linked_branch, fetch_issue_detail, fetch_open_issues, filter_issues_by_title,
     find_branch_for_issue, generate_branch_name, is_gh_cli_authenticated, is_gh_cli_available,
@@ -42,7 +43,6 @@ pub use issue_spec::{
 pub use pullrequest::{
     PrCache, PrStatusCache, PrStatusInfo, PullRequest, ReviewComment, ReviewInfo, WorkflowRunInfo,
 };
-pub use gh_cli::PrStatus;
 pub use remote::Remote;
 pub use repository::{
     detect_repo_type, find_bare_repo_in_dir, get_header_context, get_main_repo_root,

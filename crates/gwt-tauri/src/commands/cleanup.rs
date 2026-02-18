@@ -440,9 +440,7 @@ pub async fn cleanup_worktrees(
                                 },
                             );
 
-                            match gwt_core::git::gh_cli::delete_remote_branch(
-                                &repo_path, branch,
-                            ) {
+                            match gwt_core::git::gh_cli::delete_remote_branch(&repo_path, branch) {
                                 Ok(()) => (Some(true), None, Some("deleted".to_string())),
                                 Err(e) => (Some(false), Some(e), Some("failed".to_string())),
                             }
@@ -607,8 +605,8 @@ fn save_cleanup_settings(repo_path: &Path, settings: &CleanupSettings) -> Result
             .map_err(|e| format!("Failed to create .gwt directory: {}", e))?;
     }
     let settings_path = gwt_dir.join("cleanup_settings.json");
-    let json =
-        serde_json::to_string_pretty(settings).map_err(|e| format!("Failed to serialize: {}", e))?;
+    let json = serde_json::to_string_pretty(settings)
+        .map_err(|e| format!("Failed to serialize: {}", e))?;
     std::fs::write(&settings_path, json)
         .map_err(|e| format!("Failed to write cleanup settings: {}", e))
 }
@@ -940,7 +938,15 @@ mod tests {
     #[test]
     fn integrated_safe_with_merged_pr() {
         assert_eq!(
-            compute_safety_level(false, false, false, false, false, true, Some(PrStatus::Merged)),
+            compute_safety_level(
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                Some(PrStatus::Merged)
+            ),
             SafetyLevel::Safe
         );
     }
@@ -948,7 +954,15 @@ mod tests {
     #[test]
     fn integrated_safe_with_closed_pr() {
         assert_eq!(
-            compute_safety_level(false, false, false, false, false, true, Some(PrStatus::Closed)),
+            compute_safety_level(
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                Some(PrStatus::Closed)
+            ),
             SafetyLevel::Safe
         );
     }
@@ -956,7 +970,15 @@ mod tests {
     #[test]
     fn integrated_safe_with_open_pr_downgrades_to_warning() {
         assert_eq!(
-            compute_safety_level(false, false, false, false, false, true, Some(PrStatus::Open)),
+            compute_safety_level(
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                Some(PrStatus::Open)
+            ),
             SafetyLevel::Warning
         );
     }
@@ -964,7 +986,15 @@ mod tests {
     #[test]
     fn integrated_safe_with_no_pr_downgrades_to_warning() {
         assert_eq!(
-            compute_safety_level(false, false, false, false, false, true, Some(PrStatus::None)),
+            compute_safety_level(
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                Some(PrStatus::None)
+            ),
             SafetyLevel::Warning
         );
     }
@@ -972,7 +1002,15 @@ mod tests {
     #[test]
     fn integrated_warning_stays_warning_regardless_of_pr() {
         assert_eq!(
-            compute_safety_level(false, false, false, true, false, true, Some(PrStatus::Merged)),
+            compute_safety_level(
+                false,
+                false,
+                false,
+                true,
+                false,
+                true,
+                Some(PrStatus::Merged)
+            ),
             SafetyLevel::Warning
         );
     }
@@ -989,7 +1027,15 @@ mod tests {
     fn toggle_off_ignores_pr_status() {
         // With delete_remote=false, PR status is irrelevant
         assert_eq!(
-            compute_safety_level(false, false, false, false, false, false, Some(PrStatus::Open)),
+            compute_safety_level(
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                Some(PrStatus::Open)
+            ),
             SafetyLevel::Safe
         );
     }
@@ -997,7 +1043,15 @@ mod tests {
     #[test]
     fn disabled_stays_disabled_regardless_of_pr() {
         assert_eq!(
-            compute_safety_level(true, false, false, false, false, true, Some(PrStatus::Merged)),
+            compute_safety_level(
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                Some(PrStatus::Merged)
+            ),
             SafetyLevel::Disabled
         );
     }
