@@ -13,6 +13,8 @@
 - [x] T003 [US1] メニューリスナー初期化失敗を文脈付きで再送出する `gwt-gui/src/lib/menuAction.ts`
 - [x] T004 [US1] Appでメニュー初期化失敗を可視化する `gwt-gui/src/App.svelte`
 - [x] T005 [US2] Rustメニューイベント受信/送信ログを追加する `crates/gwt-tauri/src/app.rs`
+- [x] T008 [US2] Event ACL を明示的に許可する `crates/gwt-tauri/capabilities/default.json`
+- [x] T009 [US2] capabilities 設定のユニットテストを追加する `crates/gwt-tauri/src/app.rs`
 
 ## Phase 4: 検証
 

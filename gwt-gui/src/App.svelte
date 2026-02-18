@@ -69,6 +69,7 @@
     releaseWindowSessionRestoreLead,
     tryAcquireWindowSessionRestoreLead,
   } from "./lib/windowSessionRestoreLeader";
+  import { collectScreenText } from "./lib/screenCapture";
 
   interface SettingsUpdatedPayload {
     uiFontSize?: number;
@@ -1588,7 +1589,9 @@
     return active.paneId && active.paneId.length > 0 ? active.paneId : null;
   }
 
-  function getActiveEditableElement():
+  function getActiveEditableElement(
+    mode: "copy" | "paste" = "paste",
+  ):
     | HTMLInputElement
     | HTMLTextAreaElement
     | HTMLElement
@@ -1597,11 +1600,11 @@
     const el = document.activeElement;
     if (!el) return null;
 
-    if (el instanceof HTMLInputElement && !el.readOnly && !el.disabled) {
-      return el;
+    if (el instanceof HTMLInputElement && !el.disabled) {
+      if (mode === "copy" || !el.readOnly) return el;
     }
-    if (el instanceof HTMLTextAreaElement && !el.readOnly && !el.disabled) {
-      return el;
+    if (el instanceof HTMLTextAreaElement && !el.disabled) {
+      if (mode === "copy" || !el.readOnly) return el;
     }
     if (el instanceof HTMLElement && el.isContentEditable) {
       return el;
@@ -1610,18 +1613,45 @@
     return null;
   }
 
+  function getEditableSelectionText(
+    target: HTMLInputElement | HTMLTextAreaElement | HTMLElement,
+  ): string {
+    if (
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement
+    ) {
+      const start = target.selectionStart;
+      const end = target.selectionEnd;
+      if (start === null || end === null || start === end) return "";
+      const from = Math.min(start, end);
+      const to = Math.max(start, end);
+      return target.value.slice(from, to);
+    }
+
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return "";
+    const range = selection.getRangeAt(0);
+    if (!target.contains(range.commonAncestorContainer)) return "";
+    return selection.toString();
+  }
+
   async function fallbackMenuEditAction(action: "copy" | "paste") {
-    const target = getActiveEditableElement();
+    const target = getActiveEditableElement(action);
     if (!target) {
-      // Let browser/editor defaults decide when there is no editable target.
       if (action === "copy") {
-        document.execCommand("copy");
+        const sel = window.getSelection()?.toString();
+        if (sel && navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(sel);
+        }
       }
       return;
     }
 
     if (action === "copy") {
-      document.execCommand("copy");
+      const sel = getEditableSelectionText(target);
+      if (sel && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(sel);
+      }
       return;
     }
 
@@ -1647,6 +1677,29 @@
     if (target.isContentEditable) {
       target.focus();
       document.execCommand("insertText", false, text);
+    }
+  }
+
+  let copyFlashActive = $state(false);
+
+  async function handleScreenCopy() {
+    const activeTab = tabs.find((t) => t.id === activeTabId);
+    const text = collectScreenText({
+      branch: currentBranch,
+      activeTab: activeTab?.label ?? activeTabId,
+      activeTabType: activeTab?.type,
+      activePaneId:
+        activeTab?.type === "agent" || activeTab?.type === "terminal"
+          ? activeTab.paneId
+          : undefined,
+    });
+    try {
+      await navigator.clipboard.writeText(text);
+      copyFlashActive = true;
+      setTimeout(() => { copyFlashActive = false; }, 300);
+      showToast("Copied to clipboard", 2000);
+    } catch {
+      showToast("Failed to copy screen text", 4000);
     }
   }
 
@@ -1876,6 +1929,9 @@
         break;
       case "edit-paste":
         emitTerminalEditAction("paste");
+        break;
+      case "screen-copy":
+        void handleScreenCopy();
         break;
       case "debug-os-env":
         showOsEnvDebug = true;
@@ -2615,6 +2671,10 @@
   </div>
 {/if}
 
+{#if copyFlashActive}
+  <div class="copy-flash"></div>
+{/if}
+
 {#if toastMessage}
   <div class="toast-container">
     <div class="toast-message">
@@ -2911,5 +2971,21 @@
 
   .env-debug-error {
     color: var(--text-error, #f38ba8);
+  }
+
+  .copy-flash {
+    position: fixed;
+    inset: 0;
+    background: var(--accent, #89b4fa);
+    opacity: 0;
+    pointer-events: none;
+    z-index: 9999;
+    animation: copy-flash-anim 0.25s ease-out forwards;
+  }
+
+  @keyframes copy-flash-anim {
+    0% { opacity: 0; }
+    30% { opacity: 0.12; }
+    100% { opacity: 0; }
   }
 </style>

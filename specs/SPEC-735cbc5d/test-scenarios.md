@@ -309,6 +309,32 @@ When:  "develop" を選択
 Then:  Changes と Commits が develop との差分で再表示される
 ```
 
+#### T-UI-011: 基準ブランチ切り替え時の stale 応答無視
+
+```text
+Given: 基準ブランチを main から develop へ連続で切り替える
+And:   main 側リクエストの応答が develop 側より遅い
+When:  両方の応答が返る
+Then:  UI は develop の結果のみ表示し、main 側の遅延応答で上書きされない
+```
+
+#### T-UI-012: 基準ブランチ切り替え失敗の局所化
+
+```text
+Given: 基準ブランチを develop に切り替えた際に取得が失敗する
+When:  エラー応答が返る
+Then:  Git タブ内にエラー表示される
+And:   Worktree Summary 全体は消えず、他タブへ切り替え可能
+```
+
+#### T-UI-013: 候補外 base 値の防御
+
+```text
+Given: 基準ブランチ選択イベントで候補外の値が渡される
+When:  再取得を行う
+Then:  例外を投げず、有効候補へフォールバックして表示を継続する
+```
+
 ### エッジケーステスト
 
 #### T-UI-020: バイナリファイル
