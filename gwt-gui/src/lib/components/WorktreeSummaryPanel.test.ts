@@ -142,6 +142,10 @@ function sessionSummaryCalls() {
   return invokeMock.mock.calls.filter((c) => c[0] === "get_branch_session_summary");
 }
 
+function commandCalls(command: string) {
+  return invokeMock.mock.calls.filter((c) => c[0] === command);
+}
+
 describe("WorktreeSummaryPanel", () => {
   beforeEach(() => {
     cleanup();
@@ -293,6 +297,21 @@ describe("WorktreeSummaryPanel", () => {
     });
   });
 
+  it("does not prefetch Issue/PR/Docker data on branch selection", async () => {
+    await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(commandCalls("get_branch_session_summary").length).toBeGreaterThan(0);
+    });
+
+    expect(commandCalls("fetch_branch_linked_issue")).toHaveLength(0);
+    expect(commandCalls("fetch_latest_branch_pr")).toHaveLength(0);
+    expect(commandCalls("detect_docker_context")).toHaveLength(0);
+  });
+
   it("switches to Issue tab and shows linked branch issue", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "get_branch_quick_start") return [];
@@ -310,6 +329,7 @@ describe("WorktreeSummaryPanel", () => {
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
     const issueTab = tabs[2] as HTMLElement;
+    expect(commandCalls("fetch_branch_linked_issue")).toHaveLength(0);
     await fireEvent.click(issueTab);
 
     await waitFor(() => {
@@ -317,6 +337,7 @@ describe("WorktreeSummaryPanel", () => {
       expect(rendered.getByText("#1097 Worktree Summary rework")).toBeTruthy();
       expect(rendered.getByText("label: enhancement")).toBeTruthy();
     });
+    expect(commandCalls("fetch_branch_linked_issue")).toHaveLength(1);
   });
 
   it("shows empty state in Issue tab when linked issue does not exist", async () => {
@@ -352,6 +373,7 @@ describe("WorktreeSummaryPanel", () => {
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
     const prTab = tabs[3] as HTMLElement;
+    expect(commandCalls("fetch_latest_branch_pr")).toHaveLength(0);
     await fireEvent.click(prTab);
 
     await waitFor(() => {
@@ -359,6 +381,7 @@ describe("WorktreeSummaryPanel", () => {
       expect(rendered.container.querySelector(".pr-status-section")).toBeTruthy();
       expect(rendered.getByText("#42 CI Test PR")).toBeTruthy();
     });
+    expect(commandCalls("fetch_latest_branch_pr")).toHaveLength(1);
   });
 
   it("shows GitHub CLI auth warning in PR tab when CLI is unavailable", async () => {
@@ -513,6 +536,10 @@ describe("WorktreeSummaryPanel", () => {
       selectedBranch: branchFixture,
     });
 
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const prTab = tabs[3] as HTMLElement;
+    await fireEvent.click(prTab);
+
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("fetch_latest_branch_pr", {
         projectPath: "/tmp/project",
@@ -525,6 +552,8 @@ describe("WorktreeSummaryPanel", () => {
       selectedBranch: { ...branchFixture, name: "feature/next-task" },
     });
 
+    await fireEvent.click(prTab);
+
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("fetch_latest_branch_pr", {
         projectPath: "/tmp/project",
@@ -536,15 +565,58 @@ describe("WorktreeSummaryPanel", () => {
       rejectFirstPrLookup(new Error("stale request"));
     }
 
-    const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const prTab = tabs[3] as HTMLElement;
-    await fireEvent.click(prTab);
-
     await waitFor(() => {
       expect(prTab.classList.contains("active")).toBe(true);
       expect(rendered.getByText("No PR")).toBeTruthy();
       expect(rendered.queryByText(/Failed to load PR:/)).toBeNull();
     });
+  });
+
+  it("reuses cached latest PR within ttl when switching back to same branch", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") return { ...sessionSummaryFixture, markdown: null };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return latestPrFixture;
+      if (cmd === "fetch_pr_detail") return prDetailFixture;
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const prTab = tabs[3] as HTMLElement;
+    await fireEvent.click(prTab);
+
+    await waitFor(() => {
+      expect(commandCalls("fetch_latest_branch_pr")).toHaveLength(1);
+      expect(rendered.getByText("#42 CI Test PR")).toBeTruthy();
+    });
+
+    await rendered.rerender({
+      projectPath: "/tmp/project",
+      selectedBranch: { ...branchFixture, name: "feature/next-task" },
+    });
+    await fireEvent.click(prTab);
+
+    await waitFor(() => {
+      expect(commandCalls("fetch_latest_branch_pr")).toHaveLength(2);
+    });
+
+    await rendered.rerender({
+      projectPath: "/tmp/project",
+      selectedBranch: { ...branchFixture },
+    });
+    await fireEvent.click(prTab);
+
+    await waitFor(() => {
+      expect(rendered.getByText("#42 CI Test PR")).toBeTruthy();
+    });
+    expect(commandCalls("fetch_latest_branch_pr")).toHaveLength(2);
   });
 
   it("switches to Docker tab and shows current context plus quick-start docker history", async () => {
@@ -564,6 +636,7 @@ describe("WorktreeSummaryPanel", () => {
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
     const dockerTab = tabs[5] as HTMLElement;
+    expect(commandCalls("detect_docker_context")).toHaveLength(0);
     await fireEvent.click(dockerTab);
 
     await waitFor(() => {
@@ -575,6 +648,7 @@ describe("WorktreeSummaryPanel", () => {
       expect(rendered.getByText("compose args: --build -f docker-compose.dev.yml")).toBeTruthy();
       expect(rendered.getByText("Session session-456")).toBeTruthy();
     });
+    expect(commandCalls("detect_docker_context")).toHaveLength(1);
   });
 
   it("requests cached-only session summary when no agent tab exists", async () => {

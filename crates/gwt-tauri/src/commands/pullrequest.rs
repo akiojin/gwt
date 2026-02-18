@@ -9,6 +9,8 @@ use gwt_core::git::{
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// gh CLI availability and authentication status
 #[derive(Debug, Clone, Serialize)]
@@ -111,6 +113,42 @@ pub struct BranchPrReference {
     pub title: String,
     pub state: String,
     pub url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct LatestBranchPrCacheEntry {
+    value: Option<BranchPrReference>,
+    fetched_at: Instant,
+}
+
+const LATEST_BRANCH_PR_CACHE_TTL: Duration = Duration::from_secs(30);
+
+fn latest_branch_pr_cache() -> &'static Mutex<HashMap<String, LatestBranchPrCacheEntry>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, LatestBranchPrCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn read_latest_branch_pr_cache(cache_key: &str) -> Option<Option<BranchPrReference>> {
+    let cache = latest_branch_pr_cache();
+    let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+    let entry = guard.get(cache_key)?;
+    if entry.fetched_at.elapsed() < LATEST_BRANCH_PR_CACHE_TTL {
+        return Some(entry.value.clone());
+    }
+    guard.remove(cache_key);
+    None
+}
+
+fn write_latest_branch_pr_cache(cache_key: String, value: Option<BranchPrReference>) {
+    let cache = latest_branch_pr_cache();
+    let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+    guard.insert(
+        cache_key,
+        LatestBranchPrCacheEntry {
+            value,
+            fetched_at: Instant::now(),
+        },
+    );
 }
 
 fn strip_known_remote_prefix<'a>(branch: &'a str, remotes: &[Remote]) -> &'a str {
@@ -276,14 +314,21 @@ pub fn fetch_latest_branch_pr(
         return Ok(None);
     }
 
-    let latest = PrCache::fetch_latest_for_branch(&repo_path, normalized);
+    let cache_key = format!("{}::{}", repo_path.to_string_lossy(), normalized);
+    if let Some(cached) = read_latest_branch_pr_cache(&cache_key) {
+        return Ok(cached);
+    }
 
-    Ok(latest.map(|pr| BranchPrReference {
+    let latest = PrCache::fetch_latest_for_branch(&repo_path, normalized);
+    let result = latest.map(|pr| BranchPrReference {
         number: pr.number,
         title: pr.title,
         state: pr.state,
         url: pr.url,
-    }))
+    });
+    write_latest_branch_pr_cache(cache_key, result.clone());
+
+    Ok(result)
 }
 
 /// Fetch CI run log for a specific check run/job ID (T011)
