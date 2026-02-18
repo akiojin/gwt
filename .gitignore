@@ -61,4 +61,8 @@ tmp/
 temp/
 .tmp/
 .tmp-tests/
+.tmp_pkg_extract/
 .worktrees/
+
+# MCP bridge lockfile (generated, not shared)
+gwt-mcp-bridge/pnpm-lock.yaml
