@@ -1233,7 +1233,6 @@
     justify-content: space-between;
     cursor: pointer;
     list-style: none;
-    user-select: none;
     padding: 4px 0;
   }
 

@@ -222,7 +222,9 @@ pub fn build_app(
                 }
 
                 // Native menubar (SPEC-4470704f)
-                let _ = crate::menu::rebuild_menu(_app.handle());
+                if let Err(e) = crate::menu::rebuild_menu(_app.handle()) {
+                    warn!(category = "menu", error = %e, "Failed to build initial menu");
+                }
 
                 // System tray (SPEC-dfb1611a FR-310〜FR-313)
                 let tray_menu = tauri::menu::Menu::new(_app)?;
