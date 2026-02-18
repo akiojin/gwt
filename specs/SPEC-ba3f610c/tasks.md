@@ -9,12 +9,14 @@
 
 ## Phase A: 基盤モデル・型定義
 
-- [ ] T101 [US1] [基盤] 3層状態モデル定義（Session / Lead / Coordinator / Developer / Task） `crates/gwt-core/src/agent/mod.rs`
-  - Lead/Coordinator/Developerの状態enum、Session全体のステータス管理
+- [ ] T101 [US1] [基盤] エンティティモデル定義（Project / Issue / Task / Coordinator / Developer） `crates/gwt-core/src/agent/mod.rs`
+  - Project(1) → Issue(N) → Task(N) → Developer(N) → Worktree(1) の階層モデル
+  - Lead/Coordinator/Developerの状態enum
   - 依存: なし
 
 - [ ] T102 [US1] [基盤] フロント型定義を3層対応に拡張 `gwt-gui/src/lib/types.ts`
-  - LeadState / CoordinatorState / DeveloperState / TaskCard / KanbanColumn 型
+  - Project / Issue / LeadState / CoordinatorState / DeveloperState / TaskCard / KanbanColumn 型
+  - 1 Task = N Developer = N Worktree の表現
   - 依存: T101
 
 - [ ] T103 [US1] [基盤] PTY通信スキル化の基盤インターフェース定義 `crates/gwt-tauri/src/commands/terminal.rs`
@@ -87,30 +89,31 @@
   - Developer完了/Coordinator状態変更/ユーザー入力イベント + 2分間隔チェック
   - 依存: T215
 
-- [ ] T217 [US1] [テスト] Lead実行基盤切り替えテスト `crates/gwt-tauri/src/agent_master.rs`
-  - gwt内蔵AI / Claude Code等の切り替え動作検証
+- [ ] T217 [US1] [テスト] Lead gwt内蔵AI実行基盤テスト `crates/gwt-tauri/src/agent_master.rs`
+  - gwt内蔵AIとしてのLLM呼び出し・対話ループ動作検証
   - 依存: T101
 
-- [ ] T218 [US1] [実装] Lead実行基盤選択（gwt内蔵AI / Claude Code等） `crates/gwt-tauri/src/agent_master.rs`
-  - デフォルトgwt内蔵AI、設定でClaude Code等に切り替え
+- [ ] T218 [US1] [実装] Lead gwt内蔵AI実行基盤 `crates/gwt-tauri/src/agent_master.rs`
+  - gwt自身がLLMを呼び出し、チャットUIで統一的UXを提供
   - 依存: T217
 
 ## Phase C: Coordinator（Orchestrator）機能
 
-- [ ] T301 [US2] [テスト] Coordinator起動テスト（GUI内蔵ターミナルペイン） `crates/gwt-tauri/src/commands/agent_mode.rs`
-  - LeadからのCoordinator起動 → ターミナルペイン割当の検証
+- [ ] T301 [US2] [テスト] Coordinator起動テスト（1 Issue = 1 Coordinator、並列起動） `crates/gwt-tauri/src/commands/agent_mode.rs`
+  - Issue単位でのCoordinator起動 → ターミナルペイン割当 → 複数並列起動の検証
+  - ファイルパス（specs/SPEC-xxx/）受け渡しの検証
   - 依存: T210
 
-- [ ] T302 [US2] [実装] Coordinator起動・管理 `crates/gwt-tauri/src/commands/agent_mode.rs`
-  - GUI内蔵ターミナルペインでのCoordinator起動、ライフサイクル管理
+- [ ] T302 [US2] [実装] Coordinator起動・管理（Issue単位、並列対応） `crates/gwt-tauri/src/commands/agent_mode.rs`
+  - GUI内蔵ターミナルペインでのCoordinator起動、ファイルパス渡し、複数並列管理
   - 依存: T301
 
-- [ ] T303 [US3] [テスト] タスク分割・Developer割り当てテスト `crates/gwt-tauri/src/commands/agent_mode.rs`
-  - tasks.mdのタスクをDeveloper単位に割り当てるロジック検証
+- [ ] T303 [US3] [テスト] タスク分割・Developer割り当てテスト（1 Task = N Developer） `crates/gwt-tauri/src/commands/agent_mode.rs`
+  - 1タスクに複数Developer+Worktreeを割り当てるロジック検証
   - 依存: T302
 
-- [ ] T304 [US3] [実装] タスク分割とDeveloper割り当て `crates/gwt-tauri/src/commands/agent_mode.rs`
-  - 独立タスク→別Worktree、依存タスク→同一Worktree or merge連携
+- [ ] T304 [US3] [実装] タスク分割とDeveloper割り当て（1 Task = N Developer = N Worktree） `crates/gwt-tauri/src/commands/agent_mode.rs`
+  - 大タスク→複数Developer並列、独立タスク→別Worktree、依存タスク→同一Worktree or merge連携
   - 依存: T303
 
 - [ ] T305 [US3] [テスト] Worktree/ブランチ自動作成テスト `crates/gwt-core/src/agent/`
@@ -179,12 +182,12 @@
   - タブ切り替えUIとパネルコンテンツの動的表示
   - 依存: T403
 
-- [ ] T405 [US2] [テスト] Kanbanボード表示テスト（4カラム + タスクカード） `gwt-gui/src/lib/components/KanbanBoard.test.ts`
-  - Pending/Running/Completed/Failedの4カラム、カード内情報表示
+- [ ] T405 [US2] [テスト] Kanbanボード表示テスト（4カラム + Issue別フィルタ + タスクカード） `gwt-gui/src/lib/components/KanbanBoard.test.ts`
+  - Pending/Running/Completed/Failedの4カラム、Issue別フィルタ、1 Task = N Developer表示
   - 依存: T102
 
 - [ ] T406 [US2] [実装] Kanbanボード `gwt-gui/src/lib/components/KanbanBoard.svelte`
-  - 4カラムレイアウト、TaskCardコンポーネント、worktree相対パス表示
+  - 4カラムレイアウト、Issue別フィルタ/グルーピング、TaskCardコンポーネント、worktree相対パス表示
   - 依存: T405
 
 - [ ] T407 [US2] [テスト] タスクカード表示テスト（タスク名/ブランチ名/worktree/ホバー） `gwt-gui/src/lib/components/TaskCard.test.ts`

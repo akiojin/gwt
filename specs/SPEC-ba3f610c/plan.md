@@ -7,8 +7,10 @@
 ## 概要
 
 3層エージェントアーキテクチャ（Lead / Coordinator / Developer）によるプロジェクト統括機能を実装する。
-Leadがプロジェクトのゴールを保持し、要件定義・Spec Kitワークフロー・GitHub Issue/Project管理を担い、
-Coordinatorが実装タスク管理・CI監視・Developer管理を行い、Developerが各Worktreeで実装を実行する。
+
+- **Lead**（gwt内蔵AI）がプロジェクト全体を管理し、要件定義・Spec Kitワークフロー・GitHub Issue/Project管理を担う
+- **Coordinator** が Issue単位（1 Issue = 1 Coordinator）でタスク管理・CI監視・Developer管理を行う（複数並列起動可）
+- **Developer** が各Worktreeで実装を実行する（1 Task = N Developer = N Worktree）
 
 ## 技術コンテキスト
 
@@ -23,13 +25,13 @@ Coordinatorが実装タスク管理・CI監視・Developer管理を行い、Deve
 
 ### Phase A: 基盤モデル・型定義
 
-1. 3層状態モデル（Session / Lead / Coordinator / Developer / Task）の定義
+1. エンティティモデル定義（Project / Issue / Task / Coordinator / Developer）
 2. フロント型定義の3層対応（Lead / Coordinator / Developer）
 3. PTY通信のスキル化基盤（agent_tools.rs → Claude Code plugin skills）
 
 ### Phase B: Lead（PM）機能
 
-4. Lead実行基盤（gwt内蔵AI / Claude Code切り替え対応）
+4. Lead実行基盤（gwt内蔵AIとして実装）
 5. Leadチャット（ユーザー対話、IME/スピナー/自動スクロール）
 6. Spec Kit内蔵化（LLMプロンプトテンプレートのRust組み込み）
 7. Spec Kitワークフロー実行（clarify → specify → plan → tasks → tdd）
@@ -43,8 +45,8 @@ Coordinatorが実装タスク管理・CI監視・Developer管理を行い、Deve
 ### Phase C: Coordinator（Orchestrator）機能
 
 14. Coordinator起動・管理（GUI内蔵ターミナルペインで起動）
-15. Coordinator粒度の動的判断（1:1 or 1:N）
-16. タスク分割・Developer割り当て
+15. Issue単位のCoordinator起動（1 Issue = 1 Coordinator、複数並列可）
+16. タスク分割・Developer割り当て（1 Task = N Developer = N Worktree対応）
 17. Worktree/ブランチ自動作成（`agent/`プレフィックス、命名規則）
 18. Developer起動プロンプト生成（アダプティブ、CLAUDE.md規約含む）
 19. Developer完了検出（Hook Stop / GWT_TASK_DONE / プロセス終了）
@@ -58,7 +60,7 @@ Coordinatorが実装タスク管理・CI監視・Developer管理を行い、Deve
 24. Project Teamタブ・モード切り替え
 25. Leadチャット画面（バブル表示、入力エリア）
 26. 下部パネル切替（Chat / Kanban / Coordinator）
-27. Kanbanボード（Pending/Running/Completed/Failed 4カラム、タスクカード表示）
+27. Kanbanボード（Pending/Running/Completed/Failed 4カラム、Issue別フィルタ、タスクカード表示）
 28. Coordinatorパネル（状態表示、View Terminal、Chat、Developer一覧）
 29. コスト可視化（APIコール数/推定トークン数）
 30. AI設定未構成時のエラー表示
@@ -120,10 +122,11 @@ gwt-gui/src/
 
 ## 受け入れ条件
 
-- Leadチャットでユーザーと対話し、要件定義・Spec Kitワークフローを実行できる
-- Leadが成果物4点を生成し、承認後にCoordinatorを起動できる
-- CoordinatorがDeveloperを起動し、タスクを割り当てて自律実行できる
-- KanbanボードでDeveloper/タスクをPending/Running/Completed/Failedの4カラムで表示できる
+- Leadチャットでユーザーと対話し、プロジェクト全体の要件定義・Spec Kitワークフローを実行できる
+- Leadが要件をIssue単位に分割し、各Issue分の成果物4点を生成できる
+- 承認後、各IssueにCoordinatorを並列起動できる（ファイルパス受け渡し）
+- 1 Task = N Developer = N Worktreeの並列割り当てが可能
+- KanbanボードでDeveloper/タスクをPending/Running/Completed/Failedの4カラム + Issue別フィルタで表示できる
 - CoordinatorがCI結果を監視し、失敗時に自律修正ループを実行できる
 - 各層が独立して動作し、上位層の障害が下位層に影響しない
 - セッションを永続化し、gwt再起動後に復元・再開できる
