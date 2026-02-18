@@ -430,7 +430,7 @@ pub async fn cleanup_worktrees(
                                 "cleanup-progress",
                                 &CleanupProgressPayload {
                                     branch: branch.clone(),
-                                    status: "deleting_remote".to_string(),
+                                    status: "deleting".to_string(),
                                     error: None,
                                     remote_status: Some("deleting".to_string()),
                                 },

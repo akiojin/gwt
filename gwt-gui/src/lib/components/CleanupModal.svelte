@@ -79,7 +79,7 @@
     if (wt.safety_level !== "safe") return wt.safety_level;
     const branch = wt.branch;
     if (!branch) return wt.safety_level;
-    const pr = prStatuses[branch];
+    const pr = prStatuses[branch] ?? "none";
     if (pr === "open" || pr === "none") return "warning";
     return "safe";
   }
@@ -167,7 +167,7 @@
     deleteRemote = !deleteRemote;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("set_cleanup_settings", { repoPath: projectPath, settings: { delete_remote_branches: deleteRemote } });
+      await invoke("set_cleanup_settings", { projectPath, settings: { delete_remote_branches: deleteRemote } });
     } catch {
       // Ignore save errors silently
     }
@@ -215,14 +215,14 @@
         ghAvailable = available;
         if (available) {
           try {
-            const settings = await invoke<CleanupSettings>("get_cleanup_settings", { repoPath: projectPath });
+            const settings = await invoke<CleanupSettings>("get_cleanup_settings", { projectPath });
             deleteRemote = settings.delete_remote_branches;
           } catch {
             deleteRemote = false;
           }
           prLoading = true;
           try {
-            const statuses = await invoke<Record<string, PrStatus>>("get_cleanup_pr_statuses", { repoPath: projectPath });
+            const statuses = await invoke<Record<string, PrStatus>>("get_cleanup_pr_statuses", { projectPath });
             prStatuses = statuses;
           } catch {
             prStatuses = {};

@@ -139,6 +139,7 @@ const makeLocalStorageMock = () => {
 
 describe("Sidebar", () => {
   beforeEach(() => {
+    vi.useRealTimers();
     cleanup();
     eventListeners.clear();
     listenMock.mockClear();
@@ -476,7 +477,6 @@ describe("Sidebar", () => {
       statuses: Record<string, unknown>;
       ghStatus: { available: boolean; authenticated: boolean };
     };
-    vi.useFakeTimers();
     let resolveProjectB: ((value: PrStatusResponse) => void) | null = null;
     try {
       invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
@@ -576,8 +576,9 @@ describe("Sidebar", () => {
       await fireEvent.click(prTab);
       await rendered.findByText("#111 A");
 
-      await vi.advanceTimersByTimeAsync(30_000);
-      expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(0);
+      await waitFor(() => {
+        expect(countInvokeCalls("fetch_pr_status")).toBeGreaterThan(0);
+      });
       await rendered.rerender({ projectPath: "/tmp/project-b" });
       await rendered.findByText(branchFixture.name);
       await waitFor(() => {
@@ -594,7 +595,6 @@ describe("Sidebar", () => {
           ghStatus: { available: true, authenticated: true },
         });
       }
-      vi.useRealTimers();
     }
   });
 

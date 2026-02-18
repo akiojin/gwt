@@ -20,6 +20,12 @@ async function renderCleanupModal(props: any) {
   return render(CleanupModal, { props });
 }
 
+function invokeArgsFor(command: string): Record<string, unknown>[] {
+  return invokeMock.mock.calls
+    .filter((call) => call[0] === command)
+    .map((call) => (call[1] ?? {}) as Record<string, unknown>);
+}
+
 const worktreeFixture = {
   path: "/tmp/worktrees/feature/active",
   branch: "feature/active",
@@ -500,6 +506,64 @@ describe("CleanupModal", () => {
     });
   });
 
+  it("uses projectPath when loading cleanup settings and PR statuses", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") return [worktreeFixture];
+      if (command === "check_gh_available") return true;
+      if (command === "get_cleanup_settings") return { delete_remote_branches: true };
+      if (command === "get_cleanup_pr_statuses") return {};
+      return [];
+    });
+
+    await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project-args",
+      onClose: vi.fn(),
+      agentTabBranches: [],
+    });
+
+    await waitFor(() => {
+      const settingsArgs = invokeArgsFor("get_cleanup_settings")[0];
+      const statusesArgs = invokeArgsFor("get_cleanup_pr_statuses")[0];
+      expect(settingsArgs).toEqual({ projectPath: "/tmp/project-args" });
+      expect(statusesArgs).toEqual({ projectPath: "/tmp/project-args" });
+    });
+  });
+
+  it("saves remote toggle settings with projectPath", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") return [worktreeFixture];
+      if (command === "check_gh_available") return true;
+      if (command === "get_cleanup_settings") return { delete_remote_branches: false };
+      if (command === "get_cleanup_pr_statuses") return {};
+      if (command === "set_cleanup_settings") return null;
+      return [];
+    });
+
+    const rendered = await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project-toggle",
+      onClose: vi.fn(),
+      agentTabBranches: [],
+    });
+
+    await rendered.findByText(worktreeFixture.branch);
+    let remoteToggle: Element | null = null;
+    await waitFor(() => {
+      remoteToggle = rendered.container.querySelector("[data-testid='remote-toggle']");
+      expect(remoteToggle).toBeTruthy();
+    });
+    await fireEvent.click(remoteToggle as HTMLElement);
+
+    await waitFor(() => {
+      const args = invokeArgsFor("set_cleanup_settings")[0];
+      expect(args).toEqual({
+        projectPath: "/tmp/project-toggle",
+        settings: { delete_remote_branches: true },
+      });
+    });
+  });
+
   it("hides remote toggle when gh is not available", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "list_worktrees") return [worktreeFixture];
@@ -543,6 +607,31 @@ describe("CleanupModal", () => {
 
     await rendered.findByText(safeWorktree.branch);
     // Wait for PR statuses to load and safety to recalculate
+    await waitFor(() => {
+      const dot = rendered.container.querySelector(".safety-dot");
+      expect(dot?.classList.contains("dot-warning")).toBe(true);
+    });
+  });
+
+  it("downgrades safe to warning when toggle ON and PR status is missing", async () => {
+    const safeWorktree = { ...worktreeFixture, safety_level: "safe" };
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") return [safeWorktree];
+      if (command === "check_gh_available") return true;
+      if (command === "get_cleanup_settings") return { delete_remote_branches: true };
+      if (command === "get_cleanup_pr_statuses") return {};
+      return [];
+    });
+
+    const rendered = await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project",
+      onClose: vi.fn(),
+      agentTabBranches: [],
+    });
+
+    await rendered.findByText(safeWorktree.branch);
     await waitFor(() => {
       const dot = rendered.container.querySelector(".safety-dot");
       expect(dot?.classList.contains("dot-warning")).toBe(true);
@@ -787,7 +876,7 @@ describe("CleanupModal", () => {
       if (command === "list_worktrees") return [worktreeFixture];
       if (command === "check_gh_available") return true;
       if (command === "get_cleanup_settings") return { delete_remote_branches: true };
-      if (command === "get_cleanup_pr_statuses") return {};
+      if (command === "get_cleanup_pr_statuses") return { [worktreeFixture.branch!]: "merged" };
       if (command === "cleanup_worktrees") return [];
       return [];
     });
@@ -845,7 +934,7 @@ describe("CleanupModal", () => {
       if (command === "list_worktrees") return [worktreeFixture];
       if (command === "check_gh_available") return true;
       if (command === "get_cleanup_settings") return { delete_remote_branches: true };
-      if (command === "get_cleanup_pr_statuses") return {};
+      if (command === "get_cleanup_pr_statuses") return { [worktreeFixture.branch!]: "merged" };
       if (command === "cleanup_worktrees") return [];
       return [];
     });
