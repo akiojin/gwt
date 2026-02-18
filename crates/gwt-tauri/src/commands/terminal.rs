@@ -3197,9 +3197,7 @@ pub fn start_launch_job(
                     job_id: job_id_thread.clone(),
                     status: "error".to_string(),
                     pane_id: None,
-                    error: Some(
-                        "Internal error: launch thread panicked".to_string(),
-                    ),
+                    error: Some("Internal error: launch thread panicked".to_string()),
                 }
             }
         };
