@@ -18,10 +18,26 @@
   let resizeObserver: ResizeObserver | undefined = $state(undefined);
   let unlisten: (() => void) | undefined = $state(undefined);
 
-  const MOUSE_WHEEL_STEP_VALUES = new Set([120]);
-  const POTENTIAL_MOUSE_TRACKPAD_STEPS = new Set([100, 240]);
+  const MOUSE_WHEEL_STEP_VALUES = new Set([120, 240]);
+  const TRACKPAD_WHEEL_DELTA_THRESHOLD = 240;
   const MOUSE_WHEEL_STEP_REPEAT_WINDOW_MS = 220;
   const MOUSE_WHEEL_STEP_REPEAT_COUNT = 4;
+  const MOUSE_WHEEL_STEP_MOUSE_GAP_MS = 45;
+  // Mouse wheels are usually very regular and dense; treat only tight, consistent
+  // runs as mouse input. Slower, jittery integer bursts stay on trackpad path.
+
+  type WheelSample = {
+    at: number;
+    absDeltaY: number;
+    sign: number;
+  };
+
+  type WheelScrollState = {
+    axis: "vertical" | "horizontal" | null;
+    remainder: number;
+  };
+
+  type WheelAxis = "vertical" | "horizontal";
 
   type TerminalEditAction = {
     action: "copy" | "paste";
@@ -135,7 +151,15 @@
     }
   }
 
-  function isTrackpadLikeWheel(event: WheelEvent): boolean {
+  function isTrackpadLikeWheel(
+    event: WheelEvent,
+    mouseWheelStepHistory: WheelSample[],
+  ): boolean {
+    if (event.deltaMode === 1 || event.deltaMode === 2) {
+      mouseWheelStepHistory.length = 0;
+      return true;
+    }
+
     if (event.deltaMode !== 0) return false;
     const absDeltaY = Math.abs(event.deltaY);
     const absDeltaX = Math.abs(event.deltaX);
@@ -145,28 +169,86 @@
         .sourceCapabilities;
 
     if (sourceCapabilities?.firesTouchEvents === true) {
+      mouseWheelStepHistory.length = 0;
       return true;
     }
 
     // Trackpads frequently emit horizontal movement in addition to vertical scroll.
     if (absDeltaX > 0) {
+      mouseWheelStepHistory.length = 0;
       return true;
     }
 
     if (absDeltaY === 0) return false;
 
     if (!Number.isInteger(absDeltaY)) {
+      mouseWheelStepHistory.length = 0;
       return true;
     }
 
-    return !MOUSE_WHEEL_STEP_VALUES.has(absDeltaY);
+    if (absDeltaY > TRACKPAD_WHEEL_DELTA_THRESHOLD) {
+      mouseWheelStepHistory.length = 0;
+      return true;
+    }
+
+    const isPotentialMouseStep = MOUSE_WHEEL_STEP_VALUES.has(absDeltaY);
+    if (!isPotentialMouseStep) {
+      mouseWheelStepHistory.length = 0;
+      return true;
+    }
+
+    const now =
+      event.timeStamp > 0
+        ? event.timeStamp
+        : typeof performance === "undefined"
+          ? Date.now()
+          : performance.now();
+    const sign = Math.sign(event.deltaY);
+
+    while (
+      mouseWheelStepHistory.length > 0 &&
+      now - mouseWheelStepHistory[0].at > MOUSE_WHEEL_STEP_REPEAT_WINDOW_MS
+    ) {
+      mouseWheelStepHistory.shift();
+    }
+
+    mouseWheelStepHistory.push({
+      at: now,
+      absDeltaY,
+      sign,
+    });
+
+    const recentHistory = mouseWheelStepHistory.slice(-MOUSE_WHEEL_STEP_REPEAT_COUNT);
+    if (recentHistory.length < MOUSE_WHEEL_STEP_REPEAT_COUNT) {
+      return true;
+    }
+
+    const looksLikeMouseWheelRun = recentHistory.every(
+      (sample, index) => {
+        if (sample.absDeltaY !== absDeltaY) return false;
+        if (sample.sign !== sign) return false;
+        if (index === 0) return true;
+        return sample.at - recentHistory[index - 1].at >= MOUSE_WHEEL_STEP_MOUSE_GAP_MS;
+      },
+    );
+
+    return !looksLikeMouseWheelRun;
   }
 
-  function scrollViewportByWheel(rootEl: HTMLElement, event: WheelEvent): boolean {
-    const viewport = rootEl.querySelector<HTMLElement>(".xterm-viewport");
-    if (!viewport) return false;
+  function pickWheelAxis(event: WheelEvent): WheelAxis {
+    const absDeltaY = Math.abs(event.deltaY);
+    const absDeltaX = Math.abs(event.deltaX);
+    return absDeltaY >= absDeltaX ? "vertical" : "horizontal";
+  }
 
-    if (event.deltaY === 0) return false;
+  function pickWheelDelta(
+    event: WheelEvent,
+    viewport: HTMLElement,
+    wheelScrollState: WheelScrollState,
+  ): number {
+    const absDeltaY = Math.abs(event.deltaY);
+    const absDeltaX = Math.abs(event.deltaX);
+    if (absDeltaY === 0 && absDeltaX === 0) return 0;
 
     const fontSize =
       typeof terminal?.options.fontSize === "number" ? terminal.options.fontSize : 13;
@@ -174,12 +256,40 @@
       typeof terminal?.options.lineHeight === "number" ? terminal.options.lineHeight : 1;
     const lineStep = fontSize * lineHeight;
 
-    let delta = event.deltaY;
+    const axis = pickWheelAxis(event);
+    if (wheelScrollState.axis !== axis) {
+      wheelScrollState.axis = axis;
+      wheelScrollState.remainder = 0;
+    }
+
+    let delta = axis === "vertical" ? event.deltaY : event.deltaX;
+
     if (event.deltaMode === 1) {
       delta *= lineStep;
     } else if (event.deltaMode === 2) {
       delta *= viewport.clientHeight;
     }
+
+    const raw = delta + wheelScrollState.remainder;
+    const roundedDelta = Math.trunc(raw);
+    if (roundedDelta === 0) {
+      wheelScrollState.remainder = raw;
+      return 0;
+    }
+
+    wheelScrollState.remainder = raw - roundedDelta;
+    return roundedDelta;
+  }
+
+  function scrollViewportByWheel(
+    rootEl: HTMLElement,
+    event: WheelEvent,
+    wheelScrollState: WheelScrollState,
+  ): boolean {
+    const viewport = rootEl.querySelector<HTMLElement>(".xterm-viewport");
+    if (!viewport) return false;
+    const delta = pickWheelDelta(event, viewport, wheelScrollState);
+    if (delta === 0) return false;
 
     const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
     const nextScrollTop = Math.min(Math.max(viewport.scrollTop + delta, 0), maxScrollTop);
@@ -196,8 +306,11 @@
     let restoringScrollback = true;
     const pendingLiveOutputChunks: Uint8Array[] = [];
     const unregisterVoiceInputTarget = registerTerminalInputTarget(paneId, rootEl);
-    const mouseWheelStepHistory: { deltaY: number; timeStamp: number }[] = [];
-
+    const mouseWheelStepHistory: WheelSample[] = [];
+    const wheelScrollState: WheelScrollState = {
+      axis: null,
+      remainder: 0,
+    };
     const term = new Terminal({
       cursorBlink: true,
       cursorStyle: "bar",
@@ -245,53 +358,16 @@
     });
 
     const handleWheel = (event: WheelEvent) => {
-      if (event.deltaY === 0) return;
+      if (event.deltaY === 0 && event.deltaX === 0) return;
       if (!terminal) return;
-
-      const absDeltaY = Math.abs(event.deltaY);
-      const absDeltaX = Math.abs(event.deltaX);
-      const isPotentialMouseWheelStep =
-        Number.isInteger(absDeltaY) &&
-        absDeltaX === 0 &&
-        POTENTIAL_MOUSE_TRACKPAD_STEPS.has(absDeltaY);
-      let looksLikeMouseWheelRun = false;
-
-      if (isPotentialMouseWheelStep) {
-        const oldestAllowedTime = event.timeStamp - MOUSE_WHEEL_STEP_REPEAT_WINDOW_MS;
-        while (
-          mouseWheelStepHistory.length > 0 &&
-          mouseWheelStepHistory[0].timeStamp < oldestAllowedTime
-        ) {
-          mouseWheelStepHistory.shift();
-        }
-
-        mouseWheelStepHistory.push({
-          deltaY: event.deltaY,
-          timeStamp: event.timeStamp,
-        });
-
-        const recentMouseLikeHistory = mouseWheelStepHistory.slice(
-          -MOUSE_WHEEL_STEP_REPEAT_COUNT,
-        );
-        looksLikeMouseWheelRun =
-          recentMouseLikeHistory.length >= MOUSE_WHEEL_STEP_REPEAT_COUNT &&
-          recentMouseLikeHistory.every((sample) => sample.deltaY === event.deltaY);
-      }
-
-      if (!isPotentialMouseWheelStep) {
-        mouseWheelStepHistory.length = 0;
-      }
 
       const wasFocused = isTerminalFocused(rootEl);
       focusTerminalIfNeeded(rootEl, true);
 
-      const shouldFallback =
-        !wasFocused ||
-        (isTrackpadLikeWheel(event) &&
-          !(isPotentialMouseWheelStep && looksLikeMouseWheelRun));
+      const shouldFallback = !wasFocused || isTrackpadLikeWheel(event, mouseWheelStepHistory);
       if (!shouldFallback) return;
 
-      const didScroll = scrollViewportByWheel(rootEl, event);
+      const didScroll = scrollViewportByWheel(rootEl, event, wheelScrollState);
       if (!didScroll) return;
 
       event.preventDefault();
