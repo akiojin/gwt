@@ -1,3 +1,5 @@
+use crate::state::AppState;
+use tauri::State;
 use tauri::{AppHandle, Manager, WebviewWindowBuilder, Window, Wry};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -47,6 +49,16 @@ fn open_window_with_label(app: &AppHandle<Wry>, label: &str) -> Result<(), Strin
 #[tauri::command]
 pub fn get_current_window_label(window: Window) -> String {
     window.label().to_string()
+}
+
+#[tauri::command]
+pub fn try_acquire_window_restore_leader(state: State<AppState>, label: String) -> bool {
+    state.try_acquire_window_session_restore_leader(&label)
+}
+
+#[tauri::command]
+pub fn release_window_restore_leader(state: State<AppState>, label: String) {
+    state.release_window_session_restore_leader(&label);
 }
 
 #[tauri::command]

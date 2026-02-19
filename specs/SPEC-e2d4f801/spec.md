@@ -1,6 +1,6 @@
 # 機能仕様: OS環境変数の自動継承
 
-**仕様ID**: `SPEC-os-env-01`
+**仕様ID**: `SPEC-e2d4f801`
 **作成日**: 2026-02-10
 **ステータス**: 確定
 **カテゴリ**: Core / Terminal / Environment

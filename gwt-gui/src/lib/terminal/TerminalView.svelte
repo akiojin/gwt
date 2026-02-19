@@ -18,13 +18,18 @@
   let resizeObserver: ResizeObserver | undefined = $state(undefined);
   let unlisten: (() => void) | undefined = $state(undefined);
 
-  const TRACKPAD_WHEEL_DELTA_THRESHOLD = 180;
-
-  const MOUSE_STEP_VALUES = new Set([120]);
+  const MOUSE_WHEEL_STEP_VALUES = new Set([120]);
+  const POTENTIAL_MOUSE_TRACKPAD_STEPS = new Set([100, 240]);
+  const MOUSE_WHEEL_STEP_REPEAT_WINDOW_MS = 220;
+  const MOUSE_WHEEL_STEP_REPEAT_COUNT = 4;
 
   type TerminalEditAction = {
     action: "copy" | "paste";
     paneId: string;
+  };
+
+  type CaptureTerminalContainer = HTMLDivElement & {
+    __gwtTerminal?: Terminal;
   };
 
   function isTerminalFocused(rootEl: HTMLElement): boolean {
@@ -154,10 +159,7 @@
       return true;
     }
 
-    if (absDeltaY > TRACKPAD_WHEEL_DELTA_THRESHOLD) {
-      return false;
-    }
-    return !MOUSE_STEP_VALUES.has(absDeltaY);
+    return !MOUSE_WHEEL_STEP_VALUES.has(absDeltaY);
   }
 
   function scrollViewportByWheel(rootEl: HTMLElement, event: WheelEvent): boolean {
@@ -194,6 +196,7 @@
     let restoringScrollback = true;
     const pendingLiveOutputChunks: Uint8Array[] = [];
     const unregisterVoiceInputTarget = registerTerminalInputTarget(paneId, rootEl);
+    const mouseWheelStepHistory: { deltaY: number; timeStamp: number }[] = [];
 
     const term = new Terminal({
       cursorBlink: true,
@@ -233,6 +236,7 @@
     term.loadAddon(fit);
     term.loadAddon(webLinks);
     term.open(rootEl);
+    (rootEl as CaptureTerminalContainer).__gwtTerminal = term;
 
     // Initial fit
     requestAnimationFrame(() => {
@@ -244,10 +248,47 @@
       if (event.deltaY === 0) return;
       if (!terminal) return;
 
+      const absDeltaY = Math.abs(event.deltaY);
+      const absDeltaX = Math.abs(event.deltaX);
+      const isPotentialMouseWheelStep =
+        Number.isInteger(absDeltaY) &&
+        absDeltaX === 0 &&
+        POTENTIAL_MOUSE_TRACKPAD_STEPS.has(absDeltaY);
+      let looksLikeMouseWheelRun = false;
+
+      if (isPotentialMouseWheelStep) {
+        const oldestAllowedTime = event.timeStamp - MOUSE_WHEEL_STEP_REPEAT_WINDOW_MS;
+        while (
+          mouseWheelStepHistory.length > 0 &&
+          mouseWheelStepHistory[0].timeStamp < oldestAllowedTime
+        ) {
+          mouseWheelStepHistory.shift();
+        }
+
+        mouseWheelStepHistory.push({
+          deltaY: event.deltaY,
+          timeStamp: event.timeStamp,
+        });
+
+        const recentMouseLikeHistory = mouseWheelStepHistory.slice(
+          -MOUSE_WHEEL_STEP_REPEAT_COUNT,
+        );
+        looksLikeMouseWheelRun =
+          recentMouseLikeHistory.length >= MOUSE_WHEEL_STEP_REPEAT_COUNT &&
+          recentMouseLikeHistory.every((sample) => sample.deltaY === event.deltaY);
+      }
+
+      if (!isPotentialMouseWheelStep) {
+        mouseWheelStepHistory.length = 0;
+      }
+
       const wasFocused = isTerminalFocused(rootEl);
       focusTerminalIfNeeded(rootEl, true);
 
-      const shouldFallback = !wasFocused || isTrackpadLikeWheel(event);
+      const shouldFallback =
+        !wasFocused ||
+        (isTrackpadLikeWheel(event) &&
+          !(isPotentialMouseWheelStep && looksLikeMouseWheelRun));
       if (!shouldFallback) return;
 
       const didScroll = scrollViewportByWheel(rootEl, event);
@@ -288,6 +329,13 @@
 
         event.preventDefault();
         void pasteFromClipboard();
+        return false;
+      }
+
+      // Delegate all Cmd+key combinations to the native menu / browser layer.
+      // Without this, xterm consumes the keydown and calls preventDefault(),
+      // which silently breaks native accelerators (Cmd+O, Cmd+N, Cmd+, …).
+      if (event.metaKey) {
         return false;
       }
 
@@ -412,6 +460,7 @@
       rootEl.removeEventListener("wheel", handleWheel, true);
       window.removeEventListener("gwt-terminal-edit-action", handleTerminalEditAction);
       window.removeEventListener("gwt-terminal-font-size", handleFontSizeChange);
+      delete (rootEl as CaptureTerminalContainer).__gwtTerminal;
       observer.disconnect();
       term.dispose();
       unregisterVoiceInputTarget();
@@ -474,7 +523,11 @@
   }
 </script>
 
-<div class="terminal-container" bind:this={containerEl}></div>
+<div
+  class="terminal-container"
+  data-pane-id={paneId}
+  bind:this={containerEl}
+></div>
 
 <style>
   .terminal-container {

@@ -25,7 +25,7 @@ export type StoredTerminalTab = {
 };
 
 export type StoredStaticTab = {
-  type: "agentMode" | "settings" | "versionHistory";
+  type: "agentMode" | "settings" | "versionHistory" | "issues";
   id: string;
   label: string;
 };
@@ -149,20 +149,25 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
   if (
     type === "agentMode" ||
     type === "settings" ||
-    type === "versionHistory"
+    type === "versionHistory" ||
+    type === "issues"
   ) {
     const fallbackId =
       type === "agentMode"
         ? "agentMode"
         : type === "settings"
           ? "settings"
-          : "versionHistory";
+          : type === "issues"
+            ? "issues"
+            : "versionHistory";
     const fallbackLabel =
       type === "agentMode"
         ? "Master Agent"
         : type === "settings"
           ? "Settings"
-          : "Version History";
+          : type === "issues"
+            ? "Issues"
+            : "Version History";
     const id = normalizeString(obj.id) || fallbackId;
     const label = typeof obj.label === "string" ? obj.label : fallbackLabel;
     return { type, id, label };

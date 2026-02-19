@@ -232,6 +232,18 @@
 
 - [ ] **T705** [デプロイ] すべての変更をコミット＆プッシュ
 
+## フェーズ 9: Base 切り替え白画面不具合修正（2026-02-18 追補）
+
+**目的**: `main -> develop` 切り替え時に Worktree Summary 全体が消える不具合を防止する
+
+- [x] **T801** [US6] [テスト] `GitSection.test.ts` に基準ブランチ切り替え時の再取得・stale 応答無視の RED テストを追加
+- [x] **T802** [US6] [テスト] `GitChangesTab.test.ts` に base 変更時の stale 応答無視テストを追加
+- [x] **T803** [US6] [テスト] `GitCommitsTab.test.ts` に base 変更時の stale 応答無視テストを追加
+- [x] **T804** [US6] [実装] `GitSection.svelte` に request-id ガード、候補値バリデーション、フォールバックを追加
+- [x] **T805** [US6] [実装] `GitChangesTab.svelte` に request-id ガードを追加し、古い応答を破棄
+- [x] **T806** [US6] [実装] `GitCommitsTab.svelte` に request-id ガードを追加し、古い応答を破棄
+- [x] **T807** [US6] [検証] `pnpm -C gwt-gui test src/lib/components/GitSection.test.ts src/lib/components/GitChangesTab.test.ts src/lib/components/GitCommitsTab.test.ts` を実行し GREEN を確認
+
 ## タスク凡例
 
 **優先度**:

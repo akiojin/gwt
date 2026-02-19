@@ -1549,7 +1549,13 @@ mod tests {
     #[test]
     fn send_project_team_message_load_error_does_not_recreate_session() {
         let (state, _dir) = make_test_app_state_with_store();
-        state.set_project_for_window("main", "/repo".to_string());
+        state
+            .claim_project_for_window_with_identity(
+                "main",
+                "/repo".to_string(),
+                "repo-id".to_string(),
+            )
+            .unwrap();
 
         if let Ok(mut guard) = state.window_agent_modes.lock() {
             let mut mode = AgentModeState::new();

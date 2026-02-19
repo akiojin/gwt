@@ -68,6 +68,7 @@ export async function installTauriMock(
       let paneSeq = 1;
       let nextSpawnShellError = false;
       let lastSpawnedPaneId: string | null = null;
+      let restoreLeaderAcquired = false;
 
       let agentModeState: AgentModeState = {
         messages: [],
@@ -165,6 +166,14 @@ export async function installTauriMock(
         };
       }
 
+      function openProjectResult(pathLike: unknown) {
+        return {
+          info: projectInfo(pathLike),
+          action: "opened",
+          focusedWindowLabel: null,
+        };
+      }
+
       async function invoke(cmd: string, rawArgs?: unknown): Promise<unknown> {
         const args = normalizeArgs(rawArgs);
         const runtimeCommandResponses = (
@@ -231,6 +240,25 @@ export async function installTauriMock(
                 lastOpened: lastOpenedAt,
               },
             ];
+          case "get_current_window_label":
+            return "main";
+          case "try_acquire_window_restore_leader": {
+            const label = typeof args.label === "string" ? args.label.trim() : "";
+            if (label !== "main" || restoreLeaderAcquired) return false;
+            restoreLeaderAcquired = true;
+            return true;
+          }
+          case "release_window_restore_leader": {
+            const label = typeof args.label === "string" ? args.label.trim() : "";
+            if (label === "main") {
+              restoreLeaderAcquired = false;
+            }
+            return null;
+          }
+          case "open_gwt_window": {
+            const label = typeof args.label === "string" ? args.label.trim() : "";
+            return label || "main";
+          }
           case "probe_path":
             return {
               kind: "gwtProject",
@@ -238,7 +266,7 @@ export async function installTauriMock(
                 typeof args.path === "string" ? args.path : projectPath,
             };
           case "open_project":
-            return projectInfo(args.path);
+            return openProjectResult(args.path);
           case "close_project":
             return null;
           case "list_worktree_branches":

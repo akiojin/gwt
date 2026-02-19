@@ -3,12 +3,18 @@
 use crate::state::AppState;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use tauri::Manager;
 use tauri::{Emitter, EventTarget, WebviewWindowBuilder};
 use tracing::{info, warn};
 
 #[cfg(not(test))]
 use gwt_core::config::os_env;
+
+#[cfg(not(test))]
+use gwt_core::config::mcp_registration;
+#[cfg(not(test))]
+use tokio::io::AsyncReadExt;
 
 #[cfg(any(not(test), target_os = "macos"))]
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -72,8 +78,10 @@ fn menu_action_from_id(id: &str) -> Option<&'static str> {
         crate::menu::MENU_ID_FILE_CLOSE_PROJECT => Some("close-project"),
         crate::menu::MENU_ID_GIT_CLEANUP_WORKTREES => Some("cleanup-worktrees"),
         crate::menu::MENU_ID_GIT_VERSION_HISTORY => Some("version-history"),
+        crate::menu::MENU_ID_GIT_ISSUES => Some("git-issues"),
         crate::menu::MENU_ID_EDIT_COPY => Some("edit-copy"),
         crate::menu::MENU_ID_EDIT_PASTE => Some("edit-paste"),
+        crate::menu::MENU_ID_EDIT_COPY_SCREEN => Some("screen-copy"),
         crate::menu::MENU_ID_TOOLS_NEW_TERMINAL => Some("new-terminal"),
         crate::menu::MENU_ID_TOOLS_LAUNCH_AGENT => Some("launch-agent"),
         crate::menu::MENU_ID_TOOLS_LIST_TERMINALS => Some("list-terminals"),
@@ -160,11 +168,15 @@ fn best_window(app: &tauri::AppHandle<tauri::Wry>) -> Option<tauri::WebviewWindo
     app.webview_windows().into_iter().next().map(|(_, w)| w)
 }
 
+#[allow(deprecated)]
 pub fn build_app(
     builder: tauri::Builder<tauri::Wry>,
     app_state: AppState,
+    _single_instance_guard: Option<Arc<crate::single_instance::SingleInstanceGuard>>,
 ) -> tauri::Builder<tauri::Wry> {
     let builder = builder.manage(app_state);
+    #[cfg(not(test))]
+    let single_instance_guard = _single_instance_guard.clone();
 
     // Plugins are not required for unit tests and may rely on runtime features.
     #[cfg(not(test))]
@@ -173,11 +185,50 @@ pub fn build_app(
         .plugin(tauri_plugin_store::Builder::default().build());
 
     builder
-        .setup(|_app| {
+        .setup(move |_app| {
             #[cfg(not(test))]
             {
+                if let Some(guard) = single_instance_guard.as_ref() {
+                    spawn_single_instance_focus_listener(_app.handle().clone(), guard.clone());
+                }
+
+                // Clean up stale MCP state from a previous crash (FR-019)
+                crate::mcp_ws_server::cleanup_stale_state_file();
+
+                // Start MCP WebSocket server (FR-001, FR-005)
+                {
+                    let app_handle = _app.handle().clone();
+                    let state = _app.state::<AppState>();
+                    let mcp_handle_slot = state.mcp_ws_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        match crate::mcp_ws_server::start(app_handle).await {
+                            Ok(handle) => {
+                                tracing::info!(
+                                    category = "mcp",
+                                    port = handle.port,
+                                    "MCP WebSocket server ready"
+                                );
+                                if let Ok(mut slot) = mcp_handle_slot.lock() {
+                                    *slot = Some(handle);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    category = "mcp",
+                                    error = %e,
+                                    "Failed to start MCP WebSocket server"
+                                );
+                            }
+                        }
+                    });
+                }
+
                 // Native menubar (SPEC-4470704f)
-                let _ = crate::menu::rebuild_menu(_app.handle());
+                if let Err(e) = crate::menu::rebuild_menu(_app.handle()) {
+                    warn!(category = "menu", error = %e, "Failed to build initial menu");
+                } else {
+                    info!(category = "menu", "Initial native menu built");
+                }
 
                 // System tray (SPEC-dfb1611a FR-310〜FR-313)
                 let tray_menu = tauri::menu::Menu::new(_app)?;
@@ -251,6 +302,40 @@ pub fn build_app(
                 #[cfg(target_os = "macos")]
                 _tray.set_icon_as_template(true)?;
 
+                // MCP bridge: cleanup stale registrations then register for all agents (T21).
+                // Delay briefly so login-shell PATH capture can complete first.
+                {
+                    let app_handle = _app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        let state = app_handle.state::<AppState>();
+                        let resource_dir = app_handle.path().resource_dir().ok();
+                        let _ = state.wait_os_env_ready(std::time::Duration::from_secs(2));
+                        let status = mcp_registration::repair_registration(resource_dir.as_deref());
+                        state.set_mcp_registration_status(status.clone());
+                        match status.overall.as_str() {
+                            "ok" => {
+                                info!(
+                                    category = "mcp",
+                                    "MCP bridge server registered in all agent configs"
+                                );
+                            }
+                            _ => {
+                                warn!(
+                                    category = "mcp",
+                                    overall = %status.overall,
+                                    runtime = %status.bridge_runtime,
+                                    bridge = %status.bridge_script,
+                                    error = %status
+                                        .last_error_message
+                                        .clone()
+                                        .unwrap_or_else(|| "unknown".to_string()),
+                                    "MCP registration is degraded"
+                                );
+                            }
+                        }
+                    });
+                }
+
                 // Background task: capture login shell environment
                 {
                     let state = _app.state::<AppState>();
@@ -298,6 +383,23 @@ pub fn build_app(
                     });
                 }
 
+                // Background task: check gh CLI authentication (SPEC-ad1ac432 T009)
+                {
+                    let app_handle = _app.handle().clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        let available = gwt_core::git::gh_cli::check_auth();
+                        let state = app_handle.state::<AppState>();
+                        state
+                            .gh_available
+                            .store(available, std::sync::atomic::Ordering::Relaxed);
+                        tracing::info!(
+                            category = "gh_cli",
+                            available = available,
+                            "gh CLI authentication check completed"
+                        );
+                    });
+                }
+
                 // Background task: watch session files for agent status changes (SPEC-b80e7996 FR-820)
                 {
                     let watcher_handle = _app.handle().clone();
@@ -335,6 +437,7 @@ pub fn build_app(
         })
         .on_menu_event(|app, event| {
             let id = event.id().as_ref();
+            info!(category = "menu", id = id, "Native menu event received");
 
             if id == crate::menu::MENU_ID_FILE_NEW_WINDOW {
                 open_new_window(app);
@@ -448,6 +551,7 @@ pub fn build_app(
                     return;
                 }
 
+                let _ = window.emit("window-will-hide", ());
                 api.prevent_close();
                 let _ = window.hide();
                 let _ = crate::menu::rebuild_menu(window.app_handle());
@@ -521,6 +625,7 @@ pub fn build_app(
             crate::commands::terminal::launch_agent,
             crate::commands::terminal::start_launch_job,
             crate::commands::terminal::cancel_launch_job,
+            crate::commands::terminal::poll_launch_job,
             crate::commands::terminal::write_terminal,
             crate::commands::terminal::send_keys_to_pane,
             crate::commands::terminal::send_keys_broadcast,
@@ -535,6 +640,8 @@ pub fn build_app(
             crate::commands::agent_mode::restore_project_team_session_cmd,
             crate::commands::agent_mode::list_project_team_sessions_cmd,
             crate::commands::agent_mode::stop_project_team_session_cmd,
+            crate::commands::mcp::get_mcp_registration_status_cmd,
+            crate::commands::mcp::repair_mcp_registration_cmd,
             crate::commands::settings::get_settings,
             crate::commands::settings::save_settings,
             crate::commands::agents::detect_agents,
@@ -547,6 +654,10 @@ pub fn build_app(
             crate::commands::cleanup::list_worktrees,
             crate::commands::cleanup::cleanup_worktrees,
             crate::commands::cleanup::cleanup_single_worktree,
+            crate::commands::cleanup::check_gh_available,
+            crate::commands::cleanup::get_cleanup_pr_statuses,
+            crate::commands::cleanup::get_cleanup_settings,
+            crate::commands::cleanup::set_cleanup_settings,
             crate::commands::hooks::check_and_update_hooks,
             crate::commands::hooks::register_hooks,
             crate::commands::update::check_app_update,
@@ -562,11 +673,15 @@ pub fn build_app(
             crate::commands::git_view::get_base_branch_candidates,
             crate::commands::version_history::list_project_versions,
             crate::commands::version_history::get_project_version_history,
+            crate::commands::version_history::prefetch_version_history,
             crate::commands::window_tabs::sync_window_agent_tabs,
             crate::commands::window::get_current_window_label,
             crate::commands::window::open_gwt_window,
+            crate::commands::window::try_acquire_window_restore_leader,
+            crate::commands::window::release_window_restore_leader,
             crate::commands::recent_projects::get_recent_projects,
             crate::commands::issue::fetch_github_issues,
+            crate::commands::issue::fetch_github_issue_detail,
             crate::commands::issue::fetch_branch_linked_issue,
             crate::commands::issue::check_gh_cli_status,
             crate::commands::issue::find_existing_issue_branch,
@@ -588,6 +703,88 @@ pub fn build_app(
             crate::commands::system::get_system_info,
             crate::commands::system::get_stats,
         ])
+}
+
+#[cfg(not(test))]
+fn spawn_single_instance_focus_listener(
+    app_handle: tauri::AppHandle<tauri::Wry>,
+    guard: Arc<crate::single_instance::SingleInstanceGuard>,
+) {
+    tauri::async_runtime::spawn(async move {
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(err) => {
+                warn!(
+                    category = "single_instance",
+                    error = %err,
+                    "Failed to bind focus listener"
+                );
+                return;
+            }
+        };
+
+        let port = match listener.local_addr() {
+            Ok(addr) => addr.port(),
+            Err(err) => {
+                warn!(
+                    category = "single_instance",
+                    error = %err,
+                    "Failed to resolve focus listener address"
+                );
+                return;
+            }
+        };
+
+        if let Err(err) = guard.set_focus_port(Some(port)) {
+            warn!(
+                category = "single_instance",
+                error = %err,
+                "Failed to publish focus listener endpoint"
+            );
+            return;
+        }
+
+        info!(
+            category = "single_instance",
+            port = port,
+            "Focus listener ready"
+        );
+
+        loop {
+            let (mut socket, _) = match listener.accept().await {
+                Ok(v) => v,
+                Err(err) => {
+                    warn!(
+                        category = "single_instance",
+                        error = %err,
+                        "Focus listener accept failed"
+                    );
+                    break;
+                }
+            };
+
+            let mut buf = [0u8; 64];
+            let bytes_read = match socket.read(&mut buf).await {
+                Ok(n) => n,
+                Err(err) => {
+                    warn!(
+                        category = "single_instance",
+                        error = %err,
+                        "Focus listener read failed"
+                    );
+                    continue;
+                }
+            };
+            if bytes_read == 0 {
+                continue;
+            }
+
+            let payload = String::from_utf8_lossy(&buf[..bytes_read]);
+            if payload.contains("focus") {
+                show_best_window(&app_handle);
+            }
+        }
+    });
 }
 
 fn focused_window_label(app: &tauri::AppHandle<tauri::Wry>) -> String {
@@ -619,16 +816,39 @@ fn emit_menu_action(app: &tauri::AppHandle<tauri::Wry>, action: &str) {
         .get_webview_window(&label)
         .or_else(|| app.get_webview_window("main"))
     else {
+        warn!(
+            category = "menu",
+            action = action,
+            requested_label = %label,
+            "Skipping menu action emit because target window was not found"
+        );
         return;
     };
 
-    let _ = window.emit_to(
+    info!(
+        category = "menu",
+        action = action,
+        target_label = window.label(),
+        "Emitting menu action"
+    );
+
+    let emit_result = window.emit_to(
         EventTarget::webview_window(window.label()),
         crate::menu::MENU_ACTION_EVENT,
         crate::menu::MenuActionPayload {
             action: action.to_string(),
         },
     );
+
+    if let Err(err) = emit_result {
+        warn!(
+            category = "menu",
+            action = action,
+            target_label = window.label(),
+            error = %err,
+            "Failed to emit menu action"
+        );
+    }
 }
 
 fn open_new_window(app: &tauri::AppHandle<tauri::Wry>) {
@@ -751,6 +971,16 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
         }
         tauri::RunEvent::Exit => {
             info!(category = "tauri", event = "Exit", "App exiting");
+
+            // T22: Unregister MCP bridge from all agent configs on exit
+            #[cfg(not(test))]
+            if let Err(e) = gwt_core::config::unregister_all_mcp() {
+                warn!(
+                    category = "mcp",
+                    error = %e,
+                    "Failed to unregister MCP server on exit"
+                );
+            }
         }
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen {
@@ -769,6 +999,7 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn should_prevent_window_close_when_not_quitting() {
@@ -846,5 +1077,36 @@ mod tests {
 
         let empty_path = HashMap::from([("PATH".to_string(), "   ".to_string())]);
         assert_eq!(captured_path_from_env(&empty_path), None);
+    }
+
+    #[test]
+    fn capabilities_default_allows_event_listen() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let path = format!("{manifest_dir}/capabilities/default.json");
+        let contents = fs::read_to_string(path).expect("read capabilities/default.json");
+        let json: serde_json::Value =
+            serde_json::from_str(&contents).expect("parse capabilities/default.json");
+        let permissions = json
+            .get("permissions")
+            .and_then(|v| v.as_array())
+            .expect("permissions array missing");
+
+        let has_event_default = permissions
+            .iter()
+            .any(|v| v.as_str() == Some("core:event:default"));
+        assert!(
+            has_event_default,
+            "capabilities/default.json must include core:event:default"
+        );
+
+        let windows = json
+            .get("windows")
+            .and_then(|v| v.as_array())
+            .expect("windows array missing");
+        let allows_all_windows = windows.iter().any(|v| v.as_str() == Some("*"));
+        assert!(
+            allows_all_windows,
+            "capabilities/default.json must include windows: [\"*\"]"
+        );
     }
 }

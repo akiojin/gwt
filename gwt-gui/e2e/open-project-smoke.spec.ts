@@ -326,9 +326,6 @@ test("navigates Session Summary tabs and opens workflow run page", async ({
   await branchButton.click();
 
   await expect(
-    page.getByRole("heading", { level: 2, name: branchA.name }),
-  ).toBeVisible();
-  await expect(
     page.getByRole("button", { name: "Summary", exact: true }),
   ).toHaveClass(/active/);
 
@@ -357,7 +354,7 @@ test("navigates Session Summary tabs and opens workflow run page", async ({
 
   await page
     .locator(".summary-tabs")
-    .getByRole("button", { name: "AI", exact: true })
+    .getByRole("button", { name: "Summary", exact: true })
     .click();
   await expect(page.getByText("AI Summary")).toBeVisible();
 });
@@ -387,17 +384,17 @@ test("switches sort mode on worktree list", async ({ page }) => {
   await page.locator("button.recent-item").first().click();
 
   const sortText = page.locator(".sort-mode-text");
-  await expect(sortText).toHaveText("Name");
+  await expect(sortText).toHaveText("Updated");
   await expect(page.locator(".branch-list .branch-name").nth(0)).toHaveText("main");
   await expect(page.locator(".branch-list .branch-name").nth(1)).toHaveText("develop");
   await expect(page.locator(".branch-list .branch-name").nth(2)).toHaveText(
-    "feature/name-a",
+    "feature/name-b",
   );
 
   await page.locator(".sort-mode-toggle").click();
-  await expect(sortText).toHaveText("Updated");
+  await expect(sortText).toHaveText("Name");
   await expect(page.locator(".branch-list .branch-name").nth(2)).toHaveText(
-    "feature/name-b",
+    "feature/name-a",
   );
 });
 

@@ -100,6 +100,15 @@
   let summaryRebuildError: string | null = $state(null);
   const SESSION_SUMMARY_POLL_FOCUSED_INTERVAL_MS = 15000;
   const SESSION_SUMMARY_POLL_NONFOCUSED_INTERVAL_MS = 60000;
+  const QUICK_START_CACHE_TTL_MS = 30_000;
+  const LINKED_ISSUE_CACHE_TTL_MS = 120_000;
+  const LATEST_BRANCH_PR_CACHE_TTL_MS = 30_000;
+  const DOCKER_CONTEXT_CACHE_TTL_MS = 60_000;
+
+  type CacheEntry<T> = {
+    value: T;
+    fetchedAtMs: number;
+  };
 
   type DockerMode = "HostOS" | "Docker" | "Unknown";
   type DockerModeClass = "hostos" | "docker" | "unknown";
@@ -111,6 +120,11 @@
     service: string | null;
     containerName: string | null;
   };
+
+  const quickStartCache = new Map<string, CacheEntry<ToolSessionEntry[]>>();
+  const linkedIssueCache = new Map<string, CacheEntry<BranchLinkedIssueInfo | null>>();
+  const latestBranchPrCache = new Map<string, CacheEntry<BranchPrReference | null>>();
+  const dockerContextCache = new Map<string, CacheEntry<DockerContext | null>>();
 
   let ghCliStatusMessage = $derived.by(() => {
     if (!ghCliStatus) return null;
@@ -159,6 +173,29 @@
   function currentBranchName(): string {
     const rawBranch = selectedBranch?.name?.trim() ?? "";
     return normalizeBranchName(rawBranch);
+  }
+
+  function currentBranchKey(): string {
+    const branch = currentBranchName();
+    if (!branch) return "";
+    return `${projectPath}::${branch}`;
+  }
+
+  function isCacheFresh<T>(entry: CacheEntry<T> | undefined, ttlMs: number): entry is CacheEntry<T> {
+    if (!entry) return false;
+    return Date.now() - entry.fetchedAtMs < ttlMs;
+  }
+
+  async function waitForNextFrame(): Promise<void> {
+    if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 0);
+      });
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      window.requestAnimationFrame(() => resolve());
+    });
   }
 
   function normalizeSummaryLanguage(value: string | null | undefined): string {
@@ -360,7 +397,14 @@
       latestQuickStartEntry === null,
   );
 
-  async function loadQuickStart() {
+  type LoadOptions = {
+    force?: boolean;
+    defer?: boolean;
+  };
+
+  async function loadQuickStart(options: LoadOptions = {}) {
+    const force = options.force === true;
+    const defer = options.defer === true;
     quickLaunchError = null;
     quickStartError = null;
 
@@ -372,23 +416,36 @@
     }
 
     const key = `${projectPath}::${branch}`;
+    const cached = quickStartCache.get(key);
+    if (!force && isCacheFresh(cached, QUICK_START_CACHE_TTL_MS)) {
+      quickStartEntries = cached.value;
+      quickStartLoading = false;
+      return;
+    }
+
     quickStartLoading = true;
 
     try {
+      if (defer) {
+        await waitForNextFrame();
+      }
+      if (currentBranchKey() !== key) return;
+
       const invoke = await getInvoke();
       const entries = await invoke<ToolSessionEntry[]>("get_branch_quick_start", {
         projectPath,
         branch,
       });
-      const currentKey = `${projectPath}::${currentBranchName()}`;
-      if (currentKey !== key) return;
-      quickStartEntries = entries ?? [];
+      if (currentBranchKey() !== key) return;
+      const nextEntries = entries ?? [];
+      quickStartCache.set(key, { value: nextEntries, fetchedAtMs: Date.now() });
+      quickStartEntries = nextEntries;
     } catch (err) {
+      if (currentBranchKey() !== key) return;
       quickStartEntries = [];
       quickStartError = `Failed to load Quick Start: ${toErrorMessage(err)}`;
     } finally {
-      const currentKey = `${projectPath}::${currentBranchName()}`;
-      if (currentKey === key) {
+      if (currentBranchKey() === key) {
         quickStartLoading = false;
       }
     }
@@ -402,7 +459,9 @@
     return parsed.toLocaleString();
   }
 
-  async function loadBranchLinkedIssue() {
+  async function loadBranchLinkedIssue(options: LoadOptions = {}) {
+    const force = options.force === true;
+    const defer = options.defer === true;
     linkedIssueError = null;
 
     const branch = currentBranchName();
@@ -413,29 +472,44 @@
     }
 
     const key = `${projectPath}::${branch}`;
+    const cached = linkedIssueCache.get(key);
+    if (!force && isCacheFresh(cached, LINKED_ISSUE_CACHE_TTL_MS)) {
+      linkedIssue = cached.value;
+      linkedIssueLoading = false;
+      return;
+    }
+
+    linkedIssue = null;
     linkedIssueLoading = true;
     try {
+      if (defer) {
+        await waitForNextFrame();
+      }
+      if (currentBranchKey() !== key) return;
+
       const invoke = await getInvoke();
       const rawResult = await invoke<unknown>("fetch_branch_linked_issue", {
         projectPath,
         branch,
       });
       const result = normalizeLinkedIssue(rawResult);
-      const currentKey = `${projectPath}::${currentBranchName()}`;
-      if (currentKey !== key) return;
+      if (currentBranchKey() !== key) return;
+      linkedIssueCache.set(key, { value: result, fetchedAtMs: Date.now() });
       linkedIssue = result;
     } catch (err) {
+      if (currentBranchKey() !== key) return;
       linkedIssue = null;
       linkedIssueError = `Failed to load linked issue: ${toErrorMessage(err)}`;
     } finally {
-      const currentKey = `${projectPath}::${currentBranchName()}`;
-      if (currentKey === key) {
+      if (currentBranchKey() === key) {
         linkedIssueLoading = false;
       }
     }
   }
 
-  async function loadLatestBranchPr() {
+  async function loadLatestBranchPr(options: LoadOptions = {}) {
+    const force = options.force === true;
+    const defer = options.defer === true;
     latestBranchPrError = null;
 
     const branch = currentBranchName();
@@ -446,28 +520,43 @@
     }
 
     const key = `${projectPath}::${branch}`;
+    const cached = latestBranchPrCache.get(key);
+    if (!force && isCacheFresh(cached, LATEST_BRANCH_PR_CACHE_TTL_MS)) {
+      latestBranchPr = cached.value;
+      latestBranchPrLoading = false;
+      return;
+    }
+
+    latestBranchPr = null;
     latestBranchPrLoading = true;
     try {
+      if (defer) {
+        await waitForNextFrame();
+      }
+      if (currentBranchKey() !== key) return;
+
       const invoke = await getInvoke();
       const result = await invoke<BranchPrReference | null>("fetch_latest_branch_pr", {
         projectPath,
         branch,
       });
-      const currentKey = `${projectPath}::${currentBranchName()}`;
-      if (currentKey !== key) return;
+      if (currentBranchKey() !== key) return;
+      latestBranchPrCache.set(key, { value: result, fetchedAtMs: Date.now() });
       latestBranchPr = result;
     } catch (err) {
+      if (currentBranchKey() !== key) return;
       latestBranchPr = null;
       latestBranchPrError = `Failed to load PR: ${toErrorMessage(err)}`;
     } finally {
-      const currentKey = `${projectPath}::${currentBranchName()}`;
-      if (currentKey === key) {
+      if (currentBranchKey() === key) {
         latestBranchPrLoading = false;
       }
     }
   }
 
-  async function loadDockerContext() {
+  async function loadDockerContext(options: LoadOptions = {}) {
+    const force = options.force === true;
+    const defer = options.defer === true;
     dockerContextError = null;
 
     const branch = currentBranchName();
@@ -478,22 +567,35 @@
     }
 
     const key = `${projectPath}::${branch}`;
+    const cached = dockerContextCache.get(key);
+    if (!force && isCacheFresh(cached, DOCKER_CONTEXT_CACHE_TTL_MS)) {
+      dockerContext = cached.value;
+      dockerContextLoading = false;
+      return;
+    }
+
+    dockerContext = null;
     dockerContextLoading = true;
     try {
+      if (defer) {
+        await waitForNextFrame();
+      }
+      if (currentBranchKey() !== key) return;
+
       const invoke = await getInvoke();
       const result = await invoke<DockerContext>("detect_docker_context", {
         projectPath,
         branch,
       });
-      const currentKey = `${projectPath}::${currentBranchName()}`;
-      if (currentKey !== key) return;
+      if (currentBranchKey() !== key) return;
+      dockerContextCache.set(key, { value: result, fetchedAtMs: Date.now() });
       dockerContext = result;
     } catch (err) {
+      if (currentBranchKey() !== key) return;
       dockerContext = null;
       dockerContextError = `Failed to detect Docker context: ${toErrorMessage(err)}`;
     } finally {
-      const currentKey = `${projectPath}::${currentBranchName()}`;
-      if (currentKey === key) {
+      if (currentBranchKey() === key) {
         dockerContextLoading = false;
       }
     }
@@ -590,9 +692,37 @@
     void selectedBranch;
     void projectPath;
     loadQuickStart();
-    loadBranchLinkedIssue();
-    loadLatestBranchPr();
-    loadDockerContext();
+  });
+
+  $effect(() => {
+    void selectedBranch;
+    void projectPath;
+    void activeTab;
+
+    if (!currentBranchName()) {
+      linkedIssueLoading = false;
+      linkedIssueError = null;
+      linkedIssue = null;
+      latestBranchPrLoading = false;
+      latestBranchPrError = null;
+      latestBranchPr = null;
+      dockerContextLoading = false;
+      dockerContextError = null;
+      dockerContext = null;
+      return;
+    }
+
+    if (activeTab === "issue") {
+      loadBranchLinkedIssue({ defer: true });
+      return;
+    }
+    if (activeTab === "pr" || activeTab === "workflow") {
+      loadLatestBranchPr({ defer: true });
+      return;
+    }
+    if (activeTab === "docker") {
+      loadDockerContext({ defer: true });
+    }
   });
 
   $effect(() => {
@@ -740,6 +870,10 @@
     const nextProjectPath = projectPath ?? "";
     if (nextProjectPath === lastProjectPath) return;
     lastProjectPath = nextProjectPath;
+    quickStartCache.clear();
+    linkedIssueCache.clear();
+    latestBranchPrCache.clear();
+    dockerContextCache.clear();
     clearPrDetailState(currentBranchName());
   });
 
@@ -1371,9 +1505,10 @@
 
   .branch-header {
     display: flex;
-    align-items: baseline;
+    align-items: flex-start;
     justify-content: space-between;
     gap: 12px;
+    flex-wrap: wrap;
   }
 
   .branch-header-actions {
@@ -1382,14 +1517,19 @@
     justify-content: flex-end;
     gap: 8px;
     flex-wrap: wrap;
-    flex-shrink: 0;
+    margin-left: auto;
+    min-width: 0;
+    flex-shrink: 1;
   }
 
   .branch-detail h2 {
+    margin: 0;
     font-size: var(--ui-font-lg);
     font-weight: 700;
     color: var(--text-primary);
     font-family: monospace;
+    flex: 1 1 auto;
+    min-width: 0;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;

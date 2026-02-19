@@ -21,9 +21,11 @@ pub const MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS: &str = "tools-terminal-diagnostics
 
 pub const MENU_ID_GIT_CLEANUP_WORKTREES: &str = "git-cleanup-worktrees";
 pub const MENU_ID_GIT_VERSION_HISTORY: &str = "git-version-history";
+pub const MENU_ID_GIT_ISSUES: &str = "git-issues";
 
 pub const MENU_ID_EDIT_COPY: &str = "edit-copy";
 pub const MENU_ID_EDIT_PASTE: &str = "edit-paste";
+pub const MENU_ID_EDIT_COPY_SCREEN: &str = "edit-copy-screen";
 
 pub const MENU_ID_WINDOW_PREVIOUS_TAB: &str = "window-previous-tab";
 pub const MENU_ID_WINDOW_NEXT_TAB: &str = "window-next-tab";
@@ -137,6 +139,13 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
     let edit_copy = MenuItem::with_id(app, MENU_ID_EDIT_COPY, "Copy", true, Some("CmdOrCtrl+C"))?;
     let edit_paste =
         MenuItem::with_id(app, MENU_ID_EDIT_PASTE, "Paste", true, Some("CmdOrCtrl+V"))?;
+    let edit_copy_screen = MenuItem::with_id(
+        app,
+        MENU_ID_EDIT_COPY_SCREEN,
+        "Copy Screen Text",
+        true,
+        Some("CmdOrCtrl+Shift+C"),
+    )?;
 
     // Keep Undo/Redo/Cut/Select All as native actions and custom-bind Copy/Paste
     // so keyboard events can be handled by the app.
@@ -149,6 +158,8 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         .item(&edit_paste)
         .separator()
         .select_all()
+        .separator()
+        .item(&edit_copy_screen)
         .build()?;
 
     let git_cleanup_worktrees = MenuItem::with_id(
@@ -158,6 +169,7 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         true,
         Some("CmdOrCtrl+Shift+K"),
     )?;
+    let git_issues = MenuItem::with_id(app, MENU_ID_GIT_ISSUES, "Issues", true, None::<&str>)?;
     let mut git_builder = SubmenuBuilder::new(app, "Git");
 
     if should_show_version_history_menu(app, state) {
@@ -171,7 +183,11 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         git_builder = git_builder.item(&version_history).separator();
     }
 
-    let git = git_builder.item(&git_cleanup_worktrees).build()?;
+    let git = git_builder
+        .item(&git_issues)
+        .separator()
+        .item(&git_cleanup_worktrees)
+        .build()?;
 
     let tools_new_terminal = MenuItem::with_id(
         app,

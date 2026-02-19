@@ -19,6 +19,12 @@ export interface ProjectInfo {
   current_branch: string | null;
 }
 
+export interface OpenProjectResult {
+  info: ProjectInfo;
+  action: "opened" | "focusedExisting";
+  focusedWindowLabel?: string | null;
+}
+
 export interface CloneProgress {
   stage: string; // "receiving" | "resolving"
   percent: number; // 0-100
@@ -153,6 +159,24 @@ export interface VoiceInputSettings {
   model: string;
 }
 
+export interface McpAgentRegistrationStatus {
+  agent_id: string;
+  label: string;
+  config_path?: string | null;
+  registered: boolean;
+  error_code?: string | null;
+  error_message?: string | null;
+}
+
+export interface McpRegistrationStatus {
+  overall: "ok" | "degraded" | "failed" | (string & {});
+  bridge_runtime: "ok" | "missing" | (string & {});
+  bridge_script: "ok" | "missing" | (string & {});
+  agents: McpAgentRegistrationStatus[];
+  last_checked_at: number;
+  last_error_message?: string | null;
+}
+
 export interface AISettings {
   endpoint: string;
   api_key: string;
@@ -189,7 +213,8 @@ export interface Tab {
     | "agentMode"
     | "projectTeam"
     | "terminal"
-    | "issueSpec";
+    | "issueSpec"
+    | "issues";
   paneId?: string;
   cwd?: string;
   issueNumber?: number;
@@ -275,6 +300,8 @@ export interface DockerContext {
   compose_available: boolean;
   daemon_running: boolean;
   force_host: boolean;
+  container_status?: "running" | "stopped" | "not_found" | null;
+  images_exist?: boolean | null;
 }
 
 export interface ProbePathResult {
@@ -336,16 +363,25 @@ export interface WorktreeInfo {
   safety_level: "safe" | "warning" | "danger" | "disabled";
 }
 
+export type PrStatus = "merged" | "open" | "closed" | "none" | "unknown";
+
 export interface CleanupResult {
   branch: string;
   success: boolean;
   error: string | null;
+  remote_success: boolean | null;
+  remote_error: string | null;
 }
 
 export interface CleanupProgress {
   branch: string;
   status: "deleting" | "deleted" | "failed";
   error?: string;
+  remote_status?: string;
+}
+
+export interface CleanupSettings {
+  delete_remote_branches: boolean;
 }
 
 export interface CapturedEnvEntry {
@@ -420,13 +456,34 @@ export interface GitChangeSummary {
   base_branch: string;
 }
 
-// GitHub Issue types (SPEC-c6ba640a)
+// GitHub Issue types (SPEC-c6ba640a, SPEC-ca4b5b07)
+
+export interface GitHubLabel {
+  name: string;
+  color: string;
+}
+
+export interface GitHubAssignee {
+  login: string;
+  avatarUrl: string;
+}
+
+export interface GitHubMilestone {
+  title: string;
+  number: number;
+}
 
 export interface GitHubIssueInfo {
   number: number;
   title: string;
+  body?: string;
+  state: "open" | "closed";
   updatedAt: string;
-  labels: string[];
+  htmlUrl: string;
+  labels: GitHubLabel[];
+  assignees: GitHubAssignee[];
+  commentsCount: number;
+  milestone?: GitHubMilestone;
 }
 
 export interface BranchLinkedIssueInfo {
