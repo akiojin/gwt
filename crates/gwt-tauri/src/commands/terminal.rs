@@ -1359,6 +1359,14 @@ mod tests {
         }
     }
 
+    fn running_test_command() -> (&'static str, Vec<String>) {
+        if cfg!(windows) {
+            ("cmd.exe", vec!["/c".to_string(), "pause".to_string()])
+        } else {
+            ("/bin/cat", vec![])
+        }
+    }
+
     #[test]
     fn resolve_shell_launch_spec_prefers_shell_env_with_login_arg() {
         let _lock = crate::commands::ENV_LOCK.lock().unwrap();
@@ -1797,6 +1805,90 @@ mod tests {
 
         let mut mgr = state.pane_manager.lock().unwrap();
         let _ = mgr.kill_all();
+    }
+
+    #[test]
+    fn promote_unexpected_stream_eof_to_error_when_pane_is_still_running() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::commands::TestEnvGuard::new(home.path());
+
+        let state = AppState::new();
+        let pane_id = "pane-stream-eof-running-test";
+        let (command, args) = running_test_command();
+        let pane =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: pane_id.to_string(),
+                command: command.to_string(),
+                args,
+                working_dir: std::env::temp_dir(),
+                branch_name: "test-branch".to_string(),
+                agent_name: "test-agent".to_string(),
+                agent_color: AgentColor::Green,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+            })
+            .expect("failed to create test pane");
+
+        {
+            let mut mgr = state.pane_manager.lock().unwrap();
+            mgr.add_pane(pane).expect("failed to add test pane");
+        }
+
+        let mut stream_error = None;
+        promote_unexpected_stream_eof_to_error(&state, pane_id, &mut stream_error);
+        assert_eq!(stream_error.as_deref(), Some("stream closed unexpectedly"));
+
+        let mut mgr = state.pane_manager.lock().unwrap();
+        let _ = mgr.kill_all();
+    }
+
+    #[test]
+    fn promote_unexpected_stream_eof_to_error_skips_non_running_pane() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let _env = crate::commands::TestEnvGuard::new(home.path());
+
+        let state = AppState::new();
+        let pane_id = "pane-stream-eof-non-running-test";
+        let (command, args) = running_test_command();
+        let pane =
+            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
+                pane_id: pane_id.to_string(),
+                command: command.to_string(),
+                args,
+                working_dir: std::env::temp_dir(),
+                branch_name: "test-branch".to_string(),
+                agent_name: "test-agent".to_string(),
+                agent_color: AgentColor::Green,
+                rows: 24,
+                cols: 80,
+                env_vars: HashMap::new(),
+            })
+            .expect("failed to create test pane");
+
+        {
+            let mut mgr = state.pane_manager.lock().unwrap();
+            mgr.add_pane(pane).expect("failed to add test pane");
+            let pane = mgr.pane_mut_by_id(pane_id).expect("missing test pane");
+            pane.mark_error("already stopped");
+        }
+
+        let mut stream_error = None;
+        promote_unexpected_stream_eof_to_error(&state, pane_id, &mut stream_error);
+        assert!(stream_error.is_none());
+
+        let mut mgr = state.pane_manager.lock().unwrap();
+        let _ = mgr.kill_all();
+    }
+
+    #[test]
+    fn promote_unexpected_stream_eof_to_error_keeps_existing_error() {
+        let state = AppState::new();
+        let mut stream_error = Some("existing error".to_string());
+        promote_unexpected_stream_eof_to_error(&state, "missing-pane", &mut stream_error);
+        assert_eq!(stream_error.as_deref(), Some("existing error"));
     }
 
     #[test]
@@ -3168,6 +3260,31 @@ fn append_close_hint_to_pane_scrollback(state: &AppState, pane_id: &str) -> Vec<
     bytes
 }
 
+fn promote_unexpected_stream_eof_to_error(
+    state: &AppState,
+    pane_id: &str,
+    stream_error: &mut Option<String>,
+) {
+    if stream_error.is_some() {
+        return;
+    }
+
+    let still_running = if let Ok(mut manager) = state.pane_manager.lock() {
+        if let Some(pane) = manager.pane_mut_by_id(pane_id) {
+            let _ = pane.check_status();
+            matches!(pane.status(), PaneStatus::Running)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    if still_running {
+        *stream_error = Some("stream closed unexpectedly".to_string());
+    }
+}
+
 /// Stream PTY output to the frontend via Tauri events
 fn stream_pty_output(
     mut reader: Box<dyn Read + Send>,
@@ -3219,6 +3336,8 @@ fn stream_pty_output(
             }
         }
     }
+
+    promote_unexpected_stream_eof_to_error(&state, &pane_id, &mut stream_error);
 
     if let Some(details) = stream_error.as_deref() {
         let bytes = mark_pane_stream_error_and_write_message(&state, &pane_id, details);
