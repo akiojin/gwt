@@ -142,6 +142,174 @@ test("launches and completes open-project -> agent send smoke flow", async ({
   expect(invokeCommands).toContain("send_agent_mode_message");
 });
 
+test("launches agent from Launch Agent dialog and opens agent terminal tab", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await setMockCommandResponses(page, {
+    list_worktree_branches: [branchMain, branchDevelop, branchA],
+    list_remote_branches: [],
+    list_worktrees: [],
+    fetch_pr_status: {
+      statuses: {},
+      ghStatus: { available: true, authenticated: true },
+    },
+    detect_agents: [
+      {
+        id: "codex",
+        name: "Codex",
+        version: "0.99.0",
+        authenticated: true,
+        available: true,
+      },
+    ],
+    list_agent_versions: {
+      agentId: "codex",
+      package: "codex",
+      tags: ["latest"],
+      versions: ["0.99.0"],
+      source: "cache",
+    },
+  });
+
+  await expect(
+    page.getByRole("button", { name: "Open Project..." }),
+  ).toBeVisible();
+  await page.locator("button.recent-item").first().click();
+
+  const branchButton = page
+    .locator(".branch-item")
+    .filter({ hasText: branchA.name });
+  await expect(branchButton).toBeVisible();
+  await branchButton.click();
+
+  const launchAgentButton = page
+    .locator(".worktree-summary-panel")
+    .getByRole("button", { name: "Launch Agent..." });
+  await expect(launchAgentButton).toBeVisible();
+  await launchAgentButton.click();
+
+  const launchDialog = page.getByRole("dialog", { name: "Launch Agent" });
+  await expect(launchDialog).toBeVisible();
+  await expect(launchDialog.locator("select#agent-select")).toHaveValue("codex");
+
+  await launchDialog.getByRole("button", { name: "Launch", exact: true }).click();
+
+  await expect
+    .poll(async () => {
+      return page.evaluate(() => {
+        const globalWindow = window as unknown as {
+          __GWT_TAURI_INVOKE_LOG__?: Array<{
+            cmd: string;
+            args?: { event?: string };
+          }>;
+        };
+        return (globalWindow.__GWT_TAURI_INVOKE_LOG__ ?? []).some(
+          (entry) => entry.cmd === "start_launch_job",
+        );
+      });
+    })
+    .toBe(true);
+
+  await expect(page.locator(".tab.active .tab-label")).toHaveText(branchA.name);
+  const activeTerminalContainer = page.locator(
+    ".terminal-wrapper.active .terminal-container",
+  );
+  await expect(activeTerminalContainer).toBeVisible();
+  await expect(activeTerminalContainer.locator(".xterm")).toBeVisible();
+
+  await expect
+    .poll(async () => {
+      return page.evaluate(() => {
+        const globalWindow = window as unknown as {
+          __GWT_TAURI_INVOKE_LOG__?: Array<{
+            cmd: string;
+            args?: { event?: string };
+          }>;
+        };
+        return (globalWindow.__GWT_TAURI_INVOKE_LOG__ ?? []).some(
+          (entry) =>
+            entry.cmd === "plugin:event|listen" &&
+            entry.args?.event === "terminal-output",
+        );
+      });
+    })
+    .toBe(true);
+
+  const paneId = await activeTerminalContainer.getAttribute("data-pane-id");
+  expect(paneId).toBeTruthy();
+
+  const readTerminalState = async () =>
+    page.evaluate(({ targetPaneId }) => {
+      const container = document.querySelector(
+        `.terminal-wrapper.active .terminal-container[data-pane-id="${targetPaneId}"]`,
+      ) as
+        | (HTMLElement & {
+            __gwtTerminal?: {
+              rows?: number;
+              cols?: number;
+              buffer?: {
+                active?: {
+                  cursorX?: number;
+                  cursorY?: number;
+                  baseY?: number;
+                  length?: number;
+                };
+              };
+            };
+          })
+        | null;
+      if (!container) {
+        return null;
+      }
+      const terminal = container.__gwtTerminal;
+      const activeBuffer = terminal?.buffer?.active;
+      if (!terminal || !activeBuffer) {
+        return null;
+      }
+      return {
+        rows: terminal.rows ?? -1,
+        cols: terminal.cols ?? -1,
+        cursorX: activeBuffer.cursorX ?? -1,
+        cursorY: activeBuffer.cursorY ?? -1,
+        baseY: activeBuffer.baseY ?? -1,
+        length: activeBuffer.length ?? -1,
+      };
+    }, { targetPaneId: paneId });
+
+  await expect.poll(readTerminalState).not.toBeNull();
+  const beforeState = await readTerminalState();
+  expect(beforeState).not.toBeNull();
+
+  await page.evaluate(
+    ({ targetPaneId }) => {
+      const globalWindow = window as unknown as {
+        __GWT_MOCK_EMIT_EVENT__?: (event: string, payload: unknown) => void;
+      };
+      const bytes = [69, 50, 69, 45, 76, 65, 85, 78, 67, 72, 45, 79, 85, 84, 13, 10];
+      globalWindow.__GWT_MOCK_EMIT_EVENT__?.("terminal-output", {
+        pane_id: targetPaneId,
+        data: bytes,
+      });
+    },
+    { targetPaneId: paneId },
+  );
+
+  await expect
+    .poll(async () => {
+      const afterState = await readTerminalState();
+      if (!beforeState || !afterState) return false;
+      return (
+        afterState.cursorX !== beforeState.cursorX ||
+        afterState.cursorY !== beforeState.cursorY ||
+        afterState.baseY !== beforeState.baseY ||
+        afterState.length !== beforeState.length
+      );
+    })
+    .toBe(true);
+});
+
 test("shows terminal stream error and closes errored terminal tab on Enter", async ({
   page,
 }) => {
@@ -283,7 +451,6 @@ test("shows terminal stream error and closes errored terminal tab on Enter", asy
   expect(invokeCommands).toContain("write_terminal");
   expect(invokeCommands).toContain("capture_scrollback_tail");
 });
-
 test("navigates Session Summary tabs and opens workflow run page", async ({
   page,
 }) => {
