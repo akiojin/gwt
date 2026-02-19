@@ -18,9 +18,7 @@
   let resizeObserver: ResizeObserver | undefined = $state(undefined);
   let unlisten: (() => void) | undefined = $state(undefined);
 
-  const TRACKPAD_WHEEL_DELTA_THRESHOLD = 180;
-
-  const MOUSE_STEP_VALUES = new Set([120]);
+  const MOUSE_WHEEL_STEP_VALUES = new Set([120]);
 
   type TerminalEditAction = {
     action: "copy" | "paste";
@@ -154,10 +152,7 @@
       return true;
     }
 
-    if (absDeltaY > TRACKPAD_WHEEL_DELTA_THRESHOLD) {
-      return false;
-    }
-    return !MOUSE_STEP_VALUES.has(absDeltaY);
+    return !MOUSE_WHEEL_STEP_VALUES.has(absDeltaY);
   }
 
   function scrollViewportByWheel(rootEl: HTMLElement, event: WheelEvent): boolean {
