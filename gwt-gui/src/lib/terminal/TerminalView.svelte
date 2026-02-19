@@ -148,6 +148,11 @@
     event: WheelEvent,
     mouseWheelStepHistory: WheelSample[],
   ): boolean {
+    if (event.deltaMode === 1 || event.deltaMode === 2) {
+      mouseWheelStepHistory.length = 0;
+      return true;
+    }
+
     if (event.deltaMode !== 0) return false;
     const absDeltaY = Math.abs(event.deltaY);
     const absDeltaX = Math.abs(event.deltaX);
@@ -176,7 +181,7 @@
 
     if (absDeltaY > TRACKPAD_WHEEL_DELTA_THRESHOLD) {
       mouseWheelStepHistory.length = 0;
-      return false;
+      return true;
     }
 
     const isPotentialMouseStep = MOUSE_WHEEL_STEP_VALUES.has(absDeltaY);
