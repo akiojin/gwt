@@ -130,38 +130,14 @@
     }
   }
 
-  function isTrackpadLikeWheel(event: WheelEvent): boolean {
-    if (event.deltaMode === 1 || event.deltaMode === 2) {
-      return true;
-    }
-
-    if (event.deltaMode !== 0) return false;
-    const absDeltaY = Math.abs(event.deltaY);
-    const absDeltaX = Math.abs(event.deltaX);
-
-    const sourceCapabilities =
-      (event as WheelEvent & { sourceCapabilities?: { firesTouchEvents?: boolean } })
-        .sourceCapabilities;
-
-    if (sourceCapabilities?.firesTouchEvents === true) {
-      return true;
-    }
-
-    // Trackpads frequently emit horizontal movement in addition to vertical scroll.
-    if (absDeltaX > 0) {
-      return true;
-    }
-
-    if (absDeltaY === 0) return false;
-
-    return true;
+  function isScrollableWheelInput(event: WheelEvent): boolean {
+    return event.deltaY !== 0 || event.deltaX !== 0;
   }
 
-  function scrollViewportByWheel(rootEl: HTMLElement, event: WheelEvent): boolean {
-    const viewport = rootEl.querySelector<HTMLElement>(".xterm-viewport");
-    if (!viewport) return false;
-
-    if (event.deltaY === 0) return false;
+  function pickWheelDelta(event: WheelEvent, viewport: HTMLElement): number {
+    const absDeltaY = Math.abs(event.deltaY);
+    const absDeltaX = Math.abs(event.deltaX);
+    if (absDeltaY === 0 && absDeltaX === 0) return 0;
 
     const fontSize =
       typeof terminal?.options.fontSize === "number" ? terminal.options.fontSize : 13;
@@ -169,12 +145,23 @@
       typeof terminal?.options.lineHeight === "number" ? terminal.options.lineHeight : 1;
     const lineStep = fontSize * lineHeight;
 
-    let delta = event.deltaY;
+    const useVertical = absDeltaY >= absDeltaX;
+    let delta = useVertical ? event.deltaY : event.deltaX;
+
     if (event.deltaMode === 1) {
       delta *= lineStep;
     } else if (event.deltaMode === 2) {
       delta *= viewport.clientHeight;
     }
+
+    return delta;
+  }
+
+  function scrollViewportByWheel(rootEl: HTMLElement, event: WheelEvent): boolean {
+    const viewport = rootEl.querySelector<HTMLElement>(".xterm-viewport");
+    if (!viewport) return false;
+    const delta = pickWheelDelta(event, viewport);
+    if (delta === 0) return false;
 
     const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
     const nextScrollTop = Math.min(Math.max(viewport.scrollTop + delta, 0), maxScrollTop);
@@ -238,13 +225,13 @@
     });
 
     const handleWheel = (event: WheelEvent) => {
-      if (event.deltaY === 0) return;
+      if (!isScrollableWheelInput(event)) return;
       if (!terminal) return;
 
       const wasFocused = isTerminalFocused(rootEl);
       focusTerminalIfNeeded(rootEl, true);
 
-      const shouldFallback = !wasFocused || isTrackpadLikeWheel(event);
+      const shouldFallback = !wasFocused || isScrollableWheelInput(event);
       if (!shouldFallback) return;
 
       const didScroll = scrollViewportByWheel(rootEl, event);

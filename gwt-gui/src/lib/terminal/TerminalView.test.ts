@@ -758,6 +758,96 @@ describe("TerminalView", () => {
     expect(viewport.scrollTop).toBeGreaterThan(5);
   });
 
+  it("uses dominant axis for mixed wheel input", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-3-11",
+      active: true,
+    });
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement | null;
+    expect(rootEl).not.toBeNull();
+
+    const viewport = document.createElement("div");
+    viewport.className = "xterm-viewport";
+    viewport.style.overflow = "auto";
+    Object.defineProperty(viewport, "clientHeight", {
+      value: 100,
+      configurable: true,
+    });
+    Object.defineProperty(viewport, "scrollHeight", {
+      value: 200,
+      configurable: true,
+    });
+    viewport.scrollTop = 5;
+    rootEl!.appendChild(viewport);
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    const event = new Event("wheel", { bubbles: true }) as WheelEvent;
+    Object.defineProperty(event, "deltaX", { value: 120, configurable: true });
+    Object.defineProperty(event, "deltaY", { value: 1, configurable: true });
+    Object.defineProperty(event, "deltaMode", { value: 0, configurable: true });
+    expect(event.deltaX).toBe(120);
+    expect(event.deltaY).toBe(1);
+    const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+    const stopImmediatePropagationSpy = vi.spyOn(
+      event,
+      "stopImmediatePropagation",
+    );
+
+    rootEl!.dispatchEvent(event);
+
+    expect(preventDefaultSpy).toHaveBeenCalled();
+    expect(stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(viewport.scrollTop).toBeGreaterThan(5);
+  });
+
+  it("falls back when wheel has horizontal-only delta", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-3-12",
+      active: true,
+    });
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement | null;
+    expect(rootEl).not.toBeNull();
+
+    const viewport = document.createElement("div");
+    viewport.className = "xterm-viewport";
+    viewport.style.overflow = "auto";
+    Object.defineProperty(viewport, "clientHeight", {
+      value: 100,
+      configurable: true,
+    });
+    Object.defineProperty(viewport, "scrollHeight", {
+      value: 200,
+      configurable: true,
+    });
+    viewport.scrollTop = 5;
+    rootEl!.appendChild(viewport);
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    const event = new WheelEvent("wheel", {
+      deltaX: 120,
+      deltaY: 0,
+      bubbles: true,
+      deltaMode: 0,
+    });
+    const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+    const stopImmediatePropagationSpy = vi.spyOn(
+      event,
+      "stopImmediatePropagation",
+    );
+
+    rootEl!.dispatchEvent(event);
+
+    expect(preventDefaultSpy).toHaveBeenCalled();
+    expect(stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(viewport.scrollTop).toBeGreaterThan(5);
+  });
+
   it("falls back to terminal scroll when focused terminal gets large integer trackpad-like wheel", async () => {
     const { container } = await renderTerminalView({
       paneId: "pane-3-5",
