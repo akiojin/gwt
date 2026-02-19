@@ -1,8 +1,17 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
-  import type { ProfilesConfig, Profile, SettingsData, VoiceInputSettings } from "../types";
+  import type {
+    McpRegistrationStatus,
+    ProfilesConfig,
+    Profile,
+    SettingsData,
+    VoiceInputSettings,
+  } from "../types";
 
   let { onClose }: { onClose: () => void } = $props();
+
+  type SettingsTabId = "appearance" | "voiceInput" | "mcpBridge" | "profiles";
+  let activeSettingsTab: SettingsTabId = $state("appearance");
 
   let settings: SettingsData | null = $state(null);
   let profiles: ProfilesConfig | null = $state(null);
@@ -21,12 +30,25 @@
 
   let savedUiFontSize: number = $state(13);
   let savedTerminalFontSize: number = $state(13);
+  let mcpStatus: McpRegistrationStatus | null = $state(null);
+  let mcpStatusLoading: boolean = $state(false);
+  let mcpStatusRepairing: boolean = $state(false);
+  let mcpStatusMessage: string = $state("");
 
   const DEFAULT_VOICE_INPUT: VoiceInputSettings = {
     enabled: false,
     hotkey: "Mod+Shift+M",
     language: "auto",
     model: "base",
+  };
+  const DEFAULT_APP_LANGUAGE: SettingsData["app_language"] = "auto";
+  const DEFAULT_MCP_STATUS: McpRegistrationStatus = {
+    overall: "failed",
+    bridge_runtime: "missing",
+    bridge_script: "missing",
+    agents: [],
+    last_checked_at: 0,
+    last_error_message: null,
   };
 
   type AIModelInfo = {
@@ -155,6 +177,103 @@
     };
   }
 
+  function normalizeAppLanguage(
+    value: string | null | undefined
+  ): SettingsData["app_language"] {
+    const language = (value ?? "").trim().toLowerCase();
+    if (language === "ja" || language === "en" || language === "auto") {
+      return language as SettingsData["app_language"];
+    }
+    return DEFAULT_APP_LANGUAGE;
+  }
+
+  function normalizeMcpStatus(
+    value: Partial<McpRegistrationStatus> | null | undefined
+  ): McpRegistrationStatus {
+    const agents = Array.isArray(value?.agents)
+      ? value.agents.map((agent) => ({
+          agent_id: agent.agent_id ?? "unknown",
+          label: agent.label ?? "Unknown",
+          config_path: agent.config_path ?? null,
+          registered: !!agent.registered,
+          error_code: agent.error_code ?? null,
+          error_message: agent.error_message ?? null,
+        }))
+      : [];
+
+    return {
+      overall: value?.overall ?? DEFAULT_MCP_STATUS.overall,
+      bridge_runtime: value?.bridge_runtime ?? DEFAULT_MCP_STATUS.bridge_runtime,
+      bridge_script: value?.bridge_script ?? DEFAULT_MCP_STATUS.bridge_script,
+      agents,
+      last_checked_at:
+        typeof value?.last_checked_at === "number" ? value.last_checked_at : Date.now(),
+      last_error_message: value?.last_error_message ?? null,
+    };
+  }
+
+  function mcpStatusClass(status: string): "status-ok" | "status-degraded" | "status-failed" {
+    if (status === "ok") return "status-ok";
+    if (status === "degraded") return "status-degraded";
+    return "status-failed";
+  }
+
+  function mcpStatusText(status: string | null | undefined): string {
+    return (status ?? "unknown").toUpperCase();
+  }
+
+  function formatMcpCheckedAt(millis: number | null | undefined): string {
+    if (typeof millis !== "number" || millis <= 0) {
+      return "-";
+    }
+    try {
+      return new Date(millis).toLocaleString();
+    } catch {
+      return "-";
+    }
+  }
+
+  async function loadMcpStatus(showRefreshMessage: boolean) {
+    mcpStatusLoading = true;
+    if (showRefreshMessage) {
+      mcpStatusMessage = "";
+    }
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const status = await invoke<McpRegistrationStatus>("get_mcp_registration_status_cmd");
+      mcpStatus = normalizeMcpStatus(status);
+      if (showRefreshMessage) {
+        mcpStatusMessage = "MCP status refreshed.";
+      }
+    } catch (err) {
+      mcpStatus = mcpStatus ?? normalizeMcpStatus(null);
+      const message = toErrorMessage(err);
+      mcpStatusMessage = showRefreshMessage
+        ? `Failed to refresh MCP status: ${message}`
+        : `Failed to load MCP status: ${message}`;
+    } finally {
+      mcpStatusLoading = false;
+    }
+  }
+
+  async function repairMcpStatus() {
+    mcpStatusRepairing = true;
+    mcpStatusMessage = "";
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const status = await invoke<McpRegistrationStatus>("repair_mcp_registration_cmd");
+      mcpStatus = normalizeMcpStatus(status);
+      mcpStatusMessage =
+        status.overall === "ok"
+          ? "MCP registration repaired."
+          : "MCP registration remains degraded. Check details below.";
+    } catch (err) {
+      mcpStatusMessage = `Failed to repair MCP registration: ${toErrorMessage(err)}`;
+    } finally {
+      mcpStatusRepairing = false;
+    }
+  }
+
   async function fetchAiModels(
     endpoint: string,
     apiKey: string,
@@ -219,6 +338,7 @@
         invoke<ProfilesConfig>("get_profiles"),
       ]);
       loadedSettings.voice_input = normalizeVoiceInputSettings(loadedSettings.voice_input);
+      loadedSettings.app_language = normalizeAppLanguage(loadedSettings.app_language);
       settings = loadedSettings;
       savedUiFontSize = loadedSettings.ui_font_size ?? 13;
       savedTerminalFontSize = loadedSettings.terminal_font_size ?? 13;
@@ -227,6 +347,7 @@
       const keys = Object.keys(loadedProfiles.profiles ?? {});
       const nextSelected = loadedProfiles.active ?? keys[0] ?? "";
       selectedProfileKey = nextSelected;
+      await loadMcpStatus(false);
     } catch (err) {
       console.error("Failed to load settings/profiles:", err);
       errorMessage = `Failed to load settings: ${toErrorMessage(err)}`;
@@ -246,6 +367,7 @@
       if (profiles) {
         await invoke("save_profiles", { config: profiles });
       }
+      settings.app_language = normalizeAppLanguage(settings.app_language);
       saveMessage = "Settings saved.";
       savedUiFontSize = settings.ui_font_size ?? 13;
       savedTerminalFontSize = settings.terminal_font_size ?? 13;
@@ -255,6 +377,7 @@
           detail: {
             uiFontSize: savedUiFontSize,
             terminalFontSize: savedTerminalFontSize,
+            appLanguage: settings.app_language,
             voiceInput: settings.voice_input,
           },
         })
@@ -468,433 +591,570 @@
     <div class="loading">{errorMessage ?? "Failed to load settings."}</div>
   {:else}
     <div class="settings-body">
-      <details class="settings-section" open>
-        <summary class="section-title">Appearance</summary>
-        <div class="section-content">
-          <div class="field">
-            <!-- svelte-ignore a11y_label_has_associated_control -->
-            <label>Terminal Font Size</label>
-            <div class="font-size-control">
-              <button
-                class="font-size-btn"
-                onclick={() => adjustFontSize("terminal_font_size", -1)}
-                disabled={!settings || (settings.terminal_font_size ?? 13) <= 8}
-              >-</button>
+      <div class="settings-tabs">
+        <button
+          class="settings-tab-btn"
+          class:active={activeSettingsTab === "appearance"}
+          onclick={() => (activeSettingsTab = "appearance")}
+        >Appearance</button>
+        <button
+          class="settings-tab-btn"
+          class:active={activeSettingsTab === "voiceInput"}
+          onclick={() => (activeSettingsTab = "voiceInput")}
+        >Voice Input</button>
+        <button
+          class="settings-tab-btn"
+          class:active={activeSettingsTab === "mcpBridge"}
+          onclick={() => (activeSettingsTab = "mcpBridge")}
+        >MCP Bridge</button>
+        <button
+          class="settings-tab-btn"
+          class:active={activeSettingsTab === "profiles"}
+          onclick={() => (activeSettingsTab = "profiles")}
+        >Profiles</button>
+      </div>
+
+      <div class="settings-tab-content">
+        {#if activeSettingsTab === "appearance"}
+          <div class="section-content">
+            <div class="field">
+              <!-- svelte-ignore a11y_label_has_associated_control -->
+              <label>Terminal Font Size</label>
+              <div class="font-size-control">
+                <button
+                  class="font-size-btn"
+                  onclick={() => adjustFontSize("terminal_font_size", -1)}
+                  disabled={!settings || (settings.terminal_font_size ?? 13) <= 8}
+                >-</button>
+                <input
+                  type="number"
+                  min="8"
+                  max="24"
+                  step="1"
+                  value={settings.terminal_font_size ?? 13}
+                  oninput={(e) => {
+                    if (!settings) return;
+                    const raw = (e.target as HTMLInputElement).value;
+                    if (raw === "") return;
+                    const parsed = Number(raw);
+                    if (Number.isNaN(parsed)) return;
+                    settings = { ...settings, terminal_font_size: parsed };
+                  }}
+                  onchange={() => {
+                    if (!settings) return;
+                    settings = { ...settings, terminal_font_size: clampFontSize(settings.terminal_font_size ?? 13) };
+                  }}
+                />
+                <button
+                  class="font-size-btn"
+                  onclick={() => adjustFontSize("terminal_font_size", 1)}
+                  disabled={!settings || (settings.terminal_font_size ?? 13) >= 24}
+                >+</button>
+                <span class="font-size-unit">px</span>
+              </div>
+            </div>
+
+            <div class="field">
+              <!-- svelte-ignore a11y_label_has_associated_control -->
+              <label>UI Font Size</label>
+              <div class="font-size-control">
+                <button
+                  class="font-size-btn"
+                  onclick={() => adjustFontSize("ui_font_size", -1)}
+                  disabled={!settings || (settings.ui_font_size ?? 13) <= 8}
+                >-</button>
+                <input
+                  type="number"
+                  min="8"
+                  max="24"
+                  step="1"
+                  value={settings.ui_font_size ?? 13}
+                  oninput={(e) => {
+                    if (!settings) return;
+                    const raw = (e.target as HTMLInputElement).value;
+                    if (raw === "") return;
+                    const parsed = Number(raw);
+                    if (Number.isNaN(parsed)) return;
+                    settings = { ...settings, ui_font_size: parsed };
+                  }}
+                  onchange={() => {
+                    if (!settings) return;
+                    settings = { ...settings, ui_font_size: clampFontSize(settings.ui_font_size ?? 13) };
+                  }}
+                />
+                <button
+                  class="font-size-btn"
+                  onclick={() => adjustFontSize("ui_font_size", 1)}
+                  disabled={!settings || (settings.ui_font_size ?? 13) >= 24}
+                >+</button>
+                <span class="font-size-unit">px</span>
+              </div>
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="field">
+              <label for="app-language">Language</label>
+              <select
+                id="app-language"
+                class="select"
+                value={settings.app_language}
+                onchange={(e) => {
+                  if (!settings) return;
+                  settings = {
+                    ...settings,
+                    app_language: normalizeAppLanguage(
+                      (e.target as HTMLSelectElement).value
+                    ),
+                  };
+                }}
+              >
+                <option value="auto">Auto</option>
+                <option value="ja">Japanese</option>
+                <option value="en">English</option>
+              </select>
+              <span class="field-hint">
+                Used for AI summary generation language.
+              </span>
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="field">
+              <label for="log-retention">Log Retention (days)</label>
               <input
+                id="log-retention"
                 type="number"
-                min="8"
-                max="24"
-                step="1"
-                value={settings.terminal_font_size ?? 13}
-                oninput={(e) => {
-                  if (!settings) return;
-                  const raw = (e.target as HTMLInputElement).value;
-                  if (raw === "") return;
-                  const parsed = Number(raw);
-                  if (Number.isNaN(parsed)) return;
-                  settings = { ...settings, terminal_font_size: parsed };
-                }}
-                onchange={() => {
-                  if (!settings) return;
-                  settings = { ...settings, terminal_font_size: clampFontSize(settings.terminal_font_size ?? 13) };
-                }}
+                min="1"
+                max="365"
+                bind:value={settings.log_retention_days}
               />
-              <button
-                class="font-size-btn"
-                onclick={() => adjustFontSize("terminal_font_size", 1)}
-                disabled={!settings || (settings.terminal_font_size ?? 13) >= 24}
-              >+</button>
-              <span class="font-size-unit">px</span>
+              <span class="field-hint">
+                Logs older than this will be cleaned up automatically.
+              </span>
             </div>
-          </div>
 
-          <div class="field">
-            <!-- svelte-ignore a11y_label_has_associated_control -->
-            <label>UI Font Size</label>
-            <div class="font-size-control">
-              <button
-                class="font-size-btn"
-                onclick={() => adjustFontSize("ui_font_size", -1)}
-                disabled={!settings || (settings.ui_font_size ?? 13) <= 8}
-              >-</button>
+            <div class="field">
+              <!-- svelte-ignore a11y_label_has_associated_control -->
+              <label>Protected Branches</label>
+              <div class="branch-tags">
+                {#each settings.protected_branches as branch}
+                  <span class="branch-tag">
+                    {branch}
+                    <button class="tag-remove" onclick={() => removeBranch(branch)}>
+                      x
+                    </button>
+                  </span>
+                {/each}
+              </div>
+              <div class="branch-input-row">
+                <input
+                  type="text"
+                  autocapitalize="off"
+                  autocorrect="off"
+                  autocomplete="off"
+                  spellcheck="false"
+                  bind:value={newBranch}
+                  placeholder="Add branch..."
+                  onkeydown={handleBranchKeydown}
+                />
+                <button class="btn btn-add" onclick={addBranch}>Add</button>
+              </div>
+              <span class="field-hint">
+                Branches that cannot be deleted or force-pushed.
+              </span>
+            </div>
+
+            <div class="field">
+              <label for="agent-github-project-id">Spec Project ID</label>
               <input
-                type="number"
-                min="8"
-                max="24"
-                step="1"
-                value={settings.ui_font_size ?? 13}
-                oninput={(e) => {
-                  if (!settings) return;
-                  const raw = (e.target as HTMLInputElement).value;
-                  if (raw === "") return;
-                  const parsed = Number(raw);
-                  if (Number.isNaN(parsed)) return;
-                  settings = { ...settings, ui_font_size: parsed };
-                }}
-                onchange={() => {
-                  if (!settings) return;
-                  settings = { ...settings, ui_font_size: clampFontSize(settings.ui_font_size ?? 13) };
-                }}
-              />
-              <button
-                class="font-size-btn"
-                onclick={() => adjustFontSize("ui_font_size", 1)}
-                disabled={!settings || (settings.ui_font_size ?? 13) >= 24}
-              >+</button>
-              <span class="font-size-unit">px</span>
-            </div>
-          </div>
-
-          <div class="divider"></div>
-
-          <div class="field">
-            <label for="log-retention">Log Retention (days)</label>
-            <input
-              id="log-retention"
-              type="number"
-              min="1"
-              max="365"
-              bind:value={settings.log_retention_days}
-            />
-            <span class="field-hint">
-              Logs older than this will be cleaned up automatically.
-            </span>
-          </div>
-
-          <div class="field">
-            <!-- svelte-ignore a11y_label_has_associated_control -->
-            <label>Protected Branches</label>
-            <div class="branch-tags">
-              {#each settings.protected_branches as branch}
-                <span class="branch-tag">
-                  {branch}
-                  <button class="tag-remove" onclick={() => removeBranch(branch)}>
-                    x
-                  </button>
-                </span>
-              {/each}
-            </div>
-            <div class="branch-input-row">
-              <input
+                id="agent-github-project-id"
                 type="text"
                 autocapitalize="off"
                 autocorrect="off"
                 autocomplete="off"
                 spellcheck="false"
-                bind:value={newBranch}
-                placeholder="Add branch..."
-                onkeydown={handleBranchKeydown}
+                value={settings.agent_github_project_id ?? ""}
+                oninput={(e) => {
+                  if (!settings) return;
+                  settings = {
+                    ...settings,
+                    agent_github_project_id: (e.target as HTMLInputElement).value,
+                  };
+                }}
+                placeholder="PVT_xxxxxxxxxxxxxxxxxxxx"
               />
-              <button class="btn btn-add" onclick={addBranch}>Add</button>
+              <span class="field-hint">
+                Fixed GitHub Project V2 ID for issue-first spec sync.
+              </span>
             </div>
-            <span class="field-hint">
-              Branches that cannot be deleted or force-pushed.
-            </span>
           </div>
-        </div>
-      </details>
 
-      <div class="divider"></div>
+        {:else if activeSettingsTab === "voiceInput"}
+          <div class="section-content">
+            <div class="field">
+              <div class="ai-toggle">
+                <input
+                  id="voice-input-enabled"
+                  type="checkbox"
+                  checked={settings.voice_input.enabled}
+                  onchange={(e) =>
+                    updateVoiceInputField(
+                      "enabled",
+                      (e.target as HTMLInputElement).checked
+                    )}
+                />
+                <label for="voice-input-enabled" class="ai-enabled-label">
+                  Enable Voice Input
+                </label>
+              </div>
+              <span class="field-hint">
+                Hotkey toggles start/stop and inserts transcript into the focused input.
+              </span>
+            </div>
 
-      <details class="settings-section" open>
-        <summary class="section-title">Voice Input</summary>
-        <div class="section-content">
-          <div class="field">
-            <div class="ai-toggle">
+            <div class="field">
+              <label for="voice-hotkey">Hotkey</label>
               <input
-                id="voice-input-enabled"
-                type="checkbox"
-                checked={settings.voice_input.enabled}
+                id="voice-hotkey"
+                type="text"
+                value={settings.voice_input.hotkey}
+                oninput={(e) =>
+                  updateVoiceInputField(
+                    "hotkey",
+                    (e.target as HTMLInputElement).value
+                  )}
+                placeholder="Mod+Shift+M"
+              />
+              <span class="field-hint">Example: Mod+Shift+M</span>
+            </div>
+
+            <div class="field">
+              <label for="voice-language">Language</label>
+              <select
+                id="voice-language"
+                class="select"
+                value={settings.voice_input.language}
                 onchange={(e) =>
                   updateVoiceInputField(
-                    "enabled",
-                    (e.target as HTMLInputElement).checked
+                    "language",
+                    (e.target as HTMLSelectElement).value as VoiceInputSettings["language"]
                   )}
-              />
-              <label for="voice-input-enabled" class="ai-enabled-label">
-                Enable Voice Input
-              </label>
-            </div>
-            <span class="field-hint">
-              Hotkey toggles start/stop and inserts transcript into the focused input.
-            </span>
-          </div>
-
-          <div class="field">
-            <label for="voice-hotkey">Hotkey</label>
-            <input
-              id="voice-hotkey"
-              type="text"
-              value={settings.voice_input.hotkey}
-              oninput={(e) =>
-                updateVoiceInputField(
-                  "hotkey",
-                  (e.target as HTMLInputElement).value
-                )}
-              placeholder="Mod+Shift+M"
-            />
-            <span class="field-hint">Example: Mod+Shift+M</span>
-          </div>
-
-          <div class="field">
-            <label for="voice-language">Language</label>
-            <select
-              id="voice-language"
-              class="select"
-              value={settings.voice_input.language}
-              onchange={(e) =>
-                updateVoiceInputField(
-                  "language",
-                  (e.target as HTMLSelectElement).value as VoiceInputSettings["language"]
-                )}
-            >
-              <option value="auto">Auto</option>
-              <option value="ja">Japanese</option>
-              <option value="en">English</option>
-            </select>
-          </div>
-
-          <div class="field">
-            <label for="voice-model">Model</label>
-            <input
-              id="voice-model"
-              type="text"
-              value={settings.voice_input.model}
-              oninput={(e) =>
-                updateVoiceInputField(
-                  "model",
-                  (e.target as HTMLInputElement).value
-                )}
-              placeholder="base"
-            />
-            <span class="field-hint">Bundled STT model tier label.</span>
-          </div>
-        </div>
-      </details>
-
-      <div class="divider"></div>
-
-      <details class="settings-section" open>
-        <summary class="section-title">Profiles</summary>
-        <div class="section-content">
-          <div class="field">
-            <label for="active-profile">Active Profile</label>
-            <select
-              id="active-profile"
-              class="select"
-              value={profiles?.active ?? ""}
-              onchange={(e) => setActiveProfile((e.target as HTMLSelectElement).value || null)}
-            >
-              <option value="">(none)</option>
-              {#if profiles}
-                {#each sortedProfileKeys(profiles) as key}
-                  <option value={key}>{key}</option>
-                {/each}
-              {/if}
-            </select>
-            <span class="field-hint">Saved in ~/.gwt/profiles.toml</span>
-          </div>
-
-          <div class="field">
-            <label for="profile-edit">Edit Profile</label>
-            <div class="row">
-              <select
-                id="profile-edit"
-                class="select"
-                bind:value={selectedProfileKey}
-                disabled={!profiles}
               >
+                <option value="auto">Auto</option>
+                <option value="ja">Japanese</option>
+                <option value="en">English</option>
+              </select>
+            </div>
+
+            <div class="field">
+              <label for="voice-model">Model</label>
+              <input
+                id="voice-model"
+                type="text"
+                value={settings.voice_input.model}
+                oninput={(e) =>
+                  updateVoiceInputField(
+                    "model",
+                    (e.target as HTMLInputElement).value
+                  )}
+                placeholder="base"
+              />
+              <span class="field-hint">Bundled STT model tier label.</span>
+            </div>
+          </div>
+
+        {:else if activeSettingsTab === "mcpBridge"}
+          <div class="section-content">
+            <div class="mcp-overview">
+              <span class={`mcp-badge ${mcpStatusClass(mcpStatus?.overall ?? "failed")}`}>
+                Overall: {mcpStatusText(mcpStatus?.overall)}
+              </span>
+              <span class="field-hint">
+                Last checked: {formatMcpCheckedAt(mcpStatus?.last_checked_at)}
+              </span>
+            </div>
+
+            <div class="mcp-health-grid">
+              <div class="mcp-health-item">
+                <span class="mcp-health-label">Runtime (bun/node)</span>
+                <span class={`mcp-mini-badge ${mcpStatusClass(mcpStatus?.bridge_runtime ?? "missing")}`}>
+                  {mcpStatusText(mcpStatus?.bridge_runtime)}
+                </span>
+              </div>
+              <div class="mcp-health-item">
+                <span class="mcp-health-label">Bridge Script</span>
+                <span class={`mcp-mini-badge ${mcpStatusClass(mcpStatus?.bridge_script ?? "missing")}`}>
+                  {mcpStatusText(mcpStatus?.bridge_script)}
+                </span>
+              </div>
+            </div>
+
+            <div class="mcp-agent-list">
+              {#each mcpStatus?.agents ?? [] as agent (agent.agent_id)}
+                <div class="mcp-agent-row">
+                  <div class="mcp-agent-meta">
+                    <span class="mcp-agent-label">{agent.label}</span>
+                    {#if agent.config_path}
+                      <span class="mcp-agent-path mono">{agent.config_path}</span>
+                    {/if}
+                    {#if agent.error_message}
+                      <span class="field-hint">{agent.error_message}</span>
+                    {/if}
+                  </div>
+                  <span class={`mcp-mini-badge ${agent.registered ? "status-ok" : "status-failed"}`}>
+                    {agent.registered ? "REGISTERED" : "MISSING"}
+                  </span>
+                </div>
+              {/each}
+            </div>
+
+            {#if mcpStatus?.last_error_message}
+              <span class="field-hint">{mcpStatus.last_error_message}</span>
+            {/if}
+            {#if mcpStatusMessage}
+              <span class="field-hint">{mcpStatusMessage}</span>
+            {/if}
+
+            <div class="row">
+              <button
+                class="btn btn-ghost"
+                onclick={() => void loadMcpStatus(true)}
+                disabled={mcpStatusLoading || mcpStatusRepairing}
+              >
+                {mcpStatusLoading ? "Refreshing..." : "Refresh MCP Status"}
+              </button>
+              <button
+                class="btn btn-add"
+                onclick={() => void repairMcpStatus()}
+                disabled={mcpStatusRepairing}
+              >
+                {mcpStatusRepairing ? "Repairing..." : "Repair MCP Registration"}
+              </button>
+            </div>
+          </div>
+
+        {:else if activeSettingsTab === "profiles"}
+          <div class="section-content">
+            <div class="field">
+              <label for="active-profile">Active Profile</label>
+              <select
+                id="active-profile"
+                class="select"
+                value={profiles?.active ?? ""}
+                onchange={(e) => setActiveProfile((e.target as HTMLSelectElement).value || null)}
+              >
+                <option value="">(none)</option>
                 {#if profiles}
                   {#each sortedProfileKeys(profiles) as key}
                     <option value={key}>{key}</option>
                   {/each}
                 {/if}
               </select>
-              <button class="btn btn-danger" onclick={deleteSelectedProfile} disabled={!profiles || !selectedProfileKey}>
-                Delete
-              </button>
+              <span class="field-hint">Saved in ~/.gwt/profiles.toml</span>
             </div>
-          </div>
 
-          <div class="field">
-            <label for="new-profile">New Profile</label>
-            <div class="row">
-              <input
-                id="new-profile"
-                type="text"
-                autocapitalize="off"
-                autocorrect="off"
-                autocomplete="off"
-                spellcheck="false"
-                bind:value={newProfileName}
-                placeholder="e.g. development"
-              />
-              <button class="btn btn-add" onclick={createProfile} disabled={!profiles || !newProfileName.trim()}>
-                Create
-              </button>
-            </div>
-            <span class="field-hint">Name must be lowercase letters, numbers, or hyphens.</span>
-          </div>
-
-          <div class="field">
-            <!-- svelte-ignore a11y_label_has_associated_control -->
-            <label>Environment Variables</label>
-            {#if profiles && selectedProfileKey && currentProfile}
-              <div class="env-table">
-                {#each Object.keys(currentProfile.env ?? {}).sort((a, b) => a.localeCompare(b)) as key (key)}
-                  <div class="env-row">
-                    <span class="env-key mono">{key}</span>
-                    <input
-                      class="env-value"
-                      type="text"
-                      autocapitalize="off"
-                      autocorrect="off"
-                      autocomplete="off"
-                      spellcheck="false"
-                      value={currentProfile.env[key]}
-                      oninput={(e) => upsertEnvVar(key, (e.target as HTMLInputElement).value)}
-                    />
-                    <button class="btn btn-ghost" onclick={() => removeEnvVar(key)}>Remove</button>
-                  </div>
-                {/each}
-              </div>
-
-              <div class="env-add-row">
-                <input
-                  class="env-key-input"
-                  type="text"
-                  autocapitalize="off"
-                  autocorrect="off"
-                  autocomplete="off"
-                  spellcheck="false"
-                  bind:value={newEnvKey}
-                  placeholder="KEY"
-                />
-                <input
-                  class="env-value-input"
-                  type="text"
-                  autocapitalize="off"
-                  autocorrect="off"
-                  autocomplete="off"
-                  spellcheck="false"
-                  bind:value={newEnvValue}
-                  placeholder="value"
-                />
-                <button class="btn btn-add" onclick={addEnvVar} disabled={!newEnvKey.trim()}>
-                  Add
+            <div class="field">
+              <label for="profile-edit">Edit Profile</label>
+              <div class="row">
+                <select
+                  id="profile-edit"
+                  class="select"
+                  bind:value={selectedProfileKey}
+                  disabled={!profiles}
+                >
+                  {#if profiles}
+                    {#each sortedProfileKeys(profiles) as key}
+                      <option value={key}>{key}</option>
+                    {/each}
+                  {/if}
+                </select>
+                <button class="btn btn-danger" onclick={deleteSelectedProfile} disabled={!profiles || !selectedProfileKey}>
+                  Delete
                 </button>
               </div>
-            {:else}
-              <div class="field-hint">Create a profile to edit environment variables.</div>
-            {/if}
-          </div>
+            </div>
 
-          <div class="field">
-            <!-- svelte-ignore a11y_label_has_associated_control -->
-            <label>AI Settings (per profile)</label>
-            {#if profiles && selectedProfileKey && currentProfile}
-              <div class="ai-toggle">
+            <div class="field">
+              <label for="new-profile">New Profile</label>
+              <div class="row">
                 <input
-                  id="ai-enabled"
-                  type="checkbox"
-                  checked={isAiEnabled(currentProfile)}
-                  onchange={(e) => setAiEnabled((e.target as HTMLInputElement).checked)}
+                  id="new-profile"
+                  type="text"
+                  autocapitalize="off"
+                  autocorrect="off"
+                  autocomplete="off"
+                  spellcheck="false"
+                  bind:value={newProfileName}
+                  placeholder="e.g. development"
                 />
-                <label for="ai-enabled" class="ai-enabled-label">Enable AI settings</label>
+                <button class="btn btn-add" onclick={createProfile} disabled={!profiles || !newProfileName.trim()}>
+                  Create
+                </button>
               </div>
+              <span class="field-hint">Name must be lowercase letters, numbers, or hyphens.</span>
+            </div>
 
-              {#if isAiEnabled(currentProfile)}
-                {@const currentAi = currentProfile.ai}
-                {@const currentEndpoint = currentAi?.endpoint?.trim() ?? ""}
-                <div class="ai-grid">
-                  <div class="ai-field">
-                    <span class="ai-label">Endpoint</span>
-                    <input
-                      type="text"
-                      autocapitalize="off"
-                      autocorrect="off"
-                      autocomplete="off"
-                      spellcheck="false"
-                      value={currentAi?.endpoint ?? ""}
-                      oninput={(e) => updateAiField("endpoint", (e.target as HTMLInputElement).value)}
-                    />
-                  </div>
-                  <div class="ai-field">
-                    <span class="ai-label">API Key</span>
-                    <input
-                      type="text"
-                      autocapitalize="off"
-                      autocorrect="off"
-                      autocomplete="off"
-                      spellcheck="false"
-                      value={currentAi?.api_key ?? ""}
-                      oninput={(e) => updateAiField("api_key", (e.target as HTMLInputElement).value)}
-                    />
-                  </div>
-                  <div class="ai-field">
-                    <span class="ai-label">Model</span>
-                    <div class="row ai-model-row">
-                      <select
-                        class="select ai-model-select"
-                        value={currentAi?.model ?? ""}
-                        disabled={aiModelsLoading || !currentEndpoint}
-                        onchange={(e) => updateAiField("model", (e.target as HTMLSelectElement).value)}
-                      >
-                        <option value="">Select model...</option>
-                        {#each aiModelOptions as modelId (modelId)}
-                          <option value={modelId}>{modelId}</option>
-                        {/each}
-                      </select>
-                      <button
-                        class="btn btn-ghost"
-                        onclick={refreshAiModels}
-                        disabled={aiModelsLoading || !currentEndpoint}
-                      >
-                        {aiModelsLoading ? "Loading..." : "Refresh"}
-                      </button>
-                    </div>
-                    {#if aiModelsError}
-                      <span class="field-hint">{aiModelsError}</span>
-                    {:else if currentModelMissing}
-                      <span class="field-hint">
-                        Current model is not listed in /v1/models.
-                      </span>
-                    {:else if !aiModelsLoading && aiModels.length === 0 && currentEndpoint}
-                      <span class="field-hint">No models returned from /v1/models.</span>
-                    {/if}
-                  </div>
-                  <div class="ai-field">
-                    <span class="ai-label">Language</span>
-                    <select
-                      class="select"
-                      value={currentAi?.language ?? "en"}
-                      onchange={(e) => updateAiField("language", (e.target as HTMLSelectElement).value)}
-                    >
-                      <option value="en">English</option>
-                      <option value="ja">Japanese</option>
-                      <option value="auto">Auto</option>
-                    </select>
-                  </div>
-                  <div class="ai-field">
-                    <span class="ai-label">Session Summary</span>
-                    <div class="ai-checkbox">
+            <div class="field">
+              <!-- svelte-ignore a11y_label_has_associated_control -->
+              <label>Environment Variables</label>
+              {#if profiles && selectedProfileKey && currentProfile}
+                <div class="env-table">
+                  {#each Object.keys(currentProfile.env ?? {}).sort((a, b) => a.localeCompare(b)) as key (key)}
+                    <div class="env-row">
+                      <span class="env-key mono">{key}</span>
                       <input
-                        id="ai-summary"
-                        type="checkbox"
-                        checked={currentAi?.summary_enabled ?? false}
-                        onchange={(e) => updateAiField("summary_enabled", (e.target as HTMLInputElement).checked)}
+                        class="env-value"
+                        type="text"
+                        autocapitalize="off"
+                        autocorrect="off"
+                        autocomplete="off"
+                        spellcheck="false"
+                        value={currentProfile.env[key]}
+                        oninput={(e) => upsertEnvVar(key, (e.target as HTMLInputElement).value)}
                       />
-                      <label for="ai-summary">Enabled</label>
+                      <button class="btn btn-ghost" onclick={() => removeEnvVar(key)}>Remove</button>
+                    </div>
+                  {/each}
+                </div>
+
+                <div class="env-add-row">
+                  <input
+                    class="env-key-input"
+                    type="text"
+                    autocapitalize="off"
+                    autocorrect="off"
+                    autocomplete="off"
+                    spellcheck="false"
+                    bind:value={newEnvKey}
+                    placeholder="KEY"
+                  />
+                  <input
+                    class="env-value-input"
+                    type="text"
+                    autocapitalize="off"
+                    autocorrect="off"
+                    autocomplete="off"
+                    spellcheck="false"
+                    bind:value={newEnvValue}
+                    placeholder="value"
+                  />
+                  <button class="btn btn-add" onclick={addEnvVar} disabled={!newEnvKey.trim()}>
+                    Add
+                  </button>
+                </div>
+              {:else}
+                <div class="field-hint">Create a profile to edit environment variables.</div>
+              {/if}
+            </div>
+
+            <div class="field">
+              <!-- svelte-ignore a11y_label_has_associated_control -->
+              <label>AI Settings (per profile)</label>
+              {#if profiles && selectedProfileKey && currentProfile}
+                <div class="ai-toggle">
+                  <input
+                    id="ai-enabled"
+                    type="checkbox"
+                    checked={isAiEnabled(currentProfile)}
+                    onchange={(e) => setAiEnabled((e.target as HTMLInputElement).checked)}
+                  />
+                  <label for="ai-enabled" class="ai-enabled-label">Enable AI settings</label>
+                </div>
+
+                {#if isAiEnabled(currentProfile)}
+                  {@const currentAi = currentProfile.ai}
+                  {@const currentEndpoint = currentAi?.endpoint?.trim() ?? ""}
+                  <div class="ai-grid">
+                    <div class="ai-field">
+                      <span class="ai-label">Endpoint</span>
+                      <input
+                        type="text"
+                        autocapitalize="off"
+                        autocorrect="off"
+                        autocomplete="off"
+                        spellcheck="false"
+                        value={currentAi?.endpoint ?? ""}
+                        oninput={(e) => updateAiField("endpoint", (e.target as HTMLInputElement).value)}
+                      />
+                    </div>
+                    <div class="ai-field">
+                      <span class="ai-label">API Key</span>
+                      <input
+                        type="text"
+                        autocapitalize="off"
+                        autocorrect="off"
+                        autocomplete="off"
+                        spellcheck="false"
+                        value={currentAi?.api_key ?? ""}
+                        oninput={(e) => updateAiField("api_key", (e.target as HTMLInputElement).value)}
+                      />
+                    </div>
+                    <div class="ai-field">
+                      <span class="ai-label">Model</span>
+                      <div class="row ai-model-row">
+                        <select
+                          class="select ai-model-select"
+                          value={currentAi?.model ?? ""}
+                          disabled={aiModelsLoading || !currentEndpoint}
+                          onchange={(e) => updateAiField("model", (e.target as HTMLSelectElement).value)}
+                        >
+                          <option value="">Select model...</option>
+                          {#each aiModelOptions as modelId (modelId)}
+                            <option value={modelId}>{modelId}</option>
+                          {/each}
+                        </select>
+                        <button
+                          class="btn btn-ghost"
+                          onclick={refreshAiModels}
+                          disabled={aiModelsLoading || !currentEndpoint}
+                        >
+                          {aiModelsLoading ? "Loading..." : "Refresh"}
+                        </button>
+                      </div>
+                      {#if aiModelsError}
+                        <span class="field-hint">{aiModelsError}</span>
+                      {:else if currentModelMissing}
+                        <span class="field-hint">
+                          Current model is not listed in /v1/models.
+                        </span>
+                      {:else if !aiModelsLoading && aiModels.length === 0 && currentEndpoint}
+                        <span class="field-hint">No models returned from /v1/models.</span>
+                      {/if}
+                    </div>
+                    <div class="ai-field">
+                      <span class="ai-label">Language</span>
+                      <select
+                        class="select"
+                        value={currentAi?.language ?? "en"}
+                        onchange={(e) => updateAiField("language", (e.target as HTMLSelectElement).value)}
+                      >
+                        <option value="en">English</option>
+                        <option value="ja">Japanese</option>
+                        <option value="auto">Auto</option>
+                      </select>
+                    </div>
+                    <div class="ai-field">
+                      <span class="ai-label">Session Summary</span>
+                      <div class="ai-checkbox">
+                        <input
+                          id="ai-summary"
+                          type="checkbox"
+                          checked={currentAi?.summary_enabled ?? false}
+                          onchange={(e) => updateAiField("summary_enabled", (e.target as HTMLInputElement).checked)}
+                        />
+                        <label for="ai-summary">Enabled</label>
+                      </div>
                     </div>
                   </div>
-                </div>
+                {/if}
+              {:else}
+                <div class="field-hint">Create a profile to configure AI settings.</div>
               {/if}
-            {:else}
-              <div class="field-hint">Create a profile to configure AI settings.</div>
-            {/if}
+            </div>
           </div>
-        </div>
-      </details>
+        {/if}
+      </div>
     </div>
 
     <div class="settings-footer">
@@ -957,70 +1217,54 @@
 
   .settings-body {
     flex: 1;
-    padding: 24px;
     display: flex;
     flex-direction: column;
-    gap: 24px;
+    overflow: hidden;
+  }
+
+  .settings-tabs {
+    display: flex;
+    gap: 2px;
+    border-bottom: 1px solid var(--border-color);
+    padding: 0 24px;
+    flex-shrink: 0;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .settings-tab-btn {
+    padding: 10px 16px;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-muted);
+    font-size: var(--ui-font-md);
+    font-family: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .settings-tab-btn:hover {
+    color: var(--text-secondary);
+  }
+
+  .settings-tab-btn.active {
+    color: var(--text-primary);
+    border-bottom-color: var(--accent);
+  }
+
+  .settings-tab-content {
+    flex: 1;
     overflow-y: auto;
+    padding: 24px;
   }
 
   .divider {
     height: 1px;
     background: var(--border-color);
     opacity: 0.7;
-  }
-
-  .section-title {
-    font-size: var(--ui-font-md);
-    font-weight: 600;
-    color: var(--text-primary);
-    letter-spacing: 0.6px;
-    text-transform: uppercase;
-  }
-
-  .settings-section {
-    border: none;
-  }
-
-  .settings-section > summary.section-title {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    cursor: pointer;
-    list-style: none;
-    user-select: none;
-    padding: 4px 0;
-  }
-
-  .settings-section > summary.section-title::-webkit-details-marker {
-    display: none;
-  }
-
-  .settings-section > summary.section-title::marker {
-    content: "";
-  }
-
-  .settings-section > summary.section-title:focus-visible {
-    outline: 2px solid var(--border-color);
-    outline-offset: 4px;
-    border-radius: 6px;
-  }
-
-  .settings-section > summary.section-title::after {
-    content: "[+]";
-    font-family: monospace;
-    font-size: var(--ui-font-base);
-    color: var(--text-muted);
-    letter-spacing: 0;
-    text-transform: none;
-  }
-
-  .settings-section[open] > summary.section-title::after {
-    content: "[-]";
-  }
-
-  .settings-section > summary.section-title:hover::after {
-    color: var(--text-primary);
   }
 
   .section-content {
@@ -1113,6 +1357,12 @@
     width: 100%;
   }
 
+  .field input[type="text"].env-value,
+  .field input[type="text"].env-key-input,
+  .field input[type="text"].env-value-input {
+    max-width: none;
+  }
+
   .env-add-row {
     display: grid;
     grid-template-columns: 1fr 2fr auto;
@@ -1190,6 +1440,98 @@
     border: 1px solid var(--border-color);
     border-radius: 6px;
     width: fit-content;
+  }
+
+  .mcp-overview {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .mcp-badge,
+  .mcp-mini-badge {
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border-color);
+    font-family: monospace;
+    font-size: var(--ui-font-sm);
+    letter-spacing: 0.2px;
+  }
+
+  .status-ok {
+    border-color: var(--green);
+    color: var(--green);
+  }
+
+  .status-degraded {
+    border-color: var(--yellow);
+    color: var(--yellow);
+  }
+
+  .status-failed {
+    border-color: var(--red);
+    color: var(--red);
+  }
+
+  .mcp-health-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(220px, 1fr));
+    gap: 10px;
+    max-width: 760px;
+  }
+
+  .mcp-health-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+  }
+
+  .mcp-health-label {
+    color: var(--text-secondary);
+    font-size: var(--ui-font-md);
+  }
+
+  .mcp-agent-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-width: 960px;
+  }
+
+  .mcp-agent-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+  }
+
+  .mcp-agent-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .mcp-agent-label {
+    color: var(--text-primary);
+    font-size: var(--ui-font-md);
+    font-weight: 500;
+  }
+
+  .mcp-agent-path {
+    color: var(--text-muted);
+    font-size: var(--ui-font-sm);
+    word-break: break-all;
   }
 
   .field input:focus {
@@ -1290,8 +1632,13 @@
     font-size: var(--ui-font-md);
   }
 
-  .btn-add:hover {
+  .btn-add:hover:not(:disabled) {
     background: var(--bg-hover);
+  }
+
+  .btn-add:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .btn-cancel {
@@ -1413,6 +1760,13 @@
     }
     .ai-grid {
       grid-template-columns: 1fr;
+    }
+    .mcp-health-grid {
+      grid-template-columns: 1fr;
+    }
+    .mcp-agent-row {
+      flex-direction: column;
+      align-items: flex-start;
     }
   }
 </style>

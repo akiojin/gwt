@@ -20,12 +20,14 @@
     projectPath,
     selectedBranch = "",
     osEnvReady = true,
+    prefillIssue = null,
     onLaunch,
     onClose,
   }: {
     projectPath: string;
     selectedBranch?: string;
     osEnvReady?: boolean;
+    prefillIssue?: GitHubIssueInfo | null;
     onLaunch: (request: LaunchAgentRequest) => Promise<void>;
     onClose: () => void;
   } = $props();
@@ -186,6 +188,42 @@
       (dockerContext?.docker_available ?? false) &&
       (dockerComposeLike ? (dockerContext?.compose_available ?? false) : true)
   );
+
+  // Auto-control: images missing → Build required
+  let dockerBuildRequired = $derived(
+    runtimeTarget === "docker" &&
+    dockerContext?.images_exist === false
+  );
+
+  // Auto-control: containers missing → Recreate required
+  let dockerRecreateRequired = $derived(
+    runtimeTarget === "docker" &&
+    dockerComposeLike &&
+    dockerContext?.container_status === "not_found"
+  );
+
+  // Human-readable Docker status hint
+  let dockerStatusHint = $derived(
+    (() => {
+      if (runtimeTarget !== "docker") return "";
+      const imgStatus = dockerContext?.images_exist;
+      const ctrStatus = dockerContext?.container_status;
+      if (imgStatus == null || ctrStatus == null) return "";
+      const imgLabel = imgStatus ? "Images ready" : "No images";
+      const ctrLabel =
+        ctrStatus === "running" ? "Containers running"
+        : ctrStatus === "stopped" ? "Containers stopped"
+        : "No containers";
+      const actions: string[] = [];
+      if (!imgStatus) actions.push("build");
+      if (ctrStatus === "not_found") actions.push("create");
+      else if (ctrStatus === "stopped") actions.push("recreate");
+      const suffix = actions.length > 0
+        ? ` \u2014 will ${actions.join(" and ")} automatically`
+        : "";
+      return `${imgLabel} / ${ctrLabel}${suffix}`;
+    })()
+  );
   function supportsModelFor(agentId: string): boolean {
     return (
       agentId === "codex" ||
@@ -201,25 +239,32 @@
     selectedAgent === "opencode" && sessionMode === "resume"
   );
 
-  let modelOptions = $derived(
+  let modelOptions: SelectOption[] = $derived(
     selectedAgent === "codex"
       ? [
-          "gpt-5.3-codex",
-          "gpt-5.3-codex-spark",
-          "gpt-5.2-codex",
-          "gpt-5.1-codex-max",
-          "gpt-5.2",
-          "gpt-5.1-codex-mini",
+          { value: "gpt-5.3-codex", label: "gpt-5.3-codex" },
+          { value: "gpt-5.3-codex-spark", label: "gpt-5.3-codex-spark" },
+          { value: "gpt-5.2-codex", label: "gpt-5.2-codex" },
+          { value: "gpt-5.1-codex-max", label: "gpt-5.1-codex-max" },
+          { value: "gpt-5.2", label: "gpt-5.2" },
+          { value: "gpt-5.1-codex-mini", label: "gpt-5.1-codex-mini" },
         ]
       : selectedAgent === "claude"
-        ? ["opus", "sonnet", "haiku"]
+        ? [
+            { value: "opus", label: "Opus" },
+            { value: "sonnet", label: "Sonnet" },
+            { value: "haiku", label: "Haiku" },
+            { value: "opus[1m]", label: "Opus (1M context)" },
+            { value: "sonnet[1m]", label: "Sonnet (1M context)" },
+            { value: "opusplan", label: "Opus Plan (plan: opus / exec: sonnet)" },
+          ]
         : selectedAgent === "gemini"
           ? [
-              "gemini-3-pro-preview",
-              "gemini-3-flash-preview",
-              "gemini-2.5-pro",
-              "gemini-2.5-flash",
-              "gemini-2.5-flash-lite",
+              { value: "gemini-3-pro-preview", label: "gemini-3-pro-preview" },
+              { value: "gemini-3-flash-preview", label: "gemini-3-flash-preview" },
+              { value: "gemini-2.5-pro", label: "gemini-2.5-pro" },
+              { value: "gemini-2.5-flash", label: "gemini-2.5-flash" },
+              { value: "gemini-2.5-flash-lite", label: "gemini-2.5-flash-lite" },
             ]
           : []
   );
@@ -397,6 +442,12 @@
     loadAgentVersions(selectedAgent);
   });
 
+  // Auto-check Docker build/recreate when status demands it
+  $effect(() => {
+    if (dockerBuildRequired) dockerBuild = true;
+    if (dockerRecreateRequired) dockerRecreate = true;
+  });
+
   function toErrorMessage(err: unknown): string {
     if (typeof err === "string") return err;
     if (err && typeof err === "object" && "message" in err) {
@@ -539,6 +590,23 @@
     void loadBaseBranchOptions();
   });
 
+  // Apply prefill from Issue tab ("Work on this" button).
+  $effect(() => {
+    if (!prefillIssue) return;
+    branchMode = "new";
+    newBranchTab = "fromIssue";
+    selectedIssue = prefillIssue;
+
+    const names = prefillIssue.labels.map((l) => l.name.toLowerCase());
+    if (names.includes("bug")) {
+      newBranchPrefix = "bugfix/";
+    } else if (names.includes("hotfix")) {
+      newBranchPrefix = "hotfix/";
+    } else {
+      newBranchPrefix = "feature/";
+    }
+  });
+
   // Check gh CLI once per project after shell environment is ready.
   $effect(() => {
     void projectPath;
@@ -586,6 +654,7 @@
         projectPath,
         page,
         perPage: 30,
+        state: "open",
       });
       if (page === 1) {
         issues = resp.issues;
@@ -1200,8 +1269,8 @@
                   <span class="issue-title">{issue.title}</span>
                   {#if issue.labels.length > 0}
                     <span class="issue-labels">
-                      {#each issue.labels as lbl (lbl)}
-                        <span class="issue-label">{lbl}</span>
+                      {#each issue.labels as lbl (lbl.name)}
+                        <span class="issue-label">{lbl.name}</span>
                       {/each}
                     </span>
                   {/if}
@@ -1276,8 +1345,8 @@
               <label for="model-select">Model</label>
               <select id="model-select" bind:value={model}>
                 <option value="">Default</option>
-                {#each modelOptions as opt (opt)}
-                  <option value={opt}>{opt}</option>
+                {#each modelOptions as opt (opt.value)}
+                  <option value={opt.value}>{opt.label}</option>
                 {/each}
               </select>
             </div>
@@ -1619,18 +1688,29 @@
             <div class="field">
               <span class="field-label">Docker</span>
               <label class="check-row">
-                <input type="checkbox" bind:checked={dockerBuild} />
+                <input
+                  type="checkbox"
+                  bind:checked={dockerBuild}
+                  disabled={dockerBuildRequired}
+                />
                 <span>{dockerComposeLike ? "Build images" : "Build image"}</span>
               </label>
               {#if dockerComposeLike}
                 <label class="check-row">
-                  <input type="checkbox" bind:checked={dockerRecreate} />
+                  <input
+                    type="checkbox"
+                    bind:checked={dockerRecreate}
+                    disabled={dockerRecreateRequired}
+                  />
                   <span>Force recreate</span>
                 </label>
                 <label class="check-row">
                   <input type="checkbox" bind:checked={dockerKeep} />
                   <span>Keep containers running after exit</span>
                 </label>
+              {/if}
+              {#if dockerStatusHint}
+                <span class="field-hint">{dockerStatusHint}</span>
               {/if}
             </div>
           {/if}
@@ -2002,7 +2082,6 @@
     gap: 10px;
     font-size: var(--ui-font-md);
     color: var(--text-primary);
-    user-select: none;
   }
 
   .check-row input {

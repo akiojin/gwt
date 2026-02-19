@@ -5,19 +5,122 @@ use super::session_parser::{MessageRole, ParsedSession, SessionMessage};
 use std::collections::HashMap;
 use std::time::SystemTime;
 
-pub const SESSION_SYSTEM_PROMPT_BASE: &str = "You are a helpful assistant summarizing a coding agent session so the user can remember the original request and latest instruction.\nReturn Markdown only with the following format and headings, in this exact order:\n\n## <Purpose heading in the user's language>\n<1 sentence: the original user request + key constraints + explicit exclusions>\n\n## <Summary heading in the user's language>\n<1-2 sentences: current status (use a clear status word) + the latest user instruction; mention if blocked>\n\n## <Highlights heading in the user's language>\n- <Original request: ...>\n- <Latest instruction: ...>\n- <Decisions/constraints: ...>\n- <Exclusions/not doing: ...>\n- <Status: ...>\n- <Progress: ...>\n- <Recent meaningful actions (last 1-3): ...>\n- <Needs user input (as a direct question): ...>\n- <Key words (3 items): ...>\n\nAdd more bullets if there are additional important items, but keep the list concise.\nIf there was no progress, say so and why.\nIf waiting for user input, state the exact question needed.\nDo not guess; if something is unknown, say so explicitly in the user's language.\nUse short labels followed by \":\" for each bullet and translate the labels to the user's language.\nDetect the response language from the session content and respond in that language.\nIf the session contains multiple languages, use the language used by the user messages.\nAll headings and all content must be in the user's language.\nDo not output JSON, code fences, or any extra text.\n\nIgnore operational workflow chatter from this session except for content that changes direction:\n- PR/MR creation, branch operations, test/build/CI activity, and short status updates.\n- Keep summaries focused on user intent, decisions, constraints, outcomes, blockers, or pending actions.\n- Ignore one-line acknowledgements unless they contain a blocking issue or design decision.\nPrioritize substantive conversation over command history.\n\nWhen the session language is Japanese, headings must be exactly in this order:\n- ## 目的\n- ## 要約\n- ## ハイライト\nWhen the session language is English, headings must be exactly in this order:\n- ## Purpose\n- ## Summary\n- ## Highlights.";
+pub const SESSION_SYSTEM_PROMPT_BASE: &str = "You are a helpful assistant summarizing a coding agent session so the user can remember the original request and latest instruction.\nReturn Markdown only with the following format and headings, in this exact order:\n\n## <Purpose heading in the user's language>\n<1 sentence: the worktree/branch objective (why) + key constraints + explicit exclusions>\n\n## <Summary heading in the user's language>\n<1-2 sentences: current status (use a clear status word) + the latest user instruction; mention if blocked>\n\n## <Highlights heading in the user's language>\n- <Original request: ...>\n- <Latest instruction: ...>\n- <Decisions/constraints: ...>\n- <Exclusions/not doing: ...>\n- <Status: ...>\n- <Progress: ...>\n- <Recent meaningful actions (last 1-3): ...>\n- <Needs user input (as a direct question): ...>\n- <Key words (3 items): ...>\n\nAdd more bullets if there are additional important items, but keep the list concise.\nIf there was no progress, say so and why.\nIf waiting for user input, state the exact question needed.\nDo not guess; if something is unknown, say so explicitly in the user's language.\nUse short labels followed by \":\" for each bullet and translate the labels to the user's language.\nDetect the response language from the session content and respond in that language.\nIf the session contains multiple languages, use the language used by the user messages.\nAll headings and all content must be in the user's language.\nDo not output JSON, code fences, or any extra text.\n\nPurpose writing rule:\n- The Purpose section must describe the intended outcome of the worktree/branch.\n- Treat PR/MR creation, PR template filling, merge/push, and status checks as means (how), not purpose (why).\n\nIgnore operational workflow chatter from this session except for content that changes direction:\n- PR/MR creation, branch operations, test/build/CI activity, and short status updates.\n- Keep summaries focused on user intent, decisions, constraints, outcomes, blockers, or pending actions.\n- Ignore one-line acknowledgements unless they contain a blocking issue or design decision.\nPrioritize substantive conversation over command history.\n\nWhen the session language is Japanese, headings must be exactly in this order:\n- ## 目的\n- ## 要約\n- ## ハイライト\nWhen the session language is English, headings must be exactly in this order:\n- ## Purpose\n- ## Summary\n- ## Highlights.";
 
-const SESSION_SYSTEM_PROMPT_EN: &str = "You are a helpful assistant summarizing a coding agent session so the user can remember the original request and latest instruction.\nRespond in English.\nReturn Markdown only with the following format and headings, in this exact order:\n\n## Purpose\n<1 sentence: the original user request + key constraints + explicit exclusions>\n\n## Summary\n<1-2 sentences: current status (use a clear status word) + the latest user instruction; mention if blocked>\n\n## Highlights\n- <Original request: ...>\n- <Latest instruction: ...>\n- <Decisions/constraints: ...>\n- <Exclusions/not doing: ...>\n- <Status: ...>\n- <Progress: ...>\n- <Recent meaningful actions (last 1-3): ...>\n- <Needs user input (as a direct question): ...>\n- <Key words (3 items): ...>\n\nAdd more bullets if there are additional important items, but keep the list concise.\nIf there was no progress, say so and why.\nIf waiting for user input, state the exact question needed.\nDo not guess; if something is unknown, say so explicitly in English.\nUse short labels followed by \":\" for each bullet.\nAll headings and all content must be in English.\nDo not output JSON, code fences, or any extra text.\n\nIgnore operational workflow chatter from this session except for content that changes direction:\n- PR/MR creation, branch operations, test/build/CI activity, and short status updates.\n- Keep summaries focused on user intent, decisions, constraints, outcomes, blockers, or pending actions.\n- Ignore one-line acknowledgements unless they contain a blocking issue or design decision.\nPrioritize substantive conversation over command history.";
+const SESSION_SYSTEM_PROMPT_EN: &str = "You are a helpful assistant summarizing a coding agent session so the user can remember the original request and latest instruction.\nRespond in English.\nReturn Markdown only with the following format and headings, in this exact order:\n\n## Purpose\n<1 sentence: the worktree/branch objective (why) + key constraints + explicit exclusions>\n\n## Summary\n<1-2 sentences: current status (use a clear status word) + the latest user instruction; mention if blocked>\n\n## Highlights\n- <Original request: ...>\n- <Latest instruction: ...>\n- <Decisions/constraints: ...>\n- <Exclusions/not doing: ...>\n- <Status: ...>\n- <Progress: ...>\n- <Recent meaningful actions (last 1-3): ...>\n- <Needs user input (as a direct question): ...>\n- <Key words (3 items): ...>\n\nAdd more bullets if there are additional important items, but keep the list concise.\nIf there was no progress, say so and why.\nIf waiting for user input, state the exact question needed.\nDo not guess; if something is unknown, say so explicitly in English.\nUse short labels followed by \":\" for each bullet.\nAll headings and all content must be in English.\nDo not output JSON, code fences, or any extra text.\n\nPurpose writing rule:\n- The Purpose section must describe the intended outcome of the worktree/branch.\n- Treat PR/MR creation, PR template filling, merge/push, and status checks as means (how), not purpose (why).\n\nIgnore operational workflow chatter from this session except for content that changes direction:\n- PR/MR creation, branch operations, test/build/CI activity, and short status updates.\n- Keep summaries focused on user intent, decisions, constraints, outcomes, blockers, or pending actions.\n- Ignore one-line acknowledgements unless they contain a blocking issue or design decision.\nPrioritize substantive conversation over command history.";
 
-const SESSION_SYSTEM_PROMPT_JA: &str = "You are a helpful assistant summarizing a coding agent session so the user can remember the original request and latest instruction.\nRespond in Japanese.\nReturn Markdown only with the following format and headings, in this exact order:\n\n## 目的\n<1文: 元のユーザー依頼 + 重要な制約 + 明示された除外>\n\n## 要約\n<1-2文: 現在ステータス（明確な状態語を使う）+ 最新のユーザー指示。ブロックされているなら明記>\n\n## ハイライト\n- <元の依頼: ...>\n- <最新指示: ...>\n- <決定事項/制約: ...>\n- <除外/やらないこと: ...>\n- <ステータス: ...>\n- <進捗: ...>\n- <直近の意味のある行動（1-3件）: ...>\n- <ユーザーに必要な入力（質問として）: ...>\n- <キーワード（3つ）: ...>\n\n重要な項目があれば箇条書きを追加してよいが、簡潔にすること。\n進捗がない場合は、その旨と理由を書くこと。\nユーザー入力待ちの場合は、必要な質問をそのまま書くこと。\n推測しない。不明な点は不明と明記すること。\n各箇条書きは短いラベル + \":\" で始め、ラベルも日本語にすること。\n見出しと本文はすべて日本語にすること。\nJSONやコードフェンス、余計なテキストを出力しないこと。\n\n以下の運用的なやり取りは、方向性が変わる内容を除き無視すること:\n- PR/MR作成、ブランチ操作、テスト/ビルド/CI、短いステータス更新\n- 要約はユーザー意図、決定事項、制約、結果、ブロッカー、未完了作業に集中する\n- ブロッキングや設計判断を含まない1行の相槌は無視する\n会話の中身を優先し、コマンド履歴に引っ張られないこと。";
+const SESSION_SYSTEM_PROMPT_JA: &str = "You are a helpful assistant summarizing a coding agent session so the user can remember the original request and latest instruction.\nRespond in Japanese.\nReturn Markdown only with the following format and headings, in this exact order:\n\n## 目的\n<1文: Worktree/ブランチで達成する成果（Why） + 重要な制約 + 明示された除外>\n\n## 要約\n<1-2文: 現在ステータス（明確な状態語を使う）+ 最新のユーザー指示。ブロックされているなら明記>\n\n## ハイライト\n- <元の依頼: ...>\n- <最新指示: ...>\n- <決定事項/制約: ...>\n- <除外/やらないこと: ...>\n- <ステータス: ...>\n- <進捗: ...>\n- <直近の意味のある行動（1-3件）: ...>\n- <ユーザーに必要な入力（質問として）: ...>\n- <キーワード（3つ）: ...>\n\n重要な項目があれば箇条書きを追加してよいが、簡潔にすること。\n進捗がない場合は、その旨と理由を書くこと。\nユーザー入力待ちの場合は、必要な質問をそのまま書くこと。\n推測しない。不明な点は不明と明記すること。\n各箇条書きは短いラベル + \":\" で始め、ラベルも日本語にすること。\n見出しと本文はすべて日本語にすること。\nJSONやコードフェンス、余計なテキストを出力しないこと。\n\n目的の記述ルール:\n- 目的にはWorktree/ブランチの達成成果（Why）を書く。\n- PR/MR作成、PR本文テンプレート記入、merge/push、ステータス確認は手段（How）として扱い、目的にしない。\n\n以下の運用的なやり取りは、方向性が変わる内容を除き無視すること:\n- PR/MR作成、ブランチ操作、テスト/ビルド/CI、短いステータス更新\n- 要約はユーザー意図、決定事項、制約、結果、ブロッカー、未完了作業に集中する\n- ブロッキングや設計判断を含まない1行の相槌は無視する\n会話の中身を優先し、コマンド履歴に引っ張られないこと。";
 
 const MAX_MESSAGE_CHARS: usize = 220;
 const MAX_PROMPT_CHARS: usize = 8000;
+const MAX_PURPOSE_TEXT_CHARS: usize = 180;
+
+const PURPOSE_KEYWORDS: &[&str] = &[
+    "目的",
+    "目標",
+    "狙い",
+    "goal",
+    "purpose",
+    "objective",
+    "intent",
+];
+
+const OUTCOME_KEYWORDS: &[&str] = &[
+    "実装",
+    "改善",
+    "修正",
+    "追加",
+    "達成",
+    "対応",
+    "統合",
+    "機能",
+    "反映",
+    "deliver",
+    "implement",
+    "improve",
+    "fix",
+    "add",
+    "build",
+    "ship",
+    "support",
+    "enable",
+    "complete",
+];
+
+const OPERATIONAL_KEYWORDS: &[&str] = &[
+    "pr",
+    "mr",
+    "template",
+    "テンプレ",
+    "マージ",
+    "merge",
+    "push",
+    "commit",
+    "branch operation",
+    "ブランチ操作",
+    "ci",
+    "check",
+    "status",
+    "url",
+    "gh pr",
+    "rebase",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SummaryLanguage {
     Ja,
     En,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PurposeSource {
+    Explicit,
+    Inferred,
+}
+
+#[derive(Debug, Clone)]
+struct DerivedPurpose {
+    text: String,
+    source: PurposeSource,
+}
+
+impl DerivedPurpose {
+    fn explicit(text: String) -> Self {
+        Self {
+            text,
+            source: PurposeSource::Explicit,
+        }
+    }
+
+    fn inferred(text: String) -> Self {
+        Self {
+            text,
+            source: PurposeSource::Inferred,
+        }
+    }
+
+    fn is_inferred(&self) -> bool {
+        matches!(self.source, PurposeSource::Inferred)
+    }
+
+    fn confidence_label(&self) -> &'static str {
+        match self.source {
+            PurposeSource::Explicit => "explicit",
+            PurposeSource::Inferred => "inferred",
+        }
+    }
+
+    fn render_for_output(&self, lang: SummaryLanguage) -> String {
+        let text = clip_chars(self.text.trim(), MAX_PURPOSE_TEXT_CHARS);
+        if self.is_inferred() {
+            match lang {
+                SummaryLanguage::Ja => format!("（推定）{text}"),
+                SummaryLanguage::En => format!("(Inferred) {text}"),
+            }
+        } else {
+            text
+        }
+    }
 }
 
 fn session_system_prompt(language: &str) -> &'static str {
@@ -137,12 +240,36 @@ struct SessionSummaryFields {
 }
 
 pub fn build_session_prompt(parsed: &ParsedSession, language: &str) -> Vec<ChatMessage> {
+    build_session_prompt_with_context(parsed, language, None, None)
+}
+
+fn build_session_prompt_with_context(
+    parsed: &ParsedSession,
+    language: &str,
+    branch_name: Option<&str>,
+    derived_purpose: Option<&DerivedPurpose>,
+) -> Vec<ChatMessage> {
     let mut lines = Vec::new();
     lines.push(format!(
         "Agent: {} (session_id: {})",
         parsed.agent_type.display_name(),
         parsed.session_id
     ));
+    if let Some(branch) = branch_name {
+        lines.push(format!("Branch: {branch}"));
+    }
+    if let Some(purpose) = derived_purpose {
+        lines.push(format!(
+            "Derived worktree purpose ({}): {}",
+            purpose.confidence_label(),
+            purpose.text
+        ));
+    }
+    lines.push(
+        "Purpose guidance: In the Purpose section, describe the worktree objective (why). \
+Treat PR/MR creation, template filling, merge/push, and status checks as means (how), not purpose."
+            .to_string(),
+    );
 
     if parsed.messages.is_empty() {
         lines.push("No messages recorded.".to_string());
@@ -216,6 +343,267 @@ pub fn build_session_prompt(parsed: &ParsedSession, language: &str) -> Vec<ChatM
             content: user_prompt,
         },
     ]
+}
+
+fn derive_worktree_purpose_from_messages(
+    messages: &[SessionMessage],
+    branch_name: &str,
+    fallback_language: SummaryLanguage,
+) -> DerivedPurpose {
+    let mut explicit: Option<String> = None;
+    let mut inferred: Option<String> = None;
+
+    for message in messages {
+        if !matches!(message.role, MessageRole::User) {
+            continue;
+        }
+        for fragment in split_text_fragments(&message.content) {
+            let cleaned = normalize_purpose_fragment(&fragment);
+            if cleaned.is_empty() {
+                continue;
+            }
+
+            if contains_purpose_keyword(&cleaned) {
+                let candidate = extract_purpose_payload(&cleaned);
+                if is_meaningful_purpose(&candidate) {
+                    explicit = Some(candidate);
+                }
+                continue;
+            }
+
+            if is_meaningful_purpose(&cleaned) {
+                inferred = Some(cleaned);
+            }
+        }
+    }
+
+    if let Some(text) = explicit {
+        return DerivedPurpose::explicit(text);
+    }
+    if let Some(text) = inferred {
+        return DerivedPurpose::inferred(text);
+    }
+
+    DerivedPurpose::inferred(infer_purpose_from_branch(branch_name, fallback_language))
+}
+
+fn derive_worktree_purpose_from_scrollback(
+    text: &str,
+    branch_name: &str,
+    fallback_language: SummaryLanguage,
+) -> DerivedPurpose {
+    let mut explicit: Option<String> = None;
+    let mut inferred: Option<String> = None;
+
+    for fragment in split_text_fragments(text) {
+        let cleaned = normalize_purpose_fragment(&fragment);
+        if cleaned.is_empty() {
+            continue;
+        }
+
+        if contains_purpose_keyword(&cleaned) {
+            let candidate = extract_purpose_payload(&cleaned);
+            if is_meaningful_purpose(&candidate) {
+                explicit = Some(candidate);
+            }
+            continue;
+        }
+
+        if is_meaningful_purpose(&cleaned) {
+            inferred = Some(cleaned);
+        }
+    }
+
+    if let Some(text) = explicit {
+        return DerivedPurpose::explicit(text);
+    }
+    if let Some(text) = inferred {
+        return DerivedPurpose::inferred(text);
+    }
+
+    DerivedPurpose::inferred(infer_purpose_from_branch(branch_name, fallback_language))
+}
+
+fn split_text_fragments(text: &str) -> Vec<String> {
+    let normalized = text
+        .replace('\r', "\n")
+        .replace("。", "。\n")
+        .replace(". ", ".\n")
+        .replace("? ", "?\n")
+        .replace("？", "？\n");
+
+    normalized
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| line.to_string())
+        .collect()
+}
+
+fn normalize_purpose_fragment(text: &str) -> String {
+    let trimmed = text.trim();
+    let trimmed = if let Some(rest) = trimmed.strip_prefix("- ") {
+        rest.trim()
+    } else if let Some(rest) = trimmed.strip_prefix("* ") {
+        rest.trim()
+    } else if let Some(rest) = strip_ordered_prefix(trimmed) {
+        rest.trim()
+    } else {
+        trimmed
+    };
+    clip_chars(
+        trimmed
+            .trim_matches(|c| c == '"' || c == '\'' || c == '“' || c == '”')
+            .trim(),
+        MAX_PURPOSE_TEXT_CHARS,
+    )
+}
+
+fn contains_purpose_keyword(text: &str) -> bool {
+    contains_any_keyword(text, PURPOSE_KEYWORDS)
+}
+
+fn contains_any_keyword(text: &str, keywords: &[&str]) -> bool {
+    let lowered = text.to_lowercase();
+    keywords.iter().any(|keyword| {
+        if keyword.is_ascii() {
+            let needle = keyword.to_lowercase();
+            if needle.len() <= 3 && needle.chars().all(|c| c.is_ascii_alphanumeric()) {
+                contains_ascii_word(&lowered, &needle)
+            } else {
+                lowered.contains(&needle)
+            }
+        } else {
+            text.contains(keyword)
+        }
+    })
+}
+
+fn contains_ascii_word(text: &str, word: &str) -> bool {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|token| !token.is_empty() && token == word)
+}
+
+fn extract_purpose_payload(text: &str) -> String {
+    let trimmed = text.trim();
+
+    for prefix in ["目的は", "目的:", "目的：", "目標は", "目標:", "目標："] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            let candidate = rest.trim();
+            if !candidate.is_empty() {
+                return clip_chars(candidate, MAX_PURPOSE_TEXT_CHARS);
+            }
+        }
+    }
+
+    let lowered = trimmed.to_lowercase();
+    for prefix in [
+        "goal:",
+        "goal is",
+        "purpose:",
+        "purpose is",
+        "objective:",
+        "objective is",
+        "intent:",
+        "intent is",
+    ] {
+        if lowered.starts_with(prefix) {
+            let candidate = trimmed[prefix.len()..].trim();
+            if !candidate.is_empty() {
+                return clip_chars(candidate, MAX_PURPOSE_TEXT_CHARS);
+            }
+        }
+    }
+
+    if let Some((left, right)) = trimmed.split_once(':') {
+        if contains_purpose_keyword(left) {
+            let candidate = right.trim();
+            if !candidate.is_empty() {
+                return clip_chars(candidate, MAX_PURPOSE_TEXT_CHARS);
+            }
+        }
+    }
+    if let Some((left, right)) = trimmed.split_once('：') {
+        if contains_purpose_keyword(left) {
+            let candidate = right.trim();
+            if !candidate.is_empty() {
+                return clip_chars(candidate, MAX_PURPOSE_TEXT_CHARS);
+            }
+        }
+    }
+
+    clip_chars(trimmed, MAX_PURPOSE_TEXT_CHARS)
+}
+
+fn is_meaningful_purpose(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.chars().count() < 6 {
+        return false;
+    }
+    if trimmed.ends_with('?') || trimmed.ends_with('？') {
+        return false;
+    }
+    if is_unknown_placeholder(trimmed) {
+        return false;
+    }
+
+    !is_operational_only(trimmed)
+}
+
+fn is_operational_only(text: &str) -> bool {
+    let has_operational = contains_any_keyword(text, OPERATIONAL_KEYWORDS);
+    if !has_operational {
+        return false;
+    }
+    let has_outcome =
+        contains_any_keyword(text, OUTCOME_KEYWORDS) || contains_purpose_keyword(text);
+    !has_outcome
+}
+
+fn is_unknown_placeholder(text: &str) -> bool {
+    matches!(
+        text.trim(),
+        "(不明)" | "不明" | "(Not available)" | "Not available" | "(Unknown)" | "Unknown"
+    )
+}
+
+fn infer_purpose_from_branch(branch_name: &str, lang: SummaryLanguage) -> String {
+    let topic = branch_name
+        .split('/')
+        .next_back()
+        .unwrap_or(branch_name)
+        .replace(['-', '_'], " ");
+    match lang {
+        SummaryLanguage::Ja => {
+            if topic.trim().is_empty() {
+                "このWorktreeで進めている成果を達成すること".to_string()
+            } else {
+                format!("{topic} に関する成果をこのWorktreeで達成すること")
+            }
+        }
+        SummaryLanguage::En => {
+            if topic.trim().is_empty() {
+                "Deliver the primary outcome for this worktree".to_string()
+            } else {
+                format!("Deliver the outcome intended by branch '{branch_name}'")
+            }
+        }
+    }
+}
+
+fn clip_chars(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    let mut clipped = text
+        .chars()
+        .take(limit.saturating_sub(1))
+        .collect::<String>();
+    clipped.push('…');
+    clipped
 }
 
 fn is_operational_status_noise(text: &str) -> bool {
@@ -295,8 +683,20 @@ pub fn summarize_scrollback(
     branch_name: &str,
     language: &str,
 ) -> Result<SessionSummary, AIError> {
+    let fallback_language = fallback_purpose_language_for_text(language, scrollback_text);
+    let derived_purpose =
+        derive_worktree_purpose_from_scrollback(scrollback_text, branch_name, fallback_language);
     let sampled = sample_scrollback_text(scrollback_text);
-    let user_prompt = format!("Branch: {branch_name}\nTerminal session output:\n{sampled}");
+    let mut user_prompt = format!(
+        "Branch: {branch_name}\nDerived worktree purpose ({}): {}\nPurpose guidance: \
+In the Purpose section, describe the worktree objective (why). \
+Treat PR/MR creation, template filling, merge/push, and status checks as means (how), not purpose.\n\nTerminal session output:\n{sampled}",
+        derived_purpose.confidence_label(),
+        derived_purpose.text
+    );
+    if user_prompt.chars().count() > MAX_PROMPT_CHARS {
+        user_prompt = clip_chars(&user_prompt, MAX_PROMPT_CHARS);
+    }
     let messages = vec![
         ChatMessage {
             role: "system".to_string(),
@@ -310,7 +710,15 @@ pub fn summarize_scrollback(
     let content = client.create_response(messages)?;
     let fields = parse_session_summary_fields(&content).unwrap_or_default();
     let markdown = normalize_session_summary_markdown(&content, &fields, language)?;
+    let summary_lang = target_summary_language(language, &markdown);
+    let markdown = enforce_worktree_purpose_in_markdown(
+        &markdown,
+        summary_lang,
+        branch_name,
+        &derived_purpose,
+    );
     validate_session_summary_markdown(&markdown)?;
+    let task_overview = extract_purpose_body(&markdown);
 
     let token_count = scrollback_text.chars().count() / 4;
     let metrics = SessionMetrics {
@@ -325,7 +733,7 @@ pub fn summarize_scrollback(
     };
 
     Ok(SessionSummary {
-        task_overview: fields.task_overview,
+        task_overview: task_overview.or(fields.task_overview),
         short_summary: fields.short_summary,
         bullet_points: fields.bullet_points,
         markdown: Some(markdown),
@@ -362,18 +770,35 @@ fn sample_scrollback_text(text: &str) -> String {
 pub fn summarize_session(
     client: &AIClient,
     parsed: &ParsedSession,
+    branch_name: &str,
     language: &str,
 ) -> Result<SessionSummary, AIError> {
-    let messages = build_session_prompt(parsed, language);
+    let fallback_language = fallback_purpose_language_for_messages(language, &parsed.messages);
+    let derived_purpose =
+        derive_worktree_purpose_from_messages(&parsed.messages, branch_name, fallback_language);
+    let messages = build_session_prompt_with_context(
+        parsed,
+        language,
+        Some(branch_name),
+        Some(&derived_purpose),
+    );
     let content = client.create_response(messages)?;
     let fields = parse_session_summary_fields(&content).unwrap_or_default();
     let markdown = normalize_session_summary_markdown(&content, &fields, language)?;
+    let summary_lang = target_summary_language(language, &markdown);
+    let markdown = enforce_worktree_purpose_in_markdown(
+        &markdown,
+        summary_lang,
+        branch_name,
+        &derived_purpose,
+    );
     validate_session_summary_markdown(&markdown)?;
+    let task_overview = extract_purpose_body(&markdown);
 
     let metrics = build_metrics(parsed);
 
     Ok(SessionSummary {
-        task_overview: fields.task_overview,
+        task_overview: task_overview.or(fields.task_overview),
         short_summary: fields.short_summary,
         bullet_points: fields.bullet_points,
         markdown: Some(markdown),
@@ -587,6 +1012,138 @@ fn normalize_summary_headings(markdown: &str, lang: SummaryLanguage) -> String {
     out
 }
 
+fn enforce_worktree_purpose_in_markdown(
+    markdown: &str,
+    lang: SummaryLanguage,
+    branch_name: &str,
+    derived_purpose: &DerivedPurpose,
+) -> String {
+    let lines: Vec<&str> = markdown.lines().collect();
+    if lines.is_empty() {
+        return markdown.to_string();
+    }
+
+    let mut purpose_idx: Option<usize> = None;
+    for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        let Some(title) = trimmed.strip_prefix("## ") else {
+            continue;
+        };
+        if matches!(classify_heading(title.trim()), Some(HeadingKind::Purpose)) {
+            purpose_idx = Some(idx);
+            break;
+        }
+    }
+
+    let Some(start) = purpose_idx else {
+        return markdown.to_string();
+    };
+
+    let mut next_heading = lines.len();
+    for (idx, line) in lines.iter().enumerate().skip(start + 1) {
+        if line.trim_start().starts_with("## ") {
+            next_heading = idx;
+            break;
+        }
+    }
+
+    let existing_body = lines[start + 1..next_heading].join("\n");
+    let existing_trimmed = existing_body.trim();
+    let desired = derived_purpose.render_for_output(lang);
+    let existing_has_inferred_marker = has_inferred_marker(existing_trimmed, lang);
+    let should_replace = matches!(derived_purpose.source, PurposeSource::Explicit)
+        || existing_trimmed.is_empty()
+        || is_unknown_placeholder(existing_trimmed)
+        || is_operational_only(existing_trimmed);
+
+    if !should_replace {
+        if derived_purpose.is_inferred() && !existing_has_inferred_marker {
+            let annotated = annotate_as_inferred(existing_trimmed, lang);
+            let prefix = lines[..=start].join("\n");
+            if next_heading >= lines.len() {
+                return format!("{prefix}\n{annotated}");
+            }
+            let suffix = lines[next_heading..].join("\n");
+            return format!("{prefix}\n{annotated}\n\n{suffix}");
+        }
+        return markdown.to_string();
+    }
+
+    let desired_body = if desired.trim().is_empty() {
+        match lang {
+            SummaryLanguage::Ja => {
+                format!(
+                    "（推定）{}",
+                    infer_purpose_from_branch(branch_name, SummaryLanguage::Ja)
+                )
+            }
+            SummaryLanguage::En => format!(
+                "(Inferred) {}",
+                infer_purpose_from_branch(branch_name, SummaryLanguage::En)
+            ),
+        }
+    } else {
+        desired
+    };
+
+    let prefix = lines[..=start].join("\n");
+    if next_heading >= lines.len() {
+        return format!("{prefix}\n{desired_body}");
+    }
+    let suffix = lines[next_heading..].join("\n");
+    format!("{prefix}\n{desired_body}\n\n{suffix}")
+}
+
+fn has_inferred_marker(text: &str, lang: SummaryLanguage) -> bool {
+    match lang {
+        SummaryLanguage::Ja => text.trim_start().starts_with("（推定）"),
+        SummaryLanguage::En => text.trim_start().starts_with("(Inferred)"),
+    }
+}
+
+fn annotate_as_inferred(text: &str, lang: SummaryLanguage) -> String {
+    let trimmed = text.trim();
+    match lang {
+        SummaryLanguage::Ja => format!("（推定）{trimmed}"),
+        SummaryLanguage::En => format!("(Inferred) {trimmed}"),
+    }
+}
+
+fn extract_purpose_body(markdown: &str) -> Option<String> {
+    let lines: Vec<&str> = markdown.lines().collect();
+    if lines.is_empty() {
+        return None;
+    }
+
+    let mut start: Option<usize> = None;
+    for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        let Some(title) = trimmed.strip_prefix("## ") else {
+            continue;
+        };
+        if matches!(classify_heading(title.trim()), Some(HeadingKind::Purpose)) {
+            start = Some(idx + 1);
+            break;
+        }
+    }
+
+    let start = start?;
+    let mut end = lines.len();
+    for (idx, line) in lines.iter().enumerate().skip(start) {
+        if line.trim_start().starts_with("## ") {
+            end = idx;
+            break;
+        }
+    }
+
+    let body = lines[start..end].join("\n").trim().to_string();
+    if body.is_empty() {
+        None
+    } else {
+        Some(body)
+    }
+}
+
 fn heading_matches(title: &str, expected: &[&str]) -> bool {
     let trimmed = title.trim();
     expected.iter().any(|exp| {
@@ -689,6 +1246,42 @@ fn target_summary_language(requested: &str, content: &str) -> SummaryLanguage {
                 SummaryLanguage::En
             }
         }),
+        _ => SummaryLanguage::En,
+    }
+}
+
+fn fallback_purpose_language_for_messages(
+    requested: &str,
+    messages: &[SessionMessage],
+) -> SummaryLanguage {
+    match requested.trim() {
+        "ja" => SummaryLanguage::Ja,
+        "en" => SummaryLanguage::En,
+        "auto" => {
+            if messages
+                .iter()
+                .any(|message| contains_japanese(&message.content))
+            {
+                SummaryLanguage::Ja
+            } else {
+                SummaryLanguage::En
+            }
+        }
+        _ => SummaryLanguage::En,
+    }
+}
+
+fn fallback_purpose_language_for_text(requested: &str, text: &str) -> SummaryLanguage {
+    match requested.trim() {
+        "ja" => SummaryLanguage::Ja,
+        "en" => SummaryLanguage::En,
+        "auto" => {
+            if contains_japanese(text) {
+                SummaryLanguage::Ja
+            } else {
+                SummaryLanguage::En
+            }
+        }
         _ => SummaryLanguage::En,
     }
 }
@@ -1051,6 +1644,132 @@ mod tests {
         assert!(user_prompt.contains("Error: build blocked."));
         assert!(user_prompt.contains("Need confirmation?"));
         assert!(!user_prompt.contains("go"));
+    }
+
+    #[test]
+    fn test_derive_worktree_purpose_prefers_latest_explicit_user_message() {
+        let messages = vec![
+            SessionMessage {
+                role: MessageRole::User,
+                content: "目的: 古い目的".to_string(),
+                timestamp: None,
+            },
+            SessionMessage {
+                role: MessageRole::Assistant,
+                content: "了解です".to_string(),
+                timestamp: None,
+            },
+            SessionMessage {
+                role: MessageRole::User,
+                content:
+                    "違います。目的はfeature/agent-modeで作った成果をdevelopに取り込むことです。"
+                        .to_string(),
+                timestamp: None,
+            },
+        ];
+
+        let derived = derive_worktree_purpose_from_messages(
+            &messages,
+            "feature/agent-mode",
+            SummaryLanguage::Ja,
+        );
+        assert_eq!(derived.source, PurposeSource::Explicit);
+        assert!(derived.text.contains("feature/agent-mode"));
+    }
+
+    #[test]
+    fn test_derive_worktree_purpose_falls_back_to_inferred_branch_goal() {
+        let messages = vec![
+            SessionMessage {
+                role: MessageRole::User,
+                content: "PR本文テンプレートを埋めてください。".to_string(),
+                timestamp: None,
+            },
+            SessionMessage {
+                role: MessageRole::User,
+                content: "PRを作成してURLを確認".to_string(),
+                timestamp: None,
+            },
+        ];
+
+        let derived = derive_worktree_purpose_from_messages(
+            &messages,
+            "feature/agent-mode",
+            SummaryLanguage::En,
+        );
+        assert_eq!(derived.source, PurposeSource::Inferred);
+        assert!(derived.text.contains("feature/agent-mode"));
+    }
+
+    #[test]
+    fn test_derive_worktree_purpose_falls_back_to_requested_japanese_goal() {
+        let messages = vec![SessionMessage {
+            role: MessageRole::User,
+            content: "PR本文テンプレートを埋めてください。".to_string(),
+            timestamp: None,
+        }];
+
+        let derived = derive_worktree_purpose_from_messages(
+            &messages,
+            "feature/agent-mode",
+            SummaryLanguage::Ja,
+        );
+        assert_eq!(derived.source, PurposeSource::Inferred);
+        assert!(derived.text.contains("成果をこのWorktreeで達成すること"));
+        assert!(!derived.text.contains("Deliver the outcome intended"));
+    }
+
+    #[test]
+    fn test_enforce_worktree_purpose_replaces_operational_purpose_text() {
+        let markdown = "## 目的\nPR本文テンプレートを埋めてPRを作ること\n\n## 要約\n進行中\n\n## ハイライト\n- 元の依頼: ...";
+        let derived = DerivedPurpose::explicit(
+            "feature/agent-mode の成果を develop に取り込むこと".to_string(),
+        );
+        let enforced = enforce_worktree_purpose_in_markdown(
+            markdown,
+            SummaryLanguage::Ja,
+            "feature/agent-mode",
+            &derived,
+        );
+
+        assert!(enforced.contains("feature/agent-mode の成果を develop に取り込むこと"));
+        assert!(!enforced.contains("PR本文テンプレートを埋めてPRを作ること"));
+    }
+
+    #[test]
+    fn test_enforce_worktree_purpose_keeps_existing_when_inferred_and_valid() {
+        let markdown =
+            "## 目的\nIssue タブの改善成果を取り込むこと\n\n## 要約\n進行中\n\n## ハイライト\n- 元の依頼: ...";
+        let derived = DerivedPurpose::inferred(
+            "Deliver the outcome intended by branch 'feature/issue-tab'".to_string(),
+        );
+
+        let enforced = enforce_worktree_purpose_in_markdown(
+            markdown,
+            SummaryLanguage::Ja,
+            "feature/issue-tab",
+            &derived,
+        );
+
+        assert!(enforced.contains("## 目的\n（推定）Issue タブの改善成果を取り込むこと"));
+    }
+
+    #[test]
+    fn test_enforce_worktree_purpose_rewrites_pr_template_as_means() {
+        let markdown = "## 目的\nfeature/agent-mode ブランチから develop への PR を作成し、PR 本文テンプレートを埋めること\n\n## 要約\n完了\n\n## ハイライト\n- Original request: feature/agent-mode ブランチから develop への PR を作成\n- Latest instruction: PR 本文テンプレートを埋める";
+        let derived = DerivedPurpose::explicit(
+            "feature/agent-mode で達成した成果を develop に取り込むこと".to_string(),
+        );
+
+        let enforced = enforce_worktree_purpose_in_markdown(
+            markdown,
+            SummaryLanguage::Ja,
+            "feature/agent-mode",
+            &derived,
+        );
+
+        assert!(enforced.contains("feature/agent-mode で達成した成果を develop に取り込むこと"));
+        assert!(!enforced.contains("PR 本文テンプレートを埋めること"));
     }
 
     #[test]

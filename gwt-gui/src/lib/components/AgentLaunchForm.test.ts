@@ -360,6 +360,63 @@ describe("AgentLaunchForm", () => {
     ]);
   });
 
+  it("displays claude model options with 1M context and opusplan variants", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "claude",
+            name: "Claude Code",
+            version: "0.0.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "get_agent_config") {
+        return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      }
+      return [];
+    });
+
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "",
+      onLaunch,
+      onClose,
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    const modelSelect = rendered.getByLabelText("Model") as HTMLSelectElement;
+    const values = Array.from(modelSelect.options).map((o) => o.value);
+    const labels = Array.from(modelSelect.options).map((o) => o.textContent);
+
+    expect(values).toEqual([
+      "",
+      "opus",
+      "sonnet",
+      "haiku",
+      "opus[1m]",
+      "sonnet[1m]",
+      "opusplan",
+    ]);
+    expect(labels).toEqual([
+      "Default",
+      "Opus",
+      "Sonnet",
+      "Haiku",
+      "Opus (1M context)",
+      "Sonnet (1M context)",
+      "Opus Plan (plan: opus / exec: sonnet)",
+    ]);
+  });
+
   it("passes selected codex model to launch request", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "detect_agents") {
@@ -1632,7 +1689,7 @@ describe("AgentLaunchForm", () => {
                 number: 1,
                 title: "First issue",
                 updatedAt: "2026-02-13T00:00:00Z",
-                labels: ["backend", "urgent"],
+                labels: [{ name: "backend", color: "0075ca" }, { name: "urgent", color: "e4e669" }],
               },
             ],
             hasNextPage: true,
@@ -1727,6 +1784,7 @@ describe("AgentLaunchForm", () => {
         projectPath: "/tmp/project",
         page: 2,
         perPage: 30,
+        state: "open",
       });
       expect(rendered.getByText("Second issue")).toBeTruthy();
       expect(issuePageCalls).toBeGreaterThanOrEqual(2);

@@ -363,79 +363,104 @@ impl WorktreeManager {
                             return Ok(wt);
                         }
                     }
-                }
-            }
-
-            let mut remote_branch =
-                resolve_remote_branch(&self.repo_root, normalized_branch, &remotes)?;
-
-            if remote_branch.is_none() && !remotes.is_empty() {
-                // Refresh remote refs once if branch isn't found locally
-                self.repo.fetch_all()?;
-                remote_branch =
-                    resolve_remote_branch(&self.repo_root, normalized_branch, &remotes)?;
-            }
-
-            if let Some((remote, branch)) = remote_branch {
-                resolved_branch = branch.clone();
-                if !Branch::exists(&self.repo_root, &resolved_branch)? {
-                    // Check if refs/remotes/{remote}/{branch} exists locally
-                    let has_local_remote_ref = crate::process::command("git")
-                        .args([
-                            "show-ref",
-                            "--verify",
-                            "--quiet",
-                            &format!("refs/remotes/{}/{}", remote, branch),
-                        ])
-                        .current_dir(&self.repo_root)
-                        .output()
-                        .map(|o| o.status.success())
-                        .unwrap_or(false);
-
-                    if has_local_remote_ref {
-                        // Normal repo with local remote ref: create branch from it
-                        let remote_ref = format!("{}/{}", remote, resolved_branch);
-                        Branch::create(&self.repo_root, &resolved_branch, &remote_ref)?;
-                    } else {
-                        // SPEC-a70a1ece FR-124: No local remote ref, fetch from remote
-                        let fetch_output = crate::process::command("git")
-                            .args(["fetch", &remote, &format!("{}:{}", branch, branch)])
-                            .current_dir(&self.repo_root)
-                            .output()
-                            .map_err(|e| GwtError::GitOperationFailed {
-                                operation: "fetch".to_string(),
-                                details: e.to_string(),
-                            })?;
-
-                        if !fetch_output.status.success() {
-                            let err = String::from_utf8_lossy(&fetch_output.stderr);
-                            error!(
-                                category = "worktree",
-                                branch = branch.as_str(),
-                                error = %err,
-                                "Failed to fetch branch"
-                            );
-                            return Err(GwtError::GitOperationFailed {
-                                operation: "fetch".to_string(),
-                                details: err.to_string(),
-                            });
-                        }
-                        debug!(
-                            category = "worktree",
-                            branch = branch.as_str(),
-                            "Fetched branch from remote"
-                        );
+                    // SPEC-013cd65c FR-002: Bare repos store fetched branches in
+                    // refs/heads/* without refs/remotes/*, so check local refs first.
+                    if Branch::exists(&self.repo_root, branch_candidate)? {
+                        resolved_branch = branch_candidate.to_string();
                     }
                 }
-            } else {
-                error!(
-                    category = "worktree",
-                    branch = branch_name,
-                    "Branch not found"
-                );
-                return Err(GwtError::BranchNotFound {
-                    name: branch_name.to_string(),
-                });
+            }
+
+            if resolved_branch == branch_name {
+                let mut remote_branch =
+                    resolve_remote_branch(&self.repo_root, normalized_branch, &remotes)?;
+
+                if remote_branch.is_none() && !remotes.is_empty() {
+                    // Refresh remote refs once if branch isn't found locally
+                    self.repo.fetch_all()?;
+                    remote_branch =
+                        resolve_remote_branch(&self.repo_root, normalized_branch, &remotes)?;
+
+                    // SPEC-013cd65c FR-003: Bare repos fetch to refs/heads/*,
+                    // so resolve_remote_branch (which checks refs/remotes/*) may
+                    // still return None. Fall back to checking refs/heads/*.
+                    if remote_branch.is_none() {
+                        if let Some((remote_candidate, branch_candidate)) =
+                            split_remote_ref(normalized_branch)
+                        {
+                            if remotes.iter().any(|r| r.name == remote_candidate)
+                                && Branch::exists(&self.repo_root, branch_candidate)?
+                            {
+                                remote_branch = Some((
+                                    remote_candidate.to_string(),
+                                    branch_candidate.to_string(),
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                if let Some((remote, branch)) = remote_branch {
+                    resolved_branch = branch.clone();
+                    if !Branch::exists(&self.repo_root, &resolved_branch)? {
+                        // Check if refs/remotes/{remote}/{branch} exists locally
+                        let has_local_remote_ref = crate::process::command("git")
+                            .args([
+                                "show-ref",
+                                "--verify",
+                                "--quiet",
+                                &format!("refs/remotes/{}/{}", remote, branch),
+                            ])
+                            .current_dir(&self.repo_root)
+                            .output()
+                            .map(|o| o.status.success())
+                            .unwrap_or(false);
+
+                        if has_local_remote_ref {
+                            // Normal repo with local remote ref: create branch from it
+                            let remote_ref = format!("{}/{}", remote, resolved_branch);
+                            Branch::create(&self.repo_root, &resolved_branch, &remote_ref)?;
+                        } else {
+                            // SPEC-a70a1ece FR-124: No local remote ref, fetch from remote
+                            let fetch_output = crate::process::command("git")
+                                .args(["fetch", &remote, &format!("{}:{}", branch, branch)])
+                                .current_dir(&self.repo_root)
+                                .output()
+                                .map_err(|e| GwtError::GitOperationFailed {
+                                    operation: "fetch".to_string(),
+                                    details: e.to_string(),
+                                })?;
+
+                            if !fetch_output.status.success() {
+                                let err = String::from_utf8_lossy(&fetch_output.stderr);
+                                error!(
+                                    category = "worktree",
+                                    branch = branch.as_str(),
+                                    error = %err,
+                                    "Failed to fetch branch"
+                                );
+                                return Err(GwtError::GitOperationFailed {
+                                    operation: "fetch".to_string(),
+                                    details: err.to_string(),
+                                });
+                            }
+                            debug!(
+                                category = "worktree",
+                                branch = branch.as_str(),
+                                "Fetched branch from remote"
+                            );
+                        }
+                    }
+                } else {
+                    error!(
+                        category = "worktree",
+                        branch = branch_name,
+                        "Branch not found"
+                    );
+                    return Err(GwtError::BranchNotFound {
+                        name: branch_name.to_string(),
+                    });
+                }
             }
         }
 
@@ -593,22 +618,33 @@ impl WorktreeManager {
                     // refs/remotes/*, so allow remote-like bases to fall back to local refs.
                     if Branch::exists(&self.repo_root, branch)? {
                         resolved_base = Some(branch.to_string());
-                    } else if !Branch::remote_exists(&self.repo_root, remote, branch)? {
-                        error!(
-                            category = "worktree",
-                            branch = base,
-                            "Base branch not found"
-                        );
-                        return Err(GwtError::BranchNotFound {
-                            name: base.to_string(),
-                        });
                     } else {
+                        // SPEC-013cd65c FR-004: Try remote_exists first, fall back to
+                        // fetch_all + local check when it fails.
+                        let mut did_fetch = false;
+                        let mut found = Branch::remote_exists(&self.repo_root, remote, branch)?;
+                        if !found {
+                            self.repo.fetch_all()?;
+                            did_fetch = true;
+                            found = Branch::exists(&self.repo_root, branch)?
+                                || Branch::remote_exists(&self.repo_root, remote, branch)?;
+                        }
+                        if !found {
+                            error!(
+                                category = "worktree",
+                                branch = base,
+                                "Base branch not found"
+                            );
+                            return Err(GwtError::BranchNotFound {
+                                name: base.to_string(),
+                            });
+                        }
+
                         // remote_exists may succeed via ls-remote (bare repo), but the ref still
                         // needs to exist locally for `git reset --hard origin/<branch>` to work.
                         let mut local_remote_ref_present =
                             has_local_remote_ref(&self.repo_root, remote, branch);
-                        if !local_remote_ref_present {
-                            // Fetch once to materialize refs/remotes/* locally.
+                        if !local_remote_ref_present && !did_fetch {
                             self.repo.fetch_all()?;
                             local_remote_ref_present =
                                 has_local_remote_ref(&self.repo_root, remote, branch);
@@ -620,14 +656,33 @@ impl WorktreeManager {
                             // Keep going with the local branch when only refs/heads/* exists.
                             resolved_base = Some(branch.to_string());
                         } else {
-                            error!(
-                                category = "worktree",
-                                branch = base,
-                                "Base branch not found after fetch"
-                            );
-                            return Err(GwtError::BranchNotFound {
-                                name: base.to_string(),
-                            });
+                            // SPEC-013cd65c: fetch_all may not work in bare repos
+                            // (no fetch refspec). Explicitly fetch the specific branch.
+                            let fetch_output = crate::process::command("git")
+                                .args(["fetch", remote, &format!("{}:{}", branch, branch)])
+                                .current_dir(&self.repo_root)
+                                .output()
+                                .map_err(|e| GwtError::GitOperationFailed {
+                                    operation: "fetch".to_string(),
+                                    details: e.to_string(),
+                                })?;
+
+                            if fetch_output.status.success()
+                                && Branch::exists(&self.repo_root, branch)?
+                            {
+                                resolved_base = Some(branch.to_string());
+                            } else if has_local_remote_ref(&self.repo_root, remote, branch) {
+                                resolved_base = Some(base.to_string());
+                            } else {
+                                error!(
+                                    category = "worktree",
+                                    branch = base,
+                                    "Base branch not found after fetch"
+                                );
+                                return Err(GwtError::BranchNotFound {
+                                    name: base.to_string(),
+                                });
+                            }
                         }
                     }
                 } else {
@@ -1572,6 +1627,38 @@ mod tests {
     }
 
     #[test]
+    fn test_create_for_branch_remote_like_name_with_unknown_remote_returns_not_found() {
+        let temp = create_test_repo();
+
+        let remote = TempDir::new().unwrap();
+        let remote_path = remote.path().to_string_lossy().to_string();
+        run_git_in(remote.path(), &["init", "--bare"]);
+
+        run_git_in(
+            temp.path(),
+            &["remote", "add", "origin", remote_path.as_str()],
+        );
+
+        let default_branch = git_stdout(temp.path(), &["rev-parse", "--abbrev-ref", "HEAD"]);
+        run_git_in(
+            temp.path(),
+            &["push", "-u", "origin", default_branch.as_str()],
+        );
+
+        Branch::create(temp.path(), "foo", "HEAD").unwrap();
+
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+        let result = manager.create_for_branch("feature/foo");
+        assert!(matches!(
+            result,
+            Err(GwtError::BranchNotFound { ref name }) if name == "feature/foo"
+        ));
+
+        // "feature/foo" must not silently resolve to local "foo".
+        assert!(manager.get_by_branch_basic("foo").unwrap().is_none());
+    }
+
+    #[test]
     fn test_remove_worktree() {
         let temp = create_test_repo();
         let manager = WorktreeManager::new(temp.path()).unwrap();
@@ -1954,5 +2041,114 @@ mod tests {
 
         let manager = WorktreeManager::new(temp.path()).unwrap();
         assert_eq!(manager.location, WorktreeLocation::Subdir);
+    }
+
+    /// Create a bare test repository with an extra branch on the remote that is
+    /// NOT yet fetched into the bare clone.
+    /// Returns (TempDir, PathBuf, String, String) where:
+    /// - PathBuf is the bare repo path
+    /// - first String is the default branch name
+    /// - second String is the extra branch name (exists only on remote, not fetched)
+    fn create_bare_repo_with_remote_branch() -> (TempDir, PathBuf, String, String) {
+        let temp = TempDir::new().unwrap();
+
+        // Create source repo (acts as origin)
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        run_git_in(&source, &["init", "--bare"]);
+
+        // Create a helper repo to push commits to the source
+        let helper = temp.path().join("helper");
+        std::fs::create_dir_all(&helper).unwrap();
+        run_git_in(&helper, &["init"]);
+        run_git_in(&helper, &["config", "user.email", "test@test.com"]);
+        run_git_in(&helper, &["config", "user.name", "Test"]);
+        std::fs::write(helper.join("test.txt"), "hello").unwrap();
+        run_git_in(&helper, &["add", "."]);
+        run_git_in(&helper, &["commit", "-m", "initial"]);
+        let base_branch = git_stdout(&helper, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        run_git_in(
+            &helper,
+            &["remote", "add", "origin", source.to_str().unwrap()],
+        );
+        run_git_in(&helper, &["push", "-u", "origin", &base_branch]);
+
+        // Clone as bare — only default branch is in refs/heads/
+        let bare = temp.path().join("repo.git");
+        let output = crate::process::command("git")
+            .args([
+                "clone",
+                "--bare",
+                source.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Failed to create bare clone: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // NOW push a new branch to source (origin) from helper — after the bare clone
+        let mut extra_branch = "feature/unfetched-remote".to_string();
+        if extra_branch == base_branch {
+            extra_branch = "feature/unfetched-remote-2".to_string();
+        }
+
+        run_git_in(&helper, &["checkout", "-b", extra_branch.as_str()]);
+        std::fs::write(helper.join("extra-branch.txt"), "extra branch content").unwrap();
+        run_git_in(&helper, &["add", "."]);
+        run_git_in(&helper, &["commit", "-m", "extra branch commit"]);
+        run_git_in(&helper, &["push", "origin", extra_branch.as_str()]);
+
+        // Verify extra branch is NOT in local refs/heads of the bare repo
+        let has_local = Branch::exists(&bare, &extra_branch).unwrap();
+        assert!(
+            !has_local,
+            "{} should not be in refs/heads/ of bare repo before fetch",
+            extra_branch
+        );
+
+        (temp, bare, base_branch, extra_branch)
+    }
+
+    #[test]
+    fn test_bare_repo_create_for_branch_from_unfetched_remote_branch() {
+        // SPEC-013cd65c: create_for_branch("origin/<extra-branch>") should succeed
+        // even when that branch is not yet fetched into refs/heads/
+        let (_temp, bare_path, _base_branch, extra_branch) = create_bare_repo_with_remote_branch();
+
+        let manager = WorktreeManager::new(&bare_path).unwrap();
+        let remote_ref = format!("origin/{}", extra_branch);
+        let wt = manager.create_for_branch(&remote_ref).unwrap();
+
+        assert_eq!(wt.branch.as_deref(), Some(extra_branch.as_str()));
+        assert!(wt.path.exists());
+    }
+
+    #[test]
+    fn test_bare_repo_create_new_branch_from_unfetched_remote_base() {
+        // SPEC-013cd65c: create_new_branch with base "origin/<extra-branch>" should succeed
+        // even when that branch is not yet fetched into refs/heads/
+        let (_temp, bare_path, _base_branch, extra_branch) = create_bare_repo_with_remote_branch();
+
+        let manager = WorktreeManager::new(&bare_path).unwrap();
+        let remote_base = format!("origin/{}", extra_branch);
+        let wt = manager
+            .create_new_branch("feature/from-unfetched", Some(&remote_base))
+            .unwrap();
+
+        assert_eq!(wt.branch.as_deref(), Some("feature/from-unfetched"));
+        assert!(wt.path.exists());
+
+        // HEAD should point to the extra branch commit, not the default branch
+        let extra_branch_commit = {
+            // After the create, extra branch should now be fetched
+            git_stdout(&bare_path, &["rev-parse", &extra_branch])
+        };
+        let wt_head = git_stdout(&wt.path, &["rev-parse", "HEAD"]);
+        assert_eq!(wt_head, extra_branch_commit);
     }
 }

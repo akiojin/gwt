@@ -20,12 +20,11 @@ use gwt_core::terminal::{AgentColor, BuiltinLaunchConfig};
 use gwt_core::worktree::WorktreeManager;
 use serde::Deserialize;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
@@ -353,6 +352,106 @@ fn get_command_version_with_timeout(command: &str) -> Option<String> {
 }
 
 #[derive(Debug, Clone)]
+struct CodexFeatureProbeContext {
+    command: String,
+    args: Vec<String>,
+    tool_version: String,
+}
+
+static CODEX_MULTI_AGENT_SUPPORT_CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+const CODEX_FEATURES_LIST_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn codex_multi_agent_support_cache() -> &'static Mutex<HashMap<String, bool>> {
+    CODEX_MULTI_AGENT_SUPPORT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn codex_multi_agent_support_cache_key(context: &CodexFeatureProbeContext) -> String {
+    let mut key = format!("{}|{}", context.command, context.tool_version);
+    for arg in &context.args {
+        key.push('\u{1f}');
+        key.push_str(arg);
+    }
+    key
+}
+
+fn codex_features_list_contains_feature(raw: &str, feature: &str) -> bool {
+    raw.lines().any(|line| {
+        line.split_whitespace()
+            .next()
+            .is_some_and(|name| name == feature)
+    })
+}
+
+fn probe_codex_features_list(command: &str, args: &[String], timeout: Duration) -> Option<String> {
+    let command = command.to_string();
+    let args = args.to_vec();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let out = gwt_core::process::command(&command)
+            .args(args)
+            .arg("features")
+            .arg("list")
+            .output();
+        let _ = tx.send(out);
+    });
+
+    let out = rx.recv_timeout(timeout).ok()?.ok()?;
+    if !out.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if stdout.is_empty() {
+        return None;
+    }
+
+    Some(stdout)
+}
+
+fn codex_supports_multi_agent(context: &CodexFeatureProbeContext) -> bool {
+    let cache_key = codex_multi_agent_support_cache_key(context);
+    if let Ok(cache) = codex_multi_agent_support_cache().lock() {
+        if let Some(value) = cache.get(&cache_key) {
+            return *value;
+        }
+    }
+
+    let supported = match probe_codex_features_list(
+        &context.command,
+        &context.args,
+        CODEX_FEATURES_LIST_TIMEOUT,
+    ) {
+        Some(raw) => codex_features_list_contains_feature(&raw, "multi_agent"),
+        // Preserve default behavior for package-tag launches when probing is unavailable.
+        None => context.tool_version.eq_ignore_ascii_case("latest"),
+    };
+
+    if let Ok(mut cache) = codex_multi_agent_support_cache().lock() {
+        cache.insert(cache_key, supported);
+    }
+
+    supported
+}
+
+fn codex_config_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".codex").join("config.toml"))
+}
+
+fn codex_config_has_collab_alias(path: &std::path::Path) -> Result<bool, String> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read Codex config ({}): {e}", path.display()))?;
+    let parsed: toml::Value = toml::from_str(&raw)
+        .map_err(|e| format!("Failed to parse Codex config ({}): {e}", path.display()))?;
+    Ok(parsed
+        .get("features")
+        .and_then(|value| value.get("collab"))
+        .is_some())
+}
+
+#[derive(Debug, Clone)]
 struct ResolvedAgentLaunchCommand {
     command: String,
     args: Vec<String>,
@@ -600,6 +699,66 @@ fn merge_profile_env_for_docker(
             continue;
         }
         base_env.insert(k.to_string(), value.to_string());
+    }
+}
+
+fn compose_file_paths_from_args(compose_args: &[String]) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut idx = 0usize;
+    while idx + 1 < compose_args.len() {
+        if compose_args[idx] == "-f" {
+            let path = compose_args[idx + 1].trim();
+            if !path.is_empty() {
+                paths.push(PathBuf::from(path));
+            }
+            idx += 2;
+            continue;
+        }
+        idx += 1;
+    }
+    paths
+}
+
+fn collect_compose_env_keys(compose_paths: &[PathBuf]) -> HashSet<String> {
+    let mut keys = HashSet::new();
+    for compose_path in compose_paths {
+        if let Ok(found) = DockerManager::list_env_keys_from_compose_file(compose_path) {
+            keys.extend(found);
+        }
+    }
+    keys
+}
+
+fn merge_compose_env_for_docker(
+    base_env: &mut HashMap<String, String>,
+    merged_profile_env: &HashMap<String, String>,
+    compose_paths: &[PathBuf],
+) {
+    let keys = collect_compose_env_keys(compose_paths);
+    for key in keys {
+        let k = key.trim();
+        if k.is_empty() || !is_valid_docker_env_key(k) {
+            continue;
+        }
+        if let Some(value) = merged_profile_env.get(k) {
+            base_env.insert(k.to_string(), value.to_string());
+        }
+    }
+}
+
+fn merge_compose_env_from_process(
+    base_env: &mut HashMap<String, String>,
+    compose_paths: &[PathBuf],
+) {
+    let keys = collect_compose_env_keys(compose_paths);
+    for key in keys {
+        let k = key.trim();
+        if k.is_empty() || !is_valid_docker_env_key(k) {
+            continue;
+        }
+        if let Ok(value) = std::env::var(k) {
+            base_env.insert(k.to_string(), value);
+        }
     }
 }
 
@@ -1017,6 +1176,7 @@ fn build_agent_args(
     agent_id: &str,
     request: &LaunchAgentRequest,
     version_for_gates: Option<&str>,
+    enable_codex_multi_agent: bool,
 ) -> Result<Vec<String>, String> {
     let mode = request.mode.unwrap_or(SessionMode::Normal);
     let skip_permissions = request.skip_permissions.unwrap_or(false);
@@ -1058,6 +1218,7 @@ fn build_agent_args(
                 version_for_gates,
                 skip_permissions,
                 collaboration,
+                enable_codex_multi_agent,
             ));
 
             if skip_permissions {
@@ -1331,6 +1492,7 @@ mod tests {
     use std::ffi::OsString;
     use std::path::Path;
     use std::time::Duration;
+    use tempfile::TempDir;
 
     struct ScopedEnvVar {
         key: &'static str,
@@ -1455,18 +1617,18 @@ mod tests {
     }
 
     #[test]
-    fn choose_fallback_runner_prefers_bunx_when_not_local() {
+    fn choose_fallback_runner_prefers_npx_when_both_available() {
         assert_eq!(
             choose_fallback_runner(Some(Path::new("/usr/local/bin/bunx")), true),
-            Some(FallbackRunner::Bunx)
+            Some(FallbackRunner::Npx)
         );
     }
 
     #[test]
-    fn choose_fallback_runner_uses_npx_when_bunx_is_local_node_modules() {
+    fn choose_fallback_runner_uses_bunx_when_npx_unavailable() {
         assert_eq!(
-            choose_fallback_runner(Some(Path::new("/repo/node_modules/.bin/bunx")), true),
-            Some(FallbackRunner::Npx)
+            choose_fallback_runner(Some(Path::new("/usr/local/bin/bunx")), false),
+            Some(FallbackRunner::Bunx)
         );
     }
 
@@ -1873,7 +2035,7 @@ mod tests {
     fn build_agent_args_codex_continue_defaults_to_resume_last() {
         let mut req = make_request("codex");
         req.mode = Some(SessionMode::Continue);
-        let args = build_agent_args("codex", &req, Some("0.92.0")).unwrap();
+        let args = build_agent_args("codex", &req, Some("0.92.0"), false).unwrap();
         assert_eq!(args[0], "resume");
         assert_eq!(args[1], "--last");
         assert!(args.iter().any(|a| a.starts_with("--model=")));
@@ -1882,10 +2044,69 @@ mod tests {
     #[test]
     fn build_agent_args_codex_collaboration_modes_always_enabled() {
         let req = make_request("codex");
-        let args = build_agent_args("codex", &req, Some("latest")).unwrap();
+        let args = build_agent_args("codex", &req, Some("latest"), false).unwrap();
         assert!(args
             .windows(2)
             .any(|w| w[0] == "--enable" && w[1] == "collaboration_modes"));
+    }
+
+    #[test]
+    fn build_agent_args_codex_multi_agent_enabled() {
+        let req = make_request("codex");
+        let args = build_agent_args("codex", &req, Some("latest"), true).unwrap();
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--enable" && w[1] == "multi_agent"));
+    }
+
+    #[test]
+    fn build_agent_args_codex_multi_agent_disabled() {
+        let req = make_request("codex");
+        let args = build_agent_args("codex", &req, Some("latest"), false).unwrap();
+        assert!(!args
+            .windows(2)
+            .any(|w| w[0] == "--enable" && w[1] == "multi_agent"));
+    }
+
+    #[test]
+    fn codex_features_list_contains_feature_parses_first_column() {
+        let raw = r#"
+multi_agent                      experimental       true
+collaboration_modes              stable             true
+"#;
+        assert!(codex_features_list_contains_feature(raw, "multi_agent"));
+        assert!(!codex_features_list_contains_feature(raw, "collab"));
+    }
+
+    #[test]
+    fn codex_config_has_collab_alias_detects_legacy_key() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[features]
+collab = true
+multi_agent = true
+"#,
+        )
+        .unwrap();
+        assert!(codex_config_has_collab_alias(&path).unwrap());
+    }
+
+    #[test]
+    fn codex_config_has_collab_alias_ignores_missing_key() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[features]
+multi_agent = true
+"#,
+        )
+        .unwrap();
+        assert!(!codex_config_has_collab_alias(&path).unwrap());
     }
 
     #[test]
@@ -1893,10 +2114,10 @@ mod tests {
         let mut req = make_request("codex");
         req.skip_permissions = Some(true);
 
-        let legacy = build_agent_args("codex", &req, Some("0.79.9")).unwrap();
+        let legacy = build_agent_args("codex", &req, Some("0.79.9"), false).unwrap();
         assert!(legacy.iter().any(|a| a == "--yolo"));
 
-        let modern = build_agent_args("codex", &req, Some("0.80.0")).unwrap();
+        let modern = build_agent_args("codex", &req, Some("0.80.0"), false).unwrap();
         assert!(modern
             .iter()
             .any(|a| a == "--dangerously-bypass-approvals-and-sandbox"));
@@ -1907,7 +2128,7 @@ mod tests {
         let mut req = make_request("claude");
         req.mode = Some(SessionMode::Continue);
         req.resume_session_id = Some("sess-123".to_string());
-        let args = build_agent_args("claude", &req, None).unwrap();
+        let args = build_agent_args("claude", &req, None, false).unwrap();
         assert_eq!(args[0], "--resume");
         assert_eq!(args[1], "sess-123");
     }
@@ -1916,7 +2137,7 @@ mod tests {
     fn build_agent_args_claude_resume_without_id_opens_picker() {
         let mut req = make_request("claude");
         req.mode = Some(SessionMode::Resume);
-        let args = build_agent_args("claude", &req, None).unwrap();
+        let args = build_agent_args("claude", &req, None, false).unwrap();
         assert_eq!(args[0], "--resume");
         assert_eq!(args.len(), 1);
     }
@@ -1926,7 +2147,7 @@ mod tests {
         let mut req = make_request("gemini");
         req.mode = Some(SessionMode::Continue);
         req.resume_session_id = Some("sess-123".to_string());
-        let args = build_agent_args("gemini", &req, None).unwrap();
+        let args = build_agent_args("gemini", &req, None, false).unwrap();
         assert_eq!(args, vec!["-r".to_string(), "sess-123".to_string()]);
     }
 
@@ -1935,7 +2156,7 @@ mod tests {
         let mut req = make_request("opencode");
         req.mode = Some(SessionMode::Continue);
         req.resume_session_id = Some("sess-123".to_string());
-        let args = build_agent_args("opencode", &req, None).unwrap();
+        let args = build_agent_args("opencode", &req, None, false).unwrap();
         assert_eq!(args, vec!["-s".to_string(), "sess-123".to_string()]);
     }
 
@@ -1943,7 +2164,7 @@ mod tests {
     fn build_agent_args_opencode_resume_requires_session_id() {
         let mut req = make_request("opencode");
         req.mode = Some(SessionMode::Resume);
-        let err = build_agent_args("opencode", &req, None).unwrap_err();
+        let err = build_agent_args("opencode", &req, None, false).unwrap_err();
         assert!(err.to_lowercase().contains("session id"));
     }
 
@@ -2028,6 +2249,50 @@ mod tests {
         assert!(!base.contains_key("Path"));
         assert!(!base.contains_key("RANDOM_KEY"));
         assert!(!base.contains_key("=C:"));
+    }
+
+    #[test]
+    fn compose_file_paths_from_args_extracts_only_compose_files() {
+        let args = vec![
+            "-f".to_string(),
+            "/tmp/compose.base.yml".to_string(),
+            "--project-name".to_string(),
+            "test".to_string(),
+            "-f".to_string(),
+            "/tmp/compose.override.yml".to_string(),
+        ];
+
+        let paths = compose_file_paths_from_args(&args);
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0], PathBuf::from("/tmp/compose.base.yml"));
+        assert_eq!(paths[1], PathBuf::from("/tmp/compose.override.yml"));
+    }
+
+    #[test]
+    fn merge_compose_env_for_docker_includes_non_allowlisted_compose_keys() {
+        let temp = TempDir::new().unwrap();
+        let compose_path = temp.path().join("docker-compose.yml");
+        std::fs::write(
+            &compose_path,
+            r#"
+services:
+  app:
+    environment:
+      - CUSTOM_ENV
+      - GITHUB_TOKEN
+"#,
+        )
+        .unwrap();
+
+        let mut base = HashMap::new();
+        let mut merged = HashMap::new();
+        merged.insert("CUSTOM_ENV".to_string(), "custom".to_string());
+        merged.insert("GITHUB_TOKEN".to_string(), "ghs_xxx".to_string());
+
+        merge_compose_env_for_docker(&mut base, &merged, &[compose_path]);
+
+        assert_eq!(base.get("CUSTOM_ENV"), Some(&"custom".to_string()));
+        assert_eq!(base.get("GITHUB_TOKEN"), Some(&"ghs_xxx".to_string()));
     }
 
     #[test]
@@ -2277,7 +2542,7 @@ fn report_launch_progress(
     let _ = app_handle.emit("launch-progress", &payload);
 }
 
-fn launch_agent_for_project_root(
+pub(crate) fn launch_agent_for_project_root(
     project_root: PathBuf,
     request: LaunchAgentRequest,
     state: &AppState,
@@ -2285,31 +2550,51 @@ fn launch_agent_for_project_root(
     job_id: Option<&str>,
     cancelled: Option<&AtomicBool>,
 ) -> Result<String, String> {
+    tracing::debug!(job_id = ?job_id, "launch step: fetch");
     report_launch_progress(job_id, &app_handle, "fetch", None);
     if is_launch_cancelled(cancelled) {
         return Err("Cancelled".to_string());
     }
 
+    tracing::debug!(job_id = ?job_id, "launch step: validate");
     report_launch_progress(job_id, &app_handle, "validate", None);
     let agent_id = request.agent_id.trim();
     if agent_id.is_empty() {
         return Err("Agent is required".to_string());
     }
+    if agent_id == "codex" {
+        if let Some(path) = codex_config_path() {
+            match codex_config_has_collab_alias(&path) {
+                Ok(true) => {
+                    let detail = "Deprecated Codex feature key `collab` detected. Use `[features].multi_agent` in ~/.codex/config.toml.";
+                    tracing::warn!(path = %path.display(), "{detail}");
+                    report_launch_progress(job_id, &app_handle, "validate", Some(detail));
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::debug!(%error, "Failed to inspect Codex config for deprecated keys");
+                }
+            }
+        }
+    }
     if is_launch_cancelled(cancelled) {
         return Err("Cancelled".to_string());
     }
 
+    tracing::debug!(job_id = ?job_id, "launch step: paths");
     report_launch_progress(job_id, &app_handle, "paths", None);
     let repo_path = resolve_repo_path_for_project_root(&project_root)?;
     if is_launch_cancelled(cancelled) {
         return Err("Cancelled".to_string());
     }
 
+    tracing::debug!(job_id = ?job_id, "launch step: conflicts");
     report_launch_progress(job_id, &app_handle, "conflicts", None);
     if is_launch_cancelled(cancelled) {
         return Err("Cancelled".to_string());
     }
 
+    tracing::debug!(job_id = ?job_id, "launch step: create");
     report_launch_progress(job_id, &app_handle, "create", None);
 
     let (working_dir, branch_name, worktree_created) =
@@ -2371,6 +2656,7 @@ fn launch_agent_for_project_root(
         });
     }
 
+    tracing::debug!(job_id = ?job_id, "launch step: deps (waiting for environment)");
     report_launch_progress(job_id, &app_handle, "deps", Some("Waiting for environment"));
     if is_launch_cancelled(cancelled) {
         return Err("Cancelled".to_string());
@@ -2388,6 +2674,7 @@ fn launch_agent_for_project_root(
         return Err("Cancelled".to_string());
     }
 
+    tracing::debug!(job_id = ?job_id, "launch step: deps (resolved)");
     report_launch_progress(job_id, &app_handle, "deps", None);
     let mut env_vars = merge_profile_env(&os_env, request.profile.as_deref());
     // Useful for debugging and for agents that want to introspect gwt context.
@@ -2548,16 +2835,19 @@ fn launch_agent_for_project_root(
                     DockerFileType::Compose(compose_path.clone()),
                 );
 
+                let mut compose_args =
+                    vec!["-f".to_string(), compose_path.to_string_lossy().to_string()];
+                let compose_paths = compose_file_paths_from_args(&compose_args);
+
                 let mut env = manager.collect_passthrough_env();
                 // Merge only docker-relevant profile/env keys to avoid oversized command lines
                 // and invalid Windows pseudo env keys (e.g. "=C:").
                 merge_profile_env_for_docker(&mut env, &env_vars);
+                merge_compose_env_for_docker(&mut env, &env_vars, &compose_paths);
                 env.insert("COMPOSE_PROJECT_NAME".to_string(), container_name.clone());
                 apply_translated_git_env(&mut env);
 
                 let mounts = build_git_bind_mounts(&env);
-                let mut compose_args =
-                    vec!["-f".to_string(), compose_path.to_string_lossy().to_string()];
                 if let Some(override_path) = write_docker_compose_override(
                     &project_root,
                     &container_name,
@@ -2599,6 +2889,7 @@ fn launch_agent_for_project_root(
                     if compose_args.is_empty() {
                         return Err("Devcontainer is configured for compose but no compose files were found".to_string());
                     }
+                    let compose_paths = compose_file_paths_from_args(&compose_args);
 
                     // Best-effort compose service selection: prefer request, then devcontainer.json, then first service.
                     let mut services: Vec<String> = Vec::new();
@@ -2643,6 +2934,7 @@ fn launch_agent_for_project_root(
 
                     let mut env = manager.collect_passthrough_env();
                     merge_profile_env_for_docker(&mut env, &env_vars);
+                    merge_compose_env_for_docker(&mut env, &env_vars, &compose_paths);
                     env.insert("COMPOSE_PROJECT_NAME".to_string(), container_name.clone());
                     apply_translated_git_env(&mut env);
 
@@ -2749,8 +3041,24 @@ fn launch_agent_for_project_root(
         .as_deref()
         .or(Some(resolved.tool_version.as_str()));
 
+    let enable_codex_multi_agent = if agent_id == "codex" {
+        let context = CodexFeatureProbeContext {
+            command: resolved.command.clone(),
+            args: resolved.args.clone(),
+            tool_version: resolved.tool_version.clone(),
+        };
+        codex_supports_multi_agent(&context)
+    } else {
+        false
+    };
+
     let mut args = resolved.args.clone();
-    args.extend(build_agent_args(agent_id, &request, version_for_gates)?);
+    args.extend(build_agent_args(
+        agent_id,
+        &request,
+        version_for_gates,
+        enable_codex_multi_agent,
+    )?);
 
     let mode = request.mode.unwrap_or(SessionMode::Normal);
     let mode_str = match mode {
@@ -3032,42 +3340,79 @@ pub fn start_launch_job(
     let app = app_handle.clone();
     let job_id_thread = job_id.clone();
     std::thread::spawn(move || {
-        let state = app.state::<AppState>();
-        let result = launch_agent_for_project_root(
-            PathBuf::from(project_root),
-            request,
-            &state,
-            app.clone(),
-            Some(job_id_thread.as_str()),
-            Some(cancel_flag.as_ref()),
-        );
+        tracing::debug!(job_id = %job_id_thread, "launch thread started");
 
-        if let Ok(mut jobs) = state.launch_jobs.lock() {
-            jobs.remove(&job_id_thread);
-        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let state = app.state::<AppState>();
+            launch_agent_for_project_root(
+                PathBuf::from(project_root),
+                request,
+                &state,
+                app.clone(),
+                Some(job_id_thread.as_str()),
+                Some(cancel_flag.as_ref()),
+            )
+        }));
 
-        let finished = match result {
-            Ok(pane_id) => LaunchFinishedPayload {
-                job_id: job_id_thread.clone(),
-                status: "ok".to_string(),
-                pane_id: Some(pane_id),
-                error: None,
-            },
-            Err(err) if err.trim() == "Cancelled" => LaunchFinishedPayload {
-                job_id: job_id_thread.clone(),
-                status: "cancelled".to_string(),
-                pane_id: None,
-                error: None,
-            },
-            Err(err) => LaunchFinishedPayload {
-                job_id: job_id_thread.clone(),
-                status: "error".to_string(),
-                pane_id: None,
-                error: Some(err),
-            },
+        let finished = match &result {
+            Ok(Ok(pane_id)) => {
+                tracing::debug!(job_id = %job_id_thread, pane_id = %pane_id, "launch succeeded");
+                LaunchFinishedPayload {
+                    job_id: job_id_thread.clone(),
+                    status: "ok".to_string(),
+                    pane_id: Some(pane_id.clone()),
+                    error: None,
+                }
+            }
+            Ok(Err(err)) if err.trim() == "Cancelled" => {
+                tracing::debug!(job_id = %job_id_thread, "launch cancelled");
+                LaunchFinishedPayload {
+                    job_id: job_id_thread.clone(),
+                    status: "cancelled".to_string(),
+                    pane_id: None,
+                    error: None,
+                }
+            }
+            Ok(Err(err)) => {
+                tracing::warn!(job_id = %job_id_thread, error = %err, "launch failed");
+                LaunchFinishedPayload {
+                    job_id: job_id_thread.clone(),
+                    status: "error".to_string(),
+                    pane_id: None,
+                    error: Some(err.clone()),
+                }
+            }
+            Err(_panic) => {
+                tracing::error!(job_id = %job_id_thread, "launch thread panicked");
+                LaunchFinishedPayload {
+                    job_id: job_id_thread.clone(),
+                    status: "error".to_string(),
+                    pane_id: None,
+                    error: Some("Internal error: launch thread panicked".to_string()),
+                }
+            }
         };
 
+        tracing::debug!(job_id = %job_id_thread, status = %finished.status, "emitting launch-finished");
+
+        // Store the result for polling retrieval before emitting.  This
+        // guarantees the frontend can always recover the result even when
+        // Tauri events are silently lost.
+        if let Some(state) = app.try_state::<AppState>() {
+            if let Ok(mut results) = state.launch_results.lock() {
+                results.insert(job_id_thread.clone(), finished.clone());
+            }
+        }
+
         let _ = app.emit("launch-finished", &finished);
+
+        // Remove the running-job entry last so that polling sees the job
+        // as "running" until both the result store and event are done.
+        if let Some(state) = app.try_state::<AppState>() {
+            if let Ok(mut jobs) = state.launch_jobs.lock() {
+                jobs.remove(&job_id_thread);
+            }
+        }
     });
 
     Ok(job_id)
@@ -3087,6 +3432,56 @@ pub fn cancel_launch_job(job_id: String, state: State<AppState>) -> Result<(), S
         }
     }
     Ok(())
+}
+
+/// Frontend polling result for a launch job.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchJobPollResult {
+    /// `true` while the job thread is still running.
+    pub running: bool,
+    /// Populated once the job has finished (success, error, or panic).
+    /// The frontend should apply this exactly as it would a
+    /// `launch-finished` event.
+    pub finished: Option<LaunchFinishedPayload>,
+}
+
+/// Poll the state of a launch job.  Returns the final result when
+/// available so the frontend can recover even if Tauri events are lost.
+#[tauri::command]
+pub fn poll_launch_job(job_id: String, state: State<AppState>) -> LaunchJobPollResult {
+    let id = job_id.trim();
+    if id.is_empty() {
+        return LaunchJobPollResult {
+            running: false,
+            finished: None,
+        };
+    }
+
+    // Still running?
+    let running = state
+        .launch_jobs
+        .lock()
+        .map(|jobs| jobs.contains_key(id))
+        .unwrap_or(false);
+    if running {
+        return LaunchJobPollResult {
+            running: true,
+            finished: None,
+        };
+    }
+
+    // Finished – try to retrieve (and consume) the stored result.
+    let finished = state
+        .launch_results
+        .lock()
+        .ok()
+        .and_then(|mut results| results.remove(id));
+
+    LaunchJobPollResult {
+        running: false,
+        finished,
+    }
 }
 
 /// Terminal cwd changed event payload sent to the frontend
@@ -3382,12 +3777,18 @@ fn stream_pty_output(
                             }
                         };
 
-                        let manager = DockerManager::new(
-                            &worktree_path,
-                            "",
-                            DockerFileType::Compose(worktree_path.join("docker-compose.yml")),
-                        );
+                        let compose_paths = compose_file_paths_from_args(&args);
+                        let docker_file_type = compose_paths
+                            .first()
+                            .cloned()
+                            .map(DockerFileType::Compose)
+                            .unwrap_or_else(|| {
+                                DockerFileType::Compose(worktree_path.join("docker-compose.yml"))
+                            });
+
+                        let manager = DockerManager::new(&worktree_path, "", docker_file_type);
                         let mut env = manager.collect_passthrough_env();
+                        merge_compose_env_from_process(&mut env, &compose_paths);
                         env.insert("COMPOSE_PROJECT_NAME".to_string(), container_name.clone());
                         docker_compose_down(&worktree_path, &container_name, &env, &args)
                     })();

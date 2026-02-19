@@ -6,6 +6,7 @@
     LaunchAgentRequest,
     PrStatusInfo,
     GhCliStatus,
+    SettingsData,
   } from "../types";
   import AgentSidebar from "./AgentSidebar.svelte";
   import WorktreeSummaryPanel from "./WorktreeSummaryPanel.svelte";
@@ -25,6 +26,10 @@
     | { ok: true; snapshot: FilterCacheEntry }
     | { ok: false; errorMessage: string };
   type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
+  type TauriEventListen = <T = unknown>(
+    event: string,
+    handler: (event: { payload: T }) => void
+  ) => Promise<() => void>;
 
   let {
     projectPath,
@@ -45,6 +50,7 @@
     currentBranch = "",
     agentTabBranches = [],
     activeAgentTabBranch = null,
+    appLanguage = "auto",
     prStatuses = {},
     ghCliStatus = null,
   }: {
@@ -66,6 +72,7 @@
     currentBranch?: string;
     agentTabBranches?: string[];
     activeAgentTabBranch?: string | null;
+    appLanguage?: SettingsData["app_language"];
     prStatuses?: Record<string, PrStatusInfo | null>;
     ghCliStatus?: GhCliStatus | null;
   } = $props();
@@ -227,7 +234,7 @@
   let searchInput: string = $state("");
   let searchQuery: string = $state("");
   let errorMessage: string | null = $state(null);
-  let sortMode: BranchSortMode = $state("name");
+  let sortMode: BranchSortMode = $state("updated");
   let agentTabBranchSet = $derived.by(() => {
     const set = new Set<string>();
     for (const branchName of agentTabBranches) {
@@ -243,6 +250,7 @@
   let localRefreshKey = $state(0);
   let filterCache: Map<FilterType, FilterCacheEntry> = $state(new Map());
   const inflightFetches = new Map<string, Promise<FetchSnapshotResult>>();
+  let tauriEventListenPromise: Promise<TauriEventListen> | null = null;
 
   // Worktree safety info
   let worktreeMap: Map<string, WorktreeInfo> = $state(new Map());
@@ -415,10 +423,6 @@
   let contextMenu: { x: number; y: number; branch: BranchInfo } | null =
     $state(null);
 
-  // Confirmation dialog state
-  let confirmDelete: { branch: string; safetyLevel: string } | null =
-    $state(null);
-  let confirmDeleteError: string | null = $state(null);
   let resizing = false;
   let resizePointerId: number | null = null;
   let resizeStartX = 0;
@@ -499,8 +503,6 @@
   $effect(() => {
     if (mode === "branch") return;
     contextMenu = null;
-    confirmDelete = null;
-    confirmDeleteError = null;
   });
 
   function handleModeChange(next: SidebarMode) {
@@ -515,7 +517,7 @@
 
     (async () => {
       try {
-        const { listen } = await import("@tauri-apps/api/event");
+        const listen = await getEventListen();
         const unlistenFn = await listen<CleanupProgress>(
           "cleanup-progress",
           (event) => {
@@ -552,7 +554,7 @@
 
     (async () => {
       try {
-        const { listen } = await import("@tauri-apps/api/event");
+        const listen = await getEventListen();
         const unlistenFn = await listen("cleanup-completed", () => {
           deletingBranches = new Set();
           localRefreshKey++;
@@ -571,6 +573,44 @@
       cancelled = true;
       if (unlisten) unlisten();
     };
+  });
+
+  // Listen to agent-status-changed to refresh branch list (SPEC-b80e7996 FR-821)
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const listen = await getEventListen();
+        const unlistenFn = await listen("agent-status-changed", () => {
+          refreshAgentStatusCachesInBackground();
+        });
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+      } catch {
+        /* Tauri not available */
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  });
+
+  // Polling fallback for agent status (SPEC-b80e7996 FR-822)
+  // Only active when there are agent tabs open (avoids unnecessary polling).
+  $effect(() => {
+    if (mode !== "branch") return;
+    if (agentTabBranches.length === 0) return;
+    const interval = setInterval(() => {
+      refreshAgentStatusCachesInBackground();
+    }, 10_000);
+    return () => clearInterval(interval);
   });
 
   // Close context menu on outside click / Escape
@@ -594,18 +634,6 @@
     };
   });
 
-  // Close dialogs on Escape
-  $effect(() => {
-    if (!confirmDelete && !confirmDeleteError) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        confirmDelete = null;
-        confirmDeleteError = null;
-      }
-    };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
-  });
 
   function fetchBranches(token: number, forceRefresh = false) {
     const filter = activeFilter;
@@ -635,6 +663,28 @@
       if (filter === activeFilter) continue;
       const cacheKey = buildFilterCacheKey(filter, path);
       void refreshFilterSnapshot(filter, path, cacheKey, token, true, false);
+    }
+  }
+
+  function refreshAgentStatusCachesInBackground() {
+    if (mode !== "branch") return;
+    const path = projectPath;
+    if (!path) return;
+    const token = fetchToken;
+    const targetFilters: FilterType[] = ["Local", "All"];
+
+    for (const filter of targetFilters) {
+      const cacheKey = buildFilterCacheKey(filter, path);
+      const cached = filterCache.get(filter);
+      if (!cached || cached.cacheKey !== cacheKey) continue;
+      void refreshFilterSnapshot(
+        filter,
+        path,
+        cacheKey,
+        token,
+        true,
+        filter === activeFilter
+      );
     }
   }
 
@@ -838,6 +888,27 @@
     return invokeFn;
   }
 
+  async function getEventListen(): Promise<TauriEventListen> {
+    if (!tauriEventListenPromise) {
+      tauriEventListenPromise = import("@tauri-apps/api/event").then((mod) => {
+        const listenFn =
+          (mod as { listen?: TauriEventListen; default?: { listen?: TauriEventListen } }).listen ??
+          (mod as { default?: { listen?: TauriEventListen } }).default?.listen;
+        if (!listenFn) {
+          throw new Error("Tauri event listen API is unavailable");
+        }
+        return listenFn;
+      });
+    }
+
+    try {
+      return await tauriEventListenPromise;
+    } catch (error) {
+      tauriEventListenPromise = null;
+      throw error;
+    }
+  }
+
   function getSafetyLevel(branch: BranchInfo): string {
     const wt = worktreeMap.get(branch.name);
     if (!wt) return "";
@@ -1039,6 +1110,10 @@
     return agentTabBranchSet.has(normalizeTabBranch(branch.name));
   }
 
+  function isAgentRunning(branch: BranchInfo): boolean {
+    return isAgentBranchActive(branch) && branch.agent_status === "running";
+  }
+
   function handleBranchItemKeydown(event: KeyboardEvent) {
     if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
     event.preventDefault();
@@ -1129,11 +1204,9 @@
 
   function handleCleanupThisBranch() {
     if (!contextMenu) return;
-    const branch = contextMenu.branch;
+    const branchName = contextMenu.branch.name;
     contextMenu = null;
-    const level = getSafetyLevel(branch);
-    confirmDelete = { branch: branch.name, safetyLevel: level };
-    confirmDeleteError = null;
+    onCleanupRequest?.(branchName);
   }
 
   function handleCleanupWorktrees() {
@@ -1143,40 +1216,6 @@
     onCleanupRequest?.(branchName);
   }
 
-  // --- Single delete ---
-
-  async function handleConfirmDelete() {
-    if (!confirmDelete) return;
-    const { branch, safetyLevel } = confirmDelete;
-    const force = safetyLevel !== "safe";
-    confirmDelete = null;
-    confirmDeleteError = null;
-
-    deletingBranches = new Set([...deletingBranches, branch]);
-
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("cleanup_single_worktree", {
-        projectPath,
-        branch,
-        force,
-      });
-      const next = new Set(deletingBranches);
-      next.delete(branch);
-      deletingBranches = next;
-      localRefreshKey++;
-    } catch (err) {
-      const next = new Set(deletingBranches);
-      next.delete(branch);
-      deletingBranches = next;
-      confirmDeleteError =
-        typeof err === "string"
-          ? err
-          : err && typeof err === "object" && "message" in err
-            ? String((err as { message?: unknown }).message)
-            : String(err);
-    }
-  }
 </script>
 
 <aside
@@ -1198,7 +1237,7 @@
       class="mode-btn"
       class:active={mode === "agent"}
       aria-pressed={mode === "agent"}
-      title="Agent Mode"
+      title="Master Agent"
       onclick={() => handleModeChange("agent")}
     >
       <span class="mode-icon">A</span>
@@ -1280,20 +1319,21 @@
               }}
               oncontextmenu={(e) => handleContextMenu(e, branch)}
             >
-              {#if isAgentBranchActive(branch)}
-                <span
-                  class="agent-tab-icon"
-                  aria-hidden="true"
-                  title="Agent tab is open for this branch"
-                >
-                  <span class="agent-tab-bars">
-                    <span class="agent-tab-bar b1"></span>
-                    <span class="agent-tab-bar b2"></span>
-                    <span class="agent-tab-bar b3"></span>
-                  </span>
-                  <span class="agent-tab-fallback" aria-hidden="true">@</span>
-                </span>
-              {/if}
+              <span
+                class="agent-indicator-slot"
+                class:agent-active={isAgentBranchActive(branch)}
+                class:agent-running={isAgentRunning(branch)}
+                aria-hidden="true"
+                title={isAgentBranchActive(branch) ? (isAgentRunning(branch) ? "Agent is running" : "Agent tab is open") : ""}
+              >
+                {#if isAgentRunning(branch)}
+                  <span class="agent-pulse-dot"></span>
+                  <span class="agent-fallback">@</span>
+                {:else if isAgentBranchActive(branch)}
+                  <span class="agent-static-dot"></span>
+                  <span class="agent-fallback">@</span>
+                {/if}
+              </span>
               <span class="branch-icon">{branch.is_current ? "*" : " "}</span>
               {#if deletingBranches.has(branch.name)}
                 <span class="safety-spinner"></span>
@@ -1337,6 +1377,7 @@
           {selectedBranch}
           {agentTabBranches}
           {activeAgentTabBranch}
+          preferredLanguage={appLanguage}
           prNumber={selectedPrNumber}
           ghCliStatus={effectiveGhCliStatus}
           onLaunchAgent={onLaunchAgent}
@@ -1352,6 +1393,7 @@
       currentBranch={currentBranch}
       {agentTabBranches}
       {activeAgentTabBranch}
+      preferredLanguage={appLanguage}
     />
   {/if}
   <button
@@ -1398,63 +1440,6 @@
   {/if}
 {/if}
 
-<!-- Single delete confirmation dialog -->
-{#if mode === "branch"}
-  {#if confirmDelete}
-    {@const wt = worktreeMap.get(confirmDelete.branch)}
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="overlay" onclick={() => (confirmDelete = null)}>
-      <div class="confirm-dialog" onclick={(e) => e.stopPropagation()}>
-        <h3>Delete Worktree</h3>
-        <p class="confirm-text">
-          {#if confirmDelete.safetyLevel === "danger"}
-            Branch <strong>{confirmDelete.branch}</strong> has uncommitted changes
-            and unpushed commits. This cannot be undone.
-          {:else if confirmDelete.safetyLevel === "warning" && wt?.has_changes}
-            Branch <strong>{confirmDelete.branch}</strong> has uncommitted changes.
-          {:else if confirmDelete.safetyLevel === "warning" && wt?.has_unpushed}
-            Branch <strong>{confirmDelete.branch}</strong> has unpushed commits.
-          {:else}
-            Delete worktree and local branch <strong
-              >{confirmDelete.branch}</strong
-            >?
-          {/if}
-        </p>
-        <div class="confirm-actions">
-          <button class="confirm-cancel" onclick={() => (confirmDelete = null)}>
-            Cancel
-          </button>
-          <button class="confirm-delete" onclick={handleConfirmDelete}>
-            Delete
-          </button>
-        </div>
-      </div>
-    </div>
-  {/if}
-{/if}
-
-<!-- Delete error dialog -->
-{#if mode === "branch"}
-  {#if confirmDeleteError}
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="overlay" onclick={() => (confirmDeleteError = null)}>
-      <div class="confirm-dialog" onclick={(e) => e.stopPropagation()}>
-        <h3>Delete Failed</h3>
-        <p class="confirm-error">{confirmDeleteError}</p>
-        <div class="confirm-actions">
-          <button
-            class="confirm-cancel"
-            onclick={() => (confirmDeleteError = null)}
-          >
-            Close
-          </button>
-        </div>
-      </div>
-    </div>
-  {/if}
-{/if}
 
 <style>
   .sidebar {
@@ -1804,62 +1789,54 @@
     flex: 1;
   }
 
-  .agent-tab-icon {
-    color: var(--cyan);
+  /* Agent indicator: fixed-width slot for all branch rows (SPEC-b80e7996 FR-800) */
+  .agent-indicator-slot {
     width: 12px;
-    text-align: center;
+    height: 12px;
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    height: 12px;
-    line-height: 1;
   }
 
-  .agent-tab-bars {
-    display: inline-flex;
-    align-items: flex-end;
-    justify-content: center;
-    gap: 1px;
-    height: 10px;
-  }
-
-  .agent-tab-bar {
-    width: 2px;
-    height: 4px;
-    border-radius: 1px;
+  /* Layer 1: static dot — tab is open (SPEC-b80e7996 FR-801) */
+  .agent-static-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
     background: var(--cyan);
-    opacity: 0.85;
+    opacity: 0.45;
   }
 
-  .agent-tab-bar.b1 {
-    animation-delay: 0ms;
+  /* Layer 2: pulsing dot — LLM is Running (SPEC-b80e7996 FR-802) */
+  .agent-pulse-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--cyan);
+    animation: agent-pulse 1.4s ease-in-out infinite;
   }
 
-  .agent-tab-bar.b2 {
-    animation-delay: 150ms;
+  @keyframes agent-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.2; }
   }
 
-  .agent-tab-bar.b3 {
-    animation-delay: 300ms;
-  }
-
-  .agent-tab-fallback {
+  /* Reduced-motion fallback: show "@" instead of animated dot */
+  .agent-fallback {
     display: none;
     font-size: var(--ui-font-md);
     font-family: monospace;
+    color: var(--cyan);
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .agent-tab-bars {
+    .agent-pulse-dot,
+    .agent-static-dot {
       display: none;
     }
 
-    .agent-tab-bar {
-      animation: none;
-    }
-
-    .agent-tab-fallback {
+    .agent-fallback {
       display: flex;
     }
   }
@@ -1950,88 +1927,6 @@
 
   .context-menu-item.disabled:hover {
     background: none;
-  }
-
-  /* Overlays & dialogs */
-  .overlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: rgba(0, 0, 0, 0.6);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 2000;
-  }
-
-  .confirm-dialog {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: 10px;
-    padding: 20px 24px;
-    max-width: 400px;
-    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
-  }
-
-  .confirm-dialog h3 {
-    font-size: 14px;
-    font-weight: 700;
-    color: var(--text-primary);
-    margin-bottom: 8px;
-  }
-
-  .confirm-text {
-    color: var(--text-secondary);
-    font-size: 12px;
-    line-height: 1.5;
-    margin-bottom: 16px;
-  }
-
-  .confirm-error {
-    color: rgb(255, 160, 160);
-    font-size: 12px;
-    line-height: 1.5;
-    margin-bottom: 16px;
-    white-space: pre-wrap;
-  }
-
-  .confirm-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-  }
-
-  .confirm-cancel {
-    padding: 5px 14px;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-color);
-    border-radius: 5px;
-    color: var(--text-primary);
-    cursor: pointer;
-    font-family: inherit;
-    font-size: 12px;
-  }
-
-  .confirm-cancel:hover {
-    background: var(--bg-hover);
-  }
-
-  .confirm-delete {
-    padding: 5px 14px;
-    background: var(--red);
-    border: 1px solid transparent;
-    border-radius: 5px;
-    color: var(--bg-primary);
-    cursor: pointer;
-    font-family: inherit;
-    font-size: 12px;
-    font-weight: 600;
-  }
-
-  .confirm-delete:hover {
-    opacity: 0.9;
   }
 
   /* PR Status tree */

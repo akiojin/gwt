@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, waitFor, fireEvent, cleanup } from "@testing-library/svelte";
 
 import type { CommitEntry } from "../types";
@@ -33,6 +33,14 @@ describe("GitCommitsTab", () => {
   beforeEach(() => {
     cleanup();
     invokeMock.mockReset();
+    Object.defineProperty(globalThis, "__TAURI_INTERNALS__", {
+      value: { invoke: invokeMock },
+      configurable: true,
+    });
+  });
+
+  afterEach(() => {
+    delete (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   });
 
   it("renders commit list and loads more pages", async () => {
@@ -94,6 +102,65 @@ describe("GitCommitsTab", () => {
 
     await waitFor(() => {
       expect(rendered.getByText("Failed to load commits")).toBeTruthy();
+    });
+  });
+
+  it("ignores stale commit response after base branch changes again", async () => {
+    let resolveDevelop: ((value: CommitEntry[]) => void) | null = null;
+
+    invokeMock.mockImplementation((command: string, args?: { baseBranch?: string }) => {
+      if (command !== "get_branch_commits") return Promise.resolve([]);
+      if (args?.baseBranch === "develop") {
+        return new Promise<CommitEntry[]>((resolve) => {
+          resolveDevelop = resolve;
+        });
+      }
+      if (args?.baseBranch === "main") {
+        return Promise.resolve([
+          {
+            sha: "main0001",
+            message: "Main latest commit",
+            timestamp: Math.floor(Date.now() / 1000),
+            author: "tester",
+          },
+        ]);
+      }
+      return Promise.resolve([]);
+    });
+
+    const rendered = await renderTab({ baseBranch: "develop" });
+    await waitFor(() => {
+      expect(resolveDevelop).toBeTruthy();
+    });
+
+    await rendered.rerender({
+      projectPath: "/tmp/project",
+      branch: "feature/commits",
+      baseBranch: "main",
+      refreshToken: 0,
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("Main latest commit")).toBeTruthy();
+    });
+
+    const resolveDevelopNow = resolveDevelop as ((value: CommitEntry[]) => void) | null;
+    if (!resolveDevelopNow) {
+      throw new Error("Expected pending develop response");
+    }
+    resolveDevelopNow([
+      {
+        sha: "dev00001",
+        message: "Develop stale commit",
+        timestamp: Math.floor(Date.now() / 1000),
+        author: "tester",
+      },
+    ]);
+    await Promise.resolve();
+
+    await waitFor(() => {
+      expect(rendered.queryByText("Develop stale commit")).toBeNull();
+      expect(rendered.getByText("Main latest commit")).toBeTruthy();
     });
   });
 });

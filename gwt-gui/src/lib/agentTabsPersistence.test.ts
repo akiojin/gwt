@@ -140,7 +140,7 @@ describe("agentTabsPersistence", () => {
         version: 2,
         byProjectPath: {
           "/a": {
-            tabs: [{ type: "agentMode", id: "agentMode", label: "Agent Mode" }],
+            tabs: [{ type: "agentMode", id: "agentMode", label: "Master Agent" }],
             activeTabId: "agentMode",
           },
         },
@@ -166,7 +166,7 @@ describe("agentTabsPersistence", () => {
       version: 2,
       byProjectPath: {
         "/a": {
-          tabs: [{ type: "agentMode", id: "agentMode", label: "Agent Mode" }],
+          tabs: [{ type: "agentMode", id: "agentMode", label: "Master Agent" }],
           activeTabId: "agentMode",
         },
         "/b": {
@@ -184,7 +184,7 @@ describe("agentTabsPersistence", () => {
     const restored = buildRestoredProjectTabs(
       {
         tabs: [
-          { type: "agentMode", id: "agentMode", label: "Agent Mode" },
+          { type: "agentMode", id: "agentMode", label: "Master Agent" },
           { type: "settings", id: "settings", label: "Settings" },
           { type: "agent", paneId: "p1", label: "one" },
           {
@@ -200,7 +200,7 @@ describe("agentTabsPersistence", () => {
     );
 
     expect(restored.tabs).toEqual([
-      { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+      { id: "agentMode", label: "Master Agent", type: "agentMode" },
       { id: "settings", label: "Settings", type: "settings" },
       {
         id: "agent-p1",
@@ -238,7 +238,7 @@ describe("agentTabsPersistence", () => {
     expect(restored.terminalTabsToRespawn).toEqual([]);
     expect(restored.activeTerminalPaneIdToRespawn).toBeNull();
     expect(restored.tabs).toEqual([
-      { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+      { id: "agentMode", label: "Master Agent", type: "agentMode" },
       {
         id: "settings",
         label: "Settings",
@@ -271,7 +271,7 @@ describe("agentTabsPersistence", () => {
     );
 
     expect(restored.tabs).toEqual([
-      { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+      { id: "agentMode", label: "Master Agent", type: "agentMode" },
       { id: "agent-p1", label: "one", type: "agent", paneId: "p1" },
     ]);
     expect(restored.terminalTabsToRespawn).toEqual([]);
@@ -296,7 +296,7 @@ describe("agentTabsPersistence", () => {
     );
 
     expect(restored.tabs).toEqual([
-      { id: "agentMode", label: "Agent Mode", type: "agentMode" },
+      { id: "agentMode", label: "Master Agent", type: "agentMode" },
       {
         id: "agent-a-live",
         label: "feature-a",
@@ -324,5 +324,12 @@ describe("agentTabsPersistence", () => {
     expect(
       shouldRetryAgentTabRestore(2, 0, AGENT_TAB_RESTORE_MAX_RETRIES - 1),
     ).toBe(false);
+  });
+
+  it("shouldRetryAgentTabRestore handles transient empty matches", () => {
+    expect(shouldRetryAgentTabRestore(2, 0, 0)).toBe(true);
+    expect(shouldRetryAgentTabRestore(2, 1, 0)).toBe(false);
+    expect(shouldRetryAgentTabRestore(0, 0, 0)).toBe(false);
+    expect(shouldRetryAgentTabRestore(2, 0, AGENT_TAB_RESTORE_MAX_RETRIES - 1)).toBe(false);
   });
 });
