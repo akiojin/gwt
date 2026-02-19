@@ -546,8 +546,7 @@ mod tests {
         store.save_project_team(&s2).unwrap();
 
         // Also place a regular AgentSession to verify it is skipped
-        let regular =
-            AgentSession::new(SessionId("regular-1".to_string()), PathBuf::from("/r3"));
+        let regular = AgentSession::new(SessionId("regular-1".to_string()), PathBuf::from("/r3"));
         store.save(&regular).unwrap();
 
         // Also place a non-json file

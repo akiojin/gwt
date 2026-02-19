@@ -1,6 +1,6 @@
 use crate::agent_master::AgentModeState;
-use gwt_core::agent::SessionStore;
 use crate::mcp_ws_server::McpWsHandle;
+use gwt_core::agent::SessionStore;
 use gwt_core::ai::SessionSummaryCache;
 use gwt_core::config::os_env::EnvSource;
 use gwt_core::config::McpRegistrationStatus;

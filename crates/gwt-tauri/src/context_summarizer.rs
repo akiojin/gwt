@@ -57,7 +57,10 @@ pub fn build_summary_prompt(messages: &[LeadMessage]) -> String {
             MessageKind::Error => "error",
             MessageKind::Progress => "progress",
         };
-        prompt.push_str(&format!("[{}/{}]: {}\n", role_label, kind_label, msg.content));
+        prompt.push_str(&format!(
+            "[{}/{}]: {}\n",
+            role_label, kind_label, msg.content
+        ));
     }
 
     prompt
