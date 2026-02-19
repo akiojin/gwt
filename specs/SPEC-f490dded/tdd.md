@@ -57,7 +57,7 @@ pnpm --dir gwt-gui exec vitest run src/lib/components/MainArea.test.ts src/lib/a
 
 ---
 
-# TDD記録: エージェントタブの wheel フォールバック
+## TDD記録: エージェントタブの wheel フォールバック
 
 **仕様ID**: `SPEC-f490dded`
 **更新日**: 2026-02-19
@@ -75,29 +75,33 @@ pnpm --dir gwt-gui exec vitest run src/lib/components/MainArea.test.ts src/lib/a
 - `gwt-gui/src/lib/terminal/TerminalView.test.ts`
 - テスト名: `uses dominant axis for mixed wheel input`
 - テスト名: `falls back when wheel has horizontal-only delta`
+- テスト名: `keeps clear mouse-like repeated integer wheel events for terminal consumption`
+- テスト名: `accumulates fractional wheel input to preserve sub-pixel scroll`
 
 ### 期待
 
 - `deltaY` と `deltaX` の両方があるときに主要軸の delta を採用し、`xterm-viewport.scrollTop` が増減すること
+- 連続した 120/240 系の固定ステップ入力で、時間差が十分にあれば明確なマウス入力として判定し、フォールバックを避けてターミナルの既存入力経路へ委譲されること
+- 小数点デルタでも、整数化しやすい環境で移動量が蓄積されること
 
 ### 実行コマンド
 
 ```bash
-pnpm --dir gwt-gui exec vitest run src/lib/terminal/TerminalView.test.ts -t "uses dominant axis for mixed wheel input" -t "falls back when wheel has horizontal-only delta"
+pnpm --dir gwt-gui exec vitest run src/lib/terminal/TerminalView.test.ts -t "uses dominant axis for mixed wheel input" -t "falls back when wheel has horizontal-only delta" -t "keeps clear mouse-like repeated integer wheel events for terminal consumption" -t "accumulates fractional wheel input to preserve sub-pixel scroll"
 ```
 
 ### RED結果
 
 - `deltaX` が主要軸となる入力（`deltaX` 優位）を `deltaY` に委ねていた実装では、想定するスクロール方向へ移動しないため再現条件を再現できなかった。
+- 100/120/240 周辺の固定ステップをすべて trackpad 扱いし続けると、focused 時に `preventDefault` されやすく、純粋なマウス入力を奪う再現条件が残っていた。
 
 ## GREEN
 
 ### 実装
 
-- `isTrackpadLikeWheel` を `isScrollableWheelInput` に置き換え、`deltaX`/`deltaY` のいずれかが非零ならフォールバック対象とする
-- `pickWheelDelta` を追加し、`deltaY` と `deltaX` のどちらが絶対値で大きいかを採用して `scrollViewportByWheel` に適用する
-- 既存実装の mode 変換（`line`/`page`）ロジックを維持し、フォールバック不能時のみイベント伝播を許可
-- 早期 return を `event.deltaY===0` から `isScrollableWheelInput` 判定へ置換し、`deltaY=0` でも `deltaX` 主導入力を通す
+- `isTrackpadLikeWheel` を履歴付きロジック付きで再導入し、`mouseWheelStepHistory` で同一固定ステップ連打を明確なマウス入力として判定できる場合のみ除外する
+- `pickWheelAxis` と `pickWheelDelta` を導入し、軸方向を明示しつつ `WheelScrollState` でサブピクセル残差を保持してスクロール距離へ反映する
+- `scrollViewportByWheel` と `handleWheel` を状態を注入する形に更新し、判定・加算・反映の経路を一貫化
 
 ### 実行コマンド
 
@@ -107,8 +111,8 @@ pnpm --dir gwt-gui exec vitest run src/lib/terminal/TerminalView.test.ts
 
 ### GREEN結果
 
-- `TerminalView.test.ts`: 23 tests passed
+- `TerminalView.test.ts`: 24 tests passed
 
 ## REFACTOR
 
-- 既存の trackpad 判定ヒューリスティクスを `deltaX`/`deltaY` 判定へ簡素化し、入力条件が増えて再発条件を吸収しやすい構造へ整理。
+- 固定ステップマウス入力と小数点 trackpad 入力を別軸で扱えるよう、判定とスクロール反映の責務を分けて再発時の原因追跡性を改善。
