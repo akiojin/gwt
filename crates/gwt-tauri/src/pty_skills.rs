@@ -240,6 +240,7 @@ mod tests {
             rows: 24,
             cols: 80,
             env_vars: Default::default(),
+            terminal_shell: None,
         })
         .expect("failed to create test pane");
 
@@ -282,6 +283,7 @@ mod tests {
             rows: 24,
             cols: 80,
             env_vars: Default::default(),
+            terminal_shell: None,
         })
         .expect("failed to create test pane");
 

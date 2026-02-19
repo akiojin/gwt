@@ -1205,6 +1205,7 @@ describe("AgentLaunchForm", () => {
       dockerBuild: false,
       dockerRecreate: false,
       dockerKeep: false,
+      selectedShell: "",
     });
 
     invokeMock.mockImplementation(async (cmd: string) => {
@@ -1287,6 +1288,7 @@ describe("AgentLaunchForm", () => {
       dockerBuild: true,
       dockerRecreate: true,
       dockerKeep: true,
+      selectedShell: "",
     });
 
     invokeMock.mockImplementation(async (cmd: string) => {
@@ -2108,5 +2110,165 @@ describe("AgentLaunchForm", () => {
 
     await fireEvent.keyDown(overlay, { key: "Escape" });
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides shell dropdown when no shells are available", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.90.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "get_available_shells") return [];
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "none",
+          compose_services: [],
+          docker_available: false,
+          compose_available: false,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch: vi.fn().mockResolvedValue(undefined),
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Advanced" }));
+
+    expect(rendered.queryByLabelText("Shell")).toBeNull();
+  });
+
+  it("shows shell dropdown when shells are available", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.90.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "get_available_shells") {
+        return [
+          { id: "powershell", name: "PowerShell", version: "7.4.0" },
+          { id: "cmd", name: "Command Prompt" },
+        ];
+      }
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "none",
+          compose_services: [],
+          docker_available: false,
+          compose_available: false,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch: vi.fn().mockResolvedValue(undefined),
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Advanced" }));
+
+    await waitFor(() => {
+      const shellSelect = rendered.getByLabelText("Shell") as HTMLSelectElement;
+      expect(shellSelect).toBeTruthy();
+      const options = Array.from(shellSelect.options).map((o) => o.textContent);
+      expect(options).toEqual(["Auto", "PowerShell (7.4.0)", "Command Prompt"]);
+    });
+  });
+
+  it("disables shell dropdown when docker runtime is selected", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.90.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "get_available_shells") {
+        return [
+          { id: "powershell", name: "PowerShell", version: "7.4.0" },
+          { id: "cmd", name: "Command Prompt" },
+        ];
+      }
+      if (cmd === "list_agent_versions") {
+        return {
+          agentId: "codex",
+          package: "@openai/codex",
+          tags: ["latest"],
+          versions: ["0.90.0"],
+          source: "cache",
+        };
+      }
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "compose",
+          compose_services: ["app"],
+          docker_available: true,
+          compose_available: true,
+          daemon_running: true,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch: vi.fn().mockResolvedValue(undefined),
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Advanced" }));
+
+    await waitFor(() => {
+      const shellSelect = rendered.getByLabelText("Shell") as HTMLSelectElement;
+      expect(shellSelect.disabled).toBe(true);
+      expect(rendered.getByText("Container default")).toBeTruthy();
+    });
   });
 });

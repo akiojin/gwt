@@ -37,6 +37,7 @@
     onCleanupRequest,
     onLaunchAgent,
     onQuickLaunch,
+    onNewTerminal,
     onResize,
     onOpenCiLog,
     widthPx = 260,
@@ -59,6 +60,7 @@
     onCleanupRequest?: (preSelectedBranch?: string) => void;
     onLaunchAgent?: () => void;
     onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
+    onNewTerminal?: () => void;
     onResize?: (nextWidthPx: number) => void;
     onOpenCiLog?: (runId: number) => void;
     widthPx?: number;
@@ -1381,6 +1383,7 @@
           ghCliStatus={effectiveGhCliStatus}
           onLaunchAgent={onLaunchAgent}
           onQuickLaunch={onQuickLaunch}
+          onNewTerminal={onNewTerminal}
           {onOpenCiLog}
         />
       </div>

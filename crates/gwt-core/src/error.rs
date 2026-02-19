@@ -257,6 +257,7 @@ impl GwtError {
                 crate::terminal::TerminalError::ScrollbackError { .. } => "E7004",
                 crate::terminal::TerminalError::IpcError { .. } => "E7005",
                 crate::terminal::TerminalError::PaneLimitReached { .. } => "E7006",
+                crate::terminal::TerminalError::WslPathConversion { .. } => "E7007",
             },
             // E9xxx
             Self::Io(_) => "E9001",
