@@ -132,6 +132,12 @@ export interface AgentConfig {
   claude: ClaudeAgentConfig;
 }
 
+export interface ShellInfo {
+  id: string;
+  name: string;
+  version?: string;
+}
+
 export interface SettingsData {
   protected_branches: string[];
   default_base_branch: string;
@@ -150,6 +156,7 @@ export interface SettingsData {
   terminal_font_size: number;
   app_language: "auto" | "ja" | "en" | (string & {});
   voice_input: VoiceInputSettings;
+  default_shell?: string | null;
 }
 
 export interface VoiceInputSettings {
@@ -528,6 +535,7 @@ export interface LaunchAgentRequest {
   dockerBuild?: boolean;
   dockerKeep?: boolean;
   issueNumber?: number;
+  terminal_shell?: string;
 }
 
 // PR Status types (SPEC-d6949f99)

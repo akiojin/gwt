@@ -54,6 +54,7 @@ E7003 = "Emulator error"
 E7004 = "Scrollback error"
 E7005 = "IPC error"
 E7006 = "Pane limit reached"
+E7007 = "WSL path conversion failed"
 
 [general]
 E9001 = "IO error"
@@ -106,5 +107,6 @@ E7003 = ["Check terminal escape sequences", "Verify VT100 compatibility"]
 E7004 = ["Check scrollback file permissions", "Verify disk space"]
 E7005 = ["Check IPC channel state", "Verify pane connections"]
 E7006 = ["Close unused panes", "Increase pane limit in configuration"]
+E7007 = ["Verify the Windows path format", "UNC paths are not supported"]
 E9001 = ["Check file permissions", "Verify disk space"]
 E9002 = ["Report this issue", "Check logs for details"]
