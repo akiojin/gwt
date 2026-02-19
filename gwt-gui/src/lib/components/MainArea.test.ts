@@ -454,10 +454,8 @@ describe("MainArea", () => {
       activeTabId: "agent-missing-pane",
     });
 
-    expect(rendered.getByText("Waiting For Terminal Pane")).toBeTruthy();
-    expect(
-      rendered.getByText("Close this tab and launch again if it does not attach."),
-    ).toBeTruthy();
+    expect(rendered.getByText("Agent starting...")).toBeTruthy();
+    expect(rendered.getByText("Waiting for the backend terminal pane to attach.")).toBeTruthy();
     expect(rendered.container.querySelectorAll(".terminal-wrapper").length).toBe(0);
   });
 

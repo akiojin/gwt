@@ -2,7 +2,7 @@
 
 use super::MigrationError;
 use std::path::{Path, PathBuf};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Information about a created backup
 #[derive(Debug, Clone)]
