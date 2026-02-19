@@ -1,4 +1,6 @@
-use crate::agent_master::{get_agent_mode_state, send_agent_message, AgentModeState};
+use crate::agent_master::{
+    get_agent_mode_state, send_agent_message, send_project_team_message, AgentModeState,
+};
 use crate::state::AppState;
 use tauri::{Manager, State, Window};
 
@@ -14,6 +16,18 @@ pub async fn send_agent_mode_message(window: Window, input: String) -> AgentMode
     tauri::async_runtime::spawn_blocking(move || {
         let state = app_handle.state::<AppState>();
         send_agent_message(&state, &window_label, &input)
+    })
+    .await
+    .unwrap_or_else(|_| AgentModeState::new())
+}
+
+#[tauri::command]
+pub async fn send_project_team_message_cmd(window: Window, input: String) -> AgentModeState {
+    let window_label = window.label().to_string();
+    let app_handle = window.app_handle().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle.state::<AppState>();
+        send_project_team_message(&state, &window_label, &input)
     })
     .await
     .unwrap_or_else(|_| AgentModeState::new())

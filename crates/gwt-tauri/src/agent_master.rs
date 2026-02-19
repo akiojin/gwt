@@ -1,11 +1,16 @@
+use gwt_core::agent::conversation::MessageRole;
+use gwt_core::agent::developer::AgentType;
+use gwt_core::agent::lead::{LeadMessage, LeadStatus, MessageKind};
+use gwt_core::agent::session::ProjectTeamSession;
+use gwt_core::agent::types::SessionId;
 use gwt_core::ai::{AIClient, AIResponse, ChatMessage, ToolCall};
 use gwt_core::config::{ProfilesConfig, Settings};
 use gwt_core::git::{
     find_spec_issue_by_spec_id, sync_issue_to_project, upsert_spec_issue, SpecIssueSections,
     SpecProjectPhase,
 };
-use serde::Serialize;
-use std::path::Path;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 use crate::agent_tools::{builtin_tool_definitions, execute_tool_call};
 use crate::commands::project::resolve_repo_path_for_project_root;
@@ -14,7 +19,7 @@ use crate::state::AppState;
 const MAX_TOOL_CALL_LOOPS: usize = 3;
 const SYSTEM_PROMPT: &str = "You are the master agent for gwt. Use ReAct and tool calls to send instructions to agent panes and capture output when needed. Keep instructions concise and in English.\n\nReAct format:\nThought: <short reasoning>\nAction: <tool name + short params summary>\nObservation: <tool result>\n\nRules:\n- Use tool calls for actions.\n- Do not fabricate observations; observations come from tool results.\n- Keep Thought to 2-4 lines.\n- Keep spec artifacts in GitHub Issues (Issue-first). Do not generate local spec markdown files.\n- Maintain the full bundle: spec, plan, tasks, tdd, research, data-model, quickstart, contracts, checklists.\n- Keep contracts/checklists as issue comments via artifact tools.\n- When delegating to sub-agents, include a clear task and request a short completion summary.";
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentModeMessage {
     pub role: String,
     pub kind: String,
@@ -22,7 +27,7 @@ pub struct AgentModeMessage {
     pub timestamp: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentModeState {
     pub messages: Vec<AgentModeMessage>,
     pub ai_ready: bool,
@@ -36,6 +41,12 @@ pub struct AgentModeState {
     pub active_spec_issue_number: Option<u64>,
     pub active_spec_issue_url: Option<String>,
     pub active_spec_issue_etag: Option<String>,
+    /// Project Team session ID (None when in Branch Mode)
+    #[serde(default)]
+    pub project_team_session_id: Option<String>,
+    /// Lead AI status indicator for Project Team mode
+    #[serde(default)]
+    pub lead_status: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -62,6 +73,8 @@ impl AgentModeState {
             active_spec_issue_number: None,
             active_spec_issue_url: None,
             active_spec_issue_etag: None,
+            project_team_session_id: None,
+            lead_status: None,
         }
     }
 }
@@ -228,6 +241,195 @@ pub fn send_agent_message(state: &AppState, window_label: &str, input: &str) -> 
     working.is_waiting = false;
     save_agent_mode_state(state, window_label, &working);
     working
+}
+
+const PROJECT_TEAM_SYSTEM_PROMPT: &str = "You are the Lead AI agent for gwt Project Team mode. You orchestrate Coordinators and Developers to implement features. Use ReAct and tool calls when needed. Keep instructions concise and in English.\n\nReAct format:\nThought: <short reasoning>\nAction: <tool name + short params summary>\nObservation: <tool result>\n\nRules:\n- Use tool calls for actions.\n- Do not fabricate observations; observations come from tool results.\n- Keep Thought to 2-4 lines.\n- When delegating to sub-agents, include a clear task and request a short completion summary.";
+
+pub fn send_project_team_message(
+    state: &AppState,
+    window_label: &str,
+    input: &str,
+) -> AgentModeState {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return get_agent_mode_state(state, window_label);
+    }
+
+    let mut working = get_agent_mode_state(state, window_label);
+    working.messages.retain(|m| m.role != "system");
+    working.last_error = None;
+    working.is_waiting = true;
+    working.lead_status = Some("thinking".to_string());
+    push_message(&mut working, "user", "message", trimmed);
+    save_agent_mode_state(state, window_label, &working);
+
+    // Resolve project path for session persistence
+    let project_path = match state.project_for_window(window_label) {
+        Some(p) => PathBuf::from(p),
+        None => {
+            working.last_error = Some("Open a project before using Project Team mode.".to_string());
+            working.is_waiting = false;
+            working.lead_status = Some("idle".to_string());
+            save_agent_mode_state(state, window_label, &working);
+            return working;
+        }
+    };
+
+    // Load or create ProjectTeamSession
+    let session_id = working
+        .project_team_session_id
+        .clone()
+        .unwrap_or_else(|| SessionId::new().0);
+    let sid = SessionId(session_id.clone());
+
+    let mut session = state
+        .session_store
+        .load_project_team(&sid)
+        .unwrap_or_else(|_| {
+            ProjectTeamSession::new(sid.clone(), project_path, "main", AgentType::Claude)
+        });
+
+    working.project_team_session_id = Some(session_id);
+    save_agent_mode_state(state, window_label, &working);
+
+    // Update LeadState: Idle → Thinking
+    session.lead.status = LeadStatus::Thinking;
+    session.lead.conversation.push(LeadMessage::new(
+        MessageRole::User,
+        MessageKind::Message,
+        trimmed,
+    ));
+    session.touch();
+    let _ = state.session_store.save_project_team(&session);
+
+    // Load AI settings
+    let profiles = match ProfilesConfig::load() {
+        Ok(p) => p,
+        Err(e) => {
+            working.ai_ready = false;
+            working.ai_error = Some(e.to_string());
+            working.is_waiting = false;
+            working.lead_status = Some("idle".to_string());
+            session.lead.status = LeadStatus::Idle;
+            let _ = state.session_store.save_project_team(&session);
+            save_agent_mode_state(state, window_label, &working);
+            return working;
+        }
+    };
+
+    let ai = profiles.resolve_active_ai_settings();
+    let Some(settings) = ai.resolved else {
+        working.ai_ready = false;
+        working.ai_error = Some("AI settings are required.".to_string());
+        working.is_waiting = false;
+        working.lead_status = Some("idle".to_string());
+        session.lead.status = LeadStatus::Idle;
+        let _ = state.session_store.save_project_team(&session);
+        save_agent_mode_state(state, window_label, &working);
+        return working;
+    };
+    working.ai_ready = true;
+    working.ai_error = None;
+
+    let client = match AIClient::new(settings) {
+        Ok(c) => c,
+        Err(e) => {
+            working.last_error = Some(e.to_string());
+            working.is_waiting = false;
+            working.lead_status = Some("idle".to_string());
+            session.lead.status = LeadStatus::Idle;
+            let _ = state.session_store.save_project_team(&session);
+            save_agent_mode_state(state, window_label, &working);
+            return working;
+        }
+    };
+
+    // Build chat messages from working state with Project Team system prompt
+    let mut messages = build_project_team_chat_messages(&working.messages);
+
+    let mut loops = 0usize;
+    loop {
+        loops += 1;
+        let response =
+            match client.create_response_with_tools(messages.clone(), builtin_tool_definitions()) {
+                Ok(r) => r,
+                Err(e) => {
+                    working.last_error = Some(e.to_string());
+                    working.is_waiting = false;
+                    working.lead_status = Some("idle".to_string());
+                    session.lead.status = LeadStatus::Idle;
+                    let _ = state.session_store.save_project_team(&session);
+                    save_agent_mode_state(state, window_label, &working);
+                    return working;
+                }
+            };
+
+        let has_tools = !response.tool_calls.is_empty();
+        let has_action = apply_ai_response(&mut working, &response, !has_tools);
+        save_agent_mode_state(state, window_label, &working);
+
+        // Update session lead state with the response
+        if let Some(tokens) = response.usage_tokens {
+            session.lead.estimated_tokens = session.lead.estimated_tokens.saturating_add(tokens);
+        }
+        session.lead.llm_call_count = session.lead.llm_call_count.saturating_add(1);
+
+        if !response.text.trim().is_empty() {
+            session.lead.conversation.push(LeadMessage::new(
+                MessageRole::Assistant,
+                MessageKind::Message,
+                response.text.trim(),
+            ));
+        }
+
+        if response.tool_calls.is_empty() {
+            break;
+        }
+
+        if !has_action {
+            for call in &response.tool_calls {
+                push_message(&mut working, "assistant", "action", &format_tool_call(call));
+            }
+        }
+        let tool_observations = execute_tool_calls(state, window_label, &response.tool_calls);
+        for obs in &tool_observations {
+            push_message(&mut working, "tool", "observation", obs);
+        }
+        save_agent_mode_state(state, window_label, &working);
+        messages = build_project_team_chat_messages(&working.messages);
+
+        if loops >= MAX_TOOL_CALL_LOOPS {
+            break;
+        }
+    }
+
+    // Finalize: Thinking → Idle
+    session.lead.status = LeadStatus::Idle;
+    session.touch();
+    let _ = state.session_store.save_project_team(&session);
+
+    working.is_waiting = false;
+    working.lead_status = Some("idle".to_string());
+    save_agent_mode_state(state, window_label, &working);
+    working
+}
+
+fn build_project_team_chat_messages(messages: &[AgentModeMessage]) -> Vec<ChatMessage> {
+    let mut out = Vec::with_capacity(messages.len() + 1);
+    out.push(ChatMessage {
+        role: "system".to_string(),
+        content: PROJECT_TEAM_SYSTEM_PROMPT.to_string(),
+    });
+    out.extend(
+        messages
+            .iter()
+            .filter(|m| m.role != "system")
+            .map(|m| ChatMessage {
+                role: m.role.clone(),
+                content: m.content.clone(),
+            }),
+    );
+    out
 }
 
 fn apply_ai_response(
@@ -579,5 +781,158 @@ mod tests {
     fn merge_spec_section_appends_unique_input() {
         let merged = merge_spec_section("existing context", "new requirement");
         assert_eq!(merged, "existing context\n\n- new requirement");
+    }
+
+    // --- AgentModeState new fields tests ---
+
+    #[test]
+    fn agent_mode_state_new_has_none_project_team_fields() {
+        let state = AgentModeState::new();
+        assert!(state.project_team_session_id.is_none());
+        assert!(state.lead_status.is_none());
+    }
+
+    #[test]
+    fn agent_mode_state_serde_backward_compatible() {
+        // JSON without the new fields should deserialize with defaults
+        let json = r#"{
+            "messages": [],
+            "ai_ready": true,
+            "ai_error": null,
+            "last_error": null,
+            "is_waiting": false,
+            "session_name": "Master Agent",
+            "llm_call_count": 5,
+            "estimated_tokens": 1000,
+            "active_spec_id": null,
+            "active_spec_issue_number": null,
+            "active_spec_issue_url": null,
+            "active_spec_issue_etag": null
+        }"#;
+        let state: AgentModeState = serde_json::from_str(json).unwrap();
+        assert!(state.project_team_session_id.is_none());
+        assert!(state.lead_status.is_none());
+        assert!(state.ai_ready);
+        assert_eq!(state.llm_call_count, 5);
+    }
+
+    #[test]
+    fn agent_mode_state_serde_with_project_team_fields() {
+        let mut state = AgentModeState::new();
+        state.project_team_session_id = Some("pt-session-123".to_string());
+        state.lead_status = Some("thinking".to_string());
+
+        let json = serde_json::to_string(&state).unwrap();
+        let deserialized: AgentModeState = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized.project_team_session_id,
+            Some("pt-session-123".to_string())
+        );
+        assert_eq!(deserialized.lead_status, Some("thinking".to_string()));
+    }
+
+    #[test]
+    fn agent_mode_state_roundtrip_preserves_all_fields() {
+        let mut state = AgentModeState::new();
+        state.ai_ready = true;
+        state.session_name = Some("Test Session".to_string());
+        state.project_team_session_id = Some("pt-abc".to_string());
+        state.lead_status = Some("orchestrating".to_string());
+        state.llm_call_count = 42;
+        state.estimated_tokens = 5000;
+        push_message(&mut state, "user", "message", "hello");
+
+        let json = serde_json::to_string(&state).unwrap();
+        let deserialized: AgentModeState = serde_json::from_str(&json).unwrap();
+
+        assert!(deserialized.ai_ready);
+        assert_eq!(deserialized.session_name, Some("Test Session".to_string()));
+        assert_eq!(
+            deserialized.project_team_session_id,
+            Some("pt-abc".to_string())
+        );
+        assert_eq!(deserialized.lead_status, Some("orchestrating".to_string()));
+        assert_eq!(deserialized.llm_call_count, 42);
+        assert_eq!(deserialized.estimated_tokens, 5000);
+        assert_eq!(deserialized.messages.len(), 1);
+        assert_eq!(deserialized.messages[0].content, "hello");
+    }
+
+    // --- LeadState status transition tests ---
+
+    #[test]
+    fn lead_status_idle_to_thinking_transition() {
+        use gwt_core::agent::lead::LeadState;
+        let mut lead = LeadState::default();
+        assert_eq!(lead.status, LeadStatus::Idle);
+
+        lead.status = LeadStatus::Thinking;
+        assert_eq!(lead.status, LeadStatus::Thinking);
+
+        lead.status = LeadStatus::Idle;
+        assert_eq!(lead.status, LeadStatus::Idle);
+    }
+
+    #[test]
+    fn lead_message_creation_and_conversation_append() {
+        use gwt_core::agent::lead::LeadState;
+        let mut lead = LeadState::default();
+        assert!(lead.conversation.is_empty());
+
+        lead.conversation.push(LeadMessage::new(
+            MessageRole::User,
+            MessageKind::Message,
+            "implement login feature",
+        ));
+        assert_eq!(lead.conversation.len(), 1);
+        assert_eq!(lead.conversation[0].content, "implement login feature");
+        assert_eq!(lead.conversation[0].kind, MessageKind::Message);
+
+        lead.conversation.push(LeadMessage::new(
+            MessageRole::Assistant,
+            MessageKind::Thought,
+            "analyzing requirements...",
+        ));
+        assert_eq!(lead.conversation.len(), 2);
+        assert_eq!(lead.conversation[1].kind, MessageKind::Thought);
+    }
+
+    // --- Project Team message flow tests ---
+
+    #[test]
+    fn send_project_team_message_requires_open_project() {
+        let state = AppState::new();
+        let result = send_project_team_message(&state, "main", "implement auth");
+        assert!(result.last_error.is_some());
+        assert!(result
+            .last_error
+            .unwrap()
+            .contains("Open a project before using Project Team mode."));
+        assert_eq!(result.lead_status, Some("idle".to_string()));
+        assert!(!result.is_waiting);
+    }
+
+    #[test]
+    fn send_project_team_message_empty_input_returns_current_state() {
+        let state = AppState::new();
+        let result = send_project_team_message(&state, "main", "   ");
+        // Empty input should just return current state without error
+        assert!(result.last_error.is_none());
+    }
+
+    #[test]
+    fn build_project_team_chat_messages_uses_project_team_prompt() {
+        let messages = vec![AgentModeMessage {
+            role: "user".to_string(),
+            kind: "message".to_string(),
+            content: "hello".to_string(),
+            timestamp: 1,
+        }];
+        let out = build_project_team_chat_messages(&messages);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].role, "system");
+        assert_eq!(out[0].content, PROJECT_TEAM_SYSTEM_PROMPT);
+        assert_eq!(out[1].role, "user");
+        assert_eq!(out[1].content, "hello");
     }
 }

@@ -210,13 +210,11 @@ mod tests {
             active_issue_numbers: vec![10, 11],
             ..Default::default()
         };
-        state
-            .conversation
-            .push(LeadMessage::new(
-                MessageRole::User,
-                MessageKind::Message,
-                "start project",
-            ));
+        state.conversation.push(LeadMessage::new(
+            MessageRole::User,
+            MessageKind::Message,
+            "start project",
+        ));
 
         let json = serde_json::to_string_pretty(&state).unwrap();
         let deserialized: LeadState = serde_json::from_str(&json).unwrap();

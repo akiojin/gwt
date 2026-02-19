@@ -5,6 +5,7 @@ mod agent_tools;
 mod app;
 mod commands;
 mod menu;
+mod pty_skills;
 mod session_watcher;
 mod state;
 

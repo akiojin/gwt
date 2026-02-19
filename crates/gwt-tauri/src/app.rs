@@ -531,6 +531,7 @@ pub fn build_app(
             crate::commands::terminal::capture_scrollback_tail,
             crate::commands::agent_mode::get_agent_mode_state_cmd,
             crate::commands::agent_mode::send_agent_mode_message,
+            crate::commands::agent_mode::send_project_team_message_cmd,
             crate::commands::settings::get_settings,
             crate::commands::settings::save_settings,
             crate::commands::agents::detect_agents,

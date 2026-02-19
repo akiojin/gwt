@@ -207,17 +207,12 @@ impl SessionStore {
     // -- Project Team save/load ---------------------------------------------
 
     /// Save a ProjectTeamSession as `pt-{session_id}.json`.
-    pub fn save_project_team(
-        &self,
-        session: &ProjectTeamSession,
-    ) -> Result<(), std::io::Error> {
+    pub fn save_project_team(&self, session: &ProjectTeamSession) -> Result<(), std::io::Error> {
         let json = serde_json::to_string_pretty(session)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         let final_path = self.project_team_path(&session.id);
-        let tmp_path = self
-            .sessions_dir
-            .join(format!("pt-{}.tmp", session.id.0));
+        let tmp_path = self.sessions_dir.join(format!("pt-{}.tmp", session.id.0));
 
         std::fs::write(&tmp_path, json.as_bytes())?;
 
@@ -262,8 +257,7 @@ impl SessionStore {
     }
 
     fn project_team_path(&self, session_id: &SessionId) -> PathBuf {
-        self.sessions_dir
-            .join(format!("pt-{}.json", session_id.0))
+        self.sessions_dir.join(format!("pt-{}.json", session_id.0))
     }
 }
 

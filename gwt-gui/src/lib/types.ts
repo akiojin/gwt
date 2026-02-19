@@ -187,6 +187,7 @@ export interface Tab {
     | "settings"
     | "versionHistory"
     | "agentMode"
+    | "projectTeam"
     | "terminal"
     | "issueSpec";
   paneId?: string;
