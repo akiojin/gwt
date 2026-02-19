@@ -3,6 +3,11 @@
 use std::sync::OnceLock;
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 
+#[cfg(target_os = "macos")]
+use std::sync::Mutex;
+#[cfg(target_os = "macos")]
+use std::time::{Duration, Instant};
+
 /// Static GPU information (model name, total VRAM).
 #[derive(Debug, Clone)]
 pub struct GpuStaticInfo {
@@ -22,6 +27,8 @@ pub struct GpuDynamicInfo {
 pub struct SystemMonitor {
     sys: System,
     gpu_static_cache: OnceLock<GpuStaticInfo>,
+    #[cfg(target_os = "macos")]
+    gpu_static_last_failure_at: Mutex<Option<Instant>>,
 }
 
 impl Default for SystemMonitor {
@@ -41,6 +48,8 @@ impl SystemMonitor {
         Self {
             sys,
             gpu_static_cache: OnceLock::new(),
+            #[cfg(target_os = "macos")]
+            gpu_static_last_failure_at: Mutex::new(None),
         }
     }
 
@@ -65,7 +74,7 @@ impl SystemMonitor {
     /// On macOS, uses `system_profiler` to detect Apple Silicon GPU.
     /// On NVIDIA systems, dynamic GPU info comes from `gpu_dynamic_info()` instead.
     /// Successful detection is cached after the first success.
-    /// Failed probes are retried on subsequent calls.
+    /// Failed probes are retried after a short cooldown.
     pub fn gpu_static_info(&self) -> Option<GpuStaticInfo> {
         if let Some(cached) = self.gpu_static_cache.get() {
             return Some(cached.clone());
@@ -73,9 +82,36 @@ impl SystemMonitor {
 
         #[cfg(target_os = "macos")]
         {
-            let detected = detect_macos_gpu()?;
-            let _ = self.gpu_static_cache.set(detected.clone());
-            Some(detected)
+            let now = Instant::now();
+            {
+                let last_failure = match self.gpu_static_last_failure_at.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                if let Some(last_failure_at) = *last_failure {
+                    if now.duration_since(last_failure_at) < GPU_PROBE_RETRY_COOLDOWN {
+                        return None;
+                    }
+                }
+            }
+
+            let detected = detect_macos_gpu();
+            if let Some(info) = detected {
+                let _ = self.gpu_static_cache.set(info.clone());
+                let mut last_failure = match self.gpu_static_last_failure_at.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                *last_failure = None;
+                return Some(info);
+            }
+
+            let mut last_failure = match self.gpu_static_last_failure_at.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            *last_failure = Some(now);
+            None
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -119,6 +155,9 @@ fn parse_macos_gpu_name(json: &serde_json::Value) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
+const GPU_PROBE_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
+
+#[cfg(target_os = "macos")]
 fn detect_macos_gpu() -> Option<GpuStaticInfo> {
     let mut child = crate::process::command("/usr/sbin/system_profiler")
         .args(["SPDisplaysDataType", "-json"])
@@ -138,7 +177,7 @@ fn detect_macos_gpu() -> Option<GpuStaticInfo> {
         buf
     });
 
-    let status = wait_with_timeout(&mut child, std::time::Duration::from_secs(5));
+    let status = wait_with_timeout(&mut child, Duration::from_secs(5));
     let status = match status {
         Some(status) => status,
         None => {
@@ -242,9 +281,9 @@ mod tests {
 #[cfg(target_os = "macos")]
 fn wait_with_timeout(
     child: &mut std::process::Child,
-    timeout: std::time::Duration,
+    timeout: Duration,
 ) -> Option<std::process::ExitStatus> {
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Some(status),
@@ -252,7 +291,7 @@ fn wait_with_timeout(
                 if start.elapsed() >= timeout {
                     return None;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(Duration::from_millis(50));
             }
             Err(_) => return None,
         }
