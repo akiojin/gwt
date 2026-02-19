@@ -18,20 +18,6 @@
   let resizeObserver: ResizeObserver | undefined = $state(undefined);
   let unlisten: (() => void) | undefined = $state(undefined);
 
-  const MOUSE_WHEEL_STEP_VALUES = new Set([120, 240]);
-  const TRACKPAD_WHEEL_DELTA_THRESHOLD = 240;
-  const MOUSE_WHEEL_STEP_REPEAT_WINDOW_MS = 220;
-  const MOUSE_WHEEL_STEP_REPEAT_COUNT = 4;
-  // Trackpad deltas often arrive in very tight bursts; only treat canonical 120/240
-  // step runs as mouse input when they are sufficiently spaced in time.
-  const MOUSE_WHEEL_STEP_MOUSE_GAP_MS = 50;
-
-  type WheelSample = {
-    at: number;
-    absDeltaY: number;
-    sign: number;
-  };
-
   type TerminalEditAction = {
     action: "copy" | "paste";
     paneId: string;
@@ -144,12 +130,8 @@
     }
   }
 
-  function isTrackpadLikeWheel(
-    event: WheelEvent,
-    mouseWheelStepHistory: WheelSample[],
-  ): boolean {
+  function isTrackpadLikeWheel(event: WheelEvent): boolean {
     if (event.deltaMode === 1 || event.deltaMode === 2) {
-      mouseWheelStepHistory.length = 0;
       return true;
     }
 
@@ -162,70 +144,17 @@
         .sourceCapabilities;
 
     if (sourceCapabilities?.firesTouchEvents === true) {
-      mouseWheelStepHistory.length = 0;
       return true;
     }
 
     // Trackpads frequently emit horizontal movement in addition to vertical scroll.
     if (absDeltaX > 0) {
-      mouseWheelStepHistory.length = 0;
       return true;
     }
 
     if (absDeltaY === 0) return false;
 
-    if (!Number.isInteger(absDeltaY)) {
-      mouseWheelStepHistory.length = 0;
-      return true;
-    }
-
-    if (absDeltaY > TRACKPAD_WHEEL_DELTA_THRESHOLD) {
-      mouseWheelStepHistory.length = 0;
-      return true;
-    }
-
-    const isPotentialMouseStep = MOUSE_WHEEL_STEP_VALUES.has(absDeltaY);
-    if (!isPotentialMouseStep) {
-      mouseWheelStepHistory.length = 0;
-      return true;
-    }
-
-    const now =
-      event.timeStamp > 0
-        ? event.timeStamp
-        : typeof performance === "undefined"
-          ? Date.now()
-          : performance.now();
-    const sign = Math.sign(event.deltaY);
-
-    while (
-      mouseWheelStepHistory.length > 0 &&
-      now - mouseWheelStepHistory[0].at > MOUSE_WHEEL_STEP_REPEAT_WINDOW_MS
-    ) {
-      mouseWheelStepHistory.shift();
-    }
-
-    mouseWheelStepHistory.push({
-      at: now,
-      absDeltaY,
-      sign,
-    });
-
-    const recentHistory = mouseWheelStepHistory.slice(-MOUSE_WHEEL_STEP_REPEAT_COUNT);
-    if (recentHistory.length < MOUSE_WHEEL_STEP_REPEAT_COUNT) {
-      return true;
-    }
-
-    const looksLikeMouseWheelRun = recentHistory.every(
-      (sample, index) => {
-        if (sample.absDeltaY !== absDeltaY) return false;
-        if (sample.sign !== sign) return false;
-        if (index === 0) return true;
-        return sample.at - recentHistory[index - 1].at >= MOUSE_WHEEL_STEP_MOUSE_GAP_MS;
-      },
-    );
-
-    return !looksLikeMouseWheelRun;
+    return true;
   }
 
   function scrollViewportByWheel(rootEl: HTMLElement, event: WheelEvent): boolean {
@@ -262,8 +191,6 @@
     let restoringScrollback = true;
     const pendingLiveOutputChunks: Uint8Array[] = [];
     const unregisterVoiceInputTarget = registerTerminalInputTarget(paneId, rootEl);
-    const mouseWheelStepHistory: WheelSample[] = [];
-
     const term = new Terminal({
       cursorBlink: true,
       cursorStyle: "bar",
@@ -317,8 +244,7 @@
       const wasFocused = isTerminalFocused(rootEl);
       focusTerminalIfNeeded(rootEl, true);
 
-      const shouldFallback =
-        !wasFocused || isTrackpadLikeWheel(event, mouseWheelStepHistory);
+      const shouldFallback = !wasFocused || isTrackpadLikeWheel(event);
       if (!shouldFallback) return;
 
       const didScroll = scrollViewportByWheel(rootEl, event);
