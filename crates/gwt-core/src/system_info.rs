@@ -3,6 +3,11 @@
 use std::sync::OnceLock;
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 
+#[cfg(target_os = "macos")]
+use std::sync::Mutex;
+#[cfg(target_os = "macos")]
+use std::time::{Duration, Instant};
+
 /// Static GPU information (model name, total VRAM).
 #[derive(Debug, Clone)]
 pub struct GpuStaticInfo {
@@ -21,7 +26,9 @@ pub struct GpuDynamicInfo {
 /// Monitors CPU, memory, and GPU resources.
 pub struct SystemMonitor {
     sys: System,
-    gpu_static_cache: OnceLock<Option<GpuStaticInfo>>,
+    gpu_static_cache: OnceLock<GpuStaticInfo>,
+    #[cfg(target_os = "macos")]
+    gpu_static_last_failure_at: Mutex<Option<Instant>>,
 }
 
 impl Default for SystemMonitor {
@@ -41,6 +48,8 @@ impl SystemMonitor {
         Self {
             sys,
             gpu_static_cache: OnceLock::new(),
+            #[cfg(target_os = "macos")]
+            gpu_static_last_failure_at: Mutex::new(None),
         }
     }
 
@@ -64,20 +73,50 @@ impl SystemMonitor {
     ///
     /// On macOS, uses `system_profiler` to detect Apple Silicon GPU.
     /// On NVIDIA systems, dynamic GPU info comes from `gpu_dynamic_info()` instead.
-    /// Results are cached after the first call.
+    /// Successful detection is cached after the first success.
+    /// Failed probes are retried after a short cooldown.
     pub fn gpu_static_info(&self) -> Option<GpuStaticInfo> {
-        self.gpu_static_cache
-            .get_or_init(|| {
-                #[cfg(target_os = "macos")]
-                {
-                    detect_macos_gpu()
+        if let Some(cached) = self.gpu_static_cache.get() {
+            return Some(cached.clone());
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let now = Instant::now();
+            {
+                let last_failure = match self.gpu_static_last_failure_at.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                if let Some(last_failure_at) = *last_failure {
+                    if now.duration_since(last_failure_at) < GPU_PROBE_RETRY_COOLDOWN {
+                        return None;
+                    }
                 }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    None
-                }
-            })
-            .clone()
+            }
+
+            let detected = detect_macos_gpu();
+            if let Some(info) = detected {
+                let _ = self.gpu_static_cache.set(info.clone());
+                let mut last_failure = match self.gpu_static_last_failure_at.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                *last_failure = None;
+                return Some(info);
+            }
+
+            let mut last_failure = match self.gpu_static_last_failure_at.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            *last_failure = Some(now);
+            None
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            None
+        }
     }
 
     /// Dynamic GPU info from NVIDIA (requires `nvidia-gpu` feature on Linux/Windows).
@@ -105,6 +144,19 @@ impl SystemMonitor {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn parse_macos_gpu_name(json: &serde_json::Value) -> Option<String> {
+    json.get("SPDisplaysDataType")?
+        .as_array()?
+        .first()?
+        .get("sppci_model")?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
+#[cfg(target_os = "macos")]
+const GPU_PROBE_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
+
 #[cfg(target_os = "macos")]
 fn detect_macos_gpu() -> Option<GpuStaticInfo> {
     let mut child = crate::process::command("/usr/sbin/system_profiler")
@@ -114,14 +166,18 @@ fn detect_macos_gpu() -> Option<GpuStaticInfo> {
         .spawn()
         .ok()?;
 
-    let mut stdout = child.stdout.take()?;
+    let Some(mut stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    };
     let reader = std::thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = std::io::Read::read_to_end(&mut stdout, &mut buf);
         buf
     });
 
-    let status = wait_with_timeout(&mut child, std::time::Duration::from_secs(5));
+    let status = wait_with_timeout(&mut child, Duration::from_secs(5));
     let status = match status {
         Some(status) => status,
         None => {
@@ -139,13 +195,7 @@ fn detect_macos_gpu() -> Option<GpuStaticInfo> {
 
     let output = reader.join().ok()?;
     let json: serde_json::Value = serde_json::from_slice(&output).ok()?;
-    let name = json
-        .get("SPDisplaysDataType")?
-        .as_array()?
-        .first()?
-        .get("sppci_model")?
-        .as_str()?
-        .to_string();
+    let name = parse_macos_gpu_name(&json)?;
     Some(GpuStaticInfo {
         name,
         vram_total_bytes: None,
@@ -193,6 +243,8 @@ mod tests {
     #[test]
     fn gpu_static_info_returns_some_on_macos() {
         let monitor = SystemMonitor::new();
+        // Headless/virtualized macOS can legitimately return no display model.
+        // In that case we skip content assertions and only validate them when available.
         let Some(info) = monitor.gpu_static_info() else {
             return;
         };
@@ -221,13 +273,7 @@ mod tests {
     fn parse_macos_gpu_json() {
         let json_str = r#"{"SPDisplaysDataType":[{"sppci_model":"Apple M4 Max"}]}"#;
         let json: serde_json::Value = serde_json::from_str(json_str).unwrap();
-        let name = json
-            .get("SPDisplaysDataType")
-            .and_then(|v| v.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|entry| entry.get("sppci_model"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let name = parse_macos_gpu_name(&json);
         assert_eq!(name, Some("Apple M4 Max".to_string()));
     }
 }
@@ -235,9 +281,9 @@ mod tests {
 #[cfg(target_os = "macos")]
 fn wait_with_timeout(
     child: &mut std::process::Child,
-    timeout: std::time::Duration,
+    timeout: Duration,
 ) -> Option<std::process::ExitStatus> {
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Some(status),
@@ -245,7 +291,7 @@ fn wait_with_timeout(
                 if start.elapsed() >= timeout {
                     return None;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(Duration::from_millis(50));
             }
             Err(_) => return None,
         }
