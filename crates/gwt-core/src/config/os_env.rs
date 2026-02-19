@@ -202,6 +202,7 @@ pub async fn capture_login_shell_env() -> OsEnvResult {
     }
 }
 
+#[cfg(unix)]
 fn fallback_env(reason: String) -> OsEnvResult {
     OsEnvResult {
         env: std::env::vars().collect(),

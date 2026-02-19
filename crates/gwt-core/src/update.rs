@@ -944,6 +944,10 @@ fn ensure_executable(path: &Path) -> Result<(), String> {
         perms.set_mode(mode | 0o111);
         let _ = fs::set_permissions(path, perms);
     }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
     Ok(())
 }
 
@@ -964,11 +968,11 @@ fn is_process_running(pid: u32) -> bool {
         let script = format!(
             "if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}"
         );
-        return crate::process::command("powershell")
+        crate::process::command("powershell")
             .args(["-NoProfile", "-Command", &script])
             .status()
             .map(|s| s.success())
-            .unwrap_or(false);
+            .unwrap_or(false)
     }
 
     #[cfg(not(target_os = "windows"))]

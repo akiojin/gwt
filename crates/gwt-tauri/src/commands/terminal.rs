@@ -2095,6 +2095,7 @@ mod tests {
         promote_unexpected_stream_eof_to_error(&state, "missing-pane", &mut stream_error);
         assert_eq!(stream_error.as_deref(), Some("existing error"));
     }
+    #[test]
     fn append_close_hint_to_pane_scrollback_records_hint() {
         let _lock = crate::commands::ENV_LOCK.lock().unwrap();
         let home = tempfile::TempDir::new().unwrap();
