@@ -3,6 +3,9 @@
 //! Thin wrappers around existing terminal functions providing a clean skill interface
 //! for agent-mode PTY operations.
 
+// Functions will be called from ReAct loop integration (Phase 9-12).
+#![allow(dead_code)]
+
 use crate::commands::terminal::{
     capture_scrollback_tail_from_state, send_keys_broadcast_from_state,
     send_keys_to_pane_from_state,

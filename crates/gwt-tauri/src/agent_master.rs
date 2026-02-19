@@ -1,7 +1,11 @@
+// Many functions are implemented ahead of their call sites (wired in Phase 9-12).
+#![allow(dead_code)]
+
 use gwt_core::agent::conversation::MessageRole;
 use gwt_core::agent::developer::AgentType;
 use gwt_core::agent::lead::{LeadMessage, LeadStatus, MessageKind};
 use gwt_core::agent::session::ProjectTeamSession;
+use gwt_core::agent::task::{PullRequestRef, Task, TestStatus, TestVerification};
 use gwt_core::agent::types::SessionId;
 use gwt_core::ai::{AIClient, AIResponse, ChatMessage, ToolCall};
 use gwt_core::config::{ProfilesConfig, Settings};
@@ -831,6 +835,328 @@ fn format_tool_call(call: &ToolCall) -> String {
     format!("{} {}", call.name, args)
 }
 
+// ===========================================================================
+// Phase 7: US5 — Artifact Verification and Integration (T701-T706)
+// ===========================================================================
+
+/// Verify task artifacts by running a test command and returning the result.
+/// In the current pure-function form, this constructs a TestVerification from
+/// a pre-captured test output and pass/fail flag.
+pub fn verify_task_artifacts(test_command: &str, output: &str, passed: bool) -> TestVerification {
+    TestVerification {
+        status: if passed {
+            TestStatus::Passed
+        } else {
+            TestStatus::Failed
+        },
+        command: test_command.to_string(),
+        output: Some(output.to_string()),
+        attempt: 1,
+    }
+}
+
+/// Generate a PR title from a task name and issue number.
+pub fn generate_pr_title(task_name: &str, issue_number: u64) -> String {
+    format!("feat: {} (#{issue_number})", task_name.trim())
+}
+
+/// Generate a PR body from a task and its associated issue number.
+pub fn generate_pr_body(task: &Task, issue_number: u64) -> String {
+    format!(
+        "## Summary\n\n{}\n\nCloses #{issue_number}\n\n## Task\n\n- **ID**: {}\n- **Name**: {}",
+        task.description, task.id.0, task.name
+    )
+}
+
+/// CI status as observed from a PullRequestRef.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CiStatus {
+    Pending,
+    Success,
+    Failure,
+}
+
+/// Check CI status for a PR. This is a stub that derives status from the
+/// existence and number of a PullRequestRef. In production this would query
+/// the GitHub API.
+pub fn check_ci_status(pr: &Option<PullRequestRef>) -> Option<CiStatus> {
+    pr.as_ref().map(|_| CiStatus::Pending)
+}
+
+/// Determine whether we should retry a CI fix. Max 3 retries (0..=2 attempts
+/// means retries 0, 1, 2 are OK; 3+ stops).
+pub fn should_retry_ci_fix(retry_count: u8) -> bool {
+    retry_count < 3
+}
+
+/// Format a prompt instructing a developer to fix CI failures.
+pub fn format_ci_fix_prompt(ci_output: &str, task: &Task) -> String {
+    format!(
+        "CI failed for task '{}'. Please fix the following issues and push again:\n\n```\n{}\n```",
+        task.name, ci_output
+    )
+}
+
+/// Format a git merge command string for a developer to execute.
+pub fn format_merge_command(source_branch: &str, target_branch: &str) -> String {
+    format!("git merge {source_branch} --into {target_branch}")
+}
+
+/// Detect whether command output contains merge conflict markers.
+pub fn detect_merge_conflict(output: &str) -> bool {
+    output.contains("CONFLICT")
+        || output.contains("<<<<<<<")
+        || output.contains(">>>>>>>")
+        || output.contains("Merge conflict")
+        || output.contains("merge conflict")
+}
+
+// ===========================================================================
+// Phase 8: US6 — Failure Handling and Layer Independence (T801-T804)
+// ===========================================================================
+
+/// Scope of a failure — which layer is affected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FailureScope {
+    Lead,
+    Coordinator,
+    Developer,
+}
+
+/// Check if a layer status string indicates a healthy/operational state.
+pub fn is_layer_healthy(status: &str) -> bool {
+    let lower = status.to_lowercase();
+    matches!(
+        lower.as_str(),
+        "idle" | "thinking" | "orchestrating" | "running" | "waiting_approval" | "ready"
+    )
+}
+
+/// Classify a failure error message into the appropriate layer scope.
+pub fn classify_failure(error: &str) -> FailureScope {
+    let lower = error.to_lowercase();
+    if lower.contains("lead") || lower.contains("ai settings") || lower.contains("api key") {
+        FailureScope::Lead
+    } else if lower.contains("coordinator") || lower.contains("pane") || lower.contains("session") {
+        FailureScope::Coordinator
+    } else {
+        FailureScope::Developer
+    }
+}
+
+/// Determine whether a coordinator should be restarted after a crash.
+pub fn should_restart_coordinator(crash_count: u8, max_crashes: u8) -> bool {
+    crash_count < max_crashes
+}
+
+/// Calculate exponential backoff delay in milliseconds for coordinator restarts.
+/// Pattern: 1000ms, 2000ms, 4000ms, ...
+pub fn coordinator_restart_delay_ms(crash_count: u8) -> u64 {
+    1000u64 * 2u64.pow(crash_count as u32)
+}
+
+// ===========================================================================
+// Phase 5: US3 — Developer Launch and Implementation (T501-T510)
+// ===========================================================================
+
+/// Launch a coordinator for a given project issue.
+///
+/// Creates a CoordinatorState with status Starting, assigns a pane_id, and
+/// returns the state. The actual terminal pane creation is handled by the caller
+/// using the pane_id.
+pub fn launch_coordinator(
+    issue: &gwt_core::agent::issue::ProjectIssue,
+    pane_id: &str,
+) -> gwt_core::agent::coordinator::CoordinatorState {
+    gwt_core::agent::coordinator::CoordinatorState {
+        pane_id: pane_id.to_string(),
+        pid: None,
+        status: gwt_core::agent::coordinator::CoordinatorStatus::Starting,
+        started_at: chrono::Utc::now(),
+        github_issue_number: issue.github_issue_number,
+        crash_count: 0,
+    }
+}
+
+/// Build the coordinator prompt for a given GitHub issue.
+pub fn build_coordinator_prompt(issue_number: u64, issue_title: &str) -> String {
+    format!(
+        "You are a Coordinator agent. Implement GitHub Issue #{} ({}).\n\
+         Break down the work into tasks, create developer worktrees, and track progress.\n\
+         Report GWT_TASK_DONE when all tasks are complete.",
+        issue_number, issue_title
+    )
+}
+
+/// Assign developers to a task, creating DeveloperState entries.
+///
+/// Creates `count` DeveloperState entries with status Starting and the given
+/// agent type. Worktree references use placeholder paths that should be updated
+/// after actual worktree creation.
+pub fn assign_developers_to_task(
+    task: &mut gwt_core::agent::task::Task,
+    agent_type: gwt_core::agent::developer::AgentType,
+    count: usize,
+) {
+    use gwt_core::agent::developer::{DeveloperState, DeveloperStatus};
+    use gwt_core::agent::types::SubAgentId;
+    use gwt_core::agent::worktree::WorktreeRef;
+
+    for i in 0..count {
+        let dev_id = SubAgentId::new();
+        let pane_id = format!("dev-{}-{}", task.id.0, i);
+        let sanitized_name = task.name.replace(' ', "-").to_lowercase();
+        let branch_name = format!("agent/{}-dev-{}", sanitized_name, i);
+        let worktree = WorktreeRef::new(
+            &branch_name,
+            PathBuf::from(format!(".worktrees/{}", branch_name.replace('/', "-"))),
+            vec![task.id.clone()],
+        );
+        task.developers.push(DeveloperState {
+            id: dev_id,
+            agent_type,
+            pane_id,
+            pid: None,
+            status: DeveloperStatus::Starting,
+            worktree,
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            completion_source: None,
+        });
+    }
+}
+
+/// Create a developer worktree reference using the existing helpers.
+///
+/// Returns a WorktreeRef with the generated branch name and path.
+/// Note: This does not actually create the git worktree on disk;
+/// the caller must use WorktreeManager for that.
+pub fn create_developer_worktree(
+    repo_path: &Path,
+    task_name: &str,
+    existing_branches: &[String],
+) -> gwt_core::agent::worktree::WorktreeRef {
+    use gwt_core::agent::worktree::{create_agent_branch_name, worktree_path, WorktreeRef};
+
+    let branch_name = create_agent_branch_name(task_name, existing_branches);
+    let path = worktree_path(repo_path, &branch_name);
+
+    WorktreeRef::new(branch_name, path, vec![])
+}
+
+/// Resolve the auto-mode flag for a given agent type.
+///
+/// - Claude: `--dangerously-skip-permissions`
+/// - Codex: `--full-auto`
+/// - Gemini: `auto`
+pub fn auto_mode_flag(agent_type: gwt_core::agent::developer::AgentType) -> &'static str {
+    use gwt_core::agent::developer::AgentType;
+    match agent_type {
+        AgentType::Claude => "--dangerously-skip-permissions",
+        AgentType::Codex => "--full-auto",
+        AgentType::Gemini => "auto",
+    }
+}
+
+/// Resolve the agent command name for a given agent type.
+pub fn agent_command_name(agent_type: gwt_core::agent::developer::AgentType) -> &'static str {
+    use gwt_core::agent::developer::AgentType;
+    match agent_type {
+        AgentType::Claude => "claude",
+        AgentType::Codex => "codex",
+        AgentType::Gemini => "gemini",
+    }
+}
+
+/// Build the developer task prompt.
+pub fn build_developer_prompt(task_name: &str, task_description: &str) -> String {
+    format!(
+        "Task: {}\n\n{}\n\nWhen finished, output GWT_TASK_DONE on a new line.",
+        task_name, task_description
+    )
+}
+
+// ===========================================================================
+// Phase 6: US4 — Developer Completion Detection (T601-T604)
+// ===========================================================================
+
+/// Sources of completion detection, checked in priority order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionDetection {
+    /// Hook stop event detected
+    HookStop,
+    /// Output pattern (GWT_TASK_DONE) found in scrollback
+    OutputPattern,
+    /// Process has exited
+    ProcessExit,
+}
+
+/// The output pattern that signals task completion.
+pub const COMPLETION_PATTERN: &str = "GWT_TASK_DONE";
+
+/// Detect developer completion from scrollback output.
+///
+/// Checks for the GWT_TASK_DONE pattern in the scrollback text.
+pub fn detect_output_pattern(scrollback: &str) -> bool {
+    scrollback.contains(COMPLETION_PATTERN)
+}
+
+/// Check if a pane process has exited by examining its status.
+///
+/// Returns Some(exit_code) if the pane has completed, None if still running.
+pub fn check_pane_exit(state: &AppState, pane_id: &str) -> Option<i32> {
+    use gwt_core::terminal::pane::PaneStatus;
+
+    let manager = state.pane_manager.lock().ok()?;
+    let pane = manager.panes().iter().find(|p| p.pane_id() == pane_id)?;
+    match pane.status() {
+        PaneStatus::Completed(code) => Some(*code),
+        _ => None,
+    }
+}
+
+/// Detect developer completion using composite detection.
+///
+/// Check order: 1) Hook Stop event, 2) Output pattern, 3) Process exit.
+/// Returns None if the developer is still running.
+pub fn detect_developer_completion(
+    state: &AppState,
+    pane_id: &str,
+    hook_stopped: bool,
+    scrollback: &str,
+) -> Option<CompletionDetection> {
+    // 1) Hook stop
+    if hook_stopped {
+        return Some(CompletionDetection::HookStop);
+    }
+
+    // 2) Output pattern
+    if detect_output_pattern(scrollback) {
+        return Some(CompletionDetection::OutputPattern);
+    }
+
+    // 3) Process exit
+    if check_pane_exit(state, pane_id).is_some() {
+        return Some(CompletionDetection::ProcessExit);
+    }
+
+    None
+}
+
+/// Format scrollback output as a progress report.
+///
+/// Extracts the last `max_lines` non-empty lines from the scrollback for
+/// display in the Lead chat. No LLM call needed.
+pub fn format_progress_report(scrollback: &str, max_lines: usize) -> String {
+    let lines: Vec<&str> = scrollback
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+
+    let start = lines.len().saturating_sub(max_lines);
+    lines[start..].join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1365,5 +1691,525 @@ mod tests {
     fn should_poll_boundary_at_exactly_120_seconds() {
         let exactly = chrono::Utc::now() - chrono::Duration::seconds(120);
         assert!(should_poll(Some(exactly)));
+    }
+
+    // ===========================================================================
+    // Phase 7: T701/T702 — Artifact verification and PR creation
+    // ===========================================================================
+
+    #[test]
+    fn verify_task_artifacts_passed() {
+        let result = verify_task_artifacts("cargo test", "all 42 tests passed", true);
+        assert_eq!(result.status, TestStatus::Passed);
+        assert_eq!(result.command, "cargo test");
+        assert_eq!(result.output, Some("all 42 tests passed".to_string()));
+        assert_eq!(result.attempt, 1);
+    }
+
+    #[test]
+    fn verify_task_artifacts_failed() {
+        let result = verify_task_artifacts("cargo test", "2 tests failed", false);
+        assert_eq!(result.status, TestStatus::Failed);
+        assert_eq!(result.command, "cargo test");
+    }
+
+    #[test]
+    fn generate_pr_title_formats_correctly() {
+        let title = generate_pr_title("Add login endpoint", 42);
+        assert_eq!(title, "feat: Add login endpoint (#42)");
+    }
+
+    #[test]
+    fn generate_pr_title_trims_whitespace() {
+        let title = generate_pr_title("  Fix bug  ", 7);
+        assert_eq!(title, "feat: Fix bug (#7)");
+    }
+
+    #[test]
+    fn generate_pr_body_includes_task_details() {
+        use gwt_core::agent::types::TaskId;
+        let task = Task::new(
+            TaskId("task-99".to_string()),
+            "Login flow",
+            "Implement OAuth login",
+        );
+        let body = generate_pr_body(&task, 42);
+        assert!(body.contains("Implement OAuth login"));
+        assert!(body.contains("Closes #42"));
+        assert!(body.contains("task-99"));
+        assert!(body.contains("Login flow"));
+    }
+
+    // ===========================================================================
+    // Phase 7: T703/T704 — CI monitoring and auto-fix loop
+    // ===========================================================================
+
+    #[test]
+    fn check_ci_status_with_pr_returns_pending() {
+        let pr = Some(PullRequestRef {
+            number: 10,
+            url: "https://github.com/org/repo/pull/10".to_string(),
+        });
+        let status = check_ci_status(&pr);
+        assert_eq!(status, Some(CiStatus::Pending));
+    }
+
+    #[test]
+    fn check_ci_status_without_pr_returns_none() {
+        let status = check_ci_status(&None);
+        assert!(status.is_none());
+    }
+
+    #[test]
+    fn should_retry_ci_fix_within_limit() {
+        assert!(should_retry_ci_fix(0));
+        assert!(should_retry_ci_fix(1));
+        assert!(should_retry_ci_fix(2));
+    }
+
+    #[test]
+    fn should_retry_ci_fix_at_limit_stops() {
+        assert!(!should_retry_ci_fix(3));
+        assert!(!should_retry_ci_fix(4));
+        assert!(!should_retry_ci_fix(255));
+    }
+
+    #[test]
+    fn format_ci_fix_prompt_includes_output_and_task() {
+        use gwt_core::agent::types::TaskId;
+        let task = Task::new(TaskId("t-1".to_string()), "Build API", "Build the REST API");
+        let prompt = format_ci_fix_prompt("error: unused variable `x`", &task);
+        assert!(prompt.contains("Build API"));
+        assert!(prompt.contains("error: unused variable `x`"));
+        assert!(prompt.contains("CI failed"));
+    }
+
+    // ===========================================================================
+    // Phase 7: T705/T706 — Developer context sharing
+    // ===========================================================================
+
+    #[test]
+    fn format_merge_command_produces_valid_command() {
+        let cmd = format_merge_command("feature/login", "develop");
+        assert_eq!(cmd, "git merge feature/login --into develop");
+    }
+
+    #[test]
+    fn detect_merge_conflict_finds_conflict_marker() {
+        assert!(detect_merge_conflict(
+            "CONFLICT (content): Merge conflict in src/main.rs"
+        ));
+    }
+
+    #[test]
+    fn detect_merge_conflict_finds_diff_markers() {
+        assert!(detect_merge_conflict(
+            "<<<<<<< HEAD\nsome code\n=======\nother code\n>>>>>>> branch"
+        ));
+    }
+
+    #[test]
+    fn detect_merge_conflict_returns_false_for_clean_merge() {
+        assert!(!detect_merge_conflict(
+            "Merge made by the 'ort' strategy.\n 1 file changed"
+        ));
+    }
+
+    #[test]
+    fn detect_merge_conflict_finds_lowercase_marker() {
+        assert!(detect_merge_conflict(
+            "Auto-merging file.rs\nmerge conflict detected"
+        ));
+    }
+
+    // ===========================================================================
+    // Phase 8: T801/T802 — Layer independence guarantee
+    // ===========================================================================
+
+    #[test]
+    fn is_layer_healthy_operational_statuses() {
+        assert!(is_layer_healthy("idle"));
+        assert!(is_layer_healthy("thinking"));
+        assert!(is_layer_healthy("orchestrating"));
+        assert!(is_layer_healthy("running"));
+        assert!(is_layer_healthy("waiting_approval"));
+        assert!(is_layer_healthy("ready"));
+    }
+
+    #[test]
+    fn is_layer_healthy_case_insensitive() {
+        assert!(is_layer_healthy("IDLE"));
+        assert!(is_layer_healthy("Thinking"));
+        assert!(is_layer_healthy("RUNNING"));
+    }
+
+    #[test]
+    fn is_layer_healthy_unhealthy_statuses() {
+        assert!(!is_layer_healthy("crashed"));
+        assert!(!is_layer_healthy("error"));
+        assert!(!is_layer_healthy("disconnected"));
+        assert!(!is_layer_healthy(""));
+    }
+
+    #[test]
+    fn classify_failure_lead_errors() {
+        assert_eq!(
+            classify_failure("Lead AI connection timeout"),
+            FailureScope::Lead
+        );
+        assert_eq!(
+            classify_failure("AI settings are required"),
+            FailureScope::Lead
+        );
+        assert_eq!(classify_failure("Invalid API key"), FailureScope::Lead);
+    }
+
+    #[test]
+    fn classify_failure_coordinator_errors() {
+        assert_eq!(
+            classify_failure("Coordinator pane crashed"),
+            FailureScope::Coordinator
+        );
+        assert_eq!(
+            classify_failure("Terminal pane disconnected"),
+            FailureScope::Coordinator
+        );
+        assert_eq!(
+            classify_failure("Session expired for coordinator"),
+            FailureScope::Coordinator
+        );
+    }
+
+    #[test]
+    fn classify_failure_developer_errors() {
+        assert_eq!(
+            classify_failure("Build failed with exit code 1"),
+            FailureScope::Developer
+        );
+        assert_eq!(
+            classify_failure("Test compilation error"),
+            FailureScope::Developer
+        );
+    }
+
+    // ===========================================================================
+    // Phase 8: T803/T804 — Coordinator auto-restart
+    // ===========================================================================
+
+    #[test]
+    fn should_restart_coordinator_within_limit() {
+        assert!(should_restart_coordinator(0, 3));
+        assert!(should_restart_coordinator(1, 3));
+        assert!(should_restart_coordinator(2, 3));
+    }
+
+    #[test]
+    fn should_restart_coordinator_at_limit_stops() {
+        assert!(!should_restart_coordinator(3, 3));
+        assert!(!should_restart_coordinator(4, 3));
+    }
+
+    #[test]
+    fn should_restart_coordinator_custom_max() {
+        assert!(should_restart_coordinator(4, 5));
+        assert!(!should_restart_coordinator(5, 5));
+    }
+
+    #[test]
+    fn coordinator_restart_delay_exponential_backoff() {
+        assert_eq!(coordinator_restart_delay_ms(0), 1000); // 1s
+        assert_eq!(coordinator_restart_delay_ms(1), 2000); // 2s
+        assert_eq!(coordinator_restart_delay_ms(2), 4000); // 4s
+    }
+
+    #[test]
+    fn coordinator_restart_delay_higher_counts() {
+        assert_eq!(coordinator_restart_delay_ms(3), 8000); // 8s
+        assert_eq!(coordinator_restart_delay_ms(4), 16000); // 16s
+    }
+
+    // ===========================================================================
+    // Phase 5: T501/T502 — Coordinator launch
+    // ===========================================================================
+
+    #[test]
+    fn launch_coordinator_creates_starting_state() {
+        use gwt_core::agent::coordinator::CoordinatorStatus;
+        use gwt_core::agent::issue::{IssueStatus, ProjectIssue};
+
+        let issue = ProjectIssue {
+            id: "issue-42".to_string(),
+            github_issue_number: 42,
+            github_issue_url: "https://github.com/org/repo/issues/42".to_string(),
+            title: "Login feature".to_string(),
+            status: IssueStatus::Planned,
+            coordinator: None,
+            tasks: Vec::new(),
+        };
+
+        let coord = launch_coordinator(&issue, "coord-pane-42");
+        assert_eq!(coord.pane_id, "coord-pane-42");
+        assert_eq!(coord.status, CoordinatorStatus::Starting);
+        assert_eq!(coord.github_issue_number, 42);
+        assert_eq!(coord.crash_count, 0);
+        assert!(coord.pid.is_none());
+    }
+
+    #[test]
+    fn launch_coordinator_preserves_issue_number() {
+        use gwt_core::agent::issue::{IssueStatus, ProjectIssue};
+
+        let issue = ProjectIssue {
+            id: "issue-99".to_string(),
+            github_issue_number: 99,
+            github_issue_url: "https://github.com/org/repo/issues/99".to_string(),
+            title: "Another feature".to_string(),
+            status: IssueStatus::InProgress,
+            coordinator: None,
+            tasks: Vec::new(),
+        };
+
+        let coord = launch_coordinator(&issue, "coord-99");
+        assert_eq!(coord.github_issue_number, 99);
+    }
+
+    #[test]
+    fn build_coordinator_prompt_includes_issue_info() {
+        let prompt = build_coordinator_prompt(42, "Login feature");
+        assert!(prompt.contains("#42"));
+        assert!(prompt.contains("Login feature"));
+        assert!(prompt.contains("Coordinator"));
+        assert!(prompt.contains("GWT_TASK_DONE"));
+    }
+
+    // ===========================================================================
+    // Phase 5: T503/T504 — Task split and Developer assignment
+    // ===========================================================================
+
+    #[test]
+    fn assign_developers_to_task_creates_entries() {
+        use gwt_core::agent::developer::{AgentType, DeveloperStatus};
+        use gwt_core::agent::types::TaskId;
+
+        let mut task = Task::new(
+            TaskId("task-1".to_string()),
+            "Write tests",
+            "Write unit tests for auth module",
+        );
+        assert!(task.developers.is_empty());
+
+        assign_developers_to_task(&mut task, AgentType::Claude, 2);
+        assert_eq!(task.developers.len(), 2);
+
+        for (i, dev) in task.developers.iter().enumerate() {
+            assert_eq!(dev.agent_type, AgentType::Claude);
+            assert_eq!(dev.status, DeveloperStatus::Starting);
+            assert!(dev.pid.is_none());
+            assert!(dev.pane_id.contains(&format!("dev-task-1-{}", i)));
+            assert!(dev.worktree.branch_name.starts_with("agent/"));
+            assert!(dev.completed_at.is_none());
+            assert!(dev.completion_source.is_none());
+        }
+    }
+
+    #[test]
+    fn assign_developers_to_task_multiple_types() {
+        use gwt_core::agent::developer::AgentType;
+        use gwt_core::agent::types::TaskId;
+
+        let mut task = Task::new(TaskId("task-2".to_string()), "impl", "implement feature");
+
+        assign_developers_to_task(&mut task, AgentType::Claude, 1);
+        assign_developers_to_task(&mut task, AgentType::Codex, 1);
+
+        assert_eq!(task.developers.len(), 2);
+        assert_eq!(task.developers[0].agent_type, AgentType::Claude);
+        assert_eq!(task.developers[1].agent_type, AgentType::Codex);
+    }
+
+    #[test]
+    fn assign_developers_zero_count_adds_nothing() {
+        use gwt_core::agent::developer::AgentType;
+        use gwt_core::agent::types::TaskId;
+
+        let mut task = Task::new(TaskId("task-3".to_string()), "nothing", "desc");
+        assign_developers_to_task(&mut task, AgentType::Gemini, 0);
+        assert!(task.developers.is_empty());
+    }
+
+    // ===========================================================================
+    // Phase 5: T505/T506 — Worktree/branch auto-creation
+    // ===========================================================================
+
+    #[test]
+    fn create_developer_worktree_no_conflict() {
+        let wt = create_developer_worktree(Path::new("/repo"), "add login form", &[]);
+        assert_eq!(wt.branch_name, "agent/add-login-form");
+        assert_eq!(
+            wt.path,
+            PathBuf::from("/repo/.worktrees/agent-add-login-form")
+        );
+    }
+
+    #[test]
+    fn create_developer_worktree_with_conflict() {
+        let existing = vec!["agent/add-login-form".to_string()];
+        let wt = create_developer_worktree(Path::new("/repo"), "add login form", &existing);
+        assert_eq!(wt.branch_name, "agent/add-login-form-2");
+    }
+
+    // ===========================================================================
+    // Phase 5: T507/T508 — Developer launch and prompt sending
+    // ===========================================================================
+
+    #[test]
+    fn auto_mode_flag_claude() {
+        use gwt_core::agent::developer::AgentType;
+        assert_eq!(
+            auto_mode_flag(AgentType::Claude),
+            "--dangerously-skip-permissions"
+        );
+    }
+
+    #[test]
+    fn auto_mode_flag_codex() {
+        use gwt_core::agent::developer::AgentType;
+        assert_eq!(auto_mode_flag(AgentType::Codex), "--full-auto");
+    }
+
+    #[test]
+    fn auto_mode_flag_gemini() {
+        use gwt_core::agent::developer::AgentType;
+        assert_eq!(auto_mode_flag(AgentType::Gemini), "auto");
+    }
+
+    #[test]
+    fn agent_command_name_for_all_types() {
+        use gwt_core::agent::developer::AgentType;
+        assert_eq!(agent_command_name(AgentType::Claude), "claude");
+        assert_eq!(agent_command_name(AgentType::Codex), "codex");
+        assert_eq!(agent_command_name(AgentType::Gemini), "gemini");
+    }
+
+    #[test]
+    fn build_developer_prompt_includes_task_info() {
+        let prompt = build_developer_prompt("Write unit tests", "Test the auth module");
+        assert!(prompt.contains("Write unit tests"));
+        assert!(prompt.contains("Test the auth module"));
+        assert!(prompt.contains("GWT_TASK_DONE"));
+    }
+
+    // ===========================================================================
+    // Phase 6: T601/T602 — Developer completion detection
+    // ===========================================================================
+
+    #[test]
+    fn completion_pattern_is_expected() {
+        assert_eq!(COMPLETION_PATTERN, "GWT_TASK_DONE");
+    }
+
+    #[test]
+    fn detect_output_pattern_finds_marker() {
+        assert!(detect_output_pattern(
+            "some output\nGWT_TASK_DONE\nmore output"
+        ));
+    }
+
+    #[test]
+    fn detect_output_pattern_no_marker() {
+        assert!(!detect_output_pattern("some output\nno marker here\n"));
+    }
+
+    #[test]
+    fn detect_output_pattern_empty_string() {
+        assert!(!detect_output_pattern(""));
+    }
+
+    #[test]
+    fn detect_output_pattern_partial_match() {
+        assert!(!detect_output_pattern("GWT_TASK_DON"));
+    }
+
+    #[test]
+    fn check_pane_exit_nonexistent_pane() {
+        let state = AppState::new();
+        assert!(check_pane_exit(&state, "nonexistent").is_none());
+    }
+
+    #[test]
+    fn detect_developer_completion_hook_stop_highest_priority() {
+        let state = AppState::new();
+        let result = detect_developer_completion(
+            &state,
+            "pane-1",
+            true,
+            "GWT_TASK_DONE", // pattern also present
+        );
+        assert_eq!(result, Some(CompletionDetection::HookStop));
+    }
+
+    #[test]
+    fn detect_developer_completion_output_pattern_second_priority() {
+        let state = AppState::new();
+        let result = detect_developer_completion(
+            &state,
+            "nonexistent",
+            false,
+            "output line 1\nGWT_TASK_DONE\nline 3",
+        );
+        assert_eq!(result, Some(CompletionDetection::OutputPattern));
+    }
+
+    #[test]
+    fn detect_developer_completion_none_when_running() {
+        let state = AppState::new();
+        let result = detect_developer_completion(&state, "nonexistent", false, "still running...");
+        assert!(result.is_none());
+    }
+
+    // ===========================================================================
+    // Phase 6: T603/T604 — Lead progress reporting
+    // ===========================================================================
+
+    #[test]
+    fn format_progress_report_truncates_to_max_lines() {
+        let scrollback = (1..=20)
+            .map(|i| format!("Line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let report = format_progress_report(&scrollback, 10);
+        let lines: Vec<&str> = report.lines().collect();
+        assert_eq!(lines.len(), 10);
+        assert!(report.contains("Line 11"));
+        assert!(report.contains("Line 20"));
+        assert!(!report.contains("Line 10\n"));
+    }
+
+    #[test]
+    fn format_progress_report_short_output_passes_through() {
+        let scrollback = "Line 1\nLine 2\nLine 3";
+        let report = format_progress_report(scrollback, 10);
+        assert_eq!(report.lines().count(), 3);
+        assert!(report.contains("Line 1"));
+        assert!(report.contains("Line 3"));
+    }
+
+    #[test]
+    fn format_progress_report_skips_empty_lines() {
+        let scrollback = "Line 1\n\n\nLine 2\n\nLine 3\n\n";
+        let report = format_progress_report(scrollback, 10);
+        assert_eq!(report.lines().count(), 3);
+    }
+
+    #[test]
+    fn format_progress_report_empty_input() {
+        let report = format_progress_report("", 10);
+        assert!(report.is_empty());
+    }
+
+    #[test]
+    fn format_progress_report_max_lines_zero() {
+        let report = format_progress_report("Line 1\nLine 2", 0);
+        assert!(report.is_empty());
     }
 }

@@ -235,6 +235,45 @@ describe("Dashboard", () => {
     expect(titleEl?.textContent).toBe(longTitle);
   });
 
+  // T509/T510: Dashboard→Branch Mode jump
+  it("calls onTaskClick with correct id for task with developers (Branch Mode jump)", async () => {
+    let clickedId: string | null = null;
+    const issue = makeIssue({
+      expanded: true,
+      tasks: [
+        {
+          id: "task-branch-jump",
+          name: "Implement login",
+          status: "running",
+          developers: [
+            {
+              id: "dev-1",
+              agentType: "claude",
+              paneId: "pane-1",
+              status: "running",
+              worktree: {
+                branchName: "agent/implement-login",
+                path: "/repo/.worktrees/agent-implement-login",
+              },
+            },
+          ],
+          retryCount: 0,
+        },
+      ],
+      taskTotalCount: 1,
+    });
+    const rendered = await renderDashboard({
+      issues: [issue],
+      onTaskClick: (id: string) => {
+        clickedId = id;
+      },
+    });
+
+    const taskRow = rendered.getByTestId("task-row-task-branch-jump");
+    await fireEvent.click(taskRow);
+    expect(clickedId).toBe("task-branch-jump");
+  });
+
   it("renders multiple issues in order", async () => {
     const issues: DashboardIssue[] = [
       makeIssue({ id: "i-1", title: "First issue" }),
