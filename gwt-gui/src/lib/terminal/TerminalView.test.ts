@@ -358,6 +358,64 @@ describe("TerminalView", () => {
     expect(term.focus).not.toHaveBeenCalled();
   });
 
+  it("keeps very tight repeated integer wheel steps on trackpad path", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-3-tight",
+      active: true,
+    });
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement | null;
+    expect(rootEl).not.toBeNull();
+
+    const viewport = document.createElement("div");
+    viewport.className = "xterm-viewport";
+    viewport.style.overflow = "auto";
+    Object.defineProperty(viewport, "clientHeight", {
+      value: 100,
+      configurable: true,
+    });
+    Object.defineProperty(viewport, "scrollHeight", {
+      value: 1000,
+      configurable: true,
+    });
+    viewport.scrollTop = 5;
+    rootEl!.appendChild(viewport);
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    const dispatchWheel = (timeStamp: number) => {
+      const event = new WheelEvent("wheel", {
+        deltaY: 120,
+        bubbles: true,
+        deltaMode: 0,
+      });
+      Object.defineProperty(event, "timeStamp", { value: timeStamp, configurable: true });
+      const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+      const stopImmediatePropagationSpy = vi.spyOn(
+        event,
+        "stopImmediatePropagation",
+      );
+      rootEl!.dispatchEvent(event);
+      return { preventDefaultSpy, stopImmediatePropagationSpy };
+    };
+
+    const first = dispatchWheel(2000);
+    const second = dispatchWheel(2020);
+    const third = dispatchWheel(2040);
+    const fourth = dispatchWheel(2060);
+
+    expect(first.preventDefaultSpy).toHaveBeenCalled();
+    expect(second.preventDefaultSpy).toHaveBeenCalled();
+    expect(third.preventDefaultSpy).toHaveBeenCalled();
+    expect(fourth.preventDefaultSpy).toHaveBeenCalled();
+    expect(first.stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(second.stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(third.stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(fourth.stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(viewport.scrollTop).toBeGreaterThan(5);
+  });
+
   it("falls back for line-mode wheel input", async () => {
     const { container } = await renderTerminalView({
       paneId: "pane-3-9",

@@ -20,7 +20,7 @@
 
 - `pointerdown` 後、`window` に `pointermove` を dispatch したとき `onTabReorder` が1回呼ばれること。
 
-### 実行コマンド
+### 実行コマンド（RED）
 
 ```bash
 pnpm --dir gwt-gui exec vitest run src/lib/components/MainArea.test.ts -t "pointermove is dispatched on window"
@@ -40,7 +40,7 @@ pnpm --dir gwt-gui exec vitest run src/lib/components/MainArea.test.ts -t "point
 - close ボタン押下時のドラッグ開始を抑止。
 - タブ要素の `draggable` を `false` に変更し、pointer ベース経路を主動線に統一。
 
-### 実行コマンド
+### 実行コマンド（GREEN）
 
 ```bash
 pnpm --dir gwt-gui exec vitest run src/lib/components/MainArea.test.ts src/lib/appTabs.test.ts
@@ -63,12 +63,12 @@ pnpm --dir gwt-gui exec vitest run src/lib/components/MainArea.test.ts src/lib/a
 **更新日**: 2026-02-19
 **対象**: `gwt-gui/src/lib/terminal/TerminalView.svelte`
 
-## 変更理由
+### 変更理由（エージェント）
 
 - エージェントタブで出力行数が増えると、`deltaY` のみに依存した処理や trackpad 判定により wheel スクロールが再発し、再現時にはスクロールバーのドラッグは動作するがトラックパッド入力だけ失敗する事例が報告されているため。
 - `deltaX` のみのイベント（水平成分優位）でも `wheel` を拾ってローカルスクロールできるよう、軸非依存で扱えるようにする必要がある。
 
-## RED
+### RED（エージェント）
 
 ### 追加テスト
 
@@ -84,7 +84,7 @@ pnpm --dir gwt-gui exec vitest run src/lib/components/MainArea.test.ts src/lib/a
 - 連続した 120/240 系の固定ステップ入力で、時間差が十分にあれば明確なマウス入力として判定し、フォールバックを避けてターミナルの既存入力経路へ委譲されること
 - 小数点デルタでも、整数化しやすい環境で移動量が蓄積されること
 
-### 実行コマンド
+### 実行コマンド（AGENT RED）
 
 ```bash
 pnpm --dir gwt-gui exec vitest run src/lib/terminal/TerminalView.test.ts -t "uses dominant axis for mixed wheel input" -t "falls back when wheel has horizontal-only delta" -t "keeps clear mouse-like repeated integer wheel events for terminal consumption" -t "accumulates fractional wheel input to preserve sub-pixel scroll"
@@ -95,7 +95,7 @@ pnpm --dir gwt-gui exec vitest run src/lib/terminal/TerminalView.test.ts -t "use
 - `deltaX` が主要軸となる入力（`deltaX` 優位）を `deltaY` に委ねていた実装では、想定するスクロール方向へ移動しないため再現条件を再現できなかった。
 - 100/120/240 周辺の固定ステップをすべて trackpad 扱いし続けると、focused 時に `preventDefault` されやすく、純粋なマウス入力を奪う再現条件が残っていた。
 
-## GREEN
+### GREEN（エージェント）
 
 ### 実装
 
@@ -103,7 +103,7 @@ pnpm --dir gwt-gui exec vitest run src/lib/terminal/TerminalView.test.ts -t "use
 - `pickWheelAxis` と `pickWheelDelta` を導入し、軸方向を明示しつつ `WheelScrollState` でサブピクセル残差を保持してスクロール距離へ反映する
 - `scrollViewportByWheel` と `handleWheel` を状態を注入する形に更新し、判定・加算・反映の経路を一貫化
 
-### 実行コマンド
+### 実行コマンド（AGENT GREEN）
 
 ```bash
 pnpm --dir gwt-gui exec vitest run src/lib/terminal/TerminalView.test.ts
@@ -111,8 +111,8 @@ pnpm --dir gwt-gui exec vitest run src/lib/terminal/TerminalView.test.ts
 
 ### GREEN結果
 
-- `TerminalView.test.ts`: 24 tests passed
+- `TerminalView.test.ts`: 25 tests passed
 
-## REFACTOR
+### REFACTOR（エージェント）
 
 - 固定ステップマウス入力と小数点 trackpad 入力を別軸で扱えるよう、判定とスクロール反映の責務を分けて再発時の原因追跡性を改善。

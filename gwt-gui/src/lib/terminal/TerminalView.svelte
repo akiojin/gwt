@@ -22,9 +22,9 @@
   const TRACKPAD_WHEEL_DELTA_THRESHOLD = 240;
   const MOUSE_WHEEL_STEP_REPEAT_WINDOW_MS = 220;
   const MOUSE_WHEEL_STEP_REPEAT_COUNT = 4;
-  const MOUSE_WHEEL_STEP_MOUSE_GAP_MS = 50;
-  // Trackpad deltas often arrive in very tight bursts; only treat canonical 120/240
-  // step runs as mouse input when they are sufficiently spaced in time.
+  const MOUSE_WHEEL_STEP_MOUSE_GAP_MS = 45;
+  // Mouse wheels are usually very regular and dense; treat only tight, consistent
+  // runs as mouse input. Slower, jittery integer bursts stay on trackpad path.
 
   type WheelSample = {
     at: number;
