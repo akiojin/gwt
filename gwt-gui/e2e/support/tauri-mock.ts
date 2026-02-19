@@ -68,6 +68,7 @@ export async function installTauriMock(
       let paneSeq = 1;
       let nextSpawnShellError = false;
       let lastSpawnedPaneId: string | null = null;
+      let restoreLeaderAcquired = false;
 
       let agentModeState: AgentModeState = {
         messages: [],
@@ -75,7 +76,7 @@ export async function installTauriMock(
         ai_error: null,
         last_error: null,
         is_waiting: false,
-        session_name: "Agent Mode",
+        session_name: "Master Agent",
         llm_call_count: 0,
         estimated_tokens: 0,
       };
@@ -165,6 +166,14 @@ export async function installTauriMock(
         };
       }
 
+      function openProjectResult(pathLike: unknown) {
+        return {
+          info: projectInfo(pathLike),
+          action: "opened",
+          focusedWindowLabel: null,
+        };
+      }
+
       async function invoke(cmd: string, rawArgs?: unknown): Promise<unknown> {
         const args = normalizeArgs(rawArgs);
         const runtimeCommandResponses = (
@@ -191,6 +200,7 @@ export async function installTauriMock(
             return {
               ui_font_size: 13,
               terminal_font_size: 13,
+              app_language: "auto",
               voice_input: {
                 enabled: false,
                 hotkey: "Mod+Shift+M",
@@ -198,6 +208,8 @@ export async function installTauriMock(
                 model: "base",
               },
             };
+          case "rebuild_all_branch_session_summaries":
+            return null;
           case "get_system_info":
             return {
               cpu_usage_percent: 0,
@@ -228,6 +240,25 @@ export async function installTauriMock(
                 lastOpened: lastOpenedAt,
               },
             ];
+          case "get_current_window_label":
+            return "main";
+          case "try_acquire_window_restore_leader": {
+            const label = typeof args.label === "string" ? args.label.trim() : "";
+            if (label !== "main" || restoreLeaderAcquired) return false;
+            restoreLeaderAcquired = true;
+            return true;
+          }
+          case "release_window_restore_leader": {
+            const label = typeof args.label === "string" ? args.label.trim() : "";
+            if (label === "main") {
+              restoreLeaderAcquired = false;
+            }
+            return null;
+          }
+          case "open_gwt_window": {
+            const label = typeof args.label === "string" ? args.label.trim() : "";
+            return label || "main";
+          }
           case "probe_path":
             return {
               kind: "gwtProject",
@@ -235,7 +266,7 @@ export async function installTauriMock(
                 typeof args.path === "string" ? args.path : projectPath,
             };
           case "open_project":
-            return projectInfo(args.path);
+            return openProjectResult(args.path);
           case "close_project":
             return null;
           case "list_worktree_branches":

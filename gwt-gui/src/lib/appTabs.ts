@@ -1,6 +1,6 @@
 import type { Tab } from "./types";
 
-const DEFAULT_APP_TABS: Tab[] = [{ id: "agentMode", label: "Agent Mode", type: "agentMode" }];
+const DEFAULT_APP_TABS: Tab[] = [{ id: "agentMode", label: "Master Agent", type: "agentMode" }];
 export type TabDropPosition = "before" | "after";
 
 export function defaultAppTabs(): Tab[] {

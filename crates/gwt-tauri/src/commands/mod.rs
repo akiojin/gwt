@@ -8,6 +8,8 @@ pub mod docker;
 pub mod git_view;
 pub mod hooks;
 pub mod issue;
+pub mod issue_spec;
+pub mod mcp;
 pub mod profiles;
 pub mod project;
 pub mod pullrequest;
@@ -18,6 +20,7 @@ pub mod system;
 pub mod terminal;
 pub mod update;
 pub mod version_history;
+pub mod window;
 pub mod window_tabs;
 
 #[cfg(test)]

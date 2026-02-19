@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, fireEvent, waitFor, cleanup } from "@testing-library/svelte";
 
-import type { ProfilesConfig, SettingsData } from "../types";
+import type { McpRegistrationStatus, ProfilesConfig, SettingsData } from "../types";
 
 const invokeMock = vi.fn();
 
@@ -23,6 +23,7 @@ const settingsFixture: SettingsData = {
   docker_force_host: true,
   ui_font_size: 13,
   terminal_font_size: 13,
+  app_language: "auto",
   voice_input: {
     enabled: false,
     hotkey: "Mod+Shift+M",
@@ -52,6 +53,32 @@ const profilesFixture: ProfilesConfig = {
   },
 };
 
+const mcpStatusFixture: McpRegistrationStatus = {
+  overall: "ok",
+  bridge_runtime: "ok",
+  bridge_script: "ok",
+  agents: [
+    {
+      agent_id: "claude",
+      label: "Claude Code",
+      config_path: "/tmp/.claude.json",
+      registered: true,
+      error_code: null,
+      error_message: null,
+    },
+    {
+      agent_id: "codex",
+      label: "Codex",
+      config_path: "/tmp/.codex/config.toml",
+      registered: true,
+      error_code: null,
+      error_message: null,
+    },
+  ],
+  last_checked_at: 1_739_763_600_000,
+  last_error_message: null,
+};
+
 async function renderSettingsPanel(overrides: Record<string, unknown> = {}) {
   const { default: SettingsPanel } = await import("./SettingsPanel.svelte");
   return render(SettingsPanel, {
@@ -62,6 +89,19 @@ async function renderSettingsPanel(overrides: Record<string, unknown> = {}) {
   });
 }
 
+/** Click a settings tab button by its label text. */
+async function switchToTab(
+  rendered: Awaited<ReturnType<typeof renderSettingsPanel>>,
+  tabName: string,
+) {
+  const tabButtons = rendered.container.querySelectorAll(".settings-tab-btn");
+  const target = Array.from(tabButtons).find(
+    (btn) => btn.textContent?.trim() === tabName,
+  ) as HTMLButtonElement | undefined;
+  expect(target).toBeTruthy();
+  await fireEvent.click(target!);
+}
+
 describe("SettingsPanel", () => {
   beforeEach(() => {
     cleanup();
@@ -70,6 +110,8 @@ describe("SettingsPanel", () => {
       if (command === "get_settings") return structuredClone(settingsFixture);
       if (command === "get_profiles") return structuredClone(profilesFixture);
       if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
+      if (command === "get_mcp_registration_status_cmd") return structuredClone(mcpStatusFixture);
+      if (command === "repair_mcp_registration_cmd") return structuredClone(mcpStatusFixture);
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
       return null;
@@ -81,15 +123,114 @@ describe("SettingsPanel", () => {
     vi.restoreAllMocks();
   });
 
-  it("loads settings and profiles on mount", async () => {
+  it("loads settings and shows tab bar with all tabs", async () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("get_settings");
       expect(invokeMock).toHaveBeenCalledWith("get_profiles");
-      expect(rendered.getByText("Appearance")).toBeTruthy();
-      expect(rendered.getByText("Voice Input")).toBeTruthy();
-      expect(rendered.getByText("Profiles")).toBeTruthy();
+      expect(invokeMock).toHaveBeenCalledWith("get_mcp_registration_status_cmd");
+    });
+
+    const tabButtons = rendered.container.querySelectorAll(".settings-tab-btn");
+    const tabNames = Array.from(tabButtons).map((btn) => btn.textContent?.trim());
+    expect(tabNames).toEqual(["Appearance", "Voice Input", "MCP Bridge", "Profiles"]);
+  });
+
+  it("shows Appearance tab content by default", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("Terminal Font Size")).toBeTruthy();
+    });
+
+    const activeTab = rendered.container.querySelector(".settings-tab-btn.active");
+    expect(activeTab?.textContent?.trim()).toBe("Appearance");
+  });
+
+  it("switches tabs and shows only active content", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.getByText("Terminal Font Size")).toBeTruthy();
+    });
+
+    // Switch to Voice Input
+    await switchToTab(rendered, "Voice Input");
+    await waitFor(() => {
+      expect(rendered.getByText("Enable Voice Input")).toBeTruthy();
+      expect(rendered.queryByText("Terminal Font Size")).toBeNull();
+    });
+
+    // Switch to MCP Bridge
+    await switchToTab(rendered, "MCP Bridge");
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".mcp-overview")).toBeTruthy();
+      expect(rendered.queryByText("Enable Voice Input")).toBeNull();
+    });
+
+    // Switch to Profiles
+    await switchToTab(rendered, "Profiles");
+    await waitFor(() => {
+      expect(rendered.getByText("Active Profile")).toBeTruthy();
+      expect(rendered.container.querySelector(".mcp-overview")).toBeNull();
+    });
+
+    // Switch back to Appearance
+    await switchToTab(rendered, "Appearance");
+    await waitFor(() => {
+      expect(rendered.getByText("Terminal Font Size")).toBeTruthy();
+      expect(rendered.queryByText("Active Profile")).toBeNull();
+    });
+  });
+
+  it("repairs MCP registration status", async () => {
+    const degradedStatus: McpRegistrationStatus = {
+      ...mcpStatusFixture,
+      overall: "degraded",
+      bridge_script: "missing",
+      agents: mcpStatusFixture.agents.map((agent) =>
+        agent.agent_id === "codex" ? { ...agent, registered: false } : agent
+      ),
+      last_error_message: "MCP server is not registered for: Codex",
+    };
+    const repairedStatus: McpRegistrationStatus = {
+      ...mcpStatusFixture,
+      overall: "ok",
+      bridge_script: "ok",
+      agents: mcpStatusFixture.agents.map((agent) => ({ ...agent, registered: true })),
+      last_error_message: null,
+    };
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
+      if (command === "get_mcp_registration_status_cmd") return structuredClone(degradedStatus);
+      if (command === "repair_mcp_registration_cmd") return structuredClone(repairedStatus);
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "MCP Bridge");
+
+    await waitFor(() => {
+      expect(rendered.getByText("Overall: DEGRADED")).toBeTruthy();
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Repair MCP Registration" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("repair_mcp_registration_cmd");
+      expect(rendered.getByText("Overall: OK")).toBeTruthy();
+      expect(rendered.getByText("MCP registration repaired.")).toBeTruthy();
     });
   });
 
@@ -108,6 +249,12 @@ describe("SettingsPanel", () => {
 
   it("creates and deletes a profile", async () => {
     const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
 
     await rendered.findByText("New Profile");
     const newProfileInput = rendered.getByPlaceholderText(
@@ -145,6 +292,8 @@ describe("SettingsPanel", () => {
         apiKey: "test-key",
       });
     });
+
+    await switchToTab(rendered, "Profiles");
 
     const modelOptions = Array.from(
       rendered.container.querySelectorAll(".ai-model-select option")
@@ -208,6 +357,12 @@ describe("SettingsPanel", () => {
   it("shows validation error for invalid profile name", async () => {
     const rendered = await renderSettingsPanel();
 
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+
     await rendered.findByText("New Profile");
     const newProfileInput = rendered.getByPlaceholderText(
       "e.g. development"
@@ -224,6 +379,12 @@ describe("SettingsPanel", () => {
 
   it("shows validation error when creating duplicate profile", async () => {
     const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
 
     await rendered.findByText("New Profile");
     const newProfileInput = rendered.getByPlaceholderText(
@@ -255,6 +416,12 @@ describe("SettingsPanel", () => {
 
   it("toggles AI settings section by checkbox", async () => {
     const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
 
     await rendered.findByText("AI Settings (per profile)");
     const aiEnabled = rendered.container.querySelector("#ai-enabled") as HTMLInputElement;
@@ -309,8 +476,50 @@ describe("SettingsPanel", () => {
     });
   });
 
+  it("toggles env Add button disabled state based on KEY input", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+
+    await rendered.findByText("Environment Variables");
+    const addRow = rendered.container.querySelector(".env-add-row") as HTMLElement;
+    const keyInput = addRow.querySelector(".env-key-input") as HTMLInputElement;
+    const addButton = addRow.querySelector("button") as HTMLButtonElement;
+
+    // Initial state: disabled (empty KEY)
+    expect(addButton.disabled).toBe(true);
+
+    // After entering KEY: enabled
+    await fireEvent.input(keyInput, { target: { value: "MY_VAR" } });
+    await waitFor(() => {
+      expect(addButton.disabled).toBe(false);
+    });
+
+    // Whitespace-only KEY: disabled
+    await fireEvent.input(keyInput, { target: { value: "   " } });
+    await waitFor(() => {
+      expect(addButton.disabled).toBe(true);
+    });
+
+    // Re-enter KEY: enabled again
+    await fireEvent.input(keyInput, { target: { value: "ANOTHER_VAR" } });
+    await waitFor(() => {
+      expect(addButton.disabled).toBe(false);
+    });
+  });
+
   it("adds, edits, and removes environment variables", async () => {
     const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
 
     await rendered.findByText("Environment Variables");
     const addRow = rendered.container.querySelector(".env-add-row") as HTMLElement;
@@ -371,6 +580,13 @@ describe("SettingsPanel", () => {
     });
 
     const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+
     await rendered.findByText("Active Profile");
 
     const activeProfile = rendered.container.querySelector("#active-profile") as HTMLSelectElement;
@@ -408,6 +624,12 @@ describe("SettingsPanel", () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+
+    await waitFor(() => {
       expect(rendered.getByText("Failed to load models: network down")).toBeTruthy();
     });
 
@@ -440,6 +662,13 @@ describe("SettingsPanel", () => {
     });
 
     const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+
     await waitFor(() => {
       expect(rendered.getByText("Current model is not listed in /v1/models.")).toBeTruthy();
     });
@@ -462,6 +691,13 @@ describe("SettingsPanel", () => {
     });
 
     const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+
     await waitFor(() => {
       expect(rendered.getByText("No models returned from /v1/models.")).toBeTruthy();
     });
@@ -485,7 +721,12 @@ describe("SettingsPanel", () => {
     });
 
     const rendered = await renderSettingsPanel();
-    await rendered.findByText("Voice Input");
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Voice Input");
 
     const voiceEnabled = rendered.container.querySelector("#voice-input-enabled") as HTMLInputElement;
     const voiceHotkey = rendered.container.querySelector("#voice-hotkey") as HTMLInputElement;
@@ -529,6 +770,13 @@ describe("SettingsPanel", () => {
     });
 
     const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+
     await rendered.findByText("AI Settings (per profile)");
     expect(rendered.queryByText("Endpoint")).toBeNull();
 

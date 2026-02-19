@@ -18,9 +18,17 @@
   let resizeObserver: ResizeObserver | undefined = $state(undefined);
   let unlisten: (() => void) | undefined = $state(undefined);
 
+  const TRACKPAD_WHEEL_DELTA_THRESHOLD = 180;
+
+  const MOUSE_STEP_VALUES = new Set([120]);
+
   type TerminalEditAction = {
     action: "copy" | "paste";
     paneId: string;
+  };
+
+  type CaptureTerminalContainer = HTMLDivElement & {
+    __gwtTerminal?: Terminal;
   };
 
   function isTerminalFocused(rootEl: HTMLElement): boolean {
@@ -128,7 +136,32 @@
 
   function isTrackpadLikeWheel(event: WheelEvent): boolean {
     if (event.deltaMode !== 0) return false;
-    return !Number.isInteger(event.deltaY) || Math.abs(event.deltaY) <= 60;
+    const absDeltaY = Math.abs(event.deltaY);
+    const absDeltaX = Math.abs(event.deltaX);
+
+    const sourceCapabilities =
+      (event as WheelEvent & { sourceCapabilities?: { firesTouchEvents?: boolean } })
+        .sourceCapabilities;
+
+    if (sourceCapabilities?.firesTouchEvents === true) {
+      return true;
+    }
+
+    // Trackpads frequently emit horizontal movement in addition to vertical scroll.
+    if (absDeltaX > 0) {
+      return true;
+    }
+
+    if (absDeltaY === 0) return false;
+
+    if (!Number.isInteger(absDeltaY)) {
+      return true;
+    }
+
+    if (absDeltaY > TRACKPAD_WHEEL_DELTA_THRESHOLD) {
+      return false;
+    }
+    return !MOUSE_STEP_VALUES.has(absDeltaY);
   }
 
   function scrollViewportByWheel(rootEl: HTMLElement, event: WheelEvent): boolean {
@@ -204,6 +237,7 @@
     term.loadAddon(fit);
     term.loadAddon(webLinks);
     term.open(rootEl);
+    (rootEl as CaptureTerminalContainer).__gwtTerminal = term;
 
     // Initial fit
     requestAnimationFrame(() => {
@@ -259,6 +293,13 @@
 
         event.preventDefault();
         void pasteFromClipboard();
+        return false;
+      }
+
+      // Delegate all Cmd+key combinations to the native menu / browser layer.
+      // Without this, xterm consumes the keydown and calls preventDefault(),
+      // which silently breaks native accelerators (Cmd+O, Cmd+N, Cmd+, …).
+      if (event.metaKey) {
         return false;
       }
 
@@ -383,6 +424,7 @@
       rootEl.removeEventListener("wheel", handleWheel, true);
       window.removeEventListener("gwt-terminal-edit-action", handleTerminalEditAction);
       window.removeEventListener("gwt-terminal-font-size", handleFontSizeChange);
+      delete (rootEl as CaptureTerminalContainer).__gwtTerminal;
       observer.disconnect();
       term.dispose();
       unregisterVoiceInputTarget();
@@ -445,7 +487,11 @@
   }
 </script>
 
-<div class="terminal-container" bind:this={containerEl}></div>
+<div
+  class="terminal-container"
+  data-pane-id={paneId}
+  bind:this={containerEl}
+></div>
 
 <style>
   .terminal-container {

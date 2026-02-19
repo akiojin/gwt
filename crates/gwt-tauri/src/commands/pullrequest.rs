@@ -3,12 +3,14 @@
 use crate::commands::project::resolve_repo_path_for_project_root;
 use gwt_core::git::graphql;
 use gwt_core::git::{
-    is_gh_cli_authenticated, is_gh_cli_available, PrStatusInfo, ReviewComment, ReviewInfo,
-    WorkflowRunInfo,
+    is_gh_cli_authenticated, is_gh_cli_available, PrCache, PrStatusInfo, Remote, ReviewComment,
+    ReviewInfo, WorkflowRunInfo,
 };
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// gh CLI availability and authentication status
 #[derive(Debug, Clone, Serialize)]
@@ -101,6 +103,63 @@ pub struct PrDetailResponse {
     pub changed_files_count: u64,
     pub additions: u64,
     pub deletions: u64,
+}
+
+/// Latest PR reference for a branch.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchPrReference {
+    pub number: u64,
+    pub title: String,
+    pub state: String,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct LatestBranchPrCacheEntry {
+    value: Option<BranchPrReference>,
+    fetched_at: Instant,
+}
+
+const LATEST_BRANCH_PR_CACHE_TTL: Duration = Duration::from_secs(30);
+
+fn latest_branch_pr_cache() -> &'static Mutex<HashMap<String, LatestBranchPrCacheEntry>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, LatestBranchPrCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn read_latest_branch_pr_cache(cache_key: &str) -> Option<Option<BranchPrReference>> {
+    let cache = latest_branch_pr_cache();
+    let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+    let entry = guard.get(cache_key)?;
+    if entry.fetched_at.elapsed() < LATEST_BRANCH_PR_CACHE_TTL {
+        return Some(entry.value.clone());
+    }
+    guard.remove(cache_key);
+    None
+}
+
+fn write_latest_branch_pr_cache(cache_key: String, value: Option<BranchPrReference>) {
+    let cache = latest_branch_pr_cache();
+    let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+    guard.insert(
+        cache_key,
+        LatestBranchPrCacheEntry {
+            value,
+            fetched_at: Instant::now(),
+        },
+    );
+}
+
+fn strip_known_remote_prefix<'a>(branch: &'a str, remotes: &[Remote]) -> &'a str {
+    let trimmed = branch.trim();
+    let Some((first, rest)) = trimmed.split_once('/') else {
+        return trimmed;
+    };
+    if first == "origin" || remotes.iter().any(|r| r.name == first) {
+        return rest;
+    }
+    trimmed
 }
 
 fn to_workflow_run_summary(info: &WorkflowRunInfo) -> WorkflowRunSummary {
@@ -239,6 +298,37 @@ pub fn fetch_pr_detail(project_path: String, pr_number: u64) -> Result<PrDetailR
 
     let info = graphql::fetch_pr_detail(&repo_path, pr_number)?;
     Ok(to_pr_detail_response(&info))
+}
+
+/// Fetch latest branch PR: open PR first, otherwise latest closed/merged.
+#[tauri::command]
+pub fn fetch_latest_branch_pr(
+    project_path: String,
+    branch: String,
+) -> Result<Option<BranchPrReference>, String> {
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let remotes = Remote::list(&repo_path).unwrap_or_default();
+    let normalized = strip_known_remote_prefix(&branch, &remotes);
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+
+    let cache_key = format!("{}::{}", repo_path.to_string_lossy(), normalized);
+    if let Some(cached) = read_latest_branch_pr_cache(&cache_key) {
+        return Ok(cached);
+    }
+
+    let latest = PrCache::fetch_latest_for_branch(&repo_path, normalized);
+    let result = latest.map(|pr| BranchPrReference {
+        number: pr.number,
+        title: pr.title,
+        state: pr.state,
+        url: pr.url,
+    });
+    write_latest_branch_pr_cache(cache_key, result.clone());
+
+    Ok(result)
 }
 
 /// Fetch CI run log for a specific check run/job ID (T011)
@@ -479,6 +569,42 @@ mod tests {
         assert_eq!(
             detail.review_comments[0].file_path,
             Some("file.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn test_branch_pr_reference_serialization() {
+        let pr = BranchPrReference {
+            number: 123,
+            title: "Test PR".to_string(),
+            state: "OPEN".to_string(),
+            url: Some("https://github.com/example/repo/pull/123".to_string()),
+        };
+
+        let json = serde_json::to_string(&pr).unwrap();
+        assert!(json.contains("\"number\":123"));
+        assert!(json.contains("\"state\":\"OPEN\""));
+        assert!(json.contains("\"url\":\"https://github.com/example/repo/pull/123\""));
+    }
+
+    #[test]
+    fn test_strip_known_remote_prefix_for_origin_and_custom_remote() {
+        let remotes = vec![
+            Remote::new("origin", "git@github.com:o/r.git"),
+            Remote::new("upstream", "git@github.com:o/r.git"),
+        ];
+
+        assert_eq!(
+            strip_known_remote_prefix("origin/feature/x", &remotes),
+            "feature/x"
+        );
+        assert_eq!(
+            strip_known_remote_prefix("upstream/feature/x", &remotes),
+            "feature/x"
+        );
+        assert_eq!(
+            strip_known_remote_prefix("fork/feature/x", &remotes),
+            "fork/feature/x"
         );
     }
 }

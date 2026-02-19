@@ -1,8 +1,11 @@
+export type AgentStatusValue = "unknown" | "running" | "waiting_input" | "stopped";
+
 export interface BranchInfo {
   name: string;
   commit: string;
   is_current: boolean;
   is_agent_running: boolean;
+  agent_status: AgentStatusValue;
   ahead: number;
   behind: number;
   divergence_status: string; // "UpToDate" | "Ahead" | "Behind" | "Diverged"
@@ -14,6 +17,12 @@ export interface ProjectInfo {
   path: string;
   repo_name: string;
   current_branch: string | null;
+}
+
+export interface OpenProjectResult {
+  info: ProjectInfo;
+  action: "opened" | "focusedExisting";
+  focusedWindowLabel?: string | null;
 }
 
 export interface CloneProgress {
@@ -54,6 +63,10 @@ export interface AgentModeState {
   session_name?: string | null;
   llm_call_count: number;
   estimated_tokens: number;
+  active_spec_id?: string | null;
+  active_spec_issue_number?: number | null;
+  active_spec_issue_url?: string | null;
+  active_spec_issue_etag?: string | null;
 }
 
 export interface AgentSidebarSubAgent {
@@ -131,9 +144,11 @@ export interface SettingsData {
   agent_codex_path?: string | null;
   agent_gemini_path?: string | null;
   agent_auto_install_deps: boolean;
+  agent_github_project_id?: string | null;
   docker_force_host: boolean;
   ui_font_size: number;
   terminal_font_size: number;
+  app_language: "auto" | "ja" | "en" | (string & {});
   voice_input: VoiceInputSettings;
 }
 
@@ -144,11 +159,29 @@ export interface VoiceInputSettings {
   model: string;
 }
 
+export interface McpAgentRegistrationStatus {
+  agent_id: string;
+  label: string;
+  config_path?: string | null;
+  registered: boolean;
+  error_code?: string | null;
+  error_message?: string | null;
+}
+
+export interface McpRegistrationStatus {
+  overall: "ok" | "degraded" | "failed" | (string & {});
+  bridge_runtime: "ok" | "missing" | (string & {});
+  bridge_script: "ok" | "missing" | (string & {});
+  agents: McpAgentRegistrationStatus[];
+  last_checked_at: number;
+  last_error_message?: string | null;
+}
+
 export interface AISettings {
   endpoint: string;
   api_key: string;
   model: string;
-  language: "en" | "ja" | "auto";
+  language: "auto" | "ja" | "en" | (string & {});
   summary_enabled: boolean;
 }
 
@@ -172,9 +205,19 @@ export interface Tab {
   id: string;
   label: string;
   agentId?: "claude" | "codex" | "gemini" | "opencode";
-  type: "summary" | "agent" | "settings" | "versionHistory" | "agentMode" | "terminal";
+  type:
+    | "summary"
+    | "agent"
+    | "settings"
+    | "versionHistory"
+    | "agentMode"
+    | "terminal"
+    | "issueSpec"
+    | "issues";
   paneId?: string;
   cwd?: string;
+  issueNumber?: number;
+  specId?: string;
 }
 
 export interface ToolSessionEntry {
@@ -230,6 +273,7 @@ export interface SessionSummaryResult {
   generating: boolean;
   toolId?: string | null;
   sessionId?: string | null;
+  language?: "auto" | "ja" | "en" | (string & {}) | null;
   sourceType?: "session" | "scrollback" | null;
   inputMtimeMs?: number | null;
   summaryUpdatedMs?: number | null;
@@ -255,6 +299,8 @@ export interface DockerContext {
   compose_available: boolean;
   daemon_running: boolean;
   force_host: boolean;
+  container_status?: "running" | "stopped" | "not_found" | null;
+  images_exist?: boolean | null;
 }
 
 export interface ProbePathResult {
@@ -308,6 +354,7 @@ export interface WorktreeInfo {
   is_current: boolean;
   is_protected: boolean;
   is_agent_running: boolean;
+  agent_status: AgentStatusValue;
   ahead: number;
   behind: number;
   is_gone: boolean;
@@ -315,16 +362,25 @@ export interface WorktreeInfo {
   safety_level: "safe" | "warning" | "danger" | "disabled";
 }
 
+export type PrStatus = "merged" | "open" | "closed" | "none" | "unknown";
+
 export interface CleanupResult {
   branch: string;
   success: boolean;
   error: string | null;
+  remote_success: boolean | null;
+  remote_error: string | null;
 }
 
 export interface CleanupProgress {
   branch: string;
   status: "deleting" | "deleted" | "failed";
   error?: string;
+  remote_status?: string;
+}
+
+export interface CleanupSettings {
+  delete_remote_branches: boolean;
 }
 
 export interface CapturedEnvEntry {
@@ -399,13 +455,42 @@ export interface GitChangeSummary {
   base_branch: string;
 }
 
-// GitHub Issue types (SPEC-c6ba640a)
+// GitHub Issue types (SPEC-c6ba640a, SPEC-ca4b5b07)
+
+export interface GitHubLabel {
+  name: string;
+  color: string;
+}
+
+export interface GitHubAssignee {
+  login: string;
+  avatarUrl: string;
+}
+
+export interface GitHubMilestone {
+  title: string;
+  number: number;
+}
 
 export interface GitHubIssueInfo {
   number: number;
   title: string;
+  body?: string;
+  state: "open" | "closed";
+  updatedAt: string;
+  htmlUrl: string;
+  labels: GitHubLabel[];
+  assignees: GitHubAssignee[];
+  commentsCount: number;
+  milestone?: GitHubMilestone;
+}
+
+export interface BranchLinkedIssueInfo {
+  number: number;
+  title: string;
   updatedAt: string;
   labels: string[];
+  url: string;
 }
 
 export interface GhCliStatus {
@@ -466,6 +551,13 @@ export interface PrStatusInfo {
   changedFilesCount: number;
   additions: number;
   deletions: number;
+}
+
+export interface BranchPrReference {
+  number: number;
+  title: string;
+  state: "OPEN" | "CLOSED" | "MERGED" | (string & {});
+  url: string | null;
 }
 
 export interface WorkflowRunInfo {
