@@ -4,66 +4,88 @@
 
 ## テスト戦略
 
-- バックエンド（Rust）: 3層状態モデル、Lead Spec Kitワークフロー、成果物ゲート、Coordinator管理、Developer完了検出、CI監視ループ、セッション永続化をユニットテストで検証
-- フロントエンド（Svelte/TypeScript）: Kanbanボード、Leadチャット、パネル切替、タスクカード、Coordinatorパネルをコンポーネントテスト（vitest + @testing-library/svelte）で検証
+- バックエンド（Rust）: 3層状態モデル、Lead GitHub Issue仕様管理、仕様4セクションゲート、Coordinator管理、Developer完了検出、CI監視ループ、セッション永続化、コンテキスト要約をユニットテストで検証
+- フロントエンド（Svelte/TypeScript）: ダッシュボード、Leadチャット、Issue展開、Coordinator詳細、Branch Mode連携をコンポーネントテスト（vitest + @testing-library/svelte）で検証
 - 各タスクはテストファーストで進める（RED → 実装 → GREEN）
 
 ## RED → GREEN の対象
 
-### Phase A: 基盤モデル
+### Phase 1: セットアップ
 
-1. 3層状態モデル（Session / Lead / Coordinator / Developer / Task）の型定義とenum遷移テスト
-2. フロント型定義（LeadState / CoordinatorState / DeveloperState / TaskCard / KanbanColumn）の整合テスト
+1. 3層状態モデル（ProjectTeamSession / LeadState / CoordinatorState / DeveloperState / ProjectTask）の型定義とenum遷移テスト
+2. フロント型定義（ProjectTeamState / LeadState / DashboardIssue / DashboardTask / CoordinatorState / DeveloperState）の整合テスト
 3. PTY通信スキルインターフェースの入出力テスト
+4. SessionStore の AppState ワイヤリングと ProjectTeamSession 永続化テスト
 
-### Phase B: Lead機能
+### Phase 2: 基盤
 
-4. Leadチャット（IME送信抑止 / 送信中スピナー / 自動スクロール）回帰テスト
-5. Spec Kit LLMプロンプトテンプレートの読み込み・実行テスト
-6. Spec Kitワークフロー順次実行テスト（clarify → specify → plan → tasks → tdd）
-7. 成果物4点ゲートテスト（spec.md/plan.md/tasks.md/tdd.md いずれか欠損 → Coordinator起動ブロック）
-8. 計画提示・承認フローテスト（承認 → Coordinator起動 / 拒否 → 再策定）
-9. GitHub Issue作成・Project登録テスト
-10. 段階的委譲テスト（自律可能操作 vs 承認要求操作の分類）
-11. ハイブリッド常駐テスト（イベント駆動トリガー + 2分間隔ポーリング）
-12. Lead実行基盤切り替えテスト（gwt内蔵AI / Claude Code）
+5. Lead gwt内蔵AI実行基盤（LLM呼び出し・対話ループ）テスト
+6. PTY通信スキル化基盤（send_keys_to_pane / capture_scrollback_tail）テスト
 
-### Phase C: Coordinator機能
+### Phase 3: US1 — モード切り替え・基本対話
 
-13. Coordinator起動テスト（GUI内蔵ターミナルペイン割当）
-14. タスク分割テスト（独立タスク → 別Worktree / 依存タスク → 同一 or merge連携）
-15. Worktree/ブランチ自動作成テスト（agent/プレフィックス、命名サニタイズ、連番付与）
-16. Developer起動テスト（PTY送信、全自動モードフラグ、CLAUDE.md規約含むプロンプト）
-17. Developer完了検出テスト（Hook Stop / GWT_TASK_DONE / プロセス終了）
-18. CI監視・自律修正ループテスト（CI失敗 → Developer修正 → 再プッシュ、最大3回 → Lead報告）
-19. 成果物検証テスト（テスト実行 → パス → PR作成 / 失敗 → リトライ最大3回）
-20. Developer間コンテキスト共有テスト（先行タスクmerge → コンフリクト検出）
+7. Project Teamタブ・モード切り替えテスト
+8. Leadチャット（IME送信抑止 / 送信中スピナー / 自動スクロール）回帰テスト
+9. ダッシュボード表示テスト（Issue/Task/Developer階層、ステータスバッジ、折りたたみ）
+10. AI設定未構成時エラー表示テスト
+11. コスト可視化テスト（APIコール数 / 推定トークン数）
+12. Lead段階的委譲テスト（自律可能操作 vs 承認要求操作の分類）
+13. Leadハイブリッド常駐テスト（イベント駆動トリガー + 2分間隔ポーリング）
 
-### Phase D: GUI
+### Phase 4: US2 — GitHub Issue仕様管理・計画承認
 
-21. Project Teamタブ・モード切り替えテスト
-22. ダッシュボード表示テスト（Issue/Task/Developer階層、ステータスバッジ、折りたたみ）
-23. Issue展開・Coordinator詳細テスト（CI結果、Developer一覧、ターミナル/チャットリンク）
-24. TaskクリックでBranch Modeジャンプテスト（Worktree自動遷移）
-25. Coordinator詳細パネル表示テスト（状態 / Developer一覧 / View Terminal / Chat）
-26. コスト可視化テスト（APIコール数 / 推定トークン数）
-27. AI設定未構成時エラー表示テスト
+14. issue_specツール群（upsert_spec_issue / get_spec_issue等）の動作テスト
+15. GitHub Issue仕様管理ワークフロー順次実行テスト（clarify → GitHub Issueにspec/plan/tasks/tdd記録）
+16. 仕様4セクションゲートテスト（GitHub Issueのspec/plan/tasks/tdd いずれか欠損 → Coordinator起動ブロック）
+17. 計画提示・承認フローテスト（承認 → Coordinator起動 / 拒否 → 再策定）
+18. GitHub Issue作成・Project登録テスト
+19. Coordinator→Lead ハイブリッド通信テスト（Tauriイベント + scrollback読み取り）
+20. Issue展開・Coordinator詳細テスト（ステータス/CI結果/Developer一覧）
 
-### Phase E: セッション・障害
+### Phase 5: US3 — Developer起動
 
-28. セッション永続化テスト（全層状態のJSON保存 / トリガー検証）
-29. セッション復元・再開テスト（gwt再起動 → 最新未完了セッション復元）
-30. 層間独立性テスト（Lead API障害時のCoordinator/Developer続行）
-31. Coordinator自律再起動テスト（クラッシュ検出 → 30秒以内再起動 → 状態再取得）
-32. セッション強制中断テスト（Esc → SIGTERM → 5秒タイムアウト → Paused保存）
-33. ブランチモード連携テスト（agent/ブランチ表示 / 削除時Failed検出）
-34. コンテキスト要約・圧縮テスト
+21. Coordinator起動テスト（GUI内蔵ターミナルペイン、cwd=リポジトリルート、GitHub Issue番号渡し）
+22. タスク分割テスト（独立タスク → 別Worktree / 依存タスク → 同一 or merge連携）
+23. Worktree/ブランチ自動作成テスト（agent/プレフィックス、命名サニタイズ、連番付与）
+24. Developer起動テスト（PTY送信、全自動モードフラグ、CLAUDE.md規約含むプロンプト）
+25. TaskクリックでBranch Modeジャンプテスト（Worktree自動遷移）
 
-### Phase F: スキル化
+### Phase 6: US4 — Developer完了検出
 
-35. PTY通信スキル化テスト（send_keys_to_pane / send_keys_broadcast / capture_scrollback_tail）
-36. agent_tools.rs完全移行テスト（旧ツール呼び出しの廃止確認）
+26. Developer完了検出テスト（Hook Stop / GWT_TASK_DONE / プロセス終了）
+27. Lead途中経過報告テスト（scrollback取得→チャット報告、LLMコール不要）
+
+### Phase 7: US5 — 成果物検証・統合
+
+28. 成果物検証テスト（テスト実行 → パス → PR作成 / 失敗 → リトライ最大3回）
+29. CI監視・自律修正ループテスト（CI失敗 → Developer修正 → 再プッシュ、最大3回 → Lead報告）
+30. Developer間コンテキスト共有テスト（先行タスクmerge → コンフリクト検出）
+
+### Phase 8: US6 — 障害・独立性
+
+31. 層間独立性テスト（Lead API障害時のCoordinator/Developer続行）
+32. Coordinator自律再起動テスト（クラッシュ検出 → 30秒以内再起動 → 状態再取得）
+
+### Phase 9: US7 — セッション
+
+33. セッション永続化テスト（全層状態のJSON保存 / トリガー検証）
+34. セッション復元・再開テスト（gwt再起動 → 最新未完了セッション復元）
+35. セッション強制中断テスト（Esc → SIGTERM → 5秒タイムアウト → Paused保存）
+
+### Phase 10: US8 — 直接アクセス
+
+36. Coordinator詳細パネル表示テスト（状態 / Developer一覧 / View Terminal / Chat）
 37. 直接アクセステスト（Developerターミナル直操作 / Coordinatorチャット入力）
+
+### Phase 11: US9 — コンテキスト管理
+
+38. コンテキスト要約・圧縮テスト（Developer: LLM自動、Lead/Coordinator: gwt側80%閾値制御）
+
+### Phase 12: 仕上げ
+
+39. PTY通信スキル完全移行テスト（agent_tools.rs旧PTYツール呼び出しの廃止確認）
+40. issue_specスキル公開テスト（ブランチモード各エージェントからissue_specツール利用可能）
+41. ブランチモード連携テスト（agent/ブランチ表示 / 削除時Failed検出）
 
 ## テスト実行コマンド
 
@@ -73,6 +95,8 @@
 - `cargo test -p gwt-tauri agent_master -- --nocapture`
 - `cargo test -p gwt-tauri commands::agent_mode -- --nocapture`
 - `cargo test -p gwt-tauri commands::terminal -- --nocapture`
+- `cargo test -p gwt-tauri agent_tools -- --nocapture`
+- `cargo test -p gwt-tauri context_summarizer -- --nocapture`
 
 ### フロントエンド
 
@@ -86,9 +110,15 @@
 
 > 以下は実装進行に伴い更新する。
 
-- [ ] Phase A: 基盤モデルテスト
-- [ ] Phase B: Lead機能テスト
-- [ ] Phase C: Coordinator機能テスト
-- [ ] Phase D: GUIテスト
-- [ ] Phase E: セッション・障害テスト
-- [ ] Phase F: スキル化テスト
+- [ ] Phase 1: セットアップテスト
+- [ ] Phase 2: 基盤テスト
+- [ ] Phase 3: US1テスト
+- [ ] Phase 4: US2テスト
+- [ ] Phase 5: US3テスト
+- [ ] Phase 6: US4テスト
+- [ ] Phase 7: US5テスト
+- [ ] Phase 8: US6テスト
+- [ ] Phase 9: US7テスト
+- [ ] Phase 10: US8テスト
+- [ ] Phase 11: US9テスト
+- [ ] Phase 12: 仕上げテスト

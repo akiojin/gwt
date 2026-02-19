@@ -3,14 +3,15 @@
 **仕様ID**: `SPEC-ba3f610c`
 **日付**: 2026-02-19
 **仕様書**: [spec.md](./spec.md)
+**データモデル**: [data-model.md](./data-model.md)
 
 ## 概要
 
 3層エージェントアーキテクチャ（Lead / Coordinator / Developer）によるプロジェクト統括機能を実装する。
 
-- **Lead**（gwt内蔵AI）がプロジェクト全体を管理し、要件定義・Spec Kitワークフロー・GitHub Issue/Project管理を担う
-- **Coordinator** が Issue単位（1 Issue = 1 Coordinator）でタスク管理・CI監視・Developer管理を行う（複数並列起動可）
-- **Developer** が各Worktreeで実装を実行する（1 Task = N Developer = N Worktree）
+- **Lead**（gwt内蔵AI）がプロジェクト全体を管理し、要件定義・GitHub Issueベースの仕様管理・GitHub Project管理を担う
+- **Coordinator** が Issue単位（1 Issue = 1 Coordinator）でタスク管理・CI監視・Developer管理を行う（複数並列起動可、cwd=リポジトリルート）
+- **Developer** が各Worktreeで実装を実行する（1 Task = N Developer = N Worktree、エージェント種別は起動時にユーザー指定）
 
 ## 技術コンテキスト
 
@@ -20,89 +21,107 @@
 - ストレージ: ファイルシステム（`~/.gwt/sessions/`）
 - テスト: cargo test / pnpm test / vitest
 - CI/CD: GitHub Actions
+- 既存資産: SessionStore（gwt-core、ファイル永続化実装済み・AppState未接続）、AgentModePanel（Svelte 4→5移行対象）
 
 ## 実装スコープ
 
 ### Phase A: 基盤モデル・型定義
 
-1. エンティティモデル定義（Project / Issue / Task / Coordinator / Developer）
-2. フロント型定義の3層対応（Lead / Coordinator / Developer）
+1. エンティティモデル定義（ProjectTeamSession / ProjectIssue / ProjectTask / CoordinatorState / DeveloperState）
+2. フロント型定義の3層対応（ProjectTeamState / LeadState / DashboardIssue / DashboardTask / CoordinatorState / DeveloperState）
 3. PTY通信のスキル化基盤（agent_tools.rs → Claude Code plugin skills）
+4. SessionStore の AppState ワイヤリング（既存 gwt-core SessionStore を ProjectTeamSession 対応に拡張）
 
 ### Phase B: Lead（PM）機能
 
-4. Lead実行基盤（gwt内蔵AIとして実装）
-5. Leadチャット（ユーザー対話、IME/スピナー/自動スクロール）
-6. Spec Kit内蔵化（LLMプロンプトテンプレートのRust組み込み）
-7. Spec Kitワークフロー実行（clarify → specify → plan → tasks → tdd）
-8. 成果物4点ゲート（spec.md/plan.md/tasks.md/tdd.md揃うまでCoordinator起動不可）
-9. 計画提示・承認フロー
-10. GitHub Issue作成・GitHub Project登録
-11. 段階的委譲（自律範囲の判定ロジック）
-12. ハイブリッド常駐（イベント駆動 + 2分間隔ポーリング）
-13. 途中経過報告（軽量な状態チェック + チャット報告）
+5. Lead実行基盤（gwt内蔵AIとして実装、既存 agent_master.rs の拡張）
+6. Leadチャット（ユーザー対話、IME/スピナー/自動スクロール）
+7. GitHub Issue仕様管理基盤（issue_specツール群連携、スキル公開）
+8. 仕様管理ワークフロー実行（clarify → GitHub Issueにspec/plan/tasks/tdd記録）
+9. 仕様4セクションゲート（GitHub Issueにspec/plan/tasks/tdd揃うまでCoordinator起動不可）
+10. 計画提示・承認フロー
+11. GitHub Issue作成・GitHub Project登録
+12. 段階的委譲（自律範囲の判定ロジック）
+13. ハイブリッド常駐（イベント駆動 + 2分間隔ポーリング）
+14. 途中経過報告（scrollback読み取り + チャット報告、LLMコール不要）
+15. Coordinator→Lead ハイブリッド通信（重要イベント: Tauriイベント、途中経過: scrollback読み取り）
 
 ### Phase C: Coordinator（Orchestrator）機能
 
-14. Coordinator起動・管理（GUI内蔵ターミナルペインで起動）
-15. Issue単位のCoordinator起動（1 Issue = 1 Coordinator、複数並列可）
-16. タスク分割・Developer割り当て（1 Task = N Developer = N Worktree対応）
-17. Worktree/ブランチ自動作成（`agent/`プレフィックス、命名規則）
-18. Developer起動プロンプト生成（アダプティブ、CLAUDE.md規約含む）
-19. Developer完了検出（Hook Stop / GWT_TASK_DONE / プロセス終了）
-20. 並列実行制御（同時実行数のLLM判断）
-21. CI監視と自律修正ループ（CI失敗 → Developer修正 → 再プッシュ、最大3回）
-22. 成果物検証（テスト実行 → PR作成）
-23. Developer間コンテキスト共有（Git merge経由）
+16. Coordinator起動・管理（GUI内蔵ターミナルペイン、cwd=リポジトリルート）
+17. Issue単位のCoordinator起動（1 Issue = 1 Coordinator、複数並列可）
+18. タスク分割・Developer割り当て（1 Task = N Developer = N Worktree対応）
+19. Worktree/ブランチ自動作成（`agent/`プレフィックス、命名規則）
+20. Developer起動プロンプト生成（アダプティブ、CLAUDE.md規約含む、エージェント種別に応じた自動モードフラグ）
+21. Developer完了検出（Hook Stop / GWT_TASK_DONE / プロセス終了）
+22. 並列実行制御（同時実行数のLLM判断）
+23. CI監視と自律修正ループ（CI失敗 → Developer修正 → 再プッシュ、最大3回）
+24. 成果物検証（テスト実行 → PR作成）
+25. Developer間コンテキスト共有（Git merge経由）
 
 ### Phase D: GUI（プロジェクトチームUI）
 
-24. Project Teamタブ・モード切り替え
-25. ダッシュボード（左カラム：Issue/Task/Developer階層表示、ステータスバッジ）
-26. Leadチャット画面（右カラム：バブル表示、入力エリア、進捗インライン表示）
-27. ダッシュボード内Coordinator詳細展開（ステータス、ターミナル/チャットリンク）
-28. Developer表示のBranch Mode連携（TaskクリックでWorktreeジャンプ）
-29. コスト可視化（APIコール数/推定トークン数）
-30. AI設定未構成時のエラー表示
+26. Project Teamタブ・モード切り替え
+27. ダッシュボード（左カラム：Issue/Task/Developer階層表示、ステータスバッジ、折りたたみ/展開）
+28. Leadチャット画面（右カラム：バブル表示、入力エリア、進捗インライン表示）
+29. ダッシュボード内Coordinator詳細展開（ステータス、CI結果、Developer一覧、ターミナル/チャットリンク）
+30. Developer表示のBranch Mode連携（TaskクリックでWorktreeジャンプ）
+31. コスト可視化（APIコール数/推定トークン数）
+32. AI設定未構成時のエラー表示
+33. ブランチモードGitHub Issueボタン（gwt内蔵AIがissue_specツールでGitHub Issue管理を実行）
 
 ### Phase E: セッション・障害・連携
 
-31. セッション永続化（JSON形式、~/.gwt/sessions/）
-32. セッション復元・再開
-33. 層間独立性（Lead障害 / Coordinator障害 / Developer障害の各ハンドリング）
-34. Coordinator自律再起動
-35. セッション強制中断（Esc → SIGTERM → Paused永続化）
-36. ブランチモード連携（agent/ブランチ表示・削除検出）
-37. ログ記録（agent.lead.llm / agent.coordinator / agent.developer）
-38. コンテキスト要約・圧縮
+34. セッション永続化（ProjectTeamSession → JSON、~/.gwt/sessions/）
+35. セッション復元・再開（Coordinator/Developer再接続）
+36. 層間独立性（Lead障害 / Coordinator障害 / Developer障害の各ハンドリング）
+37. Coordinator自律再起動（Lead検出 → 再起動 → Developer状態再取得）
+38. セッション強制中断（Esc → SIGTERM → Paused永続化）
+39. ブランチモード連携（agent/ブランチ表示・削除検出）
+40. コンテキスト要約・圧縮（Developer: LLM自動、Lead/Coordinator: gwt側80%閾値制御）
 
 ### Phase F: スキル化・統合
 
-39. PTY通信のClaude Codeスキル化（send_keys_to_pane / send_keys_broadcast / capture_scrollback_tail）
-40. agent_tools.rsからの完全移行
-41. 直接アクセス（Developerターミナル直操作 / Coordinatorチャット）
+41. PTY通信のClaude Codeスキル化（send_keys_to_pane / send_keys_broadcast / capture_scrollback_tail）
+42. issue_specツールのClaude Codeスキル化（ブランチモード各エージェントからも利用可能に）
+43. agent_tools.rs PTYツールからの完全移行
+44. 直接アクセス（Developerターミナル直操作 / Coordinatorチャット）
+
+### Phase G: 仕上げ
+
+45. ログ記録実装（agent.lead.llm / agent.coordinator / agent.developer）
+46. 仕様・計画・タスクの最終同期確認
 
 ## 主要コード構成
 
 ```text
 crates/gwt-core/src/
 ├── agent/
-│   ├── mod.rs                    # 3層エージェントモデル
-│   ├── lead.rs                   # Lead状態・ロジック
-│   ├── coordinator.rs            # Coordinator状態・ロジック
-│   └── developer.rs              # Developer状態・ロジック
+│   ├── mod.rs                    # 3層エージェントモデル（ProjectTeamSession）
+│   ├── lead.rs                   # LeadState / LeadStatus / LeadMessage
+│   ├── coordinator.rs            # CoordinatorState / CoordinatorStatus
+│   ├── developer.rs              # DeveloperState / DeveloperStatus
+│   ├── issue.rs                  # ProjectIssue / IssueStatus
+│   ├── task.rs                   # ProjectTask（拡張: developers Vec）
+│   ├── session.rs                # ProjectTeamSession（旧AgentSession拡張）
+│   ├── session_store.rs          # SessionStore（ProjectTeamSession対応）
+│   ├── worktree.rs               # WorktreeRef（既存資産）
+│   ├── conversation.rs           # LeadMessage（kind追加）
+│   ├── scanner.rs                # RepositoryScanner（既存資産）
+│   └── prompt_builder.rs         # PromptBuilder（既存資産、拡張）
 
 crates/gwt-tauri/src/
-├── agent_master.rs               # Lead実行ループ（旧MA）
-├── state.rs                      # ウィンドウごとのProject Team状態
+├── agent_master.rs               # Lead実行ループ（GitHub Issue仕様管理統合、ハイブリッド常駐）
+├── agent_tools.rs                # LLMツール定義（PTY通信3ツール + issue_spec 7ツール）
+├── state.rs                      # AppState（SessionStoreワイヤリング追加）
 ├── commands/
-│   ├── agent_mode.rs             # Project Team用Tauriコマンド
-│   └── terminal.rs               # PTY通信（スキル化元）
-└── session/                      # セッション永続化
+│   ├── agent_mode.rs             # Project Team用Tauriコマンド（拡張）
+│   └── terminal.rs               # PTY通信（既存、スキル化元）
+└── context_summarizer.rs         # Lead/Coordinator用コンテキスト要約
 
 gwt-gui/src/
 ├── lib/components/
-│   ├── ProjectTeamPanel.svelte   # メインパネル（旧AgentModePanel）
+│   ├── ProjectTeamPanel.svelte   # メインパネル（2カラム、旧AgentModePanel）
 │   ├── LeadChat.svelte           # Leadチャット（右カラム）
 │   ├── Dashboard.svelte          # ダッシュボード（左カラム）
 │   ├── IssueItem.svelte          # Issue階層表示コンポーネント
@@ -112,19 +131,41 @@ gwt-gui/src/
 
 ## 実装方針
 
-- 既存のAgentModePanel/AgentSidebarをリネーム・拡張して3層対応する
-- Lead実行ループは既存のagent_master.rsを拡張する
+- 既存のAgentModePanel/AgentSidebarをリネーム・拡張して3層対応する（Svelte 5化）
+- Lead実行ループは既存のagent_master.rsを拡張する（ReActループ → GitHub Issue仕様管理統合ループ）
+- gwt-core の既存 SessionStore を ProjectTeamSession 対応に拡張し、AppState にワイヤリングする
 - Coordinator/Developerは新規の状態管理モジュールとして追加する
-- GUI UIは「Leadチャット + 下部切替パネル」構成で実装する
+- GUI UIはダッシュボード（左）+ Leadチャット（右）の2カラム構成で実装する
+- Coordinator→Lead通信はハイブリッド（重要イベント: Tauriイベント、途中経過: scrollback読み取り）
+- Developerのエージェント種別はプロジェクトチーム起動時にユーザーが指定する
+- コンテキスト要約はDeveloperはLLM自動、Lead/Coordinatorはgwt側で80%閾値制御
 - PTY通信は既存のsend_keys系を維持しつつ、スキルとしてのインターフェースを追加する
-- セッション永続化は既存の~/.gwt/sessions/を拡張する
 - テストは各フェーズごとにTDD（テストファースト）で進める
+
+## リスクと緩和策
+
+| リスク | 影響度 | 緩和策 |
+|---|---|---|
+| LLMコンテキスト枯渇（Lead長時間運用） | 高 | gwt側80%閾値での要約圧縮 |
+| SessionStore未接続による永続化ギャップ | 高 | Phase A でAppStateへのワイヤリングを最優先 |
+| Coordinator並列数増加によるリソース逼迫 | 中 | Coordinator/Developer数の上限をLLM判断で制御 |
+| Claude Code Agent Team APIの変更 | 中 | Coordinator実行基盤を抽象化し差し替え可能に |
+| AgentModePanel Svelte 4→5 移行時の回帰 | 低 | 既存テストを維持しつつ段階的に移行 |
+
+## 依存関係
+
+- 既存のAI要約機能（SPEC-4b893dae）のAPI設定を共有
+- 既存のGUIターミナルベースのエージェント起動機能（terminal.rs）
+- 既存のworktree管理機能（gwt-core）
+- Claude Code Hook機能（Stop）
+- Claude Code Agent Team機能（Coordinator実行基盤）
+- `gh` CLI（GitHub Issue/PR操作）
 
 ## 受け入れ条件
 
-- Leadチャットでユーザーと対話し、プロジェクト全体の要件定義・Spec Kitワークフローを実行できる
-- Leadが要件をIssue単位に分割し、各Issue分の成果物4点を生成できる
-- 承認後、各IssueにCoordinatorを並列起動できる（ファイルパス受け渡し）
+- Leadチャットでユーザーと対話し、プロジェクト全体の要件定義・GitHub Issueへの仕様記録を実行できる
+- Leadが要件をIssue単位に分割し、各GitHub Issueに仕様4セクション（spec/plan/tasks/tdd）を記録できる
+- 承認後、各IssueにCoordinatorを並列起動できる（GitHub Issue番号受け渡し）
 - 1 Task = N Developer = N Worktreeの並列割り当てが可能
 - ダッシュボードでIssue/Task/Developerの階層をステータス付きで常時俯瞰できる
 - ダッシュボードのTaskクリックでBranch Modeの該当Worktreeにジャンプできる
@@ -137,6 +178,6 @@ gwt-gui/src/
 ## 検証方針
 
 - フロントエンド: ダッシュボード、チャット、Branch Mode連携をコンポーネントテスト（vitest）で検証
-- バックエンド: Lead/Coordinator/Developer状態管理、成果物ゲート、CI監視をユニットテスト（cargo test）で検証
+- バックエンド: Lead/Coordinator/Developer状態管理、仕様4セクションゲート、CI監視をユニットテスト（cargo test）で検証
 - 回帰: 既存AgentModePanel/AgentSidebarの機能テストを維持
 - 統合: Coordinator→Developer起動→完了検出→PR作成のE2Eフローを検証
