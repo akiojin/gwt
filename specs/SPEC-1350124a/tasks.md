@@ -78,3 +78,15 @@ US4（シェル検出）─→ US1（Launch Agent選択）─→ US5（Docker無
 - [x] T038 [P] [共通] `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json` でフロントエンドの型チェックを通す
 - [x] T039 [共通] `cargo test` で全バックエンドテストを通す
 - [x] T040 [共通] `cd gwt-gui && pnpm test` で全フロントエンドテストを通す
+
+## Phase 8: Windows 実機確認（引き継ぎ）
+
+- [ ] T041 [US1] Launch Agent の Shell 選択（PowerShell / cmd / WSL）が実際の起動シェルに反映されることを Windows 実機で確認する
+- [ ] T042 [US2] Settings > Terminal で `default_shell` を `wsl` / `powershell` / `cmd` に変更したとき、New Terminal が設定値を優先して起動することを確認する
+- [ ] T043 [US1] WSL 起動時、プロンプト検出後も出力ストリームが継続し、出力が途中で途切れないことを確認する
+- [ ] T044 [US7] WSL 起動時、Profile/Launch 由来の環境変数（例: `FOO=bar`）がシェル内で参照できることを確認する
+- [ ] T045 [US1] `cmd.exe /C` 経路でスペースやメタ文字（例: `&`）を含むパス/引数でも正しく起動できることを確認する
+
+### 実装反映済みコミット
+
+- `9ce8c814` fix: ターミナルシェル選択とWSL起動の回帰を修正
