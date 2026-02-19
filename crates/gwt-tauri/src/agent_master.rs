@@ -343,13 +343,7 @@ pub fn send_project_team_message(
     working.project_team_session_id = Some(session_id);
     save_agent_mode_state(state, window_label, &working);
 
-    // Update LeadState: Idle → Thinking
-    session.lead.status = LeadStatus::Thinking;
-    session.lead.conversation.push(LeadMessage::new(
-        MessageRole::User,
-        MessageKind::Message,
-        trimmed,
-    ));
+    activate_session_for_message(&mut session, trimmed);
     session.touch();
     let _ = state.session_store.save_project_team(&session);
 
@@ -542,11 +536,21 @@ fn push_tool_turns_to_state_and_session(
     for obs in tool_observations {
         push_message(working, "tool", "observation", obs);
         session.lead.conversation.push(LeadMessage::new(
-            MessageRole::System,
+            MessageRole::Assistant,
             MessageKind::Observation,
             obs.clone(),
         ));
     }
+}
+
+fn activate_session_for_message(session: &mut ProjectTeamSession, user_message: &str) {
+    session.status = SessionStatus::Active;
+    session.lead.status = LeadStatus::Thinking;
+    session.lead.conversation.push(LeadMessage::new(
+        MessageRole::User,
+        MessageKind::Message,
+        user_message,
+    ));
 }
 
 fn push_message(state: &mut AgentModeState, role: &str, kind: &str, content: &str) {
@@ -1637,9 +1641,29 @@ mod tests {
             session.lead.conversation[0].content,
             "run_cmd {\"cmd\":\"echo hello\"}"
         );
-        assert_eq!(session.lead.conversation[1].role, MessageRole::System);
+        assert_eq!(session.lead.conversation[1].role, MessageRole::Assistant);
         assert_eq!(session.lead.conversation[1].kind, MessageKind::Observation);
         assert_eq!(session.lead.conversation[1].content, "run_cmd => ok");
+    }
+
+    #[test]
+    fn activate_session_for_message_resumes_paused_session() {
+        let mut session = ProjectTeamSession::new(
+            SessionId("pt-resume-1".to_string()),
+            PathBuf::from("/repo"),
+            "main",
+            AgentType::Claude,
+        );
+        session.status = SessionStatus::Paused;
+
+        activate_session_for_message(&mut session, "resume work");
+
+        assert_eq!(session.status, SessionStatus::Active);
+        assert_eq!(session.lead.status, LeadStatus::Thinking);
+        assert_eq!(session.lead.conversation.len(), 1);
+        assert_eq!(session.lead.conversation[0].role, MessageRole::User);
+        assert_eq!(session.lead.conversation[0].kind, MessageKind::Message);
+        assert_eq!(session.lead.conversation[0].content, "resume work");
     }
 
     // --- T401: issue_spec tools Lead integration ---
