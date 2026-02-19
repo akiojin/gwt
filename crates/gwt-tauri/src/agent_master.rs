@@ -4,7 +4,7 @@
 use gwt_core::agent::conversation::MessageRole;
 use gwt_core::agent::developer::AgentType;
 use gwt_core::agent::lead::{LeadMessage, LeadStatus, MessageKind};
-use gwt_core::agent::session::ProjectTeamSession;
+use gwt_core::agent::session::{ProjectTeamSession, SessionStatus};
 use gwt_core::agent::task::{PullRequestRef, Task, TestStatus, TestVerification};
 use gwt_core::agent::types::SessionId;
 use gwt_core::ai::{AIClient, AIResponse, ChatMessage, ToolCall};
@@ -1157,6 +1157,128 @@ pub fn format_progress_report(scrollback: &str, max_lines: usize) -> String {
     lines[start..].join("\n")
 }
 
+// ===========================================================================
+// Phase 9: US7 — Session Persistence / Restore / Force Stop (T901-T906)
+// ===========================================================================
+
+/// Persist the current ProjectTeamSession state to disk.
+///
+/// Should be called after each state change (message send, status change,
+/// task update) to ensure session data is not lost on crash or restart.
+pub fn save_project_team_state(
+    state: &AppState,
+    session: &ProjectTeamSession,
+) -> Result<(), String> {
+    state
+        .session_store
+        .save_project_team(session)
+        .map_err(|e| format!("Failed to save project team session: {e}"))
+}
+
+/// Restore the most recent active ProjectTeamSession and reconstruct
+/// the AgentModeState from it.
+///
+/// Loads the session by ID and rebuilds the in-memory state from the
+/// persisted lead conversation and metadata.
+pub fn restore_project_team_session(
+    state: &AppState,
+    session_id: &str,
+) -> Result<(ProjectTeamSession, AgentModeState), String> {
+    let sid = SessionId(session_id.to_string());
+    let session = state
+        .session_store
+        .load_project_team(&sid)
+        .map_err(|e| format!("Failed to load project team session: {e}"))?;
+
+    let mut mode = AgentModeState::new();
+    mode.project_team_session_id = Some(session_id.to_string());
+    mode.lead_status = Some(format!("{:?}", session.lead.status).to_lowercase());
+    mode.llm_call_count = session.lead.llm_call_count;
+    mode.estimated_tokens = session.lead.estimated_tokens;
+    mode.ai_ready = true;
+
+    // Reconstruct messages from lead conversation
+    for msg in &session.lead.conversation {
+        let role = match msg.role {
+            MessageRole::User => "user",
+            MessageRole::Assistant => "assistant",
+            MessageRole::System => "system",
+        };
+        let kind = match msg.kind {
+            MessageKind::Message => "message",
+            MessageKind::Thought => "thought",
+            MessageKind::Action => "action",
+            MessageKind::Observation => "observation",
+            MessageKind::Error => "error",
+            MessageKind::Progress => "progress",
+        };
+        mode.messages.push(AgentModeMessage {
+            role: role.to_string(),
+            kind: kind.to_string(),
+            content: msg.content.clone(),
+            timestamp: msg.timestamp.timestamp_millis(),
+        });
+    }
+
+    Ok((session, mode))
+}
+
+/// List all ProjectTeamSession summaries from the session store.
+pub fn list_project_team_sessions(
+    state: &AppState,
+) -> Result<Vec<ProjectTeamSessionSummary>, String> {
+    let summaries = state
+        .session_store
+        .list_project_team_sessions()
+        .map_err(|e| format!("Failed to list project team sessions: {e}"))?;
+
+    Ok(summaries
+        .into_iter()
+        .map(|s| ProjectTeamSessionSummary {
+            session_id: s.session_id.0,
+            status: format!("{:?}", s.status).to_lowercase(),
+            updated_at: s.updated_at.map(|dt| dt.timestamp_millis()),
+        })
+        .collect())
+}
+
+/// A lightweight summary for listing Project Team sessions on the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectTeamSessionSummary {
+    pub session_id: String,
+    pub status: String,
+    pub updated_at: Option<i64>,
+}
+
+/// Force-stop a running ProjectTeamSession by pausing it and saving.
+///
+/// Sets the session status to Paused and the lead status to Idle,
+/// then persists the session. Returns a user-friendly status message.
+pub fn force_stop_project_team(
+    state: &AppState,
+    session_id: &str,
+) -> Result<String, String> {
+    let sid = SessionId(session_id.to_string());
+    let mut session = state
+        .session_store
+        .load_project_team(&sid)
+        .map_err(|e| format!("Failed to load project team session: {e}"))?;
+
+    session.status = SessionStatus::Paused;
+    session.lead.status = LeadStatus::Idle;
+    session.touch();
+
+    state
+        .session_store
+        .save_project_team(&session)
+        .map_err(|e| format!("Failed to save paused session: {e}"))?;
+
+    Ok(format!(
+        "Session {} has been paused.",
+        session_id
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2211,5 +2333,240 @@ mod tests {
     fn format_progress_report_max_lines_zero() {
         let report = format_progress_report("Line 1\nLine 2", 0);
         assert!(report.is_empty());
+    }
+
+    // ===========================================================================
+    // Phase 9: T901/T902 — Session persistence
+    // ===========================================================================
+
+    fn make_test_app_state_with_store() -> (AppState, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = gwt_core::agent::SessionStore::with_dir(dir.path().to_path_buf());
+        let mut state = AppState::new();
+        // Replace the session store with one backed by a temp dir
+        state.session_store = store;
+        (state, dir)
+    }
+
+    #[test]
+    fn save_project_team_state_persists_session() {
+        let (state, _dir) = make_test_app_state_with_store();
+        let session = ProjectTeamSession::new(
+            SessionId("pt-save-1".to_string()),
+            PathBuf::from("/repo"),
+            "main",
+            AgentType::Claude,
+        );
+
+        let result = save_project_team_state(&state, &session);
+        assert!(result.is_ok());
+
+        // Verify it was persisted by loading it back
+        let loaded = state
+            .session_store
+            .load_project_team(&SessionId("pt-save-1".to_string()))
+            .unwrap();
+        assert_eq!(loaded.id.0, "pt-save-1");
+        assert_eq!(loaded.status, gwt_core::agent::session::SessionStatus::Active);
+    }
+
+    #[test]
+    fn save_project_team_state_preserves_lead_conversation() {
+        let (state, _dir) = make_test_app_state_with_store();
+        let mut session = ProjectTeamSession::new(
+            SessionId("pt-save-2".to_string()),
+            PathBuf::from("/repo"),
+            "main",
+            AgentType::Claude,
+        );
+
+        session.lead.conversation.push(LeadMessage::new(
+            MessageRole::User,
+            MessageKind::Message,
+            "implement auth",
+        ));
+        session.lead.llm_call_count = 5;
+        session.lead.estimated_tokens = 2000;
+
+        save_project_team_state(&state, &session).unwrap();
+
+        let loaded = state
+            .session_store
+            .load_project_team(&SessionId("pt-save-2".to_string()))
+            .unwrap();
+        assert_eq!(loaded.lead.conversation.len(), 1);
+        assert_eq!(loaded.lead.conversation[0].content, "implement auth");
+        assert_eq!(loaded.lead.llm_call_count, 5);
+        assert_eq!(loaded.lead.estimated_tokens, 2000);
+    }
+
+    // ===========================================================================
+    // Phase 9: T903/T904 — Session restore
+    // ===========================================================================
+
+    #[test]
+    fn restore_project_team_session_roundtrip() {
+        let (state, _dir) = make_test_app_state_with_store();
+        let mut session = ProjectTeamSession::new(
+            SessionId("pt-restore-1".to_string()),
+            PathBuf::from("/repo"),
+            "main",
+            AgentType::Claude,
+        );
+
+        session.lead.conversation.push(LeadMessage::new(
+            MessageRole::User,
+            MessageKind::Message,
+            "build a login page",
+        ));
+        session.lead.conversation.push(LeadMessage::new(
+            MessageRole::Assistant,
+            MessageKind::Thought,
+            "analyzing requirements",
+        ));
+        session.lead.llm_call_count = 3;
+        session.lead.estimated_tokens = 1500;
+
+        state.session_store.save_project_team(&session).unwrap();
+
+        let (restored_session, restored_mode) =
+            restore_project_team_session(&state, "pt-restore-1").unwrap();
+
+        // Verify session data
+        assert_eq!(restored_session.id.0, "pt-restore-1");
+        assert_eq!(restored_session.lead.conversation.len(), 2);
+        assert_eq!(
+            restored_session.lead.conversation[0].content,
+            "build a login page"
+        );
+
+        // Verify mode reconstruction
+        assert_eq!(
+            restored_mode.project_team_session_id,
+            Some("pt-restore-1".to_string())
+        );
+        assert_eq!(restored_mode.llm_call_count, 3);
+        assert_eq!(restored_mode.estimated_tokens, 1500);
+        assert_eq!(restored_mode.messages.len(), 2);
+        assert_eq!(restored_mode.messages[0].role, "user");
+        assert_eq!(restored_mode.messages[0].kind, "message");
+        assert_eq!(restored_mode.messages[0].content, "build a login page");
+        assert_eq!(restored_mode.messages[1].role, "assistant");
+        assert_eq!(restored_mode.messages[1].kind, "thought");
+        assert!(restored_mode.ai_ready);
+    }
+
+    #[test]
+    fn restore_project_team_session_not_found() {
+        let (state, _dir) = make_test_app_state_with_store();
+
+        let result = restore_project_team_session(&state, "nonexistent");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn list_project_team_sessions_returns_summaries() {
+        let (state, _dir) = make_test_app_state_with_store();
+
+        let s1 = ProjectTeamSession::new(
+            SessionId("pt-list-a".to_string()),
+            PathBuf::from("/repo"),
+            "main",
+            AgentType::Claude,
+        );
+        let s2 = ProjectTeamSession::new(
+            SessionId("pt-list-b".to_string()),
+            PathBuf::from("/repo2"),
+            "develop",
+            AgentType::Codex,
+        );
+        state.session_store.save_project_team(&s1).unwrap();
+        state.session_store.save_project_team(&s2).unwrap();
+
+        let summaries = list_project_team_sessions(&state).unwrap();
+        assert_eq!(summaries.len(), 2);
+
+        let ids: Vec<&str> = summaries.iter().map(|s| s.session_id.as_str()).collect();
+        assert!(ids.contains(&"pt-list-a"));
+        assert!(ids.contains(&"pt-list-b"));
+
+        for summary in &summaries {
+            assert_eq!(summary.status, "active");
+            assert!(summary.updated_at.is_some());
+        }
+    }
+
+    #[test]
+    fn list_project_team_sessions_empty_store() {
+        let (state, _dir) = make_test_app_state_with_store();
+
+        let summaries = list_project_team_sessions(&state).unwrap();
+        assert!(summaries.is_empty());
+    }
+
+    // ===========================================================================
+    // Phase 9: T905/T906 — Session force stop
+    // ===========================================================================
+
+    #[test]
+    fn force_stop_project_team_pauses_session() {
+        let (state, _dir) = make_test_app_state_with_store();
+        let mut session = ProjectTeamSession::new(
+            SessionId("pt-stop-1".to_string()),
+            PathBuf::from("/repo"),
+            "main",
+            AgentType::Claude,
+        );
+        session.lead.status = LeadStatus::Thinking;
+        state.session_store.save_project_team(&session).unwrap();
+
+        let msg = force_stop_project_team(&state, "pt-stop-1").unwrap();
+        assert!(msg.contains("paused"));
+
+        // Verify session status changed
+        let loaded = state
+            .session_store
+            .load_project_team(&SessionId("pt-stop-1".to_string()))
+            .unwrap();
+        assert_eq!(loaded.status, gwt_core::agent::session::SessionStatus::Paused);
+        assert_eq!(loaded.lead.status, LeadStatus::Idle);
+    }
+
+    #[test]
+    fn force_stop_project_team_not_found() {
+        let (state, _dir) = make_test_app_state_with_store();
+
+        let result = force_stop_project_team(&state, "nonexistent");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn force_stop_project_team_saves_and_reloads() {
+        let (state, _dir) = make_test_app_state_with_store();
+        let mut session = ProjectTeamSession::new(
+            SessionId("pt-stop-2".to_string()),
+            PathBuf::from("/repo"),
+            "main",
+            AgentType::Claude,
+        );
+        session.lead.status = LeadStatus::Orchestrating;
+        session.lead.conversation.push(LeadMessage::new(
+            MessageRole::User,
+            MessageKind::Message,
+            "build feature",
+        ));
+        state.session_store.save_project_team(&session).unwrap();
+
+        force_stop_project_team(&state, "pt-stop-2").unwrap();
+
+        // Verify conversation is preserved after stop
+        let loaded = state
+            .session_store
+            .load_project_team(&SessionId("pt-stop-2".to_string()))
+            .unwrap();
+        assert_eq!(loaded.lead.conversation.len(), 1);
+        assert_eq!(loaded.lead.conversation[0].content, "build feature");
+        assert_eq!(loaded.status, gwt_core::agent::session::SessionStatus::Paused);
     }
 }

@@ -5,11 +5,29 @@
     session = null,
     aiReady = true,
     onOpenSettings = () => {},
+    onOpenIssues = () => {},
+    agentBranches = [],
+    viewTerminalPaneId,
+    onBackToDashboard,
   }: {
     session: ProjectTeamState | null;
     aiReady?: boolean;
     onOpenSettings?: () => void;
+    onOpenIssues?: () => void;
+    agentBranches?: string[];
+    viewTerminalPaneId?: string | null;
+    onBackToDashboard?: () => void;
   } = $props();
+
+  let isTerminalView = $derived(
+    viewTerminalPaneId !== undefined &&
+    viewTerminalPaneId !== null &&
+    viewTerminalPaneId !== "",
+  );
+
+  function handleBackToDashboard() {
+    onBackToDashboard?.();
+  }
 
   let hasSession = $derived(session !== null);
   let issueCount = $derived(session?.issues.length ?? 0);
@@ -29,6 +47,7 @@
 
   let apiCalls = $derived(session?.lead.llmCallCount ?? 0);
   let tokensDisplay = $derived(formatTokens(session?.lead.estimatedTokens ?? 0));
+  let hasAgentBranches = $derived(hasSession && agentBranches.length > 0);
 </script>
 
 <section class="project-team-panel">
@@ -44,6 +63,12 @@
         <span class="status-badge">{session.status}</span>
       </div>
       <div class="header-right">
+        <button
+          type="button"
+          class="header-btn"
+          data-testid="github-issues-btn"
+          onclick={onOpenIssues}
+        >GitHub Issues</button>
         <span class="header-stat">API Calls: {apiCalls}</span>
         <span class="header-stat">Tokens: {tokensDisplay}</span>
         <span class="header-stat">{issueLabel}</span>
@@ -51,18 +76,54 @@
       </div>
     </header>
 
-    <div class="project-team-content">
-      <div class="project-team-dashboard">
-        <div class="placeholder-content">
-          <span class="placeholder-label">Dashboard</span>
+    {#if isTerminalView}
+      <div class="terminal-view">
+        <div class="terminal-view-toolbar">
+          <button
+            type="button"
+            class="back-to-dashboard-btn"
+            data-testid="back-to-dashboard"
+            onclick={handleBackToDashboard}
+          >Back to Dashboard</button>
+          <span class="terminal-pane-label">Terminal: {viewTerminalPaneId}</span>
+        </div>
+        <div
+          class="terminal-embed"
+          data-testid="terminal-embed"
+          data-pane-id={viewTerminalPaneId}
+        >
+          <!-- Terminal will be mounted here by xterm integration -->
         </div>
       </div>
-      <div class="project-team-chat">
-        <div class="placeholder-content">
-          <span class="placeholder-label">Lead Chat</span>
+    {:else}
+      <div class="project-team-content">
+        <div class="project-team-dashboard">
+          {#if hasAgentBranches}
+            <div class="agent-branches" data-testid="agent-branches">
+              <span class="branches-heading">Agent Branches</span>
+              <ul class="branch-list">
+                {#each agentBranches as branch}
+                  <li class="branch-item">
+                    {#if branch.startsWith("agent/")}
+                      <span class="agent-branch-badge">agent</span>
+                    {/if}
+                    <span class="branch-name">{branch}</span>
+                  </li>
+                {/each}
+              </ul>
+            </div>
+          {/if}
+          <div class="placeholder-content">
+            <span class="placeholder-label">Dashboard</span>
+          </div>
+        </div>
+        <div class="project-team-chat">
+          <div class="placeholder-content">
+            <span class="placeholder-label">Lead Chat</span>
+          </div>
         </div>
       </div>
-    </div>
+    {/if}
   {:else}
     <div class="empty-state">
       <span class="empty-message">No active session</span>
@@ -193,5 +254,112 @@
 
   .ai-error-settings-btn:hover {
     background: var(--bg-hover);
+  }
+
+  .header-btn {
+    padding: 4px 12px;
+    font-size: 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .header-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .agent-branches {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  .branches-heading {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .branch-list {
+    list-style: none;
+    margin: 6px 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .branch-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .agent-branch-badge {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    background: rgba(99, 102, 241, 0.15);
+    color: rgb(99, 102, 241);
+    font-weight: 500;
+  }
+
+  .branch-name {
+    font-family: monospace;
+    font-size: 12px;
+  }
+
+  .terminal-view {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 0;
+  }
+
+  .terminal-view-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 12px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+  }
+
+  .back-to-dashboard-btn {
+    padding: 4px 12px;
+    font-size: var(--ui-font-xs);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    cursor: pointer;
+  }
+
+  .back-to-dashboard-btn:hover {
+    background: var(--bg-primary);
+    color: var(--text-primary);
+  }
+
+  .terminal-pane-label {
+    font-size: var(--ui-font-xs);
+    color: var(--text-muted);
+    font-family: monospace;
+  }
+
+  .terminal-embed {
+    flex: 1;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    min-height: 200px;
   }
 </style>

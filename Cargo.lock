@@ -2382,6 +2382,7 @@ name = "gwt-tauri"
 version = "7.6.0"
 dependencies = [
  "chrono",
+ "dirs",
  "gwt-core",
  "notify",
  "notify-debouncer-mini",

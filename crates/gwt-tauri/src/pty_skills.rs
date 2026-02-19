@@ -2,6 +2,23 @@
 //!
 //! Thin wrappers around existing terminal functions providing a clean skill interface
 //! for agent-mode PTY operations.
+//!
+//! # Equivalence to agent_tools.rs terminal tools
+//!
+//! This module provides the same PTY functionality as the built-in tool definitions
+//! in `agent_tools.rs`, but with a cleaner Rust API that returns structured
+//! `PtySkillResult` values instead of raw `Result<String, String>`.
+//!
+//! | pty_skills function | Replaces agent_tools tool constant        |
+//! |---------------------|-------------------------------------------|
+//! | `send_to_pane()`    | `TOOL_SEND_KEYS_TO_PANE` (send_keys_to_pane) |
+//! | `broadcast()`       | `TOOL_SEND_KEYS_BROADCAST` (send_keys_broadcast) |
+//! | `capture_output()`  | `TOOL_CAPTURE_SCROLLBACK_TAIL` (capture_scrollback_tail) |
+//! | `list_panes()`      | (no equivalent in agent_tools — new addition) |
+//!
+//! Both modules delegate to the same underlying functions in
+//! `crate::commands::terminal`. The `agent_tools` module is retained for
+//! backward compatibility with the existing LLM tool-call dispatch path.
 
 // Functions will be called from ReAct loop integration (Phase 9-12).
 #![allow(dead_code)]

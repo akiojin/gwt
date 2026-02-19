@@ -1,9 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agent_logger;
 mod agent_master;
 mod agent_tools;
 mod app;
 mod commands;
+pub mod context_summarizer;
 mod menu;
 mod pty_skills;
 mod session_watcher;

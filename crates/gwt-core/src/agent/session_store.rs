@@ -250,6 +250,42 @@ impl SessionStore {
         }
     }
 
+    // -- list_project_team_sessions -----------------------------------------
+
+    /// List all ProjectTeamSession summaries found in the sessions directory.
+    pub fn list_project_team_sessions(&self) -> Result<Vec<SessionSummary>, std::io::Error> {
+        let mut summaries = Vec::new();
+
+        for entry in std::fs::read_dir(&self.sessions_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            // Only consider files matching pt-*.json
+            let file_name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            if !file_name.starts_with("pt-") || !file_name.ends_with(".json") {
+                continue;
+            }
+
+            let data = match std::fs::read_to_string(&path) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            if let Ok(session) = serde_json::from_str::<ProjectTeamSession>(&data) {
+                summaries.push(SessionSummary {
+                    session_id: session.id,
+                    status: session.status,
+                    updated_at: Some(session.updated_at),
+                });
+            }
+        }
+
+        Ok(summaries)
+    }
+
     // -- helpers ------------------------------------------------------------
 
     fn session_path(&self, session_id: &SessionId) -> PathBuf {
@@ -485,5 +521,52 @@ mod tests {
 
         let loaded = store.load_project_team(&session.id).unwrap();
         assert_eq!(loaded.status, SessionStatus::Completed);
+    }
+
+    #[test]
+    fn test_list_project_team_sessions() {
+        use crate::agent::developer::AgentType;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+
+        let s1 = ProjectTeamSession::new(
+            SessionId("pt-a".to_string()),
+            PathBuf::from("/r1"),
+            "main",
+            AgentType::Claude,
+        );
+        let s2 = ProjectTeamSession::new(
+            SessionId("pt-b".to_string()),
+            PathBuf::from("/r2"),
+            "develop",
+            AgentType::Codex,
+        );
+        store.save_project_team(&s1).unwrap();
+        store.save_project_team(&s2).unwrap();
+
+        // Also place a regular AgentSession to verify it is skipped
+        let regular =
+            AgentSession::new(SessionId("regular-1".to_string()), PathBuf::from("/r3"));
+        store.save(&regular).unwrap();
+
+        // Also place a non-json file
+        std::fs::write(dir.path().join("notes.txt"), "ignored").unwrap();
+
+        let list = store.list_project_team_sessions().unwrap();
+        assert_eq!(list.len(), 2);
+
+        let ids: Vec<&str> = list.iter().map(|s| s.session_id.0.as_str()).collect();
+        assert!(ids.contains(&"pt-a"));
+        assert!(ids.contains(&"pt-b"));
+    }
+
+    #[test]
+    fn test_list_project_team_sessions_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+
+        let list = store.list_project_team_sessions().unwrap();
+        assert!(list.is_empty());
     }
 }
