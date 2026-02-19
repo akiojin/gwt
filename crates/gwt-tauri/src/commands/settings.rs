@@ -72,6 +72,8 @@ pub struct SettingsData {
     pub app_language: String,
     #[serde(default)]
     pub voice_input: VoiceInputSettingsData,
+    #[serde(default)]
+    pub default_shell: Option<String>,
 }
 
 fn default_app_language() -> String {
@@ -115,6 +117,7 @@ impl From<&Settings> for SettingsData {
                 language: s.voice_input.language.clone(),
                 model: s.voice_input.model.clone(),
             },
+            default_shell: s.terminal.default_shell.clone(),
         }
     }
 }
@@ -151,6 +154,11 @@ impl SettingsData {
         s.voice_input.hotkey = self.voice_input.hotkey.trim().to_string();
         s.voice_input.language = self.voice_input.language.trim().to_string();
         s.voice_input.model = self.voice_input.model.trim().to_string();
+        s.terminal.default_shell = self
+            .default_shell
+            .as_ref()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
         Ok(s)
     }
 }
@@ -196,6 +204,7 @@ mod tests {
         core.voice_input.hotkey = "Mod+Shift+V".to_string();
         core.voice_input.language = "ja".to_string();
         core.voice_input.model = "base".to_string();
+        core.terminal.default_shell = Some("powershell".to_string());
         let data = SettingsData::from(&core);
         assert_eq!(data.ui_font_size, 16);
         assert_eq!(data.terminal_font_size, 20);
@@ -204,6 +213,7 @@ mod tests {
         assert_eq!(data.voice_input.hotkey, "Mod+Shift+V");
         assert_eq!(data.voice_input.language, "ja");
         assert_eq!(data.voice_input.model, "base");
+        assert_eq!(data.default_shell, Some("powershell".to_string()));
         let back = data.to_settings().unwrap();
         assert_eq!(back.appearance.ui_font_size, 16);
         assert_eq!(back.appearance.terminal_font_size, 20);
@@ -212,5 +222,31 @@ mod tests {
         assert_eq!(back.voice_input.hotkey, "Mod+Shift+V");
         assert_eq!(back.voice_input.language, "ja");
         assert_eq!(back.voice_input.model, "base");
+        assert_eq!(back.terminal.default_shell, Some("powershell".to_string()));
+    }
+
+    #[test]
+    fn test_settings_data_default_shell_none() {
+        let core = Settings::default();
+        let data = SettingsData::from(&core);
+        assert!(data.default_shell.is_none());
+        let back = data.to_settings().unwrap();
+        assert!(back.terminal.default_shell.is_none());
+    }
+
+    #[test]
+    fn test_settings_data_default_shell_trims_whitespace() {
+        let mut data = SettingsData::from(&Settings::default());
+        data.default_shell = Some("  wsl  ".to_string());
+        let back = data.to_settings().unwrap();
+        assert_eq!(back.terminal.default_shell, Some("wsl".to_string()));
+    }
+
+    #[test]
+    fn test_settings_data_default_shell_empty_becomes_none() {
+        let mut data = SettingsData::from(&Settings::default());
+        data.default_shell = Some("   ".to_string());
+        let back = data.to_settings().unwrap();
+        assert!(back.terminal.default_shell.is_none());
     }
 }
