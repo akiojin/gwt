@@ -1361,21 +1361,21 @@ fn launch_with_config(
 
 /// Build the shell command string to inject into a WSL interactive PTY.
 ///
-/// Prepends `export KEY=VALUE; ...` for any env overrides, then appends
+/// Prepends `export KEY=VALUE; ...` for env vars, then appends
 /// `cd <wsl_path> && <agent_command> <args...>`.
 fn build_wsl_inject_command(
     agent_command: &str,
     agent_args: &[String],
-    env_overrides: &HashMap<String, String>,
+    env_vars: &HashMap<String, String>,
     wsl_working_dir: &str,
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
 
-    // Export env overrides
-    let mut keys: Vec<&String> = env_overrides.keys().collect();
+    // Export env vars
+    let mut keys: Vec<&String> = env_vars.keys().collect();
     keys.sort();
     for key in keys {
-        let value = env_overrides.get(key).map(|s| s.as_str()).unwrap_or("");
+        let value = env_vars.get(key).map(|s| s.as_str()).unwrap_or("");
         // Single-quote the value and escape embedded single quotes.
         let escaped = value.replace('\'', "'\\''");
         parts.push(format!("export {key}='{escaped}'"));
@@ -1449,10 +1449,8 @@ fn wsl_prompt_detect_and_inject(
                         data: chunk.clone(),
                     };
                     let _ = app_for_stream.emit("terminal-output", &payload);
-                    // Send to prompt detector
-                    if tx.send(chunk).is_err() {
-                        break;
-                    }
+                    // Send to prompt detector if it is still listening.
+                    let _ = tx.send(chunk);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(_) => break,
@@ -1576,7 +1574,7 @@ struct WslPtyWriteParams {
     branch_name: String,
     agent_name: String,
     agent_color: AgentColor,
-    env_overrides: HashMap<String, String>,
+    env_vars: HashMap<String, String>,
     meta: Option<PaneLaunchMeta>,
 }
 
@@ -1600,7 +1598,7 @@ fn launch_with_wsl_pty_write(
         branch_name,
         agent_name,
         agent_color,
-        env_overrides,
+        env_vars,
         meta,
     } = params;
     // Phase 1: Launch wsl.exe interactively
@@ -1632,12 +1630,8 @@ fn launch_with_wsl_pty_write(
     }
 
     // Phase 2: Detect prompt and inject command
-    let inject_cmd = build_wsl_inject_command(
-        &agent_command,
-        &agent_args,
-        &env_overrides,
-        &wsl_working_dir,
-    );
+    let inject_cmd =
+        build_wsl_inject_command(&agent_command, &agent_args, &env_vars, &wsl_working_dir);
 
     let prompt_detected = wsl_prompt_detect_and_inject(
         &pane_id,
@@ -1676,12 +1670,8 @@ fn launch_with_wsl_pty_write(
     }
 
     // Build non-interactive command: wsl.exe -e bash -lc 'export ...; cd ...; exec agent args...'
-    let fallback_cmd = build_wsl_inject_command(
-        &agent_command,
-        &agent_args,
-        &env_overrides,
-        &wsl_working_dir,
-    );
+    let fallback_cmd =
+        build_wsl_inject_command(&agent_command, &agent_args, &env_vars, &wsl_working_dir);
     let fallback_config = BuiltinLaunchConfig {
         command: "wsl.exe".to_string(),
         args: vec![
@@ -1772,6 +1762,27 @@ fn resolve_shell_launch_spec(is_windows: bool) -> (String, Vec<String>) {
     (shell, args)
 }
 
+fn normalize_terminal_shell_id(shell_id: Option<&str>) -> Option<String> {
+    let normalized = shell_id
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())?;
+    match normalized.as_str() {
+        "powershell" | "cmd" | "wsl" => Some(normalized),
+        _ => None,
+    }
+}
+
+fn resolve_shell_id_for_spawn(shell_id: Option<&str>) -> Option<String> {
+    let explicit = shell_id.map(str::trim).filter(|s| !s.is_empty());
+    if explicit.is_some() {
+        return normalize_terminal_shell_id(explicit);
+    }
+
+    Settings::load_global().ok().and_then(|settings| {
+        normalize_terminal_shell_id(settings.terminal.default_shell.as_deref())
+    })
+}
+
 /// Resolve shell command and arguments for `spawn_shell`.
 ///
 /// When an explicit shell id is given (e.g. `"powershell"`, `"cmd"`, `"wsl"`),
@@ -1807,8 +1818,9 @@ fn resolve_shell_for_spawn(shell_id: Option<&str>) -> (String, Vec<String>) {
 /// Spawn a plain shell terminal (not an agent).
 ///
 /// When `shell` is `Some("powershell" | "cmd" | "wsl")` on Windows, that
-/// shell is used instead of the default resolution.  On non-Windows platforms
-/// the parameter is silently ignored.
+/// shell is used. When `shell` is omitted, Windows first consults
+/// `terminal.default_shell` in settings, then falls back to auto-resolution.
+/// On non-Windows platforms the parameter is silently ignored.
 #[tauri::command]
 pub fn spawn_shell(
     working_dir: Option<String>,
@@ -1816,7 +1828,8 @@ pub fn spawn_shell(
     state: State<AppState>,
     app_handle: AppHandle,
 ) -> Result<String, String> {
-    let (shell_cmd, shell_args) = resolve_shell_for_spawn(shell.as_deref());
+    let shell_id = resolve_shell_id_for_spawn(shell.as_deref());
+    let (shell_cmd, shell_args) = resolve_shell_for_spawn(shell_id.as_deref());
 
     let home = std::env::var("HOME")
         .map(PathBuf::from)
@@ -1829,7 +1842,7 @@ pub fn spawn_shell(
 
     // WSL on Windows: convert working dir and pass --cd flag
     let (final_cmd, final_args, terminal_shell_tag) =
-        if cfg!(target_os = "windows") && shell.as_deref() == Some("wsl") {
+        if cfg!(target_os = "windows") && shell_id.as_deref() == Some("wsl") {
             let wsl_path =
                 gwt_core::terminal::shell::windows_to_wsl_path(&resolved_dir.to_string_lossy())
                     .map_err(|e| format!("WSL path conversion failed: {e}"))?;
@@ -1964,6 +1977,54 @@ mod tests {
         let (shell, args) = resolve_shell_launch_spec(false);
         assert_eq!(shell, "/opt/homebrew/bin/pwsh.exe");
         assert!(args.is_empty());
+    }
+
+    #[test]
+    fn resolve_shell_id_for_spawn_uses_settings_default_when_shell_not_provided() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let home = TempDir::new().unwrap();
+        let _env = crate::commands::TestEnvGuard::new(home.path());
+        std::fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        std::fs::write(
+            home.path().join(".gwt").join("config.toml"),
+            "[terminal]\ndefault_shell = \"wsl\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(resolve_shell_id_for_spawn(None), Some("wsl".to_string()));
+    }
+
+    #[test]
+    fn resolve_shell_id_for_spawn_prefers_explicit_shell_over_settings() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let home = TempDir::new().unwrap();
+        let _env = crate::commands::TestEnvGuard::new(home.path());
+        std::fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        std::fs::write(
+            home.path().join(".gwt").join("config.toml"),
+            "[terminal]\ndefault_shell = \"wsl\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_shell_id_for_spawn(Some("powershell")),
+            Some("powershell".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_shell_id_for_spawn_ignores_invalid_explicit_shell() {
+        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
+        let home = TempDir::new().unwrap();
+        let _env = crate::commands::TestEnvGuard::new(home.path());
+        std::fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        std::fs::write(
+            home.path().join(".gwt").join("config.toml"),
+            "[terminal]\ndefault_shell = \"wsl\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(resolve_shell_id_for_spawn(Some("fish")), None);
     }
 
     #[test]
@@ -3829,8 +3890,8 @@ pub(crate) fn launch_agent_for_project_root(
                     gwt_core::terminal::shell::windows_to_wsl_path(&working_dir.to_string_lossy())
                         .map_err(|e| format!("WSL path conversion failed: {e}"))?;
 
-                // For WSL, only pass env_overrides (not the full merged env).
-                let wsl_env_overrides = request.env_overrides.clone().unwrap_or_default();
+                // WSL PTY-write launches must receive the same merged env as host launches.
+                let wsl_env_vars = env_vars.clone();
 
                 return launch_with_wsl_pty_write(
                     WslPtyWriteParams {
@@ -3842,7 +3903,7 @@ pub(crate) fn launch_agent_for_project_root(
                         branch_name,
                         agent_name: resolved.label.to_string(),
                         agent_color: agent_color_for(agent_id),
-                        env_overrides: wsl_env_overrides,
+                        env_vars: wsl_env_vars,
                         meta: Some(meta),
                     },
                     state,

@@ -1039,7 +1039,7 @@
 
       // Shell selection (Windows only; empty = auto).
       if (selectedShell && runtimeTarget !== "docker") {
-        request.terminal_shell = selectedShell;
+        request.terminalShell = selectedShell;
       }
 
       if (branchMode === "existing") {

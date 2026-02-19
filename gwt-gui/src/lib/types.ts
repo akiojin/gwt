@@ -536,7 +536,7 @@ export interface LaunchAgentRequest {
   dockerBuild?: boolean;
   dockerKeep?: boolean;
   issueNumber?: number;
-  terminal_shell?: string;
+  terminalShell?: string;
 }
 
 // PR Status types (SPEC-d6949f99)
