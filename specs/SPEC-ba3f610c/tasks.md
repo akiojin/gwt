@@ -360,7 +360,7 @@ US9 (コンテキスト)  ← US1
 ## Phase 12: 仕上げ・横断
 
 - [ ] T1201 [P] [共通] PTY通信スキル完全移行 `crates/gwt-tauri/src/agent_tools.rs` `crates/gwt-tauri/src/commands/terminal.rs`
-  - agent_tools.rs の send_keys系3ツール → Claude Code プラグインスキルへ完全移行
+  - agent_tools.rs の send_keys系3ツール → Codex/Geminiローカルskills + Claude Codeプラグインへ完全移行
   - 旧ツール呼び出しの廃止確認
   - 依存: T204
 
@@ -369,7 +369,7 @@ US9 (コンテキスト)  ← US1
   - 依存: T506
 
 - [ ] T1203 [P] [共通] issue_specスキル公開 `crates/gwt-tauri/src/agent_tools.rs`
-  - issue_specツール群をClaude Codeプラグインスキルとして公開、ブランチモード各エージェントから利用可能に
+  - issue_specツール群をCodex/Geminiローカルskills + Claude Codeプラグインで公開、ブランチモード各エージェントから利用可能に
   - 依存: T402
 
 - [ ] T1206 [P] [共通] ブランチモード GitHub Issueボタン `gwt-gui/src/lib/components/`

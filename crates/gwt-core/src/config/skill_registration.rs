@@ -3,6 +3,10 @@
 //! Uses managed local skill bundles
 //! for supported agents.
 
+use super::claude_plugins::{
+    get_global_claude_settings_path, get_local_claude_settings_path, is_gwt_marketplace_registered,
+    is_plugin_enabled_in_settings, setup_gwt_plugin, GWT_PLUGIN_FULL_NAME,
+};
 use crate::error::GwtError;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -17,52 +21,18 @@ struct ManagedSkill {
 
 const PTY_COMMUNICATION_SKILL: ManagedSkill = ManagedSkill {
     name: "gwt-pty-communication",
-    body: r#"---
-name: gwt-pty-communication
-description: PTY based communication tools for Project Mode orchestration (Lead/Coordinator/Developer).
----
-
-# gwt PTY Communication
-
-Use gwt terminal commands as the transport for agent-to-agent communication.
-
-## Commands
-
-- `send_keys_to_pane`: send text to a specific pane.
-- `send_keys_broadcast`: send text to all running panes.
-- `capture_scrollback_tail`: read pane output for status/progress.
-- `list_terminals`: list active pane ids.
-- `close_terminal`: stop a pane when escalation is needed.
-
-## Notes
-
-- Prefer targeted `send_keys_to_pane` for deterministic orchestration.
-- Use `capture_scrollback_tail` before sending follow-up instructions.
-"#,
+    body: include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../plugins/worktree-protection-hooks/skills/gwt-pty-communication/SKILL.md"
+    )),
 };
 
 const ISSUE_SPEC_SKILL: ManagedSkill = ManagedSkill {
     name: "gwt-issue-spec-ops",
-    body: r#"---
-name: gwt-issue-spec-ops
-description: GitHub Issue-first SPEC operations for gwt (create/update/sync artifacts and project phase).
----
-
-# gwt Issue SPEC Ops
-
-Use GitHub CLI for issue-first SPEC lifecycle.
-
-## Core operations
-
-- Upsert SPEC issue sections (`spec/plan/tasks/tdd`).
-- Upsert/list/delete artifact comments (`contract/checklist`).
-- Sync issue to the fixed repository project and update phase.
-
-## Requirements
-
-- `gh` must be installed and authenticated.
-- Repository project binding must be configured by gwt.
-"#,
+    body: include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../plugins/worktree-protection-hooks/skills/gwt-issue-spec-ops/SKILL.md"
+    )),
 };
 
 const MANAGED_SKILLS: &[ManagedSkill] = &[PTY_COMMUNICATION_SKILL, ISSUE_SPEC_SKILL];
@@ -135,7 +105,7 @@ impl Default for SkillRegistrationStatus {
                     label: agent.label().to_string(),
                     skills_path: None,
                     registered: false,
-                    missing_skills: MANAGED_SKILLS.iter().map(|s| s.name.to_string()).collect(),
+                    missing_skills: default_missing_items(*agent),
                     error_code: Some("NOT_CHECKED".to_string()),
                     error_message: Some(
                         "Skill registration status has not been checked yet.".to_string(),
@@ -150,12 +120,21 @@ impl Default for SkillRegistrationStatus {
     }
 }
 
+fn default_missing_items(agent: SkillAgentType) -> Vec<String> {
+    match agent {
+        SkillAgentType::Claude => vec![format!("enabledPlugins.{GWT_PLUGIN_FULL_NAME}")],
+        SkillAgentType::Codex | SkillAgentType::Gemini => {
+            MANAGED_SKILLS.iter().map(|s| s.name.to_string()).collect()
+        }
+    }
+}
+
 fn skills_root_for(agent: SkillAgentType) -> Option<PathBuf> {
     let home = dirs::home_dir()?;
     Some(match agent {
-        SkillAgentType::Claude => home.join(".claude").join("skills"),
         SkillAgentType::Codex => home.join(".codex").join("skills"),
         SkillAgentType::Gemini => home.join(".gemini").join("skills"),
+        SkillAgentType::Claude => return None,
     })
 }
 
@@ -181,13 +160,17 @@ fn register_agent_skills_at(root: &Path) -> Result<(), GwtError> {
 
 /// Register managed skills for one agent.
 pub fn register_agent_skills(agent: SkillAgentType) -> Result<(), GwtError> {
-    let Some(root) = skills_root_for(agent) else {
-        return Err(GwtError::ConfigWriteError {
-            reason: "Home directory could not be resolved".to_string(),
-        });
-    };
-
-    register_agent_skills_at(&root)
+    match agent {
+        SkillAgentType::Claude => setup_gwt_plugin(),
+        SkillAgentType::Codex | SkillAgentType::Gemini => {
+            let Some(root) = skills_root_for(agent) else {
+                return Err(GwtError::ConfigWriteError {
+                    reason: "Home directory could not be resolved".to_string(),
+                });
+            };
+            register_agent_skills_at(&root)
+        }
+    }
 }
 
 /// Register managed skills for all supported agents.
@@ -199,6 +182,10 @@ pub fn register_all_skills() -> Result<(), GwtError> {
 }
 
 fn status_for(agent: SkillAgentType) -> SkillAgentRegistrationStatus {
+    if agent == SkillAgentType::Claude {
+        return status_for_claude();
+    }
+
     let root = skills_root_for(agent);
     let skills_path = root.as_ref().map(|p| p.to_string_lossy().to_string());
 
@@ -238,6 +225,53 @@ fn status_for(agent: SkillAgentType) -> SkillAgentRegistrationStatus {
             None
         } else {
             Some(format!("Missing skills: {}", missing.join(", ")))
+        },
+    }
+}
+
+fn status_for_claude() -> SkillAgentRegistrationStatus {
+    let marketplace_registered = is_gwt_marketplace_registered();
+    let global_path = get_global_claude_settings_path();
+    let local_path = get_local_claude_settings_path();
+    let global_enabled = global_path
+        .as_ref()
+        .map(|p| is_plugin_enabled_in_settings(p))
+        .unwrap_or(false);
+    let local_enabled = is_plugin_enabled_in_settings(&local_path);
+    let plugin_enabled = global_enabled || local_enabled;
+
+    let mut missing_items = Vec::new();
+    if !marketplace_registered {
+        missing_items.push("gwt-plugins-marketplace".to_string());
+    }
+    if !plugin_enabled {
+        missing_items.push(format!("enabledPlugins.{GWT_PLUGIN_FULL_NAME}"));
+    }
+
+    let registered = missing_items.is_empty();
+    let settings_hint = global_path
+        .unwrap_or(local_path)
+        .to_string_lossy()
+        .to_string();
+
+    SkillAgentRegistrationStatus {
+        agent_id: SkillAgentType::Claude.id().to_string(),
+        label: SkillAgentType::Claude.label().to_string(),
+        skills_path: Some(settings_hint),
+        registered,
+        missing_skills: missing_items.clone(),
+        error_code: if registered {
+            None
+        } else {
+            Some("CLAUDE_PLUGIN_NOT_READY".to_string())
+        },
+        error_message: if registered {
+            None
+        } else {
+            Some(format!(
+                "Claude plugin registration is incomplete: {}",
+                missing_items.join(", ")
+            ))
         },
     }
 }

@@ -29,7 +29,7 @@
 
 1. エンティティモデル定義（ProjectModeSession / ProjectIssue / ProjectTask / CoordinatorState / DeveloperState）
 2. フロント型定義の3層対応（ProjectModeState / LeadState / DashboardIssue / DashboardTask / CoordinatorState / DeveloperState）
-3. PTY通信のスキル化基盤（agent_tools.rs → Codex/Claude Code/Gemini skills）
+3. PTY通信のスキル化基盤（agent_tools.rs → Codex/Geminiローカルskills + Claude Codeプラグイン）
 4. SessionStore の AppState ワイヤリング（既存 gwt-core SessionStore を ProjectModeSession 対応に拡張）
 
 ### Phase B: Lead（PM）機能
@@ -82,8 +82,8 @@
 
 ### Phase F: スキル化・統合
 
-1. PTY通信のClaude Codeスキル化（send_keys_to_pane / send_keys_broadcast / capture_scrollback_tail）
-2. issue_specツールのClaude Codeスキル化（ブランチモード各エージェントからも利用可能に）
+1. PTY通信の統合スキル化（Codex/Gemini: `~/.{codex,gemini}/skills`, Claude Code: gwtプラグイン）
+2. issue_specツールの統合スキル化（ブランチモード各エージェントからも利用可能に）
 3. agent_tools.rs PTYツールからの完全移行
 4. 直接アクセス（Developerターミナル直操作 / Coordinatorチャット）
 
