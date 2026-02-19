@@ -51,10 +51,28 @@ fn resolve_windows_shell() -> String {
     resolve_windows_shell_with(|command| which::which(command).is_ok())
 }
 
+fn escape_cmd_double_quoted(value: &str) -> String {
+    value.replace('"', "\"\"")
+}
+
+fn quote_cmd_token_if_needed(value: &str) -> String {
+    let needs_quotes = value.is_empty()
+        || value.chars().any(|c| {
+            c.is_whitespace()
+                || matches!(c, '&' | '|' | '<' | '>' | '(' | ')' | '^' | '%' | '!' | '"')
+        });
+
+    if needs_quotes {
+        format!("\"{}\"", escape_cmd_double_quoted(value))
+    } else {
+        value.to_string()
+    }
+}
+
 fn build_cmd_command_expression(command: &str, args: &[String]) -> String {
     let mut parts = Vec::with_capacity(args.len() + 1);
-    parts.push(command.to_string());
-    parts.extend(args.iter().cloned());
+    parts.push(quote_cmd_token_if_needed(command));
+    parts.extend(args.iter().map(|arg| quote_cmd_token_if_needed(arg)));
     parts.join(" ")
 }
 
@@ -334,6 +352,38 @@ mod tests {
                 "npx.cmd --yes @openai/codex@latest".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn resolve_spawn_command_cmd_shell_quotes_spaces_and_metacharacters() {
+        let args = vec![
+            "--cwd".to_string(),
+            "C:\\Users\\Test User\\repo".to_string(),
+            "a&b".to_string(),
+        ];
+        let (program, resolved_args) = resolve_spawn_command_for_platform(
+            "C:\\Program Files\\nodejs\\npx.cmd",
+            &args,
+            true,
+            || "pwsh".to_string(),
+            Some("cmd"),
+        );
+        assert_eq!(program, "cmd.exe");
+        assert_eq!(
+            resolved_args,
+            vec![
+                "/C".to_string(),
+                "\"C:\\Program Files\\nodejs\\npx.cmd\" --cwd \"C:\\Users\\Test User\\repo\" \"a&b\""
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_cmd_command_expression_escapes_embedded_quotes() {
+        let expression =
+            build_cmd_command_expression("tool.cmd", &[r#"arg "quoted" value"#.to_string()]);
+        assert_eq!(expression, r#"tool.cmd "arg ""quoted"" value""#);
     }
 
     #[test]
