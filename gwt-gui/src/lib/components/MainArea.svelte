@@ -3,6 +3,7 @@
   import type { TabDropPosition } from "../appTabs";
   import TerminalView from "../terminal/TerminalView.svelte";
   import AgentModePanel from "./AgentModePanel.svelte";
+  import ProjectTeamPanel from "./ProjectTeamPanel.svelte";
   import IssueListPanel from "./IssueListPanel.svelte";
   import IssueSpecPanel from "./IssueSpecPanel.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
@@ -62,7 +63,8 @@
   let showTerminalLayer = $derived(
     activeTab?.type === "agent" || activeTab?.type === "terminal",
   );
-  let isPinnedTab = (tabType?: Tab["type"]) => tabType === "agentMode";
+  let isPinnedTab = (tabType?: Tab["type"]) =>
+    tabType === "agentMode" || tabType === "projectTeam";
   let draggingTabId: string | null = $state(null);
   let pointerDrag:
     | {
@@ -276,6 +278,8 @@
         <VersionHistoryPanel {projectPath} />
       {:else if activeTab?.type === "agentMode"}
         <AgentModePanel />
+      {:else if activeTab?.type === "projectTeam"}
+        <ProjectTeamPanel session={null} />
       {:else if activeTab?.type === "issueSpec"}
         <IssueSpecPanel
           projectPath={projectPath}

@@ -1,3 +1,28 @@
+//! Built-in tool definitions for agent mode LLM tool-call dispatch.
+//!
+//! # Terminal tools
+//!
+//! - `send_keys_to_pane` — Send text input to a specific agent pane.
+//! - `send_keys_broadcast` — Broadcast text input to all running agent panes.
+//! - `capture_scrollback_tail` — Capture the scrollback tail for a pane as plain text.
+//!
+//! # Issue-first spec tools
+//!
+//! - `upsert_spec_issue` — Create or update an issue-first spec artifact bundle for a SPEC ID.
+//!   Merges section patches (spec, plan, tasks, tdd, research, data_model, quickstart,
+//!   contracts, checklists) with existing data via optimistic-concurrency `expected_etag`.
+//! - `get_spec_issue` — Get issue-first spec details for a given issue number.
+//! - `append_spec_contract_comment` — Append a contract payload as an issue comment
+//!   using the `contract:<name>` prefix.
+//! - `upsert_spec_issue_artifact` — Create or update a spec artifact comment
+//!   (contracts/checklists) with optional `expected_etag` for concurrency control.
+//! - `list_spec_issue_artifacts` — List spec artifact comments (contracts/checklists)
+//!   for an issue, optionally filtered by kind.
+//! - `delete_spec_issue_artifact` — Delete a spec artifact comment for
+//!   contracts/checklists from an issue.
+//! - `sync_spec_issue_project` — Sync an issue-first spec issue to GitHub Project V2
+//!   and update its phase status (draft/ready/planned/ready-for-dev/in-progress/done/blocked).
+
 use serde_json::{json, Value};
 
 use crate::commands::issue_spec::{

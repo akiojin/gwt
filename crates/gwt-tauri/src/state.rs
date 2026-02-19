@@ -1,5 +1,6 @@
 use crate::agent_master::AgentModeState;
 use crate::mcp_ws_server::McpWsHandle;
+use gwt_core::agent::SessionStore;
 use gwt_core::ai::SessionSummaryCache;
 use gwt_core::config::os_env::EnvSource;
 use gwt_core::config::McpRegistrationStatus;
@@ -132,6 +133,8 @@ pub struct AppState {
     pub gh_available: AtomicBool,
     /// MRU (most-recently-used) window focus history. Front = most recent.
     pub window_focus_history: Mutex<Vec<String>>,
+    /// Persistent storage for agent sessions (Branch Mode & Project Team).
+    pub session_store: SessionStore,
 }
 
 impl AppState {
@@ -166,6 +169,7 @@ impl AppState {
             update_manager: UpdateManager::new(),
             gh_available: AtomicBool::new(false),
             window_focus_history: Mutex::new(Vec::new()),
+            session_store: SessionStore::new(),
         }
     }
 
