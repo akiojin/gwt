@@ -2499,6 +2499,7 @@ mod tests {
                 rows: 24,
                 cols: 80,
                 env_vars: HashMap::new(),
+                terminal_shell: None,
             })
             .expect("failed to create test pane");
 
@@ -2536,6 +2537,7 @@ mod tests {
                 rows: 24,
                 cols: 80,
                 env_vars: HashMap::new(),
+                terminal_shell: None,
             })
             .expect("failed to create test pane");
 
