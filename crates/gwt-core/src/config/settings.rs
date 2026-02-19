@@ -42,6 +42,8 @@ pub struct Settings {
     pub app_language: String,
     /// Voice input settings
     pub voice_input: VoiceInputSettings,
+    /// Terminal settings
+    pub terminal: TerminalSettings,
 }
 
 impl Default for Settings {
@@ -62,6 +64,7 @@ impl Default for Settings {
             appearance: AppearanceSettings::default(),
             app_language: "auto".to_string(),
             voice_input: VoiceInputSettings::default(),
+            terminal: TerminalSettings::default(),
         }
     }
 }
@@ -90,6 +93,14 @@ pub struct AgentSettings {
 pub struct DockerSettings {
     /// Force host launch (skip docker) even when Docker files are detected
     pub force_host: bool,
+}
+
+/// Terminal settings
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerminalSettings {
+    /// Default shell program (None = use system default)
+    pub default_shell: Option<String>,
 }
 
 /// Appearance settings (font sizes)
@@ -857,5 +868,65 @@ model = "base"
             Some(value) => std::env::set_var("GWT_AGENT", value),
             None => std::env::remove_var("GWT_AGENT"),
         }
+    }
+
+    #[test]
+    fn test_terminal_default() {
+        let settings = Settings::default();
+        assert!(settings.terminal.default_shell.is_none());
+    }
+
+    #[test]
+    fn test_terminal_backward_compat() {
+        // Config without [terminal] section should deserialize with defaults
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let global_dir = temp.path().join(".gwt");
+        std::fs::create_dir_all(&global_dir).unwrap();
+        std::fs::write(global_dir.join("config.toml"), "debug = true\n").unwrap();
+
+        let settings = Settings::load_global().unwrap();
+        assert!(settings.debug);
+        assert!(settings.terminal.default_shell.is_none());
+    }
+
+    #[test]
+    fn test_terminal_save_load() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let mut settings = Settings::default();
+        settings.terminal.default_shell = Some("wsl".to_string());
+        settings.save_global().unwrap();
+
+        let loaded = Settings::load_global().unwrap();
+        assert_eq!(loaded.terminal.default_shell, Some("wsl".to_string()));
+    }
+
+    #[test]
+    fn test_terminal_reads_from_config_toml() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let global_dir = temp.path().join(".gwt");
+        std::fs::create_dir_all(&global_dir).unwrap();
+        std::fs::write(
+            global_dir.join("config.toml"),
+            r#"
+[terminal]
+default_shell = "powershell"
+"#,
+        )
+        .unwrap();
+
+        let settings = Settings::load_global().unwrap();
+        assert_eq!(
+            settings.terminal.default_shell,
+            Some("powershell".to_string())
+        );
     }
 }

@@ -24,6 +24,7 @@
     selectedBranch = null,
     onLaunchAgent,
     onQuickLaunch,
+    onNewTerminal,
     onOpenCiLog,
     agentTabBranches = [],
     activeAgentTabBranch = null,
@@ -35,6 +36,7 @@
     selectedBranch?: BranchInfo | null;
     onLaunchAgent?: () => void;
     onQuickLaunch?: (request: LaunchAgentRequest) => Promise<void>;
+    onNewTerminal?: () => void;
     onOpenCiLog?: (runId: number) => void;
     agentTabBranches?: string[];
     activeAgentTabBranch?: string | null;
@@ -1042,6 +1044,13 @@
           >
             New
           </button>
+          <button
+            class="new-terminal-btn"
+            title="New Terminal"
+            onclick={() => onNewTerminal?.()}
+          >
+            &gt;_
+          </button>
           <button class="launch-btn" onclick={() => onLaunchAgent?.()}>
             Launch Agent...
           </button>
@@ -1551,6 +1560,24 @@
 
   .launch-btn:hover {
     background: var(--accent-hover);
+  }
+
+  .new-terminal-btn {
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: var(--ui-font-sm);
+    font-weight: 700;
+    font-family: monospace;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .new-terminal-btn:hover {
+    border-color: var(--accent);
   }
 
   .header-quick-btn {

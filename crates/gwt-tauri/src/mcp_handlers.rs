@@ -479,6 +479,7 @@ pub fn handle_launch_agent(id: Value, params: &Value, ctx: &WsContext) -> JsonRp
         docker_keep: None,
         resume_session_id: None,
         create_branch: None,
+        terminal_shell: None,
     };
 
     let tab_id = match launch_agent_for_project_root(
