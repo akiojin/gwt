@@ -1,4 +1,4 @@
-# クイックスタート: プロジェクトチーム（Project Team）
+# クイックスタート: プロジェクトモード（Project Mode）
 
 **仕様ID**: `SPEC-ba3f610c` | **日付**: 2026-02-19
 
@@ -11,10 +11,10 @@
 
 ## 基本フロー
 
-### 1. プロジェクトチームを開く
+### 1. プロジェクトモードを開く
 
 1. gwt GUI を起動
-2. タブバーの `Project Team` を選択
+2. タブバーの `Project Mode` を選択
 3. Leadチャット画面が表示される（右カラム）+ ダッシュボード（左カラム）
 
 ### 2. プロジェクトを開始する
@@ -40,9 +40,9 @@
 
 ## 手動テスト手順
 
-### Project Teamタブ切り替え
+### Project Modeタブ切り替え
 
-1. Branch Modeタブが表示されている状態で `Project Team` タブをクリック
+1. Branch Modeタブが表示されている状態で `Project Mode` タブをクリック
 2. ダッシュボード + Leadチャット画面が表示される
 3. 別タブ（Settings等）をクリック → Branch Modeに戻る
 
@@ -61,6 +61,6 @@
 
 ### AI設定未構成
 
-1. AI設定を無効にしてProject Teamタブを開く
+1. AI設定を無効にしてProject Modeタブを開く
 2. エラーメッセージ "AI settings are required" が表示される
 3. 設定ウィザードへの導線が表示される

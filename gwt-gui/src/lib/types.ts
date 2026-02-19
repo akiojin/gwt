@@ -161,20 +161,19 @@ export interface VoiceInputSettings {
   model: string;
 }
 
-export interface McpAgentRegistrationStatus {
+export interface SkillAgentRegistrationStatus {
   agent_id: string;
   label: string;
-  config_path?: string | null;
+  skills_path?: string | null;
   registered: boolean;
+  missing_skills: string[];
   error_code?: string | null;
   error_message?: string | null;
 }
 
-export interface McpRegistrationStatus {
+export interface SkillRegistrationStatus {
   overall: "ok" | "degraded" | "failed" | (string & {});
-  bridge_runtime: "ok" | "missing" | (string & {});
-  bridge_script: "ok" | "missing" | (string & {});
-  agents: McpAgentRegistrationStatus[];
+  agents: SkillAgentRegistrationStatus[];
   last_checked_at: number;
   last_error_message?: string | null;
 }

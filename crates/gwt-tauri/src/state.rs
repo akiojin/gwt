@@ -1,9 +1,8 @@
 use crate::agent_master::ProjectModeState;
-use crate::mcp_ws_server::McpWsHandle;
 use gwt_core::agent::SessionStore;
 use gwt_core::ai::SessionSummaryCache;
 use gwt_core::config::os_env::EnvSource;
-use gwt_core::config::McpRegistrationStatus;
+use gwt_core::config::SkillRegistrationStatus;
 use gwt_core::terminal::manager::PaneManager;
 use gwt_core::update::UpdateManager;
 use std::collections::{HashMap, HashSet};
@@ -123,11 +122,8 @@ pub struct AppState {
     pub exit_confirm_inflight: AtomicBool,
     pub os_env: Arc<OnceCell<HashMap<String, String>>>,
     pub os_env_source: Arc<OnceCell<EnvSource>>,
-    /// Handle to the MCP WebSocket server (started during setup).
-    #[cfg_attr(test, allow(dead_code))]
-    pub mcp_ws_handle: Arc<Mutex<Option<McpWsHandle>>>,
-    /// Last observed MCP registration health snapshot.
-    pub mcp_registration_status: Arc<Mutex<McpRegistrationStatus>>,
+    /// Last observed skill registration health snapshot.
+    pub skill_registration_status: Arc<Mutex<SkillRegistrationStatus>>,
     pub update_manager: UpdateManager,
     /// Whether `gh` CLI is authenticated (SPEC-ad1ac432 T009).
     pub gh_available: AtomicBool,
@@ -164,8 +160,7 @@ impl AppState {
             exit_confirm_inflight: AtomicBool::new(false),
             os_env: Arc::new(OnceCell::new()),
             os_env_source: Arc::new(OnceCell::new()),
-            mcp_ws_handle: Arc::new(Mutex::new(None)),
-            mcp_registration_status: Arc::new(Mutex::new(McpRegistrationStatus::default())),
+            skill_registration_status: Arc::new(Mutex::new(SkillRegistrationStatus::default())),
             update_manager: UpdateManager::new(),
             gh_available: AtomicBool::new(false),
             window_focus_history: Mutex::new(Vec::new()),
@@ -245,14 +240,14 @@ impl AppState {
         }
     }
 
-    pub fn set_mcp_registration_status(&self, status: McpRegistrationStatus) {
-        if let Ok(mut slot) = self.mcp_registration_status.lock() {
+    pub fn set_skill_registration_status(&self, status: SkillRegistrationStatus) {
+        if let Ok(mut slot) = self.skill_registration_status.lock() {
             *slot = status;
         }
     }
 
-    pub fn get_mcp_registration_status(&self) -> McpRegistrationStatus {
-        self.mcp_registration_status
+    pub fn get_skill_registration_status(&self) -> SkillRegistrationStatus {
+        self.skill_registration_status
             .lock()
             .map(|s| s.clone())
             .unwrap_or_default()

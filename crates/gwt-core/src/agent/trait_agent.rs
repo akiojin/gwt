@@ -28,7 +28,7 @@ pub struct AgentCapabilities {
     pub can_write_files: bool,
     /// Can use bash
     pub can_use_bash: bool,
-    /// Can use MCP tools
+    /// Can use external tool integrations
     pub can_use_mcp: bool,
     /// Supports streaming
     pub supports_streaming: bool,

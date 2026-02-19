@@ -1,4 +1,4 @@
-# データモデル: プロジェクトチーム（Project Team）
+# データモデル: プロジェクトモード（Project Mode）
 
 **仕様ID**: `SPEC-ba3f610c` | **日付**: 2026-02-19
 
@@ -18,7 +18,7 @@ Project (1)
 
 ## バックエンド（Rust）
 
-### ProjectTeamSession
+### ProjectModeSession
 
 セッション全体のルートエンティティ。`~/.gwt/sessions/{session_id}.json` に永続化。
 
@@ -184,10 +184,10 @@ HookStop / ProcessExit / OutputPattern
 
 ## フロントエンド（TypeScript）
 
-### ProjectTeamState
+### ProjectModeState
 
 ```typescript
-interface ProjectTeamState {
+interface ProjectModeState {
   sessionId: string;
   status: "active" | "paused" | "completed" | "failed";
   lead: LeadState;
@@ -338,12 +338,12 @@ interface DeveloperState {
 
 ## 既存モデルからの移行
 
-| 既存（gwt-core） | 新規（Project Team） | 方針 |
+| 既存（gwt-core） | 新規（Project Mode） | 方針 |
 |---|---|---|
-| AgentSession | ProjectTeamSession | フィールド大幅拡張（issues/lead追加） |
+| AgentSession | ProjectModeSession | フィールド大幅拡張（issues/lead追加） |
 | Task | ProjectTask | developers Vec追加（旧sub_agent単体→複数） |
 | SubAgent | DeveloperState | リネーム + フィールド整理 |
 | WorktreeRef | WorktreeRef | task_ids削除（Developer側から参照） |
 | Conversation | LeadState.conversation | kind フィールド追加（progress等） |
-| SessionStore | SessionStore | ProjectTeamSession対応に拡張 |
-| AgentModeState | ProjectTeamState（フロント） | 3層構造に全面改訂 |
+| SessionStore | SessionStore | ProjectModeSession対応に拡張 |
+| LegacyAgentState | ProjectModeState（フロント） | 3層構造に全面改訂 |

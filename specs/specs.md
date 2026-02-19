@@ -57,7 +57,7 @@
 | [SPEC-e2d4f801](SPEC-e2d4f801/spec.md) | 機能仕様: OS環境変数の自動継承 | 2026-02-10 |
 | [SPEC-4470704f](SPEC-4470704f/spec.md) | 機能仕様: gwt GUI マルチウィンドウ + Native Windowメニュー | 2026-02-09 |
 | [SPEC-5b7a0f9c](SPEC-5b7a0f9c/spec.md) | 機能仕様: Terminal ANSI Diagnostics（GUI） | 2026-02-09 |
-| [SPEC-ba3f610c](SPEC-ba3f610c/spec.md) | 機能仕様: エージェントモード | 2026-01-22 |
+| [SPEC-ba3f610c](SPEC-ba3f610c/spec.md) | 機能仕様: プロジェクトモード | 2026-01-22 |
 | [SPEC-735cbc5d](SPEC-735cbc5d/spec.md) | GitView in Worktree Summary Panel | - |
 
 ## 移植待ち（Porting）

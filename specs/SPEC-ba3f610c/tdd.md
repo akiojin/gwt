@@ -1,4 +1,4 @@
-# TDD計画: プロジェクトチーム（Project Team）
+# TDD計画: プロジェクトモード（Project Mode）
 
 **仕様ID**: `SPEC-ba3f610c` | **日付**: 2026-02-19
 
@@ -12,10 +12,10 @@
 
 ### Phase 1: セットアップ
 
-1. 3層状態モデル（ProjectTeamSession / LeadState / CoordinatorState / DeveloperState / ProjectTask）の型定義とenum遷移テスト
-2. フロント型定義（ProjectTeamState / LeadState / DashboardIssue / DashboardTask / CoordinatorState / DeveloperState）の整合テスト
+1. 3層状態モデル（ProjectModeSession / LeadState / CoordinatorState / DeveloperState / ProjectTask）の型定義とenum遷移テスト
+2. フロント型定義（ProjectModeState / LeadState / DashboardIssue / DashboardTask / CoordinatorState / DeveloperState）の整合テスト
 3. PTY通信スキルインターフェースの入出力テスト
-4. SessionStore の AppState ワイヤリングと ProjectTeamSession 永続化テスト
+4. SessionStore の AppState ワイヤリングと ProjectModeSession 永続化テスト
 
 ### Phase 2: 基盤
 
@@ -24,7 +24,7 @@
 
 ### Phase 3: US1 — モード切り替え・基本対話
 
-1. Project Teamタブ・モード切り替えテスト
+1. Project Modeタブ・モード切り替えテスト
 2. Leadチャット（IME送信抑止 / 送信中スピナー / 自動スクロール）回帰テスト
 3. ダッシュボード表示テスト（Issue/Task/Developer階層、ステータスバッジ、折りたたみ）
 4. AI設定未構成時エラー表示テスト
@@ -93,14 +93,14 @@
 
 - `cargo test -p gwt-core agent -- --nocapture`
 - `cargo test -p gwt-tauri agent_master -- --nocapture`
-- `cargo test -p gwt-tauri commands::agent_mode -- --nocapture`
+- `cargo test -p gwt-tauri commands::project_mode -- --nocapture`
 - `cargo test -p gwt-tauri commands::terminal -- --nocapture`
 - `cargo test -p gwt-tauri agent_tools -- --nocapture`
 - `cargo test -p gwt-tauri context_summarizer -- --nocapture`
 
 ### フロントエンド
 
-- `cd gwt-gui && pnpm test src/lib/components/ProjectTeamPanel.test.ts`
+- `cd gwt-gui && pnpm test src/lib/components/ProjectModePanel.test.ts`
 - `cd gwt-gui && pnpm test src/lib/components/LeadChat.test.ts`
 - `cd gwt-gui && pnpm test src/lib/components/Dashboard.test.ts`
 - `cd gwt-gui && pnpm test src/lib/components/IssueItem.test.ts`

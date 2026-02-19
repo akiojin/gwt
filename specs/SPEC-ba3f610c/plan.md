@@ -1,4 +1,4 @@
-# 実装計画: プロジェクトチーム（Project Team）
+# 実装計画: プロジェクトモード（Project Mode）
 
 **仕様ID**: `SPEC-ba3f610c`
 **日付**: 2026-02-19
@@ -21,16 +21,16 @@
 - ストレージ: ファイルシステム（`~/.gwt/sessions/`）
 - テスト: cargo test / pnpm test / vitest
 - CI/CD: GitHub Actions
-- 既存資産: SessionStore（gwt-core、ファイル永続化実装済み・AppState未接続）、AgentModePanel（Svelte 4→5移行対象）
+- 既存資産: SessionStore（gwt-core、ファイル永続化実装済み・AppState未接続）、ProjectModePanel（Svelte 5で拡張対象）
 
 ## 実装スコープ
 
 ### Phase A: 基盤モデル・型定義
 
-1. エンティティモデル定義（ProjectTeamSession / ProjectIssue / ProjectTask / CoordinatorState / DeveloperState）
-2. フロント型定義の3層対応（ProjectTeamState / LeadState / DashboardIssue / DashboardTask / CoordinatorState / DeveloperState）
-3. PTY通信のスキル化基盤（agent_tools.rs → Claude Code plugin skills）
-4. SessionStore の AppState ワイヤリング（既存 gwt-core SessionStore を ProjectTeamSession 対応に拡張）
+1. エンティティモデル定義（ProjectModeSession / ProjectIssue / ProjectTask / CoordinatorState / DeveloperState）
+2. フロント型定義の3層対応（ProjectModeState / LeadState / DashboardIssue / DashboardTask / CoordinatorState / DeveloperState）
+3. PTY通信のスキル化基盤（agent_tools.rs → Codex/Claude Code/Gemini skills）
+4. SessionStore の AppState ワイヤリング（既存 gwt-core SessionStore を ProjectModeSession 対応に拡張）
 
 ### Phase B: Lead（PM）機能
 
@@ -59,9 +59,9 @@
 9. 成果物検証（テスト実行 → PR作成）
 10. Developer間コンテキスト共有（Git merge経由）
 
-### Phase D: GUI（プロジェクトチームUI）
+### Phase D: GUI（プロジェクトモードUI）
 
-1. Project Teamタブ・モード切り替え
+1. Project Modeタブ・モード切り替え
 2. ダッシュボード（左カラム：Issue/Task/Developer階層表示、ステータスバッジ、折りたたみ/展開）
 3. Leadチャット画面（右カラム：バブル表示、入力エリア、進捗インライン表示）
 4. ダッシュボード内Coordinator詳細展開（ステータス、CI結果、Developer一覧、ターミナル/チャットリンク）
@@ -72,7 +72,7 @@
 
 ### Phase E: セッション・障害・連携
 
-1. セッション永続化（ProjectTeamSession → JSON、~/.gwt/sessions/）
+1. セッション永続化（ProjectModeSession → JSON、~/.gwt/sessions/）
 2. セッション復元・再開（Coordinator/Developer再接続）
 3. 層間独立性（Lead障害 / Coordinator障害 / Developer障害の各ハンドリング）
 4. Coordinator自律再起動（Lead検出 → 再起動 → Developer状態再取得）
@@ -97,14 +97,14 @@
 ```text
 crates/gwt-core/src/
 ├── agent/
-│   ├── mod.rs                    # 3層エージェントモデル（ProjectTeamSession）
+│   ├── mod.rs                    # 3層エージェントモデル（ProjectModeSession）
 │   ├── lead.rs                   # LeadState / LeadStatus / LeadMessage
 │   ├── coordinator.rs            # CoordinatorState / CoordinatorStatus
 │   ├── developer.rs              # DeveloperState / DeveloperStatus
 │   ├── issue.rs                  # ProjectIssue / IssueStatus
 │   ├── task.rs                   # ProjectTask（拡張: developers Vec）
-│   ├── session.rs                # ProjectTeamSession（旧AgentSession拡張）
-│   ├── session_store.rs          # SessionStore（ProjectTeamSession対応）
+│   ├── session.rs                # ProjectModeSession（旧AgentSession拡張）
+│   ├── session_store.rs          # SessionStore（ProjectModeSession対応）
 │   ├── worktree.rs               # WorktreeRef（既存資産）
 │   ├── conversation.rs           # LeadMessage（kind追加）
 │   ├── scanner.rs                # RepositoryScanner（既存資産）
@@ -115,13 +115,13 @@ crates/gwt-tauri/src/
 ├── agent_tools.rs                # LLMツール定義（PTY通信3ツール + issue_spec 7ツール）
 ├── state.rs                      # AppState（SessionStoreワイヤリング追加）
 ├── commands/
-│   ├── agent_mode.rs             # Project Team用Tauriコマンド（拡張）
+│   ├── project_mode.rs           # Project Mode用Tauriコマンド（拡張）
 │   └── terminal.rs               # PTY通信（既存、スキル化元）
 └── context_summarizer.rs         # Lead/Coordinator用コンテキスト要約
 
 gwt-gui/src/
 ├── lib/components/
-│   ├── ProjectTeamPanel.svelte   # メインパネル（2カラム、旧AgentModePanel）
+│   ├── ProjectModePanel.svelte   # メインパネル（2カラム）
 │   ├── LeadChat.svelte           # Leadチャット（右カラム）
 │   ├── Dashboard.svelte          # ダッシュボード（左カラム）
 │   ├── IssueItem.svelte          # Issue階層表示コンポーネント
@@ -131,13 +131,13 @@ gwt-gui/src/
 
 ## 実装方針
 
-- 既存のAgentModePanel/AgentSidebarをリネーム・拡張して3層対応する（Svelte 5化）
+- 既存のProjectModePanel/AgentSidebarを拡張して3層対応する（Svelte 5）
 - Lead実行ループは既存のagent_master.rsを拡張する（ReActループ → GitHub Issue仕様管理統合ループ）
-- gwt-core の既存 SessionStore を ProjectTeamSession 対応に拡張し、AppState にワイヤリングする
+- gwt-core の既存 SessionStore を ProjectModeSession 対応に拡張し、AppState にワイヤリングする
 - Coordinator/Developerは新規の状態管理モジュールとして追加する
 - GUI UIはダッシュボード（左）+ Leadチャット（右）の2カラム構成で実装する
 - Coordinator→Lead通信はハイブリッド（重要イベント: Tauriイベント、途中経過: scrollback読み取り）
-- Developerのエージェント種別はプロジェクトチーム起動時にユーザーが指定する
+- Developerのエージェント種別はプロジェクトモード起動時にユーザーが指定する
 - コンテキスト要約はDeveloperはLLM自動、Lead/Coordinatorはgwt側で80%閾値制御
 - PTY通信は既存のsend_keys系を維持しつつ、スキルとしてのインターフェースを追加する
 - テストは各フェーズごとにTDD（テストファースト）で進める
@@ -150,7 +150,7 @@ gwt-gui/src/
 | SessionStore未接続による永続化ギャップ | 高 | Phase A でAppStateへのワイヤリングを最優先 |
 | Coordinator並列数増加によるリソース逼迫 | 中 | Coordinator/Developer数の上限をLLM判断で制御 |
 | Claude Code Agent Team APIの変更 | 中 | Coordinator実行基盤を抽象化し差し替え可能に |
-| AgentModePanel Svelte 4→5 移行時の回帰 | 低 | 既存テストを維持しつつ段階的に移行 |
+| ProjectModePanel 拡張時の回帰 | 低 | 既存テストを維持しつつ段階的に移行 |
 
 ## 依存関係
 
@@ -173,11 +173,11 @@ gwt-gui/src/
 - 各層が独立して動作し、上位層の障害が下位層に影響しない
 - セッションを永続化し、gwt再起動後に復元・再開できる
 - IME/スピナー/自動スクロールの既存チャット要件を維持する
-- PTY通信がClaude Codeスキルとして利用可能
+- PTY通信がCodex/Claude Code/Geminiスキルとして利用可能
 
 ## 検証方針
 
 - フロントエンド: ダッシュボード、チャット、Branch Mode連携をコンポーネントテスト（vitest）で検証
 - バックエンド: Lead/Coordinator/Developer状態管理、仕様4セクションゲート、CI監視をユニットテスト（cargo test）で検証
-- 回帰: 既存AgentModePanel/AgentSidebarの機能テストを維持
+- 回帰: 既存ProjectModePanel/AgentSidebarの機能テストを維持
 - 統合: Coordinator→Developer起動→完了検出→PR作成のE2Eフローを検証
