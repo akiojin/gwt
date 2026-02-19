@@ -1241,6 +1241,27 @@
     return projectPath;
   }
 
+  async function handleNewTerminal() {
+    try {
+      const workingDir = await resolveNewTerminalWorkingDir();
+      const { invoke } = await import("@tauri-apps/api/core");
+      const paneId = await invoke<string>("spawn_shell", { workingDir });
+      const cwd = workingDir || "~";
+      const label = terminalTabLabel(cwd);
+      const newTab: Tab = {
+        id: `terminal-${paneId}`,
+        label,
+        type: "terminal",
+        paneId,
+        cwd: workingDir || undefined,
+      };
+      tabs = [...tabs, newTab];
+      activeTabId = newTab.id;
+    } catch (err) {
+      console.error("Failed to spawn new terminal:", err);
+    }
+  }
+
   async function respawnStoredTerminalTabs(
     storedTabs: StoredTerminalTab[],
     targetProjectPath: string,
@@ -2434,6 +2455,7 @@
           onCleanupRequest={handleCleanupRequest}
           onLaunchAgent={requestAgentLaunch}
           onQuickLaunch={handleAgentLaunch}
+          onNewTerminal={handleNewTerminal}
           onOpenCiLog={handleOpenCiLog}
         />
       {/if}

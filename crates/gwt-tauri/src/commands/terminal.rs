@@ -154,6 +154,10 @@ pub struct LaunchAgentRequest {
     pub resume_session_id: Option<String>,
     /// Optional new branch creation request (creates branch + worktree before launch)
     pub create_branch: Option<CreateBranchRequest>,
+    /// Optional terminal shell override (e.g. "powershell", "cmd", "wsl").
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub terminal_shell: Option<String>,
 }
 
 fn strip_known_remote_prefix<'a>(branch: &'a str, remotes: &[Remote]) -> &'a str {
@@ -1355,6 +1359,348 @@ fn launch_with_config(
     Ok(pane_id)
 }
 
+/// Build the shell command string to inject into a WSL interactive PTY.
+///
+/// Prepends `export KEY=VALUE; ...` for any env overrides, then appends
+/// `cd <wsl_path> && <agent_command> <args...>`.
+fn build_wsl_inject_command(
+    agent_command: &str,
+    agent_args: &[String],
+    env_overrides: &HashMap<String, String>,
+    wsl_working_dir: &str,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    // Export env overrides
+    let mut keys: Vec<&String> = env_overrides.keys().collect();
+    keys.sort();
+    for key in keys {
+        let value = env_overrides.get(key).map(|s| s.as_str()).unwrap_or("");
+        // Single-quote the value and escape embedded single quotes.
+        let escaped = value.replace('\'', "'\\''");
+        parts.push(format!("export {key}='{escaped}'"));
+    }
+
+    // cd + exec
+    let mut cmd = format!("cd '{wsl_working_dir}'");
+    cmd.push_str(" && exec ");
+    cmd.push_str(agent_command);
+    for arg in agent_args {
+        let escaped = arg.replace('\'', "'\\''");
+        cmd.push_str(&format!(" '{escaped}'"));
+    }
+    parts.push(cmd);
+
+    parts.join(" && ")
+}
+
+/// Detect a shell prompt in PTY output and inject a command.
+///
+/// Reads from the PTY reader, looking for common shell prompt endings
+/// (`$`, `#`, `>`, `%` followed by a space or at line end).
+/// On detection, writes `command_str` + newline to the PTY input.
+/// Returns `Ok(true)` if prompt was detected and command injected,
+/// `Ok(false)` if timeout expired without detection.
+fn wsl_prompt_detect_and_inject(
+    pane_id: &str,
+    command_str: &str,
+    state: &AppState,
+    app_handle: &AppHandle,
+    timeout: Duration,
+) -> Result<bool, String> {
+    // Take a separate reader for prompt detection.
+    let reader = {
+        let manager = state
+            .pane_manager
+            .lock()
+            .map_err(|e| format!("Failed to lock pane manager: {e}"))?;
+        let pane = manager
+            .panes()
+            .iter()
+            .find(|p| p.pane_id() == pane_id)
+            .ok_or_else(|| "Pane not found".to_string())?;
+        pane.take_reader()
+            .map_err(|e| format!("Failed to take reader: {e}"))?
+    };
+
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let pane_id_stream = pane_id.to_string();
+    let app_for_stream = app_handle.clone();
+
+    // Spawn a reader thread that forwards bytes to both the channel and the frontend.
+    let reader_handle = std::thread::spawn(move || {
+        let state = app_for_stream.state::<AppState>();
+        let mut buf = [0u8; 4096];
+        let mut reader = reader;
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let chunk = buf[..n].to_vec();
+                    // Record in scrollback
+                    if let Ok(mut manager) = state.pane_manager.lock() {
+                        if let Some(pane) = manager.pane_mut_by_id(&pane_id_stream) {
+                            let _ = pane.process_bytes(&chunk);
+                        }
+                    }
+                    // Forward to frontend
+                    let payload = TerminalOutputPayload {
+                        pane_id: pane_id_stream.clone(),
+                        data: chunk.clone(),
+                    };
+                    let _ = app_for_stream.emit("terminal-output", &payload);
+                    // Send to prompt detector
+                    if tx.send(chunk).is_err() {
+                        break;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Monitor received bytes for prompt pattern.
+    let deadline = std::time::Instant::now() + timeout;
+    let mut accumulated = Vec::new();
+    let mut detected = false;
+
+    while std::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let wait = remaining.min(Duration::from_millis(100));
+        match rx.recv_timeout(wait) {
+            Ok(chunk) => {
+                accumulated.extend_from_slice(&chunk);
+                if detect_shell_prompt(&accumulated) {
+                    detected = true;
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    if detected {
+        // Write command to PTY
+        let cmd_bytes = format!("{command_str}\n");
+        let mut manager = state
+            .pane_manager
+            .lock()
+            .map_err(|e| format!("Failed to lock pane manager: {e}"))?;
+        if let Some(pane) = manager.pane_mut_by_id(pane_id) {
+            pane.write_input(cmd_bytes.as_bytes())
+                .map_err(|e| format!("Failed to write command to WSL PTY: {e}"))?;
+        }
+    }
+
+    // The reader thread will continue to run; we transition to the normal
+    // stream_pty_output loop in the caller. The reader thread stops when
+    // the PTY closes because read() returns 0 or errors. Since we already
+    // consumed the reader, the caller should NOT start stream_pty_output.
+    // Instead, this reader thread IS the stream thread.
+    //
+    // Detach the reader thread (it will run until EOF).
+    drop(reader_handle);
+
+    Ok(detected)
+}
+
+/// Check whether a byte buffer ends with a common shell prompt pattern.
+///
+/// Looks for `$`, `#`, `>`, or `%` followed by optional whitespace at the
+/// end of the output, after stripping ANSI escape sequences.
+fn detect_shell_prompt(buf: &[u8]) -> bool {
+    // Strip ANSI sequences for detection (simple state machine).
+    let stripped = strip_ansi_bytes(buf);
+    let s = String::from_utf8_lossy(&stripped);
+    let trimmed = s.trim_end();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let last = trimmed.as_bytes()[trimmed.len() - 1];
+    matches!(last, b'$' | b'#' | b'>' | b'%')
+}
+
+/// Lightweight ANSI escape stripper for prompt detection.
+fn strip_ansi_bytes(buf: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(buf.len());
+    let mut i = 0;
+    while i < buf.len() {
+        if buf[i] == 0x1b {
+            i += 1;
+            if i < buf.len() && buf[i] == b'[' {
+                // CSI sequence: skip until final byte (0x40-0x7E)
+                i += 1;
+                while i < buf.len() && !(0x40..=0x7E).contains(&buf[i]) {
+                    i += 1;
+                }
+                if i < buf.len() {
+                    i += 1; // skip final byte
+                }
+            } else if i < buf.len() && buf[i] == b']' {
+                // OSC sequence: skip until ST (ESC \ or BEL)
+                i += 1;
+                while i < buf.len() {
+                    if buf[i] == 0x07 {
+                        i += 1;
+                        break;
+                    }
+                    if buf[i] == 0x1b && i + 1 < buf.len() && buf[i + 1] == b'\\' {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+            } else {
+                // Other escape: skip one more byte
+                if i < buf.len() {
+                    i += 1;
+                }
+            }
+        } else {
+            out.push(buf[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Parameters for WSL PTY-write agent launch.
+struct WslPtyWriteParams {
+    repo_path: PathBuf,
+    agent_command: String,
+    agent_args: Vec<String>,
+    working_dir: PathBuf,
+    wsl_working_dir: String,
+    branch_name: String,
+    agent_name: String,
+    agent_color: AgentColor,
+    env_overrides: HashMap<String, String>,
+    meta: Option<PaneLaunchMeta>,
+}
+
+/// Launch an agent in WSL using the PTY write approach.
+///
+/// 1. Starts `wsl.exe --cd <wsl_path>` as an interactive PTY.
+/// 2. Monitors output for a shell prompt (3-second timeout).
+/// 3. On prompt detection, injects the agent command via PTY write.
+/// 4. On timeout, kills the pane and re-launches with non-interactive mode.
+fn launch_with_wsl_pty_write(
+    params: WslPtyWriteParams,
+    state: &AppState,
+    app_handle: AppHandle,
+) -> Result<String, String> {
+    let WslPtyWriteParams {
+        repo_path,
+        agent_command,
+        agent_args,
+        working_dir,
+        wsl_working_dir,
+        branch_name,
+        agent_name,
+        agent_color,
+        env_overrides,
+        meta,
+    } = params;
+    // Phase 1: Launch wsl.exe interactively
+    let wsl_config = BuiltinLaunchConfig {
+        command: "wsl.exe".to_string(),
+        args: vec!["--cd".to_string(), wsl_working_dir.clone()],
+        working_dir: working_dir.clone(),
+        branch_name: branch_name.clone(),
+        agent_name: agent_name.clone(),
+        agent_color,
+        env_vars: HashMap::new(), // WSL login shell handles base env
+        terminal_shell: Some("wsl".to_string()),
+    };
+
+    let pane_id = {
+        let mut manager = state
+            .pane_manager
+            .lock()
+            .map_err(|e| format!("Failed to lock pane manager: {e}"))?;
+        manager
+            .launch_agent(&repo_path, wsl_config, 24, 80)
+            .map_err(|e| format!("Failed to launch WSL terminal: {e}"))?
+    };
+
+    if let Some(ref meta) = meta {
+        if let Ok(mut map) = state.pane_launch_meta.lock() {
+            map.insert(pane_id.clone(), meta.clone());
+        }
+    }
+
+    // Phase 2: Detect prompt and inject command
+    let inject_cmd = build_wsl_inject_command(
+        &agent_command,
+        &agent_args,
+        &env_overrides,
+        &wsl_working_dir,
+    );
+
+    let prompt_detected = wsl_prompt_detect_and_inject(
+        &pane_id,
+        &inject_cmd,
+        state,
+        &app_handle,
+        Duration::from_secs(3),
+    )?;
+
+    if prompt_detected {
+        // The reader thread from wsl_prompt_detect_and_inject is already
+        // streaming output. We're done.
+        return Ok(pane_id);
+    }
+
+    // Phase 3: Fallback - kill interactive pane, re-launch non-interactively
+    tracing::warn!(
+        pane_id = %pane_id,
+        "WSL prompt not detected within timeout, falling back to non-interactive mode"
+    );
+
+    {
+        let mut manager = state
+            .pane_manager
+            .lock()
+            .map_err(|e| format!("Failed to lock pane manager: {e}"))?;
+        if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
+            let _ = pane.kill();
+        }
+        manager.remove_pane(&pane_id);
+    }
+
+    // Remove stale meta
+    if let Ok(mut map) = state.pane_launch_meta.lock() {
+        map.remove(&pane_id);
+    }
+
+    // Build non-interactive command: wsl.exe -e bash -lc 'export ...; cd ...; exec agent args...'
+    let fallback_cmd = build_wsl_inject_command(
+        &agent_command,
+        &agent_args,
+        &env_overrides,
+        &wsl_working_dir,
+    );
+    let fallback_config = BuiltinLaunchConfig {
+        command: "wsl.exe".to_string(),
+        args: vec![
+            "-e".to_string(),
+            "bash".to_string(),
+            "-lc".to_string(),
+            fallback_cmd,
+        ],
+        working_dir,
+        branch_name,
+        agent_name,
+        agent_color,
+        env_vars: HashMap::new(),
+        terminal_shell: Some("wsl".to_string()),
+    };
+
+    launch_with_config(&repo_path, fallback_config, meta, state, app_handle)
+}
+
 /// Launch a new terminal pane with an agent
 #[tauri::command]
 pub fn launch_terminal(
@@ -1382,6 +1728,7 @@ pub fn launch_terminal(
         agent_name,
         agent_color: AgentColor::Green,
         env_vars: HashMap::new(),
+        terminal_shell: None,
     };
 
     launch_with_config(&repo_path, config, None, &state, app_handle)
@@ -1425,14 +1772,51 @@ fn resolve_shell_launch_spec(is_windows: bool) -> (String, Vec<String>) {
     (shell, args)
 }
 
+/// Resolve shell command and arguments for `spawn_shell`.
+///
+/// When an explicit shell id is given (e.g. `"powershell"`, `"cmd"`, `"wsl"`),
+/// it is used directly on Windows.  Otherwise falls back to the default
+/// `resolve_shell_launch_spec` logic.
+fn resolve_shell_for_spawn(shell_id: Option<&str>) -> (String, Vec<String>) {
+    #[cfg(target_os = "windows")]
+    {
+        use gwt_core::terminal::shell::WindowsShell;
+        if let Some(id) = shell_id {
+            match id {
+                "powershell" => {
+                    let cmd = if which("pwsh").is_ok() {
+                        "pwsh".to_string()
+                    } else {
+                        "powershell".to_string()
+                    };
+                    return (cmd, Vec::new());
+                }
+                "cmd" => return ("cmd.exe".to_string(), Vec::new()),
+                "wsl" => return ("wsl".to_string(), Vec::new()),
+                _ => {} // fall through to default
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = shell_id; // suppress unused warning
+    }
+    resolve_shell_launch_spec(cfg!(windows))
+}
+
 /// Spawn a plain shell terminal (not an agent).
+///
+/// When `shell` is `Some("powershell" | "cmd" | "wsl")` on Windows, that
+/// shell is used instead of the default resolution.  On non-Windows platforms
+/// the parameter is silently ignored.
 #[tauri::command]
 pub fn spawn_shell(
     working_dir: Option<String>,
+    shell: Option<String>,
     state: State<AppState>,
     app_handle: AppHandle,
 ) -> Result<String, String> {
-    let (shell, shell_args) = resolve_shell_launch_spec(cfg!(windows));
+    let (shell_cmd, shell_args) = resolve_shell_for_spawn(shell.as_deref());
 
     let home = std::env::var("HOME")
         .map(PathBuf::from)
@@ -1443,14 +1827,30 @@ pub fn spawn_shell(
         .filter(|p| p.exists())
         .unwrap_or_else(|| home.clone());
 
+    // WSL on Windows: convert working dir and pass --cd flag
+    let (final_cmd, final_args, terminal_shell_tag) =
+        if cfg!(target_os = "windows") && shell.as_deref() == Some("wsl") {
+            let wsl_path =
+                gwt_core::terminal::shell::windows_to_wsl_path(&resolved_dir.to_string_lossy())
+                    .map_err(|e| format!("WSL path conversion failed: {e}"))?;
+            (
+                "wsl.exe".to_string(),
+                vec!["--cd".to_string(), wsl_path],
+                Some("wsl".to_string()),
+            )
+        } else {
+            (shell_cmd, shell_args, None)
+        };
+
     let config = BuiltinLaunchConfig {
-        command: shell,
-        args: shell_args,
+        command: final_cmd,
+        args: final_args,
         working_dir: resolved_dir,
         branch_name: "terminal".to_string(),
         agent_name: "terminal".to_string(),
         agent_color: AgentColor::White,
         env_vars: HashMap::new(),
+        terminal_shell: terminal_shell_tag,
     };
 
     let pane_id = {
@@ -1771,6 +2171,7 @@ mod tests {
                 rows: 24,
                 cols: 80,
                 env_vars: HashMap::new(),
+                terminal_shell: None,
             })
             .expect("failed to create test pane");
 
@@ -1830,6 +2231,7 @@ mod tests {
                 rows: 24,
                 cols: 80,
                 env_vars: HashMap::new(),
+                terminal_shell: None,
             })
             .expect("failed to create running pane");
 
@@ -1845,6 +2247,7 @@ mod tests {
                 rows: 24,
                 cols: 80,
                 env_vars: HashMap::new(),
+                terminal_shell: None,
             })
             .expect("failed to create done pane");
 
@@ -1899,6 +2302,7 @@ mod tests {
                 rows: 24,
                 cols: 80,
                 env_vars: HashMap::new(),
+                terminal_shell: None,
             })
             .expect("failed to create test pane");
 
@@ -1939,6 +2343,7 @@ mod tests {
                 rows: 24,
                 cols: 80,
                 env_vars: HashMap::new(),
+                terminal_shell: None,
             })
             .expect("failed to create test pane");
 
@@ -1988,6 +2393,7 @@ mod tests {
                 rows: 24,
                 cols: 80,
                 env_vars: HashMap::new(),
+                terminal_shell: None,
             })
             .expect("failed to create test pane");
 
@@ -2028,6 +2434,7 @@ mod tests {
             docker_keep: None,
             resume_session_id: None,
             create_branch: None,
+            terminal_shell: None,
         }
     }
 
@@ -2458,6 +2865,7 @@ services:
                 rows: 24,
                 cols: 80,
                 env_vars: HashMap::new(),
+                terminal_shell: None,
             })
             .expect("failed to create test pane");
 
@@ -2518,6 +2926,127 @@ services:
             !env_vars.contains_key("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"),
             "Codex launch env must not include CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"
         );
+    }
+
+    // --- WSL prompt detection tests (T031) ---
+
+    #[test]
+    fn detect_shell_prompt_dollar() {
+        assert!(detect_shell_prompt(b"user@host:~$ "));
+    }
+
+    #[test]
+    fn detect_shell_prompt_dollar_eol() {
+        assert!(detect_shell_prompt(b"user@host:~$"));
+    }
+
+    #[test]
+    fn detect_shell_prompt_hash() {
+        assert!(detect_shell_prompt(b"root@host:~# "));
+    }
+
+    #[test]
+    fn detect_shell_prompt_hash_eol() {
+        assert!(detect_shell_prompt(b"root@host:~#"));
+    }
+
+    #[test]
+    fn detect_shell_prompt_angle() {
+        assert!(detect_shell_prompt(b"PS C:\\Users> "));
+    }
+
+    #[test]
+    fn detect_shell_prompt_percent() {
+        assert!(detect_shell_prompt(b"user@host ~ %"));
+    }
+
+    #[test]
+    fn detect_shell_prompt_empty() {
+        assert!(!detect_shell_prompt(b""));
+    }
+
+    #[test]
+    fn detect_shell_prompt_no_prompt() {
+        assert!(!detect_shell_prompt(b"Welcome to Ubuntu 22.04 LTS\n"));
+    }
+
+    #[test]
+    fn detect_shell_prompt_with_ansi() {
+        // Prompt with ANSI color codes: \e[32muser@host\e[0m:~$
+        let buf = b"\x1b[32muser@host\x1b[0m:~$";
+        assert!(detect_shell_prompt(buf));
+    }
+
+    // --- ANSI strip tests ---
+
+    #[test]
+    fn strip_ansi_bytes_plain() {
+        let input = b"hello world";
+        assert_eq!(strip_ansi_bytes(input), b"hello world");
+    }
+
+    #[test]
+    fn strip_ansi_bytes_csi() {
+        let input = b"\x1b[32mgreen\x1b[0m";
+        assert_eq!(strip_ansi_bytes(input), b"green");
+    }
+
+    #[test]
+    fn strip_ansi_bytes_osc_bel() {
+        // OSC 7 terminated by BEL
+        let input = b"\x1b]7;file:///home/user\x07prompt$";
+        assert_eq!(strip_ansi_bytes(input), b"prompt$");
+    }
+
+    #[test]
+    fn strip_ansi_bytes_osc_st() {
+        // OSC terminated by ST (ESC \)
+        let input = b"\x1b]0;title\x1b\\prompt$";
+        assert_eq!(strip_ansi_bytes(input), b"prompt$");
+    }
+
+    // --- build_wsl_inject_command tests (T033) ---
+
+    #[test]
+    fn build_wsl_inject_command_no_env() {
+        let cmd = build_wsl_inject_command(
+            "claude",
+            &["--dangerously-skip-permissions".to_string()],
+            &HashMap::new(),
+            "/mnt/c/Users/foo",
+        );
+        assert_eq!(
+            cmd,
+            "cd '/mnt/c/Users/foo' && exec claude '--dangerously-skip-permissions'"
+        );
+    }
+
+    #[test]
+    fn build_wsl_inject_command_with_env() {
+        let mut env = HashMap::new();
+        env.insert("FOO".to_string(), "bar".to_string());
+        let cmd = build_wsl_inject_command("claude", &[], &env, "/mnt/c/repo");
+        assert_eq!(cmd, "export FOO='bar' && cd '/mnt/c/repo' && exec claude");
+    }
+
+    #[test]
+    fn build_wsl_inject_command_env_with_quotes() {
+        let mut env = HashMap::new();
+        env.insert("MSG".to_string(), "it's a test".to_string());
+        let cmd = build_wsl_inject_command("echo", &[], &env, "/mnt/c");
+        assert_eq!(
+            cmd,
+            "export MSG='it'\\''s a test' && cd '/mnt/c' && exec echo"
+        );
+    }
+
+    #[test]
+    fn build_wsl_inject_command_multiple_env_sorted() {
+        let mut env = HashMap::new();
+        env.insert("ZZZ".to_string(), "last".to_string());
+        env.insert("AAA".to_string(), "first".to_string());
+        let cmd = build_wsl_inject_command("agent", &[], &env, "/mnt/c");
+        assert!(cmd.starts_with("export AAA='first' && export ZZZ='last'"));
     }
 }
 
@@ -3216,6 +3745,7 @@ pub(crate) fn launch_agent_for_project_root(
                 agent_name: resolved.label.to_string(),
                 agent_color: agent_color_for(agent_id),
                 env_vars: docker_env.clone(),
+                terminal_shell: None,
             }
         }
         DockerExecMode::DockerRun {
@@ -3279,17 +3809,58 @@ pub(crate) fn launch_agent_for_project_root(
                 agent_name: resolved.label.to_string(),
                 agent_color: agent_color_for(agent_id),
                 env_vars: HashMap::new(),
+                terminal_shell: None,
             }
         }
-        DockerExecMode::None => BuiltinLaunchConfig {
-            command: resolved.command,
-            args,
-            working_dir,
-            branch_name,
-            agent_name: resolved.label.to_string(),
-            agent_color: agent_color_for(agent_id),
-            env_vars,
-        },
+        DockerExecMode::None => {
+            let terminal_shell = request
+                .terminal_shell
+                .as_deref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+
+            // WSL agent launch uses the PTY-write approach (FR-007).
+            if terminal_shell.as_deref() == Some("wsl") {
+                if is_launch_cancelled(cancelled) {
+                    return Err("Cancelled".to_string());
+                }
+                let wsl_path =
+                    gwt_core::terminal::shell::windows_to_wsl_path(&working_dir.to_string_lossy())
+                        .map_err(|e| format!("WSL path conversion failed: {e}"))?;
+
+                // For WSL, only pass env_overrides (not the full merged env).
+                let wsl_env_overrides = request.env_overrides.clone().unwrap_or_default();
+
+                return launch_with_wsl_pty_write(
+                    WslPtyWriteParams {
+                        repo_path: repo_path.clone(),
+                        agent_command: resolved.command.clone(),
+                        agent_args: args.clone(),
+                        working_dir,
+                        wsl_working_dir: wsl_path,
+                        branch_name,
+                        agent_name: resolved.label.to_string(),
+                        agent_color: agent_color_for(agent_id),
+                        env_overrides: wsl_env_overrides,
+                        meta: Some(meta),
+                    },
+                    state,
+                    app_handle,
+                );
+            }
+
+            BuiltinLaunchConfig {
+                command: resolved.command,
+                args,
+                working_dir,
+                branch_name,
+                agent_name: resolved.label.to_string(),
+                agent_color: agent_color_for(agent_id),
+                env_vars,
+                terminal_shell,
+            }
+        }
     };
 
     if is_launch_cancelled(cancelled) {
@@ -4313,4 +4884,37 @@ pub fn get_captured_environment(state: State<AppState>) -> CapturedEnvInfo {
 #[tauri::command]
 pub fn is_os_env_ready(state: State<AppState>) -> bool {
     state.is_os_env_ready()
+}
+
+/// Shell information returned to the frontend.
+#[derive(Debug, Serialize, Clone)]
+pub struct ShellInfo {
+    pub id: String,
+    pub name: String,
+    pub version: Option<String>,
+}
+
+/// Return the list of available Windows shells.
+///
+/// On non-Windows platforms this always returns an empty list.
+#[tauri::command]
+pub async fn get_available_shells() -> Result<Vec<ShellInfo>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use gwt_core::terminal::shell::WindowsShell;
+        let shells: Vec<ShellInfo> = WindowsShell::ALL
+            .iter()
+            .filter(|s| s.is_available())
+            .map(|s| ShellInfo {
+                id: s.id().to_string(),
+                name: s.display_name().to_string(),
+                version: s.detect_version(),
+            })
+            .collect();
+        Ok(shells)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(Vec::new())
+    }
 }

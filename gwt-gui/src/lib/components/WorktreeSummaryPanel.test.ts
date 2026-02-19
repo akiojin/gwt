@@ -850,4 +850,36 @@ describe("WorktreeSummaryPanel", () => {
       expect(rendered.getByText("Rebuild warning: branch failed")).toBeTruthy();
     });
   });
+
+  it("renders New Terminal button and fires onNewTerminal callback", async () => {
+    const onNewTerminal = vi.fn();
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+      onNewTerminal,
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByTitle("New Terminal")).toBeTruthy();
+    });
+
+    const btn = rendered.getByTitle("New Terminal");
+    await fireEvent.click(btn);
+    expect(onNewTerminal).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders New Terminal button even without onNewTerminal callback", async () => {
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByTitle("New Terminal")).toBeTruthy();
+    });
+
+    // Clicking without callback should not throw
+    const btn = rendered.getByTitle("New Terminal");
+    await fireEvent.click(btn);
+  });
 });
