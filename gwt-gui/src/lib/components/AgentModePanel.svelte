@@ -10,7 +10,7 @@
     ai_error: null,
     last_error: null,
     is_waiting: false,
-    session_name: "Master Agent",
+    session_name: "Project Team",
     llm_call_count: 0,
     estimated_tokens: 0,
   };
@@ -22,6 +22,7 @@
   let chatEl: HTMLDivElement | null = null;
   let lastMessageCount = 0;
   let lastOpenedIssueNumber: number | null = null;
+  let displaySessionName = "Project Team";
 
   function toErrorMessage(err: unknown): string {
     if (!err) return "Unknown error";
@@ -52,7 +53,9 @@
     sending = true;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      state = await invoke<AgentModeState>("send_agent_mode_message", { input: text });
+      state = await invoke<AgentModeState>("send_project_team_message_cmd", {
+        input: text,
+      });
       input = "";
     } catch (err) {
       state = {
@@ -107,6 +110,11 @@
     void refreshState();
   });
 
+  $: displaySessionName =
+    state.session_name && state.session_name !== "Master Agent"
+      ? state.session_name
+      : "Project Team";
+
   $: {
     const issueNumber = state.active_spec_issue_number ?? null;
     if (!issueNumber || issueNumber === lastOpenedIssueNumber) {
@@ -130,10 +138,16 @@
 
 <section class="agent-mode">
   <header class="agent-header">
-    <div class="agent-title">{state.session_name ?? "Master Agent"}</div>
+    <div class="agent-title">{displaySessionName}</div>
     <div class="agent-stats">
+      {#if state.lead_status}
+        <span>Lead: {state.lead_status}</span>
+      {/if}
       <span>LLM: {state.llm_call_count}</span>
       <span>Tokens: {state.estimated_tokens}</span>
+      {#if state.project_team_session_id}
+        <span>Session: {state.project_team_session_id}</span>
+      {/if}
     </div>
   </header>
 
@@ -164,7 +178,7 @@
 
   <footer class="agent-input">
     <textarea
-      placeholder="Type a task and press Enter..."
+      placeholder="Type a project-team instruction and press Enter..."
       bind:value={input}
       onkeydown={onKeydown}
       oncompositionstart={onCompositionStart}

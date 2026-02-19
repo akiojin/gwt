@@ -1,6 +1,8 @@
 import type { Tab } from "./types";
 
-const DEFAULT_APP_TABS: Tab[] = [{ id: "agentMode", label: "Master Agent", type: "agentMode" }];
+const DEFAULT_APP_TABS: Tab[] = [
+  { id: "projectTeam", label: "Project Team", type: "projectTeam" },
+];
 export type TabDropPosition = "before" | "after";
 
 export function defaultAppTabs(): Tab[] {
@@ -8,7 +10,7 @@ export function defaultAppTabs(): Tab[] {
 }
 
 export function shouldAllowRestoredActiveTab(activeTabId: string): boolean {
-  return activeTabId === "agentMode";
+  return activeTabId === "projectTeam" || activeTabId === "agentMode";
 }
 
 export function reorderTabsByDrop(

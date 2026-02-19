@@ -8,12 +8,11 @@
     GhCliStatus,
     SettingsData,
   } from "../types";
-  import AgentSidebar from "./AgentSidebar.svelte";
   import WorktreeSummaryPanel from "./WorktreeSummaryPanel.svelte";
 
   type FilterType = "Local" | "Remote" | "All";
   type BranchSortMode = "name" | "updated";
-  type SidebarMode = "branch" | "agent";
+  type SidebarMode = "branch" | "projectTeam";
   type FilterCacheEntry = {
     branches: BranchInfo[];
     remoteBranchNames: Set<string>;
@@ -1235,13 +1234,13 @@
     </button>
     <button
       class="mode-btn"
-      class:active={mode === "agent"}
-      aria-pressed={mode === "agent"}
-      title="Master Agent"
-      onclick={() => handleModeChange("agent")}
+      class:active={mode === "projectTeam"}
+      aria-pressed={mode === "projectTeam"}
+      title="Project Team"
+      onclick={() => handleModeChange("projectTeam")}
     >
-      <span class="mode-icon">A</span>
-      <span class="mode-label">Agent</span>
+      <span class="mode-icon">P</span>
+      <span class="mode-label">Project Team</span>
     </button>
   </div>
   {#if mode === "branch"}
@@ -1387,14 +1386,12 @@
       </div>
     </div>
   {:else}
-    <AgentSidebar
-      {projectPath}
-      selectedBranch={selectedBranch}
-      currentBranch={currentBranch}
-      {agentTabBranches}
-      {activeAgentTabBranch}
-      preferredLanguage={appLanguage}
-    />
+    <div class="project-team-sidebar">
+      <div class="project-team-sidebar-title">Project Team</div>
+      <div class="project-team-sidebar-body">
+        Open the <code>Project Team</code> tab in the main area and send your first instruction.
+      </div>
+    </div>
   {/if}
   <button
     type="button"
@@ -1514,6 +1511,29 @@
     cursor: pointer;
     border-radius: 6px;
     font-family: inherit;
+  }
+
+  .project-team-sidebar {
+    margin: 12px;
+    padding: 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-surface);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .project-team-sidebar-title {
+    font-size: var(--ui-font-md);
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .project-team-sidebar-body {
+    font-size: var(--ui-font-sm);
+    color: var(--text-secondary);
+    line-height: 1.4;
   }
 
   .mode-btn.active {

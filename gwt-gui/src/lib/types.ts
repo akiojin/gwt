@@ -61,6 +61,8 @@ export interface AgentModeState {
   last_error?: string | null;
   is_waiting: boolean;
   session_name?: string | null;
+  project_team_session_id?: string | null;
+  lead_status?: string | null;
   llm_call_count: number;
   estimated_tokens: number;
   active_spec_id?: string | null;

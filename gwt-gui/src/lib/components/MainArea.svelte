@@ -3,7 +3,6 @@
   import type { TabDropPosition } from "../appTabs";
   import TerminalView from "../terminal/TerminalView.svelte";
   import AgentModePanel from "./AgentModePanel.svelte";
-  import ProjectTeamPanel from "./ProjectTeamPanel.svelte";
   import IssueListPanel from "./IssueListPanel.svelte";
   import IssueSpecPanel from "./IssueSpecPanel.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
@@ -276,10 +275,8 @@
         <SettingsPanel onClose={() => onTabClose(activeTabId)} />
       {:else if activeTab?.type === "versionHistory"}
         <VersionHistoryPanel {projectPath} />
-      {:else if activeTab?.type === "agentMode"}
+      {:else if activeTab?.type === "projectTeam" || activeTab?.type === "agentMode"}
         <AgentModePanel />
-      {:else if activeTab?.type === "projectTeam"}
-        <ProjectTeamPanel session={null} />
       {:else if activeTab?.type === "issueSpec"}
         <IssueSpecPanel
           projectPath={projectPath}

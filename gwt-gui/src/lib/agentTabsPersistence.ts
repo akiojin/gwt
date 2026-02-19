@@ -25,7 +25,12 @@ export type StoredTerminalTab = {
 };
 
 export type StoredStaticTab = {
-  type: "agentMode" | "settings" | "versionHistory" | "issues";
+  type:
+    | "projectTeam"
+    | "agentMode"
+    | "settings"
+    | "versionHistory"
+    | "issues";
   id: string;
   label: string;
 };
@@ -147,30 +152,40 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
   }
 
   if (
+    type === "projectTeam" ||
     type === "agentMode" ||
     type === "settings" ||
     type === "versionHistory" ||
     type === "issues"
   ) {
+    const canonicalType = type === "agentMode" ? "projectTeam" : type;
     const fallbackId =
-      type === "agentMode"
-        ? "agentMode"
-        : type === "settings"
+      canonicalType === "projectTeam"
+        ? "projectTeam"
+        : canonicalType === "settings"
           ? "settings"
-          : type === "issues"
+          : canonicalType === "issues"
             ? "issues"
             : "versionHistory";
     const fallbackLabel =
-      type === "agentMode"
-        ? "Master Agent"
-        : type === "settings"
+      canonicalType === "projectTeam"
+        ? "Project Team"
+        : canonicalType === "settings"
           ? "Settings"
-          : type === "issues"
+          : canonicalType === "issues"
             ? "Issues"
             : "Version History";
-    const id = normalizeString(obj.id) || fallbackId;
-    const label = typeof obj.label === "string" ? obj.label : fallbackLabel;
-    return { type, id, label };
+    const idRaw = normalizeString(obj.id);
+    const id =
+      canonicalType === "projectTeam"
+        ? "projectTeam"
+        : idRaw || fallbackId;
+    const labelRaw = typeof obj.label === "string" ? obj.label.trim() : "";
+    const label =
+      canonicalType === "projectTeam" && (type === "agentMode" || !labelRaw)
+        ? "Project Team"
+        : labelRaw || fallbackLabel;
+    return { type: canonicalType, id, label };
   }
 
   return null;
@@ -435,18 +450,20 @@ export function buildRestoredProjectTabs(
     restoredTabs.push({ id: tab.id, label: tab.label, type: tab.type });
   }
 
-  if (!restoredTabs.some((tab) => tab.id === "agentMode")) {
+  if (!restoredTabs.some((tab) => tab.id === "projectTeam")) {
     restoredTabs.unshift({
-      id: "agentMode",
-      label: "Master Agent",
-      type: "agentMode",
+      id: "projectTeam",
+      label: "Project Team",
+      type: "projectTeam",
     });
   }
 
   const restoredIds = new Set(restoredTabs.map((tab) => tab.id));
+  const normalizedActiveTabId =
+    stored.activeTabId === "agentMode" ? "projectTeam" : stored.activeTabId;
   const activeTabId =
-    stored.activeTabId && restoredIds.has(stored.activeTabId)
-      ? stored.activeTabId
+    normalizedActiveTabId && restoredIds.has(normalizedActiveTabId)
+      ? normalizedActiveTabId
       : null;
 
   const activeTerminalPaneId =

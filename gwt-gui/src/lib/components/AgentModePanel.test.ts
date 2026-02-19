@@ -14,7 +14,7 @@ const baseState: AgentModeState = {
   ai_error: null,
   last_error: null,
   is_waiting: false,
-  session_name: "Master Agent",
+  session_name: "Project Team",
   llm_call_count: 0,
   estimated_tokens: 0,
 };
@@ -27,7 +27,7 @@ async function renderPanel(
     if (command === "get_agent_mode_state_cmd") {
       return { ...baseState, ...initialOverride };
     }
-    if (command === "send_agent_mode_message") {
+    if (command === "send_project_team_message_cmd") {
       return { ...baseState, ...sendOverride };
     }
     return baseState;
@@ -55,25 +55,25 @@ describe("AgentModePanel", () => {
     });
 
     const textarea = rendered.getByPlaceholderText(
-      "Type a task and press Enter..."
+      "Type a project-team instruction and press Enter..."
     ) as HTMLTextAreaElement;
 
     await fireEvent.input(textarea, { target: { value: "日本語入力" } });
     await fireEvent.compositionStart(textarea);
     await fireEvent.keyDown(textarea, { key: "Enter", isComposing: true });
 
-    expect(countInvokeCalls("send_agent_mode_message")).toBe(0);
+    expect(countInvokeCalls("send_project_team_message_cmd")).toBe(0);
 
     await fireEvent.compositionEnd(textarea);
     await fireEvent.keyDown(textarea, { key: "Enter" });
 
-    expect(countInvokeCalls("send_agent_mode_message")).toBe(0);
+    expect(countInvokeCalls("send_project_team_message_cmd")).toBe(0);
 
     await new Promise((r) => setTimeout(r, 0));
     await fireEvent.keyDown(textarea, { key: "Enter" });
 
     await waitFor(() => {
-      expect(countInvokeCalls("send_agent_mode_message")).toBe(1);
+      expect(countInvokeCalls("send_project_team_message_cmd")).toBe(1);
     });
   });
 
@@ -85,7 +85,7 @@ describe("AgentModePanel", () => {
     });
 
     const textarea = rendered.getByPlaceholderText(
-      "Type a task and press Enter..."
+      "Type a project-team instruction and press Enter..."
     ) as HTMLTextAreaElement;
 
     await fireEvent.input(textarea, { target: { value: "status" } });
@@ -163,7 +163,7 @@ describe("AgentModePanel", () => {
     });
 
     const textarea = rendered.getByPlaceholderText(
-      "Type a task and press Enter..."
+      "Type a project-team instruction and press Enter..."
     ) as HTMLTextAreaElement;
     await fireEvent.input(textarea, { target: { value: "scroll" } });
 

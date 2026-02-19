@@ -7,26 +7,27 @@ import {
 import type { Tab } from "./types";
 
 describe("appTabs", () => {
-  it("uses Master Agent as the only default tab", () => {
+  it("uses Project Team as the only default tab", () => {
     expect(defaultAppTabs()).toEqual([
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectTeam", label: "Project Team", type: "projectTeam" },
     ]);
   });
 
   it("does not allow restoring active tab from removed summary tab", () => {
     expect(shouldAllowRestoredActiveTab("summary")).toBe(false);
+    expect(shouldAllowRestoredActiveTab("projectTeam")).toBe(true);
     expect(shouldAllowRestoredActiveTab("agentMode")).toBe(true);
   });
 
   it("moves dragged tab before target tab", () => {
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectTeam", label: "Project Team", type: "projectTeam" },
       { id: "settings", label: "Settings", type: "settings" },
       { id: "versionHistory", label: "Version History", type: "versionHistory" },
     ];
 
     expect(reorderTabsByDrop(tabs, "versionHistory", "settings", "before")).toEqual([
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectTeam", label: "Project Team", type: "projectTeam" },
       { id: "versionHistory", label: "Version History", type: "versionHistory" },
       { id: "settings", label: "Settings", type: "settings" },
     ]);
@@ -34,21 +35,21 @@ describe("appTabs", () => {
 
   it("moves dragged tab after target tab", () => {
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectTeam", label: "Project Team", type: "projectTeam" },
       { id: "settings", label: "Settings", type: "settings" },
       { id: "versionHistory", label: "Version History", type: "versionHistory" },
     ];
 
-    expect(reorderTabsByDrop(tabs, "agentMode", "versionHistory", "after")).toEqual([
+    expect(reorderTabsByDrop(tabs, "projectTeam", "versionHistory", "after")).toEqual([
       { id: "settings", label: "Settings", type: "settings" },
       { id: "versionHistory", label: "Version History", type: "versionHistory" },
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectTeam", label: "Project Team", type: "projectTeam" },
     ]);
   });
 
   it("returns the original array when no reorder is needed", () => {
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectTeam", label: "Project Team", type: "projectTeam" },
       { id: "settings", label: "Settings", type: "settings" },
       { id: "versionHistory", label: "Version History", type: "versionHistory" },
     ];
