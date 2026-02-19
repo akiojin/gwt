@@ -2082,16 +2082,10 @@ mod tests {
     #[test]
     fn count_dsr_cursor_position_queries_handles_fragmented_sequence() {
         let mut pending = Vec::new();
-        assert_eq!(
-            count_dsr_cursor_position_queries(&mut pending, b"\x1b["),
-            0
-        );
+        assert_eq!(count_dsr_cursor_position_queries(&mut pending, b"\x1b["), 0);
         assert_eq!(pending, b"\x1b[".to_vec());
 
-        assert_eq!(
-            count_dsr_cursor_position_queries(&mut pending, b"6n"),
-            1
-        );
+        assert_eq!(count_dsr_cursor_position_queries(&mut pending, b"6n"), 1);
     }
 
     #[test]
@@ -4450,8 +4444,7 @@ fn stream_pty_output(
         match reader.read(&mut buf) {
             Ok(0) => break, // EOF
             Ok(n) => {
-                let dsr_queries =
-                    count_dsr_cursor_position_queries(&mut dsr_pending, &buf[..n]);
+                let dsr_queries = count_dsr_cursor_position_queries(&mut dsr_pending, &buf[..n]);
                 respond_to_dsr_cursor_queries(&state, &pane_id, dsr_queries);
 
                 // Keep the scrollback file up-to-date even if the UI is not listening.
