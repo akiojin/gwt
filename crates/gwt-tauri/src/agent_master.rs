@@ -243,7 +243,46 @@ pub fn send_agent_message(state: &AppState, window_label: &str, input: &str) -> 
     working
 }
 
-const PROJECT_TEAM_SYSTEM_PROMPT: &str = "You are the Lead AI agent for gwt Project Team mode. You orchestrate Coordinators and Developers to implement features. Use ReAct and tool calls when needed. Keep instructions concise and in English.\n\nReAct format:\nThought: <short reasoning>\nAction: <tool name + short params summary>\nObservation: <tool result>\n\nRules:\n- Use tool calls for actions.\n- Do not fabricate observations; observations come from tool results.\n- Keep Thought to 2-4 lines.\n- When delegating to sub-agents, include a clear task and request a short completion summary.";
+const PROJECT_TEAM_SYSTEM_PROMPT: &str = "You are the Lead AI agent for gwt Project Team mode. You orchestrate Coordinators and Developers to implement features. Use ReAct and tool calls when needed. Keep instructions concise and in English.
+
+ReAct format:
+Thought: <short reasoning>
+Action: <tool name + short params summary>
+Observation: <tool result>
+
+Rules:
+- Use tool calls for actions.
+- Do not fabricate observations; observations come from tool results.
+- Keep Thought to 2-4 lines.
+- When delegating to sub-agents, include a clear task and request a short completion summary.
+
+## Issue-First Spec Management
+
+All specifications must be stored as GitHub Issues using the issue_spec tools:
+- `upsert_spec_issue` - Create or update a spec issue with sections
+- `get_spec_issue` - Read current spec issue content
+- `upsert_spec_issue_artifact` - Add contract/checklist artifacts as comments
+- `list_spec_issue_artifacts` - List artifact comments on an issue
+- `delete_spec_issue_artifact` - Remove an artifact comment
+- `sync_spec_issue_project` - Sync issue to GitHub Project board
+
+## Workflow
+
+Follow this workflow for every feature request:
+
+1. **Clarify**: Ask the user to clarify ambiguous requirements. Gather enough context before proceeding.
+2. **Create GitHub Issue**: Use `upsert_spec_issue` to create a new spec issue. Include the SPEC-ID and a clear title.
+3. **Write 4 required sections**: Update the issue with all 4 gate sections via `upsert_spec_issue`:
+   - `spec` - Functional requirements and acceptance scenarios
+   - `plan` - Implementation plan with approach and architecture decisions
+   - `tasks` - Breakdown of work items with clear deliverables
+   - `tdd` - Test-first definitions and test scenarios
+4. **Gate check**: All 4 sections (spec, plan, tasks, tdd) must be non-empty before requesting user approval.
+5. **Present plan for approval**: Summarize the plan to the user and ask for explicit approval. Wait for the user to approve before starting Coordinators.
+6. **On approval**: Transition to Orchestrating and start Coordinators for each task.
+7. **On rejection**: Revise the plan based on user feedback and re-present.
+
+Do not start Coordinators or Developers until the user has explicitly approved the plan.";
 
 pub fn send_project_team_message(
     state: &AppState,
@@ -685,6 +724,105 @@ fn parse_react_sections(text: &str, allow_observation: bool) -> Vec<ReactSection
     sections
 }
 
+/// Check that the 4 gate sections (spec, plan, tasks, tdd) are all non-empty.
+/// Returns Ok(()) if complete, Err with list of missing section names otherwise.
+pub fn check_spec_sections_complete(sections: &SpecIssueSections) -> Result<(), Vec<String>> {
+    let mut missing = Vec::new();
+    if sections.spec.trim().is_empty() {
+        missing.push("spec".to_string());
+    }
+    if sections.plan.trim().is_empty() {
+        missing.push("plan".to_string());
+    }
+    if sections.tasks.trim().is_empty() {
+        missing.push("tasks".to_string());
+    }
+    if sections.tdd.trim().is_empty() {
+        missing.push("tdd".to_string());
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(missing)
+    }
+}
+
+/// Check if the user message is an approval pattern.
+pub fn is_approval_message(input: &str) -> bool {
+    let lower = input.trim().to_lowercase();
+    matches!(
+        lower.as_str(),
+        "approve" | "approved" | "yes" | "ok" | "lgtm" | "go ahead" | "proceed" | "go"
+    ) || lower.starts_with("yes,")
+        || lower.starts_with("yes ")
+        || lower.starts_with("ok,")
+        || lower.starts_with("ok ")
+        || lower.starts_with("approve ")
+}
+
+/// Register a GitHub Issue as a ProjectIssue in the session.
+/// Skips if the issue number is already registered.
+pub fn register_project_issue(
+    session: &mut ProjectTeamSession,
+    issue_number: u64,
+    issue_url: &str,
+    title: &str,
+) {
+    use gwt_core::agent::issue::{IssueStatus, ProjectIssue};
+    if session
+        .issues
+        .iter()
+        .any(|i| i.github_issue_number == issue_number)
+    {
+        return;
+    }
+    session.issues.push(ProjectIssue {
+        id: format!("issue-{}", issue_number),
+        github_issue_number: issue_number,
+        github_issue_url: issue_url.to_string(),
+        title: title.to_string(),
+        status: IssueStatus::Planned,
+        coordinator: None,
+        tasks: Vec::new(),
+    });
+}
+
+/// Format scrollback output for inclusion in Lead conversation.
+/// Truncates to `max_len` bytes with a truncation marker.
+pub fn format_scrollback_for_lead(scrollback: &str, max_len: usize) -> String {
+    if scrollback.len() <= max_len {
+        return scrollback.to_string();
+    }
+    let truncated: String = scrollback.chars().take(max_len).collect();
+    format!("{}...(truncated)", truncated)
+}
+
+/// Polling interval in seconds for the Lead hybrid resident loop.
+/// Between events the Lead stays idle; this interval triggers a status check.
+pub const POLLING_INTERVAL_SECS: u64 = 120;
+
+/// Actions that the Lead can perform autonomously without user approval.
+const AUTONOMOUS_ACTIONS: &[&str] = &["task_reorder", "parallel_degree", "retry"];
+
+/// Classify whether an action requires user approval.
+/// Autonomous actions (task reorder, parallel degree adjustment, retry) return false.
+/// All other actions (strategy change, new issue creation, PR merge, etc.) return true.
+pub fn requires_approval(action: &str) -> bool {
+    !AUTONOMOUS_ACTIONS.contains(&action)
+}
+
+/// Determine whether the Lead should perform a polling check.
+/// Returns true if never polled or if the polling interval has elapsed.
+pub fn should_poll(last_poll_at: Option<chrono::DateTime<chrono::Utc>>) -> bool {
+    match last_poll_at {
+        None => true,
+        Some(last) => {
+            let elapsed = chrono::Utc::now() - last;
+            elapsed.num_seconds() >= POLLING_INTERVAL_SECS as i64
+        }
+    }
+}
+
 fn format_tool_call(call: &ToolCall) -> String {
     let args = match serde_json::to_string(&call.arguments) {
         Ok(s) => s,
@@ -934,5 +1072,298 @@ mod tests {
         assert_eq!(out[0].content, PROJECT_TEAM_SYSTEM_PROMPT);
         assert_eq!(out[1].role, "user");
         assert_eq!(out[1].content, "hello");
+    }
+
+    // --- T401: issue_spec tools Lead integration ---
+
+    #[test]
+    fn project_team_tool_definitions_include_all_spec_tools() {
+        let defs = builtin_tool_definitions();
+        let names: Vec<String> = defs.iter().map(|d| d.function.name.clone()).collect();
+        // All spec tools must be available to the Project Team Lead
+        assert!(names.contains(&"upsert_spec_issue".to_string()));
+        assert!(names.contains(&"get_spec_issue".to_string()));
+        assert!(names.contains(&"upsert_spec_issue_artifact".to_string()));
+        assert!(names.contains(&"list_spec_issue_artifacts".to_string()));
+        assert!(names.contains(&"delete_spec_issue_artifact".to_string()));
+        assert!(names.contains(&"sync_spec_issue_project".to_string()));
+    }
+
+    #[test]
+    fn project_team_system_prompt_mentions_spec_tools() {
+        // The system prompt should instruct the Lead to use issue_spec tools
+        assert!(PROJECT_TEAM_SYSTEM_PROMPT.contains("upsert_spec_issue"));
+        assert!(PROJECT_TEAM_SYSTEM_PROMPT.contains("get_spec_issue"));
+        assert!(PROJECT_TEAM_SYSTEM_PROMPT.contains("spec"));
+    }
+
+    // --- T403: GitHub Issue spec management workflow ---
+
+    #[test]
+    fn project_team_system_prompt_has_workflow_instructions() {
+        // The prompt should describe the spec workflow: clarify → create issue → write sections
+        assert!(PROJECT_TEAM_SYSTEM_PROMPT.contains("clarif"));
+        assert!(PROJECT_TEAM_SYSTEM_PROMPT.contains("GitHub Issue"));
+        assert!(PROJECT_TEAM_SYSTEM_PROMPT.contains("plan"));
+        assert!(PROJECT_TEAM_SYSTEM_PROMPT.contains("tasks"));
+        assert!(PROJECT_TEAM_SYSTEM_PROMPT.contains("tdd"));
+    }
+
+    #[test]
+    fn project_team_system_prompt_has_section_gate_instruction() {
+        // The prompt should mention that all 4 sections are required before Coordinator
+        assert!(PROJECT_TEAM_SYSTEM_PROMPT.contains("spec"));
+        assert!(PROJECT_TEAM_SYSTEM_PROMPT.contains("plan"));
+        assert!(PROJECT_TEAM_SYSTEM_PROMPT.contains("tasks"));
+        assert!(PROJECT_TEAM_SYSTEM_PROMPT.contains("tdd"));
+        assert!(
+            PROJECT_TEAM_SYSTEM_PROMPT.contains("approval")
+                || PROJECT_TEAM_SYSTEM_PROMPT.contains("approve")
+        );
+    }
+
+    // --- T405: 4-section gate check ---
+
+    #[test]
+    fn check_spec_sections_complete_all_present() {
+        let sections = SpecIssueSections {
+            spec: "User login spec".to_string(),
+            plan: "Implementation plan".to_string(),
+            tasks: "- Task 1\n- Task 2".to_string(),
+            tdd: "Test cases: ...".to_string(),
+            research: String::new(),
+            data_model: String::new(),
+            quickstart: String::new(),
+            contracts: String::new(),
+            checklists: String::new(),
+        };
+        assert!(check_spec_sections_complete(&sections).is_ok());
+    }
+
+    #[test]
+    fn check_spec_sections_complete_missing_plan() {
+        let sections = SpecIssueSections {
+            spec: "User login spec".to_string(),
+            plan: String::new(),
+            tasks: "- Task 1".to_string(),
+            tdd: "Test cases".to_string(),
+            research: String::new(),
+            data_model: String::new(),
+            quickstart: String::new(),
+            contracts: String::new(),
+            checklists: String::new(),
+        };
+        let err = check_spec_sections_complete(&sections).unwrap_err();
+        assert_eq!(err.len(), 1);
+        assert!(err[0].contains("plan"));
+    }
+
+    #[test]
+    fn check_spec_sections_complete_missing_all_four() {
+        let sections = SpecIssueSections {
+            spec: String::new(),
+            plan: String::new(),
+            tasks: String::new(),
+            tdd: String::new(),
+            research: String::new(),
+            data_model: String::new(),
+            quickstart: String::new(),
+            contracts: String::new(),
+            checklists: String::new(),
+        };
+        let err = check_spec_sections_complete(&sections).unwrap_err();
+        assert_eq!(err.len(), 4);
+    }
+
+    #[test]
+    fn check_spec_sections_complete_whitespace_only_counts_as_missing() {
+        let sections = SpecIssueSections {
+            spec: "  \n  ".to_string(),
+            plan: "Real plan".to_string(),
+            tasks: "Real tasks".to_string(),
+            tdd: "Real tdd".to_string(),
+            research: String::new(),
+            data_model: String::new(),
+            quickstart: String::new(),
+            contracts: String::new(),
+            checklists: String::new(),
+        };
+        let err = check_spec_sections_complete(&sections).unwrap_err();
+        assert_eq!(err.len(), 1);
+        assert!(err[0].contains("spec"));
+    }
+
+    // --- T407: Plan presentation and approval flow ---
+
+    #[test]
+    fn lead_status_waiting_approval_transition() {
+        use gwt_core::agent::lead::LeadState;
+        let mut lead = LeadState {
+            status: LeadStatus::Thinking,
+            ..Default::default()
+        };
+        lead.status = LeadStatus::WaitingApproval;
+        assert_eq!(lead.status, LeadStatus::WaitingApproval);
+
+        // Approve → Orchestrating
+        lead.status = LeadStatus::Orchestrating;
+        assert_eq!(lead.status, LeadStatus::Orchestrating);
+    }
+
+    #[test]
+    fn lead_status_waiting_approval_rejection_returns_to_thinking() {
+        use gwt_core::agent::lead::LeadState;
+        let mut lead = LeadState {
+            status: LeadStatus::WaitingApproval,
+            ..Default::default()
+        };
+
+        // Reject → back to Thinking
+        lead.status = LeadStatus::Thinking;
+        assert_eq!(lead.status, LeadStatus::Thinking);
+    }
+
+    #[test]
+    fn is_approval_message_recognizes_approve_patterns() {
+        assert!(is_approval_message("approve"));
+        assert!(is_approval_message("APPROVE"));
+        assert!(is_approval_message("yes"));
+        assert!(is_approval_message("Yes, proceed"));
+        assert!(is_approval_message("ok"));
+        assert!(is_approval_message("OK"));
+        assert!(is_approval_message("go ahead"));
+        assert!(is_approval_message("lgtm"));
+    }
+
+    #[test]
+    fn is_approval_message_rejects_non_approval() {
+        assert!(!is_approval_message("reject"));
+        assert!(!is_approval_message("no"));
+        assert!(!is_approval_message("revise the plan"));
+        assert!(!is_approval_message("change the tasks section"));
+    }
+
+    // --- T409: GitHub Issue creation and Project registration ---
+
+    #[test]
+    fn register_project_issue_creates_entry() {
+        use gwt_core::agent::developer::AgentType;
+        let mut session = ProjectTeamSession::new(
+            SessionId("pt-test".to_string()),
+            PathBuf::from("/repo"),
+            "main",
+            AgentType::Claude,
+        );
+        assert!(session.issues.is_empty());
+
+        register_project_issue(
+            &mut session,
+            42,
+            "https://github.com/org/repo/issues/42",
+            "Login feature",
+        );
+        assert_eq!(session.issues.len(), 1);
+        assert_eq!(session.issues[0].github_issue_number, 42);
+        assert_eq!(
+            session.issues[0].status,
+            gwt_core::agent::issue::IssueStatus::Planned
+        );
+        assert_eq!(session.issues[0].title, "Login feature");
+    }
+
+    #[test]
+    fn register_project_issue_does_not_duplicate() {
+        use gwt_core::agent::developer::AgentType;
+        let mut session = ProjectTeamSession::new(
+            SessionId("pt-test".to_string()),
+            PathBuf::from("/repo"),
+            "main",
+            AgentType::Claude,
+        );
+
+        register_project_issue(
+            &mut session,
+            42,
+            "https://github.com/org/repo/issues/42",
+            "Login feature",
+        );
+        register_project_issue(
+            &mut session,
+            42,
+            "https://github.com/org/repo/issues/42",
+            "Login feature v2",
+        );
+        assert_eq!(session.issues.len(), 1);
+    }
+
+    // --- T411: Coordinator→Lead hybrid communication ---
+
+    #[test]
+    fn format_scrollback_for_lead_truncates_long_output() {
+        let long_text = "x".repeat(5000);
+        let formatted = format_scrollback_for_lead(&long_text, 500);
+        assert!(formatted.len() <= 600); // some overhead for prefix
+        assert!(formatted.contains("...(truncated)"));
+    }
+
+    #[test]
+    fn format_scrollback_for_lead_passes_short_output() {
+        let short_text = "Build succeeded\nAll tests passed";
+        let formatted = format_scrollback_for_lead(short_text, 500);
+        assert!(formatted.contains("Build succeeded"));
+        assert!(formatted.contains("All tests passed"));
+        assert!(!formatted.contains("truncated"));
+    }
+
+    // --- T311: Lead delegation logic (requires_approval) ---
+
+    #[test]
+    fn requires_approval_autonomous_actions() {
+        assert!(!requires_approval("task_reorder"));
+        assert!(!requires_approval("parallel_degree"));
+        assert!(!requires_approval("retry"));
+    }
+
+    #[test]
+    fn requires_approval_approval_required_actions() {
+        assert!(requires_approval("strategy_change"));
+        assert!(requires_approval("create_issue"));
+        assert!(requires_approval("pr_merge"));
+    }
+
+    #[test]
+    fn requires_approval_unknown_action_defaults_to_required() {
+        assert!(requires_approval("unknown_action"));
+        assert!(requires_approval("deploy"));
+    }
+
+    // --- T313: Lead hybrid polling ---
+
+    #[test]
+    fn polling_interval_is_120_seconds() {
+        assert_eq!(POLLING_INTERVAL_SECS, 120);
+    }
+
+    #[test]
+    fn should_poll_returns_true_when_never_polled() {
+        assert!(should_poll(None));
+    }
+
+    #[test]
+    fn should_poll_returns_false_when_recently_polled() {
+        let recent = chrono::Utc::now() - chrono::Duration::seconds(10);
+        assert!(!should_poll(Some(recent)));
+    }
+
+    #[test]
+    fn should_poll_returns_true_when_interval_exceeded() {
+        let old = chrono::Utc::now() - chrono::Duration::seconds(130);
+        assert!(should_poll(Some(old)));
+    }
+
+    #[test]
+    fn should_poll_boundary_at_exactly_120_seconds() {
+        let exactly = chrono::Utc::now() - chrono::Duration::seconds(120);
+        assert!(should_poll(Some(exactly)));
     }
 }

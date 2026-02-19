@@ -1,21 +1,51 @@
 <script lang="ts">
   import type { ProjectTeamState } from "../types";
 
-  let { session = null }: { session: ProjectTeamState | null } = $props();
+  let {
+    session = null,
+    aiReady = true,
+    onOpenSettings = () => {},
+  }: {
+    session: ProjectTeamState | null;
+    aiReady?: boolean;
+    onOpenSettings?: () => void;
+  } = $props();
 
   let hasSession = $derived(session !== null);
   let issueCount = $derived(session?.issues.length ?? 0);
   let issueLabel = $derived(issueCount === 1 ? "1 issue" : `${issueCount} issues`);
+
+  function formatTokens(tokens: number): string {
+    if (tokens >= 1_000_000) {
+      const m = tokens / 1_000_000;
+      return `~${parseFloat(m.toFixed(1))}M`;
+    }
+    if (tokens >= 1_000) {
+      const k = Math.round(tokens / 1_000);
+      return `~${k}K`;
+    }
+    return `~${tokens}`;
+  }
+
+  let apiCalls = $derived(session?.lead.llmCallCount ?? 0);
+  let tokensDisplay = $derived(formatTokens(session?.lead.estimatedTokens ?? 0));
 </script>
 
 <section class="project-team-panel">
-  {#if hasSession && session}
+  {#if !aiReady}
+    <div class="ai-error">
+      <span class="ai-error-message">AI provider is not configured</span>
+      <button class="ai-error-settings-btn" onclick={onOpenSettings}>Settings</button>
+    </div>
+  {:else if hasSession && session}
     <header class="project-team-header">
       <div class="header-left">
         <span class="header-title">Project Team</span>
         <span class="status-badge">{session.status}</span>
       </div>
       <div class="header-right">
+        <span class="header-stat">API Calls: {apiCalls}</span>
+        <span class="header-stat">Tokens: {tokensDisplay}</span>
         <span class="header-stat">{issueLabel}</span>
         <span class="header-stat agent-type">{session.developerAgentType}</span>
       </div>
@@ -134,5 +164,34 @@
   .empty-message {
     color: var(--text-muted);
     font-size: 14px;
+  }
+
+  .ai-error {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    height: 100%;
+  }
+
+  .ai-error-message {
+    color: var(--text-muted);
+    font-size: 14px;
+  }
+
+  .ai-error-settings-btn {
+    padding: 6px 16px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: 13px;
+  }
+
+  .ai-error-settings-btn:hover {
+    background: var(--bg-hover);
   }
 </style>

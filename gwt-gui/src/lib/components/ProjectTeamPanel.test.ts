@@ -15,11 +15,20 @@ const baseSession: ProjectTeamState = {
   developerAgentType: "claude",
 };
 
-async function renderPanel(session: ProjectTeamState | null = null) {
+async function renderPanel(
+  session: ProjectTeamState | null = null,
+  opts: { aiReady?: boolean; onOpenSettings?: () => void } = {},
+) {
   const { default: ProjectTeamPanel } = await import(
     "./ProjectTeamPanel.svelte"
   );
-  return render(ProjectTeamPanel, { props: { session } });
+  return render(ProjectTeamPanel, {
+    props: {
+      session,
+      aiReady: opts.aiReady ?? true,
+      onOpenSettings: opts.onOpenSettings ?? (() => {}),
+    },
+  });
 }
 
 describe("ProjectTeamPanel", () => {
@@ -142,6 +151,119 @@ describe("ProjectTeamPanel", () => {
     });
 
     expect(rendered.getByText("2 issues")).toBeTruthy();
+  });
+});
+
+// -- T307: AI not configured error display tests ----------------------------
+
+describe("ProjectTeamPanel AI error state", () => {
+  beforeEach(() => {
+    cleanup();
+  });
+
+  it("shows error message when AI is not configured", async () => {
+    const rendered = await renderPanel(null, { aiReady: false });
+
+    expect(
+      rendered.getByText("AI provider is not configured"),
+    ).toBeTruthy();
+  });
+
+  it("shows a Settings button when AI is not configured", async () => {
+    const onOpenSettings = vi.fn();
+    const rendered = await renderPanel(null, {
+      aiReady: false,
+      onOpenSettings,
+    });
+
+    const btn = rendered.getByText("Settings");
+    expect(btn).toBeTruthy();
+    await fireEvent.click(btn);
+    expect(onOpenSettings).toHaveBeenCalledOnce();
+  });
+
+  it("does not show AI error when aiReady is true", async () => {
+    const rendered = await renderPanel(null, { aiReady: true });
+
+    expect(rendered.getByText("No active session")).toBeTruthy();
+    expect(
+      rendered.container.querySelector(".ai-error"),
+    ).toBeNull();
+  });
+
+  it("shows AI error instead of session content when not configured", async () => {
+    const rendered = await renderPanel(baseSession, { aiReady: false });
+
+    expect(
+      rendered.getByText("AI provider is not configured"),
+    ).toBeTruthy();
+    // Should not render dashboard/chat when AI not configured
+    expect(
+      rendered.container.querySelector(".project-team-dashboard"),
+    ).toBeNull();
+  });
+});
+
+// -- T309: Cost visualization tests -----------------------------------------
+
+describe("ProjectTeamPanel cost display", () => {
+  beforeEach(() => {
+    cleanup();
+  });
+
+  it("displays API call count in the header", async () => {
+    const rendered = await renderPanel({
+      ...baseSession,
+      lead: { ...baseSession.lead, llmCallCount: 42, estimatedTokens: 0 },
+    });
+
+    expect(rendered.getByText("API Calls: 42")).toBeTruthy();
+  });
+
+  it("displays estimated tokens in the header", async () => {
+    const rendered = await renderPanel({
+      ...baseSession,
+      lead: {
+        ...baseSession.lead,
+        llmCallCount: 0,
+        estimatedTokens: 150000,
+      },
+    });
+
+    expect(rendered.getByText("Tokens: ~150K")).toBeTruthy();
+  });
+
+  it("formats tokens below 1000 without K suffix", async () => {
+    const rendered = await renderPanel({
+      ...baseSession,
+      lead: {
+        ...baseSession.lead,
+        llmCallCount: 1,
+        estimatedTokens: 500,
+      },
+    });
+
+    expect(rendered.getByText("Tokens: ~500")).toBeTruthy();
+  });
+
+  it("formats tokens in millions with M suffix", async () => {
+    const rendered = await renderPanel({
+      ...baseSession,
+      lead: {
+        ...baseSession.lead,
+        llmCallCount: 100,
+        estimatedTokens: 2500000,
+      },
+    });
+
+    expect(rendered.getByText("Tokens: ~2.5M")).toBeTruthy();
+  });
+
+  it("shows zero counts when no LLM calls made", async () => {
+    const rendered = await renderPanel(baseSession);
+
+    expect(rendered.getByText("API Calls: 0")).toBeTruthy();
+    expect(rendered.getByText("Tokens: ~0")).toBeTruthy();
   });
 });
 
