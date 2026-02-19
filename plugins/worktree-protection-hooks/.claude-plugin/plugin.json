@@ -1,6 +1,6 @@
 {
   "name": "worktree-protection-hooks",
-  "version": "0.2.0",
-  "description": "Worktree protection hooks and Project Mode skills",
+  "version": "0.3.0",
+  "description": "Worktree protection, gwt hook forwarding, and Project Mode skills",
   "hooks": "../hooks/hooks.json"
 }
