@@ -19,6 +19,9 @@
   let unlisten: (() => void) | undefined = $state(undefined);
 
   const MOUSE_WHEEL_STEP_VALUES = new Set([120]);
+  const POTENTIAL_MOUSE_TRACKPAD_STEPS = new Set([100, 240]);
+  const MOUSE_WHEEL_STEP_REPEAT_WINDOW_MS = 220;
+  const MOUSE_WHEEL_STEP_REPEAT_COUNT = 4;
 
   type TerminalEditAction = {
     action: "copy" | "paste";
@@ -193,6 +196,7 @@
     let restoringScrollback = true;
     const pendingLiveOutputChunks: Uint8Array[] = [];
     const unregisterVoiceInputTarget = registerTerminalInputTarget(paneId, rootEl);
+    const mouseWheelStepHistory: { deltaY: number; timeStamp: number }[] = [];
 
     const term = new Terminal({
       cursorBlink: true,
@@ -244,10 +248,47 @@
       if (event.deltaY === 0) return;
       if (!terminal) return;
 
+      const absDeltaY = Math.abs(event.deltaY);
+      const absDeltaX = Math.abs(event.deltaX);
+      const isPotentialMouseWheelStep =
+        Number.isInteger(absDeltaY) &&
+        absDeltaX === 0 &&
+        POTENTIAL_MOUSE_TRACKPAD_STEPS.has(absDeltaY);
+      let looksLikeMouseWheelRun = false;
+
+      if (isPotentialMouseWheelStep) {
+        const oldestAllowedTime = event.timeStamp - MOUSE_WHEEL_STEP_REPEAT_WINDOW_MS;
+        while (
+          mouseWheelStepHistory.length > 0 &&
+          mouseWheelStepHistory[0].timeStamp < oldestAllowedTime
+        ) {
+          mouseWheelStepHistory.shift();
+        }
+
+        mouseWheelStepHistory.push({
+          deltaY: event.deltaY,
+          timeStamp: event.timeStamp,
+        });
+
+        const recentMouseLikeHistory = mouseWheelStepHistory.slice(
+          -MOUSE_WHEEL_STEP_REPEAT_COUNT,
+        );
+        looksLikeMouseWheelRun =
+          recentMouseLikeHistory.length >= MOUSE_WHEEL_STEP_REPEAT_COUNT &&
+          recentMouseLikeHistory.every((sample) => sample.deltaY === event.deltaY);
+      }
+
+      if (!isPotentialMouseWheelStep) {
+        mouseWheelStepHistory.length = 0;
+      }
+
       const wasFocused = isTerminalFocused(rootEl);
       focusTerminalIfNeeded(rootEl, true);
 
-      const shouldFallback = !wasFocused || isTrackpadLikeWheel(event);
+      const shouldFallback =
+        !wasFocused ||
+        (isTrackpadLikeWheel(event) &&
+          !(isPotentialMouseWheelStep && looksLikeMouseWheelRun));
       if (!shouldFallback) return;
 
       const didScroll = scrollViewportByWheel(rootEl, event);
