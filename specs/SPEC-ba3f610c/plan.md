@@ -34,63 +34,63 @@
 
 ### Phase B: Lead（PM）機能
 
-5. Lead実行基盤（gwt内蔵AIとして実装、既存 agent_master.rs の拡張）
-6. Leadチャット（ユーザー対話、IME/スピナー/自動スクロール）
-7. GitHub Issue仕様管理基盤（issue_specツール群連携、スキル公開）
-8. 仕様管理ワークフロー実行（clarify → GitHub Issueにspec/plan/tasks/tdd記録）
-9. 仕様4セクションゲート（GitHub Issueにspec/plan/tasks/tdd揃うまでCoordinator起動不可）
-10. 計画提示・承認フロー
-11. GitHub Issue作成・GitHub Project登録
-12. 段階的委譲（自律範囲の判定ロジック）
-13. ハイブリッド常駐（イベント駆動 + 2分間隔ポーリング）
-14. 途中経過報告（scrollback読み取り + チャット報告、LLMコール不要）
-15. Coordinator→Lead ハイブリッド通信（重要イベント: Tauriイベント、途中経過: scrollback読み取り）
+1. Lead実行基盤（gwt内蔵AIとして実装、既存 agent_master.rs の拡張）
+2. Leadチャット（ユーザー対話、IME/スピナー/自動スクロール）
+3. GitHub Issue仕様管理基盤（issue_specツール群連携、スキル公開）
+4. 仕様管理ワークフロー実行（clarify → GitHub Issueにspec/plan/tasks/tdd記録）
+5. 仕様4セクションゲート（GitHub Issueにspec/plan/tasks/tdd揃うまでCoordinator起動不可）
+6. 計画提示・承認フロー
+7. GitHub Issue作成・GitHub Project登録
+8. 段階的委譲（自律範囲の判定ロジック）
+9. ハイブリッド常駐（イベント駆動 + 2分間隔ポーリング）
+10. 途中経過報告（scrollback読み取り + チャット報告、LLMコール不要）
+11. Coordinator→Lead ハイブリッド通信（重要イベント: Tauriイベント、途中経過: scrollback読み取り）
 
 ### Phase C: Coordinator（Orchestrator）機能
 
-16. Coordinator起動・管理（GUI内蔵ターミナルペイン、cwd=リポジトリルート）
-17. Issue単位のCoordinator起動（1 Issue = 1 Coordinator、複数並列可）
-18. タスク分割・Developer割り当て（1 Task = N Developer = N Worktree対応）
-19. Worktree/ブランチ自動作成（`agent/`プレフィックス、命名規則）
-20. Developer起動プロンプト生成（アダプティブ、CLAUDE.md規約含む、エージェント種別に応じた自動モードフラグ）
-21. Developer完了検出（Hook Stop / GWT_TASK_DONE / プロセス終了）
-22. 並列実行制御（同時実行数のLLM判断）
-23. CI監視と自律修正ループ（CI失敗 → Developer修正 → 再プッシュ、最大3回）
-24. 成果物検証（テスト実行 → PR作成）
-25. Developer間コンテキスト共有（Git merge経由）
+1. Coordinator起動・管理（GUI内蔵ターミナルペイン、cwd=リポジトリルート）
+2. Issue単位のCoordinator起動（1 Issue = 1 Coordinator、複数並列可）
+3. タスク分割・Developer割り当て（1 Task = N Developer = N Worktree対応）
+4. Worktree/ブランチ自動作成（`agent/`プレフィックス、命名規則）
+5. Developer起動プロンプト生成（アダプティブ、CLAUDE.md規約含む、エージェント種別に応じた自動モードフラグ）
+6. Developer完了検出（Hook Stop / GWT_TASK_DONE / プロセス終了）
+7. 並列実行制御（同時実行数のLLM判断）
+8. CI監視と自律修正ループ（CI失敗 → Developer修正 → 再プッシュ、最大3回）
+9. 成果物検証（テスト実行 → PR作成）
+10. Developer間コンテキスト共有（Git merge経由）
 
 ### Phase D: GUI（プロジェクトチームUI）
 
-26. Project Teamタブ・モード切り替え
-27. ダッシュボード（左カラム：Issue/Task/Developer階層表示、ステータスバッジ、折りたたみ/展開）
-28. Leadチャット画面（右カラム：バブル表示、入力エリア、進捗インライン表示）
-29. ダッシュボード内Coordinator詳細展開（ステータス、CI結果、Developer一覧、ターミナル/チャットリンク）
-30. Developer表示のBranch Mode連携（TaskクリックでWorktreeジャンプ）
-31. コスト可視化（APIコール数/推定トークン数）
-32. AI設定未構成時のエラー表示
-33. ブランチモードGitHub Issueボタン（gwt内蔵AIがissue_specツールでGitHub Issue管理を実行）
+1. Project Teamタブ・モード切り替え
+2. ダッシュボード（左カラム：Issue/Task/Developer階層表示、ステータスバッジ、折りたたみ/展開）
+3. Leadチャット画面（右カラム：バブル表示、入力エリア、進捗インライン表示）
+4. ダッシュボード内Coordinator詳細展開（ステータス、CI結果、Developer一覧、ターミナル/チャットリンク）
+5. Developer表示のBranch Mode連携（TaskクリックでWorktreeジャンプ）
+6. コスト可視化（APIコール数/推定トークン数）
+7. AI設定未構成時のエラー表示
+8. ブランチモードGitHub Issueボタン（gwt内蔵AIがissue_specツールでGitHub Issue管理を実行）
 
 ### Phase E: セッション・障害・連携
 
-34. セッション永続化（ProjectTeamSession → JSON、~/.gwt/sessions/）
-35. セッション復元・再開（Coordinator/Developer再接続）
-36. 層間独立性（Lead障害 / Coordinator障害 / Developer障害の各ハンドリング）
-37. Coordinator自律再起動（Lead検出 → 再起動 → Developer状態再取得）
-38. セッション強制中断（Esc → SIGTERM → Paused永続化）
-39. ブランチモード連携（agent/ブランチ表示・削除検出）
-40. コンテキスト要約・圧縮（Developer: LLM自動、Lead/Coordinator: gwt側80%閾値制御）
+1. セッション永続化（ProjectTeamSession → JSON、~/.gwt/sessions/）
+2. セッション復元・再開（Coordinator/Developer再接続）
+3. 層間独立性（Lead障害 / Coordinator障害 / Developer障害の各ハンドリング）
+4. Coordinator自律再起動（Lead検出 → 再起動 → Developer状態再取得）
+5. セッション強制中断（Esc → SIGTERM → Paused永続化）
+6. ブランチモード連携（agent/ブランチ表示・削除検出）
+7. コンテキスト要約・圧縮（Developer: LLM自動、Lead/Coordinator: gwt側80%閾値制御）
 
 ### Phase F: スキル化・統合
 
-41. PTY通信のClaude Codeスキル化（send_keys_to_pane / send_keys_broadcast / capture_scrollback_tail）
-42. issue_specツールのClaude Codeスキル化（ブランチモード各エージェントからも利用可能に）
-43. agent_tools.rs PTYツールからの完全移行
-44. 直接アクセス（Developerターミナル直操作 / Coordinatorチャット）
+1. PTY通信のClaude Codeスキル化（send_keys_to_pane / send_keys_broadcast / capture_scrollback_tail）
+2. issue_specツールのClaude Codeスキル化（ブランチモード各エージェントからも利用可能に）
+3. agent_tools.rs PTYツールからの完全移行
+4. 直接アクセス（Developerターミナル直操作 / Coordinatorチャット）
 
 ### Phase G: 仕上げ
 
-45. ログ記録実装（agent.lead.llm / agent.coordinator / agent.developer）
-46. 仕様・計画・タスクの最終同期確認
+1. ログ記録実装（agent.lead.llm / agent.coordinator / agent.developer）
+2. 仕様・計画・タスクの最終同期確認
 
 ## 主要コード構成
 
