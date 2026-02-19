@@ -70,9 +70,9 @@
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
-| [SPEC-488af8e2](archive/SPEC-488af8e2/spec.md) | 機能仕様: gwt GUI Docker Compose 統合（起動ウィザード + Quick Start） | 2026-02-09 | |
-| [SPEC-86bb4e7c](archive/SPEC-86bb4e7c/spec.md) | 機能仕様: gwt GUI ブランチフィルター修正・エージェント起動ウィザード・Profiles設定 | 2026-02-09 | |
-| [SPEC-90217e33](archive/SPEC-90217e33/spec.md) | 機能仕様: gwt GUI コーディングエージェント機能のTUI完全移行（Quick Start / Mode / Skip / Reasoning / Version） | 2026-02-09 | |
+| [SPEC-488af8e2](archive/SPEC-488af8e2/spec.md) | 機能仕様: gwt GUI Docker Compose 統合（起動ウィザード + Quick Start） | 2026-02-09 |
+| [SPEC-86bb4e7c](archive/SPEC-86bb4e7c/spec.md) | 機能仕様: gwt GUI ブランチフィルター修正・エージェント起動ウィザード・Profiles設定 | 2026-02-09 |
+| [SPEC-90217e33](archive/SPEC-90217e33/spec.md) | 機能仕様: gwt GUI コーディングエージェント機能のTUI完全移行（Quick Start / Mode / Skip / Reasoning / Version） | 2026-02-09 |
 | [SPEC-1ad9c07d](archive/SPEC-1ad9c07d/spec.md) | 機能仕様: エージェント起動ウィザード統合 | 2026-02-08 |
 | [SPEC-1d6dd9fc](archive/SPEC-1d6dd9fc/spec.md) | 機能仕様: マルチターミナル（gwt内蔵ターミナルエミュレータ） | 2026-02-08 |
 | [SPEC-d6210238](archive/SPEC-d6210238/spec.md) | 機能仕様: TUI→Tauri GUI完全移行 Phase 1: 基盤構築 | 2026-02-08 |
@@ -85,8 +85,8 @@
 | [SPEC-f8dab6e2](archive/SPEC-f8dab6e2/spec.md) | 機能仕様: Claude Code プラグインマーケットプレイス自動登録 | 2026-01-30 |
 | [SPEC-71f2742d](archive/SPEC-71f2742d/spec.md) | 機能仕様: カスタムコーディングエージェント登録機能 | 2026-01-26 |
 | [SPEC-f59c553d](archive/SPEC-f59c553d/spec.md) | 機能仕様: npm postinstall ダウンロード安定化 | 2026-01-26 |
-| [SPEC-2ca73d7d](archive/SPEC-2ca73d7d/spec.md) | 機能仕様: エージェント履歴の永続化 | 2026-01-22 | |
-| [SPEC-e66acf66](archive/SPEC-e66acf66/spec.md) | 機能仕様: エラーポップアップ・ログ出力システム | 2026-01-22 | |
+| [SPEC-2ca73d7d](archive/SPEC-2ca73d7d/spec.md) | 機能仕様: エージェント履歴の永続化 | 2026-01-22 |
+| [SPEC-e66acf66](archive/SPEC-e66acf66/spec.md) | 機能仕様: エラーポップアップ・ログ出力システム | 2026-01-22 |
 | [SPEC-067a8026](archive/SPEC-067a8026/spec.md) | 機能仕様: LLMベースリリースワークフロー | 2026-01-21 |
 | [SPEC-861d8cdf](archive/SPEC-861d8cdf/spec.md) | 機能仕様: エージェント状態の可視化 | 2026-01-20 |
 | [SPEC-4b893dae](archive/SPEC-4b893dae/spec.md) | 機能仕様: ブランチサマリーパネル | 2026-01-19 |
