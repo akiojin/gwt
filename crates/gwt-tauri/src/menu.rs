@@ -21,9 +21,22 @@ pub const MENU_ID_TOOLS_TERMINAL_DIAGNOSTICS: &str = "tools-terminal-diagnostics
 
 pub const MENU_ID_GIT_CLEANUP_WORKTREES: &str = "git-cleanup-worktrees";
 pub const MENU_ID_GIT_VERSION_HISTORY: &str = "git-version-history";
+pub const MENU_ID_GIT_ISSUES: &str = "git-issues";
 
 pub const MENU_ID_EDIT_COPY: &str = "edit-copy";
 pub const MENU_ID_EDIT_PASTE: &str = "edit-paste";
+pub const MENU_ID_EDIT_COPY_SCREEN: &str = "edit-copy-screen";
+
+pub const MENU_ID_WINDOW_PREVIOUS_TAB: &str = "window-previous-tab";
+pub const MENU_ID_WINDOW_NEXT_TAB: &str = "window-next-tab";
+pub const MENU_ID_WINDOW_NEXT_WINDOW: &str = "window-next-window";
+pub const MENU_ID_WINDOW_PREVIOUS_WINDOW: &str = "window-previous-window";
+#[cfg(target_os = "macos")]
+pub const MENU_ID_WINDOW_MINIMIZE: &str = "window-minimize";
+#[cfg(target_os = "macos")]
+pub const MENU_ID_WINDOW_ZOOM: &str = "window-zoom";
+#[cfg(target_os = "macos")]
+pub const MENU_ID_WINDOW_BRING_ALL_TO_FRONT: &str = "window-bring-all-to-front";
 
 pub const MENU_ID_SETTINGS_PREFERENCES: &str = "settings-preferences";
 pub const MENU_ID_HELP_ABOUT: &str = "help-about";
@@ -126,6 +139,13 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
     let edit_copy = MenuItem::with_id(app, MENU_ID_EDIT_COPY, "Copy", true, Some("CmdOrCtrl+C"))?;
     let edit_paste =
         MenuItem::with_id(app, MENU_ID_EDIT_PASTE, "Paste", true, Some("CmdOrCtrl+V"))?;
+    let edit_copy_screen = MenuItem::with_id(
+        app,
+        MENU_ID_EDIT_COPY_SCREEN,
+        "Copy Screen Text",
+        true,
+        Some("CmdOrCtrl+Shift+C"),
+    )?;
 
     // Keep Undo/Redo/Cut/Select All as native actions and custom-bind Copy/Paste
     // so keyboard events can be handled by the app.
@@ -138,6 +158,8 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         .item(&edit_paste)
         .separator()
         .select_all()
+        .separator()
+        .item(&edit_copy_screen)
         .build()?;
 
     let git_cleanup_worktrees = MenuItem::with_id(
@@ -147,6 +169,7 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         true,
         Some("CmdOrCtrl+Shift+K"),
     )?;
+    let git_issues = MenuItem::with_id(app, MENU_ID_GIT_ISSUES, "Issues", true, None::<&str>)?;
     let mut git_builder = SubmenuBuilder::new(app, "Git");
 
     if should_show_version_history_menu(app, state) {
@@ -160,7 +183,11 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         git_builder = git_builder.item(&version_history).separator();
     }
 
-    let git = git_builder.item(&git_cleanup_worktrees).build()?;
+    let git = git_builder
+        .item(&git_issues)
+        .separator()
+        .item(&git_cleanup_worktrees)
+        .build()?;
 
     let tools_new_terminal = MenuItem::with_id(
         app,
@@ -297,6 +324,44 @@ fn build_window_submenu(
 
     let mut builder = SubmenuBuilder::new(app, "Window");
 
+    // 1. Tab switching items
+    let previous_tab = MenuItem::with_id(
+        app,
+        MENU_ID_WINDOW_PREVIOUS_TAB,
+        "Previous Tab",
+        true,
+        Some("CmdOrCtrl+Shift+["),
+    )?;
+    let next_tab = MenuItem::with_id(
+        app,
+        MENU_ID_WINDOW_NEXT_TAB,
+        "Next Tab",
+        true,
+        Some("CmdOrCtrl+Shift+]"),
+    )?;
+    builder = builder.item(&previous_tab).item(&next_tab).separator();
+
+    // 2. Window switching items
+    let previous_window = MenuItem::with_id(
+        app,
+        MENU_ID_WINDOW_PREVIOUS_WINDOW,
+        "Previous Window",
+        true,
+        Some("CmdOrCtrl+Shift+`"),
+    )?;
+    let next_window = MenuItem::with_id(
+        app,
+        MENU_ID_WINDOW_NEXT_WINDOW,
+        "Next Window",
+        true,
+        Some("CmdOrCtrl+`"),
+    )?;
+    builder = builder
+        .item(&previous_window)
+        .item(&next_window)
+        .separator();
+
+    // 3. Tab list
     if tab_entries.is_empty() {
         let none_tabs = MenuItem::with_id(
             app,
@@ -322,6 +387,21 @@ fn build_window_submenu(
 
     builder = builder.separator();
 
+    // 4. Minimize / Zoom (macOS only)
+    #[cfg(target_os = "macos")]
+    {
+        let minimize = MenuItem::with_id(
+            app,
+            MENU_ID_WINDOW_MINIMIZE,
+            "Minimize",
+            true,
+            Some("CmdOrCtrl+M"),
+        )?;
+        let zoom = MenuItem::with_id(app, MENU_ID_WINDOW_ZOOM, "Zoom", true, None::<&str>)?;
+        builder = builder.item(&minimize).item(&zoom).separator();
+    }
+
+    // 5. Window list
     if window_entries.is_empty() {
         let none_windows = MenuItem::with_id(
             app,
@@ -346,6 +426,19 @@ fn build_window_submenu(
             )?;
             builder = builder.item(&item);
         }
+    }
+
+    // 6. Bring All to Front (macOS only)
+    #[cfg(target_os = "macos")]
+    {
+        let bring_all = MenuItem::with_id(
+            app,
+            MENU_ID_WINDOW_BRING_ALL_TO_FRONT,
+            "Bring All to Front",
+            true,
+            None::<&str>,
+        )?;
+        builder = builder.separator().item(&bring_all);
     }
 
     builder.build()

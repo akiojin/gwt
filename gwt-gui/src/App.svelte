@@ -2,9 +2,11 @@
   import type {
     Tab,
     BranchInfo,
-    ProjectInfo,
+    GitHubIssueInfo,
+    OpenProjectResult,
     LaunchAgentRequest,
     LaunchFinishedPayload,
+    LaunchProgressPayload,
     ProbePathResult,
     RollbackResult,
     TerminalInfo,
@@ -18,15 +20,14 @@
   import Sidebar from "./lib/components/Sidebar.svelte";
   import MainArea from "./lib/components/MainArea.svelte";
   import StatusBar from "./lib/components/StatusBar.svelte";
+  import AboutDialog from "./lib/components/AboutDialog.svelte";
   import OpenProject from "./lib/components/OpenProject.svelte";
   import AgentLaunchForm from "./lib/components/AgentLaunchForm.svelte";
   import LaunchProgressModal from "./lib/components/LaunchProgressModal.svelte";
   import MigrationModal from "./lib/components/MigrationModal.svelte";
   import CleanupModal from "./lib/components/CleanupModal.svelte";
   import {
-    formatAboutVersion,
     formatWindowTitle,
-    getAppVersionSafe,
   } from "./lib/windowTitle";
   import { inferAgentId } from "./lib/agentUtils";
   import {
@@ -44,6 +45,7 @@
     shouldAllowRestoredActiveTab,
     type TabDropPosition,
   } from "./lib/appTabs";
+  import { getNextTabId, getPreviousTabId } from "./lib/tabNavigation";
   import {
     runStartupUpdateCheck,
     STARTUP_UPDATE_INITIAL_DELAY_MS,
@@ -54,11 +56,32 @@
     VoiceInputController,
     type VoiceControllerState,
   } from "./lib/voice/voiceInputController";
+  import { createSystemMonitor } from "./lib/systemMonitor.svelte";
+  import {
+    deduplicateByProjectPath,
+    getWindowSession,
+    loadWindowSessions,
+    pruneWindowSessions,
+    removeWindowSession,
+    upsertWindowSession,
+  } from "./lib/windowSessions";
+  import {
+    releaseWindowSessionRestoreLead,
+    tryAcquireWindowSessionRestoreLead,
+  } from "./lib/windowSessionRestoreLeader";
+  import { collectScreenText } from "./lib/screenCapture";
 
   interface SettingsUpdatedPayload {
     uiFontSize?: number;
     terminalFontSize?: number;
+    appLanguage?: SettingsData["app_language"];
     voiceInput?: VoiceInputSettings;
+  }
+
+  interface AgentModeSpecIssuePayload {
+    issueNumber: number;
+    specId?: string | null;
+    issueUrl?: string | null;
   }
 
   const SIDEBAR_WIDTH_STORAGE_KEY = "gwt.sidebar.width";
@@ -123,25 +146,45 @@
   }
 
   let projectPath: string | null = $state(null);
-  let appVersion: string | null = $state(null);
   let sidebarVisible: boolean = $state(true);
   let sidebarWidthPx: number = $state(loadSidebarWidth());
   let sidebarMode: SidebarMode = $state(loadSidebarMode());
   let showAgentLaunch: boolean = $state(false);
+  let prefillIssue: GitHubIssueInfo | null = $state(null);
   let showCleanupModal: boolean = $state(false);
   let cleanupPreselectedBranch: string | null = $state(null);
   let showAbout: boolean = $state(false);
+  let aboutInitialTab: "general" | "system" | "statistics" = $state("general");
   let showTerminalDiagnostics: boolean = $state(false);
   let appError: string | null = $state(null);
   let sidebarRefreshKey: number = $state(0);
   let worktreesEventAvailable: boolean = $state(false);
-
+  let windowSessionRestoreStarted: boolean = false;
+  let currentWindowLabel: string | null = $state(null);
   let selectedBranch: BranchInfo | null = $state(null);
   let currentBranch: string = $state("");
 
   let launchProgressOpen: boolean = $state(false);
   let launchJobId: string = $state("");
   let pendingLaunchRequest: LaunchAgentRequest | null = $state(null);
+
+  type LaunchStepId = "fetch" | "validate" | "paths" | "conflicts" | "create" | "deps";
+  let launchStep: LaunchStepId = $state("fetch");
+  let launchDetail: string = $state("");
+  let launchStatus: "running" | "ok" | "error" | "cancelled" = $state("running");
+  let launchError: string | null = $state(null);
+  const LAUNCH_STEP_IDS: LaunchStepId[] = [
+    "fetch",
+    "validate",
+    "paths",
+    "conflicts",
+    "create",
+    "deps",
+  ];
+  const LAUNCH_EVENT_BUFFER_LIMIT = 64;
+  let launchJobStartPending = false;
+  let bufferedLaunchProgressEvents: LaunchProgressPayload[] = [];
+  let bufferedLaunchFinishedEvents: LaunchFinishedPayload[] = [];
   type IssueLaunchFollowup = {
     projectPath: string;
     issueNumber: number;
@@ -173,6 +216,16 @@
       .filter((b) => b && b !== "Worktree" && b !== "Agent"),
   );
 
+  let activeAgentTabBranch = $derived(
+    (() => {
+      const active = tabs.find((t) => t.id === activeTabId);
+      if (!active || active.type !== "agent") return null;
+      const branch = normalizeBranchName(active.label);
+      if (!branch || branch === "Worktree" || branch === "Agent") return null;
+      return branch;
+    })()
+  );
+
   let terminalDiagnosticsLoading: boolean = $state(false);
   let terminalDiagnostics: TerminalAnsiProbe | null = $state(null);
   let terminalDiagnosticsError: string | null = $state(null);
@@ -181,10 +234,13 @@
   let voiceInputSettings: VoiceInputSettings = $state(
     DEFAULT_VOICE_INPUT_SETTINGS,
   );
+  let appLanguage: SettingsData["app_language"] = $state("auto");
   let voiceInputListening = $state(false);
   let voiceInputSupported = $state(true);
   let voiceInputError: string | null = $state(null);
   let voiceController: VoiceInputController | null = null;
+
+  const systemMonitor = createSystemMonitor();
 
   let toastMessage = $state<string | null>(null);
   let toastTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -317,6 +373,78 @@
     }
   }
 
+  function debugLaunchEvent(message: string, payload: unknown) {
+    console.debug(`[launch] ${message}`, payload);
+  }
+
+  function clearBufferedLaunchEvents() {
+    launchJobStartPending = false;
+    bufferedLaunchProgressEvents = [];
+    bufferedLaunchFinishedEvents = [];
+  }
+
+  function bufferLaunchProgressEvent(payload: LaunchProgressPayload) {
+    if (bufferedLaunchProgressEvents.length >= LAUNCH_EVENT_BUFFER_LIMIT) {
+      bufferedLaunchProgressEvents.shift();
+    }
+    bufferedLaunchProgressEvents.push(payload);
+  }
+
+  function bufferLaunchFinishedEvent(payload: LaunchFinishedPayload) {
+    if (bufferedLaunchFinishedEvents.length >= LAUNCH_EVENT_BUFFER_LIMIT) {
+      bufferedLaunchFinishedEvents.shift();
+    }
+    bufferedLaunchFinishedEvents.push(payload);
+  }
+
+  function applyLaunchProgressPayload(payload: LaunchProgressPayload) {
+    if (launchStatus !== "running") return;
+    const next = payload.step as LaunchStepId;
+    if (LAUNCH_STEP_IDS.includes(next) && next !== launchStep) {
+      launchStep = next;
+    }
+    launchDetail = (payload.detail ?? "").toString();
+  }
+
+  function applyLaunchFinishedPayload(payload: LaunchFinishedPayload) {
+    // Retry followup on buffered events to recover from early-finished races.
+    void handleIssueLaunchFinished(payload);
+
+    if (payload.status === "cancelled") {
+      handleLaunchModalClose();
+      return;
+    }
+    if (payload.status === "ok" && payload.paneId) {
+      launchStatus = "ok";
+      handleLaunchSuccess(payload.paneId);
+      handleLaunchModalClose();
+      return;
+    }
+    launchStatus = "error";
+    launchError = payload.error || "Launch failed.";
+  }
+
+  function flushBufferedLaunchEventsForActiveJob() {
+    if (!launchJobId) {
+      clearBufferedLaunchEvents();
+      return;
+    }
+    const activeJobId = launchJobId;
+
+    for (const payload of bufferedLaunchProgressEvents) {
+      if (payload.jobId !== activeJobId) continue;
+      applyLaunchProgressPayload(payload);
+    }
+
+    for (const payload of bufferedLaunchFinishedEvents) {
+      if (payload.jobId !== activeJobId) continue;
+      applyLaunchFinishedPayload(payload);
+      if (!launchJobId || launchJobId !== activeJobId) break;
+    }
+
+    clearBufferedLaunchEvents();
+  }
+
   // Poll OS env readiness at startup; stop once ready.
   $effect(() => {
     if (osEnvReady) return;
@@ -366,19 +494,6 @@
     return () => {
       cancelled = true;
       if (unlisten) unlisten();
-    };
-  });
-
-  // Best-effort: read app version from Tauri runtime (web preview will ignore).
-  $effect(() => {
-    let cancelled = false;
-    (async () => {
-      const v = await getAppVersionSafe();
-      if (cancelled) return;
-      appVersion = v;
-    })();
-    return () => {
-      cancelled = true;
     };
   });
 
@@ -438,6 +553,66 @@
     void projectPath;
     void setWindowTitle();
     void applyAppearanceSettings();
+  });
+
+  $effect(() => {
+    if (windowSessionRestoreStarted) return;
+    windowSessionRestoreStarted = true;
+    const releaseDelayMs = 3000;
+
+    (async () => {
+      pruneWindowSessions();
+      const label = await resolveCurrentWindowLabel();
+      if (!label) return;
+      const isRestoreLeader = await tryAcquireWindowSessionRestoreLead(label);
+
+      const sessions = loadWindowSessions();
+      const normalizedSessions = deduplicateByProjectPath(
+        sessions.filter(
+          (entry) => entry.label !== label && entry.projectPath,
+        ),
+      );
+
+      if (isRestoreLeader) {
+        try {
+          for (const entry of normalizedSessions) {
+            await openAndNormalizeWindowSession(entry.label, entry.projectPath);
+          }
+          await new Promise<void>((resolve) => setTimeout(resolve, releaseDelayMs));
+          await restoreWindowSessionProject(label);
+        } finally {
+          await releaseWindowSessionRestoreLead(label);
+        }
+      } else {
+        await restoreWindowSessionProject(label);
+      }
+    })();
+  });
+
+  // Remove session entry when the window is hidden via the close button.
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen("window-will-hide", async () => {
+          const label = await resolveCurrentWindowLabel();
+          if (label) removeWindowSession(label);
+        });
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+      } catch {
+        /* not in Tauri runtime */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
   });
 
   // Best-effort: subscribe once and refresh Sidebar when worktrees change.
@@ -550,7 +725,52 @@
     };
   });
 
-  // Handle issue-linking/rollback on actual launch completion.
+  // Subscribe to launch-progress events at mount time to avoid race conditions.
+  // LaunchProgressModal is a pure display component; all event handling lives here.
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen<LaunchProgressPayload>(
+          "launch-progress",
+          (event) => {
+            const payload = event.payload;
+            if (launchJobId) {
+              if (payload.jobId !== launchJobId) {
+                debugLaunchEvent("Ignored launch-progress for different job", payload);
+                return;
+              }
+              applyLaunchProgressPayload(payload);
+              return;
+            }
+
+            if (launchJobStartPending) {
+              bufferLaunchProgressEvent(payload);
+              debugLaunchEvent("Buffered launch-progress before jobId assignment", payload);
+              return;
+            }
+
+            debugLaunchEvent("Ignored launch-progress without active job", payload);
+          },
+        );
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+      } catch (err) {
+        console.error("Failed to setup launch progress listener:", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  });
+
+  // Handle issue-linking/rollback and progress modal state on launch completion.
   $effect(() => {
     let unlisten: null | (() => void) = null;
     let cancelled = false;
@@ -561,7 +781,27 @@
         const unlistenFn = await listen<LaunchFinishedPayload>(
           "launch-finished",
           (event) => {
-            void handleIssueLaunchFinished(event.payload);
+            const payload = event.payload;
+            // Issue-linking/rollback (existing logic, applies to all jobIds).
+            void handleIssueLaunchFinished(payload);
+
+            // Progress modal state update (moved from LaunchProgressModal).
+            if (launchJobId) {
+              if (payload.jobId !== launchJobId) {
+                debugLaunchEvent("Ignored launch-finished for different job", payload);
+                return;
+              }
+              applyLaunchFinishedPayload(payload);
+              return;
+            }
+
+            if (launchJobStartPending) {
+              bufferLaunchFinishedEvent(payload);
+              debugLaunchEvent("Buffered launch-finished before jobId assignment", payload);
+              return;
+            }
+
+            debugLaunchEvent("Ignored launch-finished without active job", payload);
           },
         );
 
@@ -581,6 +821,41 @@
     };
   });
 
+  // Poll backend for launch job results.  Tauri events can be silently
+  // lost, so we periodically ask the backend directly.  When the job has
+  // finished, the stored result is applied exactly as a launch-finished
+  // event would be.
+  $effect(() => {
+    if (!launchProgressOpen || !launchJobId || launchStatus !== "running") return;
+    const jobId = launchJobId;
+    const timer = window.setInterval(async () => {
+      if (launchJobId !== jobId || launchStatus !== "running") return;
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const result = await invoke<{
+          running: boolean;
+          finished: LaunchFinishedPayload | null;
+        }>("poll_launch_job", { jobId });
+
+        if (result.running) return; // still going
+        if (launchJobId !== jobId || launchStatus !== "running") return;
+
+        if (result.finished) {
+          // Apply the stored result as if it were a normal event.
+          applyLaunchFinishedPayload(result.finished);
+        } else {
+          // No result stored – genuinely lost.
+          launchStatus = "error";
+          launchError =
+            "Launch job ended unexpectedly. Please retry.";
+        }
+      } catch {
+        /* ignore polling errors */
+      }
+    }, 1500);
+    return () => window.clearInterval(timer);
+  });
+
   function toErrorMessage(err: unknown): string {
     if (typeof err === "string") return err;
     if (err && typeof err === "object" && "message" in err) {
@@ -588,6 +863,14 @@
       if (typeof msg === "string") return msg;
     }
     return String(err);
+  }
+
+  function isTauriRuntimeAvailable(): boolean {
+    if (typeof window === "undefined") return false;
+    return (
+      typeof (window as Window & { __TAURI_INTERNALS__?: unknown })
+        .__TAURI_INTERNALS__ !== "undefined"
+    );
   }
 
   function clampFontSize(size: number): number {
@@ -612,6 +895,16 @@
     };
   }
 
+  function normalizeAppLanguage(
+    value: string | null | undefined,
+  ): SettingsData["app_language"] {
+    const language = (value ?? "").trim().toLowerCase();
+    if (language === "ja" || language === "en" || language === "auto") {
+      return language as SettingsData["app_language"];
+    }
+    return "auto";
+  }
+
   function applyUiFontSize(size: number) {
     document.documentElement.style.setProperty("--ui-font-base", `${size}px`);
   }
@@ -628,6 +921,23 @@
   ) {
     voiceInputSettings = normalizeVoiceInputSettings(value);
     voiceController?.updateSettings();
+  }
+
+  function applyAppLanguage(value: string | null | undefined) {
+    appLanguage = normalizeAppLanguage(value);
+  }
+
+  async function rebuildAllBranchSessionSummaries(language: SettingsData["app_language"]) {
+    if (!projectPath) return;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("rebuild_all_branch_session_summaries", {
+        projectPath,
+        preferredLanguage: language,
+      });
+    } catch (err) {
+      showToast(`Failed to rebuild summaries: ${toErrorMessage(err)}`, 12000);
+    }
   }
 
   function activeAgentPaneId(): string | null {
@@ -657,15 +967,88 @@
         await invoke<
           Pick<
             SettingsData,
-            "ui_font_size" | "terminal_font_size" | "voice_input"
+            "ui_font_size" | "terminal_font_size" | "app_language" | "voice_input"
           >
         >("get_settings");
       applyUiFontSize(clampFontSize(settings.ui_font_size ?? 13));
       applyTerminalFontSize(clampFontSize(settings.terminal_font_size ?? 13));
+      applyAppLanguage(settings.app_language);
       applyVoiceInputSettings(settings.voice_input);
     } catch {
       // Ignore: settings API not available outside Tauri runtime.
     }
+  }
+
+  async function resolveCurrentWindowLabel(): Promise<string | null> {
+    if (currentWindowLabel) return currentWindowLabel;
+
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const label = await invoke<string>("get_current_window_label");
+      const next = label?.trim();
+      if (!next) return null;
+      currentWindowLabel = next;
+      return next;
+    } catch {
+      return null;
+    }
+  }
+
+  async function updateWindowSession(projectPathForWindow: string | null) {
+    const label = await resolveCurrentWindowLabel();
+    if (!label) return;
+
+    if (projectPathForWindow) {
+      upsertWindowSession(label, projectPathForWindow);
+      return;
+    }
+    removeWindowSession(label);
+  }
+
+  async function openAndNormalizeWindowSession(label: string, projectPath: string) {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const openedLabelRaw = await invoke<unknown>("open_gwt_window", { label });
+      if (typeof openedLabelRaw !== "string") return;
+
+      const openedLabel = openedLabelRaw.trim();
+      if (!openedLabel || openedLabel === label) {
+        return;
+      }
+
+      removeWindowSession(label);
+      upsertWindowSession(openedLabel, projectPath);
+    } catch {
+      // Ignore restore failures: startup session restore is best-effort.
+    }
+  }
+
+  async function restoreWindowSessionProject(label: string) {
+    const session = getWindowSession(label);
+    if (!session?.projectPath) return false;
+
+    try {
+      await openProjectAndApplyCurrentWindow(session.projectPath);
+      return true;
+    } catch {
+      removeWindowSession(label);
+      return false;
+    }
+  }
+
+  function handleOpenedProjectPath(path: string) {
+    projectPath = path;
+    fetchCurrentBranch();
+    void updateWindowSession(path);
+  }
+
+  async function openProjectAndApplyCurrentWindow(path: string): Promise<OpenProjectResult> {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const result = await invoke<OpenProjectResult>("open_project", { path });
+    if (result.action === "opened") {
+      handleOpenedProjectPath(result.info.path);
+    }
+    return result;
   }
 
   async function setWindowTitle() {
@@ -686,8 +1069,7 @@
   }
 
   function handleProjectOpen(path: string) {
-    projectPath = path;
-    fetchCurrentBranch();
+    handleOpenedProjectPath(path);
   }
 
   function handleBranchSelect(branch: BranchInfo) {
@@ -716,7 +1098,7 @@
 
     const tab: Tab = {
       id: "agentMode",
-      label: "Agent Mode",
+      label: "Master Agent",
       type: "agentMode",
     };
     tabs = [...tabs, tab];
@@ -739,6 +1121,45 @@
   function handleCleanupRequest(preSelectedBranch?: string) {
     cleanupPreselectedBranch = preSelectedBranch ?? null;
     showCleanupModal = true;
+  }
+
+  async function handleOpenCiLog(runId: number) {
+    if (!projectPath) return;
+    try {
+      const workingDir = projectPath;
+      const { invoke } = await import("@tauri-apps/api/core");
+      const paneId = await invoke<string>("spawn_shell", { workingDir });
+
+      const label = `CI #${runId}`;
+      const newTab: Tab = {
+        id: `terminal-${paneId}`,
+        label,
+        type: "terminal",
+        paneId,
+        cwd: workingDir || undefined,
+      };
+      tabs = [...tabs, newTab];
+      activeTabId = newTab.id;
+
+      // Resolve and read logs via backend so bare-repo project roots still work.
+      const logOutput = await invoke<string>("fetch_ci_log", {
+        projectPath,
+        runId,
+      });
+      const delimiterBase = "__GWT_CI_LOG__";
+      let delimiter = delimiterBase;
+      let delimiterSuffix = 0;
+      while (logOutput.includes(delimiter)) {
+        delimiterSuffix += 1;
+        delimiter = `${delimiterBase}_${delimiterSuffix}`;
+      }
+      const normalized = logOutput.endsWith("\n") ? logOutput : `${logOutput}\n`;
+      const cmd = `cat <<'${delimiter}'\n${normalized}${delimiter}\n`;
+      const data = Array.from(new TextEncoder().encode(cmd));
+      await invoke("write_terminal", { paneId, data });
+    } catch (err) {
+      console.error("Failed to open CI log:", err);
+    }
   }
 
   async function fetchCurrentBranch() {
@@ -890,7 +1311,7 @@
     if (!merged.some((tab) => tab.id === "agentMode")) {
       merged.unshift({
         id: "agentMode",
-        label: "Agent Mode",
+        label: "Master Agent",
         type: "agentMode",
       });
     }
@@ -911,13 +1332,55 @@
   }
 
   async function handleAgentLaunch(request: LaunchAgentRequest) {
-    const { invoke } = await import("@tauri-apps/api/core");
-    const jobId = await invoke<string>("start_launch_job", { request });
+    // Reset progress state before starting the job.
+    launchStep = "fetch";
+    launchDetail = "";
+    launchStatus = "running";
+    launchError = null;
+    launchJobStartPending = true;
+    bufferedLaunchProgressEvents = [];
+    bufferedLaunchFinishedEvents = [];
 
-    queueIssueLaunchFollowup(jobId, request);
-    pendingLaunchRequest = request;
-    launchJobId = jobId;
-    launchProgressOpen = true;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const jobId = await invoke<string>("start_launch_job", { request });
+
+      queueIssueLaunchFollowup(jobId, request);
+      pendingLaunchRequest = request;
+      launchJobId = jobId;
+      launchProgressOpen = true;
+      flushBufferedLaunchEventsForActiveJob();
+    } catch (err) {
+      clearBufferedLaunchEvents();
+      throw err;
+    }
+  }
+
+  async function handleLaunchCancel() {
+    if (!launchJobId) {
+      handleLaunchModalClose();
+      return;
+    }
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("cancel_launch_job", { jobId: launchJobId });
+      handleLaunchModalClose();
+    } catch (err) {
+      console.error("Failed to cancel launch job:", err);
+      launchStatus = "error";
+      launchError = "Failed to send cancel request. Close this dialog and retry.";
+    }
+  }
+
+  function handleLaunchModalClose() {
+    launchProgressOpen = false;
+    launchJobId = "";
+    pendingLaunchRequest = null;
+    clearBufferedLaunchEvents();
+    launchStatus = "running";
+    launchStep = "fetch";
+    launchDetail = "";
+    launchError = null;
   }
 
   function handleLaunchSuccess(paneId: string) {
@@ -1043,6 +1506,81 @@
     activeTabId = tab.id;
   }
 
+  function openIssuesTab() {
+    const existing = tabs.find(
+      (t) => t.type === "issues" || t.id === "issues",
+    );
+    if (existing) {
+      activeTabId = existing.id;
+      return;
+    }
+
+    const tab: Tab = {
+      id: "issues",
+      label: "Issues",
+      type: "issues",
+    };
+    tabs = [...tabs, tab];
+    activeTabId = tab.id;
+  }
+
+  function handleIssueCountChange(count: number) {
+    tabs = tabs.map((t) =>
+      t.id === "issues" ? { ...t, label: count > 0 ? `Issues (${count})` : "Issues" } : t,
+    );
+  }
+
+  function handleWorkOnIssueFromTab(issue: GitHubIssueInfo) {
+    prefillIssue = issue;
+    showAgentLaunch = true;
+  }
+
+  function handleSwitchToWorktreeFromTab(branchName: string) {
+    // Find the matching agent tab and switch to it
+    const agentTab = tabs.find(
+      (t) => t.type === "agent" && normalizeBranchName(t.label) === normalizeBranchName(branchName),
+    );
+    if (agentTab) {
+      activeTabId = agentTab.id;
+      return;
+    }
+    // If no tab exists, select the branch in the sidebar
+    sidebarRefreshKey++;
+  }
+
+  function openIssueSpecTab(payload: AgentModeSpecIssuePayload) {
+    const issueNumber = Number(payload.issueNumber);
+    if (!Number.isFinite(issueNumber) || issueNumber <= 0) return;
+    const specId = payload.specId?.trim() || undefined;
+    const label = specId ? `Spec ${specId}` : `Issue #${issueNumber}`;
+
+    const existing = tabs.find((t) => t.type === "issueSpec" || t.id === "issueSpec");
+    if (existing) {
+      tabs = tabs.map((t) =>
+        t.id === existing.id
+          ? {
+              ...t,
+              label,
+              issueNumber,
+              specId,
+            }
+          : t
+      );
+      activeTabId = existing.id;
+      return;
+    }
+
+    const tab: Tab = {
+      id: "issueSpec",
+      label,
+      type: "issueSpec",
+      issueNumber,
+      ...(specId ? { specId } : {}),
+    };
+    tabs = [...tabs, tab];
+    activeTabId = tab.id;
+  }
+
   function getActiveTerminalPaneId(): string | null {
     const active = tabs.find((t) => t.id === activeTabId);
     if (!active || (active.type !== "agent" && active.type !== "terminal")) {
@@ -1051,7 +1589,9 @@
     return active.paneId && active.paneId.length > 0 ? active.paneId : null;
   }
 
-  function getActiveEditableElement():
+  function getActiveEditableElement(
+    mode: "copy" | "paste" = "paste",
+  ):
     | HTMLInputElement
     | HTMLTextAreaElement
     | HTMLElement
@@ -1060,11 +1600,11 @@
     const el = document.activeElement;
     if (!el) return null;
 
-    if (el instanceof HTMLInputElement && !el.readOnly && !el.disabled) {
-      return el;
+    if (el instanceof HTMLInputElement && !el.disabled) {
+      if (mode === "copy" || !el.readOnly) return el;
     }
-    if (el instanceof HTMLTextAreaElement && !el.readOnly && !el.disabled) {
-      return el;
+    if (el instanceof HTMLTextAreaElement && !el.disabled) {
+      if (mode === "copy" || !el.readOnly) return el;
     }
     if (el instanceof HTMLElement && el.isContentEditable) {
       return el;
@@ -1073,18 +1613,45 @@
     return null;
   }
 
+  function getEditableSelectionText(
+    target: HTMLInputElement | HTMLTextAreaElement | HTMLElement,
+  ): string {
+    if (
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement
+    ) {
+      const start = target.selectionStart;
+      const end = target.selectionEnd;
+      if (start === null || end === null || start === end) return "";
+      const from = Math.min(start, end);
+      const to = Math.max(start, end);
+      return target.value.slice(from, to);
+    }
+
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return "";
+    const range = selection.getRangeAt(0);
+    if (!target.contains(range.commonAncestorContainer)) return "";
+    return selection.toString();
+  }
+
   async function fallbackMenuEditAction(action: "copy" | "paste") {
-    const target = getActiveEditableElement();
+    const target = getActiveEditableElement(action);
     if (!target) {
-      // Let browser/editor defaults decide when there is no editable target.
       if (action === "copy") {
-        document.execCommand("copy");
+        const sel = window.getSelection()?.toString();
+        if (sel && navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(sel);
+        }
       }
       return;
     }
 
     if (action === "copy") {
-      document.execCommand("copy");
+      const sel = getEditableSelectionText(target);
+      if (sel && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(sel);
+      }
       return;
     }
 
@@ -1110,6 +1677,29 @@
     if (target.isContentEditable) {
       target.focus();
       document.execCommand("insertText", false, text);
+    }
+  }
+
+  let copyFlashActive = $state(false);
+
+  async function handleScreenCopy() {
+    const activeTab = tabs.find((t) => t.id === activeTabId);
+    const text = collectScreenText({
+      branch: currentBranch,
+      activeTab: activeTab?.label ?? activeTabId,
+      activeTabType: activeTab?.type,
+      activePaneId:
+        activeTab?.type === "agent" || activeTab?.type === "terminal"
+          ? activeTab.paneId
+          : undefined,
+    });
+    try {
+      await navigator.clipboard.writeText(text);
+      copyFlashActive = true;
+      setTimeout(() => { copyFlashActive = false; }, 300);
+      showToast("Copied to clipboard", 2000);
+    } catch {
+      showToast("Failed to copy screen text", 4000);
     }
   }
 
@@ -1175,11 +1765,7 @@
           });
 
           if (probe.kind === "gwtProject" && probe.projectPath) {
-            const info = await invoke<ProjectInfo>("open_project", {
-              path: probe.projectPath,
-            });
-            projectPath = info.path;
-            fetchCurrentBranch();
+            await openProjectAndApplyCurrentWindow(probe.projectPath);
             return;
           }
 
@@ -1209,11 +1795,7 @@
             });
 
             if (probe.kind === "gwtProject" && probe.projectPath) {
-              const info = await invoke<ProjectInfo>("open_project", {
-                path: probe.projectPath,
-              });
-              projectPath = info.path;
-              fetchCurrentBranch();
+              await openProjectAndApplyCurrentWindow(probe.projectPath);
               break;
             }
 
@@ -1273,6 +1855,7 @@
           }
 
           projectPath = null;
+          void updateWindowSession(null);
           tabs = defaultAppTabs();
           activeTabId = "agentMode";
           selectedBranch = null;
@@ -1299,6 +1882,9 @@
       case "version-history":
         openVersionHistoryTab();
         break;
+      case "git-issues":
+        openIssuesTab();
+        break;
       case "check-updates":
         {
           try {
@@ -1324,6 +1910,7 @@
         }
         break;
       case "about":
+        aboutInitialTab = "general";
         showAbout = true;
         break;
       case "list-terminals":
@@ -1342,6 +1929,9 @@
         break;
       case "edit-paste":
         emitTerminalEditAction("paste");
+        break;
+      case "screen-copy":
+        void handleScreenCopy();
         break;
       case "debug-os-env":
         showOsEnvDebug = true;
@@ -1407,6 +1997,16 @@
         } finally {
           terminalDiagnosticsLoading = false;
         }
+        break;
+      }
+      case "previous-tab": {
+        const prevId = getPreviousTabId(tabs, activeTabId);
+        if (prevId) activeTabId = prevId;
+        break;
+      }
+      case "next-tab": {
+        const nextId = getNextTabId(tabs, activeTabId);
+        if (nextId) activeTabId = nextId;
         break;
       }
     }
@@ -1560,7 +2160,8 @@
       if (
         tab.type === "agentMode" ||
         tab.type === "settings" ||
-        tab.type === "versionHistory"
+        tab.type === "versionHistory" ||
+        tab.type === "issues"
       ) {
         storedTabs.push({
           type: tab.type,
@@ -1632,6 +2233,10 @@
     let cancelled = false;
 
     (async () => {
+      if (!isTauriRuntimeAvailable()) {
+        return;
+      }
+
       try {
         const { setupMenuActionListener } = await import(
           "./lib/menuAction"
@@ -1644,8 +2249,11 @@
           return;
         }
         unlisten = unlistenFn;
-      } catch {
-        // Ignore: not available outside Tauri runtime.
+        console.info("menu listener ready");
+      } catch (err) {
+        if (cancelled) return;
+        console.error("Failed to initialize menu action listener:", err);
+        appError = `Menu integration failed: ${toErrorMessage(err)}`;
       }
     })();
 
@@ -1654,6 +2262,14 @@
       if (unlisten) {
         unlisten();
       }
+    };
+  });
+
+  // System monitor lifecycle: start polling, destroy on teardown.
+  $effect(() => {
+    systemMonitor.start();
+    return () => {
+      systemMonitor.destroy();
     };
   });
 
@@ -1691,6 +2307,14 @@
       if (typeof detail.terminalFontSize === "number") {
         applyTerminalFontSize(clampFontSize(detail.terminalFontSize));
       }
+      if (typeof detail.appLanguage === "string") {
+        const nextLanguage = normalizeAppLanguage(detail.appLanguage);
+        const changed = nextLanguage !== appLanguage;
+        applyAppLanguage(nextLanguage);
+        if (changed) {
+          void rebuildAllBranchSessionSummaries(nextLanguage);
+        }
+      }
       if (detail.voiceInput) {
         applyVoiceInputSettings(detail.voiceInput);
       }
@@ -1701,9 +2325,23 @@
       window.removeEventListener("gwt-settings-updated", onSettingsUpdated);
   });
 
-  // Global keyboard shortcut: Cmd+Shift+K / Ctrl+Shift+K to open Cleanup modal.
-  // The native menu accelerator handles this on macOS, but this provides a
-  // fallback for web-preview and non-Tauri contexts.
+  $effect(() => {
+    function onOpenIssueSpec(event: Event) {
+      const payload = (event as CustomEvent<AgentModeSpecIssuePayload>).detail;
+      if (!payload) return;
+      openIssueSpecTab(payload);
+    }
+    window.addEventListener("gwt-agent-mode-open-spec-issue", onOpenIssueSpec);
+    return () =>
+      window.removeEventListener(
+        "gwt-agent-mode-open-spec-issue",
+        onOpenIssueSpec,
+      );
+  });
+
+  // Keyboard shortcut fallbacks: these mirror native menu accelerators so that
+  // shortcuts still work even when xterm or another element has swallowed the
+  // key event before Tauri's accelerator layer can process it.
   $effect(() => {
     function onKeydown(e: KeyboardEvent) {
       if (
@@ -1724,6 +2362,46 @@
       ) {
         e.preventDefault();
         void handleMenuAction("new-terminal");
+      }
+      // Cmd+O / Ctrl+O → Open Project
+      if (
+        e.key === "o" &&
+        (e.metaKey || e.ctrlKey) &&
+        !e.shiftKey &&
+        !e.altKey
+      ) {
+        e.preventDefault();
+        void handleMenuAction("open-project");
+      }
+      // Cmd+, / Ctrl+, → Settings
+      if (
+        e.key === "," &&
+        (e.metaKey || e.ctrlKey) &&
+        !e.shiftKey &&
+        !e.altKey
+      ) {
+        e.preventDefault();
+        void handleMenuAction("open-settings");
+      }
+      // Cmd+Shift+[ / Ctrl+Shift+[ → Previous Tab
+      if (
+        e.key === "{" &&
+        e.shiftKey &&
+        (e.metaKey || e.ctrlKey) &&
+        !e.altKey
+      ) {
+        e.preventDefault();
+        void handleMenuAction("previous-tab");
+      }
+      // Cmd+Shift+] / Ctrl+Shift+] → Next Tab
+      if (
+        e.key === "}" &&
+        e.shiftKey &&
+        (e.metaKey || e.ctrlKey) &&
+        !e.altKey
+      ) {
+        e.preventDefault();
+        void handleMenuAction("next-tab");
       }
     }
     document.addEventListener("keydown", onKeydown);
@@ -1748,12 +2426,15 @@
           {selectedBranch}
           {currentBranch}
           {agentTabBranches}
+          {activeAgentTabBranch}
+          {appLanguage}
           onResize={handleSidebarResize}
           onBranchSelect={handleBranchSelect}
           onBranchActivate={handleBranchActivate}
           onCleanupRequest={handleCleanupRequest}
           onLaunchAgent={requestAgentLaunch}
           onQuickLaunch={handleAgentLaunch}
+          onOpenCiLog={handleOpenCiLog}
         />
       {/if}
       <MainArea
@@ -1766,6 +2447,9 @@
         onTabSelect={handleTabSelect}
         onTabClose={handleTabClose}
         onTabReorder={handleTabReorder}
+        onWorkOnIssue={handleWorkOnIssueFromTab}
+        onSwitchToWorktree={handleSwitchToWorktreeFromTab}
+        onIssueCountChange={handleIssueCountChange}
       />
     </div>
     <StatusBar
@@ -1777,6 +2461,13 @@
       {voiceInputListening}
       {voiceInputSupported}
       {voiceInputError}
+      cpuUsage={systemMonitor.cpuUsage}
+      memUsed={systemMonitor.memUsed}
+      memTotal={systemMonitor.memTotal}
+      onopenAboutSystem={() => {
+        aboutInitialTab = "system";
+        showAbout = true;
+      }}
     />
   </div>
 {/if}
@@ -1786,8 +2477,9 @@
     projectPath={projectPath as string}
     selectedBranch={selectedBranch?.name ?? currentBranch}
     {osEnvReady}
+    {prefillIssue}
     onLaunch={handleAgentLaunch}
-    onClose={() => (showAgentLaunch = false)}
+    onClose={() => { showAgentLaunch = false; prefillIssue = null; }}
   />
 {/if}
 
@@ -1800,21 +2492,15 @@
   onClose={() => (showCleanupModal = false)}
 />
 
-{#if showAbout}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="overlay" onclick={() => (showAbout = false)}>
-    <div class="about-dialog" onclick={(e) => e.stopPropagation()}>
-      <h2>gwt</h2>
-      <p>Git Worktree Manager</p>
-      <p class="about-version">GUI Edition</p>
-      <p class="about-version">{formatAboutVersion(appVersion)}</p>
-      <button class="about-close" onclick={() => (showAbout = false)}>
-        Close
-      </button>
-    </div>
-  </div>
-{/if}
+<AboutDialog
+  open={showAbout}
+  initialTab={aboutInitialTab}
+  cpuUsage={systemMonitor.cpuUsage}
+  memUsed={systemMonitor.memUsed}
+  memTotal={systemMonitor.memTotal}
+  gpuInfo={systemMonitor.gpuInfo}
+  onclose={() => (showAbout = false)}
+/>
 
 {#if showTerminalDiagnostics}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -1908,10 +2594,7 @@
     migrationSourceRoot = "";
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const info = await invoke<ProjectInfo>("open_project", { path: p });
-      projectPath = info.path;
-      fetchCurrentBranch();
+      await openProjectAndApplyCurrentWindow(p);
     } catch (err) {
       appError = `Failed to open migrated project: ${toErrorMessage(err)}`;
     }
@@ -1924,13 +2607,12 @@
 
 <LaunchProgressModal
   open={launchProgressOpen}
-  jobId={launchJobId}
-  onSuccess={handleLaunchSuccess}
-  onClose={() => {
-    launchProgressOpen = false;
-    launchJobId = "";
-    pendingLaunchRequest = null;
-  }}
+  step={launchStep}
+  detail={launchDetail}
+  status={launchStatus}
+  error={launchError}
+  onCancel={handleLaunchCancel}
+  onClose={handleLaunchModalClose}
 />
 {#if showOsEnvDebug}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -1989,6 +2671,10 @@
   </div>
 {/if}
 
+{#if copyFlashActive}
+  <div class="copy-flash"></div>
+{/if}
+
 {#if toastMessage}
   <div class="toast-container">
     <div class="toast-message">
@@ -2038,34 +2724,6 @@
 
   .mono {
     font-family: monospace;
-  }
-
-  .about-dialog {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: 12px;
-    padding: 32px 40px;
-    text-align: center;
-    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
-  }
-
-  .about-dialog h2 {
-    font-size: 24px;
-    font-weight: 700;
-    color: var(--accent);
-    margin-bottom: 4px;
-  }
-
-  .about-dialog p {
-    color: var(--text-secondary);
-    font-size: var(--ui-font-base);
-  }
-
-  .about-version {
-    color: var(--text-muted);
-    font-size: var(--ui-font-sm);
-    margin-top: 4px;
-    margin-bottom: 20px;
   }
 
   .about-close {
@@ -2313,5 +2971,21 @@
 
   .env-debug-error {
     color: var(--text-error, #f38ba8);
+  }
+
+  .copy-flash {
+    position: fixed;
+    inset: 0;
+    background: var(--accent, #89b4fa);
+    opacity: 0;
+    pointer-events: none;
+    z-index: 9999;
+    animation: copy-flash-anim 0.25s ease-out forwards;
+  }
+
+  @keyframes copy-flash-anim {
+    0% { opacity: 0; }
+    30% { opacity: 0.12; }
+    100% { opacity: 0; }
   }
 </style>

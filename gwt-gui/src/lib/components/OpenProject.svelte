@@ -1,5 +1,9 @@
 <script lang="ts">
-  import type { CloneProgress, ProbePathResult, ProjectInfo } from "../types";
+  import type {
+    CloneProgress,
+    OpenProjectResult,
+    ProbePathResult,
+  } from "../types";
   import MigrationModal from "./MigrationModal.svelte";
 
   interface RecentProject {
@@ -86,8 +90,12 @@
     errorMessage = null;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      const info = await invoke<ProjectInfo>("open_project", { path: projectPath });
-      onOpen(info.path);
+      const result = await invoke<OpenProjectResult>("open_project", {
+        path: projectPath,
+      });
+      if (result.action === "opened") {
+        onOpen(result.info.path);
+      }
     } catch (err) {
       errorMessage = normalizeOpenProjectError(toErrorMessage(err));
     } finally {
@@ -161,10 +169,12 @@
       });
 
       const { invoke } = await import("@tauri-apps/api/core");
-      const info = await invoke<ProjectInfo>("create_project", {
+      const result = await invoke<OpenProjectResult>("create_project", {
         request: { repoUrl, parentDir, shallow: shallowClone },
       });
-      onOpen(info.path);
+      if (result.action === "opened") {
+        onOpen(result.info.path);
+      }
     } catch (err) {
       const msg = toErrorMessage(err);
       errorMessage = msg.includes("Invalid repository URL")

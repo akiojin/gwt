@@ -102,6 +102,103 @@ describe("AgentLaunchForm", () => {
     ).toBe(true);
   });
 
+  it("shows only agent names in the agent dropdown", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.0.0",
+            authenticated: true,
+            available: true,
+          },
+          {
+            id: "claude",
+            name: "Claude Code",
+            version: "bunx",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "get_agent_config") {
+        return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      }
+      return [];
+    });
+
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "",
+      onLaunch,
+      onClose,
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    const agentSelect = rendered.getByLabelText("Agent") as HTMLSelectElement;
+    const optionLabels = Array.from(agentSelect.options).map(
+      (option) => option.textContent?.trim() ?? ""
+    );
+
+    expect(optionLabels).toEqual(["Select an agent...", "Codex", "Claude Code"]);
+    expect(optionLabels.some((label) => label.includes("("))).toBe(false);
+    expect(optionLabels.some((label) => label.includes("bunx"))).toBe(false);
+    expect(optionLabels.some((label) => label.includes("npx"))).toBe(false);
+    expect(optionLabels.some((label) => label.includes("Unavailable"))).toBe(false);
+  });
+
+  it("does not show bunx/npx in fallback hints", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "bunx",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "get_agent_config") {
+        return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      }
+      return [];
+    });
+
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "",
+      onLaunch,
+      onClose,
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    const fallbackNotice = rendered.getByText("Not installed. Launch will use a fallback runner.");
+    expect(fallbackNotice).toBeTruthy();
+
+    const binaryFallbackNotice = rendered.getByText(
+      "Installed binary not found. Launch will use fallback runner."
+    );
+    expect(binaryFallbackNotice).toBeTruthy();
+
+    expect(rendered.queryByText(/bunx/)).toBeNull();
+    expect(rendered.queryByText(/npx/)).toBeNull();
+  });
+
   it("does not close suggest modal when applying an invalid suggestion", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "detect_agents") {
@@ -260,6 +357,63 @@ describe("AgentLaunchForm", () => {
       "gpt-5.1-codex-max",
       "gpt-5.2",
       "gpt-5.1-codex-mini",
+    ]);
+  });
+
+  it("displays claude model options with 1M context and opusplan variants", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "claude",
+            name: "Claude Code",
+            version: "0.0.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "get_agent_config") {
+        return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      }
+      return [];
+    });
+
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "",
+      onLaunch,
+      onClose,
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    const modelSelect = rendered.getByLabelText("Model") as HTMLSelectElement;
+    const values = Array.from(modelSelect.options).map((o) => o.value);
+    const labels = Array.from(modelSelect.options).map((o) => o.textContent);
+
+    expect(values).toEqual([
+      "",
+      "opus",
+      "sonnet",
+      "haiku",
+      "opus[1m]",
+      "sonnet[1m]",
+      "opusplan",
+    ]);
+    expect(labels).toEqual([
+      "Default",
+      "Opus",
+      "Sonnet",
+      "Haiku",
+      "Opus (1M context)",
+      "Sonnet (1M context)",
+      "Opus Plan (plan: opus / exec: sonnet)",
     ]);
   });
 
@@ -1266,5 +1420,693 @@ describe("AgentLaunchForm", () => {
 
     await fireEvent.click(second.getByRole("button", { name: "New Branch" }));
     expect((second.getByLabelText("New Branch Name") as HTMLInputElement).value).toBe("");
+  });
+
+  it("loads base branches and applies a valid suggestion into manual branch fields", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.90.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "list_worktree_branches") return [{ name: "main" }, { name: "develop" }];
+      if (cmd === "list_remote_branches") return [{ name: "origin/release" }];
+      if (cmd === "suggest_branch_names") {
+        return {
+          status: "ok",
+          suggestions: ["feature/ship-it", "bugfix/fix-it", "hotfix/hot-one"],
+          error: null,
+        };
+      }
+      if (cmd === "list_agent_versions") {
+        return {
+          agentId: "codex",
+          package: "@openai/codex",
+          tags: ["latest", "v0.90.0", "latest"],
+          versions: ["0.90.0", "0.89.0", "0.90.0"],
+          source: "cache",
+        };
+      }
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "none",
+          compose_services: [],
+          docker_available: false,
+          compose_available: false,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch: vi.fn().mockResolvedValue(undefined),
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "New Branch" }));
+
+    const baseSelect = rendered.getByLabelText("Base Branch") as HTMLSelectElement;
+    await waitFor(() => {
+      const values = Array.from(baseSelect.options).map((o) => o.value);
+      expect(values).toContain("main");
+      expect(values).toContain("develop");
+      expect(values).toContain("origin/release");
+    });
+
+    const newBranchInput = rendered.getByLabelText("New Branch Name") as HTMLInputElement;
+    const prefixSelect = rendered.container.querySelector("#new-branch-prefix-select") as HTMLSelectElement;
+    await fireEvent.input(newBranchInput, { target: { value: "release/ship-now" } });
+    expect(prefixSelect.value).toBe("release/");
+    expect(newBranchInput.value).toBe("ship-now");
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Suggest..." }));
+    await fireEvent.input(rendered.getByLabelText("Description"), {
+      target: { value: "shipping branch" },
+    });
+    await fireEvent.click(rendered.getByRole("button", { name: "Generate" }));
+
+    await waitFor(() => {
+      expect(rendered.getByText("feature/ship-it")).toBeTruthy();
+    });
+    await fireEvent.click(rendered.getByText("feature/ship-it"));
+
+    await waitFor(() => {
+      expect(rendered.queryByRole("heading", { name: "Suggest Branch Name" })).toBeNull();
+    });
+
+    expect(prefixSelect.value).toBe("feature/");
+    expect(newBranchInput.value).toBe("ship-it");
+  });
+
+  it("handles suggestion validation and backend error variants", async () => {
+    let suggestCalls = 0;
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.90.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "list_worktree_branches") return [];
+      if (cmd === "list_remote_branches") return [];
+      if (cmd === "suggest_branch_names") {
+        suggestCalls += 1;
+        if (suggestCalls === 1) return { status: "ai-not-configured", suggestions: [], error: null };
+        if (suggestCalls === 2) return { status: "error", suggestions: [], error: "backend failure" };
+        throw "transport down";
+      }
+      if (cmd === "list_agent_versions") {
+        return {
+          agentId: "codex",
+          package: "@openai/codex",
+          tags: ["latest"],
+          versions: ["0.90.0"],
+          source: "cache",
+        };
+      }
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "none",
+          compose_services: [],
+          docker_available: false,
+          compose_available: false,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch: vi.fn().mockResolvedValue(undefined),
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "New Branch" }));
+    await fireEvent.click(rendered.getByRole("button", { name: "Suggest..." }));
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Generate" }));
+    await waitFor(() => {
+      expect(rendered.getByText("Description is required.")).toBeTruthy();
+    });
+
+    await fireEvent.input(rendered.getByLabelText("Description"), {
+      target: { value: "branch purpose" },
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Generate" }));
+    await waitFor(() => {
+      expect(rendered.getByText("AI suggestions are unavailable.")).toBeTruthy();
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Generate" }));
+    await waitFor(() => {
+      expect(rendered.getByText("backend failure")).toBeTruthy();
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Generate" }));
+    await waitFor(() => {
+      expect(rendered.getByText("transport down")).toBeTruthy();
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Close" }));
+    await waitFor(() => {
+      expect(rendered.queryByRole("heading", { name: "Suggest Branch Name" })).toBeNull();
+    });
+  });
+
+  it("shows gh unauthenticated warning when gh exists but auth is missing", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.90.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "check_gh_cli_status") return { available: true, authenticated: false };
+      if (cmd === "list_worktree_branches") return [];
+      if (cmd === "list_remote_branches") return [];
+      if (cmd === "list_agent_versions") {
+        return {
+          agentId: "codex",
+          package: "@openai/codex",
+          tags: ["latest"],
+          versions: ["0.90.0"],
+          source: "cache",
+        };
+      }
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "none",
+          compose_services: [],
+          docker_available: false,
+          compose_available: false,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch: vi.fn().mockResolvedValue(undefined),
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("check_gh_cli_status", {
+        projectPath: "/tmp/project",
+      });
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "New Branch" }));
+    await waitFor(() => {
+      expect(
+        rendered.getByText("GitHub CLI (gh) is not authenticated. Run: gh auth login")
+      ).toBeTruthy();
+      expect((rendered.getByRole("button", { name: "From Issue" }) as HTMLButtonElement).disabled).toBe(
+        true
+      );
+    });
+  });
+
+  it("renders issue labels, branch-exists state, search filter, and infinite scroll paging", async () => {
+    let issuePageCalls = 0;
+    invokeMock.mockImplementation(async (cmd: string, args?: any) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.90.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "check_gh_cli_status") return { available: true, authenticated: true };
+      if (cmd === "fetch_github_issues") {
+        issuePageCalls += 1;
+        if (args?.page === 1) {
+          return {
+            issues: [
+              {
+                number: 1,
+                title: "First issue",
+                updatedAt: "2026-02-13T00:00:00Z",
+                labels: [{ name: "backend", color: "0075ca" }, { name: "urgent", color: "e4e669" }],
+              },
+            ],
+            hasNextPage: true,
+          };
+        }
+        return {
+          issues: [
+            {
+              number: 2,
+              title: "Second issue",
+              updatedAt: "2026-02-14T00:00:00Z",
+              labels: [],
+            },
+          ],
+          hasNextPage: false,
+        };
+      }
+      if (cmd === "find_existing_issue_branch") {
+        if (args?.issueNumber === 1) return "feature/issue-1";
+        return null;
+      }
+      if (cmd === "list_worktree_branches") return [];
+      if (cmd === "list_remote_branches") return [];
+      if (cmd === "list_agent_versions") {
+        return {
+          agentId: "codex",
+          package: "@openai/codex",
+          tags: ["latest"],
+          versions: ["0.90.0"],
+          source: "cache",
+        };
+      }
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "none",
+          compose_services: [],
+          docker_available: false,
+          compose_available: false,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch: vi.fn().mockResolvedValue(undefined),
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "New Branch" }));
+    await fireEvent.click(rendered.getByRole("button", { name: "From Issue" }));
+
+    await waitFor(() => {
+      expect(rendered.getByText("First issue")).toBeTruthy();
+    });
+    await waitFor(() => {
+      expect(rendered.getByText("backend")).toBeTruthy();
+      expect(rendered.getByText("urgent")).toBeTruthy();
+      expect(rendered.getByText("Branch exists")).toBeTruthy();
+    });
+
+    await fireEvent.input(rendered.getByLabelText("Search Issues"), {
+      target: { value: "Second" },
+    });
+    await waitFor(() => {
+      expect(rendered.queryByText("First issue")).toBeNull();
+    });
+
+    await fireEvent.input(rendered.getByLabelText("Search Issues"), {
+      target: { value: "" },
+    });
+    const issueList = rendered.container.querySelector(".issue-list") as HTMLDivElement;
+    Object.defineProperty(issueList, "scrollHeight", { configurable: true, value: 200 });
+    Object.defineProperty(issueList, "clientHeight", { configurable: true, value: 50 });
+    Object.defineProperty(issueList, "scrollTop", {
+      configurable: true,
+      writable: true,
+      value: 151,
+    });
+    await fireEvent.scroll(issueList);
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("fetch_github_issues", {
+        projectPath: "/tmp/project",
+        page: 2,
+        perPage: 30,
+        state: "open",
+      });
+      expect(rendered.getByText("Second issue")).toBeTruthy();
+      expect(issuePageCalls).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it("shows GitHub API rate-limit error on issue fetch failure", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.90.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "check_gh_cli_status") return { available: true, authenticated: true };
+      if (cmd === "fetch_github_issues") throw new Error("API rate limit exceeded");
+      if (cmd === "list_worktree_branches") return [];
+      if (cmd === "list_remote_branches") return [];
+      if (cmd === "list_agent_versions") {
+        return {
+          agentId: "codex",
+          package: "@openai/codex",
+          tags: ["latest"],
+          versions: ["0.90.0"],
+          source: "cache",
+        };
+      }
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "none",
+          compose_services: [],
+          docker_available: false,
+          compose_available: false,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch: vi.fn().mockResolvedValue(undefined),
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "New Branch" }));
+    await fireEvent.click(rendered.getByRole("button", { name: "From Issue" }));
+
+    await waitFor(() => {
+      expect(rendered.getByText("GitHub API rate limit reached. Please try again later.")).toBeTruthy();
+    });
+  });
+
+  it("shows agent config and version loading warnings when those backend calls fail", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "claude",
+            name: "Claude Code",
+            version: "1.2.3",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "list_agent_versions") throw "registry unavailable";
+      if (cmd === "get_agent_config") throw "config unavailable";
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "none",
+          compose_services: [],
+          docker_available: false,
+          compose_available: false,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      return [];
+    });
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch: vi.fn().mockResolvedValue(undefined),
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("Failed to load agent config: config unavailable")).toBeTruthy();
+      expect(rendered.getByText("Failed to load version list from registry.")).toBeTruthy();
+    });
+  });
+
+  it("blocks docker launch when compose service is missing", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.90.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "list_agent_versions") {
+        return {
+          agentId: "codex",
+          package: "@openai/codex",
+          tags: ["latest"],
+          versions: ["0.90.0"],
+          source: "cache",
+        };
+      }
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "compose",
+          compose_services: [],
+          docker_available: true,
+          compose_available: true,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch: vi.fn().mockResolvedValue(undefined),
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("No services found in compose file.")).toBeTruthy();
+      expect(
+        rendered.getByText("Docker daemon is not running. gwt will try to start it on launch.")
+      ).toBeTruthy();
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Launch" }));
+    await waitFor(() => {
+      expect(rendered.getByText("Docker service is required.")).toBeTruthy();
+    });
+  });
+
+  it("includes docker compose launch options in the launch request", async () => {
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.90.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "list_agent_versions") {
+        return {
+          agentId: "codex",
+          package: "@openai/codex",
+          tags: ["latest"],
+          versions: ["0.90.0"],
+          source: "cache",
+        };
+      }
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "compose",
+          compose_services: ["app", "worker"],
+          docker_available: true,
+          compose_available: true,
+          daemon_running: true,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch,
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    const serviceSelect = await waitFor(
+      () => rendered.getByLabelText("Service") as HTMLSelectElement
+    );
+    await fireEvent.change(serviceSelect, { target: { value: "worker" } });
+
+    const checks = rendered.container.querySelectorAll(".check-row input[type='checkbox']");
+    await fireEvent.click(checks[1] as HTMLInputElement);
+    await fireEvent.click(checks[2] as HTMLInputElement);
+    await fireEvent.click(checks[3] as HTMLInputElement);
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Launch" }));
+    await waitFor(() => {
+      expect(onLaunch).toHaveBeenCalledTimes(1);
+    });
+
+    const req = onLaunch.mock.calls[0][0] as any;
+    expect(req.branch).toBe("main");
+    expect(req.dockerService).toBe("worker");
+    expect(req.dockerBuild).toBe(true);
+    expect(req.dockerRecreate).toBe(true);
+    expect(req.dockerKeep).toBe(true);
+  });
+
+  it("shows env override parse errors and handles Escape key modal behavior", async () => {
+    const onClose = vi.fn();
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.90.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "list_worktree_branches") return [];
+      if (cmd === "list_remote_branches") return [];
+      if (cmd === "list_agent_versions") {
+        return {
+          agentId: "codex",
+          package: "@openai/codex",
+          tags: ["latest"],
+          versions: ["0.90.0"],
+          source: "cache",
+        };
+      }
+      if (cmd === "suggest_branch_names") {
+        return {
+          status: "ok",
+          suggestions: ["feature/one", "feature/two", "feature/three"],
+          error: null,
+        };
+      }
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "none",
+          compose_services: [],
+          docker_available: false,
+          compose_available: false,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch: vi.fn().mockResolvedValue(undefined),
+      onClose,
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Advanced" }));
+    await fireEvent.input(rendered.getByLabelText("Env Overrides"), {
+      target: { value: "INVALID_LINE" },
+    });
+    await fireEvent.click(rendered.getByRole("button", { name: "Launch" }));
+
+    await waitFor(() => {
+      expect(rendered.getByText("Invalid env override at line 1. Use KEY=VALUE.")).toBeTruthy();
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "New Branch" }));
+    await fireEvent.click(rendered.getByRole("button", { name: "Suggest..." }));
+    await waitFor(() => {
+      expect(rendered.getByRole("heading", { name: "Suggest Branch Name" })).toBeTruthy();
+    });
+
+    const overlay = rendered.container.querySelector(".overlay") as HTMLDivElement;
+    await fireEvent.keyDown(overlay, { key: "Escape" });
+    await waitFor(() => {
+      expect(rendered.queryByRole("heading", { name: "Suggest Branch Name" })).toBeNull();
+      expect(onClose).toHaveBeenCalledTimes(0);
+    });
+
+    await fireEvent.keyDown(overlay, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

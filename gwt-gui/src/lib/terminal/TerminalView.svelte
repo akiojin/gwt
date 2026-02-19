@@ -18,9 +18,18 @@
   let resizeObserver: ResizeObserver | undefined = $state(undefined);
   let unlisten: (() => void) | undefined = $state(undefined);
 
+  const MOUSE_WHEEL_STEP_VALUES = new Set([120]);
+  const POTENTIAL_MOUSE_TRACKPAD_STEPS = new Set([100, 240]);
+  const MOUSE_WHEEL_STEP_REPEAT_WINDOW_MS = 220;
+  const MOUSE_WHEEL_STEP_REPEAT_COUNT = 4;
+
   type TerminalEditAction = {
     action: "copy" | "paste";
     paneId: string;
+  };
+
+  type CaptureTerminalContainer = HTMLDivElement & {
+    __gwtTerminal?: Terminal;
   };
 
   function isTerminalFocused(rootEl: HTMLElement): boolean {
@@ -126,11 +135,38 @@
     }
   }
 
-  function scrollViewportByWheel(rootEl: HTMLElement, event: WheelEvent) {
-    const viewport = rootEl.querySelector<HTMLElement>(".xterm-viewport");
-    if (!viewport) return;
+  function isTrackpadLikeWheel(event: WheelEvent): boolean {
+    if (event.deltaMode !== 0) return false;
+    const absDeltaY = Math.abs(event.deltaY);
+    const absDeltaX = Math.abs(event.deltaX);
 
-    if (event.deltaY === 0) return;
+    const sourceCapabilities =
+      (event as WheelEvent & { sourceCapabilities?: { firesTouchEvents?: boolean } })
+        .sourceCapabilities;
+
+    if (sourceCapabilities?.firesTouchEvents === true) {
+      return true;
+    }
+
+    // Trackpads frequently emit horizontal movement in addition to vertical scroll.
+    if (absDeltaX > 0) {
+      return true;
+    }
+
+    if (absDeltaY === 0) return false;
+
+    if (!Number.isInteger(absDeltaY)) {
+      return true;
+    }
+
+    return !MOUSE_WHEEL_STEP_VALUES.has(absDeltaY);
+  }
+
+  function scrollViewportByWheel(rootEl: HTMLElement, event: WheelEvent): boolean {
+    const viewport = rootEl.querySelector<HTMLElement>(".xterm-viewport");
+    if (!viewport) return false;
+
+    if (event.deltaY === 0) return false;
 
     const fontSize =
       typeof terminal?.options.fontSize === "number" ? terminal.options.fontSize : 13;
@@ -146,7 +182,10 @@
     }
 
     const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-    viewport.scrollTop = Math.min(Math.max(viewport.scrollTop + delta, 0), maxScrollTop);
+    const nextScrollTop = Math.min(Math.max(viewport.scrollTop + delta, 0), maxScrollTop);
+    const didScroll = nextScrollTop !== viewport.scrollTop;
+    viewport.scrollTop = nextScrollTop;
+    return didScroll;
   }
 
   onMount(() => {
@@ -157,6 +196,7 @@
     let restoringScrollback = true;
     const pendingLiveOutputChunks: Uint8Array[] = [];
     const unregisterVoiceInputTarget = registerTerminalInputTarget(paneId, rootEl);
+    const mouseWheelStepHistory: { deltaY: number; timeStamp: number }[] = [];
 
     const term = new Terminal({
       cursorBlink: true,
@@ -196,6 +236,7 @@
     term.loadAddon(fit);
     term.loadAddon(webLinks);
     term.open(rootEl);
+    (rootEl as CaptureTerminalContainer).__gwtTerminal = term;
 
     // Initial fit
     requestAnimationFrame(() => {
@@ -204,13 +245,57 @@
     });
 
     const handleWheel = (event: WheelEvent) => {
-      if (!active || !terminal) return;
       if (event.deltaY === 0) return;
+      if (!terminal) return;
 
+      const absDeltaY = Math.abs(event.deltaY);
+      const absDeltaX = Math.abs(event.deltaX);
+      const isPotentialMouseWheelStep =
+        Number.isInteger(absDeltaY) &&
+        absDeltaX === 0 &&
+        POTENTIAL_MOUSE_TRACKPAD_STEPS.has(absDeltaY);
+      let looksLikeMouseWheelRun = false;
+
+      if (isPotentialMouseWheelStep) {
+        const oldestAllowedTime = event.timeStamp - MOUSE_WHEEL_STEP_REPEAT_WINDOW_MS;
+        while (
+          mouseWheelStepHistory.length > 0 &&
+          mouseWheelStepHistory[0].timeStamp < oldestAllowedTime
+        ) {
+          mouseWheelStepHistory.shift();
+        }
+
+        mouseWheelStepHistory.push({
+          deltaY: event.deltaY,
+          timeStamp: event.timeStamp,
+        });
+
+        const recentMouseLikeHistory = mouseWheelStepHistory.slice(
+          -MOUSE_WHEEL_STEP_REPEAT_COUNT,
+        );
+        looksLikeMouseWheelRun =
+          recentMouseLikeHistory.length >= MOUSE_WHEEL_STEP_REPEAT_COUNT &&
+          recentMouseLikeHistory.every((sample) => sample.deltaY === event.deltaY);
+      }
+
+      if (!isPotentialMouseWheelStep) {
+        mouseWheelStepHistory.length = 0;
+      }
+
+      const wasFocused = isTerminalFocused(rootEl);
       focusTerminalIfNeeded(rootEl, true);
+
+      const shouldFallback =
+        !wasFocused ||
+        (isTrackpadLikeWheel(event) &&
+          !(isPotentialMouseWheelStep && looksLikeMouseWheelRun));
+      if (!shouldFallback) return;
+
+      const didScroll = scrollViewportByWheel(rootEl, event);
+      if (!didScroll) return;
+
       event.preventDefault();
       event.stopImmediatePropagation();
-      scrollViewportByWheel(rootEl, event);
     };
     rootEl.addEventListener("wheel", handleWheel, { passive: false, capture: true });
 
@@ -244,6 +329,13 @@
 
         event.preventDefault();
         void pasteFromClipboard();
+        return false;
+      }
+
+      // Delegate all Cmd+key combinations to the native menu / browser layer.
+      // Without this, xterm consumes the keydown and calls preventDefault(),
+      // which silently breaks native accelerators (Cmd+O, Cmd+N, Cmd+, …).
+      if (event.metaKey) {
         return false;
       }
 
@@ -368,6 +460,7 @@
       rootEl.removeEventListener("wheel", handleWheel, true);
       window.removeEventListener("gwt-terminal-edit-action", handleTerminalEditAction);
       window.removeEventListener("gwt-terminal-font-size", handleFontSizeChange);
+      delete (rootEl as CaptureTerminalContainer).__gwtTerminal;
       observer.disconnect();
       term.dispose();
       unregisterVoiceInputTarget();
@@ -430,7 +523,11 @@
   }
 </script>
 
-<div class="terminal-container" bind:this={containerEl}></div>
+<div
+  class="terminal-container"
+  data-pane-id={paneId}
+  bind:this={containerEl}
+></div>
 
 <style>
   .terminal-container {

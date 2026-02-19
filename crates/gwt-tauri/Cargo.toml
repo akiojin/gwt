@@ -20,8 +20,16 @@ tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+dirs.workspace = true
 which = "8"
 reqwest.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+libc.workspace = true
+sha2.workspace = true
+notify.workspace = true
+notify-debouncer-mini.workspace = true
+fs2.workspace = true
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

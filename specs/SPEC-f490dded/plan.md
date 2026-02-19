@@ -1,11 +1,12 @@
 # 実装計画: シンプルターミナルタブ
 
-**仕様ID**: `SPEC-f490dded` | **日付**: 2026-02-13 | **仕様書**: `specs/SPEC-f490dded/spec.md`
+**仕様ID**: `SPEC-f490dded` | **日付**: 2026-02-14 | **仕様書**: `specs/SPEC-f490dded/spec.md`
 
 ## 目的
 
 - Tools > New Terminal メニューおよび Ctrl+` ショートカットで、素のシェル（bash/zsh）ターミナルタブを起動可能にする
 - 既存のエージェントタブと統一された UX を提供しつつ、エージェント起動フローをバイパスする
+- タブ並び替え D&D を Tauri WebView でも安定動作させ、タブバー外 pointermove ケースで no-op にならないようにする
 
 ## 技術コンテキスト
 
@@ -151,3 +152,21 @@
 - Tab 型の terminal タイプのレンダリングテスト（ドット色、ラベル表示）
 - cwd 変更時のラベル更新テスト
 - ターミナルタブの永続化・復元テスト
+- タブ並び替え D&D の回帰テスト（`window` 配信 pointermove ケース）
+
+## 追加修正（2026-02-14）: タブ D&D no-op 対策
+
+### 目的
+
+- Tauri 実行時に HTML DragEvent が安定しない環境でも、タブ順序の変更を pointer イベントだけで完結させる
+
+### 実装
+
+1. `MainArea.svelte` のドラッグ追跡をタブバー要素依存から `window` リスナー依存へ変更する
+2. ドラッグ開始時に `window` の `pointermove / pointerup / pointercancel` を購読し、終了時に必ず解除する
+3. close ボタン押下時はドラッグ状態を開始しないガードを追加する
+4. ネイティブ DragEvent 依存を弱めるためタブの `draggable` を無効化し、pointer ベース挙動を主経路にする
+
+### 検証
+
+- `MainArea.test.ts` に `window` へ dispatch された pointermove で `onTabReorder` が呼ばれる再現テストを追加（RED→GREEN）

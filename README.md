@@ -2,43 +2,41 @@
 
 [日本語](README.ja.md)
 
-gwt is a desktop GUI app for managing Git worktrees and launching coding agents
-(Claude Code, Codex, Gemini, OpenCode).
+gwt is a desktop app for managing Git worktrees and launching coding agents
+(`Claude Code`, `Codex`, `Gemini`, `OpenCode`) on a project basis.
 
 ## Install
 
-### macOS (shell installer)
+### macOS
+
+Run the installer:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash
 ```
 
-Or install a specific version:
+Install a specific version:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash -s -- --version 6.30.3
 ```
 
-### macOS (local `.pkg` installer)
+Downloadable formats in Releases:
 
-Build a local package:
+- `.dmg`, `.pkg`
 
-```bash
-cargo tauri build
-./installers/macos/build-pkg.sh
-```
+### Windows
 
-Install from local package:
+Download `.msi` from GitHub Releases and run the installer.
 
-```bash
-./installers/macos/install.sh --pkg ./target/release/bundle/pkg/gwt-macos-$(uname -m).pkg
-```
+### Linux
 
-Or run both steps at once:
+Download one of:
 
-```bash
-./installers/macos/install-local.sh
-```
+- `.deb`
+- `.AppImage`
+
+Run with your OS standard installer method.
 
 ### Uninstall (macOS)
 
@@ -46,74 +44,63 @@ Or run both steps at once:
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/uninstall.sh | bash
 ```
 
-### Downloads
+## First-time usage
 
-GitHub Releases are the source of truth for distribution.
+1. Open gwt.
+2. Click **Open Project...** and select a Git repository.
+3. Open or switch branches in the sidebar.
+4. Use the branch actions to:
+   - create/list/clean worktrees
+   - launch an agent
+5. Open **Settings** to set up AI profile settings if you use Agent or summary features.
 
-Typical assets:
+## Automatic updates
 
-- macOS: `.dmg`, `.pkg`
-- Windows: `.msi`
-- Linux: `.AppImage`, `.deb`
+gwt checks for updates from GitHub Releases.
 
-## Development
+- On app startup, it checks updates automatically.
+- If it cannot check at first, it retries a few times automatically.
+- When an update is available, you get a notification.
+- You can also trigger manual check from the menu: **Help → Check for Updates...**.
 
-Prereqs:
+If a compatible installer/payload is available, gwt can apply it directly.
+If automatic apply is not possible, the update dialog tells you to download from Releases manually.
 
-- Rust (stable)
-- Node.js 22
-- pnpm (via Corepack)
-- Tauri system dependencies (per platform)
+## Keyboard shortcuts
 
-Run in dev:
+| Shortcut (macOS) | Shortcut (Windows/Linux) | Action |
+|---|---|---|
+| Cmd+N | Ctrl+N | New Window |
+| Cmd+O | Ctrl+O | Open Project |
+| Cmd+C | Ctrl+C | Copy |
+| Cmd+V | Ctrl+V | Paste |
+| Cmd+Shift+C | Ctrl+Shift+C | Copy Screen Text |
+| Cmd+Shift+K | Ctrl+Shift+K | Cleanup Worktrees |
+| Cmd+, | Ctrl+, | Preferences |
+| Cmd+Shift+[ | Ctrl+Shift+[ | Previous Tab |
+| Cmd+Shift+] | Ctrl+Shift+] | Next Tab |
+| Cmd+` | Ctrl+` | Next Window |
+| Cmd+Shift+` | Ctrl+Shift+` | Previous Window |
+| Cmd+M | --- | Minimize (macOS only) |
 
-```bash
-cd gwt-gui
-pnpm install --frozen-lockfile
+## Environment and requirements
 
-cd ..
-cargo tauri dev
-```
+### Required
 
-Build:
+- `git` command available in `PATH`.
 
-```bash
-cd gwt-gui
-pnpm install --frozen-lockfile
+### Optional (depends on use)
 
-cd ..
-cargo tauri build
-```
+- AI provider keys in environment variables (or saved in gwt profile settings):
+  - `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`
+  - `OPENAI_API_KEY`
+  - `GOOGLE_API_KEY` or `GEMINI_API_KEY`
+- `bunx` or `npx` for local agent launch fallback.
 
-Playwright E2E (WebView UI smoke):
+### Optional advanced toggles
 
-```bash
-cd gwt-gui
-pnpm install --frozen-lockfile
-pnpm exec playwright install chromium
-pnpm run test:e2e
-```
-
-CI runs the same Playwright suite in `.github/workflows/test.yml` (`E2E (Playwright)` job).
-
-## AI Settings
-
-Agent Mode and features like session summaries require AI settings.
-
-Steps:
-
-- Open `Settings`
-- Select a profile in `Profiles`
-- Enable `AI Settings`
-- Set `Endpoint` and `Model` (API key is optional for local LLMs)
-- Click `Save`
-
-## Repository Layout
-
-- `crates/gwt-core/`: core logic (Git/worktree/config/logs/docker/pty)
-- `crates/gwt-tauri/`: Tauri v2 backend (commands + state)
-- `gwt-gui/`: Svelte 5 frontend (UI + xterm.js)
-- `installers/`: installer definitions (e.g. WiX)
+- `GWT_AGENT_AUTO_INSTALL_DEPS` (`true` / `false`)
+- `GWT_DOCKER_FORCE_HOST` (`true` / `false`)
 
 ## License
 

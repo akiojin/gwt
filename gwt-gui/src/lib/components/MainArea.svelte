@@ -1,8 +1,11 @@
 <script lang="ts">
-  import type { LaunchAgentRequest, Tab } from "../types";
+  import type { GitHubIssueInfo, LaunchAgentRequest, Tab } from "../types";
   import type { TabDropPosition } from "../appTabs";
   import TerminalView from "../terminal/TerminalView.svelte";
   import AgentModePanel from "./AgentModePanel.svelte";
+  import ProjectTeamPanel from "./ProjectTeamPanel.svelte";
+  import IssueListPanel from "./IssueListPanel.svelte";
+  import IssueSpecPanel from "./IssueSpecPanel.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
   import VersionHistoryPanel from "./VersionHistoryPanel.svelte";
 
@@ -32,6 +35,9 @@
     onTabSelect,
     onTabClose,
     onTabReorder,
+    onWorkOnIssue,
+    onSwitchToWorktree,
+    onIssueCountChange,
   }: {
     tabs: Tab[];
     activeTabId: string;
@@ -46,6 +52,9 @@
       overTabId: string,
       position: TabDropPosition,
     ) => void;
+    onWorkOnIssue?: (issue: GitHubIssueInfo) => void;
+    onSwitchToWorktree?: (branchName: string) => void;
+    onIssueCountChange?: (count: number) => void;
   } = $props();
 
   let activeTab = $derived(tabs.find((t) => t.id === activeTabId));
@@ -54,8 +63,17 @@
   let showTerminalLayer = $derived(
     activeTab?.type === "agent" || activeTab?.type === "terminal",
   );
-  let isPinnedTab = (tabType?: Tab["type"]) => tabType === "agentMode";
+  let isPinnedTab = (tabType?: Tab["type"]) =>
+    tabType === "agentMode" || tabType === "projectTeam";
   let draggingTabId: string | null = $state(null);
+  let pointerDrag:
+    | {
+        tabId: string;
+        pointerId: number;
+        startX: number;
+        startY: number;
+      }
+    | null = null;
   let lastReorderSignature = "";
 
   function readDraggedTabId(event: DragEvent): string {
@@ -69,8 +87,25 @@
   }
 
   function resetDragState() {
+    removeGlobalPointerListeners();
     draggingTabId = null;
+    pointerDrag = null;
     lastReorderSignature = "";
+  }
+
+  function removeGlobalPointerListeners() {
+    if (typeof window === "undefined") return;
+    window.removeEventListener("pointermove", handleGlobalPointerMove);
+    window.removeEventListener("pointerup", handleGlobalPointerUp);
+    window.removeEventListener("pointercancel", handleGlobalPointerCancel);
+  }
+
+  function addGlobalPointerListeners() {
+    if (typeof window === "undefined") return;
+    removeGlobalPointerListeners();
+    window.addEventListener("pointermove", handleGlobalPointerMove);
+    window.addEventListener("pointerup", handleGlobalPointerUp);
+    window.addEventListener("pointercancel", handleGlobalPointerCancel);
   }
 
   function handleTabDragStart(event: DragEvent, tabId: string) {
@@ -112,20 +147,95 @@
   function handleTabDragEnd() {
     resetDragState();
   }
+
+  function isTabCloseControl(target: EventTarget | null): boolean {
+    return target instanceof Element && target.closest(".tab-close") !== null;
+  }
+
+  function handleTabPointerDown(event: PointerEvent, tabId: string) {
+    if (event.button !== 0) return;
+    if (isTabCloseControl(event.target)) return;
+
+    draggingTabId = tabId;
+    pointerDrag = {
+      tabId,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+    };
+    lastReorderSignature = "";
+    addGlobalPointerListeners();
+  }
+
+  function handleGlobalPointerMove(event: PointerEvent) {
+    if (!pointerDrag || event.pointerId !== pointerDrag.pointerId) return;
+    // Ignore micro jitter so simple clicks do not trigger reordering.
+    if (
+      Math.abs(event.clientX - pointerDrag.startX) < 3 &&
+      Math.abs(event.clientY - pointerDrag.startY) < 3
+    ) {
+      return;
+    }
+
+    const fromPoint =
+      typeof document !== "undefined" &&
+      typeof document.elementFromPoint === "function"
+        ? document
+            .elementFromPoint(event.clientX, event.clientY)
+            ?.closest<HTMLElement>(".tab[data-tab-id]")
+        : null;
+    const fromTarget =
+      event.target instanceof Element
+        ? event.target.closest<HTMLElement>(".tab[data-tab-id]")
+        : null;
+    const overTab = fromPoint ?? fromTarget ?? null;
+    if (!overTab) return;
+
+    const overTabId = overTab.dataset.tabId ?? "";
+    if (!overTabId || overTabId === pointerDrag.tabId) return;
+
+    const rect = overTab.getBoundingClientRect();
+    const position: TabDropPosition =
+      event.clientX <= rect.left + rect.width / 2 ? "before" : "after";
+    const signature = `${pointerDrag.tabId}:${overTabId}:${position}`;
+    if (signature === lastReorderSignature) return;
+
+    lastReorderSignature = signature;
+    onTabReorder(pointerDrag.tabId, overTabId, position);
+  }
+
+  function handleGlobalPointerUp(event: PointerEvent) {
+    if (!pointerDrag || event.pointerId !== pointerDrag.pointerId) return;
+    resetDragState();
+  }
+
+  function handleGlobalPointerCancel(event: PointerEvent) {
+    if (!pointerDrag || event.pointerId !== pointerDrag.pointerId) return;
+    resetDragState();
+  }
+
+  $effect(() => {
+    return () => {
+      removeGlobalPointerListeners();
+    };
+  });
 </script>
 
 <main class="main-area">
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="tab-bar">
     {#each tabs as tab}
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="tab"
+        data-tab-id={tab.id}
         class:active={activeTabId === tab.id}
         class:dragging={draggingTabId === tab.id}
-        draggable={tabs.length > 1}
+        draggable="false"
         onclick={() => onTabSelect(tab.id)}
         title={tab.type === "terminal" ? tab.cwd || "" : ""}
+        onpointerdown={(e) => handleTabPointerDown(e, tab.id)}
         ondragstart={(e) => handleTabDragStart(e, tab.id)}
         ondragover={(e) => handleTabDragOver(e, tab.id)}
         ondrop={handleTabDrop}
@@ -146,6 +256,8 @@
         {#if !isPinnedTab(tab.type)}
           <button
             class="tab-close"
+            type="button"
+            onpointerdown={(e) => e.stopPropagation()}
             onclick={(e) => {
               e.stopPropagation();
               onTabClose(tab.id);
@@ -166,6 +278,21 @@
         <VersionHistoryPanel {projectPath} />
       {:else if activeTab?.type === "agentMode"}
         <AgentModePanel />
+      {:else if activeTab?.type === "projectTeam"}
+        <ProjectTeamPanel session={null} />
+      {:else if activeTab?.type === "issueSpec"}
+        <IssueSpecPanel
+          projectPath={projectPath}
+          issueNumber={activeTab.issueNumber ?? 0}
+          specId={activeTab.specId}
+        />
+      {:else if activeTab?.type === "issues"}
+        <IssueListPanel
+          {projectPath}
+          onWorkOnIssue={onWorkOnIssue ?? (() => {})}
+          onSwitchToWorktree={onSwitchToWorktree ?? (() => {})}
+          {onIssueCountChange}
+        />
       {:else}
         <div class="placeholder">
           <h2>Select a tab</h2>

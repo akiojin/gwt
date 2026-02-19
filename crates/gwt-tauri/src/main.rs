@@ -1,14 +1,24 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agent_logger;
 mod agent_master;
 mod agent_tools;
 mod app;
 mod commands;
+pub mod context_summarizer;
+#[cfg_attr(test, allow(dead_code))]
+mod mcp_handlers;
+#[cfg_attr(test, allow(dead_code))]
+mod mcp_ws_server;
 mod menu;
+mod pty_skills;
+mod session_watcher;
+mod single_instance;
 mod state;
 
 use state::AppState;
 use std::io::Read;
+use std::sync::Arc;
 
 fn main() {
     // Self-update helper mode: do not start GUI, just execute requested update action.
@@ -22,11 +32,33 @@ fn main() {
         return;
     }
 
+    let single_instance_guard = match crate::single_instance::try_acquire_single_instance() {
+        Ok(crate::single_instance::AcquireOutcome::Acquired(guard)) => Arc::new(guard),
+        Ok(crate::single_instance::AcquireOutcome::AlreadyRunning(running)) => {
+            if let Err(err) = crate::single_instance::notify_existing_instance_focus() {
+                eprintln!(
+                    "gwt is already running (pid={:?}, focus_port={:?}); failed to focus existing instance: {err}",
+                    running.pid,
+                    running.focus_port
+                );
+            }
+            return;
+        }
+        Err(err) => {
+            eprintln!("failed to initialize single-instance lock: {err}");
+            return;
+        }
+    };
+
     let app_state = AppState::new();
 
-    let app = crate::app::build_app(tauri::Builder::default(), app_state)
-        .build(tauri::generate_context!())
-        .expect("error while building tauri application");
+    let app = crate::app::build_app(
+        tauri::Builder::default(),
+        app_state,
+        Some(single_instance_guard),
+    )
+    .build(tauri::generate_context!())
+    .expect("error while building tauri application");
 
     app.run(crate::app::handle_run_event);
 }

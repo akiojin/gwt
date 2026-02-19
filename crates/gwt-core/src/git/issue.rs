@@ -8,6 +8,9 @@ use super::gh_cli::{gh_command, is_gh_available};
 use super::remote::Remote;
 use super::repository::{find_bare_repo_in_dir, is_git_repo};
 
+// `gh issue list --json comments` returns at most this many comments per issue.
+const GH_COMMENTS_PREVIEW_LIMIT: u32 = 100;
+
 /// Result of fetching issues with pagination info
 #[derive(Debug, Clone)]
 pub struct FetchIssuesResult {
@@ -15,6 +18,33 @@ pub struct FetchIssuesResult {
     pub issues: Vec<GitHubIssue>,
     /// Whether there are more issues available on the next page
     pub has_next_page: bool,
+}
+
+/// GitHub label information
+#[derive(Debug, Clone)]
+pub struct GitHubLabel {
+    /// Label name
+    pub name: String,
+    /// Label color (hex without #)
+    pub color: String,
+}
+
+/// GitHub assignee information
+#[derive(Debug, Clone)]
+pub struct GitHubAssignee {
+    /// GitHub login
+    pub login: String,
+    /// Avatar URL
+    pub avatar_url: String,
+}
+
+/// GitHub milestone information
+#[derive(Debug, Clone)]
+pub struct GitHubMilestone {
+    /// Milestone title
+    pub title: String,
+    /// Milestone number
+    pub number: u32,
 }
 
 /// GitHub Issue information
@@ -26,18 +56,36 @@ pub struct GitHubIssue {
     pub title: String,
     /// Issue updatedAt timestamp (ISO-8601)
     pub updated_at: String,
-    /// Issue labels (FR-002)
-    pub labels: Vec<String>,
+    /// Issue labels
+    pub labels: Vec<GitHubLabel>,
+    /// Issue body (markdown)
+    pub body: Option<String>,
+    /// Issue state ("OPEN" or "CLOSED")
+    pub state: String,
+    /// Issue HTML URL
+    pub html_url: String,
+    /// Assignees
+    pub assignees: Vec<GitHubAssignee>,
+    /// Number of comments
+    pub comments_count: u32,
+    /// Milestone
+    pub milestone: Option<GitHubMilestone>,
 }
 
 impl GitHubIssue {
-    /// Create a new GitHubIssue
+    /// Create a new GitHubIssue with default values for extended fields
     pub fn new(number: u64, title: String, updated_at: String) -> Self {
         Self {
             number,
             title,
             updated_at,
             labels: Vec::new(),
+            body: None,
+            state: "OPEN".to_string(),
+            html_url: String::new(),
+            assignees: Vec::new(),
+            comments_count: 0,
+            milestone: None,
         }
     }
 
@@ -46,13 +94,19 @@ impl GitHubIssue {
         number: u64,
         title: String,
         updated_at: String,
-        labels: Vec<String>,
+        labels: Vec<GitHubLabel>,
     ) -> Self {
         Self {
             number,
             title,
             updated_at,
             labels,
+            body: None,
+            state: "OPEN".to_string(),
+            html_url: String::new(),
+            assignees: Vec::new(),
+            comments_count: 0,
+            milestone: None,
         }
     }
 
@@ -104,16 +158,18 @@ pub fn is_gh_cli_authenticated() -> bool {
         .unwrap_or(false)
 }
 
-/// Fetch open issues from GitHub using gh CLI with pagination support (FR-001)
+/// Fetch issues from GitHub using gh CLI with pagination support (FR-001)
 ///
 /// Returns issues sorted by updated_at descending (most recently updated first).
 /// Uses `page` and `per_page` to control pagination.
+/// `state` controls which issues to fetch ("open" or "closed").
 /// `has_next_page` is determined by requesting `per_page * page + 1` items
 /// and checking if more exist beyond the current page.
 pub fn fetch_open_issues(
     repo_path: &Path,
     page: u32,
     per_page: u32,
+    state: &str,
 ) -> Result<FetchIssuesResult, String> {
     if page == 0 {
         return Err("page must be greater than 0".to_string());
@@ -123,7 +179,7 @@ pub fn fetch_open_issues(
     }
 
     let repo_slug = resolve_repo_slug(repo_path);
-    let args = issue_list_args(repo_slug.as_deref(), page, per_page);
+    let args = issue_list_args(repo_slug.as_deref(), page, per_page, state);
 
     let output = gh_command()
         .args(args)
@@ -147,7 +203,11 @@ pub fn fetch_open_issues(
 
     // If we got more than per_page items after skipping, there's a next page
     let has_next_page = remaining.len() > per_page as usize;
-    let issues: Vec<GitHubIssue> = remaining.into_iter().take(per_page as usize).collect();
+    let mut issues: Vec<GitHubIssue> = remaining.into_iter().take(per_page as usize).collect();
+
+    for issue in &mut issues {
+        hydrate_comments_count_from_rest_if_needed(repo_path, repo_slug.as_deref(), issue);
+    }
 
     Ok(FetchIssuesResult {
         issues,
@@ -155,18 +215,19 @@ pub fn fetch_open_issues(
     })
 }
 
-fn issue_list_args(repo_slug: Option<&str>, page: u32, per_page: u32) -> Vec<String> {
+fn issue_list_args(repo_slug: Option<&str>, page: u32, per_page: u32, state: &str) -> Vec<String> {
     // Request enough items to cover the current page plus one extra to detect next page
     let limit = u64::from(per_page) * u64::from(page) + 1;
 
     let limit_str = limit.to_string();
+    let state_value = if state == "closed" { "closed" } else { "open" };
     let mut args = vec![
         "issue",
         "list",
         "--state",
-        "open",
+        state_value,
         "--json",
-        "number,title,updatedAt,labels",
+        "number,title,updatedAt,labels,body,state,url,assignees,comments,milestone",
         "--limit",
         &limit_str,
     ]
@@ -182,7 +243,53 @@ fn issue_list_args(repo_slug: Option<&str>, page: u32, per_page: u32) -> Vec<Str
     args
 }
 
-fn resolve_repo_slug(repo_path: &Path) -> Option<String> {
+fn hydrate_comments_count_from_rest_if_needed(
+    repo_path: &Path,
+    repo_slug: Option<&str>,
+    issue: &mut GitHubIssue,
+) {
+    if issue.comments_count < GH_COMMENTS_PREVIEW_LIMIT {
+        return;
+    }
+
+    let slug = repo_slug
+        .map(|value| value.to_string())
+        .or_else(|| parse_repo_slug_from_issue_html_url(&issue.html_url));
+    let Some(slug) = slug else {
+        return;
+    };
+
+    if let Ok(total_count) = fetch_issue_comments_total_count(repo_path, &slug, issue.number) {
+        issue.comments_count = total_count;
+    }
+}
+
+fn fetch_issue_comments_total_count(
+    repo_path: &Path,
+    repo_slug: &str,
+    issue_number: u64,
+) -> Result<u32, String> {
+    let endpoint = format!("repos/{}/issues/{}", repo_slug, issue_number);
+    let output = gh_command()
+        .args(["api", &endpoint, "--jq", ".comments"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to execute gh api for issue comments: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh api comments count failed: {}", stderr));
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let parsed = raw
+        .trim()
+        .parse::<u64>()
+        .map_err(|e| format!("Failed to parse comments count: {}", e))?;
+    u32::try_from(parsed).map_err(|_| "comments count exceeds u32".to_string())
+}
+
+pub(super) fn resolve_repo_slug(repo_path: &Path) -> Option<String> {
     let candidate_repo = if is_git_repo(repo_path) {
         Some(repo_path.to_path_buf())
     } else {
@@ -239,7 +346,42 @@ fn normalize_repo_slug(path: &str) -> Option<String> {
     Some(format!("{}/{}", owner, repo))
 }
 
-/// Parse gh issue list JSON output
+fn parse_repo_slug_from_issue_html_url(html_url: &str) -> Option<String> {
+    let rest = html_url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(html_url);
+    let mut parts = rest.split('/');
+    let _host = parts.next()?;
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some(format!("{}/{}", owner, repo))
+}
+
+fn parse_comments_count(item: &serde_json::Value) -> u32 {
+    if let Some(count) = item.get("commentsCount").and_then(|v| v.as_u64()) {
+        return u32::try_from(count).unwrap_or(u32::MAX);
+    }
+
+    let Some(comments) = item.get("comments") else {
+        return 0;
+    };
+
+    if let Some(count) = comments.as_u64() {
+        return u32::try_from(count).unwrap_or(u32::MAX);
+    }
+
+    if let Some(count) = comments.get("totalCount").and_then(|v| v.as_u64()) {
+        return u32::try_from(count).unwrap_or(u32::MAX);
+    }
+
+    comments.as_array().map(|arr| arr.len() as u32).unwrap_or(0)
+}
+
+/// Parse gh issue list/view JSON output
 pub fn parse_gh_issues_json(json: &str) -> Result<Vec<GitHubIssue>, String> {
     let parsed: serde_json::Value =
         serde_json::from_str(json).map_err(|e| format!("Failed to parse JSON: {}", e))?;
@@ -259,11 +401,68 @@ pub fn parse_gh_issues_json(json: &str) -> Result<Vec<GitHubIssue>, String> {
                 .and_then(|v| v.as_array())
                 .map(|arr| {
                     arr.iter()
-                        .filter_map(|label| label.get("name")?.as_str().map(String::from))
+                        .filter_map(|label| {
+                            let name = label.get("name")?.as_str()?.to_string();
+                            let color = label
+                                .get("color")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            Some(GitHubLabel { name, color })
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
-            Some(GitHubIssue::with_labels(number, title, updated_at, labels))
+            let body = item.get("body").and_then(|v| v.as_str()).map(String::from);
+            let state = item
+                .get("state")
+                .and_then(|v| v.as_str())
+                .unwrap_or("OPEN")
+                .to_string();
+            let html_url = item
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let assignees = item
+                .get("assignees")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|a| {
+                            let login = a.get("login")?.as_str()?.to_string();
+                            let avatar_url = a
+                                .get("avatarUrl")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            Some(GitHubAssignee { login, avatar_url })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let comments_count = parse_comments_count(item);
+            let milestone = item.get("milestone").and_then(|v| {
+                if v.is_null() {
+                    return None;
+                }
+                let title = v.get("title")?.as_str()?.to_string();
+                let number = v.get("number")?.as_u64()? as u32;
+                Some(GitHubMilestone { title, number })
+            });
+
+            Some(GitHubIssue {
+                number,
+                title,
+                updated_at,
+                labels,
+                body,
+                state,
+                html_url,
+                assignees,
+                comments_count,
+                milestone,
+            })
         })
         .collect();
 
@@ -271,6 +470,60 @@ pub fn parse_gh_issues_json(json: &str) -> Result<Vec<GitHubIssue>, String> {
     result.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 
     Ok(result)
+}
+
+/// Parse gh issue view JSON output (single issue)
+fn parse_gh_issue_json(json: &str) -> Result<GitHubIssue, String> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("Failed to parse JSON: {}", e))?;
+
+    // Wrap in array and reuse parse_gh_issues_json logic
+    let array_json = format!("[{}]", json.trim());
+    let mut issues = parse_gh_issues_json(&array_json)?;
+
+    if issues.is_empty() {
+        // Try parsing the original value for a better error message
+        if parsed.is_object() {
+            return Err("Failed to extract issue fields from JSON".to_string());
+        }
+        return Err("Expected JSON object for issue detail".to_string());
+    }
+
+    Ok(issues.remove(0))
+}
+
+/// Fetch a single issue detail from GitHub using gh CLI
+pub fn fetch_issue_detail(repo_path: &Path, issue_number: u64) -> Result<GitHubIssue, String> {
+    let repo_slug = resolve_repo_slug(repo_path);
+
+    let mut args = vec![
+        "issue".to_string(),
+        "view".to_string(),
+        issue_number.to_string(),
+        "--json".to_string(),
+        "number,title,body,state,url,labels,assignees,comments,milestone,updatedAt".to_string(),
+    ];
+
+    if let Some(slug) = repo_slug.as_deref() {
+        args.push("--repo".to_string());
+        args.push(slug.to_string());
+    }
+
+    let output = gh_command()
+        .args(&args)
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to execute gh CLI: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh issue view failed: {}", stderr));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut issue = parse_gh_issue_json(&stdout)?;
+    hydrate_comments_count_from_rest_if_needed(repo_path, repo_slug.as_deref(), &mut issue);
+    Ok(issue)
 }
 
 /// Filter issues by title (case-insensitive substring match)
@@ -545,7 +798,11 @@ mod tests {
 
         let issues = parse_gh_issues_json(json).unwrap();
         assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].labels, vec!["bug", "priority: high"]);
+        assert_eq!(issues[0].labels.len(), 2);
+        assert_eq!(issues[0].labels[0].name, "bug");
+        assert_eq!(issues[0].labels[0].color, "d73a4a");
+        assert_eq!(issues[0].labels[1].name, "priority: high");
+        assert_eq!(issues[0].labels[1].color, "ff0000");
     }
 
     #[test]
@@ -572,14 +829,26 @@ mod tests {
 
     #[test]
     fn test_github_issue_with_labels_constructor() {
+        let labels = vec![
+            GitHubLabel {
+                name: "bug".to_string(),
+                color: "d73a4a".to_string(),
+            },
+            GitHubLabel {
+                name: "urgent".to_string(),
+                color: "ff0000".to_string(),
+            },
+        ];
         let issue = GitHubIssue::with_labels(
             42,
             "Fix bug".to_string(),
             "2025-01-25T10:00:00Z".to_string(),
-            vec!["bug".to_string(), "urgent".to_string()],
+            labels,
         );
         assert_eq!(issue.number, 42);
-        assert_eq!(issue.labels, vec!["bug", "urgent"]);
+        assert_eq!(issue.labels.len(), 2);
+        assert_eq!(issue.labels[0].name, "bug");
+        assert_eq!(issue.labels[1].name, "urgent");
     }
 
     #[test]
@@ -726,7 +995,7 @@ mod tests {
     #[test]
     fn test_issue_list_args_without_repo_page1() {
         // page=1, per_page=50 → limit = 50*1+1 = 51
-        let args = issue_list_args(None, 1, 50);
+        let args = issue_list_args(None, 1, 50, "open");
         assert_eq!(
             args,
             vec![
@@ -735,7 +1004,7 @@ mod tests {
                 "--state",
                 "open",
                 "--json",
-                "number,title,updatedAt,labels",
+                "number,title,updatedAt,labels,body,state,url,assignees,comments,milestone",
                 "--limit",
                 "51"
             ]
@@ -747,7 +1016,7 @@ mod tests {
 
     #[test]
     fn test_issue_list_args_with_repo_page1() {
-        let args = issue_list_args(Some("owner/repo"), 1, 50);
+        let args = issue_list_args(Some("owner/repo"), 1, 50, "open");
         assert_eq!(
             args,
             vec![
@@ -756,7 +1025,7 @@ mod tests {
                 "--state",
                 "open",
                 "--json",
-                "number,title,updatedAt,labels",
+                "number,title,updatedAt,labels,body,state,url,assignees,comments,milestone",
                 "--limit",
                 "51",
                 "--repo",
@@ -771,7 +1040,7 @@ mod tests {
     #[test]
     fn test_issue_list_args_page2() {
         // page=2, per_page=50 → limit = 50*2+1 = 101
-        let args = issue_list_args(None, 2, 50);
+        let args = issue_list_args(None, 2, 50, "open");
         assert_eq!(
             args,
             vec![
@@ -780,7 +1049,7 @@ mod tests {
                 "--state",
                 "open",
                 "--json",
-                "number,title,updatedAt,labels",
+                "number,title,updatedAt,labels,body,state,url,assignees,comments,milestone",
                 "--limit",
                 "101"
             ]
@@ -793,7 +1062,7 @@ mod tests {
     #[test]
     fn test_issue_list_args_custom_per_page() {
         // page=1, per_page=10 → limit = 10*1+1 = 11
-        let args = issue_list_args(None, 1, 10);
+        let args = issue_list_args(None, 1, 10, "open");
         assert_eq!(
             args,
             vec![
@@ -802,7 +1071,7 @@ mod tests {
                 "--state",
                 "open",
                 "--json",
-                "number,title,updatedAt,labels",
+                "number,title,updatedAt,labels,body,state,url,assignees,comments,milestone",
                 "--limit",
                 "11"
             ]
@@ -813,8 +1082,14 @@ mod tests {
     }
 
     #[test]
+    fn test_issue_list_args_closed_state() {
+        let args = issue_list_args(None, 1, 10, "closed");
+        assert!(args.contains(&"closed".to_string()));
+    }
+
+    #[test]
     fn test_issue_list_args_large_values_do_not_overflow() {
-        let args = issue_list_args(None, u32::MAX, u32::MAX);
+        let args = issue_list_args(None, u32::MAX, u32::MAX, "open");
         let expected_limit = (u64::from(u32::MAX) * u64::from(u32::MAX) + 1).to_string();
 
         assert!(args
@@ -824,14 +1099,128 @@ mod tests {
 
     #[test]
     fn test_fetch_open_issues_rejects_page_zero() {
-        let err = fetch_open_issues(std::path::Path::new("."), 0, 50).unwrap_err();
+        let err = fetch_open_issues(std::path::Path::new("."), 0, 50, "open").unwrap_err();
         assert!(err.contains("page must be greater than 0"));
     }
 
     #[test]
     fn test_fetch_open_issues_rejects_per_page_zero() {
-        let err = fetch_open_issues(std::path::Path::new("."), 1, 0).unwrap_err();
+        let err = fetch_open_issues(std::path::Path::new("."), 1, 0, "open").unwrap_err();
         assert!(err.contains("per_page must be greater than 0"));
+    }
+
+    // ==========================================================
+    // Extended fields parsing tests
+    // ==========================================================
+
+    #[test]
+    fn test_parse_gh_issues_json_extended_fields() {
+        let json = r#"[
+            {
+                "number": 42,
+                "title": "Fix login bug",
+                "updatedAt": "2025-01-25T10:00:00Z",
+                "labels": [{"name": "bug", "color": "d73a4a"}],
+                "body": "This is the issue body",
+                "state": "OPEN",
+                "url": "https://github.com/user/repo/issues/42",
+                "assignees": [{"login": "octocat", "avatarUrl": "https://avatars.example.com/1"}],
+                "comments": [{"body": "comment1"}, {"body": "comment2"}],
+                "milestone": {"title": "v1.0", "number": 1}
+            }
+        ]"#;
+
+        let issues = parse_gh_issues_json(json).unwrap();
+        assert_eq!(issues.len(), 1);
+        let issue = &issues[0];
+        assert_eq!(issue.body.as_deref(), Some("This is the issue body"));
+        assert_eq!(issue.state, "OPEN");
+        assert_eq!(issue.html_url, "https://github.com/user/repo/issues/42");
+        assert_eq!(issue.assignees.len(), 1);
+        assert_eq!(issue.assignees[0].login, "octocat");
+        assert_eq!(
+            issue.assignees[0].avatar_url,
+            "https://avatars.example.com/1"
+        );
+        assert_eq!(issue.comments_count, 2);
+        assert!(issue.milestone.is_some());
+        let ms = issue.milestone.as_ref().unwrap();
+        assert_eq!(ms.title, "v1.0");
+        assert_eq!(ms.number, 1);
+    }
+
+    #[test]
+    fn test_parse_gh_issues_json_missing_optional_fields() {
+        let json = r#"[
+            {
+                "number": 1,
+                "title": "Simple issue",
+                "updatedAt": "2025-01-25T10:00:00Z"
+            }
+        ]"#;
+
+        let issues = parse_gh_issues_json(json).unwrap();
+        assert_eq!(issues.len(), 1);
+        let issue = &issues[0];
+        assert!(issue.body.is_none());
+        assert_eq!(issue.state, "OPEN");
+        assert_eq!(issue.html_url, "");
+        assert!(issue.assignees.is_empty());
+        assert_eq!(issue.comments_count, 0);
+        assert!(issue.milestone.is_none());
+    }
+
+    #[test]
+    fn test_parse_gh_issues_json_with_comment_total_count_object() {
+        let json = r#"[
+            {
+                "number": 7,
+                "title": "High traffic issue",
+                "updatedAt": "2025-01-25T10:00:00Z",
+                "comments": {"totalCount": 150}
+            }
+        ]"#;
+
+        let issues = parse_gh_issues_json(json).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].comments_count, 150);
+    }
+
+    #[test]
+    fn test_parse_gh_issues_json_with_numeric_comments() {
+        let json = r#"[
+            {
+                "number": 8,
+                "title": "REST-backed issue",
+                "updatedAt": "2025-01-25T10:00:00Z",
+                "comments": 12
+            }
+        ]"#;
+
+        let issues = parse_gh_issues_json(json).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].comments_count, 12);
+    }
+
+    #[test]
+    fn test_parse_gh_issue_json_single() {
+        let json = r#"{
+            "number": 42,
+            "title": "Fix login bug",
+            "updatedAt": "2025-01-25T10:00:00Z",
+            "labels": [],
+            "body": "body text",
+            "state": "OPEN",
+            "url": "https://github.com/user/repo/issues/42",
+            "assignees": [],
+            "comments": [],
+            "milestone": null
+        }"#;
+
+        let issue = parse_gh_issue_json(json).unwrap();
+        assert_eq!(issue.number, 42);
+        assert_eq!(issue.body.as_deref(), Some("body text"));
+        assert!(issue.milestone.is_none());
     }
 
     #[test]
@@ -850,6 +1239,12 @@ mod tests {
     fn test_parse_repo_slug_https_trailing_slash() {
         let slug = parse_repo_slug_from_remote_url("https://github.com/user/repo/").unwrap();
         assert_eq!(slug, "user/repo");
+    }
+
+    #[test]
+    fn test_parse_repo_slug_from_issue_html_url() {
+        let slug = parse_repo_slug_from_issue_html_url("https://github.com/user/repo/issues/42");
+        assert_eq!(slug.as_deref(), Some("user/repo"));
     }
 
     #[test]
