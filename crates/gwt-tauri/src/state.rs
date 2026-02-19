@@ -1,4 +1,5 @@
 use crate::agent_master::AgentModeState;
+use gwt_core::agent::SessionStore;
 use gwt_core::ai::SessionSummaryCache;
 use gwt_core::config::os_env::EnvSource;
 use gwt_core::terminal::manager::PaneManager;
@@ -106,6 +107,8 @@ pub struct AppState {
     pub update_manager: UpdateManager,
     /// MRU (most-recently-used) window focus history. Front = most recent.
     pub window_focus_history: Mutex<Vec<String>>,
+    /// Persistent storage for agent sessions (Branch Mode & Project Team).
+    pub session_store: SessionStore,
 }
 
 impl AppState {
@@ -133,6 +136,7 @@ impl AppState {
             os_env_source: Arc::new(OnceCell::new()),
             update_manager: UpdateManager::new(),
             window_focus_history: Mutex::new(Vec::new()),
+            session_store: SessionStore::new(),
         }
     }
 
