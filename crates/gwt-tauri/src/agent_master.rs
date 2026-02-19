@@ -5,6 +5,7 @@ use gwt_core::agent::conversation::MessageRole;
 use gwt_core::agent::developer::AgentType;
 use gwt_core::agent::lead::{LeadMessage, LeadStatus, MessageKind};
 use gwt_core::agent::session::{ProjectTeamSession, SessionStatus};
+use gwt_core::agent::session_store::SessionStoreError;
 use gwt_core::agent::task::{PullRequestRef, Task, TestStatus, TestVerification};
 use gwt_core::agent::types::SessionId;
 use gwt_core::ai::{AIClient, AIResponse, ChatMessage, ToolCall};
@@ -325,12 +326,19 @@ pub fn send_project_team_message(
         .unwrap_or_else(|| SessionId::new().0);
     let sid = SessionId(session_id.clone());
 
-    let mut session = state
-        .session_store
-        .load_project_team(&sid)
-        .unwrap_or_else(|_| {
+    let mut session = match state.session_store.load_project_team(&sid) {
+        Ok(session) => session,
+        Err(SessionStoreError::NotFound) => {
             ProjectTeamSession::new(sid.clone(), project_path, "main", AgentType::Claude)
-        });
+        }
+        Err(e) => {
+            working.last_error = Some(format!("Failed to load project team session: {e}"));
+            working.is_waiting = false;
+            working.lead_status = Some("idle".to_string());
+            save_agent_mode_state(state, window_label, &working);
+            return working;
+        }
+    };
 
     working.project_team_session_id = Some(session_id);
     save_agent_mode_state(state, window_label, &working);
@@ -429,15 +437,14 @@ pub fn send_project_team_message(
             break;
         }
 
-        if !has_action {
-            for call in &response.tool_calls {
-                push_message(&mut working, "assistant", "action", &format_tool_call(call));
-            }
-        }
         let tool_observations = execute_tool_calls(state, window_label, &response.tool_calls);
-        for obs in &tool_observations {
-            push_message(&mut working, "tool", "observation", obs);
-        }
+        push_tool_turns_to_state_and_session(
+            &mut working,
+            &mut session,
+            &response.tool_calls,
+            has_action,
+            &tool_observations,
+        );
         save_agent_mode_state(state, window_label, &working);
         messages = build_project_team_chat_messages(&working.messages);
 
@@ -511,6 +518,35 @@ fn execute_tool_calls(
         results.push(format!("{} => {}", call.name, result));
     }
     results
+}
+
+fn push_tool_turns_to_state_and_session(
+    working: &mut AgentModeState,
+    session: &mut ProjectTeamSession,
+    tool_calls: &[ToolCall],
+    has_action: bool,
+    tool_observations: &[String],
+) {
+    if !has_action {
+        for call in tool_calls {
+            let action = format_tool_call(call);
+            push_message(working, "assistant", "action", &action);
+            session.lead.conversation.push(LeadMessage::new(
+                MessageRole::Assistant,
+                MessageKind::Action,
+                action,
+            ));
+        }
+    }
+
+    for obs in tool_observations {
+        push_message(working, "tool", "observation", obs);
+        session.lead.conversation.push(LeadMessage::new(
+            MessageRole::System,
+            MessageKind::Observation,
+            obs.clone(),
+        ));
+    }
 }
 
 fn push_message(state: &mut AgentModeState, role: &str, kind: &str, content: &str) {
@@ -835,6 +871,16 @@ fn format_tool_call(call: &ToolCall) -> String {
     format!("{} {}", call.name, args)
 }
 
+fn lead_status_to_api_string(status: LeadStatus) -> &'static str {
+    match status {
+        LeadStatus::Idle => "idle",
+        LeadStatus::Thinking => "thinking",
+        LeadStatus::WaitingApproval => "waiting_approval",
+        LeadStatus::Orchestrating => "orchestrating",
+        LeadStatus::Error => "error",
+    }
+}
+
 // ===========================================================================
 // Phase 7: US5 — Artifact Verification and Integration (T701-T706)
 // ===========================================================================
@@ -899,7 +945,7 @@ pub fn format_ci_fix_prompt(ci_output: &str, task: &Task) -> String {
 
 /// Format a git merge command string for a developer to execute.
 pub fn format_merge_command(source_branch: &str, target_branch: &str) -> String {
-    format!("git merge {source_branch} --into {target_branch}")
+    format!("git checkout {target_branch} && git merge {source_branch}")
 }
 
 /// Detect whether command output contains merge conflict markers.
@@ -1192,7 +1238,7 @@ pub fn restore_project_team_session(
 
     let mut mode = AgentModeState::new();
     mode.project_team_session_id = Some(session_id.to_string());
-    mode.lead_status = Some(format!("{:?}", session.lead.status).to_lowercase());
+    mode.lead_status = Some(lead_status_to_api_string(session.lead.status).to_string());
     mode.llm_call_count = session.lead.llm_call_count;
     mode.estimated_tokens = session.lead.estimated_tokens;
     mode.ai_ready = true;
@@ -1254,10 +1300,7 @@ pub struct ProjectTeamSessionSummary {
 ///
 /// Sets the session status to Paused and the lead status to Idle,
 /// then persists the session. Returns a user-friendly status message.
-pub fn force_stop_project_team(
-    state: &AppState,
-    session_id: &str,
-) -> Result<String, String> {
+pub fn force_stop_project_team(state: &AppState, session_id: &str) -> Result<String, String> {
     let sid = SessionId(session_id.to_string());
     let mut session = state
         .session_store
@@ -1273,10 +1316,7 @@ pub fn force_stop_project_team(
         .save_project_team(&session)
         .map_err(|e| format!("Failed to save paused session: {e}"))?;
 
-    Ok(format!(
-        "Session {} has been paused.",
-        session_id
-    ))
+    Ok(format!("Session {} has been paused.", session_id))
 }
 
 #[cfg(test)]
@@ -1507,6 +1547,38 @@ mod tests {
     }
 
     #[test]
+    fn send_project_team_message_load_error_does_not_recreate_session() {
+        let (state, _dir) = make_test_app_state_with_store();
+        state.set_project_for_window("main", "/repo".to_string());
+
+        if let Ok(mut guard) = state.window_agent_modes.lock() {
+            let mut mode = AgentModeState::new();
+            mode.project_team_session_id = Some("pt-broken-1".to_string());
+            guard.insert("main".to_string(), mode);
+        }
+
+        let session_path = state
+            .session_store
+            .sessions_dir()
+            .join("pt-pt-broken-1.json");
+        std::fs::write(&session_path, "{ this is invalid json ").unwrap();
+
+        let result = send_project_team_message(&state, "main", "resume");
+        assert_eq!(result.lead_status, Some("idle".to_string()));
+        assert!(!result.is_waiting);
+        let err = result.last_error.unwrap();
+        assert!(err.contains("Failed to load project team session"));
+        assert!(err.contains("Parse error"));
+
+        let broken_path = state
+            .session_store
+            .sessions_dir()
+            .join("pt-pt-broken-1.json.broken");
+        assert!(broken_path.exists());
+        assert!(!session_path.exists());
+    }
+
+    #[test]
     fn build_project_team_chat_messages_uses_project_team_prompt() {
         let messages = vec![AgentModeMessage {
             role: "user".to_string(),
@@ -1520,6 +1592,48 @@ mod tests {
         assert_eq!(out[0].content, PROJECT_TEAM_SYSTEM_PROMPT);
         assert_eq!(out[1].role, "user");
         assert_eq!(out[1].content, "hello");
+    }
+
+    #[test]
+    fn push_tool_turns_to_state_and_session_persists_action_and_observation() {
+        let mut working = AgentModeState::new();
+        let mut session = ProjectTeamSession::new(
+            SessionId("pt-tools-1".to_string()),
+            PathBuf::from("/repo"),
+            "main",
+            AgentType::Claude,
+        );
+        let tool_calls = vec![ToolCall {
+            name: "run_cmd".to_string(),
+            arguments: serde_json::json!({"cmd":"echo hello"}),
+            call_id: Some("call-1".to_string()),
+        }];
+        let observations = vec!["run_cmd => ok".to_string()];
+
+        push_tool_turns_to_state_and_session(
+            &mut working,
+            &mut session,
+            &tool_calls,
+            false,
+            &observations,
+        );
+
+        assert_eq!(working.messages.len(), 2);
+        assert_eq!(working.messages[0].role, "assistant");
+        assert_eq!(working.messages[0].kind, "action");
+        assert_eq!(working.messages[1].role, "tool");
+        assert_eq!(working.messages[1].kind, "observation");
+
+        assert_eq!(session.lead.conversation.len(), 2);
+        assert_eq!(session.lead.conversation[0].role, MessageRole::Assistant);
+        assert_eq!(session.lead.conversation[0].kind, MessageKind::Action);
+        assert_eq!(
+            session.lead.conversation[0].content,
+            "run_cmd {\"cmd\":\"echo hello\"}"
+        );
+        assert_eq!(session.lead.conversation[1].role, MessageRole::System);
+        assert_eq!(session.lead.conversation[1].kind, MessageKind::Observation);
+        assert_eq!(session.lead.conversation[1].content, "run_cmd => ok");
     }
 
     // --- T401: issue_spec tools Lead integration ---
@@ -1913,7 +2027,7 @@ mod tests {
     #[test]
     fn format_merge_command_produces_valid_command() {
         let cmd = format_merge_command("feature/login", "develop");
-        assert_eq!(cmd, "git merge feature/login --into develop");
+        assert_eq!(cmd, "git checkout develop && git merge feature/login");
     }
 
     #[test]
@@ -2367,7 +2481,10 @@ mod tests {
             .load_project_team(&SessionId("pt-save-1".to_string()))
             .unwrap();
         assert_eq!(loaded.id.0, "pt-save-1");
-        assert_eq!(loaded.status, gwt_core::agent::session::SessionStatus::Active);
+        assert_eq!(
+            loaded.status,
+            gwt_core::agent::session::SessionStatus::Active
+        );
     }
 
     #[test]
@@ -2413,6 +2530,7 @@ mod tests {
             "main",
             AgentType::Claude,
         );
+        session.lead.status = LeadStatus::WaitingApproval;
 
         session.lead.conversation.push(LeadMessage::new(
             MessageRole::User,
@@ -2444,6 +2562,10 @@ mod tests {
         assert_eq!(
             restored_mode.project_team_session_id,
             Some("pt-restore-1".to_string())
+        );
+        assert_eq!(
+            restored_mode.lead_status,
+            Some("waiting_approval".to_string())
         );
         assert_eq!(restored_mode.llm_call_count, 3);
         assert_eq!(restored_mode.estimated_tokens, 1500);
@@ -2529,7 +2651,10 @@ mod tests {
             .session_store
             .load_project_team(&SessionId("pt-stop-1".to_string()))
             .unwrap();
-        assert_eq!(loaded.status, gwt_core::agent::session::SessionStatus::Paused);
+        assert_eq!(
+            loaded.status,
+            gwt_core::agent::session::SessionStatus::Paused
+        );
         assert_eq!(loaded.lead.status, LeadStatus::Idle);
     }
 
@@ -2567,6 +2692,9 @@ mod tests {
             .unwrap();
         assert_eq!(loaded.lead.conversation.len(), 1);
         assert_eq!(loaded.lead.conversation[0].content, "build feature");
-        assert_eq!(loaded.status, gwt_core::agent::session::SessionStatus::Paused);
+        assert_eq!(
+            loaded.status,
+            gwt_core::agent::session::SessionStatus::Paused
+        );
     }
 }
