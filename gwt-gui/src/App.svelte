@@ -1348,6 +1348,7 @@
       queueIssueLaunchFollowup(jobId, request);
       pendingLaunchRequest = request;
       launchJobId = jobId;
+      launchJobStartPending = false;
       launchProgressOpen = true;
       flushBufferedLaunchEventsForActiveJob();
     } catch (err) {

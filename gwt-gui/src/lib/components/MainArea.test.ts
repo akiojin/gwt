@@ -445,6 +445,22 @@ describe("MainArea", () => {
     expect(rendered.getByText("Select a tab")).toBeTruthy();
   });
 
+  it("shows waiting placeholder when active agent tab has no paneId", async () => {
+    const tabs: Tab[] = [
+      { id: "agent-missing-pane", label: "feature-terminal", type: "agent" },
+    ];
+    const rendered = await renderMainArea({
+      tabs,
+      activeTabId: "agent-missing-pane",
+    });
+
+    expect(rendered.getByText("Waiting For Terminal Pane")).toBeTruthy();
+    expect(
+      rendered.getByText("Close this tab and launch again if it does not attach."),
+    ).toBeTruthy();
+    expect(rendered.container.querySelectorAll(".terminal-wrapper").length).toBe(0);
+  });
+
   it("renders agent/terminal tab dots and terminal wrappers", async () => {
     const originalMatchMedia = window.matchMedia;
     const originalResizeObserver = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;

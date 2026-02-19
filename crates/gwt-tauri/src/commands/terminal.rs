@@ -1612,6 +1612,42 @@ mod tests {
     }
 
     #[test]
+    fn count_dsr_cursor_position_queries_detects_in_single_chunk() {
+        let mut pending = Vec::new();
+        let count = count_dsr_cursor_position_queries(&mut pending, b"\x1b[6n");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn count_dsr_cursor_position_queries_handles_fragmented_sequence() {
+        let mut pending = Vec::new();
+        assert_eq!(
+            count_dsr_cursor_position_queries(&mut pending, b"\x1b["),
+            0
+        );
+        assert_eq!(pending, b"\x1b[".to_vec());
+
+        assert_eq!(
+            count_dsr_cursor_position_queries(&mut pending, b"6n"),
+            1
+        );
+    }
+
+    #[test]
+    fn count_dsr_cursor_position_queries_ignores_other_dsr_codes() {
+        let mut pending = Vec::new();
+        let count = count_dsr_cursor_position_queries(&mut pending, b"\x1b[5n");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn count_dsr_cursor_position_queries_counts_multiple_queries() {
+        let mut pending = Vec::new();
+        let count = count_dsr_cursor_position_queries(&mut pending, b"\x1b[6nfoo\x1b[6n");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
     fn is_node_modules_bin_matches_common_paths() {
         assert!(gwt_core::terminal::runner::is_node_modules_bin(Path::new(
             "/repo/node_modules/.bin/bunx"
@@ -3652,6 +3688,61 @@ fn consume_osc7_cwd_updates(
     latest_changed
 }
 
+const DSR_CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
+const DSR_CURSOR_POSITION_RESPONSE: &[u8] = b"\x1b[1;1R";
+
+fn retain_possible_dsr_fragment(pending: &mut Vec<u8>, combined: &[u8]) {
+    pending.clear();
+    if combined.is_empty() {
+        return;
+    }
+
+    let max_keep = (DSR_CURSOR_POSITION_QUERY.len().saturating_sub(1)).min(combined.len());
+    for keep in (1..=max_keep).rev() {
+        if combined[combined.len() - keep..] == DSR_CURSOR_POSITION_QUERY[..keep] {
+            pending.extend_from_slice(&combined[combined.len() - keep..]);
+            return;
+        }
+    }
+}
+
+fn count_dsr_cursor_position_queries(pending: &mut Vec<u8>, chunk: &[u8]) -> usize {
+    if pending.is_empty() && chunk.is_empty() {
+        return 0;
+    }
+
+    let mut combined = Vec::with_capacity(pending.len() + chunk.len());
+    combined.extend_from_slice(pending);
+    combined.extend_from_slice(chunk);
+    pending.clear();
+
+    let mut count = 0usize;
+    if combined.len() >= DSR_CURSOR_POSITION_QUERY.len() {
+        for idx in 0..=combined.len() - DSR_CURSOR_POSITION_QUERY.len() {
+            if combined[idx..idx + DSR_CURSOR_POSITION_QUERY.len()] == *DSR_CURSOR_POSITION_QUERY {
+                count += 1;
+            }
+        }
+    }
+
+    retain_possible_dsr_fragment(pending, &combined);
+    count
+}
+
+fn respond_to_dsr_cursor_queries(state: &AppState, pane_id: &str, count: usize) {
+    if count == 0 {
+        return;
+    }
+
+    if let Ok(mut manager) = state.pane_manager.lock() {
+        if let Some(pane) = manager.pane_mut_by_id(pane_id) {
+            for _ in 0..count {
+                let _ = pane.write_input(DSR_CURSOR_POSITION_RESPONSE);
+            }
+        }
+    }
+}
+
 fn mark_pane_stream_error_and_write_message(
     state: &AppState,
     pane_id: &str,
@@ -3719,10 +3810,15 @@ fn stream_pty_output(
     let mut stream_error: Option<String> = None;
     let mut last_cwd = String::new();
     let mut osc7_pending = Vec::new();
+    let mut dsr_pending = Vec::new();
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break, // EOF
             Ok(n) => {
+                let dsr_queries =
+                    count_dsr_cursor_position_queries(&mut dsr_pending, &buf[..n]);
+                respond_to_dsr_cursor_queries(&state, &pane_id, dsr_queries);
+
                 // Keep the scrollback file up-to-date even if the UI is not listening.
                 if let Ok(mut manager) = state.pane_manager.lock() {
                     if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
