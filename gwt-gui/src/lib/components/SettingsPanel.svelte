@@ -2,6 +2,7 @@
   import { onDestroy, onMount } from "svelte";
   import type {
     SkillRegistrationStatus,
+    SkillRegistrationScope,
     ProfilesConfig,
     Profile,
     SettingsData,
@@ -193,6 +194,16 @@
     return DEFAULT_APP_LANGUAGE;
   }
 
+  function normalizeSkillScope(
+    value: string | null | undefined
+  ): SkillRegistrationScope | null {
+    const normalized = (value ?? "").trim().toLowerCase();
+    if (normalized === "user" || normalized === "project" || normalized === "local") {
+      return normalized as SkillRegistrationScope;
+    }
+    return null;
+  }
+
   function normalizeSkillStatus(
     value: Partial<SkillRegistrationStatus> | null | undefined
   ): SkillRegistrationStatus {
@@ -346,6 +357,18 @@
       ]);
       loadedSettings.voice_input = normalizeVoiceInputSettings(loadedSettings.voice_input);
       loadedSettings.app_language = normalizeAppLanguage(loadedSettings.app_language);
+      loadedSettings.agent_skill_registration_default_scope = normalizeSkillScope(
+        loadedSettings.agent_skill_registration_default_scope
+      );
+      loadedSettings.agent_skill_registration_codex_scope = normalizeSkillScope(
+        loadedSettings.agent_skill_registration_codex_scope
+      );
+      loadedSettings.agent_skill_registration_claude_scope = normalizeSkillScope(
+        loadedSettings.agent_skill_registration_claude_scope
+      );
+      loadedSettings.agent_skill_registration_gemini_scope = normalizeSkillScope(
+        loadedSettings.agent_skill_registration_gemini_scope
+      );
       settings = loadedSettings;
       savedUiFontSize = loadedSettings.ui_font_size ?? 13;
       savedTerminalFontSize = loadedSettings.terminal_font_size ?? 13;
@@ -375,6 +398,34 @@
     saving = true;
     saveMessage = "";
     try {
+      const normalizedDefaultScope = normalizeSkillScope(
+        settings.agent_skill_registration_default_scope
+      );
+      const normalizedCodexScope = normalizeSkillScope(
+        settings.agent_skill_registration_codex_scope
+      );
+      const normalizedClaudeScope = normalizeSkillScope(
+        settings.agent_skill_registration_claude_scope
+      );
+      const normalizedGeminiScope = normalizeSkillScope(
+        settings.agent_skill_registration_gemini_scope
+      );
+      if (
+        !normalizedDefaultScope &&
+        (normalizedCodexScope || normalizedClaudeScope || normalizedGeminiScope)
+      ) {
+        saveMessage = "Choose default skill registration scope before setting agent overrides.";
+        saving = false;
+        return;
+      }
+      settings = {
+        ...settings,
+        agent_skill_registration_default_scope: normalizedDefaultScope,
+        agent_skill_registration_codex_scope: normalizedCodexScope,
+        agent_skill_registration_claude_scope: normalizedClaudeScope,
+        agent_skill_registration_gemini_scope: normalizedGeminiScope,
+      };
+
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("save_settings", { settings });
       if (profiles) {
@@ -589,6 +640,18 @@
     const current = normalizeVoiceInputSettings(settings.voice_input);
     const next = { ...current, [field]: value } as VoiceInputSettings;
     settings = { ...settings, voice_input: normalizeVoiceInputSettings(next) };
+  }
+
+  function updateSkillScopeField(
+    field:
+      | "agent_skill_registration_default_scope"
+      | "agent_skill_registration_codex_scope"
+      | "agent_skill_registration_claude_scope"
+      | "agent_skill_registration_gemini_scope",
+    value: string
+  ) {
+    if (!settings) return;
+    settings = { ...settings, [field]: normalizeSkillScope(value) };
   }
 </script>
 
@@ -886,6 +949,91 @@
 
         {:else if activeSettingsTab === "githubIntegration"}
           <div class="section-content">
+            <div class="field">
+              <label for="skill-scope-default">Skill Registration Scope (Default)</label>
+              <select
+                id="skill-scope-default"
+                class="select"
+                value={settings.agent_skill_registration_default_scope ?? ""}
+                onchange={(e) =>
+                  updateSkillScopeField(
+                    "agent_skill_registration_default_scope",
+                    (e.target as HTMLSelectElement).value
+                  )}
+              >
+                <option value="">Not selected (prompt on startup)</option>
+                <option value="user">User (~/.xxx)</option>
+                <option value="project">Project (&lt;repo&gt;/.xxx)</option>
+                <option value="local">Local (&lt;repo&gt;/.xxx.local)</option>
+              </select>
+              <span class="field-hint">
+                Controls where managed skills/plugins are auto-registered.
+              </span>
+            </div>
+
+            <div class="field">
+              <!-- svelte-ignore a11y_label_has_associated_control -->
+              <label>Agent Scope Overrides</label>
+              <div class="row">
+                <div class="scope-select">
+                  <label for="skill-scope-codex">Codex</label>
+                  <select
+                    id="skill-scope-codex"
+                    class="select"
+                    value={settings.agent_skill_registration_codex_scope ?? ""}
+                    onchange={(e) =>
+                      updateSkillScopeField(
+                        "agent_skill_registration_codex_scope",
+                        (e.target as HTMLSelectElement).value
+                      )}
+                  >
+                    <option value="">Use default</option>
+                    <option value="user">User</option>
+                    <option value="project">Project</option>
+                    <option value="local">Local</option>
+                  </select>
+                </div>
+                <div class="scope-select">
+                  <label for="skill-scope-claude">Claude Code</label>
+                  <select
+                    id="skill-scope-claude"
+                    class="select"
+                    value={settings.agent_skill_registration_claude_scope ?? ""}
+                    onchange={(e) =>
+                      updateSkillScopeField(
+                        "agent_skill_registration_claude_scope",
+                        (e.target as HTMLSelectElement).value
+                      )}
+                  >
+                    <option value="">Use default</option>
+                    <option value="user">User</option>
+                    <option value="project">Project</option>
+                    <option value="local">Local</option>
+                  </select>
+                </div>
+                <div class="scope-select">
+                  <label for="skill-scope-gemini">Gemini</label>
+                  <select
+                    id="skill-scope-gemini"
+                    class="select"
+                    value={settings.agent_skill_registration_gemini_scope ?? ""}
+                    onchange={(e) =>
+                      updateSkillScopeField(
+                        "agent_skill_registration_gemini_scope",
+                        (e.target as HTMLSelectElement).value
+                      )}
+                  >
+                    <option value="">Use default</option>
+                    <option value="user">User</option>
+                    <option value="project">Project</option>
+                    <option value="local">Local</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <div class="divider"></div>
+
             <div class="skill-overview">
               <span class={`skill-badge ${skillStatusClass(skillStatus?.overall ?? "failed")}`}>
                 Overall: {skillStatusText(skillStatus?.overall)}
@@ -1355,6 +1503,24 @@
     gap: 8px;
     align-items: center;
     flex-wrap: wrap;
+  }
+
+  .scope-select {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 180px;
+  }
+
+  .scope-select label {
+    font-size: var(--ui-font-sm);
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+  }
+
+  .scope-select .select {
+    max-width: none;
   }
 
   .env-table {

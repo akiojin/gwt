@@ -31,6 +31,7 @@
 2. フロント型定義の3層対応（ProjectModeState / LeadState / DashboardIssue / DashboardTask / CoordinatorState / DeveloperState）
 3. PTY通信のスキル化基盤（agent_tools.rs → Codex/Geminiローカルskills + Claude Codeプラグイン）
 4. SessionStore の AppState ワイヤリング（既存 gwt-core SessionStore を ProjectModeSession 対応に拡張）
+5. Skill/Plugin登録スコープ設定モデル（default_scope + Agent別上書き）
 
 ### Phase B: Lead（PM）機能
 
@@ -85,7 +86,10 @@
 1. PTY通信の統合スキル化（Codex/Gemini: `~/.{codex,gemini}/skills`, Claude Code: gwtプラグイン）
 2. issue_specツールの統合スキル化（ブランチモード各エージェントからも利用可能に）
 3. agent_tools.rs PTYツールからの完全移行
-4. 直接アクセス（Developerターミナル直操作 / Coordinatorチャット）
+4. Claude Code Hook転送のプラグイン同梱化（`hooks.json` + `forward-gwt-hook.sh`）
+5. GUI起動時の手動Hook登録ダイアログ廃止（plugin setup自動登録へ統一）
+6. Skill/Plugin登録先のScope解決（User/Project/Local + Agent別上書き）
+7. 直接アクセス（Developerターミナル直操作 / Coordinatorチャット）
 
 ### Phase G: 仕上げ
 
@@ -140,6 +144,10 @@ gwt-gui/src/
 - Developerのエージェント種別はプロジェクトモード起動時にユーザーが指定する
 - コンテキスト要約はDeveloperはLLM自動、Lead/Coordinatorはgwt側で80%閾値制御
 - PTY通信は既存のsend_keys系を維持しつつ、スキルとしてのインターフェースを追加する
+- Claude Code Hook連携は`plugins/worktree-protection-hooks/hooks/hooks.json`を正本とし、5イベントを`gwt-tauri hook <Event>`へ転送する
+- 起動時は`repair_skill_registration`でClaudeプラグイン登録をベストエフォート自動修復し、手動Hook登録ダイアログには依存しない
+- Skill/Plugin登録は`default_scope`（User/Project/Local）を基準にし、Agent別上書きがある場合は上書きを優先する
+- Scope別の登録先はCodex/Geminiはskillsディレクトリ、Claudeはsettingsファイル（User/Project/Local）で解決する
 - テストは各フェーズごとにTDD（テストファースト）で進める
 
 ## リスクと緩和策
@@ -174,6 +182,8 @@ gwt-gui/src/
 - セッションを永続化し、gwt再起動後に復元・再開できる
 - IME/スピナー/自動スクロールの既存チャット要件を維持する
 - PTY通信がCodex/Claude Code/Geminiスキルとして利用可能
+- Claude Code Hook転送がプラグイン経由で自動有効化され、手動Hookセットアップなしで完了検出が動作する
+- SettingsでScope（User/Project/Local）とAgent別上書きを設定し、repair/statusが設定どおりの登録先に対して動作する
 
 ## 検証方針
 

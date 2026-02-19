@@ -85,6 +85,43 @@ pub struct AgentSettings {
     pub auto_install_deps: bool,
     /// Default GitHub Project V2 ID for issue-first spec sync
     pub github_project_id: Option<String>,
+    /// Skill / plugin registration scope preferences.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_registration: Option<SkillRegistrationPreferences>,
+}
+
+/// Scope for skill / plugin registration paths.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SkillRegistrationScope {
+    #[default]
+    User,
+    Project,
+    Local,
+}
+
+/// Scope preferences for managed skill / plugin registration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SkillRegistrationPreferences {
+    pub default_scope: SkillRegistrationScope,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex_scope: Option<SkillRegistrationScope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_scope: Option<SkillRegistrationScope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gemini_scope: Option<SkillRegistrationScope>,
+}
+
+impl Default for SkillRegistrationPreferences {
+    fn default() -> Self {
+        Self {
+            default_scope: SkillRegistrationScope::User,
+            codex_scope: None,
+            claude_scope: None,
+            gemini_scope: None,
+        }
+    }
 }
 
 /// Docker settings
@@ -927,6 +964,39 @@ default_shell = "powershell"
         assert_eq!(
             settings.terminal.default_shell,
             Some("powershell".to_string())
+        );
+    }
+
+    #[test]
+    fn test_skill_registration_default_unset() {
+        let settings = Settings::default();
+        assert!(settings.agent.skill_registration.is_none());
+    }
+
+    #[test]
+    fn test_skill_registration_save_load_round_trip() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp.path());
+
+        let mut settings = Settings::default();
+        settings.agent.skill_registration = Some(SkillRegistrationPreferences {
+            default_scope: SkillRegistrationScope::Project,
+            codex_scope: Some(SkillRegistrationScope::User),
+            claude_scope: Some(SkillRegistrationScope::Project),
+            gemini_scope: Some(SkillRegistrationScope::Local),
+        });
+        settings.save_global().unwrap();
+
+        let loaded = Settings::load_global().unwrap();
+        assert_eq!(
+            loaded.agent.skill_registration,
+            Some(SkillRegistrationPreferences {
+                default_scope: SkillRegistrationScope::Project,
+                codex_scope: Some(SkillRegistrationScope::User),
+                claude_scope: Some(SkillRegistrationScope::Project),
+                gemini_scope: Some(SkillRegistrationScope::Local),
+            })
         );
     }
 }

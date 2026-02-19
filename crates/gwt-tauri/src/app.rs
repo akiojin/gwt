@@ -12,7 +12,7 @@ use tracing::{info, warn};
 use gwt_core::config::os_env;
 
 #[cfg(not(test))]
-use gwt_core::config::skill_registration;
+use gwt_core::config::{skill_registration, Settings};
 #[cfg(not(test))]
 use tokio::io::AsyncReadExt;
 
@@ -278,7 +278,19 @@ pub fn build_app(
                     tauri::async_runtime::spawn(async move {
                         let state = app_handle.state::<AppState>();
                         let _ = state.wait_os_env_ready(std::time::Duration::from_secs(2));
-                        let status = skill_registration::repair_skill_registration();
+                        let settings = match Settings::load_global() {
+                            Ok(settings) => settings,
+                            Err(err) => {
+                                warn!(
+                                    category = "skills",
+                                    error = %err,
+                                    "Failed to load settings before startup skill repair; using defaults"
+                                );
+                                Settings::default()
+                            }
+                        };
+                        let status =
+                            skill_registration::repair_skill_registration_with_settings(&settings);
                         state.set_skill_registration_status(status.clone());
                         match status.overall.as_str() {
                             "ok" => {

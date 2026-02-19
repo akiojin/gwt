@@ -153,6 +153,10 @@ export interface SettingsData {
   agent_gemini_path?: string | null;
   agent_auto_install_deps: boolean;
   agent_github_project_id?: string | null;
+  agent_skill_registration_default_scope?: SkillRegistrationScope | null;
+  agent_skill_registration_codex_scope?: SkillRegistrationScope | null;
+  agent_skill_registration_claude_scope?: SkillRegistrationScope | null;
+  agent_skill_registration_gemini_scope?: SkillRegistrationScope | null;
   docker_force_host: boolean;
   ui_font_size: number;
   terminal_font_size: number;
@@ -167,6 +171,8 @@ export interface VoiceInputSettings {
   language: "auto" | "ja" | "en" | (string & {});
   model: string;
 }
+
+export type SkillRegistrationScope = "user" | "project" | "local";
 
 export interface SkillAgentRegistrationStatus {
   agent_id: string;

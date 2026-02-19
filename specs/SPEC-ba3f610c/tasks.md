@@ -372,6 +372,49 @@ US9 (コンテキスト)  ← US1
   - issue_specツール群をCodex/Geminiローカルskills + Claude Codeプラグインで公開、ブランチモード各エージェントから利用可能に
   - 依存: T402
 
+- [x] T1207 [P] [共通] Claude Hook転送のプラグイン同梱 `plugins/worktree-protection-hooks/hooks/hooks.json` `plugins/worktree-protection-hooks/hooks/scripts/forward-gwt-hook.sh`
+  - `UserPromptSubmit`/`PreToolUse`/`PostToolUse`/`Notification`/`Stop` を `gwt-tauri hook <Event>` へ転送
+  - 既存のPreToolUse保護Hook（branch/cd/file/gid-dir-overrideブロック）を維持
+  - 依存: T1201
+
+- [x] T1208 [P] [共通] 起動時手動Hook登録ダイアログ廃止 `gwt-gui/src/App.svelte`
+  - `check_and_update_hooks` / `register_hooks` 呼び出しと確認ダイアログを削除
+  - Hook導入経路をplugin setup自動登録へ一本化
+  - 依存: T1207
+
+- [x] T1209 [P] [共通] Claudeプラグイン自動登録フロー統一 `crates/gwt-core/src/config/skill_registration.rs` `crates/gwt-tauri/src/app.rs`
+  - 起動時`repair_skill_registration`でClaude向け`setup_gwt_plugin`をベストエフォート実行
+  - `enabledPlugins` と marketplace の自動修復状態をSkill Registrationに反映
+  - 依存: T1207
+
+- [x] T1210 [P] [共通] [テスト] Hook自動登録回帰テスト整備 `crates/gwt-core/src/config/claude_plugins.rs` `crates/gwt-core/src/config/claude_hooks.rs`
+  - プラグイン自動登録（marketplace / enabledPlugins）とHookコマンド互換（`gwt hook` / build binary / Windows path）を回帰検証
+  - 依存: T1208, T1209
+
+- [ ] T1211 [P] [US10] [テスト] Skill登録スコープ設定モデルテスト `crates/gwt-core/src/config/settings.rs`
+  - `default_scope`（user/project/local）とAgent別上書き（codex/claude/gemini）の保存・読み込み・デフォルト値を検証
+  - 依存: T105
+
+- [ ] T1212 [US10] Skill登録スコープ設定モデル実装 `crates/gwt-core/src/config/settings.rs` `crates/gwt-tauri/src/commands/settings.rs` `gwt-gui/src/lib/types.ts`
+  - Settingsに`skill_registration.default_scope`とAgent別上書きを追加
+  - 依存: T1211
+
+- [ ] T1213 [P] [US10] [テスト] Scope別登録先解決テスト `crates/gwt-core/src/config/skill_registration.rs`
+  - User/Project/Local + Agent別上書きでCodex/Gemini/Claudeの登録先が期待どおりに解決されることを検証
+  - 依存: T1212
+
+- [ ] T1214 [US10] Scope別登録先解決とrepair/status適用実装 `crates/gwt-core/src/config/skill_registration.rs` `crates/gwt-core/src/config/claude_plugins.rs`
+  - `register_agent_skills` / `status_for` / `repair_skill_registration`を有効スコープ基準へ変更
+  - 依存: T1213
+
+- [ ] T1215 [P] [US10] [テスト] Settings Scope UIテスト `gwt-gui/src/lib/components/SettingsPanel.test.ts`
+  - Scope選択UI、Agent別上書き、保存・再読込、repair/status表示更新を検証
+  - 依存: T1212
+
+- [ ] T1216 [US10] Settings Scope UI実装 `gwt-gui/src/lib/components/SettingsPanel.svelte`
+  - User/Project/Local選択とAgent別上書きフォームを追加
+  - 依存: T1215, T1214
+
 - [ ] T1206 [P] [共通] ブランチモード GitHub Issueボタン `gwt-gui/src/lib/components/`
   - GUI上にGitHub Issueボタン設置、gwt内蔵AIがissue_specツールでGitHub Issue管理を実行
   - 依存: T1203

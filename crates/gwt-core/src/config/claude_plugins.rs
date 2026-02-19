@@ -297,20 +297,25 @@ pub fn get_local_claude_settings_path() -> PathBuf {
     PathBuf::from(".claude").join("settings.json")
 }
 
-/// Setup gwt plugin (marketplace registration + plugin enable) (FR-003, FR-004)
-pub fn setup_gwt_plugin() -> Result<(), GwtError> {
+/// Setup gwt plugin for a specific Claude settings file.
+pub fn setup_gwt_plugin_at(settings_path: &Path) -> Result<(), GwtError> {
     // Register marketplace
     register_gwt_marketplace()?;
 
+    enable_worktree_protection_plugin(settings_path)?;
+    Ok(())
+}
+
+/// Setup gwt plugin (marketplace registration + plugin enable) (FR-003, FR-004)
+pub fn setup_gwt_plugin() -> Result<(), GwtError> {
     // Enable plugin in global settings
     if let Some(global_path) = get_global_claude_settings_path() {
-        enable_worktree_protection_plugin(&global_path)?;
+        setup_gwt_plugin_at(&global_path)?;
     }
 
     // Enable plugin in local settings
     let local_path = get_local_claude_settings_path();
-    enable_worktree_protection_plugin(&local_path)?;
-
+    setup_gwt_plugin_at(&local_path)?;
     Ok(())
 }
 
@@ -696,5 +701,25 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         let settings: Result<serde_json::Value, _> = serde_json::from_str(&content);
         assert!(settings.is_ok());
+    }
+
+    #[test]
+    fn test_setup_gwt_plugin_at_targets_selected_settings_file() {
+        let _lock = crate::config::HOME_LOCK.lock().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let _env = crate::config::TestEnvGuard::new(temp_dir.path());
+
+        let settings_path = temp_dir
+            .path()
+            .join("repo")
+            .join(".claude")
+            .join("settings.local.json");
+
+        setup_gwt_plugin_at(&settings_path).unwrap();
+
+        assert!(is_plugin_enabled_in_settings(&settings_path));
+
+        let known_marketplaces = get_known_marketplaces_path().unwrap();
+        assert!(known_marketplaces.exists());
     }
 }

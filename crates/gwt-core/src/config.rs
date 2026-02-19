@@ -30,8 +30,9 @@ pub use claude_plugins::{
     enable_worktree_protection_plugin, get_global_claude_settings_path,
     get_known_marketplaces_path, get_local_claude_settings_path, is_gwt_marketplace_registered,
     is_gwt_marketplace_registered_at, is_plugin_enabled_in_settings, is_plugin_explicitly_disabled,
-    register_gwt_marketplace, register_gwt_marketplace_at, setup_gwt_plugin, GWT_MARKETPLACE_NAME,
-    GWT_MARKETPLACE_REPO, GWT_MARKETPLACE_SOURCE, GWT_PLUGIN_FULL_NAME, GWT_PLUGIN_NAME,
+    register_gwt_marketplace, register_gwt_marketplace_at, setup_gwt_plugin, setup_gwt_plugin_at,
+    GWT_MARKETPLACE_NAME, GWT_MARKETPLACE_REPO, GWT_MARKETPLACE_SOURCE, GWT_PLUGIN_FULL_NAME,
+    GWT_PLUGIN_NAME,
 };
 pub use migration::{
     backup_broken_file, ensure_config_dir, get_cleanup_candidates, migrate_json_to_toml,
@@ -47,7 +48,7 @@ pub use session::{
     agent_has_hook_support, get_session_for_branch, infer_agent_status,
     load_sessions_from_worktrees, AgentStatus, Session,
 };
-pub use settings::Settings;
+pub use settings::{Settings, SkillRegistrationPreferences, SkillRegistrationScope};
 pub use skill_registration::{
     get_skill_registration_status, register_agent_skills, register_all_skills,
     repair_skill_registration, SkillAgentRegistrationStatus, SkillAgentType,

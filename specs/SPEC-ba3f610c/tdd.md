@@ -86,6 +86,12 @@
 1. PTY通信スキル完全移行テスト（agent_tools.rs旧PTYツール呼び出しの廃止確認）
 2. issue_specスキル公開テスト（ブランチモード各エージェントからissue_specツール利用可能）
 3. ブランチモード連携テスト（agent/ブランチ表示 / 削除時Failed検出）
+4. ClaudeプラグインHook転送マニフェスト検証（`hooks.json` に5イベント転送とPreToolUse保護Hook併存）
+5. Claudeプラグイン自動登録テスト（起動時`repair_skill_registration` → `setup_gwt_plugin`経路）
+6. 手動Hook登録ダイアログ非依存の回帰テスト（GUI起動時にmanual hook setupを要求しない）
+7. Skill登録スコープ設定モデルテスト（default_scope + Agent別上書きの永続化）
+8. Scope別登録先解決テスト（User/Project/Local + Agent別上書き）
+9. Settings Scope UIテスト（選択/保存/再読込/repair-status反映）
 
 ## テスト実行コマンド
 
@@ -97,6 +103,9 @@
 - `cargo test -p gwt-tauri commands::terminal -- --nocapture`
 - `cargo test -p gwt-tauri agent_tools -- --nocapture`
 - `cargo test -p gwt-tauri context_summarizer -- --nocapture`
+- `cargo test -p gwt-core claude_plugins -- --nocapture`
+- `cargo test -p gwt-core claude_hooks -- --nocapture`
+- `cargo test -p gwt-core skill_registration -- --nocapture`
 
 ### フロントエンド
 
@@ -105,6 +114,7 @@
 - `cd gwt-gui && pnpm test src/lib/components/Dashboard.test.ts`
 - `cd gwt-gui && pnpm test src/lib/components/IssueItem.test.ts`
 - `cd gwt-gui && pnpm test src/lib/components/CoordinatorDetail.test.ts`
+- `cd gwt-gui && pnpm test src/lib/components/SettingsPanel.test.ts`
 
 ## 実行ログ
 
