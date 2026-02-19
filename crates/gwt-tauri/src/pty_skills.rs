@@ -1,7 +1,7 @@
 //! PTY communication skill API
 //!
 //! Thin wrappers around existing terminal functions providing a clean skill interface
-//! for agent-mode PTY operations.
+//! for Project Mode PTY operations.
 //!
 //! # Equivalence to agent_tools.rs terminal tools
 //!

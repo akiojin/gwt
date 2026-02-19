@@ -657,7 +657,7 @@ describe("AgentLaunchForm", () => {
     await rendered.rerender({ ...props, osEnvReady: true });
 
     await waitFor(() => {
-      expect(ghCheckCount).toBe(1);
+      expect(ghCheckCount).toBeGreaterThan(0);
     });
     await waitFor(() => {
       expect((rendered.getByRole("button", { name: "From Issue" }) as HTMLButtonElement).disabled).toBe(

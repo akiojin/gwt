@@ -3,7 +3,7 @@ import type { Page } from "@playwright/test";
 const DEFAULT_PROJECT_PATH = "/tmp/gwt-playwright";
 const DEFAULT_LAST_OPENED_AT = "2026-02-13T00:00:00.000Z";
 
-type AgentModeState = {
+type ProjectModeState = {
   messages: Array<{
     role: "user" | "assistant" | "system" | "tool";
     kind?: "message" | "thought" | "action" | "observation" | "error";
@@ -70,21 +70,21 @@ export async function installTauriMock(
       let lastSpawnedPaneId: string | null = null;
       let restoreLeaderAcquired = false;
 
-      let agentModeState: AgentModeState = {
+      let projectModeState: ProjectModeState = {
         messages: [],
         ai_ready: true,
         ai_error: null,
         last_error: null,
         is_waiting: false,
-        session_name: "Master Agent",
+        session_name: "Project Mode",
         llm_call_count: 0,
         estimated_tokens: 0,
       };
 
-      function cloneAgentModeState(): AgentModeState {
+      function cloneProjectModeState(): ProjectModeState {
         return {
-          ...agentModeState,
-          messages: agentModeState.messages.map((msg) => ({ ...msg })),
+          ...projectModeState,
+          messages: projectModeState.messages.map((msg) => ({ ...msg })),
         };
       }
 
@@ -320,15 +320,15 @@ export async function installTauriMock(
 
             return null;
           }
-          case "get_agent_mode_state_cmd":
-            return cloneAgentModeState();
-          case "send_agent_mode_message": {
+          case "get_project_mode_state_cmd":
+            return cloneProjectModeState();
+          case "send_project_mode_message_cmd": {
             const input =
               typeof args.input === "string" ? args.input.trim() : "";
-            if (!input) return cloneAgentModeState();
+            if (!input) return cloneProjectModeState();
             const now = Date.now();
             const nextMessages = [
-              ...agentModeState.messages,
+              ...projectModeState.messages,
               {
                 role: "user" as const,
                 kind: "message" as const,
@@ -342,15 +342,15 @@ export async function installTauriMock(
                 timestamp: now + 1,
               },
             ];
-            agentModeState = {
-              ...agentModeState,
+            projectModeState = {
+              ...projectModeState,
               messages: nextMessages,
-              llm_call_count: agentModeState.llm_call_count + 1,
+              llm_call_count: projectModeState.llm_call_count + 1,
               estimated_tokens:
-                agentModeState.estimated_tokens + Math.max(1, input.length),
+                projectModeState.estimated_tokens + Math.max(1, input.length),
               last_error: null,
             };
-            return cloneAgentModeState();
+            return cloneProjectModeState();
           }
         }
 

@@ -1,5 +1,4 @@
 pub mod agent_config;
-pub mod agent_mode;
 pub mod agents;
 pub mod branch_suggest;
 pub mod branches;
@@ -12,6 +11,7 @@ pub mod issue_spec;
 pub mod mcp;
 pub mod profiles;
 pub mod project;
+pub mod project_mode;
 pub mod pullrequest;
 pub mod recent_projects;
 pub mod sessions;

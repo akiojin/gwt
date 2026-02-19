@@ -307,7 +307,7 @@ fn build_bunx_package_spec(package: &str, version: Option<&str>) -> String {
     format!("{package}@{v}")
 }
 
-fn build_agent_model_args(agent_id: &str, model: Option<&str>) -> Vec<String> {
+fn build_project_model_args(agent_id: &str, model: Option<&str>) -> Vec<String> {
     let Some(model) = model.map(|s| s.trim()).filter(|s| !s.is_empty()) else {
         return Vec::new();
     };
@@ -1251,7 +1251,7 @@ fn build_agent_args(
                 args.push("--dangerously-skip-permissions".to_string());
             }
 
-            args.extend(build_agent_model_args(agent_id, request.model.as_deref()));
+            args.extend(build_project_model_args(agent_id, request.model.as_deref()));
         }
         "gemini" => {
             match mode {
@@ -1276,7 +1276,7 @@ fn build_agent_args(
                 args.push("-y".to_string());
             }
 
-            args.extend(build_agent_model_args(agent_id, request.model.as_deref()));
+            args.extend(build_project_model_args(agent_id, request.model.as_deref()));
         }
         "opencode" => {
             match mode {
@@ -1299,7 +1299,7 @@ fn build_agent_args(
                 }
             }
 
-            args.extend(build_agent_model_args(agent_id, request.model.as_deref()));
+            args.extend(build_project_model_args(agent_id, request.model.as_deref()));
         }
         _ => {}
     }
@@ -1714,25 +1714,25 @@ mod tests {
     }
 
     #[test]
-    fn build_agent_model_args_is_agent_specific() {
+    fn build_project_model_args_is_agent_specific() {
         assert_eq!(
-            build_agent_model_args("codex", Some("gpt-5.2")),
+            build_project_model_args("codex", Some("gpt-5.2")),
             vec!["--model=gpt-5.2".to_string()]
         );
         assert_eq!(
-            build_agent_model_args("claude", Some("sonnet")),
+            build_project_model_args("claude", Some("sonnet")),
             vec!["--model".to_string(), "sonnet".to_string()]
         );
         assert_eq!(
-            build_agent_model_args("opencode", Some("provider/model")),
+            build_project_model_args("opencode", Some("provider/model")),
             vec!["-m".to_string(), "provider/model".to_string()]
         );
         assert_eq!(
-            build_agent_model_args("gemini", Some("gemini-2.5-pro")),
+            build_project_model_args("gemini", Some("gemini-2.5-pro")),
             vec!["-m".to_string(), "gemini-2.5-pro".to_string()]
         );
-        assert!(build_agent_model_args("codex", None).is_empty());
-        assert!(build_agent_model_args("codex", Some("  ")).is_empty());
+        assert!(build_project_model_args("codex", None).is_empty());
+        assert!(build_project_model_args("codex", Some("  ")).is_empty());
     }
 
     #[test]

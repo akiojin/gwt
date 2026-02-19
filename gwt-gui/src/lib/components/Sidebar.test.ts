@@ -1717,9 +1717,9 @@ describe("Sidebar", () => {
     const modeButtons = rendered.container.querySelectorAll<HTMLButtonElement>(".mode-btn");
     expect(modeButtons.length).toBe(2);
     await fireEvent.click(modeButtons[1] as HTMLButtonElement);
-    expect(onModeChange).toHaveBeenCalledWith("projectTeam");
+    expect(onModeChange).toHaveBeenCalledWith("projectMode");
 
-    await rendered.rerender({ mode: "projectTeam" });
+    await rendered.rerender({ mode: "projectMode" });
     await fireEvent.click(modeButtons[1] as HTMLButtonElement);
     expect(onModeChange).toHaveBeenCalledTimes(1);
 

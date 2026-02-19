@@ -3,7 +3,7 @@
 //! Each handler receives the WsContext and JSON-RPC params, and returns
 //! a JSON-RPC response value or error.
 
-use crate::agent_master::{get_agent_mode_state, send_agent_message, AgentModeState};
+use crate::agent_master::{get_project_mode_state, send_project_mode_message, ProjectModeState};
 use crate::commands::terminal::{launch_agent_for_project_root, LaunchAgentRequest};
 use crate::mcp_ws_server::{JsonRpcResponse, WsContext};
 use crate::state::AppState;
@@ -715,7 +715,7 @@ pub fn handle_master_send(id: Value, params: &Value, ctx: &WsContext) -> JsonRpc
             let window_label_clone = window_label.clone();
             std::thread::spawn(move || {
                 let state = app_handle.state::<AppState>();
-                let _ = send_agent_message(&state, &window_label_clone, &input);
+                let _ = send_project_mode_message(&state, &window_label_clone, &input);
             });
 
             JsonRpcResponse::success(
@@ -728,8 +728,8 @@ pub fn handle_master_send(id: Value, params: &Value, ctx: &WsContext) -> JsonRpc
             )
         }
         "clear_context" | "new_session" => {
-            if let Ok(mut map) = state.window_agent_modes.lock() {
-                map.insert(window_label, AgentModeState::new());
+            if let Ok(mut map) = state.window_project_modes.lock() {
+                map.insert(window_label, ProjectModeState::new());
             }
             JsonRpcResponse::success(
                 id,
@@ -741,7 +741,7 @@ pub fn handle_master_send(id: Value, params: &Value, ctx: &WsContext) -> JsonRpc
             )
         }
         "cancel" => {
-            if let Ok(mut map) = state.window_agent_modes.lock() {
+            if let Ok(mut map) = state.window_project_modes.lock() {
                 if let Some(mode) = map.get_mut(&window_label) {
                     mode.is_waiting = false;
                     mode.last_error = Some("Cancelled by MCP command.".to_string());
@@ -794,7 +794,7 @@ pub fn handle_master_get_state(id: Value, params: &Value, ctx: &WsContext) -> Js
         .unwrap_or(20)
         .min(200) as usize;
 
-    let mut mode = get_agent_mode_state(&state, &window_label);
+    let mut mode = get_project_mode_state(&state, &window_label);
     if include_messages {
         if mode.messages.len() > limit {
             let start = mode.messages.len().saturating_sub(limit);

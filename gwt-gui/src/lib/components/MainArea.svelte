@@ -2,7 +2,7 @@
   import type { GitHubIssueInfo, LaunchAgentRequest, Tab } from "../types";
   import type { TabDropPosition } from "../appTabs";
   import TerminalView from "../terminal/TerminalView.svelte";
-  import AgentModePanel from "./AgentModePanel.svelte";
+  import ProjectModePanel from "./ProjectModePanel.svelte";
   import IssueListPanel from "./IssueListPanel.svelte";
   import IssueSpecPanel from "./IssueSpecPanel.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
@@ -62,8 +62,7 @@
   let showTerminalLayer = $derived(
     activeTab?.type === "agent" || activeTab?.type === "terminal",
   );
-  let isPinnedTab = (tabType?: Tab["type"]) =>
-    tabType === "agentMode" || tabType === "projectTeam";
+  let isPinnedTab = (tabType?: Tab["type"]) => tabType === "projectMode";
   let draggingTabId: string | null = $state(null);
   let pointerDrag:
     | {
@@ -275,8 +274,8 @@
         <SettingsPanel onClose={() => onTabClose(activeTabId)} />
       {:else if activeTab?.type === "versionHistory"}
         <VersionHistoryPanel {projectPath} />
-      {:else if activeTab?.type === "projectTeam" || activeTab?.type === "agentMode"}
-        <AgentModePanel />
+      {:else if activeTab?.type === "projectMode"}
+        <ProjectModePanel />
       {:else if activeTab?.type === "issueSpec"}
         <IssueSpecPanel
           projectPath={projectPath}

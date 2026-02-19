@@ -1,4 +1,4 @@
-use crate::agent_master::AgentModeState;
+use crate::agent_master::ProjectModeState;
 use crate::mcp_ws_server::McpWsHandle;
 use gwt_core::agent::SessionStore;
 use gwt_core::ai::SessionSummaryCache;
@@ -97,8 +97,8 @@ pub struct AppState {
     pub window_agent_tabs: Mutex<HashMap<String, WindowAgentTabsState>>,
     /// Migration status per window label for native Window menu rendering.
     pub window_migrations: Mutex<HashMap<String, WindowMigrationState>>,
-    /// Agent mode conversation state per window label.
-    pub window_agent_modes: Mutex<HashMap<String, AgentModeState>>,
+    /// Project Mode conversation state per window label.
+    pub window_project_modes: Mutex<HashMap<String, ProjectModeState>>,
     pub pane_manager: Mutex<PaneManager>,
     pub agent_versions_cache: Mutex<HashMap<String, AgentVersionsCache>>,
     pub session_summary_cache: Mutex<HashMap<String, SessionSummaryCache>>,
@@ -133,7 +133,7 @@ pub struct AppState {
     pub gh_available: AtomicBool,
     /// MRU (most-recently-used) window focus history. Front = most recent.
     pub window_focus_history: Mutex<Vec<String>>,
-    /// Persistent storage for agent sessions (Branch Mode & Project Team).
+    /// Persistent storage for agent sessions (Branch Mode & Project Mode).
     pub session_store: SessionStore,
 }
 
@@ -146,7 +146,7 @@ impl AppState {
             windows_allowed_to_close: Mutex::new(HashSet::new()),
             window_agent_tabs: Mutex::new(HashMap::new()),
             window_migrations: Mutex::new(HashMap::new()),
-            window_agent_modes: Mutex::new(HashMap::new()),
+            window_project_modes: Mutex::new(HashMap::new()),
             pane_manager: Mutex::new(PaneManager::new()),
             agent_versions_cache: Mutex::new(HashMap::new()),
             session_summary_cache: Mutex::new(HashMap::new()),
@@ -233,7 +233,7 @@ impl AppState {
         if let Ok(mut map) = self.window_agent_tabs.lock() {
             map.remove(window_label);
         }
-        if let Ok(mut map) = self.window_agent_modes.lock() {
+        if let Ok(mut map) = self.window_project_modes.lock() {
             map.remove(window_label);
         }
     }
@@ -674,8 +674,8 @@ mod tests {
         );
         state.set_window_migration("main", "job-1".to_string(), "/tmp/repo".to_string());
 
-        if let Ok(mut map) = state.window_agent_modes.lock() {
-            map.insert("main".to_string(), AgentModeState::new());
+        if let Ok(mut map) = state.window_project_modes.lock() {
+            map.insert("main".to_string(), ProjectModeState::new());
         }
 
         state.clear_window_state("main");
@@ -687,7 +687,7 @@ mod tests {
         );
         assert!(!state.window_migrations_snapshot().contains_key("main"));
         assert!(state
-            .window_agent_modes
+            .window_project_modes
             .lock()
             .map(|m| !m.contains_key("main"))
             .unwrap_or(false));

@@ -78,7 +78,7 @@
     voiceInput?: VoiceInputSettings;
   }
 
-  interface AgentModeSpecIssuePayload {
+  interface ProjectModeSpecIssuePayload {
     issueNumber: number;
     specId?: string | null;
     issueUrl?: string | null;
@@ -89,7 +89,7 @@
   const DEFAULT_SIDEBAR_WIDTH_PX = 260;
   const MIN_SIDEBAR_WIDTH_PX = 220;
   const MAX_SIDEBAR_WIDTH_PX = 520;
-  type SidebarMode = "branch" | "projectTeam";
+  type SidebarMode = "branch" | "projectMode";
 
   const DEFAULT_VOICE_INPUT_SETTINGS: VoiceInputSettings = {
     enabled: false,
@@ -130,7 +130,9 @@
     if (typeof window === "undefined") return "branch";
     try {
       const raw = window.localStorage.getItem(SIDEBAR_MODE_STORAGE_KEY);
-      if (raw === "projectTeam" || raw === "agent") return "projectTeam";
+      if (raw === "projectMode") {
+        return "projectMode";
+      }
       return raw === "branch" ? "branch" : "branch";
     } catch {
       return "branch";
@@ -199,7 +201,7 @@
   let migrationSourceRoot: string = $state("");
 
   let tabs: Tab[] = $state(defaultAppTabs());
-  let activeTabId: string = $state("projectTeam");
+  let activeTabId: string = $state("projectMode");
 
   let agentTabsHydratedProjectPath: string | null = $state(null);
   let agentTabsRestoreToken = 0;
@@ -1091,29 +1093,23 @@
     persistSidebarWidth(next);
   }
 
-  function ensureProjectTeamTab() {
-    const existing = tabs.find(
-      (t) =>
-        t.type === "projectTeam" ||
-        t.id === "projectTeam" ||
-        t.type === "agentMode" ||
-        t.id === "agentMode",
-    );
+  function ensureProjectModeTab() {
+    const existing = tabs.find((t) => t.type === "projectMode" || t.id === "projectMode");
     if (existing) return;
 
     const tab: Tab = {
-      id: "projectTeam",
-      label: "Project Team",
-      type: "projectTeam",
+      id: "projectMode",
+      label: "Project Mode",
+      type: "projectMode",
     };
     tabs = [...tabs, tab];
   }
 
   function handleSidebarModeChange(next: SidebarMode) {
     if (sidebarMode === next) return;
-    if (next === "projectTeam") {
-      ensureProjectTeamTab();
-      activeTabId = "projectTeam";
+    if (next === "projectMode") {
+      ensureProjectModeTab();
+      activeTabId = "projectMode";
     }
     sidebarMode = next;
     persistSidebarMode(next);
@@ -1304,17 +1300,12 @@
   }
 
   function normalizePrimaryTab(tab: Tab): Tab {
-    if (
-      tab.type === "agentMode" ||
-      tab.id === "agentMode" ||
-      tab.type === "projectTeam" ||
-      tab.id === "projectTeam"
-    ) {
+    if (tab.type === "projectMode" || tab.id === "projectMode") {
       return {
         ...tab,
-        id: "projectTeam",
-        label: "Project Team",
-        type: "projectTeam",
+        id: "projectMode",
+        label: "Project Mode",
+        type: "projectMode",
       };
     }
     return tab;
@@ -1332,11 +1323,11 @@
       merged.push(normalized);
     }
 
-    if (!merged.some((tab) => tab.id === "projectTeam")) {
+    if (!merged.some((tab) => tab.id === "projectMode")) {
       merged.unshift({
-        id: "projectTeam",
-        label: "Project Team",
-        type: "projectTeam",
+        id: "projectMode",
+        label: "Project Mode",
+        type: "projectMode",
       });
     }
 
@@ -1572,7 +1563,7 @@
     sidebarRefreshKey++;
   }
 
-  function openIssueSpecTab(payload: AgentModeSpecIssuePayload) {
+  function openIssueSpecTab(payload: ProjectModeSpecIssuePayload) {
     const issueNumber = Number(payload.issueNumber);
     if (!Number.isFinite(issueNumber) || issueNumber <= 0) return;
     const specId = payload.specId?.trim() || undefined;
@@ -1881,7 +1872,7 @@
           projectPath = null;
           void updateWindowSession(null);
           tabs = defaultAppTabs();
-          activeTabId = "projectTeam";
+          activeTabId = "projectMode";
           selectedBranch = null;
           currentBranch = "";
         }
@@ -2129,7 +2120,7 @@
         }
       }
     } else if (!mergedTabs.some((tab) => tab.id === activeTabId)) {
-      activeTabId = mergedTabs[0]?.id ?? "projectTeam";
+      activeTabId = mergedTabs[0]?.id ?? "projectMode";
     }
 
     agentTabsHydratedProjectPath = targetProjectPath;
@@ -2182,16 +2173,15 @@
         continue;
       }
       if (
-        tab.type === "projectTeam" ||
-        tab.type === "agentMode" ||
+        tab.type === "projectMode" ||
         tab.type === "settings" ||
         tab.type === "versionHistory" ||
         tab.type === "issues"
       ) {
-        const staticType = tab.type === "agentMode" ? "projectTeam" : tab.type;
-        const staticId = tab.id === "agentMode" ? "projectTeam" : tab.id;
+        const staticType = tab.type === "projectMode" ? "projectMode" : tab.type;
+        const staticId = tab.id === "projectMode" ? "projectMode" : tab.id;
         const staticLabel =
-          tab.type === "agentMode" ? "Project Team" : tab.label;
+          tab.type === "projectMode" ? "Project Mode" : tab.label;
         storedTabs.push({
           type: staticType,
           id: staticId,
@@ -2356,14 +2346,14 @@
 
   $effect(() => {
     function onOpenIssueSpec(event: Event) {
-      const payload = (event as CustomEvent<AgentModeSpecIssuePayload>).detail;
+      const payload = (event as CustomEvent<ProjectModeSpecIssuePayload>).detail;
       if (!payload) return;
       openIssueSpecTab(payload);
     }
-    window.addEventListener("gwt-agent-mode-open-spec-issue", onOpenIssueSpec);
+    window.addEventListener("gwt-project-mode-open-spec-issue", onOpenIssueSpec);
     return () =>
       window.removeEventListener(
-        "gwt-agent-mode-open-spec-issue",
+        "gwt-project-mode-open-spec-issue",
         onOpenIssueSpec,
       );
   });

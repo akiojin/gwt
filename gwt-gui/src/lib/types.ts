@@ -47,21 +47,21 @@ export interface TerminalAnsiProbe {
   has_true_color: boolean;
 }
 
-export interface AgentModeMessage {
+export interface ProjectModeMessage {
   role: "user" | "assistant" | "system" | "tool";
   kind?: "message" | "thought" | "action" | "observation" | "error";
   content: string;
   timestamp: number;
 }
 
-export interface AgentModeState {
-  messages: AgentModeMessage[];
+export interface ProjectModeState {
+  messages: ProjectModeMessage[];
   ai_ready: boolean;
   ai_error?: string | null;
   last_error?: string | null;
   is_waiting: boolean;
   session_name?: string | null;
-  project_team_session_id?: string | null;
+  project_mode_session_id?: string | null;
   lead_status?: string | null;
   llm_call_count: number;
   estimated_tokens: number;
@@ -212,8 +212,7 @@ export interface Tab {
     | "agent"
     | "settings"
     | "versionHistory"
-    | "agentMode"
-    | "projectTeam"
+    | "projectMode"
     | "terminal"
     | "issueSpec"
     | "issues";
@@ -602,9 +601,9 @@ export interface PrStatusResponse {
   ghStatus: GhCliStatus;
 }
 
-// === Project Team 3-Layer Type Definitions ===
+// === Project Mode 3-Layer Type Definitions ===
 
-export interface ProjectTeamState {
+export interface ProjectModeWorkspaceState {
   sessionId: string;
   status: "active" | "paused" | "completed" | "failed";
   lead: LeadState;

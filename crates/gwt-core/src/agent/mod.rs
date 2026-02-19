@@ -31,7 +31,7 @@ pub use issue::{IssueStatus, ProjectIssue};
 pub use lead::{LeadMessage, LeadState, LeadStatus, MessageKind};
 pub use prompt_builder::PromptBuilder;
 pub use scanner::{BuildSystem, RepositoryScanResult, RepositoryScanner};
-pub use session::{AgentSession, ProjectTeamSession, SessionStatus};
+pub use session::{AgentSession, ProjectModeSession, SessionStatus};
 pub use session_store::{SessionStore, SessionStoreError, SessionSummary};
 pub use sub_agent::{CompletionSource, SubAgent, SubAgentStatus, SubAgentType};
 pub use task::{

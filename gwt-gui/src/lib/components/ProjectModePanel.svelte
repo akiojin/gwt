@@ -1,16 +1,16 @@
 <svelte:options runes={false} />
 
 <script lang="ts">
-  import type { AgentModeState } from "../types";
+  import type { ProjectModeState } from "../types";
   import { afterUpdate, onMount } from "svelte";
 
-  let state: AgentModeState = {
+  let state: ProjectModeState = {
     messages: [],
     ai_ready: false,
     ai_error: null,
     last_error: null,
     is_waiting: false,
-    session_name: "Project Team",
+    session_name: "Project Mode",
     llm_call_count: 0,
     estimated_tokens: 0,
   };
@@ -22,7 +22,7 @@
   let chatEl: HTMLDivElement | null = null;
   let lastMessageCount = 0;
   let lastOpenedIssueNumber: number | null = null;
-  let displaySessionName = "Project Team";
+  let displaySessionName = "Project Mode";
 
   function toErrorMessage(err: unknown): string {
     if (!err) return "Unknown error";
@@ -37,7 +37,7 @@
   async function refreshState() {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      state = await invoke<AgentModeState>("get_agent_mode_state_cmd");
+      state = await invoke<ProjectModeState>("get_project_mode_state_cmd");
     } catch (err) {
       state = {
         ...state,
@@ -53,7 +53,7 @@
     sending = true;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      state = await invoke<AgentModeState>("send_project_team_message_cmd", {
+      state = await invoke<ProjectModeState>("send_project_mode_message_cmd", {
         input: text,
       });
       input = "";
@@ -111,9 +111,9 @@
   });
 
   $: displaySessionName =
-    state.session_name && state.session_name !== "Master Agent"
+    state.session_name && state.session_name !== "Project Mode"
       ? state.session_name
-      : "Project Team";
+      : "Project Mode";
 
   $: {
     const issueNumber = state.active_spec_issue_number ?? null;
@@ -123,7 +123,7 @@
       lastOpenedIssueNumber = issueNumber;
       if (typeof window !== "undefined") {
         window.dispatchEvent(
-          new CustomEvent("gwt-agent-mode-open-spec-issue", {
+          new CustomEvent("gwt-project-mode-open-spec-issue", {
             detail: {
               issueNumber,
               specId: state.active_spec_id ?? null,
@@ -136,7 +136,7 @@
   }
 </script>
 
-<section class="agent-mode">
+<section class="project-mode">
   <header class="agent-header">
     <div class="agent-title">{displaySessionName}</div>
     <div class="agent-stats">
@@ -145,8 +145,8 @@
       {/if}
       <span>LLM: {state.llm_call_count}</span>
       <span>Tokens: {state.estimated_tokens}</span>
-      {#if state.project_team_session_id}
-        <span>Session: {state.project_team_session_id}</span>
+      {#if state.project_mode_session_id}
+        <span>Session: {state.project_mode_session_id}</span>
       {/if}
     </div>
   </header>
@@ -178,7 +178,7 @@
 
   <footer class="agent-input">
     <textarea
-      placeholder="Type a project-team instruction and press Enter..."
+      placeholder="Type a task and press Enter..."
       bind:value={input}
       onkeydown={onKeydown}
       oncompositionstart={onCompositionStart}
@@ -200,7 +200,7 @@
 </section>
 
 <style>
-  .agent-mode {
+  .project-mode {
     display: flex;
     flex-direction: column;
     height: 100%;

@@ -1,4 +1,4 @@
-//! Structured logging for agent mode operations
+//! Structured logging for Project Mode operations
 //!
 //! Provides JSON Lines formatted log entries for Lead, Coordinator,
 //! Developer, and Session events. Log files are written to `~/.gwt/logs/agent.jsonl`.

@@ -1,4 +1,4 @@
-//! Built-in tool definitions for agent mode LLM tool-call dispatch.
+//! Built-in tool definitions for Project Mode LLM tool-call dispatch.
 //!
 //! # Terminal tools
 //!
@@ -522,7 +522,7 @@ fn merge_sections_data(
 fn get_project_path_for_window(state: &AppState, window_label: &str) -> Result<String, String> {
     state
         .project_for_window(window_label)
-        .ok_or_else(|| "Open a project before using Master Agent.".to_string())
+        .ok_or_else(|| "Open a project before using Project Mode.".to_string())
 }
 
 #[cfg(test)]

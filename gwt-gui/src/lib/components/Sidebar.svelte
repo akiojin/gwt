@@ -12,7 +12,7 @@
 
   type FilterType = "Local" | "Remote" | "All";
   type BranchSortMode = "name" | "updated";
-  type SidebarMode = "branch" | "projectTeam";
+  type SidebarMode = "branch" | "projectMode";
   type FilterCacheEntry = {
     branches: BranchInfo[];
     remoteBranchNames: Set<string>;
@@ -1234,13 +1234,13 @@
     </button>
     <button
       class="mode-btn"
-      class:active={mode === "projectTeam"}
-      aria-pressed={mode === "projectTeam"}
-      title="Project Team"
-      onclick={() => handleModeChange("projectTeam")}
+      class:active={mode === "projectMode"}
+      aria-pressed={mode === "projectMode"}
+      title="Project Mode"
+      onclick={() => handleModeChange("projectMode")}
     >
       <span class="mode-icon">P</span>
-      <span class="mode-label">Project Team</span>
+      <span class="mode-label">Project Mode</span>
     </button>
   </div>
   {#if mode === "branch"}
@@ -1386,10 +1386,10 @@
       </div>
     </div>
   {:else}
-    <div class="project-team-sidebar">
-      <div class="project-team-sidebar-title">Project Team</div>
-      <div class="project-team-sidebar-body">
-        Open the <code>Project Team</code> tab in the main area and send your first instruction.
+    <div class="project-mode-sidebar">
+      <div class="project-mode-sidebar-title">Project Mode</div>
+      <div class="project-mode-sidebar-body">
+        Open the <code>Project Mode</code> tab in the main area and send your first instruction.
       </div>
     </div>
   {/if}
@@ -1513,7 +1513,7 @@
     font-family: inherit;
   }
 
-  .project-team-sidebar {
+  .project-mode-sidebar {
     margin: 12px;
     padding: 12px;
     border: 1px solid var(--border-color);
@@ -1524,13 +1524,13 @@
     gap: 8px;
   }
 
-  .project-team-sidebar-title {
+  .project-mode-sidebar-title {
     font-size: var(--ui-font-md);
     font-weight: 600;
     color: var(--text-primary);
   }
 
-  .project-team-sidebar-body {
+  .project-mode-sidebar-body {
     font-size: var(--ui-font-sm);
     color: var(--text-secondary);
     line-height: 1.4;

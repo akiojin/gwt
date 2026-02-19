@@ -25,12 +25,7 @@ export type StoredTerminalTab = {
 };
 
 export type StoredStaticTab = {
-  type:
-    | "projectTeam"
-    | "agentMode"
-    | "settings"
-    | "versionHistory"
-    | "issues";
+  type: "projectMode" | "settings" | "versionHistory" | "issues";
   id: string;
   label: string;
 };
@@ -152,24 +147,23 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
   }
 
   if (
-    type === "projectTeam" ||
-    type === "agentMode" ||
+    type === "projectMode" ||
     type === "settings" ||
     type === "versionHistory" ||
     type === "issues"
   ) {
-    const canonicalType = type === "agentMode" ? "projectTeam" : type;
+    const canonicalType = type === "projectMode" ? "projectMode" : type;
     const fallbackId =
-      canonicalType === "projectTeam"
-        ? "projectTeam"
+      canonicalType === "projectMode"
+        ? "projectMode"
         : canonicalType === "settings"
           ? "settings"
           : canonicalType === "issues"
             ? "issues"
             : "versionHistory";
     const fallbackLabel =
-      canonicalType === "projectTeam"
-        ? "Project Team"
+      canonicalType === "projectMode"
+        ? "Project Mode"
         : canonicalType === "settings"
           ? "Settings"
           : canonicalType === "issues"
@@ -177,13 +171,13 @@ function parseStoredProjectTab(raw: unknown): StoredProjectTab | null {
             : "Version History";
     const idRaw = normalizeString(obj.id);
     const id =
-      canonicalType === "projectTeam"
-        ? "projectTeam"
+      canonicalType === "projectMode"
+        ? "projectMode"
         : idRaw || fallbackId;
     const labelRaw = typeof obj.label === "string" ? obj.label.trim() : "";
     const label =
-      canonicalType === "projectTeam" && (type === "agentMode" || !labelRaw)
-        ? "Project Team"
+      canonicalType === "projectMode" && (type === "projectMode" || !labelRaw)
+        ? "Project Mode"
         : labelRaw || fallbackLabel;
     return { type: canonicalType, id, label };
   }
@@ -450,17 +444,17 @@ export function buildRestoredProjectTabs(
     restoredTabs.push({ id: tab.id, label: tab.label, type: tab.type });
   }
 
-  if (!restoredTabs.some((tab) => tab.id === "projectTeam")) {
+  if (!restoredTabs.some((tab) => tab.id === "projectMode")) {
     restoredTabs.unshift({
-      id: "projectTeam",
-      label: "Project Team",
-      type: "projectTeam",
+      id: "projectMode",
+      label: "Project Mode",
+      type: "projectMode",
     });
   }
 
   const restoredIds = new Set(restoredTabs.map((tab) => tab.id));
   const normalizedActiveTabId =
-    stored.activeTabId === "agentMode" ? "projectTeam" : stored.activeTabId;
+    stored.activeTabId === "projectMode" ? "projectMode" : stored.activeTabId;
   const activeTabId =
     normalizedActiveTabId && restoredIds.has(normalizedActiveTabId)
       ? normalizedActiveTabId

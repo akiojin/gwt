@@ -1,4 +1,4 @@
-//! Project issue definitions for agent mode
+//! Project issue definitions for Project Mode
 
 use serde::{Deserialize, Serialize};
 
