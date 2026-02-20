@@ -18,6 +18,7 @@
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
 | [SPEC-d95a7e0c](SPEC-d95a7e0c/spec.md) | 機能仕様: gwtに表示されるURLをクリックした場合に、外部ブラウザで開く | 2026-02-20 |
+| [SPEC-7b36bdc7](SPEC-7b36bdc7/spec.md) | 機能仕様: 設定画面で UI / Terminal フォントファミリーを選択可能にする | 2026-02-20 |
 | [SPEC-1350124a](SPEC-1350124a/spec.md) | 機能仕様: Windows シェル選択（Launch Agent / New Terminal） | 2026-02-19 |
 | [SPEC-0e6abbb7](SPEC-0e6abbb7/spec.md) | 機能仕様: 全画面テキストコピー (Cmd+Shift+C) | 2026-02-18 |
 | [SPEC-5cd3bfec](SPEC-5cd3bfec/spec.md) | 機能仕様: 設定画面のスクロールをタブ切り替えに変更 | 2026-02-18 |

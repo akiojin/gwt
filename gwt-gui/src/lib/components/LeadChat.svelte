@@ -48,9 +48,6 @@
       }
       return;
     }
-    if (event.key === "Process" && (isComposing || event.isComposing)) {
-      event.preventDefault();
-    }
   }
 
   function onCompositionStart() {

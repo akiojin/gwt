@@ -269,6 +269,10 @@ export async function installTauriMock(
             return {
               ui_font_size: 13,
               terminal_font_size: 13,
+              ui_font_family:
+                'system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif',
+              terminal_font_family:
+                '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace',
               app_language: "auto",
               agent_skill_registration_default_scope: "user",
               agent_skill_registration_codex_scope: null,
