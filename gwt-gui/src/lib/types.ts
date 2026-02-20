@@ -160,6 +160,8 @@ export interface SettingsData {
   docker_force_host: boolean;
   ui_font_size: number;
   terminal_font_size: number;
+  ui_font_family: string;
+  terminal_font_family: string;
   app_language: "auto" | "ja" | "en" | (string & {});
   voice_input: VoiceInputSettings;
   default_shell?: string | null;

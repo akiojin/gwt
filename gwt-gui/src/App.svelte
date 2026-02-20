@@ -71,10 +71,16 @@
     tryAcquireWindowSessionRestoreLead,
   } from "./lib/windowSessionRestoreLeader";
   import { collectScreenText } from "./lib/screenCapture";
+  import {
+    isAllowedExternalHttpUrl,
+    openExternalUrl,
+  } from "./lib/openExternalUrl";
 
   interface SettingsUpdatedPayload {
     uiFontSize?: number;
     terminalFontSize?: number;
+    uiFontFamily?: string;
+    terminalFontFamily?: string;
     appLanguage?: SettingsData["app_language"];
     voiceInput?: VoiceInputSettings;
   }
@@ -98,6 +104,10 @@
     language: "auto",
     model: "base",
   };
+  const DEFAULT_UI_FONT_FAMILY =
+    'system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif';
+  const DEFAULT_TERMINAL_FONT_FAMILY =
+    '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace';
 
   function clampSidebarWidth(widthPx: number): number {
     if (!Number.isFinite(widthPx)) return DEFAULT_SIDEBAR_WIDTH_PX;
@@ -558,6 +568,28 @@
     };
   });
 
+  // Keep external URL behavior consistent across all rendered links.
+  $effect(() => {
+    if (typeof document === "undefined") return;
+
+    const handleDocumentClick = (event: MouseEvent) => {
+      const anchor = nearestAnchor(event.target);
+      if (!anchor) return;
+      if (!shouldHandleExternalLinkClick(event, anchor)) return;
+
+      const rawHref = anchor.getAttribute("href");
+      if (!rawHref) return;
+
+      event.preventDefault();
+      void openExternalUrl(rawHref);
+    };
+
+    document.addEventListener("click", handleDocumentClick, true);
+    return () => {
+      document.removeEventListener("click", handleDocumentClick, true);
+    };
+  });
+
   $effect(() => {
     void projectPath;
     void setWindowTitle();
@@ -888,6 +920,28 @@
     );
   }
 
+  function nearestAnchor(target: EventTarget | null): HTMLAnchorElement | null {
+    if (!(target instanceof Element)) return null;
+    const anchor = target.closest("a[href]");
+    return anchor instanceof HTMLAnchorElement ? anchor : null;
+  }
+
+  function shouldHandleExternalLinkClick(
+    event: MouseEvent,
+    anchor: HTMLAnchorElement,
+  ): boolean {
+    if (event.defaultPrevented) return false;
+    if (event.button !== 0) return false;
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+      return false;
+    }
+    if (anchor.hasAttribute("download")) return false;
+
+    const rawHref = anchor.getAttribute("href");
+    if (!rawHref) return false;
+    return isAllowedExternalHttpUrl(rawHref);
+  }
+
   function clampFontSize(size: number): number {
     return Math.max(8, Math.min(24, Math.round(size)));
   }
@@ -920,6 +974,16 @@
     return "auto";
   }
 
+  function normalizeUiFontFamily(value: string | null | undefined): string {
+    const family = (value ?? "").trim();
+    return family.length > 0 ? family : DEFAULT_UI_FONT_FAMILY;
+  }
+
+  function normalizeTerminalFontFamily(value: string | null | undefined): string {
+    const family = (value ?? "").trim();
+    return family.length > 0 ? family : DEFAULT_TERMINAL_FONT_FAMILY;
+  }
+
   function normalizeSkillScope(
     value: string | null | undefined,
   ): SkillRegistrationScope | null {
@@ -946,10 +1010,26 @@
     document.documentElement.style.setProperty("--ui-font-base", `${size}px`);
   }
 
+  function applyUiFontFamily(family: string | null | undefined) {
+    document.documentElement.style.setProperty(
+      "--ui-font-family",
+      normalizeUiFontFamily(family),
+    );
+  }
+
   function applyTerminalFontSize(size: number) {
     (window as any).__gwtTerminalFontSize = size;
     window.dispatchEvent(
       new CustomEvent("gwt-terminal-font-size", { detail: size }),
+    );
+  }
+
+  function applyTerminalFontFamily(family: string | null | undefined) {
+    const normalized = normalizeTerminalFontFamily(family);
+    document.documentElement.style.setProperty("--terminal-font-family", normalized);
+    (window as any).__gwtTerminalFontFamily = normalized;
+    window.dispatchEvent(
+      new CustomEvent("gwt-terminal-font-family", { detail: normalized }),
     );
   }
 
@@ -1049,11 +1129,18 @@
         await invoke<
           Pick<
             SettingsData,
-            "ui_font_size" | "terminal_font_size" | "app_language" | "voice_input"
+            | "ui_font_size"
+            | "terminal_font_size"
+            | "ui_font_family"
+            | "terminal_font_family"
+            | "app_language"
+            | "voice_input"
           >
         >("get_settings");
       applyUiFontSize(clampFontSize(settings.ui_font_size ?? 13));
       applyTerminalFontSize(clampFontSize(settings.terminal_font_size ?? 13));
+      applyUiFontFamily(settings.ui_font_family);
+      applyTerminalFontFamily(settings.terminal_font_family);
       applyAppLanguage(settings.app_language);
       applyVoiceInputSettings(settings.voice_input);
     } catch {
@@ -2385,6 +2472,12 @@
       }
       if (typeof detail.terminalFontSize === "number") {
         applyTerminalFontSize(clampFontSize(detail.terminalFontSize));
+      }
+      if (typeof detail.uiFontFamily === "string") {
+        applyUiFontFamily(detail.uiFontFamily);
+      }
+      if (typeof detail.terminalFontFamily === "string") {
+        applyTerminalFontFamily(detail.terminalFontFamily);
       }
       if (typeof detail.appLanguage === "string") {
         const nextLanguage = normalizeAppLanguage(detail.appLanguage);

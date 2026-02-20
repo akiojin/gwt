@@ -140,7 +140,7 @@ pub struct TerminalSettings {
     pub default_shell: Option<String>,
 }
 
-/// Appearance settings (font sizes)
+/// Appearance settings (font size and font family)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppearanceSettings {
@@ -148,6 +148,10 @@ pub struct AppearanceSettings {
     pub ui_font_size: u32,
     /// Terminal font size in pixels (8-24, default 13)
     pub terminal_font_size: u32,
+    /// UI font family stack
+    pub ui_font_family: String,
+    /// Terminal font family stack
+    pub terminal_font_family: String,
 }
 
 impl Default for AppearanceSettings {
@@ -155,8 +159,18 @@ impl Default for AppearanceSettings {
         Self {
             ui_font_size: 13,
             terminal_font_size: 13,
+            ui_font_family: default_ui_font_family(),
+            terminal_font_family: default_terminal_font_family(),
         }
     }
+}
+
+fn default_ui_font_family() -> String {
+    "system-ui, -apple-system, \"Segoe UI\", Roboto, Ubuntu, sans-serif".to_string()
+}
+
+fn default_terminal_font_family() -> String {
+    "\"JetBrains Mono\", \"Fira Code\", \"SF Mono\", Menlo, Consolas, monospace".to_string()
 }
 
 /// Voice input settings
@@ -777,24 +791,32 @@ default_base_branch = "legacy-global"
         let settings = Settings::default();
         assert_eq!(settings.appearance.ui_font_size, 13);
         assert_eq!(settings.appearance.terminal_font_size, 13);
+        assert_eq!(
+            settings.appearance.ui_font_family,
+            "system-ui, -apple-system, \"Segoe UI\", Roboto, Ubuntu, sans-serif"
+        );
+        assert_eq!(
+            settings.appearance.terminal_font_family,
+            "\"JetBrains Mono\", \"Fira Code\", \"SF Mono\", Menlo, Consolas, monospace"
+        );
     }
 
     #[test]
     fn test_appearance_backward_compat() {
         // Config without [appearance]/[voice_input] sections should deserialize with defaults.
-        let _lock = crate::config::HOME_LOCK.lock().unwrap();
-        let temp = TempDir::new().unwrap();
-        let _env = crate::config::TestEnvGuard::new(temp.path());
-
-        let global_dir = temp.path().join(".gwt");
-        std::fs::create_dir_all(&global_dir).unwrap();
-        std::fs::write(global_dir.join("config.toml"), "debug = true\n").unwrap();
-
-        let settings = Settings::load_global().unwrap();
+        let settings: Settings = toml::from_str("debug = true\n").unwrap();
         assert!(settings.debug);
         assert_eq!(settings.app_language, "auto");
         assert_eq!(settings.appearance.ui_font_size, 13);
         assert_eq!(settings.appearance.terminal_font_size, 13);
+        assert_eq!(
+            settings.appearance.ui_font_family,
+            "system-ui, -apple-system, \"Segoe UI\", Roboto, Ubuntu, sans-serif"
+        );
+        assert_eq!(
+            settings.appearance.terminal_font_family,
+            "\"JetBrains Mono\", \"Fira Code\", \"SF Mono\", Menlo, Consolas, monospace"
+        );
         assert!(!settings.voice_input.enabled);
         assert_eq!(settings.voice_input.hotkey, "Mod+Shift+M");
         assert_eq!(settings.voice_input.language, "auto");
@@ -810,10 +832,17 @@ default_base_branch = "legacy-global"
         let mut settings = Settings::default();
         settings.appearance.ui_font_size = 16;
         settings.appearance.terminal_font_size = 18;
+        settings.appearance.ui_font_family = "Inter, sans-serif".to_string();
+        settings.appearance.terminal_font_family = "\"Cascadia Mono\", monospace".to_string();
         settings.save_global().unwrap();
         let loaded = Settings::load_global().unwrap();
         assert_eq!(loaded.appearance.ui_font_size, 16);
         assert_eq!(loaded.appearance.terminal_font_size, 18);
+        assert_eq!(loaded.appearance.ui_font_family, "Inter, sans-serif");
+        assert_eq!(
+            loaded.appearance.terminal_font_family,
+            "\"Cascadia Mono\", monospace"
+        );
     }
 
     #[test]
@@ -857,6 +886,8 @@ default_base_branch = "global-main"
 [appearance]
 ui_font_size = 17
 terminal_font_size = 19
+ui_font_family = "Inter, sans-serif"
+terminal_font_family = "\"Cascadia Mono\", monospace"
 [voice_input]
 enabled = true
 hotkey = "Mod+Shift+V"
@@ -872,6 +903,11 @@ model = "base"
         assert_eq!(loaded.app_language, "auto");
         assert_eq!(loaded.appearance.ui_font_size, 17);
         assert_eq!(loaded.appearance.terminal_font_size, 19);
+        assert_eq!(loaded.appearance.ui_font_family, "Inter, sans-serif");
+        assert_eq!(
+            loaded.appearance.terminal_font_family,
+            "\"Cascadia Mono\", monospace"
+        );
         assert!(loaded.voice_input.enabled);
         assert_eq!(loaded.voice_input.hotkey, "Mod+Shift+V");
         assert_eq!(loaded.voice_input.language, "ja");

@@ -1,6 +1,29 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.9.0] - 2026-02-20
+
+### Bug Fixes
+
+- **e2e:** Handle startup skill-scope dialog in Playwright smoke tests (#1147) by @akiojin
+- **gui:** Reduce tab activation flicker and switch stutter (#1148) by @akiojin
+- **terminal:** Stabilize windows host claude launch path (#1153)
+- **docker:** Remove HOST_GIT_COMMON_DIR short-syntax bind mount (#1151) (#1152)
+- **gui:** Allow IME process key in chat inputs (#1154)
+
+### Features
+
+- Add settings font family selection for UI and Terminal (#1155)
+- **gui:** Open clicked URLs in external browser (#1156)
+
+### Refactor
+
+- **project-mode:** Remove MCP bridge and migrate to managed skills (#1143) by @akiojin
+
+### Testing
+
+- **e2e:** Handle scope dialog in tab-switch performance spec (#1149)
+
 ## [7.8.1] - 2026-02-20
 
 ### Bug Fixes
@@ -19,6 +42,7 @@ All notable changes to this project will be documented in this file.
 - **gui:** Broaden trackpad wheel fallback conditions (#1137)
 - **agent-mode:** Fix project team session restore and merge command (#1139)
 - **gui:** Stabilize trackpad wheel fallback for rapid bursts (#1138)
+- **terminal:** Stabilize Windows Host Claude launches by defaulting to `cmd` when shell is auto, and avoid false stream-EOF error promotion while process is still alive
 - **gui:** Agentタブ空白を防止 (#1142)
 
 ### Documentation
