@@ -55,4 +55,3 @@
   - WebLinksAddon のクリックハンドラから外部起動関数が呼ばれること
 - `gwt-gui/src/lib/components/WorktreeSummaryPanel.test.ts`
   - Workflow URL オープンが共通オープナー経由で呼ばれること
-
