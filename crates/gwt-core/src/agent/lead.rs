@@ -1,4 +1,4 @@
-//! Lead state models for Project Team agent mode
+//! Lead state models for Project Mode
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

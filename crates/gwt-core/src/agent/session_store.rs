@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use super::session::{AgentSession, ProjectTeamSession, SessionStatus};
+use super::session::{AgentSession, ProjectModeSession, SessionStatus};
 use super::task::TaskStatus;
 use super::types::SessionId;
 
@@ -204,14 +204,14 @@ impl SessionStore {
         warnings
     }
 
-    // -- Project Team save/load ---------------------------------------------
+    // -- Project Mode save/load ---------------------------------------------
 
-    /// Save a ProjectTeamSession as `pt-{session_id}.json`.
-    pub fn save_project_team(&self, session: &ProjectTeamSession) -> Result<(), std::io::Error> {
+    /// Save a ProjectModeSession as `pt-{session_id}.json`.
+    pub fn save_project_mode(&self, session: &ProjectModeSession) -> Result<(), std::io::Error> {
         let json = serde_json::to_string_pretty(session)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-        let final_path = self.project_team_path(&session.id);
+        let final_path = self.project_mode_path(&session.id);
         let tmp_path = self.sessions_dir.join(format!("pt-{}.tmp", session.id.0));
 
         std::fs::write(&tmp_path, json.as_bytes())?;
@@ -227,18 +227,18 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Load a ProjectTeamSession by ID. On parse failure the file is renamed to `.broken`.
-    pub fn load_project_team(
+    /// Load a ProjectModeSession by ID. On parse failure the file is renamed to `.broken`.
+    pub fn load_project_mode(
         &self,
         session_id: &SessionId,
-    ) -> Result<ProjectTeamSession, SessionStoreError> {
-        let path = self.project_team_path(session_id);
+    ) -> Result<ProjectModeSession, SessionStoreError> {
+        let path = self.project_mode_path(session_id);
         if !path.exists() {
             return Err(SessionStoreError::NotFound);
         }
 
         let data = std::fs::read_to_string(&path)?;
-        match serde_json::from_str::<ProjectTeamSession>(&data) {
+        match serde_json::from_str::<ProjectModeSession>(&data) {
             Ok(session) => Ok(session),
             Err(e) => {
                 let broken = self
@@ -250,10 +250,10 @@ impl SessionStore {
         }
     }
 
-    // -- list_project_team_sessions -----------------------------------------
+    // -- list_project_mode_sessions -----------------------------------------
 
-    /// List all ProjectTeamSession summaries found in the sessions directory.
-    pub fn list_project_team_sessions(&self) -> Result<Vec<SessionSummary>, std::io::Error> {
+    /// List all ProjectModeSession summaries found in the sessions directory.
+    pub fn list_project_mode_sessions(&self) -> Result<Vec<SessionSummary>, std::io::Error> {
         let mut summaries = Vec::new();
 
         for entry in std::fs::read_dir(&self.sessions_dir)? {
@@ -274,7 +274,7 @@ impl SessionStore {
                 Err(_) => continue,
             };
 
-            if let Ok(session) = serde_json::from_str::<ProjectTeamSession>(&data) {
+            if let Ok(session) = serde_json::from_str::<ProjectModeSession>(&data) {
                 summaries.push(SessionSummary {
                     session_id: session.id,
                     status: session.status,
@@ -292,7 +292,7 @@ impl SessionStore {
         self.sessions_dir.join(format!("{}.json", session_id.0))
     }
 
-    fn project_team_path(&self, session_id: &SessionId) -> PathBuf {
+    fn project_mode_path(&self, session_id: &SessionId) -> PathBuf {
         self.sessions_dir.join(format!("pt-{}.json", session_id.0))
     }
 }
@@ -458,43 +458,43 @@ mod tests {
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
     }
 
-    // -- ProjectTeamSession tests -------------------------------------------
+    // -- ProjectModeSession tests -------------------------------------------
 
-    fn make_pt_session() -> ProjectTeamSession {
+    fn make_pt_session() -> ProjectModeSession {
         use crate::agent::developer::AgentType;
-        ProjectTeamSession::new(
+        ProjectModeSession::new(
             SessionId("pt-test-1".to_string()),
             PathBuf::from("/repo"),
-            "feature/agent-mode",
+            "feature/project-mode",
             AgentType::Claude,
         )
     }
 
     #[test]
-    fn test_save_and_load_project_team_roundtrip() {
+    fn test_save_and_load_project_mode_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let store = make_store(dir.path());
 
         let session = make_pt_session();
-        store.save_project_team(&session).unwrap();
+        store.save_project_mode(&session).unwrap();
 
-        let loaded = store.load_project_team(&session.id).unwrap();
+        let loaded = store.load_project_mode(&session.id).unwrap();
         assert_eq!(loaded.id, session.id);
         assert_eq!(loaded.status, SessionStatus::Active);
-        assert_eq!(loaded.base_branch, "feature/agent-mode");
+        assert_eq!(loaded.base_branch, "feature/project-mode");
     }
 
     #[test]
-    fn test_load_project_team_not_found() {
+    fn test_load_project_mode_not_found() {
         let dir = tempfile::tempdir().unwrap();
         let store = make_store(dir.path());
 
-        let result = store.load_project_team(&SessionId("nonexistent".to_string()));
+        let result = store.load_project_mode(&SessionId("nonexistent".to_string()));
         assert!(matches!(result, Err(SessionStoreError::NotFound)));
     }
 
     #[test]
-    fn test_load_project_team_broken_json() {
+    fn test_load_project_mode_broken_json() {
         let dir = tempfile::tempdir().unwrap();
         let store = make_store(dir.path());
 
@@ -502,48 +502,48 @@ mod tests {
         let path = dir.path().join("pt-bad-pt.json");
         std::fs::write(&path, "{ invalid json").unwrap();
 
-        let result = store.load_project_team(&id);
+        let result = store.load_project_mode(&id);
         assert!(matches!(result, Err(SessionStoreError::Parse(_))));
         assert!(!path.exists());
         assert!(dir.path().join("pt-bad-pt.json.broken").exists());
     }
 
     #[test]
-    fn test_save_project_team_overwrites_existing() {
+    fn test_save_project_mode_overwrites_existing() {
         let dir = tempfile::tempdir().unwrap();
         let store = make_store(dir.path());
 
         let mut session = make_pt_session();
-        store.save_project_team(&session).unwrap();
+        store.save_project_mode(&session).unwrap();
 
         session.status = SessionStatus::Completed;
-        store.save_project_team(&session).unwrap();
+        store.save_project_mode(&session).unwrap();
 
-        let loaded = store.load_project_team(&session.id).unwrap();
+        let loaded = store.load_project_mode(&session.id).unwrap();
         assert_eq!(loaded.status, SessionStatus::Completed);
     }
 
     #[test]
-    fn test_list_project_team_sessions() {
+    fn test_list_project_mode_sessions() {
         use crate::agent::developer::AgentType;
 
         let dir = tempfile::tempdir().unwrap();
         let store = make_store(dir.path());
 
-        let s1 = ProjectTeamSession::new(
+        let s1 = ProjectModeSession::new(
             SessionId("pt-a".to_string()),
             PathBuf::from("/r1"),
             "main",
             AgentType::Claude,
         );
-        let s2 = ProjectTeamSession::new(
+        let s2 = ProjectModeSession::new(
             SessionId("pt-b".to_string()),
             PathBuf::from("/r2"),
             "develop",
             AgentType::Codex,
         );
-        store.save_project_team(&s1).unwrap();
-        store.save_project_team(&s2).unwrap();
+        store.save_project_mode(&s1).unwrap();
+        store.save_project_mode(&s2).unwrap();
 
         // Also place a regular AgentSession to verify it is skipped
         let regular = AgentSession::new(SessionId("regular-1".to_string()), PathBuf::from("/r3"));
@@ -552,7 +552,7 @@ mod tests {
         // Also place a non-json file
         std::fs::write(dir.path().join("notes.txt"), "ignored").unwrap();
 
-        let list = store.list_project_team_sessions().unwrap();
+        let list = store.list_project_mode_sessions().unwrap();
         assert_eq!(list.len(), 2);
 
         let ids: Vec<&str> = list.iter().map(|s| s.session_id.0.as_str()).collect();
@@ -561,11 +561,11 @@ mod tests {
     }
 
     #[test]
-    fn test_list_project_team_sessions_empty() {
+    fn test_list_project_mode_sessions_empty() {
         let dir = tempfile::tempdir().unwrap();
         let store = make_store(dir.path());
 
-        let list = store.list_project_team_sessions().unwrap();
+        let list = store.list_project_mode_sessions().unwrap();
         assert!(list.is_empty());
     }
 }

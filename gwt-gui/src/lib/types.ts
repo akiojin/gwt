@@ -47,20 +47,22 @@ export interface TerminalAnsiProbe {
   has_true_color: boolean;
 }
 
-export interface AgentModeMessage {
+export interface ProjectModeMessage {
   role: "user" | "assistant" | "system" | "tool";
   kind?: "message" | "thought" | "action" | "observation" | "error";
   content: string;
   timestamp: number;
 }
 
-export interface AgentModeState {
-  messages: AgentModeMessage[];
+export interface ProjectModeState {
+  messages: ProjectModeMessage[];
   ai_ready: boolean;
   ai_error?: string | null;
   last_error?: string | null;
   is_waiting: boolean;
   session_name?: string | null;
+  project_mode_session_id?: string | null;
+  lead_status?: string | null;
   llm_call_count: number;
   estimated_tokens: number;
   active_spec_id?: string | null;
@@ -151,6 +153,10 @@ export interface SettingsData {
   agent_gemini_path?: string | null;
   agent_auto_install_deps: boolean;
   agent_github_project_id?: string | null;
+  agent_skill_registration_default_scope?: SkillRegistrationScope | null;
+  agent_skill_registration_codex_scope?: SkillRegistrationScope | null;
+  agent_skill_registration_claude_scope?: SkillRegistrationScope | null;
+  agent_skill_registration_gemini_scope?: SkillRegistrationScope | null;
   docker_force_host: boolean;
   ui_font_size: number;
   terminal_font_size: number;
@@ -166,20 +172,21 @@ export interface VoiceInputSettings {
   model: string;
 }
 
-export interface McpAgentRegistrationStatus {
+export type SkillRegistrationScope = "user" | "project" | "local";
+
+export interface SkillAgentRegistrationStatus {
   agent_id: string;
   label: string;
-  config_path?: string | null;
+  skills_path?: string | null;
   registered: boolean;
+  missing_skills: string[];
   error_code?: string | null;
   error_message?: string | null;
 }
 
-export interface McpRegistrationStatus {
+export interface SkillRegistrationStatus {
   overall: "ok" | "degraded" | "failed" | (string & {});
-  bridge_runtime: "ok" | "missing" | (string & {});
-  bridge_script: "ok" | "missing" | (string & {});
-  agents: McpAgentRegistrationStatus[];
+  agents: SkillAgentRegistrationStatus[];
   last_checked_at: number;
   last_error_message?: string | null;
 }
@@ -217,8 +224,7 @@ export interface Tab {
     | "agent"
     | "settings"
     | "versionHistory"
-    | "agentMode"
-    | "projectTeam"
+    | "projectMode"
     | "terminal"
     | "issueSpec"
     | "issues";
@@ -608,9 +614,9 @@ export interface PrStatusResponse {
   ghStatus: GhCliStatus;
 }
 
-// === Project Team 3-Layer Type Definitions ===
+// === Project Mode 3-Layer Type Definitions ===
 
-export interface ProjectTeamState {
+export interface ProjectModeWorkspaceState {
   sessionId: string;
   status: "active" | "paused" | "completed" | "failed";
   lead: LeadState;

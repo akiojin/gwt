@@ -26,11 +26,6 @@ jobs:
           corepack enable
           corepack prepare pnpm@10.29.2 --activate
           pnpm --version
-      - name: Build MCP bridge
-        run: |
-          cd gwt-mcp-bridge
-          pnpm install --no-frozen-lockfile
-          pnpm run build
       - name: Install system dependencies (Linux)
         run: |
           sudo apt-get update

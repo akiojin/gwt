@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import type {
-    McpRegistrationStatus,
+    SkillRegistrationStatus,
+    SkillRegistrationScope,
     ProfilesConfig,
     Profile,
     SettingsData,
@@ -11,7 +12,12 @@
 
   let { onClose }: { onClose: () => void } = $props();
 
-  type SettingsTabId = "appearance" | "voiceInput" | "mcpBridge" | "profiles" | "terminal";
+  type SettingsTabId =
+    | "appearance"
+    | "voiceInput"
+    | "githubIntegration"
+    | "profiles"
+    | "terminal";
   let activeSettingsTab: SettingsTabId = $state("appearance");
 
   let availableShells: ShellInfo[] = $state([]);
@@ -33,10 +39,10 @@
 
   let savedUiFontSize: number = $state(13);
   let savedTerminalFontSize: number = $state(13);
-  let mcpStatus: McpRegistrationStatus | null = $state(null);
-  let mcpStatusLoading: boolean = $state(false);
-  let mcpStatusRepairing: boolean = $state(false);
-  let mcpStatusMessage: string = $state("");
+  let skillStatus: SkillRegistrationStatus | null = $state(null);
+  let skillStatusLoading: boolean = $state(false);
+  let skillStatusRepairing: boolean = $state(false);
+  let skillStatusMessage: string = $state("");
 
   const DEFAULT_VOICE_INPUT: VoiceInputSettings = {
     enabled: false,
@@ -45,10 +51,8 @@
     model: "base",
   };
   const DEFAULT_APP_LANGUAGE: SettingsData["app_language"] = "auto";
-  const DEFAULT_MCP_STATUS: McpRegistrationStatus = {
+  const DEFAULT_SKILL_STATUS: SkillRegistrationStatus = {
     overall: "failed",
-    bridge_runtime: "missing",
-    bridge_script: "missing",
     agents: [],
     last_checked_at: 0,
     last_error_message: null,
@@ -189,24 +193,35 @@
     return DEFAULT_APP_LANGUAGE;
   }
 
-  function normalizeMcpStatus(
-    value: Partial<McpRegistrationStatus> | null | undefined
-  ): McpRegistrationStatus {
+  function normalizeSkillScope(
+    value: string | null | undefined
+  ): SkillRegistrationScope | null {
+    const normalized = (value ?? "").trim().toLowerCase();
+    if (normalized === "user" || normalized === "project" || normalized === "local") {
+      return normalized as SkillRegistrationScope;
+    }
+    return null;
+  }
+
+  function normalizeSkillStatus(
+    value: Partial<SkillRegistrationStatus> | null | undefined
+  ): SkillRegistrationStatus {
     const agents = Array.isArray(value?.agents)
       ? value.agents.map((agent) => ({
           agent_id: agent.agent_id ?? "unknown",
           label: agent.label ?? "Unknown",
-          config_path: agent.config_path ?? null,
+          skills_path: agent.skills_path ?? null,
           registered: !!agent.registered,
+          missing_skills: Array.isArray(agent.missing_skills)
+            ? agent.missing_skills.filter((skill) => typeof skill === "string")
+            : [],
           error_code: agent.error_code ?? null,
           error_message: agent.error_message ?? null,
         }))
       : [];
 
     return {
-      overall: value?.overall ?? DEFAULT_MCP_STATUS.overall,
-      bridge_runtime: value?.bridge_runtime ?? DEFAULT_MCP_STATUS.bridge_runtime,
-      bridge_script: value?.bridge_script ?? DEFAULT_MCP_STATUS.bridge_script,
+      overall: value?.overall ?? DEFAULT_SKILL_STATUS.overall,
       agents,
       last_checked_at:
         typeof value?.last_checked_at === "number" ? value.last_checked_at : Date.now(),
@@ -214,17 +229,17 @@
     };
   }
 
-  function mcpStatusClass(status: string): "status-ok" | "status-degraded" | "status-failed" {
+  function skillStatusClass(status: string): "status-ok" | "status-degraded" | "status-failed" {
     if (status === "ok") return "status-ok";
     if (status === "degraded") return "status-degraded";
     return "status-failed";
   }
 
-  function mcpStatusText(status: string | null | undefined): string {
+  function skillStatusText(status: string | null | undefined): string {
     return (status ?? "unknown").toUpperCase();
   }
 
-  function formatMcpCheckedAt(millis: number | null | undefined): string {
+  function formatRegistrationCheckedAt(millis: number | null | undefined): string {
     if (typeof millis !== "number" || millis <= 0) {
       return "-";
     }
@@ -235,44 +250,44 @@
     }
   }
 
-  async function loadMcpStatus(showRefreshMessage: boolean) {
-    mcpStatusLoading = true;
+  async function loadSkillStatus(showRefreshMessage: boolean) {
+    skillStatusLoading = true;
     if (showRefreshMessage) {
-      mcpStatusMessage = "";
+      skillStatusMessage = "";
     }
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      const status = await invoke<McpRegistrationStatus>("get_mcp_registration_status_cmd");
-      mcpStatus = normalizeMcpStatus(status);
+      const status = await invoke<SkillRegistrationStatus>("get_skill_registration_status_cmd");
+      skillStatus = normalizeSkillStatus(status);
       if (showRefreshMessage) {
-        mcpStatusMessage = "MCP status refreshed.";
+        skillStatusMessage = "Skill status refreshed.";
       }
     } catch (err) {
-      mcpStatus = mcpStatus ?? normalizeMcpStatus(null);
+      skillStatus = skillStatus ?? normalizeSkillStatus(null);
       const message = toErrorMessage(err);
-      mcpStatusMessage = showRefreshMessage
-        ? `Failed to refresh MCP status: ${message}`
-        : `Failed to load MCP status: ${message}`;
+      skillStatusMessage = showRefreshMessage
+        ? `Failed to refresh skill status: ${message}`
+        : `Failed to load skill status: ${message}`;
     } finally {
-      mcpStatusLoading = false;
+      skillStatusLoading = false;
     }
   }
 
-  async function repairMcpStatus() {
-    mcpStatusRepairing = true;
-    mcpStatusMessage = "";
+  async function repairSkillStatus() {
+    skillStatusRepairing = true;
+    skillStatusMessage = "";
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      const status = await invoke<McpRegistrationStatus>("repair_mcp_registration_cmd");
-      mcpStatus = normalizeMcpStatus(status);
-      mcpStatusMessage =
+      const status = await invoke<SkillRegistrationStatus>("repair_skill_registration_cmd");
+      skillStatus = normalizeSkillStatus(status);
+      skillStatusMessage =
         status.overall === "ok"
-          ? "MCP registration repaired."
-          : "MCP registration remains degraded. Check details below.";
+          ? "Skill registration repaired."
+          : "Skill registration remains degraded. Check details below.";
     } catch (err) {
-      mcpStatusMessage = `Failed to repair MCP registration: ${toErrorMessage(err)}`;
+      skillStatusMessage = `Failed to repair skill registration: ${toErrorMessage(err)}`;
     } finally {
-      mcpStatusRepairing = false;
+      skillStatusRepairing = false;
     }
   }
 
@@ -341,6 +356,18 @@
       ]);
       loadedSettings.voice_input = normalizeVoiceInputSettings(loadedSettings.voice_input);
       loadedSettings.app_language = normalizeAppLanguage(loadedSettings.app_language);
+      loadedSettings.agent_skill_registration_default_scope = normalizeSkillScope(
+        loadedSettings.agent_skill_registration_default_scope
+      );
+      loadedSettings.agent_skill_registration_codex_scope = normalizeSkillScope(
+        loadedSettings.agent_skill_registration_codex_scope
+      );
+      loadedSettings.agent_skill_registration_claude_scope = normalizeSkillScope(
+        loadedSettings.agent_skill_registration_claude_scope
+      );
+      loadedSettings.agent_skill_registration_gemini_scope = normalizeSkillScope(
+        loadedSettings.agent_skill_registration_gemini_scope
+      );
       settings = loadedSettings;
       savedUiFontSize = loadedSettings.ui_font_size ?? 13;
       savedTerminalFontSize = loadedSettings.terminal_font_size ?? 13;
@@ -349,7 +376,7 @@
       const keys = Object.keys(loadedProfiles.profiles ?? {});
       const nextSelected = loadedProfiles.active ?? keys[0] ?? "";
       selectedProfileKey = nextSelected;
-      await loadMcpStatus(false);
+      await loadSkillStatus(false);
       try {
         const result = await invoke<ShellInfo[]>("get_available_shells");
         availableShells = Array.isArray(result) ? result : [];
@@ -370,6 +397,34 @@
     saving = true;
     saveMessage = "";
     try {
+      const normalizedDefaultScope = normalizeSkillScope(
+        settings.agent_skill_registration_default_scope
+      );
+      const normalizedCodexScope = normalizeSkillScope(
+        settings.agent_skill_registration_codex_scope
+      );
+      const normalizedClaudeScope = normalizeSkillScope(
+        settings.agent_skill_registration_claude_scope
+      );
+      const normalizedGeminiScope = normalizeSkillScope(
+        settings.agent_skill_registration_gemini_scope
+      );
+      if (
+        !normalizedDefaultScope &&
+        (normalizedCodexScope || normalizedClaudeScope || normalizedGeminiScope)
+      ) {
+        saveMessage = "Choose default skill registration scope before setting agent overrides.";
+        saving = false;
+        return;
+      }
+      settings = {
+        ...settings,
+        agent_skill_registration_default_scope: normalizedDefaultScope,
+        agent_skill_registration_codex_scope: normalizedCodexScope,
+        agent_skill_registration_claude_scope: normalizedClaudeScope,
+        agent_skill_registration_gemini_scope: normalizedGeminiScope,
+      };
+
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("save_settings", { settings });
       if (profiles) {
@@ -569,6 +624,18 @@
     const next = { ...current, [field]: value } as VoiceInputSettings;
     settings = { ...settings, voice_input: normalizeVoiceInputSettings(next) };
   }
+
+  function updateSkillScopeField(
+    field:
+      | "agent_skill_registration_default_scope"
+      | "agent_skill_registration_codex_scope"
+      | "agent_skill_registration_claude_scope"
+      | "agent_skill_registration_gemini_scope",
+    value: string
+  ) {
+    if (!settings) return;
+    settings = { ...settings, [field]: normalizeSkillScope(value) };
+  }
 </script>
 
 <div class="settings-panel">
@@ -596,9 +663,9 @@
         >Voice Input</button>
         <button
           class="settings-tab-btn"
-          class:active={activeSettingsTab === "mcpBridge"}
-          onclick={() => (activeSettingsTab = "mcpBridge")}
-        >MCP Bridge</button>
+          class:active={activeSettingsTab === "githubIntegration"}
+          onclick={() => (activeSettingsTab = "githubIntegration")}
+        >GitHub Integration</button>
         <button
           class="settings-tab-btn"
           class:active={activeSettingsTab === "profiles"}
@@ -764,29 +831,6 @@
               </span>
             </div>
 
-            <div class="field">
-              <label for="agent-github-project-id">Spec Project ID</label>
-              <input
-                id="agent-github-project-id"
-                type="text"
-                autocapitalize="off"
-                autocorrect="off"
-                autocomplete="off"
-                spellcheck="false"
-                value={settings.agent_github_project_id ?? ""}
-                oninput={(e) => {
-                  if (!settings) return;
-                  settings = {
-                    ...settings,
-                    agent_github_project_id: (e.target as HTMLInputElement).value,
-                  };
-                }}
-                placeholder="PVT_xxxxxxxxxxxxxxxxxxxx"
-              />
-              <span class="field-hint">
-                Fixed GitHub Project V2 ID for issue-first spec sync.
-              </span>
-            </div>
           </div>
 
         {:else if activeSettingsTab === "voiceInput"}
@@ -863,72 +907,147 @@
             </div>
           </div>
 
-        {:else if activeSettingsTab === "mcpBridge"}
+        {:else if activeSettingsTab === "githubIntegration"}
           <div class="section-content">
-            <div class="mcp-overview">
-              <span class={`mcp-badge ${mcpStatusClass(mcpStatus?.overall ?? "failed")}`}>
-                Overall: {mcpStatusText(mcpStatus?.overall)}
+            <div class="field">
+              <label for="skill-scope-default">Skill Registration Scope (Default)</label>
+              <select
+                id="skill-scope-default"
+                class="select"
+                value={settings.agent_skill_registration_default_scope ?? ""}
+                onchange={(e) =>
+                  updateSkillScopeField(
+                    "agent_skill_registration_default_scope",
+                    (e.target as HTMLSelectElement).value
+                  )}
+              >
+                <option value="">Not selected (prompt on startup)</option>
+                <option value="user">User (~/.xxx)</option>
+                <option value="project">Project (&lt;repo&gt;/.xxx)</option>
+                <option value="local">Local (&lt;repo&gt;/.xxx.local)</option>
+              </select>
+              <span class="field-hint">
+                Controls where managed skills/plugins are auto-registered.
+              </span>
+            </div>
+
+            <div class="field">
+              <!-- svelte-ignore a11y_label_has_associated_control -->
+              <label>Agent Scope Overrides</label>
+              <div class="row">
+                <div class="scope-select">
+                  <label for="skill-scope-codex">Codex</label>
+                  <select
+                    id="skill-scope-codex"
+                    class="select"
+                    value={settings.agent_skill_registration_codex_scope ?? ""}
+                    onchange={(e) =>
+                      updateSkillScopeField(
+                        "agent_skill_registration_codex_scope",
+                        (e.target as HTMLSelectElement).value
+                      )}
+                  >
+                    <option value="">Use default</option>
+                    <option value="user">User</option>
+                    <option value="project">Project</option>
+                    <option value="local">Local</option>
+                  </select>
+                </div>
+                <div class="scope-select">
+                  <label for="skill-scope-claude">Claude Code</label>
+                  <select
+                    id="skill-scope-claude"
+                    class="select"
+                    value={settings.agent_skill_registration_claude_scope ?? ""}
+                    onchange={(e) =>
+                      updateSkillScopeField(
+                        "agent_skill_registration_claude_scope",
+                        (e.target as HTMLSelectElement).value
+                      )}
+                  >
+                    <option value="">Use default</option>
+                    <option value="user">User</option>
+                    <option value="project">Project</option>
+                    <option value="local">Local</option>
+                  </select>
+                </div>
+                <div class="scope-select">
+                  <label for="skill-scope-gemini">Gemini</label>
+                  <select
+                    id="skill-scope-gemini"
+                    class="select"
+                    value={settings.agent_skill_registration_gemini_scope ?? ""}
+                    onchange={(e) =>
+                      updateSkillScopeField(
+                        "agent_skill_registration_gemini_scope",
+                        (e.target as HTMLSelectElement).value
+                      )}
+                  >
+                    <option value="">Use default</option>
+                    <option value="user">User</option>
+                    <option value="project">Project</option>
+                    <option value="local">Local</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="skill-overview">
+              <span class={`skill-badge ${skillStatusClass(skillStatus?.overall ?? "failed")}`}>
+                Overall: {skillStatusText(skillStatus?.overall)}
               </span>
               <span class="field-hint">
-                Last checked: {formatMcpCheckedAt(mcpStatus?.last_checked_at)}
+                Last checked: {formatRegistrationCheckedAt(skillStatus?.last_checked_at)}
               </span>
             </div>
 
-            <div class="mcp-health-grid">
-              <div class="mcp-health-item">
-                <span class="mcp-health-label">Runtime (bun/node)</span>
-                <span class={`mcp-mini-badge ${mcpStatusClass(mcpStatus?.bridge_runtime ?? "missing")}`}>
-                  {mcpStatusText(mcpStatus?.bridge_runtime)}
-                </span>
-              </div>
-              <div class="mcp-health-item">
-                <span class="mcp-health-label">Bridge Script</span>
-                <span class={`mcp-mini-badge ${mcpStatusClass(mcpStatus?.bridge_script ?? "missing")}`}>
-                  {mcpStatusText(mcpStatus?.bridge_script)}
-                </span>
-              </div>
-            </div>
-
-            <div class="mcp-agent-list">
-              {#each mcpStatus?.agents ?? [] as agent (agent.agent_id)}
-                <div class="mcp-agent-row">
-                  <div class="mcp-agent-meta">
-                    <span class="mcp-agent-label">{agent.label}</span>
-                    {#if agent.config_path}
-                      <span class="mcp-agent-path mono">{agent.config_path}</span>
+            <div class="skill-agent-list">
+              {#each skillStatus?.agents ?? [] as agent (agent.agent_id)}
+                <div class="skill-agent-row">
+                  <div class="skill-agent-meta">
+                    <span class="skill-agent-label">{agent.label}</span>
+                    {#if agent.skills_path}
+                      <span class="skill-agent-path mono">{agent.skills_path}</span>
+                    {/if}
+                    {#if agent.missing_skills.length > 0}
+                      <span class="field-hint">
+                        Missing: {agent.missing_skills.join(", ")}
+                      </span>
                     {/if}
                     {#if agent.error_message}
                       <span class="field-hint">{agent.error_message}</span>
                     {/if}
                   </div>
-                  <span class={`mcp-mini-badge ${agent.registered ? "status-ok" : "status-failed"}`}>
+                  <span class={`skill-mini-badge ${agent.registered ? "status-ok" : "status-failed"}`}>
                     {agent.registered ? "REGISTERED" : "MISSING"}
                   </span>
                 </div>
               {/each}
             </div>
 
-            {#if mcpStatus?.last_error_message}
-              <span class="field-hint">{mcpStatus.last_error_message}</span>
+            {#if skillStatus?.last_error_message}
+              <span class="field-hint">{skillStatus.last_error_message}</span>
             {/if}
-            {#if mcpStatusMessage}
-              <span class="field-hint">{mcpStatusMessage}</span>
+            {#if skillStatusMessage}
+              <span class="field-hint">{skillStatusMessage}</span>
             {/if}
 
             <div class="row">
               <button
                 class="btn btn-ghost"
-                onclick={() => void loadMcpStatus(true)}
-                disabled={mcpStatusLoading || mcpStatusRepairing}
+                onclick={() => void loadSkillStatus(true)}
+                disabled={skillStatusLoading || skillStatusRepairing}
               >
-                {mcpStatusLoading ? "Refreshing..." : "Refresh MCP Status"}
+                {skillStatusLoading ? "Refreshing..." : "Refresh Skill Status"}
               </button>
               <button
                 class="btn btn-add"
-                onclick={() => void repairMcpStatus()}
-                disabled={mcpStatusRepairing}
+                onclick={() => void repairSkillStatus()}
+                disabled={skillStatusRepairing}
               >
-                {mcpStatusRepairing ? "Repairing..." : "Repair MCP Registration"}
+                {skillStatusRepairing ? "Repairing..." : "Repair Skill Registration"}
               </button>
             </div>
           </div>
@@ -1344,6 +1463,24 @@
     flex-wrap: wrap;
   }
 
+  .scope-select {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 180px;
+  }
+
+  .scope-select label {
+    font-size: var(--ui-font-sm);
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+  }
+
+  .scope-select .select {
+    max-width: none;
+  }
+
   .env-table {
     display: flex;
     flex-direction: column;
@@ -1473,15 +1610,15 @@
     width: fit-content;
   }
 
-  .mcp-overview {
+  .skill-overview {
     display: flex;
     align-items: center;
     gap: 10px;
     flex-wrap: wrap;
   }
 
-  .mcp-badge,
-  .mcp-mini-badge {
+  .skill-badge,
+  .skill-mini-badge {
     padding: 4px 10px;
     border-radius: 999px;
     border: 1px solid var(--border-color);
@@ -1505,37 +1642,14 @@
     color: var(--red);
   }
 
-  .mcp-health-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(220px, 1fr));
-    gap: 10px;
-    max-width: 760px;
-  }
-
-  .mcp-health-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    padding: 10px 12px;
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-  }
-
-  .mcp-health-label {
-    color: var(--text-secondary);
-    font-size: var(--ui-font-md);
-  }
-
-  .mcp-agent-list {
+  .skill-agent-list {
     display: flex;
     flex-direction: column;
     gap: 8px;
     max-width: 960px;
   }
 
-  .mcp-agent-row {
+  .skill-agent-row {
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -1546,20 +1660,20 @@
     background: var(--bg-secondary);
   }
 
-  .mcp-agent-meta {
+  .skill-agent-meta {
     display: flex;
     flex-direction: column;
     gap: 2px;
     min-width: 0;
   }
 
-  .mcp-agent-label {
+  .skill-agent-label {
     color: var(--text-primary);
     font-size: var(--ui-font-md);
     font-weight: 500;
   }
 
-  .mcp-agent-path {
+  .skill-agent-path {
     color: var(--text-muted);
     font-size: var(--ui-font-sm);
     word-break: break-all;
@@ -1792,10 +1906,7 @@
     .ai-grid {
       grid-template-columns: 1fr;
     }
-    .mcp-health-grid {
-      grid-template-columns: 1fr;
-    }
-    .mcp-agent-row {
+    .skill-agent-row {
       flex-direction: column;
       align-items: flex-start;
     }

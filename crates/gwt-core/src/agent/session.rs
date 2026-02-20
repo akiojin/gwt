@@ -1,4 +1,4 @@
-//! Session state for agent mode
+//! Session state for Project Mode
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -68,9 +68,9 @@ impl AgentSession {
     }
 }
 
-/// Project Team session (3-layer: Lead / Coordinator / Developer)
+/// Project Mode session (3-layer: Lead / Coordinator / Developer)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectTeamSession {
+pub struct ProjectModeSession {
     pub id: SessionId,
     pub status: SessionStatus,
     pub created_at: DateTime<Utc>,
@@ -82,7 +82,7 @@ pub struct ProjectTeamSession {
     pub developer_agent_type: AgentType,
 }
 
-impl ProjectTeamSession {
+impl ProjectModeSession {
     pub fn new(
         id: SessionId,
         repository_path: PathBuf,
@@ -119,23 +119,23 @@ mod tests {
     }
 
     #[test]
-    fn test_project_team_session_new() {
-        let session = ProjectTeamSession::new(
+    fn test_project_mode_session_new() {
+        let session = ProjectModeSession::new(
             SessionId("pt-1".to_string()),
             PathBuf::from("/repo"),
-            "feature/agent-mode",
+            "feature/project-mode",
             AgentType::Claude,
         );
         assert_eq!(session.status, SessionStatus::Active);
-        assert_eq!(session.base_branch, "feature/agent-mode");
+        assert_eq!(session.base_branch, "feature/project-mode");
         assert_eq!(session.developer_agent_type, AgentType::Claude);
         assert!(session.issues.is_empty());
         assert_eq!(session.lead.status, super::super::lead::LeadStatus::Idle);
     }
 
     #[test]
-    fn test_project_team_session_touch() {
-        let mut session = ProjectTeamSession::new(
+    fn test_project_mode_session_touch() {
+        let mut session = ProjectModeSession::new(
             SessionId("pt-2".to_string()),
             PathBuf::from("/repo"),
             "main",
@@ -148,15 +148,15 @@ mod tests {
     }
 
     #[test]
-    fn test_project_team_session_serde_roundtrip() {
-        let session = ProjectTeamSession::new(
+    fn test_project_mode_session_serde_roundtrip() {
+        let session = ProjectModeSession::new(
             SessionId("pt-3".to_string()),
             PathBuf::from("/repo"),
             "develop",
             AgentType::Gemini,
         );
         let json = serde_json::to_string_pretty(&session).unwrap();
-        let deserialized: ProjectTeamSession = serde_json::from_str(&json).unwrap();
+        let deserialized: ProjectModeSession = serde_json::from_str(&json).unwrap();
 
         assert_eq!(deserialized.id, session.id);
         assert_eq!(deserialized.status, SessionStatus::Active);

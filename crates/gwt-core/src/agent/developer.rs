@@ -1,4 +1,4 @@
-//! Developer state for agent mode (Project Team model)
+//! Developer state for Project Mode
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
