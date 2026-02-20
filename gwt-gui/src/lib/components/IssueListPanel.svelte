@@ -5,6 +5,7 @@
     GhCliStatus,
     FetchIssuesResponse,
   } from "../types";
+  import { openExternalUrl } from "../openExternalUrl";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
   import IssueSpecPanel from "./IssueSpecPanel.svelte";
 
@@ -257,12 +258,7 @@
   }
 
   async function handleOpenInGitHub(url: string) {
-    try {
-      const { open } = await import("@tauri-apps/plugin-shell");
-      await open(url);
-    } catch {
-      window.open(url, "_blank");
-    }
+    await openExternalUrl(url);
   }
 
   function handleWorkOnIssue(issue: GitHubIssueInfo) {

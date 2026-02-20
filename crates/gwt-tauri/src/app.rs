@@ -182,6 +182,7 @@ pub fn build_app(
     #[cfg(not(test))]
     let builder = builder
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_store::Builder::default().build());
 
     builder

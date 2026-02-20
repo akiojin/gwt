@@ -18,6 +18,7 @@
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
   import PrStatusSection from "./PrStatusSection.svelte";
   import { workflowStatusIcon, workflowStatusClass } from "../prStatusHelpers";
+  import { openExternalUrl } from "../openExternalUrl";
 
   let {
     projectPath,
@@ -1000,13 +1001,12 @@
       onOpenCiLog(run.runId);
       return;
     }
-    if (typeof window === "undefined" || !window.open) return;
 
     const prUrl = prDetail?.url ?? "";
     const match = prUrl.match(/^(https:\/\/github\.com\/[^/]+\/[^/]+)\//);
     const workflowBase = match ? match[1] : null;
     if (!workflowBase) return;
-    window.open(`${workflowBase}/actions/runs/${run.runId}`, "_blank", "noopener");
+    void openExternalUrl(`${workflowBase}/actions/runs/${run.runId}`);
   }
 
   async function getInvoke(): Promise<TauriInvoke> {

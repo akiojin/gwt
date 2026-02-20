@@ -135,7 +135,10 @@ impl SystemMonitor {
     }
 
     /// Dynamic GPU info from NVIDIA (requires `nvidia-gpu` feature on Linux/Windows).
-    #[cfg(feature = "nvidia-gpu")]
+    #[cfg(all(
+        feature = "nvidia-gpu",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     pub fn gpu_dynamic_info(&self) -> Vec<GpuDynamicInfo> {
         let Ok(nvml) = nvml_wrapper::Nvml::init() else {
             return Vec::new();
@@ -169,7 +172,10 @@ impl SystemMonitor {
     }
 
     /// Stub: always returns empty when NVIDIA GPU feature is not enabled.
-    #[cfg(not(feature = "nvidia-gpu"))]
+    #[cfg(not(all(
+        feature = "nvidia-gpu",
+        any(target_os = "linux", target_os = "windows")
+    )))]
     pub fn gpu_dynamic_info(&self) -> Vec<GpuDynamicInfo> {
         Vec::new()
     }

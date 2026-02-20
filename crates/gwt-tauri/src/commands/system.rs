@@ -66,9 +66,10 @@ fn build_gpu_infos(
 
         gpus.push(GpuInfo {
             name: static_info.name,
-            vram_total_bytes: static_info
-                .vram_total_bytes
-                .or(dynamic_match.as_ref().map(|info| info.vram_total_bytes)),
+            vram_total_bytes: dynamic_match
+                .as_ref()
+                .map(|info| info.vram_total_bytes)
+                .or(static_info.vram_total_bytes),
             vram_used_bytes: dynamic_match.as_ref().map(|info| info.vram_used_bytes),
             usage_percent: dynamic_match.as_ref().map(|info| info.usage_percent),
         });
@@ -206,7 +207,7 @@ mod tests {
         let gpus = build_gpu_infos(
             vec![GpuStaticInfo {
                 name: "NVIDIA GeForce RTX 4090".to_string(),
-                vram_total_bytes: None,
+                vram_total_bytes: Some(4096),
             }],
             vec![GpuDynamicInfo {
                 name: "NVIDIA GeForce RTX 4090".to_string(),
@@ -219,6 +220,7 @@ mod tests {
         assert_eq!(gpus.len(), 1);
         let gpu = &gpus[0];
         assert_eq!(gpu.name, "NVIDIA GeForce RTX 4090");
+        // Prefer NVML total VRAM over potentially stale static values.
         assert_eq!(gpu.vram_total_bytes, Some(24564));
         assert_eq!(gpu.vram_used_bytes, Some(2048));
         assert_eq!(gpu.usage_percent, Some(33.0));

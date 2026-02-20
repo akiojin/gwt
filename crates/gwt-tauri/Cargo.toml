@@ -12,6 +12,7 @@ publish = false
 gwt-core = { workspace = true, features = ["nvidia-gpu"] }
 tauri = { version = "2", features = ["macos-private-api", "tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
+tauri-plugin-shell = "2"
 tauri-plugin-store = "2"
 serde.workspace = true
 serde_json.workspace = true
