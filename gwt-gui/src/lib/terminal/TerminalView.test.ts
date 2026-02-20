@@ -5,9 +5,13 @@ const invokeMock = vi.fn();
 const listenMock = vi.fn();
 const writeTextMock = vi.fn();
 const readTextMock = vi.fn();
+const openExternalUrlMock = vi.fn();
 let customKeyEventHandler: ((event: KeyboardEvent) => boolean) | null = null;
 let terminalOutputHandler:
   | ((event: { payload: { pane_id: string; data: number[] } }) => void)
+  | null = null;
+let webLinksClickHandler:
+  | ((event: MouseEvent, uri: string) => void)
   | null = null;
 let callOrder: string[] = [];
 
@@ -29,6 +33,10 @@ vi.mock("@tauri-apps/api/event", () => ({
   },
 }));
 
+vi.mock("../openExternalUrl", () => ({
+  openExternalUrl: (...args: unknown[]) => openExternalUrlMock(...args),
+}));
+
 vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 
 vi.mock("@xterm/addon-fit", () => ({
@@ -41,7 +49,11 @@ vi.mock("@xterm/addon-fit", () => ({
 }));
 
 vi.mock("@xterm/addon-web-links", () => ({
-  WebLinksAddon: class WebLinksAddon {},
+  WebLinksAddon: class WebLinksAddon {
+    constructor(handler?: (event: MouseEvent, uri: string) => void) {
+      webLinksClickHandler = handler ?? null;
+    }
+  },
 }));
 
 vi.mock("@xterm/xterm", () => ({
@@ -106,8 +118,10 @@ describe("TerminalView", () => {
     listenMock.mockReset();
     writeTextMock.mockReset();
     readTextMock.mockReset();
+    openExternalUrlMock.mockReset();
     customKeyEventHandler = null;
     terminalOutputHandler = null;
+    webLinksClickHandler = null;
     callOrder = [];
     delete (window as any).__gwtTerminalFontSize;
     delete (window as any).__gwtTerminalFontFamily;
@@ -207,6 +221,24 @@ describe("TerminalView", () => {
     expect(terminalInstances.length).toBeGreaterThan(0);
     const term = terminalInstances[0];
     expect(term.write).toHaveBeenCalledWith("hello\n");
+  });
+
+  it("opens terminal web links with external opener", async () => {
+    openExternalUrlMock.mockResolvedValue(true);
+    await renderTerminalView({ paneId: "pane-link", active: true });
+
+    await waitFor(() => {
+      expect(webLinksClickHandler).not.toBeNull();
+    });
+
+    const preventDefault = vi.fn();
+    webLinksClickHandler!(
+      { preventDefault } as unknown as MouseEvent,
+      "https://example.com",
+    );
+
+    expect(preventDefault).toHaveBeenCalled();
+    expect(openExternalUrlMock).toHaveBeenCalledWith("https://example.com");
   });
 
   it("notifies readiness only after activation fit + resize", async () => {

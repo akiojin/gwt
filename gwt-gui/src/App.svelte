@@ -71,6 +71,10 @@
     tryAcquireWindowSessionRestoreLead,
   } from "./lib/windowSessionRestoreLeader";
   import { collectScreenText } from "./lib/screenCapture";
+  import {
+    isAllowedExternalHttpUrl,
+    openExternalUrl,
+  } from "./lib/openExternalUrl";
 
   interface SettingsUpdatedPayload {
     uiFontSize?: number;
@@ -564,6 +568,28 @@
     };
   });
 
+  // Keep external URL behavior consistent across all rendered links.
+  $effect(() => {
+    if (typeof document === "undefined") return;
+
+    const handleDocumentClick = (event: MouseEvent) => {
+      const anchor = nearestAnchor(event.target);
+      if (!anchor) return;
+      if (!shouldHandleExternalLinkClick(event, anchor)) return;
+
+      const rawHref = anchor.getAttribute("href");
+      if (!rawHref) return;
+
+      event.preventDefault();
+      void openExternalUrl(rawHref);
+    };
+
+    document.addEventListener("click", handleDocumentClick, true);
+    return () => {
+      document.removeEventListener("click", handleDocumentClick, true);
+    };
+  });
+
   $effect(() => {
     void projectPath;
     void setWindowTitle();
@@ -892,6 +918,28 @@
       typeof (window as Window & { __TAURI_INTERNALS__?: unknown })
         .__TAURI_INTERNALS__ !== "undefined"
     );
+  }
+
+  function nearestAnchor(target: EventTarget | null): HTMLAnchorElement | null {
+    if (!(target instanceof Element)) return null;
+    const anchor = target.closest("a[href]");
+    return anchor instanceof HTMLAnchorElement ? anchor : null;
+  }
+
+  function shouldHandleExternalLinkClick(
+    event: MouseEvent,
+    anchor: HTMLAnchorElement,
+  ): boolean {
+    if (event.defaultPrevented) return false;
+    if (event.button !== 0) return false;
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+      return false;
+    }
+    if (anchor.hasAttribute("download")) return false;
+
+    const rawHref = anchor.getAttribute("href");
+    if (!rawHref) return false;
+    return isAllowedExternalHttpUrl(rawHref);
   }
 
   function clampFontSize(size: number): number {

@@ -274,6 +274,10 @@ export async function installTauriMock(
               terminal_font_family:
                 '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace',
               app_language: "auto",
+              agent_skill_registration_default_scope: "user",
+              agent_skill_registration_codex_scope: null,
+              agent_skill_registration_claude_scope: null,
+              agent_skill_registration_gemini_scope: null,
               voice_input: {
                 enabled: false,
                 hotkey: "Mod+Shift+M",
