@@ -28,10 +28,12 @@ pub fn parse_classify_response(response: &str) -> Result<String, AIError> {
         ));
     }
 
-    for &prefix in VALID_PREFIXES {
-        if lower.contains(prefix) {
-            return Ok(prefix.to_string());
-        }
+    let earliest = VALID_PREFIXES
+        .iter()
+        .filter_map(|&prefix| lower.find(prefix).map(|idx| (idx, prefix)))
+        .min_by_key(|(idx, _)| *idx);
+    if let Some((_, prefix)) = earliest {
+        return Ok(prefix.to_string());
     }
 
     Err(AIError::ParseError(format!(
@@ -50,9 +52,7 @@ pub fn classify_issue_prefix(
 ) -> Result<String, AIError> {
     let title = title.trim();
     if title.is_empty() {
-        return Err(AIError::ConfigError(
-            "Issue title is empty".to_string(),
-        ));
+        return Err(AIError::ConfigError("Issue title is empty".to_string()));
     }
 
     let labels_str = if labels.is_empty() {
@@ -115,6 +115,14 @@ mod tests {
         assert_eq!(
             parse_classify_response("The prefix should be bugfix").unwrap(),
             "bugfix"
+        );
+    }
+
+    #[test]
+    fn parse_classify_response_uses_first_prefix_in_response_order() {
+        assert_eq!(
+            parse_classify_response("hotfix, not bugfix").unwrap(),
+            "hotfix"
         );
     }
 
