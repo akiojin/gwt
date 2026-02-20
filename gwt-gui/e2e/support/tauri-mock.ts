@@ -270,6 +270,10 @@ export async function installTauriMock(
               ui_font_size: 13,
               terminal_font_size: 13,
               app_language: "auto",
+              agent_skill_registration_default_scope: "user",
+              agent_skill_registration_codex_scope: null,
+              agent_skill_registration_claude_scope: null,
+              agent_skill_registration_gemini_scope: null,
               voice_input: {
                 enabled: false,
                 hotkey: "Mod+Shift+M",

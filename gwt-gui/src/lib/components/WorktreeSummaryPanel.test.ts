@@ -4,6 +4,7 @@ import type { BranchInfo } from "../types";
 
 const invokeMock = vi.fn();
 const listenMock = vi.fn();
+const openExternalUrlMock = vi.fn();
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
@@ -14,6 +15,10 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: listenMock,
+}));
+
+vi.mock("../openExternalUrl", () => ({
+  openExternalUrl: (...args: unknown[]) => openExternalUrlMock(...args),
 }));
 
 async function renderPanel(props: any) {
@@ -153,6 +158,7 @@ describe("WorktreeSummaryPanel", () => {
     listenMock.mockResolvedValue(() => {});
 
     invokeMock.mockReset();
+    openExternalUrlMock.mockReset();
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "get_branch_quick_start") return [];
       if (cmd === "get_branch_session_summary") return sessionSummaryFixture;
@@ -442,7 +448,7 @@ describe("WorktreeSummaryPanel", () => {
   });
 
   it("switches to Workflow tab and shows workflow runs", async () => {
-    const windowOpen = vi.spyOn(window, "open").mockReturnValue(null);
+    openExternalUrlMock.mockResolvedValue(true);
 
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "get_branch_quick_start") return [];
@@ -472,12 +478,9 @@ describe("WorktreeSummaryPanel", () => {
     await fireEvent.click(
       rendered.getByText("Success").closest("button") as HTMLButtonElement
     );
-    expect(windowOpen).toHaveBeenCalledWith(
+    expect(openExternalUrlMock).toHaveBeenCalledWith(
       "https://github.com/test/repo/actions/runs/100",
-      "_blank",
-      "noopener"
     );
-    windowOpen.mockRestore();
   });
 
   it("renders Workflow from resolved prNumber even when latest branch PR is unavailable", async () => {

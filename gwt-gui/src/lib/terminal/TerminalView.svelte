@@ -6,6 +6,7 @@
   import { onMount } from "svelte";
   import { isCopyShortcut, isPasteShortcut } from "./shortcuts";
   import { registerTerminalInputTarget } from "../voice/inputTargetRegistry";
+  import { openExternalUrl } from "../openExternalUrl";
 
   let {
     paneId,
@@ -411,7 +412,10 @@
     });
 
     const fit = new FitAddon();
-    const webLinks = new WebLinksAddon();
+    const webLinks = new WebLinksAddon((event, uri) => {
+      event?.preventDefault?.();
+      void openExternalUrl(uri);
+    });
 
     term.loadAddon(fit);
     term.loadAddon(webLinks);
