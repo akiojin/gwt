@@ -8,6 +8,14 @@ use super::client::{AIClient, AIError, ChatMessage};
 pub const ISSUE_CLASSIFY_SYSTEM_PROMPT: &str = "You are a branch prefix classifier for GitHub issues. Based on the issue title, labels, and body, respond with exactly ONE word indicating the branch type.\n\nValid responses: feature, bugfix, hotfix, release\n\n- bugfix: Bug reports, crashes, errors, broken functionality, regressions\n- hotfix: Critical production issues requiring immediate fix\n- feature: New features, enhancements, improvements\n- release: Release preparation, version bumps\n\nRespond with only the single word. No explanation.";
 
 const VALID_PREFIXES: &[&str] = &["feature", "bugfix", "hotfix", "release"];
+const ISSUE_BODY_MAX_CHARS: usize = 500;
+
+fn truncate_to_chars(input: &str, max_chars: usize) -> &str {
+    match input.char_indices().nth(max_chars) {
+        Some((idx, _)) => &input[..idx],
+        None => input,
+    }
+}
 
 /// Parse the AI response text into a valid branch prefix.
 ///
@@ -56,11 +64,7 @@ pub fn classify_issue_prefix(
     let body_str = match body {
         Some(b) if !b.trim().is_empty() => {
             let trimmed = b.trim();
-            if trimmed.len() > 500 {
-                &trimmed[..500]
-            } else {
-                trimmed
-            }
+            truncate_to_chars(trimmed, ISSUE_BODY_MAX_CHARS)
         }
         _ => "(none)",
     };
@@ -132,5 +136,20 @@ mod tests {
     #[test]
     fn parse_classify_response_fails_on_enhancement() {
         assert!(parse_classify_response("enhancement").is_err());
+    }
+
+    #[test]
+    fn truncate_to_chars_keeps_utf8_boundary() {
+        let input = "あ".repeat(501);
+        let truncated = truncate_to_chars(&input, 500);
+        assert_eq!(truncated.chars().count(), 500);
+        assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn truncate_to_chars_returns_original_when_shorter_than_limit() {
+        let input = "emoji😀text";
+        let truncated = truncate_to_chars(input, ISSUE_BODY_MAX_CHARS);
+        assert_eq!(truncated, input);
     }
 }

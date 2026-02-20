@@ -723,6 +723,8 @@
   }
 
   async function determinePrefixForIssue(issue: GitHubIssueInfo): Promise<void> {
+    const reqId = ++classifyRequestId;
+    const issueNumber = issue.number;
     // 1. Label-based (synchronous)
     const labelPrefix = determinePrefixFromLabels(issue.labels);
     if (labelPrefix) {
@@ -738,7 +740,6 @@
       return;
     }
     // 3. AI fallback
-    const reqId = ++classifyRequestId;
     newBranchPrefix = "" as BranchPrefix;
     prefixClassifying = true;
     try {
@@ -748,7 +749,7 @@
         labels: issue.labels.map(l => l.name),
         body: issue.body ?? null,
       });
-      if (reqId !== classifyRequestId) return; // stale request
+      if (reqId !== classifyRequestId || selectedIssue?.number !== issueNumber) return; // stale request
       if (result.status === "ok" && result.prefix) {
         const prefix = `${result.prefix}/` as BranchPrefix;
         if ((BRANCH_PREFIXES as readonly string[]).includes(prefix)) {
@@ -759,7 +760,7 @@
       }
       // Invalid response, AI not configured, or error → leave unselected
     } catch {
-      if (reqId !== classifyRequestId) return;
+      if (reqId !== classifyRequestId || selectedIssue?.number !== issueNumber) return;
     } finally {
       if (reqId === classifyRequestId) {
         prefixClassifying = false;
@@ -1104,6 +1105,7 @@
         errorMessage = "Selected issue is no longer available. Please select another issue.";
         return;
       }
+      if (!newBranchPrefix) return;
       const fullName = issueForLaunch
         ? issueBranchName
         : newBranchFullName.trim();
@@ -1833,8 +1835,9 @@
             (branchMode === "existing"
               ? !existingBranch.trim()
               : !baseBranch.trim() ||
+                newBranchPrefix === "" ||
                 (newBranchTab === "fromIssue"
-                  ? !canLaunchFromIssue(selectedIssue) || newBranchPrefix === ""
+                  ? !canLaunchFromIssue(selectedIssue)
                   : !newBranchFullName.trim()))
           }
           onclick={handleLaunch}

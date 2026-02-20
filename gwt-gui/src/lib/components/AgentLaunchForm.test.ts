@@ -840,7 +840,7 @@ describe("AgentLaunchForm", () => {
               number: 99,
               title: "Issue 99",
               updatedAt: "2026-02-13T00:00:00Z",
-              labels: [],
+              labels: [{ name: "bug", color: "d73a4a" }],
             },
           ],
           hasNextPage: false,
@@ -2565,6 +2565,201 @@ describe("AgentLaunchForm", () => {
 
     // Launch button should be disabled since prefix is empty
     expect((rendered.getByRole("button", { name: "Launch" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("keeps launch disabled in Manual tab when prefix remains empty after AI failure", async () => {
+    const onLaunch = vi.fn().mockResolvedValue(undefined);
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.90.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "check_gh_cli_status") return { available: true, authenticated: true };
+      if (cmd === "fetch_github_issues") {
+        return {
+          issues: [
+            {
+              number: 71,
+              title: "Needs AI classification",
+              state: "open",
+              updatedAt: "2026-02-13T00:00:00Z",
+              htmlUrl: "https://github.com/test/repo/issues/71",
+              labels: [{ name: "question", color: "d876e3" }],
+              assignees: [],
+              commentsCount: 0,
+            },
+          ],
+          hasNextPage: false,
+        };
+      }
+      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "classify_issue_branch_prefix") {
+        return { status: "error", error: "AI service unavailable" };
+      }
+      if (cmd === "list_worktree_branches") return [];
+      if (cmd === "list_remote_branches") return [];
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "none",
+          compose_services: [],
+          docker_available: false,
+          compose_available: false,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch,
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "New Branch" }));
+    await fireEvent.click(rendered.getByRole("button", { name: "From Issue" }));
+
+    await waitFor(() => {
+      expect((rendered.getByRole("button", { name: /#71/i }) as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: /#71/i }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("classify_issue_branch_prefix", expect.any(Object));
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Manual" }));
+    await fireEvent.input(rendered.getByLabelText("New Branch Name"), {
+      target: { value: "manual-suffix" },
+    });
+
+    const launchButton = rendered.getByRole("button", { name: "Launch" }) as HTMLButtonElement;
+    expect(launchButton.disabled).toBe(true);
+
+    await fireEvent.click(launchButton);
+    expect(onLaunch).not.toHaveBeenCalled();
+  });
+
+  it("invalidates in-flight AI classification when switching to label-derived issue", async () => {
+    let classifyCallCount = 0;
+    let resolveClassify!: (value: any) => void;
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "detect_agents") {
+        return [
+          {
+            id: "codex",
+            name: "Codex",
+            version: "0.90.0",
+            authenticated: true,
+            available: true,
+          },
+        ];
+      }
+      if (cmd === "check_gh_cli_status") return { available: true, authenticated: true };
+      if (cmd === "fetch_github_issues") {
+        return {
+          issues: [
+            {
+              number: 82,
+              title: "Issue requiring AI",
+              state: "open",
+              updatedAt: "2026-02-13T00:00:00Z",
+              htmlUrl: "https://github.com/test/repo/issues/82",
+              labels: [{ name: "enhancement", color: "a2eeef" }],
+              assignees: [],
+              commentsCount: 0,
+            },
+            {
+              number: 83,
+              title: "Issue with bug label",
+              state: "open",
+              updatedAt: "2026-02-13T00:00:00Z",
+              htmlUrl: "https://github.com/test/repo/issues/83",
+              labels: [{ name: "bug", color: "d73a4a" }],
+              assignees: [],
+              commentsCount: 0,
+            },
+          ],
+          hasNextPage: false,
+        };
+      }
+      if (cmd === "find_existing_issue_branch") return null;
+      if (cmd === "classify_issue_branch_prefix") {
+        classifyCallCount++;
+        return new Promise((resolve) => {
+          resolveClassify = resolve;
+        });
+      }
+      if (cmd === "list_worktree_branches") return [];
+      if (cmd === "list_remote_branches") return [];
+      if (cmd === "detect_docker_context") {
+        return {
+          file_type: "none",
+          compose_services: [],
+          docker_available: false,
+          compose_available: false,
+          daemon_running: false,
+          force_host: false,
+        };
+      }
+      if (cmd === "get_agent_config") return { version: 1, claude: { provider: "anthropic", glm: {} } };
+      return [];
+    });
+
+    const rendered = await renderLaunchForm({
+      projectPath: "/tmp/project",
+      selectedBranch: "main",
+      onLaunch: vi.fn().mockResolvedValue(undefined),
+      onClose: vi.fn(),
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("detect_agents");
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "New Branch" }));
+    await fireEvent.click(rendered.getByRole("button", { name: "From Issue" }));
+
+    await waitFor(() => {
+      expect((rendered.getByRole("button", { name: /#82/i }) as HTMLButtonElement).disabled).toBe(false);
+      expect((rendered.getByRole("button", { name: /#83/i }) as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: /#82/i }));
+
+    await waitFor(() => {
+      expect(classifyCallCount).toBe(1);
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: /#83/i }));
+
+    await waitFor(() => {
+      const branchNameInput = rendered.container.querySelector("input[readonly]") as HTMLInputElement;
+      expect(branchNameInput?.value).toBe("bugfix/issue-83");
+    });
+
+    resolveClassify({ status: "ok", prefix: "feature" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const branchNameInput = rendered.container.querySelector("input[readonly]") as HTMLInputElement;
+    expect(branchNameInput?.value).toBe("bugfix/issue-83");
   });
 
   // T017: Rapid issue switching discards stale requests
