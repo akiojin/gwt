@@ -154,6 +154,14 @@
     return typeof stored === "number" && stored >= 8 && stored <= 24 ? stored : 13;
   }
 
+  function getInitialTerminalFontFamily(): string {
+    const stored = (window as any).__gwtTerminalFontFamily;
+    if (typeof stored === "string" && stored.trim().length > 0) {
+      return stored.trim();
+    }
+    return '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace';
+  }
+
   async function fitAndNotifyCurrent(options?: {
     emitReady?: boolean;
     expectedActivationSerial?: number;
@@ -382,7 +390,7 @@
       cursorBlink: true,
       cursorStyle: "bar",
       fontSize: getInitialTerminalFontSize(),
-      fontFamily: "'JetBrains Mono', 'Fira Code', 'SF Mono', 'Menlo', monospace",
+      fontFamily: getInitialTerminalFontFamily(),
       lineHeight: 1.2,
       scrollback: 10000,
       theme: {
@@ -586,7 +594,19 @@
         }
       }
     };
+    const handleFontFamilyChange = (e: Event) => {
+      const family = (e as CustomEvent<string>).detail;
+      if (term && typeof family === "string" && family.trim().length > 0) {
+        const normalized = family.trim();
+        (window as any).__gwtTerminalFontFamily = normalized;
+        term.options.fontFamily = normalized;
+        if (active) {
+          void fitAndNotifyCurrent();
+        }
+      }
+    };
     window.addEventListener("gwt-terminal-font-size", handleFontSizeChange);
+    window.addEventListener("gwt-terminal-font-family", handleFontFamilyChange);
 
     return () => {
       cancelled = true;
@@ -597,6 +617,7 @@
       rootEl.removeEventListener("wheel", handleWheel, true);
       window.removeEventListener("gwt-terminal-edit-action", handleTerminalEditAction);
       window.removeEventListener("gwt-terminal-font-size", handleFontSizeChange);
+      window.removeEventListener("gwt-terminal-font-family", handleFontFamilyChange);
       delete (rootEl as CaptureTerminalContainer).__gwtTerminal;
       observer.disconnect();
       term.dispose();

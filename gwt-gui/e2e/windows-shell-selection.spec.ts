@@ -42,6 +42,15 @@ const availableShells = [
   { id: "wsl", name: "WSL" },
 ];
 
+const DEFAULT_UI_FONT_FAMILY =
+  'system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif';
+const DEFAULT_TERMINAL_FONT_FAMILY =
+  '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace';
+const UI_FONT_FAMILY_INTER =
+  '"Inter", system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif';
+const TERMINAL_FONT_FAMILY_CASCADIA =
+  '"Cascadia Mono", "Cascadia Code", Consolas, monospace';
+
 const detectedAgents = [
   {
     id: "codex",
@@ -63,6 +72,8 @@ const settingsFixture = {
   docker_force_host: true,
   ui_font_size: 13,
   terminal_font_size: 13,
+  ui_font_family: DEFAULT_UI_FONT_FAMILY,
+  terminal_font_family: DEFAULT_TERMINAL_FONT_FAMILY,
   app_language: "auto",
   voice_input: {
     enabled: false,
@@ -172,6 +183,18 @@ async function waitForMenuActionListener(page: Page) {
       });
     })
     .toBe(true);
+}
+
+async function readFontFamilyPreview(page: Page) {
+  return page.evaluate(() => ({
+    ui: getComputedStyle(document.documentElement)
+      .getPropertyValue("--ui-font-family")
+      .trim(),
+    terminal: getComputedStyle(document.documentElement)
+      .getPropertyValue("--terminal-font-family")
+      .trim(),
+    terminalWindow: (window as any).__gwtTerminalFontFamily ?? "",
+  }));
 }
 
 test.beforeEach(async ({ page }) => {
@@ -311,6 +334,95 @@ test("saves Settings Terminal default shell via Terminal tab", async ({ page }) 
 
   expect(savedSettings).not.toBeNull();
   expect(savedSettings?.default_shell).toBe("wsl");
+});
+
+test("saves UI and terminal font families from Appearance tab", async ({ page }) => {
+  await openProjectAndSelectBranch(page, {
+    list_worktree_branches: [branchMain, branchDevelop, branchFeature],
+    list_remote_branches: [],
+    list_worktrees: [],
+    get_settings: settingsFixture,
+    get_profiles: profilesFixture,
+    get_available_shells: availableShells,
+  });
+
+  await waitForMenuActionListener(page);
+  await page.evaluate(() => {
+    const globalWindow = window as unknown as {
+      __GWT_MOCK_EMIT_EVENT__?: (event: string, payload: unknown) => void;
+    };
+    globalWindow.__GWT_MOCK_EMIT_EVENT__?.("menu-action", {
+      action: "open-settings",
+    });
+  });
+
+  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Appearance", exact: true })).toHaveClass(/active/);
+
+  await page.getByLabel("UI Font Family").selectOption(UI_FONT_FAMILY_INTER);
+  await page
+    .getByLabel("Terminal Font Family")
+    .selectOption(TERMINAL_FONT_FAMILY_CASCADIA);
+
+  const preview = await readFontFamilyPreview(page);
+  expect(preview.ui).toBe(UI_FONT_FAMILY_INTER);
+  expect(preview.terminal).toBe(TERMINAL_FONT_FAMILY_CASCADIA);
+  expect(preview.terminalWindow).toBe(TERMINAL_FONT_FAMILY_CASCADIA);
+
+  await page.getByRole("button", { name: "Save" }).click();
+  await waitForInvokeCommand(page, "save_settings");
+
+  const savedSettings = await page.evaluate(() => {
+    const globalWindow = window as unknown as {
+      __GWT_TAURI_INVOKE_LOG__?: Array<{
+        cmd: string;
+        args?: { settings?: Record<string, unknown> };
+      }>;
+    };
+    const log = globalWindow.__GWT_TAURI_INVOKE_LOG__ ?? [];
+    const entry = [...log].reverse().find((item) => item.cmd === "save_settings");
+    return entry?.args?.settings ?? null;
+  });
+
+  expect(savedSettings).not.toBeNull();
+  expect(savedSettings?.ui_font_family).toBe(UI_FONT_FAMILY_INTER);
+  expect(savedSettings?.terminal_font_family).toBe(TERMINAL_FONT_FAMILY_CASCADIA);
+});
+
+test("restores font family preview on Close without saving", async ({ page }) => {
+  await openProjectAndSelectBranch(page, {
+    list_worktree_branches: [branchMain, branchDevelop, branchFeature],
+    list_remote_branches: [],
+    list_worktrees: [],
+    get_settings: settingsFixture,
+    get_profiles: profilesFixture,
+    get_available_shells: availableShells,
+  });
+
+  await waitForMenuActionListener(page);
+  await page.evaluate(() => {
+    const globalWindow = window as unknown as {
+      __GWT_MOCK_EMIT_EVENT__?: (event: string, payload: unknown) => void;
+    };
+    globalWindow.__GWT_MOCK_EMIT_EVENT__?.("menu-action", {
+      action: "open-settings",
+    });
+  });
+
+  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+
+  await page.getByLabel("UI Font Family").selectOption(UI_FONT_FAMILY_INTER);
+  await page
+    .getByLabel("Terminal Font Family")
+    .selectOption(TERMINAL_FONT_FAMILY_CASCADIA);
+
+  await page.getByRole("button", { name: "Close" }).click();
+  await expect(page.getByRole("heading", { name: "Settings" })).toBeHidden();
+
+  const preview = await readFontFamilyPreview(page);
+  expect(preview.ui).toBe(DEFAULT_UI_FONT_FAMILY);
+  expect(preview.terminal).toBe(DEFAULT_TERMINAL_FONT_FAMILY);
+  expect(preview.terminalWindow).toBe(DEFAULT_TERMINAL_FONT_FAMILY);
 });
 
 test("opens a terminal from WorktreeSummaryPanel New Terminal button", async ({
