@@ -1,6 +1,23 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.8.0] - 2026-02-20
+
+### Bug Fixes
+
+- **gui:** Broaden trackpad wheel fallback conditions (#1137)
+- **agent-mode:** Fix project team session restore and merge command (#1139)
+- **gui:** Stabilize trackpad wheel fallback for rapid bursts (#1138)
+- **gui:** Agentタブ空白を防止 (#1142)
+
+### Documentation
+
+- Simplify readmes for user-facing usage and updates (#1136)
+
+### Features
+
+- **gui:** Windows シェル選択と New Terminal ボタンを追加 (#1141)
+
 ## [7.7.0] - 2026-02-19
 
 ### Bug Fixes
