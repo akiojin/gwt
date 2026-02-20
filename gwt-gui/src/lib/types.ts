@@ -132,6 +132,12 @@ export interface AgentConfig {
   claude: ClaudeAgentConfig;
 }
 
+export interface ShellInfo {
+  id: string;
+  name: string;
+  version?: string;
+}
+
 export interface SettingsData {
   protected_branches: string[];
   default_base_branch: string;
@@ -150,6 +156,7 @@ export interface SettingsData {
   terminal_font_size: number;
   app_language: "auto" | "ja" | "en" | (string & {});
   voice_input: VoiceInputSettings;
+  default_shell?: string | null;
 }
 
 export interface VoiceInputSettings {
@@ -211,6 +218,7 @@ export interface Tab {
     | "settings"
     | "versionHistory"
     | "agentMode"
+    | "projectTeam"
     | "terminal"
     | "issueSpec"
     | "issues";
@@ -528,6 +536,7 @@ export interface LaunchAgentRequest {
   dockerBuild?: boolean;
   dockerKeep?: boolean;
   issueNumber?: number;
+  terminalShell?: string;
 }
 
 // PR Status types (SPEC-d6949f99)
@@ -597,4 +606,71 @@ export interface ReviewComment {
 export interface PrStatusResponse {
   statuses: Record<string, PrStatusInfo | null>;
   ghStatus: GhCliStatus;
+}
+
+// === Project Team 3-Layer Type Definitions ===
+
+export interface ProjectTeamState {
+  sessionId: string;
+  status: "active" | "paused" | "completed" | "failed";
+  lead: LeadState;
+  issues: ProjectIssue[];
+  developerAgentType: "claude" | "codex" | "gemini";
+}
+
+export interface LeadState {
+  messages: LeadMessage[];
+  status: "idle" | "thinking" | "waiting_approval" | "orchestrating" | "error";
+  llmCallCount: number;
+  estimatedTokens: number;
+}
+
+export interface LeadMessage {
+  role: "user" | "assistant" | "system";
+  kind: "message" | "thought" | "action" | "observation" | "error" | "progress";
+  content: string;
+  timestamp: number;
+}
+
+export interface ProjectIssue {
+  id: string;
+  githubIssueNumber: number;
+  githubIssueUrl: string;
+  title: string;
+  status: "pending" | "planned" | "in_progress" | "ci_fail" | "completed" | "failed";
+  coordinator?: CoordinatorState;
+  tasks: ProjectTask[];
+}
+
+export type DashboardIssue = ProjectIssue & {
+  expanded: boolean;
+  taskCompletedCount: number;
+  taskTotalCount: number;
+};
+
+export interface CoordinatorState {
+  paneId: string;
+  status: "starting" | "running" | "completed" | "crashed" | "restarting";
+}
+
+export interface ProjectTask {
+  id: string;
+  name: string;
+  status: "pending" | "ready" | "running" | "completed" | "failed" | "cancelled";
+  developers: DeveloperState[];
+  testStatus?: "not_run" | "running" | "passed" | "failed";
+  pullRequest?: { number: number; url: string; ciStatus?: string };
+  retryCount: number;
+}
+
+export type DashboardTask = ProjectTask & {
+  developerCount: number;
+};
+
+export interface DeveloperState {
+  id: string;
+  agentType: "claude" | "codex" | "gemini";
+  paneId: string;
+  status: "starting" | "running" | "completed" | "error";
+  worktree: { branchName: string; path: string };
 }

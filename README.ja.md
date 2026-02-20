@@ -1,42 +1,38 @@
 # gwt
 
-gwt は Git worktree 管理とコーディングエージェント起動
-（Claude Code / Codex / Gemini / OpenCode）を行うデスクトップ GUI アプリです。
+gwt は Git worktree の管理と、ブランチ単位での
+`Claude Code` / `Codex` / `Gemini` / `OpenCode` 起動を行うデスクトップ GUI アプリです。
 
 ## インストール
 
-### macOS（シェルインストーラー）
+### macOS
+
+インストーラーを実行します。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash
 ```
 
-バージョン指定:
+特定バージョンを指定してインストール:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash -s -- --version 6.30.3
 ```
 
-### macOS（ローカル `.pkg` インストーラー）
+配布アセット:
 
-ローカル `.pkg` を作成:
+- macOS: `.dmg`, `.pkg`
 
-```bash
-cargo tauri build
-./installers/macos/build-pkg.sh
-```
+### Windows
 
-ローカル `.pkg` からインストール:
+GitHub Releases から `.msi` をダウンロードして実行します。
 
-```bash
-./installers/macos/install.sh --pkg ./target/release/bundle/pkg/gwt-macos-$(uname -m).pkg
-```
+### Linux
 
-または、上記を1コマンドで実行:
+以下をダウンロードして通常の方法で実行します。
 
-```bash
-./installers/macos/install-local.sh
-```
+- `.deb`
+- `.AppImage`
 
 ### アンインストール（macOS）
 
@@ -44,15 +40,27 @@ cargo tauri build
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/uninstall.sh | bash
 ```
 
-### ダウンロード
+## 使い始め方
 
-配布は GitHub Releases のみです。
+1. gwt を起動します。
+2. **Open Project...** から Git リポジトリを開きます。
+3. サイドバーで対象ブランチを選択します。
+4. ブランチ操作欄から次を行います。
+   - worktree の作成/一覧/クリーンアップ
+   - エージェント起動
+5. Agent や要約機能を使う場合は、**Settings** で AI プロファイルを設定します。
 
-主な成果物:
+## 自動アップデート
 
-- macOS: `.dmg`, `.pkg`
-- Windows: `.msi`
-- Linux: `.AppImage`, `.deb`
+gwt は GitHub Releases を参照して自動アップデートを確認します。
+
+- 起動時に自動で更新チェックを行います。
+- 失敗した場合は数回再試行します。
+- 更新が見つかると通知されます。
+- メニューの **Help → Check for Updates...** から手動チェックできます。
+
+更新可能なインストーラー/バイナリが検出できる場合は、アプリ側から更新を適用できます。
+自動適用できない場合は、リリースページから手動ダウンロードが必要と案内されます。
 
 ## キーボードショートカット
 
@@ -62,72 +70,33 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/u
 | Cmd+O | Ctrl+O | プロジェクトを開く |
 | Cmd+C | Ctrl+C | コピー |
 | Cmd+V | Ctrl+V | ペースト |
+| Cmd+Shift+C | Ctrl+Shift+C | 画面テキストのコピー |
 | Cmd+Shift+K | Ctrl+Shift+K | Worktree のクリーンアップ |
-| Cmd+, | Ctrl+, | 環境設定 |
+| Cmd+, | Ctrl+, | 設定 |
 | Cmd+Shift+[ | Ctrl+Shift+[ | 前のタブ |
 | Cmd+Shift+] | Ctrl+Shift+] | 次のタブ |
 | Cmd+` | Ctrl+` | 次のウィンドウ |
 | Cmd+Shift+` | Ctrl+Shift+` | 前のウィンドウ |
 | Cmd+M | --- | 最小化（macOS のみ） |
 
-## 開発
+## 必要環境変数と前提
 
-前提:
+### 必須
 
-- Rust（stable）
-- Node.js 22
-- pnpm（Corepack 経由）
-- Tauri の OS 依存パッケージ（プラットフォーム別）
+- `PATH` に `git` があること（Git コマンドが使える状態）
 
-開発起動:
+### 任意
 
-```bash
-cd gwt-gui
-pnpm install --frozen-lockfile
+- AI 利用時の認証情報（または Settings のプロファイル設定でも可）:
+  - `ANTHROPIC_API_KEY` または `ANTHROPIC_AUTH_TOKEN`
+  - `OPENAI_API_KEY`
+  - `GOOGLE_API_KEY` または `GEMINI_API_KEY`
+- `bunx` / `npx`（ローカル起動のフォールバックに利用）
 
-cd ..
-cargo tauri dev
-```
+### 任意（高度設定）
 
-ビルド:
-
-```bash
-cd gwt-gui
-pnpm install --frozen-lockfile
-
-cd ..
-cargo tauri build
-```
-
-Playwright E2E（WebView UI スモーク）:
-
-```bash
-cd gwt-gui
-pnpm install --frozen-lockfile
-pnpm exec playwright install chromium
-pnpm run test:e2e
-```
-
-CI では `.github/workflows/test.yml` の `E2E (Playwright)` ジョブで同じ Playwright テストを実行します。
-
-## AI 設定
-
-Agent Mode やセッション要約を使うには AI 設定が必要です。
-
-手順:
-
-- `Settings` を開く
-- `Profiles` でプロファイルを選択
-- `AI Settings` を有効化
-- `Endpoint` と `Model` を設定（ローカル LLM の場合は API Key 省略可）
-- `Save` をクリック
-
-## ディレクトリ構成
-
-- `crates/gwt-core/`: コア（Git/worktree/設定/ログ/Docker/PTY）
-- `crates/gwt-tauri/`: Tauri v2 バックエンド（commands + state）
-- `gwt-gui/`: Svelte 5 フロントエンド（UI + xterm.js）
-- `installers/`: インストーラー定義（例: WiX）
+- `GWT_AGENT_AUTO_INSTALL_DEPS` (`true` / `false`)
+- `GWT_DOCKER_FORCE_HOST` (`true` / `false`)
 
 ## ライセンス
 

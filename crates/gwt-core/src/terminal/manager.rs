@@ -116,6 +116,15 @@ impl PaneManager {
         Ok(())
     }
 
+    /// Remove a pane by its ID (does not kill it first).
+    pub fn remove_pane(&mut self, pane_id: &str) {
+        self.panes.retain(|p| p.pane_id() != pane_id);
+        // Clamp active index
+        if !self.panes.is_empty() && self.active_index >= self.panes.len() {
+            self.active_index = self.panes.len() - 1;
+        }
+    }
+
     /// Kill all panes (FR-092).
     pub fn kill_all(&mut self) -> Result<(), TerminalError> {
         for pane in &mut self.panes {
@@ -155,6 +164,7 @@ impl PaneManager {
             rows,
             cols,
             env_vars: config.env_vars,
+            terminal_shell: config.terminal_shell,
         };
         let pane = TerminalPane::new(pane_config)?;
         self.add_pane(pane)?;
@@ -191,6 +201,7 @@ impl PaneManager {
             rows,
             cols,
             env_vars: config.env_vars,
+            terminal_shell: config.terminal_shell,
         };
         let pane = TerminalPane::new(pane_config)?;
         self.add_pane(pane)?;
@@ -336,6 +347,7 @@ mod tests {
             rows: 24,
             cols: 80,
             env_vars: HashMap::new(),
+            terminal_shell: None,
         })
         .expect("failed to create test pane")
     }
@@ -592,6 +604,7 @@ mod tests {
             agent_name: "test-agent".to_string(),
             agent_color: AgentColor::Cyan,
             env_vars: HashMap::new(),
+            terminal_shell: None,
         };
         let pane_id = mgr.launch_agent(&repo_root, config, 24, 80).unwrap();
         assert!(!pane_id.is_empty());
@@ -615,6 +628,7 @@ mod tests {
                 agent_name: format!("agent-{i}"),
                 agent_color: AgentColor::Green,
                 env_vars: HashMap::new(),
+                terminal_shell: None,
             };
             mgr.launch_agent(&repo_root, config, 24, 80).unwrap();
         }
@@ -654,6 +668,7 @@ mod tests {
             agent_name: "agent-a".to_string(),
             agent_color: AgentColor::Green,
             env_vars: HashMap::new(),
+            terminal_shell: None,
         };
         let pane_id1 = mgr.launch_agent(&repo_root, config1, 24, 80).unwrap();
 
@@ -665,6 +680,7 @@ mod tests {
             agent_name: "agent-b".to_string(),
             agent_color: AgentColor::Blue,
             env_vars: HashMap::new(),
+            terminal_shell: None,
         };
         let pane_id2 = mgr.launch_agent(&repo_root, config2, 24, 80).unwrap();
 
@@ -750,6 +766,7 @@ mod tests {
             agent_name: "agent-a".to_string(),
             agent_color: AgentColor::Green,
             env_vars: HashMap::new(),
+            terminal_shell: None,
         };
         mgr.launch_agent(&repo_root, config1, 24, 80).unwrap();
 
@@ -761,6 +778,7 @@ mod tests {
             agent_name: "agent-b".to_string(),
             agent_color: AgentColor::Blue,
             env_vars: HashMap::new(),
+            terminal_shell: None,
         };
         mgr.launch_agent(&repo_root, config2, 24, 80).unwrap();
 
@@ -815,6 +833,7 @@ mod tests {
             agent_name: "terminal".to_string(),
             agent_color: AgentColor::White,
             env_vars: HashMap::new(),
+            terminal_shell: None,
         };
         let pane_id = mgr.spawn_shell(config, 24, 80).unwrap();
         assert!(!pane_id.is_empty());
@@ -840,11 +859,48 @@ mod tests {
             agent_name: "terminal".to_string(),
             agent_color: AgentColor::White,
             env_vars: HashMap::new(),
+            terminal_shell: None,
         };
         let pane_id = mgr.spawn_shell(config, 24, 80).unwrap();
         assert_eq!(mgr.pane_count(), 2);
         assert_eq!(mgr.active_index(), 1);
         let active = mgr.active_pane().unwrap();
         assert_eq!(active.pane_id(), pane_id);
+    }
+
+    // --- 31. remove_pane ---
+
+    #[test]
+    fn test_remove_pane_by_id() {
+        let mut mgr = PaneManager::new();
+        mgr.add_pane(create_test_pane("p0")).unwrap();
+        mgr.add_pane(create_test_pane("p1")).unwrap();
+        mgr.add_pane(create_test_pane("p2")).unwrap();
+        assert_eq!(mgr.pane_count(), 3);
+
+        mgr.remove_pane("p1");
+        assert_eq!(mgr.pane_count(), 2);
+        assert!(mgr.pane_mut_by_id("p1").is_none());
+        assert!(mgr.pane_mut_by_id("p0").is_some());
+        assert!(mgr.pane_mut_by_id("p2").is_some());
+    }
+
+    #[test]
+    fn test_remove_pane_clamps_active_index() {
+        let mut mgr = PaneManager::new();
+        mgr.add_pane(create_test_pane("p0")).unwrap();
+        mgr.add_pane(create_test_pane("p1")).unwrap();
+        assert_eq!(mgr.active_index(), 1); // last added
+
+        mgr.remove_pane("p1");
+        assert_eq!(mgr.active_index(), 0); // clamped
+    }
+
+    #[test]
+    fn test_remove_pane_nonexistent() {
+        let mut mgr = PaneManager::new();
+        mgr.add_pane(create_test_pane("p0")).unwrap();
+        mgr.remove_pane("nonexistent");
+        assert_eq!(mgr.pane_count(), 1); // unchanged
     }
 }

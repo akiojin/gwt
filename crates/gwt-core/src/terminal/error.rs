@@ -24,6 +24,9 @@ pub enum TerminalError {
 
     #[error("[E7006] Pane limit reached: max {max}")]
     PaneLimitReached { max: usize },
+
+    #[error("[E7007] WSL path conversion failed: {details}")]
+    WslPathConversion { details: String },
 }
 
 #[cfg(test)]

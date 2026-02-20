@@ -9,6 +9,7 @@
     GhCliStatus,
     GitHubIssueInfo,
     LaunchAgentRequest,
+    ShellInfo,
   } from "../types";
   import {
     loadLaunchDefaults,
@@ -99,6 +100,9 @@
   let dockerKeep: boolean = $state(false);
   let pendingRuntimePreference: RuntimeTarget | null = null;
   let pendingDockerServicePreference: string = "";
+
+  let availableShells: ShellInfo[] = $state([]);
+  let selectedShell: string = $state("");
 
   let versionsLoading: boolean = $state(false);
   let versionTags: string[] = $state([]);
@@ -319,6 +323,7 @@
     dockerBuild = defaults.dockerBuild;
     dockerRecreate = defaults.dockerRecreate;
     dockerKeep = defaults.dockerKeep;
+    selectedShell = defaults.selectedShell;
     pendingRuntimePreference = runtimeTarget;
     pendingDockerServicePreference = dockerService;
   }
@@ -351,6 +356,7 @@
       dockerBuild,
       dockerRecreate,
       dockerKeep,
+      selectedShell,
     });
   }
 
@@ -361,6 +367,17 @@
 
   $effect(() => {
     detectAgents();
+  });
+
+  $effect(() => {
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        availableShells = await invoke<ShellInfo[]>("get_available_shells");
+      } catch {
+        availableShells = [];
+      }
+    })();
   });
 
   $effect(() => {
@@ -1020,6 +1037,11 @@
         request.dockerBuild = dockerBuild;
       }
 
+      // Shell selection (Windows only; empty = auto).
+      if (selectedShell && runtimeTarget !== "docker") {
+        request.terminalShell = selectedShell;
+      }
+
       if (branchMode === "existing") {
         if (!existingBranch.trim()) return;
         request.branch = existingBranch.trim();
@@ -1593,6 +1615,27 @@
         </div>
 
         {#if showAdvanced}
+          {#if availableShells.length > 0}
+            <div class="field">
+              <label for="shell-select">Shell</label>
+              <select
+                id="shell-select"
+                bind:value={selectedShell}
+                disabled={runtimeTarget === "docker"}
+              >
+                <option value="">Auto</option>
+                {#each availableShells as shell (shell.id)}
+                  <option value={shell.id}>
+                    {shell.name}{shell.version ? ` (${shell.version})` : ""}
+                  </option>
+                {/each}
+              </select>
+              {#if runtimeTarget === "docker"}
+                <span class="field-hint">Container default</span>
+              {/if}
+            </div>
+          {/if}
+
           <div class="field">
             <label for="extra-args-input">Extra Args</label>
             <textarea

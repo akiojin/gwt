@@ -84,3 +84,9 @@ US1（メニュー起動）─┬─→ US2（ショートカット起動）
 - [x] T039 [US8] close ボタン押下時のドラッグ開始を抑止し、`draggable` を無効化して pointer ベース挙動を主経路に切り替える `gwt-gui/src/lib/components/MainArea.svelte`
 - [x] T040 [US8] `MainArea.test.ts` と `appTabs.test.ts` を実行し、D&D挙動と並び替え純関数の回帰がないことを確認する `gwt-gui/src/lib/components/MainArea.test.ts` `gwt-gui/src/lib/appTabs.test.ts`
 - [x] T041 [US8] D&D不具合修正の TDD 記録（RED/GREEN/Refactor）を `tdd.md` に追加する `specs/SPEC-f490dded/tdd.md`
+
+## Phase 11: US9 トラックパッドスクロールの根本対策 (P0)
+
+- [x] T042 [US9] `deltaX`/`deltaY` 非零値を持つ wheel イベントに対するフォールバック対象を統一し、主要軸に応じて `xterm-viewport` を手動スクロールする実装へ置き換える `gwt-gui/src/lib/terminal/TerminalView.svelte`
+- [x] T043 [US9] `deltaX` 単独イベントを含む wheel スクロールの回帰を防ぐためのユニットテストを追加し、`gwt-gui/src/lib/terminal/TerminalView.test.ts` を更新する
+- [x] T044 [US9] 変更の TDD 記録を `specs/SPEC-f490dded/tdd.md` に追加し、`spec.md` の成功基準を更新する `specs/SPEC-f490dded/spec.md` `specs/SPEC-f490dded/tdd.md`

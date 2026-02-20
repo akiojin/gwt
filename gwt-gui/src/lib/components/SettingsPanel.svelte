@@ -5,13 +5,16 @@
     ProfilesConfig,
     Profile,
     SettingsData,
+    ShellInfo,
     VoiceInputSettings,
   } from "../types";
 
   let { onClose }: { onClose: () => void } = $props();
 
-  type SettingsTabId = "appearance" | "voiceInput" | "mcpBridge" | "profiles";
+  type SettingsTabId = "appearance" | "voiceInput" | "mcpBridge" | "profiles" | "terminal";
   let activeSettingsTab: SettingsTabId = $state("appearance");
+
+  let availableShells: ShellInfo[] = $state([]);
 
   let settings: SettingsData | null = $state(null);
   let profiles: ProfilesConfig | null = $state(null);
@@ -348,6 +351,12 @@
       const nextSelected = loadedProfiles.active ?? keys[0] ?? "";
       selectedProfileKey = nextSelected;
       await loadMcpStatus(false);
+      try {
+        const result = await invoke<ShellInfo[]>("get_available_shells");
+        availableShells = Array.isArray(result) ? result : [];
+      } catch {
+        availableShells = [];
+      }
     } catch (err) {
       console.error("Failed to load settings/profiles:", err);
       errorMessage = `Failed to load settings: ${toErrorMessage(err)}`;
@@ -612,6 +621,13 @@
           class:active={activeSettingsTab === "profiles"}
           onclick={() => (activeSettingsTab = "profiles")}
         >Profiles</button>
+        {#if availableShells.length > 0}
+          <button
+            class="settings-tab-btn"
+            class:active={activeSettingsTab === "terminal"}
+            onclick={() => (activeSettingsTab = "terminal")}
+          >Terminal</button>
+        {/if}
       </div>
 
       <div class="settings-tab-content">
@@ -931,6 +947,33 @@
               >
                 {mcpStatusRepairing ? "Repairing..." : "Repair MCP Registration"}
               </button>
+            </div>
+          </div>
+
+        {:else if activeSettingsTab === "terminal"}
+          <div class="section-content">
+            <div class="field">
+              <label for="default-shell">Default Shell</label>
+              <select
+                id="default-shell"
+                class="select"
+                value={settings.default_shell ?? ""}
+                onchange={(e) => {
+                  if (!settings) return;
+                  const value = (e.target as HTMLSelectElement).value;
+                  settings = { ...settings, default_shell: value || null };
+                }}
+              >
+                <option value="">System Default</option>
+                {#each availableShells as shell (shell.id)}
+                  <option value={shell.id}>
+                    {shell.name}{shell.version ? ` (${shell.version})` : ""}
+                  </option>
+                {/each}
+              </select>
+              <span class="field-hint">
+                Shell used for new terminal sessions on Windows.
+              </span>
             </div>
           </div>
 

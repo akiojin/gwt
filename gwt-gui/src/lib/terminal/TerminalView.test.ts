@@ -300,9 +300,125 @@ describe("TerminalView", () => {
     expect(stopImmediatePropagationSpy).toHaveBeenCalled();
   });
 
-  it("does not fallback when terminal already has focus with mouse-like wheel", async () => {
+  it("falls back for rapid repeated trackpad-like wheel", async () => {
     const { container } = await renderTerminalView({
       paneId: "pane-3",
+      active: true,
+    });
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement | null;
+    expect(rootEl).not.toBeNull();
+
+    const viewport = document.createElement("div");
+    viewport.className = "xterm-viewport";
+    viewport.style.overflow = "auto";
+    Object.defineProperty(viewport, "clientHeight", {
+      value: 100,
+      configurable: true,
+    });
+    Object.defineProperty(viewport, "scrollHeight", {
+      value: 1000,
+      configurable: true,
+    });
+    viewport.scrollTop = 5;
+    rootEl!.appendChild(viewport);
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+    const term = terminalInstances[0];
+
+    rootEl!.setAttribute("tabindex", "0");
+    rootEl!.focus();
+
+    const dispatchWheel = () => {
+      const event = new WheelEvent("wheel", { deltaY: 120, bubbles: true, deltaMode: 0 });
+      const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+      const stopImmediatePropagationSpy = vi.spyOn(
+        event,
+        "stopImmediatePropagation",
+      );
+      rootEl!.dispatchEvent(event);
+      return { preventDefaultSpy, stopImmediatePropagationSpy };
+    };
+
+    const first = dispatchWheel();
+    const second = dispatchWheel();
+    const third = dispatchWheel();
+    const fourth = dispatchWheel();
+
+    expect(first.preventDefaultSpy).toHaveBeenCalled();
+    expect(second.preventDefaultSpy).toHaveBeenCalled();
+    expect(third.preventDefaultSpy).toHaveBeenCalled();
+    expect(fourth.preventDefaultSpy).toHaveBeenCalled();
+    expect(first.stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(second.stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(third.stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(fourth.stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(viewport.scrollTop).toBeGreaterThan(5);
+    expect(term.focus).not.toHaveBeenCalled();
+  });
+
+  it("keeps very tight repeated integer wheel steps on trackpad path", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-3-tight",
+      active: true,
+    });
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement | null;
+    expect(rootEl).not.toBeNull();
+
+    const viewport = document.createElement("div");
+    viewport.className = "xterm-viewport";
+    viewport.style.overflow = "auto";
+    Object.defineProperty(viewport, "clientHeight", {
+      value: 100,
+      configurable: true,
+    });
+    Object.defineProperty(viewport, "scrollHeight", {
+      value: 1000,
+      configurable: true,
+    });
+    viewport.scrollTop = 5;
+    rootEl!.appendChild(viewport);
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    const dispatchWheel = (timeStamp: number) => {
+      const event = new WheelEvent("wheel", {
+        deltaY: 120,
+        bubbles: true,
+        deltaMode: 0,
+      });
+      Object.defineProperty(event, "timeStamp", { value: timeStamp, configurable: true });
+      const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+      const stopImmediatePropagationSpy = vi.spyOn(
+        event,
+        "stopImmediatePropagation",
+      );
+      rootEl!.dispatchEvent(event);
+      return { preventDefaultSpy, stopImmediatePropagationSpy };
+    };
+
+    const first = dispatchWheel(2000);
+    const second = dispatchWheel(2020);
+    const third = dispatchWheel(2040);
+    const fourth = dispatchWheel(2060);
+
+    expect(first.preventDefaultSpy).toHaveBeenCalled();
+    expect(second.preventDefaultSpy).toHaveBeenCalled();
+    expect(third.preventDefaultSpy).toHaveBeenCalled();
+    expect(fourth.preventDefaultSpy).toHaveBeenCalled();
+    expect(first.stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(second.stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(third.stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(fourth.stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(viewport.scrollTop).toBeGreaterThan(5);
+  });
+
+  it("falls back for line-mode wheel input", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-3-9",
       active: true,
     });
     const rootEl = container.querySelector(".terminal-container") as HTMLDivElement | null;
@@ -325,20 +441,82 @@ describe("TerminalView", () => {
     await waitFor(() => {
       expect(terminalInstances.length).toBeGreaterThan(0);
     });
+
+    rootEl!.setAttribute("tabindex", "0");
+    rootEl!.focus();
+    const event = new WheelEvent("wheel", {
+      deltaY: 5,
+      deltaMode: 1,
+      bubbles: true,
+    });
+    const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+    const stopImmediatePropagationSpy = vi.spyOn(
+      event,
+      "stopImmediatePropagation",
+    );
+
+    rootEl!.dispatchEvent(event);
+
+    expect(preventDefaultSpy).toHaveBeenCalled();
+    expect(stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(viewport.scrollTop).toBeGreaterThan(5);
+  });
+
+  it("also falls back for slow repeated integer wheel", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-3-8",
+      active: true,
+    });
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement | null;
+    expect(rootEl).not.toBeNull();
+
+    const viewport = document.createElement("div");
+    viewport.className = "xterm-viewport";
+    viewport.style.overflow = "auto";
+    Object.defineProperty(viewport, "clientHeight", {
+      value: 100,
+      configurable: true,
+    });
+    Object.defineProperty(viewport, "scrollHeight", {
+      value: 1000,
+      configurable: true,
+    });
+    viewport.scrollTop = 5;
+    rootEl!.appendChild(viewport);
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
     const term = terminalInstances[0];
 
     rootEl!.setAttribute("tabindex", "0");
     rootEl!.focus();
-    const event = new WheelEvent("wheel", { deltaY: 120, bubbles: true });
-    const preventDefaultSpy = vi.spyOn(event, "preventDefault");
-    const stopImmediatePropagationSpy = vi.spyOn(event, "stopImmediatePropagation");
 
-    rootEl!.dispatchEvent(event);
+    const dispatchWheel = () => {
+      const event = new WheelEvent("wheel", { deltaY: 120, bubbles: true, deltaMode: 0 });
+      const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+      const stopImmediatePropagationSpy = vi.spyOn(
+        event,
+        "stopImmediatePropagation",
+      );
+      rootEl!.dispatchEvent(event);
+      return { preventDefaultSpy, stopImmediatePropagationSpy };
+    };
 
-    expect(preventDefaultSpy).not.toHaveBeenCalled();
-    expect(stopImmediatePropagationSpy).not.toHaveBeenCalled();
-    expect(viewport.scrollTop).toBe(5);
-    expect(event.defaultPrevented).toBe(false);
+    const first = dispatchWheel();
+    const second = dispatchWheel();
+    const third = dispatchWheel();
+    const fourth = dispatchWheel();
+
+    expect(first.preventDefaultSpy).toHaveBeenCalled();
+    expect(second.preventDefaultSpy).toHaveBeenCalled();
+    expect(third.preventDefaultSpy).toHaveBeenCalled();
+    expect(fourth.preventDefaultSpy).toHaveBeenCalled();
+    expect(first.stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(second.stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(third.stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(fourth.stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(viewport.scrollTop).toBeGreaterThan(5);
     expect(term.focus).not.toHaveBeenCalled();
   });
 
@@ -417,7 +595,428 @@ describe("TerminalView", () => {
     rootEl!.focus();
 
     const event = new WheelEvent("wheel", {
-      deltaY: 100,
+      deltaY: 120,
+      bubbles: true,
+      deltaMode: 0,
+    });
+    const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+    const stopImmediatePropagationSpy = vi.spyOn(
+      event,
+      "stopImmediatePropagation",
+    );
+
+    rootEl!.dispatchEvent(event);
+
+    expect(preventDefaultSpy).toHaveBeenCalled();
+    expect(stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(viewport.scrollTop).toBeGreaterThan(5);
+  });
+
+  it("falls back to terminal scroll for oversized integer wheel deltas", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-3-10",
+      active: true,
+    });
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement | null;
+    expect(rootEl).not.toBeNull();
+
+    const viewport = document.createElement("div");
+    viewport.className = "xterm-viewport";
+    viewport.style.overflow = "auto";
+    Object.defineProperty(viewport, "clientHeight", {
+      value: 100,
+      configurable: true,
+    });
+    Object.defineProperty(viewport, "scrollHeight", {
+      value: 1000,
+      configurable: true,
+    });
+    viewport.scrollTop = 5;
+    rootEl!.appendChild(viewport);
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    rootEl!.setAttribute("tabindex", "0");
+    rootEl!.focus();
+
+    const event = new WheelEvent("wheel", {
+      deltaY: 360,
+      bubbles: true,
+      deltaMode: 0,
+    });
+    const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+    const stopImmediatePropagationSpy = vi.spyOn(
+      event,
+      "stopImmediatePropagation",
+    );
+
+    rootEl!.dispatchEvent(event);
+
+    expect(preventDefaultSpy).toHaveBeenCalled();
+    expect(stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(viewport.scrollTop).toBe(365); // 5 + 360
+  });
+
+  it("keeps repeated trackpad-like integer wheel events as terminal fallback", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-3-6",
+      active: true,
+    });
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement | null;
+    expect(rootEl).not.toBeNull();
+
+    const viewport = document.createElement("div");
+    viewport.className = "xterm-viewport";
+    viewport.style.overflow = "auto";
+    Object.defineProperty(viewport, "clientHeight", {
+      value: 100,
+      configurable: true,
+    });
+    Object.defineProperty(viewport, "scrollHeight", {
+      value: 1000,
+      configurable: true,
+    });
+    viewport.scrollTop = 5;
+    rootEl!.appendChild(viewport);
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    rootEl!.setAttribute("tabindex", "0");
+    rootEl!.focus();
+
+    const dispatchWheel = (deltaY: number) => {
+      const event = new WheelEvent("wheel", {
+        deltaY,
+        bubbles: true,
+        deltaMode: 0,
+      });
+      const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+      const stopImmediatePropagationSpy = vi.spyOn(
+        event,
+        "stopImmediatePropagation",
+      );
+      rootEl!.dispatchEvent(event);
+      return { event, preventDefaultSpy, stopImmediatePropagationSpy };
+    };
+
+    const first = dispatchWheel(100);
+    const second = dispatchWheel(100);
+    const third = dispatchWheel(100);
+    const fourth = dispatchWheel(100);
+
+    expect(first.preventDefaultSpy).toHaveBeenCalled();
+    expect(second.preventDefaultSpy).toHaveBeenCalled();
+    expect(third.preventDefaultSpy).toHaveBeenCalled();
+    expect(fourth.preventDefaultSpy).toHaveBeenCalled();
+    expect(first.stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(second.stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(third.stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(fourth.stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(viewport.scrollTop).toBe(405);
+  });
+
+  it("keeps clear mouse-like repeated integer wheel events for terminal consumption", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-3-13",
+      active: true,
+    });
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement | null;
+    expect(rootEl).not.toBeNull();
+
+    const viewport = document.createElement("div");
+    viewport.className = "xterm-viewport";
+    viewport.style.overflow = "auto";
+    Object.defineProperty(viewport, "clientHeight", {
+      value: 100,
+      configurable: true,
+    });
+    Object.defineProperty(viewport, "scrollHeight", {
+      value: 2000,
+      configurable: true,
+    });
+    viewport.scrollTop = 5;
+    rootEl!.appendChild(viewport);
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    rootEl!.setAttribute("tabindex", "0");
+    rootEl!.focus();
+
+    const dispatchWheel = (timeStamp: number) => {
+      const event = new WheelEvent("wheel", {
+        deltaY: 120,
+        bubbles: true,
+        deltaMode: 0,
+      });
+      Object.defineProperty(event, "timeStamp", { value: timeStamp, configurable: true });
+      const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+      const stopImmediatePropagationSpy = vi.spyOn(
+        event,
+        "stopImmediatePropagation",
+      );
+      rootEl!.dispatchEvent(event);
+      return { preventDefaultSpy, stopImmediatePropagationSpy };
+    };
+
+    const first = dispatchWheel(1000);
+    const second = dispatchWheel(1060);
+    const third = dispatchWheel(1120);
+    const fourth = dispatchWheel(1180);
+
+    expect(first.preventDefaultSpy).toHaveBeenCalled();
+    expect(second.preventDefaultSpy).toHaveBeenCalled();
+    expect(third.preventDefaultSpy).toHaveBeenCalled();
+    expect(fourth.preventDefaultSpy).not.toHaveBeenCalled();
+    expect(first.stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(second.stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(third.stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(fourth.stopImmediatePropagationSpy).not.toHaveBeenCalled();
+    expect(viewport.scrollTop).toBe(365);
+  });
+
+  it("accumulates fractional wheel input to preserve sub-pixel scroll", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-3-14",
+      active: true,
+    });
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement | null;
+    expect(rootEl).not.toBeNull();
+
+    const viewport = document.createElement("div");
+    viewport.className = "xterm-viewport";
+    viewport.style.overflow = "auto";
+    Object.defineProperty(viewport, "clientHeight", {
+      value: 100,
+      configurable: true,
+    });
+    Object.defineProperty(viewport, "scrollHeight", {
+      value: 200,
+      configurable: true,
+    });
+
+    let scrollTop = 5;
+    Object.defineProperty(viewport, "scrollTop", {
+      get: () => scrollTop,
+      set: (value) => {
+        scrollTop = Math.floor(value);
+      },
+      configurable: true,
+    });
+    rootEl!.appendChild(viewport);
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    rootEl!.setAttribute("tabindex", "0");
+    rootEl!.focus();
+
+    const dispatchWheel = (deltaY: number) => {
+      const event = new WheelEvent("wheel", {
+        deltaY,
+        bubbles: true,
+        deltaMode: 0,
+      });
+      const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+      const stopImmediatePropagationSpy = vi.spyOn(
+        event,
+        "stopImmediatePropagation",
+      );
+      rootEl!.dispatchEvent(event);
+      return { preventDefaultSpy, stopImmediatePropagationSpy };
+    };
+
+    const first = dispatchWheel(0.6);
+    const second = dispatchWheel(0.6);
+    const third = dispatchWheel(0.6);
+    const fourth = dispatchWheel(0.6);
+
+    expect(first.preventDefaultSpy).not.toHaveBeenCalled();
+    expect(second.preventDefaultSpy).toHaveBeenCalled();
+    expect(third.preventDefaultSpy).not.toHaveBeenCalled();
+    expect(fourth.preventDefaultSpy).toHaveBeenCalled();
+    expect(first.stopImmediatePropagationSpy).not.toHaveBeenCalled();
+    expect(second.stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(third.stopImmediatePropagationSpy).not.toHaveBeenCalled();
+    expect(fourth.stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(scrollTop).toBe(7);
+  });
+
+  it("falls back when integer wheel includes horizontal drift", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-3-7",
+      active: true,
+    });
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement | null;
+    expect(rootEl).not.toBeNull();
+
+    const viewport = document.createElement("div");
+    viewport.className = "xterm-viewport";
+    viewport.style.overflow = "auto";
+    Object.defineProperty(viewport, "clientHeight", {
+      value: 100,
+      configurable: true,
+    });
+    Object.defineProperty(viewport, "scrollHeight", {
+      value: 200,
+      configurable: true,
+    });
+    viewport.scrollTop = 5;
+    rootEl!.appendChild(viewport);
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    rootEl!.setAttribute("tabindex", "0");
+    rootEl!.focus();
+
+    const event = new WheelEvent("wheel", {
+      deltaX: 5,
+      deltaY: 120,
+      bubbles: true,
+      deltaMode: 0,
+    });
+    const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+    const stopImmediatePropagationSpy = vi.spyOn(
+      event,
+      "stopImmediatePropagation",
+    );
+
+    rootEl!.dispatchEvent(event);
+
+    expect(preventDefaultSpy).toHaveBeenCalled();
+    expect(stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(viewport.scrollTop).toBeGreaterThan(5);
+  });
+
+  it("uses dominant axis for mixed wheel input", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-3-11",
+      active: true,
+    });
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement | null;
+    expect(rootEl).not.toBeNull();
+
+    const viewport = document.createElement("div");
+    viewport.className = "xterm-viewport";
+    viewport.style.overflow = "auto";
+    Object.defineProperty(viewport, "clientHeight", {
+      value: 100,
+      configurable: true,
+    });
+    Object.defineProperty(viewport, "scrollHeight", {
+      value: 200,
+      configurable: true,
+    });
+    viewport.scrollTop = 5;
+    rootEl!.appendChild(viewport);
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    const event = new Event("wheel", { bubbles: true }) as WheelEvent;
+    Object.defineProperty(event, "deltaX", { value: 120, configurable: true });
+    Object.defineProperty(event, "deltaY", { value: 1, configurable: true });
+    Object.defineProperty(event, "deltaMode", { value: 0, configurable: true });
+    expect(event.deltaX).toBe(120);
+    expect(event.deltaY).toBe(1);
+    const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+    const stopImmediatePropagationSpy = vi.spyOn(
+      event,
+      "stopImmediatePropagation",
+    );
+
+    rootEl!.dispatchEvent(event);
+
+    expect(preventDefaultSpy).toHaveBeenCalled();
+    expect(stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(viewport.scrollTop).toBeGreaterThan(5);
+  });
+
+  it("falls back when wheel has horizontal-only delta", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-3-12",
+      active: true,
+    });
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement | null;
+    expect(rootEl).not.toBeNull();
+
+    const viewport = document.createElement("div");
+    viewport.className = "xterm-viewport";
+    viewport.style.overflow = "auto";
+    Object.defineProperty(viewport, "clientHeight", {
+      value: 100,
+      configurable: true,
+    });
+    Object.defineProperty(viewport, "scrollHeight", {
+      value: 200,
+      configurable: true,
+    });
+    viewport.scrollTop = 5;
+    rootEl!.appendChild(viewport);
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    const event = new WheelEvent("wheel", {
+      deltaX: 120,
+      deltaY: 0,
+      bubbles: true,
+      deltaMode: 0,
+    });
+    const preventDefaultSpy = vi.spyOn(event, "preventDefault");
+    const stopImmediatePropagationSpy = vi.spyOn(
+      event,
+      "stopImmediatePropagation",
+    );
+
+    rootEl!.dispatchEvent(event);
+
+    expect(preventDefaultSpy).toHaveBeenCalled();
+    expect(stopImmediatePropagationSpy).toHaveBeenCalled();
+    expect(viewport.scrollTop).toBeGreaterThan(5);
+  });
+
+  it("falls back to terminal scroll when focused terminal gets large integer trackpad-like wheel", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-3-5",
+      active: true,
+    });
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement | null;
+    expect(rootEl).not.toBeNull();
+
+    const viewport = document.createElement("div");
+    viewport.className = "xterm-viewport";
+    viewport.style.overflow = "auto";
+    Object.defineProperty(viewport, "clientHeight", {
+      value: 100,
+      configurable: true,
+    });
+    Object.defineProperty(viewport, "scrollHeight", {
+      value: 200,
+      configurable: true,
+    });
+    viewport.scrollTop = 5;
+    rootEl!.appendChild(viewport);
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    rootEl!.setAttribute("tabindex", "0");
+    rootEl!.focus();
+
+    const event = new WheelEvent("wheel", {
+      deltaY: 240,
       bubbles: true,
       deltaMode: 0,
     });

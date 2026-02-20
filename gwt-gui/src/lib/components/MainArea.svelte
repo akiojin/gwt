@@ -3,6 +3,7 @@
   import type { TabDropPosition } from "../appTabs";
   import TerminalView from "../terminal/TerminalView.svelte";
   import AgentModePanel from "./AgentModePanel.svelte";
+  import ProjectTeamPanel from "./ProjectTeamPanel.svelte";
   import IssueListPanel from "./IssueListPanel.svelte";
   import IssueSpecPanel from "./IssueSpecPanel.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
@@ -59,10 +60,20 @@
   let activeTab = $derived(tabs.find((t) => t.id === activeTabId));
   let agentTabs = $derived(tabs.filter(isAgentTabWithPaneId));
   let terminalTabs = $derived(tabs.filter(isTerminalTabWithPaneId));
-  let showTerminalLayer = $derived(
-    activeTab?.type === "agent" || activeTab?.type === "terminal",
+  let hasActiveTerminalPane = $derived(
+    (activeTab?.type === "agent" || activeTab?.type === "terminal") &&
+      typeof activeTab.paneId === "string" &&
+      activeTab.paneId.length > 0,
   );
-  let isPinnedTab = (tabType?: Tab["type"]) => tabType === "agentMode";
+  let showTerminalLayer = $derived(
+    hasActiveTerminalPane,
+  );
+  let showDetachedTerminalPlaceholder = $derived(
+    (activeTab?.type === "agent" || activeTab?.type === "terminal") &&
+      !hasActiveTerminalPane,
+  );
+  let isPinnedTab = (tabType?: Tab["type"]) =>
+    tabType === "agentMode" || tabType === "projectTeam";
   let draggingTabId: string | null = $state(null);
   let pointerDrag:
     | {
@@ -276,6 +287,13 @@
         <VersionHistoryPanel {projectPath} />
       {:else if activeTab?.type === "agentMode"}
         <AgentModePanel />
+      {:else if activeTab?.type === "agent" && !activeTab.paneId}
+        <div class="placeholder">
+          <h2>Agent starting...</h2>
+          <p>Waiting for the backend terminal pane to attach.</p>
+        </div>
+      {:else if activeTab?.type === "projectTeam"}
+        <ProjectTeamPanel session={null} />
       {:else if activeTab?.type === "issueSpec"}
         <IssueSpecPanel
           projectPath={projectPath}
@@ -289,6 +307,11 @@
           onSwitchToWorktree={onSwitchToWorktree ?? (() => {})}
           {onIssueCountChange}
         />
+      {:else if showDetachedTerminalPlaceholder}
+        <div class="placeholder">
+          <h2>Waiting For Terminal Pane</h2>
+          <p>Close this tab and launch again if it does not attach.</p>
+        </div>
       {:else}
         <div class="placeholder">
           <h2>Select a tab</h2>
@@ -464,5 +487,11 @@
     font-size: var(--ui-font-2xl);
     font-weight: 500;
     color: var(--text-secondary);
+  }
+
+  .placeholder p {
+    margin-top: 10px;
+    font-size: var(--ui-font-sm);
+    color: var(--text-muted);
   }
 </style>
