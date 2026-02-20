@@ -3,7 +3,7 @@ import type { Page } from "@playwright/test";
 const DEFAULT_PROJECT_PATH = "/tmp/gwt-playwright";
 const DEFAULT_LAST_OPENED_AT = "2026-02-13T00:00:00.000Z";
 
-type AgentModeState = {
+type ProjectModeState = {
   messages: Array<{
     role: "user" | "assistant" | "system" | "tool";
     kind?: "message" | "thought" | "action" | "observation" | "error";
@@ -54,37 +54,51 @@ export async function installTauriMock(
       type MockPane = {
         paneId: string;
         cwd: string;
+        agentName: string;
+        branchName: string;
         status: "running" | "error";
         errorMessage: string | null;
         scrollback: string;
+      };
+      type MockLaunchFinishedPayload = {
+        jobId: string;
+        status: "ok" | "cancelled" | "error";
+        paneId: string | null;
+        error: string | null;
+      };
+      type MockLaunchJob = {
+        running: boolean;
+        finished: MockLaunchFinishedPayload;
       };
 
       const invokeLog: InvokeEntry[] = [];
       const callbacks = new Map<number, (...args: unknown[]) => void>();
       const eventListeners = new Map<number, EventListener>();
       const panes = new Map<string, MockPane>();
+      const launchJobs = new Map<string, MockLaunchJob>();
       let callbackSeq = 1;
       let listenSeq = 1;
       let paneSeq = 1;
+      let launchJobSeq = 1;
       let nextSpawnShellError = false;
       let lastSpawnedPaneId: string | null = null;
       let restoreLeaderAcquired = false;
 
-      let agentModeState: AgentModeState = {
+      let projectModeState: ProjectModeState = {
         messages: [],
         ai_ready: true,
         ai_error: null,
         last_error: null,
         is_waiting: false,
-        session_name: "Master Agent",
+        session_name: "Project Mode",
         llm_call_count: 0,
         estimated_tokens: 0,
       };
 
-      function cloneAgentModeState(): AgentModeState {
+      function cloneProjectModeState(): ProjectModeState {
         return {
-          ...agentModeState,
-          messages: agentModeState.messages.map((msg) => ({ ...msg })),
+          ...projectModeState,
+          messages: projectModeState.messages.map((msg) => ({ ...msg })),
         };
       }
 
@@ -116,8 +130,8 @@ export async function installTauriMock(
       function listTerminals() {
         return Array.from(panes.values()).map((pane) => ({
           pane_id: pane.paneId,
-          agent_name: "terminal",
-          branch_name: "",
+          agent_name: pane.agentName,
+          branch_name: pane.branchName,
           status:
             pane.status === "running"
               ? "running"
@@ -144,12 +158,67 @@ export async function installTauriMock(
         panes.set(paneId, {
           paneId,
           cwd,
+          agentName: "terminal",
+          branchName: "",
           status: errorMessage ? "error" : "running",
           errorMessage,
           scrollback,
         });
 
         return paneId;
+      }
+
+      function startLaunchJob(requestLike: unknown): string {
+        const request =
+          requestLike && typeof requestLike === "object"
+            ? (requestLike as InvokeArgs)
+            : {};
+        const branchName =
+          typeof request.branch === "string" ? request.branch.trim() : "";
+        const agentName =
+          typeof request.agentId === "string" && request.agentId.trim()
+            ? request.agentId.trim()
+            : "codex";
+
+        const paneId = `mock-agent-pane-${paneSeq++}`;
+        panes.set(paneId, {
+          paneId,
+          cwd: projectPath,
+          agentName,
+          branchName,
+          status: "running",
+          errorMessage: null,
+          scrollback: "",
+        });
+
+        const jobId = `mock-launch-job-${launchJobSeq++}`;
+        launchJobs.set(jobId, {
+          running: true,
+          finished: {
+            jobId,
+            status: "ok",
+            paneId,
+            error: null,
+          },
+        });
+
+        setTimeout(() => {
+          emitEvent("launch-progress", {
+            jobId,
+            step: "spawn",
+            detail: `Launching ${agentName}`,
+          });
+        }, 0);
+
+        setTimeout(() => {
+          const job = launchJobs.get(jobId);
+          if (!job || !job.running) return;
+          job.running = false;
+          launchJobs.set(jobId, job);
+          emitEvent("launch-finished", job.finished);
+        }, 10);
+
+        return jobId;
       }
 
       function projectInfo(pathLike: unknown) {
@@ -290,6 +359,36 @@ export async function installTauriMock(
             return null;
           case "register_hooks":
             return null;
+          case "start_launch_job":
+            return startLaunchJob(args.request);
+          case "poll_launch_job": {
+            const jobId = typeof args.jobId === "string" ? args.jobId : "";
+            const job = launchJobs.get(jobId);
+            if (!job) {
+              return { running: false, finished: null };
+            }
+            return {
+              running: job.running,
+              finished: job.running ? null : job.finished,
+            };
+          }
+          case "cancel_launch_job": {
+            const jobId = typeof args.jobId === "string" ? args.jobId : "";
+            const job = launchJobs.get(jobId);
+            if (!job) return null;
+            if (job.running) {
+              job.running = false;
+              job.finished = {
+                jobId,
+                status: "cancelled",
+                paneId: null,
+                error: null,
+              };
+              launchJobs.set(jobId, job);
+              emitEvent("launch-finished", job.finished);
+            }
+            return null;
+          }
           case "spawn_shell":
             return spawnShell(args.workingDir);
           case "capture_scrollback_tail": {
@@ -320,15 +419,15 @@ export async function installTauriMock(
 
             return null;
           }
-          case "get_agent_mode_state_cmd":
-            return cloneAgentModeState();
-          case "send_agent_mode_message": {
+          case "get_project_mode_state_cmd":
+            return cloneProjectModeState();
+          case "send_project_mode_message_cmd": {
             const input =
               typeof args.input === "string" ? args.input.trim() : "";
-            if (!input) return cloneAgentModeState();
+            if (!input) return cloneProjectModeState();
             const now = Date.now();
             const nextMessages = [
-              ...agentModeState.messages,
+              ...projectModeState.messages,
               {
                 role: "user" as const,
                 kind: "message" as const,
@@ -342,15 +441,15 @@ export async function installTauriMock(
                 timestamp: now + 1,
               },
             ];
-            agentModeState = {
-              ...agentModeState,
+            projectModeState = {
+              ...projectModeState,
               messages: nextMessages,
-              llm_call_count: agentModeState.llm_call_count + 1,
+              llm_call_count: projectModeState.llm_call_count + 1,
               estimated_tokens:
-                agentModeState.estimated_tokens + Math.max(1, input.length),
+                projectModeState.estimated_tokens + Math.max(1, input.length),
               last_error: null,
             };
-            return cloneAgentModeState();
+            return cloneProjectModeState();
           }
         }
 

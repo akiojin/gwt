@@ -2,8 +2,7 @@
   import type { GitHubIssueInfo, LaunchAgentRequest, Tab } from "../types";
   import type { TabDropPosition } from "../appTabs";
   import TerminalView from "../terminal/TerminalView.svelte";
-  import AgentModePanel from "./AgentModePanel.svelte";
-  import ProjectTeamPanel from "./ProjectTeamPanel.svelte";
+  import ProjectModePanel from "./ProjectModePanel.svelte";
   import IssueListPanel from "./IssueListPanel.svelte";
   import IssueSpecPanel from "./IssueSpecPanel.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
@@ -68,11 +67,12 @@
     nonTerminalTabs.filter((tab) => mountedPanelTabIds.has(tab.id)),
   );
   let activeTerminalTabId = $derived(
-    activeTab?.type === "agent" || activeTab?.type === "terminal"
+    (activeTab?.type === "agent" || activeTab?.type === "terminal") &&
+      typeof activeTab.paneId === "string" &&
+      activeTab.paneId.length > 0
       ? activeTab.id
       : null,
   );
-  let showTerminalLayer = $derived(activeTerminalTabId !== null);
   let hasActiveNonTerminalTab = $derived(
     nonTerminalTabs.some((tab) => tab.id === activeTabId),
   );
@@ -84,8 +84,14 @@
       return map;
     })(),
   );
-  let isPinnedTab = (tabType?: Tab["type"]) =>
-    tabType === "agentMode" || tabType === "projectTeam";
+  let showTerminalLayer = $derived(
+    activeTerminalTabId !== null,
+  );
+  let showDetachedTerminalPlaceholder = $derived(
+    (activeTab?.type === "agent" || activeTab?.type === "terminal") &&
+      activeTerminalTabId === null,
+  );
+  let isPinnedTab = (tabType?: Tab["type"]) => tabType === "projectMode";
   let draggingTabId: string | null = $state(null);
   let terminalPendingTabId: string | null = $state(null);
   let visibleTerminalTabId: string | null = $state(null);
@@ -386,9 +392,16 @@
   <div class="tab-content">
     <div class="panel-layer" class:hidden={showTerminalLayer}>
       {#if nonTerminalTabs.length === 0}
-        <div class="placeholder">
-          <h2>Select a tab</h2>
-        </div>
+        {#if showDetachedTerminalPlaceholder}
+          <div class="placeholder">
+            <h2>Agent starting...</h2>
+            <p>Waiting for the backend terminal pane to attach.</p>
+          </div>
+        {:else}
+          <div class="placeholder">
+            <h2>Select a tab</h2>
+          </div>
+        {/if}
       {:else}
         {#each mountedNonTerminalTabs as tab (tab.id)}
           <div class="panel-wrapper" class:active={activeTabId === tab.id}>
@@ -396,10 +409,8 @@
               <SettingsPanel onClose={() => onTabClose(tab.id)} />
             {:else if tab.type === "versionHistory"}
               <VersionHistoryPanel {projectPath} />
-            {:else if tab.type === "agentMode"}
-              <AgentModePanel />
-            {:else if tab.type === "projectTeam"}
-              <ProjectTeamPanel session={null} />
+            {:else if tab.type === "projectMode"}
+              <ProjectModePanel />
             {:else if tab.type === "issueSpec"}
               <IssueSpecPanel
                 projectPath={projectPath}
@@ -421,9 +432,16 @@
           </div>
         {/each}
         {#if !hasActiveNonTerminalTab}
-          <div class="placeholder panel-fallback">
-            <h2>Select a tab</h2>
-          </div>
+          {#if showDetachedTerminalPlaceholder}
+            <div class="placeholder panel-fallback">
+              <h2>Agent starting...</h2>
+              <p>Waiting for the backend terminal pane to attach.</p>
+            </div>
+          {:else}
+            <div class="placeholder panel-fallback">
+              <h2>Select a tab</h2>
+            </div>
+          {/if}
         {/if}
       {/if}
     </div>
@@ -623,5 +641,11 @@
     font-size: var(--ui-font-2xl);
     font-weight: 500;
     color: var(--text-secondary);
+  }
+
+  .placeholder p {
+    margin-top: 10px;
+    font-size: var(--ui-font-sm);
+    color: var(--text-muted);
   }
 </style>

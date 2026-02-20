@@ -1,4 +1,4 @@
-# タスクリスト: プロジェクトチーム（Project Team）
+# タスクリスト: プロジェクトモード（Project Mode）
 
 **仕様ID**: `SPEC-ba3f610c` | **日付**: 2026-02-19
 
@@ -25,9 +25,9 @@ US9 (コンテキスト)  ← US1
 
 ## Phase 1: セットアップ
 
-- [ ] T101 [P] [US1] エンティティモデル定義（ProjectTeamSession / LeadState / LeadStatus / LeadMessage） `crates/gwt-core/src/agent/mod.rs` `crates/gwt-core/src/agent/lead.rs`
+- [ ] T101 [P] [US1] エンティティモデル定義（ProjectModeSession / LeadState / LeadStatus / LeadMessage） `crates/gwt-core/src/agent/mod.rs` `crates/gwt-core/src/agent/lead.rs`
   - data-model.md の LeadState / LeadStatus / LeadMessage を実装
-  - 既存 AgentSession を ProjectTeamSession に拡張
+  - 既存 AgentSession を ProjectModeSession に拡張
   - 依存: なし
 
 - [ ] T102 [P] [US1] エンティティモデル定義（ProjectIssue / IssueStatus / CoordinatorState / CoordinatorStatus） `crates/gwt-core/src/agent/issue.rs` `crates/gwt-core/src/agent/coordinator.rs`
@@ -39,11 +39,11 @@ US9 (コンテキスト)  ← US1
   - 依存: なし
 
 - [ ] T104 [P] [US1] フロント型定義を3層対応に拡張 `gwt-gui/src/lib/types.ts`
-  - ProjectTeamState / LeadState / DashboardIssue / DashboardTask / CoordinatorState / DeveloperState
+  - ProjectModeState / LeadState / DashboardIssue / DashboardTask / CoordinatorState / DeveloperState
   - 依存: なし
 
 - [ ] T105 [US1] SessionStore の AppState ワイヤリング `crates/gwt-tauri/src/state.rs` `crates/gwt-core/src/agent/session_store.rs`
-  - 既存 SessionStore を ProjectTeamSession 対応に拡張
+  - 既存 SessionStore を ProjectModeSession 対応に拡張
   - AppState に SessionStore を追加し永続化パイプラインを接続
   - 依存: T101, T102, T103
 
@@ -67,14 +67,14 @@ US9 (コンテキスト)  ← US1
 
 ## Phase 3: US1 — モード切り替えと基本対話
 
-> 独立テスト条件: Project Teamタブを開き、テキスト入力してLead応答を受け取れること
+> 独立テスト条件: Project Modeタブを開き、テキスト入力してLead応答を受け取れること
 
-- [ ] T301 [US1] [テスト] Project Teamタブ・モード切り替えテスト `gwt-gui/src/lib/components/ProjectTeamPanel.test.ts`
+- [ ] T301 [US1] [テスト] Project Modeタブ・モード切り替えテスト `gwt-gui/src/lib/components/ProjectModePanel.test.ts`
   - タブ選択→PT画面表示、他タブ→BM復帰、タスク実行中のバックグラウンド継続
   - 依存: T104
 
-- [ ] T302 [US1] Project Teamタブ・モード切り替え実装 `gwt-gui/src/lib/components/ProjectTeamPanel.svelte`
-  - 旧AgentModePanelをProjectTeamPanelにリネーム・Svelte 5化・2カラム構成
+- [ ] T302 [US1] Project Modeタブ・モード切り替え実装 `gwt-gui/src/lib/components/ProjectModePanel.svelte`
+  - 既存ProjectModePanelを2カラム構成へ拡張し、Project Mode導線を統一
   - 依存: T301
 
 - [ ] T303 [US1] [テスト] Leadチャット（IME/スピナー/自動スクロール）テスト `gwt-gui/src/lib/components/LeadChat.test.ts`
@@ -82,7 +82,7 @@ US9 (コンテキスト)  ← US1
   - 依存: T104
 
 - [ ] T304 [US1] LeadチャットUI実装 `gwt-gui/src/lib/components/LeadChat.svelte`
-  - 旧AgentModePanelからチャット部分を分離、バブル表示、進捗インライン
+  - ProjectModePanelからチャット部分を分離、バブル表示、進捗インライン
   - 依存: T303
 
 - [ ] T305 [US1] [テスト] ダッシュボード表示テスト `gwt-gui/src/lib/components/Dashboard.test.ts`
@@ -93,19 +93,19 @@ US9 (コンテキスト)  ← US1
   - 左カラム、Issue→Task→Developer階層、ステータスバッジ、折りたたみ/展開
   - 依存: T305
 
-- [ ] T307 [US1] [テスト] AI設定未構成時エラー表示テスト `gwt-gui/src/lib/components/ProjectTeamPanel.test.ts`
+- [ ] T307 [US1] [テスト] AI設定未構成時エラー表示テスト `gwt-gui/src/lib/components/ProjectModePanel.test.ts`
   - AI設定無効時のエラーメッセージと設定ウィザード導線
   - 依存: T302
 
-- [ ] T308 [US1] AI設定未構成時エラー表示実装 `gwt-gui/src/lib/components/ProjectTeamPanel.svelte`
+- [ ] T308 [US1] AI設定未構成時エラー表示実装 `gwt-gui/src/lib/components/ProjectModePanel.svelte`
   - エラーメッセージ（英語）+ AI設定ウィザード遷移リンク
   - 依存: T307
 
-- [ ] T309 [US1] [テスト] コスト可視化テスト `gwt-gui/src/lib/components/ProjectTeamPanel.test.ts`
+- [ ] T309 [US1] [テスト] コスト可視化テスト `gwt-gui/src/lib/components/ProjectModePanel.test.ts`
   - APIコール数・推定トークン数の表示検証
   - 依存: T302
 
-- [ ] T310 [US1] コスト可視化実装 `gwt-gui/src/lib/components/ProjectTeamPanel.svelte`
+- [ ] T310 [US1] コスト可視化実装 `gwt-gui/src/lib/components/ProjectModePanel.svelte`
   - LeadのLLM APIコール数/推定トークン数をGUI表示
   - 依存: T309
 
@@ -189,19 +189,19 @@ US9 (コンテキスト)  ← US1
 
 > 独立テスト条件: Coordinatorからの指示でDeveloperがGUI内蔵ターミナルペインで起動しプロンプト受信すること
 
-- [ ] T501 [US3] [テスト] Coordinator起動テスト `crates/gwt-tauri/src/commands/agent_mode.rs`
+- [ ] T501 [US3] [テスト] Coordinator起動テスト `crates/gwt-tauri/src/commands/project_mode.rs`
   - Issue単位でのCoordinator起動→ターミナルペイン割当→cwd=リポジトリルート→GitHub Issue番号渡し
   - 依存: T408
 
-- [ ] T502 [US3] Coordinator起動・管理実装 `crates/gwt-tauri/src/commands/agent_mode.rs`
+- [ ] T502 [US3] Coordinator起動・管理実装 `crates/gwt-tauri/src/commands/project_mode.rs`
   - GUI内蔵ターミナルペインでCoordinator起動、GitHub Issue番号渡し、複数並列管理
   - 依存: T501
 
-- [ ] T503 [US3] [テスト] タスク分割・Developer割り当てテスト `crates/gwt-tauri/src/commands/agent_mode.rs`
+- [ ] T503 [US3] [テスト] タスク分割・Developer割り当てテスト `crates/gwt-tauri/src/commands/project_mode.rs`
   - 1タスクに複数Developer+Worktreeを割り当てるロジック検証
   - 依存: T502
 
-- [ ] T504 [US3] タスク分割とDeveloper割り当て実装 `crates/gwt-tauri/src/commands/agent_mode.rs`
+- [ ] T504 [US3] タスク分割とDeveloper割り当て実装 `crates/gwt-tauri/src/commands/project_mode.rs`
   - 大タスク→複数Developer並列、独立→別Worktree、依存→同一/merge連携
   - 依存: T503
 
@@ -213,11 +213,11 @@ US9 (コンテキスト)  ← US1
   - 既存 sanitize_branch_name() 拡張、worktreeパス生成、連番付与
   - 依存: T505
 
-- [ ] T507 [US3] [テスト] Developer起動テスト `crates/gwt-tauri/src/commands/agent_mode.rs`
+- [ ] T507 [US3] [テスト] Developer起動テスト `crates/gwt-tauri/src/commands/project_mode.rs`
   - PTY直接通信でプロンプトが送信され、全自動モードで起動されるテスト
   - 依存: T504, T506
 
-- [ ] T508 [US3] Developer起動とプロンプト送信実装 `crates/gwt-tauri/src/commands/agent_mode.rs`
+- [ ] T508 [US3] Developer起動とプロンプト送信実装 `crates/gwt-tauri/src/commands/project_mode.rs`
   - ユーザー指定エージェント種別の自動モードフラグ + アダプティブプロンプト + CLAUDE.md規約
   - 依存: T507
 
@@ -233,11 +233,11 @@ US9 (コンテキスト)  ← US1
 
 > 独立テスト条件: DeveloperがタスクをComplete→Coordinatorが検出して次アクションに移行すること
 
-- [ ] T601 [US4] [テスト] Developer完了検出テスト（Hook Stop / GWT_TASK_DONE / プロセス終了） `crates/gwt-tauri/src/commands/agent_mode.rs`
+- [ ] T601 [US4] [テスト] Developer完了検出テスト（Hook Stop / GWT_TASK_DONE / プロセス終了） `crates/gwt-tauri/src/commands/project_mode.rs`
   - 各検出方式の動作検証、フォールバック順序の検証
   - 依存: T508
 
-- [ ] T602 [US4] Developer完了検出実装（複合方式） `crates/gwt-tauri/src/commands/agent_mode.rs`
+- [ ] T602 [US4] Developer完了検出実装（複合方式） `crates/gwt-tauri/src/commands/project_mode.rs`
   - Hook Stop最優先 → フォールバック（出力パターン / プロセス終了）
   - 依存: T601
 
@@ -253,19 +253,19 @@ US9 (コンテキスト)  ← US1
 
 > 独立テスト条件: Developer完了→テスト実行→PR作成→CI監視→修正ループが動作すること
 
-- [ ] T701 [US5] [テスト] 成果物検証（テスト実行→PR作成）テスト `crates/gwt-tauri/src/commands/agent_mode.rs`
+- [ ] T701 [US5] [テスト] 成果物検証（テスト実行→PR作成）テスト `crates/gwt-tauri/src/commands/project_mode.rs`
   - Developer完了→テスト実行→パス→PR作成のフロー検証
   - 依存: T602
 
-- [ ] T702 [US5] 成果物検証とPR作成実装 `crates/gwt-tauri/src/commands/agent_mode.rs`
+- [ ] T702 [US5] 成果物検証とPR作成実装 `crates/gwt-tauri/src/commands/project_mode.rs`
   - テスト実行指示、テスト失敗時最大3回リトライ、PR作成条件チェック、LLMでPRタイトル/本文生成
   - 依存: T701
 
-- [ ] T703 [US5] [テスト] CI監視・自律修正ループテスト `crates/gwt-tauri/src/commands/agent_mode.rs`
+- [ ] T703 [US5] [テスト] CI監視・自律修正ループテスト `crates/gwt-tauri/src/commands/project_mode.rs`
   - CI失敗検出→Developer修正指示→再プッシュ→CI再実行、最大3回→Lead報告の検証
   - 依存: T702
 
-- [ ] T704 [US5] CI監視・自律修正ループ実装 `crates/gwt-tauri/src/commands/agent_mode.rs`
+- [ ] T704 [US5] CI監視・自律修正ループ実装 `crates/gwt-tauri/src/commands/project_mode.rs`
   - gh pr checks監視 + Developer修正指示 + 3回失敗時Lead報告→ユーザー通知
   - 依存: T703
 
@@ -281,11 +281,11 @@ US9 (コンテキスト)  ← US1
 
 > 独立テスト条件: 各層の障害シナリオで他層が独立して動作し続けること
 
-- [ ] T801 [US6] [テスト] 層間独立性テスト `crates/gwt-tauri/src/commands/agent_mode.rs`
+- [ ] T801 [US6] [テスト] 層間独立性テスト `crates/gwt-tauri/src/commands/project_mode.rs`
   - Lead API障害時にCoordinator/Developer続行の検証
   - 依存: T602
 
-- [ ] T802 [US6] 層間独立性保証実装 `crates/gwt-tauri/src/commands/agent_mode.rs`
+- [ ] T802 [US6] 層間独立性保証実装 `crates/gwt-tauri/src/commands/project_mode.rs`
   - 各層のプロセス独立性、障害検出・通知
   - 依存: T801
 
@@ -301,27 +301,27 @@ US9 (コンテキスト)  ← US1
 
 > 独立テスト条件: gwt終了→再起動→前回セッション復元で中断前の状態から継続できること
 
-- [ ] T901 [US7] [テスト] セッション永続化テスト `crates/gwt-tauri/src/commands/agent_mode.rs`
+- [ ] T901 [US7] [テスト] セッション永続化テスト `crates/gwt-tauri/src/commands/project_mode.rs`
   - Lead会話/Coordinator状態/Developer状態/タスク一覧のJSON保存検証
   - 依存: T105
 
-- [ ] T902 [US7] セッション永続化実装 `crates/gwt-tauri/src/commands/agent_mode.rs`
+- [ ] T902 [US7] セッション永続化実装 `crates/gwt-tauri/src/commands/project_mode.rs`
   - 状態変更トリガーで~/.gwt/sessions/に保存（アトミック書き込み）
   - 依存: T901
 
-- [ ] T903 [US7] [テスト] セッション復元・再開テスト `crates/gwt-tauri/src/commands/agent_mode.rs`
+- [ ] T903 [US7] [テスト] セッション復元・再開テスト `crates/gwt-tauri/src/commands/project_mode.rs`
   - gwt再起動→最新未完了セッション復元→Coordinator/Developer再接続の検証
   - 依存: T902
 
-- [ ] T904 [US7] セッション復元・再開実装 `crates/gwt-tauri/src/commands/agent_mode.rs`
+- [ ] T904 [US7] セッション復元・再開実装 `crates/gwt-tauri/src/commands/project_mode.rs`
   - JSON読み込み→状態復元→ペイン再接続→worktree消失時Failed化
   - 依存: T903
 
-- [ ] T905 [US7] [テスト] セッション強制中断テスト `crates/gwt-tauri/src/commands/agent_mode.rs`
+- [ ] T905 [US7] [テスト] セッション強制中断テスト `crates/gwt-tauri/src/commands/project_mode.rs`
   - Esc→全ペインSIGTERM→5秒タイムアウト→Paused永続化の検証
   - 依存: T902
 
-- [ ] T906 [US7] セッション強制中断実装 `crates/gwt-tauri/src/commands/agent_mode.rs`
+- [ ] T906 [US7] セッション強制中断実装 `crates/gwt-tauri/src/commands/project_mode.rs`
   - Escキーイベント→SIGTERM送信→Paused状態保存→チャット表示
   - 依存: T905
 
@@ -360,7 +360,7 @@ US9 (コンテキスト)  ← US1
 ## Phase 12: 仕上げ・横断
 
 - [ ] T1201 [P] [共通] PTY通信スキル完全移行 `crates/gwt-tauri/src/agent_tools.rs` `crates/gwt-tauri/src/commands/terminal.rs`
-  - agent_tools.rs の send_keys系3ツール → Claude Code プラグインスキルへ完全移行
+  - agent_tools.rs の send_keys系3ツール → Codex/Geminiローカルskills + Claude Codeプラグインへ完全移行
   - 旧ツール呼び出しの廃止確認
   - 依存: T204
 
@@ -369,8 +369,51 @@ US9 (コンテキスト)  ← US1
   - 依存: T506
 
 - [ ] T1203 [P] [共通] issue_specスキル公開 `crates/gwt-tauri/src/agent_tools.rs`
-  - issue_specツール群をClaude Codeプラグインスキルとして公開、ブランチモード各エージェントから利用可能に
+  - issue_specツール群をCodex/Geminiローカルskills + Claude Codeプラグインで公開、ブランチモード各エージェントから利用可能に
   - 依存: T402
+
+- [x] T1207 [P] [共通] Claude Hook転送のプラグイン同梱 `plugins/gwt-integration/hooks/hooks.json` `plugins/gwt-integration/hooks/scripts/forward-gwt-hook.sh`
+  - `UserPromptSubmit`/`PreToolUse`/`PostToolUse`/`Notification`/`Stop` を `gwt-tauri hook <Event>` へ転送
+  - 既存のPreToolUse保護Hook（branch/cd/file/gid-dir-overrideブロック）を維持
+  - 依存: T1201
+
+- [x] T1208 [P] [共通] 起動時手動Hook登録ダイアログ廃止 `gwt-gui/src/App.svelte`
+  - `check_and_update_hooks` / `register_hooks` 呼び出しと確認ダイアログを削除
+  - Hook導入経路をplugin setup自動登録へ一本化
+  - 依存: T1207
+
+- [x] T1209 [P] [共通] Claudeプラグイン自動登録フロー統一 `crates/gwt-core/src/config/skill_registration.rs` `crates/gwt-tauri/src/app.rs`
+  - 起動時`repair_skill_registration`でClaude向け`setup_gwt_plugin`をベストエフォート実行
+  - `enabledPlugins` と marketplace の自動修復状態をSkill Registrationに反映
+  - 依存: T1207
+
+- [x] T1210 [P] [共通] [テスト] Hook自動登録回帰テスト整備 `crates/gwt-core/src/config/claude_plugins.rs` `crates/gwt-core/src/config/claude_hooks.rs`
+  - プラグイン自動登録（marketplace / enabledPlugins）とHookコマンド互換（`gwt hook` / build binary / Windows path）を回帰検証
+  - 依存: T1208, T1209
+
+- [ ] T1211 [P] [US10] [テスト] Skill登録スコープ設定モデルテスト `crates/gwt-core/src/config/settings.rs`
+  - `default_scope`（user/project/local）とAgent別上書き（codex/claude/gemini）の保存・読み込み・デフォルト値を検証
+  - 依存: T105
+
+- [ ] T1212 [US10] Skill登録スコープ設定モデル実装 `crates/gwt-core/src/config/settings.rs` `crates/gwt-tauri/src/commands/settings.rs` `gwt-gui/src/lib/types.ts`
+  - Settingsに`skill_registration.default_scope`とAgent別上書きを追加
+  - 依存: T1211
+
+- [ ] T1213 [P] [US10] [テスト] Scope別登録先解決テスト `crates/gwt-core/src/config/skill_registration.rs`
+  - User/Project/Local + Agent別上書きでCodex/Gemini/Claudeの登録先が期待どおりに解決されることを検証
+  - 依存: T1212
+
+- [ ] T1214 [US10] Scope別登録先解決とrepair/status適用実装 `crates/gwt-core/src/config/skill_registration.rs` `crates/gwt-core/src/config/claude_plugins.rs`
+  - `register_agent_skills` / `status_for` / `repair_skill_registration`を有効スコープ基準へ変更
+  - 依存: T1213
+
+- [ ] T1215 [P] [US10] [テスト] Settings Scope UIテスト `gwt-gui/src/lib/components/SettingsPanel.test.ts`
+  - Scope選択UI、Agent別上書き、保存・再読込、repair/status表示更新を検証
+  - 依存: T1212
+
+- [ ] T1216 [US10] Settings Scope UI実装 `gwt-gui/src/lib/components/SettingsPanel.svelte`
+  - User/Project/Local選択とAgent別上書きフォームを追加
+  - 依存: T1215, T1214
 
 - [ ] T1206 [P] [共通] ブランチモード GitHub Issueボタン `gwt-gui/src/lib/components/`
   - GUI上にGitHub Issueボタン設置、gwt内蔵AIがissue_specツールでGitHub Issue管理を実行

@@ -4,12 +4,12 @@
 use gwt_core::agent::conversation::MessageRole;
 use gwt_core::agent::developer::AgentType;
 use gwt_core::agent::lead::{LeadMessage, LeadStatus, MessageKind};
-use gwt_core::agent::session::{ProjectTeamSession, SessionStatus};
+use gwt_core::agent::session::{ProjectModeSession, SessionStatus};
 use gwt_core::agent::session_store::SessionStoreError;
 use gwt_core::agent::task::{PullRequestRef, Task, TestStatus, TestVerification};
 use gwt_core::agent::types::SessionId;
 use gwt_core::ai::{AIClient, AIResponse, ChatMessage, ToolCall};
-use gwt_core::config::{ProfilesConfig, Settings};
+use gwt_core::config::ProfilesConfig;
 use gwt_core::git::{
     find_spec_issue_by_spec_id, sync_issue_to_project, upsert_spec_issue, SpecIssueSections,
     SpecProjectPhase,
@@ -25,7 +25,7 @@ const MAX_TOOL_CALL_LOOPS: usize = 3;
 const SYSTEM_PROMPT: &str = "You are the master agent for gwt. Use ReAct and tool calls to send instructions to agent panes and capture output when needed. Keep instructions concise and in English.\n\nReAct format:\nThought: <short reasoning>\nAction: <tool name + short params summary>\nObservation: <tool result>\n\nRules:\n- Use tool calls for actions.\n- Do not fabricate observations; observations come from tool results.\n- Keep Thought to 2-4 lines.\n- Keep spec artifacts in GitHub Issues (Issue-first). Do not generate local spec markdown files.\n- Maintain the full bundle: spec, plan, tasks, tdd, research, data-model, quickstart, contracts, checklists.\n- Keep contracts/checklists as issue comments via artifact tools.\n- When delegating to sub-agents, include a clear task and request a short completion summary.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentModeMessage {
+pub struct ProjectModeMessage {
     pub role: String,
     pub kind: String,
     pub content: String,
@@ -33,8 +33,8 @@ pub struct AgentModeMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentModeState {
-    pub messages: Vec<AgentModeMessage>,
+pub struct ProjectModeState {
+    pub messages: Vec<ProjectModeMessage>,
     pub ai_ready: bool,
     pub ai_error: Option<String>,
     pub last_error: Option<String>,
@@ -46,10 +46,10 @@ pub struct AgentModeState {
     pub active_spec_issue_number: Option<u64>,
     pub active_spec_issue_url: Option<String>,
     pub active_spec_issue_etag: Option<String>,
-    /// Project Team session ID (None when in Branch Mode)
+    /// Project Mode session ID (None when in Branch Mode)
     #[serde(default)]
-    pub project_team_session_id: Option<String>,
-    /// Lead AI status indicator for Project Team mode
+    pub project_mode_session_id: Option<String>,
+    /// Lead AI status indicator for Project Mode
     #[serde(default)]
     pub lead_status: Option<String>,
 }
@@ -63,7 +63,7 @@ struct IssueSpecPreparation {
     created: bool,
 }
 
-impl AgentModeState {
+impl ProjectModeState {
     pub fn new() -> Self {
         Self {
             messages: Vec::new(),
@@ -71,40 +71,44 @@ impl AgentModeState {
             ai_error: None,
             last_error: None,
             is_waiting: false,
-            session_name: Some("Master Agent".to_string()),
+            session_name: Some("Project Mode".to_string()),
             llm_call_count: 0,
             estimated_tokens: 0,
             active_spec_id: None,
             active_spec_issue_number: None,
             active_spec_issue_url: None,
             active_spec_issue_etag: None,
-            project_team_session_id: None,
+            project_mode_session_id: None,
             lead_status: None,
         }
     }
 }
 
-pub fn get_agent_mode_state(state: &AppState, window_label: &str) -> AgentModeState {
-    let guard = match state.window_agent_modes.lock() {
+pub fn get_project_mode_state(state: &AppState, window_label: &str) -> ProjectModeState {
+    let guard = match state.window_project_modes.lock() {
         Ok(g) => g,
-        Err(_) => return AgentModeState::new(),
+        Err(_) => return ProjectModeState::new(),
     };
     let mut mode = guard
         .get(window_label)
         .cloned()
-        .unwrap_or_else(initial_agent_mode_state);
+        .unwrap_or_else(initial_project_mode_state);
     mode.messages.retain(|m| m.role != "system");
     mode
 }
 
-fn save_agent_mode_state(state: &AppState, window_label: &str, mode_state: &AgentModeState) {
-    if let Ok(mut guard) = state.window_agent_modes.lock() {
+fn save_window_project_mode_state(
+    state: &AppState,
+    window_label: &str,
+    mode_state: &ProjectModeState,
+) {
+    if let Ok(mut guard) = state.window_project_modes.lock() {
         guard.insert(window_label.to_string(), mode_state.clone());
     }
 }
 
-fn initial_agent_mode_state() -> AgentModeState {
-    let mut state = AgentModeState::new();
+fn initial_project_mode_state() -> ProjectModeState {
+    let mut state = ProjectModeState::new();
     match ProfilesConfig::load() {
         Ok(profiles) => {
             let ai = profiles.resolve_active_ai_settings();
@@ -124,18 +128,22 @@ fn initial_agent_mode_state() -> AgentModeState {
     state
 }
 
-pub fn send_agent_message(state: &AppState, window_label: &str, input: &str) -> AgentModeState {
+fn send_project_mode_message_legacy(
+    state: &AppState,
+    window_label: &str,
+    input: &str,
+) -> ProjectModeState {
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return get_agent_mode_state(state, window_label);
+        return get_project_mode_state(state, window_label);
     }
 
-    let mut working = get_agent_mode_state(state, window_label);
+    let mut working = get_project_mode_state(state, window_label);
     working.messages.retain(|m| m.role != "system");
     working.last_error = None;
     working.is_waiting = true;
     push_message(&mut working, "user", "message", trimmed);
-    save_agent_mode_state(state, window_label, &working);
+    save_window_project_mode_state(state, window_label, &working);
 
     let profiles = match ProfilesConfig::load() {
         Ok(p) => p,
@@ -143,7 +151,7 @@ pub fn send_agent_message(state: &AppState, window_label: &str, input: &str) -> 
             working.ai_ready = false;
             working.ai_error = Some(e.to_string());
             working.is_waiting = false;
-            save_agent_mode_state(state, window_label, &working);
+            save_window_project_mode_state(state, window_label, &working);
             return working;
         }
     };
@@ -153,12 +161,12 @@ pub fn send_agent_message(state: &AppState, window_label: &str, input: &str) -> 
         working.ai_ready = false;
         working.ai_error = Some("AI settings are required.".to_string());
         working.is_waiting = false;
-        save_agent_mode_state(state, window_label, &working);
+        save_window_project_mode_state(state, window_label, &working);
         return working;
     };
     working.ai_ready = true;
     working.ai_error = None;
-    save_agent_mode_state(state, window_label, &working);
+    save_window_project_mode_state(state, window_label, &working);
 
     let prep = match prepare_issue_spec_for_window(
         state,
@@ -170,7 +178,7 @@ pub fn send_agent_message(state: &AppState, window_label: &str, input: &str) -> 
         Err(e) => {
             working.last_error = Some(e);
             working.is_waiting = false;
-            save_agent_mode_state(state, window_label, &working);
+            save_window_project_mode_state(state, window_label, &working);
             return working;
         }
     };
@@ -190,14 +198,14 @@ pub fn send_agent_message(state: &AppState, window_label: &str, input: &str) -> 
         )
     };
     push_message(&mut working, "assistant", "observation", &note);
-    save_agent_mode_state(state, window_label, &working);
+    save_window_project_mode_state(state, window_label, &working);
 
     let client = match AIClient::new(settings) {
         Ok(c) => c,
         Err(e) => {
             working.last_error = Some(e.to_string());
             working.is_waiting = false;
-            save_agent_mode_state(state, window_label, &working);
+            save_window_project_mode_state(state, window_label, &working);
             return working;
         }
     };
@@ -213,14 +221,14 @@ pub fn send_agent_message(state: &AppState, window_label: &str, input: &str) -> 
                 Err(e) => {
                     working.last_error = Some(e.to_string());
                     working.is_waiting = false;
-                    save_agent_mode_state(state, window_label, &working);
+                    save_window_project_mode_state(state, window_label, &working);
                     return working;
                 }
             };
 
         let has_tools = !response.tool_calls.is_empty();
         let has_action = apply_ai_response(&mut working, &response, !has_tools);
-        save_agent_mode_state(state, window_label, &working);
+        save_window_project_mode_state(state, window_label, &working);
 
         if response.tool_calls.is_empty() {
             break;
@@ -235,7 +243,7 @@ pub fn send_agent_message(state: &AppState, window_label: &str, input: &str) -> 
         for obs in tool_observations {
             push_message(&mut working, "tool", "observation", &obs);
         }
-        save_agent_mode_state(state, window_label, &working);
+        save_window_project_mode_state(state, window_label, &working);
         messages = build_chat_messages(&working.messages);
 
         if loops >= MAX_TOOL_CALL_LOOPS {
@@ -244,11 +252,11 @@ pub fn send_agent_message(state: &AppState, window_label: &str, input: &str) -> 
     }
 
     working.is_waiting = false;
-    save_agent_mode_state(state, window_label, &working);
+    save_window_project_mode_state(state, window_label, &working);
     working
 }
 
-const PROJECT_TEAM_SYSTEM_PROMPT: &str = "You are the Lead AI agent for gwt Project Team mode. You orchestrate Coordinators and Developers to implement features. Use ReAct and tool calls when needed. Keep instructions concise and in English.
+const PROJECT_MODE_SYSTEM_PROMPT: &str = "You are the Lead AI agent for gwt Project Mode. You orchestrate Coordinators and Developers to implement features. Use ReAct and tool calls when needed. Keep instructions concise and in English.
 
 ReAct format:
 Thought: <short reasoning>
@@ -289,63 +297,63 @@ Follow this workflow for every feature request:
 
 Do not start Coordinators or Developers until the user has explicitly approved the plan.";
 
-pub fn send_project_team_message(
+pub fn send_project_mode_message(
     state: &AppState,
     window_label: &str,
     input: &str,
-) -> AgentModeState {
+) -> ProjectModeState {
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return get_agent_mode_state(state, window_label);
+        return get_project_mode_state(state, window_label);
     }
 
-    let mut working = get_agent_mode_state(state, window_label);
+    let mut working = get_project_mode_state(state, window_label);
     working.messages.retain(|m| m.role != "system");
     working.last_error = None;
     working.is_waiting = true;
     working.lead_status = Some("thinking".to_string());
     push_message(&mut working, "user", "message", trimmed);
-    save_agent_mode_state(state, window_label, &working);
+    save_window_project_mode_state(state, window_label, &working);
 
     // Resolve project path for session persistence
     let project_path = match state.project_for_window(window_label) {
         Some(p) => PathBuf::from(p),
         None => {
-            working.last_error = Some("Open a project before using Project Team mode.".to_string());
+            working.last_error = Some("Open a project before using Project Mode.".to_string());
             working.is_waiting = false;
             working.lead_status = Some("idle".to_string());
-            save_agent_mode_state(state, window_label, &working);
+            save_window_project_mode_state(state, window_label, &working);
             return working;
         }
     };
 
-    // Load or create ProjectTeamSession
+    // Load or create ProjectModeSession
     let session_id = working
-        .project_team_session_id
+        .project_mode_session_id
         .clone()
         .unwrap_or_else(|| SessionId::new().0);
     let sid = SessionId(session_id.clone());
 
-    let mut session = match state.session_store.load_project_team(&sid) {
+    let mut session = match state.session_store.load_project_mode(&sid) {
         Ok(session) => session,
         Err(SessionStoreError::NotFound) => {
-            ProjectTeamSession::new(sid.clone(), project_path, "main", AgentType::Claude)
+            ProjectModeSession::new(sid.clone(), project_path, "main", AgentType::Claude)
         }
         Err(e) => {
-            working.last_error = Some(format!("Failed to load project team session: {e}"));
+            working.last_error = Some(format!("Failed to load project mode session: {e}"));
             working.is_waiting = false;
             working.lead_status = Some("idle".to_string());
-            save_agent_mode_state(state, window_label, &working);
+            save_window_project_mode_state(state, window_label, &working);
             return working;
         }
     };
 
-    working.project_team_session_id = Some(session_id);
-    save_agent_mode_state(state, window_label, &working);
+    working.project_mode_session_id = Some(session_id);
+    save_window_project_mode_state(state, window_label, &working);
 
     activate_session_for_message(&mut session, trimmed);
     session.touch();
-    let _ = state.session_store.save_project_team(&session);
+    let _ = state.session_store.save_project_mode(&session);
 
     // Load AI settings
     let profiles = match ProfilesConfig::load() {
@@ -356,8 +364,8 @@ pub fn send_project_team_message(
             working.is_waiting = false;
             working.lead_status = Some("idle".to_string());
             session.lead.status = LeadStatus::Idle;
-            let _ = state.session_store.save_project_team(&session);
-            save_agent_mode_state(state, window_label, &working);
+            let _ = state.session_store.save_project_mode(&session);
+            save_window_project_mode_state(state, window_label, &working);
             return working;
         }
     };
@@ -369,8 +377,8 @@ pub fn send_project_team_message(
         working.is_waiting = false;
         working.lead_status = Some("idle".to_string());
         session.lead.status = LeadStatus::Idle;
-        let _ = state.session_store.save_project_team(&session);
-        save_agent_mode_state(state, window_label, &working);
+        let _ = state.session_store.save_project_mode(&session);
+        save_window_project_mode_state(state, window_label, &working);
         return working;
     };
     working.ai_ready = true;
@@ -383,14 +391,14 @@ pub fn send_project_team_message(
             working.is_waiting = false;
             working.lead_status = Some("idle".to_string());
             session.lead.status = LeadStatus::Idle;
-            let _ = state.session_store.save_project_team(&session);
-            save_agent_mode_state(state, window_label, &working);
+            let _ = state.session_store.save_project_mode(&session);
+            save_window_project_mode_state(state, window_label, &working);
             return working;
         }
     };
 
-    // Build chat messages from working state with Project Team system prompt
-    let mut messages = build_project_team_chat_messages(&working.messages);
+    // Build chat messages from working state with Project Mode system prompt
+    let mut messages = build_project_mode_chat_messages(&working.messages);
 
     let mut loops = 0usize;
     loop {
@@ -403,15 +411,15 @@ pub fn send_project_team_message(
                     working.is_waiting = false;
                     working.lead_status = Some("idle".to_string());
                     session.lead.status = LeadStatus::Idle;
-                    let _ = state.session_store.save_project_team(&session);
-                    save_agent_mode_state(state, window_label, &working);
+                    let _ = state.session_store.save_project_mode(&session);
+                    save_window_project_mode_state(state, window_label, &working);
                     return working;
                 }
             };
 
         let has_tools = !response.tool_calls.is_empty();
         let has_action = apply_ai_response(&mut working, &response, !has_tools);
-        save_agent_mode_state(state, window_label, &working);
+        save_window_project_mode_state(state, window_label, &working);
 
         // Update session lead state with the response
         if let Some(tokens) = response.usage_tokens {
@@ -439,8 +447,8 @@ pub fn send_project_team_message(
             has_action,
             &tool_observations,
         );
-        save_agent_mode_state(state, window_label, &working);
-        messages = build_project_team_chat_messages(&working.messages);
+        save_window_project_mode_state(state, window_label, &working);
+        messages = build_project_mode_chat_messages(&working.messages);
 
         if loops >= MAX_TOOL_CALL_LOOPS {
             break;
@@ -450,19 +458,19 @@ pub fn send_project_team_message(
     // Finalize: Thinking → Idle
     session.lead.status = LeadStatus::Idle;
     session.touch();
-    let _ = state.session_store.save_project_team(&session);
+    let _ = state.session_store.save_project_mode(&session);
 
     working.is_waiting = false;
     working.lead_status = Some("idle".to_string());
-    save_agent_mode_state(state, window_label, &working);
+    save_window_project_mode_state(state, window_label, &working);
     working
 }
 
-fn build_project_team_chat_messages(messages: &[AgentModeMessage]) -> Vec<ChatMessage> {
+fn build_project_mode_chat_messages(messages: &[ProjectModeMessage]) -> Vec<ChatMessage> {
     let mut out = Vec::with_capacity(messages.len() + 1);
     out.push(ChatMessage {
         role: "system".to_string(),
-        content: PROJECT_TEAM_SYSTEM_PROMPT.to_string(),
+        content: PROJECT_MODE_SYSTEM_PROMPT.to_string(),
     });
     out.extend(
         messages
@@ -477,7 +485,7 @@ fn build_project_team_chat_messages(messages: &[AgentModeMessage]) -> Vec<ChatMe
 }
 
 fn apply_ai_response(
-    state: &mut AgentModeState,
+    state: &mut ProjectModeState,
     response: &AIResponse,
     allow_observation: bool,
 ) -> bool {
@@ -515,8 +523,8 @@ fn execute_tool_calls(
 }
 
 fn push_tool_turns_to_state_and_session(
-    working: &mut AgentModeState,
-    session: &mut ProjectTeamSession,
+    working: &mut ProjectModeState,
+    session: &mut ProjectModeSession,
     tool_calls: &[ToolCall],
     has_action: bool,
     tool_observations: &[String],
@@ -543,7 +551,7 @@ fn push_tool_turns_to_state_and_session(
     }
 }
 
-fn activate_session_for_message(session: &mut ProjectTeamSession, user_message: &str) {
+fn activate_session_for_message(session: &mut ProjectModeSession, user_message: &str) {
     session.status = SessionStatus::Active;
     session.lead.status = LeadStatus::Thinking;
     session.lead.conversation.push(LeadMessage::new(
@@ -553,8 +561,8 @@ fn activate_session_for_message(session: &mut ProjectTeamSession, user_message: 
     ));
 }
 
-fn push_message(state: &mut AgentModeState, role: &str, kind: &str, content: &str) {
-    state.messages.push(AgentModeMessage {
+fn push_message(state: &mut ProjectModeState, role: &str, kind: &str, content: &str) {
+    state.messages.push(ProjectModeMessage {
         role: role.to_string(),
         kind: kind.to_string(),
         content: content.to_string(),
@@ -562,7 +570,7 @@ fn push_message(state: &mut AgentModeState, role: &str, kind: &str, content: &st
     });
 }
 
-fn build_chat_messages(messages: &[AgentModeMessage]) -> Vec<ChatMessage> {
+fn build_chat_messages(messages: &[ProjectModeMessage]) -> Vec<ChatMessage> {
     let mut out = Vec::with_capacity(messages.len() + 1);
     out.push(ChatMessage {
         role: "system".to_string(),
@@ -587,7 +595,7 @@ fn prepare_issue_spec_for_window(
     preferred_spec_id: Option<&str>,
 ) -> Result<IssueSpecPreparation, String> {
     let Some(project_path) = state.project_for_window(window_label) else {
-        return Err("Open a project before using Master Agent.".to_string());
+        return Err("Open a project before using Project Mode.".to_string());
     };
     prepare_issue_spec(Path::new(&project_path), user_input, preferred_spec_id)
 }
@@ -634,15 +642,7 @@ fn prepare_issue_spec(
         existing.as_ref().map(|e| e.etag.as_str()),
     )?;
 
-    let settings = Settings::load(project_root).unwrap_or_default();
-    if let Some(project_id) = settings.agent.github_project_id {
-        let _ = sync_issue_to_project(
-            &repo_path,
-            detail.number,
-            project_id.trim(),
-            SpecProjectPhase::Draft,
-        );
-    }
+    let _ = sync_issue_to_project(&repo_path, detail.number, "", SpecProjectPhase::Draft);
 
     Ok(IssueSpecPreparation {
         spec_id,
@@ -701,7 +701,7 @@ fn build_issue_title(spec_id: &str, user_input: &str, existing_title: Option<&st
     }
     let base = collapse_whitespace(user_input);
     let mut title = if base.is_empty() {
-        "Master Agent Task".to_string()
+        "Project Mode Task".to_string()
     } else {
         base
     };
@@ -807,7 +807,7 @@ pub fn is_approval_message(input: &str) -> bool {
 /// Register a GitHub Issue as a ProjectIssue in the session.
 /// Skips if the issue number is already registered.
 pub fn register_project_issue(
-    session: &mut ProjectTeamSession,
+    session: &mut ProjectModeSession,
     issue_number: u64,
     issue_url: &str,
     title: &str,
@@ -1211,37 +1211,37 @@ pub fn format_progress_report(scrollback: &str, max_lines: usize) -> String {
 // Phase 9: US7 — Session Persistence / Restore / Force Stop (T901-T906)
 // ===========================================================================
 
-/// Persist the current ProjectTeamSession state to disk.
+/// Persist the current ProjectModeSession state to disk.
 ///
 /// Should be called after each state change (message send, status change,
 /// task update) to ensure session data is not lost on crash or restart.
-pub fn save_project_team_state(
+pub fn save_project_mode_state(
     state: &AppState,
-    session: &ProjectTeamSession,
+    session: &ProjectModeSession,
 ) -> Result<(), String> {
     state
         .session_store
-        .save_project_team(session)
-        .map_err(|e| format!("Failed to save project team session: {e}"))
+        .save_project_mode(session)
+        .map_err(|e| format!("Failed to save project mode session: {e}"))
 }
 
-/// Restore the most recent active ProjectTeamSession and reconstruct
-/// the AgentModeState from it.
+/// Restore the most recent active ProjectModeSession and reconstruct
+/// the ProjectModeState from it.
 ///
 /// Loads the session by ID and rebuilds the in-memory state from the
 /// persisted lead conversation and metadata.
-pub fn restore_project_team_session(
+pub fn restore_project_mode_session(
     state: &AppState,
     session_id: &str,
-) -> Result<(ProjectTeamSession, AgentModeState), String> {
+) -> Result<(ProjectModeSession, ProjectModeState), String> {
     let sid = SessionId(session_id.to_string());
     let session = state
         .session_store
-        .load_project_team(&sid)
-        .map_err(|e| format!("Failed to load project team session: {e}"))?;
+        .load_project_mode(&sid)
+        .map_err(|e| format!("Failed to load project mode session: {e}"))?;
 
-    let mut mode = AgentModeState::new();
-    mode.project_team_session_id = Some(session_id.to_string());
+    let mut mode = ProjectModeState::new();
+    mode.project_mode_session_id = Some(session_id.to_string());
     mode.lead_status = Some(lead_status_to_api_string(session.lead.status).to_string());
     mode.llm_call_count = session.lead.llm_call_count;
     mode.estimated_tokens = session.lead.estimated_tokens;
@@ -1262,7 +1262,7 @@ pub fn restore_project_team_session(
             MessageKind::Error => "error",
             MessageKind::Progress => "progress",
         };
-        mode.messages.push(AgentModeMessage {
+        mode.messages.push(ProjectModeMessage {
             role: role.to_string(),
             kind: kind.to_string(),
             content: msg.content.clone(),
@@ -1273,18 +1273,18 @@ pub fn restore_project_team_session(
     Ok((session, mode))
 }
 
-/// List all ProjectTeamSession summaries from the session store.
-pub fn list_project_team_sessions(
+/// List all ProjectModeSession summaries from the session store.
+pub fn list_project_mode_sessions(
     state: &AppState,
-) -> Result<Vec<ProjectTeamSessionSummary>, String> {
+) -> Result<Vec<ProjectModeSessionSummary>, String> {
     let summaries = state
         .session_store
-        .list_project_team_sessions()
-        .map_err(|e| format!("Failed to list project team sessions: {e}"))?;
+        .list_project_mode_sessions()
+        .map_err(|e| format!("Failed to list project mode sessions: {e}"))?;
 
     Ok(summaries
         .into_iter()
-        .map(|s| ProjectTeamSessionSummary {
+        .map(|s| ProjectModeSessionSummary {
             session_id: s.session_id.0,
             status: format!("{:?}", s.status).to_lowercase(),
             updated_at: s.updated_at.map(|dt| dt.timestamp_millis()),
@@ -1292,24 +1292,24 @@ pub fn list_project_team_sessions(
         .collect())
 }
 
-/// A lightweight summary for listing Project Team sessions on the frontend.
+/// A lightweight summary for listing Project Mode sessions on the frontend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectTeamSessionSummary {
+pub struct ProjectModeSessionSummary {
     pub session_id: String,
     pub status: String,
     pub updated_at: Option<i64>,
 }
 
-/// Force-stop a running ProjectTeamSession by pausing it and saving.
+/// Force-stop a running ProjectModeSession by pausing it and saving.
 ///
 /// Sets the session status to Paused and the lead status to Idle,
 /// then persists the session. Returns a user-friendly status message.
-pub fn force_stop_project_team(state: &AppState, session_id: &str) -> Result<String, String> {
+pub fn force_stop_project_mode(state: &AppState, session_id: &str) -> Result<String, String> {
     let sid = SessionId(session_id.to_string());
     let mut session = state
         .session_store
-        .load_project_team(&sid)
-        .map_err(|e| format!("Failed to load project team session: {e}"))?;
+        .load_project_mode(&sid)
+        .map_err(|e| format!("Failed to load project mode session: {e}"))?;
 
     session.status = SessionStatus::Paused;
     session.lead.status = LeadStatus::Idle;
@@ -1317,7 +1317,7 @@ pub fn force_stop_project_team(state: &AppState, session_id: &str) -> Result<Str
 
     state
         .session_store
-        .save_project_team(&session)
+        .save_project_mode(&session)
         .map_err(|e| format!("Failed to save paused session: {e}"))?;
 
     Ok(format!("Session {} has been paused.", session_id))
@@ -1331,19 +1331,19 @@ mod tests {
     #[test]
     fn build_chat_messages_adds_system_prompt_and_filters_system_messages() {
         let input = vec![
-            AgentModeMessage {
+            ProjectModeMessage {
                 role: "system".to_string(),
                 kind: "message".to_string(),
                 content: "legacy system".to_string(),
                 timestamp: 0,
             },
-            AgentModeMessage {
+            ProjectModeMessage {
                 role: "user".to_string(),
                 kind: "message".to_string(),
                 content: "hello".to_string(),
                 timestamp: 1,
             },
-            AgentModeMessage {
+            ProjectModeMessage {
                 role: "assistant".to_string(),
                 kind: "message".to_string(),
                 content: "hi".to_string(),
@@ -1371,7 +1371,7 @@ mod tests {
         assert!(err.is_err());
         assert!(err
             .unwrap_err()
-            .contains("Open a project before using Master Agent."));
+            .contains("Open a project before using Project Mode."));
     }
 
     #[test]
@@ -1413,17 +1413,17 @@ mod tests {
         assert_eq!(merged, "existing context\n\n- new requirement");
     }
 
-    // --- AgentModeState new fields tests ---
+    // --- ProjectModeState new fields tests ---
 
     #[test]
-    fn agent_mode_state_new_has_none_project_team_fields() {
-        let state = AgentModeState::new();
-        assert!(state.project_team_session_id.is_none());
+    fn project_mode_state_new_has_none_project_mode_fields() {
+        let state = ProjectModeState::new();
+        assert!(state.project_mode_session_id.is_none());
         assert!(state.lead_status.is_none());
     }
 
     #[test]
-    fn agent_mode_state_serde_backward_compatible() {
+    fn project_mode_state_serde_backward_compatible() {
         // JSON without the new fields should deserialize with defaults
         let json = r#"{
             "messages": [],
@@ -1431,7 +1431,7 @@ mod tests {
             "ai_error": null,
             "last_error": null,
             "is_waiting": false,
-            "session_name": "Master Agent",
+            "session_name": "Project Mode",
             "llm_call_count": 5,
             "estimated_tokens": 1000,
             "active_spec_id": null,
@@ -1439,46 +1439,46 @@ mod tests {
             "active_spec_issue_url": null,
             "active_spec_issue_etag": null
         }"#;
-        let state: AgentModeState = serde_json::from_str(json).unwrap();
-        assert!(state.project_team_session_id.is_none());
+        let state: ProjectModeState = serde_json::from_str(json).unwrap();
+        assert!(state.project_mode_session_id.is_none());
         assert!(state.lead_status.is_none());
         assert!(state.ai_ready);
         assert_eq!(state.llm_call_count, 5);
     }
 
     #[test]
-    fn agent_mode_state_serde_with_project_team_fields() {
-        let mut state = AgentModeState::new();
-        state.project_team_session_id = Some("pt-session-123".to_string());
+    fn project_mode_state_serde_with_project_mode_fields() {
+        let mut state = ProjectModeState::new();
+        state.project_mode_session_id = Some("pt-session-123".to_string());
         state.lead_status = Some("thinking".to_string());
 
         let json = serde_json::to_string(&state).unwrap();
-        let deserialized: AgentModeState = serde_json::from_str(&json).unwrap();
+        let deserialized: ProjectModeState = serde_json::from_str(&json).unwrap();
         assert_eq!(
-            deserialized.project_team_session_id,
+            deserialized.project_mode_session_id,
             Some("pt-session-123".to_string())
         );
         assert_eq!(deserialized.lead_status, Some("thinking".to_string()));
     }
 
     #[test]
-    fn agent_mode_state_roundtrip_preserves_all_fields() {
-        let mut state = AgentModeState::new();
+    fn project_mode_state_roundtrip_preserves_all_fields() {
+        let mut state = ProjectModeState::new();
         state.ai_ready = true;
         state.session_name = Some("Test Session".to_string());
-        state.project_team_session_id = Some("pt-abc".to_string());
+        state.project_mode_session_id = Some("pt-abc".to_string());
         state.lead_status = Some("orchestrating".to_string());
         state.llm_call_count = 42;
         state.estimated_tokens = 5000;
         push_message(&mut state, "user", "message", "hello");
 
         let json = serde_json::to_string(&state).unwrap();
-        let deserialized: AgentModeState = serde_json::from_str(&json).unwrap();
+        let deserialized: ProjectModeState = serde_json::from_str(&json).unwrap();
 
         assert!(deserialized.ai_ready);
         assert_eq!(deserialized.session_name, Some("Test Session".to_string()));
         assert_eq!(
-            deserialized.project_team_session_id,
+            deserialized.project_mode_session_id,
             Some("pt-abc".to_string())
         );
         assert_eq!(deserialized.lead_status, Some("orchestrating".to_string()));
@@ -1527,31 +1527,31 @@ mod tests {
         assert_eq!(lead.conversation[1].kind, MessageKind::Thought);
     }
 
-    // --- Project Team message flow tests ---
+    // --- Project Mode message flow tests ---
 
     #[test]
-    fn send_project_team_message_requires_open_project() {
+    fn send_project_mode_message_requires_open_project() {
         let state = AppState::new();
-        let result = send_project_team_message(&state, "main", "implement auth");
+        let result = send_project_mode_message(&state, "main", "implement auth");
         assert!(result.last_error.is_some());
         assert!(result
             .last_error
             .unwrap()
-            .contains("Open a project before using Project Team mode."));
+            .contains("Open a project before using Project Mode."));
         assert_eq!(result.lead_status, Some("idle".to_string()));
         assert!(!result.is_waiting);
     }
 
     #[test]
-    fn send_project_team_message_empty_input_returns_current_state() {
+    fn send_project_mode_message_empty_input_returns_current_state() {
         let state = AppState::new();
-        let result = send_project_team_message(&state, "main", "   ");
+        let result = send_project_mode_message(&state, "main", "   ");
         // Empty input should just return current state without error
         assert!(result.last_error.is_none());
     }
 
     #[test]
-    fn send_project_team_message_load_error_does_not_recreate_session() {
+    fn send_project_mode_message_load_error_does_not_recreate_session() {
         let (state, _dir) = make_test_app_state_with_store();
         state
             .claim_project_for_window_with_identity(
@@ -1561,9 +1561,9 @@ mod tests {
             )
             .unwrap();
 
-        if let Ok(mut guard) = state.window_agent_modes.lock() {
-            let mut mode = AgentModeState::new();
-            mode.project_team_session_id = Some("pt-broken-1".to_string());
+        if let Ok(mut guard) = state.window_project_modes.lock() {
+            let mut mode = ProjectModeState::new();
+            mode.project_mode_session_id = Some("pt-broken-1".to_string());
             guard.insert("main".to_string(), mode);
         }
 
@@ -1573,11 +1573,11 @@ mod tests {
             .join("pt-pt-broken-1.json");
         std::fs::write(&session_path, "{ this is invalid json ").unwrap();
 
-        let result = send_project_team_message(&state, "main", "resume");
+        let result = send_project_mode_message(&state, "main", "resume");
         assert_eq!(result.lead_status, Some("idle".to_string()));
         assert!(!result.is_waiting);
         let err = result.last_error.unwrap();
-        assert!(err.contains("Failed to load project team session"));
+        assert!(err.contains("Failed to load project mode session"));
         assert!(err.contains("Parse error"));
 
         let broken_path = state
@@ -1589,25 +1589,25 @@ mod tests {
     }
 
     #[test]
-    fn build_project_team_chat_messages_uses_project_team_prompt() {
-        let messages = vec![AgentModeMessage {
+    fn build_project_mode_chat_messages_uses_project_mode_prompt() {
+        let messages = vec![ProjectModeMessage {
             role: "user".to_string(),
             kind: "message".to_string(),
             content: "hello".to_string(),
             timestamp: 1,
         }];
-        let out = build_project_team_chat_messages(&messages);
+        let out = build_project_mode_chat_messages(&messages);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].role, "system");
-        assert_eq!(out[0].content, PROJECT_TEAM_SYSTEM_PROMPT);
+        assert_eq!(out[0].content, PROJECT_MODE_SYSTEM_PROMPT);
         assert_eq!(out[1].role, "user");
         assert_eq!(out[1].content, "hello");
     }
 
     #[test]
     fn push_tool_turns_to_state_and_session_persists_action_and_observation() {
-        let mut working = AgentModeState::new();
-        let mut session = ProjectTeamSession::new(
+        let mut working = ProjectModeState::new();
+        let mut session = ProjectModeSession::new(
             SessionId("pt-tools-1".to_string()),
             PathBuf::from("/repo"),
             "main",
@@ -1648,7 +1648,7 @@ mod tests {
 
     #[test]
     fn activate_session_for_message_resumes_paused_session() {
-        let mut session = ProjectTeamSession::new(
+        let mut session = ProjectModeSession::new(
             SessionId("pt-resume-1".to_string()),
             PathBuf::from("/repo"),
             "main",
@@ -1669,10 +1669,10 @@ mod tests {
     // --- T401: issue_spec tools Lead integration ---
 
     #[test]
-    fn project_team_tool_definitions_include_all_spec_tools() {
+    fn project_mode_tool_definitions_include_all_spec_tools() {
         let defs = builtin_tool_definitions();
         let names: Vec<String> = defs.iter().map(|d| d.function.name.clone()).collect();
-        // All spec tools must be available to the Project Team Lead
+        // All spec tools must be available to the Project Mode Lead
         assert!(names.contains(&"upsert_spec_issue".to_string()));
         assert!(names.contains(&"get_spec_issue".to_string()));
         assert!(names.contains(&"upsert_spec_issue_artifact".to_string()));
@@ -1682,35 +1682,35 @@ mod tests {
     }
 
     #[test]
-    fn project_team_system_prompt_mentions_spec_tools() {
+    fn project_mode_system_prompt_mentions_spec_tools() {
         // The system prompt should instruct the Lead to use issue_spec tools
-        assert!(PROJECT_TEAM_SYSTEM_PROMPT.contains("upsert_spec_issue"));
-        assert!(PROJECT_TEAM_SYSTEM_PROMPT.contains("get_spec_issue"));
-        assert!(PROJECT_TEAM_SYSTEM_PROMPT.contains("spec"));
+        assert!(PROJECT_MODE_SYSTEM_PROMPT.contains("upsert_spec_issue"));
+        assert!(PROJECT_MODE_SYSTEM_PROMPT.contains("get_spec_issue"));
+        assert!(PROJECT_MODE_SYSTEM_PROMPT.contains("spec"));
     }
 
     // --- T403: GitHub Issue spec management workflow ---
 
     #[test]
-    fn project_team_system_prompt_has_workflow_instructions() {
+    fn project_mode_system_prompt_has_workflow_instructions() {
         // The prompt should describe the spec workflow: clarify → create issue → write sections
-        assert!(PROJECT_TEAM_SYSTEM_PROMPT.contains("clarif"));
-        assert!(PROJECT_TEAM_SYSTEM_PROMPT.contains("GitHub Issue"));
-        assert!(PROJECT_TEAM_SYSTEM_PROMPT.contains("plan"));
-        assert!(PROJECT_TEAM_SYSTEM_PROMPT.contains("tasks"));
-        assert!(PROJECT_TEAM_SYSTEM_PROMPT.contains("tdd"));
+        assert!(PROJECT_MODE_SYSTEM_PROMPT.contains("clarif"));
+        assert!(PROJECT_MODE_SYSTEM_PROMPT.contains("GitHub Issue"));
+        assert!(PROJECT_MODE_SYSTEM_PROMPT.contains("plan"));
+        assert!(PROJECT_MODE_SYSTEM_PROMPT.contains("tasks"));
+        assert!(PROJECT_MODE_SYSTEM_PROMPT.contains("tdd"));
     }
 
     #[test]
-    fn project_team_system_prompt_has_section_gate_instruction() {
+    fn project_mode_system_prompt_has_section_gate_instruction() {
         // The prompt should mention that all 4 sections are required before Coordinator
-        assert!(PROJECT_TEAM_SYSTEM_PROMPT.contains("spec"));
-        assert!(PROJECT_TEAM_SYSTEM_PROMPT.contains("plan"));
-        assert!(PROJECT_TEAM_SYSTEM_PROMPT.contains("tasks"));
-        assert!(PROJECT_TEAM_SYSTEM_PROMPT.contains("tdd"));
+        assert!(PROJECT_MODE_SYSTEM_PROMPT.contains("spec"));
+        assert!(PROJECT_MODE_SYSTEM_PROMPT.contains("plan"));
+        assert!(PROJECT_MODE_SYSTEM_PROMPT.contains("tasks"));
+        assert!(PROJECT_MODE_SYSTEM_PROMPT.contains("tdd"));
         assert!(
-            PROJECT_TEAM_SYSTEM_PROMPT.contains("approval")
-                || PROJECT_TEAM_SYSTEM_PROMPT.contains("approve")
+            PROJECT_MODE_SYSTEM_PROMPT.contains("approval")
+                || PROJECT_MODE_SYSTEM_PROMPT.contains("approve")
         );
     }
 
@@ -1840,7 +1840,7 @@ mod tests {
     #[test]
     fn register_project_issue_creates_entry() {
         use gwt_core::agent::developer::AgentType;
-        let mut session = ProjectTeamSession::new(
+        let mut session = ProjectModeSession::new(
             SessionId("pt-test".to_string()),
             PathBuf::from("/repo"),
             "main",
@@ -1866,7 +1866,7 @@ mod tests {
     #[test]
     fn register_project_issue_does_not_duplicate() {
         use gwt_core::agent::developer::AgentType;
-        let mut session = ProjectTeamSession::new(
+        let mut session = ProjectModeSession::new(
             SessionId("pt-test".to_string()),
             PathBuf::from("/repo"),
             "main",
@@ -2493,22 +2493,22 @@ mod tests {
     }
 
     #[test]
-    fn save_project_team_state_persists_session() {
+    fn save_project_mode_state_persists_session() {
         let (state, _dir) = make_test_app_state_with_store();
-        let session = ProjectTeamSession::new(
+        let session = ProjectModeSession::new(
             SessionId("pt-save-1".to_string()),
             PathBuf::from("/repo"),
             "main",
             AgentType::Claude,
         );
 
-        let result = save_project_team_state(&state, &session);
+        let result = save_project_mode_state(&state, &session);
         assert!(result.is_ok());
 
         // Verify it was persisted by loading it back
         let loaded = state
             .session_store
-            .load_project_team(&SessionId("pt-save-1".to_string()))
+            .load_project_mode(&SessionId("pt-save-1".to_string()))
             .unwrap();
         assert_eq!(loaded.id.0, "pt-save-1");
         assert_eq!(
@@ -2518,9 +2518,9 @@ mod tests {
     }
 
     #[test]
-    fn save_project_team_state_preserves_lead_conversation() {
+    fn save_project_mode_state_preserves_lead_conversation() {
         let (state, _dir) = make_test_app_state_with_store();
-        let mut session = ProjectTeamSession::new(
+        let mut session = ProjectModeSession::new(
             SessionId("pt-save-2".to_string()),
             PathBuf::from("/repo"),
             "main",
@@ -2535,11 +2535,11 @@ mod tests {
         session.lead.llm_call_count = 5;
         session.lead.estimated_tokens = 2000;
 
-        save_project_team_state(&state, &session).unwrap();
+        save_project_mode_state(&state, &session).unwrap();
 
         let loaded = state
             .session_store
-            .load_project_team(&SessionId("pt-save-2".to_string()))
+            .load_project_mode(&SessionId("pt-save-2".to_string()))
             .unwrap();
         assert_eq!(loaded.lead.conversation.len(), 1);
         assert_eq!(loaded.lead.conversation[0].content, "implement auth");
@@ -2552,9 +2552,9 @@ mod tests {
     // ===========================================================================
 
     #[test]
-    fn restore_project_team_session_roundtrip() {
+    fn restore_project_mode_session_roundtrip() {
         let (state, _dir) = make_test_app_state_with_store();
-        let mut session = ProjectTeamSession::new(
+        let mut session = ProjectModeSession::new(
             SessionId("pt-restore-1".to_string()),
             PathBuf::from("/repo"),
             "main",
@@ -2575,10 +2575,10 @@ mod tests {
         session.lead.llm_call_count = 3;
         session.lead.estimated_tokens = 1500;
 
-        state.session_store.save_project_team(&session).unwrap();
+        state.session_store.save_project_mode(&session).unwrap();
 
         let (restored_session, restored_mode) =
-            restore_project_team_session(&state, "pt-restore-1").unwrap();
+            restore_project_mode_session(&state, "pt-restore-1").unwrap();
 
         // Verify session data
         assert_eq!(restored_session.id.0, "pt-restore-1");
@@ -2590,7 +2590,7 @@ mod tests {
 
         // Verify mode reconstruction
         assert_eq!(
-            restored_mode.project_team_session_id,
+            restored_mode.project_mode_session_id,
             Some("pt-restore-1".to_string())
         );
         assert_eq!(
@@ -2609,34 +2609,34 @@ mod tests {
     }
 
     #[test]
-    fn restore_project_team_session_not_found() {
+    fn restore_project_mode_session_not_found() {
         let (state, _dir) = make_test_app_state_with_store();
 
-        let result = restore_project_team_session(&state, "nonexistent");
+        let result = restore_project_mode_session(&state, "nonexistent");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not found"));
     }
 
     #[test]
-    fn list_project_team_sessions_returns_summaries() {
+    fn list_project_mode_sessions_returns_summaries() {
         let (state, _dir) = make_test_app_state_with_store();
 
-        let s1 = ProjectTeamSession::new(
+        let s1 = ProjectModeSession::new(
             SessionId("pt-list-a".to_string()),
             PathBuf::from("/repo"),
             "main",
             AgentType::Claude,
         );
-        let s2 = ProjectTeamSession::new(
+        let s2 = ProjectModeSession::new(
             SessionId("pt-list-b".to_string()),
             PathBuf::from("/repo2"),
             "develop",
             AgentType::Codex,
         );
-        state.session_store.save_project_team(&s1).unwrap();
-        state.session_store.save_project_team(&s2).unwrap();
+        state.session_store.save_project_mode(&s1).unwrap();
+        state.session_store.save_project_mode(&s2).unwrap();
 
-        let summaries = list_project_team_sessions(&state).unwrap();
+        let summaries = list_project_mode_sessions(&state).unwrap();
         assert_eq!(summaries.len(), 2);
 
         let ids: Vec<&str> = summaries.iter().map(|s| s.session_id.as_str()).collect();
@@ -2650,10 +2650,10 @@ mod tests {
     }
 
     #[test]
-    fn list_project_team_sessions_empty_store() {
+    fn list_project_mode_sessions_empty_store() {
         let (state, _dir) = make_test_app_state_with_store();
 
-        let summaries = list_project_team_sessions(&state).unwrap();
+        let summaries = list_project_mode_sessions(&state).unwrap();
         assert!(summaries.is_empty());
     }
 
@@ -2662,24 +2662,24 @@ mod tests {
     // ===========================================================================
 
     #[test]
-    fn force_stop_project_team_pauses_session() {
+    fn force_stop_project_mode_pauses_session() {
         let (state, _dir) = make_test_app_state_with_store();
-        let mut session = ProjectTeamSession::new(
+        let mut session = ProjectModeSession::new(
             SessionId("pt-stop-1".to_string()),
             PathBuf::from("/repo"),
             "main",
             AgentType::Claude,
         );
         session.lead.status = LeadStatus::Thinking;
-        state.session_store.save_project_team(&session).unwrap();
+        state.session_store.save_project_mode(&session).unwrap();
 
-        let msg = force_stop_project_team(&state, "pt-stop-1").unwrap();
+        let msg = force_stop_project_mode(&state, "pt-stop-1").unwrap();
         assert!(msg.contains("paused"));
 
         // Verify session status changed
         let loaded = state
             .session_store
-            .load_project_team(&SessionId("pt-stop-1".to_string()))
+            .load_project_mode(&SessionId("pt-stop-1".to_string()))
             .unwrap();
         assert_eq!(
             loaded.status,
@@ -2689,17 +2689,17 @@ mod tests {
     }
 
     #[test]
-    fn force_stop_project_team_not_found() {
+    fn force_stop_project_mode_not_found() {
         let (state, _dir) = make_test_app_state_with_store();
 
-        let result = force_stop_project_team(&state, "nonexistent");
+        let result = force_stop_project_mode(&state, "nonexistent");
         assert!(result.is_err());
     }
 
     #[test]
-    fn force_stop_project_team_saves_and_reloads() {
+    fn force_stop_project_mode_saves_and_reloads() {
         let (state, _dir) = make_test_app_state_with_store();
-        let mut session = ProjectTeamSession::new(
+        let mut session = ProjectModeSession::new(
             SessionId("pt-stop-2".to_string()),
             PathBuf::from("/repo"),
             "main",
@@ -2711,14 +2711,14 @@ mod tests {
             MessageKind::Message,
             "build feature",
         ));
-        state.session_store.save_project_team(&session).unwrap();
+        state.session_store.save_project_mode(&session).unwrap();
 
-        force_stop_project_team(&state, "pt-stop-2").unwrap();
+        force_stop_project_mode(&state, "pt-stop-2").unwrap();
 
         // Verify conversation is preserved after stop
         let loaded = state
             .session_store
-            .load_project_team(&SessionId("pt-stop-2".to_string()))
+            .load_project_mode(&SessionId("pt-stop-2".to_string()))
             .unwrap();
         assert_eq!(loaded.lead.conversation.len(), 1);
         assert_eq!(loaded.lead.conversation[0].content, "build feature");

@@ -1,7 +1,7 @@
 //! Settings management commands
 
 use crate::state::AppState;
-use gwt_core::config::Settings;
+use gwt_core::config::{Settings, SkillRegistrationPreferences, SkillRegistrationScope};
 use serde::{Deserialize, Serialize};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
@@ -27,6 +27,31 @@ fn normalize_app_language(value: Option<&str>) -> String {
         "ja" => "ja".to_string(),
         "en" => "en".to_string(),
         _ => "auto".to_string(),
+    }
+}
+
+fn parse_scope_field(
+    value: Option<&str>,
+    field_name: &str,
+) -> Result<Option<SkillRegistrationScope>, String> {
+    let normalized = value.unwrap_or("").trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+
+    match normalized.as_str() {
+        "user" => Ok(Some(SkillRegistrationScope::User)),
+        "project" => Ok(Some(SkillRegistrationScope::Project)),
+        "local" => Ok(Some(SkillRegistrationScope::Local)),
+        _ => Err(format!("{field_name} must be one of: user, project, local")),
+    }
+}
+
+fn scope_to_string(scope: SkillRegistrationScope) -> String {
+    match scope {
+        SkillRegistrationScope::User => "user".to_string(),
+        SkillRegistrationScope::Project => "project".to_string(),
+        SkillRegistrationScope::Local => "local".to_string(),
     }
 }
 
@@ -65,6 +90,14 @@ pub struct SettingsData {
     pub agent_gemini_path: Option<String>,
     pub agent_auto_install_deps: bool,
     pub agent_github_project_id: Option<String>,
+    #[serde(default)]
+    pub agent_skill_registration_default_scope: Option<String>,
+    #[serde(default)]
+    pub agent_skill_registration_codex_scope: Option<String>,
+    #[serde(default)]
+    pub agent_skill_registration_claude_scope: Option<String>,
+    #[serde(default)]
+    pub agent_skill_registration_gemini_scope: Option<String>,
     pub docker_force_host: bool,
     pub ui_font_size: u32,
     pub terminal_font_size: u32,
@@ -107,6 +140,26 @@ impl From<&Settings> for SettingsData {
                 .map(|p| p.to_string_lossy().to_string()),
             agent_auto_install_deps: s.agent.auto_install_deps,
             agent_github_project_id: s.agent.github_project_id.clone(),
+            agent_skill_registration_default_scope: s
+                .agent
+                .skill_registration
+                .as_ref()
+                .map(|prefs| scope_to_string(prefs.default_scope)),
+            agent_skill_registration_codex_scope: s
+                .agent
+                .skill_registration
+                .as_ref()
+                .and_then(|prefs| prefs.codex_scope.map(scope_to_string)),
+            agent_skill_registration_claude_scope: s
+                .agent
+                .skill_registration
+                .as_ref()
+                .and_then(|prefs| prefs.claude_scope.map(scope_to_string)),
+            agent_skill_registration_gemini_scope: s
+                .agent
+                .skill_registration
+                .as_ref()
+                .and_then(|prefs| prefs.gemini_scope.map(scope_to_string)),
             docker_force_host: s.docker.force_host,
             ui_font_size: s.appearance.ui_font_size,
             terminal_font_size: s.appearance.terminal_font_size,
@@ -146,6 +199,41 @@ impl SettingsData {
             .as_ref()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
+
+        let default_scope = parse_scope_field(
+            self.agent_skill_registration_default_scope.as_deref(),
+            "agent_skill_registration_default_scope",
+        )?;
+        let codex_scope = parse_scope_field(
+            self.agent_skill_registration_codex_scope.as_deref(),
+            "agent_skill_registration_codex_scope",
+        )?;
+        let claude_scope = parse_scope_field(
+            self.agent_skill_registration_claude_scope.as_deref(),
+            "agent_skill_registration_claude_scope",
+        )?;
+        let gemini_scope = parse_scope_field(
+            self.agent_skill_registration_gemini_scope.as_deref(),
+            "agent_skill_registration_gemini_scope",
+        )?;
+
+        if default_scope.is_none()
+            && (codex_scope.is_some() || claude_scope.is_some() || gemini_scope.is_some())
+        {
+            return Err(
+                "agent_skill_registration_default_scope is required when agent overrides are set"
+                    .to_string(),
+            );
+        }
+
+        s.agent.skill_registration =
+            default_scope.map(|default_scope| SkillRegistrationPreferences {
+                default_scope,
+                codex_scope,
+                claude_scope,
+                gemini_scope,
+            });
+
         s.docker.force_host = self.docker_force_host;
         s.appearance.ui_font_size = self.ui_font_size;
         s.appearance.terminal_font_size = self.terminal_font_size;
@@ -214,6 +302,7 @@ mod tests {
         assert_eq!(data.voice_input.language, "ja");
         assert_eq!(data.voice_input.model, "base");
         assert_eq!(data.default_shell, Some("powershell".to_string()));
+        assert_eq!(data.agent_skill_registration_default_scope, None);
         let back = data.to_settings().unwrap();
         assert_eq!(back.appearance.ui_font_size, 16);
         assert_eq!(back.appearance.terminal_font_size, 20);
@@ -248,5 +337,50 @@ mod tests {
         data.default_shell = Some("   ".to_string());
         let back = data.to_settings().unwrap();
         assert!(back.terminal.default_shell.is_none());
+    }
+
+    #[test]
+    fn test_settings_data_skill_registration_round_trip() {
+        let mut core = Settings::default();
+        core.agent.skill_registration = Some(SkillRegistrationPreferences {
+            default_scope: SkillRegistrationScope::Project,
+            codex_scope: Some(SkillRegistrationScope::User),
+            claude_scope: Some(SkillRegistrationScope::Project),
+            gemini_scope: Some(SkillRegistrationScope::Local),
+        });
+
+        let data = SettingsData::from(&core);
+        assert_eq!(
+            data.agent_skill_registration_default_scope.as_deref(),
+            Some("project")
+        );
+        assert_eq!(
+            data.agent_skill_registration_codex_scope.as_deref(),
+            Some("user")
+        );
+        assert_eq!(
+            data.agent_skill_registration_claude_scope.as_deref(),
+            Some("project")
+        );
+        assert_eq!(
+            data.agent_skill_registration_gemini_scope.as_deref(),
+            Some("local")
+        );
+
+        let back = data.to_settings().unwrap();
+        assert_eq!(back.agent.skill_registration, core.agent.skill_registration);
+    }
+
+    #[test]
+    fn test_settings_data_skill_registration_override_requires_default_scope() {
+        let mut data = SettingsData::from(&Settings::default());
+        data.agent_skill_registration_default_scope = None;
+        data.agent_skill_registration_codex_scope = Some("user".to_string());
+
+        let err = data.to_settings().unwrap_err();
+        assert!(
+            err.contains("agent_skill_registration_default_scope is required"),
+            "unexpected error: {err}"
+        );
     }
 }

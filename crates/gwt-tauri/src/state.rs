@@ -1,9 +1,8 @@
-use crate::agent_master::AgentModeState;
-use crate::mcp_ws_server::McpWsHandle;
+use crate::agent_master::ProjectModeState;
 use gwt_core::agent::SessionStore;
 use gwt_core::ai::SessionSummaryCache;
 use gwt_core::config::os_env::EnvSource;
-use gwt_core::config::McpRegistrationStatus;
+use gwt_core::config::SkillRegistrationStatus;
 use gwt_core::terminal::manager::PaneManager;
 use gwt_core::update::UpdateManager;
 use std::collections::{HashMap, HashSet};
@@ -97,8 +96,8 @@ pub struct AppState {
     pub window_agent_tabs: Mutex<HashMap<String, WindowAgentTabsState>>,
     /// Migration status per window label for native Window menu rendering.
     pub window_migrations: Mutex<HashMap<String, WindowMigrationState>>,
-    /// Agent mode conversation state per window label.
-    pub window_agent_modes: Mutex<HashMap<String, AgentModeState>>,
+    /// Project Mode conversation state per window label.
+    pub window_project_modes: Mutex<HashMap<String, ProjectModeState>>,
     pub pane_manager: Mutex<PaneManager>,
     pub agent_versions_cache: Mutex<HashMap<String, AgentVersionsCache>>,
     pub session_summary_cache: Mutex<HashMap<String, SessionSummaryCache>>,
@@ -123,17 +122,14 @@ pub struct AppState {
     pub exit_confirm_inflight: AtomicBool,
     pub os_env: Arc<OnceCell<HashMap<String, String>>>,
     pub os_env_source: Arc<OnceCell<EnvSource>>,
-    /// Handle to the MCP WebSocket server (started during setup).
-    #[cfg_attr(test, allow(dead_code))]
-    pub mcp_ws_handle: Arc<Mutex<Option<McpWsHandle>>>,
-    /// Last observed MCP registration health snapshot.
-    pub mcp_registration_status: Arc<Mutex<McpRegistrationStatus>>,
+    /// Last observed skill registration health snapshot.
+    pub skill_registration_status: Arc<Mutex<SkillRegistrationStatus>>,
     pub update_manager: UpdateManager,
     /// Whether `gh` CLI is authenticated (SPEC-ad1ac432 T009).
     pub gh_available: AtomicBool,
     /// MRU (most-recently-used) window focus history. Front = most recent.
     pub window_focus_history: Mutex<Vec<String>>,
-    /// Persistent storage for agent sessions (Branch Mode & Project Team).
+    /// Persistent storage for agent sessions (Branch Mode & Project Mode).
     pub session_store: SessionStore,
 }
 
@@ -146,7 +142,7 @@ impl AppState {
             windows_allowed_to_close: Mutex::new(HashSet::new()),
             window_agent_tabs: Mutex::new(HashMap::new()),
             window_migrations: Mutex::new(HashMap::new()),
-            window_agent_modes: Mutex::new(HashMap::new()),
+            window_project_modes: Mutex::new(HashMap::new()),
             pane_manager: Mutex::new(PaneManager::new()),
             agent_versions_cache: Mutex::new(HashMap::new()),
             session_summary_cache: Mutex::new(HashMap::new()),
@@ -164,8 +160,7 @@ impl AppState {
             exit_confirm_inflight: AtomicBool::new(false),
             os_env: Arc::new(OnceCell::new()),
             os_env_source: Arc::new(OnceCell::new()),
-            mcp_ws_handle: Arc::new(Mutex::new(None)),
-            mcp_registration_status: Arc::new(Mutex::new(McpRegistrationStatus::default())),
+            skill_registration_status: Arc::new(Mutex::new(SkillRegistrationStatus::default())),
             update_manager: UpdateManager::new(),
             gh_available: AtomicBool::new(false),
             window_focus_history: Mutex::new(Vec::new()),
@@ -233,7 +228,7 @@ impl AppState {
         if let Ok(mut map) = self.window_agent_tabs.lock() {
             map.remove(window_label);
         }
-        if let Ok(mut map) = self.window_agent_modes.lock() {
+        if let Ok(mut map) = self.window_project_modes.lock() {
             map.remove(window_label);
         }
     }
@@ -245,14 +240,14 @@ impl AppState {
         }
     }
 
-    pub fn set_mcp_registration_status(&self, status: McpRegistrationStatus) {
-        if let Ok(mut slot) = self.mcp_registration_status.lock() {
+    pub fn set_skill_registration_status(&self, status: SkillRegistrationStatus) {
+        if let Ok(mut slot) = self.skill_registration_status.lock() {
             *slot = status;
         }
     }
 
-    pub fn get_mcp_registration_status(&self) -> McpRegistrationStatus {
-        self.mcp_registration_status
+    pub fn get_skill_registration_status(&self) -> SkillRegistrationStatus {
+        self.skill_registration_status
             .lock()
             .map(|s| s.clone())
             .unwrap_or_default()
@@ -674,8 +669,8 @@ mod tests {
         );
         state.set_window_migration("main", "job-1".to_string(), "/tmp/repo".to_string());
 
-        if let Ok(mut map) = state.window_agent_modes.lock() {
-            map.insert("main".to_string(), AgentModeState::new());
+        if let Ok(mut map) = state.window_project_modes.lock() {
+            map.insert("main".to_string(), ProjectModeState::new());
         }
 
         state.clear_window_state("main");
@@ -687,7 +682,7 @@ mod tests {
         );
         assert!(!state.window_migrations_snapshot().contains_key("main"));
         assert!(state
-            .window_agent_modes
+            .window_project_modes
             .lock()
             .map(|m| !m.contains_key("main"))
             .unwrap_or(false));
