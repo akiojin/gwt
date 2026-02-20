@@ -421,7 +421,7 @@ describe("SettingsPanel", () => {
     });
   });
 
-  it("toggles AI settings section by checkbox", async () => {
+  it("always shows AI settings fields in Profiles", async () => {
     const rendered = await renderSettingsPanel();
 
     await waitFor(() => {
@@ -431,19 +431,16 @@ describe("SettingsPanel", () => {
     await switchToTab(rendered, "Profiles");
 
     await rendered.findByText("AI Settings (per profile)");
-    const aiEnabled = rendered.container.querySelector("#ai-enabled") as HTMLInputElement;
-    expect(aiEnabled.checked).toBe(true);
     expect(rendered.getByText("Endpoint")).toBeTruthy();
+    expect(rendered.getByText("API Key")).toBeTruthy();
+    expect(rendered.getByText("Model")).toBeTruthy();
+    expect(rendered.getByText("Session Summary")).toBeTruthy();
+    expect(rendered.getByText("Language")).toBeTruthy();
+    expect(rendered.container.querySelector("#ai-enabled")).toBeNull();
 
-    await fireEvent.click(aiEnabled);
-    await waitFor(() => {
-      expect(rendered.queryByText("Endpoint")).toBeNull();
-    });
-
-    await fireEvent.click(aiEnabled);
-    await waitFor(() => {
-      expect(rendered.getByText("Endpoint")).toBeTruthy();
-    });
+    const apiKeyLabel = rendered.getByText("API Key");
+    const apiKeyInput = apiKeyLabel.parentElement?.querySelector("input") as HTMLInputElement;
+    expect(apiKeyInput.type).toBe("password");
   });
 
   it("adjusts font sizes and clamps numeric inputs", async () => {
@@ -765,7 +762,7 @@ describe("SettingsPanel", () => {
     });
   });
 
-  it("enables AI settings from null profile config", async () => {
+  it("shows AI fields when profile AI config is null", async () => {
     const noAiProfiles = structuredClone(profilesFixture);
     noAiProfiles.profiles.default.ai_enabled = false;
     noAiProfiles.profiles.default.ai = null;
@@ -785,17 +782,10 @@ describe("SettingsPanel", () => {
     await switchToTab(rendered, "Profiles");
 
     await rendered.findByText("AI Settings (per profile)");
-    expect(rendered.queryByText("Endpoint")).toBeNull();
+    expect(rendered.getByText("Endpoint")).toBeTruthy();
 
-    const aiEnabled = rendered.container.querySelector("#ai-enabled") as HTMLInputElement;
-    expect(aiEnabled.checked).toBe(false);
-    await fireEvent.click(aiEnabled);
-
-    await waitFor(() => {
-      expect(rendered.getByText("Endpoint")).toBeTruthy();
-    });
     const endpointInput = rendered.container.querySelector(".ai-field input") as HTMLInputElement;
-    expect(endpointInput.value).toBe("https://api.openai.com/v1");
+    expect(endpointInput.value).toBe("");
   });
 
   it("formats string load errors with toErrorMessage", async () => {
