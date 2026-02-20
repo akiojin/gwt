@@ -13,14 +13,7 @@ pub fn get_project_mode_state_cmd(window: Window, state: State<AppState>) -> Pro
 
 #[tauri::command]
 pub async fn send_project_mode_message(window: Window, input: String) -> ProjectModeState {
-    let window_label = window.label().to_string();
-    let app_handle = window.app_handle().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app_handle.state::<AppState>();
-        send_project_mode_message_impl(&state, &window_label, &input)
-    })
-    .await
-    .unwrap_or_else(|_| ProjectModeState::new())
+    send_project_mode_message_cmd(window, input).await
 }
 
 #[tauri::command]

@@ -19,7 +19,7 @@ pub enum LogCategory {
     Session,
 }
 
-/// A structured log entry for agent operations
+/// A structured log entry for Project Mode operations
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentLogEntry {
     pub timestamp: DateTime<Utc>,

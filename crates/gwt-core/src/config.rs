@@ -50,9 +50,11 @@ pub use session::{
 };
 pub use settings::{Settings, SkillRegistrationPreferences, SkillRegistrationScope};
 pub use skill_registration::{
-    get_skill_registration_status, register_agent_skills, register_all_skills,
-    repair_skill_registration, SkillAgentRegistrationStatus, SkillAgentType,
-    SkillRegistrationStatus,
+    get_skill_registration_status, get_skill_registration_status_with_settings_at_project_root,
+    register_agent_skills, register_agent_skills_with_settings_at_project_root,
+    register_all_skills, register_all_skills_with_settings_at_project_root,
+    repair_skill_registration, repair_skill_registration_with_settings_at_project_root,
+    SkillAgentRegistrationStatus, SkillAgentType, SkillRegistrationStatus,
 };
 pub use tools::{AgentType, CustomCodingAgent, ModeArgs, ModelDef, ToolsConfig};
 pub use ts_session::{

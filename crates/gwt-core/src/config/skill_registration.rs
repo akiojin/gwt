@@ -135,8 +135,14 @@ fn default_missing_items(agent: SkillAgentType) -> Vec<String> {
     }
 }
 
-fn project_root() -> Option<PathBuf> {
-    std::env::current_dir().ok()
+fn normalize_project_root(project_root: Option<&Path>) -> Option<PathBuf> {
+    project_root.map(|path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf()))
+}
+
+fn current_project_root() -> Option<PathBuf> {
+    std::env::current_dir()
+        .ok()
+        .map(|path| path.canonicalize().unwrap_or(path))
 }
 
 fn resolved_scope_for(
@@ -151,8 +157,13 @@ fn resolved_scope_for(
     })
 }
 
-fn skills_root_for(agent: SkillAgentType, settings: &Settings) -> Option<PathBuf> {
+fn skills_root_for(
+    agent: SkillAgentType,
+    settings: &Settings,
+    project_root: Option<&Path>,
+) -> Option<PathBuf> {
     let scope = resolved_scope_for(agent, settings)?;
+    let project_root = normalize_project_root(project_root);
     match (agent, scope) {
         (SkillAgentType::Codex, SkillRegistrationScope::User) => {
             dirs::home_dir().map(|home| home.join(".codex").join("skills"))
@@ -161,32 +172,33 @@ fn skills_root_for(agent: SkillAgentType, settings: &Settings) -> Option<PathBuf
             dirs::home_dir().map(|home| home.join(".gemini").join("skills"))
         }
         (SkillAgentType::Codex, SkillRegistrationScope::Project) => {
-            project_root().map(|root| root.join(".codex").join("skills"))
+            project_root.map(|root| root.join(".codex").join("skills"))
         }
         (SkillAgentType::Gemini, SkillRegistrationScope::Project) => {
-            project_root().map(|root| root.join(".gemini").join("skills"))
+            project_root.map(|root| root.join(".gemini").join("skills"))
         }
         (SkillAgentType::Codex, SkillRegistrationScope::Local) => {
-            project_root().map(|root| root.join(".codex").join("skills.local"))
+            project_root.map(|root| root.join(".codex").join("skills.local"))
         }
         (SkillAgentType::Gemini, SkillRegistrationScope::Local) => {
-            project_root().map(|root| root.join(".gemini").join("skills.local"))
+            project_root.map(|root| root.join(".gemini").join("skills.local"))
         }
         (SkillAgentType::Claude, _) => None,
     }
 }
 
-fn claude_settings_path_for(settings: &Settings) -> Option<PathBuf> {
+fn claude_settings_path_for(settings: &Settings, project_root: Option<&Path>) -> Option<PathBuf> {
     let scope = resolved_scope_for(SkillAgentType::Claude, settings)?;
+    let project_root = normalize_project_root(project_root);
     match scope {
         SkillRegistrationScope::User => {
             dirs::home_dir().map(|home| home.join(".claude").join("settings.json"))
         }
         SkillRegistrationScope::Project => {
-            project_root().map(|root| root.join(".claude").join("settings.json"))
+            project_root.map(|root| root.join(".claude").join("settings.json"))
         }
         SkillRegistrationScope::Local => {
-            project_root().map(|root| root.join(".claude").join("settings.local.json"))
+            project_root.map(|root| root.join(".claude").join("settings.local.json"))
         }
     }
 }
@@ -244,6 +256,20 @@ pub fn register_agent_skills_with_settings(
     agent: SkillAgentType,
     settings: &Settings,
 ) -> Result<(), GwtError> {
+    let current_project_root = current_project_root();
+    register_agent_skills_with_settings_at_project_root(
+        agent,
+        settings,
+        current_project_root.as_deref(),
+    )
+}
+
+/// Register managed skills for one agent using an explicit project root.
+pub fn register_agent_skills_with_settings_at_project_root(
+    agent: SkillAgentType,
+    settings: &Settings,
+    project_root: Option<&Path>,
+) -> Result<(), GwtError> {
     if settings.agent.skill_registration.is_none() {
         return Err(GwtError::ConfigWriteError {
             reason: SCOPE_NOT_CONFIGURED_MESSAGE.to_string(),
@@ -252,7 +278,7 @@ pub fn register_agent_skills_with_settings(
 
     match agent {
         SkillAgentType::Claude => {
-            let Some(path) = claude_settings_path_for(settings) else {
+            let Some(path) = claude_settings_path_for(settings, project_root) else {
                 return Err(GwtError::ConfigWriteError {
                     reason: "Claude settings path could not be resolved for selected scope."
                         .to_string(),
@@ -261,7 +287,7 @@ pub fn register_agent_skills_with_settings(
             setup_gwt_plugin_at(&path)
         }
         SkillAgentType::Codex | SkillAgentType::Gemini => {
-            let Some(root) = skills_root_for(agent, settings) else {
+            let Some(root) = skills_root_for(agent, settings, project_root) else {
                 return Err(GwtError::ConfigWriteError {
                     reason: format!(
                         "{} skills path could not be resolved for selected scope.",
@@ -282,9 +308,40 @@ pub fn register_agent_skills(agent: SkillAgentType) -> Result<(), GwtError> {
 
 /// Register managed skills for all supported agents with explicit settings.
 pub fn register_all_skills_with_settings(settings: &Settings) -> Result<(), GwtError> {
+    let current_project_root = current_project_root();
+    register_all_skills_with_settings_at_project_root(settings, current_project_root.as_deref())
+}
+
+/// Register managed skills for all supported agents with explicit settings and project root.
+pub fn register_all_skills_with_settings_at_project_root(
+    settings: &Settings,
+    project_root: Option<&Path>,
+) -> Result<(), GwtError> {
+    let mut failures = Vec::new();
     for agent in SkillAgentType::all() {
-        register_agent_skills_with_settings(*agent, settings)?;
+        if let Err(err) =
+            register_agent_skills_with_settings_at_project_root(*agent, settings, project_root)
+        {
+            warn!(
+                category = "skills",
+                agent = agent.id(),
+                error = %err,
+                "Managed skill registration failed for one agent"
+            );
+            failures.push(format!("{}: {err}", agent.label()));
+        }
     }
+
+    if !failures.is_empty() {
+        return Err(GwtError::ConfigWriteError {
+            reason: format!(
+                "Failed to register skills/plugins for {} agent(s): {}",
+                failures.len(),
+                failures.join(" | ")
+            ),
+        });
+    }
+
     Ok(())
 }
 
@@ -294,16 +351,20 @@ pub fn register_all_skills() -> Result<(), GwtError> {
     register_all_skills_with_settings(&settings)
 }
 
-fn status_for(agent: SkillAgentType, settings: &Settings) -> SkillAgentRegistrationStatus {
+fn status_for(
+    agent: SkillAgentType,
+    settings: &Settings,
+    project_root: Option<&Path>,
+) -> SkillAgentRegistrationStatus {
     if settings.agent.skill_registration.is_none() {
         return scope_unconfigured_status(agent);
     }
 
     if agent == SkillAgentType::Claude {
-        return status_for_claude(settings);
+        return status_for_claude(settings, project_root);
     }
 
-    let root = skills_root_for(agent, settings);
+    let root = skills_root_for(agent, settings, project_root);
     let skills_path = root.as_ref().map(|p| p.to_string_lossy().to_string());
 
     let Some(root) = root else {
@@ -342,8 +403,11 @@ fn status_for(agent: SkillAgentType, settings: &Settings) -> SkillAgentRegistrat
     }
 }
 
-fn status_for_claude(settings: &Settings) -> SkillAgentRegistrationStatus {
-    let settings_path = claude_settings_path_for(settings);
+fn status_for_claude(
+    settings: &Settings,
+    project_root: Option<&Path>,
+) -> SkillAgentRegistrationStatus {
+    let settings_path = claude_settings_path_for(settings, project_root);
     let Some(settings_path) = settings_path else {
         return path_unavailable_status(
             SkillAgentType::Claude,
@@ -412,9 +476,21 @@ fn settings_load_failure_status(error: &str) -> SkillRegistrationStatus {
 
 /// Read current skill registration health using explicit settings.
 pub fn get_skill_registration_status_with_settings(settings: &Settings) -> SkillRegistrationStatus {
+    let current_project_root = current_project_root();
+    get_skill_registration_status_with_settings_at_project_root(
+        settings,
+        current_project_root.as_deref(),
+    )
+}
+
+/// Read current skill registration health using explicit settings and project root.
+pub fn get_skill_registration_status_with_settings_at_project_root(
+    settings: &Settings,
+    project_root: Option<&Path>,
+) -> SkillRegistrationStatus {
     let agents: Vec<SkillAgentRegistrationStatus> = SkillAgentType::all()
         .iter()
-        .map(|a| status_for(*a, settings))
+        .map(|a| status_for(*a, settings, project_root))
         .collect();
 
     let all_ok = agents.iter().all(|a| a.registered);
@@ -457,8 +533,21 @@ pub fn get_skill_registration_status() -> SkillRegistrationStatus {
 
 /// Best-effort repair with explicit settings (register all, then return latest status).
 pub fn repair_skill_registration_with_settings(settings: &Settings) -> SkillRegistrationStatus {
+    let current_project_root = current_project_root();
+    repair_skill_registration_with_settings_at_project_root(
+        settings,
+        current_project_root.as_deref(),
+    )
+}
+
+/// Best-effort repair with explicit settings and project root.
+pub fn repair_skill_registration_with_settings_at_project_root(
+    settings: &Settings,
+    project_root: Option<&Path>,
+) -> SkillRegistrationStatus {
     if settings.agent.skill_registration.is_some() {
-        if let Err(err) = register_all_skills_with_settings(settings) {
+        if let Err(err) = register_all_skills_with_settings_at_project_root(settings, project_root)
+        {
             warn!(
                 category = "skills",
                 error = %err,
@@ -477,7 +566,7 @@ pub fn repair_skill_registration_with_settings(settings: &Settings) -> SkillRegi
         );
     }
 
-    get_skill_registration_status_with_settings(settings)
+    get_skill_registration_status_with_settings_at_project_root(settings, project_root)
 }
 
 /// Best-effort repair (register all, then return latest status).
@@ -576,7 +665,9 @@ mod tests {
 
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        let _cwd = CwdGuard::set(&repo);
+        let other = temp.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let _cwd = CwdGuard::set(&other);
 
         let mut settings = Settings::default();
         settings.agent.skill_registration = Some(crate::config::SkillRegistrationPreferences {
@@ -586,10 +677,21 @@ mod tests {
             gemini_scope: Some(SkillRegistrationScope::Project),
         });
 
-        let codex_path = skills_root_for(SkillAgentType::Codex, &settings).unwrap();
-        let gemini_path = skills_root_for(SkillAgentType::Gemini, &settings).unwrap();
-        let claude_path = claude_settings_path_for(&settings).unwrap();
         let canonical_repo = repo.canonicalize().unwrap();
+        let codex_path = skills_root_for(
+            SkillAgentType::Codex,
+            &settings,
+            Some(canonical_repo.as_path()),
+        )
+        .unwrap();
+        let gemini_path = skills_root_for(
+            SkillAgentType::Gemini,
+            &settings,
+            Some(canonical_repo.as_path()),
+        )
+        .unwrap();
+        let claude_path =
+            claude_settings_path_for(&settings, Some(canonical_repo.as_path())).unwrap();
 
         assert_eq!(codex_path, temp.path().join(".codex").join("skills"));
         assert_eq!(gemini_path, canonical_repo.join(".gemini").join("skills"));
@@ -597,6 +699,32 @@ mod tests {
             claude_path,
             canonical_repo.join(".claude").join("settings.local.json")
         );
+    }
+
+    #[test]
+    fn path_aware_resolution_requires_project_root_for_project_scopes() {
+        let mut settings = Settings::default();
+        settings.agent.skill_registration = Some(crate::config::SkillRegistrationPreferences {
+            default_scope: SkillRegistrationScope::Project,
+            codex_scope: None,
+            claude_scope: None,
+            gemini_scope: None,
+        });
+
+        assert!(skills_root_for(SkillAgentType::Codex, &settings, None).is_none());
+        assert!(skills_root_for(SkillAgentType::Gemini, &settings, None).is_none());
+        assert!(claude_settings_path_for(&settings, None).is_none());
+    }
+
+    #[test]
+    fn register_all_skills_collects_agent_failures() {
+        let err = register_all_skills_with_settings_at_project_root(&Settings::default(), None)
+            .expect_err("missing scope should return aggregated error");
+        let reason = err.to_string();
+
+        assert!(reason.contains("Codex"));
+        assert!(reason.contains("Claude Code"));
+        assert!(reason.contains("Gemini"));
     }
 
     #[test]

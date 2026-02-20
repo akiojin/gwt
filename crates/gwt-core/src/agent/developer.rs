@@ -1,4 +1,4 @@
-//! Developer state for Project Mode (Project Mode model)
+//! Developer state for Project Mode
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

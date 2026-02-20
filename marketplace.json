@@ -10,7 +10,7 @@
     {
       "name": "gwt-integration",
       "description": "GWT integration hooks and managed skills for Claude Code",
-      "version": "0.1.0",
+      "version": "0.3.0",
       "source": "./plugins/gwt-integration",
       "category": "security"
     }

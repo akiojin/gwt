@@ -290,7 +290,10 @@ pub fn build_app(
                             }
                         };
                         let status =
-                            skill_registration::repair_skill_registration_with_settings(&settings);
+                            skill_registration::repair_skill_registration_with_settings_at_project_root(
+                                &settings,
+                                None,
+                            );
                         state.set_skill_registration_status(status.clone());
                         match status.overall.as_str() {
                             "ok" => {

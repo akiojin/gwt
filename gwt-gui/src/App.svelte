@@ -1463,6 +1463,7 @@
       queueIssueLaunchFollowup(jobId, request);
       pendingLaunchRequest = request;
       launchJobId = jobId;
+      launchJobStartPending = false;
       launchProgressOpen = true;
       flushBufferedLaunchEventsForActiveJob();
     } catch (err) {
@@ -2731,6 +2732,16 @@
         <p class="scope-dialog-error">{skillScopePromptError}</p>
       {/if}
       <div class="scope-dialog-actions">
+        <button
+          class="about-close"
+          onclick={() => {
+            skillScopePromptOpen = false;
+            skillScopePromptError = null;
+          }}
+          disabled={skillScopePromptBusy}
+        >
+          Skip for now
+        </button>
         <button class="about-close" onclick={() => void applyStartupSkillScopeSelection()} disabled={skillScopePromptBusy}>
           {skillScopePromptBusy ? "Applying..." : "Apply and Continue"}
         </button>
