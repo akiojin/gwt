@@ -1772,6 +1772,15 @@ fn normalize_terminal_shell_id(shell_id: Option<&str>) -> Option<String> {
     }
 }
 
+fn resolve_agent_terminal_shell(agent_id: &str, requested_shell: Option<&str>) -> Option<String> {
+    let normalized = normalize_terminal_shell_id(requested_shell);
+    if cfg!(target_os = "windows") && agent_id == "claude" && normalized.is_none() {
+        // Claude on Windows host runtime is more stable through cmd when no explicit shell is set.
+        return Some("cmd".to_string());
+    }
+    normalized
+}
+
 fn resolve_shell_id_for_spawn(shell_id: Option<&str>) -> Option<String> {
     let explicit = shell_id.map(str::trim).filter(|s| !s.is_empty());
     if explicit.is_some() {
@@ -2032,6 +2041,28 @@ mod tests {
         .unwrap();
 
         assert_eq!(resolve_shell_id_for_spawn(Some("fish")), None);
+    }
+
+    #[test]
+    fn resolve_agent_terminal_shell_defaults_claude_to_cmd_on_windows() {
+        let resolved = resolve_agent_terminal_shell("claude", None);
+        if cfg!(target_os = "windows") {
+            assert_eq!(resolved, Some("cmd".to_string()));
+        } else {
+            assert_eq!(resolved, None);
+        }
+    }
+
+    #[test]
+    fn resolve_agent_terminal_shell_preserves_explicit_selection() {
+        assert_eq!(
+            resolve_agent_terminal_shell("claude", Some("powershell")),
+            Some("powershell".to_string())
+        );
+        assert_eq!(
+            resolve_agent_terminal_shell("claude", Some("wsl")),
+            Some("wsl".to_string())
+        );
     }
 
     #[test]
@@ -2472,7 +2503,7 @@ mod tests {
     }
 
     #[test]
-    fn promote_unexpected_stream_eof_to_error_when_pane_is_still_running() {
+    fn promote_unexpected_stream_eof_running_pane_is_platform_safe() {
         let _lock = crate::commands::ENV_LOCK.lock().unwrap();
         let home = tempfile::TempDir::new().unwrap();
         let _env = crate::commands::TestEnvGuard::new(home.path());
@@ -2503,7 +2534,11 @@ mod tests {
 
         let mut stream_error = None;
         promote_unexpected_stream_eof_to_error(&state, pane_id, &mut stream_error);
-        assert_eq!(stream_error.as_deref(), Some("stream closed unexpectedly"));
+        if cfg!(target_os = "windows") {
+            assert!(stream_error.is_none());
+        } else {
+            assert_eq!(stream_error.as_deref(), Some("stream closed unexpectedly"));
+        }
 
         let mut mgr = state.pane_manager.lock().unwrap();
         let _ = mgr.kill_all();
@@ -3996,12 +4031,8 @@ pub(crate) fn launch_agent_for_project_root(
             }
         }
         DockerExecMode::None => {
-            let terminal_shell = request
-                .terminal_shell
-                .as_deref()
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string());
+            let terminal_shell =
+                resolve_agent_terminal_shell(agent_id, request.terminal_shell.as_deref());
 
             // WSL agent launch uses the PTY-write approach (FR-007).
             if terminal_shell.as_deref() == Some("wsl") {
@@ -4411,16 +4442,36 @@ fn promote_unexpected_stream_eof_to_error(
         return;
     }
 
-    let still_running = if let Ok(mut manager) = state.pane_manager.lock() {
-        if let Some(pane) = manager.pane_mut_by_id(pane_id) {
-            let _ = pane.check_status();
-            matches!(pane.status(), PaneStatus::Running)
-        } else {
-            false
+    let pane_running = |state: &AppState, pane_id: &str| -> bool {
+        if let Ok(mut manager) = state.pane_manager.lock() {
+            if let Some(pane) = manager.pane_mut_by_id(pane_id) {
+                let _ = pane.check_status();
+                return matches!(pane.status(), PaneStatus::Running);
+            }
         }
-    } else {
         false
     };
+
+    let still_running = pane_running(state, pane_id);
+
+    #[cfg(target_os = "windows")]
+    if still_running {
+        // Windows PTY streams can transiently return EOF while the child process
+        // is still alive. Re-check briefly and avoid forcing Error state when alive.
+        let mut confirmed_running = true;
+        for _ in 0..3 {
+            std::thread::sleep(Duration::from_millis(50));
+            if !pane_running(state, pane_id) {
+                confirmed_running = false;
+                break;
+            }
+        }
+        if confirmed_running {
+            return;
+        }
+
+        return;
+    }
 
     if still_running {
         *stream_error = Some("stream closed unexpectedly".to_string());

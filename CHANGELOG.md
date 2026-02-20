@@ -1,6 +1,17 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.8.1] - 2026-02-20
+
+### Bug Fixes
+
+- **e2e:** Handle startup skill-scope dialog in Playwright smoke tests (#1147)
+- **gui:** Reduce tab activation flicker and switch stutter (#1148)
+
+### Refactor
+
+- **project-mode:** Remove MCP bridge and migrate to managed skills (#1143)
+
 ## [7.8.0] - 2026-02-20
 
 ### Bug Fixes
@@ -8,6 +19,7 @@ All notable changes to this project will be documented in this file.
 - **gui:** Broaden trackpad wheel fallback conditions (#1137)
 - **agent-mode:** Fix project team session restore and merge command (#1139)
 - **gui:** Stabilize trackpad wheel fallback for rapid bursts (#1138)
+- **terminal:** Stabilize Windows Host Claude launches by defaulting to `cmd` when shell is auto, and avoid false stream-EOF error promotion while process is still alive
 - **gui:** Agentタブ空白を防止 (#1142)
 
 ### Documentation

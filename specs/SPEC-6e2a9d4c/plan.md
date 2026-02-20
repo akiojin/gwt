@@ -19,7 +19,11 @@
 ### Phase 1: Windows Host 実行の安定化
 
 - `crates/gwt-core/src/terminal/pty.rs` に起動コマンド解決ヘルパーを追加する。
-- Windows Host OS 起動時は PowerShell（`pwsh` 優先、未導入時は `powershell.exe`）の `-Command` ラップに変換する。
+- Windows Host OS 起動時は一律 PowerShell ラップではなく、明示シェルとコマンド種別で起動経路を分岐する。
+  - `powershell` 明示: PowerShell `-Command` ラップ
+  - `.cmd/.bat`: `cmd.exe /C`
+  - それ以外: 直接実行
+- `crates/gwt-tauri/src/commands/terminal.rs` で Windows + Claude + Host runtime の shell auto 時は `cmd` を既定として補完する。
 - Windows 以外は既存の直接起動を維持する。
 
 ### Phase 2: PTY read error 時の空タブ防止
@@ -34,8 +38,9 @@
 
 ### Phase 3: テストと回帰確認
 
-- `pty.rs` にラップ変換のユニットテストを追加する。
+- `pty.rs` に Windows 起動経路分岐（PowerShell 明示 / cmd スクリプト / 直接実行）のユニットテストを追加する。
 - `pane.rs` に `Error` 状態設定のユニットテストを追加する。
+- `terminal.rs` に Claude 既定 shell 補完と Windows EOF 防御のユニットテストを追加する。
 - 変更対象クレートのテストを実行し、回帰がないことを確認する。
 
 ## テスト
