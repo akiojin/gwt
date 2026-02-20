@@ -918,7 +918,7 @@ describe("SettingsPanel", () => {
       if (command === "get_settings") return structuredClone(settingsFixture);
       if (command === "get_profiles") return structuredClone(profilesFixture);
       if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
-      if (command === "get_mcp_registration_status_cmd") return structuredClone(mcpStatusFixture);
+      if (command === "get_mcp_registration_status_cmd") return structuredClone(skillStatusFixture);
       if (command === "get_available_shells") return structuredClone(shellsFixture);
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
@@ -939,7 +939,7 @@ describe("SettingsPanel", () => {
       if (command === "get_settings") return structuredClone(settingsFixture);
       if (command === "get_profiles") return structuredClone(profilesFixture);
       if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
-      if (command === "get_mcp_registration_status_cmd") return structuredClone(mcpStatusFixture);
+      if (command === "get_mcp_registration_status_cmd") return structuredClone(skillStatusFixture);
       if (command === "get_available_shells") return structuredClone(shellsFixture);
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
@@ -975,7 +975,7 @@ describe("SettingsPanel", () => {
       if (command === "get_settings") return structuredClone(settingsFixture);
       if (command === "get_profiles") return structuredClone(profilesFixture);
       if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
-      if (command === "get_mcp_registration_status_cmd") return structuredClone(mcpStatusFixture);
+      if (command === "get_mcp_registration_status_cmd") return structuredClone(skillStatusFixture);
       if (command === "get_available_shells") return structuredClone(shellsFixture);
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
