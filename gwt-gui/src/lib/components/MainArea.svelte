@@ -2,8 +2,7 @@
   import type { GitHubIssueInfo, LaunchAgentRequest, Tab } from "../types";
   import type { TabDropPosition } from "../appTabs";
   import TerminalView from "../terminal/TerminalView.svelte";
-  import AgentModePanel from "./AgentModePanel.svelte";
-  import ProjectTeamPanel from "./ProjectTeamPanel.svelte";
+  import ProjectModePanel from "./ProjectModePanel.svelte";
   import IssueListPanel from "./IssueListPanel.svelte";
   import IssueSpecPanel from "./IssueSpecPanel.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
@@ -60,21 +59,44 @@
   let activeTab = $derived(tabs.find((t) => t.id === activeTabId));
   let agentTabs = $derived(tabs.filter(isAgentTabWithPaneId));
   let terminalTabs = $derived(tabs.filter(isTerminalTabWithPaneId));
-  let hasActiveTerminalPane = $derived(
+  let nonTerminalTabs = $derived(
+    tabs.filter((tab) => tab.type !== "agent" && tab.type !== "terminal"),
+  );
+  let mountedPanelTabIds: Set<string> = $state(new Set());
+  let mountedNonTerminalTabs = $derived(
+    nonTerminalTabs.filter((tab) => mountedPanelTabIds.has(tab.id)),
+  );
+  let activeTerminalTabId = $derived(
     (activeTab?.type === "agent" || activeTab?.type === "terminal") &&
       typeof activeTab.paneId === "string" &&
-      activeTab.paneId.length > 0,
+      activeTab.paneId.length > 0
+      ? activeTab.id
+      : null,
+  );
+  let hasActiveNonTerminalTab = $derived(
+    nonTerminalTabs.some((tab) => tab.id === activeTabId),
+  );
+  let terminalTabIdByPaneId = $derived(
+    (() => {
+      const map = new Map<string, string>();
+      for (const tab of agentTabs) map.set(tab.paneId, tab.id);
+      for (const tab of terminalTabs) map.set(tab.paneId, tab.id);
+      return map;
+    })(),
   );
   let showTerminalLayer = $derived(
-    hasActiveTerminalPane,
+    activeTerminalTabId !== null,
   );
   let showDetachedTerminalPlaceholder = $derived(
     (activeTab?.type === "agent" || activeTab?.type === "terminal") &&
-      !hasActiveTerminalPane,
+      activeTerminalTabId === null,
   );
-  let isPinnedTab = (tabType?: Tab["type"]) =>
-    tabType === "agentMode" || tabType === "projectTeam";
+  let isPinnedTab = (tabType?: Tab["type"]) => tabType === "projectMode";
   let draggingTabId: string | null = $state(null);
+  let terminalPendingTabId: string | null = $state(null);
+  let visibleTerminalTabId: string | null = $state(null);
+  let terminalActivationFallbackTimer: ReturnType<typeof setTimeout> | null =
+    null;
   let pointerDrag:
     | {
         tabId: string;
@@ -84,6 +106,33 @@
       }
     | null = null;
   let lastReorderSignature = "";
+  const TERMINAL_ACTIVATION_FALLBACK_MS = 120;
+
+  function areSetsEqual(a: Set<string>, b: Set<string>): boolean {
+    if (a.size !== b.size) return false;
+    for (const item of a) {
+      if (!b.has(item)) return false;
+    }
+    return true;
+  }
+
+  function clearTerminalActivationFallbackTimer() {
+    if (terminalActivationFallbackTimer === null) return;
+    clearTimeout(terminalActivationFallbackTimer);
+    terminalActivationFallbackTimer = null;
+  }
+
+  function handleTerminalReady(paneId: string) {
+    const tabId = terminalTabIdByPaneId.get(paneId);
+    if (!tabId) return;
+    if (!terminalPendingTabId || tabId !== terminalPendingTabId) return;
+    clearTerminalActivationFallbackTimer();
+    visibleTerminalTabId = tabId;
+  }
+
+  function isTerminalTabVisible(tabId: string): boolean {
+    return tabId === activeTerminalTabId && tabId === visibleTerminalTabId;
+  }
 
   function readDraggedTabId(event: DragEvent): string {
     if (draggingTabId) return draggingTabId;
@@ -224,7 +273,68 @@
   }
 
   $effect(() => {
+    void nonTerminalTabs;
+    void activeTabId;
+
+    const validIds = new Set(nonTerminalTabs.map((tab) => tab.id));
+    const next = new Set<string>();
+    for (const tabId of mountedPanelTabIds) {
+      if (validIds.has(tabId)) {
+        next.add(tabId);
+      }
+    }
+    if (validIds.has(activeTabId)) {
+      next.add(activeTabId);
+    }
+
+    if (!areSetsEqual(next, mountedPanelTabIds)) {
+      mountedPanelTabIds = next;
+    }
+  });
+
+  $effect(() => {
+    void activeTerminalTabId;
+
+    clearTerminalActivationFallbackTimer();
+    terminalPendingTabId = activeTerminalTabId;
+
+    if (!activeTerminalTabId) {
+      visibleTerminalTabId = null;
+      return;
+    }
+
+    visibleTerminalTabId = null;
+
+    if (typeof window === "undefined") {
+      visibleTerminalTabId = activeTerminalTabId;
+      return;
+    }
+
+    const pendingId = activeTerminalTabId;
+    const timeoutId = window.setTimeout(() => {
+      if (
+        activeTerminalTabId === pendingId &&
+        terminalPendingTabId === pendingId
+      ) {
+        visibleTerminalTabId = pendingId;
+      }
+      if (terminalActivationFallbackTimer === timeoutId) {
+        terminalActivationFallbackTimer = null;
+      }
+    }, TERMINAL_ACTIVATION_FALLBACK_MS);
+    terminalActivationFallbackTimer = timeoutId;
+
     return () => {
+      if (terminalActivationFallbackTimer === timeoutId) {
+        clearTimeout(timeoutId);
+        terminalActivationFallbackTimer = null;
+      }
+    };
+  });
+
+  $effect(() => {
+    return () => {
+      clearTerminalActivationFallbackTimer();
       removeGlobalPointerListeners();
     };
   });
@@ -281,53 +391,78 @@
 
   <div class="tab-content">
     <div class="panel-layer" class:hidden={showTerminalLayer}>
-      {#if activeTab?.type === "settings"}
-        <SettingsPanel onClose={() => onTabClose(activeTabId)} />
-      {:else if activeTab?.type === "versionHistory"}
-        <VersionHistoryPanel {projectPath} />
-      {:else if activeTab?.type === "agentMode"}
-        <AgentModePanel />
-      {:else if activeTab?.type === "agent" && !activeTab.paneId}
-        <div class="placeholder">
-          <h2>Agent starting...</h2>
-          <p>Waiting for the backend terminal pane to attach.</p>
-        </div>
-      {:else if activeTab?.type === "projectTeam"}
-        <ProjectTeamPanel session={null} />
-      {:else if activeTab?.type === "issueSpec"}
-        <IssueSpecPanel
-          projectPath={projectPath}
-          issueNumber={activeTab.issueNumber ?? 0}
-          specId={activeTab.specId}
-        />
-      {:else if activeTab?.type === "issues"}
-        <IssueListPanel
-          {projectPath}
-          onWorkOnIssue={onWorkOnIssue ?? (() => {})}
-          onSwitchToWorktree={onSwitchToWorktree ?? (() => {})}
-          {onIssueCountChange}
-        />
-      {:else if showDetachedTerminalPlaceholder}
-        <div class="placeholder">
-          <h2>Waiting For Terminal Pane</h2>
-          <p>Close this tab and launch again if it does not attach.</p>
-        </div>
+      {#if nonTerminalTabs.length === 0}
+        {#if showDetachedTerminalPlaceholder}
+          <div class="placeholder">
+            <h2>Agent starting...</h2>
+            <p>Waiting for the backend terminal pane to attach.</p>
+          </div>
+        {:else}
+          <div class="placeholder">
+            <h2>Select a tab</h2>
+          </div>
+        {/if}
       {:else}
-        <div class="placeholder">
-          <h2>Select a tab</h2>
-        </div>
+        {#each mountedNonTerminalTabs as tab (tab.id)}
+          <div class="panel-wrapper" class:active={activeTabId === tab.id}>
+            {#if tab.type === "settings"}
+              <SettingsPanel onClose={() => onTabClose(tab.id)} />
+            {:else if tab.type === "versionHistory"}
+              <VersionHistoryPanel {projectPath} />
+            {:else if tab.type === "projectMode"}
+              <ProjectModePanel />
+            {:else if tab.type === "issueSpec"}
+              <IssueSpecPanel
+                projectPath={projectPath}
+                issueNumber={tab.issueNumber ?? 0}
+                specId={tab.specId}
+              />
+            {:else if tab.type === "issues"}
+              <IssueListPanel
+                {projectPath}
+                onWorkOnIssue={onWorkOnIssue ?? (() => {})}
+                onSwitchToWorktree={onSwitchToWorktree ?? (() => {})}
+                {onIssueCountChange}
+              />
+            {:else}
+              <div class="placeholder">
+                <h2>Select a tab</h2>
+              </div>
+            {/if}
+          </div>
+        {/each}
+        {#if !hasActiveNonTerminalTab}
+          {#if showDetachedTerminalPlaceholder}
+            <div class="placeholder panel-fallback">
+              <h2>Agent starting...</h2>
+              <p>Waiting for the backend terminal pane to attach.</p>
+            </div>
+          {:else}
+            <div class="placeholder panel-fallback">
+              <h2>Select a tab</h2>
+            </div>
+          {/if}
+        {/if}
       {/if}
     </div>
 
     <div class="terminal-layer" class:hidden={!showTerminalLayer}>
       {#each agentTabs as tab (tab.id)}
-        <div class="terminal-wrapper" class:active={activeTabId === tab.id}>
-          <TerminalView paneId={tab.paneId} active={activeTabId === tab.id} />
+        <div class="terminal-wrapper" class:active={isTerminalTabVisible(tab.id)}>
+          <TerminalView
+            paneId={tab.paneId}
+            active={activeTabId === tab.id}
+            onReady={handleTerminalReady}
+          />
         </div>
       {/each}
       {#each terminalTabs as tab (tab.id)}
-        <div class="terminal-wrapper" class:active={activeTabId === tab.id}>
-          <TerminalView paneId={tab.paneId} active={activeTabId === tab.id} />
+        <div class="terminal-wrapper" class:active={isTerminalTabVisible(tab.id)}>
+          <TerminalView
+            paneId={tab.paneId}
+            active={activeTabId === tab.id}
+            onReady={handleTerminalReady}
+          />
         </div>
       {/each}
     </div>
@@ -444,9 +579,23 @@
   .panel-layer {
     position: absolute;
     inset: 0;
+    overflow: hidden;
+    padding: 0;
+    z-index: 2;
+  }
+
+  .panel-wrapper {
+    position: absolute;
+    inset: 0;
     overflow: auto;
     padding: 24px;
-    z-index: 2;
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  .panel-wrapper.active {
+    visibility: visible;
+    pointer-events: auto;
   }
 
   .terminal-layer {
@@ -481,6 +630,11 @@
     justify-content: center;
     height: 100%;
     color: var(--text-muted);
+  }
+
+  .panel-fallback {
+    position: absolute;
+    inset: 24px;
   }
 
   .placeholder h2 {

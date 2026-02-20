@@ -99,6 +99,29 @@ async function setMockCommandResponses(
   }, commandResponses);
 }
 
+async function dismissSkillRegistrationScopeDialogIfPresent(page: Page) {
+  const dialog = page.getByRole("dialog", {
+    name: "Skill registration scope",
+  });
+  const visible = await dialog
+    .isVisible({ timeout: 500 })
+    .catch(() => false);
+  if (!visible) {
+    return;
+  }
+
+  await dialog.getByRole("button", { name: "Skip for now" }).click();
+  await expect(dialog).toBeHidden();
+}
+
+async function openRecentProject(page: Page) {
+  await dismissSkillRegistrationScopeDialogIfPresent(page);
+
+  const recentItem = page.locator("button.recent-item").first();
+  await expect(recentItem).toBeVisible();
+  await recentItem.click();
+}
+
 test.beforeEach(async ({ page }) => {
   await installTauriMock(page, {
     commandResponses: {
@@ -107,7 +130,7 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("launches and completes open-project -> agent send smoke flow", async ({
+test("launches and completes open-project -> project mode send smoke flow", async ({
   page,
 }) => {
   await page.goto("/");
@@ -115,10 +138,7 @@ test("launches and completes open-project -> agent send smoke flow", async ({
   await expect(
     page.getByRole("button", { name: "Open Project..." }),
   ).toBeVisible();
-  const recentItem = page.locator("button.recent-item").first();
-  await expect(recentItem).toBeVisible();
-
-  await recentItem.click();
+  await openRecentProject(page);
 
   const prompt = page.getByPlaceholder("Type a task and press Enter...");
   await expect(prompt).toBeVisible();
@@ -139,7 +159,7 @@ test("launches and completes open-project -> agent send smoke flow", async ({
   });
 
   expect(invokeCommands).toContain("open_project");
-  expect(invokeCommands).toContain("send_agent_mode_message");
+  expect(invokeCommands).toContain("send_project_mode_message_cmd");
 });
 
 test("launches agent from Launch Agent dialog and opens agent terminal tab", async ({
@@ -176,7 +196,7 @@ test("launches agent from Launch Agent dialog and opens agent terminal tab", asy
   await expect(
     page.getByRole("button", { name: "Open Project..." }),
   ).toBeVisible();
-  await page.locator("button.recent-item").first().click();
+  await openRecentProject(page);
 
   const branchButton = page
     .locator(".branch-item")
@@ -318,7 +338,7 @@ test("shows terminal stream error and closes errored terminal tab on Enter", asy
   await expect(
     page.getByRole("button", { name: "Open Project..." }),
   ).toBeVisible();
-  await page.locator("button.recent-item").first().click();
+  await openRecentProject(page);
   await expect(
     page.getByPlaceholder("Type a task and press Enter..."),
   ).toBeVisible();
@@ -334,7 +354,7 @@ test("shows terminal stream error and closes errored terminal tab on Enter", asy
           };
           return (
             parsed.byProjectPath?.["/tmp/gwt-playwright"]?.activeTabId ===
-            "agentMode"
+            "projectMode"
           );
         } catch {
           return false;
@@ -484,7 +504,7 @@ test("navigates Session Summary tabs and opens workflow run page", async ({
   await expect(
     page.getByRole("button", { name: "Open Project..." }),
   ).toBeVisible();
-  await page.locator("button.recent-item").first().click();
+  await openRecentProject(page);
 
   const branchButton = page
     .locator(".branch-item")
@@ -548,7 +568,7 @@ test("switches sort mode on worktree list", async ({ page }) => {
   await expect(
     page.getByRole("button", { name: "Open Project..." }),
   ).toBeVisible();
-  await page.locator("button.recent-item").first().click();
+  await openRecentProject(page);
 
   const sortText = page.locator(".sort-mode-text");
   await expect(sortText).toHaveText("Updated");

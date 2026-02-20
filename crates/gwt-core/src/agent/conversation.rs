@@ -1,4 +1,4 @@
-//! Conversation history for agent mode
+//! Conversation history for Project Mode
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

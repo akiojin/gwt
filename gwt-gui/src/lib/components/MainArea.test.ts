@@ -4,6 +4,7 @@ import {
   createEvent,
   fireEvent,
   render,
+  waitFor,
 } from "@testing-library/svelte";
 import type { Tab } from "../types";
 
@@ -57,6 +58,16 @@ function createDataTransferMock(): DataTransfer {
   } as DataTransfer;
 }
 
+function getTabByLabel(container: HTMLElement, label: string): HTMLElement {
+  const tab = Array.from(container.querySelectorAll<HTMLElement>(".tab-bar .tab")).find(
+    (el) => el.querySelector(".tab-label")?.textContent?.trim() === label,
+  );
+  if (!tab) {
+    throw new Error(`Tab not found: ${label}`);
+  }
+  return tab;
+}
+
 describe("MainArea", () => {
   afterEach(() => {
     cleanup();
@@ -65,41 +76,41 @@ describe("MainArea", () => {
 
   it("renders without Session Summary tab", async () => {
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectMode", label: "Project Mode", type: "projectMode" },
     ];
-    const rendered = await renderMainArea({ tabs, activeTabId: "agentMode" });
+    const rendered = await renderMainArea({ tabs, activeTabId: "projectMode" });
 
     expect(rendered.queryByText("Session Summary")).toBeNull();
     const tabLabels = Array.from(
       rendered.container.querySelectorAll(".tab-bar .tab-label"),
     ).map((el) => el.textContent?.trim());
-    expect(tabLabels).toEqual(["Master Agent"]);
+    expect(tabLabels).toEqual(["Project Mode"]);
   });
 
-  it("keeps Master Agent pinned (no close button)", async () => {
+  it("keeps Project Mode pinned (no close button)", async () => {
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectMode", label: "Project Mode", type: "projectMode" },
     ];
-    const rendered = await renderMainArea({ tabs, activeTabId: "agentMode" });
+    const rendered = await renderMainArea({ tabs, activeTabId: "projectMode" });
 
-    const agentModeTab = rendered.container.querySelector(".tab-bar .tab");
-    expect(agentModeTab).toBeTruthy();
-    expect(agentModeTab?.querySelector(".tab-close")).toBeNull();
+    const projectModeTab = rendered.container.querySelector(".tab-bar .tab");
+    expect(projectModeTab).toBeTruthy();
+    expect(projectModeTab?.querySelector(".tab-close")).toBeNull();
   });
 
   it("shows close button for non-pinned tabs and emits close callback", async () => {
     const onTabClose = vi.fn();
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectMode", label: "Project Mode", type: "projectMode" },
       { id: "settings", label: "Settings", type: "settings" },
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "agentMode",
+      activeTabId: "projectMode",
       onTabClose,
     });
 
-    const settingsTab = rendered.getByText("Settings").closest(".tab");
+    const settingsTab = getTabByLabel(rendered.container, "Settings");
     expect(settingsTab).toBeTruthy();
     const closeButton = settingsTab?.querySelector(".tab-close");
     expect(closeButton).toBeTruthy();
@@ -113,7 +124,7 @@ describe("MainArea", () => {
     const onTabClose = vi.fn();
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectMode", label: "Project Mode", type: "projectMode" },
       { id: "settings", label: "Settings", type: "settings" },
       {
         id: "versionHistory",
@@ -123,18 +134,14 @@ describe("MainArea", () => {
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "agentMode",
+      activeTabId: "projectMode",
       onTabClose,
       onTabReorder,
     });
 
     const tabBar = rendered.container.querySelector(".tab-bar") as HTMLElement;
-    const settingsTab = rendered
-      .getByText("Settings")
-      .closest(".tab") as HTMLElement;
-    const targetTab = rendered
-      .getByText("Version History")
-      .closest(".tab") as HTMLElement;
+    const settingsTab = getTabByLabel(rendered.container, "Settings");
+    const targetTab = getTabByLabel(rendered.container, "Version History");
     const closeButton = settingsTab.querySelector(".tab-close");
     expect(closeButton).toBeTruthy();
 
@@ -176,7 +183,7 @@ describe("MainArea", () => {
   it("emits onTabReorder during dragover with before/after positions", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectMode", label: "Project Mode", type: "projectMode" },
       { id: "settings", label: "Settings", type: "settings" },
       {
         id: "versionHistory",
@@ -186,16 +193,12 @@ describe("MainArea", () => {
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "agentMode",
+      activeTabId: "projectMode",
       onTabReorder,
     });
 
-    const dragTab = rendered
-      .getByText("Settings")
-      .closest(".tab") as HTMLElement;
-    const targetTab = rendered
-      .getByText("Version History")
-      .closest(".tab") as HTMLElement;
+    const dragTab = getTabByLabel(rendered.container, "Settings");
+    const targetTab = getTabByLabel(rendered.container, "Version History");
     const dataTransfer = createDataTransferMock();
     vi.spyOn(targetTab, "getBoundingClientRect").mockReturnValue({
       x: 100,
@@ -253,16 +256,16 @@ describe("MainArea", () => {
   it("does not emit onTabReorder when dragging over the same tab", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectMode", label: "Project Mode", type: "projectMode" },
       { id: "settings", label: "Settings", type: "settings" },
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "agentMode",
+      activeTabId: "projectMode",
       onTabReorder,
     });
 
-    const tab = rendered.getByText("Settings").closest(".tab") as HTMLElement;
+    const tab = getTabByLabel(rendered.container, "Settings");
     const dataTransfer = createDataTransferMock();
     vi.spyOn(tab, "getBoundingClientRect").mockReturnValue({
       x: 100,
@@ -285,7 +288,7 @@ describe("MainArea", () => {
   it("emits onTabReorder via pointer drag fallback", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectMode", label: "Project Mode", type: "projectMode" },
       { id: "settings", label: "Settings", type: "settings" },
       {
         id: "versionHistory",
@@ -295,17 +298,13 @@ describe("MainArea", () => {
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "agentMode",
+      activeTabId: "projectMode",
       onTabReorder,
     });
 
     const tabBar = rendered.container.querySelector(".tab-bar") as HTMLElement;
-    const dragTab = rendered
-      .getByText("Settings")
-      .closest(".tab") as HTMLElement;
-    const targetTab = rendered
-      .getByText("Version History")
-      .closest(".tab") as HTMLElement;
+    const dragTab = getTabByLabel(rendered.container, "Settings");
+    const targetTab = getTabByLabel(rendered.container, "Version History");
     const originalElementFromPoint = document.elementFromPoint;
     Object.defineProperty(document, "elementFromPoint", {
       configurable: true,
@@ -358,7 +357,7 @@ describe("MainArea", () => {
   it("emits onTabReorder when pointermove is dispatched on window", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectMode", label: "Project Mode", type: "projectMode" },
       { id: "settings", label: "Settings", type: "settings" },
       {
         id: "versionHistory",
@@ -368,16 +367,12 @@ describe("MainArea", () => {
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "agentMode",
+      activeTabId: "projectMode",
       onTabReorder,
     });
 
-    const dragTab = rendered
-      .getByText("Settings")
-      .closest(".tab") as HTMLElement;
-    const targetTab = rendered
-      .getByText("Version History")
-      .closest(".tab") as HTMLElement;
+    const dragTab = getTabByLabel(rendered.container, "Settings");
+    const targetTab = getTabByLabel(rendered.container, "Version History");
     const originalElementFromPoint = document.elementFromPoint;
     Object.defineProperty(document, "elementFromPoint", {
       configurable: true,
@@ -511,7 +506,101 @@ describe("MainArea", () => {
       expect(rendered.container.querySelector(".tab-dot.codex")).toBeTruthy();
       expect(rendered.container.querySelector(".tab-dot.terminal")).toBeTruthy();
       expect(rendered.container.querySelectorAll(".terminal-wrapper").length).toBe(2);
-      expect(rendered.container.querySelectorAll(".terminal-wrapper.active").length).toBe(1);
+      await waitFor(() => {
+        expect(
+          rendered.container.querySelectorAll(".terminal-wrapper.active").length,
+        ).toBe(1);
+      });
+    } finally {
+      Object.defineProperty(window, "matchMedia", {
+        configurable: true,
+        value: originalMatchMedia,
+      });
+      if (originalResizeObserver) {
+        Object.defineProperty(globalThis, "ResizeObserver", {
+          configurable: true,
+          value: originalResizeObserver,
+        });
+      } else {
+        delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+      }
+    }
+  });
+
+  it("keeps terminal hidden until the next tab reports ready", async () => {
+    const originalMatchMedia = window.matchMedia;
+    const originalResizeObserver = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn(() => ({
+        matches: false,
+        media: "",
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    });
+    class ResizeObserverMock {
+      observe = vi.fn();
+      unobserve = vi.fn();
+      disconnect = vi.fn();
+    }
+    Object.defineProperty(globalThis, "ResizeObserver", {
+      configurable: true,
+      value: ResizeObserverMock,
+    });
+
+    const tabs: Tab[] = [
+      {
+        id: "agent-1",
+        label: "Agent",
+        type: "agent",
+        paneId: "pane-agent",
+        agentId: "codex",
+      },
+      {
+        id: "term-1",
+        label: "Terminal",
+        type: "terminal",
+        cwd: "/tmp/project",
+        paneId: "pane-term",
+      },
+    ];
+
+    try {
+      const rendered = await renderMainArea({
+        tabs,
+        activeTabId: "agent-1",
+      });
+
+      await waitFor(() => {
+        expect(
+          rendered.container.querySelectorAll(".terminal-wrapper.active").length,
+        ).toBe(1);
+      });
+
+      await rendered.rerender({
+        projectPath: "/tmp/project",
+        selectedBranch: null,
+        onLaunchAgent: vi.fn(),
+        onQuickLaunch: vi.fn(),
+        onTabSelect: vi.fn(),
+        onTabClose: vi.fn(),
+        onTabReorder: vi.fn(),
+        activeTabId: "term-1",
+        tabs,
+      });
+
+      expect(rendered.container.querySelectorAll(".terminal-wrapper.active").length).toBe(0);
+
+      await waitFor(() => {
+        expect(
+          rendered.container.querySelectorAll(".terminal-wrapper.active").length,
+        ).toBe(1);
+      });
     } finally {
       Object.defineProperty(window, "matchMedia", {
         configurable: true,
@@ -531,18 +620,18 @@ describe("MainArea", () => {
   it("supports text/plain drag fallback and ignores dragStart without dataTransfer", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectMode", label: "Project Mode", type: "projectMode" },
       { id: "settings", label: "Settings", type: "settings" },
       { id: "versionHistory", label: "Version History", type: "versionHistory" },
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "agentMode",
+      activeTabId: "projectMode",
       onTabReorder,
     });
 
-    const dragTab = rendered.getByText("Settings").closest(".tab") as HTMLElement;
-    const targetTab = rendered.getByText("Version History").closest(".tab") as HTMLElement;
+    const dragTab = getTabByLabel(rendered.container, "Settings");
+    const targetTab = getTabByLabel(rendered.container, "Version History");
     vi.spyOn(targetTab, "getBoundingClientRect").mockReturnValue({
       x: 100,
       y: 0,
@@ -572,18 +661,18 @@ describe("MainArea", () => {
   it("resets pointer drag state on pointercancel", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectMode", label: "Project Mode", type: "projectMode" },
       { id: "settings", label: "Settings", type: "settings" },
       { id: "versionHistory", label: "Version History", type: "versionHistory" },
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "agentMode",
+      activeTabId: "projectMode",
       onTabReorder,
     });
 
-    const dragTab = rendered.getByText("Settings").closest(".tab") as HTMLElement;
-    const targetTab = rendered.getByText("Version History").closest(".tab") as HTMLElement;
+    const dragTab = getTabByLabel(rendered.container, "Settings");
+    const targetTab = getTabByLabel(rendered.container, "Version History");
     const originalElementFromPoint = document.elementFromPoint;
     Object.defineProperty(document, "elementFromPoint", {
       configurable: true,

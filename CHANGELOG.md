@@ -1,6 +1,17 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.8.1] - 2026-02-20
+
+### Bug Fixes
+
+- **e2e:** Handle startup skill-scope dialog in Playwright smoke tests (#1147)
+- **gui:** Reduce tab activation flicker and switch stutter (#1148)
+
+### Refactor
+
+- **project-mode:** Remove MCP bridge and migrate to managed skills (#1143)
+
 ## [7.8.0] - 2026-02-20
 
 ### Bug Fixes

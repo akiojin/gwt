@@ -99,6 +99,21 @@ async function setMockCommandResponses(
   }, commandResponses);
 }
 
+async function dismissSkillRegistrationScopeDialogIfPresent(page: Page) {
+  const dialog = page.getByRole("dialog", {
+    name: "Skill registration scope",
+  });
+  const visible = await dialog
+    .isVisible({ timeout: 500 })
+    .catch(() => false);
+  if (!visible) {
+    return;
+  }
+
+  await dialog.getByRole("button", { name: "Skip for now" }).click();
+  await expect(dialog).toBeHidden();
+}
+
 async function openProjectAndSelectBranch(
   page: Page,
   commandResponses: Record<string, unknown>,
@@ -109,6 +124,7 @@ async function openProjectAndSelectBranch(
   await expect(
     page.getByRole("button", { name: "Open Project..." }),
   ).toBeVisible();
+  await dismissSkillRegistrationScopeDialogIfPresent(page);
   await page.locator("button.recent-item").first().click();
   await expect(
     page.getByPlaceholder("Type a task and press Enter..."),
