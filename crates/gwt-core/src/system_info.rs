@@ -184,6 +184,7 @@ impl SystemMonitor {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn normalize_vram_total_bytes(bytes: Option<u64>) -> Option<u64> {
     bytes.filter(|v| *v > 0)
 }
@@ -277,7 +278,7 @@ fn detect_windows_gpus() -> Vec<GpuStaticInfo> {
     let Ok(com_library) = COMLibrary::new() else {
         return Vec::new();
     };
-    let Ok(wmi) = WMIConnection::new(com_library.into()) else {
+    let Ok(wmi) = WMIConnection::new(com_library) else {
         return Vec::new();
     };
 
