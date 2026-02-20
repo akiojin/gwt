@@ -2,9 +2,9 @@
 
 use super::MigrationError;
 use std::path::{Path, PathBuf};
-use tracing::{debug, info};
 #[cfg(not(windows))]
 use tracing::warn;
+use tracing::{debug, info};
 
 /// Information about a created backup
 #[derive(Debug, Clone)]

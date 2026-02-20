@@ -839,7 +839,10 @@ default_base_branch = "legacy-global"
         assert_eq!(loaded.appearance.ui_font_size, 16);
         assert_eq!(loaded.appearance.terminal_font_size, 18);
         assert_eq!(loaded.appearance.ui_font_family, "Inter, sans-serif");
-        assert_eq!(loaded.appearance.terminal_font_family, "\"Cascadia Mono\", monospace");
+        assert_eq!(
+            loaded.appearance.terminal_font_family,
+            "\"Cascadia Mono\", monospace"
+        );
     }
 
     #[test]
@@ -901,7 +904,10 @@ model = "base"
         assert_eq!(loaded.appearance.ui_font_size, 17);
         assert_eq!(loaded.appearance.terminal_font_size, 19);
         assert_eq!(loaded.appearance.ui_font_family, "Inter, sans-serif");
-        assert_eq!(loaded.appearance.terminal_font_family, "\"Cascadia Mono\", monospace");
+        assert_eq!(
+            loaded.appearance.terminal_font_family,
+            "\"Cascadia Mono\", monospace"
+        );
         assert!(loaded.voice_input.enabled);
         assert_eq!(loaded.voice_input.hotkey, "Mod+Shift+V");
         assert_eq!(loaded.voice_input.language, "ja");

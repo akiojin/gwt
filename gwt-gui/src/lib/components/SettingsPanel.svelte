@@ -256,14 +256,16 @@
 
   function normalizeUiFontFamily(value: string | null | undefined): string {
     const family = (value ?? "").trim();
+    if (family.length === 0) return DEFAULT_UI_FONT_FAMILY;
     const match = UI_FONT_PRESETS.find((preset) => preset.value === family);
-    return match ? match.value : DEFAULT_UI_FONT_FAMILY;
+    return match ? match.value : family;
   }
 
   function normalizeTerminalFontFamily(value: string | null | undefined): string {
     const family = (value ?? "").trim();
+    if (family.length === 0) return DEFAULT_TERMINAL_FONT_FAMILY;
     const match = TERMINAL_FONT_PRESETS.find((preset) => preset.value === family);
-    return match ? match.value : DEFAULT_TERMINAL_FONT_FAMILY;
+    return match ? match.value : family;
   }
 
   function normalizeSkillScope(

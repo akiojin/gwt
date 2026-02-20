@@ -606,6 +606,49 @@ describe("SettingsPanel", () => {
     });
   });
 
+  it("keeps non-preset font families when loading and saving settings", async () => {
+    const customUiFamily = '"IBM Plex Sans", system-ui, sans-serif';
+    const customTerminalFamily = '"Iosevka Term", monospace';
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") {
+        return structuredClone({
+          ...settingsFixture,
+          ui_font_family: customUiFamily,
+          terminal_font_family: customTerminalFamily,
+        });
+      }
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
+      if (command === "get_skill_registration_status_cmd") return structuredClone(skillStatusFixture);
+      if (command === "repair_skill_registration_cmd") return structuredClone(skillStatusFixture);
+      if (command === "get_available_shells") return [];
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+    await rendered.findByText("Appearance");
+
+    await waitFor(() => {
+      expect(
+        document.documentElement.style.getPropertyValue("--ui-font-family")
+      ).toBe(customUiFamily);
+      expect((window as any).__gwtTerminalFontFamily).toBe(customTerminalFamily);
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("save_settings", {
+        settings: expect.objectContaining({
+          ui_font_family: customUiFamily,
+          terminal_font_family: customTerminalFamily,
+        }),
+      });
+    });
+  });
+
   it("restores font family preview when closing without save", async () => {
     const onClose = vi.fn();
     document.documentElement.style.setProperty("--ui-font-family", settingsFixture.ui_font_family);
