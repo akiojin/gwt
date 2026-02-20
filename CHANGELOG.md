@@ -19,6 +19,7 @@ All notable changes to this project will be documented in this file.
 - **gui:** Broaden trackpad wheel fallback conditions (#1137)
 - **agent-mode:** Fix project team session restore and merge command (#1139)
 - **gui:** Stabilize trackpad wheel fallback for rapid bursts (#1138)
+- **terminal:** Stabilize Windows Host Claude launches by defaulting to `cmd` when shell is auto, and avoid false stream-EOF error promotion while process is still alive
 - **gui:** Agentタブ空白を防止 (#1142)
 
 ### Documentation
