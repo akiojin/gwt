@@ -5,7 +5,7 @@
 
 ## 概要
 
-gwtでClaude Codeを起動する際、worktree-protection-hooksプラグインのマーケットプレイス登録を自動化する機能を実装する。未登録の場合は確認ダイアログを表示し、ユーザー同意後に`known_marketplaces.json`と`enabledPlugins`を更新する。
+gwtでClaude Codeを起動する際、gwt-integrationプラグインのマーケットプレイス登録を自動化する機能を実装する。未登録の場合は確認ダイアログを表示し、ユーザー同意後に`known_marketplaces.json`と`enabledPlugins`を更新する。
 
 ## 技術コンテキスト
 
@@ -110,7 +110,7 @@ pub fn is_gwt_marketplace_registered() -> bool;
 /// gwt-pluginsマーケットプレイスを登録
 pub fn register_gwt_marketplace() -> Result<(), GwtError>;
 
-/// worktree-protection-hooksプラグインを有効化
+/// gwt-integrationプラグインを有効化
 pub fn enable_worktree_protection_plugin() -> Result<(), GwtError>;
 
 /// マーケットプレイス登録とプラグイン有効化を一括実行
@@ -126,7 +126,7 @@ pub fn setup_gwt_plugin() -> Result<(), GwtError>;
 pub fn plugin_setup() -> Self {
     Self {
         title: "Setup Worktree Protection Plugin".to_string(),
-        message: "Enable worktree-protection-hooks plugin for Claude Code?".to_string(),
+        message: "Enable gwt-integration plugin for Claude Code?".to_string(),
         details: vec![
             "This will register gwt-plugins marketplace.".to_string(),
             "Plugin protects against dangerous operations.".to_string(),

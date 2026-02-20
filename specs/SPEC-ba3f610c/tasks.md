@@ -372,7 +372,7 @@ US9 (コンテキスト)  ← US1
   - issue_specツール群をCodex/Geminiローカルskills + Claude Codeプラグインで公開、ブランチモード各エージェントから利用可能に
   - 依存: T402
 
-- [x] T1207 [P] [共通] Claude Hook転送のプラグイン同梱 `plugins/worktree-protection-hooks/hooks/hooks.json` `plugins/worktree-protection-hooks/hooks/scripts/forward-gwt-hook.sh`
+- [x] T1207 [P] [共通] Claude Hook転送のプラグイン同梱 `plugins/gwt-integration/hooks/hooks.json` `plugins/gwt-integration/hooks/scripts/forward-gwt-hook.sh`
   - `UserPromptSubmit`/`PreToolUse`/`PostToolUse`/`Notification`/`Stop` を `gwt-tauri hook <Event>` へ転送
   - 既存のPreToolUse保護Hook（branch/cd/file/gid-dir-overrideブロック）を維持
   - 依存: T1201

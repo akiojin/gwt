@@ -24,7 +24,7 @@ const PTY_COMMUNICATION_SKILL: ManagedSkill = ManagedSkill {
     name: "gwt-pty-communication",
     body: include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../plugins/worktree-protection-hooks/skills/gwt-pty-communication/SKILL.md"
+        "/../../plugins/gwt-integration/skills/gwt-pty-communication/SKILL.md"
     )),
 };
 
@@ -32,7 +32,7 @@ const ISSUE_SPEC_SKILL: ManagedSkill = ManagedSkill {
     name: "gwt-issue-spec-ops",
     body: include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../plugins/worktree-protection-hooks/skills/gwt-issue-spec-ops/SKILL.md"
+        "/../../plugins/gwt-integration/skills/gwt-issue-spec-ops/SKILL.md"
     )),
 };
 

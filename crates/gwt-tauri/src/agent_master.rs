@@ -9,7 +9,7 @@ use gwt_core::agent::session_store::SessionStoreError;
 use gwt_core::agent::task::{PullRequestRef, Task, TestStatus, TestVerification};
 use gwt_core::agent::types::SessionId;
 use gwt_core::ai::{AIClient, AIResponse, ChatMessage, ToolCall};
-use gwt_core::config::{ProfilesConfig, Settings};
+use gwt_core::config::ProfilesConfig;
 use gwt_core::git::{
     find_spec_issue_by_spec_id, sync_issue_to_project, upsert_spec_issue, SpecIssueSections,
     SpecProjectPhase,
@@ -642,15 +642,7 @@ fn prepare_issue_spec(
         existing.as_ref().map(|e| e.etag.as_str()),
     )?;
 
-    let settings = Settings::load(project_root).unwrap_or_default();
-    if let Some(project_id) = settings.agent.github_project_id {
-        let _ = sync_issue_to_project(
-            &repo_path,
-            detail.number,
-            project_id.trim(),
-            SpecProjectPhase::Draft,
-        );
-    }
+    let _ = sync_issue_to_project(&repo_path, detail.number, "", SpecProjectPhase::Draft);
 
     Ok(IssueSpecPreparation {
         spec_id,

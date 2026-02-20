@@ -36,7 +36,6 @@ use crate::commands::terminal::{
 };
 use crate::state::AppState;
 use gwt_core::ai::{ToolCall, ToolDefinition, ToolFunction};
-use gwt_core::config::Settings;
 
 pub const TOOL_SEND_KEYS_TO_PANE: &str = "send_keys_to_pane";
 pub const TOOL_SEND_KEYS_BROADCAST: &str = "send_keys_broadcast";
@@ -365,14 +364,9 @@ pub fn execute_tool_call(
             let project_path = get_project_path_for_window(state, window_label)?;
             let issue_number = get_required_u64_any(&args, &["issue_number", "issueNumber"])?;
             let phase = get_required_string_any(&args, &["phase"])?;
-            let project_id = match get_optional_string_any(&args, &["project_id", "projectId"]) {
-                Some(v) if !v.trim().is_empty() => v.to_string(),
-                _ => {
-                    let settings =
-                        Settings::load(std::path::Path::new(&project_path)).unwrap_or_default();
-                    settings.agent.github_project_id.unwrap_or_default()
-                }
-            };
+            let project_id = get_optional_string_any(&args, &["project_id", "projectId"])
+                .map(str::to_string)
+                .unwrap_or_default();
             let result = sync_spec_issue_project_cmd(
                 project_path,
                 issue_number,

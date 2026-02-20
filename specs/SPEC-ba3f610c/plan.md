@@ -144,7 +144,7 @@ gwt-gui/src/
 - Developerのエージェント種別はプロジェクトモード起動時にユーザーが指定する
 - コンテキスト要約はDeveloperはLLM自動、Lead/Coordinatorはgwt側で80%閾値制御
 - PTY通信は既存のsend_keys系を維持しつつ、スキルとしてのインターフェースを追加する
-- Claude Code Hook連携は`plugins/worktree-protection-hooks/hooks/hooks.json`を正本とし、5イベントを`gwt-tauri hook <Event>`へ転送する
+- Claude Code Hook連携は`plugins/gwt-integration/hooks/hooks.json`を正本とし、5イベントを`gwt-tauri hook <Event>`へ転送する
 - 起動時は`repair_skill_registration`でClaudeプラグイン登録をベストエフォート自動修復し、手動Hook登録ダイアログには依存しない
 - Skill/Plugin登録は`default_scope`（User/Project/Local）を基準にし、Agent別上書きがある場合は上書きを優先する
 - Scope別の登録先はCodex/Geminiはskillsディレクトリ、Claudeはsettingsファイル（User/Project/Local）で解決する
