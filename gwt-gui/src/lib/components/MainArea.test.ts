@@ -4,6 +4,7 @@ import {
   createEvent,
   fireEvent,
   render,
+  waitFor,
 } from "@testing-library/svelte";
 import type { Tab } from "../types";
 
@@ -57,6 +58,16 @@ function createDataTransferMock(): DataTransfer {
   } as DataTransfer;
 }
 
+function getTabByLabel(container: HTMLElement, label: string): HTMLElement {
+  const tab = Array.from(container.querySelectorAll<HTMLElement>(".tab-bar .tab")).find(
+    (el) => el.querySelector(".tab-label")?.textContent?.trim() === label,
+  );
+  if (!tab) {
+    throw new Error(`Tab not found: ${label}`);
+  }
+  return tab;
+}
+
 describe("MainArea", () => {
   afterEach(() => {
     cleanup();
@@ -99,7 +110,7 @@ describe("MainArea", () => {
       onTabClose,
     });
 
-    const settingsTab = rendered.getByText("Settings").closest(".tab");
+    const settingsTab = getTabByLabel(rendered.container, "Settings");
     expect(settingsTab).toBeTruthy();
     const closeButton = settingsTab?.querySelector(".tab-close");
     expect(closeButton).toBeTruthy();
@@ -129,12 +140,8 @@ describe("MainArea", () => {
     });
 
     const tabBar = rendered.container.querySelector(".tab-bar") as HTMLElement;
-    const settingsTab = rendered
-      .getByText("Settings")
-      .closest(".tab") as HTMLElement;
-    const targetTab = rendered
-      .getByText("Version History")
-      .closest(".tab") as HTMLElement;
+    const settingsTab = getTabByLabel(rendered.container, "Settings");
+    const targetTab = getTabByLabel(rendered.container, "Version History");
     const closeButton = settingsTab.querySelector(".tab-close");
     expect(closeButton).toBeTruthy();
 
@@ -190,12 +197,8 @@ describe("MainArea", () => {
       onTabReorder,
     });
 
-    const dragTab = rendered
-      .getByText("Settings")
-      .closest(".tab") as HTMLElement;
-    const targetTab = rendered
-      .getByText("Version History")
-      .closest(".tab") as HTMLElement;
+    const dragTab = getTabByLabel(rendered.container, "Settings");
+    const targetTab = getTabByLabel(rendered.container, "Version History");
     const dataTransfer = createDataTransferMock();
     vi.spyOn(targetTab, "getBoundingClientRect").mockReturnValue({
       x: 100,
@@ -262,7 +265,7 @@ describe("MainArea", () => {
       onTabReorder,
     });
 
-    const tab = rendered.getByText("Settings").closest(".tab") as HTMLElement;
+    const tab = getTabByLabel(rendered.container, "Settings");
     const dataTransfer = createDataTransferMock();
     vi.spyOn(tab, "getBoundingClientRect").mockReturnValue({
       x: 100,
@@ -300,12 +303,8 @@ describe("MainArea", () => {
     });
 
     const tabBar = rendered.container.querySelector(".tab-bar") as HTMLElement;
-    const dragTab = rendered
-      .getByText("Settings")
-      .closest(".tab") as HTMLElement;
-    const targetTab = rendered
-      .getByText("Version History")
-      .closest(".tab") as HTMLElement;
+    const dragTab = getTabByLabel(rendered.container, "Settings");
+    const targetTab = getTabByLabel(rendered.container, "Version History");
     const originalElementFromPoint = document.elementFromPoint;
     Object.defineProperty(document, "elementFromPoint", {
       configurable: true,
@@ -372,12 +371,8 @@ describe("MainArea", () => {
       onTabReorder,
     });
 
-    const dragTab = rendered
-      .getByText("Settings")
-      .closest(".tab") as HTMLElement;
-    const targetTab = rendered
-      .getByText("Version History")
-      .closest(".tab") as HTMLElement;
+    const dragTab = getTabByLabel(rendered.container, "Settings");
+    const targetTab = getTabByLabel(rendered.container, "Version History");
     const originalElementFromPoint = document.elementFromPoint;
     Object.defineProperty(document, "elementFromPoint", {
       configurable: true,
@@ -511,7 +506,101 @@ describe("MainArea", () => {
       expect(rendered.container.querySelector(".tab-dot.codex")).toBeTruthy();
       expect(rendered.container.querySelector(".tab-dot.terminal")).toBeTruthy();
       expect(rendered.container.querySelectorAll(".terminal-wrapper").length).toBe(2);
-      expect(rendered.container.querySelectorAll(".terminal-wrapper.active").length).toBe(1);
+      await waitFor(() => {
+        expect(
+          rendered.container.querySelectorAll(".terminal-wrapper.active").length,
+        ).toBe(1);
+      });
+    } finally {
+      Object.defineProperty(window, "matchMedia", {
+        configurable: true,
+        value: originalMatchMedia,
+      });
+      if (originalResizeObserver) {
+        Object.defineProperty(globalThis, "ResizeObserver", {
+          configurable: true,
+          value: originalResizeObserver,
+        });
+      } else {
+        delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+      }
+    }
+  });
+
+  it("keeps terminal hidden until the next tab reports ready", async () => {
+    const originalMatchMedia = window.matchMedia;
+    const originalResizeObserver = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn(() => ({
+        matches: false,
+        media: "",
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    });
+    class ResizeObserverMock {
+      observe = vi.fn();
+      unobserve = vi.fn();
+      disconnect = vi.fn();
+    }
+    Object.defineProperty(globalThis, "ResizeObserver", {
+      configurable: true,
+      value: ResizeObserverMock,
+    });
+
+    const tabs: Tab[] = [
+      {
+        id: "agent-1",
+        label: "Agent",
+        type: "agent",
+        paneId: "pane-agent",
+        agentId: "codex",
+      },
+      {
+        id: "term-1",
+        label: "Terminal",
+        type: "terminal",
+        cwd: "/tmp/project",
+        paneId: "pane-term",
+      },
+    ];
+
+    try {
+      const rendered = await renderMainArea({
+        tabs,
+        activeTabId: "agent-1",
+      });
+
+      await waitFor(() => {
+        expect(
+          rendered.container.querySelectorAll(".terminal-wrapper.active").length,
+        ).toBe(1);
+      });
+
+      await rendered.rerender({
+        projectPath: "/tmp/project",
+        selectedBranch: null,
+        onLaunchAgent: vi.fn(),
+        onQuickLaunch: vi.fn(),
+        onTabSelect: vi.fn(),
+        onTabClose: vi.fn(),
+        onTabReorder: vi.fn(),
+        activeTabId: "term-1",
+        tabs,
+      });
+
+      expect(rendered.container.querySelectorAll(".terminal-wrapper.active").length).toBe(0);
+
+      await waitFor(() => {
+        expect(
+          rendered.container.querySelectorAll(".terminal-wrapper.active").length,
+        ).toBe(1);
+      });
     } finally {
       Object.defineProperty(window, "matchMedia", {
         configurable: true,
@@ -541,8 +630,8 @@ describe("MainArea", () => {
       onTabReorder,
     });
 
-    const dragTab = rendered.getByText("Settings").closest(".tab") as HTMLElement;
-    const targetTab = rendered.getByText("Version History").closest(".tab") as HTMLElement;
+    const dragTab = getTabByLabel(rendered.container, "Settings");
+    const targetTab = getTabByLabel(rendered.container, "Version History");
     vi.spyOn(targetTab, "getBoundingClientRect").mockReturnValue({
       x: 100,
       y: 0,
@@ -582,8 +671,8 @@ describe("MainArea", () => {
       onTabReorder,
     });
 
-    const dragTab = rendered.getByText("Settings").closest(".tab") as HTMLElement;
-    const targetTab = rendered.getByText("Version History").closest(".tab") as HTMLElement;
+    const dragTab = getTabByLabel(rendered.container, "Settings");
+    const targetTab = getTabByLabel(rendered.container, "Version History");
     const originalElementFromPoint = document.elementFromPoint;
     Object.defineProperty(document, "elementFromPoint", {
       configurable: true,
