@@ -121,19 +121,19 @@ describe("AboutDialog", () => {
     expect(onclose).toHaveBeenCalledTimes(1);
   });
 
-  it("renders GPU details in System tab when gpuInfo is provided", async () => {
+  it("renders GPU details in System tab when gpuInfos are provided", async () => {
     const rendered = await renderAboutDialog({
       open: true,
       initialTab: "system",
       cpuUsage: 22,
       memUsed: 8 * 1024 ** 3,
       memTotal: 16 * 1024 ** 3,
-      gpuInfo: {
+      gpuInfos: [{
         name: "M2 Pro",
         usage_percent: 64,
         vram_total_bytes: 8 * 1024 ** 3,
         vram_used_bytes: 4 * 1024 ** 3,
-      },
+      }],
       onclose: vi.fn(),
     });
 
@@ -141,6 +141,38 @@ describe("AboutDialog", () => {
     expect(rendered.getByText("M2 Pro")).toBeTruthy();
     expect(rendered.getByText("64%")).toBeTruthy();
     expect(rendered.getByText("VRAM: 4.0 / 8.0 GB")).toBeTruthy();
+  });
+
+  it("renders multiple GPUs and supports static-only details", async () => {
+    const rendered = await renderAboutDialog({
+      open: true,
+      initialTab: "system",
+      cpuUsage: 22,
+      memUsed: 8 * 1024 ** 3,
+      memTotal: 16 * 1024 ** 3,
+      gpuInfos: [
+        {
+          name: "NVIDIA GeForce RTX 4090",
+          usage_percent: 12,
+          vram_total_bytes: 24 * 1024 ** 3,
+          vram_used_bytes: 2 * 1024 ** 3,
+        },
+        {
+          name: "Intel(R) UHD Graphics",
+          usage_percent: null,
+          vram_total_bytes: 1 * 1024 ** 3,
+          vram_used_bytes: null,
+        },
+      ],
+      onclose: vi.fn(),
+    });
+
+    await rendered.findByText("GPU 1");
+    await rendered.findByText("GPU 2");
+    expect(rendered.getByText("NVIDIA GeForce RTX 4090")).toBeTruthy();
+    expect(rendered.getByText("Intel(R) UHD Graphics")).toBeTruthy();
+    expect(rendered.getByText("VRAM: 2.0 / 24.0 GB")).toBeTruthy();
+    expect(rendered.getByText("VRAM: 1.0 GB")).toBeTruthy();
   });
 
   it("renders detected agents in General tab", async () => {
