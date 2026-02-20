@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { installTauriMock } from "./support/tauri-mock";
 
 const defaultRecentProject = {
@@ -14,13 +14,36 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
+async function dismissSkillRegistrationScopeDialogIfPresent(page: Page) {
+  const dialog = page.getByRole("dialog", {
+    name: "Skill registration scope",
+  });
+  const visible = await dialog
+    .isVisible({ timeout: 500 })
+    .catch(() => false);
+  if (!visible) {
+    return;
+  }
+
+  await dialog.getByRole("button", { name: "Skip for now" }).click();
+  await expect(dialog).toBeHidden();
+}
+
+async function openRecentProject(page: Page) {
+  await dismissSkillRegistrationScopeDialogIfPresent(page);
+
+  const recentItem = page.locator("button.recent-item").first();
+  await expect(recentItem).toBeVisible();
+  await recentItem.click();
+}
+
 test("measures terminal tab-switch latency (p95 budget)", async ({ page }) => {
   await page.goto("/");
 
   await expect(
     page.getByRole("button", { name: "Open Project..." }),
   ).toBeVisible();
-  await page.locator("button.recent-item").first().click();
+  await openRecentProject(page);
   await expect(
     page.getByPlaceholder("Type a task and press Enter..."),
   ).toBeVisible();
