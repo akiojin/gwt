@@ -114,8 +114,7 @@
 
   function isAiEnabled(profile: Profile | null): boolean {
     if (!profile) return false;
-    if (profile.ai_enabled === false) return false;
-    return !!profile.ai;
+    return !!(profile.ai?.endpoint?.trim());
   }
 
   $effect(() => {
@@ -592,39 +591,23 @@
     newEnvValue = "";
   }
 
-  function setAiEnabled(enabled: boolean) {
-    if (!profiles) return;
-    const p = currentProfile;
-    if (!p) return;
-    if (!selectedProfileKey) return;
-    const nextProfile: Profile = enabled
-      ? {
-          ...p,
-          ai_enabled: true,
-          ai: p.ai ?? {
-            endpoint: "https://api.openai.com/v1",
-            api_key: "",
-            model: "",
-            language: "en",
-            summary_enabled: true,
-          },
-        }
-      : { ...p, ai_enabled: false };
-    profiles = {
-      ...profiles,
-      profiles: { ...(profiles.profiles ?? {}), [selectedProfileKey]: nextProfile },
-    };
-  }
-
   function updateAiField(
     field: "endpoint" | "api_key" | "model" | "language" | "summary_enabled",
     value: string | boolean
   ) {
     if (!profiles) return;
     const p = currentProfile;
-    if (!p || !p.ai) return;
+    if (!p) return;
     if (!selectedProfileKey) return;
-    const nextAi = { ...p.ai, [field]: value } as Profile["ai"];
+    const nextAi = {
+      endpoint: "",
+      api_key: "",
+      model: "",
+      language: "en",
+      summary_enabled: true,
+      ...(p.ai ?? {}),
+      [field]: value,
+    } as Profile["ai"];
     const nextProfile: Profile = { ...p, ai: nextAi };
     profiles = {
       ...profiles,
@@ -777,7 +760,7 @@
             <div class="divider"></div>
 
             <div class="field">
-              <label for="app-language">Language</label>
+              <label for="app-language">Summary Language (global)</label>
               <select
                 id="app-language"
                 class="select"
@@ -797,7 +780,7 @@
                 <option value="en">English</option>
               </select>
               <span class="field-hint">
-                Used for AI summary generation language.
+                Used as the app-wide language when rebuilding all branch summaries.
               </span>
             </div>
 
@@ -1162,22 +1145,26 @@
               <label>Environment Variables</label>
               {#if profiles && selectedProfileKey && currentProfile}
                 <div class="env-table">
-                  {#each Object.keys(currentProfile.env ?? {}).sort((a, b) => a.localeCompare(b)) as key (key)}
-                    <div class="env-row">
-                      <span class="env-key mono">{key}</span>
-                      <input
-                        class="env-value"
-                        type="text"
-                        autocapitalize="off"
-                        autocorrect="off"
-                        autocomplete="off"
-                        spellcheck="false"
-                        value={currentProfile.env[key]}
-                        oninput={(e) => upsertEnvVar(key, (e.target as HTMLInputElement).value)}
-                      />
-                      <button class="btn btn-ghost" onclick={() => removeEnvVar(key)}>Remove</button>
-                    </div>
-                  {/each}
+                  {#if Object.keys(currentProfile.env ?? {}).length === 0}
+                    <div class="env-empty">No environment variables</div>
+                  {:else}
+                    {#each Object.keys(currentProfile.env ?? {}).sort((a, b) => a.localeCompare(b)) as key (key)}
+                      <div class="env-row">
+                        <span class="env-key mono">{key}</span>
+                        <input
+                          class="env-value"
+                          type="text"
+                          autocapitalize="off"
+                          autocorrect="off"
+                          autocomplete="off"
+                          spellcheck="false"
+                          value={currentProfile.env[key]}
+                          oninput={(e) => upsertEnvVar(key, (e.target as HTMLInputElement).value)}
+                        />
+                        <button class="btn btn-ghost" onclick={() => removeEnvVar(key)}>Remove</button>
+                      </div>
+                    {/each}
+                  {/if}
                 </div>
 
                 <div class="env-add-row">
@@ -1214,102 +1201,96 @@
               <!-- svelte-ignore a11y_label_has_associated_control -->
               <label>AI Settings (per profile)</label>
               {#if profiles && selectedProfileKey && currentProfile}
-                <div class="ai-toggle">
-                  <input
-                    id="ai-enabled"
-                    type="checkbox"
-                    checked={isAiEnabled(currentProfile)}
-                    onchange={(e) => setAiEnabled((e.target as HTMLInputElement).checked)}
-                  />
-                  <label for="ai-enabled" class="ai-enabled-label">Enable AI settings</label>
-                </div>
-
-                {#if isAiEnabled(currentProfile)}
-                  {@const currentAi = currentProfile.ai}
-                  {@const currentEndpoint = currentAi?.endpoint?.trim() ?? ""}
-                  <div class="ai-grid">
-                    <div class="ai-field">
-                      <span class="ai-label">Endpoint</span>
-                      <input
-                        type="text"
-                        autocapitalize="off"
-                        autocorrect="off"
-                        autocomplete="off"
-                        spellcheck="false"
-                        value={currentAi?.endpoint ?? ""}
-                        oninput={(e) => updateAiField("endpoint", (e.target as HTMLInputElement).value)}
-                      />
-                    </div>
-                    <div class="ai-field">
-                      <span class="ai-label">API Key</span>
-                      <input
-                        type="text"
-                        autocapitalize="off"
-                        autocorrect="off"
-                        autocomplete="off"
-                        spellcheck="false"
-                        value={currentAi?.api_key ?? ""}
-                        oninput={(e) => updateAiField("api_key", (e.target as HTMLInputElement).value)}
-                      />
-                    </div>
-                    <div class="ai-field">
-                      <span class="ai-label">Model</span>
-                      <div class="row ai-model-row">
-                        <select
-                          class="select ai-model-select"
-                          value={currentAi?.model ?? ""}
-                          disabled={aiModelsLoading || !currentEndpoint}
-                          onchange={(e) => updateAiField("model", (e.target as HTMLSelectElement).value)}
-                        >
-                          <option value="">Select model...</option>
-                          {#each aiModelOptions as modelId (modelId)}
-                            <option value={modelId}>{modelId}</option>
-                          {/each}
-                        </select>
-                        <button
-                          class="btn btn-ghost"
-                          onclick={refreshAiModels}
-                          disabled={aiModelsLoading || !currentEndpoint}
-                        >
-                          {aiModelsLoading ? "Loading..." : "Refresh"}
-                        </button>
-                      </div>
-                      {#if aiModelsError}
-                        <span class="field-hint">{aiModelsError}</span>
-                      {:else if currentModelMissing}
-                        <span class="field-hint">
-                          Current model is not listed in /v1/models.
-                        </span>
-                      {:else if !aiModelsLoading && aiModels.length === 0 && currentEndpoint}
-                        <span class="field-hint">No models returned from /v1/models.</span>
-                      {/if}
-                    </div>
-                    <div class="ai-field">
-                      <span class="ai-label">Language</span>
+                {@const currentAi = currentProfile.ai ?? {
+                  endpoint: "",
+                  api_key: "",
+                  model: "",
+                  language: "en",
+                  summary_enabled: true,
+                }}
+                {@const currentEndpoint = currentAi?.endpoint?.trim() ?? ""}
+                <div class="ai-grid">
+                  <div class="ai-field">
+                    <span class="ai-label">Endpoint</span>
+                    <input
+                      type="text"
+                      autocapitalize="off"
+                      autocorrect="off"
+                      autocomplete="off"
+                      spellcheck="false"
+                      value={currentAi?.endpoint ?? ""}
+                      oninput={(e) => updateAiField("endpoint", (e.target as HTMLInputElement).value)}
+                    />
+                  </div>
+                  <div class="ai-field">
+                    <span class="ai-label">API Key</span>
+                    <input
+                      type="password"
+                      autocapitalize="off"
+                      autocorrect="off"
+                      autocomplete="off"
+                      spellcheck="false"
+                      value={currentAi?.api_key ?? ""}
+                      oninput={(e) => updateAiField("api_key", (e.target as HTMLInputElement).value)}
+                    />
+                  </div>
+                  <div class="ai-field">
+                    <span class="ai-label">Model</span>
+                    <div class="row ai-model-row">
                       <select
-                        class="select"
-                        value={currentAi?.language ?? "en"}
-                        onchange={(e) => updateAiField("language", (e.target as HTMLSelectElement).value)}
+                        class="select ai-model-select"
+                        value={currentAi?.model ?? ""}
+                        disabled={aiModelsLoading || !currentEndpoint}
+                        onchange={(e) => updateAiField("model", (e.target as HTMLSelectElement).value)}
                       >
-                        <option value="en">English</option>
-                        <option value="ja">Japanese</option>
-                        <option value="auto">Auto</option>
+                        <option value="">Select model...</option>
+                        {#each aiModelOptions as modelId (modelId)}
+                          <option value={modelId}>{modelId}</option>
+                        {/each}
                       </select>
+                      <button
+                        class="btn btn-ghost"
+                        onclick={refreshAiModels}
+                        disabled={aiModelsLoading || !currentEndpoint}
+                      >
+                        {aiModelsLoading ? "Loading..." : "Refresh"}
+                      </button>
                     </div>
-                    <div class="ai-field">
-                      <span class="ai-label">Session Summary</span>
-                      <div class="ai-checkbox">
-                        <input
-                          id="ai-summary"
-                          type="checkbox"
-                          checked={currentAi?.summary_enabled ?? false}
-                          onchange={(e) => updateAiField("summary_enabled", (e.target as HTMLInputElement).checked)}
-                        />
-                        <label for="ai-summary">Enabled</label>
-                      </div>
+                    {#if aiModelsError}
+                      <span class="field-hint">{aiModelsError}</span>
+                    {:else if currentModelMissing}
+                      <span class="field-hint">
+                        Current model is not listed in /v1/models.
+                      </span>
+                    {:else if !aiModelsLoading && aiModels.length === 0 && currentEndpoint}
+                      <span class="field-hint">No models returned from /v1/models.</span>
+                    {/if}
+                  </div>
+                  <div class="ai-field">
+                    <span class="ai-label">Profile Language</span>
+                    <select
+                      class="select"
+                      value={currentAi?.language ?? "en"}
+                      onchange={(e) => updateAiField("language", (e.target as HTMLSelectElement).value)}
+                    >
+                      <option value="en">English</option>
+                      <option value="ja">Japanese</option>
+                      <option value="auto">Auto</option>
+                    </select>
+                  </div>
+                  <div class="ai-field">
+                    <span class="ai-label">Session Summary</span>
+                    <div class="ai-checkbox">
+                      <input
+                        id="ai-summary"
+                        type="checkbox"
+                        checked={currentAi?.summary_enabled ?? false}
+                        onchange={(e) => updateAiField("summary_enabled", (e.target as HTMLInputElement).checked)}
+                      />
+                      <label for="ai-summary">Enabled</label>
                     </div>
                   </div>
-                {/if}
+                </div>
               {:else}
                 <div class="field-hint">Create a profile to configure AI settings.</div>
               {/if}
@@ -1508,6 +1489,7 @@
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
     border-radius: 8px;
+    min-height: 96px;
   }
 
   .env-row {
@@ -1515,6 +1497,12 @@
     grid-template-columns: 1fr 2fr auto;
     gap: 8px;
     align-items: center;
+  }
+
+  .env-empty {
+    color: var(--text-muted);
+    font-size: var(--ui-font-sm);
+    padding: 16px 0;
   }
 
   .env-key {
