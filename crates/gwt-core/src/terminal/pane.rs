@@ -29,6 +29,8 @@ pub struct PaneConfig {
     pub rows: u16,
     pub cols: u16,
     pub env_vars: HashMap<String, String>,
+    /// Optional shell override (e.g. "powershell", "cmd", "wsl").
+    pub terminal_shell: Option<String>,
 }
 
 /// A terminal pane integrating PTY and scrollback.
@@ -59,6 +61,7 @@ impl TerminalPane {
             env_vars,
             rows: config.rows,
             cols: config.cols,
+            terminal_shell: config.terminal_shell,
         };
 
         let pty = PtyHandle::new(pty_config)?;
@@ -239,6 +242,7 @@ mod tests {
             rows: 24,
             cols: 80,
             env_vars: HashMap::new(),
+            terminal_shell: None,
         }
     }
 

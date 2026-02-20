@@ -25,9 +25,21 @@ Downloadable formats in Releases:
 
 - `.dmg`, `.pkg`
 
+Build installers locally (one command):
+
+```bash
+pnpm run installer:macos
+```
+
 ### Windows
 
 Download `.msi` from GitHub Releases and run the installer.
+
+Build installer locally (one command, PowerShell):
+
+```powershell
+pnpm run installer:windows
+```
 
 ### Linux
 

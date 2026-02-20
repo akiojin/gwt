@@ -19,6 +19,7 @@ export type LaunchDefaults = {
   dockerBuild: boolean;
   dockerRecreate: boolean;
   dockerKeep: boolean;
+  selectedShell: string;
 };
 
 type StoredLaunchDefaults = {
@@ -81,6 +82,7 @@ function sanitizeLaunchDefaults(value: unknown): LaunchDefaults {
     dockerBuild: raw.dockerBuild === true,
     dockerRecreate: raw.dockerRecreate === true,
     dockerKeep: raw.dockerKeep === true,
+    selectedShell: normalizeString(raw.selectedShell),
   };
 }
 

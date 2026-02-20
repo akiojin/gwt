@@ -7,6 +7,8 @@
   "scripts": {
     "dev": "cargo tauri dev",
     "build": "cargo tauri build",
+    "installer:macos": "bash installers/macos/build-installer.sh",
+    "installer:windows": "powershell -ExecutionPolicy Bypass -File installers/windows/build-msi.ps1",
     "prepare": "test -n \"$CI\" || bunx husky install",
     "lint:husky": "bash scripts/verify-husky-hooks.sh"
   },

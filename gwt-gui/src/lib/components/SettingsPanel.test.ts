@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, fireEvent, waitFor, cleanup } from "@testing-library/svelte";
 
-import type { McpRegistrationStatus, ProfilesConfig, SettingsData } from "../types";
+import type { McpRegistrationStatus, ProfilesConfig, SettingsData, ShellInfo } from "../types";
 
 const invokeMock = vi.fn();
 
@@ -79,6 +79,12 @@ const mcpStatusFixture: McpRegistrationStatus = {
   last_error_message: null,
 };
 
+const shellsFixture: ShellInfo[] = [
+  { id: "powershell", name: "PowerShell", version: "7.4.1" },
+  { id: "cmd", name: "Command Prompt" },
+  { id: "wsl", name: "WSL (Ubuntu)", version: "2.0" },
+];
+
 async function renderSettingsPanel(overrides: Record<string, unknown> = {}) {
   const { default: SettingsPanel } = await import("./SettingsPanel.svelte");
   return render(SettingsPanel, {
@@ -112,6 +118,7 @@ describe("SettingsPanel", () => {
       if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
       if (command === "get_mcp_registration_status_cmd") return structuredClone(mcpStatusFixture);
       if (command === "repair_mcp_registration_cmd") return structuredClone(mcpStatusFixture);
+      if (command === "get_available_shells") return [];
       if (command === "save_settings") return null;
       if (command === "save_profiles") return null;
       return null;
@@ -802,5 +809,114 @@ describe("SettingsPanel", () => {
     await fireEvent.click(rendered.getByRole("button", { name: "Close" }));
 
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides Terminal tab when no shells are available (macOS/Linux)", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    const tabButtons = rendered.container.querySelectorAll(".settings-tab-btn");
+    const tabNames = Array.from(tabButtons).map((btn) => btn.textContent?.trim());
+    expect(tabNames).not.toContain("Terminal");
+  });
+
+  it("shows Terminal tab when shells are available (Windows)", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
+      if (command === "get_mcp_registration_status_cmd") return structuredClone(mcpStatusFixture);
+      if (command === "get_available_shells") return structuredClone(shellsFixture);
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      const tabButtons = rendered.container.querySelectorAll(".settings-tab-btn");
+      const tabNames = Array.from(tabButtons).map((btn) => btn.textContent?.trim());
+      expect(tabNames).toContain("Terminal");
+    });
+  });
+
+  it("shows shell dropdown with version subtext in Terminal tab", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
+      if (command === "get_mcp_registration_status_cmd") return structuredClone(mcpStatusFixture);
+      if (command === "get_available_shells") return structuredClone(shellsFixture);
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      const tabButtons = rendered.container.querySelectorAll(".settings-tab-btn");
+      const tabNames = Array.from(tabButtons).map((btn) => btn.textContent?.trim());
+      expect(tabNames).toContain("Terminal");
+    });
+
+    await switchToTab(rendered, "Terminal");
+
+    await waitFor(() => {
+      expect(rendered.getByText("Default Shell")).toBeTruthy();
+    });
+
+    const select = rendered.container.querySelector("#default-shell") as HTMLSelectElement;
+    expect(select).toBeTruthy();
+
+    const options = Array.from(select.options).map((o) => o.textContent?.trim());
+    expect(options).toContain("System Default");
+    expect(options).toContain("PowerShell (7.4.1)");
+    expect(options).toContain("Command Prompt");
+    expect(options).toContain("WSL (Ubuntu) (2.0)");
+  });
+
+  it("saves selected shell via Terminal tab", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "get_settings") return structuredClone(settingsFixture);
+      if (command === "get_profiles") return structuredClone(profilesFixture);
+      if (command === "list_ai_models") return [{ id: "gpt-5" }, { id: "gpt-4o-mini" }];
+      if (command === "get_mcp_registration_status_cmd") return structuredClone(mcpStatusFixture);
+      if (command === "get_available_shells") return structuredClone(shellsFixture);
+      if (command === "save_settings") return null;
+      if (command === "save_profiles") return null;
+      return null;
+    });
+
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      const tabButtons = rendered.container.querySelectorAll(".settings-tab-btn");
+      const tabNames = Array.from(tabButtons).map((btn) => btn.textContent?.trim());
+      expect(tabNames).toContain("Terminal");
+    });
+
+    await switchToTab(rendered, "Terminal");
+
+    await waitFor(() => {
+      expect(rendered.container.querySelector("#default-shell")).toBeTruthy();
+    });
+
+    const select = rendered.container.querySelector("#default-shell") as HTMLSelectElement;
+    await fireEvent.change(select, { target: { value: "wsl" } });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("save_settings", {
+        settings: expect.objectContaining({
+          default_shell: "wsl",
+        }),
+      });
+    });
   });
 });
