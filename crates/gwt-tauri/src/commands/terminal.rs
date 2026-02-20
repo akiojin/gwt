@@ -1791,7 +1791,6 @@ fn resolve_shell_id_for_spawn(shell_id: Option<&str>) -> Option<String> {
 fn resolve_shell_for_spawn(shell_id: Option<&str>) -> (String, Vec<String>) {
     #[cfg(target_os = "windows")]
     {
-        use gwt_core::terminal::shell::WindowsShell;
         if let Some(id) = shell_id {
             match id {
                 "powershell" => {

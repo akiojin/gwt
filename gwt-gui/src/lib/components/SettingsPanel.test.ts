@@ -32,6 +32,8 @@ const settingsFixture: SettingsData = {
   docker_force_host: true,
   ui_font_size: 13,
   terminal_font_size: 13,
+  ui_font_family: 'system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif',
+  terminal_font_family: '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace',
   app_language: "auto",
   voice_input: {
     enabled: false,
@@ -525,7 +527,7 @@ describe("SettingsPanel", () => {
     expect(rendered.getByText("API Key")).toBeTruthy();
     expect(rendered.getByText("Model")).toBeTruthy();
     expect(rendered.getByText("Session Summary")).toBeTruthy();
-    expect(rendered.getByText("Language")).toBeTruthy();
+    expect(rendered.getByText("Profile Language")).toBeTruthy();
     expect(rendered.container.querySelector("#ai-enabled")).toBeNull();
 
     const apiKeyLabel = rendered.getByText("API Key");
@@ -568,6 +570,93 @@ describe("SettingsPanel", () => {
     await waitFor(() => {
       expect(terminalInput.value).toBe("23");
     });
+  });
+
+  it("updates font family selects and includes them in saved settings", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await rendered.findByText("Appearance");
+    const terminalFontFamily = rendered.container.querySelector(
+      "#terminal-font-family"
+    ) as HTMLSelectElement;
+    const uiFontFamily = rendered.container.querySelector(
+      "#ui-font-family"
+    ) as HTMLSelectElement;
+
+    await fireEvent.change(terminalFontFamily, {
+      target: { value: '"Cascadia Mono", "Cascadia Code", Consolas, monospace' },
+    });
+    await fireEvent.change(uiFontFamily, {
+      target: {
+        value: '"Inter", system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif',
+      },
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("save_settings", {
+        settings: expect.objectContaining({
+          ui_font_family:
+            '"Inter", system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif',
+          terminal_font_family:
+            '"Cascadia Mono", "Cascadia Code", Consolas, monospace',
+        }),
+      });
+    });
+  });
+
+  it("restores font family preview when closing without save", async () => {
+    const onClose = vi.fn();
+    document.documentElement.style.setProperty("--ui-font-family", settingsFixture.ui_font_family);
+    document.documentElement.style.setProperty(
+      "--terminal-font-family",
+      settingsFixture.terminal_font_family
+    );
+    (window as any).__gwtTerminalFontFamily = settingsFixture.terminal_font_family;
+
+    const rendered = await renderSettingsPanel({ onClose });
+
+    await rendered.findByText("Appearance");
+    const terminalFontFamily = rendered.container.querySelector(
+      "#terminal-font-family"
+    ) as HTMLSelectElement;
+    const uiFontFamily = rendered.container.querySelector(
+      "#ui-font-family"
+    ) as HTMLSelectElement;
+
+    await fireEvent.change(terminalFontFamily, {
+      target: { value: '"SF Mono", Menlo, Monaco, Consolas, monospace' },
+    });
+    await fireEvent.change(uiFontFamily, {
+      target: {
+        value:
+          '"Source Sans 3", system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif',
+      },
+    });
+
+    await waitFor(() => {
+      expect(
+        document.documentElement.style.getPropertyValue("--ui-font-family")
+      ).toBe(
+        '"Source Sans 3", system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif'
+      );
+      expect((window as any).__gwtTerminalFontFamily).toBe(
+        '"SF Mono", Menlo, Monaco, Consolas, monospace'
+      );
+    });
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Close" }));
+
+    await waitFor(() => {
+      expect(
+        document.documentElement.style.getPropertyValue("--ui-font-family")
+      ).toBe(settingsFixture.ui_font_family);
+      expect((window as any).__gwtTerminalFontFamily).toBe(
+        settingsFixture.terminal_font_family
+      );
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it("toggles env Add button disabled state based on KEY input", async () => {

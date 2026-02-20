@@ -39,6 +39,12 @@
 
   let savedUiFontSize: number = $state(13);
   let savedTerminalFontSize: number = $state(13);
+  let savedUiFontFamily: string = $state(
+    'system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif'
+  );
+  let savedTerminalFontFamily: string = $state(
+    '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace'
+  );
   let skillStatus: SkillRegistrationStatus | null = $state(null);
   let skillStatusLoading: boolean = $state(false);
   let skillStatusRepairing: boolean = $state(false);
@@ -50,6 +56,46 @@
     language: "auto",
     model: "base",
   };
+  const DEFAULT_UI_FONT_FAMILY =
+    'system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif';
+  const DEFAULT_TERMINAL_FONT_FAMILY =
+    '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace';
+  type FontPreset = { label: string; value: string };
+  const UI_FONT_PRESETS: FontPreset[] = [
+    { label: "System UI (Default)", value: DEFAULT_UI_FONT_FAMILY },
+    {
+      label: "Inter",
+      value: '"Inter", system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif',
+    },
+    {
+      label: "Noto Sans",
+      value: '"Noto Sans", system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif',
+    },
+    {
+      label: "Source Sans 3",
+      value:
+        '"Source Sans 3", system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif',
+    },
+  ];
+  const TERMINAL_FONT_PRESETS: FontPreset[] = [
+    { label: "JetBrains Mono (Default)", value: DEFAULT_TERMINAL_FONT_FAMILY },
+    {
+      label: "Cascadia Mono",
+      value: '"Cascadia Mono", "Cascadia Code", Consolas, monospace',
+    },
+    {
+      label: "Fira Code",
+      value: '"Fira Code", "JetBrains Mono", Menlo, Consolas, monospace',
+    },
+    {
+      label: "SF Mono",
+      value: '"SF Mono", Menlo, Monaco, Consolas, monospace',
+    },
+    {
+      label: "Ubuntu Mono",
+      value: '"Ubuntu Mono", "DejaVu Sans Mono", Consolas, monospace',
+    },
+  ];
   const DEFAULT_APP_LANGUAGE: SettingsData["app_language"] = "auto";
   const DEFAULT_SKILL_STATUS: SkillRegistrationStatus = {
     overall: "failed",
@@ -110,6 +156,8 @@
     if (terminalSize >= 8 && terminalSize <= 24) {
       applyTerminalFontSize(terminalSize);
     }
+    applyUiFontFamily(settings.ui_font_family);
+    applyTerminalFontFamily(settings.terminal_font_family);
   });
 
   function isAiEnabled(profile: Profile | null): boolean {
@@ -144,16 +192,29 @@
   });
 
   onMount(() => {
-    const computed = getComputedStyle(document.documentElement).getPropertyValue("--ui-font-base");
+    const rootStyle = getComputedStyle(document.documentElement);
+    const computed = rootStyle.getPropertyValue("--ui-font-base");
     const parsedUi = Number.parseInt(computed.trim(), 10);
     savedUiFontSize = Number.isNaN(parsedUi) ? 13 : parsedUi;
     const storedTerminal = (window as any).__gwtTerminalFontSize;
     savedTerminalFontSize = typeof storedTerminal === "number" ? storedTerminal : 13;
+    const computedUiFamily = rootStyle.getPropertyValue("--ui-font-family");
+    savedUiFontFamily = normalizeUiFontFamily(computedUiFamily);
+    const storedTerminalFamily = (window as any).__gwtTerminalFontFamily;
+    if (typeof storedTerminalFamily === "string") {
+      savedTerminalFontFamily = normalizeTerminalFontFamily(storedTerminalFamily);
+    } else {
+      savedTerminalFontFamily = normalizeTerminalFontFamily(
+        rootStyle.getPropertyValue("--terminal-font-family")
+      );
+    }
   });
 
   onDestroy(() => {
     applyUiFontSize(savedUiFontSize);
     applyTerminalFontSize(savedTerminalFontSize);
+    applyUiFontFamily(savedUiFontFamily);
+    applyTerminalFontFamily(savedTerminalFontFamily);
   });
 
   function toErrorMessage(err: unknown): string {
@@ -191,6 +252,18 @@
       return language as SettingsData["app_language"];
     }
     return DEFAULT_APP_LANGUAGE;
+  }
+
+  function normalizeUiFontFamily(value: string | null | undefined): string {
+    const family = (value ?? "").trim();
+    const match = UI_FONT_PRESETS.find((preset) => preset.value === family);
+    return match ? match.value : DEFAULT_UI_FONT_FAMILY;
+  }
+
+  function normalizeTerminalFontFamily(value: string | null | undefined): string {
+    const family = (value ?? "").trim();
+    const match = TERMINAL_FONT_PRESETS.find((preset) => preset.value === family);
+    return match ? match.value : DEFAULT_TERMINAL_FONT_FAMILY;
   }
 
   function normalizeSkillScope(
@@ -356,6 +429,10 @@
       ]);
       loadedSettings.voice_input = normalizeVoiceInputSettings(loadedSettings.voice_input);
       loadedSettings.app_language = normalizeAppLanguage(loadedSettings.app_language);
+      loadedSettings.ui_font_family = normalizeUiFontFamily(loadedSettings.ui_font_family);
+      loadedSettings.terminal_font_family = normalizeTerminalFontFamily(
+        loadedSettings.terminal_font_family
+      );
       loadedSettings.agent_skill_registration_default_scope = normalizeSkillScope(
         loadedSettings.agent_skill_registration_default_scope
       );
@@ -371,6 +448,8 @@
       settings = loadedSettings;
       savedUiFontSize = loadedSettings.ui_font_size ?? 13;
       savedTerminalFontSize = loadedSettings.terminal_font_size ?? 13;
+      savedUiFontFamily = loadedSettings.ui_font_family;
+      savedTerminalFontFamily = loadedSettings.terminal_font_family;
       profiles = loadedProfiles;
 
       const keys = Object.keys(loadedProfiles.profiles ?? {});
@@ -419,6 +498,8 @@
       }
       settings = {
         ...settings,
+        ui_font_family: normalizeUiFontFamily(settings.ui_font_family),
+        terminal_font_family: normalizeTerminalFontFamily(settings.terminal_font_family),
         agent_skill_registration_default_scope: normalizedDefaultScope,
         agent_skill_registration_codex_scope: normalizedCodexScope,
         agent_skill_registration_claude_scope: normalizedClaudeScope,
@@ -434,12 +515,18 @@
       saveMessage = "Settings saved.";
       savedUiFontSize = settings.ui_font_size ?? 13;
       savedTerminalFontSize = settings.terminal_font_size ?? 13;
+      savedUiFontFamily = normalizeUiFontFamily(settings.ui_font_family);
+      savedTerminalFontFamily = normalizeTerminalFontFamily(
+        settings.terminal_font_family
+      );
       settings.voice_input = normalizeVoiceInputSettings(settings.voice_input);
       window.dispatchEvent(
         new CustomEvent("gwt-settings-updated", {
           detail: {
             uiFontSize: savedUiFontSize,
             terminalFontSize: savedTerminalFontSize,
+            uiFontFamily: savedUiFontFamily,
+            terminalFontFamily: savedTerminalFontFamily,
             appLanguage: settings.app_language,
             voiceInput: settings.voice_input,
           },
@@ -489,9 +576,23 @@
     document.documentElement.style.setProperty("--ui-font-base", size + "px");
   }
 
+  function applyUiFontFamily(family: string | null | undefined) {
+    document.documentElement.style.setProperty(
+      "--ui-font-family",
+      normalizeUiFontFamily(family)
+    );
+  }
+
   function applyTerminalFontSize(size: number) {
     (window as any).__gwtTerminalFontSize = size;
     window.dispatchEvent(new CustomEvent("gwt-terminal-font-size", { detail: size }));
+  }
+
+  function applyTerminalFontFamily(family: string | null | undefined) {
+    const normalized = normalizeTerminalFontFamily(family);
+    document.documentElement.style.setProperty("--terminal-font-family", normalized);
+    (window as any).__gwtTerminalFontFamily = normalized;
+    window.dispatchEvent(new CustomEvent("gwt-terminal-font-family", { detail: normalized }));
   }
 
   function adjustFontSize(field: "ui_font_size" | "terminal_font_size", delta: number) {
@@ -504,6 +605,8 @@
   function handleClose() {
     applyUiFontSize(savedUiFontSize);
     applyTerminalFontSize(savedTerminalFontSize);
+    applyUiFontFamily(savedUiFontFamily);
+    applyTerminalFontFamily(savedTerminalFontFamily);
     onClose();
   }
 
@@ -755,6 +858,48 @@
                 >+</button>
                 <span class="font-size-unit">px</span>
               </div>
+            </div>
+
+            <div class="field">
+              <label for="terminal-font-family">Terminal Font Family</label>
+              <select
+                id="terminal-font-family"
+                class="select"
+                value={settings.terminal_font_family}
+                onchange={(e) => {
+                  if (!settings) return;
+                  const next = normalizeTerminalFontFamily(
+                    (e.target as HTMLSelectElement).value
+                  );
+                  settings = { ...settings, terminal_font_family: next };
+                  applyTerminalFontFamily(next);
+                }}
+              >
+                {#each TERMINAL_FONT_PRESETS as preset}
+                  <option value={preset.value}>{preset.label}</option>
+                {/each}
+              </select>
+            </div>
+
+            <div class="field">
+              <label for="ui-font-family">UI Font Family</label>
+              <select
+                id="ui-font-family"
+                class="select"
+                value={settings.ui_font_family}
+                onchange={(e) => {
+                  if (!settings) return;
+                  const next = normalizeUiFontFamily(
+                    (e.target as HTMLSelectElement).value
+                  );
+                  settings = { ...settings, ui_font_family: next };
+                  applyUiFontFamily(next);
+                }}
+              >
+                {#each UI_FONT_PRESETS as preset}
+                  <option value={preset.value}>{preset.label}</option>
+                {/each}
+              </select>
             </div>
 
             <div class="divider"></div>

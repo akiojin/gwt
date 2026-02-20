@@ -20,6 +20,9 @@
   --statusbar-height: 28px;
   --tab-height: 36px;
   --ui-font-base: 13px;
+  --ui-font-family: system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif;
+  --terminal-font-family: "JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace;
+  --font-mono: var(--terminal-font-family);
   --ui-font-xs:  calc(var(--ui-font-base) - 3px);
   --ui-font-sm:  calc(var(--ui-font-base) - 2px);
   --ui-font-md:  calc(var(--ui-font-base) - 1px);
@@ -41,7 +44,7 @@ html, body, #app {
   overflow: hidden;
   background-color: var(--bg-primary);
   color: var(--text-primary);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', monospace;
+  font-family: var(--ui-font-family);
   font-size: var(--ui-font-base);
 }
 
