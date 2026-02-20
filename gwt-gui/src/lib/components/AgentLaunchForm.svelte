@@ -4,6 +4,7 @@
     AgentInfo,
     BranchInfo,
     BranchSuggestResult,
+    ClassifyResult,
     DockerContext,
     FetchIssuesResponse,
     GhCliStatus,
@@ -16,6 +17,7 @@
     saveLaunchDefaults,
     type LaunchDefaults,
   } from "../agentLaunchDefaults";
+  import { determinePrefixFromLabels } from "../agentUtils";
 
   let {
     projectPath,
@@ -114,7 +116,7 @@
   // "New Branch" fields are editable by the user.
   let baseBranch: string = $state(existingBranch);
 
-  type BranchPrefix = "feature/" | "bugfix/" | "hotfix/" | "release/";
+  type BranchPrefix = "feature/" | "bugfix/" | "hotfix/" | "release/" | "";
   const BRANCH_PREFIXES: BranchPrefix[] = ["feature/", "bugfix/", "hotfix/", "release/"];
 
   let newBranchPrefix: BranchPrefix = $state("feature/" as BranchPrefix);
@@ -149,6 +151,11 @@
   let issueBranchMap: Map<number, string | null> = $state(new Map());
   let issueBranchChecksInFlight: Set<number> = $state(new Set());
   let issueRateLimited: boolean = $state(false);
+
+  // AI prefix classification state (SPEC-a2f8e3b1)
+  let prefixClassifying: boolean = $state(false);
+  let classifyRequestId: number = $state(0);
+  let prefixCache: Map<number, BranchPrefix> = $state(new Map());
 
   let filteredIssues = $derived(
     (() => {
@@ -613,15 +620,7 @@
     branchMode = "new";
     newBranchTab = "fromIssue";
     selectedIssue = prefillIssue;
-
-    const names = prefillIssue.labels.map((l) => l.name.toLowerCase());
-    if (names.includes("bug")) {
-      newBranchPrefix = "bugfix/";
-    } else if (names.includes("hotfix")) {
-      newBranchPrefix = "hotfix/";
-    } else {
-      newBranchPrefix = "feature/";
-    }
+    void determinePrefixForIssue(prefillIssue);
   });
 
   // Check gh CLI once per project after shell environment is ready.
@@ -723,6 +722,51 @@
     }
   }
 
+  async function determinePrefixForIssue(issue: GitHubIssueInfo): Promise<void> {
+    // 1. Label-based (synchronous)
+    const labelPrefix = determinePrefixFromLabels(issue.labels);
+    if (labelPrefix) {
+      newBranchPrefix = labelPrefix;
+      prefixClassifying = false;
+      return;
+    }
+    // 2. Cache hit
+    const cached = prefixCache.get(issue.number);
+    if (cached) {
+      newBranchPrefix = cached;
+      prefixClassifying = false;
+      return;
+    }
+    // 3. AI fallback
+    const reqId = ++classifyRequestId;
+    newBranchPrefix = "" as BranchPrefix;
+    prefixClassifying = true;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const result = await invoke<ClassifyResult>("classify_issue_branch_prefix", {
+        title: issue.title,
+        labels: issue.labels.map(l => l.name),
+        body: issue.body ?? null,
+      });
+      if (reqId !== classifyRequestId) return; // stale request
+      if (result.status === "ok" && result.prefix) {
+        const prefix = `${result.prefix}/` as BranchPrefix;
+        if ((BRANCH_PREFIXES as readonly string[]).includes(prefix)) {
+          newBranchPrefix = prefix;
+          prefixCache.set(issue.number, prefix);
+          return;
+        }
+      }
+      // Invalid response, AI not configured, or error → leave unselected
+    } catch {
+      if (reqId !== classifyRequestId) return;
+    } finally {
+      if (reqId === classifyRequestId) {
+        prefixClassifying = false;
+      }
+    }
+  }
+
   function isIssueSelectable(issueNumber: number): boolean {
     if (issueBranchChecksInFlight.has(issueNumber)) return false;
     if (!issueBranchMap.has(issueNumber)) return false;
@@ -737,6 +781,7 @@
   function selectIssue(issue: GitHubIssueInfo) {
     if (!isIssueSelectable(issue.number)) return;
     selectedIssue = issue;
+    void determinePrefixForIssue(issue);
   }
 
   function handleIssueListScroll(e: Event) {
@@ -1311,11 +1356,24 @@
             {#if selectedIssue}
               <div class="field">
                 <span class="field-label">Branch Name</span>
-                <input
-                  type="text"
-                  value={issueBranchName}
-                  readonly
-                />
+                <div class="branch-name-row">
+                  <select bind:value={newBranchPrefix} disabled={prefixClassifying}>
+                    {#if newBranchPrefix === ""}
+                      <option value="" disabled>Select...</option>
+                    {/if}
+                    {#each BRANCH_PREFIXES as p (p)}
+                      <option value={p}>{p}</option>
+                    {/each}
+                  </select>
+                  {#if prefixClassifying}
+                    <span class="prefix-classifying-spinner" title="Classifying...">&#x21BB;</span>
+                  {/if}
+                  <input
+                    type="text"
+                    value={issueBranchName}
+                    readonly
+                  />
+                </div>
                 <span class="field-hint">
                   Auto-generated from issue #{selectedIssue.number}
                 </span>
@@ -1776,7 +1834,7 @@
               ? !existingBranch.trim()
               : !baseBranch.trim() ||
                 (newBranchTab === "fromIssue"
-                  ? !canLaunchFromIssue(selectedIssue)
+                  ? !canLaunchFromIssue(selectedIssue) || newBranchPrefix === ""
                   : !newBranchFullName.trim()))
           }
           onclick={handleLaunch}
@@ -2061,6 +2119,18 @@
   .branch-name-row input {
     flex: 1;
     min-width: 0;
+  }
+
+  .prefix-classifying-spinner {
+    flex: 0 0 auto;
+    font-size: var(--ui-font-lg);
+    color: var(--text-muted);
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
   }
 
   .suggest-btn {
