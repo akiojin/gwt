@@ -122,7 +122,10 @@ impl SystemMonitor {
         #[cfg(target_os = "windows")]
         {
             let detected = detect_windows_gpus();
-            let _ = self.gpu_static_cache.set(detected.clone());
+            // Avoid permanently caching transient WMI probe failures.
+            if !detected.is_empty() {
+                let _ = self.gpu_static_cache.set(detected.clone());
+            }
             detected
         }
 
@@ -263,6 +266,8 @@ fn detect_macos_gpus() -> Option<Vec<GpuStaticInfo>> {
 struct Win32VideoController {
     #[serde(rename = "Name")]
     name: Option<String>,
+    // NOTE: Win32_VideoController.AdapterRAM is a 32-bit WMI field (uint32 bytes).
+    // Values for modern GPUs can be capped/inaccurate, so this is best-effort only.
     #[serde(rename = "AdapterRAM")]
     adapter_ram: Option<u64>,
 }
