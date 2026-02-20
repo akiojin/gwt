@@ -9,7 +9,7 @@ description = "Tauri v2 GUI backend for Git Worktree Manager"
 publish = false
 
 [dependencies]
-gwt-core.workspace = true
+gwt-core = { workspace = true, features = ["nvidia-gpu"] }
 tauri = { version = "2", features = ["macos-private-api", "tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-store = "2"
