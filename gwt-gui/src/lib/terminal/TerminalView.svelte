@@ -10,13 +10,23 @@
   let {
     paneId,
     active = false,
-  }: { paneId: string; active?: boolean } = $props();
+    onReady,
+  }: {
+    paneId: string;
+    active?: boolean;
+    onReady?: (paneId: string) => void;
+  } = $props();
 
   let containerEl: HTMLDivElement | undefined = $state(undefined);
   let terminal: Terminal | undefined = $state(undefined);
   let fitAddon: FitAddon | undefined = $state(undefined);
   let resizeObserver: ResizeObserver | undefined = $state(undefined);
   let unlisten: (() => void) | undefined = $state(undefined);
+  let activationSerial = 0;
+  let lastNotifiedRows: number | null = null;
+  let lastNotifiedCols: number | null = null;
+  let resizeInFlight = false;
+  let queuedResize: { rows: number; cols: number } | null = null;
 
   const MOUSE_WHEEL_STEP_VALUES = new Set([120, 240]);
   const TRACKPAD_WHEEL_DELTA_THRESHOLD = 240;
@@ -110,9 +120,66 @@
     };
   });
 
+  $effect(() => {
+    void active;
+    void terminal;
+    void fitAddon;
+
+    const term = terminal;
+    const fit = fitAddon;
+    if (!term || !fit) return;
+
+    if (!active) {
+      activationSerial += 1;
+      return;
+    }
+
+    const currentSerial = activationSerial + 1;
+    activationSerial = currentSerial;
+
+    const rafId = requestAnimationFrame(() => {
+      void fitAndNotifyCurrent({
+        emitReady: true,
+        expectedActivationSerial: currentSerial,
+      });
+    });
+
+    return () => {
+      cancelAnimationFrame(rafId);
+    };
+  });
+
   function getInitialTerminalFontSize(): number {
     const stored = (window as any).__gwtTerminalFontSize;
     return typeof stored === "number" && stored >= 8 && stored <= 24 ? stored : 13;
+  }
+
+  async function fitAndNotifyCurrent(options?: {
+    emitReady?: boolean;
+    expectedActivationSerial?: number;
+  }) {
+    const term = terminal;
+    const fit = fitAddon;
+    if (!term || !fit) return;
+    if (!active && options?.emitReady) return;
+
+    try {
+      fit.fit();
+    } catch {
+      // Ignore fit errors in unstable resize phases.
+    }
+
+    await notifyResize(term.rows, term.cols);
+
+    if (!options?.emitReady) return;
+    if (!active) return;
+    if (
+      typeof options.expectedActivationSerial === "number" &&
+      options.expectedActivationSerial !== activationSerial
+    ) {
+      return;
+    }
+    onReady?.(paneId);
   }
 
   async function copyTextToClipboard(text: string) {
@@ -351,12 +418,6 @@
     term.open(rootEl);
     (rootEl as CaptureTerminalContainer).__gwtTerminal = term;
 
-    // Initial fit
-    requestAnimationFrame(() => {
-      fit.fit();
-      notifyResize(term.rows, term.cols);
-    });
-
     const handleWheel = (event: WheelEvent) => {
       if (event.deltaY === 0 && event.deltaX === 0) return;
       if (!terminal) return;
@@ -502,11 +563,10 @@
 
     // ResizeObserver for auto-fitting
     const observer = new ResizeObserver(() => {
+      if (!active) return;
       requestAnimationFrame(() => {
-        if (fit) {
-          fit.fit();
-          notifyResize(term.rows, term.cols);
-        }
+        if (!active) return;
+        void fitAndNotifyCurrent();
       });
     });
     observer.observe(rootEl);
@@ -521,8 +581,9 @@
       if (term && typeof size === "number" && size >= 8 && size <= 24) {
         (window as any).__gwtTerminalFontSize = size;
         term.options.fontSize = size;
-        fit.fit();
-        notifyResize(term.rows, term.cols);
+        if (active) {
+          void fitAndNotifyCurrent();
+        }
       }
     };
     window.addEventListener("gwt-terminal-font-size", handleFontSizeChange);
@@ -590,12 +651,50 @@
   }
 
   async function notifyResize(rows: number, cols: number) {
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("resize_terminal", { paneId, rows, cols });
-    } catch (err) {
-      console.error("Failed to resize terminal:", err);
+    if (lastNotifiedRows === rows && lastNotifiedCols === cols) return;
+    if (resizeInFlight) {
+      queuedResize = { rows, cols };
+      return;
     }
+
+    resizeInFlight = true;
+    let next: { rows: number; cols: number } | null = { rows, cols };
+
+    while (next) {
+      const current = next;
+      next = null;
+
+      if (
+        lastNotifiedRows === current.rows &&
+        lastNotifiedCols === current.cols
+      ) {
+        if (queuedResize) {
+          next = queuedResize;
+          queuedResize = null;
+        }
+        continue;
+      }
+
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("resize_terminal", {
+          paneId,
+          rows: current.rows,
+          cols: current.cols,
+        });
+        lastNotifiedRows = current.rows;
+        lastNotifiedCols = current.cols;
+      } catch (err) {
+        console.error("Failed to resize terminal:", err);
+      }
+
+      if (queuedResize) {
+        next = queuedResize;
+        queuedResize = null;
+      }
+    }
+
+    resizeInFlight = false;
   }
 </script>
 

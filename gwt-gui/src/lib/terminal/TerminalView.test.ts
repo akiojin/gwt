@@ -12,6 +12,8 @@ let terminalOutputHandler:
 let callOrder: string[] = [];
 
 const terminalInstances: any[] = [];
+const fitAddonInstances: any[] = [];
+const resizeObserverInstances: Array<{ __trigger: () => void }> = [];
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
@@ -26,6 +28,9 @@ vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 vi.mock("@xterm/addon-fit", () => ({
   FitAddon: class FitAddon {
     fit = vi.fn();
+    constructor() {
+      fitAddonInstances.push(this);
+    }
   },
 }));
 
@@ -58,10 +63,25 @@ vi.mock("@xterm/xterm", () => ({
 
 function installResizeObserverStub() {
   (globalThis as any).ResizeObserver = class ResizeObserver {
-    constructor(_cb: any) {}
-    observe(_el: any) {}
-    disconnect() {}
+    __callback: () => void;
+    observe = vi.fn();
+    disconnect = vi.fn();
+    constructor(cb: () => void) {
+      this.__callback = cb;
+      resizeObserverInstances.push(this as unknown as { __trigger: () => void });
+    }
+    __trigger() {
+      this.__callback();
+    }
   };
+}
+
+function triggerResizeObserver(index = 0) {
+  const observer = resizeObserverInstances[index];
+  if (!observer) {
+    throw new Error(`ResizeObserver instance ${index} not found`);
+  }
+  observer.__trigger();
 }
 
 async function renderTerminalView(props: any) {
@@ -74,6 +94,8 @@ describe("TerminalView", () => {
     cleanup();
     installResizeObserverStub();
     terminalInstances.length = 0;
+    fitAddonInstances.length = 0;
+    resizeObserverInstances.length = 0;
     invokeMock.mockReset();
     listenMock.mockReset();
     writeTextMock.mockReset();
@@ -133,6 +155,88 @@ describe("TerminalView", () => {
     expect(terminalInstances.length).toBeGreaterThan(0);
     const term = terminalInstances[0];
     expect(term.write).toHaveBeenCalledWith("hello\n");
+  });
+
+  it("notifies readiness only after activation fit + resize", async () => {
+    const onReady = vi.fn();
+    await renderTerminalView({
+      paneId: "pane-ready",
+      active: true,
+      onReady,
+    });
+
+    await waitFor(() => {
+      expect(onReady).toHaveBeenCalledWith("pane-ready");
+    });
+
+    expect(
+      invokeMock.mock.calls.some((call) => call[0] === "resize_terminal"),
+    ).toBe(true);
+    expect(fitAddonInstances.length).toBeGreaterThan(0);
+    expect(fitAddonInstances[0].fit).toHaveBeenCalled();
+  });
+
+  it("skips observer-triggered fit while inactive, then fits on activation", async () => {
+    const onReady = vi.fn();
+    const rendered = await renderTerminalView({
+      paneId: "pane-inactive",
+      active: false,
+      onReady,
+    });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+      expect(resizeObserverInstances.length).toBeGreaterThan(0);
+    });
+
+    triggerResizeObserver(0);
+    await Promise.resolve();
+
+    expect(
+      invokeMock.mock.calls.filter((call) => call[0] === "resize_terminal")
+        .length,
+    ).toBe(0);
+    expect(fitAddonInstances[0].fit).not.toHaveBeenCalled();
+
+    await rendered.rerender({
+      paneId: "pane-inactive",
+      active: true,
+      onReady,
+    });
+
+    await waitFor(() => {
+      expect(onReady).toHaveBeenCalledWith("pane-inactive");
+    });
+
+    expect(fitAddonInstances[0].fit).toHaveBeenCalled();
+    expect(
+      invokeMock.mock.calls.filter((call) => call[0] === "resize_terminal")
+        .length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("deduplicates resize_terminal calls when dimensions do not change", async () => {
+    await renderTerminalView({ paneId: "pane-dedupe", active: true });
+
+    await waitFor(() => {
+      expect(
+        invokeMock.mock.calls.filter((call) => call[0] === "resize_terminal")
+          .length,
+      ).toBeGreaterThan(0);
+    });
+
+    const before = invokeMock.mock.calls.filter(
+      (call) => call[0] === "resize_terminal",
+    ).length;
+
+    triggerResizeObserver(0);
+    triggerResizeObserver(0);
+    await Promise.resolve();
+
+    const after = invokeMock.mock.calls.filter(
+      (call) => call[0] === "resize_terminal",
+    ).length;
+    expect(after).toBe(before);
   });
 
   it("buffers live output until scrollback restore finishes", async () => {
