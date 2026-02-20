@@ -1,4 +1,4 @@
-//! Coordinator state for agent mode
+//! Coordinator state for Project Mode
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

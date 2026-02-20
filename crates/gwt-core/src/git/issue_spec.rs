@@ -343,34 +343,237 @@ pub fn sync_issue_to_project(
     project_id: &str,
     phase: SpecProjectPhase,
 ) -> Result<ProjectSyncResult, String> {
-    if project_id.trim().is_empty() {
-        return Ok(ProjectSyncResult {
-            project_item_id: None,
-            status_applied: false,
-            warning: Some("Project ID is empty. Skipped sync.".to_string()),
-        });
-    }
-
-    let issue_node_id = get_issue_node_id(repo_path, issue_number)?;
-    let project_item_id = ensure_project_item(repo_path, project_id, &issue_node_id)?;
-    let status_name = phase.as_status_name();
-    let status_applied =
-        match update_project_status(repo_path, project_id, &project_item_id, status_name) {
-            Ok(updated) => updated,
+    let resolved_project_id = if project_id.trim().is_empty() {
+        match resolve_default_project_id(repo_path) {
+            Ok(id) => id,
             Err(err) => {
                 return Ok(ProjectSyncResult {
-                    project_item_id: Some(project_item_id),
+                    project_item_id: None,
                     status_applied: false,
-                    warning: Some(err),
+                    warning: Some(format!(
+                        "Project ID auto-resolution failed via GraphQL: {err}"
+                    )),
                 });
             }
-        };
+        }
+    } else {
+        project_id.trim().to_string()
+    };
+
+    let issue_node_id = get_issue_node_id(repo_path, issue_number)?;
+    let project_item_id = ensure_project_item(repo_path, &resolved_project_id, &issue_node_id)?;
+    let status_name = phase.as_status_name();
+    let status_applied = match update_project_status(
+        repo_path,
+        &resolved_project_id,
+        &project_item_id,
+        status_name,
+    ) {
+        Ok(updated) => updated,
+        Err(err) => {
+            return Ok(ProjectSyncResult {
+                project_item_id: Some(project_item_id),
+                status_applied: false,
+                warning: Some(err),
+            });
+        }
+    };
 
     Ok(ProjectSyncResult {
         project_item_id: Some(project_item_id),
         status_applied,
         warning: None,
     })
+}
+
+fn resolve_default_project_id(repo_path: &Path) -> Result<String, String> {
+    let repo_slug = repo_name_with_owner(repo_path)?;
+    let (owner, repo_name) = split_repo_slug(&repo_slug)?;
+
+    if let Some(project_id) = query_repository_project_id(repo_path, owner, repo_name)? {
+        return Ok(project_id);
+    }
+
+    if let Some(project_id) = query_owner_project_id(repo_path, owner, &repo_slug)? {
+        return Ok(project_id);
+    }
+
+    Err(format!(
+        "No active GitHub Project found for repository {repo_slug}"
+    ))
+}
+
+fn repo_name_with_owner(repo_path: &Path) -> Result<String, String> {
+    let output = gh_command()
+        .args(["repo", "view", "--json", "nameWithOwner"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to execute gh repo view: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh repo view failed: {}", stderr.trim()));
+    }
+    parse_repo_slug_from_repo_view_json(&output.stdout)
+}
+
+fn parse_repo_slug_from_repo_view_json(bytes: &[u8]) -> Result<String, String> {
+    let value: Value =
+        serde_json::from_slice(bytes).map_err(|e| format!("Invalid gh repo view JSON: {e}"))?;
+    let slug = value
+        .get("nameWithOwner")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "nameWithOwner was not found in gh repo view output".to_string())?;
+    Ok(slug.to_string())
+}
+
+fn split_repo_slug(slug: &str) -> Result<(&str, &str), String> {
+    let Some((owner, repo_name)) = slug.split_once('/') else {
+        return Err(format!("Invalid repository slug: {slug}"));
+    };
+    let owner = owner.trim();
+    let repo_name = repo_name.trim();
+    if owner.is_empty() || repo_name.is_empty() {
+        return Err(format!("Invalid repository slug: {slug}"));
+    }
+    Ok((owner, repo_name))
+}
+
+fn query_repository_project_id(
+    repo_path: &Path,
+    owner: &str,
+    repo_name: &str,
+) -> Result<Option<String>, String> {
+    let query = "query($owner:String!, $repo:String!){ repository(owner:$owner, name:$repo){ projectsV2(first:20, orderBy:{field:UPDATED_AT, direction:DESC}){ nodes { id closed } } } }";
+    let output = gh_command()
+        .args([
+            "api",
+            "graphql",
+            "-f",
+            &format!("query={query}"),
+            "-F",
+            &format!("owner={owner}"),
+            "-F",
+            &format!("repo={repo_name}"),
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to query repository projects: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "Repository project query failed: {}",
+            stderr.trim()
+        ));
+    }
+    let value: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("Invalid repository project JSON: {e}"))?;
+    let nodes = value
+        .get("data")
+        .and_then(|v| v.get("repository"))
+        .and_then(|v| v.get("projectsV2"))
+        .and_then(|v| v.get("nodes"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok(select_project_id_from_nodes(&nodes))
+}
+
+fn query_owner_project_id(
+    repo_path: &Path,
+    owner: &str,
+    repo_slug: &str,
+) -> Result<Option<String>, String> {
+    let user_query = "query($login:String!){ user(login:$login){ projectsV2(first:20, orderBy:{field:UPDATED_AT, direction:DESC}){ nodes { id closed repositories(first:50){ nodes { nameWithOwner } } } } } }";
+    if let Some(project_id) =
+        query_owner_projects_by_kind(repo_path, user_query, "login", owner, repo_slug)?
+    {
+        return Ok(Some(project_id));
+    }
+
+    let org_query = "query($login:String!){ organization(login:$login){ projectsV2(first:20, orderBy:{field:UPDATED_AT, direction:DESC}){ nodes { id closed repositories(first:50){ nodes { nameWithOwner } } } } } }";
+    query_owner_projects_by_kind(repo_path, org_query, "login", owner, repo_slug)
+}
+
+fn query_owner_projects_by_kind(
+    repo_path: &Path,
+    query: &str,
+    var_name: &str,
+    var_value: &str,
+    repo_slug: &str,
+) -> Result<Option<String>, String> {
+    let output = gh_command()
+        .args([
+            "api",
+            "graphql",
+            "-f",
+            &format!("query={query}"),
+            "-F",
+            &format!("{var_name}={var_value}"),
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to query owner projects: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Owner project query failed: {}", stderr.trim()));
+    }
+    let value: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("Invalid owner project JSON: {e}"))?;
+    Ok(select_project_id_from_owner_projects(&value, repo_slug))
+}
+
+fn select_project_id_from_nodes(nodes: &[Value]) -> Option<String> {
+    for node in nodes {
+        let is_closed = node.get("closed").and_then(Value::as_bool).unwrap_or(false);
+        if is_closed {
+            continue;
+        }
+        if let Some(id) = node.get("id").and_then(Value::as_str).map(str::to_string) {
+            return Some(id);
+        }
+    }
+    nodes
+        .iter()
+        .find_map(|node| node.get("id").and_then(Value::as_str).map(str::to_string))
+}
+
+fn select_project_id_from_owner_projects(value: &Value, repo_slug: &str) -> Option<String> {
+    let owner_node = value
+        .get("data")
+        .and_then(|v| v.get("user").or_else(|| v.get("organization")))?;
+    let nodes = owner_node
+        .get("projectsV2")
+        .and_then(|v| v.get("nodes"))
+        .and_then(Value::as_array)?;
+
+    for node in nodes {
+        if node.get("closed").and_then(Value::as_bool).unwrap_or(false) {
+            continue;
+        }
+        let repos = node
+            .get("repositories")
+            .and_then(|v| v.get("nodes"))
+            .and_then(Value::as_array);
+        let linked = repos
+            .map(|items| {
+                items.iter().any(|repo| {
+                    repo.get("nameWithOwner")
+                        .and_then(Value::as_str)
+                        .map(|name| name.eq_ignore_ascii_case(repo_slug))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+        if linked {
+            if let Some(id) = node.get("id").and_then(Value::as_str).map(str::to_string) {
+                return Some(id);
+            }
+        }
+    }
+
+    None
 }
 
 fn render_issue_body(
@@ -1230,5 +1433,58 @@ mod tests {
         assert_eq!(parsed.kind, SpecIssueArtifactKind::Checklist);
         assert_eq!(parsed.artifact_name, "requirements.md");
         assert_eq!(parsed.content, "- [ ] item");
+    }
+
+    #[test]
+    fn parse_repo_slug_from_repo_view_json_extracts_name_with_owner() {
+        let slug = parse_repo_slug_from_repo_view_json(br#"{"nameWithOwner":"akiojin/gwt"}"#)
+            .expect("parse slug");
+        assert_eq!(slug, "akiojin/gwt");
+    }
+
+    #[test]
+    fn select_project_id_from_nodes_prefers_open_project() {
+        let nodes = vec![
+            serde_json::json!({ "id": "PVT_closed", "closed": true }),
+            serde_json::json!({ "id": "PVT_open", "closed": false }),
+        ];
+        let project_id = select_project_id_from_nodes(&nodes).expect("project id");
+        assert_eq!(project_id, "PVT_open");
+    }
+
+    #[test]
+    fn select_project_id_from_owner_projects_filters_by_repo_link() {
+        let payload = serde_json::json!({
+            "data": {
+                "user": {
+                    "projectsV2": {
+                        "nodes": [
+                            {
+                                "id": "PVT_other",
+                                "closed": false,
+                                "repositories": {
+                                    "nodes": [
+                                        { "nameWithOwner": "akiojin/other" }
+                                    ]
+                                }
+                            },
+                            {
+                                "id": "PVT_match",
+                                "closed": false,
+                                "repositories": {
+                                    "nodes": [
+                                        { "nameWithOwner": "akiojin/gwt" }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+
+        let project_id =
+            select_project_id_from_owner_projects(&payload, "akiojin/gwt").expect("project id");
+        assert_eq!(project_id, "PVT_match");
     }
 }

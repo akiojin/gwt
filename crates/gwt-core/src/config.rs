@@ -7,13 +7,13 @@ mod bare_project;
 mod claude_hook_events;
 mod claude_hooks;
 mod claude_plugins;
-pub mod mcp_registration;
 pub mod migration;
 pub mod os_env;
 mod profile;
 mod recent_projects;
 mod session;
 mod settings;
+pub mod skill_registration;
 pub mod stats;
 pub mod tools;
 mod ts_session;
@@ -30,16 +30,9 @@ pub use claude_plugins::{
     enable_worktree_protection_plugin, get_global_claude_settings_path,
     get_known_marketplaces_path, get_local_claude_settings_path, is_gwt_marketplace_registered,
     is_gwt_marketplace_registered_at, is_plugin_enabled_in_settings, is_plugin_explicitly_disabled,
-    register_gwt_marketplace, register_gwt_marketplace_at, setup_gwt_plugin, GWT_MARKETPLACE_NAME,
-    GWT_MARKETPLACE_REPO, GWT_MARKETPLACE_SOURCE, GWT_PLUGIN_FULL_NAME, GWT_PLUGIN_NAME,
-};
-pub use mcp_registration::{
-    cleanup_stale_registrations, detect_runtime,
-    get_registration_status as get_mcp_registration_status, is_registered as is_mcp_registered,
-    register_all as register_all_mcp, register_mcp_server,
-    repair_registration as repair_mcp_registration, resolve_bridge_path,
-    unregister_all as unregister_all_mcp, unregister_mcp_server, McpAgentRegistrationStatus,
-    McpAgentType, McpBridgeConfig, McpRegistrationStatus, MCP_SERVER_NAME,
+    register_gwt_marketplace, register_gwt_marketplace_at, setup_gwt_plugin, setup_gwt_plugin_at,
+    GWT_MARKETPLACE_NAME, GWT_MARKETPLACE_REPO, GWT_MARKETPLACE_SOURCE, GWT_PLUGIN_FULL_NAME,
+    GWT_PLUGIN_NAME,
 };
 pub use migration::{
     backup_broken_file, ensure_config_dir, get_cleanup_candidates, migrate_json_to_toml,
@@ -55,7 +48,14 @@ pub use session::{
     agent_has_hook_support, get_session_for_branch, infer_agent_status,
     load_sessions_from_worktrees, AgentStatus, Session,
 };
-pub use settings::Settings;
+pub use settings::{Settings, SkillRegistrationPreferences, SkillRegistrationScope};
+pub use skill_registration::{
+    get_skill_registration_status, get_skill_registration_status_with_settings_at_project_root,
+    register_agent_skills, register_agent_skills_with_settings_at_project_root,
+    register_all_skills, register_all_skills_with_settings_at_project_root,
+    repair_skill_registration, repair_skill_registration_with_settings_at_project_root,
+    SkillAgentRegistrationStatus, SkillAgentType, SkillRegistrationStatus,
+};
 pub use tools::{AgentType, CustomCodingAgent, ModeArgs, ModelDef, ToolsConfig};
 pub use ts_session::{
     get_branch_tool_history, get_last_tool_usage_map, get_ts_session_json_path,

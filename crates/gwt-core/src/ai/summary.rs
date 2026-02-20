@@ -1662,7 +1662,7 @@ mod tests {
             SessionMessage {
                 role: MessageRole::User,
                 content:
-                    "違います。目的はfeature/agent-modeで作った成果をdevelopに取り込むことです。"
+                    "違います。目的はfeature/project-modeで作った成果をdevelopに取り込むことです。"
                         .to_string(),
                 timestamp: None,
             },
@@ -1670,11 +1670,11 @@ mod tests {
 
         let derived = derive_worktree_purpose_from_messages(
             &messages,
-            "feature/agent-mode",
+            "feature/project-mode",
             SummaryLanguage::Ja,
         );
         assert_eq!(derived.source, PurposeSource::Explicit);
-        assert!(derived.text.contains("feature/agent-mode"));
+        assert!(derived.text.contains("feature/project-mode"));
     }
 
     #[test]
@@ -1694,11 +1694,11 @@ mod tests {
 
         let derived = derive_worktree_purpose_from_messages(
             &messages,
-            "feature/agent-mode",
+            "feature/project-mode",
             SummaryLanguage::En,
         );
         assert_eq!(derived.source, PurposeSource::Inferred);
-        assert!(derived.text.contains("feature/agent-mode"));
+        assert!(derived.text.contains("feature/project-mode"));
     }
 
     #[test]
@@ -1711,7 +1711,7 @@ mod tests {
 
         let derived = derive_worktree_purpose_from_messages(
             &messages,
-            "feature/agent-mode",
+            "feature/project-mode",
             SummaryLanguage::Ja,
         );
         assert_eq!(derived.source, PurposeSource::Inferred);
@@ -1723,16 +1723,16 @@ mod tests {
     fn test_enforce_worktree_purpose_replaces_operational_purpose_text() {
         let markdown = "## 目的\nPR本文テンプレートを埋めてPRを作ること\n\n## 要約\n進行中\n\n## ハイライト\n- 元の依頼: ...";
         let derived = DerivedPurpose::explicit(
-            "feature/agent-mode の成果を develop に取り込むこと".to_string(),
+            "feature/project-mode の成果を develop に取り込むこと".to_string(),
         );
         let enforced = enforce_worktree_purpose_in_markdown(
             markdown,
             SummaryLanguage::Ja,
-            "feature/agent-mode",
+            "feature/project-mode",
             &derived,
         );
 
-        assert!(enforced.contains("feature/agent-mode の成果を develop に取り込むこと"));
+        assert!(enforced.contains("feature/project-mode の成果を develop に取り込むこと"));
         assert!(!enforced.contains("PR本文テンプレートを埋めてPRを作ること"));
     }
 
@@ -1756,19 +1756,19 @@ mod tests {
 
     #[test]
     fn test_enforce_worktree_purpose_rewrites_pr_template_as_means() {
-        let markdown = "## 目的\nfeature/agent-mode ブランチから develop への PR を作成し、PR 本文テンプレートを埋めること\n\n## 要約\n完了\n\n## ハイライト\n- Original request: feature/agent-mode ブランチから develop への PR を作成\n- Latest instruction: PR 本文テンプレートを埋める";
+        let markdown = "## 目的\nfeature/project-mode ブランチから develop への PR を作成し、PR 本文テンプレートを埋めること\n\n## 要約\n完了\n\n## ハイライト\n- Original request: feature/project-mode ブランチから develop への PR を作成\n- Latest instruction: PR 本文テンプレートを埋める";
         let derived = DerivedPurpose::explicit(
-            "feature/agent-mode で達成した成果を develop に取り込むこと".to_string(),
+            "feature/project-mode で達成した成果を develop に取り込むこと".to_string(),
         );
 
         let enforced = enforce_worktree_purpose_in_markdown(
             markdown,
             SummaryLanguage::Ja,
-            "feature/agent-mode",
+            "feature/project-mode",
             &derived,
         );
 
-        assert!(enforced.contains("feature/agent-mode で達成した成果を develop に取り込むこと"));
+        assert!(enforced.contains("feature/project-mode で達成した成果を develop に取り込むこと"));
         assert!(!enforced.contains("PR 本文テンプレートを埋めること"));
     }
 

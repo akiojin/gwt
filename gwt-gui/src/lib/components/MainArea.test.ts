@@ -65,37 +65,37 @@ describe("MainArea", () => {
 
   it("renders without Session Summary tab", async () => {
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectMode", label: "Project Mode", type: "projectMode" },
     ];
-    const rendered = await renderMainArea({ tabs, activeTabId: "agentMode" });
+    const rendered = await renderMainArea({ tabs, activeTabId: "projectMode" });
 
     expect(rendered.queryByText("Session Summary")).toBeNull();
     const tabLabels = Array.from(
       rendered.container.querySelectorAll(".tab-bar .tab-label"),
     ).map((el) => el.textContent?.trim());
-    expect(tabLabels).toEqual(["Master Agent"]);
+    expect(tabLabels).toEqual(["Project Mode"]);
   });
 
-  it("keeps Master Agent pinned (no close button)", async () => {
+  it("keeps Project Mode pinned (no close button)", async () => {
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectMode", label: "Project Mode", type: "projectMode" },
     ];
-    const rendered = await renderMainArea({ tabs, activeTabId: "agentMode" });
+    const rendered = await renderMainArea({ tabs, activeTabId: "projectMode" });
 
-    const agentModeTab = rendered.container.querySelector(".tab-bar .tab");
-    expect(agentModeTab).toBeTruthy();
-    expect(agentModeTab?.querySelector(".tab-close")).toBeNull();
+    const projectModeTab = rendered.container.querySelector(".tab-bar .tab");
+    expect(projectModeTab).toBeTruthy();
+    expect(projectModeTab?.querySelector(".tab-close")).toBeNull();
   });
 
   it("shows close button for non-pinned tabs and emits close callback", async () => {
     const onTabClose = vi.fn();
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectMode", label: "Project Mode", type: "projectMode" },
       { id: "settings", label: "Settings", type: "settings" },
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "agentMode",
+      activeTabId: "projectMode",
       onTabClose,
     });
 
@@ -113,7 +113,7 @@ describe("MainArea", () => {
     const onTabClose = vi.fn();
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectMode", label: "Project Mode", type: "projectMode" },
       { id: "settings", label: "Settings", type: "settings" },
       {
         id: "versionHistory",
@@ -123,7 +123,7 @@ describe("MainArea", () => {
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "agentMode",
+      activeTabId: "projectMode",
       onTabClose,
       onTabReorder,
     });
@@ -176,7 +176,7 @@ describe("MainArea", () => {
   it("emits onTabReorder during dragover with before/after positions", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectMode", label: "Project Mode", type: "projectMode" },
       { id: "settings", label: "Settings", type: "settings" },
       {
         id: "versionHistory",
@@ -186,7 +186,7 @@ describe("MainArea", () => {
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "agentMode",
+      activeTabId: "projectMode",
       onTabReorder,
     });
 
@@ -253,12 +253,12 @@ describe("MainArea", () => {
   it("does not emit onTabReorder when dragging over the same tab", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectMode", label: "Project Mode", type: "projectMode" },
       { id: "settings", label: "Settings", type: "settings" },
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "agentMode",
+      activeTabId: "projectMode",
       onTabReorder,
     });
 
@@ -285,7 +285,7 @@ describe("MainArea", () => {
   it("emits onTabReorder via pointer drag fallback", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectMode", label: "Project Mode", type: "projectMode" },
       { id: "settings", label: "Settings", type: "settings" },
       {
         id: "versionHistory",
@@ -295,7 +295,7 @@ describe("MainArea", () => {
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "agentMode",
+      activeTabId: "projectMode",
       onTabReorder,
     });
 
@@ -358,7 +358,7 @@ describe("MainArea", () => {
   it("emits onTabReorder when pointermove is dispatched on window", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectMode", label: "Project Mode", type: "projectMode" },
       { id: "settings", label: "Settings", type: "settings" },
       {
         id: "versionHistory",
@@ -368,7 +368,7 @@ describe("MainArea", () => {
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "agentMode",
+      activeTabId: "projectMode",
       onTabReorder,
     });
 
@@ -531,13 +531,13 @@ describe("MainArea", () => {
   it("supports text/plain drag fallback and ignores dragStart without dataTransfer", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectMode", label: "Project Mode", type: "projectMode" },
       { id: "settings", label: "Settings", type: "settings" },
       { id: "versionHistory", label: "Version History", type: "versionHistory" },
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "agentMode",
+      activeTabId: "projectMode",
       onTabReorder,
     });
 
@@ -572,13 +572,13 @@ describe("MainArea", () => {
   it("resets pointer drag state on pointercancel", async () => {
     const onTabReorder = vi.fn();
     const tabs: Tab[] = [
-      { id: "agentMode", label: "Master Agent", type: "agentMode" },
+      { id: "projectMode", label: "Project Mode", type: "projectMode" },
       { id: "settings", label: "Settings", type: "settings" },
       { id: "versionHistory", label: "Version History", type: "versionHistory" },
     ];
     const rendered = await renderMainArea({
       tabs,
-      activeTabId: "agentMode",
+      activeTabId: "projectMode",
       onTabReorder,
     });
 

@@ -1,4 +1,4 @@
-//! Structured logging for agent mode operations
+//! Structured logging for Project Mode operations
 //!
 //! Provides JSON Lines formatted log entries for Lead, Coordinator,
 //! Developer, and Session events. Log files are written to `~/.gwt/logs/agent.jsonl`.
@@ -19,7 +19,7 @@ pub enum LogCategory {
     Session,
 }
 
-/// A structured log entry for agent operations
+/// A structured log entry for Project Mode operations
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentLogEntry {
     pub timestamp: DateTime<Utc>,

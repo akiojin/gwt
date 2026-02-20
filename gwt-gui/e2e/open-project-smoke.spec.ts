@@ -107,7 +107,7 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("launches and completes open-project -> agent send smoke flow", async ({
+test("launches and completes open-project -> project mode send smoke flow", async ({
   page,
 }) => {
   await page.goto("/");
@@ -139,7 +139,7 @@ test("launches and completes open-project -> agent send smoke flow", async ({
   });
 
   expect(invokeCommands).toContain("open_project");
-  expect(invokeCommands).toContain("send_agent_mode_message");
+  expect(invokeCommands).toContain("send_project_mode_message_cmd");
 });
 
 test("launches agent from Launch Agent dialog and opens agent terminal tab", async ({
@@ -334,7 +334,7 @@ test("shows terminal stream error and closes errored terminal tab on Enter", asy
           };
           return (
             parsed.byProjectPath?.["/tmp/gwt-playwright"]?.activeTabId ===
-            "agentMode"
+            "projectMode"
           );
         } catch {
           return false;

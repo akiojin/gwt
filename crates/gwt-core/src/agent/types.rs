@@ -1,4 +1,4 @@
-//! Shared identifier types for agent mode
+//! Shared identifier types for Project Mode
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

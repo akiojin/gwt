@@ -1,4 +1,4 @@
-//! Task definitions for agent mode
+//! Task definitions for Project Mode
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -78,7 +78,7 @@ pub struct Task {
     /// Associated pull request (after PR creation)
     #[serde(default)]
     pub pull_request: Option<PullRequestRef>,
-    /// Assigned developers (Project Team model)
+    /// Assigned developers (Project Mode model)
     #[serde(default)]
     pub developers: Vec<DeveloperState>,
 }

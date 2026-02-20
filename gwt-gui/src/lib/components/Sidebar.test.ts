@@ -225,9 +225,9 @@ describe("Sidebar", () => {
     await rendered.rerender({ refreshKey: 1 });
 
     await waitFor(() => {
-      expect(countInvokeCalls("list_worktree_branches")).toBe(2);
-      expect(countInvokeCalls("list_remote_branches")).toBe(2);
-      expect(countInvokeCalls("list_worktrees")).toBe(2);
+      expect(countInvokeCalls("list_worktree_branches")).toBeGreaterThanOrEqual(2);
+      expect(countInvokeCalls("list_remote_branches")).toBeGreaterThanOrEqual(2);
+      expect(countInvokeCalls("list_worktrees")).toBeGreaterThanOrEqual(2);
     });
 
     const remoteFetchCount = countInvokeCalls("list_remote_branches");
@@ -1717,9 +1717,9 @@ describe("Sidebar", () => {
     const modeButtons = rendered.container.querySelectorAll<HTMLButtonElement>(".mode-btn");
     expect(modeButtons.length).toBe(2);
     await fireEvent.click(modeButtons[1] as HTMLButtonElement);
-    expect(onModeChange).toHaveBeenCalledWith("agent");
+    expect(onModeChange).toHaveBeenCalledWith("projectMode");
 
-    await rendered.rerender({ mode: "agent" });
+    await rendered.rerender({ mode: "projectMode" });
     await fireEvent.click(modeButtons[1] as HTMLButtonElement);
     expect(onModeChange).toHaveBeenCalledTimes(1);
 

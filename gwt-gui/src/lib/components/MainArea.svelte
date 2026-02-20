@@ -2,8 +2,7 @@
   import type { GitHubIssueInfo, LaunchAgentRequest, Tab } from "../types";
   import type { TabDropPosition } from "../appTabs";
   import TerminalView from "../terminal/TerminalView.svelte";
-  import AgentModePanel from "./AgentModePanel.svelte";
-  import ProjectTeamPanel from "./ProjectTeamPanel.svelte";
+  import ProjectModePanel from "./ProjectModePanel.svelte";
   import IssueListPanel from "./IssueListPanel.svelte";
   import IssueSpecPanel from "./IssueSpecPanel.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
@@ -72,8 +71,7 @@
     (activeTab?.type === "agent" || activeTab?.type === "terminal") &&
       !hasActiveTerminalPane,
   );
-  let isPinnedTab = (tabType?: Tab["type"]) =>
-    tabType === "agentMode" || tabType === "projectTeam";
+  let isPinnedTab = (tabType?: Tab["type"]) => tabType === "projectMode";
   let draggingTabId: string | null = $state(null);
   let pointerDrag:
     | {
@@ -285,15 +283,13 @@
         <SettingsPanel onClose={() => onTabClose(activeTabId)} />
       {:else if activeTab?.type === "versionHistory"}
         <VersionHistoryPanel {projectPath} />
-      {:else if activeTab?.type === "agentMode"}
-        <AgentModePanel />
+      {:else if activeTab?.type === "projectMode"}
+        <ProjectModePanel />
       {:else if activeTab?.type === "agent" && !activeTab.paneId}
         <div class="placeholder">
           <h2>Agent starting...</h2>
           <p>Waiting for the backend terminal pane to attach.</p>
         </div>
-      {:else if activeTab?.type === "projectTeam"}
-        <ProjectTeamPanel session={null} />
       {:else if activeTab?.type === "issueSpec"}
         <IssueSpecPanel
           projectPath={projectPath}
