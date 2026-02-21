@@ -2,7 +2,7 @@
 
 **仕様ID**: `SPEC-ad1ac432`
 **作成日**: 2026-02-18
-**更新日**: 2026-02-18
+**更新日**: 2026-02-21
 **ステータス**: ドラフト
 **カテゴリ**: GUI / Worktree Management
 **依存仕様**:
@@ -105,6 +105,21 @@
 
 1. **前提条件** gh CLI が未インストールまたは未認証、**操作** Cleanup モーダルを開く、**期待結果** 「Also delete remote branches」トグルが非表示。PR バッジも表示されない。従来通りのローカルのみクリーンアップが利用可能
 
+---
+
+### ユーザーストーリー 7 - 強制Cleanupモード（unsafe限定） (優先度: P1)
+
+開発者として、unsafe な Worktree を明示的に force 指定で削除できることを認識しながら Cleanup を実行したい。
+
+**独立したテスト**: CleanupModal で「Force cleanup」を ON にして unsafe ブランチを削除した場合、結果ダイアログに force 実行の注記が表示される。disabled 行は ON でも選択不可のまま。
+
+**受け入れシナリオ**:
+
+1. **前提条件** Cleanup モーダルを開く、**操作** トグル群を確認、**期待結果** 「Force cleanup」トグルが表示される（初期値 OFF）
+2. **前提条件** unsafe ブランチを選択し「Force cleanup」を ON、**操作** "Cleanup" → 確認ダイアログで承認、**期待結果** force 指定で cleanup が実行される
+3. **前提条件** protected/current/agent-running の行が存在し「Force cleanup」を ON、**操作** チェックを試みる、**期待結果** 該当行は選択不可（disabled 維持）
+4. **前提条件** force 指定で cleanup 実行済み、**操作** 結果ダイアログを確認、**期待結果** force 実行であることを示す注記が表示される
+
 ## エッジケース
 
 - protected branch（main/master/develop/release）はリモート削除の対象外（ローカルと同じく Disabled）
@@ -114,6 +129,8 @@
 - PR 状態取得がタイムアウトした場合、PR バッジは表示されず、安全性レベルは変更しない
 - 同一ブランチに複数の PR（Open + Merged 等）がある場合、最新の PR 状態を採用する
 - リモートは `origin` のみを対象とする（複数リモートは範囲外）
+- `Force cleanup` は unsafe（warning/danger）削除時の force 実行にのみ適用し、protected/current/agent-running のガードは解除しない
+- `Force cleanup` トグル状態はセッション内のみ有効とし、モーダル再オープン時は OFF に戻す
 
 ## 要件 *(必須)*
 
@@ -140,6 +157,10 @@
 - **FR-612**: コンテキストメニューの「Cleanup this branch」は CleanupModal を開き、該当ブランチにチェックが入った状態で表示しなければ**ならない**（単体即時削除ルートを廃止し、モーダル経由に統合）
 - **FR-613**: 既存の FR-508（リモートブランチは削除しては**ならない**）を、トグル OFF 時のみ適用するよう変更する
 - **FR-614**: 既存の unsafe 確認ダイアログに「リモートブランチも削除されます」の警告を統合しなければ**ならない**（追加の確認ステップは設けない）
+- **FR-615**: CleanupModal に「Force cleanup」グローバルトグルを提供しなければ**ならない**。トグル初期値は OFF とする
+- **FR-616**: 強制実行の適用範囲は unsafe（warning/danger）削除時に限定しなければ**ならない**。safe のみ選択時は force を使っては**ならない**
+- **FR-617**: `Force cleanup` が ON の場合でも、protected/current/agent-running の削除禁止ガードを維持しなければ**ならない**
+- **FR-618**: force 指定で実行された cleanup は、結果ダイアログに force 実行であったことを示す注記を表示しなければ**ならない**
 
 ### 非機能要件
 
@@ -173,3 +194,5 @@
 - **SC-003**: リモート削除失敗時にローカル削除がロールバックされず、失敗理由が結果ダイアログに表示される
 - **SC-004**: 「Cleanup this branch」コンテキストメニューが CleanupModal 経由に統合され、リモート削除オプションが利用可能になる
 - **SC-005**: バックエンド・フロントエンドの自動テストが全て通過する
+- **SC-006**: unsafe ブランチ選択時に force 指定 cleanup が実行され、結果ダイアログに force 実行注記が表示される
+- **SC-007**: `Force cleanup` を ON にしても protected/current/agent-running 行は選択・削除できない
