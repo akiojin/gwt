@@ -563,6 +563,9 @@ fn cleanup_single_branch(
     force: bool,
     agent_branches: &HashSet<String>,
 ) -> Result<(), String> {
+    // Force mode only applies to unsafe local state (e.g. uncommitted changes).
+    // It must never bypass protected/current/running-agent guards.
+
     // Check if this is the current worktree
     let branches = Branch::list(repo_path).unwrap_or_default();
     if branches.iter().any(|b| b.name == branch && b.is_current) {
@@ -1224,6 +1227,19 @@ mod tests {
     }
 
     #[test]
+    fn force_still_rejects_protected_branch() {
+        let temp = tempfile::TempDir::new().unwrap();
+        create_test_repo(temp.path());
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+        let agents = HashSet::new();
+
+        gwt_core::git::Branch::create(temp.path(), "develop", "HEAD").unwrap();
+        let result = cleanup_single_branch(&manager, temp.path(), "develop", true, &agents);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("protected"));
+    }
+
+    #[test]
     fn rejects_agent_running_branch() {
         let temp = tempfile::TempDir::new().unwrap();
         create_test_repo(temp.path());
@@ -1241,6 +1257,22 @@ mod tests {
     }
 
     #[test]
+    fn force_still_rejects_agent_running_branch() {
+        let temp = tempfile::TempDir::new().unwrap();
+        create_test_repo(temp.path());
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+        let mut agents = HashSet::new();
+        agents.insert("feature/test".to_string());
+
+        gwt_core::git::Branch::create(temp.path(), "feature/test", "HEAD").unwrap();
+        let _wt = manager.create_for_branch("feature/test").unwrap();
+
+        let result = cleanup_single_branch(&manager, temp.path(), "feature/test", true, &agents);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("running agent"));
+    }
+
+    #[test]
     fn rejects_current_worktree() {
         let temp = tempfile::TempDir::new().unwrap();
         create_test_repo(temp.path());
@@ -1250,6 +1282,19 @@ mod tests {
         // The default branch is the current one
         let current = git_stdout(temp.path(), &["rev-parse", "--abbrev-ref", "HEAD"]);
         let result = cleanup_single_branch(&manager, temp.path(), &current, false, &agents);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("current"));
+    }
+
+    #[test]
+    fn force_still_rejects_current_worktree() {
+        let temp = tempfile::TempDir::new().unwrap();
+        create_test_repo(temp.path());
+        let manager = WorktreeManager::new(temp.path()).unwrap();
+        let agents = HashSet::new();
+
+        let current = git_stdout(temp.path(), &["rev-parse", "--abbrev-ref", "HEAD"]);
+        let result = cleanup_single_branch(&manager, temp.path(), &current, true, &agents);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("current"));
     }
