@@ -426,7 +426,7 @@ pub fn build_app(
                 return;
             }
 
-            // Window switching (MRU order)
+            // Window switching (rotation order)
             if id == crate::menu::MENU_ID_WINDOW_NEXT_WINDOW {
                 let state = app.state::<AppState>();
                 if let Some(target) = state.next_window() {
@@ -640,8 +640,6 @@ pub fn build_app(
             crate::commands::cleanup::get_cleanup_pr_statuses,
             crate::commands::cleanup::get_cleanup_settings,
             crate::commands::cleanup::set_cleanup_settings,
-            crate::commands::hooks::check_and_update_hooks,
-            crate::commands::hooks::register_hooks,
             crate::commands::update::check_app_update,
             crate::commands::update::apply_app_update,
             crate::commands::terminal::get_captured_environment,
@@ -684,6 +682,7 @@ pub fn build_app(
             crate::commands::pullrequest::fetch_pr_detail,
             crate::commands::pullrequest::fetch_latest_branch_pr,
             crate::commands::pullrequest::fetch_ci_log,
+            crate::commands::pullrequest::update_pr_branch,
             crate::commands::system::get_system_info,
             crate::commands::system::get_stats,
         ])

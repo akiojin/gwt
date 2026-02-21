@@ -1,15 +1,26 @@
 <script lang="ts">
-  import type { PrStatusInfo } from "../types";
+  import type { PrStatusInfo, WorkflowRunInfo } from "../types";
+  import { workflowStatusIcon, workflowStatusClass } from "../prStatusHelpers";
 
   let {
     prDetail = null,
     loading = false,
     error = null,
+    updateError = null,
+    onOpenCiLog,
+    onUpdateBranch,
+    updatingBranch = false,
   }: {
     prDetail?: PrStatusInfo | null;
     loading?: boolean;
     error?: string | null;
+    updateError?: string | null;
+    onOpenCiLog?: (run: WorkflowRunInfo) => void;
+    onUpdateBranch?: () => Promise<void>;
+    updatingBranch?: boolean;
   } = $props();
+
+  let checksExpanded = $state(false);
 
   function reviewStateIcon(state: string): string {
     switch (state) {
@@ -53,6 +64,56 @@
         return "unknown";
     }
   }
+
+  /** States that should display an additional badge. CLEAN, HAS_HOOKS, UNKNOWN are hidden. */
+  function shouldShowMergeStateBadge(s: string | null | undefined): boolean {
+    if (!s) return false;
+    return ["BEHIND", "BLOCKED", "DIRTY", "DRAFT", "UNSTABLE"].includes(s);
+  }
+
+  function mergeStateLabel(s: string): string {
+    switch (s) {
+      case "BEHIND": return "Behind base";
+      case "BLOCKED": return "Blocked";
+      case "DIRTY": return "Conflicts";
+      case "DRAFT": return "Draft";
+      case "UNSTABLE": return "Unstable";
+      default: return s;
+    }
+  }
+
+  function mergeStateClass(s: string): string {
+    switch (s) {
+      case "BEHIND": return "behind";
+      case "DIRTY":
+      case "BLOCKED": return "blocked";
+      case "UNSTABLE": return "unstable";
+      default: return "neutral";
+    }
+  }
+
+  function workflowStatusText(run: WorkflowRunInfo): string {
+    if (run.status === "in_progress") return "Running";
+    if (run.status === "queued") return "Queued";
+    if (run.status !== "completed") return run.status;
+    switch (run.conclusion) {
+      case "success": return "Success";
+      case "failure": return "Failure";
+      case "neutral": return "Neutral";
+      case "skipped": return "Skipped";
+      default: return "Completed";
+    }
+  }
+
+  function handleCheckClick(run: WorkflowRunInfo) {
+    if (onOpenCiLog) {
+      onOpenCiLog(run);
+    } else if (prDetail?.url) {
+      // Fallback: open GitHub Actions URL in browser
+      const repoUrl = prDetail.url.replace(/\/pull\/\d+$/, "");
+      window.open(`${repoUrl}/actions/runs/${run.runId}`, "_blank");
+    }
+  }
 </script>
 
 <div class="pr-status-section">
@@ -63,6 +124,9 @@
   {:else if !prDetail}
     <div class="pr-status-placeholder">No PR</div>
   {:else}
+    {#if updateError}
+      <div class="pr-status-warning">{updateError}</div>
+    {/if}
     <div class="pr-title">
       <a href={prDetail.url} target="_blank" rel="noopener noreferrer">
         #{prDetail.number} {prDetail.title}
@@ -80,10 +144,24 @@
       </div>
       <div class="pr-meta-item">
         <span class="pr-meta-label">Merge</span>
-        <span class="pr-meta-value">
+        <span class="pr-meta-value merge-meta-value">
           <span class="mergeable-badge {mergeableClass(prDetail.mergeable)}">
             {mergeableLabel(prDetail.mergeable)}
           </span>
+          {#if shouldShowMergeStateBadge(prDetail.mergeStateStatus)}
+            <span class="merge-state-badge {mergeStateClass(prDetail.mergeStateStatus!)}">
+              {mergeStateLabel(prDetail.mergeStateStatus!)}
+            </span>
+          {/if}
+          {#if prDetail.mergeStateStatus === "BEHIND"}
+            <button
+              class="update-branch-btn"
+              disabled={updatingBranch}
+              onclick={() => onUpdateBranch?.()}
+            >
+              {updatingBranch ? "Updating..." : "Update Branch"}
+            </button>
+          {/if}
         </span>
       </div>
       {#if (prDetail.labels?.length ?? 0) > 0}
@@ -117,6 +195,33 @@
         </div>
       {/if}
     </div>
+
+    {#if (prDetail.checkSuites?.length ?? 0) > 0}
+      <div class="checks-section">
+        <button class="checks-toggle" onclick={() => checksExpanded = !checksExpanded}>
+          <span class="checks-toggle-icon">{checksExpanded ? "\u25BC" : "\u25B6"}</span>
+          <h4>Checks ({prDetail.checkSuites.length})</h4>
+        </button>
+        {#if checksExpanded}
+          <div class="checks-list">
+            {#each prDetail.checkSuites as run}
+              <button class="check-item" onclick={() => handleCheckClick(run)}>
+                <span class="check-status {workflowStatusClass(run)}">
+                  {workflowStatusIcon(run)}
+                </span>
+                <span class="check-name">{run.workflowName}</span>
+                <span class="check-conclusion">{workflowStatusText(run)}</span>
+                {#if run.isRequired}
+                  <span class="required-badge">required</span>
+                {/if}
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {:else}
+      <div class="checks-empty">No checks</div>
+    {/if}
 
     {#if (prDetail.reviews?.length ?? 0) > 0}
       <div class="reviews-section">
@@ -242,6 +347,160 @@
     margin-right: 4px;
   }
 
+  .merge-meta-value {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .merge-state-badge {
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: var(--ui-font-xs);
+    font-weight: 600;
+  }
+
+  .merge-state-badge.clean {
+    background: rgba(63, 185, 80, 0.15);
+    color: var(--green);
+  }
+
+  .merge-state-badge.behind {
+    background: rgba(227, 179, 65, 0.15);
+    color: var(--yellow, #e3b341);
+  }
+
+  .merge-state-badge.blocked {
+    background: rgba(248, 81, 73, 0.15);
+    color: var(--red);
+  }
+
+  .merge-state-badge.unstable {
+    background: rgba(227, 179, 65, 0.15);
+    color: var(--yellow, #e3b341);
+  }
+
+  .merge-state-badge.neutral {
+    background: rgba(128, 128, 128, 0.15);
+    color: var(--text-muted);
+  }
+
+  .update-branch-btn {
+    padding: 2px 10px;
+    border-radius: 6px;
+    font-size: var(--ui-font-xs);
+    font-weight: 600;
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+
+  .update-branch-btn:hover:not(:disabled) {
+    background: var(--bg-hover, var(--bg-primary));
+  }
+
+  .update-branch-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .checks-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .checks-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    color: var(--text-secondary);
+  }
+
+  .checks-toggle h4 {
+    font-size: var(--ui-font-sm);
+    font-weight: 700;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin: 0;
+  }
+
+  .checks-toggle-icon {
+    font-size: var(--ui-font-xs);
+    color: var(--text-muted);
+  }
+
+  .checks-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .check-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: var(--ui-font-sm);
+    padding: 4px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    background: none;
+    border: none;
+    color: var(--text-primary);
+    text-align: left;
+    width: 100%;
+  }
+
+  .check-item:hover {
+    background: var(--bg-secondary);
+  }
+
+  .check-status.pass {
+    color: var(--green);
+  }
+
+  .check-status.fail {
+    color: var(--red);
+  }
+
+  .check-status.running {
+    color: var(--yellow, #e3b341);
+  }
+
+  .check-status.pending,
+  .check-status.neutral {
+    color: var(--text-muted);
+  }
+
+  .check-conclusion {
+    color: var(--text-muted);
+    font-size: var(--ui-font-xs);
+    margin-left: auto;
+  }
+
+  .checks-empty {
+    color: var(--text-muted);
+    font-size: var(--ui-font-sm);
+  }
+
+  .required-badge {
+    padding: 1px 6px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    background: rgba(128, 128, 128, 0.15);
+    color: var(--text-muted);
+    text-transform: lowercase;
+  }
+
   .reviews-section h4,
   .comments-section h4,
   .changes-section h4 {
@@ -343,6 +602,16 @@
     padding: 10px 12px;
     border: 1px solid rgba(255, 0, 0, 0.35);
     background: rgba(255, 0, 0, 0.08);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: var(--ui-font-sm);
+    line-height: 1.4;
+  }
+
+  .pr-status-warning {
+    padding: 10px 12px;
+    border: 1px solid rgba(255, 179, 0, 0.35);
+    background: rgba(255, 179, 0, 0.12);
     border-radius: 8px;
     color: var(--text-primary);
     font-size: var(--ui-font-sm);

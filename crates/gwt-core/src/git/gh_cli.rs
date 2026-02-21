@@ -127,19 +127,9 @@ pub fn delete_remote_branch(repo_path: &Path, branch: &str) -> Result<(), String
                     .unwrap_or_default();
                 let combined = format!("{}{}", stderr, stdout);
 
-                if combined.contains("404") || combined.contains("Not Found") {
-                    Err(format!("Branch '{}' not found on remote", branch))
-                } else if combined.contains("403") || combined.contains("Forbidden") {
-                    Err(format!(
-                        "Permission denied: cannot delete remote branch '{}'",
-                        branch
-                    ))
-                } else {
-                    Err(format!(
-                        "Failed to delete remote branch '{}': {}",
-                        branch,
-                        combined.trim()
-                    ))
+                match classify_delete_branch_error(&combined, branch) {
+                    None => Ok(()),
+                    Some(err) => Err(err),
                 }
             }
         }
@@ -386,6 +376,32 @@ pub fn resolve_remote_branch_sha(repo_path: &Path, branch: &str) -> Result<Strin
             let _ = child.kill();
             Err(format!("Timeout resolving SHA for '{}' (10s)", branch))
         }
+    }
+}
+
+/// Classify a GitHub API error response for branch deletion.
+///
+/// Returns `None` when the branch does not exist on the remote
+/// (idempotent success: 404 or 422 "Reference does not exist"),
+/// since the postcondition "branch is not on remote" is already met.
+/// Returns `Some(message)` for genuine errors (403, network, etc).
+fn classify_delete_branch_error(combined: &str, branch: &str) -> Option<String> {
+    if combined.contains("404")
+        || combined.contains("Not Found")
+        || combined.contains("Reference does not exist")
+    {
+        None
+    } else if combined.contains("403") || combined.contains("Forbidden") {
+        Some(format!(
+            "Permission denied: cannot delete remote branch '{}'",
+            branch
+        ))
+    } else {
+        Some(format!(
+            "Failed to delete remote branch '{}': {}",
+            branch,
+            combined.trim()
+        ))
     }
 }
 
@@ -797,5 +813,46 @@ mod tests {
         // Verify the error message format that terminal.rs checks for non-fallback
         let msg = classify_create_branch_error("422", "feature/no-fallback");
         assert!(msg.contains("already exists on remote"));
+    }
+
+    // -- classify_delete_branch_error tests --
+
+    #[test]
+    fn classify_delete_error_404_returns_none() {
+        assert!(classify_delete_branch_error("404 Not Found", "feature/x").is_none());
+    }
+
+    #[test]
+    fn classify_delete_error_not_found_returns_none() {
+        assert!(classify_delete_branch_error("Not Found", "feature/x").is_none());
+    }
+
+    #[test]
+    fn classify_delete_error_422_reference_does_not_exist_returns_none() {
+        let msg = r#"gh: Reference does not exist (HTTP 422)"#;
+        assert!(classify_delete_branch_error(msg, "feature/x").is_none());
+    }
+
+    #[test]
+    fn classify_delete_error_403_forbidden() {
+        let result = classify_delete_branch_error("403 Forbidden", "feat/z");
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("Permission denied"));
+    }
+
+    #[test]
+    fn classify_delete_error_unknown() {
+        let result = classify_delete_branch_error("something unexpected", "feat/u");
+        assert!(result.is_some());
+        let err = result.unwrap();
+        assert!(err.contains("Failed to delete remote branch"));
+        assert!(err.contains("something unexpected"));
+    }
+
+    #[test]
+    fn classify_delete_error_422_different_message_is_error() {
+        // 422 but different message should NOT be treated as success
+        let result = classify_delete_branch_error("422 Validation Failed", "feat/v");
+        assert!(result.is_some());
     }
 }

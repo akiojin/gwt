@@ -19,6 +19,8 @@ pub struct PrStatusInfo {
     pub url: String,
     /// "MERGEABLE" | "CONFLICTING" | "UNKNOWN"
     pub mergeable: String,
+    /// "BEHIND" | "BLOCKED" | "CLEAN" | "DIRTY" | "HAS_HOOKS" | "UNKNOWN" | "UNSTABLE"
+    pub merge_state_status: Option<String>,
     pub author: String,
     pub base_branch: String,
     pub head_branch: String,
@@ -44,6 +46,8 @@ pub struct WorkflowRunInfo {
     pub status: String,
     /// "success" | "failure" | "neutral" etc.
     pub conclusion: Option<String>,
+    /// Whether this check is required by branch protection rules
+    pub is_required: Option<bool>,
 }
 
 /// PR review information
@@ -491,6 +495,7 @@ mod tests {
             state: "OPEN".to_string(),
             url: "https://github.com/owner/repo/pull/42".to_string(),
             mergeable: "MERGEABLE".to_string(),
+            merge_state_status: None,
             author: "alice".to_string(),
             base_branch: "main".to_string(),
             head_branch: "feature/x".to_string(),
@@ -503,6 +508,7 @@ mod tests {
                 run_id: 12345,
                 status: "completed".to_string(),
                 conclusion: Some("success".to_string()),
+                is_required: None,
             }],
             reviews: vec![ReviewInfo {
                 reviewer: "charlie".to_string(),
@@ -561,6 +567,7 @@ mod tests {
             state: "OPEN".to_string(),
             url: "https://example.com".to_string(),
             mergeable: "UNKNOWN".to_string(),
+            merge_state_status: None,
             author: "user".to_string(),
             base_branch: "main".to_string(),
             head_branch: "feature/test".to_string(),
@@ -597,6 +604,7 @@ mod tests {
             state: "OPEN".to_string(),
             url: "https://example.com".to_string(),
             mergeable: "UNKNOWN".to_string(),
+            merge_state_status: None,
             author: "user".to_string(),
             base_branch: "main".to_string(),
             head_branch: "feature/test".to_string(),
@@ -624,6 +632,7 @@ mod tests {
             run_id: 999,
             status: "in_progress".to_string(),
             conclusion: None,
+            is_required: None,
         };
 
         let json = serde_json::to_string(&info).unwrap();
@@ -632,6 +641,53 @@ mod tests {
         assert_eq!(deserialized.run_id, 999);
         assert_eq!(deserialized.status, "in_progress");
         assert!(deserialized.conclusion.is_none());
+        assert!(deserialized.is_required.is_none());
+    }
+
+    #[test]
+    fn test_workflow_run_info_is_required_field() {
+        let info = WorkflowRunInfo {
+            workflow_name: "CI".to_string(),
+            run_id: 100,
+            status: "completed".to_string(),
+            conclusion: Some("success".to_string()),
+            is_required: Some(true),
+        };
+
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"isRequired\":true"));
+        let deserialized: WorkflowRunInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.is_required, Some(true));
+    }
+
+    #[test]
+    fn test_pr_status_info_merge_state_status_field() {
+        let info = PrStatusInfo {
+            number: 1,
+            title: "Test".to_string(),
+            state: "OPEN".to_string(),
+            url: "https://example.com".to_string(),
+            mergeable: "MERGEABLE".to_string(),
+            merge_state_status: Some("CLEAN".to_string()),
+            author: "user".to_string(),
+            base_branch: "main".to_string(),
+            head_branch: "feature/test".to_string(),
+            labels: vec![],
+            assignees: vec![],
+            milestone: None,
+            linked_issues: vec![],
+            check_suites: vec![],
+            reviews: vec![],
+            review_comments: vec![],
+            changed_files_count: 0,
+            additions: 0,
+            deletions: 0,
+        };
+
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"mergeStateStatus\":\"CLEAN\""));
+        let deserialized: PrStatusInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.merge_state_status, Some("CLEAN".to_string()));
     }
 
     #[test]
@@ -707,6 +763,7 @@ mod tests {
                 state: "OPEN".to_string(),
                 url: "https://example.com".to_string(),
                 mergeable: "UNKNOWN".to_string(),
+                merge_state_status: None,
                 author: "user".to_string(),
                 base_branch: "main".to_string(),
                 head_branch: "feature/x".to_string(),
@@ -743,6 +800,7 @@ mod tests {
                 state: "OPEN".to_string(),
                 url: "https://example.com/10".to_string(),
                 mergeable: "MERGEABLE".to_string(),
+                merge_state_status: None,
                 author: "alice".to_string(),
                 base_branch: "main".to_string(),
                 head_branch: "feature/a".to_string(),
