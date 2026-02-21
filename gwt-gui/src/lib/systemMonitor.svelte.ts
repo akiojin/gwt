@@ -4,7 +4,7 @@ interface SystemInfo {
   cpu_usage_percent: number;
   memory_used_bytes: number;
   memory_total_bytes: number;
-  gpu: GpuInfo | null;
+  gpus: GpuInfo[];
 }
 
 export interface GpuInfo {
@@ -20,7 +20,7 @@ export function createSystemMonitor() {
   let cpuUsage = $state(0);
   let memUsed = $state(0);
   let memTotal = $state(0);
-  let gpuInfo: GpuInfo | null = $state(null);
+  let gpuInfos: GpuInfo[] = $state([]);
   let timerId: ReturnType<typeof setTimeout> | null = null;
   let running = false;
   let destroyed = false;
@@ -36,7 +36,7 @@ export function createSystemMonitor() {
       cpuUsage = info.cpu_usage_percent;
       memUsed = info.memory_used_bytes;
       memTotal = info.memory_total_bytes;
-      gpuInfo = info.gpu;
+      gpuInfos = info.gpus ?? [];
     } catch (e) {
       console.warn("Failed to get system info:", e);
     } finally {
@@ -106,7 +106,7 @@ export function createSystemMonitor() {
     get cpuUsage() { return cpuUsage; },
     get memUsed() { return memUsed; },
     get memTotal() { return memTotal; },
-    get gpuInfo() { return gpuInfo; },
+    get gpuInfos() { return gpuInfos; },
     start,
     stop,
     destroy,
