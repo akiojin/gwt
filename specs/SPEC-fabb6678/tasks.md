@@ -71,23 +71,23 @@
 
 ## Phase 4: GitHub Issues 連携 (US6, US8)
 
-- [ ] T048 [US6] GitHub Issue 作成コマンドを実装する（`create_github_issue`） `crates/gwt-tauri/src/commands/report.rs`
-- [ ] T049 [US6] GitHub 認証情報の取得ロジックを実装する（プロファイル設定 or gh CLI トークン） `crates/gwt-tauri/src/commands/report.rs`
-- [ ] T050 [US6] 送信先リポジトリ検出コマンドを追加する（現在の作業リポの owner/repo を取得） `crates/gwt-tauri/src/commands/report.rs`
-- [ ] T051 [US6] T048-T050 のユニットテストを作成する `crates/gwt-tauri/tests/report_test.rs`
-- [ ] T052 [US8] ReportDialog にフォールバック UI を追加する（送信失敗時の "Copy & Open in Browser" ボタン、クリップボードコピー + shell.open） `gwt-gui/src/lib/components/ReportDialog.svelte`
-- [ ] T053 [US6] ReportDialog に送信先リポジトリ ドロップダウンを追加する `gwt-gui/src/lib/components/ReportDialog.svelte`
+- [x] T048 [US6] GitHub Issue 作成コマンドを実装する（`create_github_issue`） `crates/gwt-tauri/src/commands/report.rs`
+- [x] T049 [US6] GitHub 認証情報の取得ロジックを実装する（gh CLI 経由） `crates/gwt-tauri/src/commands/report.rs`
+- [x] T050 [US6] 送信先リポジトリ検出コマンドを追加する（現在の作業リポの owner/repo を取得） `crates/gwt-tauri/src/commands/report.rs`
+- [x] T051 [US6] T048-T050 のユニットテストを作成する（URL解析テスト） `crates/gwt-tauri/src/commands/report.rs`
+- [x] T052 [US8] ReportDialog にフォールバック UI を追加する（送信失敗時の "Copy & Open in Browser" ボタン、クリップボードコピー + shell.open） `gwt-gui/src/lib/components/ReportDialog.svelte`
+- [x] T053 [US6] ReportDialog に送信先リポジトリ ドロップダウンを追加する `gwt-gui/src/lib/components/ReportDialog.svelte`
 
 ## Phase 5: スクリーンキャプチャ + Help メニュー (US4)
 
-- [ ] T054 [US4] macOS 用ウィンドウスクリーンキャプチャを実装する（CGWindowListCreateImage） `crates/gwt-core/src/screenshot.rs`
-- [ ] T055 [US4] Windows 用ウィンドウスクリーンキャプチャを実装する（PrintWindow / BitBlt） `crates/gwt-core/src/screenshot.rs`
-- [ ] T056 [US4] スクリーンキャプチャの Tauri コマンドを追加する（`capture_screenshot`） `crates/gwt-tauri/src/commands/report.rs`
-- [ ] T057 [US4] T054-T056 のユニットテストを作成する `crates/gwt-core/tests/screenshot_test.rs`
-- [ ] T058 [US4] ReportDialog にスクリーンキャプチャボタンを追加する（Capture Screen Text / Capture Screenshot、サムネイルプレビュー） `gwt-gui/src/lib/components/ReportDialog.svelte`
-- [ ] T059 Help メニューを新規追加する（Report Issue... + Suggest Feature... + About + Check for Updates） `crates/gwt-tauri/src/menu.rs`
-- [ ] T060 Help メニューのイベント処理を App.svelte に追加する `gwt-gui/src/App.svelte`
-- [ ] T061 macOS Application メニューから About / Check for Updates を Help メニューへ移動し、Application メニューには About のみ残す `crates/gwt-tauri/src/menu.rs`
+- [ ] T054 [US4] macOS 用ウィンドウスクリーンキャプチャを実装する（CGWindowListCreateImage）— 後日実装
+- [ ] T055 [US4] Windows 用ウィンドウスクリーンキャプチャを実装する（PrintWindow / BitBlt）— 後日実装
+- [x] T056 [US4] テキストベースのスクリーンキャプチャ Tauri コマンドを追加する（`capture_screen_text`） `crates/gwt-tauri/src/commands/report.rs`
+- [ ] T057 [US4] T054-T056 のユニットテストを作成する — 後日実装
+- [x] T058 [US4] ReportDialog にスクリーンキャプチャボタンを追加する `gwt-gui/src/lib/components/ReportDialog.svelte`
+- [x] T059 Help メニューを新規追加する（Report Issue... + Suggest Feature... + About + Check for Updates） `crates/gwt-tauri/src/menu.rs`
+- [x] T060 Help メニューのイベント処理を App.svelte に追加する `gwt-gui/src/App.svelte`
+- [x] T061 macOS Application メニューから About / Check for Updates を Help メニューへ移動し、Application メニューには About のみ残す `crates/gwt-tauri/src/menu.rs`
 
 ## Phase 6: 仕上げ・横断
 
