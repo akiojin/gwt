@@ -26,7 +26,7 @@ pub use diff::{
     get_git_change_summary, get_working_tree_status, list_base_branch_candidates, FileChange,
     FileChangeKind, FileDiff, GitChangeSummary, GitViewCommit, WorkingTreeEntry,
 };
-pub use gh_cli::PrStatus;
+pub use gh_cli::{create_remote_branch, resolve_remote_branch_sha, PrStatus};
 pub use issue::{
     create_linked_branch, fetch_issue_detail, fetch_open_issues, filter_issues_by_title,
     find_branch_for_issue, generate_branch_name, is_gh_cli_authenticated, is_gh_cli_available,

@@ -200,9 +200,74 @@ fn create_new_worktree_path(
     branch_name: &str,
     base_branch: Option<&str>,
 ) -> Result<PathBuf, String> {
+    // SPEC-a4fb2db2: Try remote-first flow when gh CLI is available
+    if gwt_core::git::gh_cli::is_gh_available() && gwt_core::git::gh_cli::check_auth() {
+        match create_new_worktree_remote_first(repo_path, branch_name, base_branch) {
+            Ok(path) => return Ok(path),
+            Err(e) => {
+                // 422 (branch already exists) should not fallback — propagate error
+                if e.contains("already exists on remote") {
+                    return Err(e);
+                }
+                tracing::warn!(
+                    category = "worktree",
+                    branch = branch_name,
+                    error = %e,
+                    "Remote-first worktree creation failed, falling back to local"
+                );
+            }
+        }
+    }
+
     let manager = WorktreeManager::new(repo_path).map_err(|e| e.to_string())?;
     let wt = manager
         .create_new_branch(branch_name, base_branch)
+        .map_err(|e| e.to_string())?;
+    Ok(wt.path)
+}
+
+/// SPEC-a4fb2db2: Create a worktree by first creating the branch on GitHub,
+/// then fetching it locally.
+fn create_new_worktree_remote_first(
+    repo_path: &std::path::Path,
+    branch_name: &str,
+    base_branch: Option<&str>,
+) -> Result<PathBuf, String> {
+    // Normalize base branch: strip "origin/" prefix if present
+    let base = base_branch
+        .map(|b| b.strip_prefix("origin/").unwrap_or(b))
+        .unwrap_or("HEAD");
+
+    // Resolve the SHA of the base branch on GitHub
+    let sha = gwt_core::git::resolve_remote_branch_sha(repo_path, base)?;
+
+    // Create the branch on GitHub
+    gwt_core::git::create_remote_branch(repo_path, branch_name, &sha)?;
+
+    // Fetch the newly created branch locally
+    let fetch_output = std::process::Command::new("git")
+        .args([
+            "fetch",
+            "origin",
+            &format!("{}:{}", branch_name, branch_name),
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to run git fetch: {}", e))?;
+
+    if !fetch_output.status.success() {
+        let stderr = String::from_utf8_lossy(&fetch_output.stderr);
+        return Err(format!(
+            "Failed to fetch branch '{}' from remote: {}",
+            branch_name,
+            stderr.trim()
+        ));
+    }
+
+    // Create worktree for the fetched branch
+    let manager = WorktreeManager::new(repo_path).map_err(|e| e.to_string())?;
+    let wt = manager
+        .create_for_branch(branch_name)
         .map_err(|e| e.to_string())?;
     Ok(wt.path)
 }
