@@ -2976,6 +2976,8 @@
   mode={reportDialogMode}
   prefillError={reportDialogPrefillError}
   projectPath={projectPath ?? ""}
+  screenCaptureBranch={currentBranch}
+  screenCaptureActiveTab={tabs.find((t) => t.id === activeTabId)?.label ?? activeTabId}
   onclose={() => { reportDialogOpen = false; }}
 />
 

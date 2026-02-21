@@ -28,12 +28,16 @@
     mode,
     prefillError,
     projectPath = "",
+    screenCaptureBranch = "",
+    screenCaptureActiveTab = "",
     onclose,
   }: {
     open: boolean;
     mode: "bug" | "feature";
     prefillError?: StructuredError;
     projectPath?: string;
+    screenCaptureBranch?: string;
+    screenCaptureActiveTab?: string;
     onclose: () => void;
   } = $props();
 
@@ -98,7 +102,9 @@
       submitError = false;
       submitIssueUrl = "";
       submitBodyMarkdown = "";
-      dialogRef.showModal();
+      if (!dialogRef.open) {
+        dialogRef.showModal();
+      }
       detectTarget();
     } else if (!open && dialogRef?.open) {
       dialogRef.close();
@@ -150,8 +156,8 @@
   $effect(() => {
     if (open && includeScreenCapture && !screenCaptureText) {
       const text = collectScreenText({
-        branch: "",
-        activeTab: "",
+        branch: screenCaptureBranch,
+        activeTab: screenCaptureActiveTab,
       });
       screenCaptureText = maskSensitiveData(text);
     }

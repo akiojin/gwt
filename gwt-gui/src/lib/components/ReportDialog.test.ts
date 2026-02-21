@@ -66,7 +66,11 @@ describe("ReportDialog", () => {
   });
 
   it("renders Bug Report tab by default when mode is bug", async () => {
-    invokeMock.mockResolvedValue({ owner: "akiojin", repo: "gwt", display: "akiojin/gwt" });
+    invokeMock.mockResolvedValue({
+      owner: "akiojin",
+      repo: "gwt",
+      display: "akiojin/gwt",
+    });
 
     const rendered = await renderReportDialog({
       open: true,
@@ -83,7 +87,11 @@ describe("ReportDialog", () => {
   });
 
   it("renders Feature Request tab when mode is feature", async () => {
-    invokeMock.mockResolvedValue({ owner: "akiojin", repo: "gwt", display: "akiojin/gwt" });
+    invokeMock.mockResolvedValue({
+      owner: "akiojin",
+      repo: "gwt",
+      display: "akiojin/gwt",
+    });
 
     const rendered = await renderReportDialog({
       open: true,
@@ -98,7 +106,11 @@ describe("ReportDialog", () => {
   });
 
   it("switches tabs when clicking tab buttons", async () => {
-    invokeMock.mockResolvedValue({ owner: "akiojin", repo: "gwt", display: "akiojin/gwt" });
+    invokeMock.mockResolvedValue({
+      owner: "akiojin",
+      repo: "gwt",
+      display: "akiojin/gwt",
+    });
 
     const rendered = await renderReportDialog({
       open: true,
@@ -118,8 +130,42 @@ describe("ReportDialog", () => {
     expect(rendered.getByLabelText("Steps to Reproduce")).toBeTruthy();
   });
 
+  it("does not call showModal again when mode changes while dialog is open", async () => {
+    invokeMock.mockResolvedValue({
+      owner: "akiojin",
+      repo: "gwt",
+      display: "akiojin/gwt",
+    });
+
+    const onclose = vi.fn();
+    const showModalSpy = vi.spyOn(HTMLDialogElement.prototype, "showModal");
+    const rendered = await renderReportDialog({
+      open: true,
+      mode: "bug",
+      onclose,
+    });
+
+    expect(showModalSpy).toHaveBeenCalledTimes(1);
+
+    await rendered.rerender({
+      open: true,
+      mode: "feature",
+      onclose,
+    });
+
+    await waitFor(() => {
+      expect(showModalSpy).toHaveBeenCalledTimes(1);
+    });
+
+    showModalSpy.mockRestore();
+  });
+
   it("shows error details section when prefillError is provided", async () => {
-    invokeMock.mockResolvedValue({ owner: "akiojin", repo: "gwt", display: "akiojin/gwt" });
+    invokeMock.mockResolvedValue({
+      owner: "akiojin",
+      repo: "gwt",
+      display: "akiojin/gwt",
+    });
 
     const rendered = await renderReportDialog({
       open: true,
@@ -182,7 +228,9 @@ describe("ReportDialog", () => {
     await fireEvent.click(rendered.getByText("Submit"));
 
     await waitFor(() => {
-      expect(rendered.getByText("Issue #42 created successfully.")).toBeTruthy();
+      expect(
+        rendered.getByText("Issue #42 created successfully."),
+      ).toBeTruthy();
     });
 
     expect(invokeMock).toHaveBeenCalledWith(
@@ -255,7 +303,11 @@ describe("ReportDialog", () => {
   });
 
   it("toggles preview showing generated markdown", async () => {
-    invokeMock.mockResolvedValue({ owner: "akiojin", repo: "gwt", display: "akiojin/gwt" });
+    invokeMock.mockResolvedValue({
+      owner: "akiojin",
+      repo: "gwt",
+      display: "akiojin/gwt",
+    });
 
     const rendered = await renderReportDialog({
       open: true,
@@ -276,7 +328,11 @@ describe("ReportDialog", () => {
   });
 
   it("calls onclose when Cancel is clicked", async () => {
-    invokeMock.mockResolvedValue({ owner: "akiojin", repo: "gwt", display: "akiojin/gwt" });
+    invokeMock.mockResolvedValue({
+      owner: "akiojin",
+      repo: "gwt",
+      display: "akiojin/gwt",
+    });
     const onclose = vi.fn();
 
     const rendered = await renderReportDialog({
@@ -314,7 +370,11 @@ describe("ReportDialog", () => {
   });
 
   it("shows only akiojin/gwt when detected repo matches default", async () => {
-    invokeMock.mockResolvedValue({ owner: "akiojin", repo: "gwt", display: "akiojin/gwt" });
+    invokeMock.mockResolvedValue({
+      owner: "akiojin",
+      repo: "gwt",
+      display: "akiojin/gwt",
+    });
 
     const rendered = await renderReportDialog({
       open: true,
@@ -377,7 +437,9 @@ describe("ReportDialog", () => {
     await fireEvent.click(rendered.getByText("Submit"));
 
     await waitFor(() => {
-      expect(rendered.getByText("Issue #99 created successfully.")).toBeTruthy();
+      expect(
+        rendered.getByText("Issue #99 created successfully."),
+      ).toBeTruthy();
     });
 
     expect(invokeMock).toHaveBeenCalledWith(
@@ -389,7 +451,11 @@ describe("ReportDialog", () => {
   });
 
   it("shows diagnostic checkboxes in bug report tab", async () => {
-    invokeMock.mockResolvedValue({ owner: "akiojin", repo: "gwt", display: "akiojin/gwt" });
+    invokeMock.mockResolvedValue({
+      owner: "akiojin",
+      repo: "gwt",
+      display: "akiojin/gwt",
+    });
 
     const rendered = await renderReportDialog({
       open: true,
@@ -402,8 +468,46 @@ describe("ReportDialog", () => {
     expect(rendered.getByText("Screen Capture (text)")).toBeTruthy();
   });
 
+  it("passes current branch and active tab into screen capture", async () => {
+    invokeMock.mockResolvedValue({
+      owner: "akiojin",
+      repo: "gwt",
+      display: "akiojin/gwt",
+    });
+
+    const rendered = await renderReportDialog({
+      open: true,
+      mode: "bug",
+      screenCaptureBranch: "feature/error-reporting",
+      screenCaptureActiveTab: "Terminal (feature/error-reporting)",
+      onclose: vi.fn(),
+    });
+
+    const labels = rendered.container.querySelectorAll(".checkbox-label");
+    const captureLabel = Array.from(labels).find((l) =>
+      l.textContent?.includes("Screen Capture (text)"),
+    );
+    const captureCheckbox = captureLabel?.querySelector(
+      "input[type='checkbox']",
+    ) as HTMLInputElement;
+    expect(captureCheckbox).toBeTruthy();
+
+    await fireEvent.click(captureCheckbox);
+
+    await waitFor(() => {
+      expect(collectScreenTextMock).toHaveBeenCalledWith({
+        branch: "feature/error-reporting",
+        activeTab: "Terminal (feature/error-reporting)",
+      });
+    });
+  });
+
   it("renders preview as editable textarea", async () => {
-    invokeMock.mockResolvedValue({ owner: "akiojin", repo: "gwt", display: "akiojin/gwt" });
+    invokeMock.mockResolvedValue({
+      owner: "akiojin",
+      repo: "gwt",
+      display: "akiojin/gwt",
+    });
 
     const rendered = await renderReportDialog({
       open: true,
@@ -412,17 +516,25 @@ describe("ReportDialog", () => {
     });
 
     const titleInput = rendered.getByLabelText("Title") as HTMLInputElement;
-    await fireEvent.input(titleInput, { target: { value: "Editable preview" } });
+    await fireEvent.input(titleInput, {
+      target: { value: "Editable preview" },
+    });
     await fireEvent.click(rendered.getByText("Preview"));
 
-    const previewArea = rendered.container.querySelector(".preview-content") as HTMLTextAreaElement;
+    const previewArea = rendered.container.querySelector(
+      ".preview-content",
+    ) as HTMLTextAreaElement;
     expect(previewArea).toBeTruthy();
     expect(previewArea.tagName).toBe("TEXTAREA");
     expect(previewArea.value).toContain("Bug Report");
   });
 
   it("disables Submit button when title is empty", async () => {
-    invokeMock.mockResolvedValue({ owner: "akiojin", repo: "gwt", display: "akiojin/gwt" });
+    invokeMock.mockResolvedValue({
+      owner: "akiojin",
+      repo: "gwt",
+      display: "akiojin/gwt",
+    });
 
     const rendered = await renderReportDialog({
       open: true,
@@ -440,7 +552,11 @@ describe("ReportDialog", () => {
 
   it("disables Application Logs checkbox when no logs available", async () => {
     collectRecentLogsMock.mockResolvedValue("");
-    invokeMock.mockResolvedValue({ owner: "akiojin", repo: "gwt", display: "akiojin/gwt" });
+    invokeMock.mockResolvedValue({
+      owner: "akiojin",
+      repo: "gwt",
+      display: "akiojin/gwt",
+    });
 
     const rendered = await renderReportDialog({
       open: true,
@@ -453,14 +569,18 @@ describe("ReportDialog", () => {
     const logsLabel = Array.from(labels).find((l) =>
       l.textContent?.includes("Application Logs"),
     );
-    const logsCheckbox = logsLabel?.querySelector("input[type='checkbox']") as HTMLInputElement;
+    const logsCheckbox = logsLabel?.querySelector(
+      "input[type='checkbox']",
+    ) as HTMLInputElement;
     expect(logsCheckbox).toBeTruthy();
     await fireEvent.click(logsCheckbox);
 
     // Wait for the effect to detect empty logs and disable the checkbox
     await waitFor(() => {
       expect(logsLabel?.textContent).toContain("No logs available");
-      const updatedCheckbox = logsLabel?.querySelector("input[type='checkbox']") as HTMLInputElement;
+      const updatedCheckbox = logsLabel?.querySelector(
+        "input[type='checkbox']",
+      ) as HTMLInputElement;
       expect(updatedCheckbox.disabled).toBe(true);
     });
   });

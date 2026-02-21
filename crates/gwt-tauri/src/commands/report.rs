@@ -4,7 +4,7 @@ use gwt_core::terminal::scrollback::{strip_ansi, ScrollbackFile};
 use gwt_core::StructuredError;
 use serde::Serialize;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::State;
 
 #[derive(Debug, Clone, Serialize)]
@@ -37,6 +37,14 @@ fn log_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".gwt/logs"))
 }
 
+fn is_log_file_candidate(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+
+    name.ends_with(".jsonl") || name.contains(".jsonl.")
+}
+
 /// Read the last `max_lines` lines from the most recent log file.
 #[tauri::command]
 pub fn read_recent_logs(max_lines: Option<u32>) -> Result<String, StructuredError> {
@@ -52,7 +60,7 @@ pub fn read_recent_logs(max_lines: Option<u32>) -> Result<String, StructuredErro
                 if let Ok(files) = fs::read_dir(&ws_dir) {
                     for f in files.flatten() {
                         let p = f.path();
-                        if p.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                        if is_log_file_candidate(&p) {
                             candidates.push(p);
                         }
                     }
@@ -372,5 +380,20 @@ mod tests {
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["url"], "https://github.com/akiojin/gwt/issues/42");
         assert_eq!(json["number"], 42);
+    }
+
+    #[test]
+    fn log_file_candidate_matches_jsonl() {
+        assert!(is_log_file_candidate(Path::new("gwt.jsonl")));
+    }
+
+    #[test]
+    fn log_file_candidate_matches_rotated_jsonl() {
+        assert!(is_log_file_candidate(Path::new("gwt.jsonl.2026-02-21")));
+    }
+
+    #[test]
+    fn log_file_candidate_rejects_non_jsonl() {
+        assert!(!is_log_file_candidate(Path::new("gwt.log")));
     }
 }
