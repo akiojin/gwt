@@ -426,7 +426,7 @@ pub fn build_app(
                 return;
             }
 
-            // Window switching (MRU order)
+            // Window switching (rotation order)
             if id == crate::menu::MENU_ID_WINDOW_NEXT_WINDOW {
                 let state = app.state::<AppState>();
                 if let Some(target) = state.next_window() {
