@@ -471,7 +471,7 @@ test("shows terminal stream error and closes errored terminal tab on Enter", asy
   expect(invokeCommands).toContain("write_terminal");
   expect(invokeCommands).toContain("capture_scrollback_tail");
 });
-test("navigates Session Summary tabs and opens workflow run page", async ({
+test("navigates Summary tabs and opens workflow run page from PR checks", async ({
   page,
 }) => {
   await page.goto("/");
@@ -528,15 +528,14 @@ test("navigates Session Summary tabs and opens workflow run page", async ({
     .click();
   await expect(page.locator(".pr-title")).toBeVisible();
 
-  await page
-    .locator(".summary-tabs")
-    .getByRole("button", { name: "Workflow", exact: true })
-    .click();
-  await expect(page.locator(".workflow-status-text", { hasText: "Success" })).toBeVisible();
-  await expect(page.locator(".workflow-status-text", { hasText: "Running" })).toBeVisible();
-  await expect(page.getByText("CI Build")).toBeVisible();
+  const checksToggle = page.locator(".checks-section .checks-toggle");
+  await expect(checksToggle).toBeVisible();
+  await checksToggle.click();
+  await expect(page.locator(".check-item .check-name", { hasText: "CI Build" })).toBeVisible();
+  await expect(page.locator(".check-item .check-conclusion", { hasText: "Success" })).toBeVisible();
+  await expect(page.locator(".check-item .check-conclusion", { hasText: "Running" })).toBeVisible();
 
-  await page.locator(".workflow-status-text", { hasText: "Success" }).click();
+  await page.locator(".check-item", { hasText: "CI Build" }).click();
   await expect(page.locator(".tab.active .tab-label")).toHaveText("CI #100");
 
   await page
