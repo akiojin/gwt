@@ -309,9 +309,17 @@ describe("SettingsPanel", () => {
     });
   });
 
-  it("loads AI model options from invoke", async () => {
+  it("loads AI model options on manual refresh", async () => {
     const rendered = await renderSettingsPanel();
 
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+    expect(invokeMock.mock.calls.some(([command]) => command === "list_ai_models")).toBe(false);
+
+    await fireEvent.click(rendered.getByRole("button", { name: "Refresh" }));
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("list_ai_models", {
         endpoint: "https://api.openai.com/v1",
@@ -319,13 +327,45 @@ describe("SettingsPanel", () => {
       });
     });
 
-    await switchToTab(rendered, "Profiles");
-
     const modelOptions = Array.from(
       rendered.container.querySelectorAll(".ai-model-select option")
     ).map((o) => o.textContent?.trim());
     expect(modelOptions).toContain("gpt-5");
     expect(modelOptions).toContain("gpt-4o-mini");
+  });
+
+  it("does not auto-fetch models while editing Endpoint", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+
+    const endpointLabel = rendered.getByText("Endpoint");
+    const endpointInput = endpointLabel.parentElement?.querySelector("input") as HTMLInputElement;
+    await fireEvent.input(endpointInput, { target: { value: "https://example.local/v1" } });
+    await fireEvent.input(endpointInput, { target: { value: "https://example.local/v1/" } });
+
+    expect(invokeMock.mock.calls.some(([command]) => command === "list_ai_models")).toBe(false);
+  });
+
+  it("does not auto-fetch models while editing API Key", async () => {
+    const rendered = await renderSettingsPanel();
+
+    await waitFor(() => {
+      expect(rendered.container.querySelectorAll(".settings-tab-btn").length).toBe(4);
+    });
+
+    await switchToTab(rendered, "Profiles");
+
+    const apiKeyLabel = rendered.getByText("API Key");
+    const apiKeyInput = apiKeyLabel.parentElement?.querySelector("input") as HTMLInputElement;
+    await fireEvent.input(apiKeyInput, { target: { value: "new-key-1" } });
+    await fireEvent.input(apiKeyInput, { target: { value: "new-key-2" } });
+
+    expect(invokeMock.mock.calls.some(([command]) => command === "list_ai_models")).toBe(false);
   });
 
   it("saves settings and profiles", async () => {
@@ -855,6 +895,7 @@ describe("SettingsPanel", () => {
 
     await switchToTab(rendered, "Profiles");
 
+    await fireEvent.click(rendered.getByRole("button", { name: "Refresh" }));
     await waitFor(() => {
       expect(rendered.getByText("Failed to load models: network down")).toBeTruthy();
     });
@@ -894,6 +935,7 @@ describe("SettingsPanel", () => {
     });
 
     await switchToTab(rendered, "Profiles");
+    await fireEvent.click(rendered.getByRole("button", { name: "Refresh" }));
 
     await waitFor(() => {
       expect(rendered.getByText("Current model is not listed in /v1/models.")).toBeTruthy();
@@ -923,6 +965,7 @@ describe("SettingsPanel", () => {
     });
 
     await switchToTab(rendered, "Profiles");
+    await fireEvent.click(rendered.getByRole("button", { name: "Refresh" }));
 
     await waitFor(() => {
       expect(rendered.getByText("No models returned from /v1/models.")).toBeTruthy();

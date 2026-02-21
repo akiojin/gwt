@@ -76,11 +76,6 @@ fn build_cmd_command_expression(command: &str, args: &[String]) -> String {
     parts.join(" ")
 }
 
-fn is_windows_cmd_script(command: &str) -> bool {
-    let lower = command.trim().to_ascii_lowercase();
-    lower.ends_with(".cmd") || lower.ends_with(".bat")
-}
-
 fn resolve_spawn_command_for_platform<F>(
     command: &str,
     args: &[String],
@@ -92,39 +87,34 @@ where
     F: FnMut() -> String,
 {
     if is_windows {
+        // If an explicit shell override is provided, use it.
         if let Some(shell_id) = shell {
             if shell_id == "cmd" {
                 let expression = build_cmd_command_expression(command, args);
                 return ("cmd.exe".to_string(), vec!["/C".to_string(), expression]);
             }
+            // "wsl": command and args are already set by the caller (launch_with_wsl_pty_write
+            // or resolve_shell_for_spawn), so pass through without wrapping.
             if shell_id == "wsl" {
                 return (command.to_string(), args.to_vec());
             }
-
-            if shell_id == "powershell" {
-                let shell = resolve_windows_shell();
-                let expression = build_windows_powershell_command_expression(command, args);
-                return (
-                    shell,
-                    vec![
-                        "-NoLogo".to_string(),
-                        "-NoProfile".to_string(),
-                        "-NonInteractive".to_string(),
-                        "-ExecutionPolicy".to_string(),
-                        "Bypass".to_string(),
-                        "-Command".to_string(),
-                        expression,
-                    ],
-                );
-            }
+            // "powershell" falls through to the default PowerShell path below.
         }
 
-        if is_windows_cmd_script(command) {
-            let expression = build_cmd_command_expression(command, args);
-            return ("cmd.exe".to_string(), vec!["/C".to_string(), expression]);
-        }
-
-        return (command.to_string(), args.to_vec());
+        let shell = resolve_windows_shell();
+        let expression = build_windows_powershell_command_expression(command, args);
+        return (
+            shell,
+            vec![
+                "-NoLogo".to_string(),
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-Command".to_string(),
+                expression,
+            ],
+        );
     }
 
     (command.to_string(), args.to_vec())
@@ -285,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_spawn_command_windows_platform_uses_cmd_for_batch_script() {
+    fn resolve_spawn_command_wraps_command_for_windows_platform() {
         let args = vec!["--yes".to_string(), "@openai/codex@latest".to_string()];
         let (program, resolved_args) = resolve_spawn_command_for_platform(
             "C:\\Tools\\npx.cmd",
@@ -295,18 +285,23 @@ mod tests {
             None,
         );
 
-        assert_eq!(program, "cmd.exe");
+        assert_eq!(program, "pwsh");
         assert_eq!(
             resolved_args,
             vec![
-                "/C".to_string(),
-                "C:\\Tools\\npx.cmd --yes @openai/codex@latest".to_string(),
+                "-NoLogo".to_string(),
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-Command".to_string(),
+                "& 'C:\\Tools\\npx.cmd' '--yes' '@openai/codex@latest'".to_string(),
             ]
         );
     }
 
     #[test]
-    fn resolve_spawn_command_windows_platform_keeps_non_batch_command_without_wrapper() {
+    fn resolve_spawn_command_windows_platform_wraps_non_batch_command() {
         let args = vec!["--version".to_string()];
         let (program, resolved_args) = resolve_spawn_command_for_platform(
             "codex",
@@ -315,8 +310,19 @@ mod tests {
             || "powershell.exe".to_string(),
             None,
         );
-        assert_eq!(program, "codex");
-        assert_eq!(resolved_args, args);
+        assert_eq!(program, "powershell.exe");
+        assert_eq!(
+            resolved_args,
+            vec![
+                "-NoLogo".to_string(),
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-Command".to_string(),
+                "& 'codex' '--version'".to_string(),
+            ]
+        );
     }
 
     #[test]

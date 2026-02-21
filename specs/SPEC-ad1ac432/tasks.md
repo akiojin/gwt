@@ -7,6 +7,7 @@
 - US4（gone 区別）は US1 と並列可能
 - US5（部分失敗）は US1 の一部として実装
 - US6（gh 未対応）は US1 の一部として実装
+- US7（Force cleanup モード）は US1/US5 完了後に実装（結果表示・ガードテスト追加）
 
 ## 既存コードベース情報
 
@@ -86,3 +87,12 @@
 - [x] T039 `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json` でエラーなし `gwt-gui/`
 - [x] T040 `cd gwt-gui && pnpm test` でフロントエンドテスト通過（既存の4件の失敗は pre-existing） `gwt-gui/`
 - [x] T041 [P] `cleanup_single_worktree` コマンドのバックエンド側を deprecated マーク `crates/gwt-tauri/src/commands/cleanup.rs`
+
+## Phase 11: ストーリー 7 — Force cleanup モード（unsafe限定）
+
+- [x] T042 [US7] テスト: Force toggle 表示（初期 OFF）と safe のみ選択時に `force=false` が渡ること `gwt-gui/src/lib/components/CleanupModal.test.ts`
+- [x] T043 [US7] テスト: Force toggle ON でも disabled 行が選択不可のままであること `gwt-gui/src/lib/components/CleanupModal.test.ts`
+- [x] T044 [US7] テスト: unsafe cleanup 実行後の結果ダイアログに force 注記が表示されること `gwt-gui/src/lib/components/CleanupModal.test.ts`
+- [x] T045 [US7] 実装: CleanupModal に `Force cleanup` トグルと結果注記を追加 `gwt-gui/src/lib/components/CleanupModal.svelte`
+- [x] T046 [US7] テスト: `cleanup_single_branch` は force=true でも protected/current/agent-running を拒否すること `crates/gwt-tauri/src/commands/cleanup.rs`
+- [x] T047 [US7] 仕様同期: `SPEC-ad1ac432` の spec/plan/tasks/tdd を Force cleanup 要件で更新 `specs/SPEC-ad1ac432/spec.md`

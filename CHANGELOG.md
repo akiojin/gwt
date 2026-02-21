@@ -1,6 +1,27 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.10.0] - 2026-02-21
+
+### Bug Fixes
+
+- **windows:** Detect and display GPUs in About System (#1157)
+- Fallback to manual worktree removal on directory-not-empty (#1160)
+- **docker:** Docker起動時に選択サービスをup対象へ追加 (#1163)
+- Resolve launch-agent prefix race and utf8 truncation panic (#1164)
+- Compose envマージで使用中ポートへの巻き戻りを防止 (#1165)
+- **gui:** Stop AI model fetch during input (#1169)
+- **docker:** Compose起動直後の停止理由を表示 (#1170)
+- Stabilize windows shell selection follow-up and merge develop (#1172)
+- Marketplace.jsonを.claude-plugin/に移動
+- SPEC-a4fb2db2 分析指摘の修正（エラー分類テスト・ドキュメント整合性）
+
+### Features
+
+- **gui:** E1004エラー時に「Use Existing Branch」ボタンを表示 (#1168)
+- **cleanup:** Cleanupにunsafe限定のForce実行を追加 (#1171)
+- GitHub リモート起点の Worktree 作成 (SPEC-a4fb2db2)
+
 ## [7.9.0] - 2026-02-20
 
 ### Bug Fixes

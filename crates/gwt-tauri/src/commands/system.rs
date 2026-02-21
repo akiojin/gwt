@@ -21,28 +21,65 @@ pub struct SystemInfoResponse {
     pub cpu_usage_percent: f32,
     pub memory_used_bytes: u64,
     pub memory_total_bytes: u64,
-    pub gpu: Option<GpuInfo>,
+    pub gpus: Vec<GpuInfo>,
 }
 
-fn build_gpu_info(
-    static_info: Option<GpuStaticInfo>,
-    dynamic_info: Option<GpuDynamicInfo>,
-) -> Option<GpuInfo> {
-    match (static_info, dynamic_info) {
-        (None, None) => None,
-        (static_info, dynamic_info) => Some(GpuInfo {
-            name: static_info
-                .as_ref()
-                .map(|info| info.name.clone())
-                .unwrap_or_else(|| "NVIDIA GPU".to_string()),
-            vram_total_bytes: static_info
-                .as_ref()
-                .and_then(|info| info.vram_total_bytes)
-                .or(dynamic_info.as_ref().map(|info| info.vram_total_bytes)),
-            vram_used_bytes: dynamic_info.as_ref().map(|info| info.vram_used_bytes),
-            usage_percent: dynamic_info.as_ref().map(|info| info.usage_percent),
-        }),
+fn normalize_gpu_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn dynamic_to_gpu_info(dynamic: GpuDynamicInfo) -> GpuInfo {
+    let fallback_name = "NVIDIA GPU".to_string();
+    let name = if dynamic.name.trim().is_empty() {
+        fallback_name
+    } else {
+        dynamic.name
+    };
+    GpuInfo {
+        name,
+        vram_total_bytes: Some(dynamic.vram_total_bytes),
+        vram_used_bytes: Some(dynamic.vram_used_bytes),
+        usage_percent: Some(dynamic.usage_percent),
     }
+}
+
+fn build_gpu_infos(
+    static_infos: Vec<GpuStaticInfo>,
+    dynamic_infos: Vec<GpuDynamicInfo>,
+) -> Vec<GpuInfo> {
+    let mut gpus = Vec::with_capacity(static_infos.len().max(dynamic_infos.len()));
+    let mut remaining_dynamic: Vec<Option<GpuDynamicInfo>> =
+        dynamic_infos.into_iter().map(Some).collect();
+
+    for static_info in static_infos {
+        let static_key = normalize_gpu_name(&static_info.name);
+        let dynamic_match_index = remaining_dynamic.iter().position(|dynamic| {
+            dynamic
+                .as_ref()
+                .map(|info| normalize_gpu_name(&info.name) == static_key)
+                .unwrap_or(false)
+        });
+        let dynamic_match = dynamic_match_index.and_then(|idx| remaining_dynamic[idx].take());
+
+        gpus.push(GpuInfo {
+            name: static_info.name,
+            vram_total_bytes: dynamic_match
+                .as_ref()
+                .map(|info| info.vram_total_bytes)
+                .or(static_info.vram_total_bytes),
+            vram_used_bytes: dynamic_match.as_ref().map(|info| info.vram_used_bytes),
+            usage_percent: dynamic_match.as_ref().map(|info| info.usage_percent),
+        });
+    }
+
+    for dynamic in remaining_dynamic.into_iter().flatten() {
+        gpus.push(dynamic_to_gpu_info(dynamic));
+    }
+
+    gpus
 }
 
 // --- T031: StatsResponse / StatsEntryResponse / AgentStatEntry / RepoStatsEntry ---
@@ -80,12 +117,12 @@ pub fn get_system_info(state: State<'_, AppState>) -> SystemInfoResponse {
     monitor.refresh();
     let cpu = monitor.cpu_usage();
     let (mem_used, mem_total) = monitor.memory_info();
-    let gpu = build_gpu_info(monitor.gpu_static_info(), monitor.gpu_dynamic_info());
+    let gpus = build_gpu_infos(monitor.gpu_static_infos(), monitor.gpu_dynamic_info());
     SystemInfoResponse {
         cpu_usage_percent: cpu,
         memory_used_bytes: mem_used,
         memory_total_bytes: mem_total,
-        gpu,
+        gpus,
     }
 }
 
@@ -146,25 +183,111 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_gpu_info_returns_dynamic_payload_without_static_info() {
-        let gpu = build_gpu_info(
-            None,
-            Some(GpuDynamicInfo {
+    fn build_gpu_infos_returns_dynamic_payload_without_static_info() {
+        let gpus = build_gpu_infos(
+            vec![],
+            vec![GpuDynamicInfo {
+                name: "NVIDIA RTX 4090".to_string(),
                 usage_percent: 71.0,
                 vram_used_bytes: 1024,
                 vram_total_bytes: 2048,
-            }),
-        )
-        .expect("dynamic GPU info should produce payload");
+            }],
+        );
 
-        assert_eq!(gpu.name, "NVIDIA GPU");
+        assert_eq!(gpus.len(), 1);
+        let gpu = &gpus[0];
+        assert_eq!(gpu.name, "NVIDIA RTX 4090");
         assert_eq!(gpu.vram_total_bytes, Some(2048));
         assert_eq!(gpu.vram_used_bytes, Some(1024));
         assert_eq!(gpu.usage_percent, Some(71.0));
     }
 
     #[test]
-    fn build_gpu_info_returns_none_without_any_gpu_data() {
-        assert!(build_gpu_info(None, None).is_none());
+    fn build_gpu_infos_merges_dynamic_values_into_matching_static_entry() {
+        let gpus = build_gpu_infos(
+            vec![GpuStaticInfo {
+                name: "NVIDIA GeForce RTX 4090".to_string(),
+                vram_total_bytes: Some(4096),
+            }],
+            vec![GpuDynamicInfo {
+                name: "NVIDIA GeForce RTX 4090".to_string(),
+                usage_percent: 33.0,
+                vram_used_bytes: 2048,
+                vram_total_bytes: 24564,
+            }],
+        );
+
+        assert_eq!(gpus.len(), 1);
+        let gpu = &gpus[0];
+        assert_eq!(gpu.name, "NVIDIA GeForce RTX 4090");
+        // Prefer NVML total VRAM over potentially stale static values.
+        assert_eq!(gpu.vram_total_bytes, Some(24564));
+        assert_eq!(gpu.vram_used_bytes, Some(2048));
+        assert_eq!(gpu.usage_percent, Some(33.0));
+    }
+
+    #[test]
+    fn build_gpu_infos_keeps_static_entries_without_dynamic_metrics() {
+        let gpus = build_gpu_infos(
+            vec![GpuStaticInfo {
+                name: "Intel(R) UHD Graphics".to_string(),
+                vram_total_bytes: Some(1073741824),
+            }],
+            vec![],
+        );
+
+        assert_eq!(gpus.len(), 1);
+        let gpu = &gpus[0];
+        assert_eq!(gpu.name, "Intel(R) UHD Graphics");
+        assert_eq!(gpu.vram_total_bytes, Some(1073741824));
+        assert_eq!(gpu.vram_used_bytes, None);
+        assert_eq!(gpu.usage_percent, None);
+    }
+
+    #[test]
+    fn build_gpu_infos_returns_empty_without_any_gpu_data() {
+        assert!(build_gpu_infos(vec![], vec![]).is_empty());
+    }
+
+    #[test]
+    fn build_gpu_infos_preserves_unmatched_dynamic_entries() {
+        let gpus = build_gpu_infos(
+            vec![GpuStaticInfo {
+                name: "Intel(R) UHD Graphics".to_string(),
+                vram_total_bytes: Some(1073741824),
+            }],
+            vec![GpuDynamicInfo {
+                name: "NVIDIA GeForce RTX 4090".to_string(),
+                usage_percent: 50.0,
+                vram_used_bytes: 4096,
+                vram_total_bytes: 24564,
+            }],
+        );
+
+        assert_eq!(gpus.len(), 2);
+        let intel = &gpus[0];
+        let nvidia = &gpus[1];
+        assert_eq!(intel.name, "Intel(R) UHD Graphics");
+        assert_eq!(intel.usage_percent, None);
+        assert_eq!(nvidia.name, "NVIDIA GeForce RTX 4090");
+        assert_eq!(nvidia.vram_total_bytes, Some(24564));
+        assert_eq!(nvidia.vram_used_bytes, Some(4096));
+        assert_eq!(nvidia.usage_percent, Some(50.0));
+    }
+
+    #[test]
+    fn build_gpu_infos_uses_fallback_name_when_dynamic_name_missing() {
+        let gpus = build_gpu_infos(
+            vec![],
+            vec![GpuDynamicInfo {
+                name: "   ".to_string(),
+                usage_percent: 11.0,
+                vram_used_bytes: 128,
+                vram_total_bytes: 256,
+            }],
+        );
+
+        assert_eq!(gpus.len(), 1);
+        assert_eq!(gpus[0].name, "NVIDIA GPU");
     }
 }

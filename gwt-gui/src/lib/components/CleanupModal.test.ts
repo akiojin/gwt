@@ -241,6 +241,84 @@ describe("CleanupModal", () => {
     });
   });
 
+  it("shows force toggle and keeps safe cleanup non-force even when enabled", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") return [worktreeFixture];
+      if (command === "check_gh_available") return false;
+      if (command === "cleanup_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project",
+      onClose: vi.fn(),
+      agentTabBranches: [],
+    });
+
+    await rendered.findByText(worktreeFixture.branch);
+    let forceToggle: Element | null = null;
+    await waitFor(() => {
+      forceToggle = rendered.container.querySelector("[data-testid='force-toggle']");
+      expect(forceToggle).toBeTruthy();
+    });
+    if (!forceToggle) {
+      throw new Error("force toggle not found");
+    }
+    await fireEvent.click(forceToggle);
+
+    const checkbox = rendered.container.querySelector(
+      "tbody input[type=\"checkbox\"]"
+    ) as HTMLInputElement;
+    await fireEvent.click(checkbox);
+    await fireEvent.click(rendered.getByRole("button", { name: "Cleanup (1)" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith(
+        "cleanup_worktrees",
+        expect.objectContaining({
+          force: false,
+        })
+      );
+    });
+  });
+
+  it("keeps disabled rows unselectable even when force toggle is enabled", async () => {
+    const disabledWorktree = {
+      ...worktreeFixture,
+      path: "/tmp/worktrees/feature/disabled-force",
+      branch: "feature/disabled-force",
+      safety_level: "disabled",
+    };
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") return [disabledWorktree];
+      if (command === "check_gh_available") return false;
+      return [];
+    });
+
+    const rendered = await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project",
+      onClose: vi.fn(),
+      agentTabBranches: [],
+    });
+
+    await rendered.findByText(disabledWorktree.branch);
+    const forceToggle = rendered.container.querySelector("[data-testid='force-toggle']");
+    expect(forceToggle).toBeTruthy();
+    if (!forceToggle) {
+      throw new Error("force toggle not found");
+    }
+    await fireEvent.click(forceToggle);
+
+    const checkbox = rendered.container.querySelector(
+      "tbody input[type=\"checkbox\"]"
+    ) as HTMLInputElement;
+    expect(checkbox.disabled).toBe(true);
+    expect(rendered.getByRole("button", { name: "Cleanup (0)" })).toBeTruthy();
+  });
+
   it("preselects branch when preselectedBranch is provided", async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "list_worktrees") return [worktreeFixture];
@@ -480,6 +558,75 @@ describe("CleanupModal", () => {
 
     await waitFor(() => {
       expect(rendered.getByText("Failed to list worktrees: plain string error")).toBeTruthy();
+    });
+  });
+
+  it("shows force execution note in result dialog when unsafe cleanup is confirmed", async () => {
+    listenMock.mockResolvedValue(() => {});
+    const warningWorktree = {
+      ...worktreeFixture,
+      path: "/tmp/worktrees/feature/force-note",
+      branch: "feature/force-note",
+      safety_level: "warning",
+    };
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_worktrees") return [warningWorktree];
+      if (command === "check_gh_available") return false;
+      if (command === "cleanup_worktrees") return [];
+      return [];
+    });
+
+    const rendered = await renderCleanupModal({
+      open: true,
+      projectPath: "/tmp/project",
+      onClose: vi.fn(),
+      agentTabBranches: [],
+    });
+
+    await rendered.findByText(warningWorktree.branch);
+    const forceToggle = rendered.container.querySelector("[data-testid='force-toggle']");
+    expect(forceToggle).toBeTruthy();
+    if (!forceToggle) {
+      throw new Error("force toggle not found");
+    }
+    await fireEvent.click(forceToggle);
+
+    const checkbox = rendered.container.querySelector(
+      "tbody input[type=\"checkbox\"]"
+    ) as HTMLInputElement;
+    await fireEvent.click(checkbox);
+    await fireEvent.click(rendered.getByRole("button", { name: "Cleanup (1)" }));
+    await rendered.findByText("Unsafe Worktrees Selected");
+    await fireEvent.click(rendered.getByRole("button", { name: "Force Cleanup" }));
+
+    await waitFor(() => {
+      expect(
+        listenMock.mock.calls.some(
+          (call) => call[0] === "cleanup-completed" && typeof call[1] === "function"
+        )
+      ).toBe(true);
+    });
+
+    const handler = listenMock.mock.calls.find(
+      (call) => call[0] === "cleanup-completed"
+    )?.[1] as ((event: { payload: { results: any[] } }) => void);
+
+    handler({
+      payload: {
+        results: [{
+          branch: warningWorktree.branch,
+          success: true,
+          error: null,
+          remote_success: null,
+          remote_error: null,
+        }],
+      },
+    });
+
+    await waitFor(() => {
+      expect(rendered.getByText("Cleanup Results")).toBeTruthy();
+      expect(rendered.getByText("Force cleanup was applied to unsafe selections.")).toBeTruthy();
     });
   });
 

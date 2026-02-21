@@ -27,7 +27,7 @@ function systemInfo() {
     cpu_usage_percent: 42,
     memory_used_bytes: 8,
     memory_total_bytes: 16,
-    gpu: null,
+    gpus: [],
   };
 }
 

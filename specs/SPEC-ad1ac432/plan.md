@@ -1,6 +1,6 @@
 # 実装計画: Cleanup Remote Branches
 
-**仕様ID**: `SPEC-ad1ac432` | **日付**: 2026-02-18 | **仕様書**: `specs/SPEC-ad1ac432/spec.md`
+**仕様ID**: `SPEC-ad1ac432` | **日付**: 2026-02-21 | **仕様書**: `specs/SPEC-ad1ac432/spec.md`
 
 ## 目的
 
@@ -23,6 +23,13 @@
 - **ユーザビリティ優先**: トグル 1 つの操作。追加確認ステップなし。gh 未対応時は透過的にフォールバック
 
 ## 実装方針
+
+### 追補（2026-02-21）: Force cleanup モード
+
+- CleanupModal に `Force cleanup` トグルを追加し、unsafe 削除時の force 実行をユーザーが明示的に認識できる導線を設ける
+- force 適用範囲は unsafe（warning/danger）に限定し、safe のみ選択時は `cleanup_worktrees(force=false)` を維持する
+- protected/current/agent-running のガードは force 時も解除しない
+- 結果ダイアログに force 実行注記を表示し、実行モードを事後確認可能にする
 
 ### Phase 1: バックエンド — gh CLI 連携モジュール（gwt-core）
 
@@ -129,6 +136,12 @@
 
 - FR-508, FR-512, エッジケース, 範囲外に上書き注記を追加
 
+### Phase 6: Force cleanup 仕様反映（SPEC-ad1ac432 追記）
+
+- `spec.md` に US7 / FR-615〜FR-618 / SC-006〜SC-007 を追記
+- `CleanupModal.svelte` に `Force cleanup` トグルと結果注記を追加
+- `cleanup_single_branch` のガード維持をテストで明示（force=true でも protected/current/agent-running は拒否）
+
 ## テスト
 
 ### バックエンド（Rust）
@@ -139,6 +152,7 @@
 - `compute_safety_level` 拡張: 統合安全性の全組み合わせ（8パターン）
 - `cleanup_worktrees` リモートパス: delete_remote=true/false、gone スキップ、部分失敗
 - `CleanupResult` シリアライズ: 新フィールドの JSON 出力
+- `cleanup_single_branch` force ガード: force=true でも protected/current/agent-running は削除拒否
 
 ### フロントエンド（TypeScript / Svelte）
 
@@ -147,5 +161,8 @@
 - PR バッジの表示（Merged/Closed/Open/None/取得中）
 - gone バッジの強調表示
 - 結果ダイアログの全件表示
+- Force cleanup トグル表示（初期 OFF）
+- safe のみ選択時は Force cleanup ON でも `force=false` が渡される
+- force 実行時に結果ダイアログへ注記が表示される
 - 「Cleanup this branch」がモーダルを開くことの確認
 - unsafe 確認ダイアログのリモート警告テキスト

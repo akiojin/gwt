@@ -311,6 +311,170 @@ fn resolve_owner_repo(repo_path: &Path) -> Result<(String, String), String> {
     Ok((owner, name))
 }
 
+/// Build the API endpoint for creating a git ref.
+fn create_ref_endpoint(owner: &str, repo: &str) -> String {
+    format!("repos/{}/{}/git/refs", owner, repo)
+}
+
+/// Build the API endpoint for getting a git ref.
+fn get_ref_endpoint(owner: &str, repo: &str, branch: &str) -> String {
+    format!("repos/{}/{}/git/ref/heads/{}", owner, repo, branch)
+}
+
+/// Parse SHA from GitHub git/ref API response JSON.
+fn parse_ref_sha(json_str: &str) -> Result<String, String> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(json_str).map_err(|e| format!("Failed to parse JSON: {}", e))?;
+    parsed
+        .get("object")
+        .and_then(|o| o.get("sha"))
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Missing object.sha in response".to_string())
+}
+
+/// Resolve the SHA of a remote branch via GitHub API (SPEC-a4fb2db2 FR-002).
+///
+/// Uses `gh api repos/{owner}/{repo}/git/ref/heads/{branch}`.
+/// Returns the commit SHA on success.
+pub fn resolve_remote_branch_sha(repo_path: &Path, branch: &str) -> Result<String, String> {
+    let (owner, repo) = resolve_owner_repo(repo_path)?;
+    let endpoint = get_ref_endpoint(&owner, &repo, branch);
+
+    let child = gh_command()
+        .args(["api", &endpoint])
+        .current_dir(repo_path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+
+    let Ok(mut child) = child else {
+        return Err("Failed to spawn gh command".to_string());
+    };
+
+    match wait_with_timeout(&mut child, Duration::from_secs(10)) {
+        Some(status) => {
+            if status.success() {
+                let stdout = child
+                    .stdout
+                    .take()
+                    .and_then(|mut s| {
+                        let mut buf = String::new();
+                        std::io::Read::read_to_string(&mut s, &mut buf).ok()?;
+                        Some(buf)
+                    })
+                    .unwrap_or_default();
+                parse_ref_sha(&stdout)
+            } else {
+                let stderr = child
+                    .stderr
+                    .take()
+                    .and_then(|mut s| {
+                        let mut buf = String::new();
+                        std::io::Read::read_to_string(&mut s, &mut buf).ok()?;
+                        Some(buf)
+                    })
+                    .unwrap_or_default();
+                Err(format!(
+                    "Failed to resolve SHA for '{}': {}",
+                    branch,
+                    stderr.trim()
+                ))
+            }
+        }
+        None => {
+            let _ = child.kill();
+            Err(format!("Timeout resolving SHA for '{}' (10s)", branch))
+        }
+    }
+}
+
+/// Classify a GitHub API error response for branch creation.
+///
+/// Returns a user-friendly error message based on HTTP status codes / keywords
+/// found in the combined stderr+stdout output.
+fn classify_create_branch_error(combined: &str, branch: &str) -> String {
+    if combined.contains("422") || combined.contains("Reference already exists") {
+        format!("Branch '{}' already exists on remote", branch)
+    } else if combined.contains("403") || combined.contains("Forbidden") {
+        format!(
+            "Permission denied: cannot create remote branch '{}'",
+            branch
+        )
+    } else if combined.contains("404") || combined.contains("Not Found") {
+        format!("Repository not found on remote for branch '{}'", branch)
+    } else {
+        format!(
+            "Failed to create remote branch '{}': {}",
+            branch,
+            combined.trim()
+        )
+    }
+}
+
+/// Create a remote branch via GitHub API (SPEC-a4fb2db2 FR-001).
+///
+/// Uses `gh api --method POST repos/{owner}/{repo}/git/refs`.
+/// Timeout: 10 seconds.
+pub fn create_remote_branch(repo_path: &Path, branch: &str, sha: &str) -> Result<(), String> {
+    let (owner, repo) = resolve_owner_repo(repo_path)?;
+    let endpoint = create_ref_endpoint(&owner, &repo);
+    let ref_value = format!("refs/heads/{}", branch);
+
+    let child = gh_command()
+        .args([
+            "api",
+            "--method",
+            "POST",
+            &endpoint,
+            "-f",
+            &format!("ref={}", ref_value),
+            "-f",
+            &format!("sha={}", sha),
+        ])
+        .current_dir(repo_path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+
+    let Ok(mut child) = child else {
+        return Err("Failed to spawn gh command".to_string());
+    };
+
+    match wait_with_timeout(&mut child, Duration::from_secs(10)) {
+        Some(status) => {
+            if status.success() {
+                Ok(())
+            } else {
+                let stderr = child
+                    .stderr
+                    .take()
+                    .and_then(|mut s| {
+                        let mut buf = String::new();
+                        std::io::Read::read_to_string(&mut s, &mut buf).ok()?;
+                        Some(buf)
+                    })
+                    .unwrap_or_default();
+                let stdout = child
+                    .stdout
+                    .take()
+                    .and_then(|mut s| {
+                        let mut buf = String::new();
+                        std::io::Read::read_to_string(&mut s, &mut buf).ok()?;
+                        Some(buf)
+                    })
+                    .unwrap_or_default();
+                let combined = format!("{}{}", stderr, stdout);
+                Err(classify_create_branch_error(&combined, branch))
+            }
+        }
+        None => {
+            let _ = child.kill();
+            Err(format!("Timeout creating remote branch '{}' (10s)", branch))
+        }
+    }
+}
+
 /// Wait for a child process with a timeout.
 /// Returns `None` if the timeout is reached.
 fn wait_with_timeout(
@@ -521,5 +685,117 @@ mod tests {
         // Structural test
         let _: fn(&mut std::process::Child, Duration) -> Option<std::process::ExitStatus> =
             wait_with_timeout;
+    }
+
+    // -- SPEC-a4fb2db2: create_remote_branch / resolve_remote_branch_sha tests --
+
+    #[test]
+    fn create_remote_branch_returns_result() {
+        // Verifies that the function signature compiles correctly
+        let _: fn(&Path, &str, &str) -> Result<(), String> = create_remote_branch;
+    }
+
+    #[test]
+    fn resolve_remote_branch_sha_returns_result() {
+        // Verifies that the function signature compiles correctly
+        let _: fn(&Path, &str) -> Result<String, String> = resolve_remote_branch_sha;
+    }
+
+    #[test]
+    fn create_remote_branch_endpoint_format() {
+        let endpoint = create_ref_endpoint("akiojin", "gwt");
+        assert_eq!(endpoint, "repos/akiojin/gwt/git/refs");
+    }
+
+    #[test]
+    fn resolve_remote_branch_sha_endpoint_format() {
+        let endpoint = get_ref_endpoint("akiojin", "gwt", "develop");
+        assert_eq!(endpoint, "repos/akiojin/gwt/git/ref/heads/develop");
+    }
+
+    #[test]
+    fn resolve_remote_branch_sha_endpoint_format_with_slash() {
+        let endpoint = get_ref_endpoint("akiojin", "gwt", "feature/test");
+        assert_eq!(endpoint, "repos/akiojin/gwt/git/ref/heads/feature/test");
+    }
+
+    #[test]
+    fn resolve_remote_branch_sha_parses_json() {
+        let json = r#"{
+            "ref": "refs/heads/develop",
+            "object": {
+                "sha": "abc123def456",
+                "type": "commit"
+            }
+        }"#;
+        let sha = parse_ref_sha(json).unwrap();
+        assert_eq!(sha, "abc123def456");
+    }
+
+    #[test]
+    fn resolve_remote_branch_sha_invalid_json() {
+        let result = parse_ref_sha("not valid json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_remote_branch_sha_missing_sha() {
+        let json = r#"{"ref": "refs/heads/develop", "object": {"type": "commit"}}"#;
+        let result = parse_ref_sha(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_remote_branch_sha_missing_object() {
+        let json = r#"{"ref": "refs/heads/develop"}"#;
+        let result = parse_ref_sha(json);
+        assert!(result.is_err());
+    }
+
+    // -- SPEC-a4fb2db2: classify_create_branch_error tests --
+
+    #[test]
+    fn classify_error_422_reference_already_exists() {
+        let msg = classify_create_branch_error("Reference already exists", "feature/x");
+        assert!(msg.contains("already exists on remote"));
+        assert!(msg.contains("feature/x"));
+    }
+
+    #[test]
+    fn classify_error_422_status_code() {
+        let msg = classify_create_branch_error(
+            r#"{"message":"Reference already exists","status":"422"}"#,
+            "feat/y",
+        );
+        assert!(msg.contains("already exists on remote"));
+    }
+
+    #[test]
+    fn classify_error_403_forbidden() {
+        let msg = classify_create_branch_error("403 Forbidden", "feat/z");
+        assert!(msg.contains("Permission denied"));
+        assert!(msg.contains("feat/z"));
+    }
+
+    #[test]
+    fn classify_error_404_not_found() {
+        let msg = classify_create_branch_error("404 Not Found", "feat/w");
+        assert!(msg.contains("not found on remote"));
+        assert!(msg.contains("feat/w"));
+    }
+
+    #[test]
+    fn classify_error_unknown() {
+        let msg = classify_create_branch_error("something unexpected", "feat/u");
+        assert!(msg.contains("Failed to create remote branch"));
+        assert!(msg.contains("feat/u"));
+        assert!(msg.contains("something unexpected"));
+    }
+
+    #[test]
+    fn classify_error_422_does_not_fallback() {
+        // Verify the error message format that terminal.rs checks for non-fallback
+        let msg = classify_create_branch_error("422", "feature/no-fallback");
+        assert!(msg.contains("already exists on remote"));
     }
 }

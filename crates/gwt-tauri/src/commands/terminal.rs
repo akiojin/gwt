@@ -8,7 +8,7 @@ use gwt_core::config::stats::Stats;
 use gwt_core::config::{AgentConfig, ClaudeAgentProvider, ProfilesConfig, Settings};
 use gwt_core::docker::{
     compose_available, daemon_running, detect_docker_files, docker_available, try_start_daemon,
-    DevContainerConfig, DockerFileType, DockerManager,
+    DevContainerConfig, DockerFileType, DockerManager, PortAllocator,
 };
 use gwt_core::git::Remote;
 use gwt_core::terminal::pane::PaneStatus;
@@ -200,9 +200,74 @@ fn create_new_worktree_path(
     branch_name: &str,
     base_branch: Option<&str>,
 ) -> Result<PathBuf, String> {
+    // SPEC-a4fb2db2: Try remote-first flow when gh CLI is available
+    if gwt_core::git::gh_cli::is_gh_available() && gwt_core::git::gh_cli::check_auth() {
+        match create_new_worktree_remote_first(repo_path, branch_name, base_branch) {
+            Ok(path) => return Ok(path),
+            Err(e) => {
+                // 422 (branch already exists) should not fallback — propagate error
+                if e.contains("already exists on remote") {
+                    return Err(e);
+                }
+                tracing::warn!(
+                    category = "worktree",
+                    branch = branch_name,
+                    error = %e,
+                    "Remote-first worktree creation failed, falling back to local"
+                );
+            }
+        }
+    }
+
     let manager = WorktreeManager::new(repo_path).map_err(|e| e.to_string())?;
     let wt = manager
         .create_new_branch(branch_name, base_branch)
+        .map_err(|e| e.to_string())?;
+    Ok(wt.path)
+}
+
+/// SPEC-a4fb2db2: Create a worktree by first creating the branch on GitHub,
+/// then fetching it locally.
+fn create_new_worktree_remote_first(
+    repo_path: &std::path::Path,
+    branch_name: &str,
+    base_branch: Option<&str>,
+) -> Result<PathBuf, String> {
+    // Normalize base branch: strip "origin/" prefix if present
+    let base = base_branch
+        .map(|b| b.strip_prefix("origin/").unwrap_or(b))
+        .unwrap_or("HEAD");
+
+    // Resolve the SHA of the base branch on GitHub
+    let sha = gwt_core::git::resolve_remote_branch_sha(repo_path, base)?;
+
+    // Create the branch on GitHub
+    gwt_core::git::create_remote_branch(repo_path, branch_name, &sha)?;
+
+    // Fetch the newly created branch locally
+    let fetch_output = gwt_core::process::command("git")
+        .args([
+            "fetch",
+            "origin",
+            &format!("{}:{}", branch_name, branch_name),
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to run git fetch: {}", e))?;
+
+    if !fetch_output.status.success() {
+        let stderr = String::from_utf8_lossy(&fetch_output.stderr);
+        return Err(format!(
+            "Failed to fetch branch '{}' from remote (the remote branch was created and may need manual deletion): {}",
+            branch_name,
+            stderr.trim()
+        ));
+    }
+
+    // Create worktree for the fetched branch
+    let manager = WorktreeManager::new(repo_path).map_err(|e| e.to_string())?;
+    let wt = manager
+        .create_for_branch(branch_name)
         .map_err(|e| e.to_string())?;
     Ok(wt.path)
 }
@@ -311,7 +376,7 @@ fn build_bunx_package_spec(package: &str, version: Option<&str>) -> String {
     format!("{package}@{v}")
 }
 
-fn build_project_model_args(agent_id: &str, model: Option<&str>) -> Vec<String> {
+fn build_agent_model_args(agent_id: &str, model: Option<&str>) -> Vec<String> {
     let Some(model) = model.map(|s| s.trim()).filter(|s| !s.is_empty()) else {
         return Vec::new();
     };
@@ -622,6 +687,7 @@ fn build_docker_compose_up_args(
     compose_args: &[String],
     build: bool,
     recreate: bool,
+    service: Option<&str>,
 ) -> Vec<String> {
     let mut args = vec!["compose".to_string()];
     args.extend(compose_args.iter().cloned());
@@ -636,6 +702,9 @@ fn build_docker_compose_up_args(
     ]);
     if recreate {
         args.push("--force-recreate".to_string());
+    }
+    if let Some(service) = service.map(str::trim).filter(|s| !s.is_empty()) {
+        args.push(service.to_string());
     }
     args
 }
@@ -745,9 +814,35 @@ fn merge_compose_env_for_docker(
             continue;
         }
         if let Some(value) = merged_profile_env.get(k) {
+            if should_keep_existing_compose_port_value(base_env, k, value) {
+                continue;
+            }
             base_env.insert(k.to_string(), value.to_string());
         }
     }
+}
+
+fn should_keep_existing_compose_port_value(
+    base_env: &HashMap<String, String>,
+    key: &str,
+    incoming_value: &str,
+) -> bool {
+    let Some(existing_value) = base_env.get(key) else {
+        return false;
+    };
+
+    if existing_value == incoming_value {
+        return false;
+    }
+
+    let Some(incoming_port) = incoming_value.parse::<u16>().ok() else {
+        return false;
+    };
+    if existing_value.parse::<u16>().is_err() {
+        return false;
+    }
+
+    PortAllocator::is_port_in_use(incoming_port)
 }
 
 fn merge_compose_env_from_process(
@@ -822,6 +917,49 @@ fn ensure_docker_compose_ready() -> Result<(), String> {
     }
 }
 
+fn verify_docker_compose_service_start<IsRunning, ServiceLogs, ComposeDown>(
+    service: Option<&str>,
+    mut service_is_running: IsRunning,
+    mut service_logs: ServiceLogs,
+    mut compose_down: ComposeDown,
+) -> Result<(), String>
+where
+    IsRunning: FnMut(&str) -> Result<bool, String>,
+    ServiceLogs: FnMut(&str) -> Option<String>,
+    ComposeDown: FnMut() -> Result<(), String>,
+{
+    let selected_service = service.map(str::trim).unwrap_or_default();
+    if selected_service.is_empty() {
+        return Ok(());
+    }
+
+    match service_is_running(selected_service) {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            let mut message = format!(
+                "docker compose service '{}' is not running after startup.",
+                selected_service
+            );
+            if let Some(logs) = service_logs(selected_service) {
+                message.push_str("\n\n");
+                message.push_str(&logs);
+            }
+            if let Err(err) = compose_down() {
+                message.push_str("\n\n");
+                message.push_str(
+                    "Failed to run best-effort docker compose down after startup failure: ",
+                );
+                message.push_str(&err);
+            }
+            Err(message)
+        }
+        Err(err) => Err(format!(
+            "docker compose up succeeded, but failed to verify service '{}': {}",
+            selected_service, err
+        )),
+    }
+}
+
 fn docker_compose_up(
     worktree_path: &std::path::Path,
     container_name: &str,
@@ -829,26 +967,53 @@ fn docker_compose_up(
     compose_args: &[String],
     build: bool,
     recreate: bool,
+    service: Option<&str>,
 ) -> Result<(), String> {
     ensure_docker_compose_ready()?;
 
     let output = gwt_core::process::command("docker")
-        .args(build_docker_compose_up_args(compose_args, build, recreate))
+        .args(build_docker_compose_up_args(
+            compose_args,
+            build,
+            recreate,
+            service,
+        ))
         .current_dir(worktree_path)
         .env("COMPOSE_PROJECT_NAME", container_name)
         .envs(env_vars)
         .output()
         .map_err(|e| format!("Failed to run docker compose up: {}", e))?;
 
-    if output.status.success() {
-        return Ok(());
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            return Err("docker compose up failed".to_string());
+        }
+        return Err(stderr);
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.is_empty() {
-        return Err("docker compose up failed".to_string());
-    }
-    Err(stderr)
+    verify_docker_compose_service_start(
+        service,
+        |selected_service| {
+            docker_compose_service_is_running(
+                worktree_path,
+                container_name,
+                env_vars,
+                compose_args,
+                selected_service,
+            )
+        },
+        |selected_service| {
+            docker_compose_service_logs(
+                worktree_path,
+                container_name,
+                env_vars,
+                compose_args,
+                selected_service,
+            )
+        },
+        || docker_compose_down(worktree_path, container_name, env_vars, compose_args),
+    )
 }
 
 fn docker_compose_down(
@@ -876,6 +1041,97 @@ fn docker_compose_down(
         return Err("docker compose down failed".to_string());
     }
     Err(stderr)
+}
+
+fn docker_compose_service_is_running(
+    worktree_path: &std::path::Path,
+    container_name: &str,
+    env_vars: &HashMap<String, String>,
+    compose_args: &[String],
+    service: &str,
+) -> Result<bool, String> {
+    let mut args = vec!["compose".to_string()];
+    args.extend(compose_args.iter().cloned());
+    args.extend([
+        "ps".to_string(),
+        "--status".to_string(),
+        "running".to_string(),
+        "--services".to_string(),
+    ]);
+
+    let output = gwt_core::process::command("docker")
+        .args(args)
+        .current_dir(worktree_path)
+        .env("COMPOSE_PROJECT_NAME", container_name)
+        .envs(env_vars)
+        .output()
+        .map_err(|e| format!("Failed to run docker compose ps: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "docker compose ps failed".to_string()
+        } else {
+            stderr
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(compose_services_output_contains(stdout.as_ref(), service))
+}
+
+fn docker_compose_service_logs(
+    worktree_path: &std::path::Path,
+    container_name: &str,
+    env_vars: &HashMap<String, String>,
+    compose_args: &[String],
+    service: &str,
+) -> Option<String> {
+    let mut args = vec!["compose".to_string()];
+    args.extend(compose_args.iter().cloned());
+    args.extend([
+        "logs".to_string(),
+        "--no-color".to_string(),
+        "--tail".to_string(),
+        "80".to_string(),
+    ]);
+    args.push(service.to_string());
+
+    let output = gwt_core::process::command("docker")
+        .args(args)
+        .current_dir(worktree_path)
+        .env("COMPOSE_PROJECT_NAME", container_name)
+        .envs(env_vars)
+        .output()
+        .ok()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    let mut chunks = Vec::new();
+    if !stdout.is_empty() {
+        chunks.push(stdout);
+    }
+    if !stderr.is_empty() {
+        chunks.push(stderr);
+    }
+    if chunks.is_empty() {
+        None
+    } else {
+        Some(chunks.join("\n"))
+    }
+}
+
+fn compose_services_output_contains(output: &str, service: &str) -> bool {
+    let target = service.trim();
+    if target.is_empty() {
+        return false;
+    }
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .any(|line| line == target)
 }
 
 fn ensure_docker_ready() -> Result<(), String> {
@@ -1255,7 +1511,7 @@ fn build_agent_args(
                 args.push("--dangerously-skip-permissions".to_string());
             }
 
-            args.extend(build_project_model_args(agent_id, request.model.as_deref()));
+            args.extend(build_agent_model_args(agent_id, request.model.as_deref()));
         }
         "gemini" => {
             match mode {
@@ -1280,7 +1536,7 @@ fn build_agent_args(
                 args.push("-y".to_string());
             }
 
-            args.extend(build_project_model_args(agent_id, request.model.as_deref()));
+            args.extend(build_agent_model_args(agent_id, request.model.as_deref()));
         }
         "opencode" => {
             match mode {
@@ -1303,7 +1559,7 @@ fn build_agent_args(
                 }
             }
 
-            args.extend(build_project_model_args(agent_id, request.model.as_deref()));
+            args.extend(build_agent_model_args(agent_id, request.model.as_deref()));
         }
         _ => {}
     }
@@ -1772,15 +2028,6 @@ fn normalize_terminal_shell_id(shell_id: Option<&str>) -> Option<String> {
     }
 }
 
-fn resolve_agent_terminal_shell(agent_id: &str, requested_shell: Option<&str>) -> Option<String> {
-    let normalized = normalize_terminal_shell_id(requested_shell);
-    if cfg!(target_os = "windows") && agent_id == "claude" && normalized.is_none() {
-        // Claude on Windows host runtime is more stable through cmd when no explicit shell is set.
-        return Some("cmd".to_string());
-    }
-    normalized
-}
-
 fn resolve_shell_id_for_spawn(shell_id: Option<&str>) -> Option<String> {
     let explicit = shell_id.map(str::trim).filter(|s| !s.is_empty());
     if explicit.is_some() {
@@ -1800,6 +2047,7 @@ fn resolve_shell_id_for_spawn(shell_id: Option<&str>) -> Option<String> {
 fn resolve_shell_for_spawn(shell_id: Option<&str>) -> (String, Vec<String>) {
     #[cfg(target_os = "windows")]
     {
+        use gwt_core::terminal::shell::WindowsShell;
         if let Some(id) = shell_id {
             match id {
                 "powershell" => {
@@ -1910,6 +2158,7 @@ pub fn spawn_shell(
 mod tests {
     use super::*;
     use gwt_core::terminal::runner::FallbackRunner;
+    use std::cell::Cell;
     use std::ffi::OsString;
     use std::path::Path;
     use std::time::Duration;
@@ -1940,14 +2189,6 @@ mod tests {
                 Some(value) => std::env::set_var(self.key, value),
                 None => std::env::remove_var(self.key),
             }
-        }
-    }
-
-    fn running_test_command() -> (&'static str, Vec<String>) {
-        if cfg!(windows) {
-            ("cmd.exe", vec!["/c".to_string(), "pause".to_string()])
-        } else {
-            ("/bin/cat", vec![])
         }
     }
 
@@ -2044,28 +2285,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_agent_terminal_shell_defaults_claude_to_cmd_on_windows() {
-        let resolved = resolve_agent_terminal_shell("claude", None);
-        if cfg!(target_os = "windows") {
-            assert_eq!(resolved, Some("cmd".to_string()));
-        } else {
-            assert_eq!(resolved, None);
-        }
-    }
-
-    #[test]
-    fn resolve_agent_terminal_shell_preserves_explicit_selection() {
-        assert_eq!(
-            resolve_agent_terminal_shell("claude", Some("powershell")),
-            Some("powershell".to_string())
-        );
-        assert_eq!(
-            resolve_agent_terminal_shell("claude", Some("wsl")),
-            Some("wsl".to_string())
-        );
-    }
-
-    #[test]
     fn consume_osc7_cwd_updates_buffers_fragmented_sequences() {
         let mut pending = Vec::new();
         let mut last_cwd = String::new();
@@ -2100,36 +2319,6 @@ mod tests {
             consume_osc7_cwd_updates(&mut pending, b"\x1b]7;file://host/tmp/b\x07", &mut last_cwd),
             None
         );
-    }
-
-    #[test]
-    fn count_dsr_cursor_position_queries_detects_in_single_chunk() {
-        let mut pending = Vec::new();
-        let count = count_dsr_cursor_position_queries(&mut pending, b"\x1b[6n");
-        assert_eq!(count, 1);
-    }
-
-    #[test]
-    fn count_dsr_cursor_position_queries_handles_fragmented_sequence() {
-        let mut pending = Vec::new();
-        assert_eq!(count_dsr_cursor_position_queries(&mut pending, b"\x1b["), 0);
-        assert_eq!(pending, b"\x1b[".to_vec());
-
-        assert_eq!(count_dsr_cursor_position_queries(&mut pending, b"6n"), 1);
-    }
-
-    #[test]
-    fn count_dsr_cursor_position_queries_ignores_other_dsr_codes() {
-        let mut pending = Vec::new();
-        let count = count_dsr_cursor_position_queries(&mut pending, b"\x1b[5n");
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn count_dsr_cursor_position_queries_counts_multiple_queries() {
-        let mut pending = Vec::new();
-        let count = count_dsr_cursor_position_queries(&mut pending, b"\x1b[6nfoo\x1b[6n");
-        assert_eq!(count, 2);
     }
 
     #[test]
@@ -2243,25 +2432,25 @@ mod tests {
     }
 
     #[test]
-    fn build_project_model_args_is_agent_specific() {
+    fn build_agent_model_args_is_agent_specific() {
         assert_eq!(
-            build_project_model_args("codex", Some("gpt-5.2")),
+            build_agent_model_args("codex", Some("gpt-5.2")),
             vec!["--model=gpt-5.2".to_string()]
         );
         assert_eq!(
-            build_project_model_args("claude", Some("sonnet")),
+            build_agent_model_args("claude", Some("sonnet")),
             vec!["--model".to_string(), "sonnet".to_string()]
         );
         assert_eq!(
-            build_project_model_args("opencode", Some("provider/model")),
+            build_agent_model_args("opencode", Some("provider/model")),
             vec!["-m".to_string(), "provider/model".to_string()]
         );
         assert_eq!(
-            build_project_model_args("gemini", Some("gemini-2.5-pro")),
+            build_agent_model_args("gemini", Some("gemini-2.5-pro")),
             vec!["-m".to_string(), "gemini-2.5-pro".to_string()]
         );
-        assert!(build_project_model_args("codex", None).is_empty());
-        assert!(build_project_model_args("codex", Some("  ")).is_empty());
+        assert!(build_agent_model_args("codex", None).is_empty());
+        assert!(build_agent_model_args("codex", Some("  ")).is_empty());
     }
 
     #[test]
@@ -2503,95 +2692,6 @@ mod tests {
     }
 
     #[test]
-    fn promote_unexpected_stream_eof_running_pane_is_platform_safe() {
-        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
-        let home = tempfile::TempDir::new().unwrap();
-        let _env = crate::commands::TestEnvGuard::new(home.path());
-
-        let state = AppState::new();
-        let pane_id = "pane-stream-eof-running-test";
-        let (command, args) = running_test_command();
-        let pane =
-            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
-                pane_id: pane_id.to_string(),
-                command: command.to_string(),
-                args,
-                working_dir: std::env::temp_dir(),
-                branch_name: "test-branch".to_string(),
-                agent_name: "test-agent".to_string(),
-                agent_color: AgentColor::Green,
-                rows: 24,
-                cols: 80,
-                env_vars: HashMap::new(),
-                terminal_shell: None,
-            })
-            .expect("failed to create test pane");
-
-        {
-            let mut mgr = state.pane_manager.lock().unwrap();
-            mgr.add_pane(pane).expect("failed to add test pane");
-        }
-
-        let mut stream_error = None;
-        promote_unexpected_stream_eof_to_error(&state, pane_id, &mut stream_error);
-        if cfg!(target_os = "windows") {
-            assert!(stream_error.is_none());
-        } else {
-            assert_eq!(stream_error.as_deref(), Some("stream closed unexpectedly"));
-        }
-
-        let mut mgr = state.pane_manager.lock().unwrap();
-        let _ = mgr.kill_all();
-    }
-
-    #[test]
-    fn promote_unexpected_stream_eof_to_error_skips_non_running_pane() {
-        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
-        let home = tempfile::TempDir::new().unwrap();
-        let _env = crate::commands::TestEnvGuard::new(home.path());
-
-        let state = AppState::new();
-        let pane_id = "pane-stream-eof-non-running-test";
-        let (command, args) = running_test_command();
-        let pane =
-            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
-                pane_id: pane_id.to_string(),
-                command: command.to_string(),
-                args,
-                working_dir: std::env::temp_dir(),
-                branch_name: "test-branch".to_string(),
-                agent_name: "test-agent".to_string(),
-                agent_color: AgentColor::Green,
-                rows: 24,
-                cols: 80,
-                env_vars: HashMap::new(),
-                terminal_shell: None,
-            })
-            .expect("failed to create test pane");
-
-        {
-            let mut mgr = state.pane_manager.lock().unwrap();
-            mgr.add_pane(pane).expect("failed to add test pane");
-            let pane = mgr.pane_mut_by_id(pane_id).expect("missing test pane");
-            pane.mark_error("already stopped");
-        }
-
-        let mut stream_error = None;
-        promote_unexpected_stream_eof_to_error(&state, pane_id, &mut stream_error);
-        assert!(stream_error.is_none());
-
-        let mut mgr = state.pane_manager.lock().unwrap();
-        let _ = mgr.kill_all();
-    }
-
-    #[test]
-    fn promote_unexpected_stream_eof_to_error_keeps_existing_error() {
-        let state = AppState::new();
-        let mut stream_error = Some("existing error".to_string());
-        promote_unexpected_stream_eof_to_error(&state, "missing-pane", &mut stream_error);
-        assert_eq!(stream_error.as_deref(), Some("existing error"));
-    }
-    #[test]
     fn append_close_hint_to_pane_scrollback_records_hint() {
         let _lock = crate::commands::ENV_LOCK.lock().unwrap();
         let home = tempfile::TempDir::new().unwrap();
@@ -2796,7 +2896,7 @@ multi_agent = true
     #[test]
     fn build_docker_compose_up_args_build_and_recreate_flags() {
         assert_eq!(
-            build_docker_compose_up_args(&[], false, false),
+            build_docker_compose_up_args(&[], false, false, None),
             vec![
                 "compose".to_string(),
                 "up".to_string(),
@@ -2805,12 +2905,131 @@ multi_agent = true
             ]
         );
 
-        let build = build_docker_compose_up_args(&[], true, false);
+        let build = build_docker_compose_up_args(&[], true, false, None);
         assert!(build.contains(&"--build".to_string()));
         assert!(!build.contains(&"--no-build".to_string()));
 
-        let recreate = build_docker_compose_up_args(&[], false, true);
+        let recreate = build_docker_compose_up_args(&[], false, true, None);
         assert!(recreate.contains(&"--force-recreate".to_string()));
+
+        let with_service = build_docker_compose_up_args(&[], false, false, Some("dev"));
+        assert_eq!(with_service.last(), Some(&"dev".to_string()));
+
+        let with_blank_service = build_docker_compose_up_args(&[], false, false, Some("  "));
+        assert_eq!(
+            with_blank_service,
+            vec![
+                "compose".to_string(),
+                "up".to_string(),
+                "-d".to_string(),
+                "--no-build".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn compose_services_output_contains_matches_trimmed_exact_line() {
+        let output = " app \nworker\n";
+        assert!(compose_services_output_contains(output, "app"));
+        assert!(compose_services_output_contains(output, "worker"));
+    }
+
+    #[test]
+    fn compose_services_output_contains_does_not_match_partial_names() {
+        let output = "application\nworker-1\n";
+        assert!(!compose_services_output_contains(output, "app"));
+        assert!(!compose_services_output_contains(output, "worker"));
+    }
+
+    #[test]
+    fn verify_docker_compose_service_start_skips_when_service_is_missing() {
+        let running_called = Cell::new(false);
+        let logs_called = Cell::new(false);
+        let down_called = Cell::new(false);
+
+        let result = verify_docker_compose_service_start(
+            None,
+            |_| {
+                running_called.set(true);
+                Ok(true)
+            },
+            |_| {
+                logs_called.set(true);
+                None
+            },
+            || {
+                down_called.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(!running_called.get());
+        assert!(!logs_called.get());
+        assert!(!down_called.get());
+    }
+
+    #[test]
+    fn verify_docker_compose_service_start_returns_ok_when_service_is_running() {
+        let down_called = Cell::new(false);
+
+        let result = verify_docker_compose_service_start(
+            Some(" app "),
+            |service| {
+                assert_eq!(service, "app");
+                Ok(true)
+            },
+            |_| Some("should not be called".to_string()),
+            || {
+                down_called.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(!down_called.get());
+    }
+
+    #[test]
+    fn verify_docker_compose_service_start_runs_best_effort_down_on_failure() {
+        let down_called = Cell::new(false);
+
+        let err = verify_docker_compose_service_start(
+            Some("app"),
+            |_| Ok(false),
+            |_| Some("service logs".to_string()),
+            || {
+                down_called.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(down_called.get());
+        assert!(err.contains("docker compose service 'app' is not running after startup."));
+        assert!(err.contains("service logs"));
+        assert!(!err.contains("Failed to run best-effort docker compose down"));
+    }
+
+    #[test]
+    fn verify_docker_compose_service_start_appends_down_error_on_cleanup_failure() {
+        let down_called = Cell::new(false);
+
+        let err = verify_docker_compose_service_start(
+            Some("app"),
+            |_| Ok(false),
+            |_| None,
+            || {
+                down_called.set(true);
+                Err("cleanup failed".to_string())
+            },
+        )
+        .unwrap_err();
+
+        assert!(down_called.get());
+        assert!(err.contains("docker compose service 'app' is not running after startup."));
+        assert!(err.contains("Failed to run best-effort docker compose down"));
+        assert!(err.contains("cleanup failed"));
     }
 
     #[test]
@@ -2918,6 +3137,37 @@ services:
 
         assert_eq!(base.get("CUSTOM_ENV"), Some(&"custom".to_string()));
         assert_eq!(base.get("GITHUB_TOKEN"), Some(&"ghs_xxx".to_string()));
+    }
+
+    #[test]
+    fn merge_compose_env_for_docker_keeps_existing_allocated_port_when_incoming_is_occupied() {
+        use std::net::TcpListener;
+
+        let temp = TempDir::new().unwrap();
+        let compose_path = temp.path().join("docker-compose.yml");
+        std::fs::write(
+            &compose_path,
+            r#"
+services:
+  app:
+    ports:
+      - "${KNOWLEDGE_DB_PORT:-5432}:5432"
+"#,
+        )
+        .unwrap();
+
+        let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+        let occupied_port = occupied.local_addr().unwrap().port();
+
+        let mut base = HashMap::new();
+        base.insert("KNOWLEDGE_DB_PORT".to_string(), "15432".to_string());
+
+        let mut merged = HashMap::new();
+        merged.insert("KNOWLEDGE_DB_PORT".to_string(), occupied_port.to_string());
+
+        merge_compose_env_for_docker(&mut base, &merged, &[compose_path]);
+
+        assert_eq!(base.get("KNOWLEDGE_DB_PORT"), Some(&"15432".to_string()));
     }
 
     #[test]
@@ -3613,6 +3863,7 @@ pub(crate) fn launch_agent_for_project_root(
                     &compose_args,
                     docker_build,
                     docker_recreate,
+                    Some(service.as_str()),
                 )?;
 
                 docker_container_name = Some(container_name);
@@ -3704,6 +3955,7 @@ pub(crate) fn launch_agent_for_project_root(
                         &compose_args,
                         docker_build,
                         docker_recreate,
+                        Some(service.as_str()),
                     )?;
 
                     docker_container_name = Some(container_name);
@@ -4031,8 +4283,12 @@ pub(crate) fn launch_agent_for_project_root(
             }
         }
         DockerExecMode::None => {
-            let terminal_shell =
-                resolve_agent_terminal_shell(agent_id, request.terminal_shell.as_deref());
+            let terminal_shell = request
+                .terminal_shell
+                .as_deref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
 
             // WSL agent launch uses the PTY-write approach (FR-007).
             if terminal_shell.as_deref() == Some("wsl") {
@@ -4347,61 +4603,6 @@ fn consume_osc7_cwd_updates(
     latest_changed
 }
 
-const DSR_CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
-const DSR_CURSOR_POSITION_RESPONSE: &[u8] = b"\x1b[1;1R";
-
-fn retain_possible_dsr_fragment(pending: &mut Vec<u8>, combined: &[u8]) {
-    pending.clear();
-    if combined.is_empty() {
-        return;
-    }
-
-    let max_keep = (DSR_CURSOR_POSITION_QUERY.len().saturating_sub(1)).min(combined.len());
-    for keep in (1..=max_keep).rev() {
-        if combined[combined.len() - keep..] == DSR_CURSOR_POSITION_QUERY[..keep] {
-            pending.extend_from_slice(&combined[combined.len() - keep..]);
-            return;
-        }
-    }
-}
-
-fn count_dsr_cursor_position_queries(pending: &mut Vec<u8>, chunk: &[u8]) -> usize {
-    if pending.is_empty() && chunk.is_empty() {
-        return 0;
-    }
-
-    let mut combined = Vec::with_capacity(pending.len() + chunk.len());
-    combined.extend_from_slice(pending);
-    combined.extend_from_slice(chunk);
-    pending.clear();
-
-    let mut count = 0usize;
-    if combined.len() >= DSR_CURSOR_POSITION_QUERY.len() {
-        for idx in 0..=combined.len() - DSR_CURSOR_POSITION_QUERY.len() {
-            if combined[idx..idx + DSR_CURSOR_POSITION_QUERY.len()] == *DSR_CURSOR_POSITION_QUERY {
-                count += 1;
-            }
-        }
-    }
-
-    retain_possible_dsr_fragment(pending, &combined);
-    count
-}
-
-fn respond_to_dsr_cursor_queries(state: &AppState, pane_id: &str, count: usize) {
-    if count == 0 {
-        return;
-    }
-
-    if let Ok(mut manager) = state.pane_manager.lock() {
-        if let Some(pane) = manager.pane_mut_by_id(pane_id) {
-            for _ in 0..count {
-                let _ = pane.write_input(DSR_CURSOR_POSITION_RESPONSE);
-            }
-        }
-    }
-}
-
 fn mark_pane_stream_error_and_write_message(
     state: &AppState,
     pane_id: &str,
@@ -4433,50 +4634,6 @@ fn append_close_hint_to_pane_scrollback(state: &AppState, pane_id: &str) -> Vec<
     bytes
 }
 
-fn promote_unexpected_stream_eof_to_error(
-    state: &AppState,
-    pane_id: &str,
-    stream_error: &mut Option<String>,
-) {
-    if stream_error.is_some() {
-        return;
-    }
-
-    let pane_running = |state: &AppState, pane_id: &str| -> bool {
-        if let Ok(mut manager) = state.pane_manager.lock() {
-            if let Some(pane) = manager.pane_mut_by_id(pane_id) {
-                let _ = pane.check_status();
-                return matches!(pane.status(), PaneStatus::Running);
-            }
-        }
-        false
-    };
-
-    let still_running = pane_running(state, pane_id);
-
-    #[cfg(target_os = "windows")]
-    if still_running {
-        // Windows PTY streams can transiently return EOF while the child process
-        // is still alive. Re-check briefly and avoid forcing Error state when alive.
-        let mut confirmed_running = true;
-        for _ in 0..3 {
-            std::thread::sleep(Duration::from_millis(50));
-            if !pane_running(state, pane_id) {
-                confirmed_running = false;
-                break;
-            }
-        }
-        if confirmed_running {
-            return;
-        }
-
-        return;
-    }
-
-    if still_running {
-        *stream_error = Some("stream closed unexpectedly".to_string());
-    }
-}
 /// Stream PTY output to the frontend via Tauri events
 fn stream_pty_output(
     mut reader: Box<dyn Read + Send>,
@@ -4489,14 +4646,10 @@ fn stream_pty_output(
     let mut stream_error: Option<String> = None;
     let mut last_cwd = String::new();
     let mut osc7_pending = Vec::new();
-    let mut dsr_pending = Vec::new();
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break, // EOF
             Ok(n) => {
-                let dsr_queries = count_dsr_cursor_position_queries(&mut dsr_pending, &buf[..n]);
-                respond_to_dsr_cursor_queries(&state, &pane_id, dsr_queries);
-
                 // Keep the scrollback file up-to-date even if the UI is not listening.
                 if let Ok(mut manager) = state.pane_manager.lock() {
                     if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
@@ -4533,7 +4686,6 @@ fn stream_pty_output(
         }
     }
 
-    promote_unexpected_stream_eof_to_error(&state, &pane_id, &mut stream_error);
     if let Some(details) = stream_error.as_deref() {
         let bytes = mark_pane_stream_error_and_write_message(&state, &pane_id, details);
 

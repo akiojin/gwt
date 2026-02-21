@@ -670,6 +670,7 @@ pub fn build_app(
             crate::commands::issue::find_existing_issue_branch,
             crate::commands::issue::link_branch_to_issue,
             crate::commands::issue::rollback_issue_branch,
+            crate::commands::issue::classify_issue_branch_prefix,
             crate::commands::issue_spec::upsert_spec_issue_cmd,
             crate::commands::issue_spec::get_spec_issue_detail_cmd,
             crate::commands::issue_spec::find_spec_issue_by_spec_id_cmd,
