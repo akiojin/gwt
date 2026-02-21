@@ -311,7 +311,7 @@ fn build_bunx_package_spec(package: &str, version: Option<&str>) -> String {
     format!("{package}@{v}")
 }
 
-fn build_project_model_args(agent_id: &str, model: Option<&str>) -> Vec<String> {
+fn build_agent_model_args(agent_id: &str, model: Option<&str>) -> Vec<String> {
     let Some(model) = model.map(|s| s.trim()).filter(|s| !s.is_empty()) else {
         return Vec::new();
     };
@@ -1446,7 +1446,7 @@ fn build_agent_args(
                 args.push("--dangerously-skip-permissions".to_string());
             }
 
-            args.extend(build_project_model_args(agent_id, request.model.as_deref()));
+            args.extend(build_agent_model_args(agent_id, request.model.as_deref()));
         }
         "gemini" => {
             match mode {
@@ -1471,7 +1471,7 @@ fn build_agent_args(
                 args.push("-y".to_string());
             }
 
-            args.extend(build_project_model_args(agent_id, request.model.as_deref()));
+            args.extend(build_agent_model_args(agent_id, request.model.as_deref()));
         }
         "opencode" => {
             match mode {
@@ -1494,7 +1494,7 @@ fn build_agent_args(
                 }
             }
 
-            args.extend(build_project_model_args(agent_id, request.model.as_deref()));
+            args.extend(build_agent_model_args(agent_id, request.model.as_deref()));
         }
         _ => {}
     }
@@ -1963,15 +1963,6 @@ fn normalize_terminal_shell_id(shell_id: Option<&str>) -> Option<String> {
     }
 }
 
-fn resolve_agent_terminal_shell(agent_id: &str, requested_shell: Option<&str>) -> Option<String> {
-    let normalized = normalize_terminal_shell_id(requested_shell);
-    if cfg!(target_os = "windows") && agent_id == "claude" && normalized.is_none() {
-        // Claude on Windows host runtime is more stable through cmd when no explicit shell is set.
-        return Some("cmd".to_string());
-    }
-    normalized
-}
-
 fn resolve_shell_id_for_spawn(shell_id: Option<&str>) -> Option<String> {
     let explicit = shell_id.map(str::trim).filter(|s| !s.is_empty());
     if explicit.is_some() {
@@ -1991,6 +1982,7 @@ fn resolve_shell_id_for_spawn(shell_id: Option<&str>) -> Option<String> {
 fn resolve_shell_for_spawn(shell_id: Option<&str>) -> (String, Vec<String>) {
     #[cfg(target_os = "windows")]
     {
+        use gwt_core::terminal::shell::WindowsShell;
         if let Some(id) = shell_id {
             match id {
                 "powershell" => {
@@ -2135,14 +2127,6 @@ mod tests {
         }
     }
 
-    fn running_test_command() -> (&'static str, Vec<String>) {
-        if cfg!(windows) {
-            ("cmd.exe", vec!["/c".to_string(), "pause".to_string()])
-        } else {
-            ("/bin/cat", vec![])
-        }
-    }
-
     #[test]
     fn resolve_shell_launch_spec_prefers_shell_env_with_login_arg() {
         let _lock = crate::commands::ENV_LOCK.lock().unwrap();
@@ -2236,28 +2220,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_agent_terminal_shell_defaults_claude_to_cmd_on_windows() {
-        let resolved = resolve_agent_terminal_shell("claude", None);
-        if cfg!(target_os = "windows") {
-            assert_eq!(resolved, Some("cmd".to_string()));
-        } else {
-            assert_eq!(resolved, None);
-        }
-    }
-
-    #[test]
-    fn resolve_agent_terminal_shell_preserves_explicit_selection() {
-        assert_eq!(
-            resolve_agent_terminal_shell("claude", Some("powershell")),
-            Some("powershell".to_string())
-        );
-        assert_eq!(
-            resolve_agent_terminal_shell("claude", Some("wsl")),
-            Some("wsl".to_string())
-        );
-    }
-
-    #[test]
     fn consume_osc7_cwd_updates_buffers_fragmented_sequences() {
         let mut pending = Vec::new();
         let mut last_cwd = String::new();
@@ -2292,36 +2254,6 @@ mod tests {
             consume_osc7_cwd_updates(&mut pending, b"\x1b]7;file://host/tmp/b\x07", &mut last_cwd),
             None
         );
-    }
-
-    #[test]
-    fn count_dsr_cursor_position_queries_detects_in_single_chunk() {
-        let mut pending = Vec::new();
-        let count = count_dsr_cursor_position_queries(&mut pending, b"\x1b[6n");
-        assert_eq!(count, 1);
-    }
-
-    #[test]
-    fn count_dsr_cursor_position_queries_handles_fragmented_sequence() {
-        let mut pending = Vec::new();
-        assert_eq!(count_dsr_cursor_position_queries(&mut pending, b"\x1b["), 0);
-        assert_eq!(pending, b"\x1b[".to_vec());
-
-        assert_eq!(count_dsr_cursor_position_queries(&mut pending, b"6n"), 1);
-    }
-
-    #[test]
-    fn count_dsr_cursor_position_queries_ignores_other_dsr_codes() {
-        let mut pending = Vec::new();
-        let count = count_dsr_cursor_position_queries(&mut pending, b"\x1b[5n");
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn count_dsr_cursor_position_queries_counts_multiple_queries() {
-        let mut pending = Vec::new();
-        let count = count_dsr_cursor_position_queries(&mut pending, b"\x1b[6nfoo\x1b[6n");
-        assert_eq!(count, 2);
     }
 
     #[test]
@@ -2435,25 +2367,25 @@ mod tests {
     }
 
     #[test]
-    fn build_project_model_args_is_agent_specific() {
+    fn build_agent_model_args_is_agent_specific() {
         assert_eq!(
-            build_project_model_args("codex", Some("gpt-5.2")),
+            build_agent_model_args("codex", Some("gpt-5.2")),
             vec!["--model=gpt-5.2".to_string()]
         );
         assert_eq!(
-            build_project_model_args("claude", Some("sonnet")),
+            build_agent_model_args("claude", Some("sonnet")),
             vec!["--model".to_string(), "sonnet".to_string()]
         );
         assert_eq!(
-            build_project_model_args("opencode", Some("provider/model")),
+            build_agent_model_args("opencode", Some("provider/model")),
             vec!["-m".to_string(), "provider/model".to_string()]
         );
         assert_eq!(
-            build_project_model_args("gemini", Some("gemini-2.5-pro")),
+            build_agent_model_args("gemini", Some("gemini-2.5-pro")),
             vec!["-m".to_string(), "gemini-2.5-pro".to_string()]
         );
-        assert!(build_project_model_args("codex", None).is_empty());
-        assert!(build_project_model_args("codex", Some("  ")).is_empty());
+        assert!(build_agent_model_args("codex", None).is_empty());
+        assert!(build_agent_model_args("codex", Some("  ")).is_empty());
     }
 
     #[test]
@@ -2694,95 +2626,6 @@ mod tests {
         let _ = mgr.kill_all();
     }
 
-    #[test]
-    fn promote_unexpected_stream_eof_running_pane_is_platform_safe() {
-        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
-        let home = tempfile::TempDir::new().unwrap();
-        let _env = crate::commands::TestEnvGuard::new(home.path());
-
-        let state = AppState::new();
-        let pane_id = "pane-stream-eof-running-test";
-        let (command, args) = running_test_command();
-        let pane =
-            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
-                pane_id: pane_id.to_string(),
-                command: command.to_string(),
-                args,
-                working_dir: std::env::temp_dir(),
-                branch_name: "test-branch".to_string(),
-                agent_name: "test-agent".to_string(),
-                agent_color: AgentColor::Green,
-                rows: 24,
-                cols: 80,
-                env_vars: HashMap::new(),
-                terminal_shell: None,
-            })
-            .expect("failed to create test pane");
-
-        {
-            let mut mgr = state.pane_manager.lock().unwrap();
-            mgr.add_pane(pane).expect("failed to add test pane");
-        }
-
-        let mut stream_error = None;
-        promote_unexpected_stream_eof_to_error(&state, pane_id, &mut stream_error);
-        if cfg!(target_os = "windows") {
-            assert!(stream_error.is_none());
-        } else {
-            assert_eq!(stream_error.as_deref(), Some("stream closed unexpectedly"));
-        }
-
-        let mut mgr = state.pane_manager.lock().unwrap();
-        let _ = mgr.kill_all();
-    }
-
-    #[test]
-    fn promote_unexpected_stream_eof_to_error_skips_non_running_pane() {
-        let _lock = crate::commands::ENV_LOCK.lock().unwrap();
-        let home = tempfile::TempDir::new().unwrap();
-        let _env = crate::commands::TestEnvGuard::new(home.path());
-
-        let state = AppState::new();
-        let pane_id = "pane-stream-eof-non-running-test";
-        let (command, args) = running_test_command();
-        let pane =
-            gwt_core::terminal::pane::TerminalPane::new(gwt_core::terminal::pane::PaneConfig {
-                pane_id: pane_id.to_string(),
-                command: command.to_string(),
-                args,
-                working_dir: std::env::temp_dir(),
-                branch_name: "test-branch".to_string(),
-                agent_name: "test-agent".to_string(),
-                agent_color: AgentColor::Green,
-                rows: 24,
-                cols: 80,
-                env_vars: HashMap::new(),
-                terminal_shell: None,
-            })
-            .expect("failed to create test pane");
-
-        {
-            let mut mgr = state.pane_manager.lock().unwrap();
-            mgr.add_pane(pane).expect("failed to add test pane");
-            let pane = mgr.pane_mut_by_id(pane_id).expect("missing test pane");
-            pane.mark_error("already stopped");
-        }
-
-        let mut stream_error = None;
-        promote_unexpected_stream_eof_to_error(&state, pane_id, &mut stream_error);
-        assert!(stream_error.is_none());
-
-        let mut mgr = state.pane_manager.lock().unwrap();
-        let _ = mgr.kill_all();
-    }
-
-    #[test]
-    fn promote_unexpected_stream_eof_to_error_keeps_existing_error() {
-        let state = AppState::new();
-        let mut stream_error = Some("existing error".to_string());
-        promote_unexpected_stream_eof_to_error(&state, "missing-pane", &mut stream_error);
-        assert_eq!(stream_error.as_deref(), Some("existing error"));
-    }
     #[test]
     fn append_close_hint_to_pane_scrollback_records_hint() {
         let _lock = crate::commands::ENV_LOCK.lock().unwrap();
@@ -4375,8 +4218,12 @@ pub(crate) fn launch_agent_for_project_root(
             }
         }
         DockerExecMode::None => {
-            let terminal_shell =
-                resolve_agent_terminal_shell(agent_id, request.terminal_shell.as_deref());
+            let terminal_shell = request
+                .terminal_shell
+                .as_deref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
 
             // WSL agent launch uses the PTY-write approach (FR-007).
             if terminal_shell.as_deref() == Some("wsl") {
@@ -4691,61 +4538,6 @@ fn consume_osc7_cwd_updates(
     latest_changed
 }
 
-const DSR_CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
-const DSR_CURSOR_POSITION_RESPONSE: &[u8] = b"\x1b[1;1R";
-
-fn retain_possible_dsr_fragment(pending: &mut Vec<u8>, combined: &[u8]) {
-    pending.clear();
-    if combined.is_empty() {
-        return;
-    }
-
-    let max_keep = (DSR_CURSOR_POSITION_QUERY.len().saturating_sub(1)).min(combined.len());
-    for keep in (1..=max_keep).rev() {
-        if combined[combined.len() - keep..] == DSR_CURSOR_POSITION_QUERY[..keep] {
-            pending.extend_from_slice(&combined[combined.len() - keep..]);
-            return;
-        }
-    }
-}
-
-fn count_dsr_cursor_position_queries(pending: &mut Vec<u8>, chunk: &[u8]) -> usize {
-    if pending.is_empty() && chunk.is_empty() {
-        return 0;
-    }
-
-    let mut combined = Vec::with_capacity(pending.len() + chunk.len());
-    combined.extend_from_slice(pending);
-    combined.extend_from_slice(chunk);
-    pending.clear();
-
-    let mut count = 0usize;
-    if combined.len() >= DSR_CURSOR_POSITION_QUERY.len() {
-        for idx in 0..=combined.len() - DSR_CURSOR_POSITION_QUERY.len() {
-            if combined[idx..idx + DSR_CURSOR_POSITION_QUERY.len()] == *DSR_CURSOR_POSITION_QUERY {
-                count += 1;
-            }
-        }
-    }
-
-    retain_possible_dsr_fragment(pending, &combined);
-    count
-}
-
-fn respond_to_dsr_cursor_queries(state: &AppState, pane_id: &str, count: usize) {
-    if count == 0 {
-        return;
-    }
-
-    if let Ok(mut manager) = state.pane_manager.lock() {
-        if let Some(pane) = manager.pane_mut_by_id(pane_id) {
-            for _ in 0..count {
-                let _ = pane.write_input(DSR_CURSOR_POSITION_RESPONSE);
-            }
-        }
-    }
-}
-
 fn mark_pane_stream_error_and_write_message(
     state: &AppState,
     pane_id: &str,
@@ -4777,50 +4569,6 @@ fn append_close_hint_to_pane_scrollback(state: &AppState, pane_id: &str) -> Vec<
     bytes
 }
 
-fn promote_unexpected_stream_eof_to_error(
-    state: &AppState,
-    pane_id: &str,
-    stream_error: &mut Option<String>,
-) {
-    if stream_error.is_some() {
-        return;
-    }
-
-    let pane_running = |state: &AppState, pane_id: &str| -> bool {
-        if let Ok(mut manager) = state.pane_manager.lock() {
-            if let Some(pane) = manager.pane_mut_by_id(pane_id) {
-                let _ = pane.check_status();
-                return matches!(pane.status(), PaneStatus::Running);
-            }
-        }
-        false
-    };
-
-    let still_running = pane_running(state, pane_id);
-
-    #[cfg(target_os = "windows")]
-    if still_running {
-        // Windows PTY streams can transiently return EOF while the child process
-        // is still alive. Re-check briefly and avoid forcing Error state when alive.
-        let mut confirmed_running = true;
-        for _ in 0..3 {
-            std::thread::sleep(Duration::from_millis(50));
-            if !pane_running(state, pane_id) {
-                confirmed_running = false;
-                break;
-            }
-        }
-        if confirmed_running {
-            return;
-        }
-
-        return;
-    }
-
-    if still_running {
-        *stream_error = Some("stream closed unexpectedly".to_string());
-    }
-}
 /// Stream PTY output to the frontend via Tauri events
 fn stream_pty_output(
     mut reader: Box<dyn Read + Send>,
@@ -4833,14 +4581,10 @@ fn stream_pty_output(
     let mut stream_error: Option<String> = None;
     let mut last_cwd = String::new();
     let mut osc7_pending = Vec::new();
-    let mut dsr_pending = Vec::new();
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break, // EOF
             Ok(n) => {
-                let dsr_queries = count_dsr_cursor_position_queries(&mut dsr_pending, &buf[..n]);
-                respond_to_dsr_cursor_queries(&state, &pane_id, dsr_queries);
-
                 // Keep the scrollback file up-to-date even if the UI is not listening.
                 if let Ok(mut manager) = state.pane_manager.lock() {
                     if let Some(pane) = manager.pane_mut_by_id(&pane_id) {
@@ -4877,7 +4621,6 @@ fn stream_pty_output(
         }
     }
 
-    promote_unexpected_stream_eof_to_error(&state, &pane_id, &mut stream_error);
     if let Some(details) = stream_error.as_deref() {
         let bytes = mark_pane_stream_error_and_write_message(&state, &pane_id, details);
 
