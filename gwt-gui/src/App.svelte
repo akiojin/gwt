@@ -2680,7 +2680,7 @@
   cpuUsage={systemMonitor.cpuUsage}
   memUsed={systemMonitor.memUsed}
   memTotal={systemMonitor.memTotal}
-  gpuInfo={systemMonitor.gpuInfo}
+  gpuInfos={systemMonitor.gpuInfos}
   onclose={() => (showAbout = false)}
 />
 

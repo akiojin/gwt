@@ -41,6 +41,9 @@ sysinfo.workspace = true
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 nvml-wrapper = { workspace = true, optional = true }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+wmi = "0.14"
+
 [features]
 nvidia-gpu = ["dep:nvml-wrapper"]
 

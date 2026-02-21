@@ -33,7 +33,7 @@
     cpuUsage = 0,
     memUsed = 0,
     memTotal = 0,
-    gpuInfo = null as GpuInfo | null,
+    gpuInfos = [] as GpuInfo[],
     onclose,
   }: {
     open?: boolean;
@@ -41,7 +41,7 @@
     cpuUsage?: number;
     memUsed?: number;
     memTotal?: number;
-    gpuInfo?: GpuInfo | null;
+    gpuInfos?: GpuInfo[];
     onclose: () => void;
   } = $props();
 
@@ -169,18 +169,22 @@
               <span class={`sys-bar ${usageColorClass(memPct)}`}>{renderBar(memPct)}</span>
               <span class={`sys-value ${usageColorClass(memPct)}`}>{formatMemory(memUsed)} / {formatMemory(memTotal)} GB ({memPct}%)</span>
             </div>
-            {#if gpuInfo}
-              <div class="sys-section">
-                <span class="sys-heading">GPU</span>
-                <span class="sys-value">{gpuInfo.name}</span>
-                {#if gpuInfo.usage_percent != null}
-                  <span class={`sys-bar ${usageColorClass(gpuInfo.usage_percent)}`}>{renderBar(gpuInfo.usage_percent)}</span>
-                  <span class={`sys-value ${usageColorClass(gpuInfo.usage_percent)}`}>{Math.round(gpuInfo.usage_percent)}%</span>
-                {/if}
-                {#if gpuInfo.vram_total_bytes != null && gpuInfo.vram_used_bytes != null}
-                  <span class="sys-value">VRAM: {formatMemory(gpuInfo.vram_used_bytes)} / {formatMemory(gpuInfo.vram_total_bytes)} GB</span>
-                {/if}
-              </div>
+            {#if gpuInfos.length > 0}
+              {#each gpuInfos as gpuInfo, index (`${gpuInfo.name}-${index}`)}
+                <div class="sys-section">
+                  <span class="sys-heading">{gpuInfos.length > 1 ? `GPU ${index + 1}` : "GPU"}</span>
+                  <span class="sys-value">{gpuInfo.name}</span>
+                  {#if gpuInfo.usage_percent != null}
+                    <span class={`sys-bar ${usageColorClass(gpuInfo.usage_percent)}`}>{renderBar(gpuInfo.usage_percent)}</span>
+                    <span class={`sys-value ${usageColorClass(gpuInfo.usage_percent)}`}>{Math.round(gpuInfo.usage_percent)}%</span>
+                  {/if}
+                  {#if gpuInfo.vram_total_bytes != null && gpuInfo.vram_used_bytes != null}
+                    <span class="sys-value">VRAM: {formatMemory(gpuInfo.vram_used_bytes)} / {formatMemory(gpuInfo.vram_total_bytes)} GB</span>
+                  {:else if gpuInfo.vram_total_bytes != null}
+                    <span class="sys-value">VRAM: {formatMemory(gpuInfo.vram_total_bytes)} GB</span>
+                  {/if}
+                </div>
+              {/each}
             {:else}
               <div class="sys-section">
                 <span class="sys-heading">GPU</span>
