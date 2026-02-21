@@ -130,7 +130,59 @@ git push origin develop
 **失敗時**: 最大3回リトライ。それでも失敗した場合：
 > 「エラー: pushに失敗しました。ネットワーク接続を確認してください。」
 
-### 8. PR作成
+### 8. Closing Issue の収集
+
+`develop` 向けPRに書かれた `Closes #...` は自動クローズされないため、release PR（`develop -> main`）本文に再掲します。
+
+まず、今回のリリース範囲を決定：
+
+```bash
+if [ -n "$PREV_TAG" ]; then
+  RANGE="${PREV_TAG}..HEAD"
+else
+  RANGE="HEAD"
+fi
+```
+
+次に、リリース範囲内のマージ済みPR本文とコミット本文から、closing keyword を使っている Issue 番号を抽出：
+
+```bash
+MERGED_PRS=$(git log --merges --pretty=%s "$RANGE" \
+  | sed -n 's/^Merge pull request #\([0-9]\+\).*$/\1/p' \
+  | sort -u)
+
+ISSUE_NUMBERS=""
+for PR_NUMBER in $MERGED_PRS; do
+  PR_BODY=$(gh pr view "$PR_NUMBER" --json body --jq '.body' 2>/dev/null || true)
+  if [ -n "$PR_BODY" ]; then
+    FOUND=$(printf '%s\n' "$PR_BODY" \
+      | grep -Ei '(close[sd]?|fix(e[sd])?|resolve[sd]?)' \
+      | grep -Eo '#[0-9]+' \
+      | tr -d '#' || true)
+    if [ -n "$FOUND" ]; then
+      ISSUE_NUMBERS="${ISSUE_NUMBERS}\n${FOUND}"
+    fi
+  fi
+done
+
+COMMIT_FOUND=$(git log --format=%B "$RANGE" \
+  | grep -Ei '(close[sd]?|fix(e[sd])?|resolve[sd]?)' \
+  | grep -Eo '#[0-9]+' \
+  | tr -d '#' || true)
+
+ISSUE_NUMBERS=$(printf '%b\n%s\n' "$ISSUE_NUMBERS" "$COMMIT_FOUND" \
+  | awk 'NF' \
+  | sort -nu)
+```
+
+`ISSUE_NUMBERS` が空でなければ、PR本文の `## Closing Issues` セクションに **1行ずつ** 以下を追加：
+
+```text
+Closes #123
+Closes #456
+```
+
+### 9. PR作成/更新
 
 まず既存PRを確認：
 
@@ -139,6 +191,15 @@ gh pr list --base main --head develop --state open --json number,title
 ```
 
 #### 既存PRがある場合
+
+以下を実行して、タイトル・ラベル・本文を更新（`## Closing Issues` を反映）：
+
+```bash
+gh pr edit {PR番号} \
+  --title "chore(release): v{NEW_VERSION}" \
+  --add-label release \
+  --body "{PR_BODY}"
+```
 
 > 「既存のRelease PR（#{PR番号}）を更新しました。」
 > 「URL: {PR URL}」
@@ -162,8 +223,11 @@ PR bodyには以下を含めてください：
 - `## Summary` - このリリースの概要（変更内容を要約）
 - `## Changes` - 主な変更点をリスト形式で
 - `## Version` - バージョン番号
+- `## Closing Issues` - main マージ時にクローズしたい Issue を `Closes #<番号>` の生テキストで列挙（`ISSUE_NUMBERS` が空の場合は `None` と記載）
 
-### 9. 完了メッセージ
+**重要**: `Closes #<番号>` はコードブロックに入れず、通常の本文として記載すること。
+
+### 10. 完了メッセージ
 
 > 「リリース準備が完了しました。」
 > 「バージョン: v{NEW_VERSION}」
