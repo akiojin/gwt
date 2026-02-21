@@ -8,7 +8,7 @@ use gwt_core::config::stats::Stats;
 use gwt_core::config::{AgentConfig, ClaudeAgentProvider, ProfilesConfig, Settings};
 use gwt_core::docker::{
     compose_available, daemon_running, detect_docker_files, docker_available, try_start_daemon,
-    DevContainerConfig, DockerFileType, DockerManager,
+    DevContainerConfig, DockerFileType, DockerManager, PortAllocator,
 };
 use gwt_core::git::Remote;
 use gwt_core::terminal::pane::PaneStatus;
@@ -749,9 +749,35 @@ fn merge_compose_env_for_docker(
             continue;
         }
         if let Some(value) = merged_profile_env.get(k) {
+            if should_keep_existing_compose_port_value(base_env, k, value) {
+                continue;
+            }
             base_env.insert(k.to_string(), value.to_string());
         }
     }
+}
+
+fn should_keep_existing_compose_port_value(
+    base_env: &HashMap<String, String>,
+    key: &str,
+    incoming_value: &str,
+) -> bool {
+    let Some(existing_value) = base_env.get(key) else {
+        return false;
+    };
+
+    if existing_value == incoming_value {
+        return false;
+    }
+
+    let Some(incoming_port) = incoming_value.parse::<u16>().ok() else {
+        return false;
+    };
+    if existing_value.parse::<u16>().is_err() {
+        return false;
+    }
+
+    PortAllocator::is_port_in_use(incoming_port)
 }
 
 fn merge_compose_env_from_process(
@@ -2942,6 +2968,37 @@ services:
 
         assert_eq!(base.get("CUSTOM_ENV"), Some(&"custom".to_string()));
         assert_eq!(base.get("GITHUB_TOKEN"), Some(&"ghs_xxx".to_string()));
+    }
+
+    #[test]
+    fn merge_compose_env_for_docker_keeps_existing_allocated_port_when_incoming_is_occupied() {
+        use std::net::TcpListener;
+
+        let temp = TempDir::new().unwrap();
+        let compose_path = temp.path().join("docker-compose.yml");
+        std::fs::write(
+            &compose_path,
+            r#"
+services:
+  app:
+    ports:
+      - "${KNOWLEDGE_DB_PORT:-5432}:5432"
+"#,
+        )
+        .unwrap();
+
+        let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+        let occupied_port = occupied.local_addr().unwrap().port();
+
+        let mut base = HashMap::new();
+        base.insert("KNOWLEDGE_DB_PORT".to_string(), "15432".to_string());
+
+        let mut merged = HashMap::new();
+        merged.insert("KNOWLEDGE_DB_PORT".to_string(), occupied_port.to_string());
+
+        merge_compose_env_for_docker(&mut base, &merged, &[compose_path]);
+
+        assert_eq!(base.get("KNOWLEDGE_DB_PORT"), Some(&"15432".to_string()));
     }
 
     #[test]
