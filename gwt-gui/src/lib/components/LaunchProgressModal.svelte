@@ -7,6 +7,7 @@
     error = null,
     onCancel,
     onClose,
+    onUseExisting = null,
   }: {
     open: boolean;
     step: string;
@@ -15,7 +16,12 @@
     error: string | null;
     onCancel: () => void;
     onClose: () => void;
+    onUseExisting?: (() => void) | null;
   } = $props();
+
+  const isBranchExistsError = $derived(
+    status === "error" && error != null && error.includes("[E1004]") && onUseExisting != null,
+  );
 
   type StepId = "fetch" | "validate" | "paths" | "conflicts" | "create" | "deps";
   const STEPS: { id: StepId; label: string }[] = [
@@ -134,6 +140,9 @@
       <div class="footer">
         {#if status === "running"}
           <button class="secondary" onclick={onCancel}>Cancel (Esc)</button>
+        {:else if isBranchExistsError}
+          <button class="secondary" onclick={onClose}>Close</button>
+          <button class="primary" onclick={onUseExisting}>Use Existing Branch</button>
         {:else}
           <button class="primary" onclick={onClose}>Close</button>
         {/if}
