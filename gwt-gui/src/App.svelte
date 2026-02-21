@@ -2154,6 +2154,12 @@
         aboutInitialTab = "general";
         showAbout = true;
         break;
+      case "report-issue":
+        showReportDialog("bug");
+        break;
+      case "suggest-feature":
+        showReportDialog("feature");
+        break;
       case "list-terminals":
         // Just switch to first terminal tab if any
         {
@@ -2969,6 +2975,7 @@
   open={reportDialogOpen}
   mode={reportDialogMode}
   prefillError={reportDialogPrefillError}
+  projectPath={projectPath ?? ""}
   onclose={() => { reportDialogOpen = false; }}
 />
 

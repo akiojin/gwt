@@ -3,6 +3,8 @@
   import { maskSensitiveData } from "$lib/privacyMask";
   import { collectSystemInfo, collectRecentLogs } from "$lib/diagnostics";
   import { collectScreenText } from "$lib/screenCapture";
+  import { invoke } from "$lib/tauriInvoke";
+  import { openExternalUrl } from "$lib/openExternalUrl";
   import {
     generateBugReportBody,
     generateFeatureRequestBody,
@@ -10,15 +12,28 @@
     type FeatureRequestData,
   } from "$lib/issueTemplate";
 
+  interface ReportTarget {
+    owner: string;
+    repo: string;
+    display: string;
+  }
+
+  interface CreateIssueResult {
+    url: string;
+    number: number;
+  }
+
   let {
     open,
     mode,
     prefillError,
+    projectPath = "",
     onclose,
   }: {
     open: boolean;
     mode: "bug" | "feature";
     prefillError?: StructuredError;
+    projectPath?: string;
     onclose: () => void;
   } = $props();
 
@@ -46,6 +61,11 @@
   let logsText = $state("");
   let screenCaptureText = $state("");
 
+  // Terminal text capture state
+  let terminalCaptureText = $state("");
+  let terminalCaptureLoading = $state(false);
+  let terminalCaptureDone = $state(false);
+
   // Preview toggle
   let showPreview = $state(false);
   let previewMarkdown = $state("");
@@ -54,7 +74,17 @@
   let showErrorDetails = $state(false);
 
   // Submit state
+  let submitting = $state(false);
   let submitMessage = $state("");
+  let submitSuccess = $state(false);
+  let submitIssueUrl = $state("");
+  let submitError = $state(false);
+  let submitBodyMarkdown = $state("");
+
+  // Repository target
+  const GWT_TARGET: ReportTarget = { owner: "akiojin", repo: "gwt", display: "akiojin/gwt" };
+  let targets = $state<ReportTarget[]>([GWT_TARGET]);
+  let selectedTargetIndex = $state(0);
 
   let dialogRef: HTMLDialogElement | undefined = $state();
 
@@ -63,11 +93,36 @@
       activeTab = mode;
       showPreview = false;
       submitMessage = "";
+      submitSuccess = false;
+      submitError = false;
+      submitIssueUrl = "";
+      submitBodyMarkdown = "";
       dialogRef.showModal();
+      detectTarget();
     } else if (!open && dialogRef?.open) {
       dialogRef.close();
     }
   });
+
+  async function detectTarget() {
+    if (!projectPath) {
+      targets = [GWT_TARGET];
+      selectedTargetIndex = 0;
+      return;
+    }
+    try {
+      const detected = await invoke<ReportTarget>("detect_report_target", { projectPath });
+      if (detected.display === GWT_TARGET.display) {
+        targets = [GWT_TARGET];
+      } else {
+        targets = [GWT_TARGET, detected];
+      }
+      selectedTargetIndex = 0;
+    } catch {
+      targets = [GWT_TARGET];
+      selectedTargetIndex = 0;
+    }
+  }
 
   // Collect diagnostics when checkboxes change
   $effect(() => {
@@ -96,7 +151,18 @@
     }
   });
 
-  function generatePreview(): string {
+  function buildScreenCaptureText(): string | undefined {
+    const parts: string[] = [];
+    if (includeScreenCapture && screenCaptureText) {
+      parts.push(screenCaptureText);
+    }
+    if (terminalCaptureDone && terminalCaptureText) {
+      parts.push(terminalCaptureText);
+    }
+    return parts.length > 0 ? parts.join("\n\n") : undefined;
+  }
+
+  function generateBody(): string {
     if (activeTab === "bug") {
       const data: BugReportData = {
         title: bugTitle,
@@ -105,7 +171,7 @@
         actualResult,
         systemInfo: includeSystemInfo ? systemInfoText : undefined,
         logs: includeLogs ? logsText : undefined,
-        screenCapture: includeScreenCapture ? screenCaptureText : undefined,
+        screenCapture: buildScreenCaptureText(),
         error: prefillError,
       };
       return maskSensitiveData(generateBugReportBody(data));
@@ -120,6 +186,25 @@
     }
   }
 
+  function generatePreview(): string {
+    return generateBody();
+  }
+
+  async function handleCaptureTerminalText() {
+    terminalCaptureLoading = true;
+    terminalCaptureDone = false;
+    try {
+      const raw = await invoke<string>("capture_screen_text");
+      terminalCaptureText = maskSensitiveData(raw);
+      terminalCaptureDone = true;
+    } catch {
+      terminalCaptureText = "(Failed to capture terminal text)";
+      terminalCaptureDone = true;
+    } finally {
+      terminalCaptureLoading = false;
+    }
+  }
+
   function handlePreviewToggle() {
     showPreview = !showPreview;
     if (showPreview) {
@@ -127,8 +212,58 @@
     }
   }
 
-  function handleSubmit() {
-    submitMessage = "Submission is not yet available. This feature will be enabled in a future update.";
+  async function handleSubmit() {
+    const title = activeTab === "bug" ? bugTitle : featureTitle;
+    if (!title.trim()) {
+      submitMessage = "Please enter a title.";
+      return;
+    }
+
+    const target = targets[selectedTargetIndex] ?? GWT_TARGET;
+    const body = generateBody();
+    const labels = activeTab === "bug" ? ["bug"] : ["enhancement"];
+
+    submitting = true;
+    submitMessage = "";
+    submitSuccess = false;
+    submitError = false;
+    submitIssueUrl = "";
+    submitBodyMarkdown = body;
+
+    try {
+      const result = await invoke<CreateIssueResult>("create_github_issue", {
+        owner: target.owner,
+        repo: target.repo,
+        title,
+        body,
+        labels,
+      });
+      submitSuccess = true;
+      submitIssueUrl = result.url;
+      submitMessage = `Issue #${result.number} created successfully.`;
+    } catch {
+      submitError = true;
+      submitMessage = "Failed to create issue via GitHub CLI. You can copy the report or open it in your browser instead.";
+    } finally {
+      submitting = false;
+    }
+  }
+
+  async function handleCopyToClipboard() {
+    try {
+      await navigator.clipboard.writeText(submitBodyMarkdown);
+      submitMessage = "Copied to clipboard.";
+    } catch {
+      submitMessage = "Failed to copy to clipboard.";
+    }
+  }
+
+  function handleOpenInBrowser() {
+    const target = targets[selectedTargetIndex] ?? GWT_TARGET;
+    const title = activeTab === "bug" ? bugTitle : featureTitle;
+    const labels = activeTab === "bug" ? "bug" : "enhancement";
+    const url = `https://github.com/${target.owner}/${target.repo}/issues/new?title=${encodeURIComponent(title)}&labels=${encodeURIComponent(labels)}`;
+    openExternalUrl(url);
   }
 
   function handleCancel() {
@@ -172,6 +307,19 @@
   </div>
 
   <div class="dialog-body">
+    <div class="form-section">
+      <label class="form-label" for="report-target">Repository</label>
+      <select
+        id="report-target"
+        class="form-input"
+        bind:value={selectedTargetIndex}
+      >
+        {#each targets as target, i}
+          <option value={i}>{target.display}</option>
+        {/each}
+      </select>
+    </div>
+
     {#if activeTab === "bug"}
       <div class="form-section">
         <label class="form-label" for="bug-title">Title</label>
@@ -257,6 +405,26 @@
           <input type="checkbox" bind:checked={includeScreenCapture} />
           Screen Capture (text)
         </label>
+        <div class="capture-terminal-row">
+          <button
+            class="btn btn-capture"
+            onclick={handleCaptureTerminalText}
+            disabled={terminalCaptureLoading}
+          >
+            {#if terminalCaptureLoading}
+              Capturing...
+            {:else if terminalCaptureDone}
+              Recapture Terminal Text
+            {:else}
+              Capture Terminal Text
+            {/if}
+          </button>
+          {#if terminalCaptureDone}
+            <span class="capture-status">
+              Captured ({terminalCaptureText.length} chars)
+            </span>
+          {/if}
+        </div>
       </fieldset>
     {:else}
       <div class="form-section">
@@ -312,7 +480,25 @@
     {/if}
 
     {#if submitMessage}
-      <div class="submit-message">{submitMessage}</div>
+      <div class="submit-message" class:submit-success={submitSuccess} class:submit-error={submitError}>
+        <span>{submitMessage}</span>
+        {#if submitSuccess && submitIssueUrl}
+          <button class="link-btn" onclick={() => openExternalUrl(submitIssueUrl)}>
+            Open Issue
+          </button>
+        {/if}
+      </div>
+    {/if}
+
+    {#if submitError}
+      <div class="fallback-actions">
+        <button class="btn btn-secondary" onclick={handleCopyToClipboard}>
+          Copy to Clipboard
+        </button>
+        <button class="btn btn-secondary" onclick={handleOpenInBrowser}>
+          Open in Browser
+        </button>
+      </div>
     {/if}
   </div>
 
@@ -321,7 +507,9 @@
     <button class="btn btn-secondary" onclick={handlePreviewToggle}>
       {showPreview ? "Hide Preview" : "Preview"}
     </button>
-    <button class="btn btn-primary" onclick={handleSubmit}>Submit</button>
+    <button class="btn btn-primary" onclick={handleSubmit} disabled={submitting}>
+      {submitting ? "Submitting..." : "Submit"}
+    </button>
   </div>
 </dialog>
 
@@ -566,6 +754,38 @@
     accent-color: var(--accent);
   }
 
+  .capture-terminal-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 4px;
+  }
+
+  .btn-capture {
+    padding: 4px 12px;
+    border-radius: 5px;
+    font-family: inherit;
+    font-size: var(--ui-font-xs, 12px);
+    cursor: pointer;
+    border: 1px solid var(--border-color);
+    background: var(--bg-surface);
+    color: var(--text-primary);
+  }
+
+  .btn-capture:hover:not(:disabled) {
+    background: var(--bg-hover);
+  }
+
+  .btn-capture:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+
+  .capture-status {
+    font-size: var(--ui-font-xs, 12px);
+    color: var(--text-muted);
+  }
+
   .preview-section {
     border: 1px solid var(--border-color);
     border-radius: 6px;
@@ -600,6 +820,41 @@
     border-radius: 6px;
     padding: 8px 12px;
     text-align: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+
+  .submit-success {
+    border-color: var(--color-success, #2ea043);
+    color: var(--color-success, #2ea043);
+  }
+
+  .submit-error {
+    border-color: var(--color-danger, #da3633);
+    color: var(--color-danger, #da3633);
+  }
+
+  .link-btn {
+    background: none;
+    border: none;
+    color: var(--accent);
+    font-family: inherit;
+    font-size: var(--ui-font-sm, 13px);
+    cursor: pointer;
+    text-decoration: underline;
+    padding: 0;
+  }
+
+  .link-btn:hover {
+    filter: brightness(1.2);
+  }
+
+  .fallback-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
   }
 
   .dialog-footer {
@@ -619,12 +874,17 @@
     border: 1px solid var(--border-color);
   }
 
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
   .btn-secondary {
     background: var(--bg-surface);
     color: var(--text-primary);
   }
 
-  .btn-secondary:hover {
+  .btn-secondary:hover:not(:disabled) {
     background: var(--bg-hover);
   }
 
@@ -634,7 +894,7 @@
     border-color: var(--accent);
   }
 
-  .btn-primary:hover {
+  .btn-primary:hover:not(:disabled) {
     filter: brightness(1.1);
   }
 </style>

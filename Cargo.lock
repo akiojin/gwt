@@ -2389,6 +2389,7 @@ name = "gwt-tauri"
 version = "7.10.0"
 dependencies = [
  "chrono",
+ "directories",
  "dirs",
  "fs2",
  "futures-util",
