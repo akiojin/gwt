@@ -640,8 +640,6 @@ pub fn build_app(
             crate::commands::cleanup::get_cleanup_pr_statuses,
             crate::commands::cleanup::get_cleanup_settings,
             crate::commands::cleanup::set_cleanup_settings,
-            crate::commands::hooks::check_and_update_hooks,
-            crate::commands::hooks::register_hooks,
             crate::commands::update::check_app_update,
             crate::commands::update::apply_app_update,
             crate::commands::terminal::get_captured_environment,
