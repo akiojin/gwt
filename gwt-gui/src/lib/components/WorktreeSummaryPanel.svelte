@@ -17,7 +17,6 @@
   import GitSection from "./GitSection.svelte";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
   import PrStatusSection from "./PrStatusSection.svelte";
-  import { workflowStatusIcon, workflowStatusClass } from "../prStatusHelpers";
   import { openExternalUrl } from "../openExternalUrl";
 
   let {
@@ -58,7 +57,6 @@
     | "git"
     | "issue"
     | "pr"
-    | "workflow"
     | "docker";
   let activeTab: SummaryTab = $state("summary");
 
@@ -719,7 +717,7 @@
       loadBranchLinkedIssue({ defer: true });
       return;
     }
-    if (activeTab === "pr" || activeTab === "workflow") {
+    if (activeTab === "pr") {
       loadLatestBranchPr({ defer: true });
       return;
     }
@@ -865,9 +863,6 @@
   }
 
   let resolvedPrNumber = $derived.by(() => latestBranchPr?.number ?? prNumber ?? null);
-  let workflowDisplayPrNumber = $derived.by(
-    () => latestBranchPr?.number ?? prDetail?.number ?? resolvedPrNumber,
-  );
 
   $effect(() => {
     const nextProjectPath = projectPath ?? "";
@@ -913,7 +908,7 @@
   }
 
   $effect(() => {
-    if (activeTab !== "pr" && activeTab !== "workflow") return;
+    if (activeTab !== "pr") return;
 
     const branch = currentBranchName();
     const prNum = resolvedPrNumber;
@@ -978,25 +973,9 @@
     }
   }
 
-  function workflowStatusText(run: WorkflowRunInfo): string {
-    if (run.status !== "completed") {
-      return run.status === "in_progress" ? "Running" : "Queued";
-    }
-    switch (run.conclusion) {
-      case "success":
-        return "Success";
-      case "failure":
-        return "Failure";
-      case "neutral":
-        return "Neutral";
-      case "skipped":
-        return "Skipped";
-      default:
-        return "Completed";
-    }
-  }
+  let updatingBranch = $state(false);
 
-  function openWorkflowRun(run: WorkflowRunInfo): void {
+  function handleOpenCiLog(run: WorkflowRunInfo): void {
     if (onOpenCiLog) {
       onOpenCiLog(run.runId);
       return;
@@ -1007,6 +986,26 @@
     const workflowBase = match ? match[1] : null;
     if (!workflowBase) return;
     void openExternalUrl(`${workflowBase}/actions/runs/${run.runId}`);
+  }
+
+  async function handleUpdateBranch(): Promise<void> {
+    if (!prDetail || updatingBranch) return;
+    updatingBranch = true;
+    try {
+      const invoke = await getInvoke();
+      await invoke<string>("update_pr_branch", {
+        projectPath,
+        prNumber: prDetail.number,
+      });
+      const branch = currentBranchName();
+      if (branch && resolvedPrNumber) {
+        loadPrDetail(branch, resolvedPrNumber);
+      }
+    } catch (err) {
+      console.error("Failed to update branch:", err);
+    } finally {
+      updatingBranch = false;
+    }
   }
 
   async function getInvoke(): Promise<TauriInvoke> {
@@ -1098,15 +1097,6 @@
           }}
         >
           PR
-        </button>
-        <button
-          class="summary-tab"
-          class:active={activeTab === "workflow"}
-          onclick={() => {
-            activeTab = "workflow";
-          }}
-        >
-          Workflow
         </button>
         <button
           class="summary-tab"
@@ -1302,56 +1292,10 @@
           prDetail={prDetail}
           loading={latestBranchPrLoading || (resolvedPrNumber !== null && prDetailLoading)}
           error={ghCliStatusMessage ?? latestBranchPrError ?? prDetailError}
+          onOpenCiLog={handleOpenCiLog}
+          onUpdateBranch={handleUpdateBranch}
+          updatingBranch={updatingBranch}
         />
-      {:else if activeTab === "workflow"}
-        <div class="quick-start workflow-panel">
-          <div class="quick-header">
-            <span class="quick-title">Workflow</span>
-            {#if latestBranchPrLoading || (resolvedPrNumber !== null && prDetailLoading)}
-              <span class="quick-subtitle">Loading...</span>
-            {:else if ghCliStatusMessage}
-              <span class="quick-subtitle">GitHub CLI issue</span>
-            {:else if latestBranchPrError || prDetailError}
-              <span class="quick-subtitle">Error</span>
-            {:else if workflowDisplayPrNumber !== null}
-              <span class="quick-subtitle">#{workflowDisplayPrNumber}</span>
-            {:else}
-              <span class="quick-subtitle">No PR</span>
-            {/if}
-          </div>
-
-          {#if latestBranchPrLoading || (resolvedPrNumber !== null && prDetailLoading)}
-            <div class="session-summary-placeholder">Loading...</div>
-          {:else if ghCliStatusMessage}
-            <div class="quick-error">{ghCliStatusMessage}</div>
-          {:else if latestBranchPrError || prDetailError}
-            <div class="quick-error">{latestBranchPrError ?? prDetailError}</div>
-          {:else if workflowDisplayPrNumber === null && !prDetail}
-            <div class="session-summary-placeholder">No PR.</div>
-          {:else if !prDetail}
-            <div class="session-summary-placeholder">Loading PR details...</div>
-          {:else if prDetail.checkSuites.length > 0}
-            <div class="workflow-list">
-              {#each prDetail.checkSuites as run}
-                <button
-                  class="workflow-run-item"
-                  type="button"
-                  onclick={() => openWorkflowRun(run)}
-                >
-                  <span class="workflow-status {workflowStatusClass(run)}"
-                    >{workflowStatusIcon(run)}</span
-                  >
-                  <span class="workflow-name">{run.workflowName}</span>
-                  <span class="workflow-status-text">
-                    {workflowStatusText(run)}
-                  </span>
-                </button>
-              {/each}
-            </div>
-          {:else}
-            <div class="workflow-empty">No workflows</div>
-          {/if}
-        </div>
       {:else if activeTab === "docker"}
         <div class="quick-start docker-summary">
           <div class="quick-header">
@@ -1977,66 +1921,4 @@
     color: var(--text-secondary);
   }
 
-  .workflow-list {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  .workflow-run-item {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 8px;
-    background: none;
-    border: none;
-    color: var(--text-secondary);
-    font-size: var(--ui-font-xs);
-    cursor: pointer;
-    text-align: left;
-    font-family: inherit;
-  }
-
-  .workflow-run-item:hover {
-    background: var(--bg-hover);
-  }
-
-  .workflow-status {
-    font-size: 11px;
-    width: 14px;
-    text-align: center;
-  }
-
-  .workflow-status.pass {
-    color: var(--green);
-  }
-
-  .workflow-status.fail {
-    color: var(--red);
-  }
-
-  .workflow-status.running {
-    color: var(--yellow);
-  }
-
-  .workflow-status.pending {
-    color: var(--text-muted);
-  }
-
-  .workflow-status-text {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .workflow-empty {
-    padding: 3px 8px;
-    color: var(--text-muted);
-    font-size: var(--ui-font-xs);
-    font-style: italic;
-  }
-
-	  .workflow-panel .workflow-run-item {
-	    border-radius: 4px;
-	  }
 	</style>

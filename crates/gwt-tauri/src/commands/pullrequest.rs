@@ -37,6 +37,7 @@ pub struct PrStatusSummary {
     pub state: String,
     pub url: String,
     pub mergeable: String,
+    pub merge_state_status: Option<String>,
     pub author: String,
     pub base_branch: String,
     pub head_branch: String,
@@ -59,6 +60,7 @@ pub struct WorkflowRunSummary {
     pub run_id: u64,
     pub status: String,
     pub conclusion: Option<String>,
+    pub is_required: Option<bool>,
 }
 
 /// Serializable review info for the frontend
@@ -90,6 +92,7 @@ pub struct PrDetailResponse {
     pub state: String,
     pub url: String,
     pub mergeable: String,
+    pub merge_state_status: Option<String>,
     pub author: String,
     pub base_branch: String,
     pub head_branch: String,
@@ -168,6 +171,7 @@ fn to_workflow_run_summary(info: &WorkflowRunInfo) -> WorkflowRunSummary {
         run_id: info.run_id,
         status: info.status.clone(),
         conclusion: info.conclusion.clone(),
+        is_required: info.is_required,
     }
 }
 
@@ -196,6 +200,7 @@ fn to_pr_status_summary(info: &PrStatusInfo) -> PrStatusSummary {
         state: info.state.clone(),
         url: info.url.clone(),
         mergeable: info.mergeable.clone(),
+        merge_state_status: info.merge_state_status.clone(),
         author: info.author.clone(),
         base_branch: info.base_branch.clone(),
         head_branch: info.head_branch.clone(),
@@ -222,6 +227,7 @@ fn to_pr_detail_response(info: &PrStatusInfo) -> PrDetailResponse {
         state: info.state.clone(),
         url: info.url.clone(),
         mergeable: info.mergeable.clone(),
+        merge_state_status: info.merge_state_status.clone(),
         author: info.author.clone(),
         base_branch: info.base_branch.clone(),
         head_branch: info.head_branch.clone(),
@@ -341,6 +347,42 @@ pub fn fetch_ci_log(project_path: String, run_id: u64) -> Result<String, String>
     Ok(output)
 }
 
+/// Update a PR branch with the latest base branch changes (SPEC-de3290fc T008)
+#[tauri::command]
+pub fn update_pr_branch(project_path: String, pr_number: u64) -> Result<String, String> {
+    use gwt_core::git::gh_cli::gh_command;
+    use gwt_core::git::resolve_repo_slug;
+
+    let project_root = Path::new(&project_path);
+    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+
+    let slug = resolve_repo_slug(&repo_path)
+        .ok_or_else(|| "Failed to resolve repository slug".to_string())?;
+    let parts: Vec<&str> = slug.split('/').collect();
+    if parts.len() != 2 {
+        return Err(format!("Invalid repo slug: {}", slug));
+    }
+    let (owner, repo) = (parts[0], parts[1]);
+
+    let output = gh_command()
+        .args([
+            "api",
+            "-X",
+            "PUT",
+            &format!("/repos/{owner}/{repo}/pulls/{pr_number}/update-branch"),
+        ])
+        .current_dir(&repo_path)
+        .output()
+        .map_err(|e| format!("Failed to execute gh api: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Failed to update PR branch: {}", stderr));
+    }
+
+    Ok("Branch updated successfully".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,6 +428,7 @@ mod tests {
                 state: "OPEN".to_string(),
                 url: "https://github.com/o/r/pull/42".to_string(),
                 mergeable: "MERGEABLE".to_string(),
+                merge_state_status: None,
                 author: "alice".to_string(),
                 base_branch: "main".to_string(),
                 head_branch: "feature/x".to_string(),
@@ -398,6 +441,7 @@ mod tests {
                     run_id: 12345,
                     status: "completed".to_string(),
                     conclusion: Some("success".to_string()),
+                    is_required: None,
                 }],
                 reviews: vec![ReviewSummary {
                     reviewer: "charlie".to_string(),
@@ -456,6 +500,7 @@ mod tests {
             state: "OPEN".to_string(),
             url: "https://github.com/o/r/pull/42".to_string(),
             mergeable: "MERGEABLE".to_string(),
+            merge_state_status: None,
             author: "alice".to_string(),
             base_branch: "main".to_string(),
             head_branch: "feature/detail".to_string(),
@@ -500,6 +545,7 @@ mod tests {
             state: "OPEN".to_string(),
             url: "https://example.com".to_string(),
             mergeable: "UNKNOWN".to_string(),
+            merge_state_status: None,
             author: "user".to_string(),
             base_branch: "main".to_string(),
             head_branch: "feature/test".to_string(),
@@ -512,6 +558,7 @@ mod tests {
                 run_id: 100,
                 status: "completed".to_string(),
                 conclusion: Some("success".to_string()),
+                is_required: None,
             }],
             reviews: vec![ReviewInfo {
                 reviewer: "r1".to_string(),
@@ -540,6 +587,7 @@ mod tests {
             state: "OPEN".to_string(),
             url: "https://example.com/10".to_string(),
             mergeable: "MERGEABLE".to_string(),
+            merge_state_status: None,
             author: "user".to_string(),
             base_branch: "main".to_string(),
             head_branch: "fix/bug".to_string(),
