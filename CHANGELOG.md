@@ -1,6 +1,120 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [7.9.0] - 2026-02-20
+
+### Bug Fixes
+
+- **e2e:** Handle startup skill-scope dialog in Playwright smoke tests (#1147) by @akiojin
+- **gui:** Reduce tab activation flicker and switch stutter (#1148) by @akiojin
+- **terminal:** Stabilize windows host claude launch path (#1153)
+- **docker:** Remove HOST_GIT_COMMON_DIR short-syntax bind mount (#1151) (#1152)
+- **gui:** Allow IME process key in chat inputs (#1154)
+
+### Features
+
+- Add settings font family selection for UI and Terminal (#1155)
+- **gui:** Open clicked URLs in external browser (#1156)
+
+### Refactor
+
+- **project-mode:** Remove MCP bridge and migrate to managed skills (#1143) by @akiojin
+
+### Testing
+
+- **e2e:** Handle scope dialog in tab-switch performance spec (#1149)
+
+## [7.8.1] - 2026-02-20
+
+### Bug Fixes
+
+- **e2e:** Handle startup skill-scope dialog in Playwright smoke tests (#1147)
+- **gui:** Reduce tab activation flicker and switch stutter (#1148)
+
+### Refactor
+
+- **project-mode:** Remove MCP bridge and migrate to managed skills (#1143)
+
+## [7.8.0] - 2026-02-20
+
+### Bug Fixes
+
+- **gui:** Broaden trackpad wheel fallback conditions (#1137)
+- **agent-mode:** Fix project team session restore and merge command (#1139)
+- **gui:** Stabilize trackpad wheel fallback for rapid bursts (#1138)
+- **terminal:** Stabilize Windows Host Claude launches by defaulting to `cmd` when shell is auto, and avoid false stream-EOF error promotion while process is still alive
+- **gui:** Agentタブ空白を防止 (#1142)
+
+### Documentation
+
+- Simplify readmes for user-facing usage and updates (#1136)
+
+### Features
+
+- **gui:** Windows シェル選択と New Terminal ボタンを追加 (#1141)
+
+## [7.7.0] - 2026-02-19
+
+### Bug Fixes
+
+- **gui:** Improve trackpad wheel fallback detection (#1095)
+- Create_for_branchのremoteフォールバック誤判定を修正 (#1098)
+- **specs:** SPEC-bare-wt01 を UUID-8 形式 SPEC-013cd65c にリネーム
+- Offload branch/worktree listing to spawn_blocking (#1100)
+- **gui:** Restore startup window sessions with label fallback (#1101)
+- **gui:** Prevent periodic Worktree Loading during agent refresh (#1102)
+- Issue workflow regressions in state, comments, and branch linkage (#1106)
+- **gui:** Stabilize PR/workflow resolution and e2e summary flow (#1107)
+- **gui:** Keep session summary heading visible in narrow sidebar (#1109)
+- **ai:** Enforce worktree purpose in session summaries (#1108)
+- **gui:** Correct env var input width override and Add button disabled style (#1110)
+- **docker:** Align compose detection with launch settings (#1112)
+- 同一プロジェクトの重複オープンをcanonical pathで防止 (#1113)
+- **gui:** Prevent infinite window relaunch during restore (#1115)
+- **gui:** Deduplicate stale window sessions to prevent window multiplication
+- Launch modal cancellation and Escape dismissal regressions (#1118)
+- **gui:** Prevent launch progress race stuck at fetching step (#1120)
+- **gui:** ネイティブメニューのCmd+ショートカットがxterm.jsに横取りされる問題を修正
+- **gui:** Launch progressがfetchステップで停止する問題に対する防御策追加
+- **gui:** Launch_jobsからの削除をイベント送信後に移動しポーリング誤検知を修正
+- **gui:** ポーリングでlaunch結果を直接取得しイベント損失を完全に回復
+- BunxがpackageManager競合でPTY環境でハングする問題をnpx優先で回避
+- **gui:** DetectAgentsをosEnvReady後に実行しグローバルインストール済みエージェントを正しく検出
+- **gui:** メニュー無反応の診断性と初期化エラー処理を強化 (#1122)
+- **sidebar:** Defer heavy panel fetches on branch switch (#1123)
+- 環境キャプチャに-iフラグを追加しzshrc/bashrcのPATH設定を取得
+- Update codex multi_agent flag handling (#1124)
+- **tauri:** Allow event listener for all windows (#1125)
+- **gui:** Restore editable copy and terminal screen capture (#1126)
+- **gui:** Prevent worktree summary whiteout on base switch (#1128)
+- **core:** MacOS Apple Silicon GPUをsystem_profilerで検出 (#1131)
+- **core:** MacOS GPU検出の堅牢性とテスト安定性を改善 (#1132)
+- **core:** MacOS GPU検出の再試行性と防御性を改善 (#1133)
+
+### Documentation
+
+- Choose_fallback_runner のコメントにプライベートレジストリの根本原因を記載
+
+### Features
+
+- **summary:** Rebuild AI summaries on language switch (#1094)
+- **agent:** Add inferred agent status and runtime indicators (#1096)
+- Add issue-first spec bundle CRUD for agent mode (#1099)
+- **gui:** Worktree Summaryを7タブ構成へ再編 (Issue #1097) (#1103)
+- **gui:** Retire Quick Start tab and move Quick Launch to header (#1105)
+- **agent-mode:** Rename Agent Mode tab label to Master Agent (#1104)
+- Harden MCP bridge flow with master tools and single-instance guard (#1111)
+- **gui:** 全テキストを選択・コピー可能にする (#1116)
+- ブランチ一覧のデフォルトソートを更新順に変更（GUI版） (#1119)
+- **version-history:** Add persistent cache and prefetch flow (#1121)
+- **gui:** Launch AgentにClaude Sonnet 4.6 / 1Mコンテキスト対応モデルを追加 (#1127)
+- **gui:** 設定画面のスクロールをタブ切り替えに変更 (#1129)
+- **cleanup:** Add remote cleanup with PR-aware safety flow (#1130)
+
+### Miscellaneous Tasks
+
+- .gitignoreに一時ディレクトリとMCPブリッジlockfileを追加
+
 ## [7.6.0] - 2026-02-16
 
 ### Bug Fixes

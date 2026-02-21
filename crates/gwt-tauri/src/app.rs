@@ -12,7 +12,7 @@ use tracing::{info, warn};
 use gwt_core::config::os_env;
 
 #[cfg(not(test))]
-use gwt_core::config::mcp_registration;
+use gwt_core::config::{skill_registration, Settings};
 #[cfg(not(test))]
 use tokio::io::AsyncReadExt;
 
@@ -182,6 +182,7 @@ pub fn build_app(
     #[cfg(not(test))]
     let builder = builder
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_store::Builder::default().build());
 
     builder
@@ -190,37 +191,6 @@ pub fn build_app(
             {
                 if let Some(guard) = single_instance_guard.as_ref() {
                     spawn_single_instance_focus_listener(_app.handle().clone(), guard.clone());
-                }
-
-                // Clean up stale MCP state from a previous crash (FR-019)
-                crate::mcp_ws_server::cleanup_stale_state_file();
-
-                // Start MCP WebSocket server (FR-001, FR-005)
-                {
-                    let app_handle = _app.handle().clone();
-                    let state = _app.state::<AppState>();
-                    let mcp_handle_slot = state.mcp_ws_handle.clone();
-                    tauri::async_runtime::spawn(async move {
-                        match crate::mcp_ws_server::start(app_handle).await {
-                            Ok(handle) => {
-                                tracing::info!(
-                                    category = "mcp",
-                                    port = handle.port,
-                                    "MCP WebSocket server ready"
-                                );
-                                if let Ok(mut slot) = mcp_handle_slot.lock() {
-                                    *slot = Some(handle);
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    category = "mcp",
-                                    error = %e,
-                                    "Failed to start MCP WebSocket server"
-                                );
-                            }
-                        }
-                    });
                 }
 
                 // Native menubar (SPEC-4470704f)
@@ -302,34 +272,46 @@ pub fn build_app(
                 #[cfg(target_os = "macos")]
                 _tray.set_icon_as_template(true)?;
 
-                // MCP bridge: cleanup stale registrations then register for all agents (T21).
+                // Skill bundles: ensure managed skills are registered for supported agents.
                 // Delay briefly so login-shell PATH capture can complete first.
                 {
                     let app_handle = _app.handle().clone();
                     tauri::async_runtime::spawn(async move {
                         let state = app_handle.state::<AppState>();
-                        let resource_dir = app_handle.path().resource_dir().ok();
                         let _ = state.wait_os_env_ready(std::time::Duration::from_secs(2));
-                        let status = mcp_registration::repair_registration(resource_dir.as_deref());
-                        state.set_mcp_registration_status(status.clone());
+                        let settings = match Settings::load_global() {
+                            Ok(settings) => settings,
+                            Err(err) => {
+                                warn!(
+                                    category = "skills",
+                                    error = %err,
+                                    "Failed to load settings before startup skill repair; using defaults"
+                                );
+                                Settings::default()
+                            }
+                        };
+                        let status =
+                            skill_registration::repair_skill_registration_with_settings_at_project_root(
+                                &settings,
+                                None,
+                            );
+                        state.set_skill_registration_status(status.clone());
                         match status.overall.as_str() {
                             "ok" => {
                                 info!(
-                                    category = "mcp",
-                                    "MCP bridge server registered in all agent configs"
+                                    category = "skills",
+                                    "Managed skills are registered for all supported agents"
                                 );
                             }
                             _ => {
                                 warn!(
-                                    category = "mcp",
+                                    category = "skills",
                                     overall = %status.overall,
-                                    runtime = %status.bridge_runtime,
-                                    bridge = %status.bridge_script,
                                     error = %status
                                         .last_error_message
                                         .clone()
                                         .unwrap_or_else(|| "unknown".to_string()),
-                                    "MCP registration is degraded"
+                                    "Skill registration is degraded"
                                 );
                             }
                         }
@@ -634,10 +616,14 @@ pub fn build_app(
             crate::commands::terminal::list_terminals,
             crate::commands::terminal::probe_terminal_ansi,
             crate::commands::terminal::capture_scrollback_tail,
-            crate::commands::agent_mode::get_agent_mode_state_cmd,
-            crate::commands::agent_mode::send_agent_mode_message,
-            crate::commands::mcp::get_mcp_registration_status_cmd,
-            crate::commands::mcp::repair_mcp_registration_cmd,
+            crate::commands::project_mode::get_project_mode_state_cmd,
+            crate::commands::project_mode::send_project_mode_message,
+            crate::commands::project_mode::send_project_mode_message_cmd,
+            crate::commands::project_mode::restore_project_mode_session_cmd,
+            crate::commands::project_mode::list_project_mode_sessions_cmd,
+            crate::commands::project_mode::stop_project_mode_session_cmd,
+            crate::commands::skills::get_skill_registration_status_cmd,
+            crate::commands::skills::repair_skill_registration_cmd,
             crate::commands::settings::get_settings,
             crate::commands::settings::save_settings,
             crate::commands::agents::detect_agents,
@@ -684,6 +670,7 @@ pub fn build_app(
             crate::commands::issue::find_existing_issue_branch,
             crate::commands::issue::link_branch_to_issue,
             crate::commands::issue::rollback_issue_branch,
+            crate::commands::issue::classify_issue_branch_prefix,
             crate::commands::issue_spec::upsert_spec_issue_cmd,
             crate::commands::issue_spec::get_spec_issue_detail_cmd,
             crate::commands::issue_spec::find_spec_issue_by_spec_id_cmd,
@@ -968,16 +955,6 @@ pub fn handle_run_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: tauri:
         }
         tauri::RunEvent::Exit => {
             info!(category = "tauri", event = "Exit", "App exiting");
-
-            // T22: Unregister MCP bridge from all agent configs on exit
-            #[cfg(not(test))]
-            if let Err(e) = gwt_core::config::unregister_all_mcp() {
-                warn!(
-                    category = "mcp",
-                    error = %e,
-                    "Failed to unregister MCP server on exit"
-                );
-            }
         }
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen {

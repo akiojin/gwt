@@ -47,20 +47,22 @@ export interface TerminalAnsiProbe {
   has_true_color: boolean;
 }
 
-export interface AgentModeMessage {
+export interface ProjectModeMessage {
   role: "user" | "assistant" | "system" | "tool";
   kind?: "message" | "thought" | "action" | "observation" | "error";
   content: string;
   timestamp: number;
 }
 
-export interface AgentModeState {
-  messages: AgentModeMessage[];
+export interface ProjectModeState {
+  messages: ProjectModeMessage[];
   ai_ready: boolean;
   ai_error?: string | null;
   last_error?: string | null;
   is_waiting: boolean;
   session_name?: string | null;
+  project_mode_session_id?: string | null;
+  lead_status?: string | null;
   llm_call_count: number;
   estimated_tokens: number;
   active_spec_id?: string | null;
@@ -151,9 +153,15 @@ export interface SettingsData {
   agent_gemini_path?: string | null;
   agent_auto_install_deps: boolean;
   agent_github_project_id?: string | null;
+  agent_skill_registration_default_scope?: SkillRegistrationScope | null;
+  agent_skill_registration_codex_scope?: SkillRegistrationScope | null;
+  agent_skill_registration_claude_scope?: SkillRegistrationScope | null;
+  agent_skill_registration_gemini_scope?: SkillRegistrationScope | null;
   docker_force_host: boolean;
   ui_font_size: number;
   terminal_font_size: number;
+  ui_font_family: string;
+  terminal_font_family: string;
   app_language: "auto" | "ja" | "en" | (string & {});
   voice_input: VoiceInputSettings;
   default_shell?: string | null;
@@ -166,20 +174,21 @@ export interface VoiceInputSettings {
   model: string;
 }
 
-export interface McpAgentRegistrationStatus {
+export type SkillRegistrationScope = "user" | "project" | "local";
+
+export interface SkillAgentRegistrationStatus {
   agent_id: string;
   label: string;
-  config_path?: string | null;
+  skills_path?: string | null;
   registered: boolean;
+  missing_skills: string[];
   error_code?: string | null;
   error_message?: string | null;
 }
 
-export interface McpRegistrationStatus {
+export interface SkillRegistrationStatus {
   overall: "ok" | "degraded" | "failed" | (string & {});
-  bridge_runtime: "ok" | "missing" | (string & {});
-  bridge_script: "ok" | "missing" | (string & {});
-  agents: McpAgentRegistrationStatus[];
+  agents: SkillAgentRegistrationStatus[];
   last_checked_at: number;
   last_error_message?: string | null;
 }
@@ -217,7 +226,7 @@ export interface Tab {
     | "agent"
     | "settings"
     | "versionHistory"
-    | "agentMode"
+    | "projectMode"
     | "terminal"
     | "issueSpec"
     | "issues";
@@ -296,6 +305,12 @@ export interface BranchSuggestResult {
   status: "ok" | "ai-not-configured" | "error";
   suggestions: string[];
   error?: string | null;
+}
+
+export interface ClassifyResult {
+  status: "ok" | "ai-not-configured" | "error";
+  prefix?: string;
+  error?: string;
 }
 
 export interface DockerContext {
@@ -605,4 +620,71 @@ export interface ReviewComment {
 export interface PrStatusResponse {
   statuses: Record<string, PrStatusInfo | null>;
   ghStatus: GhCliStatus;
+}
+
+// === Project Mode 3-Layer Type Definitions ===
+
+export interface ProjectModeWorkspaceState {
+  sessionId: string;
+  status: "active" | "paused" | "completed" | "failed";
+  lead: LeadState;
+  issues: ProjectIssue[];
+  developerAgentType: "claude" | "codex" | "gemini";
+}
+
+export interface LeadState {
+  messages: LeadMessage[];
+  status: "idle" | "thinking" | "waiting_approval" | "orchestrating" | "error";
+  llmCallCount: number;
+  estimatedTokens: number;
+}
+
+export interface LeadMessage {
+  role: "user" | "assistant" | "system";
+  kind: "message" | "thought" | "action" | "observation" | "error" | "progress";
+  content: string;
+  timestamp: number;
+}
+
+export interface ProjectIssue {
+  id: string;
+  githubIssueNumber: number;
+  githubIssueUrl: string;
+  title: string;
+  status: "pending" | "planned" | "in_progress" | "ci_fail" | "completed" | "failed";
+  coordinator?: CoordinatorState;
+  tasks: ProjectTask[];
+}
+
+export type DashboardIssue = ProjectIssue & {
+  expanded: boolean;
+  taskCompletedCount: number;
+  taskTotalCount: number;
+};
+
+export interface CoordinatorState {
+  paneId: string;
+  status: "starting" | "running" | "completed" | "crashed" | "restarting";
+}
+
+export interface ProjectTask {
+  id: string;
+  name: string;
+  status: "pending" | "ready" | "running" | "completed" | "failed" | "cancelled";
+  developers: DeveloperState[];
+  testStatus?: "not_run" | "running" | "passed" | "failed";
+  pullRequest?: { number: number; url: string; ciStatus?: string };
+  retryCount: number;
+}
+
+export type DashboardTask = ProjectTask & {
+  developerCount: number;
+};
+
+export interface DeveloperState {
+  id: string;
+  agentType: "claude" | "codex" | "gemini";
+  paneId: string;
+  status: "starting" | "running" | "completed" | "error";
+  worktree: { branchName: string; path: string };
 }

@@ -1,14 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agent_logger;
 mod agent_master;
 mod agent_tools;
 mod app;
 mod commands;
-#[cfg_attr(test, allow(dead_code))]
-mod mcp_handlers;
-#[cfg_attr(test, allow(dead_code))]
-mod mcp_ws_server;
+pub mod context_summarizer;
 mod menu;
+mod pty_skills;
 mod session_watcher;
 mod single_instance;
 mod state;
@@ -23,7 +22,7 @@ fn main() {
         return;
     }
 
-    // Claude Code hooks call `/Applications/gwt.app/.../gwt-tauri hook <Event>` via `~/.claude/settings.json`.
+    // Claude Code hooks invoke `gwt-tauri hook <Event>` (plugin hook forwarding or legacy settings hook).
     // In hook mode we must NOT start the GUI event loop; process stdin JSON and exit immediately.
     if handle_hook_cli() {
         return;

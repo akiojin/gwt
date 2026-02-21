@@ -1,3 +1,28 @@
+//! Built-in tool definitions for Project Mode LLM tool-call dispatch.
+//!
+//! # Terminal tools
+//!
+//! - `send_keys_to_pane` — Send text input to a specific agent pane.
+//! - `send_keys_broadcast` — Broadcast text input to all running agent panes.
+//! - `capture_scrollback_tail` — Capture the scrollback tail for a pane as plain text.
+//!
+//! # Issue-first spec tools
+//!
+//! - `upsert_spec_issue` — Create or update an issue-first spec artifact bundle for a SPEC ID.
+//!   Merges section patches (spec, plan, tasks, tdd, research, data_model, quickstart,
+//!   contracts, checklists) with existing data via optimistic-concurrency `expected_etag`.
+//! - `get_spec_issue` — Get issue-first spec details for a given issue number.
+//! - `append_spec_contract_comment` — Append a contract payload as an issue comment
+//!   using the `contract:<name>` prefix.
+//! - `upsert_spec_issue_artifact` — Create or update a spec artifact comment
+//!   (contracts/checklists) with optional `expected_etag` for concurrency control.
+//! - `list_spec_issue_artifacts` — List spec artifact comments (contracts/checklists)
+//!   for an issue, optionally filtered by kind.
+//! - `delete_spec_issue_artifact` — Delete a spec artifact comment for
+//!   contracts/checklists from an issue.
+//! - `sync_spec_issue_project` — Sync an issue-first spec issue to GitHub Project V2
+//!   and update its phase status (draft/ready/planned/ready-for-dev/in-progress/done/blocked).
+
 use serde_json::{json, Value};
 
 use crate::commands::issue_spec::{
@@ -11,7 +36,6 @@ use crate::commands::terminal::{
 };
 use crate::state::AppState;
 use gwt_core::ai::{ToolCall, ToolDefinition, ToolFunction};
-use gwt_core::config::Settings;
 
 pub const TOOL_SEND_KEYS_TO_PANE: &str = "send_keys_to_pane";
 pub const TOOL_SEND_KEYS_BROADCAST: &str = "send_keys_broadcast";
@@ -340,14 +364,9 @@ pub fn execute_tool_call(
             let project_path = get_project_path_for_window(state, window_label)?;
             let issue_number = get_required_u64_any(&args, &["issue_number", "issueNumber"])?;
             let phase = get_required_string_any(&args, &["phase"])?;
-            let project_id = match get_optional_string_any(&args, &["project_id", "projectId"]) {
-                Some(v) if !v.trim().is_empty() => v.to_string(),
-                _ => {
-                    let settings =
-                        Settings::load(std::path::Path::new(&project_path)).unwrap_or_default();
-                    settings.agent.github_project_id.unwrap_or_default()
-                }
-            };
+            let project_id = get_optional_string_any(&args, &["project_id", "projectId"])
+                .map(str::to_string)
+                .unwrap_or_default();
             let result = sync_spec_issue_project_cmd(
                 project_path,
                 issue_number,
@@ -497,7 +516,7 @@ fn merge_sections_data(
 fn get_project_path_for_window(state: &AppState, window_label: &str) -> Result<String, String> {
     state
         .project_for_window(window_label)
-        .ok_or_else(|| "Open a project before using Master Agent.".to_string())
+        .ok_or_else(|| "Open a project before using Project Mode.".to_string())
 }
 
 #[cfg(test)]

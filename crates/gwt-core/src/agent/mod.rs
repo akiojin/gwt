@@ -6,7 +6,11 @@
 pub mod claude;
 pub mod codex;
 pub mod conversation;
+pub mod coordinator;
+pub mod developer;
 pub mod gemini;
+pub mod issue;
+pub mod lead;
 pub mod prompt_builder;
 pub mod scanner;
 pub mod session;
@@ -21,9 +25,13 @@ use crate::error::{GwtError, Result};
 use std::path::Path;
 
 pub use conversation::{Conversation, Message, MessageRole};
+pub use coordinator::{CoordinatorState, CoordinatorStatus};
+pub use developer::{DeveloperState, DeveloperStatus};
+pub use issue::{IssueStatus, ProjectIssue};
+pub use lead::{LeadMessage, LeadState, LeadStatus, MessageKind};
 pub use prompt_builder::PromptBuilder;
 pub use scanner::{BuildSystem, RepositoryScanResult, RepositoryScanner};
-pub use session::{AgentSession, SessionStatus};
+pub use session::{AgentSession, ProjectModeSession, SessionStatus};
 pub use session_store::{SessionStore, SessionStoreError, SessionSummary};
 pub use sub_agent::{CompletionSource, SubAgent, SubAgentStatus, SubAgentType};
 pub use task::{

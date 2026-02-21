@@ -7,13 +7,13 @@ mod bare_project;
 mod claude_hook_events;
 mod claude_hooks;
 mod claude_plugins;
-pub mod mcp_registration;
 pub mod migration;
 pub mod os_env;
 mod profile;
 mod recent_projects;
 mod session;
 mod settings;
+pub mod skill_registration;
 pub mod stats;
 pub mod tools;
 mod ts_session;
@@ -30,16 +30,9 @@ pub use claude_plugins::{
     enable_worktree_protection_plugin, get_global_claude_settings_path,
     get_known_marketplaces_path, get_local_claude_settings_path, is_gwt_marketplace_registered,
     is_gwt_marketplace_registered_at, is_plugin_enabled_in_settings, is_plugin_explicitly_disabled,
-    register_gwt_marketplace, register_gwt_marketplace_at, setup_gwt_plugin, GWT_MARKETPLACE_NAME,
-    GWT_MARKETPLACE_REPO, GWT_MARKETPLACE_SOURCE, GWT_PLUGIN_FULL_NAME, GWT_PLUGIN_NAME,
-};
-pub use mcp_registration::{
-    cleanup_stale_registrations, detect_runtime,
-    get_registration_status as get_mcp_registration_status, is_registered as is_mcp_registered,
-    register_all as register_all_mcp, register_mcp_server,
-    repair_registration as repair_mcp_registration, resolve_bridge_path,
-    unregister_all as unregister_all_mcp, unregister_mcp_server, McpAgentRegistrationStatus,
-    McpAgentType, McpBridgeConfig, McpRegistrationStatus, MCP_SERVER_NAME,
+    register_gwt_marketplace, register_gwt_marketplace_at, setup_gwt_plugin, setup_gwt_plugin_at,
+    GWT_MARKETPLACE_NAME, GWT_MARKETPLACE_REPO, GWT_MARKETPLACE_SOURCE, GWT_PLUGIN_FULL_NAME,
+    GWT_PLUGIN_NAME,
 };
 pub use migration::{
     backup_broken_file, ensure_config_dir, get_cleanup_candidates, migrate_json_to_toml,
@@ -55,7 +48,14 @@ pub use session::{
     agent_has_hook_support, get_session_for_branch, infer_agent_status,
     load_sessions_from_worktrees, AgentStatus, Session,
 };
-pub use settings::Settings;
+pub use settings::{Settings, SkillRegistrationPreferences, SkillRegistrationScope};
+pub use skill_registration::{
+    get_skill_registration_status, get_skill_registration_status_with_settings_at_project_root,
+    register_agent_skills, register_agent_skills_with_settings_at_project_root,
+    register_all_skills, register_all_skills_with_settings_at_project_root,
+    repair_skill_registration, repair_skill_registration_with_settings_at_project_root,
+    SkillAgentRegistrationStatus, SkillAgentType, SkillRegistrationStatus,
+};
 pub use tools::{AgentType, CustomCodingAgent, ModeArgs, ModelDef, ToolsConfig};
 pub use ts_session::{
     get_branch_tool_history, get_last_tool_usage_map, get_ts_session_json_path,
@@ -71,6 +71,9 @@ pub(crate) static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub(crate) struct TestEnvGuard {
     prev_home: Option<std::ffi::OsString>,
     prev_xdg_config: Option<std::ffi::OsString>,
+    prev_userprofile: Option<std::ffi::OsString>,
+    prev_homedrive: Option<std::ffi::OsString>,
+    prev_homepath: Option<std::ffi::OsString>,
 }
 
 #[cfg(test)]
@@ -83,13 +86,36 @@ impl TestEnvGuard {
     pub fn new(home_path: &std::path::Path) -> Self {
         let prev_home = std::env::var_os("HOME");
         let prev_xdg_config = std::env::var_os("XDG_CONFIG_HOME");
+        let prev_userprofile = std::env::var_os("USERPROFILE");
+        let prev_homedrive = std::env::var_os("HOMEDRIVE");
+        let prev_homepath = std::env::var_os("HOMEPATH");
 
         std::env::set_var("HOME", home_path);
         std::env::set_var("XDG_CONFIG_HOME", home_path.join(".config"));
+        std::env::set_var("USERPROFILE", home_path);
+        if let Some(home_str) = home_path.to_str() {
+            if home_str.len() >= 2 && home_str.as_bytes()[1] == b':' {
+                std::env::set_var("HOMEDRIVE", &home_str[..2]);
+                let rest = if home_str.len() > 2 {
+                    home_str[2..].replace('/', "\\")
+                } else {
+                    "\\".to_string()
+                };
+                let homepath = if rest.starts_with('\\') {
+                    rest
+                } else {
+                    format!("\\{rest}")
+                };
+                std::env::set_var("HOMEPATH", homepath);
+            }
+        }
 
         Self {
             prev_home,
             prev_xdg_config,
+            prev_userprofile,
+            prev_homedrive,
+            prev_homepath,
         }
     }
 
@@ -97,13 +123,36 @@ impl TestEnvGuard {
     pub fn with_xdg(home_path: &std::path::Path, xdg_config_home: &std::path::Path) -> Self {
         let prev_home = std::env::var_os("HOME");
         let prev_xdg_config = std::env::var_os("XDG_CONFIG_HOME");
+        let prev_userprofile = std::env::var_os("USERPROFILE");
+        let prev_homedrive = std::env::var_os("HOMEDRIVE");
+        let prev_homepath = std::env::var_os("HOMEPATH");
 
         std::env::set_var("HOME", home_path);
         std::env::set_var("XDG_CONFIG_HOME", xdg_config_home);
+        std::env::set_var("USERPROFILE", home_path);
+        if let Some(home_str) = home_path.to_str() {
+            if home_str.len() >= 2 && home_str.as_bytes()[1] == b':' {
+                std::env::set_var("HOMEDRIVE", &home_str[..2]);
+                let rest = if home_str.len() > 2 {
+                    home_str[2..].replace('/', "\\")
+                } else {
+                    "\\".to_string()
+                };
+                let homepath = if rest.starts_with('\\') {
+                    rest
+                } else {
+                    format!("\\{rest}")
+                };
+                std::env::set_var("HOMEPATH", homepath);
+            }
+        }
 
         Self {
             prev_home,
             prev_xdg_config,
+            prev_userprofile,
+            prev_homedrive,
+            prev_homepath,
         }
     }
 }
@@ -118,6 +167,18 @@ impl Drop for TestEnvGuard {
         match &self.prev_xdg_config {
             Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
             None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match &self.prev_userprofile {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        match &self.prev_homedrive {
+            Some(value) => std::env::set_var("HOMEDRIVE", value),
+            None => std::env::remove_var("HOMEDRIVE"),
+        }
+        match &self.prev_homepath {
+            Some(value) => std::env::set_var("HOMEPATH", value),
+            None => std::env::remove_var("HOMEPATH"),
         }
     }
 }

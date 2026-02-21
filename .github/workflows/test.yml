@@ -24,11 +24,6 @@ jobs:
           corepack enable
           corepack prepare pnpm@10.29.2 --activate
           pnpm --version
-      - name: Build MCP bridge
-        run: |
-          cd gwt-mcp-bridge
-          pnpm install --no-frozen-lockfile
-          pnpm run build
       - name: Install system dependencies (Linux)
         run: |
           sudo apt-get update
@@ -70,10 +65,6 @@ jobs:
         run: cd gwt-gui && pnpm run check
       - name: Frontend build
         run: cd gwt-gui && pnpm run build
-      - name: Install MCP bridge dependencies
-        run: cd gwt-mcp-bridge && pnpm install --no-frozen-lockfile
-      - name: Build MCP bridge
-        run: cd gwt-mcp-bridge && pnpm run build
       - name: Build check
         run: cargo check --workspace
 

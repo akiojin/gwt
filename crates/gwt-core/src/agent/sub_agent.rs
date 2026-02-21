@@ -1,4 +1,4 @@
-//! Sub-agent metadata for agent mode
+//! Sub-agent metadata for Project Mode
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

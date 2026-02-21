@@ -60,17 +60,11 @@ impl Profile {
 
     /// Resolve AI settings with environment fallbacks
     pub fn resolved_ai_settings(&self) -> Option<ResolvedAISettings> {
-        if self.ai_enabled == Some(false) {
-            return None;
-        }
         self.ai.as_ref().map(|settings| settings.resolved())
     }
 
     /// Check if AI settings are enabled for this profile
     pub fn ai_enabled(&self) -> bool {
-        if self.ai_enabled == Some(false) {
-            return false;
-        }
         self.ai
             .as_ref()
             .map(|settings| settings.is_enabled())
@@ -373,19 +367,11 @@ impl ProfilesConfig {
     /// Resolve active AI settings and feature flags.
     ///
     /// Rules:
-    /// - If the active profile has `ai` configured (present), it always wins (even when disabled).
-    ///   If `ai_enabled=false`, AI is treated as disabled with no fallback.
+    /// - If the active profile has `ai` configured (present), it always wins and
+    ///   is validated by `AISettings::is_enabled()`.
     /// - Otherwise fall back to `default_ai`.
     pub fn resolve_active_ai_settings(&self) -> ActiveAISettingsResolution {
         if let Some(profile) = self.active_profile() {
-            if profile.ai_enabled == Some(false) {
-                return ActiveAISettingsResolution {
-                    source: ActiveAISettingsSource::ActiveProfile,
-                    ai_enabled: false,
-                    summary_enabled: false,
-                    resolved: None,
-                };
-            }
             if let Some(settings) = profile.ai.as_ref() {
                 let ai_enabled = settings.is_enabled();
                 let summary_enabled = settings.is_summary_enabled();
@@ -787,12 +773,12 @@ profiles:
     }
 
     #[test]
-    fn test_profile_ai_disabled_flag_blocks_settings() {
+    fn test_profile_ai_disabled_flag_is_ignored() {
         let mut profile = Profile::new("dev");
         profile.ai = Some(ai_settings("gpt-5.2"));
         profile.ai_enabled = Some(false);
-        assert!(!profile.ai_enabled());
-        assert!(profile.resolved_ai_settings().is_none());
+        assert!(profile.ai_enabled());
+        assert!(profile.resolved_ai_settings().is_some());
     }
 
     #[test]
@@ -839,7 +825,7 @@ profiles:
     }
 
     #[test]
-    fn resolve_active_ai_settings_disables_when_profile_ai_enabled_flag_false() {
+    fn resolve_active_ai_settings_ignores_ai_enabled_flag_false() {
         let mut profiles = HashMap::new();
         let mut dev = Profile::new("dev");
         dev.ai = Some(ai_settings("gpt-5.2"));
@@ -855,9 +841,9 @@ profiles:
 
         let resolved = config.resolve_active_ai_settings();
         assert_eq!(resolved.source, ActiveAISettingsSource::ActiveProfile);
-        assert!(!resolved.ai_enabled);
-        assert!(!resolved.summary_enabled);
-        assert!(resolved.resolved.is_none());
+        assert!(resolved.ai_enabled);
+        assert!(resolved.summary_enabled);
+        assert_eq!(resolved.resolved.unwrap().model, "gpt-5.2");
     }
 
     #[test]

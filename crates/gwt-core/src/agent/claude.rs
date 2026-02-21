@@ -90,7 +90,7 @@ impl AgentTrait for ClaudeAgent {
             can_read_files: true,
             can_write_files: true,
             can_use_bash: true,
-            can_use_mcp: true,
+            can_use_mcp: false,
             supports_streaming: true,
             supports_multi_turn: true,
         }

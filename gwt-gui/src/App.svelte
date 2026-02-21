@@ -14,6 +14,7 @@
     TerminalAnsiProbe,
     CapturedEnvInfo,
     SettingsData,
+    SkillRegistrationScope,
     UpdateState,
     VoiceInputSettings,
   } from "./lib/types";
@@ -70,15 +71,21 @@
     tryAcquireWindowSessionRestoreLead,
   } from "./lib/windowSessionRestoreLeader";
   import { collectScreenText } from "./lib/screenCapture";
+  import {
+    isAllowedExternalHttpUrl,
+    openExternalUrl,
+  } from "./lib/openExternalUrl";
 
   interface SettingsUpdatedPayload {
     uiFontSize?: number;
     terminalFontSize?: number;
+    uiFontFamily?: string;
+    terminalFontFamily?: string;
     appLanguage?: SettingsData["app_language"];
     voiceInput?: VoiceInputSettings;
   }
 
-  interface AgentModeSpecIssuePayload {
+  interface ProjectModeSpecIssuePayload {
     issueNumber: number;
     specId?: string | null;
     issueUrl?: string | null;
@@ -89,7 +96,7 @@
   const DEFAULT_SIDEBAR_WIDTH_PX = 260;
   const MIN_SIDEBAR_WIDTH_PX = 220;
   const MAX_SIDEBAR_WIDTH_PX = 520;
-  type SidebarMode = "branch" | "agent";
+  type SidebarMode = "branch" | "projectMode";
 
   const DEFAULT_VOICE_INPUT_SETTINGS: VoiceInputSettings = {
     enabled: false,
@@ -97,6 +104,10 @@
     language: "auto",
     model: "base",
   };
+  const DEFAULT_UI_FONT_FAMILY =
+    'system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif';
+  const DEFAULT_TERMINAL_FONT_FAMILY =
+    '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace';
 
   function clampSidebarWidth(widthPx: number): number {
     if (!Number.isFinite(widthPx)) return DEFAULT_SIDEBAR_WIDTH_PX;
@@ -130,7 +141,10 @@
     if (typeof window === "undefined") return "branch";
     try {
       const raw = window.localStorage.getItem(SIDEBAR_MODE_STORAGE_KEY);
-      return raw === "agent" || raw === "branch" ? raw : "branch";
+      if (raw === "projectMode") {
+        return "projectMode";
+      }
+      return raw === "branch" ? "branch" : "branch";
     } catch {
       return "branch";
     }
@@ -198,7 +212,7 @@
   let migrationSourceRoot: string = $state("");
 
   let tabs: Tab[] = $state(defaultAppTabs());
-  let activeTabId: string = $state("agentMode");
+  let activeTabId: string = $state("projectMode");
 
   let agentTabsHydratedProjectPath: string | null = $state(null);
   let agentTabsRestoreToken = 0;
@@ -252,6 +266,11 @@
   let osEnvDebugData = $state<CapturedEnvInfo | null>(null);
   let osEnvDebugLoading = $state(false);
   let osEnvDebugError = $state<string | null>(null);
+  let startupSkillScopeChecked = false;
+  let skillScopePromptOpen = $state(false);
+  let skillScopeSelection = $state<SkillRegistrationScope>("user");
+  let skillScopePromptBusy = $state(false);
+  let skillScopePromptError = $state<string | null>(null);
   type AvailableUpdateState = Extract<UpdateState, { state: "available" }>;
 
   function showToast(
@@ -549,10 +568,38 @@
     };
   });
 
+  // Keep external URL behavior consistent across all rendered links.
+  $effect(() => {
+    if (typeof document === "undefined") return;
+
+    const handleDocumentClick = (event: MouseEvent) => {
+      const anchor = nearestAnchor(event.target);
+      if (!anchor) return;
+      if (!shouldHandleExternalLinkClick(event, anchor)) return;
+
+      const rawHref = anchor.getAttribute("href");
+      if (!rawHref) return;
+
+      event.preventDefault();
+      void openExternalUrl(rawHref);
+    };
+
+    document.addEventListener("click", handleDocumentClick, true);
+    return () => {
+      document.removeEventListener("click", handleDocumentClick, true);
+    };
+  });
+
   $effect(() => {
     void projectPath;
     void setWindowTitle();
     void applyAppearanceSettings();
+  });
+
+  $effect(() => {
+    if (startupSkillScopeChecked) return;
+    startupSkillScopeChecked = true;
+    void checkSkillScopePromptOnStartup();
   });
 
   $effect(() => {
@@ -873,6 +920,28 @@
     );
   }
 
+  function nearestAnchor(target: EventTarget | null): HTMLAnchorElement | null {
+    if (!(target instanceof Element)) return null;
+    const anchor = target.closest("a[href]");
+    return anchor instanceof HTMLAnchorElement ? anchor : null;
+  }
+
+  function shouldHandleExternalLinkClick(
+    event: MouseEvent,
+    anchor: HTMLAnchorElement,
+  ): boolean {
+    if (event.defaultPrevented) return false;
+    if (event.button !== 0) return false;
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+      return false;
+    }
+    if (anchor.hasAttribute("download")) return false;
+
+    const rawHref = anchor.getAttribute("href");
+    if (!rawHref) return false;
+    return isAllowedExternalHttpUrl(rawHref);
+  }
+
   function clampFontSize(size: number): number {
     return Math.max(8, Math.min(24, Math.round(size)));
   }
@@ -905,14 +974,62 @@
     return "auto";
   }
 
+  function normalizeUiFontFamily(value: string | null | undefined): string {
+    const family = (value ?? "").trim();
+    return family.length > 0 ? family : DEFAULT_UI_FONT_FAMILY;
+  }
+
+  function normalizeTerminalFontFamily(value: string | null | undefined): string {
+    const family = (value ?? "").trim();
+    return family.length > 0 ? family : DEFAULT_TERMINAL_FONT_FAMILY;
+  }
+
+  function normalizeSkillScope(
+    value: string | null | undefined,
+  ): SkillRegistrationScope | null {
+    const normalized = (value ?? "").trim().toLowerCase();
+    if (
+      normalized === "user" ||
+      normalized === "project" ||
+      normalized === "local"
+    ) {
+      return normalized as SkillRegistrationScope;
+    }
+    return null;
+  }
+
+  function hasSkillScopeConfigured(
+    settings: Partial<SettingsData> | null | undefined,
+  ): boolean {
+    return normalizeSkillScope(
+      settings?.agent_skill_registration_default_scope ?? null,
+    ) !== null;
+  }
+
   function applyUiFontSize(size: number) {
     document.documentElement.style.setProperty("--ui-font-base", `${size}px`);
+  }
+
+  function applyUiFontFamily(family: string | null | undefined) {
+    document.documentElement.style.setProperty(
+      "--ui-font-family",
+      normalizeUiFontFamily(family),
+    );
   }
 
   function applyTerminalFontSize(size: number) {
     (window as any).__gwtTerminalFontSize = size;
     window.dispatchEvent(
       new CustomEvent("gwt-terminal-font-size", { detail: size }),
+    );
+  }
+
+  function applyTerminalFontFamily(family: string | null | undefined) {
+    const normalized = normalizeTerminalFontFamily(family);
+    document.documentElement.style.setProperty("--terminal-font-family", normalized);
+    (window as any).__gwtTerminalFontFamily = normalized;
+    window.dispatchEvent(
+      new CustomEvent("gwt-terminal-font-family", { detail: normalized }),
     );
   }
 
@@ -925,6 +1042,51 @@
 
   function applyAppLanguage(value: string | null | undefined) {
     appLanguage = normalizeAppLanguage(value);
+  }
+
+  async function checkSkillScopePromptOnStartup() {
+    if (!isTauriRuntimeAvailable()) return;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const settings = await invoke<SettingsData>("get_settings");
+      if (hasSkillScopeConfigured(settings)) {
+        skillScopePromptOpen = false;
+        return;
+      }
+
+      skillScopeSelection = "user";
+      skillScopePromptError = null;
+      skillScopePromptOpen = true;
+    } catch (err) {
+      skillScopePromptOpen = false;
+      skillScopePromptError = null;
+      console.error("Failed to check startup skill scope setting:", err);
+    }
+  }
+
+  async function applyStartupSkillScopeSelection() {
+    if (skillScopePromptBusy) return;
+    skillScopePromptBusy = true;
+    skillScopePromptError = null;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const currentSettings = await invoke<SettingsData>("get_settings");
+      const nextSettings: SettingsData = {
+        ...currentSettings,
+        agent_skill_registration_default_scope: skillScopeSelection,
+        agent_skill_registration_codex_scope: null,
+        agent_skill_registration_claude_scope: null,
+        agent_skill_registration_gemini_scope: null,
+      };
+
+      await invoke("save_settings", { settings: nextSettings });
+      await invoke("repair_skill_registration_cmd");
+      skillScopePromptOpen = false;
+    } catch (err) {
+      skillScopePromptError = toErrorMessage(err);
+    } finally {
+      skillScopePromptBusy = false;
+    }
   }
 
   async function rebuildAllBranchSessionSummaries(language: SettingsData["app_language"]) {
@@ -967,11 +1129,18 @@
         await invoke<
           Pick<
             SettingsData,
-            "ui_font_size" | "terminal_font_size" | "app_language" | "voice_input"
+            | "ui_font_size"
+            | "terminal_font_size"
+            | "ui_font_family"
+            | "terminal_font_family"
+            | "app_language"
+            | "voice_input"
           >
         >("get_settings");
       applyUiFontSize(clampFontSize(settings.ui_font_size ?? 13));
       applyTerminalFontSize(clampFontSize(settings.terminal_font_size ?? 13));
+      applyUiFontFamily(settings.ui_font_family);
+      applyTerminalFontFamily(settings.terminal_font_family);
       applyAppLanguage(settings.app_language);
       applyVoiceInputSettings(settings.voice_input);
     } catch {
@@ -1090,24 +1259,23 @@
     persistSidebarWidth(next);
   }
 
-  function ensureAgentModeTab() {
-    const existing = tabs.find(
-      (t) => t.type === "agentMode" || t.id === "agentMode",
-    );
+  function ensureProjectModeTab() {
+    const existing = tabs.find((t) => t.type === "projectMode" || t.id === "projectMode");
     if (existing) return;
 
     const tab: Tab = {
-      id: "agentMode",
-      label: "Master Agent",
-      type: "agentMode",
+      id: "projectMode",
+      label: "Project Mode",
+      type: "projectMode",
     };
     tabs = [...tabs, tab];
   }
 
   function handleSidebarModeChange(next: SidebarMode) {
     if (sidebarMode === next) return;
-    if (next === "agent") {
-      ensureAgentModeTab();
+    if (next === "projectMode") {
+      ensureProjectModeTab();
+      activeTabId = "projectMode";
     }
     sidebarMode = next;
     persistSidebarMode(next);
@@ -1318,22 +1486,35 @@
     return `id:${tab.id}`;
   }
 
+  function normalizePrimaryTab(tab: Tab): Tab {
+    if (tab.type === "projectMode" || tab.id === "projectMode") {
+      return {
+        ...tab,
+        id: "projectMode",
+        label: "Project Mode",
+        type: "projectMode",
+      };
+    }
+    return tab;
+  }
+
   function mergeRestoredTabs(existingTabs: Tab[], restoredTabs: Tab[]): Tab[] {
-    const merged = [...restoredTabs];
+    const merged = restoredTabs.map((tab) => normalizePrimaryTab(tab));
     const seen = new Set(merged.map(tabMergeKey));
 
     for (const tab of existingTabs) {
-      const key = tabMergeKey(tab);
+      const normalized = normalizePrimaryTab(tab);
+      const key = tabMergeKey(normalized);
       if (seen.has(key)) continue;
       seen.add(key);
-      merged.push(tab);
+      merged.push(normalized);
     }
 
-    if (!merged.some((tab) => tab.id === "agentMode")) {
+    if (!merged.some((tab) => tab.id === "projectMode")) {
       merged.unshift({
-        id: "agentMode",
-        label: "Master Agent",
-        type: "agentMode",
+        id: "projectMode",
+        label: "Project Mode",
+        type: "projectMode",
       });
     }
 
@@ -1369,6 +1550,7 @@
       queueIssueLaunchFollowup(jobId, request);
       pendingLaunchRequest = request;
       launchJobId = jobId;
+      launchJobStartPending = false;
       launchProgressOpen = true;
       flushBufferedLaunchEventsForActiveJob();
     } catch (err) {
@@ -1402,6 +1584,15 @@
     launchStep = "fetch";
     launchDetail = "";
     launchError = null;
+  }
+
+  function handleUseExistingBranch() {
+    const req = pendingLaunchRequest;
+    if (!req) return;
+    const retryRequest: LaunchAgentRequest = { ...req };
+    delete retryRequest.createBranch;
+    handleLaunchModalClose();
+    void handleAgentLaunch(retryRequest);
   }
 
   function handleLaunchSuccess(paneId: string) {
@@ -1569,7 +1760,7 @@
     sidebarRefreshKey++;
   }
 
-  function openIssueSpecTab(payload: AgentModeSpecIssuePayload) {
+  function openIssueSpecTab(payload: ProjectModeSpecIssuePayload) {
     const issueNumber = Number(payload.issueNumber);
     if (!Number.isFinite(issueNumber) || issueNumber <= 0) return;
     const specId = payload.specId?.trim() || undefined;
@@ -1878,7 +2069,7 @@
           projectPath = null;
           void updateWindowSession(null);
           tabs = defaultAppTabs();
-          activeTabId = "agentMode";
+          activeTabId = "projectMode";
           selectedBranch = null;
           currentBranch = "";
         }
@@ -2126,7 +2317,7 @@
         }
       }
     } else if (!mergedTabs.some((tab) => tab.id === activeTabId)) {
-      activeTabId = mergedTabs[0]?.id ?? "agentMode";
+      activeTabId = mergedTabs[0]?.id ?? "projectMode";
     }
 
     agentTabsHydratedProjectPath = targetProjectPath;
@@ -2179,15 +2370,19 @@
         continue;
       }
       if (
-        tab.type === "agentMode" ||
+        tab.type === "projectMode" ||
         tab.type === "settings" ||
         tab.type === "versionHistory" ||
         tab.type === "issues"
       ) {
+        const staticType = tab.type === "projectMode" ? "projectMode" : tab.type;
+        const staticId = tab.id === "projectMode" ? "projectMode" : tab.id;
+        const staticLabel =
+          tab.type === "projectMode" ? "Project Mode" : tab.label;
         storedTabs.push({
-          type: tab.type,
-          id: tab.id,
-          label: tab.label,
+          type: staticType,
+          id: staticId,
+          label: staticLabel,
         });
       }
     }
@@ -2205,47 +2400,6 @@
       tabs: storedTabs,
       activeTabId: storedActiveTabId,
     });
-  });
-
-  // Claude Code Hooks: check & register on startup
-  $effect(() => {
-    (async () => {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const status = await invoke<{
-          registered: boolean;
-          updated: boolean;
-          temporary_execution: boolean;
-        }>("check_and_update_hooks");
-
-        if (status.temporary_execution) {
-          console.warn(
-            "gwt is running from a temporary execution environment; hooks may not persist.",
-          );
-        }
-
-        if (!status.registered) {
-          const { confirm } = await import("@tauri-apps/plugin-dialog");
-          const message = status.temporary_execution
-            ? [
-                "gwt is running from a temporary execution environment (e.g. bunx/npx cache).",
-                "If you register hooks now, the stored executable path may not persist and hooks can break later.",
-                "",
-                "Register Claude Code hooks for gwt anyway? This allows gwt to track agent status.",
-              ].join("\n")
-            : "Register Claude Code hooks for gwt? This allows gwt to track agent status.";
-          const ok = await confirm(message, {
-            title: "gwt",
-            kind: status.temporary_execution ? "warning" : "info",
-          });
-          if (ok) {
-            await invoke("register_hooks");
-          }
-        }
-      } catch (err) {
-        console.error("Failed to check/register Claude Code hooks:", err);
-      }
-    })();
   });
 
   // Native menubar integration (Tauri emits "menu-action" to the focused window).
@@ -2328,6 +2482,12 @@
       if (typeof detail.terminalFontSize === "number") {
         applyTerminalFontSize(clampFontSize(detail.terminalFontSize));
       }
+      if (typeof detail.uiFontFamily === "string") {
+        applyUiFontFamily(detail.uiFontFamily);
+      }
+      if (typeof detail.terminalFontFamily === "string") {
+        applyTerminalFontFamily(detail.terminalFontFamily);
+      }
       if (typeof detail.appLanguage === "string") {
         const nextLanguage = normalizeAppLanguage(detail.appLanguage);
         const changed = nextLanguage !== appLanguage;
@@ -2348,14 +2508,14 @@
 
   $effect(() => {
     function onOpenIssueSpec(event: Event) {
-      const payload = (event as CustomEvent<AgentModeSpecIssuePayload>).detail;
+      const payload = (event as CustomEvent<ProjectModeSpecIssuePayload>).detail;
       if (!payload) return;
       openIssueSpecTab(payload);
     }
-    window.addEventListener("gwt-agent-mode-open-spec-issue", onOpenIssueSpec);
+    window.addEventListener("gwt-project-mode-open-spec-issue", onOpenIssueSpec);
     return () =>
       window.removeEventListener(
-        "gwt-agent-mode-open-spec-issue",
+        "gwt-project-mode-open-spec-issue",
         onOpenIssueSpec,
       );
   });
@@ -2520,7 +2680,7 @@
   cpuUsage={systemMonitor.cpuUsage}
   memUsed={systemMonitor.memUsed}
   memTotal={systemMonitor.memTotal}
-  gpuInfo={systemMonitor.gpuInfo}
+  gpuInfos={systemMonitor.gpuInfos}
   onclose={() => (showAbout = false)}
 />
 
@@ -2635,7 +2795,63 @@
   error={launchError}
   onCancel={handleLaunchCancel}
   onClose={handleLaunchModalClose}
+  onUseExisting={handleUseExistingBranch}
 />
+{#if skillScopePromptOpen}
+  <div class="overlay">
+    <div class="scope-dialog" role="dialog" aria-modal="true" aria-label="Skill registration scope">
+      <h2>Skill Registration Scope</h2>
+      <p class="scope-dialog-text">
+        Select where managed skills and plugins are auto-registered. You can change this later in
+        Settings.
+      </p>
+      <div class="scope-choice-grid">
+        <button
+          class={`scope-choice ${skillScopeSelection === "user" ? "active" : ""}`}
+          onclick={() => (skillScopeSelection = "user")}
+          disabled={skillScopePromptBusy}
+        >
+          <strong>User</strong>
+          <span>~/.codex, ~/.gemini, ~/.claude</span>
+        </button>
+        <button
+          class={`scope-choice ${skillScopeSelection === "project" ? "active" : ""}`}
+          onclick={() => (skillScopeSelection = "project")}
+          disabled={skillScopePromptBusy}
+        >
+          <strong>Project</strong>
+          <span>&lt;repo&gt;/.codex, .gemini, .claude</span>
+        </button>
+        <button
+          class={`scope-choice ${skillScopeSelection === "local" ? "active" : ""}`}
+          onclick={() => (skillScopeSelection = "local")}
+          disabled={skillScopePromptBusy}
+        >
+          <strong>Local</strong>
+          <span>&lt;repo&gt;/.codex/skills.local etc.</span>
+        </button>
+      </div>
+      {#if skillScopePromptError}
+        <p class="scope-dialog-error">{skillScopePromptError}</p>
+      {/if}
+      <div class="scope-dialog-actions">
+        <button
+          class="about-close"
+          onclick={() => {
+            skillScopePromptOpen = false;
+            skillScopePromptError = null;
+          }}
+          disabled={skillScopePromptBusy}
+        >
+          Skip for now
+        </button>
+        <button class="about-close" onclick={() => void applyStartupSkillScopeSelection()} disabled={skillScopePromptBusy}>
+          {skillScopePromptBusy ? "Applying..." : "Apply and Continue"}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 {#if showOsEnvDebug}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -2844,6 +3060,94 @@
     overflow-x: auto;
     white-space: pre;
     font-size: var(--ui-font-md);
+  }
+
+  .scope-dialog {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 24px 26px;
+    max-width: 680px;
+    width: min(680px, 92vw);
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .scope-dialog h2 {
+    font-size: var(--ui-font-xl);
+    font-weight: 800;
+    color: var(--text-primary);
+    margin: 0;
+  }
+
+  .scope-dialog-text {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: var(--ui-font-md);
+    line-height: 1.5;
+  }
+
+  .scope-choice-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .scope-choice {
+    text-align: left;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    color: var(--text-secondary);
+    padding: 12px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: var(--ui-font-md);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .scope-choice strong {
+    color: var(--text-primary);
+    font-size: var(--ui-font-md);
+  }
+
+  .scope-choice span {
+    font-family: monospace;
+    font-size: var(--ui-font-sm);
+    color: var(--text-muted);
+    line-height: 1.3;
+  }
+
+  .scope-choice:hover:not(:disabled),
+  .scope-choice.active {
+    border-color: var(--accent);
+    background: var(--bg-surface);
+  }
+
+  .scope-choice:disabled {
+    opacity: 0.7;
+    cursor: default;
+  }
+
+  .scope-dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .scope-dialog-error {
+    margin: 0;
+    color: rgb(255, 160, 160);
+    font-size: var(--ui-font-sm);
+  }
+
+  @media (max-width: 860px) {
+    .scope-choice-grid {
+      grid-template-columns: 1fr;
+    }
   }
 
   .error-dialog {
