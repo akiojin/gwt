@@ -1,6 +1,10 @@
 //! GitHub Issue commands (SPEC-c6ba640a)
 
 use crate::commands::project::resolve_repo_path_for_project_root;
+use gwt_core::ai::{
+    classify_issue_prefix as core_classify_issue_prefix, format_error_for_display, AIClient,
+};
+use gwt_core::config::ProfilesConfig;
 use gwt_core::git::{
     create_linked_branch, fetch_issue_detail, fetch_open_issues, find_branch_for_issue,
     get_spec_issue_detail, is_gh_cli_authenticated, is_gh_cli_available,
@@ -307,6 +311,48 @@ pub fn rollback_issue_branch(
         remote_deleted,
         error,
     })
+}
+
+/// AI-based issue branch prefix classification result.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassifyResult {
+    /// "ok" | "ai-not-configured" | "error"
+    pub status: String,
+    pub prefix: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Classify a GitHub issue into a branch prefix using AI.
+#[tauri::command]
+pub fn classify_issue_branch_prefix(
+    title: String,
+    labels: Vec<String>,
+    body: Option<String>,
+) -> Result<ClassifyResult, String> {
+    let profiles = ProfilesConfig::load().map_err(|e| e.to_string())?;
+    let ai = profiles.resolve_active_ai_settings();
+    let Some(settings) = ai.resolved else {
+        return Ok(ClassifyResult {
+            status: "ai-not-configured".to_string(),
+            prefix: None,
+            error: None,
+        });
+    };
+
+    let client = AIClient::new(settings).map_err(|e| e.to_string())?;
+    match core_classify_issue_prefix(&client, &title, &labels, body.as_deref()) {
+        Ok(prefix) => Ok(ClassifyResult {
+            status: "ok".to_string(),
+            prefix: Some(prefix),
+            error: None,
+        }),
+        Err(err) => Ok(ClassifyResult {
+            status: "error".to_string(),
+            prefix: None,
+            error: Some(format_error_for_display(&err)),
+        }),
+    }
 }
 
 #[cfg(test)]

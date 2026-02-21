@@ -622,6 +622,7 @@ fn build_docker_compose_up_args(
     compose_args: &[String],
     build: bool,
     recreate: bool,
+    service: Option<&str>,
 ) -> Vec<String> {
     let mut args = vec!["compose".to_string()];
     args.extend(compose_args.iter().cloned());
@@ -636,6 +637,9 @@ fn build_docker_compose_up_args(
     ]);
     if recreate {
         args.push("--force-recreate".to_string());
+    }
+    if let Some(service) = service.map(str::trim).filter(|s| !s.is_empty()) {
+        args.push(service.to_string());
     }
     args
 }
@@ -855,11 +859,17 @@ fn docker_compose_up(
     compose_args: &[String],
     build: bool,
     recreate: bool,
+    service: Option<&str>,
 ) -> Result<(), String> {
     ensure_docker_compose_ready()?;
 
     let output = gwt_core::process::command("docker")
-        .args(build_docker_compose_up_args(compose_args, build, recreate))
+        .args(build_docker_compose_up_args(
+            compose_args,
+            build,
+            recreate,
+            service,
+        ))
         .current_dir(worktree_path)
         .env("COMPOSE_PROJECT_NAME", container_name)
         .envs(env_vars)
@@ -2822,7 +2832,7 @@ multi_agent = true
     #[test]
     fn build_docker_compose_up_args_build_and_recreate_flags() {
         assert_eq!(
-            build_docker_compose_up_args(&[], false, false),
+            build_docker_compose_up_args(&[], false, false, None),
             vec![
                 "compose".to_string(),
                 "up".to_string(),
@@ -2831,12 +2841,26 @@ multi_agent = true
             ]
         );
 
-        let build = build_docker_compose_up_args(&[], true, false);
+        let build = build_docker_compose_up_args(&[], true, false, None);
         assert!(build.contains(&"--build".to_string()));
         assert!(!build.contains(&"--no-build".to_string()));
 
-        let recreate = build_docker_compose_up_args(&[], false, true);
+        let recreate = build_docker_compose_up_args(&[], false, true, None);
         assert!(recreate.contains(&"--force-recreate".to_string()));
+
+        let with_service = build_docker_compose_up_args(&[], false, false, Some("dev"));
+        assert_eq!(with_service.last(), Some(&"dev".to_string()));
+
+        let with_blank_service = build_docker_compose_up_args(&[], false, false, Some("  "));
+        assert_eq!(
+            with_blank_service,
+            vec![
+                "compose".to_string(),
+                "up".to_string(),
+                "-d".to_string(),
+                "--no-build".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -3670,6 +3694,7 @@ pub(crate) fn launch_agent_for_project_root(
                     &compose_args,
                     docker_build,
                     docker_recreate,
+                    Some(service.as_str()),
                 )?;
 
                 docker_container_name = Some(container_name);
@@ -3761,6 +3786,7 @@ pub(crate) fn launch_agent_for_project_root(
                         &compose_args,
                         docker_build,
                         docker_recreate,
+                        Some(service.as_str()),
                     )?;
 
                     docker_container_name = Some(container_name);
