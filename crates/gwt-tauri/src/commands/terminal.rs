@@ -827,6 +827,7 @@ fn docker_compose_up(
     container_name: &str,
     env_vars: &HashMap<String, String>,
     compose_args: &[String],
+    service: &str,
     build: bool,
     recreate: bool,
 ) -> Result<(), String> {
@@ -840,15 +841,49 @@ fn docker_compose_up(
         .output()
         .map_err(|e| format!("Failed to run docker compose up: {}", e))?;
 
-    if output.status.success() {
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            return Err("docker compose up failed".to_string());
+        }
+        return Err(stderr);
+    }
+
+    let selected_service = service.trim();
+    if selected_service.is_empty() {
         return Ok(());
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.is_empty() {
-        return Err("docker compose up failed".to_string());
+    match docker_compose_service_is_running(
+        worktree_path,
+        container_name,
+        env_vars,
+        compose_args,
+        selected_service,
+    ) {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            let mut message = format!(
+                "docker compose service '{}' is not running after startup.",
+                selected_service
+            );
+            if let Some(logs) = docker_compose_service_logs(
+                worktree_path,
+                container_name,
+                env_vars,
+                compose_args,
+                selected_service,
+            ) {
+                message.push_str("\n\n");
+                message.push_str(&logs);
+            }
+            Err(message)
+        }
+        Err(err) => Err(format!(
+            "docker compose up succeeded, but failed to verify service '{}': {}",
+            selected_service, err
+        )),
     }
-    Err(stderr)
 }
 
 fn docker_compose_down(
@@ -876,6 +911,97 @@ fn docker_compose_down(
         return Err("docker compose down failed".to_string());
     }
     Err(stderr)
+}
+
+fn docker_compose_service_is_running(
+    worktree_path: &std::path::Path,
+    container_name: &str,
+    env_vars: &HashMap<String, String>,
+    compose_args: &[String],
+    service: &str,
+) -> Result<bool, String> {
+    let mut args = vec!["compose".to_string()];
+    args.extend(compose_args.iter().cloned());
+    args.extend([
+        "ps".to_string(),
+        "--status".to_string(),
+        "running".to_string(),
+        "--services".to_string(),
+    ]);
+
+    let output = gwt_core::process::command("docker")
+        .args(args)
+        .current_dir(worktree_path)
+        .env("COMPOSE_PROJECT_NAME", container_name)
+        .envs(env_vars)
+        .output()
+        .map_err(|e| format!("Failed to run docker compose ps: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "docker compose ps failed".to_string()
+        } else {
+            stderr
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(compose_services_output_contains(stdout.as_ref(), service))
+}
+
+fn docker_compose_service_logs(
+    worktree_path: &std::path::Path,
+    container_name: &str,
+    env_vars: &HashMap<String, String>,
+    compose_args: &[String],
+    service: &str,
+) -> Option<String> {
+    let mut args = vec!["compose".to_string()];
+    args.extend(compose_args.iter().cloned());
+    args.extend([
+        "logs".to_string(),
+        "--no-color".to_string(),
+        "--tail".to_string(),
+        "80".to_string(),
+    ]);
+    args.push(service.to_string());
+
+    let output = gwt_core::process::command("docker")
+        .args(args)
+        .current_dir(worktree_path)
+        .env("COMPOSE_PROJECT_NAME", container_name)
+        .envs(env_vars)
+        .output()
+        .ok()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    let mut chunks = Vec::new();
+    if !stdout.is_empty() {
+        chunks.push(stdout);
+    }
+    if !stderr.is_empty() {
+        chunks.push(stderr);
+    }
+    if chunks.is_empty() {
+        None
+    } else {
+        Some(chunks.join("\n"))
+    }
+}
+
+fn compose_services_output_contains(output: &str, service: &str) -> bool {
+    let target = service.trim();
+    if target.is_empty() {
+        return false;
+    }
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .any(|line| line == target)
 }
 
 fn ensure_docker_ready() -> Result<(), String> {
@@ -2814,6 +2940,20 @@ multi_agent = true
     }
 
     #[test]
+    fn compose_services_output_contains_matches_trimmed_exact_line() {
+        let output = " app \nworker\n";
+        assert!(compose_services_output_contains(output, "app"));
+        assert!(compose_services_output_contains(output, "worker"));
+    }
+
+    #[test]
+    fn compose_services_output_contains_does_not_match_partial_names() {
+        let output = "application\nworker-1\n";
+        assert!(!compose_services_output_contains(output, "app"));
+        assert!(!compose_services_output_contains(output, "worker"));
+    }
+
+    #[test]
     fn build_docker_compose_exec_args_sorts_env_and_appends_inner_command() {
         let mut env = HashMap::new();
         env.insert("B".to_string(), "2".to_string());
@@ -3611,6 +3751,7 @@ pub(crate) fn launch_agent_for_project_root(
                     &container_name,
                     &env,
                     &compose_args,
+                    &service,
                     docker_build,
                     docker_recreate,
                 )?;
@@ -3702,6 +3843,7 @@ pub(crate) fn launch_agent_for_project_root(
                         &container_name,
                         &env,
                         &compose_args,
+                        &service,
                         docker_build,
                         docker_recreate,
                     )?;

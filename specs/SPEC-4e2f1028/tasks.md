@@ -1,4 +1,4 @@
-# タスクリスト: Windows 移行プロジェクトで Docker mount エラーを回避する
+# タスクリスト: Windows 移行プロジェクトで Docker 起動失敗の可観測性を改善する
 
 ## Phase 1: セットアップ
 
@@ -23,3 +23,15 @@
 ## Phase 5: 仕上げ・横断
 
 - [x] T007 [共通] `cargo test` で追加テストを実行し結果を確認する
+
+## Phase 6: ストーリー 3（service 即時終了の検知と可視化）
+
+- [x] T010 [US3] [テスト] compose service 判定ヘルパーの単体テスト（完全一致/部分一致）を追加する `crates/gwt-tauri/src/commands/terminal.rs`
+- [x] T011 [US3] `docker compose up` 後に対象 service の running 状態を検証し、未起動時は Launch 失敗として返す `crates/gwt-tauri/src/commands/terminal.rs`
+- [x] T012 [US3] service 未起動時に compose logs（tail）を収集してエラーメッセージへ付与する `crates/gwt-tauri/src/commands/terminal.rs`
+
+## Phase 7: 仕様/TDD整合の仕上げ
+
+- [x] T013 [共通] SPEC-4e2f1028 の `spec.md` / `plan.md` / `tasks.md` を US3 追加内容で更新する `specs/SPEC-4e2f1028/spec.md`
+- [x] T014 [共通] Docker 関連ユニットテストを実行して回帰がないことを確認する `crates/gwt-tauri/src/commands/terminal.rs`
+- [x] T015 [共通] TDD 実施記録（RED/GREEN/REFACTOR）を追加する `specs/SPEC-4e2f1028/tdd.md`
