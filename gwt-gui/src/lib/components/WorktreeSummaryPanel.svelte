@@ -74,6 +74,7 @@
 
   let prDetailLoading = $state(false);
   let prDetailError: string | null = $state(null);
+  let updateBranchError: string | null = $state(null);
   let prDetail: PrStatusInfo | null = $state(null);
   let prDetailBranch: string | null = $state(null);
   let prDetailPrNumber: number | null = $state(null);
@@ -865,6 +866,7 @@
     prDetailRequestToken++;
     prDetailLoading = false;
     prDetailError = null;
+    updateBranchError = null;
     prDetail = null;
     prDetailBranch = nextBranch;
     prDetailPrNumber = null;
@@ -1050,7 +1052,7 @@
     const branch = currentBranchName();
     const prNum = prDetail.number;
     updatingBranch = true;
-    prDetailError = null;
+    updateBranchError = null;
     try {
       const invoke = await getInvoke();
       await invoke<string>("update_pr_branch", {
@@ -1063,7 +1065,7 @@
         await pollPrDetailAfterBranchUpdate(branch, prNum);
       }
     } catch (err) {
-      prDetailError = `Failed to update branch: ${toErrorMessage(err)}`;
+      updateBranchError = `Failed to update branch: ${toErrorMessage(err)}`;
       console.error("Failed to update branch:", err);
     } finally {
       updatingBranch = false;
@@ -1354,6 +1356,7 @@
           prDetail={prDetail}
           loading={latestBranchPrLoading || (resolvedPrNumber !== null && prDetailLoading)}
           error={ghCliStatusMessage ?? latestBranchPrError ?? prDetailError}
+          updateError={updateBranchError}
           onOpenCiLog={handleOpenCiLog}
           onUpdateBranch={handleUpdateBranch}
           updatingBranch={updatingBranch}

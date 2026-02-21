@@ -253,9 +253,7 @@ fn parse_check_suites(node: &serde_json::Value) -> Vec<WorkflowRunInfo> {
                         .get("conclusion")
                         .and_then(|c| c.as_str())
                         .map(|c| c.to_lowercase());
-                    let is_required = check
-                        .get("isRequired")
-                        .and_then(|v| v.as_bool());
+                    let is_required = check.get("isRequired").and_then(|v| v.as_bool());
                     Some(WorkflowRunInfo {
                         workflow_name,
                         run_id,

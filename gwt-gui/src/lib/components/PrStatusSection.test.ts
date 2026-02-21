@@ -56,6 +56,19 @@ describe("PrStatusSection", () => {
     expect(container.textContent).toContain("Something went wrong");
   });
 
+  it("shows update error while keeping PR detail visible", async () => {
+    const pr = makePrDetail({ mergeStateStatus: "BEHIND" });
+    const { container } = await renderSection({
+      prDetail: pr,
+      updateError: "Failed to update branch: 403 Forbidden",
+    });
+
+    expect(container.textContent).toContain("Failed to update branch: 403 Forbidden");
+    expect(container.textContent).toContain("Add feature X");
+    expect(container.querySelector(".update-branch-btn")).toBeTruthy();
+    expect(container.querySelector(".pr-status-error")).toBeNull();
+  });
+
   it("renders PR metadata correctly", async () => {
     const pr = makePrDetail({
       title: "Implement login",

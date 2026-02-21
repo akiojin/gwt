@@ -561,6 +561,9 @@ describe("WorktreeSummaryPanel", () => {
 
       await waitFor(() => {
         expect(rendered.getByText("Failed to update branch: 403 Forbidden")).toBeTruthy();
+        expect(rendered.getByText("#42 CI Test PR")).toBeTruthy();
+        expect(rendered.getByRole("button", { name: "Update Branch" })).toBeTruthy();
+        expect(rendered.container.querySelector(".pr-status-error")).toBeNull();
       });
     } finally {
       consoleErrorSpy.mockRestore();

@@ -6,6 +6,7 @@
     prDetail = null,
     loading = false,
     error = null,
+    updateError = null,
     onOpenCiLog,
     onUpdateBranch,
     updatingBranch = false,
@@ -13,6 +14,7 @@
     prDetail?: PrStatusInfo | null;
     loading?: boolean;
     error?: string | null;
+    updateError?: string | null;
     onOpenCiLog?: (run: WorkflowRunInfo) => void;
     onUpdateBranch?: () => Promise<void>;
     updatingBranch?: boolean;
@@ -122,6 +124,9 @@
   {:else if !prDetail}
     <div class="pr-status-placeholder">No PR</div>
   {:else}
+    {#if updateError}
+      <div class="pr-status-warning">{updateError}</div>
+    {/if}
     <div class="pr-title">
       <a href={prDetail.url} target="_blank" rel="noopener noreferrer">
         #{prDetail.number} {prDetail.title}
@@ -597,6 +602,16 @@
     padding: 10px 12px;
     border: 1px solid rgba(255, 0, 0, 0.35);
     background: rgba(255, 0, 0, 0.08);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: var(--ui-font-sm);
+    line-height: 1.4;
+  }
+
+  .pr-status-warning {
+    padding: 10px 12px;
+    border: 1px solid rgba(255, 179, 0, 0.35);
+    background: rgba(255, 179, 0, 0.12);
     border-radius: 8px;
     color: var(--text-primary);
     font-size: var(--ui-font-sm);
