@@ -131,6 +131,7 @@
 - リモートは `origin` のみを対象とする（複数リモートは範囲外）
 - `Force cleanup` は unsafe（warning/danger）削除時の force 実行にのみ適用し、protected/current/agent-running のガードは解除しない
 - `Force cleanup` トグル状態はセッション内のみ有効とし、モーダル再オープン時は OFF に戻す
+- リモートブランチ削除は冪等（idempotent）である: リモートに既に存在しないブランチの削除要求（HTTP 404 / 422 "Reference does not exist"）は成功扱いとする。事後条件「リモートにブランチが存在しない」が満たされていれば OK
 
 ## 要件 *(必須)*
 
