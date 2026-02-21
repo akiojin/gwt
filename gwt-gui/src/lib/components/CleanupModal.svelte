@@ -39,6 +39,7 @@
   type ConfirmMode = "unsafe" | "active" | "both";
   let confirmMode: ConfirmMode | null = $state(null);
   let cleaning: boolean = $state(false);
+  let forceCleanupEnabled: boolean = $state(false);
 
   // Remote toggle state
   let ghAvailable: boolean = $state(false);
@@ -52,6 +53,7 @@
   let results: CleanupResult[] = $state([]);
   let showResults: boolean = $state(false);
   let resultsDeleteRemote: boolean = $state(false);
+  let resultsForceUsed: boolean = $state(false);
 
   // Legacy failure state for invoke errors
   let failures: CleanupResult[] = $state([]);
@@ -137,6 +139,7 @@
     if (!open) {
       wasOpen = false;
       lastRefreshKey = -1;
+      forceCleanupEnabled = false;
       return;
     }
 
@@ -150,6 +153,8 @@
       showResults = false;
       failures = [];
       results = [];
+      resultsForceUsed = false;
+      forceCleanupEnabled = false;
       untrack(() => {
         fetchWorktrees({ preserveChecked: false, initRemote: true });
       });
@@ -171,6 +176,10 @@
     } catch {
       // Ignore save errors silently
     }
+  }
+
+  function handleToggleForce() {
+    forceCleanupEnabled = !forceCleanupEnabled;
   }
 
   async function fetchWorktrees({ preserveChecked, initRemote }: { preserveChecked: boolean; initRemote: boolean }) {
@@ -304,6 +313,7 @@
     cleaning = true;
     const branches = Array.from(checked);
     const wasDeleteRemote = deleteRemote;
+    const wasForce = force;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
 
@@ -318,6 +328,7 @@
           unlisten();
           const allResults = event.payload.results ?? [];
           resultsDeleteRemote = wasDeleteRemote;
+          resultsForceUsed = wasForce;
           results = allResults;
           showResults = true;
         }
@@ -331,6 +342,7 @@
       });
     } catch (err) {
       // If invoke itself fails, show as a single failure
+      resultsForceUsed = false;
       failures = branches.map((b) => ({
         branch: b,
         success: false,
@@ -347,6 +359,7 @@
   function closeResults() {
     showResults = false;
     results = [];
+    resultsForceUsed = false;
   }
 
   function closeFailures() {
@@ -412,6 +425,15 @@
             <span class="toolbar-count">
               {checkedCount} selected
             </span>
+            <!-- svelte-ignore a11y_click_events_have_key_events -->
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <!-- svelte-ignore a11y_label_has_associated_control -->
+            <label class="toggle-label toggle-label-force" data-testid="force-toggle" onclick={handleToggleForce}>
+              <span class="toggle-switch" class:toggle-on={forceCleanupEnabled}>
+                <span class="toggle-knob"></span>
+              </span>
+              <span class="toggle-text">Force cleanup</span>
+            </label>
             {#if ghAvailable}
               <!-- svelte-ignore a11y_click_events_have_key_events -->
               <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -584,6 +606,9 @@
               have an open agent tab. Cleaning them up may break the active session. Continue?
             </p>
           {/if}
+          {#if forceCleanupEnabled && hasUnsafeChecked}
+            <p>Force cleanup mode is enabled for unsafe worktrees.</p>
+          {/if}
           {#if deleteRemote}
             <p>Remote branches will also be deleted.</p>
           {/if}
@@ -621,6 +646,9 @@
       </div>
 
       <div class="dialog-body">
+        {#if resultsForceUsed}
+          <p class="result-summary">Force cleanup was applied to unsafe selections.</p>
+        {/if}
         <div class="result-list">
           {#each results as r (r.branch)}
             <div class="result-item" class:result-item-error={!r.success || r.remote_success === false}>
@@ -803,6 +831,10 @@
     cursor: pointer;
     margin-left: auto;
     user-select: none;
+  }
+
+  .toggle-label-force {
+    margin-left: 0;
   }
 
   .toggle-switch {
@@ -1182,6 +1214,12 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+  }
+
+  .result-summary {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin: 0;
   }
 
   .result-item {

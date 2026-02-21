@@ -91,6 +91,16 @@
 | `save_and_load_cleanup_settings` | 実装済 | 保存→読み込みの往復 |
 | `save_cleanup_settings_creates_gwt_dir` | 実装済 | .gwt ディレクトリを自動作成 |
 
+### Force cleanup ガード（unsafe限定）
+
+実装ファイル: `crates/gwt-tauri/src/commands/cleanup.rs`
+
+| テスト名 | 状態 | 内容 |
+|---|---|---|
+| `force_still_rejects_protected_branch` | 実装済 | force=true でも protected branch を拒否 |
+| `force_still_rejects_current_worktree` | 実装済 | force=true でも current worktree を拒否 |
+| `force_still_rejects_agent_running_branch` | 実装済 | force=true でも agent-running branch を拒否 |
+
 ## フロントエンドテスト（TypeScript / Svelte）
 
 ### CleanupModal — トグル
@@ -143,6 +153,15 @@
 | トグル ON 時にリモート警告テキスト表示 | vitest | 「Remote branches will also be deleted」 |
 | トグル OFF 時はリモート警告なし | vitest | リモート警告テキストなし |
 
+### Force cleanup モード
+
+| テストケース | 検証方法 | 内容 |
+|---|---|---|
+| Force toggle の表示（初期 OFF） | vitest | モーダル表示時に `Force cleanup` トグルが表示される |
+| Force ON + safe のみ選択 | vitest | `cleanup_worktrees` に `force=false` が渡る（unsafe 限定適用） |
+| Force ON でも disabled は不可 | vitest | protected/current/agent-running 行の選択不可を維持 |
+| force 実行注記表示 | vitest | unsafe cleanup 完了後に結果ダイアログへ force 注記表示 |
+
 ## テスト実行コマンド
 
 ```bash
@@ -177,3 +196,4 @@ cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json
 | 結果ダイアログ | 3 | 3 | 3 |
 | コンテキストメニュー統合 | 3 | 3 | 3 |
 | 確認ダイアログ | 2 | 2 | 2 |
+| Force cleanup モード | 4 | 4 | 4 |
