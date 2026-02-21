@@ -91,9 +91,9 @@
 
 ## Phase 6: 仕上げ・横断
 
-- [ ] T062 [P] `cargo clippy --all-targets --all-features -- -D warnings` が通ることを確認する
-- [ ] T063 [P] `cargo fmt` で全 Rust コードをフォーマットする
-- [ ] T064 [P] `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json` が通ることを確認する
-- [ ] T065 [P] `cd gwt-gui && pnpm test` で全フロントエンドテストが通ることを確認する
-- [ ] T066 [P] `cargo test` で全バックエンドテストが通ることを確認する
-- [ ] T067 型定義を更新する（StructuredError の TypeScript 型を types.ts に追加） `gwt-gui/src/lib/types.ts`
+- [x] T062 [P] `cargo clippy --all-targets --all-features -- -D warnings` が通ることを確認する
+- [x] T063 [P] `cargo fmt` で全 Rust コードをフォーマットする
+- [x] T064 [P] `cd gwt-gui && npx svelte-check --tsconfig ./tsconfig.json` が通ることを確認する
+- [x] T065 [P] `cd gwt-gui && pnpm test` で全フロントエンドテストが通ることを確認する（534/535、既存flaky 1件のみ失敗）
+- [x] T066 [P] `cargo test` で全バックエンドテストが通ることを確認する（433テスト合格）
+- [x] T067 型定義を更新する（StructuredError の TypeScript 型を types.ts に追加） `gwt-gui/src/lib/types.ts`

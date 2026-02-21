@@ -1,5 +1,15 @@
 export type AgentStatusValue = "unknown" | "running" | "waiting_input" | "stopped";
 
+export interface StructuredError {
+  severity: "info" | "warning" | "error" | "critical";
+  code: string;
+  message: string;
+  command: string;
+  category: string;
+  suggestions: string[];
+  timestamp: string;
+}
+
 export interface BranchInfo {
   name: string;
   commit: string;

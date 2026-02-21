@@ -303,8 +303,8 @@ pub fn execute_tool_call(
         TOOL_GET_SPEC_ISSUE => {
             let project_path = get_project_path_for_window(state, window_label)?;
             let issue_number = get_required_u64_any(&args, &["issue_number", "issueNumber"])?;
-            let detail = get_spec_issue_detail_cmd(project_path, issue_number)
-                .map_err(|e| e.message)?;
+            let detail =
+                get_spec_issue_detail_cmd(project_path, issue_number).map_err(|e| e.message)?;
             serde_json::to_string(&detail).map_err(|e| format!("Failed to serialize result: {e}"))
         }
         TOOL_APPEND_SPEC_CONTRACT_COMMENT => {
