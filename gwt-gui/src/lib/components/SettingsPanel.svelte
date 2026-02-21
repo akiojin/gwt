@@ -110,7 +110,7 @@
   let aiModels: string[] = $state([]);
   let aiModelsLoading: boolean = $state(false);
   let aiModelsError: string | null = $state(null);
-  let aiModelsLoadedKey: string = "";
+  let aiModelsLoadedKey: string = $state("");
   let aiModelsRequestSeq: number = 0;
 
   function getCurrentProfile(cfg: ProfilesConfig | null, key: string): Profile | null {
@@ -121,8 +121,17 @@
   }
 
   let currentProfile = $derived(getCurrentProfile(profiles, selectedProfileKey));
+  let currentAiRequestKey = $derived.by(() => {
+    const profileKey = selectedProfileKey.trim();
+    const ai = currentProfile?.ai;
+    const endpoint = ai?.endpoint?.trim() ?? "";
+    if (!profileKey || !ai || !endpoint) return "";
+    const apiKey = ai?.api_key?.trim() ?? "";
+    return `${profileKey}::${endpoint}::${apiKey}`;
+  });
   let aiModelOptions = $derived.by(() => {
-    const current = currentProfile?.ai?.model?.trim() ?? "";
+    const current =
+      aiModelsLoadedKey === currentAiRequestKey ? (currentProfile?.ai?.model?.trim() ?? "") : "";
     const options = [...aiModels];
     if (current && !options.includes(current)) {
       options.unshift(current);
@@ -130,6 +139,7 @@
     return options;
   });
   let currentModelMissing = $derived.by(() => {
+    if (aiModelsLoadedKey !== currentAiRequestKey) return false;
     const current = currentProfile?.ai?.model?.trim() ?? "";
     return current.length > 0 && !aiModels.includes(current);
   });
@@ -169,26 +179,27 @@
     const profileKey = selectedProfileKey.trim();
     const ai = currentProfile?.ai;
     const endpoint = ai?.endpoint?.trim() ?? "";
-    const apiKey = ai?.api_key?.trim() ?? "";
 
     if (!profileKey || !ai || !isAiEnabled(currentProfile)) {
-      resetAiModelsState();
+      if (aiModelsLoadedKey || aiModels.length > 0 || aiModelsError) {
+        resetAiModelsState();
+      }
       return;
     }
     if (!endpoint) {
+      if (aiModelsLoadedKey || aiModels.length > 0 || aiModelsError) {
+        resetAiModelsState();
+      }
+      return;
+    }
+
+    const requestKey = currentAiRequestKey;
+    if (
+      requestKey !== aiModelsLoadedKey &&
+      (aiModelsLoadedKey || aiModels.length > 0 || aiModelsError)
+    ) {
       resetAiModelsState();
-      return;
     }
-
-    const requestKey = `${profileKey}::${endpoint}::${apiKey}`;
-    if (requestKey === aiModelsLoadedKey) {
-      return;
-    }
-
-    const timer = window.setTimeout(() => {
-      void fetchAiModels(endpoint, apiKey, requestKey, false);
-    }, 250);
-    return () => window.clearTimeout(timer);
   });
 
   onMount(() => {
@@ -396,7 +407,7 @@
     } catch (err) {
       if (requestSeq !== aiModelsRequestSeq) return;
       aiModels = [];
-      aiModelsLoadedKey = "";
+      aiModelsLoadedKey = requestKey;
       aiModelsError = `Failed to load models: ${toErrorMessage(err)}`;
     } finally {
       if (requestSeq === aiModelsRequestSeq) {
@@ -1409,7 +1420,16 @@
                       <span class="field-hint">
                         Current model is not listed in /v1/models.
                       </span>
-                    {:else if !aiModelsLoading && aiModels.length === 0 && currentEndpoint}
+                    {:else if
+                      !aiModelsLoading &&
+                      currentEndpoint &&
+                      aiModelsLoadedKey !== currentAiRequestKey}
+                      <span class="field-hint">Click Refresh to load models from /v1/models.</span>
+                    {:else if
+                      !aiModelsLoading &&
+                      aiModels.length === 0 &&
+                      currentEndpoint &&
+                      aiModelsLoadedKey === currentAiRequestKey}
                       <span class="field-hint">No models returned from /v1/models.</span>
                     {/if}
                   </div>
