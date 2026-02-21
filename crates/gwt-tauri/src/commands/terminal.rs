@@ -258,7 +258,7 @@ fn create_new_worktree_remote_first(
     if !fetch_output.status.success() {
         let stderr = String::from_utf8_lossy(&fetch_output.stderr);
         return Err(format!(
-            "Failed to fetch branch '{}' from remote: {}",
+            "Failed to fetch branch '{}' from remote (the remote branch was created and may need manual deletion): {}",
             branch_name,
             stderr.trim()
         ));

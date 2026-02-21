@@ -389,6 +389,29 @@ pub fn resolve_remote_branch_sha(repo_path: &Path, branch: &str) -> Result<Strin
     }
 }
 
+/// Classify a GitHub API error response for branch creation.
+///
+/// Returns a user-friendly error message based on HTTP status codes / keywords
+/// found in the combined stderr+stdout output.
+fn classify_create_branch_error(combined: &str, branch: &str) -> String {
+    if combined.contains("422") || combined.contains("Reference already exists") {
+        format!("Branch '{}' already exists on remote", branch)
+    } else if combined.contains("403") || combined.contains("Forbidden") {
+        format!(
+            "Permission denied: cannot create remote branch '{}'",
+            branch
+        )
+    } else if combined.contains("404") || combined.contains("Not Found") {
+        format!("Repository not found on remote for branch '{}'", branch)
+    } else {
+        format!(
+            "Failed to create remote branch '{}': {}",
+            branch,
+            combined.trim()
+        )
+    }
+}
+
 /// Create a remote branch via GitHub API (SPEC-a4fb2db2 FR-001).
 ///
 /// Uses `gh api --method POST repos/{owner}/{repo}/git/refs`.
@@ -442,26 +465,7 @@ pub fn create_remote_branch(repo_path: &Path, branch: &str, sha: &str) -> Result
                     })
                     .unwrap_or_default();
                 let combined = format!("{}{}", stderr, stdout);
-
-                if combined.contains("422") || combined.contains("Reference already exists") {
-                    Err(format!("Branch '{}' already exists on remote", branch))
-                } else if combined.contains("403") || combined.contains("Forbidden") {
-                    Err(format!(
-                        "Permission denied: cannot create remote branch '{}'",
-                        branch
-                    ))
-                } else if combined.contains("404") || combined.contains("Not Found") {
-                    Err(format!(
-                        "Repository not found on remote for branch '{}'",
-                        branch
-                    ))
-                } else {
-                    Err(format!(
-                        "Failed to create remote branch '{}': {}",
-                        branch,
-                        combined.trim()
-                    ))
-                }
+                Err(classify_create_branch_error(&combined, branch))
             }
         }
         None => {
@@ -746,5 +750,52 @@ mod tests {
         let json = r#"{"ref": "refs/heads/develop"}"#;
         let result = parse_ref_sha(json);
         assert!(result.is_err());
+    }
+
+    // -- SPEC-a4fb2db2: classify_create_branch_error tests --
+
+    #[test]
+    fn classify_error_422_reference_already_exists() {
+        let msg = classify_create_branch_error("Reference already exists", "feature/x");
+        assert!(msg.contains("already exists on remote"));
+        assert!(msg.contains("feature/x"));
+    }
+
+    #[test]
+    fn classify_error_422_status_code() {
+        let msg = classify_create_branch_error(
+            r#"{"message":"Reference already exists","status":"422"}"#,
+            "feat/y",
+        );
+        assert!(msg.contains("already exists on remote"));
+    }
+
+    #[test]
+    fn classify_error_403_forbidden() {
+        let msg = classify_create_branch_error("403 Forbidden", "feat/z");
+        assert!(msg.contains("Permission denied"));
+        assert!(msg.contains("feat/z"));
+    }
+
+    #[test]
+    fn classify_error_404_not_found() {
+        let msg = classify_create_branch_error("404 Not Found", "feat/w");
+        assert!(msg.contains("not found on remote"));
+        assert!(msg.contains("feat/w"));
+    }
+
+    #[test]
+    fn classify_error_unknown() {
+        let msg = classify_create_branch_error("something unexpected", "feat/u");
+        assert!(msg.contains("Failed to create remote branch"));
+        assert!(msg.contains("feat/u"));
+        assert!(msg.contains("something unexpected"));
+    }
+
+    #[test]
+    fn classify_error_422_does_not_fallback() {
+        // Verify the error message format that terminal.rs checks for non-fallback
+        let msg = classify_create_branch_error("422", "feature/no-fallback");
+        assert!(msg.contains("already exists on remote"));
     }
 }

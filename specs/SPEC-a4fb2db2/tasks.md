@@ -37,6 +37,7 @@
 
 - **ファイル**: `crates/gwt-tauri/src/commands/terminal.rs`
 - **内容**: `create_new_worktree_remote_first()` ヘルパー追加、`create_new_worktree_path()` 変更
+  - fetch 失敗時のエラーメッセージにリモートブランチ残留の案内を含める
 - **依存**: T004
 
 ### T006: テスト GREEN 確認 + Lint
