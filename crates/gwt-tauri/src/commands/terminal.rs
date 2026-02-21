@@ -1959,7 +1959,10 @@ pub fn launch_terminal(
 ) -> Result<String, StructuredError> {
     let project_root = {
         let Some(p) = state.project_for_window(window.label()) else {
-            return Err(StructuredError::internal("No project opened", "launch_terminal"));
+            return Err(StructuredError::internal(
+                "No project opened",
+                "launch_terminal",
+            ));
         };
         PathBuf::from(p)
     };
@@ -2105,7 +2108,12 @@ pub fn spawn_shell(
         if cfg!(target_os = "windows") && shell_id.as_deref() == Some("wsl") {
             let wsl_path =
                 gwt_core::terminal::shell::windows_to_wsl_path(&resolved_dir.to_string_lossy())
-                    .map_err(|e| StructuredError::internal(&format!("WSL path conversion failed: {e}"), "spawn_shell"))?;
+                    .map_err(|e| {
+                        StructuredError::internal(
+                            &format!("WSL path conversion failed: {e}"),
+                            "spawn_shell",
+                        )
+                    })?;
             (
                 "wsl.exe".to_string(),
                 vec!["--cd".to_string(), wsl_path],
@@ -2127,27 +2135,34 @@ pub fn spawn_shell(
     };
 
     let pane_id = {
-        let mut manager = state
-            .pane_manager
-            .lock()
-            .map_err(|e| StructuredError::internal(&format!("Failed to lock pane manager: {}", e), "spawn_shell"))?;
-        manager
-            .spawn_shell(config, 24, 80)
-            .map_err(|e| StructuredError::internal(&format!("Failed to spawn shell: {}", e), "spawn_shell"))?
+        let mut manager = state.pane_manager.lock().map_err(|e| {
+            StructuredError::internal(
+                &format!("Failed to lock pane manager: {}", e),
+                "spawn_shell",
+            )
+        })?;
+        manager.spawn_shell(config, 24, 80).map_err(|e| {
+            StructuredError::internal(&format!("Failed to spawn shell: {}", e), "spawn_shell")
+        })?
     };
 
     let reader = {
-        let manager = state
-            .pane_manager
-            .lock()
-            .map_err(|e| StructuredError::internal(&format!("Failed to lock pane manager: {}", e), "spawn_shell"))?;
+        let manager = state.pane_manager.lock().map_err(|e| {
+            StructuredError::internal(
+                &format!("Failed to lock pane manager: {}", e),
+                "spawn_shell",
+            )
+        })?;
         let pane = manager
             .panes()
             .iter()
             .find(|p| p.pane_id() == pane_id)
-            .ok_or_else(|| StructuredError::internal("Pane not found after creation", "spawn_shell"))?;
-        pane.take_reader()
-            .map_err(|e| StructuredError::internal(&format!("Failed to take reader: {}", e), "spawn_shell"))?
+            .ok_or_else(|| {
+                StructuredError::internal("Pane not found after creation", "spawn_shell")
+            })?;
+        pane.take_reader().map_err(|e| {
+            StructuredError::internal(&format!("Failed to take reader: {}", e), "spawn_shell")
+        })?
     };
 
     let pane_id_clone = pane_id.clone();
@@ -4354,7 +4369,10 @@ pub fn launch_agent(
 ) -> Result<String, StructuredError> {
     let project_root = {
         let Some(p) = state.project_for_window(window.label()) else {
-            return Err(StructuredError::internal("No project opened", "launch_agent"));
+            return Err(StructuredError::internal(
+                "No project opened",
+                "launch_agent",
+            ));
         };
         PathBuf::from(p)
     };
@@ -4372,7 +4390,10 @@ pub fn start_launch_job(
 ) -> Result<String, StructuredError> {
     let project_root = {
         let Some(p) = state.project_for_window(window.label()) else {
-            return Err(StructuredError::internal("No project opened", "start_launch_job"));
+            return Err(StructuredError::internal(
+                "No project opened",
+                "start_launch_job",
+            ));
         };
         p
     };
@@ -4939,23 +4960,29 @@ pub fn write_terminal(
 ) -> Result<(), StructuredError> {
     let close_requested = is_enter_only(&data);
 
-    let mut manager = state
-        .pane_manager
-        .lock()
-        .map_err(|e| StructuredError::internal(&format!("Failed to lock pane manager: {}", e), "write_terminal"))?;
+    let mut manager = state.pane_manager.lock().map_err(|e| {
+        StructuredError::internal(
+            &format!("Failed to lock pane manager: {}", e),
+            "write_terminal",
+        )
+    })?;
 
     let should_close = {
-        let pane = manager
-            .pane_mut_by_id(&pane_id)
-            .ok_or_else(|| StructuredError::internal(&format!("Pane not found: {}", pane_id), "write_terminal"))?;
+        let pane = manager.pane_mut_by_id(&pane_id).ok_or_else(|| {
+            StructuredError::internal(&format!("Pane not found: {}", pane_id), "write_terminal")
+        })?;
 
         // Ensure we don't treat a completed pane as running due to stale status.
         let _ = pane.check_status();
 
         match pane.status() {
             PaneStatus::Running => {
-                pane.write_input(&data)
-                    .map_err(|e| StructuredError::internal(&format!("Failed to write to terminal: {}", e), "write_terminal"))?;
+                pane.write_input(&data).map_err(|e| {
+                    StructuredError::internal(
+                        &format!("Failed to write to terminal: {}", e),
+                        "write_terminal",
+                    )
+                })?;
                 return Ok(());
             }
             PaneStatus::Completed(_) | PaneStatus::Error(_) => close_requested,
@@ -4970,7 +4997,9 @@ pub fn write_terminal(
         .panes()
         .iter()
         .position(|p| p.pane_id() == pane_id)
-        .ok_or_else(|| StructuredError::internal(&format!("Pane not found: {}", pane_id), "write_terminal"))?;
+        .ok_or_else(|| {
+            StructuredError::internal(&format!("Pane not found: {}", pane_id), "write_terminal")
+        })?;
 
     manager.close_pane(index);
     let _ = app_handle.emit(
@@ -5076,15 +5105,21 @@ pub fn resize_terminal(
     cols: u16,
     state: State<AppState>,
 ) -> Result<(), StructuredError> {
-    let mut manager = state
-        .pane_manager
-        .lock()
-        .map_err(|e| StructuredError::internal(&format!("Failed to lock pane manager: {}", e), "resize_terminal"))?;
-    let pane = manager
-        .pane_mut_by_id(&pane_id)
-        .ok_or_else(|| StructuredError::internal(&format!("Pane not found: {}", pane_id), "resize_terminal"))?;
-    pane.resize(rows, cols)
-        .map_err(|e| StructuredError::internal(&format!("Failed to resize terminal: {}", e), "resize_terminal"))
+    let mut manager = state.pane_manager.lock().map_err(|e| {
+        StructuredError::internal(
+            &format!("Failed to lock pane manager: {}", e),
+            "resize_terminal",
+        )
+    })?;
+    let pane = manager.pane_mut_by_id(&pane_id).ok_or_else(|| {
+        StructuredError::internal(&format!("Pane not found: {}", pane_id), "resize_terminal")
+    })?;
+    pane.resize(rows, cols).map_err(|e| {
+        StructuredError::internal(
+            &format!("Failed to resize terminal: {}", e),
+            "resize_terminal",
+        )
+    })
 }
 
 /// Close a terminal pane
@@ -5094,16 +5129,20 @@ pub fn close_terminal(
     state: State<AppState>,
     app_handle: AppHandle,
 ) -> Result<(), StructuredError> {
-    let mut manager = state
-        .pane_manager
-        .lock()
-        .map_err(|e| StructuredError::internal(&format!("Failed to lock pane manager: {}", e), "close_terminal"))?;
+    let mut manager = state.pane_manager.lock().map_err(|e| {
+        StructuredError::internal(
+            &format!("Failed to lock pane manager: {}", e),
+            "close_terminal",
+        )
+    })?;
 
     let index = manager
         .panes()
         .iter()
         .position(|p| p.pane_id() == pane_id)
-        .ok_or_else(|| StructuredError::internal(&format!("Pane not found: {}", pane_id), "close_terminal"))?;
+        .ok_or_else(|| {
+            StructuredError::internal(&format!("Pane not found: {}", pane_id), "close_terminal")
+        })?;
 
     manager.close_pane(index);
     let _ = app_handle.emit(

@@ -394,7 +394,7 @@ impl GwtError {
             | Self::WorktreePathConflict { .. } => ErrorSeverity::Info,
 
             // Warning: recoverable but noteworthy
-            | Self::WorktreeLocked { .. }
+            Self::WorktreeLocked { .. }
             | Self::OrphanedWorktree { .. }
             | Self::PullNotFastForward { .. }
             | Self::DockerPortConflict { .. }
@@ -541,10 +541,7 @@ mod tests {
             ErrorSeverity::Info
         );
         assert_eq!(
-            GwtError::ProfileNotFound {
-                name: "x".into()
-            }
-            .severity(),
+            GwtError::ProfileNotFound { name: "x".into() }.severity(),
             ErrorSeverity::Info
         );
     }

@@ -42,8 +42,12 @@ pub async fn apply_app_update(
 ) -> Result<(), StructuredError> {
     let mgr = state.update_manager.clone();
 
-    let current_exe =
-        std::env::current_exe().map_err(|e| StructuredError::internal(&format!("Failed to locate current executable: {e}"), "apply_app_update"))?;
+    let current_exe = std::env::current_exe().map_err(|e| {
+        StructuredError::internal(
+            &format!("Failed to locate current executable: {e}"),
+            "apply_app_update",
+        )
+    })?;
 
     let update_state = tauri::async_runtime::spawn_blocking({
         let mgr = mgr.clone();
@@ -51,18 +55,31 @@ pub async fn apply_app_update(
         move || mgr.check_for_executable(true, Some(&current_exe))
     })
     .await
-    .map_err(|e| StructuredError::internal(&format!("Update check failed: {e}"), "apply_app_update"))?;
+    .map_err(|e| {
+        StructuredError::internal(&format!("Update check failed: {e}"), "apply_app_update")
+    })?;
 
     let (latest, asset_url) = match update_state {
         UpdateState::Available {
             latest, asset_url, ..
         } => (latest, asset_url),
-        UpdateState::UpToDate { .. } => return Err(StructuredError::internal("Already up to date.", "apply_app_update")),
-        UpdateState::Failed { message, .. } => return Err(StructuredError::internal(&message, "apply_app_update")),
+        UpdateState::UpToDate { .. } => {
+            return Err(StructuredError::internal(
+                "Already up to date.",
+                "apply_app_update",
+            ))
+        }
+        UpdateState::Failed { message, .. } => {
+            return Err(StructuredError::internal(&message, "apply_app_update"))
+        }
     };
 
-    let asset_url =
-        asset_url.ok_or_else(|| StructuredError::internal("No suitable update asset found for this platform.", "apply_app_update"))?;
+    let asset_url = asset_url.ok_or_else(|| {
+        StructuredError::internal(
+            "No suitable update asset found for this platform.",
+            "apply_app_update",
+        )
+    })?;
 
     let payload = tauri::async_runtime::spawn_blocking({
         let mgr = mgr.clone();
@@ -71,18 +88,24 @@ pub async fn apply_app_update(
         move || mgr.prepare_update(&latest, &asset_url)
     })
     .await
-    .map_err(|e| StructuredError::internal(&format!("Update download failed: {e}"), "apply_app_update"))?
+    .map_err(|e| {
+        StructuredError::internal(&format!("Update download failed: {e}"), "apply_app_update")
+    })?
     .map_err(|e| StructuredError::internal(&e, "apply_app_update"))?;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let update_dir = match &payload {
         PreparedPayload::PortableBinary { path } => path
             .parent()
-            .ok_or_else(|| StructuredError::internal("Invalid update payload path", "apply_app_update"))?
+            .ok_or_else(|| {
+                StructuredError::internal("Invalid update payload path", "apply_app_update")
+            })?
             .to_path_buf(),
         PreparedPayload::Installer { path, .. } => path
             .parent()
-            .ok_or_else(|| StructuredError::internal("Invalid update payload path", "apply_app_update"))?
+            .ok_or_else(|| {
+                StructuredError::internal("Invalid update payload path", "apply_app_update")
+            })?
             .to_path_buf(),
     };
     let args_file = update_dir.join("restart-args.json");

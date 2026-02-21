@@ -324,7 +324,9 @@ pub async fn list_worktrees(
             .map_err(|e| StructuredError::internal(&e, "list_worktrees"))
     })
     .await
-    .map_err(|e| StructuredError::internal(&format!("Failed to list worktrees: {e}"), "list_worktrees"))?
+    .map_err(|e| {
+        StructuredError::internal(&format!("Failed to list worktrees: {e}"), "list_worktrees")
+    })?
 }
 
 /// Check gh CLI availability (SPEC-ad1ac432 T010)

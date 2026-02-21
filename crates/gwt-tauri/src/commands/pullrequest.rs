@@ -295,7 +295,10 @@ pub fn fetch_pr_status(
 
 /// Fetch detailed PR information for a single PR (T010)
 #[tauri::command]
-pub fn fetch_pr_detail(project_path: String, pr_number: u64) -> Result<PrDetailResponse, StructuredError> {
+pub fn fetch_pr_detail(
+    project_path: String,
+    pr_number: u64,
+) -> Result<PrDetailResponse, StructuredError> {
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)
         .map_err(|e| StructuredError::internal(&e, "fetch_pr_detail"))?;

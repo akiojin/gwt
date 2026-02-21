@@ -181,8 +181,10 @@ pub fn get_project_version_history(
         .map_err(|e| StructuredError::internal(&e, "get_project_version_history"))?;
 
     let range_from_oid = match &range_from {
-        Some(r) => Some(rev_parse(&repo_path, r)
-            .map_err(|e| StructuredError::internal(&e, "get_project_version_history"))?),
+        Some(r) => Some(
+            rev_parse(&repo_path, r)
+                .map_err(|e| StructuredError::internal(&e, "get_project_version_history"))?,
+        ),
         None => None,
     };
     let range_to_oid = match rev_parse(&repo_path, &range_to) {
@@ -191,7 +193,10 @@ pub fn get_project_version_history(
             if range_to == "HEAD" && is_unborn_head(&repo_path) {
                 RANGE_OID_UNBORN_HEAD.to_string()
             } else {
-                return Err(StructuredError::internal(&err, "get_project_version_history"));
+                return Err(StructuredError::internal(
+                    &err,
+                    "get_project_version_history",
+                ));
             }
         }
     };

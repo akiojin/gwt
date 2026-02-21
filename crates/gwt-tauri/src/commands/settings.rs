@@ -309,9 +309,11 @@ pub fn save_settings(
     _state: State<AppState>,
 ) -> Result<(), StructuredError> {
     with_panic_guard("saving settings", "save_settings", || {
-        let core_settings = settings.to_settings()
+        let core_settings = settings
+            .to_settings()
             .map_err(|e| StructuredError::internal(&e, "save_settings"))?;
-        core_settings.save_global()
+        core_settings
+            .save_global()
             .map_err(|e| StructuredError::from_gwt_error(&e, "save_settings"))?;
 
         Ok(())

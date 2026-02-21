@@ -1,6 +1,6 @@
 //! Tauri commands for error reporting and feature suggestions.
 
-use gwt_core::terminal::scrollback::{ScrollbackFile, strip_ansi};
+use gwt_core::terminal::scrollback::{strip_ansi, ScrollbackFile};
 use gwt_core::StructuredError;
 use serde::Serialize;
 use std::fs;
@@ -215,7 +215,9 @@ pub fn create_github_issue(
     let repo_slug = format!("{}/{}", owner, repo);
 
     let mut cmd = gwt_core::git::gh_cli::gh_command();
-    cmd.args(["issue", "create", "--repo", &repo_slug, "--title", &title, "--body", &body]);
+    cmd.args([
+        "issue", "create", "--repo", &repo_slug, "--title", &title, "--body", &body,
+    ]);
 
     for label in &labels {
         cmd.args(["--label", label]);
@@ -259,10 +261,9 @@ const SCREEN_CAPTURE_MAX_BYTES: usize = 8192;
 pub fn capture_screen_text(
     state: State<'_, crate::state::AppState>,
 ) -> Result<String, StructuredError> {
-    let mut mgr = state
-        .pane_manager
-        .lock()
-        .map_err(|_| StructuredError::internal("Failed to lock pane manager", "capture_screen_text"))?;
+    let mut mgr = state.pane_manager.lock().map_err(|_| {
+        StructuredError::internal("Failed to lock pane manager", "capture_screen_text")
+    })?;
 
     // Flush all panes first so we get the latest data
     for pane in mgr.panes_mut() {
@@ -270,7 +271,11 @@ pub fn capture_screen_text(
     }
 
     // Now iterate immutably and capture text
-    let pane_ids: Vec<String> = mgr.panes().iter().map(|p| p.pane_id().to_string()).collect();
+    let pane_ids: Vec<String> = mgr
+        .panes()
+        .iter()
+        .map(|p| p.pane_id().to_string())
+        .collect();
     drop(mgr);
 
     let mut text = String::new();
@@ -304,16 +309,14 @@ mod tests {
 
     #[test]
     fn parse_ssh_remote() {
-        let (owner, repo) =
-            parse_owner_repo_from_remote("git@github.com:akiojin/gwt.git").unwrap();
+        let (owner, repo) = parse_owner_repo_from_remote("git@github.com:akiojin/gwt.git").unwrap();
         assert_eq!(owner, "akiojin");
         assert_eq!(repo, "gwt");
     }
 
     #[test]
     fn parse_ssh_remote_without_git_suffix() {
-        let (owner, repo) =
-            parse_owner_repo_from_remote("git@github.com:akiojin/gwt").unwrap();
+        let (owner, repo) = parse_owner_repo_from_remote("git@github.com:akiojin/gwt").unwrap();
         assert_eq!(owner, "akiojin");
         assert_eq!(repo, "gwt");
     }
@@ -328,8 +331,7 @@ mod tests {
 
     #[test]
     fn parse_https_remote_without_git_suffix() {
-        let (owner, repo) =
-            parse_owner_repo_from_remote("https://github.com/akiojin/gwt").unwrap();
+        let (owner, repo) = parse_owner_repo_from_remote("https://github.com/akiojin/gwt").unwrap();
         assert_eq!(owner, "akiojin");
         assert_eq!(repo, "gwt");
     }

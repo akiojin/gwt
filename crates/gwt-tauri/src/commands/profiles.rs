@@ -32,8 +32,7 @@ fn with_panic_guard<T>(
 #[tauri::command]
 pub fn get_profiles() -> Result<ProfilesConfig, StructuredError> {
     with_panic_guard("loading profiles", "get_profiles", || {
-        ProfilesConfig::load()
-            .map_err(|e| StructuredError::from_gwt_error(&e, "get_profiles"))
+        ProfilesConfig::load().map_err(|e| StructuredError::from_gwt_error(&e, "get_profiles"))
     })
 }
 
@@ -41,7 +40,9 @@ pub fn get_profiles() -> Result<ProfilesConfig, StructuredError> {
 #[tauri::command]
 pub fn save_profiles(config: ProfilesConfig, app_handle: AppHandle) -> Result<(), StructuredError> {
     with_panic_guard("saving profiles", "save_profiles", || {
-        config.save().map_err(|e| StructuredError::from_gwt_error(&e, "save_profiles"))?;
+        config
+            .save()
+            .map_err(|e| StructuredError::from_gwt_error(&e, "save_profiles"))?;
         let _ = crate::menu::rebuild_menu(&app_handle);
         Ok(())
     })
@@ -49,18 +50,25 @@ pub fn save_profiles(config: ProfilesConfig, app_handle: AppHandle) -> Result<()
 
 /// List AI models from a specific OpenAI-compatible endpoint (`GET /models`).
 #[tauri::command]
-pub fn list_ai_models(endpoint: String, api_key: String) -> Result<Vec<ModelInfo>, StructuredError> {
+pub fn list_ai_models(
+    endpoint: String,
+    api_key: String,
+) -> Result<Vec<ModelInfo>, StructuredError> {
     with_panic_guard("listing ai models", "list_ai_models", || {
         let endpoint = endpoint.trim();
         if endpoint.is_empty() {
-            return Err(StructuredError::internal("Endpoint is required", "list_ai_models"));
+            return Err(StructuredError::internal(
+                "Endpoint is required",
+                "list_ai_models",
+            ));
         }
 
-        let client = AIClient::new_for_list_models(endpoint, api_key.trim())
-            .map_err(|e| StructuredError::internal(&format_error_for_display(&e), "list_ai_models"))?;
-        let mut models = client
-            .list_models()
-            .map_err(|e| StructuredError::internal(&format_error_for_display(&e), "list_ai_models"))?;
+        let client = AIClient::new_for_list_models(endpoint, api_key.trim()).map_err(|e| {
+            StructuredError::internal(&format_error_for_display(&e), "list_ai_models")
+        })?;
+        let mut models = client.list_models().map_err(|e| {
+            StructuredError::internal(&format_error_for_display(&e), "list_ai_models")
+        })?;
         models.sort_by(|a, b| a.id.cmp(&b.id));
         models.dedup_by(|a, b| a.id == b.id);
         Ok(models)

@@ -35,7 +35,10 @@ pub fn get_branch_quick_start(
 
     let branch = branch.trim();
     if branch.is_empty() {
-        return Err(StructuredError::internal("Branch is required", "get_branch_quick_start"));
+        return Err(StructuredError::internal(
+            "Branch is required",
+            "get_branch_quick_start",
+        ));
     }
 
     Ok(gwt_core::config::get_branch_tool_history(

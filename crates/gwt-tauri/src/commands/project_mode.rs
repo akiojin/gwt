@@ -49,7 +49,12 @@ pub async fn restore_project_mode_session_cmd(
         Ok(mode)
     })
     .await
-    .unwrap_or_else(|_| Err(StructuredError::internal("Task join error", "restore_project_mode_session_cmd")))
+    .unwrap_or_else(|_| {
+        Err(StructuredError::internal(
+            "Task join error",
+            "restore_project_mode_session_cmd",
+        ))
+    })
 }
 
 #[tauri::command]
@@ -83,5 +88,10 @@ pub async fn stop_project_mode_session_cmd(
         Ok(msg)
     })
     .await
-    .unwrap_or_else(|_| Err(StructuredError::internal("Task join error", "stop_project_mode_session_cmd")))
+    .unwrap_or_else(|_| {
+        Err(StructuredError::internal(
+            "Task join error",
+            "stop_project_mode_session_cmd",
+        ))
+    })
 }

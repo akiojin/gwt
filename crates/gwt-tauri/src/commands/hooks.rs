@@ -50,10 +50,7 @@ pub fn check_and_update_hooks() -> Result<HooksStatus, StructuredError> {
 #[tauri::command]
 pub fn register_hooks() -> Result<(), StructuredError> {
     let settings_path = config::get_claude_settings_path().ok_or_else(|| {
-        StructuredError::internal(
-            "Could not determine Claude settings path",
-            "register_hooks",
-        )
+        StructuredError::internal("Could not determine Claude settings path", "register_hooks")
     })?;
 
     config::register_gwt_hooks(&settings_path)

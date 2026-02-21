@@ -197,9 +197,7 @@ pub fn get_stash_list(
 }
 
 #[tauri::command]
-pub fn get_base_branch_candidates(
-    project_path: String,
-) -> Result<Vec<String>, StructuredError> {
+pub fn get_base_branch_candidates(project_path: String) -> Result<Vec<String>, StructuredError> {
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)
         .map_err(|e| StructuredError::internal(&e, "get_base_branch_candidates"))?;

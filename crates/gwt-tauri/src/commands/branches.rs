@@ -375,23 +375,27 @@ pub async fn list_worktree_branches(
     app_handle: AppHandle,
 ) -> Result<Vec<BranchInfo>, StructuredError> {
     tauri::async_runtime::spawn_blocking(move || {
-        with_panic_guard("listing worktree branches", "list_worktree_branches", || {
-            let state = app_handle.state::<AppState>();
-            let listing = list_worktree_branches_impl(&project_path, &state)?;
+        with_panic_guard(
+            "listing worktree branches",
+            "list_worktree_branches",
+            || {
+                let state = app_handle.state::<AppState>();
+                let listing = list_worktree_branches_impl(&project_path, &state)?;
 
-            let prewarm_project_path = project_path.clone();
-            let prewarm_handle = app_handle.clone();
-            let branch_names = listing.branch_names;
-            tauri::async_runtime::spawn_blocking(move || {
-                crate::commands::sessions::prewarm_missing_worktree_summaries(
-                    prewarm_project_path,
-                    branch_names,
-                    prewarm_handle,
-                );
-            });
+                let prewarm_project_path = project_path.clone();
+                let prewarm_handle = app_handle.clone();
+                let branch_names = listing.branch_names;
+                tauri::async_runtime::spawn_blocking(move || {
+                    crate::commands::sessions::prewarm_missing_worktree_summaries(
+                        prewarm_project_path,
+                        branch_names,
+                        prewarm_handle,
+                    );
+                });
 
-            Ok(listing.infos)
-        })
+                Ok(listing.infos)
+            },
+        )
     })
     .await
     .map_err(|e| {

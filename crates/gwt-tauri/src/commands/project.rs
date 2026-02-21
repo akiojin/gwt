@@ -230,7 +230,10 @@ pub fn open_project(
     let p = Path::new(&path);
 
     if !p.exists() {
-        return Err(StructuredError::internal(&format!("Path does not exist: {}", path), "open_project"));
+        return Err(StructuredError::internal(
+            &format!("Path does not exist: {}", path),
+            "open_project",
+        ));
     }
 
     let project_root = resolve_project_root(p);
@@ -309,7 +312,10 @@ pub fn open_project(
         }
     }
 
-    Err(StructuredError::internal("Failed to open project due to stale duplicate window state. Please retry.", "open_project"))
+    Err(StructuredError::internal(
+        "Failed to open project due to stale duplicate window state. Please retry.",
+        "open_project",
+    ))
 }
 
 /// Get current project info from state
@@ -453,7 +459,10 @@ pub fn create_project(
     app_handle: AppHandle,
 ) -> Result<OpenProjectResult, StructuredError> {
     if !is_valid_github_repo_url(&request.repo_url) {
-        return Err(StructuredError::internal("Invalid repository URL", "create_project"));
+        return Err(StructuredError::internal(
+            "Invalid repository URL",
+            "create_project",
+        ));
     }
 
     let parent = std::path::PathBuf::from(&request.parent_dir);
@@ -492,12 +501,16 @@ pub fn create_project(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| StructuredError::internal(&format!("Failed to execute git clone: {}", e), "create_project"))?;
+        .map_err(|e| {
+            StructuredError::internal(
+                &format!("Failed to execute git clone: {}", e),
+                "create_project",
+            )
+        })?;
 
-    let mut stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| StructuredError::internal("Failed to capture git clone output", "create_project"))?;
+    let mut stderr = child.stderr.take().ok_or_else(|| {
+        StructuredError::internal("Failed to capture git clone output", "create_project")
+    })?;
 
     let mut buf = [0u8; 4096];
     let mut raw: Vec<u8> = Vec::new();
@@ -537,9 +550,12 @@ pub fn create_project(
     }
     flush_line(&mut line_buf);
 
-    let status = child
-        .wait()
-        .map_err(|e| StructuredError::internal(&format!("Failed to wait for git clone: {}", e), "create_project"))?;
+    let status = child.wait().map_err(|e| {
+        StructuredError::internal(
+            &format!("Failed to wait for git clone: {}", e),
+            "create_project",
+        )
+    })?;
 
     if !status.success() {
         // Cleanup incomplete directory (FR-303)
@@ -559,9 +575,15 @@ pub fn create_project(
             .join("\n");
 
         if tail.trim().is_empty() {
-            return Err(StructuredError::internal("git clone failed", "create_project"));
+            return Err(StructuredError::internal(
+                "git clone failed",
+                "create_project",
+            ));
         }
-        return Err(StructuredError::internal(&format!("git clone failed: {}", tail.trim()), "create_project"));
+        return Err(StructuredError::internal(
+            &format!("git clone failed: {}", tail.trim()),
+            "create_project",
+        ));
     }
 
     // Open the project root (FR-304)
@@ -615,15 +637,24 @@ pub fn start_migration_job(
 ) -> Result<String, StructuredError> {
     let selected = Path::new(&path);
     if !selected.exists() {
-        return Err(StructuredError::internal(&format!("Path does not exist: {}", path), "start_migration_job"));
+        return Err(StructuredError::internal(
+            &format!("Path does not exist: {}", path),
+            "start_migration_job",
+        ));
     }
 
     let source_root = git::get_main_repo_root(selected);
     if !git::is_git_repo(&source_root) {
-        return Err(StructuredError::internal("Not a git repository", "start_migration_job"));
+        return Err(StructuredError::internal(
+            "Not a git repository",
+            "start_migration_job",
+        ));
     }
     if git::is_bare_repository(&source_root) {
-        return Err(StructuredError::internal("Repository is already bare", "start_migration_job"));
+        return Err(StructuredError::internal(
+            "Repository is already bare",
+            "start_migration_job",
+        ));
     }
 
     let job_id = Uuid::new_v4().to_string();

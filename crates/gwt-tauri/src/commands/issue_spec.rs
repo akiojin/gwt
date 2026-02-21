@@ -239,13 +239,13 @@ pub fn list_spec_issue_artifact_comments_cmd(
     let project_root = Path::new(&project_path);
     let repo_path = resolve_repo_path_for_project_root(project_root)
         .map_err(|e| StructuredError::internal(&e, "list_spec_issue_artifact_comments_cmd"))?;
-    let kind = match kind {
-        Some(v) if !v.trim().is_empty() => Some(
-            parse_artifact_kind(&v)
-                .map_err(|e| StructuredError::internal(&e, "list_spec_issue_artifact_comments_cmd"))?,
-        ),
-        _ => None,
-    };
+    let kind =
+        match kind {
+            Some(v) if !v.trim().is_empty() => Some(parse_artifact_kind(&v).map_err(|e| {
+                StructuredError::internal(&e, "list_spec_issue_artifact_comments_cmd")
+            })?),
+            _ => None,
+        };
     let comments = list_spec_issue_artifact_comments(&repo_path, issue_number, kind)
         .map_err(|e| StructuredError::internal(&e, "list_spec_issue_artifact_comments_cmd"))?;
     Ok(comments.into_iter().map(Into::into).collect())
