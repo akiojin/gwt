@@ -684,6 +684,8 @@ pub fn build_app(
             crate::commands::pullrequest::fetch_pr_detail,
             crate::commands::pullrequest::fetch_latest_branch_pr,
             crate::commands::pullrequest::fetch_ci_log,
+            crate::commands::report::read_recent_logs,
+            crate::commands::report::get_report_system_info,
             crate::commands::system::get_system_info,
             crate::commands::system::get_stats,
         ])

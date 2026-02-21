@@ -27,6 +27,7 @@
   import LaunchProgressModal from "./lib/components/LaunchProgressModal.svelte";
   import MigrationModal from "./lib/components/MigrationModal.svelte";
   import CleanupModal from "./lib/components/CleanupModal.svelte";
+  import ReportDialog from "./lib/components/ReportDialog.svelte";
   import {
     formatWindowTitle,
   } from "./lib/windowTitle";
@@ -2963,6 +2964,13 @@
     </div>
   </div>
 {/if}
+
+<ReportDialog
+  open={reportDialogOpen}
+  mode={reportDialogMode}
+  prefillError={reportDialogPrefillError}
+  onclose={() => { reportDialogOpen = false; }}
+/>
 
 <style>
   .app-layout {
