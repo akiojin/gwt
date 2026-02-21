@@ -393,24 +393,28 @@ impl AppState {
         }
     }
 
-    /// Get next window in MRU order (after current focused window).
+    /// Get next window in rotation order (rotate list left).
     /// Returns None if only one or zero windows.
     pub fn next_window(&self) -> Option<String> {
-        let history = self.window_focus_history.lock().ok()?;
+        let mut history = self.window_focus_history.lock().ok()?;
         if history.len() <= 1 {
             return None;
         }
-        Some(history[1].clone())
+        let front = history.remove(0);
+        history.push(front);
+        Some(history[0].clone())
     }
 
-    /// Get previous window in MRU order (reverse direction).
+    /// Get previous window in rotation order (rotate list right).
     /// Returns None if only one or zero windows.
     pub fn previous_window(&self) -> Option<String> {
-        let history = self.window_focus_history.lock().ok()?;
+        let mut history = self.window_focus_history.lock().ok()?;
         if history.len() <= 1 {
             return None;
         }
-        history.last().cloned()
+        let back = history.pop().unwrap();
+        history.insert(0, back.clone());
+        Some(back)
     }
 
     /// Remove window from MRU history (on window destroy).
@@ -618,7 +622,7 @@ mod tests {
         state.push_window_focus("A");
         state.push_window_focus("B");
         state.push_window_focus("C");
-        // History: [C, B, A] → next = B
+        // History: [C, B, A] → rotate left → [B, A, C] → next = B
         assert_eq!(state.next_window(), Some("B".to_string()));
     }
 
@@ -635,7 +639,7 @@ mod tests {
         state.push_window_focus("A");
         state.push_window_focus("B");
         state.push_window_focus("C");
-        // History: [C, B, A] → previous = A
+        // History: [C, B, A] → rotate right → [A, C, B] → previous = A
         assert_eq!(state.previous_window(), Some("A".to_string()));
     }
 
@@ -648,6 +652,61 @@ mod tests {
         state.remove_window_from_history("B");
         let history = state.window_focus_history.lock().unwrap();
         assert_eq!(*history, vec!["C", "A"]);
+    }
+
+    #[test]
+    fn next_window_cycles_all_three() {
+        let state = AppState::new();
+        state.push_window_focus("C");
+        state.push_window_focus("B");
+        state.push_window_focus("A");
+        // History: [A, B, C]
+        assert_eq!(state.next_window(), Some("B".to_string()));
+        assert_eq!(state.next_window(), Some("C".to_string()));
+        assert_eq!(state.next_window(), Some("A".to_string()));
+        // Full cycle back to start
+        assert_eq!(state.next_window(), Some("B".to_string()));
+    }
+
+    #[test]
+    fn previous_window_cycles_reverse() {
+        let state = AppState::new();
+        state.push_window_focus("C");
+        state.push_window_focus("B");
+        state.push_window_focus("A");
+        // History: [A, B, C]
+        assert_eq!(state.previous_window(), Some("C".to_string()));
+        assert_eq!(state.previous_window(), Some("B".to_string()));
+        assert_eq!(state.previous_window(), Some("A".to_string()));
+        // Full cycle back to start
+        assert_eq!(state.previous_window(), Some("C".to_string()));
+    }
+
+    #[test]
+    fn push_focus_after_rotation_is_idempotent() {
+        let state = AppState::new();
+        state.push_window_focus("C");
+        state.push_window_focus("B");
+        state.push_window_focus("A");
+        // History: [A, B, C]
+        assert_eq!(state.next_window(), Some("B".to_string()));
+        // Simulate OS focus event for the rotated-to window
+        state.push_window_focus("B");
+        // B is already at front, so push_window_focus is idempotent
+        assert_eq!(state.next_window(), Some("C".to_string()));
+        state.push_window_focus("C");
+        assert_eq!(state.next_window(), Some("A".to_string()));
+    }
+
+    #[test]
+    fn two_windows_toggle() {
+        let state = AppState::new();
+        state.push_window_focus("B");
+        state.push_window_focus("A");
+        // History: [A, B]
+        assert_eq!(state.next_window(), Some("B".to_string()));
+        assert_eq!(state.next_window(), Some("A".to_string()));
+        assert_eq!(state.next_window(), Some("B".to_string()));
     }
 
     #[test]
