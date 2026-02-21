@@ -11,17 +11,11 @@ const mockResponse: PrStatusResponse = {
   statuses: {
     "feature/foo": {
       number: 42,
-      title: "Add foo",
       state: "OPEN",
       url: "https://github.com/owner/repo/pull/42",
       mergeable: "MERGEABLE",
-      author: "alice",
       baseBranch: "main",
       headBranch: "feature/foo",
-      labels: ["enhancement"],
-      assignees: ["alice"],
-      milestone: null,
-      linkedIssues: [],
       checkSuites: [
         {
           workflowName: "CI",
@@ -30,11 +24,6 @@ const mockResponse: PrStatusResponse = {
           conclusion: "success",
         },
       ],
-      reviews: [{ reviewer: "bob", state: "APPROVED" }],
-      reviewComments: [],
-      changedFilesCount: 3,
-      additions: 50,
-      deletions: 10,
     },
   },
   ghStatus: { available: true, authenticated: true },

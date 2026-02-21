@@ -3,15 +3,168 @@
 //! Provides functions to build GraphQL queries, execute them via `gh api graphql`,
 //! and parse responses into `PrStatusInfo` structs.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use super::gh_cli::gh_command;
 use super::issue::resolve_repo_slug;
 use super::pullrequest::{PrStatusInfo, ReviewComment, ReviewInfo, WorkflowRunInfo};
 
+/// GraphQL rate limit snapshot returned by GitHub API.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GraphqlRateLimitInfo {
+    pub cost: Option<u64>,
+    pub remaining: Option<u64>,
+    /// RFC3339 timestamp string (UTC), if present.
+    pub reset_at: Option<String>,
+}
+
+/// Result of lightweight PR status fetch.
+#[derive(Debug, Clone, Default)]
+pub struct PrStatusFetchResult {
+    /// Branch name (headRefName) -> PR status info.
+    pub by_head_branch: HashMap<String, PrStatusInfo>,
+    pub rate_limit: GraphqlRateLimitInfo,
+}
+
 fn graphql_string_literal(value: &str) -> String {
     // JSON string escaping is compatible with GraphQL string literal escaping.
     serde_json::to_string(value).expect("serializing GraphQL string literal should not fail")
+}
+
+fn parse_graphql_error_messages(parsed: &serde_json::Value) -> Option<String> {
+    let errors = parsed.get("errors")?.as_array()?;
+    if errors.is_empty() {
+        return None;
+    }
+    let joined = errors
+        .iter()
+        .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
+        .collect::<Vec<_>>()
+        .join("; ");
+    if joined.is_empty() {
+        return Some("Unknown GraphQL error".to_string());
+    }
+    Some(joined)
+}
+
+/// Returns true when the GraphQL error message indicates a primary/secondary rate limit.
+pub fn is_rate_limit_error(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    normalized.contains("rate limit")
+        || normalized.contains("secondary rate")
+        || normalized.contains("abuse detection")
+}
+
+/// Build a lightweight GraphQL query to fetch open PR statuses in one request.
+///
+/// Uses `pullRequests(states: OPEN)` sorted by update timestamp. The caller maps
+/// `headRefName` entries to the target branch set.
+pub fn build_open_pr_status_query(owner: &str, repo: &str, first: usize) -> String {
+    let owner = graphql_string_literal(owner);
+    let repo = graphql_string_literal(repo);
+    let first = first.clamp(1, 100);
+    format!(
+        r#"{{
+  repository(owner: {owner}, name: {repo}) {{
+    pullRequests(states: OPEN, first: {first}, orderBy: {{ field: UPDATED_AT, direction: DESC }}) {{
+      nodes {{
+        number
+        title
+        state
+        url
+        mergeable
+        author {{ login }}
+        baseRefName
+        headRefName
+        updatedAt
+        commits(last: 1) {{
+          nodes {{
+            commit {{
+              statusCheckRollup {{
+                contexts(first: 30) {{
+                  nodes {{
+                    ... on CheckRun {{
+                      name
+                      databaseId
+                      status
+                      conclusion
+                    }}
+                  }}
+                }}
+              }}
+            }}
+          }}
+        }}
+      }}
+      pageInfo {{
+        hasNextPage
+      }}
+    }}
+  }}
+  rateLimit {{
+    cost
+    remaining
+    resetAt
+  }}
+}}"#,
+        owner = owner,
+        repo = repo,
+        first = first,
+    )
+}
+
+/// Parse lightweight open-PR status response.
+pub fn parse_open_pr_status_response(json: &str) -> Result<PrStatusFetchResult, String> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("Failed to parse JSON: {}", e))?;
+
+    if let Some(msg) = parse_graphql_error_messages(&parsed) {
+        return Err(format!("GraphQL errors: {}", msg));
+    }
+
+    let repo = parsed
+        .get("data")
+        .and_then(|d| d.get("repository"))
+        .ok_or_else(|| "Missing data.repository in response".to_string())?;
+
+    let mut by_head_branch = HashMap::new();
+    if let Some(nodes) = repo
+        .get("pullRequests")
+        .and_then(|pr| pr.get("nodes"))
+        .and_then(|n| n.as_array())
+    {
+        for node in nodes {
+            if let Some(info) = parse_pr_status_node_light(node) {
+                // Keep the first entry because query order is UPDATED_AT DESC.
+                by_head_branch
+                    .entry(info.head_branch.clone())
+                    .or_insert(info);
+            }
+        }
+    }
+
+    let rate_limit = parsed
+        .get("data")
+        .and_then(|d| d.get("rateLimit"))
+        .map(parse_rate_limit_info)
+        .unwrap_or_default();
+
+    Ok(PrStatusFetchResult {
+        by_head_branch,
+        rate_limit,
+    })
+}
+
+fn parse_rate_limit_info(node: &serde_json::Value) -> GraphqlRateLimitInfo {
+    GraphqlRateLimitInfo {
+        cost: node.get("cost").and_then(|v| v.as_u64()),
+        remaining: node.get("remaining").and_then(|v| v.as_u64()),
+        reset_at: node
+            .get("resetAt")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string()),
+    }
 }
 
 /// Build a GraphQL query to fetch PR status for multiple branches at once.
@@ -216,6 +369,67 @@ fn parse_pr_node(node: &serde_json::Value, _branch: &str) -> Option<PrStatusInfo
             .unwrap_or(0),
         additions: node.get("additions").and_then(|v| v.as_u64()).unwrap_or(0),
         deletions: node.get("deletions").and_then(|v| v.as_u64()).unwrap_or(0),
+    })
+}
+
+fn parse_pr_status_node_light(node: &serde_json::Value) -> Option<PrStatusInfo> {
+    let number = node.get("number")?.as_u64()?;
+    let state = node
+        .get("state")
+        .and_then(|v| v.as_str())
+        .unwrap_or("OPEN")
+        .to_string();
+    let url = node
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mergeable = node
+        .get("mergeable")
+        .and_then(|v| v.as_str())
+        .unwrap_or("UNKNOWN")
+        .to_string();
+    let head_branch = node
+        .get("headRefName")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if head_branch.is_empty() {
+        return None;
+    }
+
+    Some(PrStatusInfo {
+        number,
+        title: node
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        state,
+        url,
+        mergeable,
+        author: node
+            .get("author")
+            .and_then(|a| a.get("login"))
+            .and_then(|l| l.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        base_branch: node
+            .get("baseRefName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        head_branch,
+        labels: vec![],
+        assignees: vec![],
+        milestone: None,
+        linked_issues: vec![],
+        check_suites: parse_check_suites(node),
+        reviews: vec![],
+        review_comments: vec![],
+        changed_files_count: 0,
+        additions: 0,
+        deletions: 0,
     })
 }
 
@@ -436,13 +650,13 @@ fn parse_review_comments(node: &serde_json::Value) -> Vec<ReviewComment> {
         .unwrap_or_default()
 }
 
-/// Fetch PR statuses for multiple branches using `gh api graphql`.
-pub fn fetch_pr_statuses(
+/// Fetch open PR statuses with lightweight fields and rate-limit metadata.
+pub fn fetch_pr_statuses_with_meta(
     repo_path: &Path,
     branch_names: &[String],
-) -> Result<Vec<(String, Option<PrStatusInfo>)>, String> {
+) -> Result<PrStatusFetchResult, String> {
     if branch_names.is_empty() {
-        return Ok(vec![]);
+        return Ok(PrStatusFetchResult::default());
     }
 
     let slug = resolve_repo_slug(repo_path)
@@ -453,6 +667,70 @@ pub fn fetch_pr_statuses(
     }
     let (owner, repo) = (parts[0], parts[1]);
 
+    // Use the maximum page size to reduce false "No PR" results in repositories
+    // with many open PRs while still issuing a single lightweight query.
+    let query_size = 100;
+    let query = build_open_pr_status_query(owner, repo, query_size);
+    let output = gh_command()
+        .args(["api", "graphql", "-f", &format!("query={}", query)])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to execute gh api graphql: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh api graphql failed: {}", stderr.trim()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut parsed = parse_open_pr_status_response(&stdout)?;
+
+    // Fallback for repositories with very large open-PR counts:
+    // backfill missing branches via the legacy per-branch alias query.
+    let missing = branch_names
+        .iter()
+        .filter(|branch| !parsed.by_head_branch.contains_key((*branch).as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() && missing.len() <= 20 {
+        if let Ok(fallback_results) = fetch_pr_statuses_alias(repo_path, owner, repo, &missing) {
+            for (_branch, info) in fallback_results {
+                if let Some(info) = info {
+                    parsed.by_head_branch.insert(info.head_branch.clone(), info);
+                }
+            }
+        }
+    }
+
+    Ok(parsed)
+}
+
+/// Fetch PR statuses for multiple branches.
+///
+/// This function keeps the previous return shape for callers by mapping
+/// lightweight open-PR results onto the requested branch list.
+pub fn fetch_pr_statuses(
+    repo_path: &Path,
+    branch_names: &[String],
+) -> Result<Vec<(String, Option<PrStatusInfo>)>, String> {
+    if branch_names.is_empty() {
+        return Ok(vec![]);
+    }
+    let fetched = fetch_pr_statuses_with_meta(repo_path, branch_names)?;
+    let mut results = Vec::with_capacity(branch_names.len());
+    for branch in branch_names {
+        let info = fetched.by_head_branch.get(branch).cloned();
+        results.push((branch.clone(), info));
+    }
+    Ok(results)
+}
+
+fn fetch_pr_statuses_alias(
+    repo_path: &Path,
+    owner: &str,
+    repo: &str,
+    branch_names: &[String],
+) -> Result<Vec<(String, Option<PrStatusInfo>)>, String> {
     let query = build_pr_status_query(owner, repo, branch_names);
     let output = gh_command()
         .args(["api", "graphql", "-f", &format!("query={}", query)])
@@ -462,7 +740,7 @@ pub fn fetch_pr_statuses(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("gh api graphql failed: {}", stderr));
+        return Err(format!("gh api graphql failed: {}", stderr.trim()));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -552,6 +830,81 @@ mod tests {
     fn test_build_pr_status_query_escapes_branch_names() {
         let query = build_pr_status_query("owner", "repo", &["fix/has\"quote".to_string()]);
         assert!(query.contains("b0: pullRequests(headRefName: \"fix/has\\\"quote\""));
+    }
+
+    #[test]
+    fn test_build_open_pr_status_query_contains_lightweight_fields() {
+        let query = build_open_pr_status_query("owner", "repo", 55);
+        assert!(query.contains("repository(owner: \"owner\", name: \"repo\")"));
+        assert!(query.contains("pullRequests(states: OPEN, first: 55"));
+        assert!(query.contains("statusCheckRollup"));
+        assert!(query.contains("rateLimit"));
+        assert!(!query.contains("reviewThreads"));
+        assert!(!query.contains("labels(first: 20)"));
+    }
+
+    #[test]
+    fn test_parse_open_pr_status_response_maps_head_branches() {
+        let json = r#"{
+          "data": {
+            "repository": {
+              "pullRequests": {
+                "nodes": [
+                  {
+                    "number": 42,
+                    "title": "PR A",
+                    "state": "OPEN",
+                    "url": "https://github.com/owner/repo/pull/42",
+                    "mergeable": "MERGEABLE",
+                    "author": { "login": "alice" },
+                    "baseRefName": "main",
+                    "headRefName": "feature/a",
+                    "commits": {
+                      "nodes": [{
+                        "commit": {
+                          "statusCheckRollup": {
+                            "contexts": {
+                              "nodes": [{
+                                "name": "CI",
+                                "databaseId": 10,
+                                "status": "COMPLETED",
+                                "conclusion": "SUCCESS"
+                              }]
+                            }
+                          }
+                        }
+                      }]
+                    }
+                  }
+                ]
+              }
+            },
+            "rateLimit": {
+              "cost": 5,
+              "remaining": 4995,
+              "resetAt": "2026-02-22T00:00:00Z"
+            }
+          }
+        }"#;
+
+        let parsed = parse_open_pr_status_response(json).unwrap();
+        let info = parsed.by_head_branch.get("feature/a").unwrap();
+        assert_eq!(info.number, 42);
+        assert_eq!(info.head_branch, "feature/a");
+        assert_eq!(info.check_suites.len(), 1);
+        assert_eq!(parsed.rate_limit.cost, Some(5));
+        assert_eq!(parsed.rate_limit.remaining, Some(4995));
+        assert_eq!(
+            parsed.rate_limit.reset_at,
+            Some("2026-02-22T00:00:00Z".to_string())
+        );
+    }
+
+    #[test]
+    fn test_is_rate_limit_error_variants() {
+        assert!(is_rate_limit_error("GraphQL: API rate limit exceeded"));
+        assert!(is_rate_limit_error("Secondary rate limit. Please wait"));
+        assert!(!is_rate_limit_error("Repository not found"));
     }
 
     // ==========================================================

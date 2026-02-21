@@ -576,6 +576,16 @@ export interface PrStatusInfo {
   deletions: number;
 }
 
+export interface PrStatusLite {
+  number: number;
+  state: "OPEN" | "CLOSED" | "MERGED";
+  url: string;
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+  baseBranch: string;
+  headBranch: string;
+  checkSuites: WorkflowRunInfo[];
+}
+
 export interface BranchPrReference {
   number: number;
   title: string;
@@ -618,7 +628,7 @@ export interface ReviewComment {
 }
 
 export interface PrStatusResponse {
-  statuses: Record<string, PrStatusInfo | null>;
+  statuses: Record<string, PrStatusLite | null>;
   ghStatus: GhCliStatus;
 }
 

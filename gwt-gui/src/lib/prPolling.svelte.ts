@@ -1,10 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { PrStatusInfo, PrStatusResponse, GhCliStatus } from "./types";
+import type { PrStatusLite, PrStatusResponse, GhCliStatus } from "./types";
 
 const POLL_INTERVAL_MS = 30_000;
 
 export interface PrPollingState {
-  statuses: Record<string, PrStatusInfo | null>;
+  statuses: Record<string, PrStatusLite | null>;
   ghStatus: GhCliStatus | null;
   loading: boolean;
   error: string | null;
