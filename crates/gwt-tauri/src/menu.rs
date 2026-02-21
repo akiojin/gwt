@@ -241,7 +241,7 @@ pub fn build_menu(app: &AppHandle<Wry>, state: &AppState) -> tauri::Result<Menu<
         MENU_ID_HELP_REPORT_ISSUE,
         "Report Issue...",
         true,
-        None::<&str>,
+        Some("CmdOrCtrl+Shift+R"),
     )?;
     let help_suggest_feature = MenuItem::with_id(
         app,

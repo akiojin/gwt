@@ -15,8 +15,8 @@
 
 ## Phase 1: セットアップ
 
-- [ ] T001 [P] 報告画像保存ディレクトリの自動作成ロジックを追加する `crates/gwt-core/src/config.rs`
-- [ ] T002 [P] Cargo.toml に画像キャプチャ用の OS ネイティブ依存クレートを追加する（macOS: core-graphics + core-foundation, Windows: windows） `Cargo.toml`
+- [ ] T001 [P] 報告画像保存ディレクトリの自動作成ロジックを追加する `crates/gwt-core/src/config.rs` — 画像キャプチャ実装時に対応（延期）
+- [ ] T002 [P] Cargo.toml に画像キャプチャ用の OS ネイティブ依存クレートを追加する（macOS: core-graphics + core-foundation, Windows: windows） `Cargo.toml` — 画像キャプチャ実装時に対応（延期）
 
 ## Phase 2: 基盤 — 構造化エラー型 + エラーバス
 

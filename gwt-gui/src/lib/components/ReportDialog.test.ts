@@ -23,7 +23,8 @@ vi.mock("$lib/openExternalUrl", () => ({
   openExternalUrl: (...args: unknown[]) => openExternalUrlMock(...args),
 }));
 
-async function renderReportDialog(props: Record<string, unknown>) {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function renderReportDialog(props: any) {
   const { default: ReportDialog } = await import("./ReportDialog.svelte");
   return render(ReportDialog, { props });
 }
@@ -399,5 +400,68 @@ describe("ReportDialog", () => {
     expect(rendered.getByText("System Info")).toBeTruthy();
     expect(rendered.getByText("Application Logs")).toBeTruthy();
     expect(rendered.getByText("Screen Capture (text)")).toBeTruthy();
+  });
+
+  it("renders preview as editable textarea", async () => {
+    invokeMock.mockResolvedValue({ owner: "akiojin", repo: "gwt", display: "akiojin/gwt" });
+
+    const rendered = await renderReportDialog({
+      open: true,
+      mode: "bug",
+      onclose: vi.fn(),
+    });
+
+    const titleInput = rendered.getByLabelText("Title") as HTMLInputElement;
+    await fireEvent.input(titleInput, { target: { value: "Editable preview" } });
+    await fireEvent.click(rendered.getByText("Preview"));
+
+    const previewArea = rendered.container.querySelector(".preview-content") as HTMLTextAreaElement;
+    expect(previewArea).toBeTruthy();
+    expect(previewArea.tagName).toBe("TEXTAREA");
+    expect(previewArea.value).toContain("Bug Report");
+  });
+
+  it("disables Submit button when title is empty", async () => {
+    invokeMock.mockResolvedValue({ owner: "akiojin", repo: "gwt", display: "akiojin/gwt" });
+
+    const rendered = await renderReportDialog({
+      open: true,
+      mode: "bug",
+      onclose: vi.fn(),
+    });
+
+    const submitBtn = rendered.getByText("Submit") as HTMLButtonElement;
+    expect(submitBtn.disabled).toBe(true);
+
+    const titleInput = rendered.getByLabelText("Title") as HTMLInputElement;
+    await fireEvent.input(titleInput, { target: { value: "Some title" } });
+    expect(submitBtn.disabled).toBe(false);
+  });
+
+  it("disables Application Logs checkbox when no logs available", async () => {
+    collectRecentLogsMock.mockResolvedValue("");
+    invokeMock.mockResolvedValue({ owner: "akiojin", repo: "gwt", display: "akiojin/gwt" });
+
+    const rendered = await renderReportDialog({
+      open: true,
+      mode: "bug",
+      onclose: vi.fn(),
+    });
+
+    // Click the Application Logs checkbox to trigger the effect
+    const labels = rendered.container.querySelectorAll(".checkbox-label");
+    const logsLabel = Array.from(labels).find((l) =>
+      l.textContent?.includes("Application Logs"),
+    );
+    const logsCheckbox = logsLabel?.querySelector("input[type='checkbox']") as HTMLInputElement;
+    expect(logsCheckbox).toBeTruthy();
+    await fireEvent.click(logsCheckbox);
+
+    // Wait for the effect to detect empty logs and disable the checkbox
+    await waitFor(() => {
+      expect(logsLabel?.textContent).toContain("No logs available");
+      const updatedCheckbox = logsLabel?.querySelector("input[type='checkbox']") as HTMLInputElement;
+      expect(updatedCheckbox.disabled).toBe(true);
+    });
   });
 });

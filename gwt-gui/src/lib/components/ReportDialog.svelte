@@ -59,6 +59,7 @@
   // Collected diagnostic data
   let systemInfoText = $state("");
   let logsText = $state("");
+  let logsUnavailable = $state(false);
   let screenCaptureText = $state("");
 
   // Terminal text capture state
@@ -134,9 +135,14 @@
   });
 
   $effect(() => {
-    if (open && includeLogs && !logsText) {
+    if (open && includeLogs && !logsText && !logsUnavailable) {
       collectRecentLogs().then((text) => {
-        logsText = text;
+        if (text) {
+          logsText = text;
+        } else {
+          logsUnavailable = true;
+          includeLogs = false;
+        }
       });
     }
   });
@@ -220,7 +226,7 @@
     }
 
     const target = targets[selectedTargetIndex] ?? GWT_TARGET;
-    const body = generateBody();
+    const body = showPreview ? previewMarkdown : generateBody();
     const labels = activeTab === "bug" ? ["bug"] : ["enhancement"];
 
     submitting = true;
@@ -397,9 +403,9 @@
           <input type="checkbox" bind:checked={includeSystemInfo} />
           System Info
         </label>
-        <label class="checkbox-label">
-          <input type="checkbox" bind:checked={includeLogs} />
-          Application Logs
+        <label class="checkbox-label" class:disabled-label={logsUnavailable}>
+          <input type="checkbox" bind:checked={includeLogs} disabled={logsUnavailable} />
+          Application Logs{logsUnavailable ? " (No logs available)" : ""}
         </label>
         <label class="checkbox-label">
           <input type="checkbox" bind:checked={includeScreenCapture} />
@@ -475,7 +481,7 @@
     {#if showPreview}
       <div class="preview-section">
         <h3>Preview</h3>
-        <pre class="preview-content">{previewMarkdown}</pre>
+        <textarea class="preview-content" bind:value={previewMarkdown} rows="10"></textarea>
       </div>
     {/if}
 
@@ -507,7 +513,7 @@
     <button class="btn btn-secondary" onclick={handlePreviewToggle}>
       {showPreview ? "Hide Preview" : "Preview"}
     </button>
-    <button class="btn btn-primary" onclick={handleSubmit} disabled={submitting}>
+    <button class="btn btn-primary" onclick={handleSubmit} disabled={submitting || !(activeTab === "bug" ? bugTitle.trim() : featureTitle.trim())}>
       {submitting ? "Submitting..." : "Submit"}
     </button>
   </div>
@@ -810,6 +816,23 @@
     overflow-y: auto;
     margin: 0;
     line-height: 1.5;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 6px 10px;
+    resize: vertical;
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .preview-content:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+
+  .disabled-label {
+    opacity: 0.5;
+    cursor: default;
   }
 
   .submit-message {
