@@ -245,7 +245,7 @@ fn create_new_worktree_remote_first(
     gwt_core::git::create_remote_branch(repo_path, branch_name, &sha)?;
 
     // Fetch the newly created branch locally
-    let fetch_output = std::process::Command::new("git")
+    let fetch_output = gwt_core::process::command("git")
         .args([
             "fetch",
             "origin",
