@@ -17,6 +17,7 @@
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
+| [SPEC-de3290fc](SPEC-de3290fc/spec.md) | 機能仕様: PRタブにWorkflowを統合しChecks/UpdateBranch/Conflict状態を表示 | 2026-02-22 |
 | [SPEC-fabb6678](SPEC-fabb6678/spec.md) | 機能仕様: 問題報告・改善提案機能（Error Reporting & Feature Suggestion） | 2026-02-22 |
 | [SPEC-a4fb2db2](SPEC-a4fb2db2/spec.md) | 機能仕様: GitHub リモート起点の Worktree 作成 | 2026-02-21 |
 | [SPEC-1161b0a1](SPEC-1161b0a1/spec.md) | 機能仕様: Windows 移行プロジェクトの Docker 起動でポート競合を回避する | 2026-02-20 |

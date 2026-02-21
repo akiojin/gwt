@@ -176,7 +176,7 @@ describe("WorktreeSummaryPanel", () => {
     delete (globalThis as any).__TAURI_INTERNALS__;
   });
 
-  it("renders branch header and fixed 6-tab UI when branch is selected", async () => {
+  it("renders branch header and fixed 5-tab UI when branch is selected (no Workflow tab)", async () => {
     const rendered = await renderPanel({
       projectPath: "/tmp/project",
       selectedBranch: branchFixture,
@@ -195,14 +195,17 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    expect(tabs).toHaveLength(6);
+    expect(tabs).toHaveLength(5);
     expect(tabs[0]?.textContent?.trim()).toBe("Summary");
     expect(tabs[0]?.classList.contains("active")).toBe(true);
     expect(tabs[1]?.textContent?.trim()).toBe("Git");
     expect(tabs[2]?.textContent?.trim()).toBe("Issue");
     expect(tabs[3]?.textContent?.trim()).toBe("PR");
-    expect(tabs[4]?.textContent?.trim()).toBe("Workflow");
-    expect(tabs[5]?.textContent?.trim()).toBe("Docker");
+    expect(tabs[4]?.textContent?.trim()).toBe("Docker");
+
+    // Verify Workflow tab does not exist
+    const tabTexts = Array.from(tabs).map((t) => t.textContent?.trim());
+    expect(tabTexts).not.toContain("Workflow");
     expect(rendered.queryByRole("button", { name: "Quick Start" })).toBeNull();
   });
 
@@ -444,9 +447,7 @@ describe("WorktreeSummaryPanel", () => {
     expect(rendered.container.querySelector(".git-section .collapse-icon")).toBeNull();
   });
 
-  it("switches to Workflow tab and shows workflow runs", async () => {
-    openExternalUrlMock.mockResolvedValue(true);
-
+  it("shows CI checks inside PR tab via PrStatusSection Checks section", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "get_branch_quick_start") return [];
       if (cmd === "get_branch_session_summary") return { ...sessionSummaryFixture, markdown: null };
@@ -463,30 +464,34 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const workflowTab = tabs[4] as HTMLElement;
-    await fireEvent.click(workflowTab);
+    const prTab = tabs[3] as HTMLElement;
+    await fireEvent.click(prTab);
 
     await waitFor(() => {
-      expect(workflowTab.classList.contains("active")).toBe(true);
-      expect(rendered.getByText("CI Build")).toBeTruthy();
-      expect(rendered.getByText("Lint")).toBeTruthy();
+      expect(prTab.classList.contains("active")).toBe(true);
+      expect(rendered.container.querySelector(".pr-status-section")).toBeTruthy();
+      // Checks section should exist within PrStatusSection
+      expect(rendered.container.querySelector(".checks-section")).toBeTruthy();
+      expect(rendered.container.textContent).toContain("Checks (2)");
     });
-
-    await fireEvent.click(
-      rendered.getByText("Success").closest("button") as HTMLButtonElement
-    );
-    expect(openExternalUrlMock).toHaveBeenCalledWith(
-      "https://github.com/test/repo/actions/runs/100",
-    );
   });
 
-  it("renders Workflow from resolved prNumber even when latest branch PR is unavailable", async () => {
+  it("polls PR detail after Update Branch until merge state changes", async () => {
+    let prDetailCallCount = 0;
+
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "get_branch_quick_start") return [];
       if (cmd === "get_branch_session_summary") return { ...sessionSummaryFixture, markdown: null };
       if (cmd === "fetch_branch_linked_issue") return null;
-      if (cmd === "fetch_latest_branch_pr") return null;
-      if (cmd === "fetch_pr_detail") return prDetailFixture;
+      if (cmd === "fetch_latest_branch_pr") return latestPrFixture;
+      if (cmd === "fetch_pr_detail") {
+        prDetailCallCount += 1;
+        if (prDetailCallCount <= 2) {
+          return { ...prDetailFixture, mergeStateStatus: "BEHIND" };
+        }
+        return { ...prDetailFixture, mergeStateStatus: "CLEAN" };
+      }
+      if (cmd === "update_pr_branch") return "accepted";
       if (cmd === "detect_docker_context") return dockerContextFixture;
       return [];
     });
@@ -494,18 +499,72 @@ describe("WorktreeSummaryPanel", () => {
     const rendered = await renderPanel({
       projectPath: "/tmp/project",
       selectedBranch: branchFixture,
-      prNumber: 42,
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const workflowTab = tabs[4] as HTMLElement;
-    await fireEvent.click(workflowTab);
+    const prTab = tabs[3] as HTMLElement;
+    await fireEvent.click(prTab);
 
     await waitFor(() => {
-      expect(workflowTab.classList.contains("active")).toBe(true);
-      expect(rendered.getByText("CI Build")).toBeTruthy();
-      expect(rendered.queryByText("No PR.")).toBeNull();
+      expect(rendered.getByRole("button", { name: "Update Branch" })).toBeTruthy();
     });
+
+    vi.useFakeTimers();
+    await fireEvent.click(rendered.getByRole("button", { name: "Update Branch" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("update_pr_branch", {
+        projectPath: "/tmp/project",
+        prNumber: 42,
+      });
+    });
+
+    await vi.advanceTimersByTimeAsync(20_000);
+
+    await waitFor(() => {
+      expect(commandCalls("fetch_pr_detail").length).toBeGreaterThanOrEqual(3);
+      expect(rendered.queryByRole("button", { name: "Update Branch" })).toBeNull();
+    });
+  });
+
+  it("shows update-branch failure in PR tab", async () => {
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd === "get_branch_quick_start") return [];
+        if (cmd === "get_branch_session_summary") return { ...sessionSummaryFixture, markdown: null };
+        if (cmd === "fetch_branch_linked_issue") return null;
+        if (cmd === "fetch_latest_branch_pr") return latestPrFixture;
+        if (cmd === "fetch_pr_detail") return { ...prDetailFixture, mergeStateStatus: "BEHIND" };
+        if (cmd === "update_pr_branch") throw new Error("403 Forbidden");
+        if (cmd === "detect_docker_context") return dockerContextFixture;
+        return [];
+      });
+
+      const rendered = await renderPanel({
+        projectPath: "/tmp/project",
+        selectedBranch: branchFixture,
+      });
+
+      const tabs = rendered.container.querySelectorAll(".summary-tab");
+      const prTab = tabs[3] as HTMLElement;
+      await fireEvent.click(prTab);
+
+      await waitFor(() => {
+        expect(rendered.getByRole("button", { name: "Update Branch" })).toBeTruthy();
+      });
+
+      await fireEvent.click(rendered.getByRole("button", { name: "Update Branch" }));
+
+      await waitFor(() => {
+        expect(rendered.getByText("Failed to update branch: 403 Forbidden")).toBeTruthy();
+        expect(rendered.getByText("#42 CI Test PR")).toBeTruthy();
+        expect(rendered.getByRole("button", { name: "Update Branch" })).toBeTruthy();
+        expect(rendered.container.querySelector(".pr-status-error")).toBeNull();
+      });
+    } finally {
+      consoleErrorSpy.mockRestore();
+    }
   });
 
   it("ignores stale latest branch PR errors after branch switch", async () => {
@@ -635,7 +694,7 @@ describe("WorktreeSummaryPanel", () => {
     });
 
     const tabs = rendered.container.querySelectorAll(".summary-tab");
-    const dockerTab = tabs[5] as HTMLElement;
+    const dockerTab = tabs[4] as HTMLElement;
     expect(commandCalls("detect_docker_context")).toHaveLength(0);
     await fireEvent.click(dockerTab);
 

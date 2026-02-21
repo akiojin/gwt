@@ -584,6 +584,7 @@ export interface PrStatusInfo {
   changedFilesCount: number;
   additions: number;
   deletions: number;
+  mergeStateStatus?: "BEHIND" | "BLOCKED" | "CLEAN" | "DIRTY" | "DRAFT" | "HAS_HOOKS" | "UNKNOWN" | "UNSTABLE" | null;
 }
 
 export interface BranchPrReference {
@@ -606,6 +607,7 @@ export interface WorkflowRunInfo {
     | "action_required"
     | "skipped"
     | null;
+  isRequired?: boolean;
 }
 
 export interface ReviewInfo {

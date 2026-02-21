@@ -17,7 +17,6 @@
   import GitSection from "./GitSection.svelte";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
   import PrStatusSection from "./PrStatusSection.svelte";
-  import { workflowStatusIcon, workflowStatusClass } from "../prStatusHelpers";
   import { openExternalUrl } from "../openExternalUrl";
 
   let {
@@ -58,7 +57,6 @@
     | "git"
     | "issue"
     | "pr"
-    | "workflow"
     | "docker";
   let activeTab: SummaryTab = $state("summary");
 
@@ -76,6 +74,7 @@
 
   let prDetailLoading = $state(false);
   let prDetailError: string | null = $state(null);
+  let updateBranchError: string | null = $state(null);
   let prDetail: PrStatusInfo | null = $state(null);
   let prDetailBranch: string | null = $state(null);
   let prDetailPrNumber: number | null = $state(null);
@@ -107,6 +106,8 @@
   const LINKED_ISSUE_CACHE_TTL_MS = 120_000;
   const LATEST_BRANCH_PR_CACHE_TTL_MS = 30_000;
   const DOCKER_CONTEXT_CACHE_TTL_MS = 60_000;
+  const UPDATE_BRANCH_POLL_ATTEMPTS = 8;
+  const UPDATE_BRANCH_POLL_INTERVAL_MS = 1_500;
 
   type CacheEntry<T> = {
     value: T;
@@ -198,6 +199,12 @@
     }
     await new Promise<void>((resolve) => {
       window.requestAnimationFrame(() => resolve());
+    });
+  }
+
+  async function waitMs(ms: number): Promise<void> {
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, ms);
     });
   }
 
@@ -719,7 +726,7 @@
       loadBranchLinkedIssue({ defer: true });
       return;
     }
-    if (activeTab === "pr" || activeTab === "workflow") {
+    if (activeTab === "pr") {
       loadLatestBranchPr({ defer: true });
       return;
     }
@@ -859,15 +866,13 @@
     prDetailRequestToken++;
     prDetailLoading = false;
     prDetailError = null;
+    updateBranchError = null;
     prDetail = null;
     prDetailBranch = nextBranch;
     prDetailPrNumber = null;
   }
 
   let resolvedPrNumber = $derived.by(() => latestBranchPr?.number ?? prNumber ?? null);
-  let workflowDisplayPrNumber = $derived.by(
-    () => latestBranchPr?.number ?? prDetail?.number ?? resolvedPrNumber,
-  );
 
   $effect(() => {
     const nextProjectPath = projectPath ?? "";
@@ -880,11 +885,28 @@
     clearPrDetailState(currentBranchName());
   });
 
-  async function loadPrDetail(branch: string, prNum: number) {
+  type LoadPrDetailOptions = {
+    clearBeforeLoad?: boolean;
+    showLoading?: boolean;
+    errorPrefix?: string;
+  };
+
+  async function loadPrDetail(
+    branch: string,
+    prNum: number,
+    options: LoadPrDetailOptions = {},
+  ) {
+    const clearBeforeLoad = options.clearBeforeLoad !== false;
+    const showLoading = options.showLoading !== false;
+    const errorPrefix = options.errorPrefix ?? null;
     const requestToken = ++prDetailRequestToken;
-    prDetailLoading = true;
-    prDetailError = null;
-    prDetail = null;
+    if (showLoading) {
+      prDetailLoading = true;
+    }
+    if (clearBeforeLoad) {
+      prDetailError = null;
+      prDetail = null;
+    }
     prDetailPrNumber = prNum;
     try {
       const invoke = await getInvoke();
@@ -901,19 +923,51 @@
       const isCurrent =
         requestToken === prDetailRequestToken && prDetailBranch === branch;
       if (isCurrent) {
-        prDetailError = toErrorMessage(err);
+        const message = toErrorMessage(err);
+        prDetailError = errorPrefix ? `${errorPrefix}: ${message}` : message;
       }
     } finally {
       const isCurrent =
         requestToken === prDetailRequestToken && prDetailBranch === branch;
-      if (isCurrent) {
+      if (isCurrent && showLoading) {
         prDetailLoading = false;
       }
     }
   }
 
+  function isViewingCurrentPr(branch: string, prNum: number): boolean {
+    if (activeTab !== "pr") return false;
+    if (currentBranchName() !== branch) return false;
+    const currentPr = resolvedPrNumber;
+    if (currentPr !== null && currentPr !== prNum) return false;
+    return true;
+  }
+
+  async function pollPrDetailAfterBranchUpdate(
+    branch: string,
+    prNum: number,
+  ): Promise<void> {
+    for (let attempt = 0; attempt < UPDATE_BRANCH_POLL_ATTEMPTS; attempt++) {
+      if (!isViewingCurrentPr(branch, prNum)) return;
+
+      await loadPrDetail(branch, prNum, {
+        clearBeforeLoad: false,
+        showLoading: false,
+        errorPrefix: "Failed to refresh PR detail",
+      });
+
+      if (!isViewingCurrentPr(branch, prNum)) return;
+      if (prDetailError) return;
+      if (prDetail?.mergeStateStatus !== "BEHIND") return;
+
+      if (attempt < UPDATE_BRANCH_POLL_ATTEMPTS - 1) {
+        await waitMs(UPDATE_BRANCH_POLL_INTERVAL_MS);
+      }
+    }
+  }
+
   $effect(() => {
-    if (activeTab !== "pr" && activeTab !== "workflow") return;
+    if (activeTab !== "pr") return;
 
     const branch = currentBranchName();
     const prNum = resolvedPrNumber;
@@ -978,25 +1032,9 @@
     }
   }
 
-  function workflowStatusText(run: WorkflowRunInfo): string {
-    if (run.status !== "completed") {
-      return run.status === "in_progress" ? "Running" : "Queued";
-    }
-    switch (run.conclusion) {
-      case "success":
-        return "Success";
-      case "failure":
-        return "Failure";
-      case "neutral":
-        return "Neutral";
-      case "skipped":
-        return "Skipped";
-      default:
-        return "Completed";
-    }
-  }
+  let updatingBranch = $state(false);
 
-  function openWorkflowRun(run: WorkflowRunInfo): void {
+  function handleOpenCiLog(run: WorkflowRunInfo): void {
     if (onOpenCiLog) {
       onOpenCiLog(run.runId);
       return;
@@ -1007,6 +1045,31 @@
     const workflowBase = match ? match[1] : null;
     if (!workflowBase) return;
     void openExternalUrl(`${workflowBase}/actions/runs/${run.runId}`);
+  }
+
+  async function handleUpdateBranch(): Promise<void> {
+    if (!prDetail || updatingBranch) return;
+    const branch = currentBranchName();
+    const prNum = prDetail.number;
+    updatingBranch = true;
+    updateBranchError = null;
+    try {
+      const invoke = await getInvoke();
+      await invoke<string>("update_pr_branch", {
+        projectPath,
+        prNumber: prNum,
+      });
+
+      if (branch) {
+        prDetailBranch = branch;
+        await pollPrDetailAfterBranchUpdate(branch, prNum);
+      }
+    } catch (err) {
+      updateBranchError = `Failed to update branch: ${toErrorMessage(err)}`;
+      console.error("Failed to update branch:", err);
+    } finally {
+      updatingBranch = false;
+    }
   }
 
   async function getInvoke(): Promise<TauriInvoke> {
@@ -1098,15 +1161,6 @@
           }}
         >
           PR
-        </button>
-        <button
-          class="summary-tab"
-          class:active={activeTab === "workflow"}
-          onclick={() => {
-            activeTab = "workflow";
-          }}
-        >
-          Workflow
         </button>
         <button
           class="summary-tab"
@@ -1302,56 +1356,11 @@
           prDetail={prDetail}
           loading={latestBranchPrLoading || (resolvedPrNumber !== null && prDetailLoading)}
           error={ghCliStatusMessage ?? latestBranchPrError ?? prDetailError}
+          updateError={updateBranchError}
+          onOpenCiLog={handleOpenCiLog}
+          onUpdateBranch={handleUpdateBranch}
+          updatingBranch={updatingBranch}
         />
-      {:else if activeTab === "workflow"}
-        <div class="quick-start workflow-panel">
-          <div class="quick-header">
-            <span class="quick-title">Workflow</span>
-            {#if latestBranchPrLoading || (resolvedPrNumber !== null && prDetailLoading)}
-              <span class="quick-subtitle">Loading...</span>
-            {:else if ghCliStatusMessage}
-              <span class="quick-subtitle">GitHub CLI issue</span>
-            {:else if latestBranchPrError || prDetailError}
-              <span class="quick-subtitle">Error</span>
-            {:else if workflowDisplayPrNumber !== null}
-              <span class="quick-subtitle">#{workflowDisplayPrNumber}</span>
-            {:else}
-              <span class="quick-subtitle">No PR</span>
-            {/if}
-          </div>
-
-          {#if latestBranchPrLoading || (resolvedPrNumber !== null && prDetailLoading)}
-            <div class="session-summary-placeholder">Loading...</div>
-          {:else if ghCliStatusMessage}
-            <div class="quick-error">{ghCliStatusMessage}</div>
-          {:else if latestBranchPrError || prDetailError}
-            <div class="quick-error">{latestBranchPrError ?? prDetailError}</div>
-          {:else if workflowDisplayPrNumber === null && !prDetail}
-            <div class="session-summary-placeholder">No PR.</div>
-          {:else if !prDetail}
-            <div class="session-summary-placeholder">Loading PR details...</div>
-          {:else if prDetail.checkSuites.length > 0}
-            <div class="workflow-list">
-              {#each prDetail.checkSuites as run}
-                <button
-                  class="workflow-run-item"
-                  type="button"
-                  onclick={() => openWorkflowRun(run)}
-                >
-                  <span class="workflow-status {workflowStatusClass(run)}"
-                    >{workflowStatusIcon(run)}</span
-                  >
-                  <span class="workflow-name">{run.workflowName}</span>
-                  <span class="workflow-status-text">
-                    {workflowStatusText(run)}
-                  </span>
-                </button>
-              {/each}
-            </div>
-          {:else}
-            <div class="workflow-empty">No workflows</div>
-          {/if}
-        </div>
       {:else if activeTab === "docker"}
         <div class="quick-start docker-summary">
           <div class="quick-header">
@@ -1977,66 +1986,4 @@
     color: var(--text-secondary);
   }
 
-  .workflow-list {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  .workflow-run-item {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 8px;
-    background: none;
-    border: none;
-    color: var(--text-secondary);
-    font-size: var(--ui-font-xs);
-    cursor: pointer;
-    text-align: left;
-    font-family: inherit;
-  }
-
-  .workflow-run-item:hover {
-    background: var(--bg-hover);
-  }
-
-  .workflow-status {
-    font-size: 11px;
-    width: 14px;
-    text-align: center;
-  }
-
-  .workflow-status.pass {
-    color: var(--green);
-  }
-
-  .workflow-status.fail {
-    color: var(--red);
-  }
-
-  .workflow-status.running {
-    color: var(--yellow);
-  }
-
-  .workflow-status.pending {
-    color: var(--text-muted);
-  }
-
-  .workflow-status-text {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .workflow-empty {
-    padding: 3px 8px;
-    color: var(--text-muted);
-    font-size: var(--ui-font-xs);
-    font-style: italic;
-  }
-
-	  .workflow-panel .workflow-run-item {
-	    border-radius: 4px;
-	  }
 	</style>

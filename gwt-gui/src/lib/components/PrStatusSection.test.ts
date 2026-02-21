@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render } from "@testing-library/svelte";
-import type { PrStatusInfo, ReviewInfo, ReviewComment } from "../types";
+import { fireEvent } from "@testing-library/svelte";
+import type { PrStatusInfo, ReviewInfo, ReviewComment, WorkflowRunInfo } from "../types";
 
 vi.mock("$lib/tauriInvoke", () => ({
   invoke: vi.fn(),
@@ -53,6 +54,19 @@ describe("PrStatusSection", () => {
   it("shows error message when error is provided", async () => {
     const { container } = await renderSection({ error: "Something went wrong" });
     expect(container.textContent).toContain("Something went wrong");
+  });
+
+  it("shows update error while keeping PR detail visible", async () => {
+    const pr = makePrDetail({ mergeStateStatus: "BEHIND" });
+    const { container } = await renderSection({
+      prDetail: pr,
+      updateError: "Failed to update branch: 403 Forbidden",
+    });
+
+    expect(container.textContent).toContain("Failed to update branch: 403 Forbidden");
+    expect(container.textContent).toContain("Add feature X");
+    expect(container.querySelector(".update-branch-btn")).toBeTruthy();
+    expect(container.querySelector(".pr-status-error")).toBeNull();
   });
 
   it("renders PR metadata correctly", async () => {
@@ -213,5 +227,293 @@ describe("PrStatusSection", () => {
     expect(container.textContent).toContain("12 files changed");
     expect(container.textContent).toContain("+350");
     expect(container.textContent).toContain("-80");
+  });
+
+  // --- T007: Checks section tests ---
+
+  describe("Checks section", () => {
+    it("does not render checks section when checkSuites is empty", async () => {
+      const pr = makePrDetail({ checkSuites: [] });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const checksSection = container.querySelector(".checks-section");
+      expect(checksSection).toBeNull();
+    });
+
+    it("renders checks section with workflow runs", async () => {
+      const checkSuites: WorkflowRunInfo[] = [
+        { workflowName: "CI", runId: 1, status: "completed", conclusion: "success" },
+        { workflowName: "Lint", runId: 2, status: "completed", conclusion: "failure" },
+      ];
+      const pr = makePrDetail({ checkSuites });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const checksSection = container.querySelector(".checks-section");
+      expect(checksSection).toBeTruthy();
+      // Shows count in collapsed toggle
+      expect(checksSection?.textContent).toContain("Checks (2)");
+
+      // Expand to see individual workflow names
+      const toggleBtn = container.querySelector(".checks-toggle") as HTMLElement;
+      await fireEvent.click(toggleBtn);
+      expect(checksSection?.textContent).toContain("CI");
+      expect(checksSection?.textContent).toContain("Lint");
+    });
+
+    it("renders checks section collapsed by default with summary count", async () => {
+      const checkSuites: WorkflowRunInfo[] = [
+        { workflowName: "CI", runId: 1, status: "completed", conclusion: "success" },
+        { workflowName: "Lint", runId: 2, status: "completed", conclusion: "failure" },
+      ];
+      const pr = makePrDetail({ checkSuites });
+      const { container } = await renderSection({ prDetail: pr });
+
+      // Should have a toggle button
+      const toggleBtn = container.querySelector(".checks-toggle");
+      expect(toggleBtn).toBeTruthy();
+
+      // Individual checks should be hidden by default
+      const checksList = container.querySelector(".checks-list");
+      expect(checksList).toBeNull();
+    });
+
+    it("expands checks list when toggle is clicked", async () => {
+      const checkSuites: WorkflowRunInfo[] = [
+        { workflowName: "CI", runId: 1, status: "completed", conclusion: "success" },
+      ];
+      const pr = makePrDetail({ checkSuites });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const toggleBtn = container.querySelector(".checks-toggle") as HTMLElement;
+      expect(toggleBtn).toBeTruthy();
+
+      await fireEvent.click(toggleBtn);
+
+      const checksList = container.querySelector(".checks-list");
+      expect(checksList).toBeTruthy();
+      expect(checksList?.textContent).toContain("CI");
+    });
+
+    it("renders status icon and class for each workflow run", async () => {
+      const checkSuites: WorkflowRunInfo[] = [
+        { workflowName: "CI", runId: 1, status: "completed", conclusion: "success" },
+        { workflowName: "Lint", runId: 2, status: "completed", conclusion: "failure" },
+        { workflowName: "Deploy", runId: 3, status: "in_progress", conclusion: null },
+      ];
+      const pr = makePrDetail({ checkSuites });
+      const { container } = await renderSection({ prDetail: pr });
+
+      // Expand checks
+      const toggleBtn = container.querySelector(".checks-toggle") as HTMLElement;
+      await fireEvent.click(toggleBtn);
+
+      const checkItems = container.querySelectorAll(".check-item");
+      expect(checkItems).toHaveLength(3);
+
+      // Check status icons are present
+      const icons = container.querySelectorAll(".check-status");
+      expect(icons).toHaveLength(3);
+      expect(icons[0].classList.contains("pass")).toBe(true);
+      expect(icons[1].classList.contains("fail")).toBe(true);
+      expect(icons[2].classList.contains("running")).toBe(true);
+    });
+
+    it("calls onOpenCiLog with WorkflowRunInfo when a check item is clicked", async () => {
+      const onOpenCiLog = vi.fn();
+      const run: WorkflowRunInfo = { workflowName: "CI", runId: 123, status: "completed", conclusion: "failure" };
+      const pr = makePrDetail({ checkSuites: [run] });
+      const { container } = await renderSection({ prDetail: pr, onOpenCiLog });
+
+      // Expand checks
+      const toggleBtn = container.querySelector(".checks-toggle") as HTMLElement;
+      await fireEvent.click(toggleBtn);
+
+      const checkItem = container.querySelector(".check-item") as HTMLElement;
+      await fireEvent.click(checkItem);
+
+      expect(onOpenCiLog).toHaveBeenCalledOnce();
+      expect(onOpenCiLog).toHaveBeenCalledWith(run);
+    });
+
+    it("shows conclusion text for each workflow run", async () => {
+      const checkSuites: WorkflowRunInfo[] = [
+        { workflowName: "CI", runId: 1, status: "completed", conclusion: "success" },
+        { workflowName: "Lint", runId: 2, status: "in_progress", conclusion: null },
+      ];
+      const pr = makePrDetail({ checkSuites });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const toggleBtn = container.querySelector(".checks-toggle") as HTMLElement;
+      await fireEvent.click(toggleBtn);
+
+      const conclusions = container.querySelectorAll(".check-conclusion");
+      expect(conclusions).toHaveLength(2);
+      expect(conclusions[0].textContent).toContain("Success");
+      expect(conclusions[1].textContent).toContain("Running");
+    });
+
+    it("shows 'No checks' when checkSuites is empty and prDetail exists", async () => {
+      const pr = makePrDetail({ checkSuites: [] });
+      const { container } = await renderSection({ prDetail: pr });
+
+      expect(container.textContent).toContain("No checks");
+    });
+  });
+
+  // --- T013: isRequired badge ---
+
+  describe("isRequired badge", () => {
+    it("shows 'required' badge when isRequired is true", async () => {
+      const checkSuites: WorkflowRunInfo[] = [
+        { workflowName: "CI", runId: 1, status: "completed", conclusion: "success", isRequired: true },
+        { workflowName: "Optional", runId: 2, status: "completed", conclusion: "success", isRequired: false },
+      ];
+      const pr = makePrDetail({ checkSuites });
+      const { container } = await renderSection({ prDetail: pr });
+
+      // Expand
+      const toggleBtn = container.querySelector(".checks-toggle") as HTMLElement;
+      await fireEvent.click(toggleBtn);
+
+      const requiredBadges = container.querySelectorAll(".required-badge");
+      expect(requiredBadges).toHaveLength(1);
+      expect(requiredBadges[0].textContent).toContain("required");
+    });
+  });
+
+  // --- T015: Merge meta row with mergeStateStatus + Update Branch button ---
+
+  describe("Merge meta row with mergeStateStatus", () => {
+    it("displays 'Behind base' badge when mergeStateStatus is BEHIND", async () => {
+      const pr = makePrDetail({ mergeStateStatus: "BEHIND" });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const stateStatusBadge = container.querySelector(".merge-state-badge");
+      expect(stateStatusBadge).toBeTruthy();
+      expect(stateStatusBadge?.textContent).toContain("Behind base");
+      expect(stateStatusBadge?.classList.contains("behind")).toBe(true);
+    });
+
+    it("displays 'Blocked' badge when mergeStateStatus is BLOCKED", async () => {
+      const pr = makePrDetail({ mergeStateStatus: "BLOCKED" });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const stateStatusBadge = container.querySelector(".merge-state-badge");
+      expect(stateStatusBadge).toBeTruthy();
+      expect(stateStatusBadge?.textContent).toContain("Blocked");
+      expect(stateStatusBadge?.classList.contains("blocked")).toBe(true);
+    });
+
+    it("displays 'Conflicts' badge when mergeStateStatus is DIRTY", async () => {
+      const pr = makePrDetail({ mergeStateStatus: "DIRTY" });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const stateStatusBadge = container.querySelector(".merge-state-badge");
+      expect(stateStatusBadge).toBeTruthy();
+      expect(stateStatusBadge?.textContent).toContain("Conflicts");
+      expect(stateStatusBadge?.classList.contains("blocked")).toBe(true);
+    });
+
+    it("displays 'Draft' badge when mergeStateStatus is DRAFT", async () => {
+      const pr = makePrDetail({ mergeStateStatus: "DRAFT" });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const stateStatusBadge = container.querySelector(".merge-state-badge");
+      expect(stateStatusBadge).toBeTruthy();
+      expect(stateStatusBadge?.textContent).toContain("Draft");
+      expect(stateStatusBadge?.classList.contains("neutral")).toBe(true);
+    });
+
+    it("displays 'Unstable' badge when mergeStateStatus is UNSTABLE", async () => {
+      const pr = makePrDetail({ mergeStateStatus: "UNSTABLE" });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const stateStatusBadge = container.querySelector(".merge-state-badge");
+      expect(stateStatusBadge).toBeTruthy();
+      expect(stateStatusBadge?.textContent).toContain("Unstable");
+      expect(stateStatusBadge?.classList.contains("unstable")).toBe(true);
+    });
+
+    it("does not display badge when mergeStateStatus is CLEAN", async () => {
+      const pr = makePrDetail({ mergeStateStatus: "CLEAN" });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const stateStatusBadge = container.querySelector(".merge-state-badge");
+      expect(stateStatusBadge).toBeNull();
+    });
+
+    it("does not display badge when mergeStateStatus is HAS_HOOKS", async () => {
+      const pr = makePrDetail({ mergeStateStatus: "HAS_HOOKS" });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const stateStatusBadge = container.querySelector(".merge-state-badge");
+      expect(stateStatusBadge).toBeNull();
+    });
+
+    it("does not display badge when mergeStateStatus is UNKNOWN", async () => {
+      const pr = makePrDetail({ mergeStateStatus: "UNKNOWN" });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const stateStatusBadge = container.querySelector(".merge-state-badge");
+      expect(stateStatusBadge).toBeNull();
+    });
+
+    it("does not display badge when mergeStateStatus is null", async () => {
+      const pr = makePrDetail({ mergeStateStatus: null });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const stateStatusBadge = container.querySelector(".merge-state-badge");
+      expect(stateStatusBadge).toBeNull();
+    });
+
+    it("does not display badge when mergeStateStatus is undefined", async () => {
+      const pr = makePrDetail();
+      const { container } = await renderSection({ prDetail: pr });
+
+      const stateStatusBadge = container.querySelector(".merge-state-badge");
+      expect(stateStatusBadge).toBeNull();
+    });
+
+    it("shows Update Branch button when mergeStateStatus is BEHIND", async () => {
+      const pr = makePrDetail({ mergeStateStatus: "BEHIND" });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const updateBtn = container.querySelector(".update-branch-btn");
+      expect(updateBtn).toBeTruthy();
+      expect(updateBtn?.textContent).toContain("Update Branch");
+    });
+
+    it("does not show Update Branch button when mergeStateStatus is CLEAN", async () => {
+      const pr = makePrDetail({ mergeStateStatus: "CLEAN" });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const updateBtn = container.querySelector(".update-branch-btn");
+      expect(updateBtn).toBeNull();
+    });
+
+    it("calls onUpdateBranch when Update Branch button is clicked", async () => {
+      const onUpdateBranch = vi.fn().mockResolvedValue(undefined);
+      const pr = makePrDetail({ mergeStateStatus: "BEHIND" });
+      const { container } = await renderSection({ prDetail: pr, onUpdateBranch });
+
+      const updateBtn = container.querySelector(".update-branch-btn") as HTMLElement;
+      await fireEvent.click(updateBtn);
+
+      expect(onUpdateBranch).toHaveBeenCalledOnce();
+    });
+
+    it("disables Update Branch button when updatingBranch is true", async () => {
+      const onUpdateBranch = vi.fn().mockResolvedValue(undefined);
+      const pr = makePrDetail({ mergeStateStatus: "BEHIND" });
+      const { container } = await renderSection({
+        prDetail: pr,
+        onUpdateBranch,
+        updatingBranch: true,
+      });
+
+      const updateBtn = container.querySelector(".update-branch-btn") as HTMLButtonElement;
+      expect(updateBtn.disabled).toBe(true);
+      expect(updateBtn.textContent).toContain("Updating");
+    });
   });
 });

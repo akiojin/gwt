@@ -30,6 +30,7 @@ pub fn build_pr_status_query(owner: &str, repo: &str, branch_names: &[String]) -
         state
         url
         mergeable
+        mergeStateStatus
         author {{ login }}
         baseRefName
         headRefName
@@ -194,12 +195,18 @@ fn parse_pr_node(node: &serde_json::Value, _branch: &str) -> Option<PrStatusInfo
     let check_suites = parse_check_suites(node);
     let reviews = parse_reviews(node);
 
+    let merge_state_status = node
+        .get("mergeStateStatus")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
     Some(PrStatusInfo {
         number,
         title,
         state,
         url,
         mergeable,
+        merge_state_status,
         author,
         base_branch,
         head_branch,
@@ -246,11 +253,13 @@ fn parse_check_suites(node: &serde_json::Value) -> Vec<WorkflowRunInfo> {
                         .get("conclusion")
                         .and_then(|c| c.as_str())
                         .map(|c| c.to_lowercase());
+                    let is_required = check.get("isRequired").and_then(|v| v.as_bool());
                     Some(WorkflowRunInfo {
                         workflow_name,
                         run_id,
                         status,
                         conclusion,
+                        is_required,
                     })
                 })
                 .collect()
@@ -291,6 +300,7 @@ pub fn build_pr_detail_query(owner: &str, repo: &str, pr_number: u64) -> String 
       state
       url
       mergeable
+      mergeStateStatus
       author {{ login }}
       baseRefName
       headRefName
@@ -309,6 +319,7 @@ pub fn build_pr_detail_query(owner: &str, repo: &str, pr_number: u64) -> String 
                     databaseId
                     status
                     conclusion
+                    isRequired(pullRequestNumber: {pr_number})
                   }}
                 }}
               }}
@@ -525,6 +536,9 @@ mod tests {
         assert!(query.contains("repository(owner: \"owner\", name: \"repo\")"));
         assert!(query.contains("b0: pullRequests(headRefName: \"feature/x\""));
         assert!(query.contains("statusCheckRollup"));
+        assert!(query.contains("mergeStateStatus"));
+        // Batch query should NOT contain isRequired (PR number not available)
+        assert!(!query.contains("isRequired"));
     }
 
     #[test]
@@ -777,6 +791,8 @@ mod tests {
         assert!(query.contains("reviewThreads"));
         assert!(query.contains("changedFiles"));
         assert!(query.contains("reviews"));
+        assert!(query.contains("mergeStateStatus"));
+        assert!(query.contains("isRequired(pullRequestNumber: 42)"));
     }
 
     #[test]
@@ -904,5 +920,105 @@ mod tests {
 
         let info = parse_pr_detail_response(json).unwrap();
         assert!(info.review_comments.is_empty());
+    }
+
+    #[test]
+    fn test_parse_pr_detail_response_merge_state_status_and_is_required() {
+        let json = r#"{
+          "data": {
+            "repository": {
+              "pullRequest": {
+                "number": 99,
+                "title": "Feature PR",
+                "state": "OPEN",
+                "url": "https://github.com/o/r/pull/99",
+                "mergeable": "MERGEABLE",
+                "mergeStateStatus": "BLOCKED",
+                "author": { "login": "dev" },
+                "baseRefName": "main",
+                "headRefName": "feature/merge",
+                "labels": { "nodes": [] },
+                "assignees": { "nodes": [] },
+                "milestone": null,
+                "closingIssuesReferences": { "nodes": [] },
+                "commits": {
+                  "nodes": [{
+                    "commit": {
+                      "statusCheckRollup": {
+                        "contexts": {
+                          "nodes": [{
+                            "name": "CI",
+                            "databaseId": 100,
+                            "status": "COMPLETED",
+                            "conclusion": "SUCCESS",
+                            "isRequired": true
+                          }, {
+                            "name": "Lint",
+                            "databaseId": 101,
+                            "status": "COMPLETED",
+                            "conclusion": "SUCCESS",
+                            "isRequired": false
+                          }]
+                        }
+                      }
+                    }
+                  }]
+                },
+                "reviews": { "nodes": [] },
+                "reviewThreads": { "nodes": [] },
+                "changedFiles": 1,
+                "additions": 5,
+                "deletions": 2
+              }
+            }
+          }
+        }"#;
+
+        let info = parse_pr_detail_response(json).unwrap();
+        assert_eq!(info.merge_state_status, Some("BLOCKED".to_string()));
+        assert_eq!(info.check_suites.len(), 2);
+        assert_eq!(info.check_suites[0].is_required, Some(true));
+        assert_eq!(info.check_suites[1].is_required, Some(false));
+    }
+
+    #[test]
+    fn test_parse_pr_status_response_merge_state_status() {
+        let json = r#"{
+          "data": {
+            "repository": {
+              "b0": {
+                "nodes": [{
+                  "number": 50,
+                  "title": "Branch PR",
+                  "state": "OPEN",
+                  "url": "https://github.com/o/r/pull/50",
+                  "mergeable": "MERGEABLE",
+                  "mergeStateStatus": "CLEAN",
+                  "author": { "login": "user" },
+                  "baseRefName": "main",
+                  "headRefName": "feature/clean",
+                  "labels": { "nodes": [] },
+                  "assignees": { "nodes": [] },
+                  "milestone": null,
+                  "closingIssuesReferences": { "nodes": [] },
+                  "commits": { "nodes": [] },
+                  "reviews": { "nodes": [] },
+                  "changedFiles": 0,
+                  "additions": 0,
+                  "deletions": 0
+                }]
+              }
+            }
+          }
+        }"#;
+
+        let branches = vec!["feature/clean".to_string()];
+        let results = parse_pr_status_response(json, &branches).unwrap();
+        let info = results[0].1.as_ref().unwrap();
+        assert_eq!(info.merge_state_status, Some("CLEAN".to_string()));
+        // Batch query: is_required should be None since isRequired is not queried
+        for cs in &info.check_suites {
+            assert!(cs.is_required.is_none());
+        }
     }
 }
