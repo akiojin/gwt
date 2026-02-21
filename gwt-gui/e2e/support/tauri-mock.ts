@@ -304,12 +304,6 @@ export async function installTauriMock(
               state: "up_to_date",
               checked_at: "2026-02-13T00:00:00.000Z",
             };
-          case "check_and_update_hooks":
-            return {
-              registered: true,
-              updated: false,
-              temporary_execution: false,
-            };
           case "get_recent_projects":
             return [
               {
@@ -364,8 +358,6 @@ export async function installTauriMock(
               last_tool_usage: null,
             };
           case "sync_window_agent_tabs":
-            return null;
-          case "register_hooks":
             return null;
           case "start_launch_job":
             return startLaunchJob(args.request);

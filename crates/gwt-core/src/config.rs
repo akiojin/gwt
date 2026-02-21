@@ -21,11 +21,7 @@ mod ts_session;
 pub use agent_config::{AgentConfig, ClaudeAgentConfig, ClaudeAgentProvider, ClaudeGlmConfig};
 pub use bare_project::BareProjectConfig;
 pub use claude_hook_events::process_claude_hook_event;
-pub use claude_hooks::{
-    all_hook_events, get_claude_settings_path, is_gwt_hooks_registered, is_temporary_execution,
-    is_temporary_execution_path, register_gwt_hooks, reregister_gwt_hooks, unregister_gwt_hooks,
-    HOOK_EVENTS_WITHOUT_MATCHER, HOOK_EVENTS_WITH_MATCHER,
-};
+pub use claude_hooks::is_gwt_hooks_registered;
 pub use claude_plugins::{
     enable_worktree_protection_plugin, get_global_claude_settings_path,
     get_known_marketplaces_path, get_local_claude_settings_path, is_gwt_marketplace_registered,
