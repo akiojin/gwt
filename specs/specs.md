@@ -17,6 +17,7 @@
 
 | SPEC ID | タイトル | 作成日 |
 | --- | --- | --- |
+| [SPEC-17e47ece](SPEC-17e47ece/spec.md) | バグ修正仕様: Windows Docker Launch で `service "dev" is not running` を防止する | 2026-02-20 |
 | [SPEC-d95a7e0c](SPEC-d95a7e0c/spec.md) | 機能仕様: gwtに表示されるURLをクリックした場合に、外部ブラウザで開く | 2026-02-20 |
 | [SPEC-7b36bdc7](SPEC-7b36bdc7/spec.md) | 機能仕様: 設定画面で UI / Terminal フォントファミリーを選択可能にする | 2026-02-20 |
 | [SPEC-1350124a](SPEC-1350124a/spec.md) | 機能仕様: Windows シェル選択（Launch Agent / New Terminal） | 2026-02-19 |

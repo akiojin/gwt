@@ -812,13 +812,16 @@ impl Repository {
 
         let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
 
-        // Handle submodule-related errors by manually removing the directory
-        // Git cannot remove worktrees containing submodules even with --force
-        if err_msg.contains("submodules cannot be moved or removed") {
+        // Handle known cleanup failures by manually removing the directory.
+        // Examples:
+        // - worktree contains submodules
+        // - git removed metadata but failed to delete directory (Directory not empty)
+        if should_fallback_to_manual_worktree_removal(&err_msg) {
             warn!(
                 category = "git",
                 path = %path.display(),
-                "Worktree contains submodules, removing directory manually"
+                error = err_msg.as_str(),
+                "Falling back to manual worktree directory removal"
             );
 
             if path.exists() {
@@ -836,7 +839,7 @@ impl Repository {
                 operation = "worktree_remove",
                 path = %path.display(),
                 force,
-                "Git worktree removed (with submodules)"
+                "Git worktree removed (manual fallback)"
             );
             return Ok(());
         }
@@ -888,6 +891,16 @@ impl Repository {
             })
         }
     }
+}
+
+fn should_fallback_to_manual_worktree_removal(err_msg: &str) -> bool {
+    let message = err_msg.to_ascii_lowercase();
+
+    if message.contains("submodules cannot be moved or removed") {
+        return true;
+    }
+
+    message.contains("failed to delete") && message.contains("directory not empty")
 }
 
 /// Information about a worktree from git worktree list
@@ -1186,6 +1199,27 @@ mod tests {
         // Check worktree path is detected as Worktree type
         let result = detect_repo_type(&worktree_path);
         assert_eq!(result, RepoType::Worktree);
+    }
+
+    #[test]
+    fn manual_worktree_removal_fallback_for_submodule_error() {
+        let err_msg = "fatal: validation failed, submodules cannot be moved or removed".to_string();
+        assert!(should_fallback_to_manual_worktree_removal(&err_msg));
+    }
+
+    #[test]
+    fn manual_worktree_removal_fallback_for_directory_not_empty_error() {
+        let err_msg =
+            "worktree remove: error: failed to delete '/tmp/wt': Directory not empty".to_string();
+        assert!(should_fallback_to_manual_worktree_removal(&err_msg));
+    }
+
+    #[test]
+    fn manual_worktree_removal_fallback_disabled_for_untracked_files_error() {
+        let err_msg =
+            "fatal: '/tmp/wt' contains modified or untracked files, use --force to delete it"
+                .to_string();
+        assert!(!should_fallback_to_manual_worktree_removal(&err_msg));
     }
 
     #[test]

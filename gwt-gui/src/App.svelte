@@ -1586,6 +1586,15 @@
     launchError = null;
   }
 
+  function handleUseExistingBranch() {
+    const req = pendingLaunchRequest;
+    if (!req) return;
+    const retryRequest: LaunchAgentRequest = { ...req };
+    delete retryRequest.createBranch;
+    handleLaunchModalClose();
+    void handleAgentLaunch(retryRequest);
+  }
+
   function handleLaunchSuccess(paneId: string) {
     const req = pendingLaunchRequest;
     const label = req ? worktreeTabLabel(req.branch) : "Worktree";
@@ -2671,7 +2680,7 @@
   cpuUsage={systemMonitor.cpuUsage}
   memUsed={systemMonitor.memUsed}
   memTotal={systemMonitor.memTotal}
-  gpuInfo={systemMonitor.gpuInfo}
+  gpuInfos={systemMonitor.gpuInfos}
   onclose={() => (showAbout = false)}
 />
 
@@ -2786,6 +2795,7 @@
   error={launchError}
   onCancel={handleLaunchCancel}
   onClose={handleLaunchModalClose}
+  onUseExisting={handleUseExistingBranch}
 />
 {#if skillScopePromptOpen}
   <div class="overlay">
