@@ -554,7 +554,7 @@
 
       // Best-effort: show recent scrollback so restored tabs aren't blank.
       try {
-        const { invoke } = await import("@tauri-apps/api/core");
+        const { invoke } = await import("$lib/tauriInvoke");
         const text = await invoke<string>("capture_scrollback_tail", {
           paneId,
           maxBytes: 64 * 1024,
@@ -657,7 +657,7 @@
 
   async function writeToTerminal(data: string) {
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const encoder = new TextEncoder();
       const bytes = Array.from(encoder.encode(data));
       await invoke("write_terminal", { paneId, data: bytes });
@@ -668,7 +668,7 @@
 
   async function writeToTerminalBytes(data: number[]) {
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       await invoke("write_terminal", { paneId, data });
     } catch (err) {
       console.error("Failed to write binary to terminal:", err);
@@ -701,7 +701,7 @@
       }
 
       try {
-        const { invoke } = await import("@tauri-apps/api/core");
+        const { invoke } = await import("$lib/tauriInvoke");
         await invoke("resize_terminal", {
           paneId,
           rows: current.rows,

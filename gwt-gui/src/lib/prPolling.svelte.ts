@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "$lib/tauriInvoke";
 import type { PrStatusInfo, PrStatusResponse, GhCliStatus } from "./types";
 
 const POLL_INTERVAL_MS = 30_000;
@@ -42,7 +42,12 @@ export function createPrPolling(
       state.statuses = result.statuses;
       state.ghStatus = result.ghStatus;
     } catch (err) {
-      state.error = err instanceof Error ? err.message : String(err);
+      state.error =
+        err instanceof Error
+          ? err.message
+          : err && typeof err === "object" && "message" in err
+            ? String((err as { message: unknown }).message)
+            : String(err);
     } finally {
       state.loading = false;
     }

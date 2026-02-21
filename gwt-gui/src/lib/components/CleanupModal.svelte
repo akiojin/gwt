@@ -171,7 +171,7 @@
   async function handleToggleRemote() {
     deleteRemote = !deleteRemote;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       await invoke("set_cleanup_settings", { projectPath, settings: { delete_remote_branches: deleteRemote } });
     } catch {
       // Ignore save errors silently
@@ -187,9 +187,9 @@
     errorMessage = null;
     const previouslyChecked = new Set(checked);
     if (!preserveChecked) checked = new Set();
-    let loadedInvoke: typeof import("@tauri-apps/api/core")["invoke"] | null = null;
+    let loadedInvoke: typeof import("$lib/tauriInvoke")["invoke"] | null = null;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       loadedInvoke = invoke;
       worktrees = await invoke<WorktreeInfo[]>("list_worktrees", {
         projectPath,
@@ -315,7 +315,7 @@
     const wasDeleteRemote = deleteRemote;
     const wasForce = force;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
 
       // Close modal immediately
       onClose();

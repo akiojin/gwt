@@ -5,11 +5,8 @@ import type { FileChange, FileDiff, WorkingTreeEntry } from "../types";
 
 const invokeMock = vi.fn();
 
-vi.mock("@tauri-apps/api/core", () => ({
+vi.mock("$lib/tauriInvoke", () => ({
   invoke: invokeMock,
-  default: {
-    invoke: invokeMock,
-  },
 }));
 
 const fileChanges: FileChange[] = [

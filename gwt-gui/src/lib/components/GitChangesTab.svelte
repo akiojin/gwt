@@ -123,7 +123,7 @@
     diffs = new Map();
     diffLoading = new Set();
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const result = await invoke<FileChange[]>("get_branch_diff_files", {
         projectPath,
         branch,
@@ -149,7 +149,7 @@
     workingTreeLoading = true;
     workingTreeError = null;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const result = await invoke<WorkingTreeEntry[]>("get_working_tree_status", {
         projectPath,
         branch,
@@ -183,7 +183,7 @@
 
     diffLoading = new Set([...diffLoading, filePath]);
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const diff = await invoke<FileDiff>("get_file_diff", {
         projectPath,
         branch,

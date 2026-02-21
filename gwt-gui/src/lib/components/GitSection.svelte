@@ -55,7 +55,7 @@
     refreshing = hasExistingSummary;
     error = null;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
 
       const [summaryResult, candidates] = await Promise.all([
         invoke<GitChangeSummary>("get_git_change_summary", {

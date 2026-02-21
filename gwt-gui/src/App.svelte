@@ -75,6 +75,7 @@
     isAllowedExternalHttpUrl,
     openExternalUrl,
   } from "./lib/openExternalUrl";
+  import { errorBus, type StructuredError } from "./lib/errorBus";
 
   interface SettingsUpdatedPayload {
     uiFontSize?: number;
@@ -258,7 +259,10 @@
 
   let toastMessage = $state<string | null>(null);
   let toastTimeout: ReturnType<typeof setTimeout> | null = null;
-  type ToastAction = { kind: "apply-update"; latest: string } | null;
+  type ToastAction =
+    | { kind: "apply-update"; latest: string }
+    | { kind: "report-error"; error: StructuredError }
+    | null;
   let toastAction = $state<ToastAction>(null);
   let lastUpdateToastVersion = $state<string | null>(null);
 
@@ -317,12 +321,36 @@
 
       showToast(`Updating to v${latest}...`, 0);
 
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       await invoke("apply_app_update");
     } catch (err) {
       showToast(`Failed to apply update: ${toErrorMessage(err)}`);
     }
   }
+
+  let reportDialogOpen = $state(false);
+  let reportDialogMode = $state<"bug" | "feature">("bug");
+  let reportDialogPrefillError = $state<StructuredError | undefined>(undefined);
+
+  function showReportDialog(mode: "bug" | "feature", prefillError?: StructuredError) {
+    reportDialogMode = mode;
+    reportDialogPrefillError = prefillError;
+    reportDialogOpen = true;
+    // Close the toast
+    toastMessage = null;
+    toastAction = null;
+  }
+
+  // Subscribe to error bus for report-worthy errors
+  const unsubErrorBus = errorBus.subscribe((error) => {
+    if (error.severity === "error" || error.severity === "critical") {
+      showToast(
+        `Error: ${error.message}`,
+        0,
+        { kind: "report-error", error },
+      );
+    }
+  });
 
   async function handleToastClick() {
     if (!toastAction) return;
@@ -354,7 +382,7 @@
     issueLaunchFollowups = next;
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
 
       if (payload.status === "ok") {
         await invoke("link_branch_to_issue", {
@@ -470,7 +498,7 @@
     let cancelled = false;
     const poll = async () => {
       try {
-        const { invoke } = await import("@tauri-apps/api/core");
+        const { invoke } = await import("$lib/tauriInvoke");
         while (!cancelled && !osEnvReady) {
           const ready = await invoke<boolean>("is_os_env_ready");
           if (ready) {
@@ -526,7 +554,7 @@
       retryDelayMs: STARTUP_UPDATE_RETRY_DELAY_MS,
       maxRetries: STARTUP_UPDATE_MAX_RETRIES,
       checkUpdate: async () => {
-        const { invoke } = await import("@tauri-apps/api/core");
+        const { invoke } = await import("$lib/tauriInvoke");
         return invoke<UpdateState>("check_app_update", { force: false });
       },
       onAvailable: (s) => {
@@ -878,7 +906,7 @@
     const timer = window.setInterval(async () => {
       if (launchJobId !== jobId || launchStatus !== "running") return;
       try {
-        const { invoke } = await import("@tauri-apps/api/core");
+        const { invoke } = await import("$lib/tauriInvoke");
         const result = await invoke<{
           running: boolean;
           finished: LaunchFinishedPayload | null;
@@ -1047,7 +1075,7 @@
   async function checkSkillScopePromptOnStartup() {
     if (!isTauriRuntimeAvailable()) return;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const settings = await invoke<SettingsData>("get_settings");
       if (hasSkillScopeConfigured(settings)) {
         skillScopePromptOpen = false;
@@ -1069,7 +1097,7 @@
     skillScopePromptBusy = true;
     skillScopePromptError = null;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const currentSettings = await invoke<SettingsData>("get_settings");
       const nextSettings: SettingsData = {
         ...currentSettings,
@@ -1092,7 +1120,7 @@
   async function rebuildAllBranchSessionSummaries(language: SettingsData["app_language"]) {
     if (!projectPath) return;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       await invoke("rebuild_all_branch_session_summaries", {
         projectPath,
         preferredLanguage: language,
@@ -1124,7 +1152,7 @@
 
   async function applyAppearanceSettings() {
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const settings =
         await invoke<
           Pick<
@@ -1152,7 +1180,7 @@
     if (currentWindowLabel) return currentWindowLabel;
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const label = await invoke<string>("get_current_window_label");
       const next = label?.trim();
       if (!next) return null;
@@ -1176,7 +1204,7 @@
 
   async function openAndNormalizeWindowSession(label: string, projectPath: string) {
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const openedLabelRaw = await invoke<unknown>("open_gwt_window", { label });
       if (typeof openedLabelRaw !== "string") return;
 
@@ -1212,7 +1240,7 @@
   }
 
   async function openProjectAndApplyCurrentWindow(path: string): Promise<OpenProjectResult> {
-    const { invoke } = await import("@tauri-apps/api/core");
+    const { invoke } = await import("$lib/tauriInvoke");
     const result = await invoke<OpenProjectResult>("open_project", { path });
     if (result.action === "opened") {
       handleOpenedProjectPath(result.info.path);
@@ -1295,7 +1323,7 @@
     if (!projectPath) return;
     try {
       const workingDir = projectPath;
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const paneId = await invoke<string>("spawn_shell", { workingDir });
 
       const label = `CI #${runId}`;
@@ -1333,7 +1361,7 @@
   async function fetchCurrentBranch() {
     if (!projectPath) return;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const branch = await invoke<BranchInfo | null>("get_current_branch", {
         projectPath,
       });
@@ -1390,7 +1418,7 @@
     if (!branchName) return projectPath;
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const worktrees = await invoke<WorktreeInfo[]>("list_worktrees", {
         projectPath,
       });
@@ -1412,7 +1440,7 @@
   async function handleNewTerminal() {
     try {
       const workingDir = await resolveNewTerminalWorkingDir();
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const paneId = await invoke<string>("spawn_shell", { workingDir });
       const cwd = workingDir || "~";
       const label = terminalTabLabel(cwd);
@@ -1443,7 +1471,7 @@
     const paneIdMap = new Map<string, string>();
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       for (const storedTab of storedTabs) {
         if (
           projectPath !== targetProjectPath ||
@@ -1544,7 +1572,7 @@
     bufferedLaunchFinishedEvents = [];
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const jobId = await invoke<string>("start_launch_job", { request });
 
       queueIssueLaunchFollowup(jobId, request);
@@ -1565,7 +1593,7 @@
       return;
     }
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       await invoke("cancel_launch_job", { jobId: launchJobId });
       handleLaunchModalClose();
     } catch (err) {
@@ -1621,7 +1649,7 @@
     if (!newTab.agentId) {
       void (async () => {
         try {
-          const { invoke } = await import("@tauri-apps/api/core");
+          const { invoke } = await import("$lib/tauriInvoke");
           const terminals = await invoke<TerminalInfo[]>("list_terminals");
           const terminal = terminals.find((t) => t.pane_id === paneId);
           const terminalAgentId = inferAgentId(terminal?.agent_name);
@@ -1662,7 +1690,7 @@
     const tab = tabs.find((t) => t.id === tabId);
     if (tab?.paneId) {
       try {
-        const { invoke } = await import("@tauri-apps/api/core");
+        const { invoke } = await import("$lib/tauriInvoke");
         await invoke("close_terminal", { paneId: tab.paneId });
       } catch {
         // Dev mode: ignore
@@ -1933,7 +1961,7 @@
 
   async function syncWindowAgentTabs() {
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const visibleTabs = tabs
         .filter((t) => t.type === "agent" || t.type === "terminal")
         .map((t) => ({ id: t.id, label: t.label, tab_type: t.type }));
@@ -1971,7 +1999,7 @@
       const recentPath = action.slice("open-recent-project::".length);
       if (recentPath) {
         try {
-          const { invoke } = await import("@tauri-apps/api/core");
+          const { invoke } = await import("$lib/tauriInvoke");
           const probe = await invoke<ProbePathResult>("probe_path", {
             path: recentPath,
           });
@@ -2001,7 +2029,7 @@
           const { open } = await import("@tauri-apps/plugin-dialog");
           const selected = await open({ directory: true, multiple: false });
           if (selected) {
-            const { invoke } = await import("@tauri-apps/api/core");
+            const { invoke } = await import("$lib/tauriInvoke");
             const probe = await invoke<ProbePathResult>("probe_path", {
               path: selected as string,
             });
@@ -2047,7 +2075,7 @@
             .map((t) => t.paneId as string);
           if (terminalPanes.length > 0) {
             try {
-              const { invoke } = await import("@tauri-apps/api/core");
+              const { invoke } = await import("$lib/tauriInvoke");
               await Promise.all(
                 terminalPanes.map((paneId) =>
                   invoke("close_terminal", { paneId }).catch(() => {}),
@@ -2060,7 +2088,7 @@
 
           // Clear backend state (window-scoped) best-effort.
           try {
-            const { invoke } = await import("@tauri-apps/api/core");
+            const { invoke } = await import("$lib/tauriInvoke");
             await invoke("close_project");
           } catch {
             // Ignore: not available outside Tauri runtime.
@@ -2100,7 +2128,7 @@
       case "check-updates":
         {
           try {
-            const { invoke } = await import("@tauri-apps/api/core");
+            const { invoke } = await import("$lib/tauriInvoke");
             const s = await invoke<UpdateState>("check_app_update", {
               force: true,
             });
@@ -2151,7 +2179,7 @@
         osEnvDebugError = null;
         (async () => {
           try {
-            const { invoke } = await import("@tauri-apps/api/core");
+            const { invoke } = await import("$lib/tauriInvoke");
             osEnvDebugData = await invoke<CapturedEnvInfo>(
               "get_captured_environment",
             );
@@ -2165,7 +2193,7 @@
       case "new-terminal": {
         try {
           const workingDir = await resolveNewTerminalWorkingDir();
-          const { invoke } = await import("@tauri-apps/api/core");
+          const { invoke } = await import("$lib/tauriInvoke");
           const paneId = await invoke<string>("spawn_shell", { workingDir });
           const cwd = workingDir || "~";
           const label = terminalTabLabel(cwd);
@@ -2197,7 +2225,7 @@
         terminalDiagnostics = null;
 
         try {
-          const { invoke } = await import("@tauri-apps/api/core");
+          const { invoke } = await import("$lib/tauriInvoke");
           terminalDiagnostics = await invoke<TerminalAnsiProbe>(
             "probe_terminal_ansi",
             {
@@ -2250,7 +2278,7 @@
 
     let terminals: TerminalInfo[] = [];
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       terminals = await invoke<TerminalInfo[]>("list_terminals");
     } catch {
       // Ignore: not available outside Tauri runtime.
@@ -2919,6 +2947,9 @@
       <span>{toastMessage}</span>
       {#if toastAction?.kind === "apply-update"}
         <button class="toast-action" onclick={handleToastClick}>Update</button>
+      {:else if toastAction?.kind === "report-error"}
+        {@const reportError = toastAction.error}
+        <button class="toast-action" onclick={() => showReportDialog("bug", reportError)}>Report</button>
       {/if}
       <button
         class="toast-close"

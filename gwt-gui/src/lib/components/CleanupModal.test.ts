@@ -4,11 +4,8 @@ import { render, waitFor, fireEvent, cleanup } from "@testing-library/svelte";
 const invokeMock = vi.fn();
 const listenMock = vi.fn();
 
-vi.mock("@tauri-apps/api/core", () => ({
+vi.mock("$lib/tauriInvoke", () => ({
   invoke: invokeMock,
-  default: {
-    invoke: invokeMock,
-  },
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({

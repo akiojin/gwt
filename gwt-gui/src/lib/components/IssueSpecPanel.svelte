@@ -48,7 +48,7 @@
     loading = true;
     error = null;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       detail = await invoke<SpecIssueDetail>("get_spec_issue_detail_cmd", {
         projectPath,
         issueNumber,

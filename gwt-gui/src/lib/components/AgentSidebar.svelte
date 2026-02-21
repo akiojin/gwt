@@ -145,7 +145,7 @@
     sidebarError = null;
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const view = await invoke<AgentSidebarView>("get_agent_sidebar_view", {
         projectPath,
       });
@@ -191,7 +191,7 @@
     }
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const result = await invoke<SessionSummaryResult>("get_branch_session_summary", {
         projectPath,
         branch,

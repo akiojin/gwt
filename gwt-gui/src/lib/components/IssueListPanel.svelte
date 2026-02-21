@@ -138,7 +138,7 @@
 
   async function checkGhCli() {
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       ghCliStatus = await invoke<GhCliStatus>("check_gh_cli_status", {
         projectPath,
       });
@@ -158,7 +158,7 @@
     error = null;
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const resp = await invoke<FetchIssuesResponse>("fetch_github_issues", {
         projectPath,
         page: pageNum,
@@ -192,7 +192,7 @@
 
   async function checkExistingBranch(issueNumber: number) {
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const branch = await invoke<string | null>("find_existing_issue_branch", {
         projectPath,
         issueNumber,
@@ -208,7 +208,7 @@
     detailError = null;
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const detail = await invoke<GitHubIssueInfo>("fetch_github_issue_detail", {
         projectPath,
         issueNumber: issue.number,

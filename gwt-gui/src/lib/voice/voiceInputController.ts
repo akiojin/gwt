@@ -130,7 +130,7 @@ function mapLanguage(value: string): string {
 }
 
 async function invokeTauri(command: string, payload: unknown) {
-  const { invoke } = await import("@tauri-apps/api/core");
+  const { invoke } = await import("$lib/tauriInvoke");
   return invoke(command, payload as Record<string, unknown>);
 }
 

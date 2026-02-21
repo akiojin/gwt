@@ -379,7 +379,7 @@
   $effect(() => {
     (async () => {
       try {
-        const { invoke } = await import("@tauri-apps/api/core");
+        const { invoke } = await import("$lib/tauriInvoke");
         availableShells = await invoke<ShellInfo[]>("get_available_shells");
       } catch {
         availableShells = [];
@@ -485,7 +485,7 @@
     agentConfigLoading = true;
     agentConfigError = null;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const cfg = await invoke<AgentConfig>("get_agent_config");
       agentConfig = cfg ?? defaultAgentConfig();
     } catch (err) {
@@ -591,7 +591,7 @@
     baseBranchOptionsLoading = true;
     baseBranchOptionsError = null;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const [local, remote] = await Promise.all([
         invoke<BranchInfo[]>("list_worktree_branches", { projectPath }),
         invoke<BranchInfo[]>("list_remote_branches", { projectPath }),
@@ -651,7 +651,7 @@
 
   async function checkGhCli() {
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       ghCliStatus = await invoke<GhCliStatus>("check_gh_cli_status", {
         projectPath,
       });
@@ -665,7 +665,7 @@
     issuesLoading = true;
     issuesError = null;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const resp = await invoke<FetchIssuesResponse>("fetch_github_issues", {
         projectPath,
         page,
@@ -702,7 +702,7 @@
   async function checkExistingBranch(issueNumber: number) {
     issueBranchChecksInFlight = new Set(issueBranchChecksInFlight).add(issueNumber);
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const branch = await invoke<string | null>("find_existing_issue_branch", {
         projectPath,
         issueNumber,
@@ -743,7 +743,7 @@
     newBranchPrefix = "" as BranchPrefix;
     prefixClassifying = true;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const result = await invoke<ClassifyResult>("classify_issue_branch_prefix", {
         title: issue.title,
         labels: issue.labels.map(l => l.name),
@@ -817,7 +817,7 @@
 
     suggestLoading = true;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const result = await invoke<BranchSuggestResult>("suggest_branch_names", {
         description,
       });
@@ -848,7 +848,7 @@
     versionsLoading = true;
     versionsError = null;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const info = await invoke<AgentVersionsInfo>("list_agent_versions", { agentId });
       if (selectedAgent !== agentId) return;
       versionTags = info.tags ?? [];
@@ -870,7 +870,7 @@
     dockerError = null;
     try {
       const key = `${projectPath}::${refBranch}`;
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const ctx = await invoke<DockerContext>("detect_docker_context", {
         projectPath,
         branch: refBranch,
@@ -951,7 +951,7 @@
   async function detectAgents() {
     loading = true;
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       agents = await invoke<AgentInfo[]>("detect_agents");
       const preferred = selectedAgent.trim();
       if (preferred && agents.some((a) => a.id === preferred && a.available)) {
@@ -1046,7 +1046,7 @@
         // Persist provider selection (GLM <-> Anthropic) before launch so the backend
         // doesn't keep injecting GLM env vars from a stale config file.
         try {
-          const { invoke } = await import("@tauri-apps/api/core");
+          const { invoke } = await import("$lib/tauriInvoke");
           await invoke("save_agent_config", { config: agentConfig });
         } catch (err) {
           errorMessage = `Failed to save agent config: ${toErrorMessage(err)}`;

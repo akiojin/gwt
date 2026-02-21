@@ -131,7 +131,7 @@
     jobId = "";
 
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const id = await invoke<string>("start_migration_job", { path: sourceRoot });
       jobId = id;
     } catch (e) {
@@ -142,7 +142,7 @@
 
   async function quitApp() {
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       await invoke("quit_app");
     } catch {
       // Ignore: not available outside Tauri runtime.
