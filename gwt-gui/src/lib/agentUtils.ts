@@ -1,3 +1,16 @@
+export type BranchPrefix = "feature/" | "bugfix/" | "hotfix/" | "release/" | "";
+
+/**
+ * Determine branch prefix from GitHub issue labels.
+ * Returns null if no deterministic mapping exists (AI fallback needed).
+ */
+export function determinePrefixFromLabels(labels: { name: string }[]): BranchPrefix | null {
+  const names = labels.map(l => l.name.toLowerCase());
+  if (names.includes("hotfix")) return "hotfix/";
+  if (names.includes("bug")) return "bugfix/";
+  return null;
+}
+
 export type AgentId = "claude" | "codex" | "gemini" | "opencode";
 
 function normalizeAgentId(raw: string | null | undefined): string {

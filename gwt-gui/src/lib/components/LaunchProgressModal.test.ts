@@ -141,4 +141,92 @@ describe("LaunchProgressModal", () => {
     expect(detailEl).not.toBeNull();
     expect(detailEl!.textContent).toBe("Installing packages...");
   });
+
+  it("shows 'Use Existing Branch' button on E1004 error when onUseExisting is provided", async () => {
+    const onUseExisting = vi.fn();
+    const { container } = await renderModal({
+      open: true,
+      step: "create",
+      detail: "",
+      status: "error",
+      error: "[E1004] Branch already exists: feature/refactoring",
+      onCancel: vi.fn(),
+      onClose: vi.fn(),
+      onUseExisting,
+    });
+
+    const buttons = container.querySelectorAll("button");
+    const useExistingBtn = Array.from(buttons).find((b) =>
+      b.textContent?.includes("Use Existing Branch"),
+    );
+    expect(useExistingBtn).not.toBeUndefined();
+    expect(useExistingBtn!.classList.contains("primary")).toBe(true);
+
+    // Close button should be secondary
+    const closeBtn = Array.from(buttons).find((b) =>
+      b.textContent?.includes("Close"),
+    );
+    expect(closeBtn).not.toBeUndefined();
+    expect(closeBtn!.classList.contains("secondary")).toBe(true);
+  });
+
+  it("does not show 'Use Existing Branch' button on non-E1004 errors", async () => {
+    const onUseExisting = vi.fn();
+    const { container } = await renderModal({
+      open: true,
+      step: "validate",
+      detail: "",
+      status: "error",
+      error: "[E1001] Repository not found",
+      onCancel: vi.fn(),
+      onClose: vi.fn(),
+      onUseExisting,
+    });
+
+    const buttons = container.querySelectorAll("button");
+    const useExistingBtn = Array.from(buttons).find((b) =>
+      b.textContent?.includes("Use Existing Branch"),
+    );
+    expect(useExistingBtn).toBeUndefined();
+  });
+
+  it("calls onUseExisting when 'Use Existing Branch' button is clicked", async () => {
+    const onUseExisting = vi.fn();
+    const { container } = await renderModal({
+      open: true,
+      step: "create",
+      detail: "",
+      status: "error",
+      error: "[E1004] Branch already exists: feature/refactoring",
+      onCancel: vi.fn(),
+      onClose: vi.fn(),
+      onUseExisting,
+    });
+
+    const buttons = container.querySelectorAll("button");
+    const useExistingBtn = Array.from(buttons).find((b) =>
+      b.textContent?.includes("Use Existing Branch"),
+    );
+    expect(useExistingBtn).not.toBeUndefined();
+    await fireEvent.click(useExistingBtn!);
+    expect(onUseExisting).toHaveBeenCalledOnce();
+  });
+
+  it("does not show 'Use Existing Branch' button on E1004 when onUseExisting is not provided", async () => {
+    const { container } = await renderModal({
+      open: true,
+      step: "create",
+      detail: "",
+      status: "error",
+      error: "[E1004] Branch already exists: feature/refactoring",
+      onCancel: vi.fn(),
+      onClose: vi.fn(),
+    });
+
+    const buttons = container.querySelectorAll("button");
+    const useExistingBtn = Array.from(buttons).find((b) =>
+      b.textContent?.includes("Use Existing Branch"),
+    );
+    expect(useExistingBtn).toBeUndefined();
+  });
 });

@@ -307,6 +307,12 @@ export interface BranchSuggestResult {
   error?: string | null;
 }
 
+export interface ClassifyResult {
+  status: "ok" | "ai-not-configured" | "error";
+  prefix?: string;
+  error?: string;
+}
+
 export interface DockerContext {
   worktree_path?: string | null;
   file_type: "compose" | "devcontainer" | "dockerfile" | "none";
