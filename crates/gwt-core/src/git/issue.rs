@@ -289,7 +289,7 @@ fn fetch_issue_comments_total_count(
     u32::try_from(parsed).map_err(|_| "comments count exceeds u32".to_string())
 }
 
-pub(super) fn resolve_repo_slug(repo_path: &Path) -> Option<String> {
+pub fn resolve_repo_slug(repo_path: &Path) -> Option<String> {
     let candidate_repo = if is_git_repo(repo_path) {
         Some(repo_path.to_path_buf())
     } else {
