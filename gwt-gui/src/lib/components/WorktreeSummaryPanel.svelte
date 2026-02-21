@@ -105,6 +105,8 @@
   const LINKED_ISSUE_CACHE_TTL_MS = 120_000;
   const LATEST_BRANCH_PR_CACHE_TTL_MS = 30_000;
   const DOCKER_CONTEXT_CACHE_TTL_MS = 60_000;
+  const UPDATE_BRANCH_POLL_ATTEMPTS = 8;
+  const UPDATE_BRANCH_POLL_INTERVAL_MS = 1_500;
 
   type CacheEntry<T> = {
     value: T;
@@ -196,6 +198,12 @@
     }
     await new Promise<void>((resolve) => {
       window.requestAnimationFrame(() => resolve());
+    });
+  }
+
+  async function waitMs(ms: number): Promise<void> {
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, ms);
     });
   }
 
@@ -875,11 +883,28 @@
     clearPrDetailState(currentBranchName());
   });
 
-  async function loadPrDetail(branch: string, prNum: number) {
+  type LoadPrDetailOptions = {
+    clearBeforeLoad?: boolean;
+    showLoading?: boolean;
+    errorPrefix?: string;
+  };
+
+  async function loadPrDetail(
+    branch: string,
+    prNum: number,
+    options: LoadPrDetailOptions = {},
+  ) {
+    const clearBeforeLoad = options.clearBeforeLoad !== false;
+    const showLoading = options.showLoading !== false;
+    const errorPrefix = options.errorPrefix ?? null;
     const requestToken = ++prDetailRequestToken;
-    prDetailLoading = true;
-    prDetailError = null;
-    prDetail = null;
+    if (showLoading) {
+      prDetailLoading = true;
+    }
+    if (clearBeforeLoad) {
+      prDetailError = null;
+      prDetail = null;
+    }
     prDetailPrNumber = prNum;
     try {
       const invoke = await getInvoke();
@@ -896,13 +921,45 @@
       const isCurrent =
         requestToken === prDetailRequestToken && prDetailBranch === branch;
       if (isCurrent) {
-        prDetailError = toErrorMessage(err);
+        const message = toErrorMessage(err);
+        prDetailError = errorPrefix ? `${errorPrefix}: ${message}` : message;
       }
     } finally {
       const isCurrent =
         requestToken === prDetailRequestToken && prDetailBranch === branch;
-      if (isCurrent) {
+      if (isCurrent && showLoading) {
         prDetailLoading = false;
+      }
+    }
+  }
+
+  function isViewingCurrentPr(branch: string, prNum: number): boolean {
+    if (activeTab !== "pr") return false;
+    if (currentBranchName() !== branch) return false;
+    const currentPr = resolvedPrNumber;
+    if (currentPr !== null && currentPr !== prNum) return false;
+    return true;
+  }
+
+  async function pollPrDetailAfterBranchUpdate(
+    branch: string,
+    prNum: number,
+  ): Promise<void> {
+    for (let attempt = 0; attempt < UPDATE_BRANCH_POLL_ATTEMPTS; attempt++) {
+      if (!isViewingCurrentPr(branch, prNum)) return;
+
+      await loadPrDetail(branch, prNum, {
+        clearBeforeLoad: false,
+        showLoading: false,
+        errorPrefix: "Failed to refresh PR detail",
+      });
+
+      if (!isViewingCurrentPr(branch, prNum)) return;
+      if (prDetailError) return;
+      if (prDetail?.mergeStateStatus !== "BEHIND") return;
+
+      if (attempt < UPDATE_BRANCH_POLL_ATTEMPTS - 1) {
+        await waitMs(UPDATE_BRANCH_POLL_INTERVAL_MS);
       }
     }
   }
@@ -990,18 +1047,23 @@
 
   async function handleUpdateBranch(): Promise<void> {
     if (!prDetail || updatingBranch) return;
+    const branch = currentBranchName();
+    const prNum = prDetail.number;
     updatingBranch = true;
+    prDetailError = null;
     try {
       const invoke = await getInvoke();
       await invoke<string>("update_pr_branch", {
         projectPath,
-        prNumber: prDetail.number,
+        prNumber: prNum,
       });
-      const branch = currentBranchName();
-      if (branch && resolvedPrNumber) {
-        loadPrDetail(branch, resolvedPrNumber);
+
+      if (branch) {
+        prDetailBranch = branch;
+        await pollPrDetailAfterBranchUpdate(branch, prNum);
       }
     } catch (err) {
+      prDetailError = `Failed to update branch: ${toErrorMessage(err)}`;
       console.error("Failed to update branch:", err);
     } finally {
       updatingBranch = false;

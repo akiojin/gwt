@@ -479,6 +479,94 @@ describe("WorktreeSummaryPanel", () => {
     });
   });
 
+  it("polls PR detail after Update Branch until merge state changes", async () => {
+    let prDetailCallCount = 0;
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_branch_quick_start") return [];
+      if (cmd === "get_branch_session_summary") return { ...sessionSummaryFixture, markdown: null };
+      if (cmd === "fetch_branch_linked_issue") return null;
+      if (cmd === "fetch_latest_branch_pr") return latestPrFixture;
+      if (cmd === "fetch_pr_detail") {
+        prDetailCallCount += 1;
+        if (prDetailCallCount <= 2) {
+          return { ...prDetailFixture, mergeStateStatus: "BEHIND" };
+        }
+        return { ...prDetailFixture, mergeStateStatus: "CLEAN" };
+      }
+      if (cmd === "update_pr_branch") return "accepted";
+      if (cmd === "detect_docker_context") return dockerContextFixture;
+      return [];
+    });
+
+    const rendered = await renderPanel({
+      projectPath: "/tmp/project",
+      selectedBranch: branchFixture,
+    });
+
+    const tabs = rendered.container.querySelectorAll(".summary-tab");
+    const prTab = tabs[3] as HTMLElement;
+    await fireEvent.click(prTab);
+
+    await waitFor(() => {
+      expect(rendered.getByRole("button", { name: "Update Branch" })).toBeTruthy();
+    });
+
+    vi.useFakeTimers();
+    await fireEvent.click(rendered.getByRole("button", { name: "Update Branch" }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("update_pr_branch", {
+        projectPath: "/tmp/project",
+        prNumber: 42,
+      });
+    });
+
+    await vi.advanceTimersByTimeAsync(20_000);
+
+    await waitFor(() => {
+      expect(commandCalls("fetch_pr_detail").length).toBeGreaterThanOrEqual(3);
+      expect(rendered.queryByRole("button", { name: "Update Branch" })).toBeNull();
+    });
+  });
+
+  it("shows update-branch failure in PR tab", async () => {
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd === "get_branch_quick_start") return [];
+        if (cmd === "get_branch_session_summary") return { ...sessionSummaryFixture, markdown: null };
+        if (cmd === "fetch_branch_linked_issue") return null;
+        if (cmd === "fetch_latest_branch_pr") return latestPrFixture;
+        if (cmd === "fetch_pr_detail") return { ...prDetailFixture, mergeStateStatus: "BEHIND" };
+        if (cmd === "update_pr_branch") throw new Error("403 Forbidden");
+        if (cmd === "detect_docker_context") return dockerContextFixture;
+        return [];
+      });
+
+      const rendered = await renderPanel({
+        projectPath: "/tmp/project",
+        selectedBranch: branchFixture,
+      });
+
+      const tabs = rendered.container.querySelectorAll(".summary-tab");
+      const prTab = tabs[3] as HTMLElement;
+      await fireEvent.click(prTab);
+
+      await waitFor(() => {
+        expect(rendered.getByRole("button", { name: "Update Branch" })).toBeTruthy();
+      });
+
+      await fireEvent.click(rendered.getByRole("button", { name: "Update Branch" }));
+
+      await waitFor(() => {
+        expect(rendered.getByText("Failed to update branch: 403 Forbidden")).toBeTruthy();
+      });
+    } finally {
+      consoleErrorSpy.mockRestore();
+    }
+  });
+
   it("ignores stale latest branch PR errors after branch switch", async () => {
     let rejectFirstPrLookup: ((reason?: Error) => void) | undefined;
 
