@@ -8,6 +8,7 @@ use gwt_core::git::gh_cli::PrStatus;
 use gwt_core::git::Branch;
 use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::worktree::WorktreeManager;
+use gwt_core::StructuredError;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -316,21 +317,29 @@ fn list_worktrees_impl(project_path: &str, state: &AppState) -> Result<Vec<Workt
 pub async fn list_worktrees(
     project_path: String,
     app_handle: AppHandle,
-) -> Result<Vec<WorktreeInfo>, String> {
+) -> Result<Vec<WorktreeInfo>, StructuredError> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app_handle.state::<AppState>();
         list_worktrees_impl(&project_path, &state)
+            .map_err(|e| StructuredError::internal(&e, "list_worktrees"))
     })
     .await
-    .map_err(|e| format!("Failed to list worktrees: {e}"))?
+    .map_err(|e| StructuredError::internal(&format!("Failed to list worktrees: {e}"), "list_worktrees"))?
 }
 
 /// Check gh CLI availability (SPEC-ad1ac432 T010)
 #[tauri::command]
-pub async fn check_gh_available(state: tauri::State<'_, AppState>) -> Result<bool, String> {
+pub async fn check_gh_available(
+    state: tauri::State<'_, AppState>,
+) -> Result<bool, StructuredError> {
     let available = tauri::async_runtime::spawn_blocking(gwt_core::git::gh_cli::check_auth)
         .await
-        .map_err(|e| format!("Failed to check gh availability: {e}"))?;
+        .map_err(|e| {
+            StructuredError::internal(
+                &format!("Failed to check gh availability: {e}"),
+                "check_gh_available",
+            )
+        })?;
     state.gh_available.store(available, Ordering::Relaxed);
     Ok(available)
 }
@@ -339,15 +348,21 @@ pub async fn check_gh_available(state: tauri::State<'_, AppState>) -> Result<boo
 #[tauri::command]
 pub async fn get_cleanup_pr_statuses(
     project_path: String,
-) -> Result<HashMap<String, String>, String> {
+) -> Result<HashMap<String, String>, StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "get_cleanup_pr_statuses"))?;
 
     let result = tauri::async_runtime::spawn_blocking(move || {
         gwt_core::git::gh_cli::get_pr_statuses(&repo_path)
     })
     .await
-    .map_err(|e| format!("Failed to get PR statuses: {e}"))?;
+    .map_err(|e| {
+        StructuredError::internal(
+            &format!("Failed to get PR statuses: {e}"),
+            "get_cleanup_pr_statuses",
+        )
+    })?;
 
     // Convert PrStatus enum to string for frontend
     Ok(result
@@ -367,9 +382,12 @@ pub async fn get_cleanup_pr_statuses(
 
 /// Get cleanup settings for a project (SPEC-ad1ac432 T019)
 #[tauri::command]
-pub async fn get_cleanup_settings(project_path: String) -> Result<CleanupSettings, String> {
+pub async fn get_cleanup_settings(
+    project_path: String,
+) -> Result<CleanupSettings, StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "get_cleanup_settings"))?;
     Ok(load_cleanup_settings(&repo_path))
 }
 
@@ -378,10 +396,12 @@ pub async fn get_cleanup_settings(project_path: String) -> Result<CleanupSetting
 pub async fn set_cleanup_settings(
     project_path: String,
     settings: CleanupSettings,
-) -> Result<(), String> {
+) -> Result<(), StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "set_cleanup_settings"))?;
     save_cleanup_settings(&repo_path, &settings)
+        .map_err(|e| StructuredError::internal(&e, "set_cleanup_settings"))
 }
 
 /// Cleanup multiple worktrees (SPEC-c4e8f210 T2, SPEC-ad1ac432 T013-T014)
@@ -393,9 +413,10 @@ pub async fn cleanup_worktrees(
     delete_remote: bool,
     state: tauri::State<'_, AppState>,
     app_handle: AppHandle,
-) -> Result<Vec<CleanupResult>, String> {
+) -> Result<Vec<CleanupResult>, StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "cleanup_worktrees"))?;
 
     // Collect gone branches for skipping remote deletion
     let branch_list = Branch::list(&repo_path).unwrap_or_default();
@@ -407,7 +428,8 @@ pub async fn cleanup_worktrees(
 
     let agent_branches = running_agent_branches(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
+        let manager = WorktreeManager::new(&repo_path)
+            .map_err(|e| StructuredError::from_gwt_error(&e, "cleanup_worktrees"))?;
         let mut results = Vec::with_capacity(branches.len());
 
         for branch in &branches {
@@ -512,7 +534,12 @@ pub async fn cleanup_worktrees(
         Ok(results)
     })
     .await
-    .map_err(|e| format!("Failed to execute cleanup task: {e}"))?
+    .map_err(|e| {
+        StructuredError::internal(
+            &format!("Failed to execute cleanup task: {e}"),
+            "cleanup_worktrees",
+        )
+    })?
 }
 
 /// Cleanup a single worktree (SPEC-c4e8f210 T3)
@@ -528,20 +555,28 @@ pub async fn cleanup_single_worktree(
     force: bool,
     state: tauri::State<'_, AppState>,
     app_handle: AppHandle,
-) -> Result<(), String> {
+) -> Result<(), StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "cleanup_single_worktree"))?;
 
     let agent_branches = running_agent_branches(&state);
     let branch_for_event = branch.clone();
     let project_path_for_event = project_path.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
-        let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
+        let manager = WorktreeManager::new(&repo_path)
+            .map_err(|e| StructuredError::from_gwt_error(&e, "cleanup_single_worktree"))?;
         cleanup_single_branch(&manager, &repo_path, &branch, force, &agent_branches)
+            .map_err(|e| StructuredError::internal(&e, "cleanup_single_worktree"))
     })
     .await
-    .map_err(|e| format!("Failed to execute cleanup task: {e}"))??;
+    .map_err(|e| {
+        StructuredError::internal(
+            &format!("Failed to execute cleanup task: {e}"),
+            "cleanup_single_worktree",
+        )
+    })??;
 
     // Emit worktrees-changed
     let _ = app_handle.emit(

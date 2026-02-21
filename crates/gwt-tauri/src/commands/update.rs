@@ -4,6 +4,7 @@ use crate::state::AppState;
 use chrono::Utc;
 use gwt_core::update::PreparedPayload;
 use gwt_core::update::UpdateState;
+use gwt_core::StructuredError;
 use tauri::{AppHandle, State};
 use tracing::warn;
 
@@ -11,7 +12,7 @@ use tracing::warn;
 pub async fn check_app_update(
     state: State<'_, AppState>,
     force: bool,
-) -> Result<UpdateState, String> {
+) -> Result<UpdateState, StructuredError> {
     let mgr = state.update_manager.clone();
     let current_exe = std::env::current_exe().ok();
     let state = tauri::async_runtime::spawn_blocking(move || {
@@ -38,11 +39,11 @@ pub async fn check_app_update(
 pub async fn apply_app_update(
     state: State<'_, AppState>,
     app_handle: AppHandle,
-) -> Result<(), String> {
+) -> Result<(), StructuredError> {
     let mgr = state.update_manager.clone();
 
     let current_exe =
-        std::env::current_exe().map_err(|e| format!("Failed to locate current executable: {e}"))?;
+        std::env::current_exe().map_err(|e| StructuredError::internal(&format!("Failed to locate current executable: {e}"), "apply_app_update"))?;
 
     let update_state = tauri::async_runtime::spawn_blocking({
         let mgr = mgr.clone();
@@ -50,18 +51,18 @@ pub async fn apply_app_update(
         move || mgr.check_for_executable(true, Some(&current_exe))
     })
     .await
-    .map_err(|e| format!("Update check failed: {e}"))?;
+    .map_err(|e| StructuredError::internal(&format!("Update check failed: {e}"), "apply_app_update"))?;
 
     let (latest, asset_url) = match update_state {
         UpdateState::Available {
             latest, asset_url, ..
         } => (latest, asset_url),
-        UpdateState::UpToDate { .. } => return Err("Already up to date.".to_string()),
-        UpdateState::Failed { message, .. } => return Err(message),
+        UpdateState::UpToDate { .. } => return Err(StructuredError::internal("Already up to date.", "apply_app_update")),
+        UpdateState::Failed { message, .. } => return Err(StructuredError::internal(&message, "apply_app_update")),
     };
 
     let asset_url =
-        asset_url.ok_or_else(|| "No suitable update asset found for this platform.".to_string())?;
+        asset_url.ok_or_else(|| StructuredError::internal("No suitable update asset found for this platform.", "apply_app_update"))?;
 
     let payload = tauri::async_runtime::spawn_blocking({
         let mgr = mgr.clone();
@@ -70,24 +71,27 @@ pub async fn apply_app_update(
         move || mgr.prepare_update(&latest, &asset_url)
     })
     .await
-    .map_err(|e| format!("Update download failed: {e}"))??;
+    .map_err(|e| StructuredError::internal(&format!("Update download failed: {e}"), "apply_app_update"))?
+    .map_err(|e| StructuredError::internal(&e, "apply_app_update"))?;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let update_dir = match &payload {
         PreparedPayload::PortableBinary { path } => path
             .parent()
-            .ok_or_else(|| "Invalid update payload path".to_string())?
+            .ok_or_else(|| StructuredError::internal("Invalid update payload path", "apply_app_update"))?
             .to_path_buf(),
         PreparedPayload::Installer { path, .. } => path
             .parent()
-            .ok_or_else(|| "Invalid update payload path".to_string())?
+            .ok_or_else(|| StructuredError::internal("Invalid update payload path", "apply_app_update"))?
             .to_path_buf(),
     };
     let args_file = update_dir.join("restart-args.json");
-    mgr.write_restart_args_file(&args_file, args)?;
+    mgr.write_restart_args_file(&args_file, args)
+        .map_err(|e| StructuredError::internal(&e, "apply_app_update"))?;
 
     let helper_exe = if cfg!(windows) {
-        mgr.make_helper_copy(&current_exe, &latest)?
+        mgr.make_helper_copy(&current_exe, &latest)
+            .map_err(|e| StructuredError::internal(&e, "apply_app_update"))?
     } else {
         current_exe.clone()
     };
@@ -95,7 +99,8 @@ pub async fn apply_app_update(
     let old_pid = std::process::id();
     match payload {
         PreparedPayload::PortableBinary { path } => {
-            mgr.spawn_internal_apply_update(&helper_exe, old_pid, &current_exe, &path, &args_file)?;
+            mgr.spawn_internal_apply_update(&helper_exe, old_pid, &current_exe, &path, &args_file)
+                .map_err(|e| StructuredError::internal(&e, "apply_app_update"))?;
         }
         PreparedPayload::Installer { path, kind } => {
             mgr.spawn_internal_run_installer(
@@ -105,7 +110,8 @@ pub async fn apply_app_update(
                 &path,
                 kind,
                 &args_file,
-            )?;
+            )
+            .map_err(|e| StructuredError::internal(&e, "apply_app_update"))?;
         }
     }
 

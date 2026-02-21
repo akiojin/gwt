@@ -1,6 +1,7 @@
 //! Claude Code Hooks management commands
 
 use gwt_core::config;
+use gwt_core::StructuredError;
 use serde::Serialize;
 
 /// Status returned by check_and_update_hooks
@@ -13,9 +14,13 @@ pub struct HooksStatus {
 
 /// Check hooks status and silently update if already registered.
 #[tauri::command]
-pub fn check_and_update_hooks() -> Result<HooksStatus, String> {
-    let settings_path = config::get_claude_settings_path()
-        .ok_or_else(|| "Could not determine Claude settings path".to_string())?;
+pub fn check_and_update_hooks() -> Result<HooksStatus, StructuredError> {
+    let settings_path = config::get_claude_settings_path().ok_or_else(|| {
+        StructuredError::internal(
+            "Could not determine Claude settings path",
+            "check_and_update_hooks",
+        )
+    })?;
 
     let temporary_execution = config::is_temporary_execution().is_some();
 
@@ -27,13 +32,11 @@ pub fn check_and_update_hooks() -> Result<HooksStatus, String> {
         });
     }
 
-    // Already registered: update executable path unless running from a temporary execution
-    // environment (bunx/npx cache paths, etc.). Auto re-registration from a transient path can
-    // overwrite a previously stable hook command and regress hook-based status tracking.
     let updated = if temporary_execution {
         false
     } else {
-        config::reregister_gwt_hooks(&settings_path).map_err(|e| e.to_string())?
+        config::reregister_gwt_hooks(&settings_path)
+            .map_err(|e| StructuredError::internal(&e.to_string(), "check_and_update_hooks"))?
     };
 
     Ok(HooksStatus {
@@ -45,9 +48,14 @@ pub fn check_and_update_hooks() -> Result<HooksStatus, String> {
 
 /// Register hooks for the first time (called after user confirmation).
 #[tauri::command]
-pub fn register_hooks() -> Result<(), String> {
-    let settings_path = config::get_claude_settings_path()
-        .ok_or_else(|| "Could not determine Claude settings path".to_string())?;
+pub fn register_hooks() -> Result<(), StructuredError> {
+    let settings_path = config::get_claude_settings_path().ok_or_else(|| {
+        StructuredError::internal(
+            "Could not determine Claude settings path",
+            "register_hooks",
+        )
+    })?;
 
-    config::register_gwt_hooks(&settings_path).map_err(|e| e.to_string())
+    config::register_gwt_hooks(&settings_path)
+        .map_err(|e| StructuredError::internal(&e.to_string(), "register_hooks"))
 }

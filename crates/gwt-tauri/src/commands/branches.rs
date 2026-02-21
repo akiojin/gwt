@@ -7,6 +7,7 @@ use gwt_core::config::{agent_has_hook_support, infer_agent_status, AgentStatus, 
 use gwt_core::git::{is_bare_repository, Branch, Remote};
 use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::worktree::WorktreeManager;
+use gwt_core::StructuredError;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -226,7 +227,11 @@ fn running_agent_branches(state: &AppState, repo_path: &Path) -> HashSet<String>
         .collect()
 }
 
-fn with_panic_guard<T>(context: &str, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+fn with_panic_guard<T>(
+    context: &str,
+    command: &str,
+    f: impl FnOnce() -> Result<T, StructuredError>,
+) -> Result<T, StructuredError> {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(result) => result,
         Err(_) => {
@@ -235,7 +240,10 @@ fn with_panic_guard<T>(context: &str, f: impl FnOnce() -> Result<T, String>) -> 
                 operation = context,
                 "Unexpected panic while handling branch command"
             );
-            Err(format!("Unexpected error while {}", context))
+            Err(StructuredError::internal(
+                &format!("Unexpected error while {}", context),
+                command,
+            ))
         }
     }
 }
@@ -249,15 +257,19 @@ struct WorktreeBranchListing {
 fn list_worktree_branches_impl(
     project_path: &str,
     state: &AppState,
-) -> Result<WorktreeBranchListing, String> {
+) -> Result<WorktreeBranchListing, StructuredError> {
     let project_root = Path::new(project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "list_worktree_branches"))?;
     let last_tool = build_last_tool_usage_map(&repo_path);
     let running_branches = running_agent_branches(state, &repo_path);
     let agent_statuses = build_agent_status_map(&repo_path, state);
 
-    let manager = WorktreeManager::new(&repo_path).map_err(|e| e.to_string())?;
-    let worktrees = manager.list_basic().map_err(|e| e.to_string())?;
+    let manager = WorktreeManager::new(&repo_path)
+        .map_err(|e| StructuredError::from_gwt_error(&e, "list_worktree_branches"))?;
+    let worktrees = manager
+        .list_basic()
+        .map_err(|e| StructuredError::from_gwt_error(&e, "list_worktree_branches"))?;
 
     let names: HashSet<String> = worktrees
         .into_iter()
@@ -274,7 +286,8 @@ fn list_worktree_branches_impl(
 
     let branch_names = names.iter().cloned().collect::<Vec<_>>();
 
-    let branches = Branch::list(&repo_path).map_err(|e| e.to_string())?;
+    let branches = Branch::list(&repo_path)
+        .map_err(|e| StructuredError::from_gwt_error(&e, "list_worktree_branches"))?;
     let mut infos: Vec<BranchInfo> = branches
         .into_iter()
         .filter(|b| names.contains(&b.name))
@@ -297,18 +310,21 @@ fn list_worktree_branches_impl(
 fn list_remote_branches_impl(
     project_path: &str,
     state: &AppState,
-) -> Result<Vec<BranchInfo>, String> {
+) -> Result<Vec<BranchInfo>, StructuredError> {
     let project_root = Path::new(project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "list_remote_branches"))?;
     let last_tool = build_last_tool_usage_map(&repo_path);
     let running_branches = running_agent_branches(state, &repo_path);
     let agent_statuses = build_agent_status_map(&repo_path, state);
     let remotes = Remote::list(&repo_path).unwrap_or_default();
 
     let branches = if is_bare_repository(&repo_path) {
-        Branch::list_remote_from_origin(&repo_path).map_err(|e| e.to_string())?
+        Branch::list_remote_from_origin(&repo_path)
+            .map_err(|e| StructuredError::from_gwt_error(&e, "list_remote_branches"))?
     } else {
-        Branch::list_remote(&repo_path).map_err(|e| e.to_string())?
+        Branch::list_remote(&repo_path)
+            .map_err(|e| StructuredError::from_gwt_error(&e, "list_remote_branches"))?
     };
 
     let mut infos: Vec<BranchInfo> = branches.into_iter().map(BranchInfo::from).collect();
@@ -329,15 +345,17 @@ fn list_remote_branches_impl(
 pub fn list_branches(
     project_path: String,
     state: State<AppState>,
-) -> Result<Vec<BranchInfo>, String> {
-    with_panic_guard("listing branches", || {
+) -> Result<Vec<BranchInfo>, StructuredError> {
+    with_panic_guard("listing branches", "list_branches", || {
         let project_root = Path::new(&project_path);
-        let repo_path = resolve_repo_path_for_project_root(project_root)?;
+        let repo_path = resolve_repo_path_for_project_root(project_root)
+            .map_err(|e| StructuredError::internal(&e, "list_branches"))?;
         let last_tool = build_last_tool_usage_map(&repo_path);
         let running_branches = running_agent_branches(&state, &repo_path);
         let agent_statuses = build_agent_status_map(&repo_path, &state);
 
-        let branches = Branch::list(&repo_path).map_err(|e| e.to_string())?;
+        let branches = Branch::list(&repo_path)
+            .map_err(|e| StructuredError::from_gwt_error(&e, "list_branches"))?;
         let mut infos: Vec<BranchInfo> = branches.into_iter().map(BranchInfo::from).collect();
         for info in &mut infos {
             info.last_tool_usage = last_tool.get(&info.name).cloned();
@@ -355,9 +373,9 @@ pub fn list_branches(
 pub async fn list_worktree_branches(
     project_path: String,
     app_handle: AppHandle,
-) -> Result<Vec<BranchInfo>, String> {
+) -> Result<Vec<BranchInfo>, StructuredError> {
     tauri::async_runtime::spawn_blocking(move || {
-        with_panic_guard("listing worktree branches", || {
+        with_panic_guard("listing worktree branches", "list_worktree_branches", || {
             let state = app_handle.state::<AppState>();
             let listing = list_worktree_branches_impl(&project_path, &state)?;
 
@@ -376,7 +394,12 @@ pub async fn list_worktree_branches(
         })
     })
     .await
-    .map_err(|e| format!("Unexpected error while listing worktree branches: {e}"))?
+    .map_err(|e| {
+        StructuredError::internal(
+            &format!("Unexpected error while listing worktree branches: {e}"),
+            "list_worktree_branches",
+        )
+    })?
 }
 
 /// List all remote branches in a repository
@@ -384,15 +407,20 @@ pub async fn list_worktree_branches(
 pub async fn list_remote_branches(
     project_path: String,
     app_handle: AppHandle,
-) -> Result<Vec<BranchInfo>, String> {
+) -> Result<Vec<BranchInfo>, StructuredError> {
     tauri::async_runtime::spawn_blocking(move || {
-        with_panic_guard("listing remote branches", || {
+        with_panic_guard("listing remote branches", "list_remote_branches", || {
             let state = app_handle.state::<AppState>();
             list_remote_branches_impl(&project_path, &state)
         })
     })
     .await
-    .map_err(|e| format!("Unexpected error while listing remote branches: {e}"))?
+    .map_err(|e| {
+        StructuredError::internal(
+            &format!("Unexpected error while listing remote branches: {e}"),
+            "list_remote_branches",
+        )
+    })?
 }
 
 /// Get the current branch
@@ -400,11 +428,13 @@ pub async fn list_remote_branches(
 pub fn get_current_branch(
     project_path: String,
     state: State<AppState>,
-) -> Result<Option<BranchInfo>, String> {
-    with_panic_guard("getting current branch", || {
+) -> Result<Option<BranchInfo>, StructuredError> {
+    with_panic_guard("getting current branch", "get_current_branch", || {
         let project_root = Path::new(&project_path);
-        let repo_path = resolve_repo_path_for_project_root(project_root)?;
-        let branch = Branch::current(&repo_path).map_err(|e| e.to_string())?;
+        let repo_path = resolve_repo_path_for_project_root(project_root)
+            .map_err(|e| StructuredError::internal(&e, "get_current_branch"))?;
+        let branch = Branch::current(&repo_path)
+            .map_err(|e| StructuredError::from_gwt_error(&e, "get_current_branch"))?;
         let last_tool = build_last_tool_usage_map(&repo_path);
         let running_branches = running_agent_branches(&state, &repo_path);
         let agent_statuses = build_agent_status_map(&repo_path, &state);
@@ -460,9 +490,10 @@ mod tests {
 
     #[test]
     fn test_with_panic_guard_returns_error_on_panic() {
-        let result: Result<(), String> = with_panic_guard("test", || -> Result<(), String> {
-            panic!("boom");
-        });
+        let result: Result<(), StructuredError> =
+            with_panic_guard("test", "test_cmd", || -> Result<(), StructuredError> {
+                panic!("boom");
+            });
         assert!(result.is_err());
     }
 

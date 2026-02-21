@@ -1,10 +1,15 @@
 //! Agent-specific configuration (global, not per-profile)
 
 use gwt_core::config::AgentConfig;
+use gwt_core::StructuredError;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use tracing::error;
 
-fn with_panic_guard<T>(context: &str, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+fn with_panic_guard<T>(
+    context: &str,
+    command: &str,
+    f: impl FnOnce() -> Result<T, StructuredError>,
+) -> Result<T, StructuredError> {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(result) => result,
         Err(_) => {
@@ -13,23 +18,28 @@ fn with_panic_guard<T>(context: &str, f: impl FnOnce() -> Result<T, String>) -> 
                 operation = context,
                 "Unexpected panic while handling agent config command"
             );
-            Err(format!("Unexpected error while {}", context))
+            Err(StructuredError::internal(
+                &format!("Unexpected error while {}", context),
+                command,
+            ))
         }
     }
 }
 
 /// Get current agent config (global: ~/.gwt/agents.toml)
 #[tauri::command]
-pub fn get_agent_config() -> Result<AgentConfig, String> {
-    with_panic_guard("loading agent config", || {
-        AgentConfig::load().map_err(|e| e.to_string())
+pub fn get_agent_config() -> Result<AgentConfig, StructuredError> {
+    with_panic_guard("loading agent config", "get_agent_config", || {
+        AgentConfig::load().map_err(|e| StructuredError::from_gwt_error(&e, "get_agent_config"))
     })
 }
 
 /// Save agent config (always writes TOML: ~/.gwt/agents.toml)
 #[tauri::command]
-pub fn save_agent_config(config: AgentConfig) -> Result<(), String> {
-    with_panic_guard("saving agent config", || {
-        config.save().map_err(|e| e.to_string())
+pub fn save_agent_config(config: AgentConfig) -> Result<(), StructuredError> {
+    with_panic_guard("saving agent config", "save_agent_config", || {
+        config
+            .save()
+            .map_err(|e| StructuredError::from_gwt_error(&e, "save_agent_config"))
     })
 }

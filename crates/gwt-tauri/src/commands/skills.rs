@@ -4,6 +4,7 @@ use gwt_core::config::{
     repair_skill_registration, repair_skill_registration_with_settings_at_project_root, Settings,
     SkillRegistrationStatus,
 };
+use gwt_core::StructuredError;
 use std::path::PathBuf;
 use tauri::{State, Window};
 
@@ -21,7 +22,7 @@ fn resolve_window_project_root(state: &AppState, window: &Window) -> Option<Path
 pub fn get_skill_registration_status_cmd(
     window: Window,
     state: State<AppState>,
-) -> Result<SkillRegistrationStatus, String> {
+) -> Result<SkillRegistrationStatus, StructuredError> {
     let project_root = resolve_window_project_root(&state, &window);
     let status = match Settings::load_global() {
         Ok(settings) => get_skill_registration_status_with_settings_at_project_root(
@@ -38,7 +39,7 @@ pub fn get_skill_registration_status_cmd(
 pub fn repair_skill_registration_cmd(
     window: Window,
     state: State<AppState>,
-) -> Result<SkillRegistrationStatus, String> {
+) -> Result<SkillRegistrationStatus, StructuredError> {
     let project_root = resolve_window_project_root(&state, &window);
     let status = match Settings::load_global() {
         Ok(settings) => repair_skill_registration_with_settings_at_project_root(

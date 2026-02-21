@@ -12,6 +12,7 @@ use gwt_core::config::{ProfilesConfig, ResolvedAISettings, ToolSessionEntry};
 use gwt_core::git::Branch;
 use gwt_core::terminal::pane::PaneStatus;
 use gwt_core::terminal::scrollback::ScrollbackFile;
+use gwt_core::StructuredError;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -27,13 +28,14 @@ use tauri::{AppHandle, Emitter, Manager, State};
 pub fn get_branch_quick_start(
     project_path: String,
     branch: String,
-) -> Result<Vec<ToolSessionEntry>, String> {
+) -> Result<Vec<ToolSessionEntry>, StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "get_branch_quick_start"))?;
 
     let branch = branch.trim();
     if branch.is_empty() {
-        return Err("Branch is required".to_string());
+        return Err(StructuredError::internal("Branch is required", "get_branch_quick_start"));
     }
 
     Ok(gwt_core::config::get_branch_tool_history(
@@ -93,11 +95,13 @@ struct RunningPaneRef {
 pub fn get_agent_sidebar_view(
     project_path: String,
     state: State<AppState>,
-) -> Result<AgentSidebarView, String> {
+) -> Result<AgentSidebarView, StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "get_agent_sidebar_view"))?;
 
-    let parsed = parse_latest_spec_tasks(project_root)?;
+    let parsed = parse_latest_spec_tasks(project_root)
+        .map_err(|e| StructuredError::internal(&e, "get_agent_sidebar_view"))?;
     let entries = load_recent_sub_agents(&repo_path);
     let running_refs = collect_running_pane_refs(&state, &repo_path);
 
@@ -1876,13 +1880,14 @@ pub fn get_branch_session_summary(
     cached_only: Option<bool>,
     state: State<AppState>,
     app_handle: AppHandle,
-) -> Result<SessionSummaryResult, String> {
+) -> Result<SessionSummaryResult, StructuredError> {
     let (result, job) = get_branch_session_summary_immediate(
         &project_path,
         &branch,
         cached_only.unwrap_or(false),
         &state,
-    )?;
+    )
+    .map_err(|e| StructuredError::internal(&e, "get_branch_session_summary"))?;
     if let Some(job) = job {
         match job {
             SummaryJob::Session(job) => start_session_summary_job(job, &state, app_handle),
@@ -1897,9 +1902,10 @@ pub fn rebuild_all_branch_session_summaries(
     project_path: String,
     preferred_language: Option<String>,
     app_handle: AppHandle,
-) -> Result<(), String> {
+) -> Result<(), StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "rebuild_all_branch_session_summaries"))?;
     let repo_key = repo_path.to_string_lossy().to_string();
     let branches = collect_rebuild_target_branches(&repo_path);
     let language = normalize_summary_rebuild_language(preferred_language.as_deref());

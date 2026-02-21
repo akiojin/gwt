@@ -8,6 +8,7 @@ use crate::commands::project::resolve_repo_path_for_project_root;
 use crate::state::{AppState, VersionHistoryCacheEntry};
 use gwt_core::ai::{format_error_for_display, AIClient, AIError, ChatMessage};
 use gwt_core::config::ProfilesConfig;
+use gwt_core::StructuredError;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -110,22 +111,25 @@ struct VersionHistoryUpdatedPayload {
 pub fn list_project_versions(
     project_path: String,
     limit: usize,
-) -> Result<ProjectVersions, String> {
+) -> Result<ProjectVersions, StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "list_project_versions"))?;
 
     let limit = limit.max(1);
     let tag_limit = limit.saturating_sub(1);
 
     // Fetch an extra tag so each displayed tag can have a "previous" range bound.
-    let tags = list_version_tags(&repo_path, Some(tag_limit.saturating_add(1)))?;
+    let tags = list_version_tags(&repo_path, Some(tag_limit.saturating_add(1)))
+        .map_err(|e| StructuredError::internal(&e, "list_project_versions"))?;
 
     let mut items = Vec::new();
 
     // Unreleased range: latest tag -> HEAD (or entire history if no tags exist)
     {
         let latest = tags.first().cloned();
-        let commit_count = rev_list_count(&repo_path, latest.as_deref(), "HEAD")?;
+        let commit_count = rev_list_count(&repo_path, latest.as_deref(), "HEAD")
+            .map_err(|e| StructuredError::internal(&e, "list_project_versions"))?;
         items.push(VersionItem {
             id: VERSION_ID_UNRELEASED.to_string(),
             label: "Unreleased (HEAD)".to_string(),
@@ -137,7 +141,8 @@ pub fn list_project_versions(
 
     for (idx, tag) in tags.iter().take(tag_limit).enumerate() {
         let prev = tags.get(idx + 1).cloned();
-        let commit_count = rev_list_count(&repo_path, prev.as_deref(), tag.as_str())?;
+        let commit_count = rev_list_count(&repo_path, prev.as_deref(), tag.as_str())
+            .map_err(|e| StructuredError::internal(&e, "list_project_versions"))?;
         items.push(VersionItem {
             id: tag.to_string(),
             label: tag.to_string(),
@@ -156,23 +161,28 @@ pub fn get_project_version_history(
     version_id: String,
     state: State<AppState>,
     app_handle: AppHandle,
-) -> Result<VersionHistoryResult, String> {
+) -> Result<VersionHistoryResult, StructuredError> {
     let project_root = Path::new(&project_path);
-    let repo_path = resolve_repo_path_for_project_root(project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(project_root)
+        .map_err(|e| StructuredError::internal(&e, "get_project_version_history"))?;
     let repo_key = repo_path.to_string_lossy().to_string();
 
-    let profiles = ProfilesConfig::load().map_err(|e| e.to_string())?;
+    let profiles = ProfilesConfig::load()
+        .map_err(|e| StructuredError::internal(&e.to_string(), "get_project_version_history"))?;
     let settings = match resolve_version_history_ai_settings(&profiles) {
         Some(settings) => settings,
         None => return Ok(disabled_version_history_result(&version_id)),
     };
 
     // Resolve the requested version into a concrete git range.
-    let (label, range_from, range_to) = resolve_range_for_version(&repo_path, &version_id)?;
-    let commit_count = rev_list_count(&repo_path, range_from.as_deref(), &range_to)?;
+    let (label, range_from, range_to) = resolve_range_for_version(&repo_path, &version_id)
+        .map_err(|e| StructuredError::internal(&e, "get_project_version_history"))?;
+    let commit_count = rev_list_count(&repo_path, range_from.as_deref(), &range_to)
+        .map_err(|e| StructuredError::internal(&e, "get_project_version_history"))?;
 
     let range_from_oid = match &range_from {
-        Some(r) => Some(rev_parse(&repo_path, r)?),
+        Some(r) => Some(rev_parse(&repo_path, r)
+            .map_err(|e| StructuredError::internal(&e, "get_project_version_history"))?),
         None => None,
     };
     let range_to_oid = match rev_parse(&repo_path, &range_to) {
@@ -181,7 +191,7 @@ pub fn get_project_version_history(
             if range_to == "HEAD" && is_unborn_head(&repo_path) {
                 RANGE_OID_UNBORN_HEAD.to_string()
             } else {
-                return Err(err);
+                return Err(StructuredError::internal(&err, "get_project_version_history"));
             }
         }
     };

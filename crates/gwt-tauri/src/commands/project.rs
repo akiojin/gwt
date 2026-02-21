@@ -5,6 +5,7 @@ use gwt_core::git::{self, Branch};
 use gwt_core::migration::{
     derive_bare_repo_name, execute_migration, rollback_migration, MigrationConfig, MigrationState,
 };
+use gwt_core::StructuredError;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::Stdio;
@@ -225,17 +226,18 @@ pub fn open_project(
     window: tauri::Window,
     path: String,
     state: State<AppState>,
-) -> Result<OpenProjectResult, String> {
+) -> Result<OpenProjectResult, StructuredError> {
     let p = Path::new(&path);
 
     if !p.exists() {
-        return Err(format!("Path does not exist: {}", path));
+        return Err(StructuredError::internal(&format!("Path does not exist: {}", path), "open_project"));
     }
 
     let project_root = resolve_project_root(p);
-    let repo_path = resolve_repo_path_for_project_root(&project_root)?;
+    let repo_path = resolve_repo_path_for_project_root(&project_root)
+        .map_err(|e| StructuredError::internal(&e, "open_project"))?;
     if git::is_git_repo(&repo_path) && !git::is_bare_repository(&repo_path) {
-        return Err("Migration required: normal repositories are not supported. Please migrate to a bare gwt project.".to_string());
+        return Err(StructuredError::internal("Migration required: normal repositories are not supported. Please migrate to a bare gwt project.", "open_project"));
     }
     let project_root_str = project_root.to_string_lossy().to_string();
     let project_identity = canonical_project_identity(&project_root);
@@ -307,7 +309,7 @@ pub fn open_project(
         }
     }
 
-    Err("Failed to open project due to stale duplicate window state. Please retry.".to_string())
+    Err(StructuredError::internal("Failed to open project due to stale duplicate window state. Please retry.", "open_project"))
 }
 
 /// Get current project info from state
@@ -334,7 +336,7 @@ pub fn get_project_info(window: tauri::Window, state: State<AppState>) -> Option
 
 /// Close the current window's project (clear window-scoped state)
 #[tauri::command]
-pub fn close_project(window: tauri::Window, state: State<AppState>) -> Result<(), String> {
+pub fn close_project(window: tauri::Window, state: State<AppState>) -> Result<(), StructuredError> {
     state.clear_project_for_window(window.label());
     let _ = crate::menu::rebuild_menu(window.app_handle());
     Ok(())
@@ -449,25 +451,25 @@ pub fn create_project(
     request: NewProjectRequest,
     state: State<AppState>,
     app_handle: AppHandle,
-) -> Result<OpenProjectResult, String> {
+) -> Result<OpenProjectResult, StructuredError> {
     if !is_valid_github_repo_url(&request.repo_url) {
-        return Err("Invalid repository URL".to_string());
+        return Err(StructuredError::internal("Invalid repository URL", "create_project"));
     }
 
     let parent = std::path::PathBuf::from(&request.parent_dir);
     if !parent.exists() {
-        return Err(format!(
-            "Parent directory does not exist: {}",
-            request.parent_dir
+        return Err(StructuredError::internal(
+            &format!("Parent directory does not exist: {}", request.parent_dir),
+            "create_project",
         ));
     }
 
     let repo_name = git::extract_repo_name(&request.repo_url);
     let target = parent.join(&repo_name);
     if target.exists() {
-        return Err(format!(
-            "Target directory already exists: {}",
-            target.display()
+        return Err(StructuredError::internal(
+            &format!("Target directory already exists: {}", target.display()),
+            "create_project",
         ));
     }
 
@@ -490,12 +492,12 @@ pub fn create_project(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Failed to execute git clone: {}", e))?;
+        .map_err(|e| StructuredError::internal(&format!("Failed to execute git clone: {}", e), "create_project"))?;
 
     let mut stderr = child
         .stderr
         .take()
-        .ok_or_else(|| "Failed to capture git clone output".to_string())?;
+        .ok_or_else(|| StructuredError::internal("Failed to capture git clone output", "create_project"))?;
 
     let mut buf = [0u8; 4096];
     let mut raw: Vec<u8> = Vec::new();
@@ -537,7 +539,7 @@ pub fn create_project(
 
     let status = child
         .wait()
-        .map_err(|e| format!("Failed to wait for git clone: {}", e))?;
+        .map_err(|e| StructuredError::internal(&format!("Failed to wait for git clone: {}", e), "create_project"))?;
 
     if !status.success() {
         // Cleanup incomplete directory (FR-303)
@@ -557,9 +559,9 @@ pub fn create_project(
             .join("\n");
 
         if tail.trim().is_empty() {
-            return Err("git clone failed".to_string());
+            return Err(StructuredError::internal("git clone failed", "create_project"));
         }
-        return Err(format!("git clone failed: {}", tail.trim()));
+        return Err(StructuredError::internal(&format!("git clone failed: {}", tail.trim()), "create_project"));
     }
 
     // Open the project root (FR-304)
@@ -610,18 +612,18 @@ pub fn start_migration_job(
     path: String,
     state: State<AppState>,
     app_handle: AppHandle,
-) -> Result<String, String> {
+) -> Result<String, StructuredError> {
     let selected = Path::new(&path);
     if !selected.exists() {
-        return Err(format!("Path does not exist: {}", path));
+        return Err(StructuredError::internal(&format!("Path does not exist: {}", path), "start_migration_job"));
     }
 
     let source_root = git::get_main_repo_root(selected);
     if !git::is_git_repo(&source_root) {
-        return Err("Not a git repository".to_string());
+        return Err(StructuredError::internal("Not a git repository", "start_migration_job"));
     }
     if git::is_bare_repository(&source_root) {
-        return Err("Repository is already bare".to_string());
+        return Err(StructuredError::internal("Repository is already bare", "start_migration_job"));
     }
 
     let job_id = Uuid::new_v4().to_string();
@@ -689,7 +691,7 @@ pub fn start_migration_job(
 
 /// Quit the app (used by forced migration refusal).
 #[tauri::command]
-pub fn quit_app(state: State<AppState>, app_handle: AppHandle) -> Result<(), String> {
+pub fn quit_app(state: State<AppState>, app_handle: AppHandle) -> Result<(), StructuredError> {
     state.request_quit();
     app_handle.exit(0);
     Ok(())
