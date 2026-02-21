@@ -852,12 +852,54 @@ fn ensure_docker_compose_ready() -> Result<(), String> {
     }
 }
 
+fn verify_docker_compose_service_start<IsRunning, ServiceLogs, ComposeDown>(
+    service: Option<&str>,
+    mut service_is_running: IsRunning,
+    mut service_logs: ServiceLogs,
+    mut compose_down: ComposeDown,
+) -> Result<(), String>
+where
+    IsRunning: FnMut(&str) -> Result<bool, String>,
+    ServiceLogs: FnMut(&str) -> Option<String>,
+    ComposeDown: FnMut() -> Result<(), String>,
+{
+    let selected_service = service.map(str::trim).unwrap_or_default();
+    if selected_service.is_empty() {
+        return Ok(());
+    }
+
+    match service_is_running(selected_service) {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            let mut message = format!(
+                "docker compose service '{}' is not running after startup.",
+                selected_service
+            );
+            if let Some(logs) = service_logs(selected_service) {
+                message.push_str("\n\n");
+                message.push_str(&logs);
+            }
+            if let Err(err) = compose_down() {
+                message.push_str("\n\n");
+                message.push_str(
+                    "Failed to run best-effort docker compose down after startup failure: ",
+                );
+                message.push_str(&err);
+            }
+            Err(message)
+        }
+        Err(err) => Err(format!(
+            "docker compose up succeeded, but failed to verify service '{}': {}",
+            selected_service, err
+        )),
+    }
+}
+
 fn docker_compose_up(
     worktree_path: &std::path::Path,
     container_name: &str,
     env_vars: &HashMap<String, String>,
     compose_args: &[String],
-    service: &str,
     build: bool,
     recreate: bool,
     service: Option<&str>,
@@ -885,41 +927,28 @@ fn docker_compose_up(
         return Err(stderr);
     }
 
-    let selected_service = service.trim();
-    if selected_service.is_empty() {
-        return Ok(());
-    }
-
-    match docker_compose_service_is_running(
-        worktree_path,
-        container_name,
-        env_vars,
-        compose_args,
-        selected_service,
-    ) {
-        Ok(true) => Ok(()),
-        Ok(false) => {
-            let mut message = format!(
-                "docker compose service '{}' is not running after startup.",
-                selected_service
-            );
-            if let Some(logs) = docker_compose_service_logs(
+    verify_docker_compose_service_start(
+        service,
+        |selected_service| {
+            docker_compose_service_is_running(
                 worktree_path,
                 container_name,
                 env_vars,
                 compose_args,
                 selected_service,
-            ) {
-                message.push_str("\n\n");
-                message.push_str(&logs);
-            }
-            Err(message)
-        }
-        Err(err) => Err(format!(
-            "docker compose up succeeded, but failed to verify service '{}': {}",
-            selected_service, err
-        )),
-    }
+            )
+        },
+        |selected_service| {
+            docker_compose_service_logs(
+                worktree_path,
+                container_name,
+                env_vars,
+                compose_args,
+                selected_service,
+            )
+        },
+        || docker_compose_down(worktree_path, container_name, env_vars, compose_args),
+    )
 }
 
 fn docker_compose_down(
@@ -2072,6 +2101,7 @@ pub fn spawn_shell(
 mod tests {
     use super::*;
     use gwt_core::terminal::runner::FallbackRunner;
+    use std::cell::Cell;
     use std::ffi::OsString;
     use std::path::Path;
     use std::time::Duration;
@@ -3004,6 +3034,97 @@ multi_agent = true
     }
 
     #[test]
+    fn verify_docker_compose_service_start_skips_when_service_is_missing() {
+        let running_called = Cell::new(false);
+        let logs_called = Cell::new(false);
+        let down_called = Cell::new(false);
+
+        let result = verify_docker_compose_service_start(
+            None,
+            |_| {
+                running_called.set(true);
+                Ok(true)
+            },
+            |_| {
+                logs_called.set(true);
+                None
+            },
+            || {
+                down_called.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(!running_called.get());
+        assert!(!logs_called.get());
+        assert!(!down_called.get());
+    }
+
+    #[test]
+    fn verify_docker_compose_service_start_returns_ok_when_service_is_running() {
+        let down_called = Cell::new(false);
+
+        let result = verify_docker_compose_service_start(
+            Some(" app "),
+            |service| {
+                assert_eq!(service, "app");
+                Ok(true)
+            },
+            |_| Some("should not be called".to_string()),
+            || {
+                down_called.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(!down_called.get());
+    }
+
+    #[test]
+    fn verify_docker_compose_service_start_runs_best_effort_down_on_failure() {
+        let down_called = Cell::new(false);
+
+        let err = verify_docker_compose_service_start(
+            Some("app"),
+            |_| Ok(false),
+            |_| Some("service logs".to_string()),
+            || {
+                down_called.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(down_called.get());
+        assert!(err.contains("docker compose service 'app' is not running after startup."));
+        assert!(err.contains("service logs"));
+        assert!(!err.contains("Failed to run best-effort docker compose down"));
+    }
+
+    #[test]
+    fn verify_docker_compose_service_start_appends_down_error_on_cleanup_failure() {
+        let down_called = Cell::new(false);
+
+        let err = verify_docker_compose_service_start(
+            Some("app"),
+            |_| Ok(false),
+            |_| None,
+            || {
+                down_called.set(true);
+                Err("cleanup failed".to_string())
+            },
+        )
+        .unwrap_err();
+
+        assert!(down_called.get());
+        assert!(err.contains("docker compose service 'app' is not running after startup."));
+        assert!(err.contains("Failed to run best-effort docker compose down"));
+        assert!(err.contains("cleanup failed"));
+    }
+
+    #[test]
     fn build_docker_compose_exec_args_sorts_env_and_appends_inner_command() {
         let mut env = HashMap::new();
         env.insert("B".to_string(), "2".to_string());
@@ -3832,7 +3953,6 @@ pub(crate) fn launch_agent_for_project_root(
                     &container_name,
                     &env,
                     &compose_args,
-                    &service,
                     docker_build,
                     docker_recreate,
                     Some(service.as_str()),
@@ -3925,7 +4045,6 @@ pub(crate) fn launch_agent_for_project_root(
                         &container_name,
                         &env,
                         &compose_args,
-                        &service,
                         docker_build,
                         docker_recreate,
                         Some(service.as_str()),
