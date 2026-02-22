@@ -540,31 +540,60 @@ pub fn filter_issues_by_title<'a>(issues: &'a [GitHubIssue], query: &str) -> Vec
 }
 
 /// Check if a branch for the given issue already exists
-/// Searches for branches containing "issue-{number}" pattern
+/// Searches local branches first, then remote tracking branches.
 pub fn find_branch_for_issue(
     repo_path: &Path,
     issue_number: u64,
 ) -> Result<Option<String>, String> {
     let pattern = format!("issue-{}", issue_number);
 
+    // Search local branches first
     let output = crate::process::command("git")
         .args(["branch", "--list", &format!("*{}*", pattern)])
         .current_dir(repo_path)
         .output()
         .map_err(|e| format!("Failed to execute git branch: {}", e))?;
 
-    if !output.status.success() {
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let local: Vec<&str> = stdout
+            .lines()
+            .map(|line| line.trim().trim_start_matches("* "))
+            .filter(|branch| branch.contains(&pattern))
+            .collect();
+
+        if let Some(branch) = local.first() {
+            return Ok(Some(branch.to_string()));
+        }
+    }
+
+    // Fallback: search remote tracking branches
+    let remote_output = crate::process::command("git")
+        .args(["branch", "-r", "--list", &format!("*{}*", pattern)])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to execute git branch -r: {}", e))?;
+
+    if !remote_output.status.success() {
         return Ok(None);
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let branches: Vec<&str> = stdout
+    let stdout = String::from_utf8_lossy(&remote_output.stdout);
+    let remote_branch = stdout
         .lines()
-        .map(|line| line.trim().trim_start_matches("* "))
-        .filter(|branch| branch.contains(&pattern))
-        .collect();
+        .map(|line| line.trim())
+        .find(|branch| branch.contains(&pattern));
 
-    Ok(branches.first().map(|s| s.to_string()))
+    Ok(remote_branch.map(|b| strip_remote_prefix(b).to_string()))
+}
+
+/// Strip remote prefix from a remote branch name.
+/// e.g., "origin/feature/issue-42" -> "feature/issue-42"
+fn strip_remote_prefix(remote_branch: &str) -> &str {
+    remote_branch
+        .split_once('/')
+        .map(|(_, rest)| rest)
+        .unwrap_or(remote_branch)
 }
 
 /// Generate full branch name from type and issue
@@ -612,6 +641,10 @@ pub fn create_linked_branch(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        // SPEC-rb01a2f3 FR-003: Treat "already exists" as success
+        if stderr.contains("already exists") {
+            return Ok(());
+        }
         return Err(format!("gh issue develop failed: {}", stderr.trim()));
     }
 
@@ -1268,4 +1301,42 @@ mod tests {
     fn test_parse_repo_slug_rejects_extra_segments() {
         assert!(parse_repo_slug_from_remote_url("https://github.com/owner/repo/extra").is_none());
     }
+
+    // ==========================================================
+    // SPEC-rb01a2f3: Remote branch prefix stripping tests
+    // ==========================================================
+
+    #[test]
+    fn test_strip_remote_prefix_origin() {
+        assert_eq!(
+            strip_remote_prefix("origin/feature/issue-42"),
+            "feature/issue-42"
+        );
+    }
+
+    #[test]
+    fn test_strip_remote_prefix_upstream() {
+        assert_eq!(
+            strip_remote_prefix("upstream/bugfix/issue-10"),
+            "bugfix/issue-10"
+        );
+    }
+
+    #[test]
+    fn test_strip_remote_prefix_simple_branch() {
+        assert_eq!(strip_remote_prefix("origin/issue-42"), "issue-42");
+    }
+
+    #[test]
+    fn test_strip_remote_prefix_no_prefix() {
+        // Edge case: no slash means no remote prefix, return as-is
+        assert_eq!(strip_remote_prefix("issue-42"), "issue-42");
+    }
+
+    // ==========================================================
+    // SPEC-rb01a2f3: find_branch_for_issue remote search
+    // ==========================================================
+
+    // Note: find_branch_for_issue with remote search requires a git repo,
+    // tested via integration tests (same as local branch search, see line 958)
 }
