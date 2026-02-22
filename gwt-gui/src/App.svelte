@@ -1151,6 +1151,16 @@
     }
   }
 
+  function continueStartupWithProcessEnvFallback() {
+    // Fallback path when persisting startup mode fails (e.g. config permission/corruption):
+    // continue app startup with the already-available process environment snapshot.
+    osEnvCaptureSelection = "process_env";
+    osEnvReady = true;
+    startupOsEnvCaptureResolved = true;
+    osEnvCapturePromptOpen = false;
+    showToast("Startup mode could not be saved. Continuing with process environment.", 9000);
+  }
+
   async function checkSkillScopePromptOnStartup() {
     if (!isTauriRuntimeAvailable()) return;
     try {
@@ -2943,6 +2953,15 @@
         <p class="os-env-dialog-error">{osEnvCapturePromptError}</p>
       {/if}
       <div class="os-env-dialog-actions">
+        {#if osEnvCapturePromptError}
+          <button
+            class="about-close"
+            onclick={continueStartupWithProcessEnvFallback}
+            disabled={osEnvCapturePromptBusy}
+          >
+            Continue with Process Env
+          </button>
+        {/if}
         <button
           class="about-close"
           onclick={() => void applyStartupOsEnvCaptureSelection()}
