@@ -231,6 +231,7 @@ impl AppState {
         if let Ok(mut map) = self.window_project_modes.lock() {
             map.remove(window_label);
         }
+        self.remove_window_from_history(window_label);
     }
 
     pub fn clear_window_state(&self, window_label: &str) {
@@ -415,6 +416,18 @@ impl AppState {
         let back = history.pop().unwrap();
         history.insert(0, back.clone());
         Some(back)
+    }
+
+    /// Get the most recently focused window without rotating history.
+    pub fn most_recent_window(&self) -> Option<String> {
+        let history = self.window_focus_history.lock().ok()?;
+        history.first().cloned()
+    }
+
+    /// Get the least recently focused window without rotating history.
+    pub fn least_recent_window(&self) -> Option<String> {
+        let history = self.window_focus_history.lock().ok()?;
+        history.last().cloned()
     }
 
     /// Remove window from MRU history (on window destroy).
@@ -604,6 +617,30 @@ mod tests {
     }
 
     #[test]
+    fn clear_project_for_window_removes_window_from_mru_history() {
+        let state = AppState::new();
+        state.push_window_focus("C");
+        state.push_window_focus("B");
+        state.push_window_focus("A");
+        // History: [A, B, C]
+        state.clear_project_for_window("B");
+        let history = state.window_focus_history.lock().unwrap();
+        assert_eq!(*history, vec!["A", "C"]);
+    }
+
+    #[test]
+    fn window_rotation_skips_window_after_project_close() {
+        let state = AppState::new();
+        state.push_window_focus("C");
+        state.push_window_focus("B");
+        state.push_window_focus("A");
+        // History: [A, B, C]
+        state.clear_project_for_window("B");
+        assert_eq!(state.next_window(), Some("C".to_string()));
+        assert_eq!(state.next_window(), Some("A".to_string()));
+    }
+
+    #[test]
     fn mru_push_moves_to_front() {
         let state = AppState::new();
         state.push_window_focus("A");
@@ -641,6 +678,19 @@ mod tests {
         state.push_window_focus("C");
         // History: [C, B, A] → rotate right → [A, C, B] → previous = A
         assert_eq!(state.previous_window(), Some("A".to_string()));
+    }
+
+    #[test]
+    fn mru_peek_recent_and_oldest_without_rotation() {
+        let state = AppState::new();
+        state.push_window_focus("A");
+        state.push_window_focus("B");
+        state.push_window_focus("C");
+        // History: [C, B, A]
+        assert_eq!(state.most_recent_window(), Some("C".to_string()));
+        assert_eq!(state.least_recent_window(), Some("A".to_string()));
+        let history = state.window_focus_history.lock().unwrap();
+        assert_eq!(*history, vec!["C", "B", "A"]);
     }
 
     #[test]

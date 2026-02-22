@@ -534,7 +534,10 @@ describe("CleanupModal", () => {
       expect(rendered.getByText("[object Object]")).toBeTruthy();
     });
 
-    await fireEvent.click(rendered.getByRole("button", { name: "Close" }));
+    const failuresDialog = rendered.getByRole("dialog", { name: "Cleanup Failures" });
+    const closeBtn = failuresDialog.querySelector(".close-btn") as HTMLButtonElement;
+    expect(closeBtn).toBeTruthy();
+    await fireEvent.click(closeBtn);
     await waitFor(() => {
       expect(rendered.queryByText("Cleanup Failed")).toBeNull();
     });

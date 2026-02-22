@@ -2960,12 +2960,13 @@
       {/if}
       <button
         class="toast-close"
+        aria-label="Close"
         onclick={() => {
           toastMessage = null;
           toastAction = null;
         }}
       >
-        [x]
+        &times;
       </button>
     </div>
   </div>
@@ -3265,8 +3266,15 @@
     border: none;
     color: var(--text-muted);
     cursor: pointer;
-    font-size: 13px;
-    padding: 0;
+    font-size: 20px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    line-height: 1;
+  }
+
+  .toast-close:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
   }
 
   .env-debug-dialog {

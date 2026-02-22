@@ -757,7 +757,7 @@
 <div class="settings-panel">
   <div class="settings-header">
     <h2>Settings</h2>
-    <button class="close-btn" onclick={handleClose}>[x]</button>
+    <button class="close-btn" onclick={handleClose} aria-label="Close">&times;</button>
   </div>
 
   {#if loadingSettings || loadingProfiles}
@@ -1510,13 +1510,15 @@
     border: none;
     color: var(--text-muted);
     cursor: pointer;
-    font-size: var(--ui-font-lg);
-    font-family: monospace;
-    padding: 2px 4px;
+    font-size: 20px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    line-height: 1;
   }
 
   .close-btn:hover {
     color: var(--text-primary);
+    background: var(--bg-hover);
   }
 
   .loading {

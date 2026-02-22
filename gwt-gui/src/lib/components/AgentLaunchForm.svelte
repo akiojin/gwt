@@ -1147,7 +1147,7 @@
   <div class="dialog modal-dialog-shell" onclick={(e) => e.stopPropagation()}>
     <div class="dialog-header">
       <h2>Launch Agent</h2>
-      <button class="close-btn" onclick={onClose}>[x]</button>
+      <button class="close-btn" onclick={onClose} aria-label="Close">&times;</button>
     </div>
 
     {#if loading}
@@ -1864,7 +1864,7 @@
       <div class="dialog modal-dialog-shell suggest-dialog">
         <div class="dialog-header">
           <h2>Suggest Branch Name</h2>
-          <button class="close-btn" type="button" onclick={closeSuggestModal}>[x]</button>
+          <button class="close-btn" type="button" onclick={closeSuggestModal} aria-label="Close">&times;</button>
         </div>
 
         <div class="dialog-body">
@@ -1972,13 +1972,15 @@
     border: none;
     color: var(--text-muted);
     cursor: pointer;
-    font-size: var(--ui-font-lg);
-    font-family: monospace;
-    padding: 2px 4px;
+    font-size: 20px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    line-height: 1;
   }
 
   .close-btn:hover {
     color: var(--text-primary);
+    background: var(--bg-hover);
   }
 
   .loading {
