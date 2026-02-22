@@ -4,19 +4,60 @@
   import { WebLinksAddon } from "@xterm/addon-web-links";
   import "@xterm/xterm/css/xterm.css";
   import { onMount } from "svelte";
-  import { isCtrlCShortcut, isPasteShortcut } from "./shortcuts";
+  import { isCopyShortcut, isPasteShortcut } from "./shortcuts";
   import { registerTerminalInputTarget } from "../voice/inputTargetRegistry";
+  import { openExternalUrl } from "../openExternalUrl";
 
   let {
     paneId,
     active = false,
-  }: { paneId: string; active?: boolean } = $props();
+    onReady,
+  }: {
+    paneId: string;
+    active?: boolean;
+    onReady?: (paneId: string) => void;
+  } = $props();
 
   let containerEl: HTMLDivElement | undefined = $state(undefined);
   let terminal: Terminal | undefined = $state(undefined);
   let fitAddon: FitAddon | undefined = $state(undefined);
   let resizeObserver: ResizeObserver | undefined = $state(undefined);
   let unlisten: (() => void) | undefined = $state(undefined);
+  let activationSerial = 0;
+  let lastNotifiedRows: number | null = null;
+  let lastNotifiedCols: number | null = null;
+  let resizeInFlight = false;
+  let queuedResize: { rows: number; cols: number } | null = null;
+
+  const MOUSE_WHEEL_STEP_VALUES = new Set([120, 240]);
+  const TRACKPAD_WHEEL_DELTA_THRESHOLD = 240;
+  const MOUSE_WHEEL_STEP_REPEAT_WINDOW_MS = 220;
+  const MOUSE_WHEEL_STEP_REPEAT_COUNT = 4;
+  const MOUSE_WHEEL_STEP_MOUSE_GAP_MS = 45;
+  // Mouse wheels are usually very regular and dense; treat only tight, consistent
+  // runs as mouse input. Slower, jittery integer bursts stay on trackpad path.
+
+  type WheelSample = {
+    at: number;
+    absDeltaY: number;
+    sign: number;
+  };
+
+  type WheelScrollState = {
+    axis: "vertical" | "horizontal" | null;
+    remainder: number;
+  };
+
+  type WheelAxis = "vertical" | "horizontal";
+
+  type TerminalEditAction = {
+    action: "copy" | "paste";
+    paneId: string;
+  };
+
+  type CaptureTerminalContainer = HTMLDivElement & {
+    __gwtTerminal?: Terminal;
+  };
 
   function isTerminalFocused(rootEl: HTMLElement): boolean {
     const el = document.activeElement;
@@ -71,6 +112,7 @@
       window.setTimeout(focusIfNeeded, 60),
       window.setTimeout(focusIfNeeded, 200),
       window.setTimeout(focusIfNeeded, 500),
+      window.setTimeout(focusIfNeeded, 1200),
     ];
 
     return () => {
@@ -80,9 +122,74 @@
     };
   });
 
+  $effect(() => {
+    void active;
+    void terminal;
+    void fitAddon;
+
+    const term = terminal;
+    const fit = fitAddon;
+    if (!term || !fit) return;
+
+    if (!active) {
+      activationSerial += 1;
+      return;
+    }
+
+    const currentSerial = activationSerial + 1;
+    activationSerial = currentSerial;
+
+    const rafId = requestAnimationFrame(() => {
+      void fitAndNotifyCurrent({
+        emitReady: true,
+        expectedActivationSerial: currentSerial,
+      });
+    });
+
+    return () => {
+      cancelAnimationFrame(rafId);
+    };
+  });
+
   function getInitialTerminalFontSize(): number {
     const stored = (window as any).__gwtTerminalFontSize;
     return typeof stored === "number" && stored >= 8 && stored <= 24 ? stored : 13;
+  }
+
+  function getInitialTerminalFontFamily(): string {
+    const stored = (window as any).__gwtTerminalFontFamily;
+    if (typeof stored === "string" && stored.trim().length > 0) {
+      return stored.trim();
+    }
+    return '"JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace';
+  }
+
+  async function fitAndNotifyCurrent(options?: {
+    emitReady?: boolean;
+    expectedActivationSerial?: number;
+  }) {
+    const term = terminal;
+    const fit = fitAddon;
+    if (!term || !fit) return;
+    if (!active && options?.emitReady) return;
+
+    try {
+      fit.fit();
+    } catch {
+      // Ignore fit errors in unstable resize phases.
+    }
+
+    await notifyResize(term.rows, term.cols);
+
+    if (!options?.emitReady) return;
+    if (!active) return;
+    if (
+      typeof options.expectedActivationSerial === "number" &&
+      options.expectedActivationSerial !== activationSerial
+    ) {
+      return;
+    }
+    onReady?.(paneId);
   }
 
   async function copyTextToClipboard(text: string) {
@@ -121,9 +228,104 @@
     }
   }
 
-  function scrollViewportByWheel(rootEl: HTMLElement, event: WheelEvent) {
-    const viewport = rootEl.querySelector<HTMLElement>(".xterm-viewport");
-    if (!viewport) return;
+  function isTrackpadLikeWheel(
+    event: WheelEvent,
+    mouseWheelStepHistory: WheelSample[],
+  ): boolean {
+    if (event.deltaMode === 1 || event.deltaMode === 2) {
+      mouseWheelStepHistory.length = 0;
+      return true;
+    }
+
+    if (event.deltaMode !== 0) return false;
+    const absDeltaY = Math.abs(event.deltaY);
+    const absDeltaX = Math.abs(event.deltaX);
+
+    const sourceCapabilities =
+      (event as WheelEvent & { sourceCapabilities?: { firesTouchEvents?: boolean } })
+        .sourceCapabilities;
+
+    if (sourceCapabilities?.firesTouchEvents === true) {
+      mouseWheelStepHistory.length = 0;
+      return true;
+    }
+
+    // Trackpads frequently emit horizontal movement in addition to vertical scroll.
+    if (absDeltaX > 0) {
+      mouseWheelStepHistory.length = 0;
+      return true;
+    }
+
+    if (absDeltaY === 0) return false;
+
+    if (!Number.isInteger(absDeltaY)) {
+      mouseWheelStepHistory.length = 0;
+      return true;
+    }
+
+    if (absDeltaY > TRACKPAD_WHEEL_DELTA_THRESHOLD) {
+      mouseWheelStepHistory.length = 0;
+      return true;
+    }
+
+    const isPotentialMouseStep = MOUSE_WHEEL_STEP_VALUES.has(absDeltaY);
+    if (!isPotentialMouseStep) {
+      mouseWheelStepHistory.length = 0;
+      return true;
+    }
+
+    const now =
+      event.timeStamp > 0
+        ? event.timeStamp
+        : typeof performance === "undefined"
+          ? Date.now()
+          : performance.now();
+    const sign = Math.sign(event.deltaY);
+
+    while (
+      mouseWheelStepHistory.length > 0 &&
+      now - mouseWheelStepHistory[0].at > MOUSE_WHEEL_STEP_REPEAT_WINDOW_MS
+    ) {
+      mouseWheelStepHistory.shift();
+    }
+
+    mouseWheelStepHistory.push({
+      at: now,
+      absDeltaY,
+      sign,
+    });
+
+    const recentHistory = mouseWheelStepHistory.slice(-MOUSE_WHEEL_STEP_REPEAT_COUNT);
+    if (recentHistory.length < MOUSE_WHEEL_STEP_REPEAT_COUNT) {
+      return true;
+    }
+
+    const looksLikeMouseWheelRun = recentHistory.every(
+      (sample, index) => {
+        if (sample.absDeltaY !== absDeltaY) return false;
+        if (sample.sign !== sign) return false;
+        if (index === 0) return true;
+        return sample.at - recentHistory[index - 1].at >= MOUSE_WHEEL_STEP_MOUSE_GAP_MS;
+      },
+    );
+
+    return !looksLikeMouseWheelRun;
+  }
+
+  function pickWheelAxis(event: WheelEvent): WheelAxis {
+    const absDeltaY = Math.abs(event.deltaY);
+    const absDeltaX = Math.abs(event.deltaX);
+    return absDeltaY >= absDeltaX ? "vertical" : "horizontal";
+  }
+
+  function pickWheelDelta(
+    event: WheelEvent,
+    viewport: HTMLElement,
+    wheelScrollState: WheelScrollState,
+  ): number {
+    const absDeltaY = Math.abs(event.deltaY);
+    const absDeltaX = Math.abs(event.deltaX);
+    if (absDeltaY === 0 && absDeltaX === 0) return 0;
 
     const fontSize =
       typeof terminal?.options.fontSize === "number" ? terminal.options.fontSize : 13;
@@ -131,27 +333,66 @@
       typeof terminal?.options.lineHeight === "number" ? terminal.options.lineHeight : 1;
     const lineStep = fontSize * lineHeight;
 
-    let delta = event.deltaY;
+    const axis = pickWheelAxis(event);
+    if (wheelScrollState.axis !== axis) {
+      wheelScrollState.axis = axis;
+      wheelScrollState.remainder = 0;
+    }
+
+    let delta = axis === "vertical" ? event.deltaY : event.deltaX;
+
     if (event.deltaMode === 1) {
       delta *= lineStep;
     } else if (event.deltaMode === 2) {
       delta *= viewport.clientHeight;
     }
 
-    viewport.scrollTop += delta;
+    const raw = delta + wheelScrollState.remainder;
+    const roundedDelta = Math.trunc(raw);
+    if (roundedDelta === 0) {
+      wheelScrollState.remainder = raw;
+      return 0;
+    }
+
+    wheelScrollState.remainder = raw - roundedDelta;
+    return roundedDelta;
+  }
+
+  function scrollViewportByWheel(
+    rootEl: HTMLElement,
+    event: WheelEvent,
+    wheelScrollState: WheelScrollState,
+  ): boolean {
+    const viewport = rootEl.querySelector<HTMLElement>(".xterm-viewport");
+    if (!viewport) return false;
+    const delta = pickWheelDelta(event, viewport, wheelScrollState);
+    if (delta === 0) return false;
+
+    const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+    const nextScrollTop = Math.min(Math.max(viewport.scrollTop + delta, 0), maxScrollTop);
+    const didScroll = nextScrollTop !== viewport.scrollTop;
+    viewport.scrollTop = nextScrollTop;
+    return didScroll;
   }
 
   onMount(() => {
     const rootEl = containerEl;
     if (!rootEl) return;
     let cancelled = false;
+    let receivedLiveOutput = false;
+    let restoringScrollback = true;
+    const pendingLiveOutputChunks: Uint8Array[] = [];
     const unregisterVoiceInputTarget = registerTerminalInputTarget(paneId, rootEl);
-
+    const mouseWheelStepHistory: WheelSample[] = [];
+    const wheelScrollState: WheelScrollState = {
+      axis: null,
+      remainder: 0,
+    };
     const term = new Terminal({
       cursorBlink: true,
       cursorStyle: "bar",
       fontSize: getInitialTerminalFontSize(),
-      fontFamily: "'JetBrains Mono', 'Fira Code', 'SF Mono', 'Menlo', monospace",
+      fontFamily: getInitialTerminalFontFamily(),
       lineHeight: 1.2,
       scrollback: 10000,
       theme: {
@@ -180,38 +421,63 @@
     });
 
     const fit = new FitAddon();
-    const webLinks = new WebLinksAddon();
+    const webLinks = new WebLinksAddon((event, uri) => {
+      event?.preventDefault?.();
+      void openExternalUrl(uri);
+    });
 
     term.loadAddon(fit);
     term.loadAddon(webLinks);
     term.open(rootEl);
-
-    // Initial fit
-    requestAnimationFrame(() => {
-      fit.fit();
-      notifyResize(term.rows, term.cols);
-    });
+    (rootEl as CaptureTerminalContainer).__gwtTerminal = term;
 
     const handleWheel = (event: WheelEvent) => {
-      if (!active || !terminal) return;
+      if (event.deltaY === 0 && event.deltaX === 0) return;
+      if (!terminal) return;
 
+      const wasFocused = isTerminalFocused(rootEl);
       focusTerminalIfNeeded(rootEl, true);
-      if (isTerminalFocused(rootEl)) return;
+
+      const shouldFallback = !wasFocused || isTrackpadLikeWheel(event, mouseWheelStepHistory);
+      if (!shouldFallback) return;
+
+      const didScroll = scrollViewportByWheel(rootEl, event, wheelScrollState);
+      if (!didScroll) return;
 
       event.preventDefault();
       event.stopImmediatePropagation();
-      scrollViewportByWheel(rootEl, event);
     };
+    const handleRootPointerDown = () => {
+      focusTerminalIfNeeded(rootEl, true);
+    };
+    const handleWindowFocus = () => {
+      focusTerminalIfNeeded(rootEl, true);
+    };
+    const handleVisibilityChange = () => {
+      if (document.hidden) return;
+      focusTerminalIfNeeded(rootEl);
+    };
+
+    rootEl.addEventListener("pointerdown", handleRootPointerDown, { capture: true });
     rootEl.addEventListener("wheel", handleWheel, { passive: false, capture: true });
+    window.addEventListener("focus", handleWindowFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     term.attachCustomKeyEventHandler((event: KeyboardEvent) => {
       if (event.type !== "keydown") return true;
 
-      if (isCtrlCShortcut(event)) {
+      if (isCopyShortcut(event)) {
         const selection = term.getSelection();
         if (selection.length > 0) {
           event.preventDefault();
           void copyTextToClipboard(selection);
+          return false;
+        }
+
+        // On macOS `Cmd+C` should only copy when text is selected; do not
+        // send SIGINT when there is no active selection.
+        if (event.metaKey && !event.ctrlKey) {
+          event.preventDefault();
           return false;
         }
 
@@ -230,6 +496,13 @@
         return false;
       }
 
+      // Delegate all Cmd+key combinations to the native menu / browser layer.
+      // Without this, xterm consumes the keydown and calls preventDefault(),
+      // which silently breaks native accelerators (Cmd+O, Cmd+N, Cmd+, …).
+      if (event.metaKey) {
+        return false;
+      }
+
       return true;
     });
 
@@ -240,6 +513,24 @@
       void writeToTerminal(text);
     };
     rootEl.addEventListener("paste", handlePaste);
+
+    const handleTerminalEditAction = (event: Event) => {
+      const detail = (event as CustomEvent<TerminalEditAction>).detail;
+      if (!detail || detail.paneId !== paneId) return;
+
+      if (detail.action === "copy") {
+        const selection = term.getSelection();
+        if (selection.length > 0) {
+          void copyTextToClipboard(selection);
+        }
+        return;
+      }
+
+      if (detail.action === "paste") {
+        void pasteFromClipboard();
+      }
+    };
+    window.addEventListener("gwt-terminal-edit-action", handleTerminalEditAction);
 
     // Handle user input -> send to PTY backend
     term.onData((data: string) => {
@@ -255,23 +546,17 @@
       writeToTerminalBytes(Array.from(bytes));
     });
 
-    // Best-effort: show recent scrollback so restored tabs aren't blank.
+    // Subscribe first so startup output isn't lost before the listener attaches.
     (async () => {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const text = await invoke<string>("capture_scrollback_tail", {
-          paneId,
-          maxBytes: 64 * 1024,
-        });
-        if (text) {
-          term.write(text);
-        }
-      } catch {
-        // Ignore: not available outside Tauri runtime.
-      }
-
       // Listen to terminal output from backend.
-      const unlistenFn = await setupEventListener(term);
+      const unlistenFn = await setupEventListener(term, (bytes) => {
+        receivedLiveOutput = true;
+        if (restoringScrollback) {
+          pendingLiveOutputChunks.push(bytes);
+          return;
+        }
+        term.write(bytes);
+      });
       if (cancelled) {
         if (unlistenFn) {
           unlistenFn();
@@ -281,15 +566,34 @@
       if (unlistenFn) {
         unlisten = unlistenFn;
       }
+
+      // Best-effort: show recent scrollback so restored tabs aren't blank.
+      try {
+        const { invoke } = await import("$lib/tauriInvoke");
+        const text = await invoke<string>("capture_scrollback_tail", {
+          paneId,
+          maxBytes: 64 * 1024,
+        });
+        if (text) {
+          term.write(text);
+        }
+      } catch {
+        // Ignore: not available outside Tauri runtime.
+      } finally {
+        restoringScrollback = false;
+        for (const chunk of pendingLiveOutputChunks) {
+          term.write(chunk);
+        }
+        pendingLiveOutputChunks.length = 0;
+      }
     })();
 
     // ResizeObserver for auto-fitting
     const observer = new ResizeObserver(() => {
+      if (!active) return;
       requestAnimationFrame(() => {
-        if (fit) {
-          fit.fit();
-          notifyResize(term.rows, term.cols);
-        }
+        if (!active) return;
+        void fitAndNotifyCurrent();
       });
     });
     observer.observe(rootEl);
@@ -304,11 +608,24 @@
       if (term && typeof size === "number" && size >= 8 && size <= 24) {
         (window as any).__gwtTerminalFontSize = size;
         term.options.fontSize = size;
-        fit.fit();
-        notifyResize(term.rows, term.cols);
+        if (active) {
+          void fitAndNotifyCurrent();
+        }
+      }
+    };
+    const handleFontFamilyChange = (e: Event) => {
+      const family = (e as CustomEvent<string>).detail;
+      if (term && typeof family === "string" && family.trim().length > 0) {
+        const normalized = family.trim();
+        (window as any).__gwtTerminalFontFamily = normalized;
+        term.options.fontFamily = normalized;
+        if (active) {
+          void fitAndNotifyCurrent();
+        }
       }
     };
     window.addEventListener("gwt-terminal-font-size", handleFontSizeChange);
+    window.addEventListener("gwt-terminal-font-family", handleFontFamilyChange);
 
     return () => {
       cancelled = true;
@@ -316,15 +633,24 @@
         unlisten();
       }
       rootEl.removeEventListener("paste", handlePaste);
+      rootEl.removeEventListener("pointerdown", handleRootPointerDown, true);
       rootEl.removeEventListener("wheel", handleWheel, true);
+      window.removeEventListener("focus", handleWindowFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("gwt-terminal-edit-action", handleTerminalEditAction);
       window.removeEventListener("gwt-terminal-font-size", handleFontSizeChange);
+      window.removeEventListener("gwt-terminal-font-family", handleFontFamilyChange);
+      delete (rootEl as CaptureTerminalContainer).__gwtTerminal;
       observer.disconnect();
       term.dispose();
       unregisterVoiceInputTarget();
     };
   });
 
-  async function setupEventListener(term: Terminal): Promise<(() => void) | null> {
+  async function setupEventListener(
+    term: Terminal,
+    onOutput?: (bytes: Uint8Array) => void,
+  ): Promise<(() => void) | null> {
     try {
       const { listen } = await import("@tauri-apps/api/event");
       const unlistenFn = await listen<{ pane_id: string; data: number[] }>(
@@ -332,7 +658,11 @@
         (event) => {
           if (event.payload.pane_id === paneId) {
             const bytes = new Uint8Array(event.payload.data);
-            term.write(bytes);
+            if (onOutput) {
+              onOutput(bytes);
+            } else {
+              term.write(bytes);
+            }
           }
         }
       );
@@ -345,7 +675,7 @@
 
   async function writeToTerminal(data: string) {
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       const encoder = new TextEncoder();
       const bytes = Array.from(encoder.encode(data));
       await invoke("write_terminal", { paneId, data: bytes });
@@ -356,7 +686,7 @@
 
   async function writeToTerminalBytes(data: number[]) {
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
+      const { invoke } = await import("$lib/tauriInvoke");
       await invoke("write_terminal", { paneId, data });
     } catch (err) {
       console.error("Failed to write binary to terminal:", err);
@@ -364,16 +694,58 @@
   }
 
   async function notifyResize(rows: number, cols: number) {
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("resize_terminal", { paneId, rows, cols });
-    } catch (err) {
-      console.error("Failed to resize terminal:", err);
+    if (lastNotifiedRows === rows && lastNotifiedCols === cols) return;
+    if (resizeInFlight) {
+      queuedResize = { rows, cols };
+      return;
     }
+
+    resizeInFlight = true;
+    let next: { rows: number; cols: number } | null = { rows, cols };
+
+    while (next) {
+      const current = next;
+      next = null;
+
+      if (
+        lastNotifiedRows === current.rows &&
+        lastNotifiedCols === current.cols
+      ) {
+        if (queuedResize) {
+          next = queuedResize;
+          queuedResize = null;
+        }
+        continue;
+      }
+
+      try {
+        const { invoke } = await import("$lib/tauriInvoke");
+        await invoke("resize_terminal", {
+          paneId,
+          rows: current.rows,
+          cols: current.cols,
+        });
+        lastNotifiedRows = current.rows;
+        lastNotifiedCols = current.cols;
+      } catch (err) {
+        console.error("Failed to resize terminal:", err);
+      }
+
+      if (queuedResize) {
+        next = queuedResize;
+        queuedResize = null;
+      }
+    }
+
+    resizeInFlight = false;
   }
 </script>
 
-<div class="terminal-container" bind:this={containerEl}></div>
+<div
+  class="terminal-container"
+  data-pane-id={paneId}
+  bind:this={containerEl}
+></div>
 
 <style>
   .terminal-container {

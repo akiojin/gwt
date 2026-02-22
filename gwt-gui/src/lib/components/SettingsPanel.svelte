@@ -498,6 +498,7 @@
             endpoint: "https://api.openai.com/v1",
             api_key: "",
             model: "",
+            language: "en",
             summary_enabled: true,
           },
         }

@@ -4,6 +4,8 @@
     BranchInfo,
     ProjectInfo,
     LaunchAgentRequest,
+    LaunchProgressPayload,
+    LaunchFinishedPayload,
     ProbePathResult,
     TerminalInfo,
     TerminalAnsiProbe,
@@ -31,9 +33,11 @@
     buildRestoredAgentTabs,
     shouldRetryAgentTabRestore,
   } from "./lib/agentTabsPersistence";
+  import { reorderTabsByDrop, type TabDropPosition } from "./lib/appTabs";
   import {
     VoiceInputController,
     type VoiceControllerState,
+    type VoiceControllerSettings,
   } from "./lib/voice/voiceInputController";
 
   interface MenuActionPayload {
@@ -51,7 +55,17 @@
   const DEFAULT_SIDEBAR_WIDTH_PX = 260;
   const MIN_SIDEBAR_WIDTH_PX = 220;
   const MAX_SIDEBAR_WIDTH_PX = 520;
-  type SidebarMode = "branch" | "agent";
+  type SidebarMode = "branch" | "projectMode";
+
+  type LaunchStepId = "fetch" | "validate" | "paths" | "conflicts" | "create" | "deps";
+  const LAUNCH_STEP_IDS: LaunchStepId[] = [
+    "fetch",
+    "validate",
+    "paths",
+    "conflicts",
+    "create",
+    "deps",
+  ];
 
   const DEFAULT_VOICE_INPUT_SETTINGS: VoiceInputSettings = {
     enabled: false,
@@ -95,7 +109,8 @@
     if (typeof window === "undefined") return "branch";
     try {
       const raw = window.localStorage.getItem(SIDEBAR_MODE_STORAGE_KEY);
-      return raw === "agent" || raw === "branch" ? raw : "branch";
+      if (raw === "projectMode" || raw === "agent") return "projectMode";
+      return raw === "branch" ? "branch" : "branch";
     } catch {
       return "branch";
     }
@@ -130,6 +145,10 @@
   let launchProgressOpen: boolean = $state(false);
   let launchJobId: string = $state("");
   let pendingLaunchRequest: LaunchAgentRequest | null = $state(null);
+  let launchStep: LaunchStepId = $state("fetch");
+  let launchDetail: string = $state("");
+  let launchStatus: "running" | "ok" | "error" | "cancelled" = $state("running");
+  let launchError: string | null = $state(null);
 
   let migrationOpen: boolean = $state(false);
   let migrationSourceRoot: string = $state("");
@@ -305,6 +324,65 @@
     };
   });
 
+  // Keep launch progress state in App and render it via LaunchProgressModal.
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen<LaunchProgressPayload>(
+          "launch-progress",
+          (event) => {
+            const payload = event.payload;
+            if (!launchJobId || payload.jobId !== launchJobId) return;
+            applyLaunchProgressPayload(payload);
+          },
+        );
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+      } catch (err) {
+        console.error("Failed to setup launch progress listener:", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  });
+
+  $effect(() => {
+    let unlisten: null | (() => void) = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen<LaunchFinishedPayload>(
+          "launch-finished",
+          (event) => {
+            const payload = event.payload;
+            if (!launchJobId || payload.jobId !== launchJobId) return;
+            applyLaunchFinishedPayload(payload);
+          },
+        );
+        if (cancelled) {
+          unlistenFn();
+          return;
+        }
+        unlisten = unlistenFn;
+      } catch (err) {
+        console.error("Failed to setup launch finished listener:", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  });
+
   function toErrorMessage(err: unknown): string {
     if (typeof err === "string") return err;
     if (err && typeof err === "object" && "message" in err) {
@@ -378,8 +456,17 @@
     return null;
   }
 
-  function readVoiceInputSettingsForController(): VoiceInputSettings {
-    return voiceInputSettings;
+  function readVoiceInputSettingsForController(): VoiceControllerSettings {
+    const settings = normalizeVoiceInputSettings(voiceInputSettings);
+    return {
+      enabled: settings.enabled,
+      engine: settings.engine ?? "qwen3-asr",
+      hotkey: settings.hotkey,
+      ptt_hotkey: settings.ptt_hotkey ?? "Mod+Shift+Space",
+      language: settings.language,
+      quality: settings.quality ?? "balanced",
+      model: settings.model,
+    };
   }
 
   function readVoiceFallbackTerminalPaneId(): string | null {
@@ -473,8 +560,9 @@
 
   function handleSidebarModeChange(next: SidebarMode) {
     if (sidebarMode === next) return;
-    if (next === "agent") {
+    if (next === "projectMode") {
       ensureAgentModeTab();
+      activeTabId = "agentMode";
     }
     sidebarMode = next;
     persistSidebarMode(next);
@@ -528,13 +616,82 @@
     return b ? normalizeBranchName(b) : "Worktree";
   }
 
+  function applyLaunchProgressPayload(payload: LaunchProgressPayload) {
+    if (launchStatus !== "running") return;
+    const nextStep = String(payload.step ?? "") as LaunchStepId;
+    if (LAUNCH_STEP_IDS.includes(nextStep) && nextStep !== launchStep) {
+      launchStep = nextStep;
+    }
+    launchDetail = String(payload.detail ?? "");
+  }
+
+  function applyLaunchFinishedPayload(payload: LaunchFinishedPayload) {
+    if (launchStatus !== "running") return;
+
+    if (payload.status === "ok" && payload.paneId) {
+      launchStatus = "ok";
+      launchDetail = "Launch completed.";
+      handleLaunchSuccess(payload.paneId);
+      return;
+    }
+
+    if (payload.status === "cancelled") {
+      launchStatus = "cancelled";
+      launchDetail = "Launch cancelled.";
+      return;
+    }
+
+    launchStatus = "error";
+    launchError = payload.error || "Launch failed.";
+  }
+
   async function handleAgentLaunch(request: LaunchAgentRequest) {
+    launchStep = "fetch";
+    launchDetail = "";
+    launchStatus = "running";
+    launchError = null;
+
     const { invoke } = await import("@tauri-apps/api/core");
     const jobId = await invoke<string>("start_launch_job", { request });
 
     pendingLaunchRequest = request;
     launchJobId = jobId;
     launchProgressOpen = true;
+  }
+
+  async function handleLaunchCancel() {
+    if (!launchJobId) {
+      handleLaunchModalClose();
+      return;
+    }
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("cancel_launch_job", { jobId: launchJobId });
+      handleLaunchModalClose();
+    } catch (err) {
+      console.error("Failed to cancel launch job:", err);
+      launchStatus = "error";
+      launchError = "Failed to send cancel request. Close this dialog and retry.";
+    }
+  }
+
+  function handleLaunchModalClose() {
+    launchProgressOpen = false;
+    launchJobId = "";
+    pendingLaunchRequest = null;
+    launchStatus = "running";
+    launchStep = "fetch";
+    launchDetail = "";
+    launchError = null;
+  }
+
+  function handleUseExistingBranch() {
+    const req = pendingLaunchRequest;
+    if (!req) return;
+    const retryRequest: LaunchAgentRequest = { ...req };
+    delete retryRequest.createBranch;
+    handleLaunchModalClose();
+    void handleAgentLaunch(retryRequest);
   }
 
   function handleLaunchSuccess(paneId: string) {
@@ -589,6 +746,16 @@
 
   function handleTabSelect(tabId: string) {
     activeTabId = tabId;
+  }
+
+  function handleTabReorder(
+    dragTabId: string,
+    overTabId: string,
+    position: TabDropPosition,
+  ) {
+    const nextTabs = reorderTabsByDrop(tabs, dragTabId, overTabId, position);
+    if (nextTabs === tabs) return;
+    tabs = nextTabs;
   }
 
   function openSettingsTab() {
@@ -1096,6 +1263,7 @@
         onQuickLaunch={handleAgentLaunch}
         onTabSelect={handleTabSelect}
         onTabClose={handleTabClose}
+        onTabReorder={handleTabReorder}
       />
     </div>
     <StatusBar
@@ -1253,13 +1421,13 @@
 
 <LaunchProgressModal
   open={launchProgressOpen}
-  jobId={launchJobId}
-  onSuccess={handleLaunchSuccess}
-  onClose={() => {
-    launchProgressOpen = false;
-    launchJobId = "";
-    pendingLaunchRequest = null;
-  }}
+  step={launchStep}
+  detail={launchDetail}
+  status={launchStatus}
+  error={launchError}
+  onCancel={handleLaunchCancel}
+  onClose={handleLaunchModalClose}
+  onUseExisting={handleUseExistingBranch}
 />
 {#if showOsEnvDebug}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
