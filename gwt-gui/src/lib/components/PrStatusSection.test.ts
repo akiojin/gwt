@@ -151,6 +151,17 @@ describe("PrStatusSection", () => {
     expect(badge?.textContent).toContain("Unknown");
   });
 
+  it("renders merged badge when PR state is MERGED even if mergeable is UNKNOWN", async () => {
+    const pr = makePrDetail({ state: "MERGED", mergeable: "UNKNOWN" });
+    const { container } = await renderSection({ prDetail: pr });
+
+    const badge = container.querySelector(".mergeable-badge");
+    expect(badge).toBeTruthy();
+    expect(badge?.classList.contains("merged")).toBe(true);
+    expect(badge?.textContent).toContain("Merged");
+    expect(badge?.textContent).not.toContain("Unknown");
+  });
+
   it("renders reviews with correct state icons", async () => {
     const reviews: ReviewInfo[] = [
       { reviewer: "alice", state: "APPROVED" },
@@ -404,6 +415,17 @@ describe("PrStatusSection", () => {
       expect(stateStatusBadge?.classList.contains("blocked")).toBe(true);
     });
 
+    it("shows only 'Blocked' when mergeStateStatus is BLOCKED and mergeable is MERGEABLE", async () => {
+      const pr = makePrDetail({ mergeable: "MERGEABLE", mergeStateStatus: "BLOCKED" });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const mergeableBadge = container.querySelector(".mergeable-badge");
+      expect(mergeableBadge).toBeNull();
+      const stateStatusBadge = container.querySelector(".merge-state-badge");
+      expect(stateStatusBadge).toBeTruthy();
+      expect(stateStatusBadge?.textContent).toContain("Blocked");
+    });
+
     it("displays 'Conflicts' badge when mergeStateStatus is DIRTY", async () => {
       const pr = makePrDetail({ mergeStateStatus: "DIRTY" });
       const { container } = await renderSection({ prDetail: pr });
@@ -412,6 +434,16 @@ describe("PrStatusSection", () => {
       expect(stateStatusBadge).toBeTruthy();
       expect(stateStatusBadge?.textContent).toContain("Conflicts");
       expect(stateStatusBadge?.classList.contains("blocked")).toBe(true);
+    });
+
+    it("does not display 'Conflicts' badge when mergeable is CONFLICTING", async () => {
+      const pr = makePrDetail({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const stateStatusBadge = container.querySelector(".merge-state-badge");
+      expect(stateStatusBadge).toBeNull();
+      const mergeableBadge = container.querySelector(".mergeable-badge");
+      expect(mergeableBadge?.textContent).toContain("Conflicting");
     });
 
     it("displays 'Draft' badge when mergeStateStatus is DRAFT", async () => {
@@ -514,6 +546,22 @@ describe("PrStatusSection", () => {
       const updateBtn = container.querySelector(".update-branch-btn") as HTMLButtonElement;
       expect(updateBtn.disabled).toBe(true);
       expect(updateBtn.textContent).toContain("Updating");
+    });
+
+    it("does not show mergeStateStatus badge when PR state is MERGED", async () => {
+      const pr = makePrDetail({ state: "MERGED", mergeStateStatus: "BEHIND" });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const stateStatusBadge = container.querySelector(".merge-state-badge");
+      expect(stateStatusBadge).toBeNull();
+    });
+
+    it("does not show Update Branch button when PR state is MERGED", async () => {
+      const pr = makePrDetail({ state: "MERGED", mergeStateStatus: "BEHIND" });
+      const { container } = await renderSection({ prDetail: pr });
+
+      const updateBtn = container.querySelector(".update-branch-btn");
+      expect(updateBtn).toBeNull();
     });
   });
 });
