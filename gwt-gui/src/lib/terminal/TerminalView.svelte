@@ -112,6 +112,7 @@
       window.setTimeout(focusIfNeeded, 60),
       window.setTimeout(focusIfNeeded, 200),
       window.setTimeout(focusIfNeeded, 500),
+      window.setTimeout(focusIfNeeded, 1200),
     ];
 
     return () => {
@@ -446,7 +447,21 @@
       event.preventDefault();
       event.stopImmediatePropagation();
     };
+    const handleRootPointerDown = () => {
+      focusTerminalIfNeeded(rootEl, true);
+    };
+    const handleWindowFocus = () => {
+      focusTerminalIfNeeded(rootEl, true);
+    };
+    const handleVisibilityChange = () => {
+      if (document.hidden) return;
+      focusTerminalIfNeeded(rootEl);
+    };
+
+    rootEl.addEventListener("pointerdown", handleRootPointerDown, { capture: true });
     rootEl.addEventListener("wheel", handleWheel, { passive: false, capture: true });
+    window.addEventListener("focus", handleWindowFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     term.attachCustomKeyEventHandler((event: KeyboardEvent) => {
       if (event.type !== "keydown") return true;
@@ -618,7 +633,10 @@
         unlisten();
       }
       rootEl.removeEventListener("paste", handlePaste);
+      rootEl.removeEventListener("pointerdown", handleRootPointerDown, true);
       rootEl.removeEventListener("wheel", handleWheel, true);
+      window.removeEventListener("focus", handleWindowFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("gwt-terminal-edit-action", handleTerminalEditAction);
       window.removeEventListener("gwt-terminal-font-size", handleFontSizeChange);
       window.removeEventListener("gwt-terminal-font-family", handleFontFamilyChange);
