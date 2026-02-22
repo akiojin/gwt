@@ -416,7 +416,7 @@ test("restores font family preview on Close without saving", async ({ page }) =>
     .getByLabel("Terminal Font Family")
     .selectOption(TERMINAL_FONT_FAMILY_CASCADIA);
 
-  await page.getByRole("button", { name: "Close" }).click();
+  await page.locator(".settings-footer .btn-cancel", { hasText: "Close" }).click();
   await expect(page.getByRole("heading", { name: "Settings" })).toBeHidden();
 
   const preview = await readFontFamilyPreview(page);

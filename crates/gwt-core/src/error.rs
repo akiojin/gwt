@@ -570,7 +570,7 @@ mod tests {
         );
         assert_eq!(GwtError::GitNotFound.severity(), ErrorSeverity::Error);
         assert_eq!(
-            GwtError::Io(std::io::Error::new(std::io::ErrorKind::Other, "test")).severity(),
+            GwtError::Io(std::io::Error::other("test")).severity(),
             ErrorSeverity::Error
         );
     }
