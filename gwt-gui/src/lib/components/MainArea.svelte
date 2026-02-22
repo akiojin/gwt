@@ -95,6 +95,7 @@
   let draggingTabId: string | null = $state(null);
   let terminalPendingTabId: string | null = $state(null);
   let visibleTerminalTabId: string | null = $state(null);
+  let terminalReadyTabIds: Set<string> = $state(new Set());
   let terminalActivationFallbackTimer: ReturnType<typeof setTimeout> | null =
     null;
   let pointerDrag:
@@ -125,6 +126,9 @@
   function handleTerminalReady(paneId: string) {
     const tabId = terminalTabIdByPaneId.get(paneId);
     if (!tabId) return;
+    if (!terminalReadyTabIds.has(tabId)) {
+      terminalReadyTabIds = new Set(terminalReadyTabIds).add(tabId);
+    }
     if (!terminalPendingTabId || tabId !== terminalPendingTabId) return;
     clearTerminalActivationFallbackTimer();
     visibleTerminalTabId = tabId;
@@ -303,6 +307,11 @@
       return;
     }
 
+    if (terminalReadyTabIds.has(activeTerminalTabId)) {
+      visibleTerminalTabId = activeTerminalTabId;
+      return;
+    }
+
     visibleTerminalTabId = null;
 
     if (typeof window === "undefined") {
@@ -316,6 +325,7 @@
         activeTerminalTabId === pendingId &&
         terminalPendingTabId === pendingId
       ) {
+        terminalReadyTabIds = new Set(terminalReadyTabIds).add(pendingId);
         visibleTerminalTabId = pendingId;
       }
       if (terminalActivationFallbackTimer === timeoutId) {
@@ -330,6 +340,27 @@
         terminalActivationFallbackTimer = null;
       }
     };
+  });
+
+  $effect(() => {
+    void agentTabs;
+    void terminalTabs;
+
+    const validTerminalTabIds = new Set([
+      ...agentTabs.map((tab) => tab.id),
+      ...terminalTabs.map((tab) => tab.id),
+    ]);
+
+    const next = new Set<string>();
+    for (const tabId of terminalReadyTabIds) {
+      if (validTerminalTabIds.has(tabId)) {
+        next.add(tabId);
+      }
+    }
+
+    if (!areSetsEqual(next, terminalReadyTabIds)) {
+      terminalReadyTabIds = next;
+    }
   });
 
   $effect(() => {

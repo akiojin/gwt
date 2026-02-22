@@ -449,6 +449,44 @@ describe("TerminalView", () => {
     });
   });
 
+  it("focuses terminal on pointerdown", async () => {
+    const { container } = await renderTerminalView({
+      paneId: "pane-focus-pointer",
+      active: true,
+    });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    const rootEl = container.querySelector(".terminal-container") as HTMLDivElement | null;
+    expect(rootEl).not.toBeNull();
+    const term = terminalInstances[0];
+    term.focus.mockClear();
+
+    await fireEvent.pointerDown(rootEl!);
+
+    expect(term.focus).toHaveBeenCalledTimes(1);
+  });
+
+  it("refocuses terminal when window regains focus", async () => {
+    await renderTerminalView({
+      paneId: "pane-focus-window",
+      active: true,
+    });
+
+    await waitFor(() => {
+      expect(terminalInstances.length).toBeGreaterThan(0);
+    });
+
+    const term = terminalInstances[0];
+    term.focus.mockClear();
+
+    window.dispatchEvent(new Event("focus"));
+
+    expect(term.focus).toHaveBeenCalledTimes(1);
+  });
+
   it("scrolls terminal viewport when wheel is used", async () => {
     const { container } = await renderTerminalView({
       paneId: "pane-2",
